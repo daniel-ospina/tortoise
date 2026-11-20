@@ -4569,6 +4569,20 @@ surfaces:
   # `tortoise/sdk.py` and `tortoise/tool_registry.py` are both SHARED_MODULEs (a full
   # matrix anyway), so `core` is the honest floor rather than a reach claim.
   - test_sdk_retirement.py
+  # #13899 (the FINAL batch): the SWEEP'S OWN VERIFIER. Three questions, each one a
+  # failure the review found in `tools/sdk_privatise.py` itself: (a) `--check`
+  # derived its rename map from a moving `merge-base`, so it reported "0 typed
+  # references" over ANY tree once this branch merged — the vacuity arm asserts the
+  # empty-map refusal instead of a passing zero; (b) the sweep typed receivers
+  # PER FILE, so `hosted_api.py`'s `reg` (an SDK in one function, a FalkorDB `Graph`
+  # in the next) was rewritten wholesale and 80 graph reads became a dependency on
+  # `falkordb.Graph._query` — the scope arm pins that; (c) the residue was printed,
+  # never pinned, so a NEW untyped shape was invisible. `core`, and it needs NO
+  # database: the arms are synthetic modules plus the pinned map (which reads
+  # `tortoise/sdk.py` at `SWEEP_BASE` through `git show`, so a full-history checkout
+  # is what it needs, not a graph). Hermetic — measured 6 passed in 28 s on a lane
+  # box, most of it the session conftest.
+  - test_sdk_privatise_sweep.py
   # #12901 (wave 2): the control-plane retirement's own gate — every one of the sixteen
   # names is gone AND its private seam exists, the failure is the documented removal
   # error with no false hint, no production caller still reaches a closed door, and no
@@ -14847,6 +14861,7 @@ durations:
   test_retype_8882.py: 0.2  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.1
   test_runner_tool_contract.py: 32.8  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 1.2
   test_sdk_retirement.py: 2.5  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 1.4
+  test_sdk_privatise_sweep.py: 28.0  # new in #13899; MEASURED LOCALLY, not from junit (the file did not exist at the 2026-11-16 capture): 6 passed in 28.01 s on a contended lane box, of which ~25 s is the session conftest every file in this pool pays. The weight covers the arms themselves: `rename_map(SWEEP_BASE)` runs one `git show` + parse of the 50k-line `tortoise/sdk.py`, and the two typing arms parse a synthetic 7-line module. Hermetic — no DB, no graph, no network, no model; the empty-map arm returns before the tree walk. ci_timing.py --refresh-durations replaces this from junit once a push-to-main sweep includes it.
   test_secret_not_printed_5109.py: 0.4  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.3s) is a LOWER bound; kept 0.4
   test_semantics_write_path_7852.py: 6.6  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 7.0
   test_served_skill_byte_parity.py: 0.1

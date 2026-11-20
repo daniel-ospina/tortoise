@@ -263,12 +263,12 @@ def _retrieve_pipeline(sdk, question: str, *, limit: int, item_cap: int,
     # date). Leaving it unset selects as of the wall clock, which reorders the
     # same question across a ``validTo`` boundary and breaks the
     # re-baseline-then-compare rule in the module docstring.
-    hits = sdk.tortoise_fts_query(
+    hits = sdk._tortoise_fts_query(
         question, limit=limit, pool_size=None, include_terminal=True,
         query_date=question_date or None,
         keep_numeric=keep_numeric, search_keys_prf=search_keys_prf,
         fusion_weights=fusion_weights, fusion_k=fusion_k)
-    annotated = sdk.annotate_ask_hits(hits)
+    annotated = sdk._annotate_ask_hits(hits)
     # #4155: the lane's key verbatim (retrieval.ask_session_key) — a local
     # copy would silently diverge from the pipeline this bench mirrors.
     deduped = dedup_pool(
@@ -303,7 +303,7 @@ def _measure_question(sdk, question: dict, *, keep_numeric: bool,
     # pool@120 — the full fused pool (pool floor = 120; limit=120 returns it)
     # #8487: no valid-time opt-out — measures the shipped reader, at the
     # question's own instant (the same date the pipeline arm renders below).
-    pool_hits = sdk.tortoise_fts_query(
+    pool_hits = sdk._tortoise_fts_query(
         q, limit=120, pool_size=None, include_terminal=True,
         query_date=question.get("question_date") or None,
         keep_numeric=keep_numeric, search_keys_prf=search_keys_prf,
@@ -368,7 +368,7 @@ def _scan_for_failures(data: list[dict], *, scan_limit: int,
             db = os.path.join(tempfile.mkdtemp(prefix="ask_scan_"), "t.db")
             sdk2 = TortoiseSDK(db)
             _seed_question(sdk2, question)
-            hits = sdk2.tortoise_fts_query(
+            hits = sdk2._tortoise_fts_query(
                 question["question"], limit=120, pool_size=None,
                 include_terminal=True,
                 # #8487 review round 8 (P2): the SUBSET DEFINITION must be

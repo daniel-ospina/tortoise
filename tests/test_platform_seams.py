@@ -51,13 +51,15 @@ import os
 from tortoise.sdk import TortoiseSDK
 sdk = TortoiseSDK(db_path=os.environ["TORTOISE_DB_PATH"])
 proj = sdk._get_proj()
-ev = sdk.create_point(
+# The private `def`s the class holds: #12901's FINAL batch privatised `create_point`
+# and `create_operator` off the surface, so the retired public spellings raise here.
+ev = sdk._create_point(
     "evidence",
     "CI deploys on main merge via GitHub Actions [supporting record]")
-claim = sdk.create_point(
+claim = sdk._create_point(
     "statement",
     "The CI pipeline deploys via GitHub Actions on main merge.")
-sdk.create_operator("IMPL", ev["id"], [claim["id"]])
+sdk._create_operator("IMPL", ev["id"], [claim["id"]])
 for pid, a, b in ((claim["id"], 12.0, 1.0), (ev["id"], 12.0, 1.0)):
     m = round(a / (a + b), 4)
     proj.g.query(

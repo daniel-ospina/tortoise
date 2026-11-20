@@ -196,7 +196,7 @@ def _run_capture(base: Path, *, fail_phase: str | None, tag: str) -> dict:
             raise RuntimeError(f"injected {fail_phase} write failure")
 
         if fail_phase == "point":
-            sdk.create_point = _boom  # type: ignore[method-assign]
+            sdk._create_point = _boom  # type: ignore[method-assign]
         elif fail_phase == "entity":
             sdk.create_entity = _boom  # type: ignore[method-assign]
         elif fail_phase is not None:

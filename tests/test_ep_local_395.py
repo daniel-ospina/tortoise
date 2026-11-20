@@ -83,7 +83,7 @@ def _seeded(seed: int, fn):
 
 
 def _make_claim(sdk: TortoiseSDK, content: str, kind: str = "statement") -> dict:
-    return sdk.create_point(kind, content, dedup=False, status="live")
+    return sdk._create_point(kind, content, dedup=False, status="live")
 
 
 def _chain(sdk: TortoiseSDK, n: int, prefix: str = "c",
@@ -91,7 +91,7 @@ def _chain(sdk: TortoiseSDK, n: int, prefix: str = "c",
     """Chain of n claims linked by n-1 operators; returns claim ids."""
     claims = [_make_claim(sdk, f"{prefix}{i}") for i in range(n)]
     for i in range(n - 1):
-        sdk.create_operator(op_type, claims[i]["id"], [claims[i + 1]["id"]],
+        sdk._create_operator(op_type, claims[i]["id"], [claims[i + 1]["id"]],
                             direction=direction)
     return [c["id"] for c in claims]
 
@@ -337,13 +337,13 @@ def _build_vector_fixture(sdk: TortoiseSDK, vector: str):
     ids: dict[str, str] = {}
 
     def c(kind, content):
-        p = sdk.create_point(kind, content, dedup=False, status="live")
+        p = sdk._create_point(kind, content, dedup=False, status="live")
         ids[content] = p["id"]
         return p["id"]
 
     if vector == "a":  # dirty boundary neighbor
         a, b = c("statement", "a-dirty-boundary"), c("statement", "b")
-        sdk.create_operator("IMPL", a, [b])
+        sdk._create_operator("IMPL", a, [b])
         sdk._dirty_roots.add(a)
         return ep, ids
     if vector == "b":  # max_hops truncation regime (covered in AC4 k-regime)
@@ -351,7 +351,7 @@ def _build_vector_fixture(sdk: TortoiseSDK, vector: str):
     if vector == "c":  # NAND back-pressure crossing the boundary
         z = _chain(sdk, 4, prefix="nand-")
         outside = c("statement", "outside-nand")
-        sdk.create_operator("NAND", outside, [z[2]])
+        sdk._create_operator("NAND", outside, [z[2]])
         return ep, {"z": z, "outside": outside}
     if vector == "d":  # operator-less direct edge (#888 W5)
         a, b = c("statement", "d1"), c("statement", "d2")
@@ -363,14 +363,14 @@ def _build_vector_fixture(sdk: TortoiseSDK, vector: str):
         return ep, {"d1": a, "d2": b}
     if vector == "e":  # IMPL directionality asymmetry (unidirectional)
         a, b = c("statement", "e-src"), c("statement", "e-tgt")
-        sdk.create_operator("IMPL", a, [b], direction="unidirectional")
+        sdk._create_operator("IMPL", a, [b], direction="unidirectional")
         return ep, {"src": a, "tgt": b}
     if vector == "f":  # draft claims on the boundary (#780)
         live = c("statement", "f-live")
-        draft = sdk.create_point("statement", "f-draft", status="draft")
-        sdk.create_operator("IMPL", live, [draft["id"]],
+        draft = sdk._create_point("statement", "f-draft", status="draft")
+        sdk._create_operator("IMPL", live, [draft["id"]],
                             promote_source=False)  # draft op + draft target
-        sdk.set_point_baseline(live, 1, 1)
+        sdk._set_point_baseline(live, 1, 1)
         return ep, {"live": live, "draft": draft["id"]}
     if vector == "g":  # legacy op_type-only operator (no is_operator)
         a, b = c("statement", "g-a"), c("statement", "g-b")
@@ -401,8 +401,8 @@ def test_vector_c_nand_boundary():
         ep, ids = _build_vector_fixture(sdk, "c")  # noqa: RUF059
         z = ids["z"]
         # Baseline the two ends so EP is well-posed.
-        sdk.set_point_baseline(z[0], 8.0, 1.0)
-        sdk.set_point_baseline(z[3], 1.0, 1.0)
+        sdk._set_point_baseline(z[0], 8.0, 1.0)
+        sdk._set_point_baseline(z[3], 1.0, 1.0)
         # Local k=2 run from the chain start vs full None run.
         ep2 = TortoiseEP(sdk._get_proj())
         _seeded(7, lambda: ep2.run([z[0]], max_hops=2))
@@ -458,11 +458,11 @@ def test_vector_f_draft_boundary():
         # Draft-op-mediated run: live's posterior must stay its prior
         # (a draft-connected operator must change NO live posterior).
         sdk._dirty_roots.add(ids["live"])
-        result = sdk.compute_confidence()
+        result = sdk._compute_confidence()
         # No live closure exists (the draft operator bridges nothing live) —
         # the run is vacuous; live keeps its neutral Beta(1,1) prior.
         assert result.get("diagnostic") in ("no_factors", None), result
-        conf = sdk.get_confidence(ids["live"])
+        conf = sdk._get_confidence(ids["live"])
         assert conf["mean"] == pytest.approx(0.5, abs=1e-9), conf
 
 
@@ -501,8 +501,8 @@ def test_canonical_bfs_consistency():
         a = _make_claim(sdk, "cons-a")
         b = _make_claim(sdk, "cons-b")
         c = _make_claim(sdk, "cons-c")
-        op1 = sdk.create_operator("IMPL", a["id"], [b["id"]])
-        op2 = sdk.create_operator("NAND", b["id"], [c["id"]])
+        op1 = sdk._create_operator("IMPL", a["id"], [b["id"]])
+        op2 = sdk._create_operator("NAND", b["id"], [c["id"]])
         proj = sdk._get_proj()
         ep = sdk._get_ep()
         affected = ep._affected_claims([a["id"]], max_hops=None)
@@ -530,9 +530,9 @@ def test_ac2_noarg_runs_local_ep_no_global_extract(monkeypatch):
     with _fresh_sdk() as sdk:
         a = _make_claim(sdk, "z1")
         b = _make_claim(sdk, "z2")
-        sdk.set_point_baseline(a["id"], 1, 1)
-        sdk.set_point_baseline(b["id"], 1, 1)
-        sdk.create_operator("IMPL", a["id"], [b["id"]])
+        sdk._set_point_baseline(a["id"], 1, 1)
+        sdk._set_point_baseline(b["id"], 1, 1)
+        sdk._create_operator("IMPL", a["id"], [b["id"]])
         assert sdk._dirty_roots, "create_operator marks inputs dirty"
         calls: list = []
 
@@ -541,7 +541,7 @@ def test_ac2_noarg_runs_local_ep_no_global_extract(monkeypatch):
         monkeypatch.setattr(
             proj, "extract_svbp_factors",
             lambda *a, **k: (calls.append(1) or original(*a, **k)))
-        result = sdk.compute_confidence()
+        result = sdk._compute_confidence()
         assert calls == [], "no-arg path must NOT call extract_svbp_factors (#395)"
         assert set(result.keys()) == {"iterations", "converged", "confidences"} \
             or {"iterations", "converged", "confidences"} <= set(result.keys())
@@ -561,7 +561,7 @@ def test_ac2_noarg_clean_no_dirty_roots():
     "nothing was capped". The pre-#6211 key-set is a SUBSET of the result.
     """
     with _fresh_sdk() as sdk:
-        result = sdk.compute_confidence()
+        result = sdk._compute_confidence()
         assert result == {"iterations": 0, "converged": True,
                           "confidences": {},
                           "diagnostic": "no_dirty_roots",
@@ -575,8 +575,8 @@ def test_ac2_noarg_draft_only_no_factors():
     (preserves the pre-#395 diagnostic for the vacuous-dirty case)."""
     with _fresh_sdk() as sdk:
         # #1088: draft must be explicit — live is the create default.
-        sdk.create_point("statement", "draft-only", status="draft")
-        result = sdk.compute_confidence(require_calibration=True)
+        sdk._create_point("statement", "draft-only", status="draft")
+        result = sdk._compute_confidence(require_calibration=True)
         assert result["diagnostic"] == "no_factors", result
 
 
@@ -594,8 +594,8 @@ def test_ac3_max_hops_none_both_impls_and_run_contract():
         a = _make_claim(sdk, "m1")
         b = _make_claim(sdk, "m2")
         c = _make_claim(sdk, "m3")
-        op1 = sdk.create_operator("IMPL", a["id"], [b["id"]])
-        op2 = sdk.create_operator("IMPL", b["id"], [c["id"]])
+        op1 = sdk._create_operator("IMPL", a["id"], [b["id"]])
+        op2 = sdk._create_operator("IMPL", b["id"], [c["id"]])
         proj = sdk._get_proj()
         ep = sdk._get_ep()
         # #5566: m4/m5 reach the graph ONLY through a non-logical (`related`)
@@ -623,7 +623,7 @@ def test_ac3_max_hops_none_both_impls_and_run_contract():
         # `(mit)-[:IMPL]->(op)` is not an operator INPUT either, so the
         # directed hop must not admit the mitigation point (whose prior is a
         # calibrated baseline `mitigate_operator` set).
-        mit = sdk.mitigate_operator(op1["id"], "weakness", strength=0.3)["id"]
+        mit = sdk._mitigate_operator(op1["id"], "weakness", strength=0.3)["id"]
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.confidence=0.7",
             params={"id": mit},
@@ -690,21 +690,21 @@ def test_idempotent_remitigation_dirties_the_operator():
     with _fresh_sdk() as sdk:
         src = _make_claim(sdk, "source")
         claim = _make_claim(sdk, "downstream")
-        sdk.set_point_baseline(src["id"], 10, 1)
-        sdk.set_point_baseline(claim["id"], 1, 1)
-        op = sdk.create_operator("IMPL", src["id"], [claim["id"]])
+        sdk._set_point_baseline(src["id"], 10, 1)
+        sdk._set_point_baseline(claim["id"], 1, 1)
+        op = sdk._create_operator("IMPL", src["id"], [claim["id"]])
         proj = sdk._get_proj()
-        mit = sdk.mitigate_operator(op["id"], "minor caveat", strength=0.1)
-        weak = sdk.compute_confidence()["confidences"][claim["id"]]["mean"]
+        mit = sdk._mitigate_operator(op["id"], "minor caveat", strength=0.1)
+        weak = sdk._compute_confidence()["confidences"][claim["id"]]["mean"]
         # Clear the creation-time marking: the graph flags AND the in-memory
         # mirror, i.e. what a rebuilt/replayed process starts from.
         proj.g.query(
             "MATCH (n:Point) WHERE n.ep_dirty = true "
             "SET n.ep_dirty = null, n.ep_dirty_at = null")
         sdk._dirty_roots.clear()
-        assert sdk.compute_confidence()["diagnostic"] == "no_dirty_roots"
+        assert sdk._compute_confidence()["diagnostic"] == "no_dirty_roots"
         # The idempotent UPDATE path: a stronger mitigation on the same operator.
-        sdk.mitigate_operator(op["id"], "major counter-evidence", strength=0.5)
+        sdk._mitigate_operator(op["id"], "major counter-evidence", strength=0.5)
         # #7505: the roots are the operator's INPUTS (which is what seeds its
         # factor), not the operator — an operator root is not sweepable, so
         # marking it would strand `_auto_dream_mode()` on 'local' forever.
@@ -713,7 +713,7 @@ def test_idempotent_remitigation_dirties_the_operator():
         assert op["id"] not in sdk._dirty_roots, (
             "#7505: a mitigation write must not mint an unsweepable operator "
             "root — the operator's INPUTS carry the re-mitigation")
-        strong = sdk.compute_confidence()["confidences"][claim["id"]]["mean"]
+        strong = sdk._compute_confidence()["confidences"][claim["id"]]["mean"]
         assert strong < weak, (
             "a stronger re-mitigation must lower the downstream claim's "
             f"confidence: weak(0.10)={weak:.4f}, strong(0.50)={strong:.4f}")
@@ -751,10 +751,10 @@ def test_a_mitigation_write_reaches_its_operator_from_any_caller():
     with _fresh_sdk() as sdk:
         src = _make_claim(sdk, "source")
         claim = _make_claim(sdk, "downstream")
-        sdk.set_point_baseline(src["id"], 10, 1)
-        sdk.set_point_baseline(claim["id"], 1, 1)
-        op = sdk.create_operator("IMPL", src["id"], [claim["id"]])
-        mit = sdk.mitigate_operator(op["id"], "minor caveat", strength=0.1)
+        sdk._set_point_baseline(src["id"], 10, 1)
+        sdk._set_point_baseline(claim["id"], 1, 1)
+        op = sdk._create_operator("IMPL", src["id"], [claim["id"]])
+        mit = sdk._mitigate_operator(op["id"], "minor caveat", strength=0.1)
         proj = sdk._get_proj()
         proj.g.query(
             "MATCH (n:Point) WHERE n.ep_dirty = true "
@@ -768,7 +768,7 @@ def test_a_mitigation_write_reaches_its_operator_from_any_caller():
             "a mitigation is the SOURCE of (mit)-[:IMPL]->(op); root discovery "
             "that reads the id only as the operator's TARGET finds no operator, "
             "so the write is a silent no-op")
-        sdk.update_point(mit["id"], mitigation_strength=0.5)
+        sdk._update_point(mit["id"], mitigation_strength=0.5)
         roots = sorted(
             r[0] for r in proj.g.query(
                 "MATCH (n:Point) WHERE n.ep_dirty = true RETURN n.id").result_set)
@@ -789,11 +789,11 @@ def test_ac3_last_affected_no_stale_writeback():
     with _fresh_sdk() as sdk:
         a = _make_claim(sdk, "s1")
         b = _make_claim(sdk, "s2")
-        sdk.set_point_baseline(a["id"], 1, 1)
-        sdk.set_point_baseline(b["id"], 1, 1)
-        sdk.create_operator("IMPL", a["id"], [b["id"]])
+        sdk._set_point_baseline(a["id"], 1, 1)
+        sdk._set_point_baseline(b["id"], 1, 1)
+        sdk._create_operator("IMPL", a["id"], [b["id"]])
         ep = sdk._get_ep()
-        sdk.compute_confidence()
+        sdk._compute_confidence()
         assert len(ep._last_affected) == 2
         iterations, converged = ep.run(["missing-id"], max_hops=None)
         assert (iterations, converged) == (0, True)
@@ -812,12 +812,12 @@ def test_ac3_writeback_set_equals_run_set():
         a = _make_claim(sdk, "w1")
         b = _make_claim(sdk, "w2")
         c = _make_claim(sdk, "w3")
-        sdk.set_point_baseline(a["id"], 1, 1)
-        sdk.set_point_baseline(b["id"], 1, 1)
-        sdk.set_point_baseline(c["id"], 1, 1)
-        sdk.create_operator("IMPL", a["id"], [b["id"]])
-        sdk.create_operator("IMPL", b["id"], [c["id"]])
-        result = sdk.compute_confidence(anchors=[a["id"]], max_hops=1)
+        sdk._set_point_baseline(a["id"], 1, 1)
+        sdk._set_point_baseline(b["id"], 1, 1)
+        sdk._set_point_baseline(c["id"], 1, 1)
+        sdk._create_operator("IMPL", a["id"], [b["id"]])
+        sdk._create_operator("IMPL", b["id"], [c["id"]])
+        result = sdk._compute_confidence(anchors=[a["id"]], max_hops=1)
         assert set(result["confidences"].keys()) == \
             sdk._get_ep()._last_affected
         stamped = {
@@ -840,11 +840,11 @@ def test_compute_confidence_read_never_stamps_updated_at():
         a = _make_claim(sdk, "f1")
         b = _make_claim(sdk, "f2")
         c = _make_claim(sdk, "f3")
-        sdk.set_point_baseline(a["id"], 1, 1)
-        sdk.set_point_baseline(b["id"], 1, 1)
-        sdk.set_point_baseline(c["id"], 1, 1)
-        sdk.create_operator("IMPL", a["id"], [b["id"]])
-        sdk.create_operator("IMPL", b["id"], [c["id"]])
+        sdk._set_point_baseline(a["id"], 1, 1)
+        sdk._set_point_baseline(b["id"], 1, 1)
+        sdk._set_point_baseline(c["id"], 1, 1)
+        sdk._create_operator("IMPL", a["id"], [b["id"]])
+        sdk._create_operator("IMPL", b["id"], [c["id"]])
         proj = sdk._get_proj()
 
         def _updated_at(pid: str):
@@ -859,7 +859,7 @@ def test_compute_confidence_read_never_stamps_updated_at():
         assert all(v is not None for v in before.values()), (
             "claims carry their creation updatedAt stamp")
 
-        result = sdk.compute_confidence(anchors=[a["id"]], max_hops=1)
+        result = sdk._compute_confidence(anchors=[a["id"]], max_hops=1)
         assert result["converged"] is True
         assert set(result["confidences"]) == sdk._get_ep()._last_affected
 
@@ -1719,7 +1719,7 @@ def test_ac5_interactive_latency_zone():
     with _fresh_sdk() as sdk:
         zone = _chain(sdk, 40, prefix="lat-")
         for cid in zone:
-            sdk.set_point_baseline(cid, 1, 1)  # #344: calibrated graph
+            sdk._set_point_baseline(cid, 1, 1)  # #344: calibrated graph
         assert sdk._dirty_roots
         # THIS BOX's speed, measured OUTSIDE the timed window and before it, so
         # the calibration's own CPU is never attributed to the pass. It sets the
@@ -1736,7 +1736,7 @@ def test_ac5_interactive_latency_zone():
         cpus = _ac5_effective_cpus()
         before = tuple(v / cpus for v in os.getloadavg()[:2])
         w0, c0 = time.perf_counter(), time.process_time()
-        result = sdk.compute_confidence()
+        result = sdk._compute_confidence()
         elapsed = time.perf_counter() - w0
         cpu = time.process_time() - c0
         after = tuple(v / cpus for v in os.getloadavg()[:2])
@@ -1809,13 +1809,13 @@ def test_ac8_selection_depth_equals_run_depth():
         a = _make_claim(sdk, "r1")
         b = _make_claim(sdk, "r2")
         c = _make_claim(sdk, "r3")
-        sdk.set_point_baseline(a["id"], 1, 1)
-        sdk.set_point_baseline(b["id"], 1, 1)
-        sdk.set_point_baseline(c["id"], 1, 1)
-        sdk.create_operator("IMPL", a["id"], [b["id"]])
-        sdk.create_operator("IMPL", b["id"], [c["id"]])
-        r1 = sdk.compute_confidence(anchors=[a["id"]], max_hops=1)
-        r2 = sdk.compute_confidence(anchors=[a["id"]], max_hops=2)
+        sdk._set_point_baseline(a["id"], 1, 1)
+        sdk._set_point_baseline(b["id"], 1, 1)
+        sdk._set_point_baseline(c["id"], 1, 1)
+        sdk._create_operator("IMPL", a["id"], [b["id"]])
+        sdk._create_operator("IMPL", b["id"], [c["id"]])
+        r1 = sdk._compute_confidence(anchors=[a["id"]], max_hops=1)
+        r2 = sdk._compute_confidence(anchors=[a["id"]], max_hops=2)
         assert c["id"] in r2["confidences"], "max_hops=2 reaches c"
         assert set(r1["confidences"]) == set(sdk._get_ep()._last_affected)
         assert set(r2["confidences"]) == set(sdk._get_ep()._last_affected)
@@ -1830,9 +1830,9 @@ def test_ac9_bypass_path_audit():
     with _fresh_sdk() as sdk:
         a = _make_claim(sdk, "bp1")
         b = _make_claim(sdk, "bp2")
-        sdk.set_point_baseline(a["id"], 1, 1)
-        sdk.set_point_baseline(b["id"], 1, 1)
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+        sdk._set_point_baseline(a["id"], 1, 1)
+        sdk._set_point_baseline(b["id"], 1, 1)
+        op = sdk._create_operator("IMPL", a["id"], [b["id"]])
         # ingest.py pattern: direct ep.run(op_ids, max_hops=3) — unchanged.
         ep = sdk._get_ep()
         n_iter, converged = ep.run([op["id"]], max_hops=3,
@@ -1841,7 +1841,7 @@ def test_ac9_bypass_path_audit():
         assert b["id"] in ep._last_affected
         # No-arg path after a direct projection write covers the zone.
         sdk._dirty_roots.add(a["id"])
-        result = sdk.compute_confidence()
+        result = sdk._compute_confidence()
         assert a["id"] in result["confidences"] and b["id"] in result["confidences"]
 
 

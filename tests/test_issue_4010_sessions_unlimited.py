@@ -167,7 +167,7 @@ class TestResolvedLimitsContract:
         monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
         reg = TortoiseSDK(db_path, namespace="registry")
         try:
-            team = reg.org_create(f"contract-{os.urandom(4).hex()}")
+            team = reg._org_create(f"contract-{os.urandom(4).hex()}")
             limits = resolve_org_limits(team["id"])
             missing = [k for k in _RESOURCE_LIMIT_KEYS.values()
                        if k not in limits]
@@ -203,7 +203,7 @@ class TestStoredValueIsNotHonoured:
         monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
         reg = TortoiseSDK(db_path, namespace="registry")
         try:
-            team = reg.org_create(f"stored-{os.urandom(4).hex()}")
+            team = reg._org_create(f"stored-{os.urandom(4).hex()}")
             tid = team["id"]
             reg._get_registry().query(
                 "MATCH (t:Team {id:$id}) SET t.max_sessions = $ms",
@@ -267,7 +267,9 @@ class TestStoredValuesCleared:
         try:
             reg = sdk._get_registry()
             for i in range(2):
-                team = sdk.org_create(f"clear-{i}-{os.urandom(4).hex()}")
+                team = sdk._org_create(f"clear-{i}-{os.urandom(4).hex()}")
+                # `reg` is a FalkorDB `Graph` (a vendor handle), NOT the SDK: its door is
+                # `query`, and `_query` is the vendor's PRIVATE delegate (#13899 review P2).
                 reg.query(
                     "MATCH (t:Team {id:$id}) SET t.max_sessions = $ms",
                     params={"id": team["id"], "ms": LEGACY_CAP},
@@ -321,7 +323,7 @@ def hosted_org_past_cap(monkeypatch):
             reg = TortoiseSDK(db_path, namespace="registry")
             tenant = None
             try:
-                team = reg.org_create(f"cap-{os.urandom(4).hex()}")
+                team = reg._org_create(f"cap-{os.urandom(4).hex()}")
                 tid = team["id"]
                 # The registry auth lane resolves :APIKey nodes (lookup_hash
                 # prefix scan) — mint one whose plaintext this test holds.

@@ -54,7 +54,7 @@ def sdk():
 
 
 def _make_point(sdk: TortoiseSDK, **kw):
-    return sdk.create_point(kw.pop("kind", "statement"),
+    return sdk._create_point(kw.pop("kind", "statement"),
                             kw.pop("content", "test content"), **kw)
 
 
@@ -109,13 +109,13 @@ class TestCreateEntity:
     def test_aliases_are_thin_and_consistent(self, sdk):
         """Legacy create_* methods return the bare node (no nudges key) with
         identical field semantics to create_entity."""
-        a = sdk.create_subject("Alpha", "company")
+        a = sdk._create_subject("Alpha", "company")
         b = sdk.create_entity("subject", "Beta", subjectKind="company")["node"]
         assert a.get("subjectKind") == b.get("subjectKind") == "company"
         assert a.get("status") == b.get("status"), (a, b)
         assert a.get("status") is None, a
         assert "nudges" not in a  # legacy contract: node only
-        ev = sdk.create_event("review", "meeting")
+        ev = sdk._create_event("review", "meeting")
         assert ev.get("eventKind") == "meeting"
         # #13100: the ingest marker, not a lifecycle word (`pending` -> `indexed`)
         assert ev.get("eventStatus") == "pending"
@@ -165,8 +165,8 @@ class TestUpdate:
     def test_update_point_promotes_draft_to_live(self, sdk):
         # Draft is explicit since #1088 (a no-status create is LIVE).
         p = _make_point(sdk, content="draft claim", status="draft")
-        assert sdk.get_point(p["id"]).get("status") == "draft"
-        r = sdk.update(p["id"], status="live")
+        assert sdk._get_point(p["id"]).get("status") == "draft"
+        r = sdk._update(p["id"], status="live")
         assert r["status"] == "live"
 
     def test_update_point_object_increments_version(self, sdk):
@@ -174,14 +174,14 @@ class TestUpdate:
         p = _make_point(sdk, content="versioned claim")
         proj = sdk._get_proj()
         proj.g.query("MATCH (n:Point {id:$id}) SET n:Object", params={"id": p["id"]})
-        r1 = sdk.update(p["id"], note="first")
+        r1 = sdk._update(p["id"], note="first")
         assert r1["version"] == 1
-        r2 = sdk.update(p["id"], note="second")
+        r2 = sdk._update(p["id"], note="second")
         assert r2["version"] == 2
 
     def test_update_plain_entity_sets_props(self, sdk):
         obj = sdk.create_entity("object", "Plain Entity", objectKind="service")["node"]
-        r = sdk.update(obj["id"], tier="enterprise", sla="99.9")
+        r = sdk._update(obj["id"], tier="enterprise", sla="99.9")
         assert r.get("tier") == "enterprise"
         assert r.get("sla") == "99.9"
 
@@ -189,7 +189,7 @@ class TestUpdate:
         """Point-lifecycle semantics: context is removed (#49) — still rejected."""
         p = _make_point(sdk, content="ctx claim")
         with pytest.raises(TypeError, match="context"):
-            sdk.update(p["id"], context="x")
+            sdk._update(p["id"], context="x")
 
     def test_update_validates_status(self, sdk):
         p = _make_point(sdk, content="status claim")
@@ -199,21 +199,21 @@ class TestUpdate:
         # unknown word is refused, and refuses by WORD rather than silently
         # storing.
         with pytest.raises(ValueError, match="was refused"):
-            sdk.update(p["id"], status="bogus")
+            sdk._update(p["id"], status="bogus")
 
     def test_update_only_promotes_draft_to_live(self, sdk):
         p = _make_point(sdk, content="promote claim")
-        sdk.update(p["id"], status="live")
+        sdk._update(p["id"], status="live")
         with pytest.raises(ValueError, match="only promotes"):
-            sdk.update(p["id"], status="retracted")  # lifecycle via retract/supersede
+            sdk._update(p["id"], status="retracted")  # lifecycle via retract/supersede
 
     def test_update_unknown_id_returns_empty(self, sdk):
-        assert sdk.update("000000000000-000000000000", tier="x") == {}
+        assert sdk._update("000000000000-000000000000", tier="x") == {}
 
     def test_update_tags_sync(self, sdk):
         p = _make_point(sdk, content="tagged claim")
-        sdk.update(p["id"], tags=["gamma"])
-        assert [r["id"] for r in sdk.query_points_by_tag("gamma")] == [p["id"]]
+        sdk._update(p["id"], tags=["gamma"])
+        assert [r["id"] for r in sdk._query_points_by_tag("gamma")] == [p["id"]]
 
     def test_update_entity_via_legacy_alias(self, sdk):
         obj = sdk.create_entity("object", "Alias Entity", objectKind="service")["node"]
@@ -226,21 +226,21 @@ class TestUpdate:
 class TestDelete:
     def test_delete_point(self, sdk):
         p = _make_point(sdk, content="doomed point")
-        assert sdk.delete(p["id"]) is True
-        assert sdk.get_point(p["id"]) == {}
-        assert sdk.delete(p["id"]) is False  # idempotent False on re-delete
+        assert sdk._delete(p["id"]) is True
+        assert sdk._get_point(p["id"]) == {}
+        assert sdk._delete(p["id"]) is False  # idempotent False on re-delete
 
     def test_delete_entity(self, sdk):
         obj = sdk.create_entity("object", "Doomed Entity", objectKind="service")["node"]
-        assert sdk.delete(obj["id"]) is True
+        assert sdk._delete(obj["id"]) is True
         assert sdk.get_entity(obj["id"]) == {}
 
     def test_delete_unknown_false(self, sdk):
-        assert sdk.delete("000000000000-000000000000") is False
+        assert sdk._delete("000000000000-000000000000") is False
 
     def test_delete_event_by_eventid(self, sdk):
         ev = sdk.create_entity("event", "doomed event", eventKind="meeting")["node"]
-        assert sdk.delete(ev["eventId"]) is True
+        assert sdk._delete(ev["eventId"]) is True
 
 
 # ── supersede / transfer_edges ──────────────────────────────────────
@@ -257,18 +257,18 @@ class TestSupersede:
         r = sdk.supersede_knowledge(old["id"], new["id"])
         assert r["invalidated"] is True
         assert r.get("edges_transferred") == 0  # nothing to transfer, still full path
-        assert sdk.get_point(old["id"])["status"] == "superseded"
+        assert sdk._get_point(old["id"])["status"] == "superseded"
 
     def test_legacy_alias_parity(self, sdk):
         """invalidate_point ≡ supersede(transfer_edges=False);
         supersede_point ≡ supersede(transfer_edges=True)."""
         old, new = self._old_new(sdk, "old alpha", "new alpha")
-        r_legacy = sdk.invalidate_point(old["id"], new["id"])
+        r_legacy = sdk._invalidate_point(old["id"], new["id"])
         old2, new2 = self._old_new(sdk, "old beta", "new beta")
         r_new = sdk.supersede_knowledge(old2["id"], new2["id"], transfer_edges=False)
         assert r_legacy["invalidated"] == r_new["invalidated"] is True
-        assert sdk.get_point(old["id"]).get("outdated") is True
-        assert sdk.get_point(old2["id"]).get("outdated") is True
+        assert sdk._get_point(old["id"]).get("outdated") is True
+        assert sdk._get_point(old2["id"]).get("outdated") is True
 
     def test_guards_preserved(self, sdk):
         """Missing/self endpoints still raise through the consolidated entry."""
@@ -281,13 +281,13 @@ class TestSupersede:
     def test_transfer_true_transfers_edges(self, sdk):
         old, new = self._old_new(sdk)
         obj = sdk.create_entity("object", "Sup Target", objectKind="product")["node"]
-        sdk.create_edge("aboutObject", old["id"], obj["id"])
+        sdk._create_edge("aboutObject", old["id"], obj["id"])
         r = sdk.supersede_knowledge(old["id"], new["id"], transfer_edges=True)
         assert r["invalidated"] is True
         assert r["edges_transferred"] >= 1
         assert _about_targets(sdk, old["id"], "aboutObject") == []  # moved off
         assert _about_targets(sdk, new["id"], "aboutObject") == [obj["id"]]
-        assert sdk.get_point(old["id"])["status"] == "superseded"
+        assert sdk._get_point(old["id"])["status"] == "superseded"
         assert len(_corrects_into(sdk, new["id"])) == 1
 
     def test_transfer_false_matches_invalidate(self, sdk):
@@ -295,13 +295,13 @@ class TestSupersede:
         NO edge transfer."""
         old, new = self._old_new(sdk)
         obj = sdk.create_entity("object", "Inv Target", objectKind="product")["node"]
-        sdk.create_edge("aboutObject", old["id"], obj["id"])
+        sdk._create_edge("aboutObject", old["id"], obj["id"])
         r = sdk.supersede_knowledge(old["id"], new["id"], transfer_edges=False)
         assert r["invalidated"] is True
         assert "edges_transferred" not in r
         assert _about_targets(sdk, old["id"], "aboutObject") == [obj["id"]]  # stays
         assert _about_targets(sdk, new["id"], "aboutObject") == []  # not moved
-        assert sdk.get_point(old["id"]).get("outdated") is True
+        assert sdk._get_point(old["id"]).get("outdated") is True
         assert len(_corrects_into(sdk, new["id"])) == 1
 
 
@@ -312,7 +312,7 @@ class TestCreateEdge:
     def test_typed_structural_edge(self, sdk):
         p = _make_point(sdk, content="produces claim")
         obj = sdk.create_entity("object", "Output", objectKind="artifact")["node"]
-        r = sdk.create_edge("produces", p["id"], obj["id"])
+        r = sdk._create_edge("produces", p["id"], obj["id"])
         assert r["created"] is True
         assert r["edge"] == {"relation": "produces", "from": p["id"], "to": obj["id"]}
         assert _about_targets(sdk, p["id"], "produces") == [obj["id"]]
@@ -320,25 +320,25 @@ class TestCreateEdge:
     def test_about_edge_via_create_edge(self, sdk):
         subj = sdk.create_entity("subject", "Edge Team", subjectKind="team")["node"]
         p = _make_point(sdk, content="edge claim")
-        assert sdk.create_edge("aboutSubject", p["id"], subj["id"])["created"] is True
+        assert sdk._create_edge("aboutSubject", p["id"], subj["id"])["created"] is True
         assert _about_targets(sdk, p["id"], "aboutSubject") == [subj["id"]]
 
     def test_related_and_depends_on(self, sdk):
         o1 = sdk.create_entity("object", "R1", objectKind="service")["node"]
         o2 = sdk.create_entity("object", "R2", objectKind="service")["node"]
-        assert sdk.create_edge("related", o1["id"], o2["id"])["created"] is True
-        assert sdk.create_edge("dependsOn", o1["id"], o2["id"])["created"] is True
+        assert sdk._create_edge("related", o1["id"], o2["id"])["created"] is True
+        assert sdk._create_edge("dependsOn", o1["id"], o2["id"])["created"] is True
 
     def test_unknown_relation_raises(self, sdk):
         p = _make_point(sdk, content="x")
         with pytest.raises(ValueError, match="Unknown predicate"):
-            sdk.create_edge("FLIES", p["id"], p["id"])
+            sdk._create_edge("FLIES", p["id"], p["id"])
 
     def test_operator_less_by_default(self, sdk):
         """Reification rule (v3.5 §8): structural edges carry NO operator."""
         p = _make_point(sdk, content="reify claim")
         obj = sdk.create_entity("object", "Reify", objectKind="artifact")["node"]
-        sdk.create_edge("uses", p["id"], obj["id"])
+        sdk._create_edge("uses", p["id"], obj["id"])
         ops = sdk._get_proj().g.query(
             "MATCH (n:Point {is_operator:true}) RETURN count(n)"
         ).result_set[0][0]
@@ -346,7 +346,7 @@ class TestCreateEdge:
 
     def test_missing_endpoint_returns_created_false(self, sdk):
         p = _make_point(sdk, content="orphan edge claim")
-        r = sdk.create_edge("uses", p["id"], "000000000000-000000000000")
+        r = sdk._create_edge("uses", p["id"], "000000000000-000000000000")
         assert r["created"] is False
 
 
@@ -369,7 +369,7 @@ class TestNudges:
     def test_nudges_suggest_mitigate_for_operator(self, sdk):
         a = _make_point(sdk, content="widgets are reliable")
         b = _make_point(sdk, content="widgets break often")
-        sdk.create_operator("IMPL", a["id"], [b["id"]], label="widgets support plan")
+        sdk._create_operator("IMPL", a["id"], [b["id"]], label="widgets support plan")
         r = sdk.create_entity("object", "widgets plan", objectKind="plan")
         rels = [n["suggested_relation"] for n in r["nudges"]]
         assert "mitigate" in rels, f"operator candidate not nudged: {rels}"

@@ -319,10 +319,10 @@ def test_invalidate_point_delegates_the_verdict_to_the_declaration(
         predecessor ``validFrom`` verbatim, and the clock is frozen so the
         ``now`` the stamp block computes is exactly ``now``.
     """
-    old = sdk.create_point(
+    old = sdk._create_point(
         "statement", "vw5374 invalidate old",
         **({"validFrom": vf} if vf is not None else {}))
-    repl = sdk.create_point("statement", "vw5374 invalidate repl")
+    repl = sdk._create_point("statement", "vw5374 invalidate repl")
     fixed = _dt.datetime.fromisoformat(now)
 
     class _FrozenDatetime(_dt.datetime):
@@ -332,7 +332,7 @@ def test_invalidate_point_delegates_the_verdict_to_the_declaration(
 
     with monkeypatch.context() as m:
         m.setattr(_dt, "datetime", _FrozenDatetime)
-        raised = _raised(lambda: sdk.invalidate_point(old["id"], repl["id"]))
+        raised = _raised(lambda: sdk._invalidate_point(old["id"], repl["id"]))
 
     assert raised is expected
     if expected:

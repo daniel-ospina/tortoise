@@ -118,7 +118,7 @@ def test_rebuild_all_rederives_event_meta_watermark(tmp_path):
     """
     sdk, events = _mk_sdk(tmp_path)
     for i in range(3):
-        sdk.create_point("statement", f"pre-rebuild {i}")
+        sdk._create_point("statement", f"pre-rebuild {i}")
     proj = sdk._get_proj()
 
     assert _seqs(sdk) == [1, 2, 3]
@@ -151,7 +151,7 @@ def test_rebuild_all_rederives_event_meta_watermark(tmp_path):
     # forever — and a tail poll resumes at seq 4. Pre-fix the fresh stream
     # restarted at 1, so `read_after(3)` returned [] and NOTHING told the
     # subscriber: it starved for good with its cursor still "valid".
-    sdk.create_point("statement", "post-rebuild")
+    sdk._create_point("statement", "post-rebuild")
     assert _seqs(sdk) == [4]
     delivered = event_store.read_after(proj, 3)
     assert [e["seq"] for e in delivered] == [4], (
@@ -182,7 +182,7 @@ def test_rebuild_all_never_moves_the_watermark_backward_on_retry(tmp_path):
     """
     sdk, events = _mk_sdk(tmp_path)
     for i in range(3):
-        sdk.create_point("statement", f"post-wipe emit {i}")
+        sdk._create_point("statement", f"post-wipe emit {i}")
     assert _meta(sdk) == (3, 1), "the live capture must really be the LOWER one"
     _plant(Path(_sidecar_path(events)),
            _sidecar_payload(event_meta=[{"last_seq": 500}]))
@@ -210,7 +210,7 @@ def test_rebuild_all_keeps_the_fresh_capture_when_it_is_higher(tmp_path):
     """
     sdk, events = _mk_sdk(tmp_path)
     for i in range(3):
-        sdk.create_point("statement", f"live {i}")
+        sdk._create_point("statement", f"live {i}")
     assert _meta(sdk) == (3, 1)
     _plant(Path(_sidecar_path(events)),
            _sidecar_payload(event_meta=[{"last_seq": 1}]))
@@ -264,7 +264,7 @@ def test_rebuild_journal_only_engine_keeps_watermark(tmp_path):
     above, and `rebuild()` replays it, so the graph is non-empty afterwards.
     """
     sdk, events = _mk_sdk(tmp_path)
-    sdk.create_point("statement", "only event")
+    sdk._create_point("statement", "only event")
     proj = sdk._get_proj()
     assert _meta(sdk) == (1, 1)
 
@@ -350,7 +350,7 @@ def test_rebuild_all_carries_the_watermark_in_the_prewipe_sidecar(
 
     sdk, events = _mk_sdk(tmp_path)
     for i in range(3):
-        sdk.create_point("statement", f"pre {i}")
+        sdk._create_point("statement", f"pre {i}")
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
     assert written, "no pre-wipe sidecar was written — the spy missed"
@@ -471,7 +471,7 @@ def test_v2_leftover_with_a_live_reset_counter_reports_the_loss(
     """
     sdk, events = _mk_sdk(tmp_path)
     for i in range(3):
-        sdk.create_point("statement", f"pre-wipe {i}")
+        sdk._create_point("statement", f"pre-wipe {i}")
     assert _meta(sdk) == (3, 1)
     path = Path(_sidecar_path(events))
     payload = _sidecar_payload(version=2, batch_snapshot=[{"id": "b1"}])
@@ -558,7 +558,7 @@ def test_rebuild_all_refuses_before_the_wipe_when_capture_fails(
     from tortoise import projection as pr
 
     sdk, events = _mk_sdk(tmp_path)
-    sdk.create_point("statement", "keep me")
+    sdk._create_point("statement", "keep me")
     proj = sdk._get_proj()
     before = _seen_points(sdk)
     assert _meta(sdk) == (1, 1)
@@ -591,7 +591,7 @@ def test_event_meta_only_write_failure_names_the_watermark(
     from tortoise import projection as pr
 
     sdk, events = _mk_sdk(tmp_path)
-    sdk.create_point("statement", "journaled, so no graph-only snapshot")
+    sdk._create_point("statement", "journaled, so no graph-only snapshot")
 
     def boom(path, payload):
         raise OSError("simulated disk failure")
@@ -621,7 +621,7 @@ def test_rebuild_all_degrades_when_the_watermark_restore_fails(
     driver failure the degraded leg exists for.
     """
     sdk, events = _mk_sdk(tmp_path)
-    sdk.create_point("statement", "keep me")
+    sdk._create_point("statement", "keep me")
     proj = sdk._get_proj()
 
     def boom(_proj, _carried):
@@ -649,7 +649,7 @@ def test_rebuild_journal_only_degrades_when_the_watermark_restore_fails(
     raise after the wipe.
     """
     sdk, events = _mk_sdk(tmp_path)
-    sdk.create_point("statement", "keep me")
+    sdk._create_point("statement", "keep me")
     proj = sdk._get_proj()
 
     def boom(_proj, _carried):
@@ -877,7 +877,7 @@ def test_capture_watermark_refuses_a_corrupt_live_counter(tmp_path):
     from tortoise.event_store import capture_watermark
 
     sdk, events = _mk_sdk(tmp_path)
-    sdk.create_point("statement", "keep me")
+    sdk._create_point("statement", "keep me")
     proj = sdk._get_proj()
     proj.g.query(
         f"MATCH (m:GraphEventMeta) SET m.last_seq = {2 ** 63 - 1}")

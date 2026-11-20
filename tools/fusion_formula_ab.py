@@ -459,7 +459,7 @@ def measure_question(sdk, q: dict, *, alpha: float, primary: str,
                                      else alpha), primary=primary,
                          capture=capture, inject=inject):
             t0 = time.monotonic()
-            hits = sdk.tortoise_fts_query(
+            hits = sdk._tortoise_fts_query(
                 q["question"], limit=LIMIT, pool_size=LEG_DEPTH,
                 include_terminal=True, keep_numeric=True,
                 search_keys_prf=True, fusion_weights=None, fusion_k=60,

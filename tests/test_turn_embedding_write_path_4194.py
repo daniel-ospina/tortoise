@@ -281,7 +281,7 @@ def test_no_embedder_still_stores_the_turn_and_declares_the_leg_impaired(
             "vector is worse than an honest NULL")
 
     trace: list[dict] = []
-    sdk.recall_state("auth dead-end", limit=5, leg_trace=trace)
+    sdk._recall_state("auth dead-end", limit=5, leg_trace=trace)
     marker = declared_degraded_read(trace)
     assert marker is not None, (
         "a vector leg that never ran was reported as available")

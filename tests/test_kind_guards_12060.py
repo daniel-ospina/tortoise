@@ -149,7 +149,7 @@ def _pack_guard(**overrides) -> Confusion:
 class TestAcceptance1RedirectAndOverride:
     def test_issue_identifier_as_a_subject_lands_as_a_work_item(self, sdk,
                                                                 no_pack_guards):
-        r = sdk.create_subject(ISSUE_NAME)
+        r = sdk._create_subject(ISSUE_NAME)
         labels, object_kind, _subject_kind = _labels_kinds(sdk, r["id"])
         assert labels == ["Object"], (
             "an issue identifier minted a :Subject — the work-item read can "
@@ -158,7 +158,7 @@ class TestAcceptance1RedirectAndOverride:
         assert "kind_redirect" in r, r
 
     def test_the_ax_block_has_the_fixed_shape(self, sdk, no_pack_guards):
-        r = sdk.create_subject(ISSUE_NAME)
+        r = sdk._create_subject(ISSUE_NAME)
         block = r["kind_redirect"]
         # what changed, why (rule id), the exact override, how to undo — as DATA.
         assert block["from"] == {"kind": None, "layer": "subject"}
@@ -177,7 +177,7 @@ class TestAcceptance1RedirectAndOverride:
 
     def test_as_declared_lands_as_a_subject_and_records_the_override(
             self, sdk, no_pack_guards):
-        r = sdk.create_subject(ISSUE_NAME, intent=INTENT_AS_DECLARED)
+        r = sdk._create_subject(ISSUE_NAME, intent=INTENT_AS_DECLARED)
         labels, _ok, _sk = _labels_kinds(sdk, r["id"])
         assert labels == ["Subject"], "the caller's intent was overruled"
         assert "kind_redirect" not in r
@@ -186,7 +186,7 @@ class TestAcceptance1RedirectAndOverride:
         assert r["kind_guard_overridden"]["declaredLayer"] == "subject"
 
     def test_the_override_is_counted(self, sdk, no_pack_guards):
-        sdk.create_subject(ISSUE_NAME, intent=INTENT_AS_DECLARED)
+        sdk._create_subject(ISSUE_NAME, intent=INTENT_AS_DECLARED)
         rows = kind_guard_counts()
         assert [x["outcome"] for x in rows] == ["overridden"]
         assert rows[0]["rule"] == "issue-identifier-is-work-item"
@@ -201,7 +201,7 @@ class TestAcceptance1RedirectAndOverride:
         declared keyword there, so the override travels that channel with NO
         tool-parameter change (the #12060 out-of-scope rule: no MCP surface
         change without the owner)."""
-        r = sdk.create_subject(ISSUE_NAME, **{"intent": INTENT_AS_DECLARED})
+        r = sdk._create_subject(ISSUE_NAME, **{"intent": INTENT_AS_DECLARED})
         assert _labels_kinds(sdk, r["id"])[0] == ["Subject"]
         assert r["kind_guard_overridden"]["rule"] == "issue-identifier-is-work-item"
 
@@ -211,26 +211,26 @@ class TestAcceptance1RedirectAndOverride:
         reserving the name unconditionally would silently DROP a legitimate
         property — and a reserved-name refusal would be a refusal on a path that
         must never refuse (#1934)."""
-        r = sdk.create_subject("Widget", intent="purchase")
+        r = sdk._create_subject("Widget", intent="purchase")
         assert "kind_guard_overridden" not in r
         assert _node_props(sdk, r["id"])["intent"] == "purchase"
         # …and the guard still fires, because a non-token is not an override
-        r2 = sdk.create_subject(ISSUE_NAME, intent="purchase")
+        r2 = sdk._create_subject(ISSUE_NAME, intent="purchase")
         assert r2["kind_redirect"]["rule"] == "issue-identifier-is-work-item"
 
     def test_the_alias_doors_surface_the_ax_fields(self, sdk, no_pack_guards):
         """The alias unwrapped ``result["node"]`` and dropped top-level keys —
         the #8171 P2 the advisories already got. The AX fields ride the node."""
-        r = sdk.create_subject(ISSUE_NAME)
+        r = sdk._create_subject(ISSUE_NAME)
         assert r["kind_redirect"]["rule"] == "issue-identifier-is-work-item"
-        r2 = sdk.create_object("issue:daniel-ospina/tortoise#99999")
+        r2 = sdk._create_object("issue:daniel-ospina/tortoise#99999")
         assert r2["objectKind"] == "core:WorkItem"
         assert r2["kind_redirect"]["to"]["kind"] == "core:WorkItem"
 
     def test_declared_kind_and_layer_are_preserved_on_the_node(
             self, sdk, no_pack_guards):
         """R5 — an override, a replay or an audit can restore what was asked."""
-        r = sdk.create_subject("daniel-ospina/agent-infra",
+        r = sdk._create_subject("daniel-ospina/agent-infra",
                                subjectKind="core:naturalPerson")
         assert _labels_kinds(sdk, r["id"])[1] == "core:Project"
         props = _node_props(sdk, r["id"])
@@ -245,7 +245,7 @@ class TestAcceptance1RedirectAndOverride:
                                                          no_pack_guards):
         """ONE decision, taken once: after the guard rewrites the kind, the
         kind↔layer router sees a consistent write and stays silent."""
-        r = sdk.create_subject(ISSUE_NAME)
+        r = sdk._create_subject(ISSUE_NAME)
         codes = [a.get("code") for a in (r.get("advisories") or [])]
         assert "kind_layer_routed" not in codes, r.get("advisories")
         assert "kind_other_layer" not in codes
@@ -327,7 +327,7 @@ class TestAcceptance2Abstention:
                 ("the owner", None, "Subject"),          # abstains, unchanged
                 ("daniel-ospina/agent-infra", "core:naturalPerson", "Object"),
                 ("Acme Corp", None, "Subject")):
-            r = sdk.create_subject(name, subjectKind=kind)
+            r = sdk._create_subject(name, subjectKind=kind)
             assert r.get("id"), name
             assert _labels_kinds(sdk, r["id"])[0] == [expected_label], name
         # The abstention was reported, not swallowed...
@@ -818,7 +818,7 @@ class TestAcceptance4NoModelCalls:
                 ("Acme Corp", "object", None, None)):
             resolve(name, layer, kind, intent=intent, pack_confusions=())
         # …and a full write through the door
-        r = sdk.create_subject(ISSUE_NAME)
+        r = sdk._create_subject(ISSUE_NAME)
         assert r["kind_redirect"]["rule"] == "issue-identifier-is-work-item"
 
     def test_the_guard_module_imports_nothing_at_module_scope(self):
@@ -997,7 +997,7 @@ class TestAcceptance6PackExtensionPoint:
         """Absent ``guards:`` means "no redirects" — not "no write"."""
         _catalog_pack(tmp_path, monkeypatch, "acme", guards=" []")
         assert kg._catalog_pack_guards() == ()
-        r = sdk.create_subject("acme widget")
+        r = sdk._create_subject("acme widget")
         assert "kind_redirect" not in r and "kind_redirect_skipped" not in r
 
     def test_a_catalog_block_that_is_not_a_sequence_is_READ_not_skipped(
@@ -1057,7 +1057,7 @@ class TestAcceptance6PackExtensionPoint:
 """)
         rules = {c.rule for c in kg._catalog_pack_guards()}
         assert any(r.startswith("acme:") for r in rules), rules
-        r = sdk.create_subject("acme-42")
+        r = sdk._create_subject("acme-42")
         assert r["kind_redirect"]["to"]["kind"] == "acme:concept"
         assert _labels_kinds(sdk, r["id"])[1] == "acme:concept"
         # The table's own coherence check has a RUNNER here, where the pack is in
@@ -1083,7 +1083,7 @@ class TestAcceptance6PackExtensionPoint:
         # the graph HAS pack records, and this one is not among them
         monkeypatch.setattr("tortoise.sdk._graph_installed_namespaces",
                             lambda _sdk: frozenset({"core"}))
-        r = sdk.create_subject("ISSUE-7")
+        r = sdk._create_subject("ISSUE-7")
         assert r.get("id")
         assert r["kind_redirect_skipped"]["reason"] == \
             kg.SKIP_DECLARING_PACK_NOT_INSTALLED
@@ -1105,9 +1105,9 @@ class TestReviewFindingsClosed:
         raised `TypeError: got multiple values for keyword argument 'intent'` AT
         THE RELAY — the #2296 relay-collision class, reopened by adding a
         parameter and not a strip. The bag is now built, not splatted."""
-        r = sdk.create_subject("acme", props={"intent": "prefer-latest"})
+        r = sdk._create_subject("acme", props={"intent": "prefer-latest"})
         assert _node_props(sdk, r["id"])["intent"] == "prefer-latest"
-        r2 = sdk.create_object("acme thing", props={"intent": "measured"})
+        r2 = sdk._create_object("acme thing", props={"intent": "measured"})
         assert _node_props(sdk, r2["id"])["intent"] == "measured"
 
     def test_the_redirect_still_abstains_for_a_word_that_is_no_longer_a_status(
@@ -1146,7 +1146,7 @@ class TestReviewFindingsClosed:
             reason="an org name", declaring_pack="acme")
         monkeypatch.setattr(kg, "_catalog_pack_guards", lambda: (guard,))
         with pytest.raises(ValueError) as exc:
-            sdk.create_object("acme-org-7", status="active")
+            sdk._create_object("acme-org-7", status="active")
         message = str(exc.value)
         assert "status 'active' was refused" in message
         assert "advance_stage" in message, \
@@ -1166,7 +1166,7 @@ class TestReviewFindingsClosed:
             redirect="core:organization", fallback="core:Project",
             reason="an org name", declaring_pack="acme")
         monkeypatch.setattr(kg, "_catalog_pack_guards", lambda: (guard,))
-        r = sdk.create_object("acme-org-8", status="live")
+        r = sdk._create_object("acme-org-8", status="live")
         assert _labels_kinds(sdk, r["id"])[0] == ["Subject"]
         assert r["kind_redirect"]["to"]["kind"] == "core:organization"
 
@@ -1196,7 +1196,7 @@ class TestReviewFindingsClosed:
         """#12060 review P2. `setdefault` let a props bag shadow `declaredKind`
         and `kindRedirectRule`, so the node's attribution disagreed with the
         reply — an audit would read a rule that never fired."""
-        r = sdk.create_subject(ISSUE_NAME, declaredKind="core:role",
+        r = sdk._create_subject(ISSUE_NAME, declaredKind="core:role",
                                kindRedirectRule="forged-rule",
                                declaredLayer="point")
         props = _node_props(sdk, r["id"])
@@ -1211,7 +1211,7 @@ class TestReviewFindingsClosed:
         `objectKind="core:organization"` and `object_kind="core:team"` ("nothing
         is dropped, nothing is rewritten") — but the guard runs FIRST, so a
         rewrite here silently discarded one value and pre-empted the report."""
-        r = sdk.create_subject(
+        r = sdk._create_subject(
             "daniel-ospina/agent-infra",
             props={"subjectKind": "core:naturalPerson",
                    "subject_kind": "core:team"})
@@ -1281,7 +1281,7 @@ class TestReviewRound2Closed:
             pattern=r"^daniel-ospina/[a-z-]+$", redirect="core:Project",
             fallback="core:WorkItem", reason="a project", declaring_pack="acme")
         monkeypatch.setattr(kg, "_catalog_pack_guards", lambda: (guard,))
-        r = sdk.create_subject("daniel-ospina/agent-infra")   # must NOT raise
+        r = sdk._create_subject("daniel-ospina/agent-infra")   # must NOT raise
         assert r.get("id"), "a guard turned a legal write into a refusal"
         assert r["kind_redirect_skipped"]["reason"] == \
             kg.SKIP_TARGET_LABEL_AMBIGUOUS
@@ -1296,13 +1296,13 @@ class TestReviewRound2Closed:
         disclosure (`_kind_layer_advisory`) while its AX block said `undo: none`.
         MEASURED before the fix: the graph held the name under both labels and
         the reply carried no advisory."""
-        sdk.create_subject("acme/corp")          # the peer on the OTHER label
+        sdk._create_subject("acme/corp")          # the peer on the OTHER label
         guard = Confusion(
             rule="acme:project", when="nameMatches", pattern=r"^acme/[a-z]+$",
             redirect="core:Project", fallback="core:WorkItem",
             reason="an org slash-name is a project", declaring_pack="acme")
         monkeypatch.setattr(kg, "_catalog_pack_guards", lambda: (guard,))
-        r = sdk.create_subject("acme/corp")
+        r = sdk._create_subject("acme/corp")
         assert r["kind_redirect"]["to"]["layer"] == "object"
         blob = json.dumps(r.get("advisories") or [])
         assert "ALREADY" in blob and "SECOND" in blob, r.get("advisories")
@@ -1939,14 +1939,14 @@ class TestReviewRound4Closed:
                 fallback="core:organization",
                 reason="an org handle names an organization",
             ),))
-        r = sdk.create_object("org-4242", roleHolder="daniel")
+        r = sdk._create_object("org-4242", roleHolder="daniel")
         # The write LANDED, as an :Object, unchanged — no ValueError.
         assert r.get("id")
         assert _labels_kinds(sdk, r["id"])[0] == ["Object"]
         assert r["kind_redirect_skipped"]["reason"] == \
             "role-holder-not-legal-on-subject"
         # The negative control: without `roleHolder` the same write redirects.
-        r2 = sdk.create_object("org-4243")
+        r2 = sdk._create_object("org-4243")
         assert _labels_kinds(sdk, r2["id"])[0] == ["Subject"]
         assert r2["kind_redirect"]["to"]["kind"] == "core:organization"
 

@@ -135,18 +135,18 @@ def sdk(monkeypatch):
 def _seed_provenanced(sdk: TortoiseSDK) -> list[dict]:
     """The point + its own raw source chunk, both written through the product
     SDK, both returned by the product read."""
-    sdk.create_point(
+    sdk._create_point(
         "statement", QUOTE,
         id=STATEMENT_ID, session_id=SESSION, status="draft",
         quote=QUOTE, source_turn_id=SOURCE_TURN_ID,
         span_start=SPAN_START, span_end=SPAN_END)
     # The windowed verbatim transcript that turn lives in — the chunk holds the
     # quote verbatim, which is the containment leg ``_is_own_source`` reads.
-    sdk.create_point(
+    sdk._create_point(
         "session-transcript",
         f"user: {QUOTE}\nthe buyer paid cash.",
         id=CHUNK_ID, session_id=SESSION, status="draft")
-    hits = sdk.tortoise_fts_query("tea set cost", limit=10)
+    hits = sdk._tortoise_fts_query("tea set cost", limit=10)
     by_id = {h["id"]: h for h in hits}
     assert STATEMENT_ID in by_id, "the statement must be retrievable"
     return [by_id[STATEMENT_ID], by_id[CHUNK_ID]]
@@ -168,9 +168,9 @@ def test_unprovenanced_hit_stays_byte_identical(sdk):
     """A legacy point (no provenance written) gains NO keys — additive and
     present-only, so the widening cannot hand every existing row four empty
     fields (which would also make every hit look provenanced downstream)."""
-    sdk.create_point("statement", "the garden gate needs oiling",
+    sdk._create_point("statement", "the garden gate needs oiling",
                      id="p8658bare", session_id=SESSION, status="draft")
-    hits = sdk.tortoise_fts_query("garden gate oiling", limit=5)
+    hits = sdk._tortoise_fts_query("garden gate oiling", limit=5)
     bare = next(h for h in hits if h["id"] == "p8658bare")
     for key in ("quote", "source_turn_id", "span_start", "span_end"):
         assert key not in bare, (

@@ -73,19 +73,19 @@ def _world(sdk, *, comparator="<=", threshold=10.0, tag=None):
     the target is a ``target`` Object, the goal is a ``goal`` Object.
     """
     suffix = f" [{tag}]" if tag else ""
-    indicator = sdk.create_object(f"CI pipeline duration{suffix}",
+    indicator = sdk._create_object(f"CI pipeline duration{suffix}",
                                   objectKind="workflow")
-    target_node = sdk.create_object(
+    target_node = sdk._create_object(
         f"CI <= 10m{suffix}", objectKind="target",
         comparator=comparator, threshold=threshold, dwell=1,
     )
-    goal = sdk.create_object(f"CI is fast{suffix}", objectKind="goal",
+    goal = sdk._create_object(f"CI is fast{suffix}", objectKind="goal",
                              goalState="active")
     return indicator, target_node, goal
 
 
 def _reading(sdk, indicator, value, *, at, unit="minutes"):
-    return sdk.create_event(
+    return sdk._create_event(
         f"CI run at {at}", "measurement", value=value, unit=unit,
         startedAt=at, aboutObject=indicator["id"],
     )
@@ -169,11 +169,11 @@ def test_a_goal_belief_really_moved_so_the_explanation_is_about_a_move(sdk):
     """
     indicator, target_node, goal = _world(sdk)
     met = _judge(sdk, indicator, target_node, goal, 9.0, at="2026-11-11T10:00:00Z")
-    after_met = sdk.compute_confidence()
+    after_met = sdk._compute_confidence()
     g_met = after_met["confidences"][goal["id"]]["mean"]
 
     unmet = _judge(sdk, indicator, target_node, goal, 12.0, at="2026-11-11T11:00:00Z")
-    after_unmet = sdk.compute_confidence()
+    after_unmet = sdk._compute_confidence()
     g_unmet = after_unmet["confidences"][goal["id"]]["mean"]
     assert g_unmet < g_met, f"the goal did not follow the reading: {g_met} -> {g_unmet}"
 
@@ -274,8 +274,8 @@ def test_an_operator_endpoint_written_as_an_event_is_traversed(sdk):
     """
     indicator, _target, _goal = _world(sdk, tag="op")
     reading = _reading(sdk, indicator, 12.0, at="2026-11-11T10:00:00Z")
-    claim = sdk.create_point("statement", "the CI pipeline is slow")
-    sdk.create_operator("IMPL", reading["id"], [claim["id"]],
+    claim = sdk._create_point("statement", "the CI pipeline is slow")
+    sdk._create_operator("IMPL", reading["id"], [claim["id"]],
                         direction="->", label="supports")
 
     blocks = assemble_why_blocks(sdk._get_proj(), [claim["id"]])
@@ -291,8 +291,8 @@ def test_an_operator_endpoint_written_as_an_object_is_traversed(sdk):
     """The mirror case: an ``:Object`` supporter (a goal lending support to a
     claim — the supra-goal shape the reasoning loop produces)."""
     _indicator, _target, goal = _world(sdk, tag="obj")
-    claim = sdk.create_point("statement", "the team is shipping fast")
-    sdk.create_operator("IMPL", goal["id"], [claim["id"]],
+    claim = sdk._create_point("statement", "the team is shipping fast")
+    sdk._create_operator("IMPL", goal["id"], [claim["id"]],
                         direction="->", label="supports")
 
     blocks = assemble_why_blocks(sdk._get_proj(), [claim["id"]])
@@ -311,8 +311,8 @@ def test_a_nand_counter_claim_written_as_an_event_is_surfaced(sdk):
     direct arm out entirely, so the conflict would vanish rather than widen.
     """
     _indicator, _target, _goal = _world(sdk, tag="nand")
-    claim = sdk.create_point("statement", "the weekly report is accurate")
-    counter = sdk.create_event("report was disputed", "note",
+    claim = sdk._create_point("statement", "the weekly report is accurate")
+    counter = sdk._create_event("report was disputed", "note",
                                startedAt="2026-11-11T09:00:00Z")
     sdk._get_proj().g.query(
         "MATCH (c), (t) WHERE c.id = $c AND t.id = $t CREATE (c)-[:NAND]->(t)",
@@ -335,10 +335,10 @@ def test_a_nand_operators_non_point_source_is_surfaced(sdk):
     green, while the real effect is an operator-mediated counterargument written
     as an ``:Event`` silently vanishing from ``conflicts``.
     """
-    claim = sdk.create_point("statement", "the migration is safe to run")
-    evidence = sdk.create_event("migration broke staging", "incident",
+    claim = sdk._create_point("statement", "the migration is safe to run")
+    evidence = sdk._create_event("migration broke staging", "incident",
                                 startedAt="2026-11-11T09:00:00Z")
-    sdk.create_operator("NAND", evidence["id"], [claim["id"]], direction="-")
+    sdk._create_operator("NAND", evidence["id"], [claim["id"]], direction="-")
     assert _labels(sdk, evidence["id"]) == ["Event"]
 
     block = assemble_why_blocks(sdk._get_proj(), [claim["id"]])[claim["id"]]
@@ -355,11 +355,11 @@ def test_a_tradeoff_alternative_written_as_an_object_is_surfaced(sdk):
     ``epistemic_disjunction('alt')`` to ``alt:Point`` left every test green while
     an alternative written as an ``:Object`` would silently empty the dimension.
     """
-    decision = sdk.create_point("decision", "how to land the rollout")
-    alt_a = sdk.create_object("land it behind a flag", objectKind="option")
-    alt_b = sdk.create_object("land it to everyone", objectKind="option")
-    sdk.create_operator("IMPL", decision["id"], [alt_a["id"]])
-    sdk.create_operator("IMPL", decision["id"], [alt_b["id"]])
+    decision = sdk._create_point("decision", "how to land the rollout")
+    alt_a = sdk._create_object("land it behind a flag", objectKind="option")
+    alt_b = sdk._create_object("land it to everyone", objectKind="option")
+    sdk._create_operator("IMPL", decision["id"], [alt_a["id"]])
+    sdk._create_operator("IMPL", decision["id"], [alt_b["id"]])
 
     block = assemble_why_blocks(sdk._get_proj(), [decision["id"]])[decision["id"]]
     labels = sorted(t["label"] for t in block.get("tradeoffs") or [])
@@ -384,11 +384,11 @@ def test_option_kind_alternatives_are_surfaced_under_a_NON_decision_anchor(sdk):
     so only ``any(a["kind"] == "option")`` can admit it. Measured as a mutant:
     revert that one cell and this pin reports ``None``.
     """
-    anchor = sdk.create_object("how to land the rollout", objectKind="plan")
-    alt_a = sdk.create_object("land it behind a flag", objectKind="option")
-    alt_b = sdk.create_object("land it to everyone", objectKind="option")
-    sdk.create_operator("IMPL", anchor["id"], [alt_a["id"]])
-    sdk.create_operator("IMPL", anchor["id"], [alt_b["id"]])
+    anchor = sdk._create_object("how to land the rollout", objectKind="plan")
+    alt_a = sdk._create_object("land it behind a flag", objectKind="option")
+    alt_b = sdk._create_object("land it to everyone", objectKind="option")
+    sdk._create_operator("IMPL", anchor["id"], [alt_a["id"]])
+    sdk._create_operator("IMPL", anchor["id"], [alt_b["id"]])
 
     block = assemble_why_blocks(sdk._get_proj(), [anchor["id"]])[anchor["id"]]
     labels = sorted(t["label"] for t in block.get("tradeoffs") or [])
@@ -421,11 +421,11 @@ def test_a_decision_written_as_an_object_emits_its_tradeoffs(sdk):
     block. Measured as a mutant: revert the anchor cell alone and this pin reports
     ``None``, while the option-kind pin below stays green.
     """
-    decision = sdk.create_object("how to land the rollout", objectKind="decision")
-    alt_a = sdk.create_object("land it behind a flag", objectKind="plan")
-    alt_b = sdk.create_object("land it to everyone", objectKind="plan")
-    sdk.create_operator("IMPL", decision["id"], [alt_a["id"]])
-    sdk.create_operator("IMPL", decision["id"], [alt_b["id"]])
+    decision = sdk._create_object("how to land the rollout", objectKind="decision")
+    alt_a = sdk._create_object("land it behind a flag", objectKind="plan")
+    alt_b = sdk._create_object("land it to everyone", objectKind="plan")
+    sdk._create_operator("IMPL", decision["id"], [alt_a["id"]])
+    sdk._create_operator("IMPL", decision["id"], [alt_b["id"]])
 
     block = assemble_why_blocks(sdk._get_proj(), [decision["id"]])[decision["id"]]
     labels = sorted(t["label"] for t in block.get("tradeoffs") or [])
@@ -445,7 +445,7 @@ def test_two_distinct_event_counter_claims_are_both_surfaced(sdk):
     NANDers carry colliding DISPLAY identities (``{id:'C1'}`` and
     ``{eventId:'C1'}``) and are distinct nodes.
     """
-    claim = sdk.create_point("statement", "the weekly report is accurate")
+    claim = sdk._create_point("statement", "the weekly report is accurate")
     g = sdk._get_proj().g
     g.query("CREATE (e:Event {id:'C1', name:'first counter-claim', "
             "eventKind:'note', status:'live'})")
@@ -479,7 +479,7 @@ def test_two_distinct_event_supporters_are_both_surfaced(sdk):
 
     Measured: passes at this head; a reverted ``sup_key`` yields ONE chain entry.
     """
-    claim = sdk.create_point("statement", "the build is green")
+    claim = sdk._create_point("statement", "the build is green")
     g = sdk._get_proj().g
     g.query("CREATE (e:Event {id:'SX1', name:'first supporter', "
             "eventKind:'note'})")
@@ -514,7 +514,7 @@ def test_a_non_epistemic_endpoint_is_not_traversed(sdk):
     `:Source` NANDer as a counter-claim. Pre-#11928 those nodes were excluded by
     the label on `sup`/`c`; this pins the replacement.
     """
-    claim = sdk.create_point("statement", "the build is green [non-epistemic]")
+    claim = sdk._create_point("statement", "the build is green [non-epistemic]")
     g = sdk._get_proj().g
     g.query("CREATE (d:Document {id:'DOC-1', name:'a document', title:'Doc'})")
     g.query("CREATE (s:Source {id:'SRC-1', name:'a source'})")
@@ -557,9 +557,9 @@ def test_the_point_lane_gains_no_assessment_and_keeps_its_supersession(sdk):
     where the reasoning loop never wrote, or a consumer cannot tell "not judged"
     from "judged and unknown".
     """
-    claim = sdk.create_point("statement", "an ordinary claim")
-    supporter = sdk.create_point("statement", "an ordinary support")
-    sdk.create_operator("IMPL", supporter["id"], [claim["id"]],
+    claim = sdk._create_point("statement", "an ordinary claim")
+    supporter = sdk._create_point("statement", "an ordinary support")
+    sdk._create_operator("IMPL", supporter["id"], [claim["id"]],
                         direction="->", label="supports")
 
     block = assemble_why_blocks(sdk._get_proj(), [claim["id"]])[claim["id"]]
@@ -578,9 +578,9 @@ def test_a_derived_claim_that_is_not_a_judgement_is_not_an_assessment(sdk):
     unrelated derivation as the goal's verdict.
     """
     _indicator, _target, goal = _world(sdk, tag="derived")
-    derived = sdk.create_point("statement", "a derived statement, no verdict",
+    derived = sdk._create_point("statement", "a derived statement, no verdict",
                                claim_class="derived")
-    sdk.create_operator("IMPL", derived["id"], [goal["id"]], direction="->")
+    sdk._create_operator("IMPL", derived["id"], [goal["id"]], direction="->")
 
     block = assemble_why_blocks(sdk._get_proj(), [goal["id"]])[goal["id"]]
     assert "assessment" not in block, (
@@ -601,9 +601,9 @@ def test_a_derived_claim_that_is_not_a_judgement_is_not_an_assessment(sdk):
     # contract. Measured: the assertions above stay green with `claimClass`
     # dropped from the discriminator.
     other = _world(sdk, tag="nonderived")[2]
-    stamped = sdk.create_point("statement", "a non-derived claim with a state",
+    stamped = sdk._create_point("statement", "a non-derived claim with a state",
                                judgementState="met")
-    sdk.create_operator("IMPL", stamped["id"], [other["id"]], direction="->")
+    sdk._create_operator("IMPL", stamped["id"], [other["id"]], direction="->")
     other_block = assemble_why_blocks(sdk._get_proj(), [other["id"]])[other["id"]]
     assert "assessment" not in other_block, (
         "a NON-derived claim carrying a judgementState was presented as a "
@@ -631,7 +631,7 @@ def test_an_eventId_only_event_is_not_explainable_and_that_is_recorded(sdk):
     stays green (measured, mutation pass F6). That is correct: a half-widening is
     not user-visible, so it must not be pinnable as if it were.
     """
-    claim = sdk.create_point("statement", "a claim with a keyless counter-claim")
+    claim = sdk._create_point("statement", "a claim with a keyless counter-claim")
     sdk._get_proj().g.query(
         "CREATE (e:Event {eventId:'KEYLESS1', name:'a keyless reading', "
         "eventKind:'note', status:'live'})")
@@ -685,7 +685,7 @@ def test_the_fusion_order_is_total_so_row_order_cannot_decide(sdk):
         f"expected exactly three total selection sorts in why.py, found {total_sorts}")
 
     # BEHAVIOUR: colliding display identities, fused order by internal id.
-    claim = sdk.create_point("statement", "the fused-order claim")
+    claim = sdk._create_point("statement", "the fused-order claim")
     g = sdk._get_proj().g
     g.query("CREATE (e:Event {id:'DUP', name:'dup A', eventKind:'note', "
             "status:'live'})")
@@ -716,7 +716,7 @@ def test_an_unchanged_state_keeps_one_live_judgement_per_target(sdk):
     the dimension is a bounded LIST, newest first, capped at
     ``W4_MAX_ASSESSMENTS``."""
     indicator, target_a, goal = _world(sdk, tag="multi")
-    target_b = sdk.create_object("CI <= 5m [multi]", objectKind="target",
+    target_b = sdk._create_object("CI <= 5m [multi]", objectKind="target",
                                  comparator="<=", threshold=5.0, dwell=1)
     _reading(sdk, indicator, 7.0, at="2026-11-11T10:00:00Z")
     first = judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
@@ -735,7 +735,7 @@ def test_an_unchanged_state_keeps_one_live_judgement_per_target(sdk):
     # a cap of three (measured — uncapping left every test green). D4 allows n
     # targets, so a goal with several must still emit at most W4_MAX_ASSESSMENTS.
     for i in range(4, 8):
-        extra = sdk.create_object(f"CI <= {i}m [multi]", objectKind="target",
+        extra = sdk._create_object(f"CI <= {i}m [multi]", objectKind="target",
                                   comparator="<=", threshold=float(i), dwell=1)
         judge_and_record(sdk, goal_id=goal["id"], indicator_id=indicator["id"],
                          target=Target.from_node(extra))
@@ -803,21 +803,21 @@ def _two_label_batch(dimension, sdk):
     Point-side read failure is the one that used to suppress everything after it.
     Returns ``(proj, point_id, object_id, block_key)``.
     """
-    claim = sdk.create_point("statement", "the cache is warm")
+    claim = sdk._create_point("statement", "the cache is warm")
     proj = sdk._get_proj()
     if dimension == "conflicts":
         _, _, anchor = _world(sdk, tag="legs-conflicts")
-        counter = sdk.create_point("statement", "the cache is cold")
+        counter = sdk._create_point("statement", "the cache is cold")
         proj.g.query(
             "MATCH (a:Point {id:$a}), (t) WHERE t.id = $t CREATE (a)-[:NAND]->(t)",
             params={"a": counter["id"], "t": anchor["id"]})
         return proj, claim["id"], anchor["id"], "conflicts"
     if dimension == "tradeoffs":
-        anchor = sdk.create_object("how to land it [legs]", objectKind="decision")
-        op_a = sdk.create_object("behind a flag [legs]", objectKind="plan")
-        op_b = sdk.create_object("to everyone [legs]", objectKind="plan")
-        sdk.create_operator("IMPL", anchor["id"], [op_a["id"]])
-        sdk.create_operator("IMPL", anchor["id"], [op_b["id"]])
+        anchor = sdk._create_object("how to land it [legs]", objectKind="decision")
+        op_a = sdk._create_object("behind a flag [legs]", objectKind="plan")
+        op_b = sdk._create_object("to everyone [legs]", objectKind="plan")
+        sdk._create_operator("IMPL", anchor["id"], [op_a["id"]])
+        sdk._create_operator("IMPL", anchor["id"], [op_b["id"]])
         return proj, claim["id"], anchor["id"], "tradeoffs"
     key = "assessment" if dimension == "assessments" else "support_chain"
     indicator, target_node, goal = _world(sdk, tag=f"legs-{dimension}")
@@ -901,8 +901,8 @@ def test_the_support_dimensions_direct_leg_still_runs_when_the_operator_leg_rais
     from tortoise.projection import _GuardedGraph
 
     proj = sdk._get_proj()
-    claim = sdk.create_point("caching", "the cache is warm")
-    supporter = sdk.create_point("cache-hit-rate", "the hit rate is 98%")
+    claim = sdk._create_point("caching", "the cache is warm")
+    supporter = sdk._create_point("cache-hit-rate", "the hit rate is 98%")
     proj.g.query(
         "MATCH (a:Point {id:$a}), (t:Point {id:$t}) CREATE (a)-[:IMPL]->(t)",
         params={"a": supporter["id"], "t": claim["id"]})
@@ -948,7 +948,7 @@ def test_a_non_first_labels_existence_probe_failure_keeps_the_other_blocks(
     from tortoise.projection import _GuardedGraph
 
     proj = sdk._get_proj()
-    claim = sdk.create_point("caching", "the cache is warm")
+    claim = sdk._create_point("caching", "the cache is warm")
     indicator, target_node, goal = _world(sdk, tag="anchor-probe")
     _judge(sdk, indicator, target_node, goal, 8.0, at="2026-05-01T00:00:00Z")
     healthy = assemble_why_blocks(proj, [claim["id"], goal["id"]])
@@ -988,7 +988,7 @@ def test_no_resolvable_label_still_yields_no_blocks(sdk, monkeypatch):
     from tortoise.projection import _GuardedGraph
 
     proj = sdk._get_proj()
-    claim = sdk.create_point("caching", "the cache is warm")
+    claim = sdk._create_point("caching", "the cache is warm")
     poisoned = {why_module._for_label(why_module._EP_CYPHER, label)
                 for label in why_module.EPISTEMIC_LABELS}
     real_query = proj.g.query
@@ -1161,7 +1161,7 @@ def test_an_ask_lane_event_hit_renders_no_status(sdk, monkeypatch):
     from tortoise import why as why_module
 
     monkeypatch.setenv("TORTOISE_W4_ENRICHMENT", "1")
-    reading = sdk.create_event("CI run", "measurement", value=8.0, unit="minutes")
+    reading = sdk._create_event("CI run", "measurement", value=8.0, unit="minutes")
     item = {"id": reading["id"], "kind": "event", "content": "CI run"}
     enriched = why_module.enrich_items(sdk._get_proj(), [dict(item)])
     assert enriched, "fixture: the :Event must enrich to anything at all"

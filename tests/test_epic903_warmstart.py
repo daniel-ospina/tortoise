@@ -59,7 +59,7 @@ def _dream_full_clean(sdk):
     without this the DE2E-6a hard gate would compare two censored runs
     (determinism, not warm-vs-from-scratch equivalence)."""
     random.seed(FIXED_SEED)
-    return sdk.dream(mode="full", warm_start=False)
+    return sdk._dream(mode="full", warm_start=False)
 
 
 class TestDe2e6aEquivalenceHardGate:
@@ -75,19 +75,19 @@ class TestDe2e6aEquivalenceHardGate:
             assert r_ref["converged_all"] is True
 
             # Mutate evidence: change a premise baseline (topology unchanged).
-            f.sdk.set_point_baseline(f.claims["p1"], 8.0, 1.0)
+            f.sdk._set_point_baseline(f.claims["p1"], 8.0, 1.0)
 
             # Warm-started pass — DIRECTLY after the mutation, no
             # message-flushing run interleaved (vacuous-pass guard).
             random.seed(FIXED_SEED)
-            r_warm = f.sdk.dream(mode="full")
+            r_warm = f.sdk._dream(mode="full")
             warm_conf = _confidences(f.sdk, claim_ids)
             assert r_warm["converged_all"] is True
 
             # Isolated from-scratch reference on the SAME post-mutation state.
             f2 = f1_corpus()
             try:
-                f2.sdk.set_point_baseline(f2.claims["p1"], 8.0, 1.0)
+                f2.sdk._set_point_baseline(f2.claims["p1"], 8.0, 1.0)
                 r_iso = _dream_full_clean(f2.sdk)
                 iso_conf = _confidences(f2.sdk, set(f2.claims.values()))
                 assert r_iso["converged_all"] is True
@@ -141,10 +141,10 @@ class TestDe2e6aEquivalenceHardGate:
         try:
             _dream_full_clean(f.sdk)
             op_key = next(k for k in f.operators if k.startswith("impl"))
-            f.sdk.delete_point(f.operators[op_key])
+            f.sdk._delete_point(f.operators[op_key])
             # Warm-started directly (no interleaved flush).
             random.seed(FIXED_SEED)
-            r_warm = f.sdk.dream(mode="full")
+            r_warm = f.sdk._dream(mode="full")
             assert r_warm["converged_all"] is True
             warm_conf = _confidences(f.sdk, set(f.claims.values()))
             # Isolated from-scratch reference on the same post-delete state —
@@ -152,7 +152,7 @@ class TestDe2e6aEquivalenceHardGate:
             f2 = f1_corpus()
             try:
                 _dream_full_clean(f2.sdk)
-                f2.sdk.delete_point(f2.operators[op_key])
+                f2.sdk._delete_point(f2.operators[op_key])
                 r_iso = _dream_full_clean(f2.sdk)
                 assert r_iso["converged_all"] is True
                 iso_conf = _confidences(f2.sdk, set(f2.claims.values()))
@@ -194,9 +194,9 @@ class TestDe2e6aEquivalenceHardGate:
         try:
             _dream_full_clean(f.sdk)
             op_key = next(k for k in f.operators if k.startswith("impl"))
-            f.sdk.delete_point(f.operators[op_key])
+            f.sdk._delete_point(f.operators[op_key])
             random.seed(FIXED_SEED)
-            f.sdk.dream(mode="full")
+            f.sdk._dream(mode="full")
             pid = f.claims["p1"]  # `impl_1` is p1's ONLY edge
             assert not _has_factor(f.sdk, pid), "p1 must be operator-less now"
             row = f.sdk._get_proj().g.query(
@@ -227,9 +227,9 @@ class TestDe2e6aEquivalenceHardGate:
                 params={"id": f.claims["p3"]},
             ).result_set
             pre_conf = float(pre[0][0]) if pre and pre[0][0] else None
-            f.sdk.set_point_baseline(f.claims["p3"], 2.0, 6.0)
+            f.sdk._set_point_baseline(f.claims["p3"], 2.0, 6.0)
             random.seed(FIXED_SEED)
-            r_warm = f.sdk.dream(mode="full")
+            r_warm = f.sdk._dream(mode="full")
             assert r_warm["converged_all"] is True
             post = proj.g.query(
                 "MATCH (n:Point {id:$id}) RETURN n.confidence",
@@ -243,7 +243,7 @@ class TestDe2e6aEquivalenceHardGate:
             f2 = f1_corpus()
             try:
                 _dream_full_clean(f2.sdk)
-                f2.sdk.set_point_baseline(f2.claims["p3"], 2.0, 6.0)
+                f2.sdk._set_point_baseline(f2.claims["p3"], 2.0, 6.0)
                 r_iso = _dream_full_clean(f2.sdk)
                 assert r_iso["converged_all"] is True
                 warm_conf = _confidences(f.sdk, set(f.claims.values()))
@@ -281,17 +281,17 @@ class TestDe2e6aEquivalenceHardGate:
         f = f3_nonconvergent()
         try:
             random.seed(FIXED_SEED)
-            r = f.sdk.dream(mode="local")
+            r = f.sdk._dream(mode="local")
             assert r["converged"] is False
             # Warm-start on the same graph — completes without tearing.
             random.seed(FIXED_SEED)
-            r2 = f.sdk.dream(mode="local")
+            r2 = f.sdk._dream(mode="local")
             assert isinstance(r2["converged"], bool)
             # From-scratch reference on the same graph — same result shape.
             f3 = f3_nonconvergent()
             try:
                 random.seed(FIXED_SEED)
-                r3 = f3.sdk.dream(mode="local", warm_start=False)
+                r3 = f3.sdk._dream(mode="local", warm_start=False)
                 assert r3["converged"] == r2["converged"]
             finally:
                 f3.sdk.close()
@@ -310,7 +310,7 @@ class TestDe2e6aEquivalenceHardGate:
             half = list(f.claims.values())[:30]
             f.sdk._get_ep().invalidate_messages(half)
             random.seed(FIXED_SEED)
-            r_warm = f.sdk.dream(mode="full")
+            r_warm = f.sdk._dream(mode="full")
             assert r_warm["converged_all"] is True
             warm_conf = _confidences(f.sdk, set(f.claims.values()))
             # Isolated from-scratch reference (no partial flush — the flush
@@ -356,7 +356,7 @@ class TestDe2e6bCostMetric:
             assert hasattr(ep, "_warm_skipped_updates")
             # A second full pass (now warm, seeds present) censors updates.
             random.seed(FIXED_SEED)
-            f.sdk.dream(mode="full")
+            f.sdk._dream(mode="full")
             assert ep._warm_skipped_updates >= 0
         finally:
             f.sdk.close()
@@ -373,7 +373,7 @@ class TestDe2e12Concurrency:
 
             def worker():
                 random.seed(FIXED_SEED)
-                results.append(f.sdk.dream(mode="full"))
+                results.append(f.sdk._dream(mode="full"))
 
             threads = [threading.Thread(target=worker) for _ in range(4)]
             for t in threads:
@@ -400,18 +400,18 @@ class TestDe2e12Concurrency:
 
             def dreamer_worker():
                 random.seed(FIXED_SEED)
-                results.append(f.sdk.dream(mode="full"))
+                results.append(f.sdk._dream(mode="full"))
 
             t1 = threading.Thread(target=dreamer_worker)
             t1.start()
             # Baseline write lands while the warm pass may be mid-run.
-            f.sdk.set_point_baseline(f.claims["p5"], 6.0, 1.0)
+            f.sdk._set_point_baseline(f.claims["p5"], 6.0, 1.0)
             t1.join()
             assert results and results[0]["converged_all"] is True
             # The write invalidated seeds + marked dirty — a subsequent pass
             # converges (no stale-cache crash).
             random.seed(FIXED_SEED)
-            r2 = f.sdk.dream(mode="full")
+            r2 = f.sdk._dream(mode="full")
             assert r2["converged_all"] is True
         finally:
             f.sdk.close()
@@ -425,11 +425,11 @@ class TestDe2e12Concurrency:
             cid = f.claims["p1"]
             # Interleave reads and dreams.
             for _ in range(3):
-                conf = f.sdk.compute_confidence(
+                conf = f.sdk._compute_confidence(
                     anchors=[cid], max_hops=1, require_calibration=False)
                 assert "confidences" in conf
                 random.seed(FIXED_SEED)
-                f.sdk.dream(mode="full")
+                f.sdk._dream(mode="full")
             assert f.sdk._get_ep()._warm_skipped_updates >= 0
         finally:
             f.sdk.close()

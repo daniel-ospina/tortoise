@@ -44,7 +44,7 @@ def reg_sdk(monkeypatch, tmp_path):
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     monkeypatch.setenv("TORTOISE_DB_PATH", db)
     sdk = TortoiseSDK(db, namespace="registry")
-    sdk.org_create(name="quota-team")
+    sdk._org_create(name="quota-team")
     yield sdk
     sdk.close()
 
@@ -87,7 +87,7 @@ class TestEnforceTeamLimit:
         import os
         db = os.path.join(tmp_path, "team.db")
         sdk = TortoiseSDK(db, namespace=f"test_quota_team1_{os.urandom(4).hex()}")
-        sdk.create_point("statement", "A")
+        sdk._create_point("statement", "A")
         limits = {"org_id": "team1", "max_points": 1}
         with pytest.raises(QuotaExceededError) as exc_info:
             enforce_org_limit(limits, "points", sdk=sdk)
@@ -112,7 +112,7 @@ class TestEnforceTeamLimit:
         import os
         db = os.path.join(tmp_path, "team.db")
         sdk = TortoiseSDK(db, namespace=f"test_quota_team1_{os.urandom(4).hex()}")
-        sdk.create_point("statement", "A")
+        sdk._create_point("statement", "A")
         limits = {"org_id": "team1", "max_points": 10}
         enforce_org_limit(limits, "points", sdk=sdk)  # must not raise
         sdk.close()
@@ -466,9 +466,9 @@ class TestSessionsQuota:
             tenant._capture_session(
                 [{"role": "user", "content": "okay"}], session_id="only_s1")
             # ~10 non-Session nodes: turn Point + Event + extracted points
-            tenant.create_point("statement", "plain non-episodic point")
+            tenant._create_point("statement", "plain non-episodic point")
             for i in range(8):
-                tenant.create_point("statement", f"filler point {i}")
+                tenant._create_point("statement", f"filler point {i}")
             assert count_org_usage(tid, "sessions", sdk=tenant) == 1
             # 11 = 1 plain + 8 fillers + 1 v2-extracted value point + 1
             # v2-minted Object entity (the deterministic _V2SessionMock
@@ -663,8 +663,8 @@ class TestDocumentsQuota:
                 params={"id": tid})
             # 2 non-episodic points → OVER the points cap (max_points=1) —
             # irrelevant here; 9 docs < 10 (derived cap) → passes
-            tenant.create_point("statement", "claim one")
-            tenant.create_point("statement", "claim two")
+            tenant._create_point("statement", "claim one")
+            tenant._create_point("statement", "claim two")
             for i in range(9):
                 self._seed_doc(tenant, i, kind="brief")
             limits = resolve_org_limits(tid)
@@ -1145,10 +1145,10 @@ class TestObjectSubjectQuota:
         tid = _find_org_id(reg_sdk)
         tenant = self._tenant(reg_sdk, tmp_path)
         try:
-            tenant.create_point("statement", "a plain point")
-            tenant.create_object("acme", objectKind="org")
-            tenant.create_object("globex", objectKind="org")
-            tenant.create_subject("alice", subjectKind="person")
+            tenant._create_point("statement", "a plain point")
+            tenant._create_object("acme", objectKind="org")
+            tenant._create_object("globex", objectKind="org")
+            tenant._create_subject("alice", subjectKind="person")
             assert count_org_usage(tid, "points", sdk=tenant) == 4
         finally:
             tenant.close()
@@ -1159,7 +1159,7 @@ class TestObjectSubjectQuota:
         tid = _find_org_id(reg_sdk)
         tenant = self._tenant(reg_sdk, tmp_path)
         try:
-            tenant.create_object("o1", objectKind="org")
+            tenant._create_object("o1", objectKind="org")
             limits = {"org_id": tid, "max_points": 1}
             with pytest.raises(QuotaExceededError, match="points limit reached"):
                 enforce_org_limit(limits, "points", sdk=tenant)
@@ -1171,7 +1171,7 @@ class TestObjectSubjectQuota:
         tid = _find_org_id(reg_sdk)
         tenant = self._tenant(reg_sdk, tmp_path)
         try:
-            tenant.create_subject("s1", subjectKind="person")
+            tenant._create_subject("s1", subjectKind="person")
             limits = {"org_id": tid, "max_points": 1}
             with pytest.raises(QuotaExceededError, match="points limit reached"):
                 enforce_org_limit(limits, "points", sdk=tenant)
@@ -1183,8 +1183,8 @@ class TestObjectSubjectQuota:
         tid = _find_org_id(reg_sdk)
         tenant = self._tenant(reg_sdk, tmp_path)
         try:
-            tenant.create_object("o1", objectKind="org")
-            tenant.create_subject("s1", subjectKind="person")
+            tenant._create_object("o1", objectKind="org")
+            tenant._create_subject("s1", subjectKind="person")
             # 2 nodes → at/over a cap of 2 → 402
             with pytest.raises(QuotaExceededError, match="points limit reached"):
                 enforce_org_limit({"org_id": tid, "max_points": 2},
@@ -1203,9 +1203,9 @@ class TestObjectSubjectQuota:
         tid = _find_org_id(reg_sdk)
         tenant = self._tenant(reg_sdk, tmp_path)
         try:
-            tenant.create_point("statement", "one")
-            tenant.create_point("statement", "two")
-            tenant.create_point("statement", "three")
+            tenant._create_point("statement", "one")
+            tenant._create_point("statement", "two")
+            tenant._create_point("statement", "three")
             assert count_org_usage(tid, "points", sdk=tenant) == 3
             # at/over cap → 402; below cap → passes (unchanged semantics)
             with pytest.raises(QuotaExceededError, match="points limit reached"):
@@ -1259,8 +1259,8 @@ class TestEventQuota:
         tid = _find_org_id(reg_sdk)
         tenant = self._tenant(reg_sdk, tmp_path)
         try:
-            tenant.create_event("kickoff", "meeting")
-            tenant.create_event("deploy", "deployment")
+            tenant._create_event("kickoff", "meeting")
+            tenant._create_event("deploy", "deployment")
             assert count_org_usage(tid, "points", sdk=tenant) == 2
         finally:
             tenant.close()
@@ -1271,7 +1271,7 @@ class TestEventQuota:
         tid = _find_org_id(reg_sdk)
         tenant = self._tenant(reg_sdk, tmp_path)
         try:
-            tenant.create_event("e1", "meeting")
+            tenant._create_event("e1", "meeting")
             with pytest.raises(QuotaExceededError, match="points limit reached"):
                 enforce_org_limit(
                     {"org_id": tid, "max_points": 1}, "points", sdk=tenant)
@@ -1284,7 +1284,7 @@ class TestEventQuota:
         tid = _find_org_id(reg_sdk)
         tenant = self._tenant(reg_sdk, tmp_path)
         try:
-            tenant.create_event("e1", "meeting")
+            tenant._create_event("e1", "meeting")
             enforce_org_limit(
                 {"org_id": tid, "max_points": 2}, "points", sdk=tenant)
         finally:
@@ -1302,7 +1302,7 @@ class TestEventQuota:
                 "eventKind:'AgentSession', is_episodic:true})")
             assert count_org_usage(tid, "points", sdk=tenant) == 0
             # and a flag-less Event beside it counts once
-            tenant.create_event("direct", "meeting")
+            tenant._create_event("direct", "meeting")
             assert count_org_usage(tid, "points", sdk=tenant) == 1
         finally:
             tenant.close()

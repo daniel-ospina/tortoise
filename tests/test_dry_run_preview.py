@@ -107,7 +107,7 @@ def _edge_keys_at(sdk: TortoiseSDK, point_id: str) -> set:
 
 
 def _seed_point(sdk: TortoiseSDK, content: str = "seed") -> str:
-    return sdk.create_point("statement", content)["id"]
+    return sdk._create_point("statement", content)["id"]
 
 
 # ── A. the default path is unchanged ────────────────────────────────
@@ -190,7 +190,7 @@ class TestDefaultPathUnchanged:
         assert assertion["id"] == ids["b"], assertion
         assert assertion["confirmation"], assertion
         # ...and the item is still there, which is the whole point.
-        assert sdk.get_point(ids["b"]) is not None, "the default path deleted the item"
+        assert sdk._get_point(ids["b"]) is not None, "the default path deleted the item"
         assert results["tortoise_delete_entity"] is True, (
             results["tortoise_delete_entity"])
         assert results["tortoise_retract_point"]["status"] == "retracted", (
@@ -245,7 +245,7 @@ class TestDryRunWritesNothing:
     def test_delete_point_preview(self, mcp, sdk):
         a = _seed_point(sdk, "a")
         subj = sdk.create_entity("subject", "S", subjectKind="company")["node"]["id"]
-        sdk.create_edge("aboutSubject", a, subj)
+        sdk._create_edge("aboutSubject", a, subj)
         before = _graph_counts(sdk)
         before_props = _point_props(sdk, a)
 
@@ -308,7 +308,7 @@ class TestDryRunWritesNothing:
     def test_supersede_preview_transfer_edges(self, mcp, sdk):
         old, new = _seed_point(sdk, "old"), _seed_point(sdk, "new")
         x = _seed_point(sdk, "x")
-        sdk.create_direct_edge("IMPL", old, x)
+        sdk._create_direct_edge("IMPL", old, x)
         before = _graph_counts(sdk)
         result = mcp.tortoise_supersede(old, new, dry_run=True)
         self._assert_unchanged(sdk, before, result)
@@ -335,7 +335,7 @@ class TestBlastRadius:
         a = _seed_point(sdk, "a")
         subj = sdk.create_entity(
             "subject", "S", subjectKind="company")["node"]["id"]
-        sdk.create_edge("aboutSubject", a, subj)  # a -> subj
+        sdk._create_edge("aboutSubject", a, subj)  # a -> subj
         preview = mcp.tortoise_delete_point(a, dry_run=True)
         assert preview["edges"] == [
             {"type": "aboutSubject", "from": a, "to": subj}], preview
@@ -343,7 +343,7 @@ class TestBlastRadius:
     def test_supersede_preview_reports_the_new_edge_endpoints(self, mcp, sdk):
         old, new = _seed_point(sdk, "old"), _seed_point(sdk, "new")
         x = _seed_point(sdk, "x")
-        sdk.create_direct_edge("IMPL", old, x)  # old -> x, becomes new -> x
+        sdk._create_direct_edge("IMPL", old, x)  # old -> x, becomes new -> x
         preview = mcp.tortoise_supersede(old, new, dry_run=True)
         assert {"type": "IMPL", "from": new, "to": x} in preview["edges"]
 
@@ -413,7 +413,7 @@ class TestBlastRadius:
         edge's reverse INPUT mirror transfers too, so the successor gains 4
         edges while the writer's primary `edges_transferred` counter stays 2."""
         old, new = _seed_point(sdk, "old"), _seed_point(sdk, "new")
-        op = sdk.create_operator("IMPL", old, [old])
+        op = sdk._create_operator("IMPL", old, [old])
         from tortoise.mcp_server import _preview_supersede
         preview = _preview_supersede(sdk, old, new)
         assert preview["edges_created_at_new"] == 4, preview
@@ -433,7 +433,7 @@ class TestBlastRadius:
         must agree with the writer (a CREATE here doubled the edge)."""
         old, new = _seed_point(sdk, "old"), _seed_point(sdk, "new")
         t = _seed_point(sdk, "t")
-        op = sdk.create_operator("IMPL", old, [t])
+        op = sdk._create_operator("IMPL", old, [t])
         sdk._get_proj().g.query(
             "MATCH (op:Point {id:$op}), (new:Point {id:$new}) "
             "CREATE (op)-[:IMPL {idx:0}]->(new)",
@@ -533,7 +533,7 @@ class TestBlastRadius:
     def test_delete_point_preview_reports_the_tag_gc_cascade(self, mcp, sdk):
         """`delete_point` also hard-deletes orphaned :Tag nodes when the point
         carried a tag — part of the blast radius."""
-        p = sdk.create_point("statement", "tagged one", tags=["solo-tag"])["id"]
+        p = sdk._create_point("statement", "tagged one", tags=["solo-tag"])["id"]
         preview = mcp.tortoise_delete_point(p, dry_run=True)
         assert preview["tags_removed"] >= 1, preview
         assert "solo-tag" in preview["tags"], preview
@@ -572,7 +572,7 @@ class TestBlastRadius:
             "CREATE (n:Point {id:'newdup', content:'y', pointKind:'statement'})")
         subj = sdk.create_entity(
             "subject", "S", subjectKind="company")["node"]["id"]
-        sdk.create_edge("aboutSubject", old, subj)
+        sdk._create_edge("aboutSubject", old, subj)
         from tortoise.mcp_server import _preview_supersede
         preview = _preview_supersede(sdk, old, "newdup")
         assert preview["successor_nodes"] == 2, preview
@@ -620,8 +620,8 @@ class TestBlastRadius:
         is a no-op — the preview must not claim a net-new edge."""
         old, new = _seed_point(sdk, "old"), _seed_point(sdk, "new")
         x = _seed_point(sdk, "x")
-        sdk.create_direct_edge("IMPL", new, x)   # already at the successor
-        sdk.create_direct_edge("IMPL", old, x)   # transfers onto the same edge
+        sdk._create_direct_edge("IMPL", new, x)   # already at the successor
+        sdk._create_direct_edge("IMPL", old, x)   # transfers onto the same edge
         from tortoise.mcp_server import _preview_supersede
         preview = _preview_supersede(sdk, old, new)
         assert preview["edges_created_at_new"] == 0, preview
@@ -633,8 +633,8 @@ class TestBlastRadius:
         a = _seed_point(sdk, "a")
         subj = sdk.create_entity("subject", "S", subjectKind="company")["node"]["id"]
         obj = sdk.create_entity("object", "O", objectKind="product")["node"]["id"]
-        sdk.create_edge("aboutSubject", a, subj)
-        sdk.create_edge("aboutObject", a, obj)
+        sdk._create_edge("aboutSubject", a, subj)
+        sdk._create_edge("aboutObject", a, obj)
         preview = mcp.tortoise_delete_point(a, dry_run=True)
         preview_edges = {(e["type"], e["from"], e["to"]) for e in preview["edges"]}
         assert len(preview_edges) == 2, preview
@@ -662,12 +662,12 @@ class TestBlastRadius:
         x, y = _seed_point(sdk, "x"), _seed_point(sdk, "y")
         subj = sdk.create_entity("subject", "S", subjectKind="company")["node"]["id"]
         # an operator edge op -> old
-        sdk.create_operator("IMPL", old, [x])
+        sdk._create_operator("IMPL", old, [x])
         # a direct IMPL/NAND pair, one in each direction
-        sdk.create_direct_edge("IMPL", old, x)
-        sdk.create_direct_edge("NAND", y, old)
+        sdk._create_direct_edge("IMPL", old, x)
+        sdk._create_direct_edge("NAND", y, old)
         # a structural edge
-        sdk.create_edge("aboutSubject", old, subj)
+        sdk._create_edge("aboutSubject", old, subj)
         # an alreadyDecided operator — must stay attached to the dead prior.
         # ⛔ Its input is `z`, NOT `y`: `y` already carries a direct `NAND` into
         # `old`, and since #12067/#12112 the mechanism set is CLOSED — a pair
@@ -677,9 +677,9 @@ class TestBlastRadius:
         # carries the 'NAND' mechanism as a direct edge`). The double-claim was
         # the fixture's, not the writer's.
         z = _seed_point(sdk, "z")
-        sdk.create_operator("IMPL", old, [z], label="alreadyDecided")
+        sdk._create_operator("IMPL", old, [z], label="alreadyDecided")
         # a self edge to the successor — delete-only, never repointed
-        sdk.create_edge("aboutObject", old, new)
+        sdk._create_edge("aboutObject", old, new)
 
         from tortoise.mcp_server import _preview_supersede
 
@@ -702,12 +702,12 @@ class TestBlastRadius:
 
     @pytest.mark.parametrize("rel,direction,make_endpoint", [
         # (old)-[:IMPL]->(object) — the PR #8622 headline shape
-        ("IMPL", "out", lambda sdk: sdk.create_object("Widget", "product")["id"]),
+        ("IMPL", "out", lambda sdk: sdk._create_object("Widget", "product")["id"]),
         # (object)-[:NAND]->(old) — the inbound leg, so the descriptor's SRC is
         # the non-Point endpoint (the direction a src-only widening would miss)
-        ("NAND", "in", lambda sdk: sdk.create_object("Widget", "product")["id"]),
+        ("NAND", "in", lambda sdk: sdk._create_object("Widget", "product")["id"]),
         # (subject)-[:IMPL]->(old) — the other non-Point carrier
-        ("IMPL", "in", lambda sdk: sdk.create_subject("Acme")["id"]),
+        ("IMPL", "in", lambda sdk: sdk._create_subject("Acme")["id"]),
     ], ids=["point-to-object", "object-to-point", "subject-to-point"])
     def test_supersede_preview_transfers_a_non_point_direct_edge(
             self, sdk, rel, direction, make_endpoint):
@@ -732,9 +732,9 @@ class TestBlastRadius:
         old, new = _seed_point(sdk, "old"), _seed_point(sdk, "new")
         other = make_endpoint(sdk)
         if direction == "out":
-            sdk.create_direct_edge(rel, old, other, label="related-to")
+            sdk._create_direct_edge(rel, old, other, label="related-to")
         else:
-            sdk.create_direct_edge(rel, other, old, label="related-to")
+            sdk._create_direct_edge(rel, other, old, label="related-to")
 
         from tortoise.mcp_server import _preview_supersede
 
@@ -832,8 +832,8 @@ class TestBlastRadius:
 
         # (a) the idx-less `mitigated_by` edge is net-new at the successor
         src, tgt = _seed_point(sdk, "src"), _seed_point(sdk, "tgt")
-        op = sdk.create_operator("IMPL", src, [tgt])
-        mit = sdk.mitigate_operator(op["id"], "no control group", 0.3)
+        op = sdk._create_operator("IMPL", src, [tgt])
+        mit = sdk._mitigate_operator(op["id"], "no control group", 0.3)
         new = _seed_point(sdk, "new-context")
         before = _edge_keys_at(sdk, new)
         preview = _preview_supersede(sdk, mit["id"], new)
@@ -847,8 +847,8 @@ class TestBlastRadius:
         # (b) a successor pre-wired with the same (operator, type) edge at ANY
         # idx is already-present, not net-new (the bare MERGE matches it)
         old2, new2 = _seed_point(sdk, "old2"), _seed_point(sdk, "new2")
-        op2 = sdk.create_operator("IMPL", old2, [tgt])
-        mit2 = sdk.mitigate_operator(op2["id"], "second", 0.3)
+        op2 = sdk._create_operator("IMPL", old2, [tgt])
+        mit2 = sdk._mitigate_operator(op2["id"], "second", 0.3)
         sdk._get_proj().g.query(
             "MATCH (o:Point {id:$o}), (n:Point {id:$n}) "
             "MERGE (o)-[:mitigated_by {idx:3}]->(n)",
@@ -860,7 +860,7 @@ class TestBlastRadius:
 
         # (c) the alreadyDecided INPUT mirror stays on the prior AND is visible
         old3, new3 = _seed_point(sdk, "old3"), _seed_point(sdk, "new3")
-        keep_op = sdk.create_operator("IMPL", old3, [tgt],
+        keep_op = sdk._create_operator("IMPL", old3, [tgt],
                                       label="alreadyDecided")
         preview3 = _preview_supersede(sdk, old3, new3)
         kept3 = {(e["type"], e["from"], e["to"])
@@ -874,7 +874,7 @@ class TestBlastRadius:
         # of (b). Reverting `op_id in pre_op_in_any` to the idx-keyed
         # membership makes this assertion fail.
         old4, new4 = _seed_point(sdk, "old4"), _seed_point(sdk, "new4")
-        op4 = sdk.create_operator("IMPL", src, [tgt])
+        op4 = sdk._create_operator("IMPL", src, [tgt])
         sdk._get_proj().g.query(
             "MATCH (o:Point {id:$o}), (op:Point {id:$op}) "
             "CREATE (o)-[:INPUT]->(op)",  # NO idx (the null-idx class)
@@ -894,7 +894,7 @@ class TestBlastRadius:
         # pre-wire is already-present, while a different-idx pre-wire is
         # correctly net-new — the rule is idx-keyed, not any-idx.
         old5, new5 = _seed_point(sdk, "old5"), _seed_point(sdk, "new5")
-        op5 = sdk.create_operator("IMPL", src, [tgt])
+        op5 = sdk._create_operator("IMPL", src, [tgt])
         sdk._get_proj().g.query(
             "MATCH (o:Point {id:$o}), (op:Point {id:$op}) "
             "CREATE (o)-[:INPUT {idx:0}]->(op)",
@@ -910,7 +910,7 @@ class TestBlastRadius:
             "the same-idx INPUT pre-wire must be classified already-present")
 
         old6, new6 = _seed_point(sdk, "old6"), _seed_point(sdk, "new6")
-        op6 = sdk.create_operator("IMPL", src, [tgt])
+        op6 = sdk._create_operator("IMPL", src, [tgt])
         sdk._get_proj().g.query(
             "MATCH (o:Point {id:$o}), (op:Point {id:$op}) "
             "CREATE (o)-[:INPUT {idx:0}]->(op)",
@@ -949,9 +949,9 @@ class TestBlastRadius:
         x = _seed_point(sdk, "x")
         sdk._get_proj().g.query(
             "MATCH (a:Point {id:$o}) CREATE (a)-[:IMPL]->(a)", params={"o": old})
-        sdk.create_direct_edge("IMPL", old, x)
+        sdk._create_direct_edge("IMPL", old, x)
         # THE precondition: the repoint target already exists.
-        sdk.create_direct_edge("IMPL", new, old)
+        sdk._create_direct_edge("IMPL", new, old)
 
         from tortoise.mcp_server import _preview_supersede
 
@@ -982,9 +982,9 @@ class TestBlastRadius:
         x = _seed_point(sdk, "x")
         sdk._get_proj().g.query(
             "MATCH (a:Point {id:$o}) CREATE (a)-[:IMPL]->(a)", params={"o": old})
-        sdk.create_direct_edge("IMPL", old, x)
+        sdk._create_direct_edge("IMPL", old, x)
         # The OPPOSITE type — must NOT suppress the divergence.
-        sdk.create_direct_edge("NAND", new, old)
+        sdk._create_direct_edge("NAND", new, old)
 
         from tortoise.mcp_server import _preview_supersede
 
@@ -1023,7 +1023,7 @@ class TestBlastRadius:
         sdk._get_proj().g.query(
             "MATCH (a:Point {id:$o}) CREATE (a)-[:IMPL]->(a)",
             params={"o": old})
-        sdk.create_direct_edge("IMPL", old, x)  # one ordinary transferred edge
+        sdk._create_direct_edge("IMPL", old, x)  # one ordinary transferred edge
 
         from tortoise.mcp_server import _preview_supersede
 
@@ -1057,9 +1057,9 @@ class TestBlastRadius:
         x, y = _seed_point(sdk, "x"), _seed_point(sdk, "y")
         subj = sdk.create_entity(
             "subject", "S", subjectKind="company")["node"]["id"]
-        sdk.create_direct_edge("IMPL", old, x)      # transferred
-        sdk.create_edge("aboutSubject", old, subj)  # transferred
-        sdk.create_edge("related", old, y)          # in NO transfer leg
+        sdk._create_direct_edge("IMPL", old, x)      # transferred
+        sdk._create_edge("aboutSubject", old, subj)  # transferred
+        sdk._create_edge("related", old, y)          # in NO transfer leg
 
         from tortoise.mcp_server import _preview_supersede
 
@@ -1167,8 +1167,8 @@ class TestBlastRadius:
         from tortoise.mcp_server import _preview_supersede
 
         old, new = _seed_point(sdk, "old"), _seed_point(sdk, "new")
-        obj = sdk.create_object("Widget", "product")["id"]
-        sdk.create_direct_edge("IMPL", old, obj, label="related-to")
+        obj = sdk._create_object("Widget", "product")["id"]
+        sdk._create_direct_edge("IMPL", old, obj, label="related-to")
 
         # Prelude: with the writer's real four-label vocabulary the edge is a
         # transfer — so the narrowing below is what changes the verdict, not a
@@ -1191,7 +1191,7 @@ class TestDryRunKeepsValidation:
 
     def test_retract_preview_rejects_an_operator(self, mcp, sdk):
         a, b = _seed_point(sdk, "a"), _seed_point(sdk, "b")
-        op = sdk.create_operator("IMPL", a, [b])["id"]
+        op = sdk._create_operator("IMPL", a, [b])["id"]
         before = _graph_counts(sdk)
         result = mcp.tortoise_retract_point(op, dry_run=True)
         assert result.get("error"), result
@@ -1221,7 +1221,7 @@ class TestDryRunKeepsValidation:
         """
         future = (_dt.datetime.now(_dt.UTC)
                   + _dt.timedelta(days=30)).replace(microsecond=0)
-        old = sdk.create_point(
+        old = sdk._create_point(
             "statement", "future claim", validFrom=future.isoformat())["id"]
         new = _seed_point(sdk, "replacement")
         before = _graph_counts(sdk)
@@ -1231,7 +1231,7 @@ class TestDryRunKeepsValidation:
         assert "retract_point" in str(preview["error"])
         # the write path refuses the SAME input, identically
         with pytest.raises(ValueError, match="retract_point"):
-            sdk.invalidate_point(old, new)
+            sdk._invalidate_point(old, new)
         assert _graph_counts(sdk) == before
 
     def test_supersede_preview_transfer_false_rejects_an_inverted_window(
@@ -1241,7 +1241,7 @@ class TestDryRunKeepsValidation:
         re-divergence of the two previews would otherwise be silent."""
         future = (_dt.datetime.now(_dt.UTC)
                   + _dt.timedelta(days=30)).replace(microsecond=0)
-        old = sdk.create_point(
+        old = sdk._create_point(
             "statement", "future claim", validFrom=future.isoformat())["id"]
         new = _seed_point(sdk, "replacement")
         before = _graph_counts(sdk)
@@ -1429,10 +1429,10 @@ class TestSupersedeWindowParity:
     """
 
     def _pair(self, sdk, predecessor_start, successor_start=None):
-        old = sdk.create_point("statement", "claim v1",
+        old = sdk._create_point("statement", "claim v1",
                                validFrom=predecessor_start)["id"]
         kw = {} if successor_start is None else {"validFrom": successor_start}
-        new = sdk.create_point("statement", "claim v2", **kw)["id"]
+        new = sdk._create_point("statement", "claim v2", **kw)["id"]
         return old, new
 
     def test_supersede_preview_refuses_a_retroactive_successor(self, mcp, sdk):

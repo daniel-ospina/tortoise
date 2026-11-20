@@ -66,12 +66,18 @@ def _post_mutation_oracle(ids: dict[str, str]) -> dict[str, float]:
     clone, _ = fresh_sdk(prefix="tortoise_epic903_f4truth_")
     try:
         clone_ids, clone_ops = _build_f4_graph(clone)  # noqa: RUF059
-        clone.set_point_baseline(clone_ids["r1"], 1.0, 8.0)  # same mutation
+        # #12901 FINAL batch: `set_point_baseline` was PRIVATISED (`_set_point_baseline`).
+        clone._set_point_baseline(clone_ids["r1"], 1.0, 8.0)  # same mutation
         random.seed(FIXED_SEED)
         # Hermetic posture, matching ``fresh_sdk`` and ``capture_f4_oracle``:
         # the fixture is synthetic, so it must not depend on the ambient
         # TORTOISE_EP_REQUIRE_CALIBRATION another lane left in the process.
-        clone.dream(mode="full", warm_start=False, require_calibration=False)
+        # ⛔ ONE mutation, not two: the privatisation re-point of the line above
+        # also inserted a DUPLICATE `_set_point_baseline(...)` here, so the oracle
+        # applied the baseline twice while the live fixture applies it once — the
+        # pair this function exists to keep identical (#13899 re-cut review, P2).
+        # `_dream` keeps the private spelling (`dream` was privatised too).
+        clone._dream(mode="full", warm_start=False, require_calibration=False)
         proj = clone._get_proj()
         rows = proj.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.confidence",
@@ -92,7 +98,7 @@ class TestDe2e9StalenessError:
             sdk = f.sdk
             # Mutate region R's evidence (r1's baseline — R's claims are
             # null-stamped → stalest-ranked → drained FIRST by stale-first).
-            sdk.set_point_baseline(f.ids["r1"], 1.0, 8.0)
+            sdk._set_point_baseline(f.ids["r1"], 1.0, 8.0)
             # POST-mutation ground truth (sandboxed clone with the mutation).
             truth = _post_mutation_oracle(f.ids)
 
@@ -140,7 +146,7 @@ class TestDe2e9StalenessError:
             coverages = []
             for _ in range(6):
                 random.seed(FIXED_SEED)
-                r = sdk.dream(mode="stale-first", budget=budget,
+                r = sdk._dream(mode="stale-first", budget=budget,
                                require_calibration=False)
                 assert r["converged_all"] is True
                 conf = _conf_by_key(sdk, f.ids)
@@ -172,7 +178,7 @@ class TestDe2e9StalenessError:
         try:
             assert _coverage(f.sdk, f.ids) == 0.0
             random.seed(FIXED_SEED)
-            r = f.sdk.dream(mode="stale-first", budget=2,
+            r = f.sdk._dream(mode="stale-first", budget=2,
                             require_calibration=False)
             assert r["converged_all"] is True
             assert _coverage(f.sdk, f.ids) > 0.0

@@ -67,7 +67,7 @@ def test_link_source_to_entity():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         _ensure_nodes(sdk)
-        sdk.link_source_to_entity("doc.txt", "obj-1", "Object")
+        sdk._link_source_to_entity("doc.txt", "obj-1", "Object")
 
         proj = sdk._get_proj()
         r = proj.g.query(
@@ -88,7 +88,7 @@ def test_link_source_to_entity_rejects_action():
         proj.g.query("CREATE (a:Action {id:'act-1', name:'Foo', actionKind:'test'})")
 
         with pytest.raises(ValueError, match="Invalid entity_label: Action"):
-            sdk.link_source_to_entity("doc2.txt", "act-1", "Action")
+            sdk._link_source_to_entity("doc2.txt", "act-1", "Action")
     finally:
         sdk.close()
 
@@ -102,7 +102,7 @@ def test_link_source_to_entity_rejects_invalid_label():
         proj.g.query("CREATE (o:Object {id:'obj-2', name:'Gadget', objectKind:'product'})")
 
         with pytest.raises(ValueError, match="Invalid entity_label: Subject"):
-            sdk.link_source_to_entity("doc3.txt", "obj-2", "Subject")
+            sdk._link_source_to_entity("doc3.txt", "obj-2", "Subject")
     finally:
         sdk.close()
 
@@ -117,7 +117,7 @@ def test_link_source_to_entity_document_label():
         # "Document" alias resolves to Source and matches the entity by url.
         proj.g.query("CREATE (d:Source {url:'doc-1', title:'Some Doc', documentKind:'report'})")
 
-        sdk.link_source_to_entity("doc4.txt", "doc-1", "Document")
+        sdk._link_source_to_entity("doc4.txt", "doc-1", "Document")
 
         r = proj.g.query(
             "MATCH (s:Source {url:'doc4.txt'})-[:references]->(d:Source {url:'doc-1'}) "
@@ -136,7 +136,7 @@ def test_link_source_to_entity_event_label():
         proj.g.query("CREATE (s:Source {url:'doc5.txt', sourceKind:'document', title:'doc5.txt', contentHash:'', ingestedAt:'2024-01-01'})")
         proj.g.query("CREATE (ev:Event {id:'ev-1', eventId:'ev-1', name:'Meeting', eventKind:'meeting'})")
 
-        sdk.link_source_to_entity("doc5.txt", "ev-1", "Event")
+        sdk._link_source_to_entity("doc5.txt", "ev-1", "Event")
 
         r = proj.g.query(
             "MATCH (s:Source {url:'doc5.txt'})-[:references]->(e:Event {id:'ev-1'}) "
@@ -157,7 +157,7 @@ def test_sdk_link_source_to_entity():
         proj.g.query("CREATE (s:Source {url:'sdk_doc.txt', sourceKind:'document', title:'sdk_doc.txt', contentHash:'', ingestedAt:'2024-01-01'})")
         proj.g.query("CREATE (o:Object {id:'sdk-obj', name:'SDK Widget', objectKind:'product'})")
 
-        sdk.link_source_to_entity("sdk_doc.txt", "sdk-obj", "Object")
+        sdk._link_source_to_entity("sdk_doc.txt", "sdk-obj", "Object")
 
         r = proj.g.query(
             "MATCH (s:Source {url:'sdk_doc.txt'})-[:references]->(o:Object {id:'sdk-obj'}) "
@@ -298,7 +298,7 @@ def test_link_source_to_entity_source_kind_passthrough():
         proj.g.query(
             "CREATE (d:Source {url:'doc-k', title:'Kind Test', documentKind:'report'})"
         )
-        sdk.link_source_to_entity("src-kind.txt", "doc-k", "Document",
+        sdk._link_source_to_entity("src-kind.txt", "doc-k", "Document",
                                    source_kind="github_issue")
 
         # Verify the Source node was created with the right sourceKind
@@ -353,7 +353,7 @@ def test_link_source_to_entity_writes_no_self_loop_5151():
     """
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
-        sdk.link_source_to_entity("X", "X", "Source")
+        sdk._link_source_to_entity("X", "X", "Source")
         proj = sdk._get_proj()
 
         nodes = proj.g.query(
@@ -363,7 +363,7 @@ def test_link_source_to_entity_writes_no_self_loop_5151():
         assert _self_loop_count(proj) == 0, "degenerate self-loop references edge minted"
 
         # Idempotent: a re-link must not mint it on the second pass either.
-        sdk.link_source_to_entity("X", "X", "Source")
+        sdk._link_source_to_entity("X", "X", "Source")
         assert _self_loop_count(proj) == 0, (
             "the second call minted the self-loop the first one suppressed"
         )
@@ -381,7 +381,7 @@ def test_link_source_to_entity_writes_no_self_loop_through_the_Document_alias_51
     """
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
-        sdk.link_source_to_entity("X", "X", "Document")
+        sdk._link_source_to_entity("X", "X", "Document")
         proj = sdk._get_proj()
         assert _self_loop_count(proj) == 0, (
             "the `Document` alias minted a Source→Source self-loop"
@@ -419,7 +419,7 @@ def test_the_self_loop_guard_sees_the_RESOLVED_key_not_the_raw_spelling_5151():
             "longer reproduces the case the caller-side guard cannot catch"
         )
 
-        sdk.link_source_to_entity(variant, "https://example.test/a", "Source")
+        sdk._link_source_to_entity(variant, "https://example.test/a", "Source")
         assert _self_loop_count(proj) == 0, (
             "a URL variant collapsed onto the entity node and minted a self-loop"
         )
@@ -445,8 +445,8 @@ def test_the_self_loop_guard_does_not_suppress_legitimate_links_5151():
         proj.g.query("CREATE (a:Source {url:'a'}),(b:Source {url:'b'})")
         proj.g.query("CREATE (o:Object {id:'X', name:'o'})")
 
-        sdk.link_source_to_entity("a", "b", "Source")   # containment
-        sdk.link_source_to_entity("X", "X", "Object")   # equal string, other label
+        sdk._link_source_to_entity("a", "b", "Source")   # containment
+        sdk._link_source_to_entity("X", "X", "Object")   # equal string, other label
 
         containment = proj.g.query(
             "MATCH (a:Source {url:'a'})-[:references]->(b:Source {url:'b'}) "

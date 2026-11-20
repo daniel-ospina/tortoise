@@ -88,7 +88,7 @@ def _forged_prop_value(name: str, forged_ts: str):
 
 def test_create_document_journals_and_survives_rebuild(env):
     sdk, events = env
-    doc = sdk.create_document("Quarterly Report", "report")
+    doc = sdk._create_document("Quarterly Report", "report")
     did = doc["id"]
     proj = sdk._get_proj()
 
@@ -157,7 +157,7 @@ def test_the_record_carries_the_applied_payload(env):
     fail-closed ``ValueError`` contract instead.
     """
     sdk, events = env
-    doc = sdk.create_document("Payload Doc", "report")
+    doc = sdk._create_document("Payload Doc", "report")
     proj = sdk._get_proj()
     live = _sources(proj, doc["id"])[0][0]
     rec = _document_created(events)[0]
@@ -277,7 +277,7 @@ def test_a_reserved_envelope_prop_cannot_forge_or_suppress_the_record(env):
             f"{name!r} is an `_emit_event` envelope name and must be stripped "
             "from every entity-door record payload — leaving it in lets a "
             "caller prop bind that parameter or re-type the record")
-    doc = sdk.create_document("Forged", "report", recorded_ts=forged)
+    doc = sdk._create_document("Forged", "report", recorded_ts=forged)
     rec = _document_created(events)[0]
     assert rec["ts"] != forged, (
         "a caller `recorded_ts` prop forged the record's envelope ts")
@@ -300,11 +300,11 @@ def test_a_reserved_envelope_prop_cannot_forge_or_suppress_the_record(env):
     # The generic update door splats caller props straight into `_emit_event`,
     # so before the intake strip each of these bound its own parameter or
     # overwrote the built envelope via `event.update(extra)`.
-    pt = sdk.create_point("statement", "a point")
+    pt = sdk._create_point("statement", "a point")
     # `type_` and `new_content` are the CALL-collision names: pre-fix either of
     # them in this splat raises `TypeError` AFTER the live write, with no
     # `PointRevised` record (so this call itself errors before any assertion).
-    sdk.update_point(pt["id"], recorded_ts=forged, type="PointAdded",
+    sdk._update_point(pt["id"], recorded_ts=forged, type="PointAdded",
                      point={"id": "forged"}, payload={"forged": True},
                      ts=forged, event_id="FORGED-EVENT-ID",
                      projection_version=99, initiated_by="FORGED-ACTOR",
@@ -336,7 +336,7 @@ def test_a_reserved_envelope_prop_cannot_forge_or_suppress_the_record(env):
     # A `type` prop must not suppress a Document's record: with it suppressed
     # the node is live-only and `rebuild_all` destroys it.
     n_before = len(_document_created(events))
-    doc2 = sdk.create_document("Forged2", "report", type="SourceCreated")
+    doc2 = sdk._create_document("Forged2", "report", type="SourceCreated")
     recs = _document_created(events)
     # Two SEPARATE assertions: `recs` is `_document_created(events)`, already
     # filtered to `type == "DocumentCreated"`, so a `recs[-1].get("type") ==
@@ -437,9 +437,9 @@ def test_a_caller_seq_prop_cannot_forge_a_journal_position(env):
     are wrong pre-fix, but only the update half is a top-level leak.
     """
     sdk, events = env
-    point = sdk.create_point("observation", "seq must not survive",
+    point = sdk._create_point("observation", "seq must not survive",
                              seq=42, key="seq-forge")
-    sdk.update_point(point["id"], seq=43, content="revised")
+    sdk._update_point(point["id"], seq=43, content="revised")
     lines = _journal(events)
     assert lines, "the journal is empty — this leg proves nothing"
     for line in lines:
@@ -587,9 +587,9 @@ def test_a_relay_door_strips_the_reserved_names_before_splatting(env):
     sdk, _events = env
     poisoned = {"self": "FORGED", "type": "FORGED", "type_": "X",
                 "new_content": "FORGED", "point": {"forged": True}}
-    for door, args in ((sdk.create_subject, ("relay-subject",)),
-                       (sdk.create_object, ("relay-object",)),
-                       (sdk.create_event, ("relay-event", "meeting"))):
+    for door, args in ((sdk._create_subject, ("relay-subject",)),
+                       (sdk._create_object, ("relay-object",)),
+                       (sdk._create_event, ("relay-event", "meeting"))):
         node = door(*args, props=dict(poisoned))
         assert node.get("id"), f"{door.__name__} relay dropped the write"
         live = sdk._get_proj().g.query(
@@ -603,7 +603,7 @@ def test_a_relay_door_strips_the_reserved_names_before_splatting(env):
     # POINT the reserved names are strip-and-ignore, so the legitimate co-supplied
     # `summary` must land; on a `:Source` the same undeclared name keeps the LOUD
     # D30 refusal it has through every other path.
-    pt = sdk.create_point("statement", "relay point")
+    pt = sdk._create_point("statement", "relay point")
     sdk.update_knowledge(pt["id"], props={"self": "FORGED", "summary": "relayed"})
     pt_live = sdk._get_proj().g.query(
         "MATCH (n:Point {id:$i}) RETURN properties(n)",
@@ -625,7 +625,7 @@ def test_document_mutation_survives_rebuild(env):
     ``_CANONICAL_ENTITY_LABELS``, so it folds.
     """
     sdk, events = env
-    doc = sdk.create_document("MutDoc", "report")
+    doc = sdk._create_document("MutDoc", "report")
     sdk.update_knowledge(doc["id"], documentKind="brief")
     proj = sdk._get_proj()
     proj.rebuild_all(str(events), confirm_destructive=True)
@@ -637,8 +637,8 @@ def test_document_mutation_survives_rebuild(env):
 def test_one_create_is_one_record(env):
     """Emit-on-every-write must not become emit-twice-per-write."""
     sdk, events = env
-    sdk.create_document("A", "report")
-    sdk.create_document("B", "report")
+    sdk._create_document("A", "report")
+    sdk._create_document("B", "report")
     assert len(_document_created(events)) == 2
 
 
@@ -649,7 +649,7 @@ def test_journal_less_sdk_still_creates_the_document(tmp_path):
     stays green because the live create is independent of the record."""
     sdk = TortoiseSDK(str(tmp_path / "nojournal.db"))
     try:
-        doc = sdk.create_document("No Journal", "report")
+        doc = sdk._create_document("No Journal", "report")
         assert _sources(sdk._get_proj(), doc["id"]), (
             "an unconfigured journal must not change the create")
     finally:
@@ -674,7 +674,7 @@ def test_append_failure_does_not_crash_the_create(env, monkeypatch, caplog):
     monkeypatch.setattr(EventLog, "append", _raise_append)
     try:
         with caplog.at_level(logging.ERROR, logger="tortoise.sdk"):
-            doc = sdk.create_document("Append Fail", "report")
+            doc = sdk._create_document("Append Fail", "report")
         assert _sources(proj, doc["id"]), (
             "an append failure must not crash the create; node stays live")
         assert any("failed to append" in r.getMessage()

@@ -179,7 +179,7 @@ def test_sdk_emit_event_survives_unreachable_seam(tmp_path):
     sdk = TortoiseSDK(str(tmp_path / "test.db"), event_log_path=events)
     try:
         with _UnimportableSeam():
-            sdk.create_point("observation", "log-0")
+            sdk._create_point("observation", "log-0")
 
         with open(events, encoding="utf-8") as fh:
             lines = [ln for ln in fh if ln.strip()]

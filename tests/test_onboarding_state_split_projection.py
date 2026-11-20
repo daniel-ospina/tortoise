@@ -176,7 +176,7 @@ class TestOnboardsEdge:
         import uuid
         sdk = _make_sdk(namespace=org_id)
         try:
-            node = sdk.create_subject(
+            node = sdk._create_subject(
                 f"org{uuid.uuid4().hex[:8]}", subjectKind="organization",
                 org_id=org_id)
             return node["id"]

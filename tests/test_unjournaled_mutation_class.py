@@ -405,7 +405,7 @@ class TestPropertyMutationRoundTrip:
         not claim coverage for the rest.
         """
         sdk, events = env
-        sub = sdk.create_subject("Topic")
+        sub = sdk._create_subject("Topic")
         sid = (sub.get("node") or sub)["id"]
         oid = sdk.create_entity("object", name="O",
                                 objectKind="k")["node"]["id"]
@@ -515,7 +515,7 @@ class TestPropertyMutationRoundTrip:
         sdk._emit_event("ObjectSuperseded", id=oid, name="O",
                         supersedes_by="other", session_id="s", evidence="e")
         sdk.update_knowledge(oid, status="deprecated")
-        sdk.delete_entity(oid)
+        sdk._delete_entity__svc(oid)
 
         caplog.clear()
         with caplog.at_level("WARNING"):
@@ -656,8 +656,8 @@ class TestPointDeleteTwoStore:
 
     def test_hard_delete_is_durable(self, env, caplog):
         sdk, events = env
-        pid = sdk.create_point("observation", "delete me")["id"]
-        sdk.delete_point(pid)
+        pid = sdk._create_point("observation", "delete me")["id"]
+        sdk._delete_point(pid)
         assert _rows(sdk, "Point", pid) == [], "premise: live hard-delete"
 
         _assert_round_trip(sdk, events, caplog)
@@ -667,8 +667,8 @@ class TestPointDeleteTwoStore:
     def test_delete_journals_honest_op_and_no_retract_line(self, env):
         """The two stores, one meaning each."""
         sdk, events = env
-        pid = sdk.create_point("observation", "x")["id"]
-        sdk.delete_point(pid)
+        pid = sdk._create_point("observation", "x")["id"]
+        sdk._delete_point(pid)
 
         recs = [r for r in _mutations(events) if r.get("id") == pid]
         assert [(r["op"], r["label"]) for r in recs] == [("delete", "Point")]
@@ -695,8 +695,8 @@ class TestPointDeleteTwoStore:
         process's switch folded an unswitched writer's deletes as tombstones.
         """
         sdk, _events = env
-        pid = sdk.create_point("observation", "x")["id"]
-        sdk.delete_point(pid)
+        pid = sdk._create_point("observation", "x")["id"]
+        sdk._delete_point(pid)
 
         types = [r[0] for r in sdk._get_proj().g.query(
             "MATCH (e:GraphEvent) RETURN e.type").result_set]
@@ -713,8 +713,8 @@ class TestPointDeleteTwoStore:
         hard-delete row would pass while retract silently broke.
         """
         sdk, events = env
-        pid = sdk.create_point("observation", "retract me")["id"]
-        sdk.retract_point(pid)
+        pid = sdk._create_point("observation", "retract me")["id"]
+        sdk._retract_point(pid)
         assert _rows(sdk, "Point", pid) != [], "premise: retract keeps the node"
         assert _props(sdk, "Point", pid, "status")["status"] == "retracted"
 
@@ -726,10 +726,10 @@ class TestPointDeleteTwoStore:
     def test_delete_entity_point_agrees_with_delete_point(self, env, caplog):
         """The two Point-delete doors must end in the same graph state."""
         sdk, events = env
-        a = sdk.create_point("observation", "via delete_point")["id"]
-        b = sdk.create_point("observation", "via delete_entity")["id"]
-        sdk.delete_point(a)
-        assert sdk.delete_entity(b)
+        a = sdk._create_point("observation", "via delete_point")["id"]
+        b = sdk._create_point("observation", "via delete_entity")["id"]
+        sdk._delete_point(a)
+        assert sdk._delete_entity__svc(b)
 
         _assert_round_trip(sdk, events, caplog)
         assert _rows(sdk, "Point", a) == [] and _rows(sdk, "Point", b) == [], \
@@ -1064,8 +1064,8 @@ class TestRegressionGuards:
         ``EntityMutated`` for a NON-status prop either; #3311's seam adds one
         for ``status`` ONLY, and this test's subject is the annotator path."""
         sdk, events = env
-        pid = sdk.create_point("observation", "x")["id"]
-        sdk.update_point(pid, note="annotated")
+        pid = sdk._create_point("observation", "x")["id"]
+        sdk._update_point(pid, note="annotated")
         kinds = [e.get("type") for e in _journal(events)]
         assert "PointRevised" in kinds
         assert not [r for r in _mutations(events) if r.get("id") == pid], (

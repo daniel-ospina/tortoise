@@ -346,7 +346,7 @@ def snapshot_points(sdk, session_id: str) -> list[dict]:
 
 def recall_texts(sdk, query: str, *, limit: int = 8) -> list[str]:
     """Real recall_state over the cell graph → the surfaced content texts."""
-    results = sdk.recall_state(query=query, limit=limit)
+    results = sdk._recall_state(query=query, limit=limit)
     texts: list[str] = []
     for result in results:
         content = result.get("content")
@@ -428,9 +428,9 @@ def ep_warm_start(sdk, *, log: list[str] | None = None) -> dict:
     alpha, beta = credibility_prior("medium")
     seeded = 0
     for (pid,) in rows:
-        sdk.set_point_baseline(pid, alpha, beta, source="system-default")
+        sdk._set_point_baseline(pid, alpha, beta, source="system-default")
         seeded += 1
-    dreamed = sdk.dream(mode="full", require_calibration=False,
+    dreamed = sdk._dream(mode="full", require_calibration=False,
                         warm_start=True)
     disclosure = {
         "seeded": seeded,
@@ -475,7 +475,7 @@ def replay_reflex(sdk, turns: list[dict], *, log: list[str] | None = None
             proj, window, prior_context=prior_context,
             min_confidence=REFLEX_MIN_CONFIDENCE,
             max_pointers=REFLEX_MAX_POINTERS,
-            _search_fn=sdk.tortoise_fts_query,
+            _search_fn=sdk._tortoise_fts_query,
             # #12297: graded-reflex eval — the same re-owned-order seam as the
             # product read; a re-picked page would move the injected pointer set.
             _search_kwargs={"_rerank_candidates": False},

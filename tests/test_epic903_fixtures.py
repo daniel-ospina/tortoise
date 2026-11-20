@@ -157,7 +157,7 @@ class TestF1Corpus:
         try:
             random.seed(FIXED_SEED)
             all_ops = list(f.operators.values())
-            result = f.sdk.compute_confidence(factors=all_ops,
+            result = f.sdk._compute_confidence(factors=all_ops,
                                               require_calibration=False)
             assert result["converged"] is True
             # converged BEFORE exhausting the cap — i.e., the production
@@ -247,7 +247,7 @@ class TestF3Calibration:
         f = f3_nonconvergent()
         try:
             random.seed(FIXED_SEED)
-            result = f.sdk.dream(dirty_only=True)
+            result = f.sdk._dream(dirty_only=True)
             assert result["converged"] is False, (
                 "F3 converged — the fails-to-converge structure lost its "
                 "limit cycle; re-calibrate"
@@ -266,7 +266,7 @@ class TestF3Calibration:
             f = f3_nonconvergent()
             try:
                 random.seed(seed)
-                result = f.sdk.dream(dirty_only=True)
+                result = f.sdk._dream(dirty_only=True)
                 assert result["converged"] is False, f"seed {seed} converged"
             finally:
                 f.sdk.close()
@@ -282,14 +282,14 @@ class TestF3Calibration:
             ids = {name: _make_claim(sdk, name)["id"]
                    for name in ("A", "B", "C")}
             ops = [
-                sdk.create_operator("NAND", ids[a], [ids[b]],
+                sdk._create_operator("NAND", ids[a], [ids[b]],
                                     direction="bidirectional")["id"]
                 for a, b in (("A", "B"), ("B", "C"), ("C", "A"))
             ]
             for name in ("A", "B", "C"):
-                sdk.set_point_baseline(ids[name], 10.0, 1.0)
+                sdk._set_point_baseline(ids[name], 10.0, 1.0)
             random.seed(FIXED_SEED)
-            result = sdk.compute_confidence(factors=ops,
+            result = sdk._compute_confidence(factors=ops,
                                             require_calibration=False)
             assert result["converged"] is True, (
                 "B7 triangle unexpectedly non-convergent — re-examine whether "
@@ -434,16 +434,21 @@ class TestF4CaptureGuards:
             self._targeted, self._stabilized = targeted, stabilized
             self.calls: list[tuple[str, dict]] = []
 
-        def compute_confidence(self, **kw):
-            self.calls.append(("compute_confidence", kw))
+        # The three seams ``capture_f4_oracle`` reaches are the PRIVATE spellings
+        # (#12901 retired the public ones), so the double mirrors the class it
+        # stands in for. Defining the public names here left every arm of this
+        # class running over an AttributeError envelope instead of the capture's
+        # own guards.
+        def _compute_confidence(self, **kw):
+            self.calls.append(("_compute_confidence", kw))
             return self._targeted
 
-        def dream(self, **kw):
-            self.calls.append(("dream", kw))
+        def _dream(self, **kw):
+            self.calls.append(("_dream", kw))
             return self._stabilized
 
-        def get_confidence(self, _pid, **kw):
-            self.calls.append(("get_confidence", kw))
+        def _get_confidence(self, _pid, **kw):
+            self.calls.append(("_get_confidence", kw))
             return {"mean": 0.5}
 
     _CLEAN_TARGETED: ClassVar[dict[str, object]] = {
@@ -458,7 +463,7 @@ class TestF4CaptureGuards:
         # of the fail-closed calibration gate explicitly, or the capture is only
         # hermetic by accident (fresh_sdk's setdefault).
         assert [name for name, _ in duck.calls] == [
-            "compute_confidence", "dream", "get_confidence", "get_confidence"]
+            "_compute_confidence", "_dream", "_get_confidence", "_get_confidence"]
         assert all(kw.get("require_calibration") is False for _, kw in duck.calls)
         assert duck.calls[1][1].get("warm_start") is False  # Epic 903-C4 (#1242)
 
@@ -530,7 +535,7 @@ class TestF4CaptureGuards:
         before = random.getstate()
 
         class _Boom(self._Duck):
-            def dream(self, **kw):
+            def _dream(self, **kw):
                 raise RuntimeError("pass blew up")
 
         with pytest.raises(RuntimeError, match="pass blew up"):

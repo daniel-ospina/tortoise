@@ -487,7 +487,7 @@ def seeded(tmp_path, monkeypatch):
     monkeypatch.setenv("TORTOISE_DB_PATH", db)
 
     reg = TortoiseSDK(db_path=db, namespace="registry")
-    team = reg.org_create("capstone-v2-team")
+    team = reg._org_create("capstone-v2-team")
     key = reg._apikey_create(team["id"], "capstone")["api_key"]
     org = team["id"]
 
@@ -496,12 +496,12 @@ def seeded(tmp_path, monkeypatch):
     s["org"] = org
 
     # ── the seed ────────────────────────────────────────────────────────────
-    s["claim"] = sdk.create_point(
+    s["claim"] = sdk._create_point(
         "statement", "The capstone V2 lane proves payloads, not statuses.")["id"]
     # A CALIBRATED claim: the `check_confidence(claim_id=…)` happy path refuses
     # an uncalibrated evidence point by name, so the happy path needs one that
     # carries a credibility prior.
-    s["calibrated"] = sdk.create_point(
+    s["calibrated"] = sdk._create_point(
         "statement", "A calibrated seeded claim for the confidence arm.",
         credibility="high")["id"]
     # ⛔ The operator's TARGET restates the SOURCE verbatim ON PURPOSE.
@@ -514,7 +514,7 @@ def seeded(tmp_path, monkeypatch):
     # scorers (bge-small cosine, and the TF-IDF fallback `_encode` degrades to
     # when the embeddings extra is absent — #399), so no box can change the
     # verdict.
-    s["claim2"] = sdk.create_point(
+    s["claim2"] = sdk._create_point(
         "statement", "The capstone V2 lane proves payloads, not statuses.")["id"]
     # ── the `check_confidence(topic=…)` seed ───────────────────────────────
     # That arm dispatches to `belief_timeline`, which RESOLVES the topic as an
@@ -524,16 +524,16 @@ def seeded(tmp_path, monkeypatch):
     # draft seeded the property and recorded the empty answer as a measured
     # "arm gap", i.e. it read as "this tool is broken" when it was the seed.
     s["topic"] = "capstone-topic"
-    s["topic_object"] = sdk.create_object(
+    s["topic_object"] = sdk._create_object(
         "capstone-topic", objectKind="core:thing")["id"]
-    s["topic_decision"] = sdk.create_point(
+    s["topic_decision"] = sdk._create_point(
         "decision", "The capstone retrieval window ships in Q3.")["id"]
-    sdk.create_edge("aboutObject", s["topic_decision"], s["topic_object"])
-    s["object"] = sdk.create_object("Widget", objectKind="core:thing")["id"]
-    s["subject"] = sdk.create_subject("Alice")["id"]
+    sdk._create_edge("aboutObject", s["topic_decision"], s["topic_object"])
+    s["object"] = sdk._create_object("Widget", objectKind="core:thing")["id"]
+    s["subject"] = sdk._create_subject("Alice")["id"]
     s["source"] = sdk.register_source("https://example.test/a", "web")["id"]
-    s["event"] = sdk.create_event("Deploy", eventKind="core:action")["id"]
-    s["operator"] = sdk.create_operator("IMPL", s["claim"], [s["claim2"]])["id"]
+    s["event"] = sdk._create_event("Deploy", eventKind="core:action")["id"]
+    s["operator"] = sdk._create_operator("IMPL", s["claim"], [s["claim2"]])["id"]
     # ── the `review_link_candidates` seed ─────────────────────────────────
     # A related-but-UNCONNECTED pair the add arm must PROPOSE. The pre-r8 row
     # asserted `claim2` — the operator's target — so the pair it named is
@@ -545,14 +545,14 @@ def seeded(tmp_path, monkeypatch):
     # the embedding cosine AND under the TF-IDF fallback, and no edge between
     # the two, so "proposed" is the product's answer on every box.
     s["review_pair"] = [
-        sdk.create_point(
+        sdk._create_point(
             "statement",
             "A related-pair statement seeded for the link-candidate arm.",
         )["id"]
         for _ in range(2)
     ]
     s["session"] = "sess-capstone-1"
-    sdk.create_event("capstone session", eventKind="AgentSession",
+    sdk._create_event("capstone session", eventKind="AgentSession",
                      session_id=s["session"], agent_name="capstone")
 
     # ── the `structure_check` seed ────────────────────────────────────────
@@ -562,7 +562,7 @@ def seeded(tmp_path, monkeypatch):
     # parent JTBD is exactly the shape the `orphan_use_case` rule reports, which
     # is what lets the assertion below read a VIOLATION back out instead of
     # asserting an empty answer.
-    s["use_case"] = sdk.create_point(
+    s["use_case"] = sdk._create_point(
         "useCase",
         "An orphaned capstone useCase, seeded so the chain validator has "
         "something to report.")["id"]
@@ -572,7 +572,7 @@ def seeded(tmp_path, monkeypatch):
     # batch set carry no payload at all over this transport (measured), which is
     # the same wire shape as a broken seam. A real ingest gives both arms an id
     # to read back, so neither assertion has to accept an empty answer.
-    s["batch"] = sdk.ingest({
+    s["batch"] = sdk._ingest({
         "points": [{"content": "An ingested capstone batch point.",
                      "kind": "statement"}],
     })["batch_id"]
@@ -968,7 +968,7 @@ class TestListKnowledgeKinds:
     def test_diary_kind_reads_the_seeded_author(self, seeded):
         """`kind='diary'` is PER-AUTHOR. Seed one entry so the arm is not vacuous."""
         door, _s, sdk = seeded
-        sdk.create_point("diary", "Seeded diary entry for the read arm.",
+        sdk._create_point("diary", "Seeded diary entry for the read arm.",
                          authoredBy="capstone-author")
         status, out = door.call("tortoise_list_knowledge",
                                 {"kind": "diary", "agent": "capstone-author"})
@@ -2192,7 +2192,7 @@ class TestRelationshipsAndRemainingReads:
 
     def test_diary_read_returns_the_seeded_entry(self, seeded):
         door, _s, sdk = seeded
-        sdk.create_point("diary", "Diary read arm entry.", authoredBy="reader")
+        sdk._create_point("diary", "Diary read arm entry.", authoredBy="reader")
         status, out = door.call("tortoise_diary_read",
                                 {"agent_name": "reader"})
         assert status == 200

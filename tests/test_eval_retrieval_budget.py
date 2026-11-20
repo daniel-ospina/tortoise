@@ -51,7 +51,7 @@ def test_hybrid_seam_threads_elevated_timeout(tmp_path, monkeypatch):
         captured["timeout"] = kw.get("_elevated_timeout_ms")
         return []
 
-    monkeypatch.setattr(TortoiseSDK, "tortoise_fts_query", _fake_fts)
+    monkeypatch.setattr(TortoiseSDK, "_tortoise_fts_query", _fake_fts)
     sdk = _fresh_sdk(tmp_path)
     try:
         q = _mini()[0]
@@ -130,7 +130,7 @@ def test_vector_arm_unaffected_by_eval_budget(tmp_path, monkeypatch):
     monkeypatch.setattr(ret_mod, "_count_embedded_points", lambda proj: 1)
     monkeypatch.setattr(ret_mod, "_encode_query_vec", lambda q: [0.0])
     monkeypatch.setattr(se, "run_vector_query", _fake_vector_query)
-    monkeypatch.setattr(TortoiseSDK, "tortoise_fts_query", _fake_fts)
+    monkeypatch.setattr(TortoiseSDK, "_tortoise_fts_query", _fake_fts)
     sdk = _fresh_sdk(tmp_path)
     try:
         q = _mini()[0]

@@ -63,7 +63,7 @@ def sdk():
 
 
 def _make_point(sdk: TortoiseSDK, content: str = "content", **kw):
-    return sdk.create_point(kw.pop("kind", "statement"), content, **kw)
+    return sdk._create_point(kw.pop("kind", "statement"), content, **kw)
 
 
 def _props(sdk: TortoiseSDK, pid: str) -> dict:
@@ -120,7 +120,7 @@ def test_future_dated_predecessor_refused_without_mutation(sdk):
     before = _props(sdk, old["id"])
 
     with pytest.raises(ValueError, match="retract_point"):
-        sdk.invalidate_point(old["id"], repl["id"])
+        sdk._invalidate_point(old["id"], repl["id"])
 
     # (a) nothing was mutated — byte-identical props (validFrom, no validTo,
     #     no expiredAt, no outdated, unchanged updatedAt).
@@ -159,7 +159,7 @@ def test_normal_dated_predecessor_still_invalidates_and_stays_readable(sdk):
     old = _make_point(sdk, content="live claim", validFrom=past.isoformat())
     repl = _make_point(sdk, content="replacement")
 
-    res = sdk.invalidate_point(old["id"], repl["id"])
+    res = sdk._invalidate_point(old["id"], repl["id"])
     assert res["invalidated"] is True
 
     op = _props(sdk, old["id"])
@@ -201,7 +201,7 @@ def test_valid_from_equal_to_now_is_not_an_inversion(sdk, monkeypatch):
 
     with monkeypatch.context() as m:
         m.setattr(_dt, "datetime", _FrozenDatetime)
-        res = sdk.invalidate_point(old["id"], repl["id"])
+        res = sdk._invalidate_point(old["id"], repl["id"])
 
     assert res["invalidated"] is True
     op = _props(sdk, old["id"])
@@ -240,7 +240,7 @@ def test_unparseable_valid_from_does_not_refuse(sdk):
     # an OPEN start covers every instant — including `now`, before any write
     assert sdk.get_historical_knowledge(old["id"], now_iso)["found"] is True
 
-    res = sdk.invalidate_point(old["id"], repl["id"])
+    res = sdk._invalidate_point(old["id"], repl["id"])
     assert res["invalidated"] is True
     op = _props(sdk, old["id"])
     assert op["outdated"] is True
@@ -269,7 +269,7 @@ def test_falsey_but_present_valid_from_is_a_real_past_start(sdk):
 
     assert sdk.get_historical_knowledge(old["id"], now_iso)["found"] is True
 
-    res = sdk.invalidate_point(old["id"], repl["id"])
+    res = sdk._invalidate_point(old["id"], repl["id"])
     assert res["invalidated"] is True
     op = _props(sdk, old["id"])
     assert op["validFrom"] == 0
@@ -297,9 +297,9 @@ def test_retract_point_is_the_window_agnostic_route_after_refusal(sdk):
     repl = _make_point(sdk, content="replacement")
 
     with pytest.raises(ValueError, match="retract_point"):
-        sdk.invalidate_point(old["id"], repl["id"])
+        sdk._invalidate_point(old["id"], repl["id"])
 
-    sdk.retract_point(old["id"])
+    sdk._retract_point(old["id"])
     op = _props(sdk, old["id"])
     assert op["status"] == "retracted"
     assert "validTo" not in op
@@ -338,7 +338,7 @@ def test_duplicate_id_group_refuses_when_ANY_node_is_future_dated(sdk):
     repl = _make_point(sdk, content="replacement")
 
     with pytest.raises(ValueError, match="retract_point"):
-        sdk.invalidate_point("dup5358", repl["id"])
+        sdk._invalidate_point("dup5358", repl["id"])
 
     rows = proj.g.query(
         "MATCH (n:Point {id:'dup5358'}) RETURN n.validFrom, n.validTo"

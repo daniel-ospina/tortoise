@@ -147,12 +147,12 @@ def _seed_entities(sdk: TortoiseSDK,
                           "subjectKind": "naturalPerson"}]
     for i, name in enumerate(object_names):
         items.append({"ref": f"o{i}", "type": "object", "name": name})
-    refs = sdk.ingest({"entities": items})["ids"]["refs"]
+    refs = sdk._ingest({"entities": items})["ids"]["refs"]
     return refs["s"], [refs[f"o{i}"] for i in range(len(object_names))]
 
 
 def _seed_subject_and_point(sdk: TortoiseSDK) -> tuple[str, str]:
-    res = sdk.ingest({
+    res = sdk._ingest({
         "entities": [{"ref": "s", "type": "subject", "name": "Analyst Alice",
                       "subjectKind": "naturalPerson"}],
         "points": [{"ref": "p", "kind": "statement", "content": "Datasets exist"}],
@@ -190,7 +190,7 @@ def _direct_edge_rows(sdk: TortoiseSDK, op_type: str) -> list:
 def _write_via_operator_route(sdk: TortoiseSDK, src: str, tgt: str,
                               op_type: str) -> dict:
     """Route A — the operator primitive (#7902 already admitted all four)."""
-    return sdk.create_operator(op_type, src, [tgt], direction=DIRECTION)
+    return sdk._create_operator(op_type, src, [tgt], direction=DIRECTION)
 
 
 def _write_via_direct_route(sdk: TortoiseSDK, src: str, tgt: str,
@@ -199,7 +199,7 @@ def _write_via_direct_route(sdk: TortoiseSDK, src: str, tgt: str,
     route selector classifies it 'direct' and it dispatches to
     ``create_direct_edge``. Until #7925 the endpoint contract refused the
     non-Point endpoints this carries."""
-    return sdk.ingest({"connections": [
+    return sdk._ingest({"connections": [
         {"from": src, "to": tgt, "operator": op_type, "direction": DIRECTION},
     ]})
 
@@ -230,7 +230,7 @@ def _target_confidence(sdk: TortoiseSDK, *node_ids: str) -> dict[str, dict]:
     is then asserted as a second, independent guard.
     """
     _solve_to_fixed_point(sdk)
-    out = sdk.compute_confidence()
+    out = sdk._compute_confidence()
     assert out["converged"] is True, (
         f"EP did not converge in {out['iterations']} iterations "
         f"(diagnostic={out.get('diagnostic')!r}); route parity is only "

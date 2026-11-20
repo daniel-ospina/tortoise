@@ -729,7 +729,7 @@ def _stub_create_point_path(monkeypatch, *, opener=None, listed=None):
     class _Sdk:
         _dirty_roots: tuple = ()
 
-        def create_point(self, **kw):
+        def _create_point(self, **kw):
             return {"id": "p-truth", "content": kw["content"]}
 
         def _get_proj(self):
@@ -888,7 +888,7 @@ def _stub_mintable_org_graph(monkeypatch, *, listed=(), org_id: str = "org-truth
     class _PointSdk:
         _dirty_roots: tuple = ()
 
-        def create_point(self, **kw):
+        def _create_point(self, **kw):
             return {"id": "p-truth", "content": kw["content"]}
 
         def _get_proj(self):

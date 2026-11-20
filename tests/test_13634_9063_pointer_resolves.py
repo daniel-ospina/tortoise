@@ -183,7 +183,7 @@ def test_the_refusal_does_not_point_at_a_closed_issue(sdk):
     sdk.register_source("https://example.org/13634-declared-prior", "web", tier="T1")
 
     with pytest.raises(ValueError) as excinfo:
-        sdk.set_point_baseline("https://example.org/13634-declared-prior", 2.0, 1.0)
+        sdk._set_point_baseline("https://example.org/13634-declared-prior", 2.0, 1.0)
     msg = str(excinfo.value)
 
     # The pre-existing guard (#9063): name the label that was FOUND, never ":Point".

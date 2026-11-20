@@ -124,53 +124,53 @@ class TestDecideWiring:
 
     def test_create_option_point(self, sdk):
         """Option points are created with kind='option'."""
-        p = sdk.create_point("option", "AGPLv3 dual-licensing", dedup=True)
+        p = sdk._create_point("option", "AGPLv3 dual-licensing", dedup=True)
         assert p["id"]
         assert p.get("pointKind") == "option"
         # Verify dedup works (opt-in via dedup=True; content_hash stored on first call)
-        p2 = sdk.create_point("option", "AGPLv3 dual-licensing", dedup=True)
+        p2 = sdk._create_point("option", "AGPLv3 dual-licensing", dedup=True)
         assert p2["id"] == p["id"]
 
     def test_create_criterion_point(self, sdk):
         """Criterion points are created with kind='criterion'."""
-        p = sdk.create_point("criterion", "Developer adoption")
+        p = sdk._create_point("criterion", "Developer adoption")
         assert p["id"]
         assert p.get("pointKind") == "criterion"
 
     def test_create_evidence_point(self, sdk):
         """Evidence/finding points are created with kind='evidence'."""
-        p = sdk.create_point("evidence", "AGPLv3 is OSI-approved")
+        p = sdk._create_point("evidence", "AGPLv3 is OSI-approved")
         assert p["id"]
         assert p.get("pointKind") == "evidence"
 
     def test_impl_operator_wiring(self, sdk):
         """IMPL edge from evidence to option."""
-        opt = sdk.create_point("option", "Option A")
-        ev = sdk.create_point("evidence", "Supports A")
-        op = sdk.create_operator("IMPL", ev["id"], [opt["id"]])
+        opt = sdk._create_point("option", "Option A")
+        ev = sdk._create_point("evidence", "Supports A")
+        op = sdk._create_operator("IMPL", ev["id"], [opt["id"]])
         assert op["id"]
         assert op.get("is_operator") is True
 
     def test_nand_operator_wiring(self, sdk):
         """NAND edge from evidence to option."""
-        opt = sdk.create_point("option", "Option A")
-        ev = sdk.create_point("evidence", "Opposes A")
-        op = sdk.create_operator("NAND", ev["id"], [opt["id"]])
+        opt = sdk._create_point("option", "Option A")
+        ev = sdk._create_point("evidence", "Opposes A")
+        op = sdk._create_operator("NAND", ev["id"], [opt["id"]])
         assert op["id"]
         assert op.get("is_operator") is True
 
     def test_mitigation_range_clamped(self, sdk):
         """mitigate_operator enforces [0, 1] range on strength."""
-        opt = sdk.create_point("option", "Option A")
-        ev = sdk.create_point("evidence", "Weak evidence")
-        op = sdk.create_operator("IMPL", ev["id"], [opt["id"]])
+        opt = sdk._create_point("option", "Option A")
+        ev = sdk._create_point("evidence", "Weak evidence")
+        op = sdk._create_operator("IMPL", ev["id"], [opt["id"]])
 
         # Valid range
-        m1 = sdk.mitigate_operator(op["id"], "Minor caveat", 0.10)
+        m1 = sdk._mitigate_operator(op["id"], "Minor caveat", 0.10)
         assert m1.get("id")
 
         # Strength is stored — verify we can mitigate at different levels
-        m2 = sdk.mitigate_operator(op["id"], "Major limitation", 0.50)
+        m2 = sdk._mitigate_operator(op["id"], "Major limitation", 0.50)
         assert m2.get("id")
 
     def test_decide_clamps_out_of_range_strength(self):
@@ -200,8 +200,8 @@ class TestDecideWiring:
         decide.py`` — it could not have failed if #6671 came back (#6671 review).
         """
         decide = _load_decide_script()
-        crit = sdk.create_point("criterion", f"Enterprise readiness {_mk()}")
-        opt = sdk.create_point("option", f"Option A {_mk()}")
+        crit = sdk._create_point("criterion", f"Enterprise readiness {_mk()}")
+        opt = sdk._create_point("option", f"Option A {_mk()}")
 
         data = {
             "context": f"issue-6671-relevance-{_mk()}",
@@ -241,10 +241,10 @@ class TestDecideWiring:
         the same rule and SAY it declined (#6671 review).
         """
         decide = _load_decide_script()
-        crit = sdk.create_point("criterion", f"Shared criterion {_mk()}")
-        a = sdk.create_point("option", f"Option A {_mk()}")
-        b = sdk.create_point("option", f"Option B {_mk()}")
-        multi = sdk.create_operator("IMPL", crit["id"], [a["id"], b["id"]])
+        crit = sdk._create_point("criterion", f"Shared criterion {_mk()}")
+        a = sdk._create_point("option", f"Option A {_mk()}")
+        b = sdk._create_point("option", f"Option B {_mk()}")
+        multi = sdk._create_operator("IMPL", crit["id"], [a["id"], b["id"]])
 
         data = {
             "context": f"issue-6671-shared-{_mk()}",
@@ -272,18 +272,18 @@ class TestDecideWiring:
     def test_compute_confidence_with_anchors(self, sdk):
         """EP computes confidence for points via anchors-based selection."""
         # Create two options
-        opt_a = sdk.create_point("option", "Option A", status="live")
-        opt_b = sdk.create_point("option", "Option B", status="live")
+        opt_a = sdk._create_point("option", "Option A", status="live")
+        opt_b = sdk._create_point("option", "Option B", status="live")
 
         # Evidence strongly supports A, opposes B
-        ev1 = sdk.create_point("evidence", "A is better", status="live")
-        ev2 = sdk.create_point("evidence", "B has problems", status="live")
+        ev1 = sdk._create_point("evidence", "A is better", status="live")
+        ev2 = sdk._create_point("evidence", "B has problems", status="live")
 
-        sdk.create_operator("IMPL", ev1["id"], [opt_a["id"]])
-        sdk.create_operator("NAND", ev2["id"], [opt_b["id"]])
+        sdk._create_operator("IMPL", ev1["id"], [opt_a["id"]])
+        sdk._create_operator("NAND", ev2["id"], [opt_b["id"]])
 
         # Use anchors-based selection (replaces context scoping)
-        result = sdk.compute_confidence(anchors=[opt_a["id"], opt_b["id"]])
+        result = sdk._compute_confidence(anchors=[opt_a["id"], opt_b["id"]])
         assert "iterations" in result
         assert "converged" in result
         confs = result.get("confidences", {})
@@ -292,44 +292,44 @@ class TestDecideWiring:
     def test_truth_challenge_nands_point(self, sdk):
         """Truth challenge: NAND the target finding POINT directly (it's FALSE)."""
         # Finding that supports option
-        ev_support = sdk.create_point("evidence", "Provider protects privacy")
-        opt = sdk.create_point("option", "Option A")
-        sdk.create_operator("IMPL", ev_support["id"], [opt["id"]])
+        ev_support = sdk._create_point("evidence", "Provider protects privacy")
+        opt = sdk._create_point("option", "Option A")
+        sdk._create_operator("IMPL", ev_support["id"], [opt["id"]])
 
         # Truth challenge: another finding says ev_support is FALSE
-        ev_challenge = sdk.create_point("evidence",
+        ev_challenge = sdk._create_point("evidence",
             "Metadata reveals topics — provider CAN infer content")
-        truth_op = sdk.create_operator("NAND", ev_challenge["id"], [ev_support["id"]])
+        truth_op = sdk._create_operator("NAND", ev_challenge["id"], [ev_support["id"]])
         assert truth_op["id"]
         # The NAND is directly on the finding point — not on the operator
         # This means the finding itself is challenged as FALSE
 
     def test_relevance_challenge_mitigates_operator(self, sdk):
         """Relevance challenge: mitigates the OPERATOR (TRUE but matters LESS)."""
-        opt = sdk.create_point("option", "Option A")
-        ev = sdk.create_point("evidence",
+        opt = sdk._create_point("option", "Option A")
+        ev = sdk._create_point("evidence",
             "Provider cannot read content")
-        impl_op = sdk.create_operator("IMPL", ev["id"], [opt["id"]])
+        impl_op = sdk._create_operator("IMPL", ev["id"], [opt["id"]])
 
         # Relevance challenge: the finding is TRUE but its importance is OVERSTATED
         # → mitigate the OPERATOR, NOT the finding point
-        mitigation = sdk.mitigate_operator(impl_op["id"],
+        mitigation = sdk._mitigate_operator(impl_op["id"],
             "Metadata is lossy — visible but not full content", 0.20)
         assert mitigation.get("id")
         # The finding point is NOT NANDed — it's still true, just weaker
 
     def test_option_point_never_nanded_for_bad_fit(self, sdk):
         """Never NAND an option or criterion point for bad fit — express fit on the operator."""
-        opt = sdk.create_point("option", "Option A")
-        crit = sdk.create_point("criterion", "Enterprise readiness")
+        opt = sdk._create_point("option", "Option A")
+        crit = sdk._create_point("criterion", "Enterprise readiness")
 
         # Bad fit: criterion opposes option — express as NAND on the operator
-        bad_fit_op = sdk.create_operator("NAND", crit["id"], [opt["id"]])
+        bad_fit_op = sdk._create_operator("NAND", crit["id"], [opt["id"]])
         assert bad_fit_op["id"]
 
         # The option point itself is never NANDed — it's still a valid option
         # We verify by checking the option point still exists and isn't outdated
-        retrieved = sdk.get_point(opt["id"])
+        retrieved = sdk._get_point(opt["id"])
         assert retrieved["id"] == opt["id"]
         # Option is not outdated or invalidated (status may be draft until an edge
         # promotes it — what matters is it is NOT 'outdated')
@@ -338,33 +338,33 @@ class TestDecideWiring:
     def test_full_wiring_produces_ranked_output(self, sdk):
         """End-to-end: create options + criteria + findings, wire edges, compute confidence."""
         # Options
-        opt_a = sdk.create_point("option", "Option A", status="live")
-        opt_b = sdk.create_point("option", "Option B", status="live")
+        opt_a = sdk._create_point("option", "Option A", status="live")
+        opt_b = sdk._create_point("option", "Option B", status="live")
 
         # Criteria
-        crit_1 = sdk.create_point("criterion", "Security", status="live")
-        crit_2 = sdk.create_point("criterion", "Adoption", status="live")
+        crit_1 = sdk._create_point("criterion", "Security", status="live")
+        crit_2 = sdk._create_point("criterion", "Adoption", status="live")
 
         # Findings
-        f1 = sdk.create_point("evidence", "A is secure", status="live")
-        f2 = sdk.create_point("evidence", "A has wide adoption", status="live")
-        f3 = sdk.create_point("evidence", "B has security issues", status="live")
+        f1 = sdk._create_point("evidence", "A is secure", status="live")
+        f2 = sdk._create_point("evidence", "A has wide adoption", status="live")
+        f3 = sdk._create_point("evidence", "B has security issues", status="live")
 
         # Wire: criteria → options
-        sdk.create_operator("IMPL", crit_1["id"], [opt_a["id"]])
-        sdk.create_operator("IMPL", crit_2["id"], [opt_a["id"]])
-        sdk.create_operator("IMPL", crit_1["id"], [opt_b["id"]])
-        sdk.create_operator("NAND", crit_2["id"], [opt_b["id"]])
+        sdk._create_operator("IMPL", crit_1["id"], [opt_a["id"]])
+        sdk._create_operator("IMPL", crit_2["id"], [opt_a["id"]])
+        sdk._create_operator("IMPL", crit_1["id"], [opt_b["id"]])
+        sdk._create_operator("NAND", crit_2["id"], [opt_b["id"]])
 
         # Wire: findings → options
-        sdk.create_operator("IMPL", f1["id"], [opt_a["id"]])
-        sdk.create_operator("IMPL", f2["id"], [opt_a["id"]])
-        sdk.create_operator("NAND", f3["id"], [opt_b["id"]])
+        sdk._create_operator("IMPL", f1["id"], [opt_a["id"]])
+        sdk._create_operator("IMPL", f2["id"], [opt_a["id"]])
+        sdk._create_operator("NAND", f3["id"], [opt_b["id"]])
 
         # Compute with anchors
         all_ids = [opt_a["id"], opt_b["id"], crit_1["id"], crit_2["id"],
                      f1["id"], f2["id"], f3["id"]]
-        result = sdk.compute_confidence(anchors=all_ids)
+        result = sdk._compute_confidence(anchors=all_ids)
         assert result["iterations"] >= 0
         confs = result.get("confidences", {})
 
@@ -383,36 +383,36 @@ class TestDecideContextFree:
         """Wire 2 options + findings, run compute_confidence(factors=...),
         and assert a ranked table is produced with numeric confidences."""
         # Options
-        opt_a = sdk.create_point("option", "Option A", status="live")
-        opt_b = sdk.create_point("option", "Option B", status="live")
+        opt_a = sdk._create_point("option", "Option A", status="live")
+        opt_b = sdk._create_point("option", "Option B", status="live")
 
         # Findings
-        f1 = sdk.create_point("evidence", "A is strongly supported", status="live")
-        f2 = sdk.create_point("evidence", "B has major issues", status="live")
+        f1 = sdk._create_point("evidence", "A is strongly supported", status="live")
+        f2 = sdk._create_point("evidence", "B has major issues", status="live")
 
         # Collect operator IDs as the CLI would for --context-free mode
         operator_ids: list[str] = []
 
         # Wire: finding → options (IMPL supports, NAND opposes)
         # A gets 2 IMPL supports, B gets 1 NAND oppose → clear A > B
-        op1 = sdk.create_operator("IMPL", f1["id"], [opt_a["id"]])
+        op1 = sdk._create_operator("IMPL", f1["id"], [opt_a["id"]])
         operator_ids.append(op1["id"])
 
-        op2 = sdk.create_operator("IMPL", f1["id"], [opt_b["id"]])
+        op2 = sdk._create_operator("IMPL", f1["id"], [opt_b["id"]])
         operator_ids.append(op2["id"])
 
-        op3 = sdk.create_operator("NAND", f2["id"], [opt_b["id"]])
+        op3 = sdk._create_operator("NAND", f2["id"], [opt_b["id"]])
         operator_ids.append(op3["id"])
 
         # Extra IMPL for A to create clear separation
-        f3 = sdk.create_point("evidence", "A is also cost-effective", status="live")
-        op4 = sdk.create_operator("IMPL", f3["id"], [opt_a["id"]])
+        f3 = sdk._create_point("evidence", "A is also cost-effective", status="live")
+        op4 = sdk._create_operator("IMPL", f3["id"], [opt_a["id"]])
         operator_ids.append(op4["id"])
 
         assert len(operator_ids) == 4, f"Expected 4 operators, got {len(operator_ids)}"
 
         # Compute confidence via explicit factors (context-free)
-        result = sdk.compute_confidence(factors=operator_ids)
+        result = sdk._compute_confidence(factors=operator_ids)
 
         assert "iterations" in result
         assert result["iterations"] >= 0
@@ -449,24 +449,24 @@ class TestDecideContextFree:
         ranked output within tolerance (not identical — different EP scopes —
         but same relative ordering)."""
         # Options
-        opt_a = sdk.create_point("option", "Option A", status="live")
-        opt_b = sdk.create_point("option", "Option B", status="live")
+        opt_a = sdk._create_point("option", "Option A", status="live")
+        opt_b = sdk._create_point("option", "Option B", status="live")
 
         # Findings
-        f1 = sdk.create_point("evidence", "A is good", status="live")
-        f2 = sdk.create_point("evidence", "B is bad", status="live")
+        f1 = sdk._create_point("evidence", "A is good", status="live")
+        f2 = sdk._create_point("evidence", "B is bad", status="live")
 
         operator_ids: list[str] = []
 
-        op1 = sdk.create_operator("IMPL", f1["id"], [opt_a["id"]])
+        op1 = sdk._create_operator("IMPL", f1["id"], [opt_a["id"]])
         operator_ids.append(op1["id"])
-        op2 = sdk.create_operator("NAND", f2["id"], [opt_b["id"]])
+        op2 = sdk._create_operator("NAND", f2["id"], [opt_b["id"]])
         operator_ids.append(op2["id"])
 
         # Context-free
-        result_cf = sdk.compute_confidence(factors=operator_ids)
+        result_cf = sdk._compute_confidence(factors=operator_ids)
         # Anchors-based
-        result_anchors = sdk.compute_confidence(
+        result_anchors = sdk._compute_confidence(
             anchors=[opt_a["id"], opt_b["id"], f1["id"], f2["id"]],
         )
 
@@ -506,12 +506,12 @@ class TestIssue400EPFixes:
 
     def test_batch_factor_extraction_has_both_inputs(self, sdk):
         """Batch extract_svbp_factors returns operators with all inputs (not N+1 drops)."""
-        opt_a = sdk.create_point("option", "Option A", status="live")
-        opt_b = sdk.create_point("option", "Option B", status="live")
-        ev = sdk.create_point("evidence", "Both good", status="live")
+        opt_a = sdk._create_point("option", "Option A", status="live")
+        opt_b = sdk._create_point("option", "Option B", status="live")
+        ev = sdk._create_point("evidence", "Both good", status="live")
 
         # Create operator with source + 2 targets (3 inputs total)
-        op = sdk.create_operator("IMPL", ev["id"], [opt_a["id"], opt_b["id"]])
+        op = sdk._create_operator("IMPL", ev["id"], [opt_a["id"], opt_b["id"]])
 
         proj = sdk._get_proj()
         factors, _ = proj.extract_svbp_factors()
@@ -536,16 +536,16 @@ class TestIssue400EPFixes:
 
     def test_create_operator_missing_endpoint_raises(self, sdk):
         """create_operator with missing source or target raises ValueError (no silent drop)."""
-        ev = sdk.create_point("evidence", "Real evidence")
+        ev = sdk._create_point("evidence", "Real evidence")
         fake_id = "nonexistent-point-000000"
 
         # Missing target
         with pytest.raises(ValueError, match="do not exist"):
-            sdk.create_operator("IMPL", ev["id"], [fake_id])
+            sdk._create_operator("IMPL", ev["id"], [fake_id])
 
         # Missing source
         with pytest.raises(ValueError, match="do not exist"):
-            sdk.create_operator("IMPL", fake_id, [ev["id"]])
+            sdk._create_operator("IMPL", fake_id, [ev["id"]])
 
     def test_compute_confidence_empty_signals_no_dirty_roots(self, sdk):
         """compute_confidence on empty graph returns diagnostic='no_dirty_roots' (#395).
@@ -554,7 +554,7 @@ class TestIssue400EPFixes:
         found no operators); the new no-arg contract short-circuits on the
         dirty-roots check first — 'no_factors' now means "dirty roots but no
         live closure" (breaking-change record, AC8)."""
-        result = sdk.compute_confidence()
+        result = sdk._compute_confidence()
         assert result["iterations"] == 0
         assert result["converged"] is True
         assert result.get("diagnostic") == "no_dirty_roots", (
@@ -564,11 +564,11 @@ class TestIssue400EPFixes:
 
     def test_nand_operator_gets_weight_3(self, sdk):
         """NAND operators get weight 3.0 in factor extraction (batch query preserves this)."""
-        opt_a = sdk.create_point("option", "Option A", status="live")
-        opt_b = sdk.create_point("option", "Option B", status="live")
-        ev = sdk.create_point("evidence", "A opposes B", status="live")
+        opt_a = sdk._create_point("option", "Option A", status="live")
+        opt_b = sdk._create_point("option", "Option B", status="live")
+        ev = sdk._create_point("evidence", "A opposes B", status="live")
 
-        op = sdk.create_operator("NAND", ev["id"], [opt_a["id"], opt_b["id"]])
+        op = sdk._create_operator("NAND", ev["id"], [opt_a["id"], opt_b["id"]])
 
         proj = sdk._get_proj()
         factors, _ = proj.extract_svbp_factors()
@@ -727,7 +727,7 @@ class TestIssue6671CriterionKindRegistered:
         import logging
 
         with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
-            sdk.create_point("criterion", f"Developer adoption {uuid.uuid4().hex[:6]}")
+            sdk._create_point("criterion", f"Developer adoption {uuid.uuid4().hex[:6]}")
         assert "Unrecognized pointKind" not in caplog.text, caplog.text
 
 
@@ -768,8 +768,8 @@ class TestIssue6671ReviewGaps:
         endpoint anchored as `:Point` in the lookup misses a Subject/Object
         endpoint and duplicates the edge."""
         decide = _load_decide_script()
-        subject = sdk.create_subject(f"Subject {_mk()}")
-        option = sdk.create_point("option", f"Option {_mk()}")
+        subject = sdk._create_subject(f"Subject {_mk()}")
+        option = sdk._create_point("option", f"Option {_mk()}")
 
         data = {
             "context": "issue-6671-gaps",
@@ -794,9 +794,9 @@ class TestIssue6671ReviewGaps:
         two live copies on one bridge (measured), i.e. this issue's defect
         returning permanently."""
         decide = _load_decide_script()
-        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
-        opt = sdk.create_point("option", f"Option {_mk()}")
-        draft = sdk.create_operator("IMPL", crit["id"], [opt["id"]],
+        crit = sdk._create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk._create_point("option", f"Option {_mk()}")
+        draft = sdk._create_operator("IMPL", crit["id"], [opt["id"]],
                                     promote_source=False)
         assert draft.get("status") == "draft"
 
@@ -827,9 +827,9 @@ class TestIssue6671ReviewGaps:
         stored status too (`POINT_STATUS_VALUES`), and calling a retracted claim
         a "draft" would hide that the run re-asserted it at full EP weight."""
         decide = _load_decide_script()
-        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
-        opt = sdk.create_point("option", f"Option {_mk()}")
-        op = sdk.create_operator("IMPL", crit["id"], [opt["id"]])
+        crit = sdk._create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk._create_point("option", f"Option {_mk()}")
+        op = sdk._create_operator("IMPL", crit["id"], [opt["id"]])
         # Neither `retract_point` nor `update_point` moves an OPERATOR through
         # its lifecycle (retraction is for statement points; update_point only
         # promotes draft→live), so the non-live state is written directly — the
@@ -838,7 +838,7 @@ class TestIssue6671ReviewGaps:
         sdk._get_proj().g.query(
             "MATCH (p:Point {id:$i}) SET p.status = 'retracted'",
             params={"i": op["id"]})
-        assert sdk.get_point(op["id"]).get("status") == "retracted"
+        assert sdk._get_point(op["id"]).get("status") == "retracted"
 
         data = {
             "context": "issue-6671-gaps",
@@ -872,11 +872,11 @@ class TestIssue6671ReviewGaps:
         arbitrary. Electing the draft while a live copy exists would make the
         run say — and under --context-free, RANK — the copy EP ignores."""
         decide = _load_decide_script()
-        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
-        opt = sdk.create_point("option", f"Option {_mk()}")
-        draft = sdk.create_operator("IMPL", crit["id"], [opt["id"]],
+        crit = sdk._create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk._create_point("option", f"Option {_mk()}")
+        draft = sdk._create_operator("IMPL", crit["id"], [opt["id"]],
                                     promote_source=False)
-        live = sdk.create_operator("IMPL", crit["id"], [opt["id"]])
+        live = sdk._create_operator("IMPL", crit["id"], [opt["id"]])
 
         data = {
             "context": "issue-6671-gaps",
@@ -896,10 +896,10 @@ class TestIssue6671ReviewGaps:
         leaves the other at full weight — the mitigation split #6671 measured,
         and the reason a polluted graph could still rank by run count."""
         decide = _load_decide_script()
-        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
-        opt = sdk.create_point("option", f"Option {_mk()}")
-        sdk.create_operator("IMPL", crit["id"], [opt["id"]])
-        sdk.create_operator("IMPL", crit["id"], [opt["id"]])   # pre-fix pollution
+        crit = sdk._create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk._create_point("option", f"Option {_mk()}")
+        sdk._create_operator("IMPL", crit["id"], [opt["id"]])
+        sdk._create_operator("IMPL", crit["id"], [opt["id"]])   # pre-fix pollution
         assert _operator_census(sdk).get("IMPL") == 2
 
         data = {
@@ -950,11 +950,11 @@ class TestIssue6671ReviewGaps:
         `supports` must not weaken the `refutes` bridge, and must not mint a
         claim the input never declared."""
         decide = _load_decide_script()
-        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
-        opt = sdk.create_point("option", f"Option {_mk()}")
-        supports = sdk.create_operator("IMPL", crit["id"], [opt["id"]],
+        crit = sdk._create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk._create_point("option", f"Option {_mk()}")
+        supports = sdk._create_operator("IMPL", crit["id"], [opt["id"]],
                                        label="supports")
-        refutes = sdk.create_operator("IMPL", crit["id"], [opt["id"]],
+        refutes = sdk._create_operator("IMPL", crit["id"], [opt["id"]],
                                       label="refutes")
 
         data = {
@@ -982,9 +982,9 @@ class TestIssue6671ReviewGaps:
         at full weight, so a "this surface does not rank it" note would be
         false."""
         decide = _load_decide_script()
-        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
-        opt = sdk.create_point("option", f"Option {_mk()}")
-        op = sdk.create_operator("IMPL", crit["id"], [opt["id"]])
+        crit = sdk._create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk._create_point("option", f"Option {_mk()}")
+        op = sdk._create_operator("IMPL", crit["id"], [opt["id"]])
         sdk._get_proj().g.query(
             "MATCH (p:Point {id:$i}) SET p.status = 'pending'",
             params={"i": op["id"]})
@@ -1008,9 +1008,9 @@ class TestIssue6671ReviewGaps:
         status=live (`tortoise.live.is_terminal_status(status, outdated)`), so
         the run must say so rather than silently electing a dead bridge."""
         decide = _load_decide_script()
-        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
-        opt = sdk.create_point("option", f"Option {_mk()}")
-        op = sdk.create_operator("IMPL", crit["id"], [opt["id"]])
+        crit = sdk._create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk._create_point("option", f"Option {_mk()}")
+        op = sdk._create_operator("IMPL", crit["id"], [opt["id"]])
         sdk._get_proj().g.query(
             "MATCH (p:Point {id:$i}) SET p.outdated = true",
             params={"i": op["id"]})
@@ -1046,9 +1046,9 @@ class TestIssue6671ReviewGaps:
 
         # A foreign writer dirties the graph with claims this decision does not
         # own — the wide pass now has posteriors that are not ours.
-        f1 = sdk.create_point("statement", f"foreign {_mk()}")
-        f2 = sdk.create_point("statement", f"foreign {_mk()}")
-        sdk.create_operator("IMPL", f1["id"], [f2["id"]])
+        f1 = sdk._create_point("statement", f"foreign {_mk()}")
+        f2 = sdk._create_point("statement", f"foreign {_mk()}")
+        sdk._create_operator("IMPL", f1["id"], [f2["id"]])
 
         run2 = decide.file_decision(sdk, data)
         assert run2["confidences"], (
@@ -1062,10 +1062,10 @@ class TestIssue6671ReviewGaps:
         names no label cannot say which one it damps, so it must damp NOTHING
         rather than weaken both (and it never mints a claim to damp)."""
         decide = _load_decide_script()
-        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
-        opt = sdk.create_point("option", f"Option {_mk()}")
-        sdk.create_operator("IMPL", crit["id"], [opt["id"]], label="supports")
-        sdk.create_operator("IMPL", crit["id"], [opt["id"]], label="refutes")
+        crit = sdk._create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk._create_point("option", f"Option {_mk()}")
+        sdk._create_operator("IMPL", crit["id"], [opt["id"]], label="supports")
+        sdk._create_operator("IMPL", crit["id"], [opt["id"]], label="refutes")
 
         data = {
             "context": "issue-6671-ambiguous",
@@ -1090,10 +1090,10 @@ class TestIssue6671ReviewGaps:
         Reusing it would silently widen this decision's claim (and a relevance
         edge would damp those other pairs through it)."""
         decide = _load_decide_script()
-        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
-        a = sdk.create_point("option", f"Option A {_mk()}")
-        b = sdk.create_point("option", f"Option B {_mk()}")
-        multi = sdk.create_operator("IMPL", crit["id"], [a["id"], b["id"]])
+        crit = sdk._create_point("criterion", f"Criterion {_mk()}")
+        a = sdk._create_point("option", f"Option A {_mk()}")
+        b = sdk._create_point("option", f"Option B {_mk()}")
+        multi = sdk._create_operator("IMPL", crit["id"], [a["id"], b["id"]])
 
         data = {
             "context": "issue-6671-multi",
@@ -1116,9 +1116,9 @@ class TestIssue6671ReviewGaps:
         touching its status, and `update_point` refuses to clear it — so the
         promotion remedy would be a dead end. The note must name the marker."""
         decide = _load_decide_script()
-        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
-        opt = sdk.create_point("option", f"Option {_mk()}")
-        op = sdk.create_operator("IMPL", crit["id"], [opt["id"]],
+        crit = sdk._create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk._create_point("option", f"Option {_mk()}")
+        op = sdk._create_operator("IMPL", crit["id"], [opt["id"]],
                                  promote_source=False)
         sdk._get_proj().g.query(
             "MATCH (p:Point {id:$i}) SET p.outdated = true",
@@ -1298,10 +1298,10 @@ class TestIssue9631CliDecideRerunIsIdempotent:
         writer = TortoiseSDK()
         writer._proj = _projection_for(db)
         try:
-            crit = writer.create_point("criterion", crit_text)
-            a = writer.create_point("option", a_text)
-            b = writer.create_point("option", b_text)
-            shared = writer.create_operator("IMPL", crit["id"], [a["id"], b["id"]])
+            crit = writer._create_point("criterion", crit_text)
+            a = writer._create_point("option", a_text)
+            b = writer._create_point("option", b_text)
+            shared = writer._create_operator("IMPL", crit["id"], [a["id"], b["id"]])
         finally:
             writer._proj.close()
 
@@ -1356,9 +1356,9 @@ class TestIssue9631CliDecideRerunIsIdempotent:
         writer = TortoiseSDK()
         writer._proj = _projection_for(db)
         try:
-            crit = writer.create_point("criterion", crit_text)
-            opt = writer.create_point("option", opt_text)
-            op_id = writer.create_operator(
+            crit = writer._create_point("criterion", crit_text)
+            opt = writer._create_point("option", opt_text)
+            op_id = writer._create_operator(
                 "NAND", crit["id"], [opt["id"]])["id"]
             # The pre-#7852 shape: the operator exists, `direction` does not.
             writer._proj.g.query(
@@ -1450,7 +1450,7 @@ class TestIssue9631CliDecideRerunIsIdempotent:
         writer = TortoiseSDK()
         writer._proj = _projection_for(db)
         try:
-            subject = writer.create_subject(f"Subject {_mk()}")
+            subject = writer._create_subject(f"Subject {_mk()}")
         finally:
             writer._proj.close()
 
@@ -1507,10 +1507,10 @@ class TestIssue9631SharedWiringRulesAreStatedOnce:
         (#9631 review, round 5)."""
         from tortoise.decide_wiring import may_mint_damped_bridge, select_damp_targets
 
-        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
-        a = sdk.create_point("option", f"Option A {_mk()}")
-        b = sdk.create_point("option", f"Option B {_mk()}")
-        sdk.create_operator("IMPL", crit["id"], [a["id"], b["id"]])
+        crit = sdk._create_point("criterion", f"Criterion {_mk()}")
+        a = sdk._create_point("option", f"Option A {_mk()}")
+        b = sdk._create_point("option", f"Option B {_mk()}")
+        sdk._create_operator("IMPL", crit["id"], [a["id"], b["id"]])
 
         pick = select_damp_targets(sdk._get_proj(), "IMPL", crit["id"],
                                    a["id"], None)
@@ -1528,12 +1528,12 @@ class TestIssue9631SharedWiringRulesAreStatedOnce:
         so this mixed state slipped through (#9631 review, round 3)."""
         from tortoise.decide_wiring import may_mint_damped_bridge, select_damp_targets
 
-        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
-        a = sdk.create_point("option", f"Option A {_mk()}")
-        b = sdk.create_point("option", f"Option B {_mk()}")
-        shared = sdk.create_operator("IMPL", crit["id"], [a["id"], b["id"]],
+        crit = sdk._create_point("criterion", f"Criterion {_mk()}")
+        a = sdk._create_point("option", f"Option A {_mk()}")
+        b = sdk._create_point("option", f"Option B {_mk()}")
+        shared = sdk._create_operator("IMPL", crit["id"], [a["id"], b["id"]],
                                      label="supports")
-        unlabelled = sdk.create_operator("IMPL", crit["id"], [a["id"]])
+        unlabelled = sdk._create_operator("IMPL", crit["id"], [a["id"]])
 
         pick = select_damp_targets(sdk._get_proj(), "IMPL", crit["id"],
                                    a["id"], "supports")
@@ -1555,10 +1555,10 @@ class TestIssue9631SharedWiringRulesAreStatedOnce:
         third bridge next to it (#9631 review, round 5)."""
         from tortoise.decide_wiring import may_mint_damped_bridge, select_damp_targets
 
-        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
-        a = sdk.create_point("option", f"Option A {_mk()}")
-        b = sdk.create_point("option", f"Option B {_mk()}")
-        foreign = sdk.create_operator("IMPL", crit["id"], [a["id"], b["id"]],
+        crit = sdk._create_point("criterion", f"Criterion {_mk()}")
+        a = sdk._create_point("option", f"Option A {_mk()}")
+        b = sdk._create_point("option", f"Option B {_mk()}")
+        foreign = sdk._create_operator("IMPL", crit["id"], [a["id"], b["id"]],
                                       label="refutes")
 
         pick = select_damp_targets(sdk._get_proj(), "IMPL", crit["id"],
@@ -1577,9 +1577,9 @@ class TestIssue9631SharedWiringRulesAreStatedOnce:
         decision file whose label used to be ignored grows an unreported twin
         (#9631 review: this note was unpinned)."""
         decide = _load_decide_script()
-        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
-        opt = sdk.create_point("option", f"Option {_mk()}")
-        sdk.create_operator("IMPL", crit["id"], [opt["id"]], label="refutes")
+        crit = sdk._create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk._create_point("option", f"Option {_mk()}")
+        sdk._create_operator("IMPL", crit["id"], [opt["id"]], label="refutes")
 
         data = {
             "context": "issue-9631-label-note",
@@ -1608,9 +1608,9 @@ class TestIssue9631SharedWiringRulesAreStatedOnce:
         claimed with a Layer-3 predicate) grew an unreported twin. There is no
         edge-delete API, so the silence is the whole defect."""
         decide = _load_decide_script()
-        crit = sdk.create_point("criterion", f"Criterion {_mk()}")
-        opt = sdk.create_point("option", f"Option {_mk()}")
-        sdk.create_operator("IMPL", crit["id"], [opt["id"]], label="supports")
+        crit = sdk._create_point("criterion", f"Criterion {_mk()}")
+        opt = sdk._create_point("option", f"Option {_mk()}")
+        sdk._create_operator("IMPL", crit["id"], [opt["id"]], label="supports")
 
         data = {
             "context": "issue-9631-unlabelled-note",
