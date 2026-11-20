@@ -3284,7 +3284,13 @@ def _d5_flag_word(text: str) -> tuple[str, str] | None:
     # name is validated here. `_ARG_TAKING_SHORT_FLAGS` IS consulted, for one purpose: whether an
     # ATTACHED value is ADMISSIBLE on a short cluster (`-A2` is read as a flag word, `-c'…'` is
     # not) — the same question the docstring above answers, and the one whose answer is `None`
-    # for `grep -c'…'`. The `--` test mirrors GNU grep's `=`/attached-value reach on the long form.
+    # for `grep -c'…'`. ⛔ BOTH ROWS ARE PINNED, because a sentence about a set that nothing varies
+    # on is the inert-narration defect this file bans: `grep -c'x' '^\+$'` admits the attached
+    # value only while this set is consulted (dropping the set reads the next quoted token as the
+    # count's expression and REDs it), while `grep -c'^\+$'` has no separate token to become one
+    # and is `[]` either way — so the first spelling carries the witness. The long form's attached
+    # suffix is taken WITHOUT consulting a set (`--count'x'` is read, although GNU grep answers
+    # `unrecognized option`), because grep is the judge of the name and not a table of ours.
     if text.startswith("--"):
         match = re.fullmatch(r"(--[A-Za-z0-9][A-Za-z0-9-]*)(.*)", text, re.S)
     elif text.startswith("-"):
@@ -3702,8 +3708,9 @@ def _d5_blank_count_expression() -> str:
         "`^[+\\-]$`, which counts the same class and is graded as this one now — which is a "
         "class-test gap and not a reader gap; or the row prescribes the COMPLEMENT "
         "(`grep -vc '^[+-] …'`) — read, and refused BY DESIGN by `_inverts_the_match_set`; or the "
-        "row asks for a count that PRINTS NOTHING (`-qc`/`-lc`/`-Lc`) — also refused by design, "
-        "by `_requests_a_count`'s `_D5_COUNT_SUPPRESSING_SHORT_FLAGS` scan. Only the first two "
+        "row asks for a count whose output `grep` SUPPRESSES OR REPLACES (`-q` prints nothing, "
+        "`-l`/`-L` print filenames) — also refused by design, by `_requests_a_count`'s "
+        "`_D5_COUNT_SUPPRESSING_SHORT_FLAGS` scan. Only the first two "
         "are gaps; the last two are the arm working. Naming only the reader was a false "
         "attribution, and naming fewer than all four is the same defect one round later "
         "(#13962, #13995 reviews)")
@@ -3900,6 +3907,12 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
     for not_a_prescription in (
         "grep -c'^\\+$'",                # `-c` takes no argument -> invalid option, exit 2
         "grep -c, '^\\+$'",              # …same, the `,` is parsed as another option
+        # ⛔ THE ROW THAT WITNESSES THE ATTACHED-VALUE SET (#13995 review round 9, P2 — MEASURED):
+        # with `_ARG_TAKING_SHORT_FLAGS` dropped from `_d5_flag_word`'s tail this one REDs (the
+        # next quoted token becomes the count's expression) while `grep -c'^\+$'` above stays `[]`
+        # — an attached value with NO separate token never yields a prescription either way.
+        "grep -c'x' '^\\+$'",           # `-c` takes no argument: `x` is not a value, and the
+                                         # operand is not this flag's count expression
         "grep -c -f /tmp/pats '^\\+$'",   # `-f` supplies the PATTERN; the quoted token is a FILE
         "grep -ec '^\\+$'",              # `-e` takes `c` as ITS pattern; this is not a count
         "grep -e'c' '^\\+$'",            # …same, attached
