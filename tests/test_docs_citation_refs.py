@@ -3875,12 +3875,13 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
     of the row's own expression tripped the ZERO assertion, whose message blames the count READER
     for a spelling the CLASS TEST was the one to reject (a false RED with a misattributed cause).
 
-    Accepted here, each measured: `^[+-]$`, `^[-+]$`, `^[+\-]$`, and the alternation form
-    `^(\+|-)$` (a PLAIN group — each counts `2` on the `x`/`+`/`-`/empty probe). ⛔ `^[+\-]$` IS A
-    DECLARED SUPERSET, not an equivalence: with no backslash escapes inside a POSIX bracket it also
-    carries a literal `\` member and counts `3` on a probe that has a `\` line — accepted because
-    it is the spelling a document plausibly writes, and the cost is one impossible diff line, stated
-    rather than implied. Three spellings are NOT among them, all measured: `^[\-+]$` (the
+    Accepted here, each measured — SPELLINGS CHECKED, NOT A GRAMMAR: `^[+-]$`, `^[-+]$`,
+    `^[+\-]$`, and the alternation forms `^(\+|-)$` / `^(-|\+)$` (PLAIN groups, each counting `2`
+    on the `x`/`+`/`-`/empty probe). ⛔ ANY BACKSLASH-BEARING BRACKET IS A DECLARED SUPERSET, not
+    an equivalence (#13995 review round 13, P3, MEASURED): a POSIX bracket has no escapes, so the
+    `\` is a MEMBER, and `^[+\-]$` plus its siblings count `3` on a probe that carries a `\` line
+    (the class counts 2). Accepted because it is a spelling a document plausibly writes, with the
+    cost (one impossible diff line) stated rather than implied. Three spellings are NOT among them, all measured: `^[\-+]$` (the
     DESCENDING range `\`–`+`: `grep: Invalid range end`, rc 2, and this test now refuses it too),
     `^(?:\+|-)$` (POSIX ERE has no non-capturing group: `warning: ? at start of expression`,
     counts `1` under `-E` and `0` under BRE) and `^+$`/`^-$` (one sign, half the class). What it
@@ -3890,9 +3891,11 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
     claim of closure. ⛔ A LONE SIGN IS NOT THIS CLASS, AND IS REJECTED (#13995 review round 10,
     P2 — MEASURED): this test used to accept `^-$` and `^+$` as "one `+` or one `-`", which is
     false in both directions — `^-$` counts ONLY the removed half (measured `0` on a diff whose
-    only blank line is added), and `^+$` matches only `+` lines (`+` is literal at the start of a
-    BRE, and ERE warns `+ at start of expression` and then treats it literally too — measured 1 on
-    `x`/`+`/`-`/empty, where the class counts 2). Accepting them let a row re-spell its way out of
+    only blank line is added), and `^+$` names ONE shape, but WHICH shape depends on the dialect
+    (#13995 review round 13, P3, MEASURED, correcting the sentence round 11 wrote): under `-E`,
+    the dialect this arm grades, it warns `+ at start of expression` and matches the EMPTY line
+    (`grep -nE '^+$'` -> the blank line, count 1); under BRE it matches a lone `+` line instead.
+    Either way one shape, never the class. Accepting them let a row re-spell its way out of
     half the class
     while this arm still called it graded; arm (5) of this cell caught it, which is why this is a
     second guard's weakness rather than an open hole — and why it is closed here rather than left
@@ -3920,10 +3923,20 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
         # A single anchor with no bracket and no two-branch alternation names ONE line shape —
         # `^-$`, `^\+$`, `^(\-)$` — never both halves of this class.
         return False
+    # A BARE `+` IS NOT A BRANCH OF THIS CLASS (#13995 review round 13, P2, MEASURED). The
+    # blanket `alternative.replace("\\", "")` read `^(+|-)$` as the two signs, but under `-E`
+    # (the dialect this arm grades) that expression WARNS `+ at start of expression` and matches
+    # the `-` line AND the EMPTY line: 2 on the probe, never a lone `+`, so it is half the class
+    # plus a shape the class excludes; `^(-|+)$` does not even run (`Unmatched ( or \(`, rc 2).
+    # Accept the escaped forms and a leading bare `-` (grep reads that literally: `^(-|\+)$` -> 2),
+    # refuse everything else.
     signs = set()
     for alternative in alternatives:
-        sign = alternative.replace("\\", "")
-        if sign not in ("+", "-"):
+        if alternative == "\\+":
+            sign = "+"
+        elif alternative in ("-", "\\-"):
+            sign = "-"
+        else:
             return False
         signs.add(sign)
     return signs == {"+", "-"}
@@ -4384,7 +4397,8 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
     # instrument from the one the sentence names. The third row is the alternation spelling of the
     # same half-class (`?` unsupported in ERE → one sign, measured), so the rejection is not a
     # special case for the literal form.
-    for half_class in ("^-$", "^+$", "^(\\-)$", "^(?:\\+|-)$", "^[-]$", "^[\\-+]$"):
+    for half_class in ("^-$", "^+$", "^(\\-)$", "^(?:\\+|-)$", "^[-]$", "^[\\-+]$",
+                       "^(+|-)$", "^(-|+)$"):
         assert not _d5_counts_the_blank_class(half_class), (
             f"{half_class!r} must NOT be graded as the blank class: each names ONE line shape "
             "(`^-$` counts only the removed half, measured 0 on a diff whose only blank line is "
