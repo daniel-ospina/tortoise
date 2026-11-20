@@ -347,8 +347,15 @@ SWEEP_NAMES = 66
 #: (`tests/test_onboarding_seed.py`, `#13971` review round 8): they call
 #: `surface.create_subject(...)` and `surface.create_edge(...)` on the seed surface, which are
 #: ordinary-word receivers on an untyped `surface` — the shape this counter exists to report, not
-#: a typed SDK site. `+1` each (11831 → 11833), counted per row on this tree with `--repin`; the
-#: rows are the two new tests' own calls, so the move is attributable line-for-line.
+#: a typed SDK site. Both calls sit in ONE test
+#: (`test_the_org_seed_surface_delegates_the_seed_doors_to_the_sdk`), and they are the two rows
+#: this branch adds: `surface.create_subject` 6 → 7
+#: and `surface.create_edge` 1 → 2, read from `--report`'s row dump against `SWEEP_BASE` (⛔ NOT
+#: from `--repin`, which prints the tuple and nothing else). The TOTAL is this tree's own
+#: measurement — `--repin` prints `(11833, "c115acaf5bbb4163")` and `--check` exits 0 — and the
+#: per-head totals recorded below are likewise `--repin` readings, not arithmetic on the rows: the
+#: last step's row decomposition is NOT fully attributed, so this block claims the rows it can
+#: name and leaves the remainder to the tool.
 #: ⛔ A FIRST READING OF THIS DELTA attributed the +2 to the `tests/test_github_indexer.py`
 #: citation rows added for the moved `entities.py` addresses, on the theory that a pin row
 #: QUOTES its statement and so re-counts the `.query(` inside the string. That is wrong on this
