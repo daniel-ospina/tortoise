@@ -576,7 +576,8 @@ def test_the_real_docs_tree_is_not_empty():
 #: `_BRACKET` over the SAME alphabet — a strict subset of `_BRACKET`'s interior — so wherever
 #: `_BRACKET` fails, no path through the subset reaches a `]` either and the negative lookahead is
 #: ALWAYS satisfied. MEASURED: replacing it with a bare `[` changed no answer across 69,904 fuzz
-#: cases and HALVED the run (`[` x3200 0.3987 -> 0.2212 s). ⛔ An earlier revision of this
+#: cases and HALVED the run (the ONE copy of that figure lives beside `_OPEN_BRACKET` below;
+#: do not restate it here). ⛔ An earlier revision of this
 #: paragraph said "the lookahead is what keeps each pair disjoint" and named a `_OPEN_TAG`
 #: lookahead that an earlier round DELETED — the tag half of that sentence described code that no
 #: longer existed, one commit after the sentence was written (#13921 review, finding 3).
@@ -827,10 +828,17 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     #    gap units. That is a strict superset of the old candidate set — the old single position
     #    is still one of the boundaries — and it re-grades `=` / `:` / `->` / `→` as the answer
     #    forms the docstring lists.
-    #  * ⛔ A SLICE FULL-MATCH IS NOT ENOUGH TO SAY "UNIT BOUNDARY" (#13921 review, F4): a unit's
-    #    LOOKAHEAD cannot see past the slice it is handed, so `[is]` would let `[` match the
-    #    UNTERMINATED-bracket unit on the prefix `" ["` and grade the `is` INSIDE the bracket (and
-    #    a tag's quoted `title="a: b"` would do the same through its `:`). So the boundaries are
+    #  * ⛔ A SLICE FULL-MATCH IS NOT ENOUGH TO SAY "UNIT BOUNDARY" (#13921 review, F4, MECHANISM
+    #    CORRECTED in the last round, MEASURED): a slice that ENDS INSIDE a unit cannot require
+    #    that unit to match — `_BRACKET` needs its `]`, so on the prefix `" ["` the bare `[` unit
+    #    takes it and a full-match of the slice succeeds while a unit boundary was never reached,
+    #    which would grade the `is` INSIDE the bracket. ⛔ An earlier form of this sentence said
+    #    "a unit's LOOKAHEAD cannot see past the slice" — there is no lookahead in that unit any
+    #    more (`_OPEN_BRACKET` is a bare `[`), and it added a tag example (`title="a: b"` through
+    #    its `:`) that MEASURED does NOT diverge: a slice full-match on that row still yields the
+    #    outer `prints`, because the inner `:` produces an unclassifiable head and the classifier
+    #    skips it, so it was never a witness for this property. The `[is]` row is. So the
+    #    boundaries are
     #    ENUMERATED from the document itself, walking `_GAP_UNIT` with `match`. ⛔ THAT IS THE
     #    **FIRST-MATCH** PARSE, NOT THE CLOSURE'S PARSE, AND THE DIFFERENCE IS DECLARED AND
     #    WITNESSED (#13921 review, final round, finding 2, MEASURED — an earlier form of this
@@ -2017,8 +2025,9 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         assert _seen_inner and _seen_inner[0][0].strip() == "prints TWO paths", (
             f"the arm took a verb INSIDE the unit {_inner}: expected the outer `prints`, got "
             f"{_seen_inner!r} — a separator full-match cannot tell a unit boundary from a "
-            "position inside a unit, because a unit's lookahead cannot see past the slice it is "
-            "given (#13921 review, F4)")
+            "position inside a unit: a slice that ENDS INSIDE a unit cannot require that unit "
+            "to match, so `_BRACKET` fails for want of its `]` and the bare `[` takes the prefix "
+            "(#13921 review, F4)")
     # ⛔ AND THE `break` GETS A WITNESS, BECAUSE DELETING IT REDS NO OTHER ROW (#13921 review,
     # finding 4, MEASURED). That line is load-bearing: it is what restores ONE answer per command
     # occurrence now that the verb scan starts at the command rather than at the end of the
@@ -2085,8 +2094,9 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     # to the end and fails, and a run of `[` is ~n such starts, so the run is ~n^2 (#13921 review,
     # finding 3: this line said LINEAR 1,300 lines from a paragraph that says NOT LINEAR). ⛔ IT IS
     # ONE SCAN PER START, NOT TWO: the second was `_OPEN_BRACKET`'s lookahead and it is gone — an
-    # inert construct, deleted, which nearly HALVED this cost (MEASURED `[` x 3200: lookahead
-    # 0.8179 s, bare `[` 0.4026 s). `7557a52cf5` measured the earlier ambiguous form as
+    # inert construct, deleted, which nearly HALVED this cost — the ONE copy of that figure lives
+    # beside `_OPEN_BRACKET` above; do not restate it here. `7557a52cf5` measured the earlier
+    # ambiguous form as
     # EXPONENTIAL; bounded here so a regression reds instead of hanging, 28 spaces being the size
     # that took 15.8 s there.
     import time as _time
