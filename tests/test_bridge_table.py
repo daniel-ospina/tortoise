@@ -2396,9 +2396,12 @@ def test_approved_row_that_reflows_fails_the_build_instead_of_truncating_its_mem
     `cells` is split out of ONE physical line, so a cell that reflows onto a second line
     leaves its continuation unread while the row still parses. Measured before the fix:
     adding a newline inside row 21's cell still parsed 23 rows with no guard firing,
-    `mitigate_operator` silently left the row, and the regenerated artifact told the owner
-    `annotate_operator` had "*no approved row* … refuted" — a false statement about the
-    owner-approved doc, in the artifact #4513 exists to make trustworthy (#8930 review, P1).
+    `mitigate_operator` silently left the row, and the regenerated artifact reported THAT
+    tool — not `annotate_operator`, which the same truncation KEPT — as "*(no approved row
+    names it)*" / **refuted**, its only approved home being the row the reflow cut. A false
+    statement about the owner-approved doc, in the artifact #4513 exists to make
+    trustworthy (#8930 review, P1; this sentence named `annotate_operator`, corrected in
+    #13970 against a replay of this test's own mutation).
 
     The row is DETECTED, not joined: a widened regex would accept the wrap and keep
     guessing at the continuation.

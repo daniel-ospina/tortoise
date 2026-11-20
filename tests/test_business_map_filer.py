@@ -595,14 +595,20 @@ def test_a_MIXED_run_does_not_call_its_OWN_lines_an_EARLIER_run(
     so the declines are appended BEFORE the first mismatch save — which is what
     makes this deterministic rather than order-dependent.
 
-    Mutant: `carried`'s snapshot and the `reobserved` filter are REDUNDANT —
-    either alone prevents the mislabel — so mutating either ONE stays green
-    (measured both ways at #13950 review round 36, and re-measured at this
-    head after the `Retry-After` row was added: each stays fully green — no
-    row reds). Remove BOTH
-    (compute `carried` from `st["failed"]` AND drop the filter) and the original
-    bug is back: this row reds, together with
-    `test_a_re_observed_failure_is_reported_ONCE_not_under_two_HEADINGS`.
+    Mutant, and the two guards are NOT interchangeable:
+    compute `carried` from `st["failed"]` (drop the `failed_before` snapshot) —
+    NO row reds, because the `reobserved` filter below prevents the same mislabel
+    on its own and THAT row carries the pin. Remove the FILTER alone instead and
+    `test_a_re_observed_failure_is_reported_ONCE_not_under_two_HEADINGS` reds;
+    remove BOTH and the original bug is back, so THIS row reds too.
+    ⛔ So this row pins the PAIR; the individual guard is pinned by the dedupe row.
+    ⛔ STATED AS ROW NAMES, NOT PASS COUNTS, deliberately — a count rots the moment
+    a test is added, which is how an earlier version of this note came to read
+    "133 passed" for a run that had also reported a failure. Two earlier versions
+    also said "either one alone stays green … each stays fully green — no row
+    reds", which was measured FALSE for the filter (#13950 follow-up): the
+    filter is the load-bearing guard, and it is pinned.
+    Measured at `959c0306` on `main`.
     """
     state_path = tmp_path / "state.json"
 
@@ -2849,11 +2855,12 @@ def test_a_ZERO_retry_after_is_the_RAMP_not_a_hammer(monkeypatch):
     ⛔ NOT a mutant: the `time.sleep` line's own condition. After that
     normalisation `wait` is `None` or in `[1.0, 120.0]`, so the sleep line can
     never see a falsy non-`None` and mutating its test reds NOTHING (measured at
-    #13950 review round 35, re-measured round 7 of this lane: the suite stays
-    fully green — no row reds; the green TOTAL it used to quote is not repeated
-    here, because every row added since has falsified it). The load-bearing guard
-    is the normalisation, and an earlier version of this docstring named the
-    inert line.
+    #13950 review round 35, and re-measured twice since — on `main` at
+    `959c0306` (where the finding was first filed) and again at this head: the
+    suite stays fully green, no row reds. The green TOTAL this note used to quote
+    is not repeated, because every row added since has falsified it. The
+    load-bearing guard is the normalisation, and an earlier version of this
+    docstring named the inert line.
     """
     sleeps: list[float] = []
     monkeypatch.setattr(filer.time, "sleep", lambda s: sleeps.append(s))

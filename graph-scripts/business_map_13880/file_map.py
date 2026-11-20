@@ -1090,14 +1090,23 @@ def write_map(doc: dict) -> int:
     # `9 marker(s) from an earlier run are STILL unresolved`). `carried` is a
     # statement about what was on disk BEFORE this run, so it reads that.
     #
-    # ⛔ AND THIS SNAPSHOT IS REDUNDANT WITH THE `reobserved` FILTER BELOW, which
-    # is WHY NEITHER IS INDIVIDUALLY PINNED: either one alone prevents the
-    # mislabel, so mutating this line or that filter SEPARATELY leaves the suite
-    # green (measured both ways at #13950 review round 36 — 133 passed each), and
-    # only removing BOTH reproduces the bug and reds
-    # `test_a_MIXED_run_does_not_call_its_OWN_lines_an_EARLIER_run` plus
-    # `test_a_re_observed_failure_is_reported_ONCE_not_under_two_HEADINGS`. Kept
-    # as a pair deliberately: the snapshot expresses the QUESTION (what was on
+    # ⛔ AND THIS SNAPSHOT IS NOW DEFENCE IN DEPTH, NOT THE LOAD-BEARING GUARD:
+    # the `reobserved` filter below prevents the same mislabel on its own, and it
+    # is the one that is PINNED. Measured at `959c0306` on `main` (#13950
+    # follow-up), in all three directions: remove this snapshot alone → no row
+    # reds; remove the FILTER alone →
+    # `test_a_re_observed_failure_is_reported_ONCE_not_under_two_HEADINGS` reds;
+    # remove BOTH → that row reds plus
+    # `test_a_MIXED_run_does_not_call_its_OWN_lines_an_EARLIER_run`.
+    # ⛔ STATED AS ROW NAMES, NOT PASS COUNTS, deliberately: a count rots the
+    # moment a test is added, which is how an earlier version of this note came to
+    # read "133 passed each" for a run that had also reported a failure.
+    # ⛔ AND TWO EARLIER VERSIONS OF IT SAID "mutating either one alone stays
+    # green" / "each stays fully green — no row reds". That is FALSE for the
+    # filter, and it was asserted without that direction ever being run — the
+    # exact defect this work exists to close, so it is recorded here rather than
+    # quietly edited away.
+    # Kept as a pair deliberately: the snapshot expresses the QUESTION (what was on
     # disk before this run), the filter expresses the PRINT rule (a marker this
     # run re-observed is reported under its own heading), and the two answer
     # different questions that happen to coincide here.
