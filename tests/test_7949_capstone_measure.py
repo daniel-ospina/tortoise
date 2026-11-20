@@ -6609,12 +6609,12 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # hold EXACTLY from that START, which is again how the numbers below were re-derived
         # rather than nudged — a uniform +18, and the offsets re-measured rather than assumed.
         # ⛔ THIS BRANCH REACHED THE SAME PAIR INDEPENDENTLY, by STRUCTURE rather than by an
-        # inferred offset, at `eefad7c242`: each of the four anchors above was found from its
-        # own `grep -n`, in the order the block above states — START, `nodes_used`, `max_nodes`,
-        # END — and each landed exactly where the three offsets predict, the END once more being
-        # the blank line before `return OrgInfoResponse(`. The figures are deliberately NOT
-        # repeated here: what is new is the ATTRIBUTION and the fact that the two sides of this
-        # merge resolved to the SAME pair by structure rather than picking one.
+        # inferred offset, at `32307d0109` — whose PARENT `eefad7c242` still pinned the stale
+        # pair against a tree whose own START was already this one. Each of the four anchors was
+        # found from its own `grep -n`, in the order stated above, and each landed exactly where
+        # the three offsets predict. The figures are deliberately NOT repeated here: what is new
+        # is the ATTRIBUTION, and that the two sides of this merge resolved to the SAME pair by
+        # structure rather than picking one.
         # ⛔ AN EARLIER cut of this comment recorded the forward merge of `origin/main`
         # `0774035055`, where `main`'s `376cbd613d` (`#12943`, the tenant / cache-graph split)
         # inserted 22 lines above `org_info` and the span was `:15262-15339` at THAT head, with
