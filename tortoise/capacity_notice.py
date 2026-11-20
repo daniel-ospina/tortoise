@@ -561,6 +561,36 @@ _ACCOUNT_SELECT = ("id", "name", "email", "storage_notice_pct", "deleted_at",
 #: `read_account` retries without these and re-raises when the retry also fails.
 _ACCOUNT_DRIFT_SOFT = ("suspended_at",)
 
+#: What a REJECTED PROJECTION looks like from this seam (#14038 review, P1).
+#:
+#: The rejection is what licenses the degrade in `read_account`, so it must be
+#: told apart from a TRANSIENT read failure — retrying without `suspended_at`
+#: after a timeout or a 5xx would read a suspended org as un-suspended, mail it
+#: and burn its once-ever stamp (the stamp is not retryable).
+#:
+#: PostgREST answers an unknown column in `select` with **HTTP 400**: Postgres'
+#: `42703` (`column organizations.suspended_at does not exist`) when the column
+#: reaches SQL, or `PGRST204` when it came through a `columns=` parameter
+#: (Supabase's PostgREST error-code reference). `SupabaseControlPlane.query`
+#: renders only the STATUS and discards the body, so a bare `HTTP 400` from this
+#: one-row, `id`-filtered GET is the drift shape — a PATCH/POST body rejection or
+#: a bad filter cannot produce one here, and if a 400 has any other cause the
+#: retry 400s too and the ORIGINAL error is re-raised. A transport failure or a
+#: 5xx states a different text and is NOT drift: it propagates at once.
+_SCHEMA_REJECTION_MARKERS = ("pgrst204", "42703", "does not exist",
+                             "undefined column", "http 400")
+
+
+def _rejected_the_projection(err: BaseException) -> bool:
+    """True only for a read whose error STATES a rejected column.
+
+    Fails CLOSED on anything it does not recognise: an unknown error is treated
+    as transient, so the account reports `notice-mark-unavailable` and is retried
+    on the next pass instead of being mailed as if it were un-suspended.
+    """
+    text = str(err).lower()
+    return any(marker in text for marker in _SCHEMA_REJECTION_MARKERS)
+
 
 @dataclass(frozen=True)
 class Account:
@@ -583,14 +613,24 @@ def read_account(cp, org_id: str) -> Account | None:
     degrade to "not suspended" and keep the pass alive, while a schema missing
     `storage_notice_pct` (the ledger) or `deleted_at` (base, fail-closed) must
     stop this account's send. A single 400 does not say which, so the retry
-    without the drift-soft columns is what separates the two: it succeeds only
-    when the drift is theirs, and its failure re-raises the original error into
-    `notify_account`'s ``notice-mark-unavailable`` path.
+    without the drift-soft columns separates the two — and its failure re-raises
+    the original error into `notify_account`'s ``notice-mark-unavailable`` path.
+
+    ⛔ BUT THE RETRY IS LICENSED ONLY BY A REJECTION (#14038 review, P1). The
+    first read may also fail for a reason that has nothing to do with the schema
+    — a connection reset, a 5xx, a timeout — and retrying THAT without
+    `suspended_at` succeeds, so a suspended org reads as un-suspended, is mailed
+    (the copy offers a capacity purchase to an account that cannot use it) and
+    has its once-ever stamp burnt. So the degrade happens only when the first
+    error states a rejected column (`_rejected_the_projection`); anything else
+    propagates to `notice-mark-unavailable` and is retried next pass.
     """
     try:
         rows = cp.query("organizations", select=list(_ACCOUNT_SELECT),
                         filters=[("id", "eq", org_id)])
     except Exception as first:
+        if not _rejected_the_projection(first):
+            raise
         soft_select = [c for c in _ACCOUNT_SELECT if c not in _ACCOUNT_DRIFT_SOFT]
         try:
             rows = cp.query("organizations", select=soft_select,
@@ -666,9 +706,11 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
                 "capacity notice: the account row for team %s is unreadable "
                 "(%s) — nothing is sent for this account. `suspended_at` already "
                 "degrades on its own (0015, additive — read_account retries "
-                "without it), so what is left is a FAIL-CLOSED column: the "
-                "ledger storage_notice_pct (20261120000001) or the base "
-                "deleted_at.",
+                "without it), so what reaches here is either a FAIL-CLOSED "
+                "column (the ledger storage_notice_pct / 20261120000001, or the "
+                "base deleted_at) or a TRANSIENT read failure, which "
+                "`read_account` refuses to read as schema drift (#14038 review, "
+                "P1). Both are retried on the next pass; neither sends.",
                 org_id, type(e).__name__)
             return {"status": "notice-mark-unavailable", "org_id": org_id}
     if account is None:
