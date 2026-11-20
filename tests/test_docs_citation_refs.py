@@ -3280,9 +3280,11 @@ def _d5_flag_word(text: str) -> tuple[str, str] | None:
     """
     if text in ("-", "--"):
         return text, ""
-    # grep is the judge of the NAME (`-mc`, `-Dc`, `-Ac` are all rejected by it, measured), so the
-    # option's argument-taking-ness is never decided here — only `option.startswith("--")` below is
-    # asked, and only to mirror GNU grep's `=`/space-free value rules.
+    # grep is the judge of the NAME (`-mc`, `-Dc`, `-Ac` are all rejected by it, measured), so no
+    # name is validated here. `_ARG_TAKING_SHORT_FLAGS` IS consulted, for one purpose: whether an
+    # ATTACHED value is ADMISSIBLE on a short cluster (`-A2` is read as a flag word, `-c'…'` is
+    # not) — the same question the docstring above answers, and the one whose answer is `None`
+    # for `grep -c'…'`. The `--` test mirrors GNU grep's `=`/attached-value reach on the long form.
     if text.startswith("--"):
         match = re.fullmatch(r"(--[A-Za-z0-9][A-Za-z0-9-]*)(.*)", text, re.S)
     elif text.startswith("-"):
@@ -3692,16 +3694,18 @@ def _d5_blank_count_expression() -> str:
     # reading it is told to look for a second command that does not exist.
     assert blank_prescriptions, (
         "this arm SEES no BLANK-line count command at this head "
-        f"(count commands read: {prescriptions!r}), so it executes nothing — and THREE different "
-        "stages can be the reason, so check all three before editing anything: the `05-verify.md` "
+        f"(count commands read: {prescriptions!r}), so it executes nothing — and FOUR different "
+        "stages can be the reason, so check all four before editing anything: the `05-verify.md` "
         "row may still PRESCRIBE one in a spelling the count reader cannot see (an unquoted "
         "expression; a pattern supplied on `-e`/`-f`); or the reader DID read it and "
         "`_d5_counts_the_blank_class` rejected the spelling — measured on a row spelled "
         "`^[+\\-]$`, which counts the same class and is graded as this one now — which is a "
         "class-test gap and not a reader gap; or the row prescribes the COMPLEMENT "
-        "(`grep -vc '^[+-] […]'` — read, and refused BY DESIGN by `_inverts_the_match_set`, never "
-        "a gap in either of the other two). Naming only the reader was a false attribution, and "
-        "naming only two of the three is the same defect one round later "
+        "(`grep -vc '^[+-] …'`) — read, and refused BY DESIGN by `_inverts_the_match_set`; or the "
+        "row asks for a count that PRINTS NOTHING (`-qc`/`-lc`/`-Lc`) — also refused by design, "
+        "by `_requests_a_count`'s `_D5_COUNT_SUPPRESSING_SHORT_FLAGS` scan. Only the first two "
+        "are gaps; the last two are the arm working. Naming only the reader was a false "
+        "attribution, and naming fewer than all four is the same defect one round later "
         "(#13962, #13995 reviews)")
     assert len(blank_prescriptions) == 1, (
         f"05-verify.md prescribes {len(blank_prescriptions)} BLANK-line count commands "
@@ -3806,6 +3810,15 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
     # `-C3` is CONTEXT, not count — a short flag containing no `c` — and it must not be read as
     # a prescription at all (#13995 review measured it too, on the pre-widening regex).
     assert _d5_count_prescriptions("`grep -C3 '^\\+$'`") == []
+    # ⛔ …AND A COUNT WHOSE OUTPUT IS SUPPRESSED IS NOT A COUNT REQUEST EITHER (#13995 review
+    # round 8, P3 — MEASURED at this head). `-q` prints nothing, `-l`/`-L` print filenames, so
+    # `_requests_a_count` declines the whole word BY DESIGN — which makes this the FOURTH cause a
+    # ZERO-graded class can have, and the one the ZERO message must name so a fixer does not go
+    # widening the reader for a spelling that is correctly refused.
+    for suppressing in ("grep -qc '^\\+$'", "grep -lc '^\\+$'", "grep -Lc '^\\+$'"):
+        assert _d5_count_prescriptions(f"`{suppressing}`") == [], (
+            f"{suppressing!r} asks for a count whose output `grep` suppresses or replaces, so "
+            f"it must NOT be read as a count request (by design — the ZERO message names it)")
     # …and the residual is pinned as a residual, so the comment's "does not read" list cannot
     # silently become false in the other direction: an expression in a shell variable IS read
     # (the command is seen) and is NOT classifiable, which is the sentence the comment now
