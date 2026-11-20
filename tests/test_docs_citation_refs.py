@@ -2880,13 +2880,22 @@ def _norm_for_ban(text: str) -> str:
       artifact — at `84b94ad74f`, the head the D5 cell grades, the document itself wraps a
       sentence mid-clause: `git show 84b94ad74f:docs/epics/…/05-verify.md | sed -n '131,132p'`.
 
+    ⛔ SO THE FOLD IS TOTAL, NOT ENUMERATED: everything that is not a letter or a digit is
+    collapsed to one space on BOTH sides. Case, line breaks, commas and every other mark are
+    the SAME axis — the layout of an unchanged sentence — and closing them one mark per review
+    round is how this cell spent rounds 26-28. MEASURED: the strict fold still reports `[]` for
+    every row against the real `05-verify.md` (no false red), and each mutant of it REDS the
+    cells that carry its controls.
+
     ⛔ WHAT IS STILL NOT CAUGHT, DECLARED rather than chased: a SEMANTIC escape — re-wording the
-    noun, the copula or the verb — is outside what any normalisation can close, and it is the
-    residual each detector's own docstring already names. This arm grades the document's TEXT; it
-    is a tripwire for the retired spellings and their mechanical variations, never a proof that a
-    claim is absent. Widening it into a parser was rejected: the claim is prose.
+    noun, the copula or the verb, or reordering the clause — is outside what any normalisation
+    can close, and it is the residual each detector's own docstring already names. This arm
+    grades the document's TEXT; it is a tripwire for the retired spellings and their mechanical
+    variations, never a proof that a claim is absent. Widening it into a parser was rejected: the
+    claim is prose. If a future round finds another MECHANICAL escape it is a bug in this fold;
+    a re-worded claim is the declared residual and belongs to the human-read arm.
     """
-    return re.sub(r"[,\s]+", " ", text).lower()
+    return re.sub(r"[^0-9a-z]+", " ", text.lower())
 
 
 def _false_filter_descriptions(doc: str) -> list[str]:
@@ -3096,6 +3105,12 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
             assert _false_filter_descriptions(comma) == [spelling], (
                 f"the ledger ban misses its own row with one inserted comma ({comma!r}) "
                 "(#13948 review round 28)")
+        # ⛔ AND A MARK THAT IS NEITHER WHITESPACE NOR A COMMA (#13948 review round 29): the
+        # fold is total on purpose, so a fold narrowed back to `[,\s]+` must RED here. Without
+        # this probe that regression left both cells GREEN (MEASURED: `2 passed`).
+        assert _false_filter_descriptions(spelling.replace(" is ", " — is ", 1)) == [spelling], (
+            "the ledger ban misses its own row with an em dash inserted — the fold must be total "
+            "over punctuation, not comma-only (#13948 review round 29)")
 
     # (4) MECHANISM: the premise of (1), executed rather than reasoned about — and executed
     # with the patterns the DOCUMENT states, so a document that states a different filter is
@@ -3260,6 +3275,13 @@ def test_the_D5_row_types_no_verdict_about_the_head_being_merged():
         assert _d5_head_bound_verdicts(comma), (
             f"the per-head-verdict ban misses {comma!r} with one inserted comma "
             "(#13948 review round 28)")
+    # ⛔ Non-comma, non-whitespace marks too — the fold is total, and a comma-only regression
+    # must RED (#13948 review round 29).
+    for marked in ("at this head — the FIRST of them prints a path",
+                   "and the claim does not; hold for this head"):
+        assert _d5_head_bound_verdicts(marked), (
+            f"the per-head-verdict ban misses {marked!r} with a mark inserted — the fold must be "
+            "total over punctuation, not comma-only (#13948 review round 29)")
 
 
 def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
