@@ -16723,8 +16723,10 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #: that clause ever had a reader. What IS new coverage here: the `dedup_reviewed IS NULL`
 #: clause below, the `_D5_TRIPLE_RE` three-anchor sentence (a number swapped onto ANOTHER
 #: anchor's slot, which no per-line row can see), the #13845 quota guard (a number ON D5's
-#: line belonging to a clause about another file), the I7 `nodes_used`/`max_nodes` pair
-#: (#13879) and the `sdk.py` import's other hit (#13879). Provenance is attached to each
+#: line belonging to a clause about another file) and the `sdk.py` import's other hit
+#: (#13879) — and NOT the I7 `nodes_used`/`max_nodes` pair, which this tuple does not carry: those
+#: two rows are DELETED (see the note at their old site below), because the `_i7` arms bind
+#: `04-plan.md`'s range endpoints, not this row's pair of anchors. Provenance is attached to each
 #: item rather than to a POSITION — "the last two" would silently re-attribute the next
 #: entry appended here. No count is stated either: this list grows, and a count in a
 #: comment is the head-bound figure the rows below forbid.
@@ -16765,9 +16767,10 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     # say.
     # ⛔ AND THE LABELLED PAIR IS **UNGUARDED**, stated here because an earlier cut of this
     # comment claimed the opposite (fresh review at `1021ff6ed7`, P2, MEASURED):
-    # `test_the_merge_head_honours_line_is_what_that_head_carries` hard-codes
-    # `2584a86ec1` (`_honours`) and the quartet head (`bd020ff45b`), both read out of
-    # `tortoise/sdk.py`; NO arm in `tests/` or `tools/` reads
+    # `test_the_merge_head_honours_line_is_what_that_head_carries` hard-codes `2584a86ec1`
+    # (`_honours`) and reads the quartet's head OUT OF THE DOCUMENT (`_quartet.group("head")`
+    # -> `bd020ff45b` at this head), then compares each against `git show <sha>:tortoise/sdk.py`;
+    # NO arm in `tests/` or `tools/` reads
     # `09f5c99afd:tortoise/hosted_api.py`, so `:15328`/`:15405`/`:15357`/`:15367` are
     # read by nothing. Guarding them is a follow-up, not a claim this file can make.
     # ⛔ THE `sdk.py` IMPORT'S *OTHER* HIT, bound to the sentence that states it (#13879
