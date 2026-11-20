@@ -250,14 +250,30 @@ family_rank:
 # absorbed into a new sibling) per the owner's #9660 ruling, and `TortoiseSDK.delete`
 # dispatches by label, so the capability is unchanged. No container row arrives, so no other
 # keyword can move. The nine unmoved rows are the check's own output.
+# #11609 LANE P7 (the last mile): 40 -> 39, and this time FOUR counts move because this
+# wave both REGISTERS rows and RETIRES rows, which no earlier wave did:
+#   · `fetch` 9 -> 10  — `tortoise_get_historical_knowledge` ARRIVES (row 5).
+#   · `link` 2 -> 3    — `tortoise_link_entities` ARRIVES (row 19), while the two doors it
+#                        absorbs (`create_edge`, `create_operator`) also derived `link`, so
+#                        link 2 + 1 - 2 + 2 = 3: the container row plus the two doors whose
+#                        keyword it now carries.
+#   · `list` 4 -> 3    — `tortoise_list_graphs` retires into `graph_overview(section="graphs")`.
+#   · `create` 8 -> 6  — a net effect of the same P7 batch: the two `create_*` doors leave
+#                        (their `create` keywords leave with them) and neither replacement
+#                        row derives `create` (`link_entities` derives `link`).
+# `check`, `operate`, `update`, `find`, `delete` and `trace` are unmoved — `poll_events`
+# (`fetch`) replaces `events_poll` (`fetch`) one-for-one, and `delete_knowledge` replaces
+# the kept `delete` row one-for-one. Measured, not asserted: this is the check's own output
+# against the P7 registry (`fetch: 10, create: 6, update: 5, delete: 2, list: 3, find: 2,
+# trace: 1, check: 5, link: 3, operate: 2`).
 baseline_counts:
-  fetch: 9
-  create: 8
-  list: 4
+  fetch: 10
+  create: 6
+  list: 3
   check: 5
   operate: 2
   update: 5
   find: 2
   delete: 2
-  link: 2
+  link: 3
   trace: 1
