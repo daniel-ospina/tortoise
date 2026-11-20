@@ -479,9 +479,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "128 of this document's 223",
-        "dedupes the **328** as-written spellings to 223 — **105**",
-        "328 written spellings → 223 pairs → 105 collisions → 128 drifters of the 223",
+        "127 of this document's 222",
+        "dedupes the **328** as-written spellings to 222 — **106**",
+        "328 written spellings → 222 pairs → 106 collisions → 127 drifters of the 222",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -525,7 +525,7 @@ _SPELLING = re.compile(r"([A-Za-z0-9_][A-Za-z0-9_./-]*\.py):(\d+)")
 #: `:NNNN` is not adjacent to the `.py` — so the one-token basis RESOLVES but does not COUNT these, which is
 #: exactly what the header's alternative-basis sentence discloses. Counting them here, from the document,
 #: is what makes that disclosure a measurement: it shipped as the asserted constant "one pair" while the
-#: document wrote FOUR, so the comparator enforced a figure the tree contradicts (`#13854` review).
+#: document wrote MORE THAN ONE, so the comparator enforced a figure the tree contradicts (`#13854`).
 _TWO_SPAN = re.compile(r"`([A-Za-z0-9_][A-Za-z0-9_./-]*\.py)`\s*`(?::(\d+))")
 #: ⛔ The figures are matched with the header's EMPHASIS STRIPPED, never against one rendering of them.
 #: `main` bolds the spelling and collision counts (`dedupes the **327** … — **113**`) and not the ratio's
