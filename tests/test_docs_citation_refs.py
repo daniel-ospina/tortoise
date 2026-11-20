@@ -3845,7 +3845,11 @@ def _inverts_the_match_set(flags: str) -> bool:
 #: spelling would red the arm — and it is bounded: the executed row is still `_D5_BLANK_COUNT_RE`,
 #: so nothing here can make a wrong count look right. Closing it means validating `m`/`A`/`B`/`C`
 #: as numeric and `d`/`D` against their allowed sets; until then the classification above matches
-#: the code. It was already true on `origin/main` at `af3e8b0ffa`.
+#: the code. It was already true on `origin/main` at `d4a8dddc4e` — ⛔ the earlier cut of this
+#: sentence cited `af3e8b0ffa`, which is THIS branch's first commit and therefore carries the
+#: reader under test; it cannot witness what `origin/main` does (#14027 round 9, P3 — MEASURED:
+#: `git merge-base --is-ancestor af3e8b0ffa origin/main` is rc 1, `d4a8dddc4e` is rc 0, and
+#: `origin/main`'s own `_d5_count_prescriptions` answers `['^[+-]$']` for all three spellings).
 _D5_RETARGETING_SHORT_FLAGS = frozenset("Fz")
 _D5_RETARGETING_LONG_FLAGS = frozenset({"--fixed-strings", "--null-data"})
 _D5_RETARGETING_LONG_RIVALS = ("--null",)
