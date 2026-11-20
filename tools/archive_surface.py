@@ -629,7 +629,8 @@ def surface_violations(entries: list[dict], surface: dict) -> list[str]:
     the detector FIRES. A gate nobody has seen fire is indistinguishable from one that
     cannot.
     """
-    tools = surface["tools"]
+    # `tools`/`methods`/`modules` are read through `live_return` below — ONE definition of
+    # "came back" for both directions, so the two arms cannot disagree about the same tree.
     forward = surface["forward"]
     sdk_retired = surface["sdk_retired"]
     out: list[str] = []

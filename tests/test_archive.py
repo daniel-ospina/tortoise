@@ -1585,7 +1585,7 @@ def test_the_shrink_arm_is_OFF_unless_a_base_ref_is_given(
 
 def test_an_unreadable_base_ref_is_a_refusal_not_a_pass(tree: Path) -> None:
     """A gate that cannot answer must not answer 'nothing was removed'."""
-    with pytest.raises(arch.ArchiveRefused, match="merge base|base ref"):
+    with pytest.raises(arch.ArchiveRefused, match=r"merge base|base ref"):
         arch.shrink_violations(tree, base_ref="no-such-ref")
 
 
