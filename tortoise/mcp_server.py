@@ -4360,7 +4360,8 @@ def tortoise_create_point(kind: str, content: str,
     # derived cache's cap (`graph_storage`) must not refuse the RECORD's write;
     # it moves to the cache FOLD instead. That is only sound here because BOTH
     # halves hold, measured in this tree:
-    #   1. TRUTH FIRST — `TortoiseSDK.create_point` calls `_emit_event`
+    #   1. TRUTH FIRST — `TortoiseSDK._create_point` (the method this branch
+    #      privatised; `create_point` before #13899) calls `_emit_event`
     #      (`journal append + record projection`) BEFORE its `CREATE (:Point)`
     #      block, so the record holds the write before the cache is touched, and
     #      `PointAdded` is one of the 11 journal-carried types `rebuild_all`
