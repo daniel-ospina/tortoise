@@ -16855,33 +16855,50 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
             "the document and the pin disagree about which pair is current. Re-derive "
             "both ends rather than moving the label (#13750 review, cycle 3)")
 
-    # ⛔ AND THE TENSE (#13879 review, finding 1 — MEASURED survivor). The facts above were
-    # green while a mutant that restated the HISTORY pair as current ALSO stayed green:
-    # rewriting D5's "are the pairs this branch carried at the head it carried them" to
-    # "are the pairs `04-plan.md` carries at THIS head" passed, because the loop grades that
-    # the pair is NAMED and never how it is DESIGNATED — which is the pre-`#13841` numbering
-    # read as present tense, this PR's own defect one direction over.
+    # ⛔ AND THE TENSE (#13879 review — TWO measured survivors in an earlier cut of this
+    # block). The facts above were green while a mutant that restated the HISTORY pair as
+    # current ALSO stayed green: rewriting D5's "are the pairs this branch carried at the
+    # head it carried them" to "are the pairs `04-plan.md` carries at THIS head" passed,
+    # because the loop grades that the pair is NAMED and never how it is DESIGNATED — which
+    # is the pre-`#13841` numbering read as present tense, this PR's own defect one
+    # direction over. The first repair anchored at ONE occurrence and matched the literal
+    # `at THIS head`, and two further mutants survived it (both measured): a restatement
+    # appended 151 chars past the anchor, and the LOWERCASE designation the row normally
+    # writes (`at this head` occurs 54x in this row, `at THIS head` 11x).
     #
-    # BOUNDED windows, never an unbounded regex: D5 is a single ~50k-char line, so a `.*`
-    # would match almost anywhere in the row and prove nothing.
-    _hist_at = text.find(":15262-15339` → `:15328-15405`")
-    assert _hist_at != -1, "D5 no longer names the retired pair at all"
-    _hist_window = text[_hist_at:_hist_at + 120]
-    assert "at THIS head" not in _hist_window, (
-        "D5 designates the pre-`#13841` pair `:15262-15339` -> `:15328-15405` as CURRENT "
-        "('at THIS head'), but `04-plan.md` carries `:15346-15423` and carries NEITHER "
-        "history endpoint — that is the pre-`#13841` numbering read as present tense, "
-        "which is the exact rot this row exists to stop")
-    assert "carried at the head" in _hist_window, (
+    # So: scan EVERY occurrence of both retired endpoints and grade the DESIGNATION PHRASE,
+    # case-insensitively. Two deliberate choices, both measured:
+    #   * not a bare `at this head` token — occurrence #1 of the retired range sits in a
+    #     list of pairs whose +200 window legitimately reads "…carried by neither side at
+    #     this head", which a token test would false-red;
+    #   * bounded to 200 chars and never `.*` — D5 is a single ~53k-char line, so an
+    #     unbounded regex could match anywhere in the row and prove nothing.
+    _CURRENT = re.compile(
+        r"(?:carries?|carried)\s+at\s+this\s+head|at\s+this\s+head\s+the\s+range",
+        re.I)
+    _retired_offsets = [
+        _m.start()
+        for _p in ("15262-15339", "15328-15405")
+        for _m in re.finditer(re.escape(_p), text)
+    ]
+    assert _retired_offsets, "D5 no longer names the retired pair at all"
+    for _off in _retired_offsets:
+        _window = text[_off:_off + 200]
+        assert not _CURRENT.search(_window), (
+            "D5 designates the retired pre-`#13841` pair as CURRENT — "
+            f"{_window[:110]!r} — but `04-plan.md` carries `:15346-15423` and carries "
+            "NEITHER retired endpoint. That is the pre-`#13841` numbering read as "
+            "present tense, the exact rot this row exists to stop")
+    assert "carried at the head" in text, (
         "D5 no longer marks the retired pair as HISTORY ('carried at the head'): the "
         "row keeps it as a record of the head that produced it, so it must not lose "
         "that designation (#13750 review, cycle 3)")
     _cur_at = text.find("`:15346-15423`")
     assert _cur_at != -1, "D5 no longer names the current I7 span"
-    assert "at THIS head" in text[max(0, _cur_at - 120):_cur_at], (
-        "D5 states `:15346-15423` without designating it as the CURRENT span ('at THIS "
-        "head'). A reader cannot tell a current address from a superseded one, and "
-        "`04-plan.md` carries exactly this range")
+    assert _CURRENT.search(text[max(0, _cur_at - 200):_cur_at]), (
+        "D5 states `:15346-15423` without designating it as the CURRENT span. A reader "
+        "cannot tell a current address from a superseded one, and `04-plan.md` carries "
+        "exactly this range")
     assert "sdk.py:28718" in text, (
         "D5 no longer names `sdk.py:28718`, the value `04-plan.md`'s own row carries at "
         "this head (`grep -n 'declared_relation_predicates()' "
