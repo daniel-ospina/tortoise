@@ -3004,10 +3004,17 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # have; the file's own rule is that such a class is DECLARED rather than claimed away, so it
     # is declared here with its examples. Corpus cost, measured over all 855 `docs/**/*.md`:
     # 6 refusals before, 6 after, set difference 0 — no live victim, which is why this is a
-    # documented residual and not a blocker. ⛔ TIGHTENING IT IS A REAL FOLLOW-UP (requiring a
-    # verb, not a bare anchor noun, after the `tortoise/` reference in this alternative): it is
-    # NOT done here because it changes a sentence shape this commit only just widened, and a
-    # half-tightened tail would be worse than a declared one.
+    # documented residual and not a blocker. ⛔ TIGHTENING IT WAS MEASURED AND REFUTED, NOT LEFT
+    # OPEN (#13802 review, round 27, P2): "require a verb, not a bare anchor noun, after the
+    # `tortoise/` reference" was implemented and measured at `c42c6cb4`. It closes four of the five
+    # sentences above, still refuses the fifth (`… set are read by the resolver`, because `reads?`
+    # is in the verb list), and OPENS a false PASS — `<N> <noun> in the `tortoise/` set at this
+    # head.` has no verb after the reference, so the SIZE of the diff's `tortoise/` set at this head
+    # walks green. That is the direction this file says costs more than an over-block (D5), so the
+    # over-block above is the cheaper side of the trade and the residual STAYS. Separating the two
+    # shapes needs a predicate-vs-locative model, not a one-line tail edit; the four spellings the
+    # tightening would green are therefore still refused, and the five membership claims it would
+    # allow are pinned MUST-RED in the witness test so the same edit cannot be landed silently.
     # (Pre-existing and not this widening's doing: `Every file in the `tortoise/` set has a module
     # docstring.` is refused at BOTH `180b95d07d` and this head — the shared tail, not this class.)
     r"|(?:(?:the|a|an|its|this|that|those|these|just|only|still|now|actually|also"
@@ -3576,6 +3583,27 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         # reds this line and forces the declaration at the widening to be rewritten, instead of the
         # behaviour changing silently while the suite stays green (which is how this finding arose).
         "All six paths in the `tortoise/` set are covered by tests.",
+        # ⛔ AND THE CELL THE RECORDED FOLLOW-UP MEASURABLY OPENS, WHICH IS WHY IT WAS NOT APPLIED
+        # (#13802 review, round 27, P2 — MEASURED, both directions, at `c42c6cb4`). The round-26
+        # lane recorded the tightening as "requiring a verb, not a bare anchor noun, after the
+        # `tortoise/` reference", and that was implemented here and MEASURED before it was
+        # rejected: it does close four of the five over-block sentences above (`… set are
+        # covered by tests`, `… set are the resolver`, `… set were added`, plus the `tree`
+        # spelling), leaves the fifth REFUSED (`… set are read by the resolver` — `reads?` is in
+        # the verb list), and turns the five MEMBERSHIP CLAIMS below GREEN, because a bare
+        # `<N> <noun> in the `tortoise/` set at this head` has no verb after the reference to
+        # reach. Those claims state the SIZE of the diff's `tortoise/` set at this head — the
+        # direction this file says costs more than an over-block (D5) — so the tightening is a
+        # REFUTED prescription, not an unfinished one: the over-block and that false PASS share
+        # one substring shape, and separating them needs a predicate-vs-locative model this ban
+        # does not have. Their polarity at `c42c6cb4` is RED and it must stay RED; each is pinned
+        # here so the next lane that tries the same one-line tightening reds the suite instead of
+        # landing it. Measured at the same head, the same five are GREEN under that tightening.
+        "Six paths in the `tortoise/` set at this head.",
+        "All six paths in the `tortoise/` set at this head.",
+        "Six entries in the `tortoise/` set at this head.",
+        "Two files in the `tortoise/` set, at this head.",
+        "Those two files in the `tortoise/` set at this head.",
     ):
         assert _TORTOISE_SET_DIRECTION_CLAIM.search(_claimed), (
             f"the direction detector does not see {_claimed!r}, so that spelling of a "
