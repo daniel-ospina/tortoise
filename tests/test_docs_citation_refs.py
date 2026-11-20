@@ -3542,15 +3542,20 @@ def _d5_flag_word(text: str) -> tuple[str, str] | None:
             # never declined — the prose claimed a check the code did not run.
             return option + rest, ""
         # ⛔ THIS IS `None`, NOT A MEMBERSHIP TEST (#14027 round 10, P3 — MEASURED). The split
-        # above has already returned for every short cluster with an argument-taking character at
-        # index >= 1, and a short flag word is always at least `-` plus one character, so
-        # `option[-1]` is always inside `option[1:]` — which makes `option[-1] in
-        # _ARG_TAKING_SHORT_FLAGS` unreachable-True here. Instrumented over 2,664,574 tokens this
-        # line was reached 481,304 times and answered True 0 times, so the `(option, rest)` branch
-        # was dead; the file's own rule bans a member nothing can reach, and the one spelling it
-        # was written for (`-e^[+-]$`) is read by the split one branch up. Deleting the test changes
-        # no answer: `_d5_flag_word`, `_d5_blank_class_prescriptions` and
-        # `_d5_count_prescriptions` are identical over 47,264 enumerated tokens.
+        # above iterates `range(1, len(option))` — every index of `option[1:]` — and the short
+        # regex `(-[A-Za-z0-9]+)` guarantees `len(option) >= 2`, so `option[-1]` is always inside
+        # `option[1:]`. A token that reaches this line therefore has NO argument-taking character
+        # there, which makes `option[-1] in _ARG_TAKING_SHORT_FLAGS` unreachable-True: the
+        # `(option, rest)` branch was dead. Measured, zero exceptions: instrumented over every
+        # 1-3 character alphanumeric cluster, over 6,055,850 enumerated tokens, and over this
+        # repo's own docs corpus (950 reaches) the branch never fired, and
+        # `_d5_flag_word` / `_d5_blank_class_prescriptions` / `_d5_count_prescriptions` are
+        # unchanged by its removal. The file's own rule bans a member nothing can reach, and the
+        # one spelling the test was written for (`-e^[+-]$`) is read by the split one branch up.
+        # ⛔ NO TOKEN TOTAL IS STATED: the reach count is always a multiple of the number of
+        # clusters with no argument-taking character in `option[1:]`, so a total-and-hits pair is
+        # arithmetic that can silently stop agreeing — which the previous cut of this comment
+        # demonstrated by getting it wrong (#14027, P3).
         return None
     if option.startswith("--"):
         if rest.startswith("="):
