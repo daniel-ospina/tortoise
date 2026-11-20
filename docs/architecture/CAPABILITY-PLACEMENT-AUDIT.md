@@ -82,7 +82,7 @@ land on the wrong line; open it at the head `#13854` names. The alternative — 
 document back to pin addresses — is the per-row pass the review recommended as its own doc lane, and it is
 NOT done here.
 ⛔ **Take the head from the list, never from the row.** §2.1's whole-node row carries one of each
-(`record_serve.py:468` is in the `main` list; `projection/__init__.py:14169` is not, so it is at the pin),
+(`record_serve.py:468` is in THIS revision's group above; `projection/__init__.py:14169` is in neither list, so it is at the pin),
 and reading a row's head off its neighbours is exactly how a cite gets opened on a line nobody read. The
 ratio below is a **whole-document** measurement — every `path.py:NNNN` pair in this file, the `main`-set
 addresses above included — so it is the count of how much of a document written at the pin has since
@@ -180,8 +180,8 @@ two of this class as well — `sdk.py:24440` and `search_engine.py:6891`, both o
 open at the pin — plus row 13's four writer addresses, which the `#13394` sweep found pinned at **this head** (⚠️ NOT at
 `main` `ae54df166d`, where `hosted_api.py`'s `:23046` is `for ev in (payload.events or []):` and the commit
 door's `MERGE (s:Source {url:$did})` is the integration head's line) but
-absent from this list, so the rule above was sending a reader to the pin, where three of them are a comment and the fourth
-(`:22919`) is unrelated code:
+absent from this list, so the rule above was sending a reader to the pin, where three of them are a comment and the fourth is an
+unrelated `params={"eid": _eid, "oid": _oid},` statement (`main`'s `:22919` is a different line of the same door):
 `sdk.py:22081` (the capture writer) with its read-back `:22204`, and `hosted_api.py:23046` (the commit
 door's `MERGE (s:Source {url:$did})`) with `_execute_commit_writes` at `:22858`; and §2.5's `:Tag`
 paragraph, whose **five** reader addresses the `#13879` review re-derived from that row's own quoted
