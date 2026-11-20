@@ -1036,9 +1036,9 @@ def _require_served_restore_labels(
 
 
 #: The labels a coverage-gated ``embedding`` can be attached to, in the order the
-#: writer census scans them. ``:Point``/``:Operator`` are deliberately absent — a
-#: ``:Point``'s vector is RECORD TRUTH (`#5004`), and since `#13971` that is exactly why
-#: its restored GRAPH copy is gated: the record holds it, the in-graph `:Point` index is
+#: writer census scans them. ``:Operator`` is deliberately absent — no gate covers it.
+#: ``:Point`` JOINED the set in `#13971`: its vector is RECORD TRUTH (`#5004`), and that is
+#: exactly why its restored GRAPH copy is gated — the record holds it, the in-graph `:Point` index is
 #: RETIRED (`#13330`), so re-writing the property on a DR restore would undo a strip that
 #: has already run. Gating it keeps the two stores consistent — the strip's own writer
 #: census asks this function for every label it stores, and an ungated restore is a
