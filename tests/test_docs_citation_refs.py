@@ -1997,10 +1997,14 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
 #: character is ALWAYS `+` or `-`. The stage therefore drops a changed line whose first
 #: non-space character AFTER the marker is `#` — a `#` comment, and equally a docstring line
 #: whose own text opens with `#` (measured: `tortoise/ranking.py`'s `graph_boost` docstring
-#: carries such a line). An empty result therefore proves that every changed line OPENS with
-#: `#`; it cannot prove those lines are comments, which is the over-claim that TWO separate
-#: sentences of the D5 cell made — and the second one was not among the three the review
-#: quoted, which is why the correction is a ban over the class and not a patch of one
+#: carries such a line). An empty result therefore proves that every changed line WHICH
+#: REACHED STAGE 2 opens with `#`; it cannot prove those lines are comments, and it says
+#: nothing at all about a blank-line-only change — stage 1 drops an added line that is just
+#: `+`/`-` and any added line whose content itself opens with `+`/`-` (measured:
+#: `printf '%s\n' '+' '++i' '--counter' | grep -E '^[+-][^+-]' | grep -vE '^[+-][[:space:]]*#'`
+#: is silent while the input holds three changed lines). That was the over-claim that TWO
+#: separate sentences of the D5 cell made — and the second one was not among the three the
+#: review quoted, which is why the correction is a ban over the class and not a patch of one
 #: sentence.
 _FILTER_FALSE_DESCRIPTIONS = (
     "drops only lines whose first non-space character is `#`",
