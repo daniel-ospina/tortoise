@@ -289,15 +289,25 @@ def test_the_edge_arm_ignores_edges_that_are_not_the_map_s(map_doc):
 
     Mutant: credit an edge whenever each endpoint matches ANY identity present
     (`& present`) — both foreign-edge cases go green with zero declared edges.
+
+    ⛔ THE MAP'S REAL OPERATOR ROWS RIDE ALONG, and that is what makes this row
+    discriminating. With an EMPTY operator list the verdict is 1 for a reason
+    that has nothing to do with this arm — all 51 operator edges are missing — so
+    the fixture passed over the very mutant it names: `held = bool({a, b} &
+    present)` (the pre-fix existential arm) left the `[]`-operator form GREEN
+    (#13913 round 11, measured). With the operator arm satisfied, a structural
+    edge can only be credited by THIS arm, so the mutant is the only thing that
+    can turn the verdict green.
     """
     foreign_nodes = [["Object", f"foreign-{i}", "", ""] for i in range(30)]
     foreign_edges = [["IMPL", "Object", "", f"foreign-{i}", "",
                       "Object", "", f"foreign-{i + 1}", ""]
                      for i in range(29)]
-    assert filer.verdict(map_doc, _node_rows(map_doc) + foreign_nodes,
-                         foreign_edges, []) == 1
+    _structural, operators = _edge_rows(map_doc)
+    nodes = _node_rows(map_doc) + foreign_nodes
+    assert filer.verdict(map_doc, nodes, foreign_edges, operators) == 1
     padded = [foreign_edges[i % len(foreign_edges)] for i in range(len(map_doc["edges"]))]
-    assert filer.verdict(map_doc, _node_rows(map_doc) + foreign_nodes, padded, []) == 1
+    assert filer.verdict(map_doc, nodes, padded, operators) == 1
 
 
 def test_the_edge_arm_reads_the_relation_not_only_the_endpoints(map_doc):
@@ -880,6 +890,20 @@ def test_a_5xx_after_the_last_attempt_raises_instead_of_returning_the_body(monke
     with pytest.raises(RuntimeError, match="UNCONFIRMED"):
         mcp.call("tortoise_create_edge", {})
 
+    # ⛔ AND THE STATUS DECIDES, even when the body LOOKS like a tool result.
+    # This second fixture is what isolates the `attempt == 5` raise: the gateway
+    # shape above is caught ONE GUARD LATER by "carried no tool result", so the
+    # fall-through mutant stayed GREEN over it (#13913 round 11, measured). A 5xx
+    # means the door MAY have acted, so the outcome is UNCONFIRMED however
+    # plausible the body — that is the leg round 7 was about.
+    monkeypatch.setattr(
+        mcp, "_post",
+        lambda body: (500, {"jsonrpc": "2.0", "id": 1,
+                            "result": {"structuredContent": {"id": "node-1"}}}, {}),
+    )
+    with pytest.raises(filer.UnknownOutcome):
+        mcp.call("tortoise_create_operator", {})
+
 
 def test_a_non_rpc_body_is_not_read_as_success(monkeypatch):
     """A 4xx JSON body is not a tool result — the MCP wire answers `content[]`
@@ -1114,8 +1138,15 @@ def test_the_verdict_refuses_an_operator_over_EXTRA_endpoints(map_doc):
     """An operator over three endpoints holds a declared pair's endpoints, so a
     match without an ARITY leg certifies an edge the graph does not hold.
 
-    Mutant: drop `len(ends) == 2` — this padded operator satisfies all 51
-    declared operator edges and the verdict returns 0.
+    The arity guarantee has TWO independent legs in `presence()` and this row
+    pins the SLOT-KEY one — `not (set(slots) - {0, 1})`. (The per-slot ENDPOINT
+    count, `len(slots[k]) == 1`, is a different leg with its own row:
+    `test_an_operator_with_TWO_targets_in_one_slot_certifies_nothing`.)
+
+    Mutant: drop `not (set(slots) - {0, 1})` — this padded operator satisfies
+    every declared operator edge and the verdict returns 0. The older spelling of
+    this docstring named `len(ends) == 2`, which the code has not carried since
+    the slot model landed; the mutant named here is the one that reds it.
     """
     edge_rows, op_rows = _edge_rows(map_doc)
     nid = op_rows[0][0]
