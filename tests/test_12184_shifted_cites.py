@@ -160,7 +160,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # it (`grep -rn 11281 tests/` -> nothing): the audit document's header promises a reader for
     # every entry it re-derives, and this one had none. `:11280` is the `g.query(` call; the
     # document cites the query LITERAL's first line, which is `:11281` (its siblings in the same
-    # paragraph follow the same convention — `sdk.py:31347` is the literal while `:31346` is the call).
+    # paragraph follow the same convention — `sdk.py:31378` is the literal while `:31377` is the call).
     (_AUDIT, "`mcp_server.py:11281`", _MCP, 11281, "OPTIONAL MATCH (t)<-[:TAGGED]-(q)"),
     # ⛔ The SAME address has a SECOND written site — the header enumeration spells it BARE
     # (`` `mcp_server.py:5184`/`:8206`/`:11281` ``), and the §2.5 token above cannot see a bare
@@ -205,10 +205,6 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # form), which is the same one-site-vs-one-string gap the `:11281` header half and `:6989` were:
     # re-pointing any one of them to a stale number left every arm green. One ROW per SITE, pinned by
     # the fragment the header paragraph quotes for it.
-    # ⚠️ RE-DERIVED at this branch's head, not carried from `#13991`: that PR measured the four at
-    # `:31365`/`:31347`/`:24327`/`:24671` on ITS tree, and this branch's own `sdk.py` insertions sit above
-    # all four, so those numbers open on unrelated code here (`git show 22bb351bb5:tortoise/sdk.py |
-    # sed -n '31365p'` -> `{"url": row[0], …}`). By CONTENT: `grep -n` on each quoted fragment.
     (_AUDIT, "`:31396`", _SDK, 31396, 'MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag})'),
     (_AUDIT, "`:31378`", _SDK, 31378, '"MATCH (t:Tag) "'),
     (_AUDIT, "`:24358`", _SDK, 24358, "MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) "),
@@ -297,7 +293,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
 #: header must carry, target file, 1-based line **on this branch's tree**, verbatim fragment on that
 #: line). Five of these
-#: are reached by `_PINS` already; `:2485`, `:2542` and `projection/entities.py:5794` were in NO pin at all
+#: are reached by `_PINS` already; `:2485`, `:2542` and `projection/entities.py:5797` were in NO pin at all
 #: before this one, and the header named none of the eight — which is the defect
 #: `test_the_main_set_enumeration_names_the_group_it_was_missing` exists for.
 #: ⚠️ The sdk/hosted_api rows here were `main`'s figures until `#13363` re-derived them: that branch's
@@ -373,12 +369,11 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2463`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:5184`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:11281`'): 1,
-    # 4: the header's TWO BARE spellings of this address (the `main`-set enumeration and the
-    # re-derivation clause #13991's merge added to the same paragraph), plus the two BARE sites §2.5
-    # adds (§2.5's five-address enumeration and its `:11280` -> `:11281` provenance sentence) — see
-    # the row's own comment for the sites. Measured on the merged document:
-    # `grep -o '`:11281`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 4.
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:11281`'): 4,
+    # 3: the header's BARE spelling of the same address, plus the two BARE sites the #13991 branch
+    # itself adds (§2.5's five-address enumeration and its `:11280` -> `:11281` provenance sentence) —
+    # see the row's own comment for the three line numbers. Measured on the merged document:
+    # `grep -o '`:11281`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 3.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:11281`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5654`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8206`'): 2,
     # The four bare `sdk.py` `:Tag` siblings the header paragraph enumerates, one occurrence each —
@@ -573,10 +568,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
         # A SELF-INFLICTED one: an alternative counting basis was described as "±5 … the numerator does not
         # move — it is 124 under either basis". Both halves are claims about MEASUREMENT, and both were
         # asserted rather than measured: the basis-INVARIANCE is false (counting the two-code-span pairs
-        # adds addresses, TWO of them drifters at this edition — `cache_projection.py:2485` and
-        # `sdk.py:2917`; `sdk.py:61587` is past both heads' EOF, so it is non-comparable and adds nothing,
-        # and the two span form of a pair that is ALSO written one-token adds no pair at all), so the
-        # numerator moves 127 -> 129 while the denominator moves 223 -> 226), and "±5"
+        # adds four addresses, THREE of them drifters (`cache_projection.py:2485` and `sdk.py:2917`;
+        # `sdk.py:61587` is past both heads' EOF, so it is non-comparable and adds nothing), so the
+        # numerator moves 127 -> 130 while the denominator moves 223 -> 227), and "±5"
         # names a fixed offset for a denominator that moves by whatever the counting decision moves it by. A
         # reader told to compare numerators across bases would have "corrected" a correct figure by
         # arithmetic — the offset-not-content failure, one level down.

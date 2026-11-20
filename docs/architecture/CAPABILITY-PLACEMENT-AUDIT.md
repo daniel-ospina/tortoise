@@ -112,14 +112,16 @@ the ratio below counts them rather than pretending it compares them. ⛔ **That 
 re-derive from a symbol.**
 **The drift is 127 of those 223.** ⚠️ **These counts are a parsing decision, and this header states which
 one it took**: the 223 counts unique `(resolved path, start line)` pairs over `path.py:NNNN` spellings
-written as ONE token. The document also writes five pairs as two code spans
+written as ONE token. The document also writes six pairs as two code spans
 (`` `cache_projection.py` `:2485` ``, a `main`-set address listed above, plus
-`` `sdk.py` `:2917` ``, `` `sdk.py` `:61587` ``, `` `sdk.py` `:61594` `` and
-`` `projection/entities.py` `:5819` ``); TWO of them are ALSO written one-token —
-`` `sdk.py` `:61594` `` in the `:Meta` row of §2.7 and `` `projection/entities.py` `:5819` `` in row 13, so both
-are already inside the 223 — and the other three are resolved but not counted by the one-token rule,
-so counting that form gives **226 pairs and 129 drifters**. So the
-basis must travel with the figure — 127 and 129 are one measurement under two counting decisions, not two
+`` `sdk.py` `:2917` ``, `` `sdk.py` `:61587` ``, `` `sdk.py` `:61594` ``,
+`` `projection/entities.py` `:5765` `` and the `#13124` enumeration's
+`` `projection/entities.py` `:5819` ``); five of them are resolved but not counted by the one-token rule —
+`` `sdk.py` `:61594` `` is ALSO written one-token, in the `:Meta` row of §2.7, so it is one of the 223
+already — and counting that form gives **227 pairs and 130 drifters**. ⛔ **This enumeration is COUNTED, not
+carried**: the `#13971` merge brought `main`'s edition of this paragraph, which listed five forms in a
+document that writes six, so the sentence would have published a denominator one short. So the
+basis must travel with the figure — 127 and 130 are one measurement under two counting decisions, not two
 findings. ⚠️ **An earlier form of
 this paragraph sat in the MIDDLE of the sentence it qualifies**, between `103` and `collisions`, so the
 sentence read "…to 211 — 103 … collisions —" around a full paragraph; its alternative basis then quoted a
@@ -192,14 +194,10 @@ add five more **as-written spellings** — 328 → 333 — and so 105 → 110 co
 spelling that shares its `(path, line)` pair with another, while adding **no pair at all**: 223 either
 way, because each of the five already carries its pair from §2.5. A bare sibling adds neither. The pin
 agrees: `_REDEFINED_13854` pins each of these four by content at ONE occurrence of the
-§2.5 token, so a second one-token spelling would red it. ⚠️ **The four `sdk.py` ones are re-derived at
-THIS head, by content, not by a delta**: this branch's own `sdk.py` insertions sit above all four, so the
-`#13879` numbers (`:31365`/`:31347`/`:24327`/`:24671`) land on unrelated code here and every one of them
-was opened and re-pointed. Only the `mcp_server.py` one survived the merge unchanged, and it is the one
-`#13879` corrected (`:11280` → `:11281`, where the statement itself opens). Each was
+§2.5 token, so a second one-token spelling would red it. Each was
 opened at this head, and ⛔ **none of them
 opens at the pin**: at `ccb49741b2ec` all five of those numbers
-read an unrelated statement (`git show ccb49741b2ec:tortoise/sdk.py | sed -n '31378p;31396p;24358p;24702p'`,
+read an unrelated statement (`git show ccb49741b2ec:tortoise/sdk.py | sed -n '31365p;31347p;24327p;24671p'`,
 and `…:tortoise/mcp_server.py | sed -n '11281p'`), so the head these five belong to is this one, and a
 reader sent to the pin would have found a different line at every one of them — which is why they are
 enumerated here rather than left to the paragraph's own say-so. ⛔ **A `file:line` in NEITHER list has an UNDECLARED head: the pin
@@ -593,10 +591,11 @@ read resolves the node **through the edge** — `sdk.py:31396`
 `sdk.py:24358` (`MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) WHERE t.name IN $names`) /
 `mcp_server.py:11281` (`MATCH (t:Tag) OPTIONAL MATCH (t)<-[:TAGGED]-(q)`), and
 `sdk.py:24702` (`MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t`, the orphan GC) — all five
-addresses opened at this head (#13879 review, P2, and this branch's `sdk.py` insertions): the four
-`sdk.py` ones are re-derived BY CONTENT here, since those insertions move them off `#13879`'s
-`:31365`/`:31347`/`:24327`/`:24671`, and only the `mcp_server.py` one was stale at `:11280` → `:11281`,
-where the statement itself opens. A traversal needs its
+addresses opened at this head and re-checked in this pass (#13879 review, P2): the `mcp_server.py`
+one was stale at main's head, at `:11280` → `:11281` (`#13991`), and this branch's own `sdk.py`
+insertions then moved the four `sdk.py` addresses by `+31` — each re-derived by the fragment it
+quotes (`grep -nF`), never by applying that delta — while the `mcp_server.py` one landed where
+`#13991` left it. A traversal needs its
 **endpoint in the graph**, so "the node is only the endpoint label" is not an exemption — it is the
 justification. **Verdict: `graph`.**
 
