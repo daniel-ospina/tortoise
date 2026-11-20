@@ -39,6 +39,20 @@ named test goes RED):
   every node is "unserved" and the caller silently reverts to creation recency.
 * **Accept a checkpoint that disables its own prefix check** (``head_len = 0``) →
   ``test_a_forged_checkpoint_cannot_disable_the_prefix_check`` RED.
+* **Prune only the entries that carry a time** (the second cut) →
+  ``test_pruning_ages_an_entry_with_no_time_too`` RED — that class aged by no
+  path at all, so the roll-up grew unbounded at every window while the reading
+  still advertised a bound.
+* **Read a window of ``0`` as "no window"** →
+  ``test_a_window_that_cannot_bound_is_refused_loudly`` RED — one parameter whose
+  whole job is bounding memory may not be silently ignored.
+* **Let a non-UTF-8 checkpoint escape ``refresh``** →
+  ``test_a_corrupt_checkpoint_is_a_cache_miss`` RED — ``refresh`` promises it
+  never raises, and a corrupt cache is a MISS.
+* **Name a module that does not exist in the forbidden set** (so the guard reads
+  as protecting something) → ``test_the_no_graph_guard_names_modules_that_EXIST``
+  RED; and **miss the module that owns the graph client** (``.projection``) →
+  ``test_the_no_graph_guard_covers_every_module_that_reaches_a_store`` RED.
 """
 
 from __future__ import annotations
@@ -186,7 +200,7 @@ def test_incremental_equals_cold_replay(stream: Path) -> None:
     _serve(stream, "Point", ["p1", "p2"], at=_at(1))
     _serve(stream, "Object", ["o1"], at=_at(2))
     _serve(stream, "Point", ["p1"], at=_at(3))
-    _serve(stream, "Event", ["e1"], at=_at(4))
+    _serve_row(stream, "Event", "e1", at=_at(4))
 
     incremental = usage_signal.refresh(stream)
     snapshot = {
@@ -320,15 +334,25 @@ def test_a_torn_tail_is_folded_exactly_once(stream: Path) -> None:
 
 
 def test_a_corrupt_checkpoint_is_a_cache_miss(stream: Path) -> None:
-    """An unreadable checkpoint replays from cold — never a partial state."""
+    """An unreadable checkpoint replays from cold — never a partial state.
+
+    ⛔ TWO corruptions, not one. `{not json` is valid UTF-8, so it only reaches
+    the `json.loads` handler — and that left the OTHER shape untested:
+    `Path.read_text` raises **`UnicodeDecodeError`** on non-UTF-8 bytes, which is
+    a `ValueError` raised BEFORE any parse, so an `except OSError` on the read let
+    it escape `refresh`, the one function here that promises it never raises.
+    """
     _serve(stream, "Point", ["p1"], at=_at(1))
     before = usage_signal.refresh(stream)
-    usage_signal.checkpoint_path(stream).write_text("{not json", encoding="utf-8")
+    ckpt = usage_signal.checkpoint_path(stream)
 
-    after = usage_signal.refresh(stream)
+    for corruption in (b"{not json", b"\xff\xfe not utf8"):
+        ckpt.write_bytes(corruption)
 
-    assert after.replayed is True
-    assert after.serve_count("Point", "p1") == before.serve_count("Point", "p1")
+        after = usage_signal.refresh(stream)  # must not raise
+
+        assert after.replayed is True
+        assert after.serve_count("Point", "p1") == before.serve_count("Point", "p1")
 
 
 def test_a_capped_stream_is_reported(stream: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -446,6 +470,72 @@ def test_pruning_bounds_the_rollup_and_names_the_watermark(stream: Path) -> None
     assert got.pruned_before == _at(1)
 
 
+def test_pruning_ages_an_entry_with_no_time_too(stream: Path) -> None:
+    """⛔ THE BOUND MUST REACH EVERY ENTRY CLASS, or it is not a bound.
+
+    An entry whose serves all carried an unparseable `at` is stored as
+    `[None, None, n]`, and the first cut's `last_dt is not None and …` skipped it
+    at EVERY window — so the roll-up grew without bound while the reading still
+    printed `pruned`/`undated_serves` as counters. The bound failed OPEN and
+    SILENTLY, on the one property it advertises.
+    """
+    _serve(stream, "Point", ["recent"], at="2026-01-03T23:00:00+00:00")
+    with open(stream, "a", encoding="utf-8") as fh:
+        for key in ("undated-a", "undated-b"):
+            fh.write(
+                json.dumps({"event": "serve", "label": "Point", "key": key}) + "\n"
+            )
+
+    now = datetime(2026, 1, 4, 0, 0, tzinfo=UTC)
+    got = usage_signal.refresh(stream, now=now, window_days=2)
+
+    assert got.entry("Point", "undated-a") is None
+    assert got.entry("Point", "undated-b") is None
+    assert got.pruned_undated == 2
+    # …and it is NOT reported as the dated watermark's doing: nothing places an
+    # undated entry before `pruned_before`, so saying so would be a fabrication.
+    assert got.pruned == 0
+    assert got.pruned_before is None
+    assert got.entry("Point", "recent") is not None
+
+
+def test_a_window_that_cannot_bound_is_refused_loudly(
+    stream: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ `=0` IS NOT "NO WINDOW" — the same refusal the typo arm makes.
+
+    The parse-failure arm warns "A MISTYPED WINDOW IS NOT 'NO WINDOW'", and then
+    the numeric arm returned `None` for `0` and every negative with no warning at
+    all: the reading was byte-identical to *unconfigured* (`pruned=0`,
+    `pruned_before=None`, `window_started=None`) while the roll-up ran unbounded.
+    A non-finite value is worse still — `timedelta(days=nan)` RAISES, out of a
+    function whose docstring says NEVER raises.
+    """
+    _serve(stream, "Point", ["ancient"], at=_at(1))
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+
+    for raw in ("0", "-1", "nan", "inf"):
+        usage_signal._warned.clear()
+        caplog.clear()
+        monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, raw)
+
+        with caplog.at_level("WARNING", logger=usage_signal.logger.name):
+            got = usage_signal.refresh(stream, now=now)
+
+        assert got.window_started is None, f"{raw!r} silently became a window"
+        assert got.pruned == 0
+        assert any("UNBOUNDED" in r.getMessage() for r in caplog.records), (
+            f"{raw!r} was ignored without a warning — the operator believes the "
+            f"roll-up is bounded"
+        )
+
+    # …and the explicit argument is refused the same way, never raised out of.
+    usage_signal._warned.clear()
+    got = usage_signal.refresh(stream, now=now, window_days=float("nan"))
+    assert got.window_started is None
+    assert got.entry("Point", "ancient") is not None
+
+
 def test_the_rollup_is_exact_by_default(stream: Path) -> None:
     """No window ⇒ no pruning ⇒ `serve_count` is the stream's own count."""
     _serve(stream, "Point", ["ancient"], at=_at(1))
@@ -535,12 +625,27 @@ def _stamp(value: str | None) -> float:
 #: Package roots a serve counter may never import. A residency signal that can
 #: reach one of these can write to the store it is bounding — the write
 #: amplification `#14011` exists to avoid — so the reachability itself is banned.
+#:
+#: ⛔ THE LIST IS CHECKED IN BOTH DIRECTIONS, because it rotted in both:
+#: `tortoise.manager` and `tortoise.graph_connection` DO NOT EXIST (the first cut
+#: forbade two modules that are in no tree), while `tortoise.projection` — the
+#: module that actually carries `from falkordb import FalkorDB` and what
+#: `tortoise/sdk.py` itself reaches the client through — was absent, so
+#: `from .projection import FalkorProjection` stayed GREEN. Two tests below hold
+#: the two directions: every name resolves to a real module, and every module in
+#: the tree that imports a store client is named here. Scope, stated rather than
+#: implied: it covers DIRECT importers (the closure is not walked — this module
+#: legitimately imports `read_ledger` for `_stamp`/`row_key`, and a closure would
+#: have to forbid that too).
 _FORBIDDEN_GRAPH_ROOTS = (
     "falkordb",
     "redis",
-    "tortoise.manager",
-    "tortoise.graph_connection",
+    "tortoise.__main__",
+    "tortoise.backup",
+    "tortoise.cypher_guard",
+    "tortoise.projection",
     "tortoise.sdk",
+    "tortoise.session_indexer",
 )
 
 
@@ -598,12 +703,65 @@ def test_no_graph_dependency() -> None:
 
 def test_the_no_graph_guard_catches_relative_imports() -> None:
     """The guard itself is pinned — it was defeated once by import spelling."""
-    assert _imports_of("from . import manager\n") == {"tortoise.manager"}
-    assert _imports_of("from .graph_connection import get\n") == {
-        "tortoise.graph_connection"
+    assert _imports_of("from . import projection\n") == {"tortoise.projection"}
+    assert _imports_of("from .projection import FalkorProjection\n") == {
+        "tortoise.projection"
     }
     assert _imports_of("import redis\n") == {"redis"}
     assert _imports_of("from . import read_ledger\n") == {"tortoise.read_ledger"}
+
+
+def test_the_no_graph_guard_names_modules_that_EXIST() -> None:
+    """⛔ A FORBIDDEN NAME THAT IS IN NO TREE PROTECTS NOTHING.
+
+    The first cut forbade `tortoise.manager` and `tortoise.graph_connection`,
+    neither of which exists, while omitting `tortoise.projection` — so the guard's
+    summary ("no graph in reach at all") was carried by a list half of which could
+    never match and none of which was the real client's home.
+    """
+    package = Path(usage_signal.__file__).parent
+    missing: list[str] = []
+    for root in _FORBIDDEN_GRAPH_ROOTS:
+        if "." not in root:
+            continue  # third-party (`falkordb`, `redis`) — not this tree's to resolve
+        parts = root.split(".")[1:]
+        candidate = package.joinpath(*parts)
+        if not (candidate.with_suffix(".py").is_file() or candidate.is_dir()):
+            missing.append(root)
+    assert missing == [], (
+        f"the forbidden set names module(s) that do not exist: {missing} — a dead "
+        f"entry makes the guard read as protection it cannot provide"
+    )
+
+
+def test_the_no_graph_guard_covers_every_module_that_reaches_a_store() -> None:
+    """⛔ THE OTHER DIRECTION: a real graph-owning module may not be left out.
+
+    Derived from the TREE rather than listed, so a future module that starts
+    holding the client cannot slip past the guard the way `.projection` did.
+    """
+    package = Path(usage_signal.__file__).parent
+    covered = [
+        p.relative_to(package).with_suffix("") for p in package.rglob("*.py")
+    ]
+    uncovered: list[str] = []
+    for rel in covered:
+        parts = [part for part in rel.parts if part != "__init__"]
+        module = "tortoise" + ("." + ".".join(parts) if parts else "")
+        source = package.joinpath(*rel.parts).with_suffix(".py").read_text(
+            encoding="utf-8"
+        )
+        if not ("from falkordb import" in source or "import falkordb" in source):
+            continue
+        if not any(
+            module == root or module.startswith(root + ".")
+            for root in _FORBIDDEN_GRAPH_ROOTS
+        ):
+            uncovered.append(module)
+    assert uncovered == [], (
+        f"module(s) reach a graph client but are not in the forbidden set, so a "
+        f"serve counter could import them unnoticed: {uncovered}"
+    )
 
 
 def test_recording_never_raises_on_a_broken_path(tmp_path: Path) -> None:

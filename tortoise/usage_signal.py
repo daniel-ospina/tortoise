@@ -119,6 +119,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import math
 import os
 import stat
 import threading
@@ -273,7 +274,23 @@ def _max_bytes() -> int:
         return DEFAULT_MAX_BYTES
 
 
-def _window_days() -> float | None:
+def _window_days(explicit: float | None = None) -> float | None:
+    """The pruning window in days, or ``None`` for "keep every entry".
+
+    ⛔ A VALUE THE OPERATOR MEANT AS A BOUND IS NEVER SILENTLY "NO BOUND". Every
+    arm that cannot honour the stated bound WARNS and then degrades to "keep
+    everything" in the open — the typo arm, the ``0`` arm and the negative arm
+    alike. The numeric arm used to fall through silently, so
+    ``TORTOISE_USAGE_SIGNAL_WINDOW_DAYS=0`` was byte-identical to *unconfigured*
+    (``pruned=0``, ``pruned_before=None``, ``window_started=None``) while the
+    roll-up ran unbounded — the same quiet direction the comment below refuses,
+    on the one parameter whose whole job is bounding memory.
+
+    A NON-FINITE value is refused for a second reason: ``timedelta(days=nan)``
+    raises, and ``refresh`` promises it never does.
+    """
+    if explicit is not None:
+        return _checked_window(explicit, repr(explicit), "the `window_days` argument")
     raw = os.environ.get(USAGE_WINDOW_DAYS_ENV)
     if raw is None or not raw.strip():
         return None
@@ -291,7 +308,27 @@ def _window_days() -> float | None:
             raw,
         )
         return None
-    return days if days > 0 else None
+    return _checked_window(days, raw, USAGE_WINDOW_DAYS_ENV)
+
+
+def _checked_window(days: float, raw: str, origin: str) -> float | None:
+    """A stated window that cannot bound anything is refused LOUDLY.
+
+    ``0`` and the negatives prune nothing (an entry is never older than
+    everything) and ``nan``/``inf`` raise or never fire, so all four are the
+    "unbounded while the operator believes otherwise" shape the typo arm above
+    already refuses.
+    """
+    if not math.isfinite(days) or days <= 0:
+        _warn_once(
+            "window-nonpositive",
+            "usage signal: %s=%s is not a POSITIVE day count — the roll-up is "
+            "running UNBOUNDED (every entry kept); fix the value to bound it",
+            origin,
+            raw,
+        )
+        return None
+    return days
 
 
 def _warn_once(key: str, msg: str, *args: object) -> None:
@@ -643,6 +680,10 @@ class _State:
     capped: bool = False
     pruned: int = 0
     pruned_before: str | None = None
+    #: Entries dropped by the window for having NO parseable time at all. They
+    #: carry no watermark (nothing places them), so they are counted apart from
+    #: `pruned` rather than letting `pruned_before` claim to describe them.
+    pruned_undated: int = 0
     #: Every partition the stream has been seen to carry, bounded (all we need
     #: is "more than one"). Serialised as a sorted list.
     tenants: set[str | None] = field(default_factory=set)
@@ -673,18 +714,39 @@ class _State:
         RECENCY score (which is what consumes this) and it is honest about what
         was dropped — silently keeping a decayed count would be a number the
         stream no longer supports.
+
+        ⛔ **EVERY entry class ages, or "bounded" is a claim about one of them.**
+        The first cut skipped an entry whose stored ``last`` is not a parseable
+        stamp (``apply(..., None)`` stores ``None``; a torn-then-repaired line can
+        store junk), so a roll-up of undated serves grew without bound at EVERY
+        window while still printing ``pruned``/``undated_serves`` as counters —
+        the bound failing OPEN and SILENTLY, on the one property it advertises.
+        Those entries are now dropped too, counted separately in
+        ``pruned_undated`` because they have no watermark to name: nothing says
+        WHEN they were served, only that nothing places them inside the window.
+
+        ⚠️ This is NOT a reversal of "an undated serve sorts WARMEST". That rule
+        governs the ORDERING door, where evicting a node on unknown recency is the
+        dangerous direction. Prune governs MEMORY, an entry with no time at all
+        cannot be shown to belong to the window, and the survivors are still
+        ordered warmest-first.
         """
         dropped: list[Any] = []
+        undated: list[Any] = []
         watermark: str | None = None
         for coord, slot in self.entries.items():
             last = slot[0]
             last_dt = _stamp(last) if isinstance(last, str) else None
-            if last_dt is not None and last_dt < before:
+            if last_dt is None:
+                undated.append(coord)
+            elif last_dt < before:
                 dropped.append(coord)
                 if watermark is None or _stamp_cmp(last, watermark) > 0:
                     watermark = last
-        for coord in dropped:
+        for coord in dropped + undated:
             del self.entries[coord]
+        if undated:
+            self.pruned_undated += len(undated)
         if dropped:
             self.pruned += len(dropped)
             if watermark is not None and (
@@ -692,7 +754,7 @@ class _State:
                 or _stamp_cmp(watermark, self.pruned_before) > 0
             ):
                 self.pruned_before = watermark
-        return bool(dropped)
+        return bool(dropped or undated)
 
 
 @dataclass(frozen=True)
@@ -727,6 +789,11 @@ class UsageReading:
     serves_folded: int = 0
     observed_from: str | None = None
     window_started: str | None = None
+    #: Entries the window dropped because nothing places them in time at all — the
+    #: class that used to age by NO path (`prune` skipped it, so the roll-up grew
+    #: unbounded at every window). Counted apart from :attr:`pruned`, whose
+    #: `pruned_before` watermark cannot describe an entry that carries no time.
+    pruned_undated: int = 0
     tenants: int = 0
     pooled: bool = False
     error: str | None = None
@@ -899,6 +966,7 @@ class UsageReading:
             "served_total": self.served_total,
             "pruned": self.pruned,
             "pruned_before": self.pruned_before,
+        "pruned_undated": self.pruned_undated,
             "capped": self.capped,
             "lines_read": self.lines_read,
             "lines_skipped": self.lines_skipped,
@@ -945,6 +1013,7 @@ def _serialise(state: _State) -> dict[str, Any]:
         "capped": state.capped,
         "pruned": state.pruned,
         "pruned_before": state.pruned_before,
+        "pruned_undated": state.pruned_undated,
         "tenants": sorted(t for t in state.tenants if t is not None)
         + ([None] if None in state.tenants else []),
         "observed_from": state.observed_from,
@@ -1005,6 +1074,7 @@ def _deserialise(payload: Any) -> _State | None:
             unresolved_skips=int(payload.get("unresolved_skips") or 0),
             capped=bool(payload.get("capped")),
             pruned=int(payload.get("pruned") or 0),
+            pruned_undated=int(payload.get("pruned_undated") or 0),
             pruned_before=(
                 str(payload["pruned_before"])
                 if payload.get("pruned_before") is not None
@@ -1051,15 +1121,28 @@ def _deserialise(payload: Any) -> _State | None:
 
 
 def _load_checkpoint(target: Path) -> _State | None:
+    """Read a checkpoint, or ``None`` (a CACHE MISS) for every way it can fail.
+
+    ⛔ ``read_text`` raises **``UnicodeDecodeError``** on bytes that are not
+    UTF-8, and that is a ``ValueError`` — so an ``except OSError`` alone let it
+    escape, even though ``refresh`` promises twice in its own docstring that it
+    NEVER raises and that a checkpoint it cannot read is a cache miss. It is
+    raised BEFORE the ``json.loads`` try below, so that handler could not catch
+    it either; a corrupt or foreign-written checkpoint took `refresh` out at the
+    one function that promises it cannot. ``RecursionError`` (deeply nested JSON)
+    is the same class one step further in.
+    """
     try:
         raw = target.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    except OSError:
+    except (OSError, ValueError):
+        # OSError: unreadable. ValueError: NOT UTF-8 — decode fails before any
+        # parse, which is why this arm has to be here and not at `json.loads`.
         return None
     try:
         return _deserialise(json.loads(raw))
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
 
 
@@ -1154,6 +1237,7 @@ def _empty_reading(
         served_total=0,
         pruned=0,
         pruned_before=None,
+        pruned_undated=0,
         capped=False,
         lines_read=0,
         lines_skipped=0,
@@ -1196,6 +1280,7 @@ def _to_reading(
         served_total=state.served_total,
         pruned=state.pruned,
         pruned_before=state.pruned_before,
+        pruned_undated=state.pruned_undated,
         capped=state.capped,
         lines_read=state.lines_read,
         lines_skipped=state.lines_skipped,
@@ -1360,12 +1445,17 @@ def refresh(
     bounding the roll-up's memory. ``None`` (default) keeps every entry, so
     ``serve_count`` is exact. Pruning is a separate, opt-in bound and it is
     reported (:attr:`UsageReading.pruned`, :attr:`UsageReading.pruned_before`).
+    ⛔ It bounds EVERY entry class, not only the dated one: an entry whose serves
+    all carried an unparseable ``at`` is dropped too and counted in
+    :attr:`UsageReading.pruned_undated`, because nothing places it inside or
+    outside the window — before that arm existed, that class grew without bound at
+    any window while the reading still advertised a bound.
     """
     target = Path(path) if path is not None else usage_path()
     ref = now or datetime.now(UTC)
     if ref.tzinfo is None:
         ref = ref.replace(tzinfo=UTC)
-    window = window_days if window_days is not None else _window_days()
+    window = _window_days(window_days)
     window_started: str | None = None
     if window is not None:
         window_started = (ref - timedelta(days=window)).isoformat(timespec="seconds")
@@ -1528,6 +1618,12 @@ def _main(argv: list[str] | None = None) -> int:
             f"pruned           : {got.pruned:,} entr(ies) last served at or before "
             f"{got.pruned_before} (dropped by {USAGE_WINDOW_DAYS_ENV}) — their exact "
             f"counts are gone, their recency is bounded"
+        )
+    if got.pruned_undated:
+        print(
+            f"pruned (undated) : {got.pruned_undated:,} entr(ies) had NO parseable "
+            f"`at` at all, so nothing places them inside the window — dropped for "
+            f"the same bound (they are the class that used to age by no path)"
         )
     if got.undated_serves:
         print(

@@ -3999,6 +3999,19 @@ surfaces:
   # file, so it matches no SOURCE_PATTERN) nor tortoise/sdk.py selects anything
   # narrower, and the hook it pins lives in the read funnel every surface uses.
   - test_read_ledger.py
+  # #14011 (`SEARCH-ARCHITECTURE.md` §7's window-local counter): the usage
+  # signal's own suite. `core` is the right arm for exactly the reason the read
+  # ledger's row above names — `tortoise/usage_signal.py` is a NEW file that
+  # matches no `SOURCE_PATTERNS` entry, so the one diff class the module OWNS
+  # (`tortoise/usage_signal.py` alone) selects `core`, and without this row the
+  # only file that guards it runs in NO leg. Measured: `select(["tortoise/usage_signal.py"])`
+  # → surfaces `["core"]`, and `test_usage_signal.py` absent from its test list.
+  # ⚠️ Today `tortoise/sdk.py` travels in the same diff and is a SHARED_MODULES
+  # entry, so the FULL matrix masks the drop — the masking stops the moment a
+  # later PR touches the module alone, which is the silent-drop class
+  # `--integrity` cannot see (it checks the file is in SOME surface, not that a
+  # diff can select it).
+  - test_usage_signal.py
   - test_5509_name_keyed_identity_reads.py
   - test_7925_route_parity.py
   # #6211: `tortoise/ep.py` and `tortoise/sdk.py` are SHARED_MODULES, so a
@@ -14965,6 +14978,7 @@ durations:
   test_oauth_consent_jti_store.py: 0.1
   test_onboarding_session_recording_parity.py: 1.8  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 2.6
   test_read_ledger.py: 1.0  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.6
+  test_usage_signal.py: 2.0  # new in #14011 (PR #14065) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ('a default is not a reading'): the `core` registration above puts the file in `fast_pool()`, and `--integrity` stays green either way (the coverage check is a 0.90 RATIO with headroom), so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file; the file is also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`, because the entry-rule pin iterates an EXPLICIT tuple and cannot see a file nobody listed. What the weight covers, hermetic (no DB, no graph, no network, no model call — every case is a `tmp_path` stream plus an atomically-replaced checkpoint beside it): the fold's BOUND as a number (`bytes_folded`/`lines_folded`/`serves_folded` against the real file size, so a full replay reds instead of hiding behind a cumulative `lines_read`), torn-tail and cold-vs-incremental equality, the three-way stream identity (dev/ino, size, fixed-length prefix fingerprint) including a forged `head_len=0` checkpoint that would disable it, the three refusal doors (capped, pooled, stale/empty), prune reaching BOTH entry classes (dated watermark and the no-time-at-all class that aged by no path before), a window of `0`/`-1`/`nan`/`inf` refused LOUDLY rather than silently unbounded, and the funnel wiring itself (`_usage_record`, the `_record_reads` pool guard as the named `_usage_record_served`, and `_ledger_record`'s 14 sites driven by one hook). ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin (`tools/ci_selection.py --integrity` is the authority).
   test_run_affected.py: 9.9  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 8.8
   test_s3_prior_ablation.py: 2.5  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 1.2
   test_sdk_surface_declaration.py: 2.1  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 2.4
