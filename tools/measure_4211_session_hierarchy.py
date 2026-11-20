@@ -58,14 +58,26 @@ ephemeral (``m4211``/``test``/``tmp``/``lane``/``scratch``/``e2e``/``ci_``);
 ``--allow-non-ephemeral-writes`` overrides that deliberately and is recorded in argv and
 in ``arms.writer.non_ephemeral_write_override``.
 
-Exit codes: 0 = MEASURED (whatever the numbers are), 2 = could not measure — the reason is
-in the receipt's TOP-LEVEL ``unmeasurable`` block, which is written whenever ANY arm could
-not measure: a replayed writer, a graph that raised during the census, an unreadable node
-count, or a ``skipped`` arm (a store that is not on this box, a graph that is not in the
-file, no ``TORTOISE_DB_URI``, no capture journal) — a skip measured NOTHING, so it is a
-refusal, never a completed capture. A ``--out`` receipt is never replaced by an
-unmeasurable run (it writes ``<name>.unmeasurable.json`` beside it), so a re-run scripted
-as ``--out <receipt> || exit 1`` cannot overwrite the receipt it failed to reproduce.
+Exit codes: 0 = MEASURED (whatever the numbers are), 2 = could not measure.
+
+⛔ ``2`` is reached on TWO different paths and the reason lives in a different place on
+each — a caller must not read one contract off the other (#13919 review round 7, item 4):
+
+* **A run that got as far as the arms.** The reason is in the receipt's TOP-LEVEL
+  ``unmeasurable`` block, written whenever ANY arm could not measure: a replayed writer,
+  a graph that raised during the census, a census that inspected NO graph at all (an
+  empty instance reaches a wrong port/host exactly like a real instance with no
+  captures, so a zero shape is never a measurement), an unreadable node count, or a
+  ``skipped`` arm (a store that is not on this box, a graph that is not in the file, no
+  ``TORTOISE_DB_URI``, no capture journal) — a skip measured NOTHING, so it is a
+  refusal, never a completed capture. A ``--out`` receipt is never replaced by an
+  unmeasurable run (it writes ``<name>.unmeasurable.json`` beside it), so a re-run
+  scripted as ``--out <receipt> || exit 1`` cannot overwrite the receipt it failed to
+  reproduce.
+* **A refusal taken BEFORE any arm runs** — an interpreter below 3.12, or an ``--arms``
+  value that names no measurable arm. There is **no receipt at all**: the reason is on
+  **stderr** (attributable stderr is the #5128 invariant) and ``--out`` is not written.
+  A caller that reads the receipt for its reason will find no file — it must read stderr.
 
 Definition discipline (#4211 review round 1): a *turn* is
 ``coalesce(p.is_episodic,false)=true AND p.pointKind='event'`` — the product's own
@@ -259,9 +271,19 @@ QUERIES: list[tuple[str, str]] = [
      "max(s.created_at) AS max_created_at"),
     # ── what a turn -> Object -> turn walk could reach ──
     ("objects_total", "MATCH (o:Object) RETURN count(o) AS n"),
+    # ⛔ A key NAMED `*turn*` applies the turn discriminator (see TURN), and the any-kind
+    # reading is reported BESIDE it (`objects_with_gt1_point`) — the same discipline as
+    # `sessions_with_gt1_contains_turn` / `sessions_with_gt1_contains_point`. This key
+    # shipped UNFILTERED and counted any attached Point: on the committed receipt the
+    # writer arm holds 9 Point->Object edges against 8 turns, the ninth hanging off an
+    # extracted claim Point, so the reading was one attachment away from being wrong
+    # (#13919 review round 7, item 3).
     ("objects_with_gt1_turn",
-     "MATCH (t:Point)-[:aboutObject]->(o:Object) "
-     "WITH o, count(DISTINCT t) AS c WHERE c > 1 RETURN count(*) AS n"),
+     f"MATCH (p:Point)-[:aboutObject]->(o:Object) WHERE {TURN} "
+     "WITH o, count(DISTINCT p) AS c WHERE c > 1 RETURN count(*) AS n"),
+    ("objects_with_gt1_point",
+     "MATCH (p:Point)-[:aboutObject]->(o:Object) "
+     "WITH o, count(DISTINCT p) AS c WHERE c > 1 RETURN count(*) AS n"),
     ("objects_reaching_gt1_session",
      "MATCH (s:Session)-[:aboutObject]->(o:Object) "
      "WITH o, count(DISTINCT s) AS c WHERE c > 1 RETURN count(*) AS n"),
@@ -810,13 +832,22 @@ def _instrument_note(kinds: dict[str, int]) -> str:
 
 
 def _mark_shrunken_denominator(body: dict) -> dict:
-    """A graph that RAISED is not a graph that was measured: say so at the arm level.
+    """A graph that RAISED — or a census that inspected NO graph — is not a measurement.
 
     ⛔ The COUNT comes from ``graphs_skipped_on_error`` — the authoritative total — not
     from ``skipped_on_error``, which the census truncates to 25. Reading the truncated
     list made the sentence say "25 of 173 graphs raised" beside a field a few lines
     above it that said 30, under-stating the incompleteness in the one sentence a
     reader acts on (#4211 review F4).
+
+    ⛔ ZERO INSPECTED GRAPHS IS THE SAME CLASS OF NON-ANSWER, and it used to reach
+    ``return 0`` (#13919 review round 7, item 1). An instance with no graphs has no
+    error to count, so nothing was marked: the documented one-line re-run against a
+    wrong/fresh container published ``graphs with a turn store: 0 of 0``, all-zero
+    totals and ``every graph turns<=CONTAINS: None`` — and REPLACED the committed
+    receipt, destroying the artifact of record while reporting success. ``_is_empty``
+    states the principle for one graph (a zero shape must be NAMED, never published as
+    a measurement); this is the same rule at the arm level.
     """
     errors = body.get("skipped_on_error") or []
     total = body.get("graphs_skipped_on_error")
@@ -829,6 +860,18 @@ def _mark_shrunken_denominator(body: dict) -> dict:
             f"{total} of {body.get('graphs_on_instance')} graphs raised during the "
             f"census ({named}{more}), so the aggregates are a SHRUNKEN denominator — "
             "'0 aboutObject in N of N' is NOT reproducible from this run")
+    elif not body.get("graphs_with_turn_store"):
+        # The denominator's OTHER zero: nothing raised, because nothing was READ. The
+        # numbers below are a census of zero graphs — the shape a mistyped host, port or
+        # password produces as readily as a real instance with no captures.
+        body["unmeasurable"] = (
+            "the census inspected NO graph: 0 of "
+            f"{body.get('graphs_on_instance')} on the instance held a turn store "
+            f"({body.get('graphs_without_turn_store')} filtered out, "
+            f"{body.get('graphs_skipped_on_error')} raised), so every aggregate here "
+            "is a census of ZERO graphs — a zero SHAPE, not a measurement of 'no "
+            "aboutObject anywhere'. Check which instance this URI reached (host, "
+            "port, password, graph) before reading the zeros as a finding")
     return body
 
 
@@ -1390,6 +1433,8 @@ def main(argv: list[str] | None = None) -> int:
               inst.get("every_graph_has_fewer_turns_than_contains"))
         if inst.get("skipped_on_error"):
             print("  ⛔ graphs that RAISED    :", inst["skipped_on_error"])
+        if inst.get("unmeasurable"):
+            print("  ⛔ UNMEASURABLE          :", inst["unmeasurable"])
     corp = receipt["arms"].get("corpus")
     if isinstance(corp, dict) and "stats" in corp:
         print("\n== arm corpus (~/.tortoise/session-events) ==")

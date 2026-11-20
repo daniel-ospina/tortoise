@@ -1727,6 +1727,24 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_measure_4211_session_hierarchy.py::
              # test_a_tool_only_diff_selects_this_pin.
              "tools/measure_4211_session_hierarchy.py",
+             # #4211 / #13919 review (round 7): the instrument's COMMITTED RECEIPT.
+             # Registering the tool and its suite left the ARTIFACT ungated, and MEASURED
+             # before this entry: `select(["docs/scoping/receipts/2026-11-19-4211-
+             # hierarchy-remeasure.json"], "pull_request", manifest)` -> `surfaces: []`,
+             # while the sibling receipt
+             # `2026-11-03-10538-window-arm-retention.json` selects `[`eval`]` — so a
+             # hand-edit of the numbers, or a re-emit by a changed instrument, selected
+             # NOTHING and shipped green. That is the #1349/#2938/#3616 silent-drop
+             # class on the artifact the #4211 "0 aboutObject in 60 of 173" verdict is
+             # ARGUED FROM, and it is what made the round-7 finding beside it (a
+             # zero-graph re-run replacing the receipt while exiting 0) undetectable.
+             # `core`, not `eval`: the pin that reads the receipt lives in
+             # tests/test_measure_4211_session_hierarchy.py, which is registered `core`
+             # in config/ci-surfaces.yml — an `eval` row here would select a surface in
+             # which that pin does not run. Pinned from the other side by
+             # tests/test_measure_4211_session_hierarchy.py::
+             # test_a_receipt_only_diff_selects_this_pin.
+             "docs/scoping/receipts/2026-11-19-4211-hierarchy-remeasure.json",
              # #9607: `tortoise/quadrature.py` is registered in `onboarding` (its
              # /docs formula guard lives there), and a SOURCE_PATTERNS match
              # REPLACES the `core` fallback (#2938) — so without this entry the

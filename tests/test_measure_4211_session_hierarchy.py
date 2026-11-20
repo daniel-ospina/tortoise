@@ -136,27 +136,72 @@ def _run(graph, keys: tuple[str, ...]) -> dict:
     return out
 
 
-_TURN_KEYS = ("sessions_with_gt1_contains_turn",
-              "sessions_with_gt1_entity_linked_turn",
-              "turns_per_session_contains_max_avg")
+#: Keys named `*turn*` that legitimately cannot carry the discriminator, each with the
+#: reason. The population of turn-named keys is DERIVED from QUERIES below, never a
+#: hand-kept list of the ones that DO carry it — a literal tuple of three names is what
+#: silently passed the fourth, unfiltered `objects_with_gt1_turn` (#13919 round-7 item 3).
+_TURN_KEY_EXEMPT = {
+    "session_turn_count_sum": (
+        # The exemption is only valid because the Cypher really is the SDK property sum: a
+        # `*turn*` key that neither carries TURN nor sums `turn_count` reds below.
+        "sums the SDK's own `s.turn_count` PROPERTY — the value IS the product's turn "
+        "counter (a Session property), so the Point discriminator does not apply to it"),
+}
 
 
-# ── P1: the keys named `*turn*` must count TURNS ──────────────────────────
+# ── P1: the keys named `*turn*` must count TURNS ─────────────────────────
 
 def test_every_turn_named_key_carries_the_turn_discriminator():
     queries = dict(mod.QUERIES)
-    for key in _TURN_KEYS:
-        assert mod.TURN in queries[key], (
-            f"{key} is named after turns but its Cypher applies no turn discriminator — "
-            "it counts claim/transcript Points as turns")
+    named = {k: q for k, q in queries.items() if "turn" in k.lower()}
+    assert len(named) >= 4, (
+        f"the population is DERIVED from QUERIES; {len(named)} key(s) is too few to "
+        "prove anything (the read or the naming changed)")
+    for key, reason in _TURN_KEY_EXEMPT.items():
+        assert key in queries, f"the exemption {key!r} names no query — drop the entry"
+        assert "turn_count" in queries[key], (
+            f"{key!r} is exempted on the ground that {reason}, but its Cypher no "
+            "longer reads `turn_count` — the exemption is now a hole")
+    failures = [k for k, q in named.items()
+                if k not in _TURN_KEY_EXEMPT and mod.TURN not in q]
+    assert not failures, (
+        f"these keys are named after turns but apply no turn discriminator: {failures} — "
+        "they count claim/transcript Points as turns (round-7 item 3: "
+        "`objects_with_gt1_turn` shipped unfiltered, with `t` as the Point variable as "
+        "the tell)")
 
 
 def test_the_any_kind_reading_is_reported_beside_the_turn_reading():
     queries = dict(mod.QUERIES)
-    assert "sessions_with_gt1_contains_point" in queries
-    assert "is_episodic" not in queries["sessions_with_gt1_contains_point"], (
-        "the any-kind key must stay UNFILTERED — it is the visible other half of the "
-        "divergence the turn keys report")
+    for pair in (("sessions_with_gt1_contains_turn", "sessions_with_gt1_contains_point"),
+                 ("objects_with_gt1_turn", "objects_with_gt1_point")):
+        assert pair[1] in queries, (
+            f"{pair[0]} carries the turn discriminator, so its any-kind reading must be "
+            "published BESIDE it — otherwise the divergence is invisible")
+        assert "is_episodic" not in queries[pair[1]], (
+            f"{pair[1]} must stay UNFILTERED — it is the visible other half of the "
+            "divergence the turn key reports")
+        assert mod.TURN not in queries[pair[1]], f"{pair[1]} is not the any-kind reading"
+
+
+def test_an_object_attached_by_one_turn_and_one_claim_point_is_not_a_gt1_turn_object():
+    """The falsifier case for `objects_with_gt1_turn`.
+
+    The committed receipt's writer arm holds 9 Point->Object edges against 8 turns (the
+    ninth hangs off an extracted `statement` Point), so this shape is the SHIPPED one,
+    not a hypothetical. Unfiltered, an Object with one turn and one claim Point read as
+    "more than one turn" — the same defect the `sessions_with_gt1_*` keys were split to
+    fix, on the key that was missed (#13919 round-7 item 3).
+    """
+    class _ObjectsGraph:
+        def query(self, cypher, params=None):
+            # Turn filter present -> only the one Object whose attachments are all turns.
+            return _Result([[1]]) if mod.TURN in cypher else _Result([[2]])
+
+    got = _run(_ObjectsGraph(), ("objects_with_gt1_turn", "objects_with_gt1_point"))
+    assert got["objects_with_gt1_turn"] == 1
+    assert got["objects_with_gt1_point"] == 2
+    assert got["objects_with_gt1_turn"] != got["objects_with_gt1_point"]
 
 
 def test_a_session_with_one_turn_and_one_claim_point_is_not_a_gt1_turn_session():
@@ -1186,3 +1231,161 @@ def test_r7_the_writer_queries_failed_describes_BOTH_reads(monkeypatch):
     assert "turns_total" in body["queries_failed"]["before"], (
         "the side that actually failed must be named — otherwise "
         "`queries_failed: []` reads as 'every query ran'")
+
+# ══════════════════════════════════════════════════════════════════════════
+# Review round 7 — the fresh-context review at 75216acaaf (PR #13919)
+#
+# Four findings: a re-run that measured NOTHING still exited 0 and REPLACED the
+# committed receipt; the receipt itself was gated by NOTHING (a receipt-only diff
+# selected no surface and no test opened it); `objects_with_gt1_turn` was a
+# `*turn*`-named key with no turn discriminator; and the exit-2 contract named a
+# receipt location that three of its paths do not write.
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_a_census_that_inspected_NO_graph_is_unmeasurable_not_a_zero_measurement(monkeypatch):
+    """Round-7 item 1. An instance with no graphs has no error to count, so the old
+    checker found nothing to mark: the documented one-line re-run published
+    `graphs with a turn store: 0 of 0`, all-zero totals, and exited 0."""
+    body = _instrument(monkeypatch, {})
+    assert body["graphs_with_turn_store"] == 0
+    assert body["graphs_skipped_on_error"] == 0
+    assert "unmeasurable" in body, (
+        "a census of ZERO graphs published its zeros as a measurement — the same "
+        "zero-shape-as-verdict defect `_is_empty` refuses for one graph")
+    assert "inspected NO graph" in body["unmeasurable"]
+    assert "ZERO graphs" in body["unmeasurable"]
+
+
+def test_a_census_whose_every_graph_was_filtered_out_is_unmeasurable(monkeypatch):
+    """Same zero, other cause: the instance has graphs but none holds a turn store."""
+    body = _instrument(monkeypatch, {"g-empty": _FakeInstrumentGraph(sessions=0, turns=0)})
+    assert body["graphs_on_instance"] == 1
+    assert body["graphs_without_turn_store"] == 1
+    assert body["graphs_with_turn_store"] == 0
+    assert "unmeasurable" in body
+    assert "0 of 1" in body["unmeasurable"]
+
+
+def test_a_zero_graph_receipt_cannot_replace_the_committed_receipt(monkeypatch, tmp_path):
+    """The harm the fix is for: the artifact of record, destroyed, reporting success."""
+    good = {"issue": 4211, "arms": {"instrument": {"graphs_with_turn_store": 60}},
+            "purpose": "the artifact of record"}
+    out = tmp_path / "receipt.json"
+    out.write_text(json.dumps(good) + "\n")
+    monkeypatch.setattr(mod, "_open_live", lambda uri: (_FakeDB({}), {"graph": "x"}))
+    rc = mod.main(["--arms", "instrument", "--live-uri", "docker://:@localhost:1/x",
+                   "--out", str(out)])
+    assert rc == 2, "a run that measured nothing reported success"
+    assert json.loads(out.read_text()) == good, "the receipt of record was replaced"
+    sibling = tmp_path / "receipt.unmeasurable.json"
+    assert "inspected NO graph" in json.dumps(json.loads(sibling.read_text()))
+
+
+# ── round-7 item 2: the committed receipt is a GATED artifact ─────────────
+
+_RECEIPT = (_REPO / "docs" / "scoping" / "receipts"
+            / "2026-11-19-4211-hierarchy-remeasure.json")
+
+
+def _receipt() -> dict:
+    return json.loads(_RECEIPT.read_text())
+
+
+def test_a_receipt_only_diff_selects_this_pin():
+    """`docs/` is a flat `NON_PYTHON_PREFIXES` entry, so a receipt-only diff selected NO
+    surface — measured before the `CORE_ALSO` entry: `surfaces: []`, `full: false`, and a
+    hand-edited number shipped green on the artifact the #4211 verdict is argued from."""
+    from tools import ci_selection
+
+    manifest = ci_selection.load_manifest()
+    selection = ci_selection.select(
+        ["docs/scoping/receipts/2026-11-19-4211-hierarchy-remeasure.json"],
+        "pull_request", manifest)
+    assert "core" in (selection.get("surfaces") or []), selection.get("surfaces")
+    files = selection.get("test_files")
+    if files == "ALL":
+        return
+    assert "test_measure_4211_session_hierarchy.py" in files, (
+        "a receipt-only diff no longer runs the pin that reads the receipt — the "
+        "`CORE_ALSO` entry for the artifact was dropped")
+
+
+def test_the_committed_receipt_cannot_be_hand_edited_or_passed_off_as_current():
+    """Three invariants a hand-edit or a careless re-emit cannot satisfy silently:
+
+    1. every key the receipt publishes is a query the tool actually has (no invented
+       number, no key the instrument stopped producing);
+    2. every query the tool has but the receipt does NOT carry is CALIBRATED by name in
+       `post_measurement_revision` — an absent measurement must be named, never just
+       missing;
+    3. an artifact produced by a different instrument revision than HEAD's must say so,
+       so a stale receipt is distinguishable from a reproduced one.
+    """
+    receipt = _receipt()
+    assert receipt["issue"] == 4211
+    assert "unmeasurable" not in receipt, (
+        "the artifact of record carries a top-level UNMEASURABLE block — it is not a "
+        "measurement to argue a verdict from")
+    queries = {key for key, _ in mod.QUERIES}
+    calibration = json.dumps(receipt.get("post_measurement_revision") or {})
+    for arm in ("store", "writer", "live"):
+        counts = receipt["arms"][arm]["counts"]
+        invented = sorted(set(counts) - queries)
+        assert not invented, (
+            f"{arm}: keys that are not queries of the instrument: {invented} — a number "
+            "nobody measured, or one the tool no longer produces")
+        undocumented = sorted(k for k in queries - set(counts) if k not in calibration)
+        assert not undocumented, (
+            f"{arm}: queries the receipt does not carry and does not calibrate: "
+            f"{undocumented} — an absent measurement must be named in "
+            "post_measurement_revision, or it reads as a measurement that was taken")
+    live_sha = mod._sha256(mod._TOOL_PATH)
+    assert receipt["instrument"]["sha256"], "the artifact does not pin its instrument"
+    if receipt["instrument"]["sha256"] != live_sha:
+        assert receipt.get("post_measurement_revision"), (
+            "the receipt was produced by a DIFFERENT instrument revision than the one "
+            "at HEAD and does not calibrate that — a stale artifact would be "
+            "indistinguishable from a reproduced one")
+
+
+def test_the_receipts_headline_figures_are_pinned():
+    """The figures the #4211 verdict is ARGUED FROM.
+
+    Re-measuring must update these deliberately: the test file is what a receipt-only
+    diff now selects, so the update is a reviewable line instead of an invisible one.
+    """
+    receipt = _receipt()
+    inst = receipt["arms"]["instrument"]
+    assert (inst["graphs_with_turn_store"], inst["graphs_on_instance"]) == (60, 173)
+    assert inst["graphs_with_zero_aboutObject"] == 60
+    assert inst["totals"]["aboutObject_edges"] == 0
+    assert inst["totals"]["turns"] == 24999
+    assert receipt["arms"]["store"]["counts"]["sessions_total"] == 1538
+    writer = receipt["arms"]["writer"]["counts"]
+    assert writer["turns_with_aboutObject"] == 8
+    point_edges = [row[2] for row in writer["aboutObject_by_endpoint"]
+                   if row[0] == "Point"]
+    assert point_edges == [9], (
+        "9 Point->Object edges against 8 turns is WHY `objects_with_gt1_turn` needed "
+        "the turn discriminator — if this changes, re-read that finding")
+
+
+# ── round-7 item 4: the exit-2 contract names BOTH paths ──────────────────
+
+def test_the_exit_contract_names_where_a_PRE_ARM_refusal_puts_its_reason(tmp_path):
+    """The docstring said exit 2 ALWAYS leaves its reason in the receipt's top-level
+    `unmeasurable` block. The interpreter guard and the `--arms` refusal exit 2 with NO
+    receipt — a caller written to the stated contract reads a missing file."""
+    doc = mod.__doc__ or ""
+    assert "TOP-LEVEL" in doc
+    assert "stderr" in doc and "no receipt at all" in doc, (
+        "the exit-2 contract still names only the receipt, so a caller cannot tell a "
+        "refusal that wrote one from a refusal that wrote nothing")
+    out = tmp_path / "r.json"
+    try:
+        mod.main(["--arms", "crocodile", "--out", str(out)])
+    except SystemExit as exc:  # argparse's refusal path
+        assert exc.code == 2, "a pre-arm refusal must use this tool's could-not-measure code"
+    assert not out.exists(), (
+        "a pre-arm refusal wrote a receipt, which is what made the old contract read "
+        "as accurate")
