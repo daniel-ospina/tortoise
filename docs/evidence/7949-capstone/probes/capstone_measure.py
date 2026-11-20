@@ -4182,6 +4182,22 @@ def e6_row_reasons(row: dict, *, pnia_verdict: str) -> list[str]:
     return reasons
 
 
+def _e6_load_error_text(reason: object) -> str:
+    """ONE isolated pack's reason as TEXT — the census emits a LIST, and `str()` is not one.
+
+    ⛔ ``tools/pack_relation_census.py`` publishes ``load_errors`` as ``{pack: list[str]}``
+    (``PackRegistry.errors`` is ``namespace -> [message, …]``), so ``str(reason)`` renders a
+    Python list LITERAL into a committed note — ``project-management (['duplicate
+    namespace: …'])`` — which reads as a malformed reason rather than as the reason
+    (#11695 review P2, measured against the producer's own shape). A sequence is JOINED;
+    a bare string (the shape a synthetic census or an older record may carry) passes
+    through unchanged, so neither shape can produce a list literal in the artifact.
+    """
+    if isinstance(reason, (list, tuple)):
+        return "; ".join(str(item) for item in reason)
+    return str(reason)
+
+
 def _e6_row_ref(row: dict) -> dict:
     """The identifying cells a defect is reported with — never the whole row."""
     return {key: row.get(key) for key in
@@ -4245,12 +4261,12 @@ def measure_e6(*, packs_dir: Path | str | None = None,
     floor of 30, and every other cell read clean. A population that is not "every declared
     row across the installed packs" is therefore REFUSED rather than scored.
     """
-    census_tool = _pack_census_module()
     relative = os.path.relpath(Path(packs_dir or (ROOT / PACKS_DIR)), ROOT)
     measurement: dict = {
         "census_tool": "tools/pack_relation_census.py (build_census, write_probe=False)",
         "packs_dir": relative.replace(os.sep, "/"),
-        "packs": 0, "relations": 0, "hierarchies": 0, "declared": 0,
+        "packs": 0, "pack_names": [],
+        "relations": 0, "hierarchies": 0, "declared": 0,
         "writable": 0, "declaration_only": 0,
         "predicate_not_in_allowlist": 0,
         "defects": [], "unbound_and_unexplained": 0,
@@ -4260,6 +4276,11 @@ def measure_e6(*, packs_dir: Path | str | None = None,
         "error": None,
     }
     try:
+        # ⛔ INSIDE the guard, not above it: an import failure of the census tool is the
+        # same class of gap as a build failure — a NAMED `error` on this row — and lifting
+        # the import out of the `try` would let it escape `main` and take the five rows
+        # above with it (#11695 review P3).
+        census_tool = _pack_census_module()
         census = census_tool.build_census(Path(packs_dir or (ROOT / PACKS_DIR)))
     except Exception as exc:  # the other rows must still be scored, and the gap named
         measurement["error"] = census_reason(exc)
@@ -4279,9 +4300,15 @@ def measure_e6(*, packs_dir: Path | str | None = None,
     # this function's docstring. Carried rather than dropped, and the row refuses on it.
     load_errors = census.get("load_errors") or {}
     measurement.update({
-        "load_errors": ({str(pack): str(reason) for pack, reason in load_errors.items()}
-                        if isinstance(load_errors, dict) else {"<census>": str(load_errors)}),
+        "load_errors": ({str(pack): _e6_load_error_text(reason)
+                         for pack, reason in load_errors.items()}
+                        if isinstance(load_errors, dict)
+                        else {"<census>": _e6_load_error_text(load_errors)}),
         "packs": population.get("packs", len(packs)),
+        # ⛔ The INVENTORY, not only a count of it (#11695 review P1). "45 declared rows
+        # over 7 packs" is satisfied by the 7 that happened to survive, so a pin that
+        # compares counts cannot see a pack that left the denominator — the names can.
+        "pack_names": sorted(str(name) for name in packs),
         "relations": population.get("relations", 0),
         "hierarchies": population.get("hierarchies", 0),
         # ⛔ `population.declared` — the registered denominator, ROWS not connections,
@@ -4381,7 +4408,7 @@ def build_e6_row(e6: dict, *, bars: dict) -> dict:
                   f"is not scored — a registry that reports zero declared rows would "
                   f"otherwise read GREEN over a subject that is not there. {beside}")
     elif load_errors:
-        isolated = "; ".join(f"{pack} ({reason})"
+        isolated = "; ".join(f"{pack} ({_e6_load_error_text(reason)})"
                              for pack, reason in sorted(load_errors.items()))
         detail = (f"⛔ the registry ISOLATED {len(load_errors)} pack(s), so the population "
                   f"below is NOT every declared row across the installed packs and the row "
@@ -4432,6 +4459,44 @@ def build_e6_row(e6: dict, *, bars: dict) -> dict:
         "written": written,
         "load_errors": load_errors,
         "note": (f"{result['value']}; bar {result['bar']}; {detail}"),
+    }
+
+
+def e6_census_record(e6: dict, e6_row: dict) -> dict:
+    """The machine record's ``run.e6_census`` block — ONE home for the carry.
+
+    ⛔ A separate function because the block carries a REFUSAL REASON as well as numbers:
+    ``load_errors`` is why the row refuses, and a reader of the RECORD (not the human log)
+    must be able to see which pack left the denominator instead of inferring it from a
+    smaller population. Two reverts of that carry — dropping the key, or hardcoding an
+    empty map — were both invisible to every pin while the block lived inline in
+    ``render_log`` (#11695 review P1, measured: 13/13 green). Pinned by
+    ``test_e6s_isolated_pack_is_carried_into_the_machine_record`` AND by the renderer pin's
+    equality against this function, so neither this block nor its call site can lose it.
+    """
+    return {
+        "source": e6["census_tool"],
+        "packs_dir": e6["packs_dir"],
+        "population": {
+            "packs": e6["packs"],
+            "relations": e6["relations"],
+            "hierarchies": e6["hierarchies"],
+            "declared": e6["declared"],
+        },
+        "writable": e6["writable"],
+        "declaration_only": e6["declaration_only"],
+        "predicate_not_in_allowlist": e6["predicate_not_in_allowlist"],
+        "unbound_and_unexplained": e6["unbound_and_unexplained"],
+        "unbound": e6["defects"],
+        "written": e6["written"],
+        "written_source": e6["written_source"],
+        # ⛔ A pack the registry ISOLATED is why the row refuses; carrying the map
+        # means a reader of the RECORD can see which pack left the denominator
+        # instead of inferring it from a smaller population.
+        "load_errors": e6.get("load_errors") or {},
+        "outcome": e6_row["outcome"],
+        "bar": e6_row["bar"],
+        "error": e6.get("error"),
     }
 
 
@@ -4866,31 +4931,9 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
             "a_row_census": a_census,
             # #11695: E6's population and its defect list, so the row's numbers are
             # machine-readable in the same block as every other row's. `written` rides
-            # BESIDE `unbound_and_unexplained` and is never the bar (§3.8).
-            "e6_census": {
-                "source": e6["census_tool"],
-                "packs_dir": e6["packs_dir"],
-                "population": {
-                    "packs": e6["packs"],
-                    "relations": e6["relations"],
-                    "hierarchies": e6["hierarchies"],
-                    "declared": e6["declared"],
-                },
-                "writable": e6["writable"],
-                "declaration_only": e6["declaration_only"],
-                "predicate_not_in_allowlist": e6["predicate_not_in_allowlist"],
-                "unbound_and_unexplained": e6["unbound_and_unexplained"],
-                "unbound": e6["defects"],
-                "written": e6["written"],
-                "written_source": e6["written_source"],
-                # ⛔ A pack the registry ISOLATED is why the row refuses; carrying the map
-                # means a reader of the RECORD can see which pack left the denominator
-                # instead of inferring it from a smaller population.
-                "load_errors": e6.get("load_errors") or {},
-                "outcome": e6_row["outcome"],
-                "bar": e6_row["bar"],
-                "error": e6.get("error"),
-            },
+            # BESIDE `unbound_and_unexplained` and is never the bar (§3.8). Extracted so
+            # the CARRY is pinned directly as well as through this renderer.
+            "e6_census": e6_census_record(e6, e6_row),
             "e4_receipt": {
                 "numerator": e4["edge_correct"],
                 "denominator": e4["planted"],
