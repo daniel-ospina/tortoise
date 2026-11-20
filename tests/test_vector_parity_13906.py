@@ -479,3 +479,44 @@ def test_the_vector_poison_moves_the_victim_beyond_the_whole_corpus(harness):
     assert [r.key for r in perturbed] == [r.key for r in rows]
     assert all(a.embedding == b.embedding for a, b in zip(perturbed, rows)
                if a.key != "anchor")
+
+
+def test_a_nan_distance_is_not_a_verified_one(harness):
+    """The `None` twin, one input type over — and the reachable one.
+
+    `delta > worst_delta` is False for NaN, so an all-NaN arm published
+    `ok: True, max_delta: 0.0`. Not hypothetical: pgvector answers **NaN**, not
+    NULL, for a zero-norm vector (measured: `SELECT '[0,0,0]'::vector <=>
+    '[1,0,0]'::vector` → `NaN`), so one zero-norm `embedding_vec` in a tenant
+    turned a REQUIRED arm green on the one value it cannot score.
+    """
+    truth_rows = [("a", 0.1), ("b", 0.2), ("c", 0.3)]
+    cmp_ = harness.compare(truth_rows, ["a", "b", "c"],
+                           candidate_distances=[float("nan")] * 3)
+    assert cmp_["distance"]["ok"] is False
+    assert cmp_["distance"]["unmeasured"] == 3
+
+    inf = harness.compare(truth_rows, ["a", "b", "c"],
+                          candidate_distances=[0.1, float("inf"), 0.3])
+    assert inf["distance"]["ok"] is False
+    assert inf["distance"]["unmeasured"] == 1
+
+    verdict = harness._verdict({"queries": [{
+        "query": "q0",
+        "record": {"ids_equal": True, "order": "exact", "recall": 1.0,
+                   "distance": cmp_["distance"]},
+        "graph_scan_vs_euclidean": {"ids_equal": True, "order": "exact",
+                                    "recall": 1.0,
+                                    "distance": {"ok": True,
+                                                 "max_delta": 0.0}},
+        "graph_index_vs_cosine": {"recall": 1.0, "order": "exact"},
+        "metric_divergence_ids": []}], "arms": {}}, poisoned=None)
+    assert verdict["ok"] is False
+
+
+def test_an_empty_report_is_not_parity(harness):
+    """`--queries < 1` is refused at the CLI, but the VERDICT must refuse it too:
+    zero measurements is the strongest possible absence of evidence."""
+    verdict = harness._verdict({"queries": [], "arms": {}}, poisoned=None)
+    assert verdict["ok"] is False
+    assert any("no queries" in f for f in verdict["failures"])
