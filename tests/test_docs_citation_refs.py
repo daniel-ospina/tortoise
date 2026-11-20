@@ -3840,14 +3840,16 @@ def _d5_class_members(char_class: str) -> set[str] | None:
 
     ⛔ BUT THE ESCAPE MACHINERY SURVIVES, AND POSIX HAS NO SUCH THING — so this helper really does
     over-accept, deliberately, with the cost stated (#14026 review, P2 — MEASURED). A backslash
-    inside a bracket is an ORDINARY MEMBER: `^[+\-]$` is the class `{+,-,\}` and counts `3` where
-    this class counts `2`, while the escape model answers `{+,-}` for it — i.e. it grades a
+    inside a bracket is an ORDINARY MEMBER: `^[+\-]$` is the class `{+,-,\}` and counts `3` on a
+    probe carrying a lone `\` line, where this class counts `2` — the two agree at `2` only on
+    the 4-line probe, which carries no `\`. So the escape model, answering `{+,-}`, grades a
     SUPERSET as the class. That over-acceptance is the DECLARED superset written up at
     `_d5_counts_the_blank_class` and pinned as ACCEPTED in the spellings cell, and its cost is one
-    impossible diff line (no line of a unified diff is a bare `\`, because every diff line carries
-    a `+`/`-`/space prefix). Removing the machinery would be stricter and would reverse a landed
-    decision, so it is a reopen rather than a tidy-up — which is why this paragraph states what
-    the CODE does and not what POSIX says.
+    impossible diff line (no line of a unified diff is a bare `\`: every diff BODY line carries a
+    `+`/`-`/space prefix, and the header lines — `diff --git`, `index`, `---`/`+++`, `@@` — and
+    the `\ No newline at end of file` marker are all multi-character). Removing the machinery would
+    be stricter and would reverse a landed decision, so it is a reopen rather than a tidy-up —
+    which is why this paragraph states what the CODE does and not what POSIX says.
     """
     content = char_class[1:-1]
     if not content or content[0] == "^":
@@ -4406,7 +4408,12 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
         "fragment claim is stale (#13995 review rounds 1-2)")
 
     # ⛔ THE BLANK-CLASS TEST IS A BOUNDED EQUIVALENCE, NOT A SPELLING LIST (#13995 review, P2 —
-    # MEASURED). Each spelling below counts the SAME class (`2` on the 4-line probe). The old test,
+    # MEASURED). Each spelling below counts the SAME class on the 4-line probe — `2`, which is what
+    # makes them controls here — although `^[+\-]$` reaches that `2` as a DECLARED SUPERSET rather
+    # than as an equivalence: it also matches a lone `\`, so on a probe carrying one it counts `3`
+    # where the class counts `2` (see `_d5_counts_the_blank_class`). Stated rather than implied,
+    # because "the SAME class" on its own was false for that row (#14026 review, P2 — MEASURED).
+    # The old test,
     # `\^(?:\\[+-]|\[[-+]+\])\$`, carried the first and the third of these and REJECTED the other
     # two — measured on the pre-fix reader — in both directions: as a SECOND prescription it left
     # the arm GREEN (false PASS), and in place of the row's own expression it tripped the ZERO
