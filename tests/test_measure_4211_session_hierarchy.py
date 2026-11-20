@@ -1404,7 +1404,15 @@ def test_the_receipts_instrument_note_is_RE_DERIVED_from_its_own_breakdown():
     assert _REFUTED_ATTRIBUTION not in inst["note"], (
         "the artifact still asserts the attribution its own contains_targets_by_kind "
         "refutes")
-    assert inst["note"] == mod._instrument_note(inst["contains_targets_by_kind"]), (
+    # ⛔ Re-derive with the SAME inputs the arm passes — the kinds AND the totals.
+    # Passing the kinds alone left `aboutObject_edges` unread, which the cycle-9 fix
+    # made visible (`reads None here`); a pin that calls the generator differently from
+    # the arm is pinning a different string.
+    derived = mod._instrument_note(
+        inst["contains_targets_by_kind"],
+        {"aboutObject_edges": inst["totals"]["aboutObject_edges"],
+         "turns_with_aboutObject": inst["totals"]["turns_with_aboutObject"]})
+    assert inst["note"] == derived, (
         "the receipt's note is NOT the derivation of the breakdown it publishes — "
         "either it was hand-edited, or it predates _instrument_note() and must be "
         "re-derived")
@@ -1899,3 +1907,102 @@ def test_c8_a_ledger_sentence_about_a_QUERY_matches_the_query_it_describes():
                 "reader would take the #12244 double-wire question as answered")
             assert "is the OBJECT reading" in ledger, (
                 f"{arm}: the ledger must say which reading this artifact actually took")
+
+
+# ── #13919 review cycle 9 ───────────────────────────────────────────────────
+def test_c9_the_note_cannot_assert_an_aboutObject_count_it_did_not_read(monkeypatch):
+    """C9 (P1): the note said ``0 aboutObject`` unconditionally.
+
+    ``_instrument_note`` took only the kind breakdown, while ``measure_instrument``
+    computes ``aboutObject_edges`` and ``turns_with_aboutObject`` a few lines above and
+    publishes them in the SAME body. So on a population where the edge IS present — the
+    very answer the #4211 gate exists to detect — the artifact would say 42 in ``totals``
+    and 0 in the note explaining it. A generated field must not assert a number it did
+    not read (the ``role_evidence`` / ``~/.zshrc:48`` class).
+    """
+    class _Attached(_FakeInstrumentGraph):
+        """Holds turns AND entity attachment: 42 edges, 42 attached turns."""
+
+        def query(self, cypher: str, params=None) -> _Result:
+            if "aboutObject" in cypher and "count" in cypher:
+                return _Result([[42]])
+            return super().query(cypher, params)
+
+    # Drive the ARM: a helper-only pin would stay green while the arm ignored `totals`.
+    body = _instrument(monkeypatch, {"g": _Attached(sessions=3, turns=7)})
+    about = body["totals"]["aboutObject_edges"]
+    assert about > 0, f"the fixture must produce attachment (got {about})"
+    assert "0 `aboutObject`" not in body["note"], (
+        f"totals say {about} aboutObject edge(s) and the note says 0")
+    assert "`aboutObject` IS present" in body["note"], body["note"]
+    assert str(about) in body["note"], body["note"]
+
+
+def test_c9_the_note_does_not_cite_a_chunk_writer_it_measured_NONE_of():
+    """C9, second half: "not one writer's output" was unconditional too.
+
+    On a breakdown of ``event`` only, the sentence offered ``session-transcript``
+    (written only by the eval ingest lane) as its evidence of a mix while its own
+    parenthetical reported that kind as 0 — naming a writer with no measured output as
+    proof of a second writer.
+    """
+    note = mod._instrument_note({"event": 10},
+                                {"aboutObject_edges": 0, "turns_with_aboutObject": 0})
+    assert "session-transcript=0" in note or "10 event / 0 session-transcript" in note
+    assert "not one writer's output" not in note, (
+        "one kind was measured; there is no second writer to evidence")
+    assert "only `event` targets" in note, note
+
+
+def test_c9_a_BEFORE_side_partial_read_is_a_verdict_even_with_a_READABLE_delta(
+        monkeypatch, tmp_path):
+    """C9 (P2): the BEFORE half of `failed_any` had no test that could red.
+
+    Reverting `failed_any = _failed_keys(before) or _failed_keys(after)` to the
+    after-only form left the whole suite green, because the two tests that look like
+    they cover it seed a failure set that ALSO makes the delta unreadable (so the next
+    branch supplies the verdict) or fail BOTH sides. A before-side partial read with
+    three successful captures and a readable non-zero delta is the shape that
+    discriminates, and its absence reverted the cycle-6 defect.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/m4211_hierarchy")
+    keys = [k for k, _ in mod.QUERIES]
+    err = {"error": "TimeoutError: Timeout reading from socket"}
+    before = {k: (0 if k != "aboutObject_by_endpoint" else dict(err)) for k in keys}
+    after = {k: 1 for k in keys}          # clean, every count readable
+    seq = iter([dict(before), dict(after)])
+    monkeypatch.setattr(mod, "_run_queries", lambda g: next(seq))
+
+    class _Graph:
+        def query(self, *_a, **_k):
+            return _Result([[0]])
+
+    class _Proj:
+        g = _Graph()
+
+    class _FakeSDK:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def _get_proj(self):
+            return _Proj()
+
+        def create_object(self, *_a, **_k):
+            return {}
+
+        def _capture_session(self, conv, session_id=None):
+            return {"ok": True, "turns": 1, "extraction_mode": "mocked",
+                    "errors": [], "warnings": []}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("tortoise.sdk.TortoiseSDK", _FakeSDK)
+    body = mod.measure_writer()
+    assert body["delta_this_run"].get("turns_total") == 1, (
+        "the fixture's delta must be READABLE, or the next branch supplies the verdict "
+        "and this pin proves nothing")
+    assert body.get("unmeasurable"), (
+        "one BEFORE-side query raised, the delta was readable, and the arm published "
+        "itself as MEASURED")
+    assert "aboutObject_by_endpoint" in body["unmeasurable"]

@@ -872,25 +872,33 @@ def measure_instrument(uri: str) -> dict:
         # (which hardcodes ``"k": "event"``). Naming one writer for a mixed population
         # sent a reader looking for the wrong one, which is the asserted-vs-measured
         # class this PR already fixed for ``role_evidence.uri_source``.
-        "note": _instrument_note(kinds),
+        "note": _instrument_note(
+            kinds,
+            {"aboutObject_edges": total("aboutObject_edges"),
+             "turns_with_aboutObject": total("turns_with_aboutObject")}),
     })
 
 
-def _instrument_note(kinds: dict[str, int]) -> str:
-    """The instrument arm's attribution, derived from the breakdown it MEASURED.
+def _instrument_note(kinds: dict[str, int], totals: dict[str, int] | None = None) -> str:
+    """The instrument arm's attribution, derived from what it MEASURED.
 
-    #13919 review round 7: the note used to name one writer for the whole population,
-    "the fixture seeder ... writes the Session->turn CONTAINS edges". The arm's own
-    ``contains_targets_by_kind`` refutes that — on the censused population 12,606 of
-    37,605 CONTAINS targets are ``session-transcript``, and ``tortoise/retrieval.py``
-    records that kind as written ONLY by the eval ingest lane, "⚠️ NOR the ask-fixture
-    seeder" (which hardcodes ``"k": "event"``). So the population is NOT one
-    writer's output, and the honest note is the split this arm computed.
+    ⛔ ``totals`` IS REQUIRED FOR A TRUE NOTE (#13919 cycle 9). The previous signature
+    took only the kind breakdown and then asserted ``0 aboutObject`` unconditionally —
+    while the arm computes ``aboutObject_edges`` and ``turns_with_aboutObject`` a few
+    lines above and publishes them in the SAME body. On a population where the edge IS
+    present (the very answer the #4211 gate exists to detect) the artifact said 42 in
+    ``totals`` and 0 in its own ``note``. A generated field must not assert a number it
+    did not read; that is the ``role_evidence``/``~/.zshrc:48`` class this PR has
+    already fixed twice.
 
-    What survives, and is what the note is FOR: the ask-fixture seeder and the **v1**
-    ingest leg run no entity-link pass, so 0 ``aboutObject`` over that material describes
-    THEM. The writer arm measures the product's own capture path separately, which is
-    why the gate's answer does not depend on this note.
+    The attribution itself is from #13919 round 7: the note used to name one writer for
+    the whole population, "the fixture seeder ... writes the Session->turn CONTAINS
+    edges". The arm's own ``contains_targets_by_kind`` refutes that — on the censused
+    population 12,606 of 37,605 CONTAINS targets are ``session-transcript``, and
+    ``tortoise/retrieval.py`` records that kind as written ONLY by the eval ingest lane,
+    "⚠️ NOR the ask-fixture seeder" (which hardcodes ``"k": "event"``). So the
+    population is NOT one writer's output, and the honest note is the split this arm
+    computed — but only when it MEASURED a split.
 
     ⛔ And the causal claim is NARROWER than it first read (#13919 review round 9).
     ``tortoise/retrieval.py``'s citation names the eval ingest lane as
@@ -898,29 +906,50 @@ def _instrument_note(kinds: dict[str, int]) -> str:
     (R8) — ``MERGE (e)-[:aboutObject]->(o)`` and the ``E7 (D7)``
     ``MERGE (p)-[:aboutObject]->(o)`` parity route, gated on ``about_entities``
     resolving to an existing ``:Object``. ``ingest.py`` carries zero ``aboutObject``
-    writes. So this census's 0 also measures the ABSENCE OF v2 EXTRACTION OUTPUT in
-    these graphs — a fact about the population, not a property of "the eval ingest
-    lane". Saying otherwise would be the rounds-7/8 defect again, one layer down: the
+    writes. Saying otherwise would be the rounds-7/8 defect again, one layer down: the
     source check that stopped at ``ingest.py`` and missed its successor.
     """
     total = sum(kinds.values())
     if not total:
         return ("no CONTAINS targets were measured, so this run says nothing about "
                 "which writer produced the population")
+    totals = totals or {}
+    about = totals.get("aboutObject_edges")
     parts = ", ".join(f"{kind}={cnt}" for kind, cnt in kinds.items())
     turn_n = kinds.get("event", 0)
     chunk_n = kinds.get("session-transcript", 0)
+
+    if isinstance(about, int) and about > 0:
+        # ⛔ The edge IS present. State the MEASURED count and do NOT reason about a
+        # zero this run did not observe.
+        return (
+            f"CONTAINS targets by kind, MEASURED here: {parts} ({total} total; "
+            f"{turn_n} event / {chunk_n} session-transcript). `aboutObject` IS present "
+            f"on this population: {about} edge(s), with "
+            f"{totals.get('turns_with_aboutObject')} turn(s) carrying one. So the "
+            "writers behind these stores DID run an entity-link pass — `#2165` "
+            "(R8)/E7-D7 in `tools/longmem_eval/ingest_v2.py` is one of them — and the "
+            "#4211 question ('is there an edge for the arm to walk') is answered "
+            "AFFIRMATIVELY for them. The product's own capture path is what the "
+            "`writer` arm measures separately.")
+
+    mixed = ("This population is not one writer's output \u2014 `tortoise/retrieval.py` "
+             "records that `session-transcript` is written only by the eval ingest "
+             "lane, and `tools/ask_spotcheck.py::seed_capture_turn_store` hardcodes "
+             '`"k": "event"`' + ", so it writes none of them. " if chunk_n else
+             "This population carries only `event` targets, which the ask-fixture "
+             "seeder does write; `tortoise/retrieval.py` records that "
+             "`session-transcript` is written only by the eval ingest lane, and "
+             "NONE was measured here. ")
+
     return (
         f"CONTAINS targets by kind, MEASURED here: {parts} ({total} total; "
-        f"{turn_n} event / {chunk_n} session-transcript). This population is not one "
-        "writer's output — `tortoise/retrieval.py` records that "
-        "`session-transcript` is written only by the eval ingest lane, and "
-        "`tools/ask_spotcheck.py::seed_capture_turn_store` hardcodes `\"k\": \"event\"`, "
-        "so it writes none of them. Neither of those — the seeder, nor the eval "
-        "ingest V1 leg (`tools/longmem_eval/ingest.py`, zero `aboutObject` writes) — "
-        "runs the entity-link pass, so 0 `aboutObject` here describes THEIR output. "
-        "⛔ It does NOT describe the whole eval lane: its V2 leg "
-        "(`tools/longmem_eval/ingest_v2.py`) DOES write the edge by its own parity "
+        f"{turn_n} event / {chunk_n} session-transcript). " + mixed +
+        "Neither the seeder nor the eval ingest V1 leg "
+        "(`tools/longmem_eval/ingest.py`, zero `aboutObject` writes) runs the "
+        f"entity-link pass, and `aboutObject_edges` reads {about} here, so that 0 "
+        "describes THEIR output. \u26d4 It does NOT describe the whole eval lane: its V2 "
+        "leg (`tools/longmem_eval/ingest_v2.py`) DOES write the edge by its own parity "
         "route (#2165/E7-D7, gated on `about_entities`), so a census that reads 0 "
         "here also measures the ABSENCE OF v2 EXTRACTION OUTPUT in these graphs. "
         "The product's own capture path is what the `writer` arm measures, before "
