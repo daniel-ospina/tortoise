@@ -56,12 +56,13 @@ _AMBIENT = ("FLY_API_TOKEN", "FLY_MACHINES_FILE", "FLY_TOML", "FLY_APP",
 #: A PINNED SUBSET of the names the LIVE manifest declares `fly-toml-env` — NOT the
 #: full audited set. ⛔ Do not read it as one: the live set grows with every
 #: `fly-toml-env` DECLARATION — not with every `fly.toml [env]` key (`[env]` holds
-#: 20 keys while only 8 are declared `fly-toml-env`).
-#: The count ran 3 until `98dae4857a` (2026-10-26) declared a 4th, then 6 at
-#: `5f6ed5ae6a` (2026-11-17) — which is where THIS comment and the tuple were
-#: written, so "three names" was already stale on arrival; the set has grown since
-#: (7 at `e3f894b31b`, 8 with #13926). ⛔ So a count here is HISTORY, never a standing
-#: claim: state the rule, not the total.
+#: 20 keys while only 8 are declared `fly-toml-env`; that 8 is itself pending
+#: #13923, which owns `main`'s duplicate `TORTOISE_EMBEDDER_WARMUP` and may leave 7).
+#: This block and the tuple were written at `552e845ec5` (2026-09-28, #5656), when the
+#: manifest declared exactly 3 — precisely these three — so "the three names" was TRUE
+#: then. It went stale at `98dae4857a` (2026-10-26), which declared a 4th; the set
+#: stands at 7 by `e3f894b31b` and 8 with #13926. ⛔ A count here is HISTORY, never a
+#: standing claim: state the rule, not the total.
 #: `LIVE_NAMES` is fixture data for the tests below and is never compared against
 #: the real manifest; what is pinned is that a manifest edit is a DELIBERATE test
 #: change, not that this tuple covers the audited set.
