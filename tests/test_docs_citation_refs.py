@@ -3313,7 +3313,7 @@ def _d5_words(text: str, start: int):
 
 
 def _d5_flag_word(text: str) -> tuple[str, str] | None:
-    """`(option, attached_value)` for a plausible `grep` flag TOKEN, or `None` if it is not one.
+    r"""`(option, attached_value)` for a plausible `grep` flag TOKEN, or `None` if it is not one.
 
     `None` is what keeps prose out: while the flag word was a bag of characters it swallowed
     the closing backtick and the comma, so `` `grep -c`, '^[+-]$' `` became a prescription. A
@@ -3668,48 +3668,63 @@ def _d5_split_top_level(body: str, sep: str) -> list[str] | None:
 
 
 def _d5_class_members(char_class: str) -> set[str] | None:
-    """The single characters a `[...]` class matches, or `None` if it is not a plain set of them.
+    r"""The single characters a `[...]` class matches, or `None` if it is not a plain set of them.
 
-    A negated class, a RANGE (`[a-z]`, and `[+-z]` where the hyphen sits between two members) and
-    an incomplete escape are all answered `None` rather than interpreted.
+    A negated class and a RANGE (`[a-z]`, and `[+-z]` where the hyphen sits between two members)
+    are answered `None` rather than interpreted.
+
+    ⛔ BACKSLASH IS A LITERAL MEMBER INSIDE A BRACKET, NOT AN ESCAPE — MEASURED, and modelling it
+    as an escape was this helper's own false PASS (#13995 review round 11, P2). POSIX bracket
+    expressions have no escape sequences, and GNU grep 3.11 agrees: on a probe holding `+`, `-`,
+    a lone `\`, blank, `++` and `--`, `grep -cE '^[\-]$'` prints **2** — the class is `{`\`, `-`}`,
+    it matches the lone backslash as well as the hyphen. So:
+      * `^[+\-]$` and `^[\+\-]$` count **3** (they also match a lone `\`), i.e. a SUPERSET of this
+        class, while the escape model graded them as exactly it;
+      * `^[\-+]$` is not even a valid expression — `grep: Invalid range end`, rc 2 — because a
+        `-` between two members is a RANGE and `\`(0x5C)..`+`(0x2B) is reversed. The predicate
+        accepted it while the docstring said it did not.
     """
     content = char_class[1:-1]
     if not content or content[0] == "^":
         return None
     members: set[str] = set()
-    escaped = False
     for index, char in enumerate(content):
-        if escaped:
-            members.add(char)
-            escaped = False
-            continue
-        if char == "\\":
-            escaped = True
-            continue
         if char == "-" and 0 < index < len(content) - 1:
-            return None  # an unescaped `-` between members is a RANGE, not a member
+            return None  # a `-` between members is a RANGE, not a member
         members.add(char)
-    return None if escaped else members
+    return members
 
 
 def _d5_counts_the_blank_class(expr: str) -> bool:
     r"""Does `expr` count exactly the lines that are one `+` or one `-`?
 
     ⛔ A BOUNDED EQUIVALENCE, NOT A REGEX-EQUIVALENCE DECISION (#13995 review, P2 — MEASURED).
-    The test this replaces was a SPELLING LIST, `\^(?:\\[+-]|\[[-+]+\])\$`, so
-    `^[+\\-]$` and `^(\\+|-)$` — the same class, measured `2` on the 4-line probe — were read as
+    The test this replaces was a SPELLING LIST, `\^(?:\\[+-]|\[[-+]+\])\$`, so `^[-+]$` and
+    `^(\+|-)$` — the same class, each measured `2` on the 4-line probe — were read as
     expressions of some OTHER class. Two consequences, both measured: a second blank-class
     prescription spelled either way left the arm GREEN (a false PASS), and putting one in place
     of the row's own expression tripped the ZERO assertion, whose message blames the count READER
     for a spelling the CLASS TEST was the one to reject (a false RED with a misattributed cause).
 
-    Accepted here, each measured: `^[+-]$`, `^[+\-]$`, `^[-+]$`, and the alternation forms
-    `^(\+|-)$` and `^(?:\+|-)$`. `^[\-+]$` is NOT among them: GNU grep answers `Invalid range
-    end`, rc 2, so it is not a spelling a working document can carry (measured). What it does NOT
-    decide is stated at
-    the assertion that uses it: a regex equivalent to this class but spelled differently
-    (`^[+]$|^[-]$`, a lookahead, a POSIX class) is not recognised — a declared residual, not a
-    claim of closure. ⛔ A LONE SIGN IS NOT THIS CLASS, AND IS REJECTED (#13995 review round 10,
+    Accepted here, each measured `2` on the 4-line probe: `^[+-]$`, `^[-+]$`, and the
+    alternation form `^(\+|-)$`.
+
+    ⛔ AND THREE SPELLINGS THAT LOOK EQUIVALENT ARE NOT, EACH MEASURED (#13995 review round 11,
+    P2 — this predicate graded all three as the class while the docstring called two of them
+    accepted equivalences):
+      * `^[+\-]$` / `^[\+\-]$` count **3**, not 2: a backslash INSIDE a bracket is a LITERAL
+        member (POSIX; measured `grep -cE '^[\-]$'` -> `2`, matching a lone `\` as well as a
+        lone `-`), so these match a lone backslash too — a superset, not this class;
+      * `^[\-+]$` is not a spelling a working document can carry at all: `grep: Invalid range
+        end`, rc 2 (`-` between two members is a range, `\`..`+` reversed);
+      * `^(?:\+|-)$` is not POSIX ERE: GNU grep warns `? at start of expression` and prints
+        **1**, i.e. it counts only the REMOVED half — the same narrowing this predicate refuses
+        for `^-$`, one spelling over. An ordinary group is fine; a non-capturing one is not.
+
+    What it does NOT decide is stated at the assertion that uses it: a regex equivalent to this
+    class but spelled differently (`^[+]$|^[-]$`, a lookahead, a POSIX class) is not recognised —
+    a declared residual, not a claim of closure. ⛔ A LONE SIGN IS NOT THIS CLASS, AND IS REJECTED
+    (#13995 review round 10,
     P2 — MEASURED): this test used to accept `^-$` and `^+$` as "one `+` or one `-`", which is
     false in both directions — `^-$` counts ONLY the removed half (measured `0` on a diff whose
     only blank line is added), and `^+$` is not a regex at all (`grep: Invalid preceding
@@ -3725,10 +3740,12 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
     if alternatives is None:
         return False
     if len(alternatives) == 1 and body.startswith("(") and body.endswith(")"):
-        inner = body[1:-1]
-        if inner.startswith("?:"):
-            inner = inner[2:]
-        nested = _d5_split_top_level(inner, "|")
+        # ⛔ A PLAIN GROUP ONLY. `(?:…)` is PCRE, not POSIX ERE: GNU grep warns `? at start of
+        # expression` and prints 1 — the removed half only — so stripping the `?:` and grading
+        # it as two alternatives was a false PASS (#13995 review round 11, P2 — measured).
+        # Leaving the `?:` in place makes the split yield `?:\+` and `-`, and `? : +` is not a
+        # sign, so the non-capturing form falls out as NOT this class without a special case.
+        nested = _d5_split_top_level(body[1:-1], "|")
         alternatives = nested if nested is not None else alternatives
     if len(alternatives) == 1:
         alternative = alternatives[0]
@@ -3830,7 +3847,7 @@ def _d5_blank_count_expression() -> str:
         "row may still PRESCRIBE one in a spelling the count reader cannot see (an unquoted "
         "expression; a pattern supplied on `-e`/`-f`); or the reader DID read it and "
         "`_d5_counts_the_blank_class` rejected the spelling — measured on a row spelled "
-        "`^[+\\-]$`, which counts the same class and is graded as this one now — which is a "
+        "`^[-+]$`, which counts the same class and is graded as this one now — which is a "
         "class-test gap and not a reader gap; or the row prescribes the COMPLEMENT "
         "(`grep -vc '^[+-] …'`) — read, and refused BY DESIGN by `_inverts_the_match_set`; or the "
         "row asks for a count whose output `grep` SUPPRESSES OR REPLACES (`-q` prints nothing, "
@@ -4143,17 +4160,17 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
 
     # ⛔ THE BLANK-CLASS TEST IS A BOUNDED EQUIVALENCE, NOT A SPELLING LIST (#13995 review, P2 —
     # MEASURED). Each spelling below counts the SAME class (`2` on the 4-line probe). The old test,
-    # `\^(?:\\[+-]|\[[-+]+\])\$`, carried the first and the third of these and REJECTED the other
-    # three — measured on the pre-fix reader — in both directions: as a SECOND prescription it left
+    # `\^(?:\\[+-]|\[[-+]+\])\$`, carried the first and the third of these and REJECTED the
+    # other — measured on the pre-fix reader — in both directions: as a SECOND prescription it left
     # the arm GREEN (false PASS), and in place of the row's own expression it tripped the ZERO
     # assertion whose message blamed the count READER (false RED, misattributed). The two the list
     # already carried are kept as controls, so a narrowing that loses them reds here too.
+    # ⛔ `^[+\-]$` and `^(?:\+|-)$` USED TO BE IN THIS LOOP AND ARE NOT THE CLASS — measured, see
+    # the rejection loop below (#13995 review round 11, P2).
     for equivalent_class in (
         "grep -cE '^[+-]$'",           # the form the row itself uses
-        "grep -cE '^[+\\-]$'",         # the hyphen escaped inside the class
         "grep -cE '^[-+]$'",           # members in the other order
-        "grep -cE '^(\\+|-)$'",        # alternation inside a plain group
-        "grep -cE '^(?:\\+|-)$'",      # …and a non-capturing group
+        "grep -cE '^(\\+|-)$'",        # alternation inside a PLAIN group
     ):
         assert _d5_blank_class_prescriptions(
             f"a prescription: `{equivalent_class}`\n") == [
@@ -4188,6 +4205,34 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
             "line is added) and `^+$` is not a regex grep accepts. Grading it would let the "
             "row's instrument narrow while this arm reported the class as graded "
             "(#13995 review round 10, P2)")
+
+    # ⛔ …AND THREE SPELLINGS THAT LOOK EQUIVALENT ARE NOT, EACH MEASURED (#13995 review round
+    # 11, P2). The predicate graded all four of these spellings as the class while this file's
+    # own docstring said two of them counted something else — the "state what you measured" rule
+    # (#1469-1470), failed in code rather than in prose this time. Probe for every number below:
+    # a file holding `+`, `-`, a lone `\`, a blank line, `++`, `--`.
+    for not_the_class, why in (
+        ("^[+\\-]$", "counts 3, not 2: a backslash INSIDE a bracket is a LITERAL member "
+                       "(POSIX; measured `^[\\-]$` -> 2, matching a lone `\\` as well as a "
+                       "`-`), so this also counts a line that is one backslash — a SUPERSET of "
+                       "the class, not the class"),
+        ("^[\\+\\-]$", "is the same literal-backslash superset and also counts 3"),
+        ("^[\\-+]$", "is not an expression grep will run at all: `Invalid range end`, rc 2 — "
+                      "`-` between two members is a RANGE and `\\`(0x5C)..`+`(0x2B) is "
+                      "reversed — so a row spelled this way counts NOTHING, not this class"),
+        ("^(?:\\+|-)$", "is not POSIX ERE: GNU grep warns `? at start of expression` and "
+                         "prints 1, i.e. it counts ONLY the removed half — the same narrowing "
+                         "refused for `^-$`, one spelling over"),
+    ):
+        assert not _d5_counts_the_blank_class(not_the_class), (
+            f"{not_the_class!r} must NOT be graded as the blank class: it {why}. Grading it "
+            "reports the row's instrument as the one the sentence names while grep counts "
+            "something else — the false PASS #13962 exists to retire (#13995 review round 11, "
+            "P2)")
+        assert _d5_blank_class_prescriptions(f"a prescription: `grep -cE '{not_the_class}'`\n") == [], (
+            f"a prescription spelled {not_the_class!r} must not be GRADED as a BLANK-class "
+            "count — as a second prescription it would leave the `== 1` arm GREEN while the row "
+            "carried an instrument that does not count this class (#13995 review round 11, P2)")
 
 
 def test_the_d5_count_reader_reads_the_LONG_spelling_and_the_ABBREVIATION_of_a_flag():
