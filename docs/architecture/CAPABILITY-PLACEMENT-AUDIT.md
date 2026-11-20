@@ -380,10 +380,10 @@ READER uses it (a predicate **inside** a walk, or an answer **composed** with on
 | `tortoise/domain_validators.py:241-243` | `MATCH (n:Point {status:'draft'}) WHERE n.is_operator = false AND NOT (n)--()` — the `orphaned_draft` rule (#131) tests **existence of any edge**, which is adjacency | **adjacency** |
 | **the whole-node accessor family** — `tortoise/sdk.py:27614`, `:28513`, `:30171`, `:30267`, `:30366` (`get_point`'s `_cache_answer`), `:43995`; `tortoise/record_serve.py:468` (`READ_POINT_BY_ID`, `status=SERVED`); `tortoise/projection/__init__.py:14169`; and the label-generic `tortoise/record_reconcile.py:533` | `MATCH (n:Point …) RETURN properties(n)` — the **whole node**, handed back as a dict. ⚠️ **A whole-node read IS a reader in this census** (§2.4 counts it for `capture_redactions`, row 14 for `Point.mentions`), and an earlier draft omitted the whole family from this table while counting it elsewhere — which is how the `story_arc` "zero readers" error survived three drafts | **none** |
 
-**Verdict: `graph`.** Nineteen reader rows — **thirteen capability-carrying**, **four deliberately `none`**
+**Verdict: `graph`.** Eighteen reader rows — **thirteen capability-carrying**, **four deliberately `none`**
 (`search_engine.py:4878-4880`, a plain label scan; `domain_validators.py:105`, a property-equality join;
-`sdk.py:41542`, a filtered EP listing; and the whole-node accessor family above), and **two that are
-capability-carrying in form and dead as evidence** (`propagation.py:81`/`:86`). The thirteen span **six files**
+`sdk.py:41542`, a filtered EP listing; and the whole-node accessor family above), and **one row (two lines)
+that is capability-carrying in form and dead as evidence** (`propagation.py:81`/`:86`). The thirteen span **six files**
 (`ep.py`, `sdk.py`, `mcp_server.py`, `projection/edges.py`, `search_engine.py`, `domain_validators.py`) — the
 four `none` rows bring `record_serve.py`, `projection/__init__.py` and `record_reconcile.py` as well; a
 record-backed copy could not answer any of them without re-implementing belief
@@ -687,7 +687,7 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 
 | # | shape | readers (summary) | needs graph? | verdict | one-line reason |
 |---|---|---|---|---|---|
-| 1 | `:Point` core (`id`, content, `pointKind`, `status`) | §2.1, 19 reader rows (13 capability-carrying + 4 `none` + 2 named-but-dead) | **yes** — EP walk, `IMPL`/`NAND`/`TAGGED`/`extractedFrom` adjacency, FTS, HNSW — **all five** capabilities | **graph** | the belief walk *is* the product; **all five** capabilities read it |
+| 1 | `:Point` core (`id`, content, `pointKind`, `status`) | §2.1, 18 reader rows (13 capability-carrying + 4 `none` + 1 named-but-dead row) | **yes** — EP walk, `IMPL`/`NAND`/`TAGGED`/`extractedFrom` adjacency, FTS, HNSW — **all five** capabilities | **graph** | the belief walk *is* the product; **all five** capabilities read it |
 | 2 | `:Point.ep_*`, `baseline_set`, `confidence` | **the live walk**: `ep.py:1620-1632`, swept per label from `live.py:667` (`EPISTEMIC_LABELS`). ⚠️ **Not** `projection/propagation.py:81,86` — dead (`_compute_confidence` has no production caller) — and **not** `sdk.py:41542`, a filtered listing with no walk, which §2.1 now files `none` | **yes** — EP state | **graph** | there is no EP in SQL without building one |
 | 2b | `:Point.is_episodic` (the turn discriminator) | **a predicate INSIDE eight `CONTAINS` walks** — `sdk.py:3132-3135` (`_capture_turn_ids`), `:4373` (the `collect(t.id)` prior read, `:4368-4375`), `session_schema.py:857` (short turns) and `:912` (entity-link under-count), `hosted_api.py:45032` (the hosted prior turn count), and three walks the tables above cite for adjacency only or not at all: the two capture retry-**heal** scans `sdk.py:19956-19958` (`_capture_session`) and `hosted_api.py:21195-21196` (`coalesce(n.is_episodic, false) <> true`, READ-then-STAMP — the ids the predicate keeps are stamped back at `sdk.py:19819` / `hosted_api.py:21207`) and the C4 turn-shape filter `session_reinjection.py:568-570` (`_TURN_SHAPE_FILTER` at `:268` = `coalesce(p.is_episodic, false) = true AND …`, inside the `(s)-[:CONTAINS]->(p:Point)` walk). ⚠️ **Three label scans read the same property with NO walk at all** — `cache_eviction.py:229` (`POPULATION_RESIDENT_COUNT`'s `turn` population), `projection/__init__.py:13760` (the PRE-wipe episodic `:Point` roster, which fails closed rather than degrade), `quota.py:1307-1309` (the quota count's `(n:Point AND (n.is_episodic IS NULL OR n.is_episodic = false))` arm, beside the `:Object`/`:Subject` and `:Event` arms) — and each is **`none`** capability: a label scan filtered on a property is the same SQL shape that makes row 2e's sweeps `record_only`. The row's **`graph`** verdict rests on the eight walks alone, never on these; they are listed because "in no row at all" is this census's own named failure class, and these three were in no row until this revision | **yes** — it decides which members each walk counts | **graph** | every one of those walks visits a different set, and returns a different count, if this predicate moves — §2.4's rule 1, applied to a property rather than a label. ⛔ **`eight` is a LOWER BOUND, and the row says so on purpose**: three consecutive revisions said three, then five, then eight, and **the verdict needs only ONE site** — the count's job is to stop a lane reading the row as exhaustive. The two misses were the **negative** arms (`<> true` at the two heals) and a predicate spliced in by string concatenation (`session_reinjection.py`); the check that finds the rest is `git grep -n 'is_episodic' -- 'tortoise/*.py'` read for a `CONTAINS` in the same statement, not another review cycle |
 | 2c | `:Point.speaker` | `sdk.py:45114` — `RETURN n.id, ev.startedAt, n.speaker, t.speaker, …`, a **sibling column** of the ask-annotation query's `OPTIONAL MATCH (n)<-[:CONTAINS]-(s:Session)` leg (whose answer is `collect(DISTINCT s.created_at)`); written at `sdk.py:2869` (`t.speaker=turn.speaker`); no `WHERE` names it anywhere | **no** — `none` capability | **`record_only`** (property-level) | a per-point string read straight off the node; the walk beside it collects session timestamps, not speakers — §2.4's sibling rule |
@@ -703,7 +703,7 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 | 7b | `:Session` telemetry — the **sibling** members of row 7 plus the remainder (`capture_ok`, `capture_extractor`, `capture_lane`, `entity_links_attempted`, `harness`, `actor_user_id`, `capture_redactions`, `machine_id`, `model`, `client_captured_at*`, `value_nodes_*`, `draft_count`, `commit_count`) | **sibling columns / plain projections** — `hosted_api.py:24770-24802` (`list_sessions`: `s.machine_id, s.model` at `:24791`, `s.capture_ok, s.capture_extractor` at `:24797`, the provenance triplet at `:24801`, each beside `count(p)`), `sdk.py:58105-58129` (the session-detail point lookup — **no walk in the statement**), `session_schema.py:855-861`/`:916-917` (reported beside the retrofit walks), `sdk.py:19302`; point lookups and `SET`-that-reads: `hosted_api.py:22307-22308` (the commit-state load, which names BOTH `value_nodes_*` members), `:22980-22981` (`value_nodes_created`, inside the commit atom), `:22982-22985` (`draft_count`, `commit_count`), `:24493-24497` (**`value_nodes_held`** — its own `:Session` `MERGE`/`SET` with no `:CommitRecord` in the statement, §2.4's split), `sdk.py:4234-4237`; whole-node reads for `capture_redactions` (`tools/backfill_copy_turns.py:188-192`, `projection/__init__.py:14484`) | **no** — `none` capability | **`record_only`** (property-level; §6.1) | read, but by nothing that needs the graph — property projections, property guards and node dumps, not edges. ⚠️ **The four sibling members (`capture_ok`, `capture_extractor`, `capture_lane`, `entity_links_attempted`) were in row 7 until the `#13095` review**; they are siblings of the walks that made the round trip look, and §2.4's rule is what moved them. The counter increments stay graph-coupled, so see §6.1 |
 | 8 | `:Object` / `:Subject` core | §2.5 | **yes** — `aboutObject` adjacency (`assembly.py:2632`), the `-[r]->` walk (`sdk.py:37720`) **and a fulltext index on `name`** | **graph** | an Event reaches its Object by EDGE; ⚠️ `supersededBy` is a **string matched by equality** (`audit.py:817`), not a walk — SQL-shaped, and an earlier draft wrongly cited it as the reason |
 | 9 | `story_arc` (on **any** label) | **no Cypher query NAMES it** — but six whole-node reads carry it (`sdk.py:27614`, `:28513`, `:30171`, `:30267`, `:30366`, `:43995`); capability **`none`** | **no** | **`record_only`** ⛔ **move gated on a deliberate pin decision** (§5.1) | its one NAMED reader is `public.session_narrative`; the graph carries it only via `RETURN properties(n)`, which is `none`-capability by the same disposition row 14 gives `Point.mentions`; the mechanism CAN deny it, two policy pins currently refuse the entry |
-| 10 | `:GraphEvent` | §2.6 | **no** | **`record_only`** ⛔ blocked | ordered scan + aggregates; no record table (§5.2) |
+| 10 | `:GraphEvent` | §2.6 | **no** | **`record_only`** ⛔ blocked | ordered scan + aggregates; no `NODE_TABLES` record table and no tier column (§5.2) — `public.journal_event` exists but is not a field-for-field superset (§6.3) |
 | 11 | bookkeeping labels (§2.7) | §2.7 | **no** | **`record_only`** ⛔ blocked | key lookups and label scans; no record table (§5.2) |
 | 11c | `:OnboardingState` / `:OnboardingStep` | §2.7 | **yes** — `completed_steps()` walks `COMPLETED_STEP` | **graph** | the docstring is explicit: *"Canonical completed-step ids from the edge set (never a second store)"* — the edge IS the store |
 | 11b | `:Tag` | §2.5 | **yes** — `TAGGED` is how every tag is read | **graph** | the edge is the read; the node is its endpoint |
@@ -939,11 +939,14 @@ The census's largest non-Point verdict (`:GraphEvent`, §2.6) and twelve bookkee
 
 > `cache_tier` is a column on **`public.point`**. `read_record_view` applies the tier predicate **only**
 > where `NODE_TABLES[label] == 'point'` (`cache_projection.py:3841`), and a `record_only` row only has
-> meaning because a **record table holds it**. A shape with **no record table** has nowhere for the row to
-> live once the graph refuses it.
+> meaning because a **record table holds it**. A shape with **no `NODE_TABLES` record table** has nowhere
+> for the row to live once the graph refuses it. ⚠️ That is "no **tiered** record table", not "no record
+> home exists": `public.journal_event` DOES exist for `:GraphEvent` (§6.3) — it is simply not a
+> `NODE_TABLES` row and carries no `cache_tier` column, which is what the mechanism needs.
 
-So for `:GraphEvent` and the twelve bookkeeping labels the sequence must be: **give it a record home**
-(a `journal_event`-backed feed for `:GraphEvent`; a table for the others) → **then** tier it. That is
+So for `:GraphEvent` and the twelve bookkeeping labels the sequence must be: **give it a `NODE_TABLES`
+record home with a tier column** (for `:GraphEvent`, first *proving* `journal_event` is a field-for-field
+superset — §6.3 shows it is not today; a table for the others) → **then** tier it. That is
 `#13082` Phase 1 territory ("a migrated query must be *deleted* from the graph path in the same PR, and
 the graph-side data it needed becomes a candidate for `record_only` in the next capability audit").
 
@@ -955,7 +958,7 @@ eviction policy — that is `#13084` and P0-c.
 
 | precondition | shapes it blocks | what unblocks it |
 |---|---|---|
-| **no record table** → no tier can refuse the row | `:GraphEvent`, `:ContextSubscription`, the eleven other bookkeeping labels | a record home, then `cache_tier` (§5.2) |
+| **no `NODE_TABLES` record table** (and no tier column) → no tier can refuse the row | `:GraphEvent`, `:ContextSubscription`, the eleven other bookkeeping labels | a tiered record home, then `cache_tier` (§5.2); for `:GraphEvent` that starts with proving `journal_event` is a field-for-field superset, which it is **not** today (§6.3) |
 | **a policy pin** → the declaration is refused although the seam would honour it | `point.story_arc` **and** `Point.mentions` (§3 row 14) — ONE precondition, TWO shapes | `#10429`: widen the completeness pin with a tail-only category (§5.1). ⚠️ What refuses any new entry regardless of label is the *exact-dict* pin, not the completeness pin (`tests/test_cache_projection.py:186-195` compares `{source, event}` to the WHOLE `CACHE_FORBIDDEN_COLUMNS`) — which is why it blocks both shapes and why naming only `story_arc` here was an error |
 | **a record table but no tier COLUMN** → having a row is not having a tier | every non-`:Point` label whose move is **whole-label** (none in this census — §3 rows 1/4/5/6/8 all read a capability and are all `graph`; §1's record-table column is NOT a move criterion, and reading it as one is the error this cell corrects) | a `cache_tier` column (one migration per label) **plus** the `if table == "point"` arm at `cache_projection.py:3841` widened; ⚠️ this does **not** unblock row 7b, which is a **property-level** move the row-level tier cannot express (§6.1) |
 
@@ -1072,10 +1075,34 @@ rules are arguable here.
 ### 6.3 `:GraphEvent` — the *verdict* is settled, the *move* is not
 
 - **The question:** *does `public.journal_event` already carry every field `poll_events` serves, with a
-  stable cursor?* The census says every `:GraphEvent` emit sits behind a journal append (`sdk._emit_event`
-  → `event_store.append_event`), and `journal_event` is the position table — so the answer is very likely
-  yes, which would make the move a **feed re-pointing** rather than a new store. **Verify the field-for-field
-  match on a real tenant before proposing it**; a cursor that moves by one is a silent subscriber gap.
+  stable cursor?* ⛔ **The premise that this would be an easy yes is FALSE, and the code says so in three
+  places.** An earlier revision of this paragraph claimed "every `:GraphEvent` emit sits behind a journal
+  append" and concluded the move was "very likely" a feed re-pointing. It is not:
+
+  1. **`_emit_event`'s own contract** (`sdk.py:15958-15962`): the JSONL half is written only *when* `point`,
+     `id` or `turns` is provided — *"Events with NONE of the three are skipped (nothing meaningful to log)."*
+  2. **`append_event`'s own contract** (`event_store.py:808`, and again in its module docstring at `:58`):
+     *"a payload-only emit writes one with no JSONL record at all."*
+  3. **A shipped call site in exactly that class** — the turn hard delete (`sdk.py:3777`): it emits
+     `PointRetracted` as an `:GraphEvent` subscriber row and *separately* calls
+     `_journal_entity_mutation("Point", tid, "delete")` for the JSONL half, whose record is `EntityMutated`
+     (folded by `_delete_entity_by_id`). The surrounding comment states the split as a contract — *"Two
+     stores, one meaning each"* — so `journal_event` does not carry the same **event type**, let alone every
+     field of it.
+
+  A missing event type is worse than the off-by-one cursor the old paragraph warned about: a subscriber would
+  see a stream that is complete-looking and silently short. **Verify the field-for-field match against
+  `poll_events`, event type by event type, on a real tenant before proposing it.**
+
+- ⚠️ **And "no record table" was the wrong words for a label whose stream table EXISTS.**
+  `public.journal_event` is real (`supabase/migrations/20261012000001_record_event_stream.sql:81`), and the
+  migration's own `COMMENT ON TABLE` (`:93-94`) calls it *"the append-only record of what happened
+  (GraphEvent)"* — enforced by the trigger created at `:111` from the function at `:96`, with exactly one
+  exception (`:104-106` permits a DELETE when `app.record_journal_purge = 'on'`, the tenant-erasure path).
+  The accurate statement is **"no `NODE_TABLES` record table, and no `cache_tier` column"** — which is the
+  precondition that actually blocks the move (§5.2), and a different fact from "no record home exists".
+  The `#13094` work is therefore **not** "build a store": it is "prove, event type by event type, that the
+  existing stream is a field-for-field superset — and if it is not, add what is missing".
 
 ### 6.4 `:Source.embedding` on a non-episodic Source — **decided 2026-11-17, cited not reopened**
 
