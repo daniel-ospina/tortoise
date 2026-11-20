@@ -993,7 +993,7 @@ class TestS3:
             def __init__(self):
                 self.calls = []
 
-            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False, **_ignored):
+            def _tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False, **_ignored):
                 self.calls.append((query, entity_type))
                 if entity_type == "object":
                     return [{"id": "obj-1", "content": "single-flash pipeline",
@@ -1029,7 +1029,7 @@ class TestS3:
             def _get_proj(self):
                 return EmbeddedProjection()
 
-            def tortoise_fts_query(self, *args, **kwargs):
+            def _tortoise_fts_query(self, *args, **kwargs):
                 self.calls += 1
                 return []
 
@@ -1058,7 +1058,7 @@ class TestS3:
             def _get_proj(self):
                 raise RuntimeError("transient open failure")
 
-            def tortoise_fts_query(self, *args, **kwargs):
+            def _tortoise_fts_query(self, *args, **kwargs):
                 self.calls += 1
                 return []
 
@@ -1092,7 +1092,7 @@ class TestS3:
             def _get_proj(self):
                 return FlaglessProjection()
 
-            def tortoise_fts_query(self, *args, **kwargs):
+            def _tortoise_fts_query(self, *args, **kwargs):
                 self.calls += 1
                 return []
 
@@ -1121,7 +1121,7 @@ class TestS3:
             def __init__(self):
                 self.calls = []
 
-            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False, **_ignored):
+            def _tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False, **_ignored):
                 self.calls.append((query, entity_type))
                 # the REAL callee row shape: ``SearchResult.to_dict()`` keys
                 # the kind as ``point_kind`` (#4511) — never ``kind``.
@@ -1159,7 +1159,7 @@ class TestS3:
         """
 
         class MockSDK:
-            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False, **_ignored):
+            def _tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False, **_ignored):
                 return {
                     "point": [{"id": "pt-1", "content": "flash is the path",
                                "point_kind": "statement"}],
@@ -1195,7 +1195,7 @@ class TestS3:
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
 
         class MockSDK:
-            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False, **_ignored):
+            def _tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False, **_ignored):
                 if entity_type == "object":
                     return [{"id": "obj-1", "content": "single-flash pipeline",
                              "point_kind": "core:plan"}]
@@ -1231,7 +1231,7 @@ class TestS3:
             candidate window is filtered by ``exclude_turn_echo_session``
             before it is returned."""
 
-            def tortoise_fts_query(self, query, *, entity_type, limit=3,
+            def _tortoise_fts_query(self, query, *, entity_type, limit=3,
                                    include_terminal=False,
                                    exclude_turn_echo_session=None, **_ignored):
                 if entity_type != "point":
@@ -1364,7 +1364,7 @@ class TestS3:
             def __init__(self):
                 self.seen = {}
 
-            def tortoise_fts_query(self, query, *, entity_type, limit=3,
+            def _tortoise_fts_query(self, query, *, entity_type, limit=3,
                                    include_terminal=False,
                                    exclude_turn_echo_session=None, **_ignored):
                 self.seen[entity_type] = exclude_turn_echo_session
@@ -1415,7 +1415,7 @@ class TestS3:
             def __init__(self):
                 self.asked = []
 
-            def tortoise_fts_query(self, query, *, entity_type, limit=3,
+            def _tortoise_fts_query(self, query, *, entity_type, limit=3,
                                    include_terminal=False,
                                    exclude_turn_echo_session=None, **_ignored):
                 self.asked.append((entity_type, limit, exclude_turn_echo_session))
@@ -1447,7 +1447,7 @@ class TestS3:
         would turn this test into a tripwire on every future private kwarg
         instead of on the one behaviour it names."""
         class StrictMockSDK:
-            def tortoise_fts_query(self, query, *, entity_type, limit=3,
+            def _tortoise_fts_query(self, query, *, entity_type, limit=3,
                                    include_terminal=False, _record_reads=True,
                                    _valid_time_rerank=True):
                 return []
@@ -1462,7 +1462,7 @@ class TestS3:
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
 
         class MockSDK:
-            def tortoise_fts_query(self, query, *, entity_type, limit=3,
+            def _tortoise_fts_query(self, query, *, entity_type, limit=3,
                                    include_terminal=False,
                                    exclude_turn_echo_session=None, **_ignored):
                 if entity_type != "point":
@@ -1487,7 +1487,7 @@ class TestS3:
         from tortoise.retrieval import is_turn_echo_row
 
         class MockSDK:
-            def tortoise_fts_query(self, query, *, entity_type, limit=3,
+            def _tortoise_fts_query(self, query, *, entity_type, limit=3,
                                    include_terminal=False,
                                    exclude_turn_echo_session=None, **_ignored):
                 if entity_type != "point":
@@ -1561,7 +1561,7 @@ class TestS3:
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
 
         class BoomSDK:
-            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False, **_ignored):
+            def _tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False, **_ignored):
                 raise ConnectionError("graph unreachable")
 
         res = v2.search_graph(BoomSDK(), S2_FIXTURE, "STORY")

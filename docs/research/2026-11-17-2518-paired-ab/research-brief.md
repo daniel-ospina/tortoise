@@ -47,7 +47,7 @@ resolves **7.82 pp**; 5 pp needs **~733 per arm** and 3 pp **~2,037 per arm** (a
 
 ⛔ **And the comparison was worse than underpowered — it was structurally blind, which the call site
 fixes and this control reproduces as a gate, not as a measured effect.** `entity_key_expansion` arms only
-when `entity_type == "point"` (`TortoiseSDK.tortoise_fts_query` in `tortoise/sdk.py`: both halves sit
+when `entity_type == "point"` (`TortoiseSDK._tortoise_fts_query` in `tortoise/sdk.py`: both halves sit
 behind `entity_key_expansion and entity_type == "point"`), and `tools/candidate_recall_11901.py` measures the
 **OBJECT** leg. The control below ran the object arm on the same frozen corpus and the same box, back to
 back (`paired-object-60-control.json`, n = 60) — over an **independent draw** from the same 1,000-name
@@ -62,7 +62,7 @@ ranked lists for the **point** arm only: both sides were `None`, so the "identic
 switch states" was `None == None` for every item — a constant no retrieval behaviour can move, published
 as a measurement (`#13267` F1). The identity is TRUE, and it is a **call-site fact**
 (`entity_key_expansion and entity_type == "point"`, both halves of
-`TortoiseSDK.tortoise_fts_query` — cited by predicate and symbol, never by `file:line`, which had already
+`TortoiseSDK._tortoise_fts_query` — cited by predicate and symbol, never by `file:line`, which had already
 drifted when this was re-reviewed, `#13267` F3), not something that artifact measured. The **committed**
 artifact carries `identity_measured: false` with those counts `null` rather than a number — a post-hoc
 annotation on a legacy run, not something a re-run would emit: the tool now emits `identity_measured`

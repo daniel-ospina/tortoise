@@ -77,12 +77,12 @@ class FakeSDK:
         self.points: list[dict] = []
         self.closed = False
 
-    def create_point(self, **kw):
+    def _create_point(self, **kw):
         pid = f"p{len(self.points)}"
         self.points.append({"id": pid, **kw})
         return {"id": pid}
 
-    def recall_state(self, query=None, *, kind=None, limit=10,
+    def _recall_state(self, query=None, *, kind=None, limit=10,
                      object_centric=True, leg_trace=None):
         if self.fail_probe:
             raise RuntimeError("store down")

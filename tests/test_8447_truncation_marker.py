@@ -280,7 +280,7 @@ class TestHostedResponseCarriesIt:
                 # substitutes `_data_sdk` must model the attach.
                 return object()
 
-            def tortoise_fts_query(self, q, limit=10, read_status_out=None,
+            def _tortoise_fts_query(self, q, limit=10, read_status_out=None,
                                    _truncation_out=None, **_ignored):
                 if _truncation_out is not None:
                     _truncation_out.update(marker)
@@ -1514,7 +1514,7 @@ class TestTheCensusNamesItsEvidenceHome:
 # joins this list") only means something if the list is TRUE. It has now shipped
 # wrong TWICE as a cardinality claim — first "the only place the marker is
 # written" (when `/v1/search` was already the second site), then "TWO sites meet
-# it today" (when `sdk.py::issue_insight` had been a third site all along, and
+# it today" (when `sdk.py::_issue_insight` had been a third site all along, and
 # already had its own `truncated` row in the rendered surface doc). A lane
 # auditing #8447 starts from this register, so a count that has quietly gone
 # stale makes it conclude a real site does not write the marker — the same
@@ -1681,8 +1681,8 @@ class TestTheMarkerSiteRegisterIsComplete:
         assert sites == {
             "tortoise/hosted_api.py::list_points",
             "tortoise/hosted_api.py::search",
-            "tortoise/sdk.py::issue_insight",
-            "tortoise/sdk.py::tortoise_fts_query",
+            "tortoise/sdk.py::_issue_insight",
+            "tortoise/sdk.py::_tortoise_fts_query",
         }, sites
 
     def test_every_marker_call_site_is_named_in_the_register(self):
@@ -1702,7 +1702,7 @@ class TestTheMarkerSiteRegisterIsComplete:
         invisible to anyone reading the register.
         """
         doc = self._module_docstring()
-        assert "tortoise/sdk.py::issue_insight" in doc, (
+        assert "tortoise/sdk.py::_issue_insight" in doc, (
             "the register omits `issue_insight`, which calls `_mark_truncation` "
             "on a plain `[:limit]` cut — no offset, no cursor")
 

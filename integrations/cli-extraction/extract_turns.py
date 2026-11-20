@@ -994,7 +994,7 @@ def _created_by_other_source(p):
 
 def _source_points():
     # public door: query() filters Points by property, terminal statuses included
-    return sdk.query(extractedFrom=source, include_retracted=True)
+    return sdk._query(extractedFrom=source, include_retracted=True)
 
 before_points = _source_points()
 before = len(before_points)
@@ -1006,7 +1006,7 @@ try:
                  'extraction_kind': p['orig']}
         if p['when']:
             props['extracted_when'] = p['when']
-        r = sdk.create_point(p['kind'], p['content'], **props)
+        r = sdk._create_point(p['kind'], p['content'], **props)
         if not r.get('id'):
             raise RuntimeError(f'create_point failed: {str(r)[:200]}')
         if r.get('status') != 'live':
@@ -1133,11 +1133,11 @@ try:
                            'the source URL is being reused with a different domain')
 
     sdk.manage_source_trust(url=source, tier='T2')      # EP-compatibility is required, not optional
-    _rel = sdk.get_source_reliability(source)
+    _rel = sdk._get_source_reliability(source)
     if not isinstance(_rel, dict) or _rel.get('reliability') is None:
         raise RuntimeError('read-back failed: source still untiered after manage_source_trust')
 
-    ep = sdk.compute_confidence(anchors=made)
+    ep = sdk._compute_confidence(anchors=made)
     # Both EP flags are REQUIRED and must be real bools. Without this, an
     # absent or renamed key reads as "not truncated" / "not converged" and
     # the receipt positively records a value compute_confidence never

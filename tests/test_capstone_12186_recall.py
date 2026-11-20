@@ -1026,7 +1026,7 @@ def test_the_arms_pass_the_arguments_the_door_notes_say_they_do():
     """
     def _record(arms_seen: list, door_calls: list):
         class _Sdk:
-            def tortoise_fts_query(self, query, **kwargs):
+            def _tortoise_fts_query(self, query, **kwargs):
                 door_calls.append({"query": query, **kwargs})
                 return []
 

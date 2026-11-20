@@ -635,11 +635,11 @@ class _AskFakeSDK:
     def _get_proj(self):
         return object()
 
-    def tortoise_fts_query(self, query, **kwargs):
+    def _tortoise_fts_query(self, query, **kwargs):
         self.query_kwargs = kwargs
         return [dict(h) for h in self._pool]
 
-    def annotate_ask_hits(self, hits, **kwargs):
+    def _annotate_ask_hits(self, hits, **kwargs):
         return [dict(h) for h in hits]
 
 

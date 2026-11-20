@@ -399,7 +399,7 @@ class TestArmGate:
         arm = A4TortoiseArm()
 
         class _FakeSDK:
-            def recall_state(self, query=None, *, kind=None, limit=10,
+            def _recall_state(self, query=None, *, kind=None, limit=10,
                              object_centric=True, leg_trace=None):
                 if leg_trace is not None:
                     leg_trace.append(
@@ -444,7 +444,7 @@ class TestArmObservedVectorRefusal:
         arm = A4TortoiseArm()
 
         class _FakeSDK:
-            def recall_state(self, query=None, *, kind=None, limit=10,
+            def _recall_state(self, query=None, *, kind=None, limit=10,
                              object_centric=True, leg_trace=None):
                 if leg_trace is not None:
                     leg_trace.append(
@@ -527,7 +527,7 @@ class TestArmObservedVectorRefusal:
         armed: dict = {}
 
         class _FakeSDK:
-            def recall_state(self, query=None, *, kind=None, limit=10,
+            def _recall_state(self, query=None, *, kind=None, limit=10,
                              object_centric=True, leg_trace=None):
                 if leg_trace is not None:
                     leg_trace.append(

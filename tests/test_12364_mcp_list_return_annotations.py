@@ -392,7 +392,7 @@ def test_the_two_named_tools_declare_a_shape_fastmcp_accepts():
     passing.
     """
     for name, sdk_method, expected in (
-            ("tortoise_belief_timeline", "belief_timeline", "list"),
+            ("tortoise_belief_timeline", "_belief_timeline", "list"),
             # #11609: the SDK method retired into `review_link_candidates`, which
             # returns `Any` — so this door owes its OWN envelope (`-> dict`) rather
             # than the SDK method's list type. The premise is re-derived, not dropped.
@@ -439,7 +439,7 @@ def test_the_two_named_tools_declare_a_shape_fastmcp_accepts():
 class _StubSDK:
     """The SDK as both wrappers see it: a method that returns a list."""
 
-    def belief_timeline(self, topic, limit=50):
+    def _belief_timeline(self, topic, limit=50):
         return []
 
     def review_link_candidates(self, kind="connections", *,
@@ -497,7 +497,7 @@ async def test_a_non_empty_list_result_keeps_its_rows(stubbed):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name,args,raising", [
-    ("tortoise_belief_timeline", {"topic": "Helios"}, "belief_timeline"),
+    ("tortoise_belief_timeline", {"topic": "Helios"}, "_belief_timeline"),
     ("tortoise_list_dedup_candidates", {}, "review_link_candidates"),
 ])
 async def test_a_safe_failure_is_not_demoted_into_the_success_payload(
@@ -567,7 +567,9 @@ def test_the_passthrough_recogniser_sees_both_idiomatic_shapes():
         return {"mode": "state", "rows": ms._safe(  # pragma: no cover
             ms._get_org_sdk()._belief_timeline, topic)}
 
-    assert _passthrough_of(one_statement) == "belief_timeline"
-    assert _passthrough_of(bound_then_return) == "belief_timeline"
+    # #12901: the door calls the PRIVATE seam, so the recogniser answers the
+    # spelling the class actually holds.
+    assert _passthrough_of(one_statement) == "_belief_timeline"
+    assert _passthrough_of(bound_then_return) == "_belief_timeline"
     assert _passthrough_of(enveloped) is None
     assert _passthrough_of(reshaped) is None

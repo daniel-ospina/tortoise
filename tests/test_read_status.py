@@ -674,7 +674,7 @@ class TestHostedSearchRoute:
                 # routes now receive.
                 return object()
 
-            def tortoise_fts_query(self, q, limit=10, read_status_out=None,
+            def _tortoise_fts_query(self, q, limit=10, read_status_out=None,
                                    _truncation_out=None, **_ignored):
                 if read_status_out is not None:
                     read_status_out["status"] = term
@@ -745,7 +745,7 @@ class TestAStoreThatWillNotOpenKeepsTheDocumentedArms:
             def _get_proj(self):
                 raise ConnectionError("the store at <fdb://x> will not open")
 
-            def tortoise_fts_query(self, *a, **kw):  # pragma: no cover
+            def _tortoise_fts_query(self, *a, **kw):  # pragma: no cover
                 raise AssertionError(
                     "the query ran against a store that never opened")
 

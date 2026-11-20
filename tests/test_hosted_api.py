@@ -5979,7 +5979,7 @@ class TestIssueInsightAPI:
         import tortoise.hosted_api as hosted_api
 
         class _FakeSDK:
-            def issue_insight(self, title, body=None, repo=None, limit=2):
+            def _issue_insight(self, title, body=None, repo=None, limit=2):
                 return {
                     "has_prior": True, "no_prior_knowledge": False,
                     "repo_not_indexed": False,
@@ -6020,7 +6020,7 @@ class TestIssueInsightAPI:
         import tortoise.hosted_api as hosted_api
 
         class _FakeSDK:
-            def issue_insight(self, title, body=None, repo=None, limit=2):
+            def _issue_insight(self, title, body=None, repo=None, limit=2):
                 return {
                     "has_prior": True, "no_prior_knowledge": False,
                     "repo_not_indexed": False,

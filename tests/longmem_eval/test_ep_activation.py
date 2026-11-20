@@ -210,7 +210,7 @@ class _FakeSDK:
     def _get_proj(self):
         return self._proj
 
-    def get_point(self, pid):
+    def _get_point(self, pid):
         return {"id": pid, "status": "live"}
 
     def _emit_event(self, type_, **kwargs):
@@ -219,7 +219,7 @@ class _FakeSDK:
     def _mark_dirty(self, point_ids):
         self.dirty_calls.append(list(point_ids))
 
-    def dream(self, **kwargs):
+    def _dream(self, **kwargs):
         self.dream_calls.append(kwargs)
         return {"mode": "full"}
 

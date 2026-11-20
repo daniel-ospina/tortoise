@@ -445,7 +445,7 @@ def test_dream_pass_precomputes_and_the_push_carries_post_dream_numbers():
         def _mark_dirty(self, roots):
             self.marked = list(roots)
 
-        def dream(self, **kwargs):
+        def _dream(self, **kwargs):
             _set_posterior(sdk, pid, 3.0, 2.0)      # mean = 0.6
             return {"mode": "local", "affected_claims": [pid],
                     "budget_used": 1, "coverage": 1.0, "converged": True}
