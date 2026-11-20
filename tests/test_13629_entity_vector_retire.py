@@ -9163,6 +9163,20 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict([d]).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in dict([d])}
+        return None
+    _write(props)
+""",
     )
     assert accepted, "the accepted fixture tuple is EMPTY — the loop below asserts nothing"
     # ⛔ A DELIBERATE OVER-REFUSAL MUST STAY PINNED AS ONE. `k.upper()` can never produce
