@@ -5537,12 +5537,12 @@ class _EntityHandlers:
         #     which is the exact stall #13224/#13229 removed. Nothing in this
         #     PR's test set would red on that loss, because this PR replaced the
         #     code path, so no test on either side pins `bounded` on `st`.
-        # #13626: AND NOT AT ALL ONCE THE RECORD OWNS THE `document` VECTOR. This fold
-        # still writes the `:Source` ROW — only the vector is omitted — because the
-        # `:Source` node is the document's identity and `set_embedding_clause`'s
-        # preserve-on-null leaves a stored vector alone. The conjunct sits in the TEST
-        # rather than around the block so the write-stop is the encode itself, the same
-        # shape `_upsert_subject` / `_upsert_object` use.
+        # #13626: NOT AT ALL ONCE THE RECORD OWNS THE `document` VECTOR — unless the `source`
+        # half still wants one (#13854 below). This fold still writes the `:Source` ROW — the
+        # vector is omitted only when BOTH halves answer stop — because the `:Source` node is
+        # the document's identity and `set_embedding_clause`'s preserve-on-null leaves a stored
+        # vector alone. The conjunct sits in the TEST rather than around the block so the write-stop
+        # is the encode itself, the same shape `_upsert_subject` / `_upsert_object` use.
         # ⛔ AND IT ASKS THE `:Source` HALF TOO (#13854 review). ONE `:Source` vector serves
         # both halves of the node, and `LABEL_SERVED` splits those halves on `document_kind`
         # — so a node this fold writes need not belong to the `document` population at all.
@@ -5554,17 +5554,17 @@ class _EntityHandlers:
         # a document write still pays one encode, and `#5008`'s identifier-only refusal still
         # lives inside it.
         _text_ready = bool(not ev.get("suppress_embedding") and st and st.strip())
-        embedding = None
-        # ⛔ TWO ARMS, NOT ONE `or` — and the suppression below is load-bearing, not tidiness. The
-        # writer census (`tools/strip_graph_entity_vectors.py::_asks_the_gate`) refuses a
-        # BooleanOp it cannot split: it reads the gate calls as `and` CONJUNCTS, so an `or`
-        # test is "masked" and the fold would count as still emitting, re-opening the
-        # `:Source` acceptance gap this arm closes. Each conjunctive ask below is visible to
-        # it, and the two arms are the SAME encode, so `simplify` would merge them — see
-        # `test_the_document_fold_asks_the_gate`'s per-label arms.
-        if _text_ready and _derived_mirror_required("document"):  # noqa: SIM114
+        # ⛔ TWO ARMS, NOT ONE `or`, AND SIBLING `if`s, NOT `if`/`elif`. The suppression in each
+        # test is load-bearing, and the census (`…strip_graph_entity_vectors.py::_asks_the_gate`)
+        # is why these are two tests: it reads gate calls as `and` CONJUNCTS (an `or` test is
+        # "masked", so the fold would count as still emitting) and it SKIPS an `if` whose
+        # `orelse` STORES — which an `elif` is, so the `document` ask went uncredited (#13854
+        # review C1, measured False at `9550359714`). The 2nd arm runs only if the 1st did not STORE (the flag), so a document write still pays exactly ONE encode — an `embedding is None` guard would re-enter it on `#5008`'s refusal and meter the decline twice (#13854 review P3).
+        _vector_written = False
+        if _text_ready and _derived_mirror_required("document"):
             embedding = _encode_document_mirror(self.required_embedding_dim, st)
-        elif _text_ready and _derived_mirror_required("source"):
+            _vector_written = True
+        if _text_ready and not _vector_written and _derived_mirror_required("source"):
             embedding = _encode_document_mirror(self.required_embedding_dim, st)
         # #125 capture fields — use ev.get(field) with NO default so None →
         # Cypher null, letting coalesce fall through to existing on partial

@@ -224,6 +224,33 @@ def test_the_document_fold_asks_the_gate(proj, monkeypatch):
                  "title") == "Other doc", "the ROW was not written on the stop arm"
 
 
+def test_the_document_fold_is_credited_for_BOTH_halves_by_the_census():
+    """⛔ THE CENSUS'S `any()` OVER A LABEL'S TYPES CANNOT SEE A LOST HALF (#13854 review C1).
+
+    `:Source` is ONE label serving TWO `entity_type`s, so
+    `test_every_declared_writer_of_a_retired_label_asks_the_gate` accepts a writer when
+    **any** of the label's types answers gated. That union is right for the population
+    question it asks — but it is silent about a fold that writes the one shared node and
+    answers for only one of the two halves, which is exactly the `:Source` acceptance gap
+    this PR closes. Measured at `9550359714`: with the fold spelled `if …("document"): …
+    elif …("source"): …`, `_writer_consults_gate(…, ("source",))` answered True and
+    `("document",)` answered **False** — the `elif` is the first `if`'s `orelse`, that arm
+    stores, and the stop-arm rule then skips the outer `if` altogether — and the census test
+    stayed GREEN on it, because `source` alone satisfied the union.
+
+    So the union needs a per-half companion for the labels that HAVE two halves. Both
+    answers are asserted: a spelling that loses the OTHER half is the same defect mirrored.
+    """
+    from tools import strip_graph_entity_vectors as strip
+
+    for half in ("document", "source"):
+        gated, why = strip._writer_consults_gate(
+            "tortoise.projection.entities", "_upsert_document", (half,))
+        assert gated is True, (
+            f"the document fold writes the ONE `:Source` node but the census cannot see "
+            f"it ask the gate about `{half}`: {why}")
+
+
 # ── 3. the source fold (the caller passthrough) ─────────────────────────
 
 
