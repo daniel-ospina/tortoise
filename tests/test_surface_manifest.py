@@ -7918,6 +7918,36 @@ def test_a_deliberate_shrink_passes_with_a_named_waiver():
     assert sm.shrink_problems(base, now, allowed=["tool:tortoise_deliberate_drop"]) == []
 
 
+def test_the_memory_note_does_not_advertise_a_removal_route_the_pin_refuses():
+    """Review ISSUE 2 of PR #14039: `MEMORY.md`'s `[surface-cut]` is the file that SENDS lanes here.
+
+    It listed three equivalent removal routes. The third — `cut --allow-removal` — cannot land:
+    `cmd_cut` prints it and persists NOTHING, while the required `surface-guard` job runs
+    `surface_manifest.py check --base-ref` and supplies no `--allow-surface-shrink`
+    (deliberately — `archive/README.md` says so). A lane that follows the note into that route
+    reds a required job with no flag it can pass, so the note may still MENTION the flag as long
+    as it says it does not land and names the pin that refuses it.
+
+    The note is now correct; this is the row that keeps it correct, because nothing else in the
+    tree reads it and the sentence is one an edit can silently restore to the pre-fix shape.
+    Non-vacuity: the pre-fix sentence was the plain third route — the flag, `#12237` and the
+    `#12327` reference, with no statement that it is local-only.
+    """
+    note = (ROOT / "MEMORY.md").read_text(encoding="utf-8")
+    entry = [ln for ln in note.splitlines() if ln.startswith("[surface-cut]: ")]
+    assert len(entry) == 1, f"the note needs exactly one `[surface-cut]` home: {entry}"
+    line = entry[0]
+    assert "--allow-removal" in line, "non-vacuity: the note advertises this flag"
+    assert "LOCAL-ONLY" in line, (
+        "the `--allow-removal` route must say it is local-only — `cut` persists nothing from "
+        f"it, so the shrink pin reds the PR and CI supplies no waiver: {line}"
+    )
+    assert "check --base-ref" in line, (
+        "name the pin that refuses it, so a reader can check the claim instead of trusting the "
+        f"note: {line}"
+    )
+
+
 def test_the_gate_reds_through_cmd_check_and_not_only_through_the_helper(
     checker, tmp_path, monkeypatch
 ):
