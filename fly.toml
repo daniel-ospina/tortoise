@@ -445,9 +445,14 @@ kill_timeout = 30
   TORTOISE_REAUTH_WINDOW_SECONDS = "900"
   TORTOISE_MANUAL_LINKING_ENABLED = "1"
   # ── #13923 — the embedder WARM-UP switch, carried at its LIVE value ───────
-  # Production runs `0` (measured on the machine: `printenv`). This entry does
-  # NOT settle the value — it carries the live value across, behaviour-
-  # preserving. Flipping it is an operator/owner call, not a correction of it.
+  # Production ran `0` when it was MEASURED on the machine (`printenv`, during the
+  # #13923 investigation, before this entry existed). ⛔ Do not restate that as an
+  # unrecorded present-tense fact and do not invent a fresh figure: the route
+  # RE-CHECKS the value after the Fly secret is unset (see the #4126 route (b) block
+  # in `.github/scripts/fly-managed-secrets.txt` — "verify BOTH"), so the value
+  # carried here is not trusted past that step. This entry does NOT settle the value
+  # — it carries the measured one across, behaviour-preserving — and flipping it is
+  # an operator/owner call, not a correction of it.
   # ⚠️ THE PREMISE FOR `0` IS DATED, AND IT SUPPORTS TWO DIFFERENT SENTENCES.
   # `0` was set while the ~196 s cold load could not fit; the deploy that applies
   # THIS entry carries #13674's fix (a 300 s LOAD bound under a 420 s grace), so a

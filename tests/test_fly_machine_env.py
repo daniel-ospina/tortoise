@@ -53,8 +53,13 @@ FIXTURES = _tmp()
 _AMBIENT = ("FLY_API_TOKEN", "FLY_MACHINES_FILE", "FLY_TOML", "FLY_APP",
             "FLY_MANAGED_SECRETS_FILE", "FLY_API_URL", "FLY_GUARD_MAX_ATTEMPTS")
 
-#: The three names the LIVE manifest declares fly-toml-env (pinned, so a manifest
-#: edit that changes the audited set is a deliberate test change, not a silent one).
+#: A PINNED SUBSET of the names the LIVE manifest declares `fly-toml-env` — NOT the
+#: full audited set. ⛔ Do not read it as one: the live set grows with every `[env]`
+#: declaration (7 on `main` at `e3f894b31b`; 8 once #13926 merged, which added
+#: `TORTOISE_EMBEDDER_WARMUP`), so a count written here is stale by the next
+#: declaration — this comment said "three" while the manifest already declared 7.
+#: `LIVE_NAMES` is fixture data for the tests below and is never compared against
+#: the real manifest; the pin that matters is `deliberate test change`, not coverage.
 LIVE_NAMES = ("TORTOISE_CONTROL_PLANE", "TORTOISE_REAUTH_WINDOW_SECONDS",
               "TORTOISE_MANUAL_LINKING_ENABLED")
 
