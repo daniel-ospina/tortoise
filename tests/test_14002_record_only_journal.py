@@ -542,16 +542,32 @@ def test_a_door_that_drops_the_flag_is_refused_by_the_gate(wiring_mod, tmp_path)
     assert old in source, (
         "the mutation no longer matches the tree — the SDK door's forwarding "
         "line has moved and this leg must be re-pointed at it")
-    mutated = tmp_path / "sdk.py"
-    mutated.write_text(source.replace(old, "            )", 1))
-
     import ast
 
-    problems = wiring_mod.journal_skip_forwarding_problems(
-        ast.parse(mutated.read_text()), "tortoise/sdk.py")
-    assert problems, (
-        "a door that drops `journal_skipped=` was certified — every write on a "
-        "cut-over graph is then refused as `position_unverifiable`")
+    def problems_for(mutated: str) -> list[str]:
+        path = tmp_path / "sdk_mutant.py"
+        path.write_text(mutated)
+        return wiring_mod.journal_skip_forwarding_problems(
+            ast.parse(path.read_text()), "tortoise/sdk.py")
+
+    # ⛔ DROPPING IT IS NOT THE ONLY WAY TO LOSE IT (#14002 review, P2). A door
+    # that forwards a CONSTANT produces the same loss from the other side:
+    # `False` skips the append and the seam refuses the write (neither store);
+    # `True` forces allocation on a graph that is not cut over
+    # (`cursor_not_active`). Both passed this gate while it certified on the
+    # keyword's PRESENCE alone, so all four shapes are asserted.
+    for label, replacement in (
+            ("dropped", "            )"),
+            ("as a constant False", "            journal_skipped=False)"),
+            ("as a constant True", "            journal_skipped=True)"),
+            ("as None", "            journal_skipped=None)")):
+        problems = problems_for(source.replace(old, replacement, 1))
+        assert problems, (
+            f"the gate certified a door that supplies journal_skipped {label} — "
+            "a constant reproduces the two-allocator loss (False: the append is "
+            "skipped and the write is refused as `position_unverifiable`; True: "
+            "allocation is forced on a graph that is not cut over), which is "
+            "exactly the false PASS this check exists to stop")
 
 
 # ── 5. the live legs: the issue's ACCEPTANCE, on a real Postgres ──────────

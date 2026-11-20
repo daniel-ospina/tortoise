@@ -1244,6 +1244,17 @@ def journal_skip_forwarding_problems(tree: ast.AST, rel: str) -> list[str]:
 
     Synthetic-module shaped (like :func:`position_problems_for_module`), because
     a rule that only ever runs against a complying tree cannot be proven to fire.
+
+    ⛔ A CONSTANT IS NOT A FORWARD (#14002 review, P2). Certifying on the
+    KEYWORD'S PRESENCE alone let three mutants through — `journal_skipped=False`,
+    `=True`, `=None` — and each is a real defect: a hard-coded ``False``
+    re-creates the exact loss shape this change exists to prevent (the chokepoint
+    skips the append, so the seam sees `seq=None`, reads it as the #9307
+    unproven state, refuses `position_unverifiable`, and the write is in neither
+    store — with the gate printing `WIRED`), and a hard-coded ``True`` forces
+    allocation on a graph that is not cut over. The value must be a NAME, the
+    same rule :func:`the_chokepoint_skips_the_append` fact 4 applies at the
+    chokepoint.
     """
     modules, functions = _record_bindings(tree)
     problems: list[str] = []
@@ -1251,14 +1262,25 @@ def journal_skip_forwarding_problems(tree: ast.AST, rel: str) -> list[str]:
         owner, name = _resolve_record_call(call, modules, functions)
         if owner is None or name != _LIVE_DOOR:
             continue
-        if any(kw.arg == "journal_skipped" for kw in call.keywords):
+        bound = {kw.arg: kw.value for kw in call.keywords if kw.arg}
+        value = bound.get("journal_skipped")
+        if value is None:
+            problems.append(
+                f"{rel}:{call.lineno} calls {_LIVE_DOOR}() without "
+                "`journal_skipped=` — on a cut-over graph the caller has no "
+                "journal line to hand the seam, and a seam that is not told so "
+                "refuses the write as `position_unverifiable` (counted, WARNed, "
+                "permanent). Forward the chokepoint's own decision (#14002)")
             continue
-        problems.append(
-            f"{rel}:{call.lineno} calls {_LIVE_DOOR}() without "
-            "`journal_skipped=` — on a cut-over graph the caller has no "
-            "journal line to hand the seam, and a seam that is not told so "
-            "refuses the write as `position_unverifiable` (counted, WARNed, "
-            "permanent). Forward the chokepoint's own decision (#14002)")
+        if not isinstance(value, ast.Name):
+            problems.append(
+                f"{rel}:{call.lineno} calls {_LIVE_DOOR}() with "
+                f"journal_skipped={ast.unparse(value)!r} — a CONSTANT is not the "
+                "chokepoint's decision: `False` re-creates the two-allocator "
+                "loss (the append is skipped and the seam refuses the write as "
+                "`position_unverifiable`, so it lands in neither store) and "
+                "`True` forces allocation on a graph that is not cut over. "
+                "Forward the name the chokepoint bound (#14002)")
     return problems
 
 

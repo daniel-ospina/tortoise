@@ -48,7 +48,11 @@ What IS true here, and what the falsifiers measure:
 
 3. **That disagreement is NAMED, not silent.** Every outcome this function
    RETURNS says whether the record took the write (`LiveWrite.record`), and a
-   failure leaves `unprojected` set with the journal position. The named
+   failure leaves `unprojected` set with the journal position. ⛔ NOT ON THE
+   RECORD-ONLY ARM (#14002): a skipped append has no line, so `unprojected` is
+   `0` there by contract and the loss signal is the PAIR
+   `appended=False, applied=False` — do not build a "was this write lost?"
+   check from `unprojected` alone. The named
    disagreement is readable from the two stores without this process's memory:
    `record_projection.journal_coverage` compares the journal's own enumeration
    (`EventLog.position()` or the read-only `position_readonly()`) with
