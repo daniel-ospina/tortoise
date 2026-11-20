@@ -2838,9 +2838,16 @@ _FILTER_FALSE_DESCRIPTIONS = (
 #: `marker` ("after the `+`/`-` prefix") reds; reword it to name the marker. A false PASS on prose
 #: that misdescribes the filter is the failure this cell exists to retire, so the false red is the
 #: direction to accept.
+#: ⛔ CASE-INSENSITIVE AND PLURAL-TOLERANT, deliberately (#13948 review round 24, P2 — measured).
+#: As first compiled, `\bchar(?:acter)?\b` and `\bmarker\b` were case-SENSITIVE, so the arm was
+#: wrong in BOTH directions: a re-capitalised restatement (`whose first non-space Character is
+#: `#``) was a **false PASS** — the bypass this cell exists to close — while a sentence that DID
+#: name the marker, capitalised (`… after the diff Marker is `#``), was a **false RED** whose
+#: message told the author to reword it to name the marker it already named. `markers?` because the
+#: plural is the same noun.
 _FALSE_FILTER_PROPERTY_RE = re.compile(
-    r"\bchar(?:acter)?\b(?:(?!\bmarker\b).){0,400}?"
-    r"(?:is equal to|equals|is a|is)\s*`?#`?", re.S)
+    r"\bchar(?:acter)?\b(?:(?!\bmarkers?\b).){0,400}?"
+    r"(?:is equal to|equals|is a|is)\s*`?#`?", re.S | re.I)
 
 #: The pipeline the document STATES for the `tortoise/` half — `grep -E '<include>' | grep -vE
 #: '<exclude>'`, spelled with or without markdown's escaped pipe.
@@ -3102,7 +3109,10 @@ def test_the_D5_row_types_no_verdict_about_the_head_being_merged():
 
     and the cell said the opposite of both — `does NOT hold for this head`, and "at this head
     the FIRST of them prints a path". PROVENANCE, measured: the merged `:134` is byte-identical
-    to `main`'s (`git show 84b94ad74f:…:134 | md5sum` == `git show e23cf75b0a:…:134`), while
+    to `main`'s (`git show 84b94ad74f:docs/epics/2026-11-04-7949-extractor-v4-capstone/05-verify.md
+    | sed -n '134p' | md5sum` == the same pipeline at `e23cf75b0a`) — ⛔ the `rev:path:LINE` form
+    cannot express a line, so the extraction is spelled out; the plain `rev:path` blob differs at
+    both heads and only the LINE is what this row is about, while
     the branch's own `:134` carried the corrected sentences — so the conflict resolution took
     one side wholesale, and nothing in the suite read either sentence.
 
