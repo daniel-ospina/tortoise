@@ -4618,8 +4618,8 @@ load-bearing:
 > direction is deliberate: the ON arm refuses writes on a graph that has not been seeded.
 
 **What it gates.** With it ON, the live door **allocates** the journal ordinal for a graph instead of
-enumerating one. With it OFF (today's production value) nothing changes. Two consequences, both
-load-bearing:
+enumerating one. With it OFF, nothing changes on a graph that has not been cut over. Two
+consequences, both load-bearing:
 
 1. **On a graph that holds a `public.record_cursor` row, the ENUMERATED arm is REFUSED by name** —
    `record_projection._refuse_an_enumerated_replay` (`tortoise/record_projection.py:7566`). The cursor

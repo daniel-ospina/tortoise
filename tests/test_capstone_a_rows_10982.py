@@ -249,11 +249,18 @@ def test_every_rows_adding_amendment_is_indexed_once_in_the_record():
     assert "6664402530" in entry[0]["kind"], "the ruling this row rests on must be cited in the record"
 
 
-def test_no_existing_bar_moved_the_probe_reads_the_same_seven():
+def test_no_existing_bar_moved_the_probe_reads_the_same_eight():
     """⛔ An invariant, not a sentence: the probe PARSES the bars out of the record.
 
     FAILS IF the amendment moved any E-row bar — the property the amendment entry claims — because
     the probe's own `parse_bars` reads them out of this record and nothing else.
+
+    ⛔ EIGHT, not seven (#11695): the E6 producer added `bars["E6"]` and
+    `floors["e6_declared_rows"]` (`#11673`'s registered bar and floor). Neither is an
+    amendment to an EXISTING row — the seven above are byte-identical to what this
+    pin asserted before it — so the arm keeps its job: it fails if a LATER change moves
+    one of them, and the two E6 entries are asserted here so they cannot be re-typed
+    somewhere else either.
     """
     probe = _probe()
     bars = probe.parse_bars(_record())
@@ -264,9 +271,12 @@ def test_no_existing_bar_moved_the_probe_reads_the_same_seven():
     assert bars["E3"] == {"required_share": 1.0}
     assert bars["E4"] == {"required": 15, "of": 15}
     assert bars["E5"] == {"ratio": 0.9, "raw_absolute": 0.8}
+    # #11695: the sixth row's own bar and floor, parsed out of §3.1 like the seven above.
+    assert bars["E6"] == {"unbound_max": 0}
     assert bars["floors"] == {"e1_objects": 30, "e1_min_before_share": 0.2,
                              "e2b_surviving_units": 30, "e3_derived_nodes": 30,
-                             "e5_rate_min_sentences": 10}
+                             "e5_rate_min_sentences": 10,
+                             "e6_declared_rows": 30}
 
 
 def test_the_amended_record_still_passes_its_own_gate():

@@ -91,6 +91,128 @@ def _capture_alert(monkeypatch) -> list[dict]:
     return alerts
 
 
+def _enforce_quota_double(resource: str = "points", *,
+                         truth_carried: bool = False) -> None:
+    """Stand-in for `tortoise.mcp_server._enforce_quota`, shape-checked below.
+
+    ⛔ A DOUBLE THAT MIRRORS A REAL DOOR MUST BE PINNED TO IT, NOT DESCRIBED
+    (#14003 review, cycle 4, P3 — MEASURED). This stub's shape was wrong twice before
+    any reader existed: `lambda resource:` raised `TypeError` on every `_quota_gated`
+    write once #13829 added `truth_carried`, and its replacement `lambda resource,
+    **kw:` accepted ANY keyword — a real shape drift would then raise in production
+    while these arms stayed green. Reverting either fix left the whole file green
+    BEFORE THIS READER EXISTED (`58 passed` then, on the cycle-2 `**kw` shape — the
+    file is 59 now), so the comment's "MIRRORS IT EXACTLY" had no force at all.
+    `test_the_enforce_quota_double_is_the_door` reads this signature against the
+    door's, so the next drift reds instead of being described in prose.
+    """
+    return None
+
+
+def _assert_door_shaped(installed, door) -> None:
+    """Assert `installed` matches the door's parameters, ALL FOUR of them.
+
+    ⛔ THE PIN IS TOTAL (#14037 review, cycle 2, P3 — MEASURED): a
+    `(name, kind, default)` triple compared with `==` left TWO drifts GREEN — an
+    annotation-only change (`resource: int = "points"` passed), and `False`↔`0`
+    because `False == 0`. So name/kind/ANNOTATION are compared by `==` (both modules
+    are PEP-563, so both sides carry the strings `'str'`/`'bool'`) and each default by
+    `type` AND `==` — which rejects `False`↔`0` and `True`↔`1` while never rejecting
+    an equal default. ⚠️ NOT by `is`: identity false-REDs a CORRECT stand-in as soon
+    as the door's default stops being interned (`"points.v2"`, `1000`, `0.5` all
+    measure `equal=True, identical=False`), and the failure text would then send the
+    author to "fix the stand-in" for a fix that does not exist.
+
+    ⚠️ `door` is captured BEFORE an arm's `setattr` and never re-read afterwards:
+    comparing `mcp._enforce_quota` against itself would pass for ANY object, which
+    would make this a tautology that reads exactly like a real assertion.
+    """
+    import inspect
+
+    installed_params = list(inspect.signature(installed).parameters.values())
+    door_params = list(inspect.signature(door).parameters.values())
+    assert [(p.name, p.kind, p.annotation) for p in installed_params] == [
+        (p.name, p.kind, p.annotation) for p in door_params], (
+        f"the `_enforce_quota` stand-in installed here ({installed!r}) has parameters "
+        "(name, kind, annotation) that no longer match the door's — a wider stand-in "
+        "(`**kw`) fails OPEN on a shape drift and a narrower one (a missing default) "
+        "reads a legal zero-arg door call as a TEST defect. Fix the stand-in, not "
+        "this assertion")
+    assert all(type(a.default) is type(b.default) and a.default == b.default
+               for a, b in zip(installed_params, door_params, strict=True)), (
+        f"the `_enforce_quota` stand-in installed here ({installed!r}) has a DEFAULT "
+        "that differs from the door's — `False == 0` is True, so a plain equality "
+        "comparison would accept a flipped default, which is why the TYPE is compared "
+        "too. Identity is deliberately NOT used: it false-REDs an equal but "
+        "non-interned default. Fix the stand-in, not this assertion")
+
+
+def _assert_door_arm(installed, door) -> None:
+    """Assert an arm installed the ONE pinned double, and that it matches the door.
+
+    ⛔ TWO ASSERTIONS, AND BOTH ARE LOAD-BEARING (#14003 review, cycle 5, P3 —
+    the F1 gap, MEASURED): reading only the module-level symbol left the defect
+    this pin exists to prevent able to return through the two places the double
+    exists to protect. Restoring main's pre-fix inline
+    `lambda resource="points", *, truth_carried=False: None` at either
+    `setattr` kept the whole file GREEN, because no assertion observed what an
+    arm actually installed.
+
+    ⚠️ THE MUTANT ONLY THE IDENTITY LEG CATCHES IS A **TYPED** COPY OF THE DOOR
+    (#14037 review, cycle 6, P3 — MEASURED), *not* main's pre-fix lambda: an earlier
+    cut of this docstring named the lambda, and that was FALSE once
+    `_assert_door_shaped` began comparing ANNOTATION as well as name/kind. A lambda
+    carries `inspect.Parameter.empty` for every annotation, so main's lambda is
+    already RED one leg EARLIER (measured: lambda → params leg RED; typed copy →
+    shape GREEN, identity RED). The typed copy is the one that genuinely slips
+    through a shape check —
+    `def _stub(resource: str = "points", *, truth_carried: bool = False) -> None`
+    matches name, kind, annotation AND default, and is still a SECOND copy of the
+    door's shape that nothing keeps in sync. So the arm must install the pinned
+    symbol by IDENTITY, and that symbol must still match `door`. ⛔ Do not read the
+    lambda case as "the shape leg already covers this" and drop the identity
+    assertion — the typed copy goes green again if you do.
+    """
+    assert installed is _enforce_quota_double, (
+        f"this arm installed {installed!r} instead of the pinned "
+        "`_enforce_quota_double` — a private stand-in is a second copy of the "
+        "door's shape that nothing keeps in sync (which is exactly how the "
+        "earlier `**kw` form went unnoticed). Install the pinned symbol, not a copy")
+    _assert_door_shaped(installed, door)
+
+
+def test_the_enforce_quota_double_is_the_door():
+    """Name, kind, annotation AND default per parameter, read from the door itself.
+
+    ⛔ WHY A READER AND NOT A COMMENT (#14003 review, cycle 4, P3 — MEASURED): the
+    double's two earlier shapes were both wrong and neither was observable — the
+    `**kw` form fails OPEN (an unexpected keyword is swallowed, so a door drift
+    surfaces only in production `TypeError`) and the missing-default form fails
+    CLOSED (a legal zero-arg `_enforce_quota()` would read as a TEST defect).
+
+    The neighbouring `test_13829_cache_cap_at_fold.py`
+    `test_the_mcp_gate_defaults_to_the_protective_arm` is *narrower* than this
+    one: it asserts ONE parameter's default on the real `_quota_gated`, not a
+    per-parameter comparison of a double. What the two share is the pattern —
+    read the door rather than trust a comment — not the strength of the claim.
+
+    ⛔ AND THE PIN IS TOTAL, WHICH COST ONE MORE REVIEW ROUND (#14037 review, cycle
+    2, P3 — MEASURED). A `(name, kind, default)` triple compared with `==` left TWO
+    drifts GREEN: an annotation-only change (`resource: int = "points"` passed), and
+    `False`↔`0` because `False == 0`. So name/kind/ANNOTATION are compared by `==`
+    (both modules are PEP-563, so both sides carry the strings `'str'`/`'bool'`) and
+    each default by `type` AND `==` — see `_assert_door_shaped` for why identity is
+    deliberately not the instrument.
+
+    This test pins the symbol's definition; each `TestRunnerWiring` arm
+    additionally pins what it INSTALLS, via `_assert_door_arm`.
+    """
+    import tortoise.mcp_server as mcp
+
+    _assert_door_shaped(_enforce_quota_double, mcp._enforce_quota)
+
+
+
 @pytest.fixture(autouse=True)
 def _clean_context():
     """Every test starts and ends with NO active tally (no cross-test bleed)."""
@@ -1252,22 +1374,29 @@ class TestRunnerWiring:
         import tortoise.mcp_server as mcp
         calls = _capture_writer(monkeypatch)
         alerts = _capture_alert(monkeypatch)
-        # ⛔ THE STUB MIRRORS THE DOOR'S SIGNATURE, keyword-only `truth_carried` included
-        # (#13829 added it to `_quota_gated`'s call and `lambda resource:` then raised
-        # TypeError on every `_quota_gated` write — a stale stub reads as a test defect).
-        # ⛔ AND IT MIRRORS IT EXACTLY, NOT WITH `**kw` (#14003 review, cycle 2, P3 —
-        # MEASURED): `**kw` accepts ANY keyword, so if `_quota_gated` ever passed a
-        # differently-named one the production door would raise `TypeError` while this arm
-        # stayed green — a fail-open double under a comment claiming a mirror. The door is
-        # `def _enforce_quota(resource="points", *, truth_carried=False)`
-        # (`tortoise/mcp_server.py:3666`) and the only keyword call passes
-        # `truth_carried=` (`:3773`). ⚠️ AND "EXACTLY" INCLUDES THE DEFAULTS (#14003
-        # review, cycle 3, P3 — MEASURED): the first cut carried `resource` with no default,
-        # so the double was strictly NARROWER than the door — `_enforce_quota()` is legal
-        # against the door and would have raised `TypeError` inside `<lambda>` here and read
-        # as a test defect. Name, kind AND default are now equal on both.
-        monkeypatch.setattr(mcp, "_enforce_quota",
-                            lambda resource="points", *, truth_carried=False: None)
+        # ⛔ THE STUB IS `_enforce_quota_double`, AND ITS SHAPE IS READ BY A TEST — not
+        # promised by this comment (#14003 review, cycle 4, P3 — MEASURED). The claim
+        # "mirrors the door exactly" was wrong TWICE with nothing red: `lambda resource:`
+        # raised `TypeError` on every `_quota_gated` write once #13829 added
+        # `truth_carried`, and `lambda resource, **kw:` swallowed any keyword, so a door
+        # drift would have raised in production while this arm stayed green (measured,
+        # before the reader below existed: reverting to that shape left the whole file
+        # green, `58 passed` then — the file is 59 now).
+        # `test_the_enforce_quota_double_is_the_door` compares name, kind,
+        # annotation AND default per parameter against the door itself — and
+        # `_assert_door_arm` below pins THAT THIS ARM installs the same pinned symbol.
+        # What needs that IDENTITY leg is a TYPED copy of the door's signature, which
+        # passes the shape comparison above and is still a second copy nothing keeps in
+        # sync (it reddened NOTHING before the arm assertion existed). ⚠️ NOT main's
+        # pre-fix inline lambda: a lambda carries no annotations, so the annotation leg
+        # already reds it one leg earlier — an earlier cut of this comment named the
+        # lambda and was wrong at that point (#14037 review, cycle 6, P3). ⚠️ the two
+        # `mcp_server.py` addresses an earlier cut typed here are GONE on purpose:
+        # nothing reads a number in a comment, which is the rule #14025 applied to
+        # `tests/test_7949_capstone_measure.py`.
+        door = mcp._enforce_quota          # the REAL door, before the patch
+        monkeypatch.setattr(mcp, "_enforce_quota", _enforce_quota_double)
+        _assert_door_arm(mcp._enforce_quota, door)
         monkeypatch.setattr(mcp_auth, "_current_org_id",
                             contextvars.ContextVar("t", default=None))
         monkeypatch.setattr(mcp_auth, "_current_org_limits",
@@ -1305,8 +1434,9 @@ class TestRunnerWiring:
         import tortoise.mcp_auth as mcp_auth
         import tortoise.mcp_server as mcp
         calls = _capture_writer(monkeypatch)
-        monkeypatch.setattr(mcp, "_enforce_quota",
-                            lambda resource="points", *, truth_carried=False: None)
+        door = mcp._enforce_quota          # the REAL door, before the patch
+        monkeypatch.setattr(mcp, "_enforce_quota", _enforce_quota_double)
+        _assert_door_arm(mcp._enforce_quota, door)
         monkeypatch.setattr(mcp_auth, "_current_org_id",
                             contextvars.ContextVar("t", default="org-M"))
         monkeypatch.setattr(mcp_auth, "_current_org_limits",
