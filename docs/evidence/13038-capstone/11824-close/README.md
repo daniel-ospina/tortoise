@@ -88,16 +88,21 @@ Five disclosures that bound any use of it:
   Q3 decision, both terminal statuses.
 
 **A fresh-judged 3/6 does exist — at a different product.** `13302/README.md`
-records `bf3a7b8e77bf` (the parent commit of #13302) scored by a fresh reader at
-81.0 s: *3 right · 3 wrong — Q1, Q5, Q6 wrong*. That is the same tally as an
+records `bf3a7b8e77bf` (the `main` commit 13302's before arm was taken at — it is
+*not* `353c225703af`'s parent, which is `f462ad3acbb4`) scored by a fresh reader
+at 81.0 s: *3 right · 3 wrong — Q1, Q5, Q6 wrong*. That is the same tally as an
 actual judgement, taken at `bf3a7b8e77bf` rather than at `9e9fc232`. Re-running
 the before arm with `--judge fresh` at `9e9fc232` is the only way this board
 becomes a judgement of it (`rerun.sh`, ~2–4 min by `## How to re-run`).
 
 ## After — `6 right · 0 wrong · 0 blocked · 0 unjudged`
 
-`scoreboard-after.md` · `run-after.json` · product **`28ca66878d`**, run
-**2026-11-20T17:10:09Z → 17:12:51Z** on `main` (local target, 161.5 s), judge
+`scoreboard-after.md` · `run-after.json` · product **`28ca66878d`** — a commit on
+`main` that was **42 first-parent commits behind main's tip** (`e93f5df4648`)
+when this run started, so this is a measurement of *a* `main` state, not of
+`main`'s tip on 2026-11-20. (The asymmetry is the before arm's: `9e9fc232` **was**
+main's tip at its own run start, 0 commits behind.) Run
+**2026-11-20T17:10:09Z → 17:12:51Z** (local target, 161.5 s), judge
 **fresh** (`pi -p --no-session --no-tools`, 84.0 s).
 
 **Zero degraded legs on this run** — `vector`, `fts`, `structural` and
@@ -112,9 +117,9 @@ on every one of its runs. And 4 of the 13 searches reported no legs at all
 Q6 `has anything we relied on been withdrawn` and Q6 `ended` — which is why the
 posture reads `searches: 13` while the `vector` / `fts` / `structural` legs report
 9 runs each and `valid_time` reports 5 — it runs only on the `include_terminal`
-reads. Q1's two object
-searches took different paths inside this one run: `current commitments`
-`keyword_only` with no legs, `onboarding flow` `hybrid` with three.
+reads. Q1's two object searches took different paths inside this one run:
+`current commitments` `keyword_only` with no legs, `onboarding flow` `hybrid`
+with three.
 
 ⚠️ **The read path is not clean either — but the instrument's own wording for why
 is wrong on this run.** Six row-level signals fire, two each on Q1, Q5 and Q6
@@ -227,13 +232,16 @@ cannot carry its own `sha256` and still be unchanged by carrying it.
   board, so a disputed verdict can be re-read rather than argued.
 - The two runs are **different products scored by different judges** (a
   transported baseline file, then a fresh reader), so this is a comparison of two
-  states of the product, not a controlled A/B. Anything else that landed between
-  them is in the delta and not attributed here.
+  states of the product, not a controlled A/B. The after arm measures a `main`
+  commit that trailed main's tip by 42 first-parent commits when it ran, so
+  anything that landed on `main` between them — and everything that landed after
+  `28ca66878d` and before that tip — is in neither arm and therefore not in the
+  delta either.
 - **The before arm's verdicts are not this product's**, so the 3 in 3 → 6 is a
   comparison reference rather than a measurement. The measured half of the before
-  arm is its payloads, and four baseline clauses (Q5's `because` and `cause`, Q1's
-  `cause`, Q6's `cause`) are contradicted by them — the payload wins, and all four
-  are named in `## Before`.
+  arm is its payloads, and five baseline clauses (Q5's `because` and `cause`, Q1's
+  `cause`, Q6's `because` and `cause`) are contradicted by them — the payload
+  wins, and all five are named in `## Before`.
 - **One payload signal is unverified and belongs here rather than in a
   conclusion.** `run-after.json` → `rows[Q6].calls[0]` asks
   `search('has anything we relied on been withdrawn', point,

@@ -274,9 +274,10 @@ the exact commands are in [`13302/`](13302/README.md); this bundle's own four fi
 because the baseline above is the FIRST scoreboard and a later run must not overwrite the record of
 what it measured.
 
-**Measured 2026-11-20 — the re-measurement at `main`, with its limits
+**Measured 2026-11-20 — the re-measurement on a `main` commit, with its limits
 ([`11824-close/`](11824-close/README.md)).** Two runs bracketing this strand's implementation work:
-`9e9fc232` (2026-11-18) and `28ca66878d` on `main` (2026-11-20), scored `3 right · 3 wrong` →
+`9e9fc232` (2026-11-18, main's tip at its run start) and `28ca66878d` on `main` (2026-11-20, 42
+first-parent commits behind main's tip at its run start), scored `3 right · 3 wrong` →
 `6 right · 0 wrong`. Read them through the bundle README, which states the bounds; three
 reconciliations so the tree does not read as a 6 → 3 → 6 regression:
 
@@ -296,7 +297,8 @@ reconciliations so the tree does not read as a 6 → 3 → 6 regression:
   ahead 1, behind 36), so it is not a prior state of `main` and the newer board is not a
   re-measurement of a 5/1 `main`.
 
-What the newer bundle adds on top of `13302/`: an after arm that is **`main`** rather than a PR
-branch, a before arm whose **payload** is committed alongside the reused verdicts so a disputed row
-can be re-read, verbatim-artefact digests, and an attribution table restricted to slices verified
-absent from the before product.
+What the newer bundle adds on top of `13302/`: an after arm taken at a **`main` commit** rather than
+at a PR branch (42 first-parent commits behind main's tip when it ran, which the bundle states),
+a before arm whose **payload** is committed alongside the reused verdicts so a disputed row can be
+re-read, verbatim-artefact digests, and an attribution table restricted to slices verified absent
+from the before product.
