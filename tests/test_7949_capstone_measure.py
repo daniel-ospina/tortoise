@@ -16737,6 +16737,21 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     ]
     assert len(d5) == 1, f"D5 must be ONE line, found {len(d5)}"
     text = d5[0]
+    # ⛔ THE ROW'S OWN COUNT IS NOW TYPED (#13900 review, P2-1). The row states how
+    # many `:N` tokens share its line, and until this assert NOTHING read that figure — which is
+    # why `~50` survived four sibling corrections and disagreed with the `262` this file already
+    # states elsewhere. It is re-MEASURED here rather than typed as a constant, so the row cannot
+    # drift from the line it describes: the sentence is the claim, the line is its subject.
+    _stated_count = re.search(r"carrying (\d+) numbers", text)
+    assert _stated_count is not None, (
+        "the D5 row no longer states how many `:N` tokens carry its line — that figure was "
+        "refuted once at `~50` while the line carried 262, so a row that stops stating it "
+        "cannot be checked at all (#13900 review, P2-1)")
+    _measured_count = len(re.findall(r":\d{2,}", text))
+    assert int(_stated_count.group(1)) == _measured_count, (
+        f"the D5 row says its line carries {_stated_count.group(1)} `:N` tokens, but the line "
+        f"carries {_measured_count} — the same sentence family stated two different figures, "
+        "which is the failure the D5 row exists to prevent (#13900 review, P2-1)")
     sources = {key: path.read_text(encoding="utf-8").splitlines()
                for key, path in _EPIC_CITE_SOURCES.items()}
 

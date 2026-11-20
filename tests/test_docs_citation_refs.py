@@ -523,27 +523,39 @@ def test_the_real_docs_tree_is_not_empty():
 #: of SPELLINGS — the earlier attempts died because they enumerated those — it is the closure
 #: itself, stated once, and each kind is defined structurally:
 #:
-#:   1. a non-word character (plus `_`, which Python counts as a word character and markdown
-#:      emphasis depends on), and for the wide gap any other non-`;`, non-`|` character;
-#:   2. a TAG — any run between `<` and `>` in which a QUOTED attribute value is a unit (so
-#:      `title="a > b"` does not close early) and in which a SOFT break is allowed but a BLANK
-#:      line is not: `_TAG` below;
+#:   1. a single character — a non-word one (plus `_`, which Python counts as a word character and
+#:      markdown emphasis depends on), and for the wide gap any other non-`;`, non-`|`, non-`<`
+#:      character;
+#:   2. a TAG — any run between `<` and `>` in which a QUOTED attribute value is one unit (so
+#:      `title="a > b"` does not close early: CommonMark allows any character but the matching
+#:      quote inside a quoted value) and in which a SOFT break is allowed but a BLANK line is not:
+#:      `_TAG` below;
 #:   3. a BRACKETED run — `[…]`, which covers `[^1]`, `[^note]`, `[^A]`, `[12]` and a markdown
 #:      link label alike; a run of DIGITS or of LETTERS is not spelled separately anywhere;
-#:   4. an ENTITY — `&…;` with `[#\w]{1,10}` inside, which covers `&nbsp;`, `&#160;` and `&#xA0;`
-#:      (the numeric references are why a letters-only charset was a measured hole).
+#:   4. an AMPERSAND — `_AMP` below, which is EITHER an entity (`&…;` with `[#\w]{1,10}` inside,
+#:      covering `&nbsp;`, `&#160;` and `&#xA0;`) OR a bare `&` that does not begin one. Both gaps
+#:      take `&` out of their single-character unit and reach it ONLY through `_AMP`, whose two
+#:      branches a negative lookahead keeps mutually exclusive, so `&` has one parse.
+#:      ⛔ THE BARE BRANCH IS NOT DECORATION (#13900 review, cycles 9-13, MEASURED): the first form
+#:      of this unit dropped it, and ``… -- tortoise/` R&D prints TWO paths`` then returned `[]` —
+#:      a claim left GREEN. `&` is a character `origin/main`'s gap already admitted, and a closure
+#:      that drops a form the previous rule had is a regression wearing a widening's clothes.
 #:
 #: A SOFT BREAK is not a paragraph break (`7557a52cf5`'s measurement, kept): a single newline is
-#: crossed, a BLANK line is the boundary. The alternatives are close to disjoint — `&` can start
-#: both the entity unit and the catch-all in the wide gap — but every unit is bounded at 10
-#: characters, and the measured cost is linear (8/16/28/40/80/200 spaces and 40 repeated units:
-#: 0.000-0.002 s; the ambiguous form `7557a52cf5` replaced took 15.8 s at 24 spaces).
+#: crossed, a BLANK line is the boundary. Every unit in the WIDE gap begins with a different
+#: character, so that run has one parse. The narrow gap is not fully DISJOINT — `<` can begin
+#: both a tag and a single-character unit — because the single-character branch matching a bare
+#: `<` is the wider reading and is kept; a tag probe that then fails costs one bounded scan
+#: (measured: 3,200 `<` with no `>` / 9.6 KB → 0.001-0.002 s). The measured cost is linear:
+#: 8/16/28/40/80/200 spaces and 40 repeated units of each kind → 0.000-0.002 s; the ambiguous
+#: form `7557a52cf5` replaced took 15.8 s at 24 spaces.
+_AMP = r"(?:&[#\w]{1,10};|&(?![#\w]{1,10};))"
 _TAG = (r'<(?:"[^"\n]*"|\'[^\'\n]*\'|[^>"\'\n]'
         r'|\n(?![^\S\n]*\n))*>')
-_GAP_FULL = (r"(?:[^;|<&\n]|" + _TAG + r"|&[#\w]{1,10};"
-              r"|\n(?![^\S\n]*\n)){0,40}?")
-_GAP_ABBREV = (r"(?:[^\w\n]|_|" + _TAG + r"|\[[^\]\n]*\]|&[#\w]{1,10};"
-                r"|\n(?![^\S\n]*\n))*")
+_GAP_FULL = (r"(?:[^;|<&\n]|" + _TAG + r"|" + _AMP
+             + r"|\n(?![^\S\n]*\n)){0,40}?")
+_GAP_ABBREV = (r"(?:[^\w&\n]|_|" + _TAG + r"|\[[^\]\n]*\]|" + _AMP
+               + r"|\n(?![^\S\n]*\n))*")
 
 def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]:
     """Every typed ANSWER to `cmd` in `doc`, as `(answer, claims_empty)` pairs.
@@ -600,8 +612,11 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     # skipped. Pre-existing, and the live document does not wrap; it is named here so the
     # closure claim above is read as "closed under formatting ON ONE LINE". ⛔ THE SEPARATOR
     # IS NOT CUT THERE (#13900 review, cycle 10, P2): a hard-wrapped COMMAND→VERB pair stays
-    # graded, because `\n(?![^\S\n]*\n)` admits a soft break while a blank line stops the
-    # gap — `origin/main` graded it too.
+    # graded, because the gap crosses ONE newline through its own soft-break branch
+    # (`\n(?![^\S\n]*\n)` — a soft break is not a paragraph break) and `origin/main` graded it
+    # too. ⛔ NOT "because `\s` is in the separator class" (#13900 review, P2-3): the
+    # single-character unit excludes `\n` in both gaps, so a newline is graded ONLY by that
+    # branch — the earlier wording named a mechanism the code no longer had.
     # ⛔ AND A SECOND LIMIT, measured by TWO review cycles on the SAME sentence family
     # (#13845): a claim that names the command by PRONOUN — "the command this clause
     # prescribes returns NOTHING AT ALL" — carries no command token, so no shape rule can
@@ -1617,6 +1632,48 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             f"the arm SKIPPED {_refuted!r} — a lead punctuation mark after the verb and a "
             "separator run longer than four are the SAME answer; each returned `[]` before "
             "this fix (#13900 review, cycle 10, P2)")
+    # ⛔ AND THE FOUR SEPARATOR UNITS, EACH PINNED (#13900 review, cycles 9-13). The unit list IS
+    # the closure, so a unit with no witness is a claim and not a test. Non-vacuity is MEASURED
+    # against `ff83caa198`'s own function, not asserted, and the ABBREVIATION rows below are SPLIT
+    # by what that measurement said: five returned `[]` there (repaired holes), one was already
+    # graded (a regression pin). Two earlier forms of the closure bounded the tag at the first
+    # `>` and the footnote at `[\^?\d+]`, which is why a tag whose QUOTED attribute carries `>`
+    # and a NAMED footnote (`[^note]`, in-house spelling) walked through.
+    for _refuted in ("`-- tortoise/`[^note] prints TWO paths",
+                     "`-- tortoise/`[^A] prints TWO paths",
+                     "`-- tortoise/`&#160;prints TWO paths",
+                     "`-- tortoise/`&#xA0;prints TWO paths",
+                     '`-- tortoise/`<span title="a > b">prints TWO paths'):
+        assert _typed_answers_to_tortoise_cmd(_refuted, "-- tortoise/"), (
+            f"the arm SKIPPED {_refuted!r} — a bracketed run, a NUMERIC entity and a tag whose "
+            "quoted attribute carries `>` are each one separator unit, and each of these "
+            "returned `[]` at `ff83caa198` (#13900 review, cycles 9-13)")
+    # THIS row is a REGRESSION pin, not a repaired hole: `ff83caa198` graded `[12]` (through the
+    # digit-only footnote form) and the structural bracketed unit must keep grading it.
+    assert _typed_answers_to_tortoise_cmd(
+        "`-- tortoise/`[12] prints TWO paths", "-- tortoise/"), (
+        "the BRACKETED unit regressed a spelling the digit-only footnote form already "
+        "graded — `[12]` was GREEN-to-RED at `ff83caa198` (#13900 review, cycles 9-13)")
+    # …and on the subject that grades a claim about THIS head, where the entity unit was open
+    # in the same way (both rows measured `[]` at `ff83caa198`).
+    _full_subject = _TORTOISE_CENSUS_CMD
+    for _refuted in (f"`{_full_subject}`&#160;prints TWO paths",
+                     f"`{_full_subject}`&#xA0;prints TWO paths"):
+        assert _typed_answers_to_tortoise_cmd(_refuted, _full_subject), (
+            f"the arm SKIPPED {_refuted!r} — a NUMERIC entity between the command and the "
+            "verb is a separator, and it returned `[]` at `ff83caa198` "
+            "(#13900 review, cycles 9-13)")
+    # ⛔ AND `&` IS NOT DROPPED BY THE ENTITY UNIT (#13900 review, cycles 9-13, MEASURED). This is
+    # a REGRESSION pin, and it says so: `ff83caa198` GRADED this row (its single-character class
+    # admitted `&`), and the first form of the entity unit excluded `&` from that class, so a `&`
+    # that forms no entity STOPPED the gap and this claim went GREEN. `_AMP`'s second branch is
+    # what keeps the character the previous rule already had.
+    _seen_amp = _typed_answers_to_tortoise_cmd(
+        f"`{_full_subject}` R&D prints TWO paths", _full_subject)
+    assert _seen_amp and _seen_amp[0][1] is False, (
+        "the arm SKIPPED a bare `&` that forms no entity (`R&D`) — it was graded at "
+        "`ff83caa198`, so the entity unit narrowed the gap below what the previous rule "
+        "admitted (#13900 review, cycles 9-13)")
     # ⛔ A SOFT BREAK IS GRADED, A PARAGRAPH BREAK IS THE BOUNDARY (kept from `7557a52cf5`,
     # whose measurement this replaces the earlier "hard wrap is a residual" pin with a measured
     # one). A single newline is a CommonMark SOFT BREAK — the claim continues — so the wrapped
