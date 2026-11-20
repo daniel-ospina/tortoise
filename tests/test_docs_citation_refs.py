@@ -3908,6 +3908,7 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
     alternatives = _d5_split_top_level(body, "|")
     if alternatives is None:
         return False
+    grouped = False
     if len(alternatives) == 1 and body.startswith("(") and body.endswith(")"):
         inner = body[1:-1]
         # ⛔ NO `?:` STRIPPING: POSIX ERE has no non-capturing group, so `^(?:\+|-)$` is not the
@@ -3916,12 +3917,22 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
         # the body is `?:\+|-` and the sign loop refuses it below.
         nested = _d5_split_top_level(inner, "|")
         alternatives = nested if nested is not None else alternatives
+        grouped = True
     if len(alternatives) == 1:
         alternative = alternatives[0]
         if alternative.startswith("[") and alternative.endswith("]"):
             return _d5_class_members(alternative) == {"+", "-"}
         # A single anchor with no bracket and no two-branch alternation names ONE line shape —
         # `^-$`, `^\+$`, `^(\-)$` — never both halves of this class.
+        return False
+    # AN UNGROUPED ALTERNATION IS NOT A CLASS (#13995 review round 14, P2, MEASURED). ERE binds
+    # the anchors to each BRANCH, so `^\+|-$` is `(^\+)|(-$)`: starts with `+` OR ends with `-`.
+    # Measured on `x`/`+`/`-`/empty/`++`/`+-`/`-+`/`--`/`a`/`\`/`1`/`~` it matches FIVE lines
+    # (`+ - ++ +- --`) where the class has two — 22 such spellings are accepted by the sign loop
+    # below, none of them the class, and the retired spelling-list regex refused all of them, so
+    # this was a widening onto a WRONG class, not a residual. A multi-branch body must therefore
+    # be a GROUP; only the `( ... )` branch above may set `grouped`.
+    if len(alternatives) > 1 and not grouped:
         return False
     # A BARE `+` IS NOT A BRANCH OF THIS CLASS (#13995 review round 13, P2, MEASURED). The
     # blanket `alternative.replace("\\", "")` read `^(+|-)$` as the two signs, but under `-E`
@@ -4398,7 +4409,7 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
     # same half-class (`?` unsupported in ERE → one sign, measured), so the rejection is not a
     # special case for the literal form.
     for half_class in ("^-$", "^+$", "^(\\-)$", "^(?:\\+|-)$", "^[-]$", "^[\\-+]$",
-                       "^(+|-)$", "^(-|+)$"):
+                       "^(+|-)$", "^(-|+)$", "^\\+|-$", "^-|\\+$"):
         assert not _d5_counts_the_blank_class(half_class), (
             f"{half_class!r} must NOT be graded as the blank class: each names ONE line shape "
             "(`^-$` counts only the removed half, measured 0 on a diff whose only blank line is "
