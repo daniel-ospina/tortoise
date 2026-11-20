@@ -1,0 +1,1286 @@
+{
+  "_meta": {
+    "issue": 13880,
+    "purpose": "The business map: architecture / strategy / product / decisions / goals / constraints judged out of the four legacy graphs (2026-11-19) and re-filed into the clean graph live-v5 (org 3326a01ea34ae595d84de5d8f9, graph g_311d79c684de4d0e8953d189ed) through the normal doors.",
+    "law": "docs/ONTOLOGY.md v3.38 core + packs/product-strategy + packs/venture. A decision is an Event (eventKind: decision); a goal is an Object (goalState); a person/role is a Subject (subjectKind + holdsRole, distinct from memberOf); a document/url is a Source; a claim is a Point (pointKind: statement); support/contradiction between epistemic nodes is an operator (IMPL/NAND).",
+    "provenance": "Every item names the legacy carrier it was judged from in `legacy`. Items whose authority is a repo document name it in `source` (filed as a :Source, and wired with `extractedFrom` where the claim came from the document). Nothing here is a copy of a legacy node: every item was re-judged and re-stated.",
+    "dropped_categories": "See JUDGEMENT.md \u2014 PR-review chatter, CI/test minutiae, harness/lane ops, GraphEvent journal, Session/onboarding bookkeeping, synthetic benchmark corpora, and duplicates.",
+    "idempotency": "Subjects merge by name; Objects merge by name; Points are created with dedup=true; edges are checked before creation. Re-running any batch is safe."
+  },
+  "subjects": [
+    {
+      "ref": "sub:premise-labs",
+      "name": "Premise Labs",
+      "subjectKind": "organization",
+      "why": "The company. tortoise.premiselabs.co is the product site, app.premiselabs.co the product dashboard."
+    },
+    {
+      "ref": "sub:daniel",
+      "name": "Daniel Ospina",
+      "subjectKind": "naturalPerson",
+      "why": "The owner: he rules on the ontology, the MCP/SDK surface, and product/architecture direction."
+    },
+    {
+      "ref": "sub:epistemic-team",
+      "name": "epistemic-team",
+      "subjectKind": "team",
+      "why": "The team that owns Tortoise and docs/ONTOLOGY.md (frontmatter ownedBy: epistemic-team)."
+    },
+    {
+      "ref": "sub:owner-role",
+      "name": "owner",
+      "subjectKind": "role",
+      "why": "The decision authority many legacy rulings name ('by owner ruling'). A role, held by Daniel \u2014 not membership."
+    }
+  ],
+  "objects": [
+    {
+      "ref": "obj:tortoise",
+      "name": "Tortoise",
+      "objectKind": "product-strategy:product",
+      "status": "live",
+      "why": "The marketable offering: a semantic / epistemic / episodic memory graph for agents (SDK + MCP server + hosted API)."
+    },
+    {
+      "ref": "obj:market",
+      "name": "the agent-memory market",
+      "objectKind": "product-strategy:market",
+      "status": "live",
+      "why": "The competitive arena the product operates in; eight systems were surveyed in the legacy corpus."
+    },
+    {
+      "ref": "obj:comp-graphiti",
+      "name": "Graphiti",
+      "objectKind": "product-strategy:competitor",
+      "status": "live",
+      "why": "Named competitor in the legacy survey and in product/competition/."
+    },
+    {
+      "ref": "obj:comp-neo4j-memory",
+      "name": "Neo4j Agent Memory",
+      "objectKind": "product-strategy:competitor",
+      "status": "live",
+      "why": "Named competitor in the legacy survey."
+    },
+    {
+      "ref": "obj:comp-graphrag",
+      "name": "GraphRAG",
+      "objectKind": "product-strategy:competitor",
+      "status": "live",
+      "why": "Named competitor in the legacy survey."
+    },
+    {
+      "ref": "obj:comp-supermemory",
+      "name": "Supermemory",
+      "objectKind": "product-strategy:competitor",
+      "status": "live",
+      "why": "Named competitor; also present in product/competition/supermemory.md."
+    },
+    {
+      "ref": "obj:comp-letta",
+      "name": "Letta / Cognee",
+      "objectKind": "product-strategy:competitor",
+      "status": "live",
+      "why": "Named competitor (product/competition/letta-cognee.md); the ecosystem the buyer compares against."
+    },
+    {
+      "ref": "obj:goal-revenue",
+      "name": "validate revenue",
+      "objectKind": "goal",
+      "status": "live",
+      "goalState": "active",
+      "why": "Top goal of the beta cascade: prove someone pays for Tortoise. Owner-stated 2026-11-02. No pass/fail metric declared yet."
+    },
+    {
+      "ref": "obj:goal-beta",
+      "name": "launch private beta",
+      "objectKind": "goal",
+      "status": "live",
+      "goalState": "blocked",
+      "why": "Owner-stated goal; the beta launch is how revenue gets validated. Blocked 2026-11-02 because neither gate was met."
+    },
+    {
+      "ref": "obj:goal-gate-b1",
+      "name": "merge all P0 and P1 issues",
+      "objectKind": "goal",
+      "status": "live",
+      "goalState": "blocked",
+      "why": "Gate 1 for the private beta. Measured 2026-11-02: 15 P0-blocker + 28 P1-severe open; 0 closed by a merge in the hour to 15:25Z."
+    },
+    {
+      "ref": "obj:goal-gate-b2",
+      "name": "announcement ready for the interested segment in Attio CRM",
+      "objectKind": "goal",
+      "status": "live",
+      "goalState": "active",
+      "why": "Gate 2 for the private beta. The owner defined 'interested' as an Attio pipeline stage; the count was UNEVALUATED at 16:25Z."
+    },
+    {
+      "ref": "obj:goal-bottlenecks",
+      "name": "reduce agent-harness bottlenecks",
+      "objectKind": "goal",
+      "status": "live",
+      "goalState": "active",
+      "why": "Subgoal of Gate 1 (owner correction 2026-11-02: NOT of the announcement gate)."
+    },
+    {
+      "ref": "obj:goal-c1",
+      "name": "C1: venv reaping matches a bare relative argv",
+      "objectKind": "goal",
+      "status": "live",
+      "goalState": "active",
+      "why": "Throughput unblocker named by the owner: the reaper never matched a bare relative .venv/bin/python argv."
+    },
+    {
+      "ref": "obj:goal-c2",
+      "name": "C2: the merge rail exits instead of waiting forever",
+      "objectKind": "goal",
+      "status": "live",
+      "goalState": "active",
+      "why": "A stuck merge must not hold a merge slot for hours."
+    },
+    {
+      "ref": "obj:goal-c3",
+      "name": "C3: every queued CI run is attributed to a cause",
+      "objectKind": "goal",
+      "status": "live",
+      "goalState": "active",
+      "why": "The queue must be diagnosable rather than a number."
+    },
+    {
+      "ref": "obj:goal-c4",
+      "name": "C4: deployed code equals the pin",
+      "objectKind": "goal",
+      "status": "live",
+      "goalState": "active",
+      "why": "Every box runs the pinned tree, so a fix that landed is a fix that is live."
+    },
+    {
+      "ref": "obj:goal-c5",
+      "name": "C5: review throughput",
+      "objectKind": "goal",
+      "status": "live",
+      "goalState": "active",
+      "why": "A required per-PR review check makes review capacity a hard ceiling on merges per hour."
+    },
+    {
+      "ref": "obj:prog-speedrun",
+      "name": "a16z Speedrun SR008",
+      "objectKind": "venture:program",
+      "status": "live",
+      "why": "Highest-priority funding programme in the legacy accelerator survey; window Oct 12 - Nov 1, up to $1M as $500K / 10% SAFE + $500K next round, cohort late Jan - Apr 2027."
+    },
+    {
+      "ref": "obj:prog-yc",
+      "name": "YC W2027",
+      "objectKind": "venture:program",
+      "status": "live",
+      "why": "Second priority; deadline Nov 2 8pm PT, decision Dec 11 (single-source in the corpus)."
+    },
+    {
+      "ref": "obj:prog-era",
+      "name": "ERA W'27",
+      "objectKind": "venture:program",
+      "status": "live",
+      "why": "Same-day fallback in the priority sequence; shares the November deadline cluster."
+    },
+    {
+      "ref": "obj:prog-techstars",
+      "name": "Techstars Spring 2027",
+      "objectKind": "venture:program",
+      "status": "live",
+      "why": "November deadline cluster; the London deal terms ($220K for 5%) are single-sourced in the corpus."
+    },
+    {
+      "ref": "obj:prog-ef",
+      "name": "EF The Bridge cycle",
+      "objectKind": "venture:program",
+      "status": "live",
+      "why": "Named in the same funding programme table."
+    },
+    {
+      "ref": "obj:prog-hf0",
+      "name": "HF0",
+      "objectKind": "venture:program",
+      "status": "live",
+      "why": "Part of the top-tier accelerator cluster the survey judged dense enough to make the ruled-out programmes cost no viable path."
+    },
+    {
+      "ref": "std:pricing-shape",
+      "name": "no per-graph caps and no node-count pricing",
+      "objectKind": "standard",
+      "status": "live",
+      "why": "Standing pricing constraint: nodes were retired as the customer-facing unit; free=1 graph, solo=2, pro/team unlimited; storage is the purchasable dimension and it is per account."
+    },
+    {
+      "ref": "std:surface-approval",
+      "name": "the MCP and SDK surface cannot grow by accident",
+      "objectKind": "standard",
+      "status": "live",
+      "why": "Adding or removing a tool from TOOL_REGISTRY or a public method on TortoiseSDK needs the owner's approval first; the surface manifest is the drift control, not the approval."
+    },
+    {
+      "ref": "std:no-capture-caps",
+      "name": "no capture caps",
+      "objectKind": "standard",
+      "status": "live",
+      "why": "Owner ruling #4010 on the capture path."
+    },
+    {
+      "ref": "std:record-truth",
+      "name": "the record is truth and the graph is a derived hot cache",
+      "objectKind": "standard",
+      "status": "live",
+      "why": "STORAGE-ARCHITECTURE \u00a72.0: Postgres is the system of record, the graph is a projection that must be re-derivable."
+    }
+  ],
+  "sources": [
+    {
+      "ref": "src:ontology",
+      "url": "https://github.com/daniel-ospina/tortoise/blob/main/docs/ONTOLOGY.md",
+      "sourceKind": "document",
+      "documentKind": "strategyDoc",
+      "why": "Canonical ontology v3.38 \u2014 the law for what kinds exist."
+    },
+    {
+      "ref": "src:storage",
+      "url": "https://github.com/daniel-ospina/tortoise/blob/main/docs/architecture/STORAGE-ARCHITECTURE.md",
+      "sourceKind": "document",
+      "documentKind": "architectureDoc",
+      "why": "The record-vs-graph architecture (\u00a72.0 record is truth)."
+    },
+    {
+      "ref": "src:extractor-v4",
+      "url": "https://github.com/daniel-ospina/tortoise/blob/main/docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md",
+      "sourceKind": "document",
+      "documentKind": "architectureDoc",
+      "why": "The extraction architecture the S1-narrative owner ruling governs."
+    },
+    {
+      "ref": "src:pricing",
+      "url": "https://github.com/daniel-ospina/tortoise/blob/main/product/pricing.json",
+      "sourceKind": "document",
+      "documentKind": "planDoc",
+      "why": "The owner-confirmed pricing model (status current, owner_confirmed 2026-08-07) with its decision trail."
+    },
+    {
+      "ref": "src:retention",
+      "url": "https://github.com/daniel-ospina/tortoise/blob/main/docs/retention-and-deletion.md",
+      "sourceKind": "document",
+      "documentKind": "strategyDoc",
+      "why": "The authority on deletion/retention the raw-availability axis cites."
+    },
+    {
+      "ref": "src:mcp-surface",
+      "url": "https://github.com/daniel-ospina/tortoise/blob/main/docs/product/canonical-mcp-tools.md",
+      "sourceKind": "document",
+      "documentKind": "apiSpec",
+      "why": "Where the owner's surface approval is recorded before the manifest is cut."
+    }
+  ],
+  "events": [
+    {
+      "ref": "ev:beta-gates-measured",
+      "eventKind": "decision",
+      "startedAt": "2026-11-02",
+      "content": "The private-beta launch was held blocked on 2026-11-02 by measurement, not by opinion: 15 P0-blocker and 28-29 P1-severe issues were open and no P0/P1 had been closed by a merge in the hour to 15:25Z. The owner named the two gates (merge all P0/P1; announcement ready for the 'interested' Attio population) as the only paths to the launch.",
+      "about": [
+        "obj:goal-beta",
+        "obj:goal-gate-b1",
+        "obj:goal-gate-b2"
+      ],
+      "legacy": "core:goal objects 'launch private beta' / 'merge all P0 and P1 issues' / 'announcement ready ... Attio CRM' with their summaries and evidence fields; decision events 'The owner corrected the goal cascade: reduce bottlenecks is a subgoal of GATE-B1'"
+    },
+    {
+      "ref": "ev:interested-definition",
+      "eventKind": "decision",
+      "startedAt": "2026-11-02",
+      "content": "The owner defined 'interested' for the beta announcement as a PIPELINE STAGE in the Attio CRM, so the gate population is every prospect whose Attio opportunity sits at that stage. The stage count was not measurable from the box on 2026-11-02, which is what kept the gate at active rather than met.",
+      "about": [
+        "obj:goal-gate-b2"
+      ],
+      "legacy": "core:goal 'announcement ready for the interested segment in Attio CRM' summary; goal-cascade lane"
+    },
+    {
+      "ref": "ev:unlimited-graphs",
+      "eventKind": "decision",
+      "startedAt": "2026-09-01",
+      "content": "Owner decision (Gate #2): pro and team have unlimited graphs, free keeps 1 and solo 2, and NO pricing value changes when per-graph tenancy ships. The per-graph key and recording features ship without becoming per-graph charges.",
+      "about": [
+        "std:pricing-shape",
+        "obj:tortoise"
+      ],
+      "source": "src:pricing",
+      "legacy": "product/pricing.json _comment (Epic #2083, Gate #2) as corroborated by the legacy pricing findings"
+    },
+    {
+      "ref": "ev:storage-dimensions",
+      "eventKind": "decision",
+      "startedAt": "2026-11-08",
+      "content": "Owner ruling (#11758): the two purchasable storage dimensions are stored data (Postgres bytes) and hot capacity (graph MB); the allowance and the bill are PER ACCOUNT, so a second graph does not double the allowance and adds no second line.",
+      "about": [
+        "std:pricing-shape"
+      ],
+      "source": "src:pricing",
+      "legacy": "product/pricing.json storage block (owner 'ok' 2026-11-08, comment 6807826749)"
+    },
+    {
+      "ref": "ev:nodes-retired",
+      "eventKind": "decision",
+      "startedAt": "2026-11-01",
+      "content": "Nodes were retired as the customer-facing pricing unit (#4495/#5331): the node cap was replaced, not extended. A capability census therefore cannot contradict the recorded decision of no per-graph caps, no node-count pricing, and unlimited graphs per tenant.",
+      "about": [
+        "std:pricing-shape"
+      ],
+      "legacy": "point 'The capability census PR does not contradict the recorded decision of no per-graph caps, no node-count pricing, and unlimited graphs per tenant.'"
+    },
+    {
+      "ref": "ev:fleet-memory",
+      "eventKind": "decision",
+      "startedAt": "2026-11-02",
+      "content": "The owner ruled that the fleet's memory is the Tortoise hosted graph, and that every dispatch uses the research skill, which must check the graph before deriving.",
+      "about": [
+        "obj:tortoise"
+      ],
+      "legacy": "decision event 'The owner ruled on 2026-11-02 that the fleet's memory is the Tortoise hosted graph ...'"
+    },
+    {
+      "ref": "ev:hosted-postponed",
+      "eventKind": "decision",
+      "startedAt": "2026-11-01",
+      "content": "Owner ruling 2026-11-01T05:58Z postponed the entire hosted deployment setup and named the arming issue explicitly: do not arm, provision, or point anything at the hosted store until it is settled.",
+      "about": [
+        "obj:tortoise"
+      ],
+      "legacy": "decision event 'The owner ruling of 2026-11-01T05:58Z postponed the entire hosted deployment setup ...'"
+    },
+    {
+      "ref": "ev:extractor-v4-s1",
+      "eventKind": "decision",
+      "startedAt": "2026-09-23",
+      "content": "Owner ruling under EXTRACTOR-V4 \u00a7S3: phase 2 of the extractor is committed to RECEIVING the S1 narrative rather than re-deriving it. The narrative is the load-bearing artifact; later phases consume it.",
+      "about": [
+        "obj:tortoise"
+      ],
+      "source": "src:extractor-v4",
+      "legacy": "decision events 'The owner ruling of 2026-09-23 in EXTRACTOR-V4 \u00a7S3 was implemented' and '... committed phase 2 to receiving the S1 narrative'"
+    },
+    {
+      "ref": "ev:ontology-status-model",
+      "eventKind": "decision",
+      "startedAt": "2026-11-17",
+      "content": "The owner approved the v3.37 ontology status-model change and the lifecycle vocabulary ('good > easy': the structurally correct fix rather than the smallest diff). Six hunks plus a version bump to the ontology standard were approved on 2026-11-17: one closed set of four statuses for every knowledge kind, with retracted/outdated/archived demoted to read-side legacy.",
+      "about": [
+        "std:surface-approval"
+      ],
+      "source": "src:ontology",
+      "legacy": "decision events 'The v3.37 ontology status-model change was approved by the owner as good > easy', 'The owner approved the exact text of the ONTOLOGY.md lifecycle-vocabulary change on 2026-11-17'"
+    },
+    {
+      "ref": "ev:graph-as-tool",
+      "eventKind": "decision",
+      "startedAt": "2026-11-02",
+      "content": "The owner ruled that 'stop sending graph on writes' is not a candidate fix but a REOPENING of the graph-as-tool-argument decision, and must reopen that decision rather than ship quietly. The same rule was applied to the default-graph form on 2026-10-27.",
+      "about": [
+        "obj:tortoise"
+      ],
+      "legacy": "decision events 'The owner ruled on the graph-omission P0 that stop sending graph on writes is not a candidate but a reopening of the graph-as-tool-argument decision' and 'The owner ruled on 2026-10-27 that the default-graph form is the pre-#9340 defect ...'"
+    },
+    {
+      "ref": "ev:generic-measurement-text",
+      "eventKind": "decision",
+      "startedAt": "2026-11-15",
+      "content": "The owner ruled that measurement tools be described generically in user-facing text, retiring vendor and cookie names from what a customer reads.",
+      "about": [
+        "obj:tortoise",
+        "std:surface-approval"
+      ],
+      "legacy": "decision event 'The owner ruled on 2026-11-15 that measurement tools be described generically, retiring vendor and cookie names from the user-facing text'"
+    },
+    {
+      "ref": "ev:business-map-law",
+      "eventKind": "decision",
+      "startedAt": "2026-11-19",
+      "content": "The owner ruled the shape of the business map itself: do not bloat the ontology \u2014 packs plus core already declare the business logic, so this is a business-mapping exercise. Notes about a PR going through review are noise; what is wanted is architecture, strategy, product. A superseded duplicate carries no knowledge of its own.",
+      "about": [
+        "obj:tortoise",
+        "obj:market"
+      ],
+      "legacy": "issue #13880 objective, quoting the owner 2026-11-19"
+    },
+    {
+      "ref": "ev:no-capture-caps",
+      "eventKind": "decision",
+      "startedAt": "2026-11-01",
+      "content": "Owner ruling #4010 on the capture path: no capture caps. Extraction is not rationed by a cap on how much of a session is captured \u2014 a cap there decides what the product may know, which is a product decision the owner keeps.",
+      "about": [
+        "std:no-capture-caps"
+      ],
+      "legacy": "issue #4010 as cited by every lane brief ('No capture caps (#4010)') and the standard 'no capture caps' object"
+    },
+    {
+      "ref": "ev:wave1-exit-gate",
+      "eventKind": "decision",
+      "startedAt": "2026-09-22",
+      "content": "The Wave-1 exit gate was replaced: the 'aha test' is WITHDRAWN as the gate and as open owner decision #1, and the gate is now the nine objectives' done-states, each observed against the running system. The 2026-09-22 plan supersedes-in-part the 2026-09-17 plan and the 2026-09-13 roadmap, which still carry the old aha gate and must be read as superseded rather than authoritative.",
+      "about": [
+        "obj:goal-beta"
+      ],
+      "legacy": "points attached to the legacy Objects 'Tortoise beta roadmap' and 'Tortoise beta plan' in org_3326a01ea34ae595d84de5d8f9 ('The aha test is withdrawn as the Wave-1 exit gate ... the gate is now the nine objectives' done-states'; '... explicitly supersedes_in_part the 2026-09-17 plan and 2026-09-13 roadmap')"
+    }
+  ],
+  "points": [
+    {
+      "ref": "pt:record-truth",
+      "content": "Postgres is the system of record and the graph is a derived hot cache: every graph node must be re-derivable from the journal, so a node written only to the graph is the defect, not the optimization.",
+      "about": [
+        "std:record-truth"
+      ],
+      "source": "src:storage",
+      "legacy": "docs/architecture/STORAGE-ARCHITECTURE.md \u00a72.0 as carried by the legacy 'record is truth' findings and the GraphEvent journal (76,561 nodes) that exists to make replay possible"
+    },
+    {
+      "ref": "pt:journal-is-not-knowledge",
+      "content": "GraphEvent, Session, Meta, EpMeta and the onboarding nodes are the write-ahead journal and capture bookkeeping, not knowledge: 72,488 GraphEvents in the largest legacy graph, 42% of all nodes. Their home is the record, and re-filing them into a belief graph would duplicate the journal into the cache.",
+      "legacy": "label census of the four legacy graphs; issue #13880 source table"
+    },
+    {
+      "ref": "pt:decision-is-event",
+      "content": "A decision is an Event on the timeline, not a first-class Point: the graph says 'this state is based on these reasons', never 'this decision was made because of these reasons'. Filing a decision as a Point is a kind error.",
+      "about": [
+        "std:surface-approval"
+      ],
+      "source": "src:ontology",
+      "legacy": "docs/ONTOLOGY.md \u00a72 state-centric model and \u00a75 point-kind vocabulary; re-derived from #13420"
+    },
+    {
+      "ref": "pt:goal-is-object",
+      "content": "A goal is an Object carrying goalState (met / active / blocked / unmet / superseded / abandoned), which is a different axis from status: status says whether the goal is promoted for use, goalState says whether it is met.",
+      "about": [
+        "obj:goal-revenue",
+        "obj:goal-beta"
+      ],
+      "source": "src:ontology",
+      "legacy": "core:goal objects with goalState; ontology \u00a74.1/\u00a75 (#7856)"
+    },
+    {
+      "ref": "pt:role-vs-member",
+      "content": "A person holding a role is not membership: holdsRole (person to role) is a distinct predicate from memberOf (member to team or org), and collapsing the two loses who is accountable for what.",
+      "about": [
+        "sub:owner-role"
+      ],
+      "source": "src:ontology",
+      "legacy": "docs/ONTOLOGY.md \u00a73.6 note on holdsRole vs memberOf"
+    },
+    {
+      "ref": "pt:doc-is-source",
+      "content": "A document is a Source, not an Object: its bytes live outside the graph, and the claims extracted from it carry the epistemic weight while extractedFrom ties each claim back to where it was read.",
+      "about": [
+        "std:record-truth"
+      ],
+      "source": "src:ontology",
+      "legacy": "docs/ONTOLOGY.md \u00a74.4/\u00a74.6; legacy corpus shape (3,035 Sources, 16,185 extractedFrom edges)"
+    },
+    {
+      "ref": "pt:sdk-surface-consolidation",
+      "content": "The public SDK surface is being consolidated from 91 tools/methods toward 27: the surface is a contract every integration is built on, so it may not grow by accident and every retirement must name a customer-visible replacement.",
+      "about": [
+        "obj:tortoise",
+        "std:surface-approval"
+      ],
+      "source": "src:mcp-surface",
+      "legacy": "core:target 'tortoise SDK 91->27 tool consolidation target'; point 'The 66 retirement records exist mechanically in RETIRED_SDK_METHODS but name no replacement'"
+    },
+    {
+      "ref": "pt:single-write-door",
+      "content": "Every one of the eight agent-memory systems surveyed has effectively one write door \u2014 a single write entry point.",
+      "about": [
+        "obj:market",
+        "obj:tortoise"
+      ],
+      "legacy": "points attached to Graphiti / Neo4j Agent Memory / GraphRAG in team_7a3b5403935f865c27d3fb1751"
+    },
+    {
+      "ref": "pt:graphiti-three-doors",
+      "content": "Graphiti exposes three write APIs \u2014 add_episode, add_episode_bulk, add_triplet \u2014 so it does not have a single write entry point.",
+      "about": [
+        "obj:comp-graphiti"
+      ],
+      "legacy": "point attached to competitor Graphiti"
+    },
+    {
+      "ref": "pt:neo4j-write-shapes",
+      "content": "Neo4j Agent Memory documents batch, streaming and buffered writes alongside its MemoryClient, so it too has more than one write entry point.",
+      "about": [
+        "obj:comp-neo4j-memory"
+      ],
+      "legacy": "point attached to competitor Neo4j Agent Memory"
+    },
+    {
+      "ref": "pt:graphrag-batch",
+      "content": "GraphRAG is a batch pipeline with an update path rather than a single write entry point, and its documented update command offers standard and fast incremental indexing \u2014 so 'full re-index is the norm' is not a safe claim.",
+      "about": [
+        "obj:comp-graphrag"
+      ],
+      "legacy": "points attached to competitor GraphRAG"
+    },
+    {
+      "ref": "pt:supermemory-no-asof",
+      "content": "Supermemory has no as-of / time-travel search capability: it cannot answer what the memory held at a past instant.",
+      "about": [
+        "obj:comp-supermemory"
+      ],
+      "legacy": "point attached to competitor Supermemory"
+    },
+    {
+      "ref": "pt:accel-cluster",
+      "content": "Four top-priority funding programmes (Speedrun SR008, YC W2027, ERA W'27, Techstars Spring 2027) share overlapping November deadlines and all require a US entity \u2014 so the deadline cluster is a single constraint, not four independent choices.",
+      "about": [
+        "obj:prog-speedrun",
+        "obj:prog-yc",
+        "obj:prog-era",
+        "obj:prog-techstars"
+      ],
+      "legacy": "point attached to YC W2027 in team_7a3b5403935f865c27d3fb1751"
+    },
+    {
+      "ref": "pt:accel-priority",
+      "content": "The funding priority sequence is a16z Speedrun SR008 first (window Oct 12 - Nov 1, up to $1M as $500K / 10% SAFE plus $500K in the next round, cohort late Jan - Apr 2027), then YC W2027 (Nov 2, decision Dec 11), with ERA as the same-day fallback and Techstars on Nov 18.",
+      "about": [
+        "obj:prog-speedrun",
+        "obj:prog-yc",
+        "obj:prog-era"
+      ],
+      "legacy": "point attached to a16z Speedrun"
+    },
+    {
+      "ref": "pt:accel-density",
+      "content": "The top-tier accelerator cluster (Speedrun, YC, ERA, Techstars, HF0) is dense enough that the ruled-out programmes (Hello Tomorrow, 4YFN, SXSW Pitch, MuckerLab) cost no viable path.",
+      "about": [
+        "obj:prog-hf0",
+        "obj:prog-speedrun"
+      ],
+      "legacy": "point attached to YC W2027"
+    },
+    {
+      "ref": "pt:sxsw-ruled-out",
+      "content": "SXSW Pitch is ruled out for 2027 because it requires the product to have launched before 1 January 2024, which an alpha fails conditional on incorporation.",
+      "about": [
+        "obj:prog-techstars"
+      ],
+      "legacy": "point attached to SXSW Pitch (product-strategy:campaign) in team_7a3b5403935f865c27d3fb1751"
+    },
+    {
+      "ref": "pt:accel-terms-single-source",
+      "content": "Two funding terms in the survey are single-sourced and must be verified before a decision rests on them: Techstars' standard deal ($220K for 5%) has no inline source, and Y Combinator's W2027 deadline carries no ycombinator.com citation.",
+      "about": [
+        "obj:prog-techstars",
+        "obj:prog-yc"
+      ],
+      "legacy": "points attached to Techstars London and YC W2027"
+    },
+    {
+      "ref": "pt:infra-supabase",
+      "content": "At 1,000,000 MAU Supabase's total ($2,925) is the lowest of any provider that meters MAU \u2014 the unit-economics floor the hosted product is measured against.",
+      "about": [
+        "obj:tortoise"
+      ],
+      "legacy": "point attached to customerSegment 'MAU-metered providers'"
+    },
+    {
+      "ref": "pt:infra-identity-platform",
+      "content": "Identity Platform's per-unit rate falls to $0.0032 in the 1M-10M band, so auth cost is not linear in MAU at the top of the band.",
+      "about": [
+        "obj:tortoise"
+      ],
+      "legacy": "point attached to competitor 'Identity Platform' (an auth vendor in the legacy cost comparison)"
+    },
+    {
+      "ref": "pt:model-cost-spread",
+      "content": "The same DeepSeek model carries a wide price spread by supplier: v4-flash is $0.07/$0.14 per 1M tokens on OpenRouter against $0.138/$0.275 on Venice, and v4-pro-0813 is ~$0.579/$1.738 on OpenRouter against $1.65/$4.95 on Venice. Supplier choice for the extraction leg is a real cost lever, not a rounding error.",
+      "about": [
+        "obj:tortoise"
+      ],
+      "legacy": "points attached to deepseek-v4-flash-0731 / deepseek-v4-pro-0813 in team_7a3b5403935f865c27d3fb1751"
+    },
+    {
+      "ref": "pt:paid-tiers-buy-overage",
+      "content": "Every paid tier includes an amount of stored data and hot capacity and buys more above it at the published rate, while free and anon publish no included record amount and are REFUSED at their included amount instead: an over-cap write on a paid tier is a bill, on free it is a refusal.",
+      "about": [
+        "std:pricing-shape",
+        "obj:tortoise"
+      ],
+      "source": "src:pricing",
+      "legacy": "product/pricing.json storage block (#11758); legacy point 'D11 - over-cap refused, under-cap succeeds'"
+    },
+    {
+      "ref": "pt:beta-gate-counts",
+      "content": "The 2026-11-02 gate measurement is the baseline the beta launch is judged against: 15 P0-blocker plus 28-29 P1-severe open, and one PR merged in the hour to 15:25Z that closed no P1.",
+      "about": [
+        "obj:goal-gate-b1"
+      ],
+      "legacy": "core:goal 'merge all P0 and P1 issues' summary/evidence"
+    },
+    {
+      "ref": "pt:revenue-unevaluated",
+      "content": "No revenue metric and no measurement of revenue validation existed at 2026-11-02, which is why 'validate revenue' sits at goalState=active: achievement could not be evidenced either way.",
+      "about": [
+        "obj:goal-revenue"
+      ],
+      "legacy": "core:goal 'GOAL-A: validate revenue' evidence field"
+    },
+    {
+      "ref": "pt:dedup-earlier-carrier",
+      "content": "When two lanes carry the same commitment, the earlier carrier wins and the later one is superseded naming the winner: a duplicate is retired with a supersedeReason, never left live beside its twin.",
+      "about": [
+        "obj:goal-revenue"
+      ],
+      "legacy": "core:goal 'GOAL-A: validate revenue' supersededBy/supersedeReason"
+    },
+    {
+      "ref": "pt:harness-is-a-constraint-on-product",
+      "content": "The agent-harness throughput work is a CONSTRAINT on the product's roadmap, not a product goal in its own right: it exists because merging P0/P1 is gated on the pipeline moving at all.",
+      "about": [
+        "obj:goal-bottlenecks",
+        "obj:goal-gate-b1"
+      ],
+      "legacy": "core:goal 'reduce agent-harness bottlenecks' summary; owner correction of the cascade"
+    },
+    {
+      "ref": "pt:retention-doctrine",
+      "content": "A deletion of raw content is an ACT, recorded durably and bounded by a 10-day deletion-marker TTL, and a recorded act always wins over a live observation: a probe can never un-delete a memory.",
+      "about": [
+        "std:record-truth"
+      ],
+      "source": "src:retention",
+      "legacy": "docs/retention-and-deletion.md as cited by the Source rawState axis; legacy 'retention-doctrine quote' point"
+    },
+    {
+      "ref": "pt:beta-exit-is-donestates",
+      "content": "The beta's Wave-1 exit criterion is not a statistic: it is the nine objectives' done-states, each observed against the running system. A gate phrased as a cohort size plus a success bar was withdrawn precisely because it could not be observed against the system.",
+      "about": [
+        "obj:goal-beta"
+      ],
+      "legacy": "'Tortoise beta roadmap' claims: 'The roadmap still asserts that the value scorecard's statistics depend on the cohort numbers in open decision 1, contradicting the withdrawal' + the withdrawal itself"
+    }
+  ],
+  "edges": [
+    {
+      "from": "sub:daniel",
+      "to": "sub:premise-labs",
+      "relation": "memberOf"
+    },
+    {
+      "from": "sub:daniel",
+      "to": "sub:owner-role",
+      "relation": "holdsRole"
+    },
+    {
+      "from": "sub:epistemic-team",
+      "to": "sub:premise-labs",
+      "relation": "memberOf"
+    },
+    {
+      "from": "obj:tortoise",
+      "to": "sub:premise-labs",
+      "relation": "ownedBy"
+    },
+    {
+      "from": "std:pricing-shape",
+      "to": "sub:premise-labs",
+      "relation": "ownedBy"
+    },
+    {
+      "from": "obj:market",
+      "to": "obj:tortoise",
+      "relation": "related"
+    },
+    {
+      "from": "obj:goal-beta",
+      "to": "obj:goal-revenue",
+      "op": "IMPL",
+      "label": "addresses",
+      "direction": "->",
+      "why": "A beta launch is how revenue gets validated."
+    },
+    {
+      "from": "obj:goal-gate-b1",
+      "to": "obj:goal-beta",
+      "op": "IMPL",
+      "label": "dependsOn",
+      "direction": "->",
+      "why": "Nothing ships to a beta while 15 P0-blockers and 29 P1-severe are open."
+    },
+    {
+      "from": "obj:goal-gate-b2",
+      "to": "obj:goal-beta",
+      "op": "IMPL",
+      "label": "dependsOn",
+      "direction": "->",
+      "why": "The announcement must be ready to send to exactly the interested population."
+    },
+    {
+      "from": "obj:goal-bottlenecks",
+      "to": "obj:goal-gate-b1",
+      "op": "IMPL",
+      "label": "addresses",
+      "direction": "->",
+      "why": "Merging P0/P1 is faster if the harness is unblocked (owner correction 2026-11-02)."
+    },
+    {
+      "from": "obj:goal-c1",
+      "to": "obj:goal-bottlenecks",
+      "op": "IMPL",
+      "label": "hasPart",
+      "direction": "<->"
+    },
+    {
+      "from": "obj:goal-c2",
+      "to": "obj:goal-bottlenecks",
+      "op": "IMPL",
+      "label": "hasPart",
+      "direction": "<->"
+    },
+    {
+      "from": "obj:goal-c3",
+      "to": "obj:goal-bottlenecks",
+      "op": "IMPL",
+      "label": "hasPart",
+      "direction": "<->"
+    },
+    {
+      "from": "obj:goal-c4",
+      "to": "obj:goal-bottlenecks",
+      "op": "IMPL",
+      "label": "hasPart",
+      "direction": "<->"
+    },
+    {
+      "from": "obj:goal-c5",
+      "to": "obj:goal-bottlenecks",
+      "op": "IMPL",
+      "label": "hasPart",
+      "direction": "<->"
+    },
+    {
+      "from": "obj:goal-revenue",
+      "to": "sub:daniel",
+      "relation": "ownedBy"
+    },
+    {
+      "from": "obj:goal-beta",
+      "to": "obj:tortoise",
+      "relation": "dependsOn"
+    },
+    {
+      "from": "obj:prog-speedrun",
+      "to": "obj:tortoise",
+      "relation": "related"
+    },
+    {
+      "from": "obj:prog-yc",
+      "to": "obj:tortoise",
+      "relation": "related"
+    },
+    {
+      "from": "obj:prog-era",
+      "to": "obj:tortoise",
+      "relation": "related"
+    },
+    {
+      "from": "obj:prog-techstars",
+      "to": "obj:tortoise",
+      "relation": "related"
+    },
+    {
+      "from": "obj:prog-ef",
+      "to": "obj:tortoise",
+      "relation": "related"
+    },
+    {
+      "from": "obj:prog-hf0",
+      "to": "obj:tortoise",
+      "relation": "related"
+    },
+    {
+      "from": "obj:comp-graphiti",
+      "to": "obj:market",
+      "relation": "related"
+    },
+    {
+      "from": "obj:comp-neo4j-memory",
+      "to": "obj:market",
+      "relation": "related"
+    },
+    {
+      "from": "obj:comp-graphrag",
+      "to": "obj:market",
+      "relation": "related"
+    },
+    {
+      "from": "obj:comp-supermemory",
+      "to": "obj:market",
+      "relation": "related"
+    },
+    {
+      "from": "obj:comp-letta",
+      "to": "obj:market",
+      "relation": "related"
+    },
+    {
+      "from": "pt:single-write-door",
+      "to": "obj:market",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:graphiti-three-doors",
+      "to": "pt:single-write-door",
+      "op": "NAND",
+      "label": "refutes",
+      "direction": "->",
+      "why": "A true finding that counts against the single-door claim: it names one system with three doors."
+    },
+    {
+      "from": "pt:neo4j-write-shapes",
+      "to": "pt:single-write-door",
+      "op": "NAND",
+      "label": "refutes",
+      "direction": "->"
+    },
+    {
+      "from": "pt:graphrag-batch",
+      "to": "pt:single-write-door",
+      "op": "NAND",
+      "label": "refutes",
+      "direction": "->"
+    },
+    {
+      "from": "pt:graphiti-three-doors",
+      "to": "obj:comp-graphiti",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:neo4j-write-shapes",
+      "to": "obj:comp-neo4j-memory",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:graphrag-batch",
+      "to": "obj:comp-graphrag",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:supermemory-no-asof",
+      "to": "obj:comp-supermemory",
+      "op": "NAND",
+      "label": "refutes",
+      "direction": "->",
+      "why": "A capability gap that counts against the competitor, not against a claim of ours."
+    },
+    {
+      "from": "pt:accel-cluster",
+      "to": "obj:prog-speedrun",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:accel-priority",
+      "to": "obj:prog-speedrun",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:accel-priority",
+      "to": "obj:prog-yc",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:accel-density",
+      "to": "pt:accel-cluster",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:sxsw-ruled-out",
+      "to": "pt:accel-density",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:accel-terms-single-source",
+      "to": "pt:accel-priority",
+      "op": "NAND",
+      "label": "refutes",
+      "direction": "->",
+      "why": "It contradicts the priority sequence's confidence: two of its terms are single-sourced."
+    },
+    {
+      "from": "pt:infra-supabase",
+      "to": "obj:tortoise",
+      "op": "IMPL",
+      "label": "addresses",
+      "direction": "->"
+    },
+    {
+      "from": "pt:infra-identity-platform",
+      "to": "pt:infra-supabase",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:model-cost-spread",
+      "to": "obj:tortoise",
+      "op": "IMPL",
+      "label": "addresses",
+      "direction": "->"
+    },
+    {
+      "from": "pt:paid-tiers-buy-overage",
+      "to": "std:pricing-shape",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:record-truth",
+      "to": "std:record-truth",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:journal-is-not-knowledge",
+      "to": "std:record-truth",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:decision-is-event",
+      "to": "std:record-truth",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:goal-is-object",
+      "to": "obj:goal-revenue",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:role-vs-member",
+      "to": "sub:owner-role",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:doc-is-source",
+      "to": "std:record-truth",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:sdk-surface-consolidation",
+      "to": "std:surface-approval",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:sdk-surface-consolidation",
+      "to": "obj:tortoise",
+      "op": "IMPL",
+      "label": "addresses",
+      "direction": "->"
+    },
+    {
+      "from": "pt:beta-gate-counts",
+      "to": "obj:goal-gate-b1",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:revenue-unevaluated",
+      "to": "obj:goal-revenue",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:dedup-earlier-carrier",
+      "to": "obj:goal-revenue",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:harness-is-a-constraint-on-product",
+      "to": "obj:goal-bottlenecks",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:retention-doctrine",
+      "to": "std:record-truth",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "ev:beta-gates-measured",
+      "to": "obj:goal-beta",
+      "relation": "aboutObject"
+    },
+    {
+      "from": "ev:interested-definition",
+      "to": "obj:goal-gate-b2",
+      "relation": "aboutObject"
+    },
+    {
+      "from": "ev:unlimited-graphs",
+      "to": "std:pricing-shape",
+      "relation": "produces"
+    },
+    {
+      "from": "ev:storage-dimensions",
+      "to": "std:pricing-shape",
+      "relation": "produces"
+    },
+    {
+      "from": "ev:nodes-retired",
+      "to": "std:pricing-shape",
+      "relation": "produces"
+    },
+    {
+      "from": "ev:fleet-memory",
+      "to": "obj:tortoise",
+      "relation": "aboutObject"
+    },
+    {
+      "from": "ev:hosted-postponed",
+      "to": "obj:tortoise",
+      "relation": "aboutObject"
+    },
+    {
+      "from": "ev:extractor-v4-s1",
+      "to": "obj:tortoise",
+      "relation": "aboutObject"
+    },
+    {
+      "from": "ev:ontology-status-model",
+      "to": "std:surface-approval",
+      "relation": "aboutObject"
+    },
+    {
+      "from": "ev:graph-as-tool",
+      "to": "obj:tortoise",
+      "relation": "aboutObject"
+    },
+    {
+      "from": "ev:generic-measurement-text",
+      "to": "obj:tortoise",
+      "relation": "aboutObject"
+    },
+    {
+      "from": "ev:business-map-law",
+      "to": "obj:tortoise",
+      "relation": "aboutObject"
+    },
+    {
+      "from": "pt:decision-is-event",
+      "to": "ev:business-map-law",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "ev:beta-gates-measured",
+      "to": "pt:beta-gate-counts",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "ev:beta-gates-measured",
+      "to": "ev:interested-definition",
+      "op": "IMPL",
+      "label": "causes",
+      "direction": "->"
+    },
+    {
+      "from": "pt:paid-tiers-buy-overage",
+      "to": "ev:storage-dimensions",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "std:pricing-shape",
+      "to": "ev:nodes-retired",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "std:record-truth",
+      "to": "ev:graph-as-tool",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "sub:daniel",
+      "to": "ev:business-map-law",
+      "relation": "performs"
+    },
+    {
+      "from": "sub:daniel",
+      "to": "ev:unlimited-graphs",
+      "relation": "performs"
+    },
+    {
+      "from": "sub:daniel",
+      "to": "ev:storage-dimensions",
+      "relation": "performs"
+    },
+    {
+      "from": "sub:daniel",
+      "to": "ev:ontology-status-model",
+      "relation": "performs"
+    },
+    {
+      "from": "src:ontology",
+      "to": "sub:epistemic-team",
+      "relation": "authoredBy"
+    },
+    {
+      "from": "src:storage",
+      "to": "sub:epistemic-team",
+      "relation": "authoredBy"
+    },
+    {
+      "from": "src:extractor-v4",
+      "to": "sub:epistemic-team",
+      "relation": "authoredBy"
+    },
+    {
+      "from": "src:retention",
+      "to": "sub:epistemic-team",
+      "relation": "authoredBy"
+    },
+    {
+      "from": "src:mcp-surface",
+      "to": "sub:epistemic-team",
+      "relation": "authoredBy"
+    },
+    {
+      "from": "src:pricing",
+      "to": "sub:daniel",
+      "relation": "authoredBy"
+    },
+    {
+      "from": "src:ontology",
+      "to": "obj:tortoise",
+      "relation": "references"
+    },
+    {
+      "from": "src:storage",
+      "to": "obj:tortoise",
+      "relation": "references"
+    },
+    {
+      "from": "src:extractor-v4",
+      "to": "obj:tortoise",
+      "relation": "references"
+    },
+    {
+      "from": "src:pricing",
+      "to": "std:pricing-shape",
+      "relation": "references"
+    },
+    {
+      "from": "src:mcp-surface",
+      "to": "std:surface-approval",
+      "relation": "references"
+    },
+    {
+      "from": "src:retention",
+      "to": "std:record-truth",
+      "relation": "references"
+    },
+    {
+      "from": "ev:no-capture-caps",
+      "to": "std:no-capture-caps",
+      "relation": "produces"
+    },
+    {
+      "from": "sub:daniel",
+      "to": "ev:no-capture-caps",
+      "relation": "performs"
+    },
+    {
+      "from": "std:no-capture-caps",
+      "to": "std:record-truth",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->",
+      "why": "The record can only be truth about what capture was allowed to record."
+    },
+    {
+      "from": "ev:wave1-exit-gate",
+      "to": "obj:goal-beta",
+      "relation": "aboutObject"
+    },
+    {
+      "from": "ev:wave1-exit-gate",
+      "to": "std:record-truth",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->",
+      "why": "The gate moved to states observed against the running system \u2014 the record, not a forecast."
+    },
+    {
+      "from": "pt:beta-exit-is-donestates",
+      "to": "obj:goal-beta",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:beta-exit-is-donestates",
+      "to": "ev:wave1-exit-gate",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->"
+    },
+    {
+      "from": "pt:beta-exit-is-donestates",
+      "to": "pt:beta-gate-counts",
+      "op": "IMPL",
+      "label": "supports",
+      "direction": "->",
+      "why": "Both gates are measured against the system rather than against an intention."
+    }
+  ]
+}
