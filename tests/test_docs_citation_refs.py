@@ -1922,7 +1922,27 @@ _TORTOISE_NAMED_HEAD = re.compile(r"(?:`[0-9a-f]{7,40}`|\b[0-9a-f]{7,40}\b|#\d{3
 #: A copula is deliberately NOT an event verb: `#10215` shipped that; at this head …` is a
 #: claim about THIS head introduced by an unrelated citation, and round 12's counterexamples
 #: are all of that shape.
-_TORTOISE_HEAD_BINDING_AT = re.compile(r"(?:at|on|in|as\s+of)\s+`?[0-9a-f]{7,40}`?")
+#: ⛔ AND THE BINDING IS CASE-INSENSITIVE BECAUSE THE BAN IS (#13802, round 21 — MEASURED).
+#: `_TORTOISE_SET_DIRECTION_CLAIM` compiles `re.IGNORECASE` (its own contract: "FORMATTING IS
+#: NOT CONTENT … the form matched case-insensitively"), and these two constants did not — so
+#: the SAME sentence was refused when its binding was spelled at a sentence start, which is
+#: the most ordinary spelling of a named head in this corpus (`At `945817d22a`, the base this
+#: branch was re-derived on`). Measured in-process on the round-20 head:
+#:
+#:   "At `2584a86ec1` the `tortoise/` set was non-empty — five paths."   -> REFUSED
+#:   "at `2584a86ec1` the `tortoise/` set was non-empty — five paths."   -> allowed
+#:   "`#10215`'s `8bc2fbed1` Touches no `tortoise/` file at all"          -> REFUSED
+#:
+#: That is a FALSE BLOCK on head-named history — the one direction this file's docstring
+#: forbids — and a contract inconsistency inside one module. The widening is only the CASE of
+#: the SAME bound constructions (the sha class accepts `[0-9A-F]`, which every git object id
+#: spelling allows), never a third construction: measured over all 855 `docs/**/*.md`, the ban's
+#: hit set is UNCHANGED by the flag (6 -> 6, 0 newly refused, 0 newly allowed, and the witness
+#: test above passes untouched), so no claim that was refused on its merits is now excused.
+#: NO LIVE VICTIM at the head this was written (0 case-only false blocks in the corpus) — this
+#: closes the class before the next historical sentence is written in the capitalised form.
+_TORTOISE_HEAD_BINDING_AT = re.compile(
+    r"(?:at|on|in|as\s+of)\s+`?[0-9a-f]{7,40}`?", re.IGNORECASE)
 _TORTOISE_HEAD_BINDING = re.compile(
     r"(?:(?:at|on|in|as\s+of)\s+`?[0-9a-f]{7,40}`?"
     # ⛔ AND THE `#PR` FORM REQUIRES ITS EVENT VERB TOO (round 13 review, P1 — MEASURED):
@@ -1938,7 +1958,9 @@ _TORTOISE_HEAD_BINDING = re.compile(
     r"|`?[0-9a-f]{7,40}`?\s+"
     r"(?:adds?|added|touches?|touched|lands?|landed|ships?|shipped|moves?|moved"
     r"|re-?points?|re-?pointed|re-?derives?|re-?derived|de-?types?|de-?typed"
-    r"|says?|said|states?|claims?|records?|carried|derives?|renumbers?|renumbered)\b)")
+    r"|says?|said|states?|claims?|records?|carried|derives?|renumbers?|renumbered)\b)",
+    # case as well as spelling — see the measurement on `_TORTOISE_HEAD_BINDING_AT` above
+    re.IGNORECASE)
 
 
 #: ⛔ MARKDOWN EMPHASIS IS ABSORBED WHERE IT OCCURS — THE TEXT IS NOT STRIPPED (#13802 review,
@@ -2048,7 +2070,14 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # real sentences in RECONCILE-A1-A2-A5.md, about a DIFFERENT command) were then refused.
     # This anchor is the `-- tortoise/` SHORTHAND FOR THAT DIFF, and the backticks are what
     # identifies it as a command spelling rather than a flag on any `git` invocation.
-    r"|\**`-- tortoise/`\**"
+    # ⛔ AND THE CLASS IS THE FILE'S OWN DECLARED ONE, NOT `\**` (#13802 review, round 19, P1 —
+    # MEASURED). Round 18 wrote `\**` here and at the `tortoise/` arm. That is a NARROWER class
+    # than the contract stated 80 lines above ("the tolerance is a `[*_`]{0,3}` class … written
+    # INLINE"): underscore emphasis is not asterisks, so `The _`tortoise/`_ set prints NOTHING`
+    # stayed GREEN. The backtick stays OUT of this class on purpose — the arm above measured that
+    # making the delimiters optional widens the anchor to ANY `-- tortoise/`, which refuses two
+    # true `git grep … -- tortoise/` sentences. Emphasis inside, delimiters literal.
+    r"|[*_]{0,3}`-- tortoise/`[*_]{0,3}"
     # ⛔ AND THE TREE'S OTHER SUBJECT NOUNS (#13802 review, round 13, P2 — MEASURED: the SAME
     # verb and the SAME answer were refused on `set` and GREEN on `diff`/`files`/`paths`/
     # `directory`, every one of them a noun this pattern's own ANSWER alternation carries, so
@@ -2058,7 +2087,7 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # anchor, so `The **`tortoise/`** set prints NOTHING` and `**`-- tortoise/`** prints
     # NOTHING` were GREEN here while the detector read the second — the exact
     # "detector-read, ban-blind" shape, on the rail where this ban is the only arm)
-    r"|\**`?tortoise/`?\**\s+(?:set|side|part|diff|files?|paths?|directory|tree|subtree|"
+    r"|[*_]{0,3}`?tortoise/`?[*_]{0,3}\s+[*_]{0,3}(?:set|side|part|diff|files?|paths?|directory|tree|subtree|"
     r"module\s+set|delta|changes?)(?:\s*\([^)]{0,90}\))?[^`]{0,40}?"
     # ⛔ AND THE INDIRECT REFERENCE (#13802 review, round 5, P2 — MEASURED). The guarded
     # document states the answer WITHOUT repeating the command: "at THIS head the command
@@ -2079,7 +2108,15 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # head, returns NOTHING` were BOTH GREEN through this ban AND its sibling detector, in
     # the depth-1 configuration where the measured leg skips). Six tokens with optional
     # punctuation is still bounded: the POINTER and PAST-TENSE forms must reach no answer.
-    r"(?:\s+there)?(?:\s*,?\s*(?:\([^)]{0,90}\)|[\w-]+),?){0,6}\s*[*_`]{0,3}"
+    # ⛔ AND THE EMPHASIS CLASS IS FOLLOWED BY ITS OWN WHITESPACE (#13802 review, round 19, P1 —
+    # MEASURED). Ordered `\s*[*_`]{0,3}` and with no `\s*` after it, emphasis that is then
+    # followed by a space could not be crossed at all: `**`git diff --name-only
+    # origin/main...HEAD -- tortoise/`** prints NOTHING` and its `***` spelling were read by the
+    # sibling DETECTOR and refused by no arm in this checkout or at the base — the "detector-read,
+    # ban-blind" shape, on the one anchor where the detector is meant to be the companion. The
+    # pair is what crosses `**` + space; it cannot cross a word, so the over-block surface is
+    # unchanged.
+    r"(?:\s+there)?(?:\s*,?\s*(?:\([^)]{0,90}\)|[\w-]+),?){0,6}\s*[*_`]{0,3}\s*"
     # ⛔ THE VERB CLASS IS THE DETECTOR'S OWN LIST (#13802 review, round 5, P2; merge-round
     # review, P1): `reports exactly two paths` and `yields `tortoise/x.py`` were green
     # here, and so were `shows`, `names`, `has`, `includes`, `contains` and the bare `=` /
@@ -2107,7 +2144,10 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # `prints now nothing`, `is still empty` and 1260 of 1536 verb×modifier×answer cells were
     # detector-only, and on the `set`/deictic anchor NEITHER arm saw them)
     r"now|still|actually|also)\s+)?"
-    r"(?:,\s*[^,.;\n]{1,30},)?\s*"
+    # ⛔ AND ONE DASH IS AN INSERTION TOO (#13802, round 21 — `f0fea1ce1c` made the closing dash
+    # optional; the row claimed it, and `The `tortoise/` set prints — NOTHING` had been GREEN
+    # because the alternative demanded a CLOSING dash as well)
+    r"(?:,\s*[^,.;\n]{1,30},|\s*[—–]\s*[^.;\n]{0,30}?(?:[—–]\s*)?)?\s*"
     # ⛔ AND A PARENTHETICAL (#13802 review, round 14, P2 — MEASURED: `(run at this head)`
     # between the command and the verb, and `set (measured with `git diff …`) is empty`,
     # were GREEN in BOTH arms while the comma and bare forms were refused)
@@ -2116,11 +2156,16 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     r"(?:(?:us|them|you)\s+)?(?:back\s+)?"
     # ⛔ AND `no longer`, the ordinary English spelling of the emptiness reversal (#13802
     # review, round 12, P2 — `is no longer empty` was GREEN through both arms)
-    r"(?:(?:NOT|not|no\s+longer|NO\s+LONGER)\s+)?[*_]{0,3}"
+    # ⛔ AND A BACKTICK AFTER THE EMPHASIS (#13802 review, round 20, P1 — MEASURED: the verb's
+    # `[*_`]{0,3}` spends its budget on `**`, leaving the backtick that opens the answer
+    # unconsumed — `**prints** `NOTHING`` was GREEN while the detector read it, the
+    # detector-read/ban-blind shape again)
+    r"(?:(?:NOT|not|no\s+longer|NO\s+LONGER)\s+)?[*_`]{0,3}"
     # AND THE ANSWER FORMS that detector knows, in the same widening: `one path` as
     # readily as `exactly two`, `both modules` as readily as `TWO modules`, and a
     # MODIFIED membership count ("the two COMMENT-ONLY modules") as readily as a bare one.
-    r"(?:NOTHING|NO paths?|no (?:`?tortoise/[^`\s]*`?\s*)?(?:paths?|files?|entries|diffs?|hits?)"
+    r"(?:NOTHING|NO paths?|no (?:`?tortoise/[^`\s]*`?\s*)?(?:paths?|files?|entry|entries|"
+    r"modules?|edits?|diffs?|hits?|records?|items?|rows?|lines?|changes?)"
     # ⛔ AND THE SPACE SPELLING OF `non-empty` (#13802 review, cycle 6, P1 — MEASURED):
     # the detector's own class is `non[- ]?empty`, so it reads `is non empty`; this
     # pattern listed only the hyphen and closed spellings, so
@@ -2225,7 +2270,7 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # one requires an ANSWER to open a clause and `tortoise/` to follow inside the same
     # sentence, so ordinary prose that merely begins with `Nothing` is untouched. The
     # emptiness-only cut of round 13 covered ONE direction of the two — that is round 16's fix.
-    r"|(?:^|[.;:!?]\s|\n)[*_`]{0,3}(?:NOTHING|Nothing|EMPTY|Empty|NONE|None|ZERO|Zero|`?\[\]`?"
+    r"|(?:^|[.;:!?]\s|\n)(?:there\s+(?:is|are)\s+)?[*_`]{0,3}(?:NOTHING|Nothing|EMPTY|Empty|NONE|None|ZERO|Zero|`?\[\]`?"
     r"|both\s+(?:files?|paths?|modules?|entries)"
     r"|(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:files?|paths?|modules?|"
     # ⛔ AND THE OTHER COUNT NOUNS ARE IN THIS CLASS TOO (#13802 review, cycle 9, P2 —
@@ -2234,7 +2279,26 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # here — an asymmetry between the two orders of the same sentence, and one the row's own
     # residual sentence did not cover, because these nouns are inside the ban's own lists.
     r"entries|entry|edits?|diffs?|hits?|records?|items?|rows?|lines?|changes?)"
-    r"|(?:an?|the)\s+(?:empty|non[- ]?empty))"
+    r"|(?:an?|the)\s+(?:empty|non[- ]?empty)"
+    # ⛔ AND THE `no <noun>` SPELLING IN THE ANSWER-FIRST ORDER (#13802 review, round 21 —
+    # MEASURED at this head: `There are no files in the `tortoise/` set at this head.` is GREEN
+    # while its VERB-FIRST twin `The `tortoise/` set shows no changes at this head` is refused
+    # by the arm below — the same claim, two orders, one refused, which is exactly the
+    # asymmetry rounds 13 and 16 closed twice before). The noun class is the ban's OWN count
+    # class (`entries|entry|edits?|diffs?|hits?|records?|items?|rows?|lines?|changes?`) plus the
+    # three shapes it spells out (`files?|paths?|modules?`), so the two orders cannot drift
+    # apart again. Bounded exactly like its siblings: the clause must OPEN with `no <noun>`,
+    # `tortoise/` must follow inside the same sentence, and a verb or subject-noun of the anchor
+    # list must follow THAT — so `No changes to `tortoise/` are needed` stays allowed (its
+    # `are` is not in the list), pinned in the must-not-refuse set below.
+    r"|no\s+(?:files?|paths?|modules?|entries|entry|edits?|diffs?|hits?|records?|items?|"
+    r"rows?|lines?|changes?))"
+    # ⚠️ DECLARED RESIDUAL, MEASURED (delta review of this widening): the QUOTE- and
+    # PAREN-wrapped answer (`The `tortoise/` set prints 'NOTHING' at this head.`, `… prints
+    # (NOTHING) at this head.`) is read by NEITHER arm — the emphasis class is `[*_`]`, and the
+    # sibling DETECTOR strips `[*_`]` but matches on a COMMAND token, so it reads none of them
+    # either. A gap in BOTH arms, not the detector-read/ban-blind asymmetry the rail must not
+    # carry; the live-victim scan over all 855 `docs/**/*.md` finds zero of either form.
     # ⛔ AND THE ANCHOR MUST BE FOLLOWED BY THE VERB OR THE SUBJECT-NOUN (#13802 review, round
     # 16 — MEASURED): without that, ordinary prose (`… it is transport only — nothing in
     # `tortoise/``, `; `tortoise/x.py` was in an earlier cut`) matched the emptiness answer and
@@ -2249,7 +2313,33 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # boundary that is true after a word AND after punctuation, so both spellings are read.
     r"(?![A-Za-z0-9_])[^.\n]{0,60}?tortoise/`?\s*(?:set|side|part|diff|files?|paths?|directory|tree|"
     r"subtree|delta|changes?|holds|holds?|returns?|prints?|reports?|lists?|"
-    r"carries|contains?|includes?|shows?|names?|gives|outputs?|yields|answers?)\b"
+    r"carries|contains?|includes?|shows?|names?|gives|outputs?|yields|answers?|"
+    # ⛔ AND THE LINK VERB THIS FAMILY WAS MISSING (#13802 review, P2 — MEASURED, and
+    # disclosed at `480c675313` as PRE-EXISTING and left: *"the same `[]`-unreachability
+    # survives in a SIBLING alternative … arm E's trailing verb list has no `has`"*).
+    # The answer-first order names the action with the LINKING verb, and this list carried
+    # no `has` while BOTH other families did (the general verb class above: `has|holds?`;
+    # the verb-before-path family: `carries|touches|has|holds|…`). Measured over a 13-verb ×
+    # 7-answer grid at `9024f2e5d0`: **42 of 210** answer-first cells were read by NEITHER
+    # this ban NOR the sibling detector (`_typed_answers_to_tortoise_cmd` → `[]` for every
+    # one of them, so on the `set`/deictic anchor there was no second layer either) —
+    # `` `[]` is what `-- tortoise/` has at this head. `` and its whole count-side family
+    # walked through green while the SAME claim in the verb-then-answer order red. A verb
+    # the other two families carry and this one does not is the same hole round 17 closed in
+    # the verb-before-path direction, so the list is now aligned with theirs.
+    # ⚠️ THE COPULAS STAY OUT, AND THAT IS A MEASURED DECISION, NOT AN OVERSIGHT (#13802
+    # review, P2 — the general class carries `is|are|was|were|remains?|stays?` because there
+    # a copula is BOUNDED by the answer that follows it; at the END of this alternative there
+    # is nothing after the verb to bind it, so `is` would refuse `One path in `tortoise/` is
+    # deprecated.` and `Two paths in `tortoise/` are read by the resolver.` — ordinary prose
+    # about the tree, not a direction claim. That is the file's own trade, stated here rather
+    # than matched: an over-block costs more than a false PASS. What the added verbs do NOT
+    # buy is a NEW over-block class — `One path in `tortoise/` holds a typo.` is refused at
+    # `9024f2e5d0` already, so the prose cost of `has` is one the class had paid for `holds`.
+    # Measured over 855 `docs/**/*.md`: **0 new hits** (6 before, 6 after, set difference
+    # zero) and 0 over the 13 guarded bundle documents; every must-not-refuse form in the
+    # witness test stays GREEN.
+    r"has|have|had|comes? back|resolves?|reveals?|reads?|touches?)\b"
     # C) ⛔ AND THE VERB-BEFORE-THE-PATH FAMILY (#13802 review, P1 — 15 freshly-invented
     # spellings measured GREEN): `this diff carries no `tortoise/` path at all`, `this diff
     # touches no `tortoise/` file`, `the `tortoise/` set holds no path here`. Shape A cannot
@@ -2269,10 +2359,23 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # ⛔ WITH THE SAME INSERTION TOLERANCE FAMILY A CARRIES (#13802 review, round 18, P2 —
     # MEASURED: `This diff carries, at this head, no `tortoise/` path at all` and
     # `This diff carries (measured at this head) no …` were GREEN while the bare form red)
-    r"(?:,\s*[^,.;\n]{1,30},|\s*\([^)]{0,90}\))?\s+"
-    r"(?:no|zero|only)\s+`?tortoise/[^`]*`?"
-    # ⛔ AND THE SYMBOL VERBS IN THEIR OWN ALTERNATIVE (`\b` cannot anchor before `-` or `→`,
-    # which is why putting them in the list above left them blind — MEASURED, round 17)
+    # ⛔ AND THE PREPOSITION BRIDGE AND THE DASH INSERTS, WHICH FAMILY A HAD AND THIS ONE DID
+    # NOT (#13802 review, round 21, P2 — MEASURED in-process at `9024f2e5d0`): the verb list
+    # above was widened to "every verb the rest of this pattern carries" and it then carried
+    # `resolves?`/`answers?`/`comes? back` WITHOUT the particle bridge family A pairs them with
+    # at its own `(?:(?:with|to|as|into|out|of)\s+)?`, so the natural spelling of the very verbs
+    # the round-17 widening added stayed GREEN through BOTH arms (`This diff resolves to no
+    # `tortoise/` path at all.` / `comes back with no …` / `answers with no …` -> ban-NONE), while
+    # family A's `resolves to ZERO` red. Family C also had no dash insert at all. The pre-fix
+    # readings are pinned as must-red witnesses in the test below, so this is measured rather
+    # than asserted. `\s*` before the qualifier is what lets the bridge's own trailing space be
+    # consumed — family A's post-insert tolerance is `\s*` for the same reason, and it cannot
+    # cross a word, so the over-block surface is unchanged (verified over all 855 docs).
+    r"\s*(?:(?:with|to|as|into|out|of)\s+)?"
+    r"(?:,\s*[^,.;\n]{1,30},|\s*\([^)]{0,90}\)|\s*[—–]\s*[^.;\n]{0,30}?(?:[—–]\s*)?)?"
+    r"\s*(?:no|zero|only)\s+`?tortoise/[^`]*`?"
+    # ⛔ AND THE SYMBOL VERBS IN THEIR OWN ALTERNATIVE (the regex `\b` cannot anchor before
+    # `-` or `→`, which is why putting them in the list above left them blind — MEASURED, round 17)
     r"|\s(?:=|:|->|→)\s+(?:no|zero|only)\s+`?tortoise/[^`]*`?"
     r"(?:\s+(?:paths?|files?|modules?|edits?)\b)?"
     r"|\b(?:carries|touches|has|holds|contains|includes|names|lists)\s+"
@@ -2485,6 +2588,62 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "This diff carries, at this head, no `tortoise/` path at all.",
         "This diff carries (measured at this head) no `tortoise/` path at all.",
         "`None` is what the `tortoise/` set holds at this head.",
+        # ⛔ AND THE PRODUCTS THE ENUMERATED CLASSES MISSED (#13802 review, round 20 — emphasis
+        # on the VERB plus a backticked answer left the backtick unconsumed; the em dash is this
+        # corpus's own house punctuation for the same slot; and `There is …` puts a copula in
+        # front of the answer-first arm)
+        "`-- tortoise/` **prints** `NOTHING` at this head.",
+        "`-- tortoise/` **_prints_** `two` paths at this head.",
+        "The `-- tortoise/` set prints — at this head — NOTHING.",
+        "There is NOTHING in the `tortoise/` set at this head.",
+        # ⛔ AND THE SINGLE DASH, AND THE `no <noun>` SET THE BAN'S OWN COUNT CLASS CARRIES
+        # (#13802 review, round 21 — the dash alternative required a CLOSING dash, and the `no`
+        # alternative listed 5 of the 13 nouns its own count class lists)
+        "The `tortoise/` set prints — NOTHING at this head.",
+        # …in both dash spellings (the `[–]` half is the same insertion, pinned separately)
+        "The `tortoise/` set prints – NOTHING at this head.",
+        "The `tortoise/` set shows no changes at this head",
+        "The `tortoise/` set carries no edits at this head",
+        "The `tortoise/` set reports no rows at this head",
+        # ⛔ AND THE PARTICLE BRIDGE AND THE DASH IN THE VERB-BEFORE-THE-PATH FAMILY (#13802
+        # review, round 21, P2 — MEASURED at `9024f2e5d0`: the round-17 widening added
+        # `resolves?|answers?|comes? back` to family C's verb list but not the preposition bridge
+        # family A pairs them with, and family C had no dash insert at all, so all four strings
+        # below were GREEN through the ban AND the sibling detector. Non-vacuity: every one of
+        # them FAILS on the pre-fix code and passes here.)
+        "This diff resolves to no `tortoise/` path at all, at this head.",
+        "This diff comes back with no `tortoise/` file at this head.",
+        "This diff answers with no tortoise/ file at this head.",
+        "This diff carries — at this head — no `tortoise/` path at all.",
+        # ⛔ AND THE SAME THREE CLAIMS IN THE ANSWER-FIRST ORDER (#13802 review, round 21 —
+        # MEASURED GREEN at this head while every verb-first twin above was refused: the
+        # `no <noun>` branch existed only on the verb-then-answer side)
+        "There are no files in the `tortoise/` set at this head.",
+        "There are no entries in the `tortoise/` set at this head.",
+        "There are no changes in the `tortoise/` diff at this head.",
+        # ⛔ AND THE THREE AXES ROUND 18 LEFT OPEN (#13802 review, round 19, P1 — every one
+        # MEASURED GREEN at the round-18 head, RED here). Round 18 wrote a `\**` class where
+        # this file's own contract says `[*_`]{0,3}`, and it put that class BEFORE the space
+        # rather than on both sides of it, so: (a) the emphasis-then-space form — the one the
+        # sibling DETECTOR reads — was refused by no arm; (b) underlines and (c) emphasis on
+        # the NOUN after the anchor were outside the class entirely. (a) is the dangerous
+        # direction: detector-read and ban-blind is a refuted claim walking green.
+        # ⛔ AND THE ANSWER-FIRST LINK VERBS (#13802 review, P2 — every one GREEN at
+        # `9024f2e5d0` and RED here; the `[]`/`has` cell is the one the `480c675313` review
+        # disclosed as pre-existing and left, the rest are the same grid)
+        "`[]` is what `-- tortoise/` has at this head.",
+        "Two paths are what the `tortoise/` set has at this head.",
+        "`[]` is what the `tortoise/` set had at this head.",
+        "Nothing is what `-- tortoise/` reads at this head.",
+        "Six entries are what the `tortoise/` diff reveals at this head.",
+        "Both files are what the `-- tortoise/` set touches at this head.",
+        "One path is what `-- tortoise/` resolves at this head.",
+        "`[]` is what the `tortoise/` set comes back with at this head.",
+        f"**`{_cmd}`** prints NOTHING at this head.",
+        f"***`{_cmd}`*** prints NOTHING at this head.",
+        "The _`tortoise/`_ set prints NOTHING at this head.",
+        "The `tortoise/` **set** prints NOTHING at this head.",
+
         # ⛔ AND EVERY DETERMINER THE DETECTOR STRIPS (#13802 review, round 19, P2 — MEASURED:
         # `_typed_answers_to_tortoise_cmd` strips determiners in a LOOP at `:698`, but this ban's
         # count and emptiness answer groups carried only `a`/`an`/`the`, so `returns those two
@@ -2538,6 +2697,19 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         # MEASURED: the unanchored verb-before-path alternative refused a named-head
         # emptiness claim, and the bundle already ships one in README.md)
         "`#10215`'s `8bc2fbed1` touches no `tortoise/` file at all",
+        # ⛔ AND ITS CAPITALISED SPELLINGS (#13802, round 21 — MEASURED: both were REFUSED at
+        # the round-20 head while the lowercase witnesses above were allowed, because the two
+        # binding constants were compiled without `re.IGNORECASE` while the ban itself is not
+        # — a sentence-initial `At `…`` is the corpus's own spelling and case is not content).
+        # Non-vacuity: the first two FAIL on the pre-fix code (`ban.findall` returns them).
+        "At `2584a86ec1` the `tortoise/` set was non-empty — five paths.",
+        "In `2584a86ec1` the `tortoise/` set was non-empty",
+        "`#10215`'s `8bc2fbed1` Touches no `tortoise/` file at all",
+        # ⛔ AND THE `no <noun>` ANSWER-FIRST BOUND MUST NOT REFUSE ORDINARY PROSE (#13802
+        # review, round 21). The verb after the anchor is the bound: `are` is not in that list,
+        # so this sentence states no direction about the `-- tortoise/` set and stays allowed —
+        # the over-block pin for the widening above.
+        "No changes to `tortoise/` are needed for this row",
     ):
         assert not _TORTOISE_SET_DIRECTION_CLAIM.search(_allowed), (
             f"the direction detector REFUSES {_allowed!r}, which states the command (or "
