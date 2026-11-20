@@ -2532,30 +2532,54 @@ def test_r14_the_recorded_cypher_is_the_query_this_tool_still_runs():
     "disclosed, not silent" discipline the ledger already holds for the numbers.
     """
     receipt = _receipt()
-    ledger = json.dumps(receipt.get("post_measurement_revision") or {})
+    changes = (receipt.get("post_measurement_revision") or {}).get(
+        "round_14_review", {}).get("keyed_query_changes")
+    assert isinstance(changes, dict) and changes, (
+        "the artifact carries no STRUCTURAL disclosure map. `key in "
+        "json.dumps(post_measurement_revision)` is not one: it accepts a key whose name "
+        "merely OCCURS in the ledger's prose, which was true of 16 of the 33 keys here — "
+        "so a drifted query on any of those was silently 'disclosed'")
     current = dict(mod.QUERIES)
+    per_session = dict(mod._PER_SESSION)
     compared = 0
-    disclosed: list[str] = []
+    drifted: set[str] = set()
     for arm in ("store", "writer", "live"):
-        recorded = receipt["arms"][arm]["queries"]
-        for key, cypher in recorded.items():
+        for key, cypher in receipt["arms"][arm]["queries"].items():
             assert key in current, (
                 f"{arm}.queries publishes a key this tool no longer runs: {key!r} — a "
                 "recorded reading whose query was renamed away")
             compared += 1
-            if cypher == current[key]:
-                continue
-            assert key in ledger, (
-                f"{arm}.queries[{key!r}] is NOT the Cypher this tool runs, and "
-                "`post_measurement_revision` does not name it — so the artifact "
-                "publishes a number under a query that would not reproduce it, with no "
-                "disclosure. Either re-run, or name the key in the ledger.")
-            disclosed.append(f"{arm}.{key}")
-    assert compared >= 90, (
-        f"only {compared} recorded quer(ies) compared — the pin has gone vacuous")
-    assert disclosed, (
-        "no recorded query differs from the tool's at this head — if the artifact was "
-        "genuinely re-measured, delete this arm's ledger rows rather than the premise")
+            if cypher != current[key]:
+                drifted.add(f"queries.{key}")
+    for key, cypher in receipt["arms"]["writer"]["per_session_queries"].items():
+        assert key in per_session, (
+            f"per_session_queries publishes a key this tool no longer runs: {key!r}")
+        compared += 1
+        if cypher != per_session[key]:
+            drifted.add(f"per_session_queries.{key}")
+    # ⛔ EXACT membership in BOTH directions, which a substring test cannot give:
+    # an undisclosed drift is a number under a query that would not reproduce it, and a
+    # stale disclosure row is a claim about a difference that no longer exists.
+    undisclosed = sorted(drifted - set(changes))
+    assert not undisclosed, (
+        f"recorded Cypher(s) that differ from the tool's at this head with NO row in "
+        f"`round_14_review.keyed_query_changes`: {undisclosed} — either re-run, or "
+        "disclose the key in that map")
+    stale = sorted(set(changes) - drifted)
+    assert not stale, (
+        f"`keyed_query_changes` discloses {stale} as drifted, but the recorded Cypher IS "
+        "the tool's at this head — a disclosure row outliving its difference")
+    # ⛔ THE COUNT IS A MEASURED LITERAL, not a formula over the tool: `3 *
+    # len(QUERIES) + len(_PER_SESSION)` is derived from the very objects the loop reads, so
+    # it cannot notice a loop that stops visiting them (the tool has 41 QUERIES; the
+    # ARTIFACT records 33 per arm, because 8 were added after this run). Pin the artifact's
+    # own population instead: 3 arms x 33 + 5 per-session = 104 at this head.
+    assert compared == 104, (
+        f"{compared} recorded quer(ies) compared, not 104 — either the loop stopped "
+        "visiting an arm/block, or the artifact was re-measured (then re-count this)")
+    assert len(drifted) == 8, (
+        f"{len(drifted)} recorded quer(ies) drift from the tool, not 8 — if the artifact "
+        "was genuinely re-measured, shrink `keyed_query_changes` WITH it")
 
 
 def test_r14_the_per_session_row_set_is_the_capture_set():
@@ -2580,14 +2604,12 @@ def test_r14_the_per_session_row_set_is_the_capture_set():
         f"capture: rows {sorted(writer['per_session'])}, "
         f"captures {sorted(writer['captures'])}")
 
-    # …and the tool's own loop must be over `captures`, not over a slice of it.
-    source = _TOOL.read_text(encoding="utf-8")
-    assert "for sid in captures:" in source, (
-        "the per-session loop no longer names `captures` — if it now iterates a subset, "
-        "the receipt's row set is measured from less than the run captured")
-    assert "for sid in list(captures)[:" not in source, (
-        "the per-session loop slices `captures`, so a run measures a PART of what it "
-        "captured and publishes the part as the whole")
+    # ⛔ …and the TOOL half is driven, not grepped (#13919 round 15, P3-4). A source-text
+    # match (`"for sid in captures:" in source`) is satisfied by any edit that keeps that
+    # literal header — measured: inserting `if sid == "m4211-noref": continue` one line
+    # below it left the suite green, and the re-run receipt then agreed with ITSELF
+    # (rows == its own shrunken captures), so the artifact-side assertion above is no
+    # defence either. Drive `measure_writer` and compare the two sets it produces.
 
 
 def test_r14_the_per_session_query_set_is_the_tools_own():
@@ -2725,5 +2747,126 @@ def test_r14_a_PARTIAL_replay_is_not_published_as_a_measurement(monkeypatch):
     assert replayed_sid in body["unmeasurable"], (
         "the refusal must NAME the replayed session, or a reader cannot tell which of "
         f"the three captures contributed no new writes: {body['unmeasurable']!r}")
-    assert "counts" not in body or body.get("unmeasurable"), (
-        "counts were published beside an unmeasurable verdict")
+
+
+def test_r15_the_per_session_loop_measures_EVERY_capture(monkeypatch):
+    """R15-4 (P3): the tool-side half of the row-set pin was a SOURCE-TEXT match.
+
+    `assert "for sid in captures:" in source` is satisfied by any edit that keeps that
+    literal header, so inserting `if sid == "m4211-noref": continue` directly below it kept
+    the whole suite green — and a re-run by that tool emits rows == its own shrunken
+    `captures`, so the artifact-side equality is no defence either. The contract is
+    behavioural: the row set the arm PUBLISHES equals the capture set the arm MADE.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/m4211_hierarchy")
+    counts = {"points_total": 0, "turns_total": 0, "contains_edges": 0,
+              "sessions_total": 0, "objects_total": 0,
+              "aboutObject_by_endpoint": 0, "turns_with_aboutObject": 0,
+              "sessions_with_aboutObject": 0}
+    seq = iter([dict(counts), dict(counts, points_total=9, turns_total=8)])
+    monkeypatch.setattr(mod, "_run_queries", lambda g: next(seq))
+
+    class _Graph:
+        def query(self, *_a, **_k):
+            return _Result([[0]])
+
+    class _Proj:
+        g = _Graph()
+
+    class _FakeSDK:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def _get_proj(self):
+            return _Proj()
+
+        def create_object(self, *_a, **_k):
+            return {}
+
+        def _capture_session(self, conv, session_id=None):
+            return {"ok": True, "turns": 3, "extraction_mode": "llm:mock",
+                    "errors": [], "warnings": []}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("tortoise.sdk.TortoiseSDK", _FakeSDK)
+
+    body = mod.measure_writer()
+    assert set(body["per_session"]) == set(body["captures"]), (
+        "the arm captured "
+        f"{sorted(body['captures'])} but published per-session rows for "
+        f"{sorted(body['per_session'])} — a partial row set is a row set that cannot "
+        "support the ledger readings derived from it")
+    assert len(body["per_session"]) == 3, body["per_session"]
+
+
+def test_r15_a_failed_out_write_exits_2_not_1_on_EVERY_path(monkeypatch, tmp_path,
+                                                           capsys):
+    """R15-2 (P2): the exit-contract fix had NO pin, and R15-3 (P3): only ONE of its two
+    call sites was guarded.
+
+    Reverting the guard entirely left the suite green (measured by review round 15), so the
+    `rc=1` traceback could be restored silently — and the *other* `_publish` call site,
+    inside `except Exception`, still exited 1 when an arm RAISED and the write failed.
+
+    Both paths are asserted, and the report is asserted to still PRINT: a caller must be
+    able to tell "measured but not published" from "nothing measured".
+    """
+    # `/dev/null/x.json`: the parent is a character device, so mkdir raises.
+    bad = "/dev/null/x.json"
+
+    # Path A — the normal path, corpus arm with no capture journal.
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/m4211_hierarchy")
+    rc = mod.main(["--arms", "corpus", "--sessions-dir", str(tmp_path / "absent"),
+                   "--out", bad])
+    assert rc == 2, f"a failed --out write exited {rc}, not the documented 2"
+    err = capsys.readouterr().err
+    assert "could not write --out" in err, (
+        "the write failure must be ATTRIBUTED on stderr, not raised as a traceback: "
+        f"stderr was {err!r}")
+
+    # Path B — an arm RAISED and the write failed: the second call site.
+    def _boom():
+        raise RuntimeError("arm blew up")
+
+    monkeypatch.setattr(mod, "measure_corpus", lambda *_a, **_k: _boom())
+    rc = mod.main(["--arms", "corpus", "--out", bad])
+    assert rc == 2, (
+        f"an arm that RAISED with a failing --out write exited {rc}, not 2 — the second "
+        "_publish call site is unguarded again")
+
+
+def test_r15_the_receipt_shape_disclosures_are_themselves_pinned():
+    """R15-7 (P3): the three round-14 receipt-SHAPE disclosures were unpinned.
+
+    Deleting `instrument.arms_requested / instrument.arms_not_requested` and
+    `instrument.argv is NOT a reproduction command` from
+    `post_measurement_revision.round_14_review.not_in_this_receipt` left the suite green
+    (measured by review round 15) — although the argv row is the only thing standing
+    between a reader and copying this artifact's own `["--out", …]` (no `--arms`) into a
+    run that reproduces the SHRUNKEN, writer-less measurement the PR body warns about.
+
+    A disclosure nobody can verify by test is a sentence; the keys are the artifact's
+    contract, so the keys are pinned.
+    """
+    rows = (_receipt().get("post_measurement_revision") or {}).get(
+        "round_14_review", {}).get("not_in_this_receipt") or {}
+    for key in (
+        "per_session_queries.session_aboutObject_edges",
+        "queries text for the keys the turn-filter and multiplicity fixes touched",
+        "instrument.arms_requested / instrument.arms_not_requested",
+        "instrument.argv is NOT a reproduction command",
+    ):
+        assert key in rows, (
+            f"the artifact no longer discloses {key!r} — a reader is back to trusting a "
+            f"shape this run does not carry. Present: {sorted(rows)}")
+
+    # The argv row's REASON must still be true of the artifact and the tool, or it is a
+    # sentence about a defect that has since been fixed (the same rot the cite pins catch).
+    argv = _receipt()["instrument"]["argv"]
+    assert "--arms" not in argv, (
+        "instrument.argv now names --arms, so the disclosure row is stale — delete it")
+    assert mod.DEFAULT_ARMS and "writer" not in mod.DEFAULT_ARMS, (
+        "DEFAULT_ARMS is no longer the read-only set, so copying this argv WOULD "
+        "reproduce the writer arm — the disclosure row is stale")

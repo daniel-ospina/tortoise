@@ -1622,6 +1622,27 @@ def _raised_queries(body) -> list | dict | None:
     return failed or None
 
 
+def _publish_or_refuse(receipt: dict, out: str | None, *, why: str) -> int:
+    """Publish, or refuse in the 0-or-2 contract — never a bare traceback (#13919 round 15).
+
+    ⛔ EVERY call site goes through here. The first fix guarded only the normal path and
+    left the `except Exception` one at `main`'s arm dispatch unguarded, so a run where an
+    arm RAISED **and** the `--out` write failed still exited **1** with a raw
+    `FileExistsError` traceback and printed nothing — measured by review round 15 on
+    `--out /dev/null/x.json` with `measure_store` raising `RuntimeError`.
+
+    Returns 0 when the write happened (or no `--out` was asked for), and 2 with an
+    attributable stderr line when it did not. The caller decides what to print; this
+    function never writes the human report itself, so it cannot double-print.
+    """
+    try:
+        _publish(receipt, out)
+    except OSError as exc:
+        print(f"could not write --out {out!r}: {exc} — {why}", file=sys.stderr)
+        return 2
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
                                 allow_abbrev=False)
@@ -1727,9 +1748,12 @@ def main(argv: list[str] | None = None) -> int:
             "error": f"{type(exc).__name__}: {exc}",
             "traceback": traceback.format_exc()[-3000:],
         }
-        _publish(receipt, args.out)
+        rc = _publish_or_refuse(
+            receipt, args.out,
+            why="the measurement is printed below but NOT published; the run is "
+                "already unmeasurable")
         print(f"UNMEASURABLE: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return 2
+        return rc or 2
 
     # An arm that could not measure is a TOP-LEVEL verdict, not a nested note. The
     # documented contract (0 = measured) reads the top-level block, and a replay that
@@ -1766,13 +1790,12 @@ def main(argv: list[str] | None = None) -> int:
     # failure is reported in the same shape as every other refusal: named on stderr,
     # exit 2, and it is raised BEFORE the report so no caller reads a printed summary
     # as "the receipt was written".
-    try:
-        _publish(receipt, args.out)
-    except OSError as exc:
-        print(f"could not write --out {args.out!r}: {exc} — the measurement below is "
-              "printed but NOT published", file=sys.stderr)
+    rc = _publish_or_refuse(
+        receipt, args.out,
+        why="the measurement is printed below but NOT published")
+    if rc:
         _print_report(receipt)
-        return 2
+        return rc
 
     _print_report(receipt)
     if receipt.get("unmeasurable"):
