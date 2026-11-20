@@ -306,14 +306,30 @@ def test_the_declaration_docstring_states_the_measured_split_not_the_delta():
     off_surface = live - set(declared)
     absent = [n for n in declared if not surface.resolves(n, live)]
 
-    assert str(len(off_surface)) in doc, (
-        f"the docstring never states the {len(off_surface)} live methods that are off the "
-        "approved surface — the set Phase 2 removes, by measurement"
-    )
-    assert str(len(absent)) in doc, (
-        f"the docstring never states the {len(absent)} approved-but-absent methods — the set "
-        "Phase 2 implements, by measurement"
-    )
+    # ⛔ THE COUNT MUST BE ATTACHED TO ITS CLAIM, never a bare digit — and this is not
+    # pedantry, it is MEASURED: once the migration emptied the sets, `str(0) in doc` was
+    # satisfied by `40 approved`, `2026-09-21` and `4120)` ALREADY IN THE DOCSTRING, so the
+    # two pins below could not fail whatever the prose claimed. Each half therefore has to
+    # appear on a line that makes its claim, carrying the MEASURED size with digit
+    # boundaries (`(?<!\d)0(?!\d)`: `4120` does not satisfy it).
+    def _claim_lines(*phrases: str) -> list[str]:
+        flat = [ln.replace("**", "").replace("`", "") for ln in doc.splitlines()]
+        return [ln for ln in flat if any(ph in ln for ph in phrases)]
+
+    for phrases, measured, what in (
+        (("off the approved surface",), len(off_surface),
+         "the live-but-unapproved set that Phase 2 removes"),
+        (("IMPLEMENTS", "implement set"), len(absent),
+         "the approved-but-absent set that Phase 2 implements"),
+    ):
+        lines = _claim_lines(*phrases)
+        assert lines, (
+            f"the docstring no longer states {what} {' / '.join(phrases)!r} — the claim is "
+            "gone, so a count pin would be checking nothing")
+        assert any(re.search(rf"(?<!\d){measured}(?!\d)", ln) for ln in lines), (
+            f"no line carrying {' / '.join(phrases)!r} attaches the measured size {measured} "
+            f"to {what}; a bare digit elsewhere in the docstring does not count. "
+            f"Lines seen: {lines[:3]}")
 
     # ROUND-6 ISSUE 1: the count pin above is satisfied by a bare `30` ANYWHERE, which is how
     # a sentence claiming `31 declared names` for the implement set passed. Attach the count
