@@ -2799,6 +2799,16 @@ def test_r15_the_per_session_loop_measures_EVERY_capture(monkeypatch):
         f"{sorted(body['per_session'])} — a partial row set is a row set that cannot "
         "support the ledger readings derived from it")
     assert len(body["per_session"]) == 3, body["per_session"]
+    # ⛔ …and each ROW carries every per-session reading (#13919 round 16, P3-1). The row
+    # set alone leaves the sibling half of the same comprehension unpinned: a run can
+    # publish 3 of the 5 readings while `per_session_queries` claims 5 ran, and the
+    # artifact then agrees with itself. Measured by review round 16: slicing the key loop
+    # to `list(_PER_SESSION.items())[:3]` left the suite at 100 passed.
+    for sid, row in body["per_session"].items():
+        assert set(row) == set(mod._PER_SESSION), (
+            f"per_session[{sid!r}] publishes {sorted(set(row))} but the arm's query block "
+            f"declares {sorted(mod._PER_SESSION)} — a receipt asserting N queries produced "
+            "fewer results")
 
 
 def test_r15_a_failed_out_write_exits_2_not_1_on_EVERY_path(monkeypatch, tmp_path,
@@ -2853,7 +2863,6 @@ def test_r15_the_receipt_shape_disclosures_are_themselves_pinned():
     rows = (_receipt().get("post_measurement_revision") or {}).get(
         "round_14_review", {}).get("not_in_this_receipt") or {}
     for key in (
-        "per_session_queries.session_aboutObject_edges",
         "queries text for the keys the turn-filter and multiplicity fixes touched",
         "instrument.arms_requested / instrument.arms_not_requested",
         "instrument.argv is NOT a reproduction command",
@@ -2870,3 +2879,46 @@ def test_r15_the_receipt_shape_disclosures_are_themselves_pinned():
     assert mod.DEFAULT_ARMS and "writer" not in mod.DEFAULT_ARMS, (
         "DEFAULT_ARMS is no longer the read-only set, so copying this argv WOULD "
         "reproduce the writer arm — the disclosure row is stale")
+
+    # ⛔ EVERY round's rows, not only round 14's (#13919 round 16, P3-4). Round 14's key
+    # set was pinned while the earlier rounds' stayed deletable in silence — measured by
+    # review round 16: deleting `round_10_review.not_in_this_receipt["arms.instrument
+    # .queries"]` left the suite at 100 passed, and that is the row telling a reader the
+    # census arm carries NO Cypher at all, i.e. the arm the headline "0 aboutObject in 60
+    # of 173" rests on. Pinned as a whole-key-set equality per round, so an addition is
+    # also a deliberate act.
+    pm = _receipt().get("post_measurement_revision") or {}
+    expected_rounds = {
+        "second_review_round": {
+            "every_graph_has_fewer_turns_than_contains", "object_kinds",
+            "pair_count_guard", "per_graph_omitted", "session_created_at_range",
+        },
+        "third_review_round": {
+            "role_evidence.uri_source", "skipped_arms_were_exit_0",
+            "truncated_error_prose", "uri_field_shape",
+        },
+        "round_7_census_and_gate": {
+            "exit_2_contract_named_one_location", "no_gate_selected_this_artifact",
+            "objects_with_gt1_turn_was_UNFILTERED", "sessions_with_gt1_contains_point",
+            "zero_graph_census_was_exit_0",
+        },
+        "round_10_review": {
+            "arms.instrument.queries",
+            "arms.instrument.per_graph[*].contains_targets_by_kind (SHAPE)",
+            "objects_reaching_gt1_event (MEANING)",
+            "session_turn_count_sum (MEANING)",
+            "store arm temp-dir leak",
+        },
+        "round_14_review": {
+            "instrument.argv is NOT a reproduction command",
+            "instrument.arms_requested / instrument.arms_not_requested",
+            "queries text for the keys the turn-filter and multiplicity fixes touched",
+        },
+    }
+    for round_key, want in expected_rounds.items():
+        got = set((pm.get(round_key) or {}).get("not_in_this_receipt") or {})
+        assert got == want, (
+            f"`post_measurement_revision.{round_key}.not_in_this_receipt` key set is not "
+            f"the recorded one — missing {sorted(want - got)}, unexpected "
+            f"{sorted(got - want)}. A disclosure row deleted in silence re-opens the "
+            "class this pin exists for.")

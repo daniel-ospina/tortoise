@@ -1750,9 +1750,15 @@ def main(argv: list[str] | None = None) -> int:
         }
         rc = _publish_or_refuse(
             receipt, args.out,
-            why="the measurement is printed below but NOT published; the run is "
-                "already unmeasurable")
+            # ⛔ THIS PATH PRINTS NO REPORT (#13919 round 16, P3-3). The sentence used to
+            # say "the measurement is printed below", which is true of the normal path and
+            # FALSE here — `_print_report` is not called, so the operator was told to look
+            # for output that never appears, and the traceback (this block's entire
+            # diagnostic payload) was dropped on the one path where the receipt could not
+            # be written. Name what actually happens, and print the traceback tail.
+            why="the receipt was NOT written, so the traceback below is the only record")
         print(f"UNMEASURABLE: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(receipt["unmeasurable"]["traceback"], file=sys.stderr)
         return rc or 2
 
     # An arm that could not measure is a TOP-LEVEL verdict, not a nested note. The
