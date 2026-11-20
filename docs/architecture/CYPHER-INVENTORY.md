@@ -35,8 +35,8 @@ this document classifies **statements**.
 | `fulltext` | 2 |
 | `ddl` | 17 |
 | `unresolved` (statement not statically resolvable) | 102 |
-| non-Cypher door calls (excluded from every shape total) | 264 |
-| **AST door calls** = census + non-Cypher | **1581** |
+| non-Cypher door calls (excluded from every shape total) | 265 |
+| **AST door calls** = census + non-Cypher | **1582** |
 
 > **The finding, with its count: 586 of 1317 product statements (44.5 %) need none of the
 > four graph-only capabilities.** They are lookups, listings, filters, aggregates and ordered reads —
@@ -97,15 +97,15 @@ population: every tracked `tortoise/**/*.py` except `tortoise/test_*.py`
 door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 
-1,635 occurrences of the door predicate across 109 files
+1,636 occurrences of the door predicate across 109 files
 2,365 occurrences of the verb predicate across 147 files   (upper-bound shape, see below)
 
-1,635  regex door-pattern occurrences
+1,636  regex door-pattern occurrences
   −54  occurrences on a line carrying NO door call (comments and docstrings)
-= 1,581  occurrences on a line carrying a door CALL          [measured]
+= 1,582  occurrences on a line carrying a door CALL          [measured]
   − 0   of those, the AST did not record (residual)
-= 1,581  AST door calls
-= 1317  classified Cypher statements + 264 non-Cypher door calls
+= 1,582  AST door calls
+= 1317  classified Cypher statements + 265 non-Cypher door calls
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
@@ -113,9 +113,9 @@ The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (
 prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
 cannot do. Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 303 files>` → **1,635** across **109** files: exactly the
-tool's number. A bare `rg … tortoise/` gives 1,641 / 110, the 6 extra occurrences living in
-`tortoise/test_*.py`; `--glob '!tortoise/test_*.py'` reproduces 1,635 / 109 on this tree, because
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 303 files>` → **1,636** across **109** files: exactly the
+tool's number. A bare `rg … tortoise/` gives 1,642 / 110, the 6 extra occurrences living in
+`tortoise/test_*.py`; `--glob '!tortoise/test_*.py'` reproduces 1,636 / 109 on this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
 * `rg -io '\b(MATCH|MERGE)\s*\(' <those 302 files>` → **2,352** across **146** files, while the tool
@@ -418,7 +418,7 @@ halves:
    statement. A product PR that adds a query owns the one-line pin update; the alternative (a census
    that only counts its own diff) is a snapshot wearing a census's name.
 
-**The cut this PR (#13998, `feat/13998-threshold-emails`) makes — THREE non-Cypher door calls and one new scanned file, and NOT ONE Cypher statement.** The capacity notices read and stamp their high-water mark through PostgREST, not the graph: `tortoise/capacity_notice.py::read_account` (new file, hence `files_scanned` 302→**303**) selects the orgs row, and `tortoise/supabase_control.py`'s `org_storage_notice_pct` / `set_org_storage_notice_pct` read and compare-and-swap the mark. All three are `cp.query(...)` — door calls with no Cypher statement — so `non_cypher_door_calls` 261→**264** and `ast_door_calls` 1578→**1581** (= 1317 + 264), while `sites` **1317**, `files` **100**, `plain` **868**, `candidates` **586**, `unresolved` **102**, `partial` **318** and every shape pin are UNCHANGED — a notification-ledger write is not a graph migration candidate, which is why the metric §0 is about does not move. §1's `rg` reconciliation moves only on the door predicate: door **1,635 / 109** whole-text (was 1,632 / 108), bare **1,641 / 110** (was 1,638 / 109 — the 6 extra are still entirely `tortoise/test_*.py`), verb **2,365 / 147** unchanged. ⚠️ Appendix A's ROW SET is therefore unchanged, but its `file:line` rows are not: the review fixes above moved code inside `hosted_api.py`, `quota.py` and `supabase_control.py`, which all already carried sites — the exact staleness the counts cannot see, which is why the appendix is regenerated from `--markdown` at this head rather than edited.
+**The cut this PR (#13998, `feat/13998-threshold-emails`) makes — FOUR non-Cypher door calls and one new scanned file, and NOT ONE Cypher statement.** The capacity notices read and stamp their high-water mark through PostgREST, not the graph: `tortoise/capacity_notice.py::read_account` (new file, hence `files_scanned` 302→**303**) selects the orgs row and — since review round 4 — retries once without `suspended_at` when the schema rejects it, and `tortoise/supabase_control.py`'s `org_storage_notice_pct` / `set_org_storage_notice_pct` read and compare-and-swap the mark. All four are `cp.query(...)` — door calls with no Cypher statement — so `non_cypher_door_calls` 261→**265** and `ast_door_calls` 1578→**1582** (= 1317 + 265), while `sites` **1317**, `files` **100**, `plain` **868**, `candidates` **586**, `unresolved` **102**, `partial` **318** and every shape pin are UNCHANGED — a notification-ledger write is not a graph migration candidate, which is why the metric §0 is about does not move. §1's `rg` reconciliation moves only on the door predicate: door **1,636 / 109** whole-text (was 1,632 / 108), bare **1,642 / 110** (was 1,638 / 109 — the 6 extra are still entirely `tortoise/test_*.py`), verb **2,365 / 147** unchanged. ⚠️ Appendix A's ROW SET is therefore unchanged, but its `file:line` rows are not: the review fixes above moved code inside `hosted_api.py`, `quota.py` and `supabase_control.py`, which all already carried sites — the exact staleness the counts cannot see, which is why the appendix is regenerated from `--markdown` at this head rather than edited (re-diffed after the drift-soft retry: identical to the committed rows).
 
 **The cut this PR (#13906, `feat/13906-vector-move`) makes — one site, and it is a RE-CLASSIFICATION rather than a new query — re-cut at `origin/main` `ef1d6f7561` after the rebase.** The parity work moved `vector_search`'s kNN `SELECT` out of the function body into `tortoise/record_vector.py::knn_statement`, because the harness that EXPLAINs that read must plan the **same string** the read runs (the reviewed defect: an instrument that re-spells the SELECT can only prove something about its own spelling). The door call did not move and no statement was added — but the census's static resolver no longer follows it: the argument is now a value returned by another function, so the site lands in the documented **over-report** arm (`unresolved`) instead of the `SQL_VETO` arm that used to fold it to `non_cypher_door_calls`. The two operands therefore move by ONE in OPPOSITE directions and the reconciliation cannot lose or gain a call: `sites` 1316→**1317**, `unresolved` 101→**102** (the `shape_unresolved` and `shape_unresolved_unresolved` pins with it), `non_cypher_door_calls` 262→**261**, `files` 99→**100** (`record_vector.py` is the file that starts CARRYING a site); `ast_door_calls` **1578** (= 1317 + 261) and `files_scanned` **302** are unchanged, as are `plain` **868** / `candidates` **586** (which is why the migration metric §0 is about does not move: an `unresolved` site is never a candidate), `adjacency`, `ep`, `ddl`, `traversal`, `fulltext` and `partial` **318**. §1's `rg` reconciliation is unchanged at this tree (door **1,632 / 108** whole-text, verb **2,365 / 147**, bare **1,638 / 109**) because no door CALL line was added or removed — only the text it is handed. ⚠️ **This paragraph was re-cut TWICE**: the branch merged `origin/main` twice while it ran, and a rebase onto `ef1d6f7561` moved every Appendix A `file:line` row again — so the numbers above were derived by RUNNING the tool at the tree being merged, never carried from the branch head, and each earlier value (1325 / 102 / 110 / 261 / 1586 at the pre-rebase head) was this same cut against an earlier base. ⚠️ The paragraphs below describe earlier cuts against their own bases, so no number in them is the table's any more; §0, §3 and the pins carry the **#13998** cut above.
 
@@ -947,8 +947,8 @@ the order was fixed (`#13098` review F8).
 <!-- cypher-inventory:shape_traversal_read = 3 -->
 <!-- cypher-inventory:shape_fulltext_read = 2 -->
 <!-- cypher-inventory:shape_unresolved_unresolved = 102 -->
-<!-- cypher-inventory:non_cypher_door_calls = 264 -->
-<!-- cypher-inventory:ast_door_calls = 1581 -->
+<!-- cypher-inventory:non_cypher_door_calls = 265 -->
+<!-- cypher-inventory:ast_door_calls = 1582 -->
 <!-- cypher-inventory:partial = 318 -->
 
 ---
