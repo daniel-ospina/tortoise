@@ -245,6 +245,155 @@ def test_the_edge_arm_reads_the_relation_not_only_the_endpoints(map_doc):
     assert filer.verdict(map_doc, _node_rows(map_doc), structural, inverted) == 1
 
 
+def test_a_REVERSED_operator_is_not_the_declared_edge(map_doc):
+    """An operator whose source and target are swapped is not the declared edge.
+
+    46 of the map's 51 operators declare `->`, i.e. direction is what EP
+    propagates, so an unordered endpoint-set match certifies a backwards map.
+
+    Mutant: match on `a in ends and b in ends` — this goes green.
+    """
+    _structural, operators = _edge_rows(map_doc)
+    reversed_rows = []
+    for row in operators:
+        slot = row[2]
+        reversed_rows.append([row[0], row[1], 1 if slot == 0 else 0, *row[3:]])
+    assert filer.verdict(map_doc, _node_rows(map_doc), _structural, reversed_rows) == 1
+
+
+def test_an_operator_over_a_THIRD_node_does_not_cover_a_declared_pair(map_doc):
+    """One operator over `a -> b` must not certify a declared `b -> c`."""
+    structural, _operators = _edge_rows(map_doc)
+    op_edges = [e for e in map_doc["edges"] if "op" in e]
+    first = op_edges[0]
+    rows = [[ "opX", first["op"], 0, *_row_for(map_doc, first["to"])],
+            [ "opX", first["op"], 1, *_row_for(map_doc, first["from"])],
+            [ "opX", first["op"], 1, *_row_for(map_doc, first["to"])]]
+    assert filer.verdict(map_doc, _node_rows(map_doc), structural, rows) == 1
+
+
+def test_the_verdict_refuses_DUPLICATED_nodes(map_doc):
+    """Two copies of a non-idempotent node are invisible to a set-based read-back.
+
+    Mutant: drop the `duplicates()` arm — this reports 78/78 and exits 0 over a
+    graph holding two copies of every decision.
+    """
+    nodes = _node_rows(map_doc)
+    structural, operators = _edge_rows(map_doc)
+    assert filer.verdict(map_doc, nodes, structural, operators) == 0
+    assert filer.verdict(map_doc, nodes + nodes, structural, operators) == 1
+    assert filer.duplicates(map_doc, nodes) == []
+
+
+def test_the_structural_edge_query_is_NULL_SAFE():
+    """`NOT (a.is_operator = true)` DROPS every non-Point-sourced edge.
+
+    A Subject/Object/Source/Event carries no `is_operator` property, so the old
+    predicate evaluated to NULL for all 50 structural edges of this map and
+    `WHERE NULL` excluded them — `--verify` failed a correctly filed map.
+
+    Mutant: restore `NOT (a.is_operator = true OR a.op_type IS NOT NULL)`.
+    """
+    predicate = filer.NON_OPERATOR_PREDICATE
+    assert "a.is_operator IS NULL" in predicate
+    assert not predicate.lstrip("(").startswith("NOT ")
+    # the three-valued truth table that makes the old form wrong
+    def old(is_op, op_type):          # the pre-fix predicate, verbatim
+        return not ((is_op is True) or (op_type is not None))
+    def new(is_op, op_type):
+        return (is_op is None or is_op is False) and op_type is None
+    assert old(None, None) is True, "python `not None` is True; CYPHER `NOT null` is NULL"
+    assert new(None, None) is True     # a non-Point source IS non-operator
+    assert old(True, None) is False and new(True, None) is False
+
+
+def test_an_UNKNOWN_outcome_keeps_the_intent_marker(tmp_path, monkeypatch, map_doc, capsys):
+    """A transport death leaves the marker in place, so the next run does not
+    re-issue the operator.
+
+    Mutant: `except Exception: unmark(marker)` (one arm for both classes) — the
+    next run writes a SECOND operator over the same endpoints (#10849).
+    """
+    state_path = tmp_path / "state.json"
+    op_calls = {"n": 0}
+
+    class _DiesOnOperator(_StubMcp):
+        def __init__(self, *_a, **_k) -> None:
+            self._n = 0
+            self._inner = _RealMcp("not-a-real-key")
+
+            def _post(body: dict):
+                tool = (body.get("params") or {}).get("name")
+                if tool == "tortoise_create_operator":
+                    op_calls["n"] += 1
+                    raise filer.urllib.error.URLError("connection reset")
+                self._n += 1
+                return (200, {"jsonrpc": "2.0", "id": body.get("id"), "result": {
+                    "structuredContent": {"id": f"{tool}:{self._n}"}}}, {})
+
+            self._inner._post = _post
+
+        def call(self, tool: str, args: dict, **kw) -> dict:
+            return self._inner.call(tool, args, **kw)
+
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _DiesOnOperator)
+    first_op = next(i for i, e in enumerate(map_doc["edges"]) if "op" in e)
+    assert filer.write_map(map_doc) == 1
+    capsys.readouterr()
+    written = json.loads(state_path.read_text())["written"]
+    assert f"edge:{first_op}" in written, "the UNKNOWN outcome retired the intent marker"
+
+
+def test_a_marker_without_an_id_is_AMBIGUOUS_not_re_created(tmp_path, monkeypatch, map_doc, capsys):
+    """A recorded-but-id-less Event must not be re-created on resume.
+
+    `create_event` has no existence check, so re-issuing mints a SECOND Event
+    carrying the same identity — and `--verify`'s identity arm cannot see it
+    (that is what `duplicates()` is for, checked separately).
+
+    Mutant: `if already(...) and ref in ids: continue` (the pre-fix guard) —
+    every event is re-created and the run exits 0.
+    """
+    stale = {"ids": {}, "written": [], "failed": []}
+    for e in map_doc["events"]:
+        stale["written"].append(f"event:{e['ref']}")
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps(stale))
+    monkeypatch.setattr(filer, "STATE_PATH", path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _RecordingMcp)
+    _RecordingMcp.instances.clear()
+
+    assert filer.write_map(map_doc) == 1
+    calls = [c for c in _RecordingMcp.instances[-1].calls
+             if c[0] == "tortoise_create_event"]
+    assert calls == [], f"re-created {len(calls)} event(s) whose outcome is UNKNOWN"
+    capsys.readouterr()
+
+
+def test_a_state_whose_SOURCE_ids_are_urls_is_legitimate(map_doc, tmp_path, monkeypatch, capsys):
+    """A Source's `id` IS its url, so that must not read as a forged id.
+
+    `entities.py`: `s.id = coalesce($id, $url)`. The guard refused every state a
+    successful run wrote, and its printed remedy (delete the file) re-issued all
+    14 events and 51 operators.
+
+    Mutant: drop the `if "url" in item: return False` arm — this exits 2.
+    """
+    real_ids = {"ids": {s["ref"]: s["url"] for s in map_doc["sources"]},
+                "written": [], "failed": []}
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps(real_ids))
+    monkeypatch.setattr(filer, "STATE_PATH", path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _RecordingMcp)
+    _RecordingMcp.instances.clear()
+    assert filer.write_map(map_doc) == 0
+    capsys.readouterr()
+
+
 def test_validate_refuses_an_undeclared_object_kind(map_doc):
     """A kind neither core nor an installed pack declares is refused.
 
@@ -506,8 +655,10 @@ def _edge_rows(doc: dict) -> tuple[list[list], list[list]]:
         a, b = _row_for(doc, e["from"]), _row_for(doc, e["to"])
         if "op" in e:
             nid = op_index.setdefault(e["from"] + "|" + e["to"], [f"op{len(op_index)}"])
-            operators.append([nid[0], e["op"], *a])
-            operators.append([nid[0], e["op"], *b])
+            # idx 0 IS the source, idx >= 1 ARE the targets (the fold writes one
+            # edge per slot with `idx`) — the read-back matches on the SLOT.
+            operators.append([nid[0], e["op"], 0, *a])
+            operators.append([nid[0], e["op"], 1, *b])
         else:
             structural.append([e["relation"], *a, *b])
     return structural, operators
