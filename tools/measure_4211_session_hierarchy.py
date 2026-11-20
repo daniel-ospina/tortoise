@@ -85,12 +85,22 @@ import sys
 # every tools/ entry point. MEASURED: the pre-guard tool redded that corpus pin for
 # BOTH of its cases (parametrised over tools/*.py), which is what made #13919 a
 # PR-introduced failure rather than a main baseline red.
+#
+# The refusal must not wear a VERDICT's status (#4053/#11342, the same reason
+# `tools/ram_window_census.py` — the sibling census — prints its own message): this
+# tool's DECLARED exit contract is 0 = MEASURED / 2 = could not measure, so
+# `raise SystemExit("<message>")` would exit 1, a code this tool does not otherwise
+# use and which reads to a caller as a verdict about the measurement. An old
+# interpreter is not a verdict — it is "could not measure" — so it exits 2, and
+# since `SystemExit(<int>)` carries no message the refusal is printed explicitly.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    raise SystemExit(
+    print(
         f"tools/measure_4211_session_hierarchy.py requires Python >= 3.12 (got "
         f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        f"`uv run python tools/measure_4211_session_hierarchy.py`"
+        "`uv run python tools/measure_4211_session_hierarchy.py`",
+        file=sys.stderr,
     )
+    raise SystemExit(2)
 
 import argparse
 import contextlib
@@ -409,17 +419,26 @@ def _open_embedded(path: Path):
     registration (#1005), which is what makes the close in ``measure_store`` reachable.
     """
     from tortoise import FalkorDB
-    from tortoise.projection import _bounded_server_socket_kwargs
+    from tortoise.projection import _embedded_retry, _socket_timeouts
 
-    # ⛔ A read bound, from the product's ONE resolver — splatted INLINE because
-    # `tests/test_bounded_raw_clients_3065.py` reads the CALL's keywords (#3065/#8118):
-    # ``falkordb`` defaults ``socket_timeout=None`` and hands it to redis-py
-    # explicitly, so an unbounded handle parks this arm in ``recv()`` forever against
-    # a stalled engine — alive, 0% CPU, printing nothing — which for a tool whose
-    # contract is "measure and change nothing" is indistinguishable from a slow answer.
-    # Residue of the same PR: this site and the one in ``_open_live`` were the two
-    # offenders that redded the tool-surface inventory at #13919.
-    return FalkorDB(str(path), **_bounded_server_socket_kwargs())
+    # ⛔ A read bound, written down rather than inherited (``falkordb`` defaults
+    # ``socket_timeout=None`` and hands it to redis-py explicitly, so a bare
+    # construction is UNBOUNDED: against a stalled engine this arm parks in
+    # ``recv()`` forever — alive, 0% CPU, printing nothing — which for a tool whose
+    # contract is "measure and change nothing" is indistinguishable from a slow
+    # answer).
+    #
+    # ⛔ The EMBEDDED lane's policy, NOT ``_bounded_server_socket_kwargs()`` — that
+    # dict's own docstring says it is "NOT for the embedded (unix-socket) lane", and
+    # the reason is load-bearing here: redis-py DROPS ``socket_connect_timeout`` on
+    # the unix-socket branch, so spreading the server pair at this call site would
+    # wire a CONNECT bound that does not exist — a knob that reads as wired and does
+    # nothing, which is the trap #3421 removed from the product's own embedded
+    # branch. The embedded lane takes its read bound from ``_socket_timeouts()``
+    # directly and its retry policy from ``_embedded_retry()`` — exactly what
+    # ``projection``'s embedded branch does with these same two helpers.
+    _connect_to, read_to = _socket_timeouts()
+    return FalkorDB(str(path), socket_timeout=read_to, retry=_embedded_retry())
 
 
 def measure_store(db_path: str, graph_name: str) -> dict:
