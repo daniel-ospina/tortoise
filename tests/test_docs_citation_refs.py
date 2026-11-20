@@ -2650,6 +2650,17 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # where the measured leg skips (a shallow checkout, `:1122`), this ban is the only layer, so
     # a detector-read/ban-blind spelling is a hole and not a narrowing. `/` is in the token class
     # because `origin/main` is this repo's most ordinary path token; the run is bounded at eight.
+    # ⛔ AND THAT WIDENING COSTS AN OVER-BLOCK, DECLARED RATHER THAN CLAIMED AWAY (#13802 review,
+    # round 27, P2 — MEASURED GREEN at `180b95d07d` and RED here, so it is THIS change's): the
+    # peer's determiner/count arm accepts `the <count-noun>` with no count in it, so a
+    # path-bearing filler now carries the class into TRUE prose:
+    #   `` `-- tortoise/` prints the paths it printed yesterday. ``                 -> REFUSED (pre-existing)
+    #   `` `-- tortoise/` at the head of origin/main prints the same paths it printed before. `` -> REFUSED (NEW)
+    # Removing `a|an|the` from that arm reds 61 of the 192 must-refuse witnesses (measured), so a
+    # narrowing is not a drive-by; the trade is taken in the safe direction (something right is
+    # refused, not something wrong slips through) and pinned in the must-refuse tuple so a later
+    # tightening reds it instead of changing behaviour silently. Live cost today: zero — the
+    # corpus refusal set is the same six lines at `180b95d07d`, at the peer head and here.
     r"(?:\s+there)?(?:\s*,?\s*(?:\([^)]{0,90}\)|[\w/-]+),?){0,8}\s*[*_`]{0,3}\s*"
     # ⛔ THE VERB CLASS IS THE DETECTOR'S OWN LIST (#13802 review, round 5, P2; merge-round
     # review, P1): `reports exactly two paths` and `yields `tortoise/x.py`` were green
@@ -2874,7 +2885,13 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # clause openings this family models — no `docs/` line carries any of them with a direction
     # claim, and matching a `|`-delimited cell would need a cell boundary model this ban does not
     # have.
-    r"(?:[*_`]{0,3}(?!(?:head|merge)(?![A-Za-z0-9]))[\w-]+[*_`]{0,3}\s+){0,3}"
+    # ⛔ AND THAT INTERVENING RUN ADMITS A PATH-BEARING TOKEN, FOR THE SAME REASON ITS SIBLING
+    # FILLER DOES (#13802 review, round 27, P2 — MEASURED: with `[\w-]+`, `At the head of
+    # origin/main you are about to merge there are no files in the `tortoise/` set.` was GREEN
+    # while its un-fronted twin was RED — the parity the `merg*` tail now gives every other
+    # spelling, defeated by one `/`. The two arms read the SAME token class for the SAME reason:
+    # `origin/main` is this repo's most ordinary path token.)
+    r"(?:[*_`]{0,3}(?!(?:head|merge)(?![A-Za-z0-9]))[\w/-]+[*_`]{0,3}\s+){0,3}"
     # ⛔ AND THE HYPHENATED `merge-time` (#13802 review, round 25, P2 — MEASURED: `At merge-time
     # there are no files in the `tortoise/` set.` was GREEN while its UN-FRONTED twin `There are
     # no files in the `tortoise/` set at merge-time.` was RED — the same one-order-refused
@@ -2899,10 +2916,26 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # PR`, `at the head of this branch` — is still GREEN in the fronted order. A general
     # any-word tail was CONSIDERED AND REJECTED: it is not a shape, it is "any phrase", and it
     # would refuse ordinary prose (`At the head of the file, …`) that this file pins as
-    # MUST-NOT-REFUSE. Live victims measured: `grep -rIo 'head of the PR' docs` -> 0,
-    # `grep -rIo 'head of this branch' docs` -> 0; corpus hit set unchanged at 6.
-    r"(?:\s+(?:(?:head|time)(?:\s+(?:[\w-]+\s+){0,4}[\w-]*merg\w*)?"
-    r"|(?:[\w-]+\s+){0,4}[\w-]*merg\w*)[*_`]{0,3})?"
+    # MUST-NOT-REFUSE. Live victims measured: `grep -rIo 'head of the PR' docs | wc -l` -> 0,
+    # `grep -rIo 'head of this branch' docs | wc -l` -> 2 (neither is a direction claim — the
+    # count and the READING are stated separately, so a verifier re-running the command gets the
+    # number this comment prints); corpus hit set unchanged at 6.
+    # ⛔ AND THE RUN IS BOUNDED AT EIGHT, MATCHING FAMILY A (#13802 review, round 27, P2 —
+    # MEASURED: at `{0,4}` the parity the line above claims was still broken one step out —
+    # `At the head of the branch you are about to merge there are no files in the `tortoise/`
+    # set.` was GREEN while its un-fronted twin was RED, and the sibling detector reads neither
+    # (`[]`), so there was no second layer. The sentence above said "every adverbial form"; it
+    # said so while the bound was 4 and family A's filler (`:2653`) was 8, which is why the same
+    # five-token phrase was caught command-first and missed fronted. The bound is now the SAME
+    # eight in both places, so the parity is a property of the two arms rather than a coincidence
+    # of their bounds.)
+    # ⛔ AND THE TAIL READS THE SAME TOKEN CLASS AS ITS TWO SIBLINGS (#13802 review, round 27,
+    # P2 — MEASURED: with `[\w-]+` here, `At the head of origin/main you are about to merge
+    # there are no files in the `tortoise/` set.` stayed GREEN while its un-fronted twin was RED —
+    # the LAST of the three runs in this family to learn that a `/` is a token character, and the
+    # one that kept the parity claim false after the other two were fixed.)
+    r"(?:\s+(?:(?:head|time)(?:\s+(?:[\w/-]+\s+){0,8}[\w/-]*merg\w*)?"
+    r"|(?:[\w/-]+\s+){0,8}[\w/-]*merg\w*)[*_`]{0,3})?"
     # ⛔ AND EMPHASIS MAY WRAP THE ADVERBIAL'S OWN TRAILING PUNCTUATION (#13802 review, round 26,
     # P1 — MEASURED: round 23 put `[*_`]{0,3}` on every TOKEN of the fronted group and declared
     # the class closed under formatting, but the `,` / `:` / `.` / `—` that ENDS the adverbial had
@@ -3496,6 +3529,14 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "At the head post-merge there are no files in the `tortoise/` set.",
         "At the time of the merge there are no files in the `tortoise/` set.",
         "At this merge's head there are no files in the `tortoise/` set.",
+        # ⛔ AND THE PARITY HOLDS AT THE BOUND, NOT ONLY BELOW IT (#13802 review, round 27, P2 —
+        # MEASURED: the tail's run was `{0,4}` and `[\w-]+`, so parity broke for a path-bearing
+        # token and for a run of five; `At the head of the branch you are about to merge …` was
+        # GREEN while its un-fronted twin was RED. Both runs now read the same eight-token,
+        # `/`-bearing class as family A, so the parity is a property of the two arms rather than
+        # a coincidence of their bounds. These two are the bound and the `/`, one each.)
+        "At the head of the branch you are about to merge there are no files in the `tortoise/` set.",
+        "At the head of origin/main you are about to merge there are no files in the `tortoise/` set.",
         # ⛔ AND THE FAMILY-A FILLER'S TWO BLIND SPOTS (#13802 review, round 26, P2 — MEASURED
         # detector-read/ban-blind on 600 of 11,220 swept cells: a `/`-bearing token
         # (`origin/main`) and a run longer than six words both defeated the filler, while the
@@ -3503,6 +3544,14 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         # the only layer, so each is a hole rather than a narrowing.
         f"`{_cmd}` at the head of origin/main prints NOTHING at this head.",
         f"`{_cmd}` at the head you are about to merge prints NOTHING at this head.",
+        # ⛔ AND THE OVER-BLOCK THE `/` WIDENING BUYS, PINNED ON PURPOSE IN THE REFUSING
+        # DIRECTION (#13802 review, round 27, P2 — MEASURED `base=GREEN, HEAD=RED`: the peer's
+        # count arm accepts `the <count-noun>` with no count in it, so a path-bearing filler
+        # carries the class into TRUE prose). Pinned here so a later tightening reds this line
+        # and forces the declaration at the widening to be rewritten, instead of the behaviour
+        # changing silently while the suite stays green — the same trade, and the same pin, the
+        # peer's determiner widening already carries.
+        f"`{_cmd}` at the head of origin/main prints the same paths it printed before.",
         # ⛔ AND THE DECLARED OVER-BLOCK, PINNED AS MUST-REFUSE ON PURPOSE (#13802 review, round 26,
         # P2). `All six paths in the `tortoise/` set are covered by tests.` is TRUE prose and this
         # ban REFUSES it: the determiner/count widening's tail is satisfied by its own anchor noun

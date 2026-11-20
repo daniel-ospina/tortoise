@@ -16487,9 +16487,10 @@ def test_every_bundle_table_row_carries_its_headers_cell_count():
 
 def test_the_D5_row_is_still_one_table_row():
     """D5 is the row this bundle re-derives 269 cite-shaped tokens on at this head, and it is
-    ONE line. ⛔ THAT FIGURE IS A READING, NOT A PIN: `6991e2f0ad` moved it off `262`, so the
-    arm below RE-MEASURES it against the line and reds on drift rather than trusting this
-    sentence.
+    ONE line. ⛔ THAT FIGURE IS A READING, NOT A PIN, AND IT IS NOW READ: the arm below derives
+    the line's own count and compares it with every `<n> cite-shaped` sentence in this file, so
+    `6991e2f0ad` moving the line off `262` reds instead of leaving four comments behind (a
+    mutated figure was measured GREEN before that arm existed — #13802 review, round 27, P2).
 
     ⛔ THE MEASUREMENT THAT MAKES THIS A PIN RATHER THAN A NICETY: every cite arm in
     this file is line-scoped, so this row can be broken structurally — 6 cells against a
@@ -16771,7 +16772,8 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     text = d5[0]
     # ⛔ THE ROW'S OWN COUNT IS NOW TYPED (#13900 review, P2-1). The row states how
     # many `:N` tokens share its line, and until this assert NOTHING read that figure — which is
-    # why `~50` survived four sibling corrections and disagreed with the `262` this file already
+    # why `~50` survived four sibling corrections and disagreed with the `262` this file stated
+    # at `f16ef087d1`
     # states elsewhere. It is re-MEASURED here rather than typed as a constant, so the row cannot
     # drift from the line it describes: the sentence is the claim, the line is its subject.
     _stated_count = re.search(r"carrying (\d+) numbers", text)
@@ -16784,6 +16786,23 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         f"the D5 row says its line carries {_stated_count.group(1)} `:N` tokens, but the line "
         f"carries {_measured_count} — the same sentence family stated two different figures, "
         "which is the failure the D5 row exists to prevent (#13900 review, P2-1)")
+    # ⛔ AND THE FIGURES THIS FILE STATES IN ITS OWN COMMENTS GET A READER TOO (#13802 review,
+    # round 27, P2 — MEASURED: four comments sentence-initialised the same count (`6808`,
+    # `16489`, `16691`, `16720`) and NOTHING read them, so a mutated figure (`269` -> `263` in
+    # the docstring) left this arm GREEN — a typed number in the file whose thesis is "a typed
+    # number rots", with the fix's own sentence asserting "the arm below RE-MEASURES it" while no
+    # such arm existed. The derivation is the same one the row is graded by: the number is read
+    # OUT of this file and compared with the live line, so the four sentences cannot drift from
+    # the row they describe. Any NEW `<n> cite-shaped` sentence is graded too, which is why the
+    # number is bound to the phrase rather than to a line number.
+    _typed_comment_counts = {
+        int(n) for line in Path(__file__).read_text(encoding="utf-8").splitlines()
+        for n in re.findall(r"(\d+)\s+cite-shaped", line)}
+    assert _typed_comment_counts == {_measured_count}, (
+        f"this file states {sorted(_typed_comment_counts)} as the D5 line's `:N` count in its "
+        f"own comments, but the line carries {_measured_count} — re-derive the sentence, do not "
+        "re-type it: an unread figure is exactly the rot the D5 row exists to prevent "
+        "(#13802 review, round 27, P2)")
     sources = {key: path.read_text(encoding="utf-8").splitlines()
                for key, path in _EPIC_CITE_SOURCES.items()}
 
