@@ -5350,10 +5350,14 @@ def test_the_d5_count_reader_does_not_describe_itself_as_complete():
 
     ⛔ NON-VACUOUS BY CONSTRUCTION, which is why a prose finding gets a cell at all. Each needle
     below is a substring of the PRE-FIX SNIPPET recorded beside it in `_D5_RETIRED_OVERCLAIMS` —
-    six review rounds' wordings, so the snippet for a round-1 claim IS `origin/main`'s text while
-    the ones for rounds 5-6 are earlier states of this branch, NOT of `origin/main` (measured: four
-    of the six needles do not occur in `git show origin/main:tests/test_docs_citation_refs.py`, and
-    claiming they did is the same over-claim this cell exists to ban). The ban therefore REDS on
+    seven review rounds' wordings, so WHICH commit a snippet is the text of depends on the round:
+    the round-1 and round-6 wordings are `origin/main`'s own text, the round-5 one is an earlier
+    state of this branch. ⛔ NO COUNT IS STATED HERE ON PURPOSE (#14027 round 7, P3 — this sentence
+    used to say "measured: four of the six needles do not occur in `git show origin/main:…`", and
+    appending a needle made both integers false; a hardcoded census inside the cell whose subject
+    is "a claim that outruns its own artifact" is that same defect one tuple entry later). The
+    per-needle provenance is beside each row in `_D5_RETIRED_OVERCLAIMS`, where the round that
+    produced it is named. The ban therefore REDS on
     code a review round actually graded — it is not a test written beside a wording edit, it IS the
     wording edit asserted. The
     checks run in the control direction first: every needle must still be found in the pre-fix
