@@ -2797,8 +2797,9 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # one requires an ANSWER to open a clause and `tortoise/` to follow inside the same
     # sentence, so ordinary prose that merely begins with `Nothing` is untouched. The
     # emptiness-only cut of round 13 covered ONE direction of the two — that is round 16's fix.
-    r"|(?:^|[.;:!?]\s|\n)(?:[*_`]{0,3}(?:at|on|in)[*_`]{0,3}\s+"
-    r"[*_`]{0,3}(?:this|the|that)[*_`]{0,3}"
+    r"|(?:(?:^|\n)[ \t]*(?:[-*+>]|\d+[.)])?[ \t]*|[.;:!?]\s)"
+    r"(?:[*_`]{0,3}(?:at|on|in)[*_`]{0,3}\s+"
+    r"(?:[*_`]{0,3}(?:this|the|that)[*_`]{0,3}\s+)?"
     # ⛔ AND THE FRONTED ADVERBIAL IS A STRUCTURE, NOT A LIST OF SPELLINGS (#13802 review, round
     # 23, P1 + P2 — MEASURED at `3b901efa84`). Round 22 closed the fronting hole with a bounded
     # list (`at this head|at the head you merge|at this merge|…`) and that reproduced, on the
@@ -2810,8 +2811,11 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     #       `**At this head** there are no files in the `tortoise/` set.`   -> GREEN
     #       `_At this head_ …`, `` `At this head` … ``, `At **this** head …`  -> GREEN
     #       `At this head — there are no files in the `tortoise/` set.`     -> GREEN
-    #     The emphasised form is not invented: `**At this head**` occurs in `docs/` (3 files,
-    #     e.g. `docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md:216`), and
+    #     The emphasised form is not invented, and the count is the MEASURED one (round 24, P2 —
+    #     the earlier sentence said "3 files" for a spelling that occurs ONCE): `grep -ro -F
+    #     '**At this head**' docs --include='*.md'` -> 1 occurrence, case-insensitively -> 3
+    #     (`-i`), e.g. `docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md:216`.
+    #     The ban does not care about the case: it compiles IGNORECASE. And
     #     the sibling detector reads none of them (`_typed_answers_to_tortoise_cmd -> []`), so
     #     there was no second layer.
     # (b) THE LIST'S STATED JUSTIFICATION WAS FALSE. "The spellings this corpus actually uses …
@@ -2822,21 +2826,41 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # ⚠️ AND THE STRUCTURE'S OWN RESIDUAL IS MEASURED, NOT ASSERTED (round 23): of the same
     # eighteen spellings, THREE remain GREEN at this head — `at merge time`, `as of this head`
     # and `at the head of this merge` — because none of them has the shape the class reads
-    # (preposition + determiner + … + `head`/`merge`). They are the declared residual this
-    # class pays for in exchange for reading thirteen of eighteen instead of five. ⛔ AND THE
-    # RESIDUAL COSTS NOTHING LIVE, MEASURED RATHER THAN ASSUMED: `at merge time` DOES occur in
-    # `docs/` (10 lines) but only as ordinary prose about merges (`file at merge time`,
-    # `conflicting at merge time`, `as it is at merge time`) — none of those lines is a
-    # direction claim, and the corpus scan below finds 0 new refusals and 0 lost ones; the other
-    # two spellings do not occur at all. A residual is priced by live victims, not by word counts.
+    # (preposition + determiner + … + `head`/`merge`). ⛔ ROUND 24 CUT THAT RESIDUAL FROM THREE TO
+    # TWO, AND ONE OF THE THREE WAS A REGRESSION RATHER THAN A RESIDUAL (MEASURED at
+    # `8f2f2ad25b`): `at merge time` was RED at `3b901efa84` — the round-22 bounded list carried
+    # `at\s+merge\s+time` — and the structural class DROPPED it, i.e. a capability left the
+    # guard silently and NO witness red, because that spelling was pinned nowhere. So the
+    # determiner above is now OPTIONAL and `time` is in the trailing group: `At merge time there
+    # are no files in the `tortoise/` set.` is RED here again, and pinned below. The residual is
+    # the two that still have no shape to read — `as of this head` (the preposition phrase `as
+    # of`) and `at the head of this merge` (a noun phrase after `head`) — and it is priced by
+    # LIVE VICTIMS, not word counts: neither occurs in `docs/` today, and the corpus scan below
+    # finds 0 new refusals and 0 lost ones.
     # So the boundary is the STRUCTURE — a preposition the ban already treats as a head binder,
-    # a determiner, up to two intervening words, then `head`/`merge` (optionally `you merge`) —
-    # case-insensitively (the ban's own flag), with the emphasis class on every token and the
-    # em/en-dash bridge the dash family already carries. Enumerating spellings is what failed;
-    # this reads the shape the spellings share.
-    r"(?:\s+[*_`]{0,3}(?!(?:head|merge)(?![A-Za-z0-9]))[\w-]+[*_`]{0,3}){0,2}"
-    r"\s+[*_`]{0,3}(?:head|merge)(?![A-Za-z0-9])[*_`]{0,3}"
-    r"(?:\s+(?:head|you\s+merge)[*_`]{0,3})?"
+    # an OPTIONAL determiner, up to two intervening words, then `head`/`merge` (optionally a
+    # trailing `head`, `time`, or `<pronoun> merge`) — case-insensitively (the ban's own flag),
+    # with the emphasis class on every token and the em/en-dash bridge the dash family already
+    # carries. Enumerating spellings is what failed; this reads the shape the spellings share.
+    # ⛔ AND THE CLAUSE OPENS ON A MARKDOWN PREFIX TOO (#13802 review, round 24, P2 — PRE-EXISTING
+    # at `3b901efa84`, closed here because this range's whole subject is the clause-opening
+    # shape): `^` is string-start only (no MULTILINE) and the old `\n` branch required the
+    # adverbial IMMEDIATELY after the newline, so a list item, a blockquote or an indented line
+    # defeated the entire family — `- At this head there are no files …`, `> …`, `1. …`, and a
+    # single leading space, all GREEN at every head before this one. 115 lines in `docs/` carry
+    # a `[-*+>] … at|on|in (this|the|that) … (head|merge)` shape today; the corpus scan below
+    # shows 0 of them is a direction claim, so the widening costs nothing live and the prefix is
+    # pinned below.
+    r"(?:[*_`]{0,3}(?!(?:head|merge)(?![A-Za-z0-9]))[\w-]+[*_`]{0,3}\s+){0,2}"
+    r"[*_`]{0,3}(?:head|merge)(?![A-Za-z0-9])[*_`]{0,3}"
+    # ⛔ AND THE TRAILING SHAPE IS PRONOUN-GENERAL, NOT ONE PRONOUN (#13802 review, round 24,
+    # P2 — MEASURED at `8f2f2ad25b`): the literal `you\s+merge` refused `head you merge` and
+    # left `head we merge` / `head they merge` / `head one merge` GREEN in BOTH arms. `time`
+    # is here for the same reason (#13802 review, round 24, P1 — the structural class DROPPED
+    # `at merge time`, which the round-22 bounded list HAD caught: RED at `3b901efa84`, GREEN
+    # here before this line, i.e. a capability silently leaving the guard with no witness to
+    # red. That regression is why the determiner above is optional and `time` is below.)
+    r"(?:\s+(?:head|time|[\w-]+\s+merge)[*_`]{0,3})?"
     r"\s*(?:[—–]\s*)?,?\s+)?"
     # ⚠️ DECLARED OVER-BLOCK, MEASURED (round 23, P2): this prefix extends a PRE-EXISTING
     # over-block into fronted prose — `At this head nothing in the `tortoise/` set is broken.`,
@@ -3232,6 +3256,22 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "At the merge there are no files in the `tortoise/` set.",
         "At this merge head there are no files in the `tortoise/` set.",
         "In this head there are no files in the `tortoise/` set.",
+        # ⛔ AND THE FOUR SHAPES ROUND 23's STRUCTURE STILL DID NOT READ (#13802 review, round 24
+        # — every one MEASURED GREEN at `8f2f2ad25b` in this ban AND in the sibling detector):
+        # the determiner-less temporal spelling the round-22 LIST caught and the structural class
+        # DROPPED (a regression, P1: RED at `3b901efa84` → GREEN at `8f2f2ad25b`), the
+        # `<pronoun> merge` shape for pronouns other than `you`, and the markdown list /
+        # blockquote / numbered-item / indented openings that the clause anchor could not reach.
+        # `at merge time` is pinned because nothing pinned it while it silently left the guard;
+        # the four markdown/pronoun forms are pinned so the next prefix edit reds instead of
+        # regressing quietly.
+        "At merge time there are no files in the `tortoise/` set.",
+        "At the head we merge there are no files in the `tortoise/` set.",
+        "At the head they merge there are no files in the `tortoise/` set.",
+        "- At this head there are no files in the `tortoise/` set.",
+        "> At this head there are no files in the `tortoise/` set.",
+        "1. At this head there are no files in the `tortoise/` set.",
+        "  At this head there are no files in the `tortoise/` set.",
         # ⛔ AND THE SAME THREE CLAIMS IN THE ANSWER-FIRST ORDER (#13802 review, round 21 —
         # MEASURED GREEN at this head while every verb-first twin above was refused: the
         # `no <noun>` branch existed only on the verb-then-answer side)
