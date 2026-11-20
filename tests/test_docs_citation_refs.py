@@ -517,8 +517,8 @@ def test_the_real_docs_tree_is_not_empty():
 #: is the REASON it existed — the abbreviation is a SUBSTRING of every longer `git diff <other
 #: revs> -- tortoise/` invocation — and it is honoured by the SUBJECT LIST the callers pass
 #: (`_TORTOISE_CENSUS_SUBJECTS`), not by two gap constants. `_GAP_FULL` / `_GAP_ABBREV` are
-#: gone: aliasing both to `_GAP` made the selection between them a no-op that kept these
-#: paragraphs alive.
+#: gone: a second name for the same closure is what let the selection between the two be a
+#: no-op that kept these paragraphs alive.
 #:
 #: The gap is a run of FIVE UNIT KINDS and nothing else. Listing them is not an enumeration of
 #: SPELLINGS — the earlier attempts died because they enumerated those — it is the closure
@@ -600,13 +600,13 @@ _BRACKET = r"\[(?:\\.|[^\]\n]|" + _SOFT + r")*\]"
 #: separator (`is`, a URL's `:`), not a word between the command and the verb.
 _OPEN_BRACKET = r"\[(?![^\]\n]*\])"
 #: ⛔ ONE GAP, ONE UNIT LIST, AND THE UNITS ARE WHAT THE MATCHER WALKS (#13921 review, F5).
-#: `_GAP_UNIT` is the single alternation every separator character goes through; `_GAP` is its
-#: `*`-closure and is kept as the STATEMENT of the separator for readers. The matcher no longer
-#: relies on a greedy `_GAP*` to skip the separator — it walks `_GAP_UNIT` itself, so the
-#: separated position list is the thing that decides where a verb may start (see the scan below).
+#: `_GAP_UNIT` is the single alternation every separator character goes through; the separator is
+#: its `*`-CLOSURE, and the matcher walks that closure unit by unit (below) instead of letting a
+#: greedy `_GAP*` skip it — so the position list the walk produces is what decides where a verb
+#: may start. There is no `_GAP` constant to drift from `_GAP_UNIT`: a second name for the same
+#: closure is what let `_GAP_FULL` / `_GAP_ABBREV` alias it and two gaps go on being described.
 _GAP_UNIT = (r"(?:[^\w<&[\n]|_|" + _TAG + r"|" + _BRACKET + r"|" + _AMP + r"|"
              + _OPEN_BRACKET + r"|" + _SOFT + r")")
-_GAP = _GAP_UNIT + r"*"
 
 def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]:
     """Every typed ANSWER to `cmd` in `doc`, as `(answer, claims_empty)` pairs.
@@ -1732,7 +1732,7 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     assert _typed_answers_to_tortoise_cmd(
         f"`{_full_subject}` R&D prints TWO paths", _full_subject) == [], (
         "a WORD between the command and the verb is now detected — that contradicts the "
-        "declared limit at `_GAP`, so the declaration must change with it")
+        "declared limit in the `_GAP_UNIT` block, so the declaration must change with it")
     # ⛔ THE TWO SENTENCES THIS PR IS TITLED AFTER ARE **NOT** GRADED, AND THAT IS THE DECLARED
     # LIMIT — PINNED, because the claim that they WERE graded is the sentence that had to be
     # withdrawn (#13921 review, F2/P1-1, MEASURED). Each carries a WORD between the command and
