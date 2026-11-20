@@ -428,6 +428,13 @@ class Mcp:
                     "params": {"name": tool, "arguments": args},
                 })
             except urllib.error.HTTPError as exc:
+                # ⛔ READING THE BODY CAN FAIL TOO, and this runs INSIDE the
+                # handler where no sibling `except` can see it: a truncated or
+                # reset body (`IncompleteRead`) raised HERE escaped `call()` as
+                # itself, so `write_once` read a 5xx as a definite REFUSAL and
+                # retired a non-idempotent intent the server may have acted on —
+                # the resume then re-issued `create_operator` (#13913 review
+                # round 8, measured). No body is an UNKNOWN body, never a refusal.
                 code, payload = exc.code, None
                 # ⛔ THE BODY READ IS PART OF THE CLASSIFICATION. This read sits
                 # inside `except HTTPError`, so an exception raised HERE is not
@@ -443,6 +450,15 @@ class Mcp:
                 try:
                     body = exc.read().decode("utf-8", "replace")
                 except (OSError, ValueError, http.client.HTTPException) as read_exc:
+                    # ⛔ THE STATUS CODE STILL DECIDES. A 4xx (other than 408/429)
+                    # was refused BEFORE the handler ran, so an unreadable body
+                    # does not make the outcome unknown — the intent may be
+                    # retired. Only a 5xx/timeout/rate-limit is UNKNOWN without a
+                    # body, because the door may have acted on it.
+                    if 400 <= code < 500 and code not in (408, 429):
+                        raise Refusal(
+                            f"{tool} refused: HTTP {code} — the write did not land "
+                            f"(body unreadable: {read_exc})") from read_exc
                     if not retry_safe:
                         raise UnknownOutcome(
                             _unknown(tool, f"HTTP {code} body unreadable: "
@@ -474,10 +490,18 @@ class Mcp:
                 time.sleep(min(60, 5 * (attempt + 1)))
                 continue
 
+            # ⛔ A BODY THAT PARSES TO A NON-OBJECT IS STILL UNREADABLE. A proxy
+            # error page can be valid JSON (`[]`, `"Bad Gateway"`, `502`), and
+            # `payload.get` then raised `AttributeError` — again outside every
+            # classification, again retiring the intent (#13913 review round 8).
+            if payload is not None and not isinstance(payload, dict):
+                raise UnknownOutcome(
+                    f"{tool}: HTTP {code} body is not a JSON-RPC object "
+                    f"({type(payload).__name__}) — the write is UNCONFIRMED")
             err = (payload or {}).get("error")
             if err:
-                retry_after = ((err.get("data") or {}).get("retry_after")
-                               if isinstance(err.get("data"), dict) else None)
+                data = err.get("data") if isinstance(err, dict) else None
+                retry_after = data.get("retry_after") if isinstance(data, dict) else None
                 if retry_after:
                     # "the work may still complete" — wait the advertised delay,
                     # then re-issue. Only for a write whose repeat converges.
@@ -1250,7 +1274,13 @@ def presence(doc: dict, node_rows: list, edge_rows: list,
                 # declared pair's identities and would otherwise certify it.
                 and a in slots.get(0, set())
                 and b in slots.get(1, set())
-                and all(slot in (0, 1) for slot in slots)
+                # ⛔ ONE ENDPOINT PER SLOT, not merely one SLOT KEY: a slot holds
+                # a SET, so an operator with TWO targets in slot 1 held both of a
+                # declared pair's identities and certified both edges while
+                # pricing them as one three-input factor (#13913 review round 8).
+                and len(slots.get(0, ())) == 1
+                and len(slots.get(1, ())) == 1
+                and not (set(slots) - {0, 1})
                 for kind, direction, slots in operators.values()
             )
         else:
@@ -1306,29 +1336,38 @@ def duplicate_operators(doc: dict, op_rows: list) -> list[tuple[str, str, str]]:
             slot = -1
         slots.setdefault(slot, set()).update(_row_identities(row[4:8]))
 
-    holders: dict[tuple[str, tuple, tuple], set[object]] = {}
-    where: dict[tuple[str, tuple, tuple], tuple[str, str]] = {}
+    # ⛔ COUNTED PER ENDPOINT PAIR, not per (mechanism, direction, pair): a
+    # re-issued `create_operator` is a duplicate even when the second call stored
+    # a DIFFERENT direction or mechanism, and both copies still make EP price
+    # that claim pair twice (#10849) — measured: a duplicate with a flipped
+    # direction or a flipped mechanism read `101/101`, `dup_ops=[]`, exit 0
+    # (#13913 review round 8). A pair carrying TWO DECLARED operators (IMPL and
+    # NAND over one pair is a legitimate contradiction) is not a duplicate, so the
+    # comparison is against the number of edges the map DECLARES over that pair.
+    declared_by_pair: dict[tuple[tuple, tuple], int] = {}
+    where: dict[tuple[tuple, tuple], list[tuple[str, str, str]]] = {}
     for e in doc["edges"]:
         if "op" not in e:
             continue
-        want = direction_of(e)
-        want = aliases.get(want, want)
-        a, b = by_ref[e["from"]], by_ref[e["to"]]
-        key = (e["op"], a, b)
-        where[key] = (e["from"], e["to"])
-        for nid, (kind, direction, slots) in grouped.items():
-            if (kind == e["op"] and direction == want
-                    and all(slot in (0, 1) for slot in slots)
-                    and a in slots.get(0, set())
-                    and b in slots.get(1, set())):
+        key = (by_ref[e["from"]], by_ref[e["to"]])
+        declared_by_pair[key] = declared_by_pair.get(key, 0) + 1
+        where.setdefault(key, []).append((e["op"], e["from"], e["to"]))
+
+    holders: dict[tuple[tuple, tuple], set[object]] = {}
+    for nid, (_kind, _dir, slots) in grouped.items():
+        if not (len(slots.get(0, ())) == 1 and len(slots.get(1, ())) == 1
+                and not (set(slots) - {0, 1})):
+            continue
+        source = next(iter(slots[0]))
+        target = next(iter(slots[1]))
+        for key in declared_by_pair:
+            if source == key[0] and target == key[1]:
                 holders.setdefault(key, set()).add(nid)
     out: list[tuple[str, str, str]] = []
-    for key, ids in holders.items():
-        if len(ids) > 1:
-            kind, _a, _b = key
-            frm, to = where[key]
-            out.append((kind, frm, to))
-    return sorted(out)
+    for key, ids in sorted(holders.items()):
+        if len(ids) > declared_by_pair[key]:
+            out.extend(where[key])
+    return out
 
 
 def verdict(doc: dict, node_rows: list, edge_rows: list, op_rows: list) -> int:
@@ -1463,8 +1502,10 @@ def main() -> int:
         return write_map(doc)
     if args.verify:
         return verify(doc)
+    # ⛔ NOT 0: a runbook that passes the mode through an empty variable would
+    # read success from a run that neither wrote nor verified anything.
     ap.print_help()
-    return 0
+    return 2
 
 
 if __name__ == "__main__":
