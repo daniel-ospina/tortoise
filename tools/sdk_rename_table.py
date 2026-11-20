@@ -95,13 +95,15 @@ from tools.bridge_table import _sdk_targets  # noqa: E402
 # The single owner of "where did a RETIRED name go". A retired name is not a ROW in this
 # table (it maps the live surface), but when a quote we must trust MENTIONS one — beta's
 # W8 row routes `get_source_reliability`'s reads "via `list_sources`", which itself retires
-# into `list_knowledge` — the replacement it reaches has to come from somewhere. Importing
-# the ledger is the same rule as the line above: a second copy would be a second answer.
+# into `list_knowledge` — the replacement it reaches has to come from somewhere.
 # The machine-readable record of EVERY name that LEFT the surface, in the four blocks the
 # ledger keeps (`#4282`'s 26 name surplus, the `#12901` wave-1 and wave-2 control-plane
 # blocks, the FINAL batch's privatised engine surface, plus the unhinted-but-live
-# destination cell). Importing it here is the same rule as the two imports above: a second
-# copy of "which names departed" would be a second answer.
+# destination cell). Importing it here is the same rule as `_sdk_targets` above: a second
+# copy of "which names departed" would be a second answer. ⛔ ONE import block, not two:
+# the `RETIRED_SDK_METHODS` line that used to stand here on its own was merged into the
+# block below to satisfy I001, and this comment used to say "the two imports above" —
+# which the merge falsified (#13899 re-cut review, P2).
 #
 # ⛔ WHY THIS EXISTS — the `STALE canonical member` arm (below) needs a second question
 # asked of it. `docs/product/canonical-sdk-methods.md`'s GROUP tables are DELIBERATELY the
