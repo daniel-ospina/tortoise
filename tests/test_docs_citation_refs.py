@@ -556,10 +556,12 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
     """
     answers: list[tuple[str, bool]] = []
     # ⛔ ONE LIMIT THIS CLASS DOES NOT COVER, STATED BECAUSE IT CANNOT BE INFERRED (#13831
-    # review): a HARD-WRAPPED answer is not detected — the window is cut at the first
+    # review): a HARD-WRAPPED ANSWER is not detected — the ANSWER window is cut at the first
     # newline, so `prints only the\ntwo comment-only modules` and `returns\nnothing` are
     # skipped. Pre-existing, and the live document does not wrap; it is named here so the
-    # closure claim above is read as "closed under formatting ON ONE LINE".
+    # closure claim above is read as "closed under formatting ON ONE LINE". ⛔ THE SEPARATOR
+    # IS NOT CUT THERE (#13900 review, cycle 10, P2): a hard-wrapped COMMAND→VERB pair stays
+    # graded, because `\s` is in the separator class and `origin/main` graded it too.
     # ⛔ AND A SECOND LIMIT, measured by TWO review cycles on the SAME sentence family
     # (#13845): a claim that names the command by PRONOUN — "the command this clause
     # prescribes returns NOTHING AT ALL" — carries no command token, so no shape rule can
@@ -598,9 +600,9 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             # file GREEN — this document uses `—` 402 times, so that spelling is natural here.
             # A list of separators is the same mistake as a list of skips: closed only
             # against what someone thought of. So the separator is NOT enumerated — it is any
-            # run of non-word, non-newline characters, plus the two FORMS through which a
-            # word character legitimately reaches a separator (an inline tag, a footnote
-            # marker). Words cannot cross it, so a sentence such as
+            # run of non-word characters, plus the two FORMS through which a word character
+            # legitimately reaches a separator (an inline tag, a footnote marker). Words
+            # cannot cross it, so a sentence such as
             # "`-- tortoise/` — see the row below — prints …" is deliberately NOT graded as
             # an answer: admitting prose there is how a rule loses the ability to tell a
             # claim from a sentence about one.
@@ -615,7 +617,13 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             # unbounded — and a table cell spends the whole budget, so one emphasis mark on
             # top of it is ungraded. The quantifier is therefore unbounded: prose cannot
             # cross it, because a word character ends the run, so there is nothing to cap.
-            + r"(?:[^\w\n]|_|<[^>\n]{1,8}>|\[\^?\d{1,3}\])*"
+            # ⛔ AND A NEWLINE IS A SEPARATOR, NOT A WORD (#13900 review, cycle 10, P2,
+            # MEASURED at `47b3ea7001`): `[^\w\n]` excluded it, so the HARD-WRAPPED pair
+            # `` `-- tortoise/` `` / `prints …` returned `[]` — another REGRESSION against
+            # `origin/main`, whose `[`_\s*]*` admitted `\s`. `\s` is therefore in the class.
+            # Only the ANSWER window is cut at a newline (the residual the docstring states);
+            # the separator is not, because a word character still ends the run.
+            + r"(?:\s|[^\w\n]|_|<[^>\n]{1,8}>|\[\^?\d{1,3}\])*"
               r"(?:(?:still|now|actually|also)\s+)?"
               r"(prints|returns|yields|reports|gives|outputs|carries|lists|shows|"
               r"names|includes|contains|has|->|→|is|=|:)", doc, flags=re.IGNORECASE):
@@ -653,7 +661,11 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
         # matcher) — NOT in the module docstring, which states the NAME-vs-line rule and says
         # nothing about past-tense answers (#13900 review, finding 2) — and it is pinned by the
         # witnesses below, which assert the OPPOSITE of a skip: a claim that is an answer is
-        # graded wherever it sits on the line, whatever surrounds it.
+        # graded wherever it sits on the line, whatever surrounds it — a separator is any run
+        # of non-word characters (newlines included) and punctuation between the verb and the
+        # answer is stripped. The exceptions are the residuals THIS docstring declares (a
+        # hard-wrapped ANSWER, a verb or an answer word outside the listed classes, a pronoun
+        # subject), and they are named THERE, not left to be inferred from this sentence.
         #
         # RESIDUAL, stated: a PRESENT-TENSE answer about another head is now refused here.
         # That is the deliberate trade — re-word a sentence, in exchange for a class of
@@ -671,6 +683,19 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
         # `` prints `two` path `` forms this witness list pins are MUTATIONS of those, not
         # quotations of the tree — stated as mutations so the comment cannot go stale with it.
         low = re.sub(r"[`*_]", "", low).strip()
+        # ⛔ PUNCTUATION AFTER THE VERB IS NOT A DIFFERENT ANSWER (#13900 review, cycle 10,
+        # P2, MEASURED at `706709c4df` and still open at `47b3ea7001`): `_member` and
+        # `_empty` below are anchored at `^`, so `prints — two modules at this head`,
+        # `prints: two modules …` and `prints (two modules …` all returned `[]` while
+        # `prints two modules …` was graded — a ONE-CHARACTER edit silenced a red, in a
+        # document that writes `—` 402 times. The lead here is punctuation, never content,
+        # so it is stripped to the first word; a head that is ONLY punctuation leaves an
+        # empty window and is skipped as before. Repeated because one mark may sit behind
+        # another (`— **nothing**`).
+        _lead = None
+        while _lead != low:
+            _lead = low
+            low = re.sub(r"^[^\w\s]+", "", low).strip()
         if not rest:
             continue
         # ⛔ THE HEAD OF THE ANSWER DECIDES, AND NOTHING ELSE DOES (#13795 review,
@@ -1522,6 +1547,25 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         assert _typed_answers_to_tortoise_cmd(_refuted, "-- tortoise/"), (
             f"the arm SKIPPED {_refuted!r} — punctuation between the command and the verb "
             "is still the same claim (#13900 review, finding 2)")
+    # ⛔ AND THE TWO SHAPES CYCLE 10 FOUND STILL OPEN (#13900 review, cycle 10, P2,
+    # MEASURED at `706709c4df` AND STILL OPEN at `47b3ea7001`): (i) ONE punctuation mark
+    # AFTER the verb, which `_member`/`_empty` miss because they are anchored at `^` — a
+    # one-character edit silenced a red — and (ii) a HARD-WRAPPED pair, which the separator
+    # class excluded by excluding `\n` although `origin/main` graded it. Non-vacuity is
+    # MEASURED against `47b3ea7001`'s own function, not asserted: the three lead-punctuation
+    # rows and the hard-wrap row each returned `[]` there and are graded here. The last two
+    # rows are REGRESSION PINS instead, and say so: the unbounded quantifier that commit
+    # shipped already grades them, and they returned `[]` only under the retired `{0,4}`.
+    for _refuted in ("`-- tortoise/` prints — two modules at this head",
+                     "`-- tortoise/` prints: two modules at this head",
+                     "`-- tortoise/` prints (two modules at this head)",
+                     "`-- tortoise/`      prints ONE path at this head",
+                     "| **`-- tortoise/`** | prints ONE path at this head |",
+                     "`-- tortoise/`\nprints ONE path at this head"):
+        assert _typed_answers_to_tortoise_cmd(_refuted, "-- tortoise/"), (
+            f"the arm SKIPPED {_refuted!r} — a lead punctuation mark after the verb, a "
+            "separator run longer than four, and a hard wrap are all the SAME answer; "
+            "each returned `[]` before this fix (#13900 review, cycle 10, P2)")
     # ⛔ AND THE PUNCTUATION CYCLE 9 MEASURED UNGRADED (#13900 review, cycle 9, P1): each of
     # these returned `[]` when the separator was an enumerated character class.
     for _refuted in ("`-- tortoise/` — prints ONE path at this head.",
