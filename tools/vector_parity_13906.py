@@ -68,6 +68,7 @@ import contextlib
 import json
 import math
 import os
+import shlex
 import sys
 import time
 import uuid
@@ -529,17 +530,95 @@ def _assert_loopback(host: str, what: str, allow_remote: bool) -> None:
         f"--allow-remote-writes if you really mean it.")
 
 
+RECORD_DSN_NO_HOST = "<host not resolvable — cannot PROVE it is local>"
+
+
+def _split_host_list(value: str) -> list[str]:
+    """libpq accepts a COMMA-SEPARATED host list in one `host=`/`hostaddr=` value.
+
+    ``host=127.0.0.1,db.prod.example.com`` is a failover list, so the remote entry
+    is a store this run may reach — every member is kept, none is dropped.
+    """
+    out: list[str] = []
+    for part in value.split(","):
+        host = part.strip()
+        if host.startswith("[") and host.endswith("]"):  # libpq's `host=[::1]`
+            host = host[1:-1]
+        if host:
+            out.append(host)
+    return out
+
+
+def _conninfo_hosts(dsn: str) -> list[str]:
+    """The `host`/`hostaddr` keywords of libpq's whitespace conninfo form."""
+    hosts: list[str] = []
+    try:
+        tokens = shlex.split(dsn)
+    except ValueError:  # unbalanced quoting: nothing proven, caller refuses
+        return hosts
+    for token in tokens:
+        key, sep, value = token.partition("=")
+        if sep and key in ("host", "hostaddr"):
+            hosts.extend(_split_host_list(value))
+    return hosts
+
+
+def _record_dsn_hosts(dsn: str) -> list[str]:
+    """Every host libpq would DIAL from this DSN — by libpq's OWN precedence.
+
+    ⛔ THE AUTHORITY IS NOT THE ANSWER, and reading it alone is a FAIL-OPEN. In
+    libpq's URI form a ``host=``/``hostaddr=`` in the QUERY STRING overrides the
+    authority's host, and ``hostaddr`` names the address actually dialled
+    (``host`` is then used only for certificate verification and SNI). Measured
+    against libpq's own resolver (``PQconninfoParse``):
+
+        postgresql://127.0.0.1/db?host=db.prod.example.com
+            -> host='db.prod.example.com'       (the query wins)
+        postgresql://127.0.0.1/db?hostaddr=203.0.113.9
+            -> hostaddr='203.0.113.9'           (the address dialled)
+
+    so a DSN whose AUTHORITY is loopback still writes to a remote record — the
+    store ``run()`` seeds and ``teardown()`` deletes by ``org_id``. Every host
+    this returns must be loopback. The authority is INCLUDED even when a query
+    parameter overrides it: over-blocking costs an ``--allow-remote-writes``
+    flag, under-blocking costs a tenant's rows.
+
+    Returns ``[]`` when the DSN names no host at all — the caller refuses that
+    (``RECORD_DSN_NO_HOST``), it does not treat it as local.
+    """
+    hosts: list[str] = []
+    if "://" in dsn:
+        parts = urlsplit(dsn)
+        query = parse_qs(parts.query)
+        # `hostaddr` first: it is the address libpq dials, so naming it first in
+        # the refusal names the store the run would actually hit.
+        for key in ("hostaddr", "host"):
+            for value in query.get(key, []):
+                hosts.extend(_split_host_list(value))
+        if parts.hostname:
+            hosts.append(parts.hostname)
+    else:
+        hosts.extend(_conninfo_hosts(dsn))
+    return hosts
+
+
 def _assert_local_record_dsn(dsn: str | None, allow_remote: bool) -> None:
     """Refuse a record DSN that is not PROVABLY local — including one we cannot parse.
 
-    ⛔ THE DECISION, not just the leaf. ``urlsplit(...).hostname`` is ``None`` for
-    two legal libpq spellings which BOTH reach a remote host — a URI carrying the
-    host in its query string (``postgresql:///db?host=db.example.com``) and the
+    ⛔ THE DECISION, not just the leaf. ``urlsplit(...).hostname`` answered a
+    different question than the one that matters. It is ``None`` for two legal
+    libpq spellings which BOTH reach a remote host — a URI carrying the host in
+    its query string (``postgresql:///db?host=db.example.com``) and the
     whitespace conninfo form (``host=db.example.com dbname=x``; PostgreSQL's own
-    §34.1.1 admits either). Written as ``host = …; if host:`` the guard therefore
-    SKIPPED exactly when it could not decide, on the path where ``run()`` seeds
-    that store and ``teardown()`` deletes by ``org_id`` — a no-op on the
-    destructive path the README advertises as safety property R1.
+    §34.1.1 admits either) — so written as ``host = …; if host:`` the guard
+    SKIPPED exactly when it could not decide. And where it did answer, it could
+    be WRONG: a loopback authority with ``?host=``/``?hostaddr=`` in the query
+    string reads as local here while libpq dials the query's host (see
+    ``_record_dsn_hosts`` for the measurement).
+
+    Both failures sit on the path where ``run()`` seeds that store and
+    ``teardown()`` deletes by ``org_id`` — a no-op on the destructive path the
+    README advertises as safety property R1.
 
     ``tortoise.config.is_loopback_uri`` is this repo's fail-closed predicate for
     the same question (an absent hostname is NOT loopback, ``tortoise/config.py:375``);
@@ -548,10 +627,8 @@ def _assert_local_record_dsn(dsn: str | None, allow_remote: bool) -> None:
     """
     if not dsn:
         return
-    host = urlsplit(dsn).hostname
-    _assert_loopback(
-        host or "<host not resolvable — cannot PROVE it is local>",
-        "record database", allow_remote)
+    for host in _record_dsn_hosts(dsn) or [RECORD_DSN_NO_HOST]:
+        _assert_loopback(host, "record database", allow_remote)
 
 
 def app_role_dsn(dsn: str) -> str:

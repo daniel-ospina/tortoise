@@ -14,7 +14,7 @@ aboutObjects: "SEARCH-ARCHITECTURE.md §3, §6.1; #11642; #13220; #13610; #5004;
 # Dense-leg query parity — both stores, one corpus, four readers (#13906)
 
 **Instrument:** `tools/vector_parity_13906.py` · **Comparator pins:**
-`tests/test_vector_parity_13906.py` (41 DB-free tests) · **Artifacts, this
+`tests/test_vector_parity_13906.py` (43 DB-free tests) · **Artifacts, this
 directory:** `parity-run.json`, `poison-{id,order,recall,vector}.json`.
 
 The question this answers, in one sentence: **for the same tenant data and the
@@ -281,6 +281,13 @@ what round 7's own pin had failed to do. Two findings, both reproduced here firs
 | **J2** `compare` published `distance.ok: True, max_delta: 0.0` over **ZERO** compared rows — `zip([], [])` runs no iterations — which is what made a raised leg's empty answer look like a passed value check | read the branch | `ok` is `None` (UNMEASURED) with a reason when no candidate row was compared, so every consumer that requires a positive measurement fails on it; pinned by `test_an_empty_answer_is_not_a_passed_distance_check` |
 | **J3** the header above still carried the round-1 count (**30** DB-free tests) while §6 at that revision said **39** and the tree collected 39 (37 `def test_` + 2 from the one parametrized case) — the D1 stale-count pattern, re-staled by round 7's nine added pins. ⚠️ The first draft of THIS ROW said "36", which was neither the header nor §6; it quoted the round-6/7 *mutation* figures by mistake. Corrected here because the same section two paragraphs down records exactly that failure mode — a correction that asserts a previous text was wrong while being wrong itself | `git show <parent>:README.md` lines 17 and 318, plus the parent revision's own test-count (`def test_` occurrences, counted with grep -c) | corrected to **41**, and §6's count now matches the tree |
 
+### Round 8: a guard that read the AUTHORITY while libpq dialled the QUERY STRING
+
+| finding | verified how | fix |
+|---|---|---|
+| **K1** `_assert_local_record_dsn` decided locality from `urlsplit(dsn).hostname` alone. libpq's URI form lets `host=`/`hostaddr=` in the **query string** OVERRIDE the authority, and `hostaddr` is the address actually dialled — so `postgresql://127.0.0.1/db?host=db.prod.example.com` read as LOCAL here while `psycopg2.connect()` reached a remote record, which `run()` then seeds (org, graph, node_identity, `point` rows) and `teardown()` deletes from by `org_id`. H1 closed the `hostname is None` half of this guard and left this half open: the destructive path R1 advertises was still reachable with a DSN that looks loopback | measured on libpq's own resolver (`PQconninfoParse`, via `ctypes`): `?host=db.prod.example.com` → `host='db.prod.example.com'` (the query wins over the `127.0.0.1` authority); `?hostaddr=203.0.113.9` → `hostaddr='203.0.113.9'`. The shipped guard returned normally on both — measured, not inferred. Controls behaved: `postgresql:///db?host=…` and `host=… dbname=…` are refused, a plain remote authority is refused, plain loopback passes | the decision is now `_record_dsn_hosts()` — EVERY host libpq would dial (query `hostaddr`, query `host`, the authority, comma-separated failover lists, and the whitespace conninfo keywords), each of which must be loopback; the authority is kept even when a query parameter overrides it, because over-blocking costs an `--allow-remote-writes` flag while under-blocking costs a tenant's rows. Pinned by `test_a_host_in_the_query_string_overrides_the_authority_and_is_refused`: 6 remote shapes refused (two of them the new `?host=`/`?hostaddr=` forms) with `--allow-remote-writes` still reaching a real remote run, 5 local shapes passing, 2 no-host shapes refused — plus an AST read so the decision cannot go back to an inlined authority read |
+| **K2** the pin count moved with this round's pin (41 → **43**, `41 def test_` + 2 from the one parametrised case) | `uv run python tools/test_lane.py run -- tests/test_vector_parity_13906.py -q` → `43 passed`; `--collect-only` → `43 tests collected` | the header above and §6 both state **43**, the tree's own count, so the J3 re-stale cannot repeat in this revision |
+
 ### The two evidence errors this section exists to correct
 
 Both were in the **previous revision of this document**, and both are the
@@ -327,7 +334,7 @@ done
 ```
 
 DB-free comparator pins: `uv run python tools/test_lane.py run --
-tests/test_vector_parity_13906.py -q` → **41 passed**.
+tests/test_vector_parity_13906.py -q` → **43 passed**.
 
 ## 7. What this artifact does NOT establish
 
