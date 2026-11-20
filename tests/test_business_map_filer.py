@@ -822,6 +822,195 @@ def test_a_verdict_refuses_a_WRONG_mechanism_and_a_WRONG_target(map_doc):
         "declared edge")
 
 
+def test_a_200_body_that_is_not_a_tool_result_is_an_UNKNOWN_outcome(monkeypatch):
+    """The arm that catches a proxy/an error page on a 2xx had no row of its own.
+
+    `test_a_non_rpc_body_is_not_read_as_success` feeds a **401**, which `urlopen`
+    raises as `HTTPError` and the `400 <= code < 500` arm answers first, so the
+    "not a tool result" guard was never reached: defanging it left the suite
+    green (#13913 review round 16). A 200 whose body is `{"message": …}` is a
+    proxy error page — a transport that answered, and a write that did not
+    happen.
+
+    Mutant: `if not isinstance(result, dict):` — this raises nothing and reds.
+    """
+    mcp = _RealMcp("not-a-real-key")
+    monkeypatch.setattr(mcp, "_post",
+                        lambda _b: (200, {"message": "Unauthorized"}, {}))
+    with pytest.raises(filer.UnknownOutcome) as excinfo:
+        mcp.call("tortoise_create_operator", {}, retry_safe=False)
+    assert "no tool result" in str(excinfo.value), excinfo.value
+
+
+def test_a_200_error_page_never_certifies_a_write(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """The consequence: rc 1 and NO edge marker, so a resume cannot skip it.
+
+    Measured with such a transport: the shipped filer gives rc=1 with every edge
+    reported `no tool result`, while a filer that dropped the guard gave rc=0,
+    `failed: []` and `all nodes and edges written` over zero created edges — and
+    every marker left in `written`, so the resume skipped them permanently.
+
+    Mutant: the `not isinstance(result, dict) or not (…content… or
+    …structuredContent…)` guard reduced to `not isinstance(result, dict)`.
+    """
+    class _ErrorPage(_RealMcp):
+        def _post(self, body):
+            tool = (body.get("params") or {}).get("name")
+            if tool in ("tortoise_create_edge", "tortoise_create_operator"):
+                return 200, {"message": "Unauthorized"}, {}
+            # nodes land first: the arm under test is the EDGE loop's
+            return 200, {"content": [{"type": "text", "text": "{}"}],
+                         "structuredContent": {"id": "node-id"}}, {}
+
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _ErrorPage)
+    assert filer.write_map(map_doc) == 1
+    capsys.readouterr()
+    state = json.loads(state_path.read_text())
+    assert state["failed"], "a 2xx error page left no diagnosis"
+    structural = [filer.edge_marker(e) for e in map_doc["edges"] if "op" not in e]
+    assert structural
+    assert not [m for m in state["written"] if m in structural], (
+        "an edge answered by a 2xx error page was marked as written")
+    # ⛔ THE OPERATOR ARM IS FAIL-CLOSED, NOT EMPTY: its marker STAYS (the write
+    # may have landed) and is reported as unconfirmed, so a resume never
+    # re-issues it.
+    ops = [filer.edge_marker(e) for e in map_doc["edges"] if "op" in e]
+    assert [m for m in ops if m in state["written"]], (
+        "an UNCONFIRMED operator intent was retired — the resume would re-issue it")
+    assert [m for m in state["unconfirmed"] if m in ops], state["unconfirmed"]
+    assert any("no tool result" in f for f in state["failed"]), state["failed"]
+
+
+def test_MAIN_refuses_a_map_that_VALIDATE_rejected(tmp_path, monkeypatch, map_doc,
+                                                  capsys):
+    """`validate()`'s verdict is the ONLY gate between it and `--write`.
+
+    Nothing tested the `if errs: return 2` branch, so disabling it left the suite
+    green while making EVERY `validate()` refusal leg bypassable: a map with
+    `objectKind: not-a-kind` then wrote through 180 transport calls and exited 0
+    (#13913 review round 16).
+
+    Mutant: `if errs:` → `if False:` — this reds on both modes.
+    """
+    bad = json.loads(json.dumps(map_doc))
+    bad["objects"][0]["objectKind"] = "not-a-kind"
+    path = tmp_path / "bad_map.json"
+    path.write_text(json.dumps(bad))
+    monkeypatch.setattr(filer, "MAP_PATH", path)
+    calls = []
+
+    class _Counting(_StubMcp):
+        def call(self, tool: str, args: dict, **_kw) -> dict:
+            calls.append(tool)
+            return super().call(tool, args, **_kw)
+
+    monkeypatch.setattr(filer, "Mcp", _Counting)
+    monkeypatch.setattr(filer, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+
+    for mode in ("--dry-run", "--write"):
+        monkeypatch.setattr(filer.sys, "argv", ["file_map.py", mode])
+        assert filer.main() == 2, f"{mode} accepted a map validate() refused"
+        assert not calls, f"{mode} reached the transport: {calls[:3]}"
+    err = capsys.readouterr().err
+    assert "MAP REFUSED" in err, err
+
+
+@pytest.mark.parametrize(("mutate", "expect"), [
+    (lambda d: next(o for o in d["objects"]
+                    if o["objectKind"] == "product-strategy:competitor"
+                    ).update(goalState="met"),
+     "goalState is only meaningful"),
+    (lambda d: d["points"][0].update(kind="decision"),
+     "the state-centric model writes `statement` only"),
+    (lambda d: d["points"][0].update(source="src:not-declared"),
+     "is not declared in sources[]"),
+    (lambda d: next(e for e in d["edges"] if "op" in e).update(direction="sideways"),
+     "not one of"),
+    (lambda d: next(e for e in d["edges"] if "op" in e).update(
+        to=next(s["ref"] for s in d["sources"])),
+     "not epistemic"),
+])
+def test_each_VALIDATE_refusal_leg_actually_refuses(map_doc, mutate, expect):
+    """Five refusal legs had NO row: each could be disabled with a green suite.
+
+    Measured pre-fix: setting `if False:` on any of the five left 82 passed, and
+    four of the five then FILED with exit 0 (the undeclared `source` one is caught
+    later by `doc_by_ref`'s `KeyError`). The `direction` leg is the notable one:
+    `DIRECTIONS` is loaded from `tortoise.live` precisely because a surface-legal
+    `unidirectional` was being refused, yet the leg that consumes it was untested
+    (#13913 review round 16).
+
+    Mutant: `if False:` on that leg's `errs.append` — its own case reds.
+    """
+    bad = json.loads(json.dumps(map_doc))
+    mutate(bad)
+    errs = filer.validate(bad)
+    assert [e for e in errs if expect in e], (expect, errs)
+
+
+def test_presence_refuses_a_TWO_ROW_source_slot_and_reads_a_STORED_alias(map_doc):
+    """Two `presence()` legs that decided a certificate with no row of their own.
+
+    (a) `len(slots.get(0, ())) == 1`: a slot 0 holding TWO rows — the declared
+    source first — certified the declared edge, while the shipped code reports it
+    missing. `create_operator` writes `inputs = [source_id] + target_ids`, so
+    slot 0 is one row through this door; the leg is defensive, and it also guards
+    the `slots[0][0]` index.
+    (b) the STORED-side `DIRECTION_ALIASES` normalisation: an operator stored with
+    `direction: unidirectional` — a surface-legal value, the very one that forced
+    `DIRECTIONS` to be read from `tortoise.live` — read back MISSING without it.
+    (#13913 review round 16.)
+
+    Mutants: delete the `len(slots.get(0, ())) == 1` leg; drop the stored-side
+    alias — each reds only its own assertion.
+    """
+    idents = filer.identity_by_ref(map_doc)
+    edge_rows, op_rows = _edge_rows(map_doc)
+    declared = next(e for e in map_doc["edges"] if "op" in e)
+    src, dst = idents[declared["from"]], idents[declared["to"]]
+    triple = (declared["op"], declared["from"], declared["to"])
+    holders: dict[str, list] = {}
+    for row in op_rows:
+        holders.setdefault(row[0], []).append(row)
+    opid = next(
+        nid for nid, rows in holders.items()
+        if {tuple(r[4:]) for r in rows if r[2] == 0} == {tuple(_row_of(src))}
+        and {tuple(r[4:]) for r in rows if r[2] == 1} == {tuple(_row_of(dst))})
+
+    def _missing(rows) -> set:
+        _n, missing_edges = filer.presence(
+            map_doc, _node_rows(map_doc), edge_rows, rows)
+        return missing_edges
+
+    assert triple not in _missing(op_rows), "the fixture's own rows do not certify it"
+
+    # (a) a SECOND row in slot 0, declared source first
+    decoy = next(ident for ref, ident in idents.items()
+                 if ident != src and ident != dst)
+    wide_source = [list(r) for r in op_rows]
+    for row in wide_source:
+        if row[0] == opid and row[2] == 0:
+            row.extend([])  # keep the shape, append below
+    wide_source.insert(
+        next(i for i, r in enumerate(wide_source) if r[0] == opid and r[2] == 0) + 1,
+        [opid, declared["op"], 0, filer.direction_of(declared), *_row_of(decoy)])
+    assert triple in _missing(wide_source), (
+        "a source slot holding TWO rows certified the declared edge")
+
+    # (b) the operator stored with the surface's alias spelling
+    aliased = [list(r) for r in op_rows]
+    for row in aliased:
+        if row[0] == opid:
+            row[3] = "unidirectional"
+    assert triple not in _missing(aliased), (
+        "an operator stored with `unidirectional` read back as MISSING")
+
+
 def test_a_structural_edge_the_door_DECLINED_is_not_marked_written(
         tmp_path, monkeypatch, map_doc, capsys):
     """`create_edge` declines WITHOUT raising, so its result is the only witness.
@@ -1706,6 +1895,16 @@ def test_the_readback_query_columns_are_DERIVED_from_IDENTITY_PROPS(monkeypatch)
     op_q = next(q for q in queries if "o.is_operator = true" in q)
     for prop in filer.IDENTITY_PROPS:
         assert f"coalesce(x.{prop},'')" in op_q, op_q
+    # ⛔ THE LEADING COLUMNS ARE READ POSITIONALLY BY `presence()`, so a
+    # transcription here is a false FAILURE over a correctly filed graph: with
+    # every operator row at `idx=-1` the shipped query shape reports 101/101
+    # declared edges missing (a correct graph reports 50 — the structural ones
+    # only). Only the `x.*` tail was pinned (#13913 review round 16).
+    for leading in ("coalesce(o.id, o.nodeKey, toString(id(o)))",
+                    "coalesce(o.op_type, e.op_type, '')",
+                    "coalesce(e.idx, -1)",
+                    "coalesce(o.direction,'')"):
+        assert leading in op_q, (leading, op_q)
 
 
 def test_an_UNREADABLE_body_is_an_UNKNOWN_outcome_not_a_refusal(monkeypatch):
