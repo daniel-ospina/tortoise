@@ -1919,7 +1919,16 @@ _TORTOISE_NAMED_HEAD = re.compile(r"(?:`[0-9a-f]{7,40}`|\b[0-9a-f]{7,40}\b|#\d{3
 _TORTOISE_HEAD_BINDING_AT = re.compile(r"(?:at|on|in|as\s+of)\s+`?[0-9a-f]{7,40}`?")
 _TORTOISE_HEAD_BINDING = re.compile(
     r"(?:(?:at|on|in|as\s+of)\s+`?[0-9a-f]{7,40}`?"
+    # ⛔ AND THE `#PR` FORM REQUIRES ITS EVENT VERB TOO (round 13 review, P1 — MEASURED):
+    # without this group the alternative was satisfied by ANY `#NNN` followed by whitespace,
+    # so `Per `#10215` at this head the `tortoise/` set is empty.` — the pinned round-12
+    # must-red witness with ONE COMMA DELETED — was excused as a historical mention and the
+    # ban read green over it. The copula is still not an event verb (see above), which is
+    # exactly why `#10215` + ` at this head` must not bind.
     r"|`?#\d{3,6}`?['’]?s?\s+(?:`?[0-9a-f]{7,40}`?\s+)?"
+    r"(?:adds?|added|touches?|touched|lands?|landed|ships?|shipped|moves?|moved"
+    r"|re-?points?|re-?pointed|re-?derives?|re-?derived|de-?types?|de-?typed"
+    r"|says?|said|states?|claims?|records?|carried|derives?|renumbers?|renumbered)\b"
     r"|`?[0-9a-f]{7,40}`?\s+"
     r"(?:adds?|added|touches?|touched|lands?|landed|ships?|shipped|moves?|moved"
     r"|re-?points?|re-?pointed|re-?derives?|re-?derived|de-?types?|de-?typed"
@@ -2384,8 +2393,10 @@ def test_the_document_types_no_numstat_figure_for_the_index_residual():
     this branch's range produces that census, and ⛔ **the figure the earlier cut typed was HEAD-BOUND, not false**:
     with this same pattern it reproduces SIX matches across FIVE lines at `6238dde72a`
     (`:102`, `:108`, `:114`, `:134`, `:143`) and at every head from there up to
-    `8bdd34c631^` — ⛔ and the WINDOW is stated rather than left to "every head before"
-    (round 12 review, P2: that absolute was false — heads OLDER than `6238dde72a` carry FEWER
+    `8bdd34c631^` (the blob is unchanged back to `9205cdc72c`, so those ancestors measure
+    the same 6/5 — the figure STARTS there, not at `6238dde72a`) — ⛔ and the WINDOW is
+    stated rather than left to "every head before"
+    (round 12 review, P2: that absolute was false — heads OLDER than the blob carry FEWER
     of the clauses, `aeb4882c18` matching three lines and `f6f202cf5c` four, so a reviewer who
     tested it on one of those would read the figure as unreproducible and "correct" a true
     statement, which is how round 10 went wrong) — whose own commit (`fix(13728)`,
