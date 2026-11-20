@@ -487,7 +487,7 @@ worst case `2 × (8×15 + 90) = 420 s of 600 s`. Second consumer (`ci_check_repa
 | zombies have `total_count: 0` | `gh api .../actions/runs/{42067212986,43098610530}/jobs?filter=latest&per_page=100` | 17:58Z |
 | **every** live queued run sampled has ≥1 job, incl. two at 143-145 s with `ua == ca` | 6 age bands × up to 4 sampled runs, `jobs?filter=latest&per_page=1` | 18:16Z |
 | no live queued run reaches 5 400 s | same read | 18:16Z |
-| `oldest=1215486s`, `PR-BACKLOGGED`, `congests_pr=True` | `python3 tools/ci_queue_health.py --json` at `38802821cf` | 17:53Z |
+| `oldest=1215486s`, `PR-BACKLOGGED`, `congests_pr=True` | `uv run python tools/ci_queue_health.py --json` at `38802821cf` | 17:53Z |
 | job-creation latency and the 90-minute floor | `docs/ops/ci-wall-clock.md` §1 (in-tree, re-read, not re-measured) | — |
 | `ZERO_JOB_MIN_AGE_S = 5400` | `tools/ci_check_repair.py:246` | — |
 
