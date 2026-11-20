@@ -1168,6 +1168,21 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # Same behaviour, one row, no reading that says otherwise.
     "test_9079_event_writers_journal.py": [
         r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*$'],
+    # #13826: the write-gate file drives `tortoise.session_indexer.main()`, which
+    # assigns `os.environ["TORTOISE_DB_URI"]` DIRECTLY — not through `monkeypatch`
+    # — and `monkeypatch.undo()` restores only a key IT changed. So the site
+    # re-registers the CURRENT value first, which is what makes the teardown put
+    # back the endpoint `main()` overwrote (the same care the
+    # `test_9079_event_writers_journal.py` row above takes, for the same reason).
+    # The value pinned is whatever is already present, so the site cannot flip a
+    # lane; it exists so a leaked live endpoint does not outlive the module.
+    # Function-scoped `monkeypatch` — auto-undone. ⛔ `^`…`$`-anchored to THIS
+    # row's one spelling: `_is_declared` matches each censused line on its own, so
+    # a FUTURE site in the same file reds until it is triaged (#11083 — a looser
+    # arm would ride along silently, which is the #942 vacuity vector this census
+    # exists to catch).
+    "test_13826_write_gate.py": [
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", os\.environ\.get\("TORTOISE_DB_URI", ""\)\)$'],
     # The arm's `--db` scoping tests (#1349 isolation): an explicit `--db` must
     # beat a stale `TORTOISE_DB_URI`, so the stale value is set to a DIFFERENT
     # endpoint and then the store's own `_temporary_env_var` proves the scoped
