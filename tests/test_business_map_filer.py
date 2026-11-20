@@ -373,6 +373,16 @@ def test_the_verdict_refuses_DUPLICATED_nodes(map_doc):
     assert filer.verdict(map_doc, nodes, structural, operators) == 0
     assert filer.verdict(map_doc, nodes + nodes, structural, operators) == 1
     assert filer.duplicates(map_doc, nodes) == []
+    # ⛔ THE SCOPE IS DECLARED IDENTITIES ONLY, and only its INCLUSION was pinned.
+    # A duplicated node the map does NOT declare is not a filing defect: without
+    # the scope, `--verify` prints `DUPLICATED — 1 declared identity(ies)` and
+    # exits 1 naming a node this map never claims — the false-red class this PR
+    # keeps closing (measured: dropping the filter left 116 passed) (#13913
+    # round 19).
+    foreign = [["Object", "foreign-dup", "", ""], ["Object", "foreign-dup", "", ""]]
+    assert filer.duplicates(map_doc, [*nodes, *foreign]) == []
+    assert filer.verdict(map_doc, [*nodes, *foreign], structural, operators) == 0, (
+        "an undeclared duplicated node was reported as a filing defect")
 
 
 def test_the_structural_edge_query_is_NULL_SAFE():
@@ -714,6 +724,29 @@ def test_validate_refuses_an_undeclared_object_kind(map_doc):
     bad["objects"][0]["objectKind"] = "core:notARealKind"
     errs = filer.validate(bad)
     assert any("is not declared by core or any installed pack" in e for e in errs), errs
+
+
+def test_validate_refuses_two_judgements_of_one_edge(map_doc):
+    """`edge_key` is endpoints + mechanism, so a differently-WORDED twin is a duplicate.
+
+    The gate refuses "the same edge judged twice" by `edge_key`, deliberately NOT
+    by `edge_marker`: two rows that differ only in their Layer-2 WORD are one
+    operator, and `presence()` cannot read a label back by this module's own
+    stated limitation — so one written operator would certify BOTH. Measured:
+    keying the gate on `edge_marker` left 116 passed, and the pair then passed
+    `validate()` (#13913 review round 19).
+
+    Mutant: `edge_seen[edge_key(e)]` → `edge_seen[edge_marker(e)]` — this reds.
+    """
+    twin = json.loads(json.dumps(map_doc))
+    base = next(e for e in twin["edges"] if "op" in e and e.get("label") == "supports")
+    other = "causes" if base["op"] == "IMPL" else "supports"
+    assert filer.SEMANTICS_MECHANISMS_FALLBACK[other] == base["op"], (
+        "the twin's word must resolve to the SAME mechanism, or it is refused "
+        "for a different reason")
+    twin["edges"].append({**base, "label": other})
+    errs = filer.validate(twin)
+    assert [e for e in errs if "judged twice" in e], errs
 
 
 def test_validate_refuses_an_orphan(map_doc):
@@ -2660,7 +2693,13 @@ def test_a_node_is_matched_by_its_LABEL_and_its_declared_property(map_doc):
     # The graph holds the Event (name + content), and NOT the Point, but the
     # Event's content column carries the Point's content.
     rows = [["Event", "a different event entirely", "", point["content"]]]
-    assert filer.presence(map_doc, rows, [], [])[0] != []
+    # ⛔ THE IDENTITY ITSELF, not "the missing list is non-empty": 77 OTHER
+    # declared nodes are absent from this one-row graph, so `!= []` is satisfied
+    # by them and the label leg of the node arm went unpinned (measured: matching
+    # a bare `(prop, value)` with no label left 116 passed) (#13913 round 19).
+    missing_nodes, _missing_edges = filer.presence(map_doc, rows, [], [])
+    assert ("Point", "content", point["content"]) in missing_nodes, (
+        "the Event row's content column certified the declared POINT")
     assert filer.verdict(map_doc, rows, [], []) == 1
     # And the same row does not double-count as a duplicate of anything.
     full = _node_rows(map_doc)
