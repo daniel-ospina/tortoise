@@ -506,7 +506,7 @@ def test_the_real_docs_tree_is_not_empty():
     assert len(list(DOCS.rglob("*.md"))) > 100
 
 
-#: ⛔ ONE GAP, FIVE UNIT KINDS, NO BUDGET — AND `_GAP_UNIT` IS THE LIST (#13921 review, F5).
+#: ⛔ ONE GAP, SIX UNIT KINDS, NO BUDGET — AND `_GAP_UNIT` IS THE LIST (#13921 review, F5).
 #:
 #: This block used to describe TWO gaps: a WIDE one for the FULL command
 #: (`git diff --name-only origin/main...HEAD -- tortoise/`) budgeted at 40 units of text that
@@ -520,13 +520,17 @@ def test_the_real_docs_tree_is_not_empty():
 #: gone: a second name for the same closure is what let the selection between the two be a
 #: no-op that kept these paragraphs alive.
 #:
-#: The gap is a run of FIVE UNIT KINDS and nothing else. Listing them is not an enumeration of
+#: The gap is a run of SIX UNIT KINDS and nothing else. Listing them is not an enumeration of
 #: SPELLINGS — the earlier attempts died because they enumerated those — it is the closure
 #: itself, stated once, and each kind is defined structurally:
 #:
 #:   1. a single character — a non-word one, plus `_`, which Python counts as a word character
 #:      and markdown emphasis depends on. `&`, `<` and `[` are EXCLUDED from this class: each of
-#:      them has its own unit below, so each has exactly one way to parse;
+#:      them has its own unit below, so each has exactly one way to parse. ⛔ THAT SENTENCE WAS
+#:      FALSE FOR `<` UNTIL `_OPEN_TAG` (#13921 review, finding 1, MEASURED): `<` reached only
+#:      `_TAG`, which requires a closing `>`, so an UNTERMINATED `<` had ZERO ways to parse and the
+#:      walk stopped on it — a fail-open the `&` row and `_OPEN_BRACKET` were both added under.
+#:      It is true now because the pair is disjoint, not because it was ever argued to be;
 #:   2. a TAG — any run between `<` and `>` in which a QUOTED attribute value is one unit (so
 #:      `title="a > b"` does not close early: CommonMark allows any character but the matching
 #:      quote inside a quoted value) and in which a SOFT break is allowed but a BLANK line is
@@ -542,30 +546,47 @@ def test_the_real_docs_tree_is_not_empty():
 #:      returned `[]` — a claim left GREEN. `&` is a character `origin/main`'s gap already
 #:      admitted, and a closure that drops a form the previous rule had is a regression wearing
 #:      a widening's clothes.
-#:   5. an UNTERMINATED bracket — `_OPEN_BRACKET` below, a `[` with no reachable `]`.
+#:   5. an UNTERMINATED bracket — `_OPEN_BRACKET` below, a `[` with no reachable `]`;
+#:   6. an UNTERMINATED tag — `_OPEN_TAG` below, a `<` with no reachable `>`, which is what a bare
+#:      `<` in a separator is and which `_TAG` alone refused (#13921 review, finding 1).
 #:
-#: ⛔ `_OPEN_BRACKET` IS THE ONE SAME-FIRST-CHARACTER PAIR, AND ITS LOOKAHEAD IS WHY THE RUN IS
-#: STILL LINEAR (#13921 review, P2-3, MEASURED). `_BRACKET` and `_OPEN_BRACKET` both begin `[`,
-#: so the reason this block used to give — "each kind begins with a unique first character" — is
-#: FALSE, and a stale reason in this file is the defect class it keeps reviewing itself for. The
-#: real reason is that the two are DISJOINT by construction: `_BRACKET` matches only when a
-#: closing `]` is reachable, and `_OPEN_BRACKET` is guarded by `(?![^\]\n]*\])`, i.e. it matches
-#: only when none is. The one input where both can start is a bracket whose interior crosses a
-#: soft break (`[a\n]`): `_BRACKET` takes it whole while the lookahead, being line-bounded,
-#: cannot see the `]` — the same bounded residual as the unterminated `<` run below, not an
-#: exponential. MEASURED at this head: 200 x `[` -> 0.0009 s, 40 x `[\]` -> 0.0000 s.
+#: ⛔ TWO SAME-FIRST-CHARACTER PAIRS, AND THE LOOKAHEAD IS WHAT KEEPS EACH PAIR DISJOINT — BUT NOT
+#: WHAT KEEPS THE RUN LINEAR (#13921 review, finding 4, MEASURED). `_BRACKET`/`_OPEN_BRACKET` both
+#: begin `[` and `_TAG`/`_OPEN_TAG` both begin `<`, so the reason this block used to give — "each
+#: kind begins with a unique first character" — is FALSE, and a stale reason in this file is the
+#: defect class it keeps reviewing itself for. (`_OPEN_TAG` makes this TWO pairs, not one: the
+#: previous revision of this paragraph called `[` "the ONE same-first-character pair", and the
+#: `<` hole below is what that miscount was hiding.) The real reason each pair is disjoint is
+#: that the SECOND branch matches only when the first cannot: `_BRACKET` requires a reachable `]`
+#: and `_OPEN_BRACKET` is guarded by `(?![^\]\n]*\])`; `_TAG` requires the `>`, is tried FIRST,
+#: and `_OPEN_TAG` is guarded by `(?![^>\n]*>)`. The one input where either pair can both start
+#: is a run whose interior crosses a soft break (`[a\n]`, `<span\ntitle="a">`): the closing unit
+#: takes it whole while the lookahead, being line-bounded, cannot see the closer — a bounded
+#: residual shared by both pairs, not an exponential.
+#: ⛔ AND THE RUN IS **NOT** LINEAR — the word this block used to carry, on the strength of a
+#: single 200-point reading (#13921 review, finding 4). MEASURED at this head: 200 × `[` ->
+#: 0.0014 s, 400 -> 0.0037, 800 -> 0.0144, 1600 -> 0.0559, 3200 -> 0.2248 s — about x3.9 per
+#: DOUBLING, i.e. ~n^2, because each start is scanned TWICE (the closing unit scans to the end and
+#: fails, then its lookahead scans to the end and succeeds). 200 × `<` behaves the same way
+#: (0.0010 -> 0.20 s over the same range). What the lookahead buys is the removal of the EXPONENT
+#: (16 x `[\]` took 22.8 s before it), not linearity, and 3200 repeated brackets is not a shape a
+#: document reaches; the honest statement is ~n^2, measured at these five points.
 #:
 #: A SOFT BREAK is not a paragraph break (`7557a52cf5`'s measurement, kept): a single newline is
 #: crossed, a BLANK line is the boundary — and a blank line ends the gap with no guard of its
 #: own, because `_SOFT` refuses to cross one and the single-character unit excludes `\n`.
-#: ⛔ `<` IS NOT AMBIGUOUS ANY MORE (#13921 review, P2-3): the single-character unit excludes
-#: it, so `<` reaches only `_TAG` — the old note that "`<` can begin both a tag and a
-#: single-character unit" describes a class member that no longer exists. What remains is the
-#: cost of a tag probe on an UNTERMINATED `<` run (measured 28 characters -> 0.19 s, growing
-#: about x1.7 per character), which is a DECLARED residual pinned by its own timing witness, not
-#: a claim of linearity. Otherwise the measured cost is linear: 8/16/28/40/80/200 spaces and 40
-#: repeated units of each kind -> 0.000-0.002 s; the ambiguous form `7557a52cf5` replaced took
-#: 15.8 s at 24 spaces.
+#: ⛔ THE `<` RESIDUAL IS ATTACHED TO THE INPUT THAT HAS IT (#13921 review, finding 3, MEASURED).
+#: This paragraph used to say "the cost of a tag probe on an UNTERMINATED `<` run (measured 28
+#: characters -> 0.19 s, growing about x1.7 per character)" — and a bare `<` run is not that
+#: input: 200 `<` takes 0.0010 s and scales ~n^2 like every other pair above. The exponential
+#: belongs to a tag that OPENS and never CLOSES with a QUOTE inside it, `<a` + a run of `'`, where
+#: the quoted branch and the catch-all both consume each quote: MEASURED at this head n=20 ->
+#: 0.0018 s, 24 -> 0.0124, 26 -> 0.0321, 28 -> 0.0841, 32 -> 0.5815 s (a x1.6-1.7 step per
+#: character). That residual is DECLARED, not fixed, and it is pinned by its own timing witness at
+#: the `< 2.0 s` row, which uses the SAME input (`"<a" + "'" * 28`) — a future reader who guards
+#: "a `<` run" would guard the wrong shape and conclude the residual was closed. Otherwise the
+#: measured cost is flat: 8/16/28/40/80/200 spaces and 40 repeated units of each kind ->
+#: 0.000-0.002 s; the ambiguous form `7557a52cf5` replaced took 15.8 s at 24 spaces.
 _AMP = r"(?:&[#\w]{1,10};|&(?![#\w]{1,10};))"
 #: ⛔ A SOFT BREAK IS CROSSED INSIDE A UNIT, NOT ONLY BETWEEN UNITS (#13900 review,
 #: verification round, MEASURED). Three holes, each reproduced on the LIVE document:
@@ -599,6 +620,19 @@ _BRACKET = r"\[(?:\\.|[^\]\n]|" + _SOFT + r")*\]"
 #: they are (#13921 review, F2/P1-1) — what the retry fixes is a listed verb sitting INSIDE the
 #: separator (`is`, a URL's `:`), not a word between the command and the verb.
 _OPEN_BRACKET = r"\[(?![^\]\n]*\])"
+#: ⛔ AND AN UNTERMINATED TAG IS ONE TOO (#13921 review, finding 1, MEASURED). `_TAG` requires a
+#: closing `>`, so BEFORE this constant a bare `<` matched NOTHING in the alternation and the
+#: separator walk stopped dead on it: `` `-- tortoise/` < prints TWO paths `` returned `[]` at
+#: `b19c056151`, while `origin/main`'s `_GAP_ABBREV` (`[^\w&\n]`, which admitted `<`) graded
+#: it. That is a fail-open regression wearing a widening's clothes — the same argument the `&`
+#: branch and `_OPEN_BRACKET` were added under — and the comment at item 1 asserting that `<`
+#: "has exactly one way to parse" was FALSE for an unterminated one: it had ZERO.
+#: The pair stays disjoint by the same construction as the brackets, and the ORDER matters:
+#: `_TAG` is tried first and requires the `>`, so this lookahead is reached only when `_TAG`
+#: failed. Its `[^>\n]*` is line-bounded, so a tag whose interior crosses a SOFT break
+#: (`<span\ntitle="a">`) is taken whole by `_TAG` and never reaches here — the same declared,
+#: bounded residual as `[a\n]` under `_BRACKET`/`_OPEN_BRACKET`.
+_OPEN_TAG = r"<(?![^>\n]*>)"
 #: ⛔ ONE GAP, ONE UNIT LIST, AND THE UNITS ARE WHAT THE MATCHER WALKS (#13921 review, F5).
 #: `_GAP_UNIT` is the single alternation every separator character goes through; the separator is
 #: its `*`-CLOSURE, and the matcher walks that closure unit by unit (below) instead of letting a
@@ -606,7 +640,7 @@ _OPEN_BRACKET = r"\[(?![^\]\n]*\])"
 #: may start. There is no `_GAP` constant to drift from `_GAP_UNIT`: a second name for the same
 #: closure is what let `_GAP_FULL` / `_GAP_ABBREV` alias it and two gaps go on being described.
 _GAP_UNIT = (r"(?:[^\w<&[\n]|_|" + _TAG + r"|" + _BRACKET + r"|" + _AMP + r"|"
-             + _OPEN_BRACKET + r"|" + _SOFT + r")")
+             + _OPEN_BRACKET + r"|" + _OPEN_TAG + r"|" + _SOFT + r")")
 
 def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]:
     """Every typed ANSWER to `cmd` in `doc`, as `(answer, claims_empty)` pairs.
@@ -772,14 +806,22 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
         # nothing about past-tense answers (#13900 review, finding 2) — and it is pinned by the
         # witnesses below, which assert the OPPOSITE of a skip: a claim that is an answer is
         # graded wherever it sits on the line, whatever surrounds it — the gap between the
-        # command and the verb is a run of separator UNITS (the four kinds stated at the
-        # constants, not a character class), and the budget and the boundary differ BY SUBJECT:
+        # command and the verb is a run of separator UNITS (the SIX kinds stated at the
+        # constants, not a character class), with NO budget, ONE gap and ONE boundary:
         # ⛔ NO BUDGET, NO SECOND GAP, AND NO `;`/`|` TERMINATORS (#13921 review, F5). This
         # sentence used to say "the FULL command admits at most 40 units and the ABBREVIATION is
         # unbounded; in both, `;` and `|` stop the wide gap and a `.` does not" — all four
         # clauses false since the prose admission was retired: there is ONE gap, it has no
         # budget, and `;`, `|` and `.` are ordinary single characters. What DOES hold, and is
-        # what the witnesses pin: a SOFT break is crossed and a BLANK line is the boundary. The
+        # what the witnesses pin: a SOFT break is crossed and a BLANK line is the boundary. ⛔ AND
+        # TWO CLAUSES SURVIVED THAT CORRECTION, WHICH MADE THEM FALSE TOO (#13921 review,
+        # finding 2, MEASURED): the sentence above them still read "the FOUR kinds" (the
+        # constants state SIX — `_OPEN_TAG` was added in this same round) and "the budget and the
+        # boundary differ BY SUBJECT" (there is ONE gap: no budget, no per-subject boundary) — a
+        # self-contradiction two lines long, in the file whose stated purpose is refusing stale
+        # claims, left standing while the sentence BELOW it was rewritten. The setup sentence now
+        # states what the constants state, and the count is checked against the constant block by
+        # eye on every edit: a count typed into prose rots exactly like a line number. The
         # exceptions are the residuals THIS docstring declares (a hard-wrapped ANSWER, a verb or
         # an answer word outside the listed classes, a pronoun subject), and they are named
         # THERE, not left to be inferred from here.
@@ -1774,14 +1816,37 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         f"`{_full_subject}` [ prints TWO paths", _full_subject), (
         "an UNTERMINATED `[` ended the separator — `_OPEN_BRACKET` is the unit that admits it, "
         "and `[` is a character `origin/main`'s gap already had (#13921 review, F4)")
+    # ⛔ AN UNTERMINATED `<` IS THE SAME CLASS, AND IT WAS STILL OPEN (#13921 review, finding 1,
+    # MEASURED). `_TAG` requires a closing `>`, so a bare `<` matched NOTHING in the unit list and
+    # the separator walk stopped on it: `` `-- tortoise/` < prints TWO paths `` returned `[]` at
+    # `b19c056151`, while `origin/main`'s `_GAP_ABBREV` (`[^\w&\n]`, which
+    # admitted `<`) returned `[('prints TWO paths', False)]` — a fail-open REGRESSION, not a
+    # declared limit, and the ABBREVIATION is the spelling this document uses most. The row is on
+    # BOTH subjects: the abbreviation is the regression `origin/main` proves, and the full command
+    # is the widening that closes the same hole there (it was `[]` at `e3f894b31b` too).
+    # Non-vacuity: deleting `_OPEN_TAG` from the unit list reds BOTH rows, because `<` is excluded
+    # from the single-character class — so the unit cannot be reverted silently, which is the
+    # property `_OPEN_BRACKET`'s row above has and this hole is exactly what its absence cost.
+    for _subject in _TORTOISE_CENSUS_SUBJECTS:
+        assert _typed_answers_to_tortoise_cmd(
+            f"`{_subject}` < prints TWO paths", _subject), (
+            f"an UNTERMINATED `<` ended the separator on subject {_subject!r} — `_OPEN_TAG` is "
+            "the unit that admits it, `_TAG` requires the `>`, and `<` is a character "
+            "`origin/main`'s gap already had (#13921 review, finding 1)")
     # ⛔ AND THE RETRY EARNS ITS OWN WITNESS, WHICH ONLY A VERB *INSIDE* A UNIT CAN GIVE
     # (#13921 review, F2/F4, MEASURED). Reducing the scan to its FIRST candidate reddened nothing
     # in this file, because under the old anchor the first candidate was already the occurrence's
     # verb. Now that the scan starts at the command, a verb sitting INSIDE a unit (`[is]`, a tag's
     # quoted `title="a: b"`) comes first and its separator IS a full gap match — it is only not a
     # UNIT BOUNDARY — so the scan must continue past it. Each row must grade the OUTER verb.
-    # Non-vacuity: a slice full-match instead of the boundary list grades the inner verb here
-    # (measured: `[is]` then yields `('is ] prints TWO paths', False)`).
+    # ⛔ WHICH ROW PROVES THE RETRY, STATED BECAUSE ONLY ONE DOES (#13921 review, mutation table,
+    # MEASURED): the `[is]` row. Remove the boundary guard entirely and `[is]` yields
+    # `('is ] prints TWO paths', False)` — RED — while the `<span title="a: b">` row stays GREEN,
+    # because the inner `:` there produces an unclassifiable head and the classifier skips it. The
+    # tag row is a genuine `_TAG` witness (deleting `_TAG` reds it) and it pins that a verb inside
+    # a quoted attribute is not TAKEN — but a reader who strengthens the retry's removal test
+    # against it would test nothing, so: a slice full-match instead of the boundary list is
+    # reddened by the `[is]` row alone.
     for _inner, _row in (("[is]", "`-- tortoise/` [is] prints TWO paths"),
                          ('<span title="a: b">',
                           '`-- tortoise/`<span title="a: b">prints TWO paths')):
