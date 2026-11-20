@@ -421,7 +421,7 @@ kill_timeout = 30
   R2_SECRET_ACCESS_KEY = ""
   R2_BUCKET = ""
   # ── #4126 secret-provenance: non-secret CONFIG, version-controlled here ────
-  # These three were Fly SECRETS with no managing source — the recorded debt in
+  # These four were Fly SECRETS with no managing source — the recorded debt in
   # `.github/scripts/fly-managed-secrets.txt`. A non-secret config value belongs
   # in version control, so it lives here and is declared `fly-toml-env` there.
   # The deploy then no longer needs a secret for any of them, and the provenance
@@ -439,6 +439,25 @@ kill_timeout = 30
   TORTOISE_CONTROL_PLANE = "supabase"
   TORTOISE_REAUTH_WINDOW_SECONDS = "900"
   TORTOISE_MANUAL_LINKING_ENABLED = "1"
+  # ── #13923 — the embedder WARM-UP switch, carried at its LIVE value ───────
+  # Production runs `0`. The embedder cannot load in production (#13674 — hybrid
+  # retrieval is OFF there because the model load does not fit the budget), so
+  # the measured 195.8 s pre-warm would buy nothing. The switch gates the
+  # WARM-UP only — `EmbeddingModel.get()` on the REQUEST path is deliberately
+  # NOT gated (#13674 review F3) — and one declaration feeds both consumers:
+  # `entrypoint.sh::_prewarm_embedder` and the hosted lifespan pre-warm, whose
+  # earlier flag-blindness is #7809.
+  # ⛔ `0` IS THE LIVE VALUE, NOT `.env.example`'s default — see the ⛔ above;
+  # do NOT "fix" it to match `.env.example`.
+  # ⛔ MOVING IT OFF THE FLY SECRET IS ROUTE (b) AND THE ORDER IS LOAD-BEARING:
+  # merged entry → `deploy-hosted` DISPATCH of the merged commit with the per-run
+  # `skip-fly-secret-provenance: true` → the `deploy-api` job's Deploy step
+  # succeeds → `flyctl secrets unset` → verify BOTH `secrets list` and
+  # `printenv`. Unsetting FIRST leaves the flag absent (default true) and every
+  # boot pays ~196 s. The full procedure and its three failure modes are the
+  # #4126 block in `.github/scripts/fly-managed-secrets.txt` — do not improvise
+  # from this comment. Tracked in #13923.
+  TORTOISE_EMBEDDER_WARMUP = "0"
   # ── #10794 — the CONSENT KEY SET's rotation knob, versioned ───────────────
   # `CONSENT_TOKEN_CURRENT_KID` names which kid in `CONSENT_TOKEN_KEYS` MINTS; unset/empty
   # resolves to the FIRST kid in the set (declared order), so the ordinary rotation is one
