@@ -1024,9 +1024,9 @@ def test_a_rebuild_is_refused_where_the_record_owns_the_ordinal(monkeypatch,
     `tortoise rebuild` is a WIPE + journal-only replay, and
     `STORAGE-ARCHITECTURE.md` §3 makes journal completeness a PRECONDITION of
     `derived = replay(journal)`. On a cut-over graph the file stops being
-    appended to, so a rebuild from it would produce a graph as of the arming
-    point and **silently drop every later record** — `rebuild_all` prints
-    `Done:` either way, and the counts it prints are the journal's own.
+    appended to, so a rebuild from it would produce a graph as of the point the
+    append stopped and **silently drop every later record** — `rebuild_all`
+    prints `Done:` either way, and the counts it prints are the journal's own.
 
     The gate is deliberately broader than per-graph (a `record_cursor` row is
     keyed by `(org_id, graph_id)` and this door has neither): a resolvable record
@@ -1078,6 +1078,22 @@ def test_a_rebuild_is_refused_where_the_record_owns_the_ordinal(monkeypatch,
     assert "not an export yet" in refusal.lower(), (
         "the refusal claims the file is an export — nothing writes it on a "
         "cut-over graph, so an operator sent looking for one finds nothing")
+    # ⛔ AND THE INSTANT IT NAMES IS THE FLAG ROLL, NOT `arm` (PR #14081 review,
+    # P2). `record_writer.record_owns_position` bails on `record_live_allocate()`
+    # BEFORE it reads the row (`record_writer.py:2849-2850`), and the documented
+    # cutover order arms every graph FIRST and rolls the box flag afterwards
+    # (`live_write.py:105-109`) — so the arm→roll window is normal and the file
+    # STILL GROWS in it. A refusal that dates the frozen prefix at the arming
+    # point understates the loss by that whole window, on the one message an
+    # operator reads to decide whether a rebuild would drop records.
+    assert rw.RECORD_ALLOCATE_ENV in refusal, (
+        "the refusal does not name the switch whose roll stops the append — an "
+        "operator cannot tell when the file froze, and any single per-graph "
+        "instant is EARLIER than the real edge")
+    assert "arming point" not in refusal.lower(), (
+        "the refusal dates the frozen prefix at the per-graph ARM — the "
+        "documented order rolls the box flag afterwards, so a rebuild drops "
+        "every record written in that window, not only later ones")
     assert "Nothing was wiped" in refusal
     assert "--journal-is-complete" in refusal, (
         "the refusal does not name its own escape — an operator has no way to "
@@ -1117,6 +1133,55 @@ def test_a_rebuild_is_refused_where_the_record_owns_the_ordinal(monkeypatch,
 
 
 # ── 5. the wiring gate: the deletion class, with its mutations ────────────
+
+#: The freeze POINT, in the prose that states it: the append stops at the BOX
+#: flag roll (with the row `active`), never at the per-graph `arm`. Each anchor
+#: locates the sentence IN ITS OWN FILE, and the window after it must name the
+#: switch and must not re-date the freeze at the cutover.
+_FREEZE_POINT_SITES = (
+    ("tortoise/live_write.py", "the file is a FROZEN PREFIX"),
+    ("tortoise/record_writer.py",
+     "the file is a FROZEN PREFIX rather than an export"),
+    ("tortoise/__main__.py", "the journal stops being appended to"),
+)
+
+
+def test_every_surface_that_names_the_freeze_point_names_the_flag_roll():
+    """⛔ THE INSTANT IN THE VOCABULARY IS PINNED, BECAUSE NOTHING EXECUTES IT.
+
+    The wrong instant survived exactly because these sentences are prose: #14081
+    removed "the JSONL is an EXPORT" from four sites and replaced it with "it
+    stops at the cutover instant" — while the SAME PR stated the correct
+    mechanism twice in `record_projection.py` (`:7819`, `:8074`) and once in the
+    evidence record. Both statements were in the tree and the suite was green,
+    so a *disclosure* (the reviewer's word) becomes a leg here.
+
+    The mutant is the shipped wording, not a phrase this PR invented: reverting
+    any site to `it stops at the cutover instant` (or the refusal to `as of the
+    arming point`) reds this leg. `record_owns_position` bails on
+    `record_live_allocate()` before it reads the row (`record_writer.py:2849`),
+    and the documented order arms every graph first and rolls the flag
+    afterwards (`live_write.py:105-109`), so the arm→roll window is normal and
+    the file still grows in it.
+    """
+    root = Path(__file__).resolve().parent.parent
+    switch = "TORTOISE_RECORD_ALLOCATE"
+    for rel, anchor in _FREEZE_POINT_SITES:
+        source = (root / rel).read_text()
+        assert source.count(anchor) == 1, (
+            f"{rel}: the anchor {anchor!r} matches {source.count(anchor)} times — "
+            "this leg must be re-pointed at the sentence that states the freeze")
+        start = source.index(anchor)
+        window = source[start:start + 420]
+        assert switch in window, (
+            f"{rel}: the frozen-prefix sentence ({anchor!r}) does not name "
+            f"{switch} — the append stops at the BOX flag roll with the row "
+            "`active`, not at the per-graph `arm`, so a wrong instant sizes the "
+            "loss wrong")
+        assert "cutover instant" not in window, (
+            f"{rel}: the frozen-prefix sentence still dates the freeze at the "
+            "cutover — every graph is armed FIRST and the flag rolled "
+            "afterwards, so the file still grows in that window")
 
 @pytest.fixture(scope="module")
 def wiring_mod():

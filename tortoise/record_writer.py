@@ -2782,8 +2782,10 @@ def record_owns_position(*, tenant: tuple[str, str] | None = None,
     remove the SECOND allocator: while the record owns the ordinal, the write path
     must not append to the JSONL at all. Then there is one number space, writing
     the file becomes OPTIONAL (nothing on the write path depends on it) and — on a
-    cut-over graph — the file is a FROZEN PREFIX rather than an export: it stops at
-    the cutover instant, and no exporter exists (`event_id`/`initiated_by`/
+    cut-over graph — the file is a FROZEN PREFIX rather than an export: the append
+    stops when the BOX's `TORTOISE_RECORD_ALLOCATE` is rolled with the row
+    `active`, NOT at the per-graph `arm` (the arm→roll window still appends), and
+    no exporter exists (`event_id`/`initiated_by`/
     `projection_version` have no column, so a line rendered from the record would
     be a different journal; §A7.8 item 6 and §A7.5.6's drainer are unbuilt).
     ⛔ Do not describe it as "an export" until they are. Concurrent writers then

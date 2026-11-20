@@ -126,9 +126,11 @@ Consequences, all of them intended:
   `event_id`/`initiated_by`/`projection_version` have no column, so a line
   rendered from the record would be a different journal — see
   `docs/evidence/14002-record-only-journal/README.md` §5). On a cut-over graph
-  the file is a FROZEN PREFIX: it stops at the cutover instant and keeps
-  whatever it had. Say that, not "export", until §A7.8 item 6 and a drainer
-  (§A7.5.6) exist;
+  the file is a FROZEN PREFIX: the append stops when the BOX's
+  `TORTOISE_RECORD_ALLOCATE` is rolled (with the graph's row `active`) — NOT at
+  the per-graph `arm`, so the arm→roll window is normal and the file still grows
+  in it — and after the roll it keeps whatever it had. Say that, not "export",
+  until §A7.8 item 6 and a drainer (§A7.5.6) exist;
 * `position_divergence` is unreachable on the production path, while the guard
   itself is untouched — it still refuses every disagreeing ordinal a direct
   caller hands it;
