@@ -2898,12 +2898,30 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # this order puts it before the clause instead. The noun class, the optional MODIFIED noun
     # (`the two comment-only modules`) and the determiner list are the verb-first group's, so
     # the two orders cannot drift apart in this dimension either.
-    # ⛔ OVER-BLOCK IS BOUNDED BY THE TAIL, NOT BY THE ANSWER (#13802 review, P2 — MEASURED):
-    # every widened form still has to reach `tortoise/` and then a subject-noun or verb inside
-    # the same sentence, so `Those two files in `tortoise/` are read by the resolver.`,
-    # `All six paths under `tortoise/` are covered by tests.` and `2 files under `tortoise/`
-    # were added by that PR.` stay ALLOWED (`are`/`under`/`were` are not in that list). Corpus
-    # cost measured over all 855 `docs/**/*.md`: 6 refusals before, 6 after, set difference 0.
+    # ⛔ OVER-BLOCK IS NOT BOUNDED BY THE TAIL — MEASURED, AND THE EARLIER CLAIM HERE WAS FALSE
+    # (#13802 review, round 26, P2). The text this replaced said the widened forms "still have to
+    # reach `tortoise/` and then a subject-noun OR VERB", and that this kept
+    # `All six paths under `tortoise/` are covered by tests.` allowed because `are`/`under`/`were`
+    # are not in that list. The `under tortoise/` spelling IS still allowed — but the
+    # `in the `tortoise/` SET` spelling is not, because the tail's own anchor noun `set` (likewise
+    # `tree`, `directory`) satisfies it BEFORE any verb is reached, so the verb is never consulted.
+    # MEASURED at `3b8a38bdd0` (GREEN at `180b95d07d` -> RED here):
+    #   `These two files in the `tortoise/` set are the resolver and its test.`
+    #   `All six paths in the `tortoise/` set are covered by tests.`
+    #   `All six paths in the `tortoise/` tree are covered by tests.`
+    #   `Those two files in the `tortoise/` set are read by the resolver.`
+    #   `2 files in the `tortoise/` set were added by that PR.`
+    # while their bare-anchor twins (`in `tortoise/``, `under `tortoise/``) stay ALLOWED. So this
+    # widening BUYS the closing of the false-PASS cell and PAYS an over-block class it did not
+    # have; the file's own rule is that such a class is DECLARED rather than claimed away, so it
+    # is declared here with its examples. Corpus cost, measured over all 855 `docs/**/*.md`:
+    # 6 refusals before, 6 after, set difference 0 — no live victim, which is why this is a
+    # documented residual and not a blocker. ⛔ TIGHTENING IT IS A REAL FOLLOW-UP (requiring a
+    # verb, not a bare anchor noun, after the `tortoise/` reference in this alternative): it is
+    # NOT done here because it changes a sentence shape this commit only just widened, and a
+    # half-tightened tail would be worse than a declared one.
+    # (Pre-existing and not this widening's doing: `Every file in the `tortoise/` set has a module
+    # docstring.` is refused at BOTH `180b95d07d` and this head — the shared tail, not this class.)
     r"|(?:(?:the|a|an|its|this|that|those|these|just|only|still|now|actually|also"
     r"|exactly|at\s+least|at\s+most|more\s+than|fewer\s+than|no\s+fewer\s+than"
     r"|no\s+more\s+than|as\s+many\s+as|a\s+total\s+of|all|both)\s+)*"
@@ -3410,6 +3428,14 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "`-- tortoise/` prints `two` paths",
         "`-- tortoise/` prints _two_ paths",
         "`-- tortoise/` prints Comment-Only",
+        # ⛔ AND THE DECLARED OVER-BLOCK, PINNED AS MUST-REFUSE ON PURPOSE (#13802 review, round 26,
+        # P2). `All six paths in the `tortoise/` set are covered by tests.` is TRUE prose and this
+        # ban REFUSES it: the determiner/count widening's tail is satisfied by its own anchor noun
+        # `set` before any verb is read, so the widening reaches a sentence it should not. It sits
+        # here so the trade is WITNESSED IN THE FAILING DIRECTION — a later tightening of the tail
+        # reds this line and forces the declaration at the widening to be rewritten, instead of the
+        # behaviour changing silently while the suite stays green (which is how this finding arose).
+        "All six paths in the `tortoise/` set are covered by tests.",
     ):
         assert _TORTOISE_SET_DIRECTION_CLAIM.search(_claimed), (
             f"the direction detector does not see {_claimed!r}, so that spelling of a "
@@ -3439,11 +3465,14 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "No changes to `tortoise/` are needed for this row",
         # ⛔ AND THE OVER-BLOCK PINS FOR THE DETERMINER WIDENING (#13802 review, P2 —
         # MEASURED GREEN at `180b95d07d` and GREEN here): a determiner + count + noun is
-        # ordinary English, so the widening is bounded by the TAIL (a subject-noun or verb of
-        # the anchor list must follow the `tortoise/` reference) and not by the answer. Each of
-        # these names the `tortoise/` tree and asserts no direction; the word after it
-        # (`are`, `under`, `were`) is why it stays allowed, and that is what keeps the corpus
-        # refusal set at 6 before and 6 after the widening.
+        # ordinary English, so the widening is bounded by the TAIL — but ⛔ NOT BY A VERB ONLY
+        # (#13802 review, round 26, P2: this comment said the tail keeps these allowed because
+        # `are`/`under`/`were` are not in the anchor list, and that is FALSE for the
+        # `in the `tortoise/` set` spelling, where the tail's own anchor noun `set` satisfies it
+        # before any verb is read). What these four actually pin is the BARE-anchor spelling
+        # (`in `tortoise/``, `under `tortoise/``); the `in the `tortoise/` set|tree|directory`
+        # spelling is the DECLARED OVER-BLOCK, measured and stated at the widening itself. The
+        # corpus refusal set is 6 before and 6 after either way.
         "Those two files in `tortoise/` are read by the resolver.",
         "All six paths under `tortoise/` are covered by tests.",
         "These three modules in `tortoise/` were touched by #12943.",
