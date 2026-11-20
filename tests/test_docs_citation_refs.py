@@ -3891,6 +3891,50 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
             f"{not_a_prescription!r} is not a count of anything and must not be read as a "
             "prescription — widen this and a correct document can red (#13995 review round 3)")
 
+    # ⛔ AND THE ARG-TAKING SET IS A SET, NOT A SAMPLE — EVERY MEMBER HAS ITS OWN ROW
+    # (#13995 review, P2 — MEASURED). `_ARG_TAKING_SHORT_FLAGS` narrates a repair that a round-3
+    # verification measured (`-D` added, because `_requests_a_count("-Dc")` answered True) and
+    # says its list is "the whole set, not a sample". Measured at `53f7535e657` by deleting one
+    # letter at a time and re-running THIS cell: only `m` and `A` were pinned (by the
+    # separate-value rows further down), while `B`, `C`, `d` and `D` left the cell GREEN with
+    # `grep -Dc '^\+$'` graded a BLANK-class prescription again — the exact round-3 defect, a
+    # false RED on a correct document; and `e`/`f` left it GREEN because the command is never
+    # graded either way (`_d5_supplies_the_pattern` declines it on a literal `ef` before the set
+    # is consulted), so their membership had no witness at all. Real grep counts none of the
+    # eight clusters (measured on GNU grep 3.11, on the 4-line `+`/`-`/`+import os`/` a` probe):
+    # `-Dc` ⇒ `grep: unknown devices method`, rc 2; `-mc` ⇒ `invalid max count`, rc 2;
+    # `-Ac`/`-Bc`/`-Cc` ⇒ `invalid context length argument`, rc 2; `-dc` ⇒ `invalid argument 'c'
+    # for '--directories'`, rc 1; `-fc` ⇒ `c: No such file or directory` (that is `-f c`, a
+    # pattern FILE), rc 2; `-ec` ⇒ the pattern `c`, with `'^\+$'` as a FILE, rc 2.
+    #
+    # ⛔ `pinned_members` IS WRITTEN OUT, NOT DERIVED FROM THE CONSTANT, ON PURPOSE. A table that
+    # iterates its own subject cannot witness an OMISSION — the direction this row exists for
+    # (agent-infra#3442 rule 3: an assertion whose value cannot vary under the mutation it claims
+    # to guard). The set-equality row below then makes an ADDITION equally impossible without a
+    # witness, which is the other half of the same claim: a letter that does NOT take an argument
+    # would stop the cluster scan early and hide a real `c` after it (`grep -xc` is `-x -c`, a
+    # count), so it may not arrive silently either.
+    pinned_members = ("e", "f", "m", "A", "B", "C", "d", "D")
+    for arg_taking in pinned_members:
+        assert _short_flag_head(f"-{arg_taking}c") == "", (
+            f"`-{arg_taking}c` must END the cluster scan at `{arg_taking}` — the rest of that "
+            "word is its ARGUMENT, not a run of flags (`-A2`, `-fc`, `-Dc`) — so "
+            f"`_ARG_TAKING_SHORT_FLAGS` must still carry `{arg_taking}`. Drop that letter and "
+            "this word reads as a count request again, which is the round-3 defect (#13995 "
+            "review, P2)")
+        assert _d5_count_prescriptions(f"a command: `grep -{arg_taking}c '^\\+$'`\n") == [], (
+            f"`-{arg_taking}c` is `-{arg_taking} c` — a VALUE, not the count flag — so this "
+            "command counts nothing (measured on GNU grep 3.11: it exits 1/2 rejecting the "
+            "argument). Reading it as a BLANK-class prescription is a false RED on a correct "
+            "document, and no row pinned that before #13995's review (#13995 review, P2)")
+    assert set(_ARG_TAKING_SHORT_FLAGS) == set(pinned_members), (
+        "`_ARG_TAKING_SHORT_FLAGS` must be exactly the short flags MEASURED to take an "
+        f"argument ({sorted(pinned_members)}). A letter added without its own row above stops "
+        "the cluster scan early, so a real `c` after it goes unread (a false PASS); a letter "
+        "removed puts a flag's VALUE back into the flag run (a false RED). Take the "
+        "measurement against `grep --help`, then extend `pinned_members` in the same commit "
+        "(#13995 review, P2)")
+
     # ⛔ AND PROSE THAT MERELY NAMES THE COUNT COMMAND IS NOT A PRESCRIPTION — the regression
     # round 3 caught, measured against the reader it replaced. While the flag word was a bag of
     # characters (`[^\s'\"]*`) it swallowed the CLOSING BACKTICK, `,`, `)` and `;`, so the quote
