@@ -1877,11 +1877,36 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     # same name shadows `[env]` — the gate reports that as STALE), so the fixture
     # must not seed those names. Seeding every declared name modelled the pre-fix
     # state and would make this test assert a violation that no longer exists.
+    #
+    # ⛔ ...EXCEPT the name whose route-(b) transition is STILL OPEN, which is why
+    # this fixture carries it. `TORTOISE_EMBEDDER_WARMUP` IS a live Fly secret
+    # today: the `fly-toml-env` declaration and the `[env]` value are merged while
+    # the secret is unset LAST, after `[env]` is on the machine (#13923, the
+    # manifest's "ORDER MATTERS" block). Excluding it modelled the state AFTER the
+    # unset — a production state that does not exist yet — so the suite read GREEN
+    # over a state the gate REFUSES, which is exactly the false PASS that let a
+    # merged branch claim it had unblocked deploys (#13941 owner direction check,
+    # measured: RC=0 without the shadow, RC=1 with it). A fixture that assumes the
+    # transition away cannot certify the change that depends on it, so it is seeded
+    # and its verdict is pinned BY NAME instead of asserted away.
+    #
+    # ⛔ The tolerated name comes from THIS RECORDED SET, not from the fixture seed.
+    # Keyed to the seed it was vacuous: seeding a different `fly-toml-env` name moved the
+    # tolerance with it and the mutant passed, tolerating a shadow nobody recorded as the
+    # open interval (measured). The set names the issue that carries each transition, so a
+    # second open route-(b) cannot appear here without being written down.
+    open_route_b = {"TORTOISE_EMBEDDER_WARMUP": "#13923"}
+    for name in open_route_b:
+        assert declared.get(name) == "fly-toml-env", (
+            f"{name} is recorded here as an OPEN route-(b) transition but this manifest "
+            f"declares it {declared.get(name)!r}. A transition that is not declared "
+            "`fly-toml-env` has nothing left to unset, so this arm would be pinning a "
+            "state the branch does not ship — re-read the manifest before editing either."
+        )
+    living = [n for n in sorted(declared) if not declared[n].startswith("fly-toml-env")]
     real_secrets = _fixture(
         "real-manifest-names.json",
-        json.dumps(
-            [{"name": n} for n in sorted(declared) if not declared[n].startswith("fly-toml-env")]
-        ),
+        json.dumps([{"name": n} for n in [*living, *open_route_b]]),
     )
     r = _run(
         real_secrets,
@@ -1907,8 +1932,58 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
         # pinned out of the way.
         extra_env={"FLY_MITIGATION_LEDGER": str(_fixture("no-ledger.txt", "# empty\n"))},
     )
-    assert "STALE DECLARATION" not in r.stdout, r.stdout
+    # ⛔ NOT `assert "STALE DECLARATION" not in r.stdout` while the shadow is live:
+    # that assertion is what made the suite green over a state the deploy gate
+    # refuses. What this test is entitled to require is narrower and mechanical —
+    # a STALE violation is tolerated ONLY for the recorded open transition, only
+    # with its shadow clause, and only as the BYPASSABLE exit 1 (an exit 2 can
+    # never be bypassed, so it must not pass for any state). Every other kind of
+    # violation on the shipped artifacts is still a defect and still fails here,
+    # and the day the secret is unset the arm holds with no edit: the tolerated
+    # set simply comes back empty.
     assert "UNDECLARED" not in r.stdout, r.stdout
+    stale = [line for line in r.stdout.splitlines() if "STALE DECLARATION" in line]
+    foreign = [line for line in stale if not any(n in line for n in open_route_b)]
+    assert not foreign, (
+        "the shipped artifacts carry a STALE declaration for a name that is not the open "
+        f"route-(b) transition — that is a real defect, not the recorded interval:\n{foreign}"
+    )
+    if stale:
+        assert "which shadows [env]" in stale[0], (
+            "the tolerated STALE for the open transition is no longer the shadow refusal, so "
+            "this test would tolerate a DIFFERENT breakage of the same name. The runbook quotes "
+            "this message; re-derive it from the gate before widening this:\n"
+            f"{stale[0]}"
+        )
+        assert r.returncode == 1, (
+            f"the open transition must be the BYPASSABLE exit 1, not {r.returncode} — an exit 2 "
+            "cannot be bypassed, so a deploy would be hard-blocked rather than transitioned"
+        )
+    # Non-vacuity: the arm above must be able to tell the two states apart. With the
+    # shadow withheld the SAME fixture must come back CLEAN (exit 0, no STALE), so a
+    # gate that stopped sampling the secret list — or a fixture edit that dropped it —
+    # reds here instead of passing this test's tolerances silently.
+    without_shadow = _fixture(
+        "real-manifest-names-no-shadow.json",
+        json.dumps([{"name": n} for n in living]),
+    )
+    control = _run(
+        without_shadow,
+        manifest=REAL_MANIFEST,
+        workflow=REAL_WORKFLOW,
+        toml=REAL_FLY_TOML,
+        present=_declared_gh_names(REAL_MANIFEST),
+        extra_env={"FLY_MITIGATION_LEDGER": str(_fixture("no-ledger.txt", "# empty\n"))},
+    )
+    assert control.returncode == 0, control.stdout + control.stderr
+    assert "STALE DECLARATION" not in control.stdout, (
+        "with the transition's shadow withheld the shipped artifacts must be CLEAN; if they are "
+        f"not, the tolerated-STALE arm above is excusing a violation that is not the transition:\n"
+        f"{control.stdout}"
+    )
+    assert r.returncode != control.returncode, (
+        "the two fixtures must produce DIFFERENT verdicts, or every arm above is vacuous"
+    )
     # #4126's seven recorded-debt names, pinned by KIND so a revert to
     # `unmanaged` (or a dropped declaration) fails HERE, in review, instead of
     # hard-blocking the deploy in CI.
@@ -2083,7 +2158,14 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     )
 
     assert debt == set(), f"recorded debt remains: {sorted(debt)}"
-    assert r.returncode == 0, r.stdout + r.stderr
+    # ⛔ The shipped artifacts' exit code FOLLOWS the open transition, and it is the
+    # point of the shape above: while the shadow is live the deploy gate refuses this
+    # name (exit 1, bypassable only by a per-run input), so a branch that merges this
+    # route before the `[env]`-then-unset order is PERFORMED AND VERIFIED cannot claim
+    # it unblocked deploys — the claim is now measured here instead of asserted in a
+    # PR body over a fixture that omitted the live secret (#13941 owner direction
+    # check). The day the secret is unset this asserts 0 with no edit.
+    assert r.returncode == (1 if stale else 0), r.stdout + r.stderr
 
 
 # ── The #13674 line citations (#13814) ───────────────────────────────────────
@@ -3943,6 +4025,33 @@ def test_the_warmup_revert_guidance_names_both_red_states():
             f"in. Quote at least through {state_clause!r}."
             f"\n  quoted:   {quoted[leader]}\n  emitted:  {emitted[leader]}"
         )
+
+
+def test_the_route_b_landing_precondition_lives_where_the_operator_reads_it():
+    """#13941: "do not land this before the unset is performed and verified" must not live only in a PR.
+
+    The owner's direction check on #13941 recorded, on the PR, that the route-(b)
+    state is exit-1 by construction while the Fly secret lives — and a PR comment
+    is exactly the artifact the next lane does NOT read. The failure mode it guards
+    is measured, not hypothetical: the branch's own evidence block reported green
+    because its fixture omitted the live name, and merging that direction ahead of
+    the transition re-blocks EVERY deploy while the change reads as a fix.
+
+    So the precondition is stated in the runbook's operator section, and pinned
+    here: a future edit that drops the sentence (to "simplify" the section, or to
+    delete it with the paragraph it sits under) reds instead of quietly
+    re-authorising a land-before-transition.
+    """
+    section = _embedder_warmup_runbook_section()
+    # Non-vacuity: a section read that picked up the wrong region must not pass.
+    assert "TORTOISE_EMBEDDER_WARMUP" in section, "the section reader found the wrong region"
+    assert "must not land before the transition is PERFORMED AND VERIFIED" in section, (
+        "the runbook no longer states that this route-(b) direction may not land before the "
+        "unset is performed and verified. That sentence is the only place an operator (or a "
+        "lane that reads the runbook instead of PR comments) learns that merging it ahead of "
+        "the transition leaves every deploy refused at exit 1 — the state #13941's owner "
+        "direction check measured."
+    )
 
 
 def test_the_fly_column_guard_rejects_every_no_home_spelling(monkeypatch):

@@ -4461,6 +4461,18 @@ is red in either order. The quotes above are bound to the messages the gate **ac
 `tests/test_fly_secret_drift.py::test_the_warmup_revert_guidance_names_both_red_states`, so a reworded
 violation reds here instead of leaving the runbook quoting a sentence no operator will ever see.
 
+⛔ **And this direction must not land before the transition is PERFORMED AND VERIFIED.** A merged
+`fly-toml-env` declaration while the secret lives leaves every deploy refused — exit **1**
+(`STALE DECLARATION … also a Fly secret`), cleared only by a per-run bypass — so the branch reads as
+"the gate is fine now" while it is the gate holding the release train. ⛔ **A green suite is not that
+verification:** the three states measure differently and only one is green — `main`'s duplicate pair
+is exit **2** (`manifest unusable`, NOT bypassable), this route-(b) declaration is exit **1**, and
+`fly-only:#13674` with the `[env]` row removed is exit **0** (#13941's owner direction check, measured
+2026-11-20; the live-value fixture matters — the same run is exit 0 if the secret list is seeded
+WITHOUT this name, which is the false green that check was written for). Those numbers are pinned by
+`tests/test_fly_secret_drift.py::test_shipped_manifest_matches_the_real_workflow_and_recorded_debt`,
+which seeds this name as the live shadow, so this state cannot be reported as clean again.
+
 ⛔ **The `fly-toml-env` declaration is NOT `fly-only:` and must not be rewritten as one.** `fly-only:`
 is RESERVED for a deliberate, PERMANENT out-of-band secret whose issue carries a recorded `OVERRIDES:`
 ruling; this value is non-secret config whose source is version control, which is the `fly-toml-env`
