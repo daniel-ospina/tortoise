@@ -894,29 +894,6 @@ def _build_search_text(title, summary=None, topics=None) -> str:
     return " ".join(filter(None, parts))
 
 
-def _encode_document_mirror(required_dim: int | None, st: str):
-    """The `:Document` fold's ONE encode, shared by both halves of the `:Source` node.
-
-    ⛔ THE SEAM (#13447) — see `_upsert_subject`. The TEXT here is `st`
-    (`_build_search_text(title, summary, topics)`), and it is ALSO the record's text:
-    `#13412` LANDED in main and the seam's `DocumentCreated` rule CALLS `_upsert_document`
-    itself (`derived_embedding._document_embedding_parts`), so the record column and this
-    fold compose ONE string and the text-keyed memo serves the second leg at zero model
-    calls — a document write pays ONE encode, like every other label. ⚠️ The comment this
-    moved out of said the opposite until review cycle 8 (P3); it then contradicted the
-    seam module's own `DocumentCreated` paragraph ("the document pair dedupes for free").
-
-    `#5008` (an identifier-only text earns no vector) and `#13224`'s `bounded=True` are
-    INSIDE `derived_embedding.encode` / its `encode_for_row` primitive, so both halves of
-    the gate ask get the same refusals by construction rather than by a second copy here.
-    """
-    try:
-        from tortoise import derived_embedding
-        return derived_embedding.encode(st, required_dim, bounded=True)
-    except Exception:
-        return None
-
-
 def _seq_events(events):
     """Yield ``(journal_seq, record)`` for a deferred-fold batch (#3722 P2).
 
@@ -5550,22 +5527,47 @@ class _EntityHandlers:
         # the vector only when BOTH `document` and `source` answer stop; asking `document`
         # alone here wrote NO vector when the `document` half was covered but the `source`
         # half was not, i.e. the "vector in neither store" state (#11395) the conservative
-        # arm exists to forbid. Both arms call the ONE encode, so the seam rule is unchanged:
-        # a document write still pays one encode, and `#5008`'s identifier-only refusal still
-        # lives inside it.
+        # arm exists to forbid.
         _text_ready = bool(not ev.get("suppress_embedding") and st and st.strip())
         # ⛔ TWO ARMS, NOT ONE `or`, AND SIBLING `if`s, NOT `if`/`elif`. The suppression in each
         # test is load-bearing, and the census (`…strip_graph_entity_vectors.py::_asks_the_gate`)
         # is why these are two tests: it reads gate calls as `and` CONJUNCTS (an `or` test is
         # "masked", so the fold would count as still emitting) and it SKIPS an `if` whose
         # `orelse` STORES — which an `elif` is, so the `document` ask went uncredited (#13854
-        # review C1, measured False at `9550359714`). The 2nd arm runs only if the 1st did not STORE (the flag), so a document write still pays exactly ONE encode — an `embedding is None` guard would re-enter it on `#5008`'s refusal and meter the decline twice (#13854 review P3).
+        # review C1, measured False at `9550359714`). The 2nd arm runs only if the 1st did not
+        # STORE (the flag), so a document write still pays exactly ONE encode — an `embedding is
+        # None` guard would re-enter it on `#5008`'s refusal and meter the decline twice
+        # (#13854 review P3).
+        # ⛔ AND THE SEAM (#13447) IS SPELLED INLINE IN THIS FUNCTION, NOT THROUGH A MODULE HELPER.
+        # The TEXT is `st` (`_build_search_text(title, summary, topics)`), and it is ALSO the
+        # record's text: `#13412` LANDED in main and the seam's `DocumentCreated` rule CALLS
+        # `_upsert_document` itself (`derived_embedding._document_embedding_parts`), so the record
+        # column and this fold compose ONE string and the text-keyed memo serves the second leg at
+        # zero model calls. The CALL has to sit in THIS function's body: the `#5008` seam census
+        # (`test_dod_5090_probe`) and `tortoise.embed_writer_register`'s seam-CALL population
+        # attribute an encode to the writer that PERFORMS it, so a shared `_encode_document_mirror`
+        # helper made this fold read as a writer that embeds OUTSIDE the gate — the `#13826` CI
+        # reds in `test (b)`, `(c)` and `(e)` (`test_11641_runtime_vector_label`,
+        # `test_dod_5090_probe`, `test_embed_writer_register`).
+        # `#5008` (an identifier-only text earns no vector) and `#13224`'s `bounded=True` live inside
+        # `derived_embedding.encode` / its `encode_for_row` primitive, so each arm gets the same
+        # refusals by construction rather than by a second copy here.
         _vector_written = False
         if _text_ready and _derived_mirror_required("document"):
-            embedding = _encode_document_mirror(self.required_embedding_dim, st)
+            try:
+                from tortoise import derived_embedding
+                embedding = derived_embedding.encode(
+                    st, self.required_embedding_dim, bounded=True)
+            except Exception:
+                pass
             _vector_written = True
         if _text_ready and not _vector_written and _derived_mirror_required("source"):
-            embedding = _encode_document_mirror(self.required_embedding_dim, st)
+            try:
+                from tortoise import derived_embedding
+                embedding = derived_embedding.encode(
+                    st, self.required_embedding_dim, bounded=True)
+            except Exception:
+                pass
         # #125 capture fields — use ev.get(field) with NO default so None →
         # Cypher null, letting coalesce fall through to existing on partial
         # updates. CRITICAL: "" is non-null in Cypher — coalesce("", d.f, ...)
