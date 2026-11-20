@@ -3320,7 +3320,11 @@ def _d5_flag_word(text: str) -> tuple[str, str] | None:
     flag token here is `--`/`-` plus alphanumerics (which still expresses `-c`, `-Ec`,
     `--count`, `-C3`, `-m2`), optionally followed by an ATTACHED value — `=value` or a quoted
     section — and an attached value is only possible on a flag that TAKES one, so
-    `grep -c'…'` (which grep rejects with `invalid option`, measured) is not read at all.
+    `grep -c'…'` is not read at all: grep answers `invalid option` to it when the attached text
+    is not itself an option letter (`` `-c'^\+$'` `` → `grep: invalid option -- '^'`, rc 2,
+    measured). The reader models the DOCUMENT's token — quotes preserved — not the shell's:
+    a short cluster followed by a QUOTED section is what "attached value" means here, and whether
+    grep would accept the unquoted residue is grep's question, not this reader's.
     """
     if text in ("-", "--"):
         return text, ""
@@ -3699,11 +3703,20 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
     of the row's own expression tripped the ZERO assertion, whose message blames the count READER
     for a spelling the CLASS TEST was the one to reject (a false RED with a misattributed cause).
 
-    Accepted here, each measured: `^[+-]$`, `^[+\-]$`, `^[-+]$`, `^[\-+]$`, and the alternation
-    forms `^(\+|-)$`, `^(?:\+|-)$`, `^(+|\-)$`. What it does NOT decide is stated at the
-    assertion that uses it: a regex equivalent to this class but spelled differently
+    Accepted here, each measured: `^[+-]$`, `^[+\-]$`, `^[-+]$`, and the alternation forms
+    `^(\+|-)$` and `^(?:\+|-)$`. `^[\-+]$` is NOT among them: GNU grep answers `Invalid range
+    end`, rc 2, so it is not a spelling a working document can carry (measured). What it does NOT
+    decide is stated at
+    the assertion that uses it: a regex equivalent to this class but spelled differently
     (`^[+]$|^[-]$`, a lookahead, a POSIX class) is not recognised — a declared residual, not a
-    claim of closure.
+    claim of closure. ⛔ A LONE SIGN IS NOT THIS CLASS, AND IS REJECTED (#13995 review round 10,
+    P2 — MEASURED): this test used to accept `^-$` and `^+$` as "one `+` or one `-`", which is
+    false in both directions — `^-$` counts ONLY the removed half (measured `0` on a diff whose
+    only blank line is added), and `^+$` is not a regex at all (`grep: Invalid preceding
+    regular expression`, rc 2). Accepting them let a row re-spell its way out of half the class
+    while this arm still called it graded; arm (5) of this cell caught it, which is why this is a
+    second guard's weakness rather than an open hole — and why it is closed here rather than left
+    to that one.
     """
     if not (expr.startswith("^") and expr.endswith("$")):
         return False
@@ -3721,7 +3734,9 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
         alternative = alternatives[0]
         if alternative.startswith("[") and alternative.endswith("]"):
             return _d5_class_members(alternative) == {"+", "-"}
-        return alternative in ("+", "-", "\\+", "\\-")
+        # A single anchor with no bracket and no two-branch alternation names ONE line shape —
+        # `^-$`, `^\+$`, `^(\-)$` — never both halves of this class.
+        return False
     signs = set()
     for alternative in alternatives:
         sign = alternative.replace("\\", "")
@@ -3899,16 +3914,23 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
     The control is the mutation itself, not a list of regexes: what is asserted is the outcome
     the arm needs — one BLANK-class expression seen per spelling, and none from the two
     non-count `grep` stages the same cell prescribes.
+
+    ⛔ THE EXPRESSION IN THESE FIXTURES IS `^[+-]$`, THE CLASS THE ROW ACTUALLY CARRIES — NOT A
+    SINGLE SIGN BETWEEN ANCHORS (#13995 review round 10, P2 — MEASURED). One sign is HALF the
+    class (`^-$` counts only removed lines), and a bare `+` between anchors is not a regex grep
+    accepts at all. The class test now says so, so a fixture spelled that way would assert "this
+    is a BLANK-class count" over an expression that is not one; these fixtures are about the
+    FLAG/spelling axis, so they carry an expression that really is the class.
     """
     for spelling in (
-        "grep -Ec '^\\+$'",            # flag BEFORE the `c`
-        'grep -cE "^\\+$"',            # double-quoted expression
-        "grep -c -E '^\\+$'",          # flags split across two words
-        "grep --count '^\\+$'",        # the long form
-        "grep -c -- '^\\+$'",          # POSIX end-of-flags `--`
-        "grep -c --color=never '^\\+$'",  # a long flag WITH a value
-        "grep -c $'^\\+$'",            # ANSI-C quoting
-        "grep -c '^\\+$'",             # the spelling that already worked, kept as the floor
+        "grep -Ec '^[+-]$'",           # flag BEFORE the `c`
+        'grep -cE "^[+-]$"',           # double-quoted expression
+        "grep -c -E '^[+-]$'",         # flags split across two words
+        "grep --count '^[+-]$'",       # the long form
+        "grep -c -- '^[+-]$'",         # POSIX end-of-flags `--`
+        "grep -c --color=never '^[+-]$'",  # a long flag WITH a value
+        "grep -c $'^[+-]$'",           # ANSI-C quoting
+        "grep -c '^[+-]$'",            # the spelling that already worked, kept as the floor
     ):
         seen = _d5_count_prescriptions(f"a prescription: `{spelling}`\n")
         assert len(seen) == 1 and _d5_counts_the_blank_class(seen[0]), (
@@ -4034,8 +4056,11 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
         # with `_ARG_TAKING_SHORT_FLAGS` dropped from `_d5_flag_word`'s tail this one REDs (the
         # next quoted token becomes the count's expression) while `grep -c'^\+$'` above stays `[]`
         # — an attached value with NO separate token never yields a prescription either way.
-        "grep -c'x' '^\\+$'",           # `-c` takes no argument: `x` is not a value, and the
-                                         # operand is not this flag's count expression
+        "grep -c'x' '^\\+$'",           # `-c` takes no argument, so as THIS READER models the
+                                         # document token (quotes preserved) `'x'` is not an
+                                         # attached value — and the shell would strip the quotes
+                                         # and hand grep `-cx`, a VALID count (measured, rc 0);
+                                         # the reader models the prose, not a shell transcript
         "grep -c -f /tmp/pats '^\\+$'",   # `-f` supplies the PATTERN; the quoted token is a FILE
         "grep -ec '^\\+$'",              # `-e` takes `c` as ITS pattern; this is not a count
         "grep -e'c' '^\\+$'",            # …same, attached
@@ -4149,6 +4174,20 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
             "improvement — but the class test describes itself as a BOUNDED equivalence and "
             "names this as a residual, so update that docstring in the same commit instead of "
             "leaving a false statement beside the code (#13995 review, P2)")
+    # ⛔ AND A LONE SIGN IS NOT THIS CLASS (#13995 review round 10, P2 — MEASURED). `^-$` counts
+    # ONLY the removed half — 0 on a diff whose only blank line is added — and `^+$` is not a
+    # regex at all (`grep: Invalid preceding regular expression`, rc 2). Grading either as this
+    # class let a row re-spell its way out of half of it while the arm still called it graded,
+    # which is a false PASS in the direction that matters: the arm cannot tell a narrower
+    # instrument from the one the sentence names. The last row is the alternation spelling of the
+    # same half-class, so the rejection is not a special case for the literal form.
+    for half_class in ("^-$", "^+$", "^(\\-)$", "^[-]$"):
+        assert not _d5_counts_the_blank_class(half_class), (
+            f"{half_class!r} must NOT be graded as the blank class: a lone sign names ONE line "
+            "shape (`^-$` counts only the removed half, measured 0 on a diff whose only blank "
+            "line is added) and `^+$` is not a regex grep accepts. Grading it would let the "
+            "row's instrument narrow while this arm reported the class as graded "
+            "(#13995 review round 10, P2)")
 
 
 def test_the_d5_count_reader_reads_the_LONG_spelling_and_the_ABBREVIATION_of_a_flag():
