@@ -356,6 +356,25 @@ def test_the_event_identity_is_the_name_its_door_writes(map_doc):
     assert event_names <= names, sorted(event_names - names)
     contents = {value for prop, value in filer.map_identities(map_doc) if prop == "content"}
     assert not (event_names & contents)
+    # The read-back's power rests on identities being DISTINCT: `ev:no-capture-caps`
+    # and the `standard` Object "no capture caps" collide on an unprefixed slug, and
+    # the read-back then cannot tell them apart (one hides the other).
+    idents = filer.map_identities(map_doc)
+    assert len(idents) == len(set(idents)) == 78
+    assert len({filer.event_name(e) for e in map_doc["events"]}) == len(map_doc["events"])
+
+
+def test_validate_refuses_two_items_sharing_one_identity(map_doc):
+    """`--verify` reads by identity, so a shared identity must be refused.
+
+    Mutant: drop the identity-coverage block from `validate()` — two distinct
+    nodes collapse into one read-back key and one of them can be missing without
+    the verdict noticing.
+    """
+    clashing = json.loads(json.dumps(map_doc))
+    clashing["objects"][0]["name"] = filer.event_name(map_doc["events"][0])
+    errs = filer.validate(clashing)
+    assert any("share the identity" in e for e in errs), errs
 
 
 def test_the_readback_verdict_is_identity_scoped_not_a_count(map_doc):

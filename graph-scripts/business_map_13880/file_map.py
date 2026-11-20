@@ -242,6 +242,17 @@ def validate(doc: dict) -> list[str]:
     for ref in refs:
         if ref not in connected:
             errs.append(f"{ref}: no edges — an orphan node is invisible")
+
+    # identity check — `--verify` reads the map back BY IDENTITY, so two items
+    # sharing one (property, value) make one of them unverifiable: the read-back
+    # cannot tell them apart and reports both present when one is missing.
+    seen: dict[tuple[str, str], int] = {}
+    for ident in map_identities(doc):
+        seen[ident] = seen.get(ident, 0) + 1
+    for (prop, value), count in sorted(seen.items()):
+        if count > 1:
+            errs.append(f"{count} items share the identity {prop}={value[:60]!r} — "
+                        "the read-back cannot tell them apart")
     return errs
 
 
@@ -612,8 +623,15 @@ def event_name(event: dict) -> str:
     inventing a title. Deriving the name from the ref keeps the node's identity
     the judgement's, not this script's: a name the map does not declare would be
     a fact the door made up.
+
+    The `eventKind:` prefix is not decoration — it is what makes the identity
+    UNIQUE. `ev:no-capture-caps` and the `standard` Object "no capture caps" are
+    two different nodes, and an unprefixed slug gave them the same identity, so
+    the read-back could not tell them apart (`validate()` now refuses a
+    collision outright rather than letting one item hide the other).
     """
-    return event["ref"].split(":", 1)[-1].replace("-", " ")
+    slug = event["ref"].split(":", 1)[-1].replace("-", " ")
+    return f'{event["eventKind"]}: {slug}'
 
 
 # ── read-back verification (read-only, FalkorDB) ──────────────────────────
