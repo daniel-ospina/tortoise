@@ -441,8 +441,8 @@
     },
     {
       "ref": "pt:journal-is-not-knowledge",
-      "content": "GraphEvent, Session, Meta, EpMeta and the onboarding nodes are the write-ahead journal and capture bookkeeping, not knowledge: 76,610 GraphEvent nodes in the largest legacy graph (the #13880 label census over the four legacy graph exports, measured 2026-11-19 \u2014 a cited count, since that surface is not the one `--verify` reads). Their home is the record, and re-filing them into a belief graph would duplicate the journal into the cache.",
-      "legacy": "label census of the four legacy graph exports (2026-11-19); issue #13880 source table. The count is cited from that census: the exports are not on the instance `--verify` reads, and no percentage is stated because the denominator was never counted on a surface anyone can re-measure."
+      "content": "GraphEvent, Session, Meta, EpMeta and the onboarding nodes are the write-ahead journal and capture bookkeeping, not knowledge: 76,610 GraphEvent nodes of the largest legacy graph's 126,908 (the #13880 `GRAPH.MEMORY USAGE` measurement over Falkor, 2026-11-20 \u2014 cited, not re-derived here; the 2026-11-19 label census of the same graph records 72,488). Their home is the record, and re-filing them into a belief graph would duplicate the journal into the cache.",
+      "legacy": "label census of the four legacy graph exports (2026-11-19, 72,488 GraphEvent for the largest) and the 2026-11-20 Falkor byte measurement (76,610 of 126,908); issue #13880 source table and comments. The count is cited: neither surface is the one `--verify` reads, and no percentage is stated because the denominator was never counted on a surface anyone can re-measure."
     },
     {
       "ref": "pt:decision-is-event",
