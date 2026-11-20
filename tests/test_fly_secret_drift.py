@@ -2087,8 +2087,10 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
 
 
 # ── The #13674 line citations (#13814) ───────────────────────────────────────
-# TWO artifacts cite `embeddings.py` BY LINE — the manifest's #13674 block and
-# the runbook's operator section — so a merge that grows that module silently
+# ONE artifact still cites `embeddings.py` BY LINE — the runbook's operator
+# section. It used to be two: the manifest's `#13674` block carried the same
+# numbers until #13926 took that name to route (b) and the deleted block took
+# them with it (see SCOPE below) — so a merge that grows that module silently
 # turns a cite into a pointer at unrelated code while every sentence around it
 # still reads as true. Measured: the origin/main integration that brought #13819
 # inserted 102 lines into and deleted 11 from `tortoise/embeddings.py`
@@ -2097,9 +2099,10 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
 # other check in CI reads a line number, and a reader who follows one lands
 # nowhere.
 #
-# Both copies are pinned by the same checker below. Pinning only the manifest
-# would be the fail-open this PR keeps paying for: the suite stays green while
-# the OPERATOR-facing copy — the one read mid-incident — rots silently.
+# That copy is pinned by the checker below, and it is the one that needed the pin
+# most: it is written for an OPERATOR under incident pressure, and no other check
+# in CI reads a line number out of it — so without this pin it rots silently
+# while the suite stays green.
 #
 # ⛔ SCOPE AFTER #13926. The manifest's copy is no longer declared by THIS PR: the
 # name went to `fly-toml-env` (route (b), `fly.toml [env]`) and the manifest's own
@@ -2642,9 +2645,13 @@ def _assert_every_citation_reads_the_flag(
 ) -> None:
     """Every cite must land on code that reads the flag, in the function named.
 
-    Shared by the manifest and runbook tests deliberately: the two artifacts
-    carry the SAME numbers, and a second, slightly different checker is how two
-    copies drift apart while both look pinned.
+    Kept as ONE checker for every artifact that carries these readers: they hold
+    the SAME numbers, and a second, slightly different checker is how two copies
+    drift apart while both look pinned. Since #13926 the runbook's operator
+    section is the only artifact pinned through it — the manifest's copy went with
+    its `#13674` block (see SCOPE at the top of this section) — but the parameter
+    stays, so re-pointing it at another artifact is a marker change rather than a
+    second implementation.
     """
     # Non-vacuity: a parser that found nothing would clear every assertion below.
     assert len(cites) >= 8, f"{artifact}: the reader list's citations could not be read: {cites}"
@@ -3341,12 +3348,16 @@ def _reviewer_entry_point() -> str:
     # push of this probe. Same fail-closed behaviour: `None` when the heading is
     # gone.
     #
-    # ⛔ The heading must be the BLOCK'S OWN line, not a prose mention of it. The
-    # gap paragraph and the #13674 block both refer to this paragraph BY NAME, and
-    # a containment match takes the FIRST mention — which slices a note instead of
-    # the entry point and then reports that the entry point names no `fly-only:`
-    # member at all. Measured while fixing #13814's review: adding one note that
-    # named the paragraph cost a full failure of
+    # ⛔ The heading must be the BLOCK'S OWN line, not a prose mention of it. A
+    # prose note that names this paragraph is a MENTION, and a containment match
+    # takes the FIRST one — which slices a note instead of the entry point and
+    # then reports that the entry point names no `fly-only:` member at all. Two
+    # such notes lived in this manifest (the `DECLARED GAP` paragraph and the
+    # `#13674` entry block, both deleted when #13926 took that name to route (b)),
+    # so the artifact carries no live example — the anchor stays because the next
+    # note written above this block re-creates the trap. Measured while fixing
+    # #13814's review: adding one note that named the paragraph cost a full
+    # failure of
     # `test_the_reviewer_entry_point_names_every_fly_only_member` (all three names
     # reported missing). The same trap was fixed for `_declared_gap_paragraph`'s
     # anchor in the commit that reconciled the two P2 fixes; this is the twin the
@@ -3424,11 +3435,13 @@ def _declared_gap_paragraph() -> str:
     paragraph exists only while a gap does.
     """
     lines = REAL_MANIFEST.read_text().splitlines()
-    # The heading must OPEN its line, not merely contain the phrase: the manifest's
-    # own `#13674` entry block REFERS to this paragraph by name (`… the `ONE DECLARED GAP`
-    # paragraph above …`), and a containment match would anchor the reader inside that
-    # block the moment the real paragraph is deleted — which is exactly the stale-removal
-    # case this reader exists to report, so a containment match would make it pass.
+    # The heading must OPEN its line, not merely contain the phrase: a prose note
+    # that NAMES this paragraph (the `#13674` entry block did — `… the `ONE DECLARED
+    # GAP` paragraph above …`) would let a containment match anchor the reader
+    # inside that note the moment the real paragraph is deleted — which is exactly
+    # the stale-removal case this reader exists to report, so a containment match
+    # would make it pass. Both that block and the paragraph are gone now (#13926),
+    # so the line anchor is what makes this reader report the absence instead.
     #
     # ⛔ THE COUNT IS PART OF THE ANCHOR, not the literal `ONE`. Pinning `⚠️ ONE
     # DECLARED GAP` made a CORRECTLY declared SECOND gap invisible: measured (#13814
