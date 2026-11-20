@@ -16719,10 +16719,10 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     # review, P2). The I7 pair above closed this class for two anchors and left this
     # equally bindable clause unbound: the row states `:45867` as CURRENT
     # ("the same grep also hits `:45867`"), and REVERTING the re-derivation to the
-    # pre-fix `:45728` reddened NOTHING — measured at `4747fb570e` by the reviewer: the
-    # whole D5-reading set plus `tests/test_12184_shifted_cites.py` stayed at
-    # `20 passed`, which is the file's own documented failure mode (a number asserted as
-    # current may name prose, a comment or an unrelated statement indefinitely).
+    # pre-fix `:45728` reddened NOTHING — the delta adds no `def test_`, so this selection is
+    # the same at `4747fb570e`: `pytest tests/test_7949_capstone_measure.py -k D5 -q` ->
+    # `3 passed`, plus `pytest tests/test_12184_shifted_cites.py -q` -> `14 passed`, i.e.
+    # `17 passed` and no red. ⛔ The `20 passed` an earlier cut printed is DELETED: it measures 17.
     # Both parts were measured unique at that head: the regex matches the D5 row once,
     # and the needle occurs in `sdk.py` once — so this pins the ADDRESS, not just a
     # number that happens to sit on the line.
