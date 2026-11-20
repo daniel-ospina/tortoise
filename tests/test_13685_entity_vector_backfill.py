@@ -269,7 +269,7 @@ def test_point_is_in_the_default_population():
     `:Point` used to be appended here BY HAND because the census's `RETIRED` population —
     the population a DESTRUCTIVE tool iterates — excluded it (`NOT_IN_SCOPE`). `#13971`
     moved it INTO `RETIRED` (record coverage for `point`/`operator` is measurable from a
-    fresh process and every `:Point` writer is gated on that same predicate), so this
+    fresh process, and two of its four declared writers ask that gate), so this
     constant is now exactly the census's population and must not append the label twice:
     a duplicate would run the fill twice for one label, and a constant that disagrees with
     the population it says it derives from is the second spelling `#9553` records.

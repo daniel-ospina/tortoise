@@ -17460,7 +17460,7 @@ class FalkorProjection(
             #
             # ⚠️ The consequence is stated, not hidden: `:Point` therefore does NOT satisfy the
             # strip's writer census (`tools/strip_graph_entity_vectors.py::_fold_consults_gate`
-            # names this writer as the one that does not ask), so the plan refuses `:Point` until
+            # names this writer as one of the two that do not ask), so the plan refuses `:Point` until
             # the snapshot-restore population can be answered per-id by the record. A strip an
             # operator cannot run is cheap; a rebuild that drops the only copy is not.
             emb = sp.get("embedding")

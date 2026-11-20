@@ -3001,7 +3001,7 @@ class _EntityHandlers:
         # test_a_verified_label_whose_fold_still_writes_the_graph_keeps_the_fallback`), and
         # that set must equal the labels the folds stop writing. The consequence is stated
         # rather than hidden: a `rebuild_all` re-materialises the journal's vectors, so
-        # `tools.strip_graph_entity_vectors.py` must be re-run after a rebuild. Three OTHER
+        # `tools.strip_graph_entity_vectors.py` must be re-run after a rebuild. Two OTHER
         # `:Point` writers also keep their copy on lanes where it is the sole carrier — the
         # capture turn write, the pass-1b snapshot restore in `projection::_rebuild_all_replay`
         # (`#13971` review P1) — while the SDK door and `restore_graph` DO ask.

@@ -309,8 +309,8 @@ PLAN_VERSION = 3
 #: ⛔ `:Point` USED TO BE APPENDED HERE BY HAND, and `#13971` removed the duplicate. The
 #: reason it was appended was that `RETIRED` — the population a DESTRUCTIVE tool
 #: iterates — excluded it (`NOT_IN_SCOPE`), so this fill-only tool had to add it itself.
-#: `#13971` moved `:Point` INTO `RETIRED` (the record's coverage is measurable and every
-#: `:Point` writer is gated on that same predicate), so appending it again would run the
+#: `#13971` moved `:Point` INTO `RETIRED` (the record's coverage is measurable, and two of
+#: its four declared writers ask that gate), so appending it again would run the
 #: fill twice for one label and make this constant disagree with the population it says
 #: it derives from. ⚠️ Its measured `fillable` on
 #: production was **0** (`Point graph=31,610 record=36,942 unmatched=16,982 existing=

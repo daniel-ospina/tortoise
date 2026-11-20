@@ -363,9 +363,10 @@ FOLD_WRITERS: dict[str, tuple[str, ...]] = {
     # test_a_verified_label_whose_fold_still_writes_the_graph_keeps_the_fallback`). The
     # consequence is stated in the tool's own refusal text rather than hidden: a
     # `rebuild_all` re-materialises the journal's `:Point` vectors, so the strip is an
-    # operator action that has to be RE-RUN after a rebuild. Every other `:Point` writer —
-    # the live capture, the SDK update door, the snapshot restore and `restore_graph` — asks
-    # the gate, so a strip is not undone by an ordinary create or update.
+    # operator action that has to be RE-RUN after a rebuild. TWO of the four declared
+    # `:Point` writers ask the gate (the SDK update door and `restore_graph`); the live
+    # capture and the pass-1b snapshot restore must NOT, because on their lanes the graph
+    # copy is the SOLE store — which is why the census REFUSES `:Point` and names both.
     "Event": ("_upsert_event", "_event_plain_merge"),
     # ⛔ NOT `_event_plain_merge`: it MERGEs `(s:Source {url:$id})` but every `embedding`
     # touch in it is on `e` (`clear_embedding(..., "e", ...)` and
@@ -5022,12 +5023,12 @@ def render_plan(plan: dict) -> str:
         # next rebuild as "the strip silently failed".
         lines += [
             "",
-            "⚠️ `:Point` durability: a `rebuild_all` REPLAYS the journal, which re-adds "
-            "every journalled `:Point` vector — re-run this tool after a rebuild. Ordinary "
-            "creates and updates do not re-add it (the SDK update door and the DR restore "
-            "ask the gate and stop; the capture writer and the pass-1b snapshot restore keep "
-            "the vector on the lanes where it is the ONLY copy, which is why this plan "
-            "refuses `:Point` while the writer census names them).",
+            "⚠️ `:Point` durability: the JOURNAL FOLD re-adds the vector, so this plan is "
+            "undone by a `rebuild_all` AND by any journalled point write that carries one "
+            "— re-run this tool afterwards. Only the SDK update door and the DR restore "
+            "ask the gate and stop; the capture writer, the pass-1b snapshot restore and "
+            "the fold keep the copy on the lanes where it is the ONLY one, which is why "
+            "this plan refuses `:Point` while the writer census names them.",
         ]
     measured = plan.get("population") or [r["label"] for r in plan["labels"]]
     declared = plan.get("declared_population") or measured

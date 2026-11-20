@@ -296,7 +296,8 @@ def test_the_source_fold_asks_the_gate(proj, monkeypatch):
 
 
 def test_the_point_journal_fold_deliberately_keeps_the_mirror(proj, monkeypatch):
-    """`:Point` is gated at FOUR writers — and NOT at the journal fold, on purpose.
+    """`:Point`'s four declared writers: two ask the gate, two deliberately must not — and
+    the journal fold does not ask either, on purpose.
 
     ⛔ THIS TEST PINS AN EXCEPTION, and the exception is a RECORDED DECISION rather than a
     gap. `_upsert_point_props` is the journal fold: its vector is the JOURNAL's own record
