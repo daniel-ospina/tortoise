@@ -1949,10 +1949,17 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             "label are each one unit; each was measured `[]` when its unit was narrowed "
             "(#13900 review, verification round, P2)")
     # …AND A `;` INSIDE A BRACKET DOES NOT END THE GAP: the bracketed run is ONE unit, so this
-    # claim parses only if `_BRACKET` is consumed whole. Dropping it reds this row and nothing
-    # else (measured). (#13900 verification: this row used to carry prose — "in the note [a; b]
-    # above" — which is the declared out-of-scope form now that the gap is units-only, so the
-    # prose is gone and the property it was testing, the bracket unit, is what remains.)
+    # claim parses only if `_BRACKET` is consumed whole. ⛔ THIS ROW IS NOT WHAT A `_BRACKET`
+    # REMOVAL REDS FIRST (#13921 review, finding 5, MEASURED): deleting `_BRACKET` from
+    # `_GAP_UNIT` reds the `[^note]` row of the separator-unit block ~190 lines above (it asserts
+    # `[]` and is the first bracket row in file order), and this row is masked behind it. The
+    # earlier form of this comment claimed "Dropping it reds this row and nothing else
+    # (measured)" — a measurement claim the suite does not demonstrate, which is the same
+    # over-stated-attribution class as the `[is]` row above. The ROW is still worth keeping: it
+    # pins `_BRACKET` on an input no other bracket row spells. (#13900 verification: this row used
+    # to carry prose — "in the note [a; b] above" — which is the declared out-of-scope form now
+    # that the gap is units-only, so the prose is gone and the property it was testing, the
+    # bracket unit, is what remains.)
     assert _typed_answers_to_tortoise_cmd(
         f"`{_full_subject}` [a; b] prints TWO paths", _full_subject), (
         "a `;` inside a bracket ended the gap — the bracketed run must be one unit "
@@ -2005,6 +2012,24 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         "longer than 2 s; the declared-residual paragraph beside `_BRACKET` states this input's "
         "measured growth and why only the TAG's overlap is left — read it there, not here "
         "(#13921 review, finding 3)")
+    # ⛔ AND THE BRACKET PAIR'S OWN EXPONENT GETS THE BOUND ABOVE, BECAUSE ITS FIX HAD NO WITNESS
+    # (#13921 review, finding 1, MEASURED). The disjoint-prefix edit that removes the exponent is
+    # exactly the kind of change that reads as coverage and is not: reverting `_BRACKET`'s
+    # catch-all to admit `\` reddened NOTHING in this file, so the 2^n could come back silently —
+    # the same "a unit with no witness is a claim and not a test" failure the `break` had. This is
+    # the shape a reader would NOT guard by intuition: `[` is how `_OPEN_BRACKET` is usually
+    # exercised, and a bare `[` run is ~n^2, so the reds-from-the-wrong-shape trap is live.
+    # MEASURED through the walk: 0.0196 s at 20 backslashes, 0.0973 at 24, 0.5960 at 28, 3.8566 at
+    # 32, 42.97 at 36 before the catch-all excluded `\`; 0.0001 s at every one of them after, and
+    # 0.0014 s at 3200. Bounded at 2 s, so the exponent can only come back as a RED, never as a
+    # hung suite. Non-vacuity, EXECUTED: restoring `[^\]\n]` as the catch-all reds this row.
+    _t0 = _time.monotonic()
+    _typed_answers_to_tortoise_cmd(
+        "`` `-- tortoise/` [ ``" + "\\" * 36 + " prints TWO paths", "-- tortoise/")
+    assert _time.monotonic() - _t0 < 2.0, (
+        "the BRACKET pair's branches are ambiguous again — `[` + 36 backslashes with no reachable "
+        "`]` took longer than 2 s; it measured 42.97 s while `_BRACKET`'s catch-all admitted `\\` "
+        "and 0.0001 s once it excluded it (#13921 review, finding 1)")
     # ⛔ AND THE PUNCTUATION CYCLE 9 MEASURED UNGRADED (#13900 review, cycle 9, P1): each of
     # these returned `[]` when the separator was an enumerated character class.
     for _refuted in ("`-- tortoise/` — prints ONE path at this head.",
