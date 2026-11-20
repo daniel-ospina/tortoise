@@ -2884,13 +2884,37 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # `docs/**/*.md` is 6 before and 6 after, set difference zero in both directions.
     r"(?:there\s+(?:is|are)\s+)?[*_`]{0,3}(?:NOTHING|Nothing|EMPTY|Empty|NONE|None|ZERO|Zero|`?\[\]`?"
     r"|both\s+(?:files?|paths?|modules?|entries)"
-    r"|(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:files?|paths?|modules?|"
+    # ⛔ AND THE REPEATED-DETERMINER / `\d+` SHAPE THE VERB-FIRST ORDER GOT IN ROUND 19, ONE
+    # ORDER OVER (#13802 review, P2 — MEASURED at `180b95d07d`). Round 19 widened the
+    # verb-then-answer count answer to strip determiners in a LOOP and to carry `\d+`; this
+    # alternative kept the bare `(?:one|two|…|ten)\s+<noun>` head, so the SAME claim was
+    # refused in one order and GREEN in the other — the asymmetry rounds 13/16/21/25 each
+    # closed once, reappearing in the dimension round 19 had just closed:
+    #   RED    `` `-- tortoise/` prints those two files at this head. ``
+    #   GREEN  `` Those two files are what `-- tortoise/` prints at this head. ``
+    # SEVEN cells measured GREEN here while their verb-first twins red — `those`, `these`, `its`,
+    # `all`, `just`, `those 2`, and a bare `2`. `\d+` belongs here for round 19's own reason:
+    # the separate `\b\d+\b` arm fires only when the digit sits directly after the VERB, and
+    # this order puts it before the clause instead. The noun class, the optional MODIFIED noun
+    # (`the two comment-only modules`) and the determiner list are the verb-first group's, so
+    # the two orders cannot drift apart in this dimension either.
+    # ⛔ OVER-BLOCK IS BOUNDED BY THE TAIL, NOT BY THE ANSWER (#13802 review, P2 — MEASURED):
+    # every widened form still has to reach `tortoise/` and then a subject-noun or verb inside
+    # the same sentence, so `Those two files in `tortoise/` are read by the resolver.`,
+    # `All six paths under `tortoise/` are covered by tests.` and `2 files under `tortoise/`
+    # were added by that PR.` stay ALLOWED (`are`/`under`/`were` are not in that list). Corpus
+    # cost measured over all 855 `docs/**/*.md`: 6 refusals before, 6 after, set difference 0.
+    r"|(?:(?:the|a|an|its|this|that|those|these|just|only|still|now|actually|also"
+    r"|exactly|at\s+least|at\s+most|more\s+than|fewer\s+than|no\s+fewer\s+than"
+    r"|no\s+more\s+than|as\s+many\s+as|a\s+total\s+of|all|both)\s+)*"
+    r"(?:one|two|three|four|five|six|seven|eight|nine|ten|both|\d+)[*_`]{0,3}\s+"
+    r"(?:[\w-]+[*_`]{0,3}\s+)?"
     # ⛔ AND THE OTHER COUNT NOUNS ARE IN THIS CLASS TOO (#13802 review, cycle 9, P2 —
     # MEASURED): `entries`, `diffs` and `edits` red in the VERB-THEN-ANSWER arm (`:2169` binds
     # them) while `Six entries are what the `tortoise/` set holds at this head` stayed GREEN
     # here — an asymmetry between the two orders of the same sentence, and one the row's own
     # residual sentence did not cover, because these nouns are inside the ban's own lists.
-    r"entries|entry|edits?|diffs?|hits?|records?|items?|rows?|lines?|changes?)"
+    r"(?:files?|paths?|modules?|entries|entry|edits?|diffs?|hits?|records?|items?|rows?|lines?|changes?)"
     r"|(?:an?|the)\s+(?:empty|non[- ]?empty)"
     # ⛔ AND THE `no <noun>` SPELLING IN THE ANSWER-FIRST ORDER (#13802 review, round 21 —
     # MEASURED at this head: `There are no files in the `tortoise/` set at this head.` is GREEN
@@ -3347,6 +3371,20 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "`-- tortoise/` returns those 2 files at this head",
         "`-- tortoise/` returns its empty set at this head",
         "`-- tortoise/` (run at this head) prints nothing",
+        # ⛔ AND THE ANSWER-FIRST ORDER OF THE SAME DETERMINER CLASS (#13802 review, P2 —
+        # MEASURED at `180b95d07d`: every one of these was GREEN while its pinned verb-first
+        # twin directly above reds, i.e. round 19's widening reached ONE of the two orders).
+        # Non-vacuity: each FAILS on the pre-fix code — measured GREEN at `180b95d07d`, RED
+        # here — and `two files` stays as the control that reds at BOTH heads, so the block
+        # is not satisfied by the bare-count class the arm already had.
+        "Those two files are what `-- tortoise/` prints at this head.",
+        "These two files are what `-- tortoise/` prints at this head.",
+        "Its two files are what `-- tortoise/` prints at this head.",
+        "Just two files are what `-- tortoise/` prints at this head.",
+        "All six paths are what `-- tortoise/` prints at this head.",
+        "Those 2 files are what `-- tortoise/` prints at this head.",
+        "2 files are what `-- tortoise/` prints at this head.",
+        "The two comment-only modules are what `-- tortoise/` prints at this head.",
         "The `tortoise/` set (measured with `git diff --name-only origin/main...HEAD -- tortoise/`) is empty",
         # ⛔ AND THE FOUR FORMS THE DETECTOR READ WHILE THIS BAN DID NOT (#13802 review,
         # cycle 6, P1 — each MEASURED `ban=False` in-process against the detector's own
@@ -3399,6 +3437,17 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         # so this sentence states no direction about the `-- tortoise/` set and stays allowed —
         # the over-block pin for the widening above.
         "No changes to `tortoise/` are needed for this row",
+        # ⛔ AND THE OVER-BLOCK PINS FOR THE DETERMINER WIDENING (#13802 review, P2 —
+        # MEASURED GREEN at `180b95d07d` and GREEN here): a determiner + count + noun is
+        # ordinary English, so the widening is bounded by the TAIL (a subject-noun or verb of
+        # the anchor list must follow the `tortoise/` reference) and not by the answer. Each of
+        # these names the `tortoise/` tree and asserts no direction; the word after it
+        # (`are`, `under`, `were`) is why it stays allowed, and that is what keeps the corpus
+        # refusal set at 6 before and 6 after the widening.
+        "Those two files in `tortoise/` are read by the resolver.",
+        "All six paths under `tortoise/` are covered by tests.",
+        "These three modules in `tortoise/` were touched by #12943.",
+        "2 files under `tortoise/` were added by that PR.",
     ):
         assert not _TORTOISE_SET_DIRECTION_CLAIM.search(_allowed), (
             f"the direction detector REFUSES {_allowed!r}, which states the command (or "
