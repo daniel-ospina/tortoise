@@ -262,7 +262,9 @@ cutover by the same window. The measured cost above is the alternative.
    it (`record_write_failures`) and WARNs that it is in neither store — a
    notification, not a recovery.
 4. **The JSONL is off the write path, and NOT yet an export** — it is a FROZEN
-   PREFIX on a cut-over graph, and no export job writes it (and no drainer ships). The
+   PREFIX once the box flag is rolled (the append stops when the FLAG is rolled, not
+   at `arm`: on a row-`active` graph that is not yet armed the file still grows), and
+   no export job writes it (and no drainer ships). The
    file's content is not reproducible from the record alone (`event_id`,
    `initiated_by`, `projection_version` are stored by neither column nor
    payload — measured in `docs/evidence/12894-live-wiring/README.md` §3.1), so an
@@ -274,13 +276,17 @@ cutover by the same window. The measured cost above is the alternative.
    (`backup.py:638`, "the journal always"), and `journal_segments.seal_active`
    moves the active file aside and creates a fresh empty one. Both are operator
    verbs (seal has no production caller), so the frozen prefix holds absent
-   operator action. ⚠️ And a restore onto a CUT-OVER graph lands in a quieter
-   state than `record_writer`'s journal-behind warning describes: the guard is
-   skipped there (there is no second reading), so the restored journal is an inert
-   stale prefix that nothing reports, while the record — which `restore` does not
-   rewind — still owns the ordinal. The journal-behind case that DOES warn is the
-   still-appending arm, where it does not wedge: it silently loses a row per write
-   for `counter - floor` records.
+   operator action. ⚠️ And a restore onto an ARMED cut-over graph lands in a
+   quieter state than `record_writer`'s journal-behind warning describes: the guard
+   is skipped there (there is no second reading), so neither a write-path refusal
+   nor a `record-reconcile --journal` contradiction fires — while the record, which
+   `restore` does not rewind, still owns the ordinal. It is not unreported though:
+   `tools/record_allocator_cli.py status --journal <path>` computes
+   `position_divergence` from exactly that pair (a row-`active` cursor whose
+   enumeration is shorter than the counter) and names the same remedy. The
+   journal-behind case that the DOOR warns about is the still-appending arm, where
+   it does not wedge: it loses a row per write, with one WARNING each, for
+   `counter - floor` records.
 5. **A sealed layout (#13050) is still a procedural gate**: `read_cursor` answers
    the file-local/segment-spanning question the same way it did, so *do not arm
    across a seal* continues to hold. Segment-aware numbering is #13050's.
