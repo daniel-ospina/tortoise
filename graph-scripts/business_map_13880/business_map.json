@@ -437,12 +437,12 @@
         "std:record-truth"
       ],
       "source": "src:storage",
-      "legacy": "docs/architecture/STORAGE-ARCHITECTURE.md \u00a72.0 as carried by the legacy 'record is truth' findings and the GraphEvent journal (76,561 nodes) that exists to make replay possible"
+      "legacy": "docs/architecture/STORAGE-ARCHITECTURE.md \u00a72.0 as carried by the legacy 'record is truth' findings and the GraphEvent journal (76,610 nodes of the largest legacy graph) that exists to make replay possible"
     },
     {
       "ref": "pt:journal-is-not-knowledge",
-      "content": "GraphEvent, Session, Meta, EpMeta and the onboarding nodes are the write-ahead journal and capture bookkeeping, not knowledge: 72,488 GraphEvents in the largest legacy graph, 42% of all nodes. Their home is the record, and re-filing them into a belief graph would duplicate the journal into the cache.",
-      "legacy": "label census of the four legacy graphs; issue #13880 source table"
+      "content": "GraphEvent, Session, Meta, EpMeta and the onboarding nodes are the write-ahead journal and capture bookkeeping, not knowledge: 76,610 GraphEvent nodes in the largest legacy graph (the #13880 label census over the four legacy graph exports, measured 2026-11-19 \u2014 a cited count, since that surface is not the one `--verify` reads). Their home is the record, and re-filing them into a belief graph would duplicate the journal into the cache.",
+      "legacy": "label census of the four legacy graph exports (2026-11-19); issue #13880 source table. The count is cited from that census: the exports are not on the instance `--verify` reads, and no percentage is stated because the denominator was never counted on a surface anyone can re-measure."
     },
     {
       "ref": "pt:decision-is-event",

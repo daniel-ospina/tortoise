@@ -169,33 +169,65 @@ SWEEP_NAMES = 66
 #: the eighth row is `scale_graph.compute_confidence`'s second occurrence. A receiver such as
 #: `type(sdk)` or `store` is exactly what the sweep refuses to guess at, so the row was
 #: REPORTED rather than rewritten; fixing the call site is what removes it.
-#: RE-PINNED → (11802, "9e7cfa678c4d1126") by `#13919` (the `#4211` hierarchy-census lane), and
-#: this move is declared row-by-row because it is an UPWARD move on TWO fronts that are not the same
-#: event. The pin (11752) was measured on `127294ccad`, `#13899`'s own head — re-measured there with
-#: `--repin` on a detached worktree at that commit, still 11752 / `910c86ce66c0eac9`, so the pin's
-#: provenance holds and this is not a drifted pin.
-#: `main` had already moved the residue to 11784 (+32) WITHOUT a re-pin, in commits that are not this
-#: PR's:
-#:   * `g.query` 1460 → 1483 (+23) and `proj.g.query` 3629 → 3637 (+8) — ordinary-word rows on a
-#:     FalkorDB `Graph`;
-#:   * +1 NEW row, `retired_vector_labels.update` — a plain `set` `.update(…)` from the derived-vector
-#:     retirement (`#13629`), the same shape as the already-declared `declared_markers.update`.
-#: THIS PR adds the remaining +18, all inside the two files it introduces for the census, and each
-#: delta below was read off `--repin` on the merged tree rather than by arithmetic:
-#:   * `tools/measure_4211_session_hierarchy.py` — `g.query` +7, `h.update` 60 → 62;
-#:   * `tests/test_measure_4211_session_hierarchy.py` — `super().query` 62 → 67, `seen.update` 99 →
-#:     101, `out.update` 41 → 42, `graph.query` 267 → 268.
+#: RE-PINNED → (11762, "c78653328fa17ea7") by `#13906`'s query-parity harness, on a base that
+#: carries `#13899`'s `--check` CALLER — so the gate first ran against this PR's own new files after
+#: the forward merge, and it reded exactly there. Ten rows, every one an ordinary-word receiver on
+#: an object that is not the SDK, each attributed with `edits_for` on the one file it lives in
+#: rather than by arithmetic:
+#:   * `self.g.query` 7 and `self.g.delete` 1 — `self.g` is a **`falkordb` Graph**
+#:     (`self.client.select_graph(...)`, `tools/vector_parity_13906.py:1511` and `:1538`): the same
+#:     shape as the `g.query` / `graph.query` / `proj.g.query` rows already pinned;
+#:   * `self.client.list_graphs` 1 — the **`falkordb.FalkorDB` client itself**
+#:     (`tools/vector_parity_13906.py:1510`), not an SDK handle;
+#:   * `urlsplit(hash_shape).query` 1 — a **`urllib.parse.SplitResult` attribute**, a DSN's query
+#:     component (`tests/test_vector_parity_13906.py`), caught by the `X.query` shape only because
+#:     that receiver cannot be typed from evidence.
+#: None of the ten is a reference to a retired public name — `typed references still pointing at a
+#: public name: 0` on this tree. The pin moves UPWARD because the tree gained files: that is the
+#: direction which has to be declared deliberately rather than absorbed silently.
+#: RE-CUT to the REBASED tree → (11794, "d26b6f638a612643"). The pin is an ABSOLUTE count of the
+#: tree, so it moves with the base as well as with this PR: the branch was rebased onto
+#: `origin/main` `ef1d6f7561`, which observes 11784 on its OWN tree against the same pin of 11752.
+#: ⛔ So the 32 rows between 11752 and that base's 11784 are the BASE's, not declared here, and this
+#: block does not enumerate them (they are `#13854`/`#13966`-era merges' business); the ten above
+#: are the only rows this PR owns. ⛔ And
+#: ⛔ **`--check` on that tree is RED regardless of this pin** — `typed references still pointing at
+#: a public name: 4`, all four on the typed SDK receiver `._ingest_corpus` in
+#: `tests/test_13826_write_gate.py:544,555,580,596` (a `#13854` file). A re-pin cannot make that
+#: check green, and this PR does not FIX it: the four are base-owned and out of this PR's scope.
+#: Measured here, so the next lane does not have to re-derive it:
+#:   `typed references` on the merge parent = 4; on this tree = 4 (this PR adds NONE).
+#: ⛔ THE PARAGRAPH ABOVE IS MAINTENANCE HISTORY, NOT A LIVE CLAIM — corrected by `#13919` at the
+#: merge of `origin/main` `6fbd96f270` (see the `#13919` block immediately below). The four typed
+#: references it records were `main`'s own red and are **0** on this tree, measured with `--check`
+#: (exit 0); a reader must not re-derive `main`'s red from this paragraph.
+#:
+#: RE-CUT to the MERGED tree → (11822, "05e0ff542dfb8e62") by `#13919` (the `#4211` hierarchy-census
+#: lane), merging `origin/main` `6fbd96f270` into `chore/4211-edge-census-mac`. The pin is an
+#: ABSOLUTE count, so it moves with the base as well as with the PR, and this block therefore
+#: declares ONLY the rows this PR owns — the base's rows above stay `main`'s business:
+#:   * `origin/main` `6fbd96f270` on its OWN tree measures (11804, "e0c67cf6a5e97d20") — read off
+#:     `--repin` in a detached worktree at that commit, so the base's contribution is measured and
+#:     not inferred from the difference;
+#:   * THIS PR adds +18, all inside the two files it introduces for the census, and every row
+#:     delta below is the difference of two MEASURED counts — `--report --base 28ca66878d` on the
+#:     merged tree minus the same on `origin/main` `6fbd96f270`'s own tree — not arithmetic on this
+#:     pin: `g.query` 1483 → 1490 (+7) and `h.update` 60 → 62 (+2) in
+#:     `tools/measure_4211_session_hierarchy.py`; `super().query` 62 → 67 (+5), `seen.update` 99 →
+#:     101 (+2), `out.update` 41 → 42 (+1) and `graph.query` 267 → 268 (+1) in
+#:     `tests/test_measure_4211_session_hierarchy.py`. 7+2+5+2+1+1 = 18 = 11822 − 11804.
 #: Every one is an ordinary-word receiver on a dict/set or on a FalkorDB `Graph` (or a fake standing in
 #: for one). ⛔ The five `super().query(…)` rows are a test double that OVERRIDES `Graph.query` and
 #: delegates to the fake's own implementation — re-pointing them at a private spelling would break the
-#: double's fidelity to the API it stands in for, which is exactly the `declared_markers.update` case
-#: above (a name-scoped rewrite would be sabotage). No new SDK-holding receiver is added.
-#: The typed-reference count went 5 → 0 in the same commit: 4 `sdk.ingest_corpus(…)` calls in
-#: `tests/test_13826_write_gate.py` and 1 `sdk.create_object(…)` in `tools/measure_4211_session_hierarchy.py`
-#: still used the RETIRED public spellings, which the SDK's `__getattr__` answers with an
-#: `AttributeError` migration hint rather than forwarding — so those were latent runtime failures, not
-#: style.
-SWEEP_RESIDUE = (11802, "9e7cfa678c4d1126")
+#: double's fidelity to the API it stands in for, which is exactly the `declared_markers.update`
+#: precedent (a name-scoped rewrite would be sabotage). No new SDK-holding receiver is added.
+#: The typed-reference count is 0 on this tree, measured (`--check` exit 0). It was 5 on the merged
+#: tree before `21ae734ce3`: 1 `sdk.create_object(…)` in `tools/measure_4211_session_hierarchy.py` and
+#: the four `sdk.ingest_corpus(…)` calls in `tests/test_13826_write_gate.py` that were `main`'s own
+#: red — those two names are RETIRED public spellings (`#4282`/`#13899`) which the SDK's `__getattr__`
+#: answers with an `AttributeError` migration hint rather than forwarding, so they were latent runtime
+#: failures, not style.
+SWEEP_RESIDUE = (11822, "05e0ff542dfb8e62")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —

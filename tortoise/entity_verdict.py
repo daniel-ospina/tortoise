@@ -43,7 +43,7 @@ verdict value here:
 * **⛔ writing `dedup_reviewed='link'` is worse than inert — it silently
   DEQUEUES.** The write is one call (`sdk.update_entity` → `_update_entity`'s
   `SET n += $props`), but the content review queue filters `dedup_reviewed IS
-  NULL` (`sdk.py:24856`), so ANY non-NULL value removes the row from review with
+  NULL` (`sdk.py:28395`), so ANY non-NULL value removes the row from review with
   no verdict applied. A band that wrote `'link'` today would delete a review
   nobody counts.
 
@@ -106,7 +106,7 @@ evaluable at this layer: the verdict defers to it by leaving `target_suppressed`
 here (the target-less form, which suppresses regardless of pair) and by never
 re-offering a reviewed pair (the queue's own universe). Stated rather than
 approximated: a rejection that names a survivor is honoured by the merge verb
-(`sdk.py:24861-24879`), not by this module.
+(`sdk.py:28759`), not by this module.
 
 Closure re-verification (M-4)
 -----------------------------

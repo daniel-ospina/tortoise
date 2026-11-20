@@ -1730,6 +1730,25 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # than riding along on this arm (#11083). Reformatting the call is likewise a
     # re-triage, not a silent pass. The arm also pins the VALUE (`_uri()`), so the
     # #11083 hazard — an arm wider than the site it was written for — cannot recur here.
+    # ⛔ THIS IS THE ONLY ROW for this file (#12631): three lanes triaged #13903
+    # concurrently and `main` ended up carrying three copies of this key, of which
+    # Python silently kept the last — a duplicate dict key is a SHADOWED row, not a
+    # stronger declaration, and the two it shadowed authorized nothing while reading
+    # as coverage. If you are here to add a row, EDIT THIS ONE.
+    # ⚠️ Do NOT restate the licence above as "the same ladder": `_uri()`'s fall-backs
+    # are NOT byte-identical to the module probe's. That caveat, and the coverage counts
+    # that make it checkable, are already recorded ONCE in this file — `#13886`'s block
+    # above (`_uri()`'s own ladder is NOT byte-identical …, and its "Coverage of the
+    # live-store reads" paragraph). Read them there; do NOT copy the digits here: those
+    # counts are live (`test_13557_13558_reachable_reads.py` is an actively growing
+    # module), so a second copy is a copy that goes stale with nothing reddening. This
+    # paragraph is a POINTER precisely so that no COVERAGE COUNT from that block is
+    # restated here — if you find a count of read sites, of ladder rungs, or of scanned
+    # modules, it is a regression, not a record. (The "three" above is the size of the
+    # #12631 race — three rows for this key — not a coverage figure, and it is a fact
+    # about a past merge that cannot go stale.)
+    # The row's licence is the narrow, sufficient one: the probe's ANSWER is reused, and
+    # the probe is what decides `@_docker_only`.
     "test_13557_13558_reachable_reads.py": [
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", _uri\(\)\)$'],
 }

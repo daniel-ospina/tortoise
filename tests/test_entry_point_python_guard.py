@@ -1687,6 +1687,7 @@ REFUSAL_CODES: dict[str, int] = {
     "tools/cypher_inventory.py": 2,
     "tools/reap_empty_test_graphs.py": 2,
     "tools/claim_dense_leg_13732.py": 4,
+    "tools/vector_parity_13906.py": 4,
 }
 
 #: Why THAT code is the right one for THAT file — quoted in the failure message, so
@@ -1780,6 +1781,21 @@ REFUSAL_WHY: dict[str, str] = {
         "the old phrasing read as 'the guard is unreachable' when reaching it is "
         "the guard's whole job. No wrapper in `.github/` branches on it. The code "
         "chosen is safe; the shape is the guard's, not new"
+    ),
+    "tools/vector_parity_13906.py": (
+        "the tool's own exit table is 0 PARITY, 1 a required comparison DIVERGED, "
+        "2 CANNOT-RUN (the `CannotRun` class, which exists precisely because a "
+        "`SystemExit(<message>)` refusal wears 1 and the falsifier's repro loop is "
+        "one `echo exit=$?` per poison — so a missing pgvector, a refused non-local "
+        "DSN or a never-ready index would read as 'poison confirmed' when nothing "
+        "was measured), and 3 BLIND. So 0/1/2/3 are ALL spent, and the historical "
+        "`raise SystemExit(<message>)` shape — exit 1 — is the exact false PASS "
+        "`CannotRun` exists to close, one indirection out: on a pre-3.12 "
+        "interpreter `--poison id` would exit 1 and read as a detected poison. 4 "
+        "is the only non-answer left, and it is the same code the sibling guard in "
+        "`tools/claim_dense_leg_13732.py` takes for an unsupported interpreter. "
+        "`SystemExit(<int>)` carries no message, so the refusal prints to stderr; "
+        "no wrapper in `.github/` branches on 4"
     ),
 }
 
