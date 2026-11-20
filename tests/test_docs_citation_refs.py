@@ -2643,7 +2643,14 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # ban-blind" shape, on the one anchor where the detector is meant to be the companion. The
     # pair is what crosses `**` + space; it cannot cross a word, so the over-block surface is
     # unchanged.
-    r"(?:\s+there)?(?:\s*,?\s*(?:\([^)]{0,90}\)|[\w-]+),?){0,6}\s*[*_`]{0,3}\s*"
+    # ⛔ AND THE FILLER ADMITS A PATH-BEARING TOKEN AND A LONGER RUN (#13802 review, round 26,
+    # P2 — MEASURED: the filler was `[\w-]+` x <=6, so a gap containing a `/`-bearing token
+    # (`at the head of origin/main`) or one longer than six words defeated it, and every one of
+    # those cells was DETECTOR-READ and BAN-BLIND — 600 of 11,220 swept cells. On the anchors
+    # where the measured leg skips (a shallow checkout, `:1122`), this ban is the only layer, so
+    # a detector-read/ban-blind spelling is a hole and not a narrowing. `/` is in the token class
+    # because `origin/main` is this repo's most ordinary path token; the run is bounded at eight.
+    r"(?:\s+there)?(?:\s*,?\s*(?:\([^)]{0,90}\)|[\w/-]+),?){0,8}\s*[*_`]{0,3}\s*"
     # ⛔ THE VERB CLASS IS THE DETECTOR'S OWN LIST (#13802 review, round 5, P2; merge-round
     # review, P1): `reports exactly two paths` and `yields `tortoise/x.py`` were green
     # here, and so were `shows`, `names`, `has`, `includes`, `contains` and the bare `=` /
@@ -2797,7 +2804,13 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # one requires an ANSWER to open a clause and `tortoise/` to follow inside the same
     # sentence, so ordinary prose that merely begins with `Nothing` is untouched. The
     # emptiness-only cut of round 13 covered ONE direction of the two — that is round 16's fix.
-    r"|(?:(?:^|\n)[ \t]*(?:[-*+>]+|\d+[.)])?[ \t]*|[.;:!?]\s)"
+    # ⛔ AND THE SENTENCE BOUNDARY TOLERATES EMPHASIS AFTER THE PUNCTUATION (#13802 review,
+    # round 26, P1 — MEASURED: `**At this head.** There are no files in the `tortoise/` set.`
+    # was GREEN because a bold span CLOSING the previous sentence puts `**` between the `.` and
+    # the space this branch required. `.` then `[*_`]{0,3}` then whitespace is the same sentence
+    # boundary the branch already reads; it crosses no word, so the over-block surface is
+    # unchanged (corpus 6 -> 6, measured).
+    r"|(?:(?:^|\n)[ \t]*(?:[-*+>]+|\d+[.)])?[ \t]*|[.;:!?][*_`]{0,3}\s)"
     r"(?:[*_`]{0,3}(?:at|on|in)[*_`]{0,3}\s+"
     r"(?:[*_`]{0,3}(?:this|the|that)[*_`]{0,3}\s+)?"
     # ⛔ AND THE FRONTED ADVERBIAL IS A STRUCTURE, NOT A LIST OF SPELLINGS (#13802 review, round
@@ -2861,12 +2874,12 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # clause openings this family models — no `docs/` line carries any of them with a direction
     # claim, and matching a `|`-delimited cell would need a cell boundary model this ban does not
     # have.
-    r"(?:[*_`]{0,3}(?!(?:head|merge)(?![A-Za-z0-9]))[\w-]+[*_`]{0,3}\s+){0,2}"
+    r"(?:[*_`]{0,3}(?!(?:head|merge)(?![A-Za-z0-9]))[\w-]+[*_`]{0,3}\s+){0,3}"
     # ⛔ AND THE HYPHENATED `merge-time` (#13802 review, round 25, P2 — MEASURED: `At merge-time
     # there are no files in the `tortoise/` set.` was GREEN while its UN-FRONTED twin `There are
     # no files in the `tortoise/` set at merge-time.` was RED — the same one-order-refused
     # asymmetry rounds 13/16/21 closed, sitting inside the class this round widened.)
-    r"[*_`]{0,3}(?:head|merge)(?:[ -]time)?(?![A-Za-z0-9])[*_`]{0,3}"
+    r"[*_`]{0,3}(?:head|merge)(?:[ -]time)?(?:['’]s)?(?![A-Za-z0-9])[*_`]{0,3}"
     # ⛔ AND THE TRAILING SHAPE IS PRONOUN-GENERAL, NOT ONE PRONOUN (#13802 review, round 24,
     # P2 — MEASURED at `8f2f2ad25b`): the literal `you\s+merge` refused `head you merge` and
     # left `head we merge` / `head they merge` / `head one merge` GREEN in BOTH arms. `time`
@@ -2874,8 +2887,33 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # `at merge time`, which the round-22 bounded list HAD caught: RED at `3b901efa84`, GREEN
     # here before this line, i.e. a capability silently leaving the guard with no witness to
     # red. That regression is why the determiner above is optional and `time` is below.)
-    r"(?:\s+(?:head|time|[\w-]+\s+merge)[*_`]{0,3})?"
-    r"\s*(?:[—–]\s*)?,?\s+)?"
+    # ⛔ AND ONE `<word> merge` WAS STILL ONE ALTERNATION, NOT A TAIL (#13802 review, round 26,
+    # P2 — MEASURED: `["-+]\s+merge` reads exactly ONE word before `merge`, so the FRONTED
+    # order stayed GREEN while its un-fronted twin was REFUSED in five grammatical shapes —
+    # `at the head you are merging` / `… you are about to merge` / `… to be merged` /
+    # `… you will merge` / `… post-merge` — the same one-order-refused asymmetry rounds
+    # 13/16/21/25 closed, one grammatical step further out. The tail is now a bounded TOKEN RUN
+    # ending in a `merg*` word, so every inflection (`merge`/`merging`/`merged`) and every
+    # adverbial form of the same claim is read by the shape rather than by a list.
+    # ⚠️ DECLARED RESIDUAL, MEASURED: a tail that carries NO `merg*` word — `at the head of the
+    # PR`, `at the head of this branch` — is still GREEN in the fronted order. A general
+    # any-word tail was CONSIDERED AND REJECTED: it is not a shape, it is "any phrase", and it
+    # would refuse ordinary prose (`At the head of the file, …`) that this file pins as
+    # MUST-NOT-REFUSE. Live victims measured: `grep -rIo 'head of the PR' docs` -> 0,
+    # `grep -rIo 'head of this branch' docs` -> 0; corpus hit set unchanged at 6.
+    r"(?:\s+(?:(?:head|time)(?:\s+(?:[\w-]+\s+){0,4}[\w-]*merg\w*)?"
+    r"|(?:[\w-]+\s+){0,4}[\w-]*merg\w*)[*_`]{0,3})?"
+    # ⛔ AND EMPHASIS MAY WRAP THE ADVERBIAL'S OWN TRAILING PUNCTUATION (#13802 review, round 26,
+    # P1 — MEASURED: round 23 put `[*_`]{0,3}` on every TOKEN of the fronted group and declared
+    # the class closed under formatting, but the `,` / `:` / `.` / `—` that ENDS the adverbial had
+    # to sit OUTSIDE the emphasis. So the idiomatic markdown lead-in — the bundle's own house
+    # spelling, `**At this head:**` — was refused by no alternative:
+    #   `**At this head,** there are no files in the `tortoise/` set.`  -> GREEN
+    #   `**At this head:** …` · `_At this head,_ …` · `**At merge time,** …` -> GREEN
+    #   `**At this head —** …` · `**At this head.** There are …`              -> GREEN
+    # The sibling detector reads none of them (no command token), so there was no second layer.
+    # The closing emphasis is absorbed after the punctuation, which cannot cross a word.
+    r"\s*(?:[—–]\s*)?,?[*_`]{0,3}\s+)?"
     # ⚠️ DECLARED OVER-BLOCK, MEASURED (round 23, P2): this prefix extends a PRE-EXISTING
     # over-block into fronted prose — `At this head nothing in the `tortoise/` set is broken.`,
     # `At this head none of the `tortoise/` files were touched.` and `At this head both files in
@@ -3372,6 +3410,36 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "`-- tortoise/` prints `two` paths",
         "`-- tortoise/` prints _two_ paths",
         "`-- tortoise/` prints Comment-Only",
+        # ⛔ AND EMPHASIS MAY WRAP THE ADVERBIAL'S OWN TRAILING PUNCTUATION (#13802 review,
+        # round 26, P1 — every one MEASURED GREEN before the fix, and refused by no
+        # alternative: round 23 put the emphasis class on every TOKEN of the fronted group and
+        # read that as "closed under formatting", but the `,`/`:`/`.`/`—` ENDING the adverbial
+        # had to sit OUTSIDE the emphasis. These are the bundle's own house lead-in spellings
+        # (`**… measured at this head:**` is used 8x in `PRE-REGISTRATION.md`), and the
+        # sibling detector reads none of them, so there was no second layer.
+        "**At this head,** there are no files in the `tortoise/` set.",
+        "**At this head:** there are no files in the `tortoise/` set.",
+        "_At this head,_ there are no files in the `tortoise/` set.",
+        "**At merge time,** there are no files in the `tortoise/` set.",
+        "**At this head —** there are no files in the `tortoise/` set.",
+        "**At this head.** There are no files in the `tortoise/` set.",
+        # ⛔ AND THE GRAMMATICAL TAILS OF THE FRONTED ORDER (#13802 review, round 26, P2 —
+        # every one MEASURED `fronted=GREEN, unfronted=RED`, the one-order-refused asymmetry
+        # rounds 13/16/21/25 closed, one grammatical step out from the pinned
+        # `At the head we merge …`). The trailing group is a bounded token run ending in a
+        # `merg*` word, so these pin the SHAPE rather than another list of spellings.
+        "At the head you are merging there are no files in the `tortoise/` set.",
+        "At the head to be merged there are no files in the `tortoise/` set.",
+        "At the head post-merge there are no files in the `tortoise/` set.",
+        "At the time of the merge there are no files in the `tortoise/` set.",
+        "At this merge's head there are no files in the `tortoise/` set.",
+        # ⛔ AND THE FAMILY-A FILLER'S TWO BLIND SPOTS (#13802 review, round 26, P2 — MEASURED
+        # detector-read/ban-blind on 600 of 11,220 swept cells: a `/`-bearing token
+        # (`origin/main`) and a run longer than six words both defeated the filler, while the
+        # detector read the answer). On the anchors where the measured leg skips this ban is
+        # the only layer, so each is a hole rather than a narrowing.
+        f"`{_cmd}` at the head of origin/main prints NOTHING at this head.",
+        f"`{_cmd}` at the head you are about to merge prints NOTHING at this head.",
     ):
         assert _TORTOISE_SET_DIRECTION_CLAIM.search(_claimed), (
             f"the direction detector does not see {_claimed!r}, so that spelling of a "
@@ -3399,6 +3467,18 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         # so this sentence states no direction about the `-- tortoise/` set and stays allowed —
         # the over-block pin for the widening above.
         "No changes to `tortoise/` are needed for this row",
+        # ⛔ AND THE MUST-STAY-GREEN FORMS THE WIDENED CLASSES INHERITED (#13802 review, round
+        # 26, P3 — MEASURED: `8379b2cfec` and `180b95d07d` both reported "10 of 10
+        # must-stay-green prose forms still GREEN", and NEITHER string existed in this file:
+        # the tuple held 8 entries, none from the fronted/marker classes those rounds added. So
+        # the over-block claim rested on an in-process measurement nobody could re-run, and
+        # nothing would red if the next widening made a head adverb in ordinary prose refuse.
+        # These pin it: a head adverb that carries NO direction claim stays allowed, in a list
+        # item, an ordered item and a blockquote — the three clause openings the marker class
+        # adds — and each is a one-edit regression away from the ban's own vocabulary.
+        "- At the head of the file, the parser stops.",
+        "1. Note the merge base.",
+        "> At the head of the file, nothing is imported.",
     ):
         assert not _TORTOISE_SET_DIRECTION_CLAIM.search(_allowed), (
             f"the direction detector REFUSES {_allowed!r}, which states the command (or "

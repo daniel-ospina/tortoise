@@ -6805,7 +6805,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # the four suites GREEN. Measured with it, per statement (cycle 5): the two claims the
     # first cut covered red, and the OTHER TWO — the `grep` output and the mid clause — stayed
     # green at 458 passed, so a half-done move was still reachable. All FOUR are asserted here
-    # because D5 is one markdown LINE carrying 262 cite-shaped `:N` tokens (the `~50` these
+    # because D5 is one markdown LINE carrying 269 cite-shaped `:N` tokens at this head
+    # (the `~50` these
     # comments used to say was an order of magnitude low — #13900 review, finding 5): a row
     # cannot separate two
     # statements on one line, and an arm that covers half of them reports a guarantee it does
@@ -16485,7 +16486,10 @@ def test_every_bundle_table_row_carries_its_headers_cell_count():
 
 
 def test_the_D5_row_is_still_one_table_row():
-    """D5 is the row this bundle re-derives 262 cite-shaped tokens on, and it is ONE line.
+    """D5 is the row this bundle re-derives 269 cite-shaped tokens on at this head, and it is
+    ONE line. ⛔ THAT FIGURE IS A READING, NOT A PIN: `6991e2f0ad` moved it off `262`, so the
+    arm below RE-MEASURES it against the line and reds on drift rather than trusting this
+    sentence.
 
     ⛔ THE MEASUREMENT THAT MAKES THIS A PIN RATHER THAN A NICETY: every cite arm in
     this file is line-scoped, so this row can be broken structurally — 6 cells against a
@@ -16684,7 +16688,8 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #: D5's PRESENT-TENSE anchors, each bound to the line of the tree it names. ⛔ The clause
 #: below had NO reader before this pin, which is why it rotted while the suite was green
 #: (#13602 review, finding 1): a `_pin_row_failures` row asserts the number appears
-#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 262 cite-shaped tokens, so any
+#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 269 cite-shaped tokens at
+#: this head, so any
 #: occurrence satisfied every row — including the historical ones — and a number asserted
 #: as CURRENT could name prose, a comment or an unrelated statement indefinitely. These
 #: rows bind the ANCHOR PROSE to the tree instead of the number to the line, so a
@@ -16712,7 +16717,8 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     ),
     # ⛔ THE QUOTA GUARD, BOUND TO ITS OWN SENTENCE (#13845 review, finding 1, P1). The
     # `_pin_row_failures` row for this line was satisfied by ANY `:N` on it, and the D5 row
-    # carries 262 cite-shaped `:N` tokens (measured at this head with
+    # carries 269 cite-shaped `:N` tokens at this head (re-measured after `6991e2f0ad` moved
+    # the line off the `262` this comment carried, which was true at `f16ef087d1`; measured here with
     # `len(re.findall(r":\d{2,}", <the `| **D5**` line>)` — the `~50` this comment used to
     # say was an order of magnitude low, which is the same rot one layer up) — so `:20329`
     # was "read" from an unrelated clause denoting a
@@ -16750,7 +16756,7 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     `the caller does not ask for the anchor.`) and the anchor triple `:21540`/`:21498`/
     `:28543` (the tree's are `:21604`/`:21562`/`:28607`; those three are `proj, self,`,
     a comment, and prose). Every one of them was GREEN here, because no row could see a
-    number that shared a line with 262 others (the `~50` this sentence used to say
+    number that shared a line with 262 others at `f16ef087d1` (the `~50` this sentence used to say
     was an order of magnitude low: #13900 review, cycle 11).
 
     ⛔ A reader who re-verifies the way the document instructs is what this protects: the
@@ -16771,7 +16777,7 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     _stated_count = re.search(r"carrying (\d+) numbers", text)
     assert _stated_count is not None, (
         "the D5 row no longer states how many `:N` tokens carry its line — that figure was "
-        "refuted once at `~50` while the line carried 262, so a row that stops stating it "
+        "refuted once at `~50` while the line carried 262 at `f16ef087d1`, so a row that stops stating it "
         "cannot be checked at all (#13900 review, P2-1)")
     _measured_count = len(re.findall(r":\d{2,}", text))
     assert int(_stated_count.group(1)) == _measured_count, (
