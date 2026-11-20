@@ -1948,11 +1948,17 @@ def test_a_RETRY_AFTER_HEADER_is_the_back_off_when_the_body_names_none(monkeypat
     silently dropped and the client ramp `[5, 10, 15, 20, 25]` runs where arm
     (a) asserts `[7.0] * 5`; (c) `_retry_after_seconds(headers)` → `None` at the
     sleep site. ⛔ NOT a
-    mutant: reverting the call site to `code, payload, _ = self._post(...)`. Once
-    the handler binds `headers`, that tuple element is never READ on a 5xx — a
-    real `_post` cannot return one — so the mutation is equivalent and this row
-    correctly stays green over it. Stated rather than implied, because a pin that
-    names an equivalent mutant as its mutant overclaims what it covers.
+    mutant FOR THIS ROW: reverting the call site to
+    `code, payload, _ = self._post(...)`. Once
+    the handler binds `headers`, that tuple element is never READ on a real 5xx —
+    `urlopen` cannot return one — so this row correctly stays green over it.
+    ⛔ IT IS STILL NOT AN EQUIVALENT MUTANT SUITE-WIDE, and calling it one was the
+    round-34 error: `test_an_HTTP_DATE_Retry_After_is_advice_too` stubs `_post`
+    to return a non-2xx TUPLE (`503, {}, {"Retry-After": stamp}`) and reads that
+    third element, so it REDS under the same mutation. Stated rather than
+    implied, because a pin that names an equivalent mutant as its mutant
+    overclaims what it covers — and one that calls a divergent mutation
+    equivalent mis-attributes another row's red.
     """
     sleeps: list[float] = []
     monkeypatch.setattr(filer.time, "sleep", lambda s: sleeps.append(s))
@@ -2184,7 +2190,11 @@ def test_a_BODY_ONLY_retry_after_is_honoured_on_a_NON_2xx(monkeypatch):
 
 
 def test_the_200_error_arm_takes_FIVE_back_offs_not_six(monkeypatch):
-    """The `data.retry_after` arm is the only retry arm with no attempt guard.
+    """The `data.retry_after` arm WAS the only retry arm with no attempt guard.
+
+    This row is the pin for the guard that closed it. Every retry arm now guards
+    before sleeping (`attempt == 5`, `attempt < 5`, `attempt < 2`); this one used
+    to sleep on the sixth iteration and then `continue` straight out of the loop.
 
     ⛔ A DIFFERENT ARM FROM THE ONE ABOVE. A non-2xx now reaches the STATUS arm
     (that reordering is this PR's point), so the `error` arm's `retry_after`
@@ -2635,14 +2645,22 @@ def test_a_ZERO_retry_after_is_the_RAMP_not_a_hammer(monkeypatch):
     over-wait is the accepted trade (#13950 review round 3 measured the `0` case).
 
     ⛔ TWO CHANNELS, TWO DIFFERENT GUARDS, so both are driven here. A `0` in the
-    BODY reaches `wait` as `0.0` and is turned into the ramp by the sleep
-    expression's truthiness test; a `0` in the HEADER is dropped to the next
+    BODY arrives at `wait` as `0.0` and is turned into the ramp by the
+    NORMALISATION on the assignment line (`… if wait else None`), which maps a
+    non-positive value to `None`; a `0` in the HEADER is dropped to the next
     channel by the `or` in the assignment, and with no body value there is none.
     An earlier cut of this row drove only the header, so the mutant below — which
     is the guard the body case depends on — stayed GREEN.
 
-    Mutant: `time.sleep(min(120, wait) if wait else …)` → `… if wait is not None …`
-    — this reds on the body case with `0.0` sleeps.
+    Mutant: `wait = min(120, max(1.0, wait)) if wait else None` → `… if wait is
+    not None …` — this reds on the body case with five `1.0` sleeps, because the
+    `0.0` then survives to the 1 s floor instead of taking the ramp.
+
+    ⛔ NOT a mutant: the `time.sleep` line's own condition. After that
+    normalisation `wait` is `None` or in `[1.0, 120.0]`, so the sleep line can
+    never see a falsy non-`None` and mutating its test reds NOTHING (measured at
+    #13950 review round 35: 133 passed). The load-bearing guard is the
+    normalisation, and an earlier version of this docstring named the inert line.
     """
     sleeps: list[float] = []
     monkeypatch.setattr(filer.time, "sleep", lambda s: sleeps.append(s))

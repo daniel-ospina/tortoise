@@ -614,7 +614,8 @@ class Mcp:
                     # the next channel and then to the ramp, which waits LONGER than
                     # advised and never shorter.
                     wait = min(120, max(1.0, wait)) if wait else None
-                    time.sleep(wait if wait else min(60, 5 * (attempt + 1)))
+                    time.sleep(wait if wait is not None
+                               else min(60, 5 * (attempt + 1)))
                     continue
                 # ⛔ The SIXTH attempt used to FALL THROUGH: a gateway's error
                 # body is not a JSON-RPC `result`, so `_refusal` found nothing
@@ -654,8 +655,10 @@ class Mcp:
                 # written and no later run could clear it — the hand-edited-
                 # `state.json` recovery the `4xx` arm's own comment describes
                 # (#13950 review round 33). On a 4xx the STATUS, not the advice,
-                # decides landed-ness; the advice arm still governs every other
-                # response (#13950 review round 34).
+                # decides landed-ness. This arm governs only the responses that
+                # REACH it — 2xx/3xx — because `code >= 500 or code in (408, 429)`
+                # leaves at the status arm ABOVE, which honours the same advice for
+                # its own wait (#13950 review rounds 34 and 35).
                 if retry_after is not None and not (400 <= code < 500):
                     # "the work may still complete" — wait the advertised delay,
                     # then re-issue. Only for a write whose repeat converges.
@@ -855,7 +858,13 @@ def _http_date_seconds(value: str) -> float | None:
         when = email.utils.parsedate_to_datetime(value)
     except (TypeError, ValueError, OverflowError):
         return None
-    if when is None:            # `parsedate_to_datetime` returns it for a bad day
+    # Defensive only: on this module's 3.12 floor `parsedate_to_datetime` RAISES
+    # (`ValueError`) on a bad day rather than returning a sentinel, and the
+    # `except` above is what handles that. Kept so a future stdlib change cannot
+    # turn the result into an `AttributeError` two lines below (#13950 review
+    # round 35 measured: `parsedate_to_datetime("not a date")` raises, and so
+    # does a day out of range).
+    if when is None:
         return None
     if when.tzinfo is None:     # `-0000` is legal and parses NAIVE, as UTC
         when = when.replace(tzinfo=datetime.UTC)
