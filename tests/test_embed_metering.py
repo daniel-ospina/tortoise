@@ -1252,9 +1252,10 @@ class TestRunnerWiring:
         import tortoise.mcp_server as mcp
         calls = _capture_writer(monkeypatch)
         alerts = _capture_alert(monkeypatch)
-        # The door's signature is `_enforce_quota(resource, *, truth_carried=False)`
-        # (`#13835`); the stub answers for the whole gate, so it accepts the keyword
-        # rather than asserting a call shape these tests are not about.
+        # ⛔ THE STUB MIRRORS THE DOOR'S SIGNATURE, keyword-only `truth_carried` included
+        # (#13829 added it to `_quota_gated`'s call and `lambda resource:` then raised
+        # TypeError on every `_quota_gated` write — a stale stub reads as a test defect, so
+        # the `**kw` is what keeps this arm measuring the no-org rule it names).
         monkeypatch.setattr(mcp, "_enforce_quota", lambda resource, **kw: None)
         monkeypatch.setattr(mcp_auth, "_current_org_id",
                             contextvars.ContextVar("t", default=None))

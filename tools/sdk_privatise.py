@@ -308,7 +308,29 @@ SWEEP_NAMES = 66
 #: +3 = 11832 − 11829; the typed-reference count went 3 → 0 and is `0` at this pin, measured.
 #: ⛔ The alternative — giving a SURFACE private-looking doors so a name-based sweep stays quiet —
 #: is the sweep dictating the adapter's API, and it is what this re-cut undoes.
-SWEEP_RESIDUE = (11832, "d96145e7d7b3d741")
+#:
+#: MERGED `origin/main` (`c841cfc269`, #14003) — and the two blocks above and below are the SAME pin
+#: read at two heads, not two competing numbers. `main`'s own lane took 11822 DOWN by one (a removed
+#: call site, `tests/test_12941_read_your_writes.py` re-pointed to `stub._get_point`), so neither side's
+#: figure carries: the merged pin is RE-MEASURED on THIS tree with `--repin`, never computed from
+#: 11821 + 7 + 3. ⛔ The row list is kept as history under the head it was measured at, because a row
+#: list taken from another head is the D5 rot this repo forbids (`05-verify.md` deviation D5).
+#: MEASURED ON THE MERGED TREE (the merge that resolved this file's conflict): `--repin` prints
+#: (11831, "0a42bc1bd08ae831") and `--check` exits 0 with `typed references still pointing at a public
+#: name: 0`. Both sides' histories above are preserved because each row is still owned by the head
+#: that measured it; only THIS pin is this tree's.
+#:
+#: `main`'s own block, kept as the history of the -1:
+#: RE-CUT DOWN 11822 → (11821, "abf4a5c65f380206") by the #14003 lane, and the move is a REMOVED
+#: call site rather than a new shape: `tests/test_12941_read_your_writes.py:803` was the LAST site
+#: still calling the RETIRED public spelling on a `TortoiseSDK`, `stub.get_point("p-1", served_out={})`
+#: — #13899's sweep re-pointed that file's seven other sites to `_get_point` and missed this one, so it
+#: raised `AttributeError` instead of asserting the record bound and reddened `test (a)`. Re-pointed
+#: to `stub._get_point(...)`, which removes exactly that one untyped-receiver row (-1: 11822 → 11821).
+#: Direction matters and is the reason this is safe to take: a residue that SHRINKS cannot hide a new
+#: reference shape, and `typed references still pointing at a public name: 0` on this tree says no
+#: typed site replaced it. Measured with `--repin` on THIS tree, never by arithmetic on the last pin.
+SWEEP_RESIDUE = (11831, "0a42bc1bd08ae831")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
