@@ -72,7 +72,6 @@ import contextlib
 import json
 import math
 import os
-import re
 import sys
 import time
 import uuid
@@ -605,13 +604,89 @@ def _split_host_list(value: str) -> list[str]:
     return out
 
 
-#: libpq's conninfo grammar allows SPACES, TABS and NEWLINES around `=`, and
-#: single-quoted values. A `shlex` token loop that requires `key=value` in ONE
-#: token therefore cannot see `hostaddr = 203.0.113.9` — measured with libpq
-#: (`psql` dials 203.0.113.9 for `host=127.0.0.1 hostaddr = 203.0.113.9`).
-_CONNINFO_KV = re.compile(
-    r"""(?<![A-Za-z0-9_])(host|hostaddr|service)\s*=\s*(?:'((?:[^'\\]|\\.)*)'|(\S+))""",
-    re.IGNORECASE)
+def _conninfo_pairs(dsn: str) -> list[tuple[str | None, str | None]]:
+    """(keyword, value) pairs of a conninfo, parsed by LIBPQ's grammar.
+
+    ⛔ ONE WALKER, TWO CALLERS, because a regex cannot express this grammar and a
+    split between the two interpretations is how a fail-open hides. libpq allows
+    whitespace on BOTH sides of `=`, single-quoted values with backslash escapes,
+    and `\\<space>` inside an unquoted value — and it SKIPS the whitespace after
+    `=`, so `dbname= host=127.0.0.1` is ONE pair whose value is the whole string.
+    A flat `(host|hostaddr|service)` regex with `\\s*=\\s*` inventing a `host=` there
+    certified a store libpq dialled elsewhere: with `PGHOST=203.0.113.9` set,
+    `dbname= host=127.0.0.1` is `dbname='host=127.0.0.1'` to libpq (NO host), so
+    the environment supplies the remote host — while the regex both reported a
+    loopback host AND suppressed the environment fallback (the "key present" set),
+    and the guard PASSED. Measured in review; 1,111 of 49,171 conninfo × env pairs.
+
+    ``(None, value)`` marks a bare token (no `=`), which libpq rejects and the
+    rebuild re-emits verbatim.
+    """
+    pairs: list[tuple[str | None, str | None]] = []
+    i, n = 0, len(dsn)
+    while i < n:
+        if dsn[i].isspace():
+            i += 1
+            continue
+        word_start = i
+        while i < n and not dsn[i].isspace() and dsn[i] != "=":
+            i += 1
+        word = dsn[word_start:i]
+        j = i
+        while j < n and dsn[j].isspace():
+            j += 1
+        if not word or j >= n or dsn[j] != "=":
+            pairs.append((None, word))
+            continue
+        j += 1                                    # consume `=`
+        while j < n and dsn[j].isspace():         # libpq skips these
+            j += 1
+        value_chars: list[str] = []
+        if j < n and dsn[j] == "'":
+            j += 1
+            while j < n:
+                if dsn[j] == "\\":
+                    if j + 1 < n:
+                        value_chars.append(dsn[j + 1])
+                    j += 2
+                    continue
+                if dsn[j] == "'":
+                    j += 1
+                    break
+                value_chars.append(dsn[j])
+                j += 1
+        else:
+            while j < n and (dsn[j] == "\\" or not dsn[j].isspace()):
+                if dsn[j] == "\\" and j + 1 < n:
+                    value_chars.append(dsn[j + 1])
+                    j += 2
+                    continue
+                value_chars.append(dsn[j])
+                j += 1
+        pairs.append((word.lower(), "".join(value_chars)))
+        i = j
+    return pairs
+
+
+def _conninfo_hosts(dsn: str) -> tuple[list[str], set[str]]:
+    """(hosts, keys) named by libpq's whitespace conninfo form.
+
+    ⛔ THE GRAMMAR IS LIBPQ'S, NOT A REGEX'S — see `_conninfo_pairs`, which is the
+    one parser both this and the rebuild use.
+    """
+    hosts: list[str] = []
+    keys: set[str] = set()
+    for key, value in _conninfo_pairs(dsn):
+        if key is None:
+            continue
+        keys.add(key)
+        if key == "service" and value:
+            # The host comes from pg_service.conf, which this harness cannot read
+            # before connecting — unknowable, so never loopback.
+            hosts.append(RECORD_DSN_SERVICE)
+        elif key in ("host", "hostaddr"):
+            hosts.extend(_split_host_list(value or ""))
+    return hosts, keys
 
 
 def _authority_hosts(netloc: str) -> list[str]:
@@ -641,30 +716,6 @@ def _authority_hosts(netloc: str) -> list[str]:
         elif entry:
             hosts.append(entry)
     return [unquote(host) for host in hosts if host]
-
-
-def _conninfo_hosts(dsn: str) -> tuple[list[str], set[str]]:
-    """(hosts, keys) named by libpq's whitespace conninfo form.
-
-    ⛔ THE GRAMMAR IS LIBPQ'S, NOT `shlex`'S. `key=value` in one whitespace
-    token is the common shape, not the grammar: spaces and newlines are legal
-    around `=`, and a backslash-escaped or single-quoted value is legal too. A
-    parser that misses a keyword does not merely under-report — it lets a
-    sibling loopback keyword satisfy the guard while a remote one is dialled.
-    """
-    hosts: list[str] = []
-    keys: set[str] = set()
-    for match in _CONNINFO_KV.finditer(dsn):
-        key = match.group(1).lower()
-        value = match.group(2) if match.group(2) is not None else (match.group(3) or "")
-        keys.add(key)
-        if key == "service" and value:
-            # The host comes from pg_service.conf, which this harness cannot read
-            # before connecting — unknowable, so never loopback.
-            hosts.append(RECORD_DSN_SERVICE)
-        elif key in ("host", "hostaddr"):
-            hosts.extend(_split_host_list(value))
-    return hosts, keys
 
 
 def _split_uri(dsn: str) -> tuple[str, str]:
@@ -871,75 +922,27 @@ def _assert_local_record_dsn(dsn: str | None, allow_remote: bool) -> None:
 
 
 def _drop_options_pairs(dsn: str) -> str:
-    """Delete every TOP-LEVEL `options` pair from a conninfo, and nothing else.
+    """Re-emit a conninfo without its `options` pair, every other pair intact.
 
-    ⛔ A REGEX CANNOT DO THIS. libpq's conninfo is a little grammar, and two legal
-    spellings defeat a pattern match — both measured with real `PQconninfoParse`:
+    ⛔ IT PARSES WITH THE SAME WALKER THE GUARD USES (`_conninfo_pairs`). Two
+    independent interpretations of one grammar is how a rebuild certified a DSN
+    libpq rejects: a regex version truncated a backslash-escaped space and deleted
+    `options=` from INSIDE another keyword's quoted value (libpq: `missing "="
+    after "-c"`; one password silently became `'a   c'`), and a token loop that
+    understood only `key = value` destroyed the one-sided spacings.
 
-        host=127.0.0.1 options=-c\\ search_path=a
-            a backslash-escaped space in an UNQUOTED value: `(\\S+)` stopped at the
-            space, so the value was truncated and its remainder became a bogus
-            keyword (libpq: `invalid connection option "search_path"`);
-        host=127.0.0.1 password='options=zzz'
-            `options=` inside ANOTHER keyword's quoted value was matched and
-            deleted, unbalancing that quote (libpq: `missing "=" after "-c"`) —
-            and worse, `password='a options=b c'` PARSED with the password silently
-            changed to `'a   c'`.
-
-    So the scan tracks single-quote state and backslash escapes, and deletes only
-    a `options` keyword at TOP level together with its value (`'…'` or a run of
-    `\\.` / non-space characters — the two shapes libpq admits).
+    An EMPTY value re-emits QUOTED (`dbname=''`): libpq skips whitespace after
+    `=`, so a bare `dbname=` followed by ` options=…` would take `options='-c` as
+    dbname's value (`invalid connection option "role"`).
     """
     out: list[str] = []
-    i, n = 0, len(dsn)
-    while i < n:
-        # find a top-level word start
-        if dsn[i].isspace():
-            out.append(dsn[i])
-            i += 1
+    for key, value in _conninfo_pairs(dsn):
+        if key is None:
+            continue                              # a bare token: libpq rejects it anyway
+        if key == "options":
             continue
-        word_start = i
-        while i < n and not dsn[i].isspace() and dsn[i] != "=":
-            i += 1
-        word = dsn[word_start:i]
-        # optional whitespace, then `=`?
-        j = i
-        while j < n and dsn[j].isspace():
-            j += 1
-        if not word or j >= n or dsn[j] != "=":
-            out.append(dsn[word_start:i])
-            continue
-        j += 1                                   # consume `=`
-        while j < n and dsn[j].isspace():
-            j += 1
-        # the value: a quoted run that honours escapes, else escaped/non-space run
-        value_start = j
-        if j < n and dsn[j] == "'":
-            j += 1
-            while j < n:
-                if dsn[j] == "\\":
-                    j += 2
-                    continue
-                if dsn[j] == "'":
-                    j += 1
-                    break
-                j += 1
-        else:
-            while j < n and (dsn[j] == "\\" or not dsn[j].isspace()):
-                j += 2 if dsn[j] == "\\" else 1
-        value = dsn[value_start:j]
-        if word.lower() == "options":
-            out.append(" ")                      # drop the pair entirely
-        else:
-            # ⛔ AN EMPTY VALUE MUST BE QUOTED. `dbname=` at the end of a
-            # conninfo is legal (libpq: `dbname=''`), but re-emitting it bare and
-            # then appending ` options=…` makes libpq skip whitespace AFTER the
-            # `=` and read `options='-c` as dbname's value — the tail then becomes
-            # the bogus keyword `role=tortoise_record_app'` (`invalid connection
-            # option "role"`). Measured in review.
-            out.append(f"{word}={value if value else chr(39) * 2}")
-        i = j
-    return "".join(out)
+        out.append(f"{key}={_quote_conninfo_value(value)}")
+    return " ".join(out)
 
 
 def _quote_conninfo_value(value: str | None) -> str:
