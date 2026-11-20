@@ -14,7 +14,7 @@ aboutObjects: "SEARCH-ARCHITECTURE.md §3, §6.1; #11642; #13220; #13610; #5004;
 # Dense-leg query parity — both stores, one corpus, four readers (#13906)
 
 **Instrument:** `tools/vector_parity_13906.py` · **Comparator pins:**
-`tests/test_vector_parity_13906.py` (61 DB-free tests) · **Artifacts, this
+`tests/test_vector_parity_13906.py` (62 DB-free tests) · **Artifacts, this
 directory:** `parity-run.json`, `poison-{id,order,recall,vector}.json`.
 
 The question this answers, in one sentence: **for the same tenant data and the
@@ -393,6 +393,16 @@ rebuild still wrong for two legal conninfo spellings — both measured on real
 | **S1** `_uri_hosts` split the DSN at the FIRST `?` anywhere, which is not libpq's order: libpq takes the AUTHORITY as everything after `://` up to the first `/` (or the end), and only then looks for the `?` separator in what follows. So a `?` inside userinfo/password is not a separator — `postgresql://127.0.0.1:p?ss@203.0.113.9:1/db` has `host='203.0.113.9'` to libpq (`PQconninfoParse`: user `127.0.0.1`, password `p?ss`, host `203.0.113.9`, and `psql` DIALS that address) while the split truncated the authority at `127.0.0.1` and certified the remote store as local — on the path where `run()` seeds and `teardown()` deletes by `org_id`. The same misparse ran in the OTHER direction too: a loopback DSN whose password contained `?` was refused | `PQconninfoParse` + `psql` on three shapes, plus the over-block control | `_split_uri()` implements libpq's order once, and `_uri_hosts` and `app_role_dsn` both use it — so the guard reads the host libpq will dial AND `app_role_dsn` no longer cuts a DSN in the middle of a password. Pinned by `test_a_question_mark_inside_userinfo_is_not_a_query_separator` (three remote shapes refused, the loopback-with-`?`-password shape accepted, and the split itself asserted); the mutant restoring `partition("?")` reds it |
 | **S2** `PGHOST` is still consulted when the DSN sets `hostaddr`: libpq dials `hostaddr` and uses `host` only as the TLS name, so this is a friction-only over-block in the fail-closed direction | `dbname=x hostaddr=127.0.0.1` under `PGHOST=203.0.113.9` → refused, though libpq dials the loopback address | left as-is, deliberately: the over-block is cleared with `--allow-remote-writes`, and narrowing it buys nothing this guard needs |
 
+### Round 16: the authority also ends at a `?` — a pathless URI's query was invisible
+
+| finding | verified how | fix |
+|---|---|---|
+| **P1 (BLOCKING)** round 15's `_split_uri` ended the authority at the first `/` **or the end of the string**, then searched for `?` only in what followed. With no `/dbname` before the separator there is nothing to follow, so a PATHLESS URI's query was never examined: `postgresql://127.0.0.1:5432?host=db.prod.example.com` (libpq: `host='db.prod.example.com'`, and `psql 'postgresql://127.0.0.1:1?host=203.0.113.9&connect_timeout=3'` fails with `connection to server at "203.0.113.9", port 1 failed` — a real dial) yielded `hosts=['127.0.0.1']` and PASSED the guard. Same shapes with `?hostaddr=`, `?service=` and a bracketed `[::1]` authority. A differential over ~151k generated spellings found **1,866 bypasses, all one family** (every one pathless); the conninfo/whitespace axis yielded zero | `PQconninfoParse` as the oracle on 15 boundary shapes, plus `psql` for the dial | `_split_uri` now implements BOTH boundaries in libpq's order — userinfo = last `@` before the first `/`; authority = to the first `/` after that, or to the first `?` (which then starts the query). Re-checked against libpq on the 15 boundary shapes: **0 bypasses**, and every shape's guard now agrees with libpq's own answer. Pinned by `test_a_pathless_uri_still_carries_a_query`; the mutant restoring the `/`-or-end rule reds it, and the mutant ignoring userinfo reds BOTH it and round 15's pin |
+| **P1 (same root, second surface)** `app_role_dsn` set its separator with `sep = "?" if raw_query or head != dsn else ""`, so for a pathless URI with a query it appended a SECOND `?` — libpq rejects the result (`extra key/value separator "="`), so a run the guard certified would answer `record_error` on every query and exit 2 | `PQconninfoParse` on the rebuilt DSN | the separator is now unconditional, because `head` already excludes the query; pinned in the same test (`built.count("?") == 1`) |
+| **P2 (docstring)** round 15's prose stated the rule as *"…up to the first `/` (or the end) … and only searches for the `?` in what follows"* — the sentence the hole was built from. Corrected alongside the code, with both boundaries and the two half-fixes' failure modes spelled out | — | docstring rewritten |
+| **P2 (non-blocking, friction)** a `#` in userinfo (`postgresql://u#x@127.0.0.1/db?sslmode=require`) is REFUSED as `RECORD_DSN_AMBIGUOUS` although libpq dials `127.0.0.1` — the docstring's authority-first split exists so a `#` in userinfo is *not* over-blocked, but the `#`-in-base arm still does it whenever a query is present | `PQconninfoParse`: `user='u#x', host='127.0.0.1'` | left as-is: fail-closed, cleared by `--allow-remote-writes` |
+| **P2 (non-blocking, latent)** `_assert_local_record_dsn` skips any host string starting with `/` as a unix-socket path, and `_authority_hosts` percent-decodes before that test (`postgresql://%2Ffoo:5432` → host `/foo` → skipped). No independently exploitable case found, and libpq also reads `/foo` as a socket dir | `PQconninfoParse` + `PQhost` | noted as a hardening seam, not a defect |
+
 ## 6. Reproducing
 
 ```bash
@@ -422,7 +432,7 @@ done
 ```
 
 DB-free comparator pins: `uv run python tools/test_lane.py run --
-tests/test_vector_parity_13906.py -q` → **61 passed**.
+tests/test_vector_parity_13906.py -q` → **62 passed**.
 
 Falsifier exit codes — the recipe above reads them, so they are part of the
 contract, not decoration:

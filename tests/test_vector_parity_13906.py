@@ -1879,3 +1879,50 @@ def test_a_question_mark_inside_userinfo_is_not_a_query_separator(harness):
 
     # …and the over-block it removes: a `?` in the password of a LOOPBACK DSN.
     harness._assert_local_record_dsn("postgresql://u:pa?ss@127.0.0.1:5432/db", False)
+
+def test_a_pathless_uri_still_carries_a_query(harness):
+    """The authority ends at the first `/` after the userinfo — **or** at a `?`.
+
+    ⛔ THE SECOND BOUNDARY, and the half-fix that misses it is a bypass: with no
+    `/dbname` before the separator, "authority to the first `/` (or the end)"
+    swallows the query whole, so `?host=` / `?hostaddr=` / `?service=` are never
+    examined and the guard certifies a remote store as local. Measured against
+    libpq's own `PQconninfoParse`:
+
+        postgresql://127.0.0.1:5432?host=db.prod.example.com  -> host='db.prod.example.com'
+        postgresql://[::1]?host=db.prod.example.com            -> host='db.prod.example.com'
+        postgresql://127.0.0.1:5432?hostaddr=10.1.2.3          -> hostaddr='10.1.2.3'
+
+    (`psql 'postgresql://127.0.0.1:1?host=203.0.113.9&connect_timeout=3'` fails
+    with `connection to server at "203.0.113.9", port 1 failed`, which is the
+    dial.) The userinfo-first rule pinned above must survive: a `?` BEFORE the
+    `@` is userinfo, not a query.
+    """
+    cases = {
+        "postgresql://127.0.0.1:5432?host=db.prod.example.com": "db.prod.example.com",
+        "postgresql://localhost:5432?host=db.prod.example.com": "db.prod.example.com",
+        "postgresql://[::1]?host=db.prod.example.com": "db.prod.example.com",
+        "postgresql://127.0.0.1:5432?hostaddr=10.1.2.3&sslmode=disable": "10.1.2.3",
+        "postgresql://127.0.0.1:5432?service=prod": None,   # service => unknowable
+    }
+    for dsn, remote in cases.items():
+        hosts = harness._record_dsn_hosts(dsn)
+        assert remote is None or remote in hosts, (dsn, hosts)
+        with pytest.raises(harness.CannotRun):
+            harness._assert_local_record_dsn(dsn, False)
+
+    # …and the userinfo rule is not regressed by the second boundary
+    harness._assert_local_record_dsn("postgresql://u:pa?ss@127.0.0.1:5432/db", False)
+    with pytest.raises(harness.CannotRun):
+        harness._assert_local_record_dsn("postgresql://127.0.0.1:p?ss@203.0.113.9:1/db", False)
+
+    # THE SPLIT, both shapes, so neither half can drift silently
+    assert harness._split_uri("postgresql://127.0.0.1:5432?host=x") == (
+        "postgresql://127.0.0.1:5432", "host=x")
+    assert harness._split_uri("postgresql://u:pa?ss@127.0.0.1:5432/db") == (
+        "postgresql://u:pa?ss@127.0.0.1:5432/db", "")
+
+    # app_role_dsn must not hand libpq two `?` (it rejects the result outright)
+    built = harness.app_role_dsn("postgresql://127.0.0.1:5432?host=x")
+    assert built.count("?") == 1, built
+    assert "options=" in built and built.startswith("postgresql://127.0.0.1:5432?host=x&"), built
