@@ -3866,9 +3866,16 @@ def _d5_class_members(char_class: str) -> set[str] | None:
             # (#13995 review round 12, P2 — MEASURED). `[\-+]` reads as the DESCENDING RANGE
             # `\`–`+` — `grep -cE '^[\-+]$'` → `grep: Invalid range end`, rc 2, in BRE and ERE —
             # so consuming `\-` as an escaped member (which this helper did) graded a command that
-            # cannot run as a BLANK-class prescription. An escaped `-` BETWEEN two members is the
-            # range case; one at either end is the literal `[+\-]`/`[-+]` spelling, kept because
-            # GNU grep accepts it (it also carries a literal `\` member — a declared superset).
+            # cannot run as a BLANK-class prescription. The rule, stated exactly (#14026 review, P2
+            # — MEASURED, because this comment used to merge three different spellings into one
+            # sentence): an escaped `-` BETWEEN two members is the range case and is refused
+            # wherever it sits — `[\-+]` and `[+\-+]` both answer `None` for that reason, and
+            # `grep -cE` refuses both with `Invalid range end`, rc 2. An escaped hyphen ANYWHERE
+            # ELSE is consumed as a member, which keeps `[+\-]` and `[-\+]` accepted; both also
+            # match a lone `\`, so they count `3` on a probe carrying one where this class counts
+            # `2` — the DECLARED SUPERSET documented in the docstring above. The UNESCAPED `[-+]`
+            # is the plain class with no `\` member at all (counts `2` on that probe), and it is
+            # kept as the class itself — not as a superset.
             if index + 2 < len(content) and content[index + 1] == "-":
                 return None  # a `-` between members is a RANGE, escaped or not
             escaped = True
@@ -3891,10 +3898,11 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
     for a spelling the CLASS TEST was the one to reject (a false RED with a misattributed cause).
 
     ⛔ AND THIS SENTENCE USED TO NAME A SECOND SPELLING BESIDE IT, ON A PREMISE THAT IS FALSE
-    (#14026 review, P2 — MEASURED). It read "`^[+\-]$` and `^(\+|-)$` — the same class, measured
-    `2` on the 4-line probe — were read as expressions of some OTHER class". Only `^(\+|-)$` is
-    this class; `^[+\-]$` is NOT — a POSIX bracket has no escapes, so its members are `{+,-,\}`
-    and it counts `3` on a probe carrying a lone `\` line, which is the DECLARED SUPERSET
+    (#14026 review, P2 — MEASURED). It read that `^[+\-]$` and `^(\+|-)$` were "the same class,
+    measured `2` on the 4-line probe" and were read as expressions of some OTHER class. Only
+    `^(\+|-)$` is this class; `^[+\-]$` is NOT — a POSIX bracket has no escapes, so its members
+    are `{+,-,\}` and it counts `3` on a probe carrying a lone `\` line, which is the DECLARED
+    SUPERSET
     documented in the NEXT paragraph. They agree at `2` only on the 4-line probe, which carries no
     `\`. So the retired list REFUSING `^[+\-]$` was the correct answer rather than a defect, and
     the sentence used a true statement about one spelling to carry a false one about the other —
