@@ -705,7 +705,10 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             # more than an over-block (D5: `docs/epics/2026-11-04-7949-extractor-v4-capstone/05-verify.md`).
             # A true history sentence is written in the PAST TENSE, which is outside the verb list
             # and therefore outside this matcher — that is the one half of the convention measured
-            # to work (`:763`).
+            # to work, and it is stated as a RESIDUAL at THIS function's head (the
+            # "RESIDUAL, stated" note immediately above the `rest = doc[...]` slice below) rather
+            # than pointed at by line number: a `:NNNN` here was measured to have drifted onto a
+            # bare assignment (#13900 review, verification round, P2).
             + (_GAP_FULL if cmd == _TORTOISE_CENSUS_CMD else _GAP_ABBREV)
             + r"(?:(?:still|now|actually|also)\s+)?"
               r"(prints|returns|yields|reports|gives|outputs|carries|lists|shows|"
@@ -748,9 +751,15 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
         # nothing about past-tense answers (#13900 review, finding 2) — and it is pinned by the
         # witnesses below, which assert the OPPOSITE of a skip: a claim that is an answer is
         # graded wherever it sits on the line, whatever surrounds it — the gap between the
-        # command and the verb is any run of up to 40 characters with no newline and no sentence
-        # terminator (see the matcher), and punctuation between the verb and the answer is
-        # stripped. The exceptions are the residuals THIS docstring declares (a
+        # command and the verb is a run of separator UNITS (the four kinds stated at the
+        # constants, not a character class), and the budget and the boundary differ BY SUBJECT:
+        # the FULL command admits at most 40 units and the ABBREVIATION is unbounded; in both, a
+        # SOFT break is crossed and a BLANK line is the boundary, `;` and `|` stop the wide gap
+        # and a `.` does not. ⛔ An earlier form of this sentence said "up to 40 characters with no
+        # newline and no sentence terminator", which was wrong on four counts at once — measured
+        # (#13900 review, verification round, P2): a newline is crossed, the abbreviation's gap is
+        # unbounded, a `.` is not a terminator, and the budget counts UNITS (a tag or a bracket is
+        # one, however long). The exceptions are the residuals THIS docstring declares (a
         # hard-wrapped ANSWER, a verb or an answer word outside the listed classes, a pronoun
         # subject), and they are named THERE, not left to be inferred from this sentence.
         #
@@ -1694,6 +1703,30 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         "the arm SKIPPED a bare `&` that forms no entity (`R&D`) — it was graded at "
         "`ff83caa198`, so the entity unit narrowed the gap below what the previous rule "
         "admitted (#13900 review, cycles 9-13)")
+    # ⛔ A SOFT BREAK IS CROSSED INSIDE A UNIT TOO, AND EACH UNIT KIND GETS ITS OWN WITNESS
+    # (#13900 review, verification round, P2, MEASURED). The comment beside `_TAG` / `_BRACKET`
+    # says "three holes, each reproduced on the LIVE document" — and before this block NOTHING
+    # asserted any of them: reverting all three (the bracket's interior, the quoted attribute's
+    # value, the tag catch-all's `'`) left this suite byte-for-byte identical, which is this
+    # file's own rule — "a unit with no witness is a claim and not a test" — failing in the
+    # direction that matters, because the fix could be silently reverted. Each row is ONE line,
+    # and each returned `[]` under the reverted form (measured against the pre-fix constants).
+    for _refuted in ("`-- tortoise/` [the census\nsection above] prints FIVE paths",
+                     '`-- tortoise/`<span title="a\nb">prints TWO paths',
+                     "`-- tortoise/`<that row's own path> prints TWO paths",
+                     "`-- tortoise/`[a\\]b] prints TWO paths"):
+        assert _typed_answers_to_tortoise_cmd(_refuted, "-- tortoise/"), (
+            f"the arm SKIPPED {_refuted!r} — a soft break inside a bracket, a soft break inside "
+            "a tag's quoted value, a bare apostrophe in a tag and an ESCAPED character in a "
+            "label are each one unit; each was measured `[]` when its unit was narrowed "
+            "(#13900 review, verification round, P2)")
+    # …AND THE BRACKET UNIT IS IN THE **WIDE** GAP TOO, which no row reached either: `;` STOPPS
+    # the wide gap, so this claim parses ONLY if the bracketed run is one unit there. Dropping
+    # `_BRACKET` from `_GAP_FULL` reds this row and nothing else (measured).
+    assert _typed_answers_to_tortoise_cmd(
+        f"`{_full_subject}` in the note [a; b] above prints TWO paths", _full_subject), (
+        "the WIDE gap's bracketed unit is gone — a `;` inside a bracket must not stop the gap "
+        "(#13900 review, verification round, P2)")
     # ⛔ A SOFT BREAK IS GRADED, A PARAGRAPH BREAK IS THE BOUNDARY (kept from `7557a52cf5`,
     # whose measurement this replaces the earlier "hard wrap is a residual" pin with a measured
     # one). A single newline is a CommonMark SOFT BREAK — the claim continues — so the wrapped
@@ -1715,6 +1748,26 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     assert _time.monotonic() - _t0 < 2.0, (
         "the separator's alternatives are ambiguous again — 28 spaces after the subject took "
         "longer than 2 s, and at `d38f9152af` 24 spaces alone took 15.8 s (measured)")
+    # ⛔ AND THE SAME BOUND FOR AN AMBIGUOUS UNIT, WHICH THE SPACES ROW CANNOT SEE (#13900
+    # review, verification round, P2, MEASURED). Spaces are unambiguous, so timing them proves
+    # nothing about the alternations that ARE ambiguous: `\\.` and `[^\]\n]` both consume a
+    # backslash-led pair, and the tag catch-all admits `'` that the quoted branch also consumes.
+    # MEASURED growth of an unterminated `<a''''…` run (no verb, so the gap is fully explored):
+    # n=20 0.004 s, n=24 0.024 s, n=26 0.068 s, n=28 0.194 s — ≈×1.7 per character.
+    # ⚠️ DECLARED RESIDUAL, not a fixed hole: that cost is EXPONENTIAL in the run length and is
+    # left as one, deliberately — making the alternations disjoint (excluding `\` and `'` from
+    # the single-character classes) CHANGES which inputs parse and is therefore a behaviour change
+    # this cycle did not measure. What is pinned is that it does not get WORSE, and what is
+    # declared is that it exists: the live tree's slowest file is 16.7 ms and 855 files take
+    # ~1.0 s, so the hazard is a future document with a long unterminated tag or label, not today's
+    # tree. A `docs/` file that reds this row is a RESOURCE regression to be measured, not a red
+    # to be silenced.
+    _t0 = _time.monotonic()
+    _typed_answers_to_tortoise_cmd("`-- tortoise/`<a" + "'" * 28, "-- tortoise/")
+    assert _time.monotonic() - _t0 < 2.0, (
+        "an ambiguous UNIT's alternatives exploded — an unterminated 28-character tag run took "
+        "longer than 2 s; measured 0.194 s at this head, growing ≈×1.7 per character "
+        "(#13900 review, verification round, P2)")
     # ⛔ AND THE PUNCTUATION CYCLE 9 MEASURED UNGRADED (#13900 review, cycle 9, P1): each of
     # these returned `[]` when the separator was an enumerated character class.
     for _refuted in ("`-- tortoise/` — prints ONE path at this head.",
