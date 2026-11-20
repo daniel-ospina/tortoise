@@ -1742,8 +1742,11 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # live-store reads" paragraph). Read them there; do NOT copy the digits here: those
     # counts are live (`test_13557_13558_reachable_reads.py` is an actively growing
     # module), so a second copy is a copy that goes stale with nothing reddening. This
-    # paragraph is a POINTER precisely so that no number is restated — if you find one
-    # here, it is a regression, not a record.
+    # paragraph is a POINTER precisely so that no COVERAGE COUNT from that block is
+    # restated here — if you find a count of read sites, of ladder rungs, or of scanned
+    # modules, it is a regression, not a record. (The "three" above is the size of the
+    # #12631 race — three rows for this key — not a coverage figure, and it is a fact
+    # about a past merge that cannot go stale.)
     # The row's licence is the narrow, sufficient one: the probe's ANSWER is reused, and
     # the probe is what decides `@_docker_only`.
     "test_13557_13558_reachable_reads.py": [
