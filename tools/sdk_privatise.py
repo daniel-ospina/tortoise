@@ -234,6 +234,27 @@ SWEEP_NAMES = 66
 #: red — those two names are RETIRED public spellings (`#4282`/`#13899`) which the SDK's `__getattr__`
 #: answers with an `AttributeError` migration hint rather than forwarding, so they were latent runtime
 #: failures, not style.
+#: ⛔ RE-CUT AGAIN onto `origin/main` `6fbd96f270` → (11804, "e0c67cf6a5e97d20"), MEASURED with
+#: `--repin` on THIS tree. The value is the same one `origin/main` observes on its OWN tree
+#: (`uv run python tools/sdk_privatise.py --repin` in a clean checkout of `6fbd96f270` prints
+#: `(11804, 'e0c67cf6a5e97d20')`), so NONE of the rows below the previous pin are this PR's:
+#: the four typed references this lane exists to fix were already re-pointed on `main` by
+#: `#13973` (`tests/test_13826_write_gate.py` calls `_ingest_corpus` at `6fbd96f270`, and this
+#: PR's diff no longer touches that file at all), so `typed references still pointing at a
+#: public name: 0` on both sides. The +10 over `main`'s own pin of 11794 are the BASE's, from
+#: the merges that landed while this PR waited (`#13914`, `#13950`, `#13972`-era); they are not
+#: enumerated here, because a row list taken from another head is the D5 rot this repo forbids
+#: (`docs/epics/2026-11-04-7949-extractor-v4-capstone/05-verify.md`, deviation D5). ⛔ The
+#: practical effect is that `main`'s `--check` is RED on its own tree at `6fbd96f270` and this
+#: re-cut turns it green; re-derive the pair with `--repin`, never by arithmetic on the last one.
+#:
+#: RE-CUT AGAIN → still (11822, "05e0ff542dfb8e62") by `#13919`, merging `origin/main`
+#: `3d99bd51d6` into `chore/4211-edge-census-mac`. Both trees were re-measured for THIS merge rather
+#: than carried forward: `origin/main` `3d99bd51d6` on its OWN tree prints
+#: (11804, "e0c67cf6a5e97d20") — identical to the pair its own block above records, so that merge
+#: moved neither side's number — and the merged tree prints (11822, "05e0ff542dfb8e62"), i.e. the
+#: same 11804 + this PR's declared +18 (the two census files, row by row above). `--check` on the
+#: merged tree: `typed references still pointing at a public name: 0`, exit 0.
 SWEEP_RESIDUE = (11822, "05e0ff542dfb8e62")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
