@@ -3790,9 +3790,15 @@ def test_declaration_path_rejects_undeclared():
     # #12631: the `test_13557_13558_reachable_reads.py` row's arm is anchored at BOTH
     # ends, and that narrowing is a CLAIM the row's own comment makes — so it is
     # enforced here, not just written. Scoped to the SAME declared file, per the
-    # `test_unknown.py` lesson above. Two independent widenings red the negatives:
-    # dropping the `^…$` anchors makes the commented-out line "declared", and
-    # loosening the value to a bare variable name makes a different expression pass.
+    # `test_unknown.py` lesson above. THREE independent widenings red the negatives, one
+    # per end of the anchor plus the value: dropping the `^` makes the commented-out line
+    # "declared"; loosening the value to a bare variable name makes a different
+    # expression pass; and dropping the `$` alone is the one that is easy to miss and
+    # worst — `_MUTATION_RE` is applied to WHOLE source and `_uri_mutation_sites` yields
+    # ONE STRIPPED LINE PER MATCH, so a single line carrying a second mutation
+    # (`monkeypatch.setenv(...); monkeypatch.delenv(...)`) yields that same line twice
+    # and an unanchored arm would declare BOTH, letting the `delenv` ride along silently
+    # (#11083). With `$` the row declares neither and both red, which is fail-closed.
     assert _is_declared(
         "test_13557_13558_reachable_reads.py",
         'monkeypatch.setenv("TORTOISE_DB_URI", _uri())')
@@ -3802,6 +3808,13 @@ def test_declaration_path_rejects_undeclared():
     assert not _is_declared(
         "test_13557_13558_reachable_reads.py",
         'monkeypatch.setenv("TORTOISE_DB_URI", uri)')
+    assert not _is_declared(
+        "test_13557_13558_reachable_reads.py",
+        'monkeypatch.setenv("TORTOISE_DB_URI", _uri()); '
+        'monkeypatch.delenv("TORTOISE_DB_URI")')
+    assert not _is_declared(
+        "test_13557_13558_reachable_reads.py",
+        'monkeypatch.setenv("TORTOISE_DB_URI", _uri())  # pinned lane')
 
 
 def test_restoration_exemption_boundary():
