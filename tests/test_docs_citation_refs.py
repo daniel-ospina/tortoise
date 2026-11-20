@@ -3055,23 +3055,31 @@ _D5_BLANK_COUNT_RE = re.compile(
     r"that counts the BLANK ones at YOUR head")
 
 
-#: ANY `grep -c…` prescription in the bundle, whatever command prefix and whatever sentence
-#: follows it, plus the shape that makes a prescription BLANK-class. Keying "exactly one" on
-#: the COMMAND PREFIX was still a spelling rather than a property (#13956 review, cycle 5):
+#: Every `grep` prescription whose `-`-anchored flag words are immediately followed by a quoted
+#: expression, plus the shape that makes a prescription BLANK-class.
+#: ⛔ THAT SENTENCE IS A SHAPE AND NOT A PROMISE ABOUT SPELLING (#13995 review, P2 — MEASURED).
+#: Earlier cuts claimed EVERY count prescription in the bundle regardless of how it was prefixed
+#: or worded, which is the false-PASS guarantee #13962 was filed against. That claim is FALSE in
+#: both directions: the reader does not see `grep -cE ^[+-]$` (unquoted, `[]`), and it DOES read
+#: `grep --count '^\+$'`, which is not `-c`-spelled at all. The shapes it does not read are listed
+#: at the foot of this block; that list is a list, not the closure. Keying "exactly one" on the
+#: COMMAND PREFIX was still a spelling rather than a property (#13956 review, cycle 5):
 #: this row already prescribes `git diff origin/main...HEAD -- tortoise/` five times, so a
 #: second BLANK-class command written that way left the count GREEN while the row carried two
 #: prescriptions — the retired, narrower one among the ungraded ones — and, in the other
 #: direction, it redded a legitimately different command of the same shape
-#: (`grep -cE '^\+import '`), which is an over-block on a correct document. Keying on the
-#: EXPRESSION is prefix-independent and refuses only what the class is: a count of the blank
-#: `+`/`-` lines.
+#: (`grep -cE '^\+import '`), which is an over-block on a correct document. Refusing on the
+#: CLASS (a count of the blank `+`/`-` lines) rather than on the prefix is what avoids that
+#: over-block; the flag word below carries the SPELLING, because a shape is the most a guard of
+#: this kind can honestly claim.
 #:
-#: ⛔ AND THE FLAGS AND THE QUOTE ARE PART OF THE MATCH, BECAUSE "PREFIX-INDEPENDENT" WAS NOT
-#: (#13962, MEASURED). The cut above read `grep -c[A-Za-z]* '<expr>'` — ONE spelling of a count
-#: command — while claiming to read the expression "whatever command prefix". SEVEN other
-#: spellings of the SAME prescription left this arm GREEN, each measured by appending one line
-#: to the bundle and running the cell that calls `_d5_blank_count_expression` (`1 passed` for
-#: every one): `grep -Ec '^\+$'` (flag before the `c`), `grep -cE "^\+$"` (double-quoted
+#: ⛔ AND THE FLAGS AND THE QUOTE ARE PART OF THE MATCH — AN EARLIER CUT OF THIS BLOCK CALLED
+#: ITSELF "PREFIX-INDEPENDENT" AND IT WAS NOT (#13962, MEASURED). The cut above read
+#: `grep -c[A-Za-z]* '<expr>'` — ONE spelling of a count command — while claiming to read the
+#: expression "whatever command prefix". SEVEN other spellings of the SAME prescription left
+#: this arm GREEN, each measured by appending one line to the bundle and running the cell that
+#: calls `_d5_blank_count_expression` (`1 passed` for every one): `grep -Ec '^\+$'` (flag
+#: before the `c`), `grep -cE "^\+$"` (double-quoted
 #: expression), `grep -c -E '^\+$'` (flags split), `grep --count '^\+$'` (long form),
 #: `grep -c -- '^\+$'` (POSIX end-of-flags `--`), `grep -c --color=never '^\+$'` (a long flag
 #: WITH a value) and `grep -c $'^\+$'` (ANSI-C quoting). In every one the row carried TWO
@@ -3150,11 +3158,23 @@ def _requests_a_count(flags: str) -> bool:
 
 
 def _d5_count_prescriptions(bundle: str) -> list[str]:
-    """The EXPRESSION of every `grep` count command in `bundle`, whatever its spelling.
+    """The EXPRESSION of every `grep` count command in `bundle` whose flags are `-`-anchored
+    words immediately followed by a quoted expression.
+
+    ⛔ THAT IS A SHAPE, NOT A CLAIM ABOUT SPELLING, and the sentence it replaces claimed the other
+    thing (banned by `test_the_d5_count_reader_does_not_describe_itself_as_complete` —
+    #13995 review, P2). The count commands this does NOT read are named in
+    `_D5_ANY_COUNT_EXPR_RE`'s residual block above (an unquoted expression; a flag
+    whose argument is a SEPARATE word — `grep -m 2 -c '^+$'`, `grep -f FILE -c '^+$'`; a pattern
+    attached to its own flag — `-e'…'`; flags after the expression; another tool; a concatenation
+    past its first fragment), and every one of them is pinned in
+    `test_the_d5_count_reader_sees_one_command_however_it_is_spelled` — as `[]` for all but the
+    concatenation, which is pinned at its first fragment. So "every" here is bounded by that
+    list, and that list is a list rather than the closure.
 
     The count flag is what makes a `grep` a prescription to be counted, so the filter is
     `_requests_a_count`, never a spelling of the flag run. Measured control: each of #13962's
-    four mutants returns exactly one BLANK-class expression here, and the two filter stages in
+    SEVEN mutants returns exactly one BLANK-class expression here, and the two filter stages in
     the same cell (`grep -E`, `grep -vE`) return none.
     """
     return [
@@ -3200,7 +3220,7 @@ def _d5_blank_count_expression() -> str:
         "05-verify.md no longer states exactly one `git diff … | grep -cE '<expr>'` command "
         f"bound to the BLANK-line class (found {found!r}), so this arm executes nothing")
     # ⛔ THE GATE ABOVE COUNTS PRESCRIPTIONS ANYWHERE IN THE BUNDLE, AND IT COUNTS THEM WHATEVER
-    # THEIR FLAG SPELLING (#13962 — the four mutants on `_D5_ANY_COUNT_EXPR_RE`); THIS ONE BINDS THE
+    # THEIR FLAG SPELLING (#13962 — the SEVEN mutants on `_D5_ANY_COUNT_EXPR_RE`); THIS ONE BINDS
     # EXECUTED EXPRESSION TO THE CLASS (#13956 review, P2 — MEASURED). The two are NOT
     # equivalent, and the gap is a fail-open on the exact defect this cell exists to retire: a
     # second, correctly-spelled BLANK-class prescription anywhere in the bundle keeps
@@ -3342,6 +3362,66 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
         "a concatenated expression must be read as its FIRST fragment only — if it is now read "
         "whole, the comment's concatenation bullet is stale; if it is not read at all, the "
         "fragment claim is stale (#13995 review rounds 1-2)")
+
+
+#: The completeness claims about `_D5_ANY_COUNT_EXPR_RE` that #13995's reviews retired, each
+#: paired with the PRE-FIX text it was cut from. Every needle is assembled from fragments so that
+#: it appears contiguously in the pre-fix snippet and NEVER in this file's own source — otherwise
+#: the ban row below would match the ban itself.
+_D5_RETIRED_OVERCLAIMS = (
+    ("prescription in the bundle, "  "whatever command prefix",
+     "#: ANY `grep -c…` prescription in the bundle, "  "whatever command prefix and whatever "
+     "sentence"),
+    ("EXPRESSION is "  "prefix-independent",
+     "#: EXPRESSION is "  "prefix-independent and refuses only what the class is"),
+    ("count command in `bundle`, "  "whatever its spelling",
+     '    """The EXPRESSION of every `grep` count command in `bundle`, '  'whatever its spelling.'),
+)
+
+
+def test_the_d5_count_reader_does_not_describe_itself_as_complete():
+    """#13995 — the reader's prose may not promise more than its own residual list gives.
+
+    ⛔ NON-VACUOUS BY CONSTRUCTION, which is why a prose finding gets a cell at all. Each needle
+    below is a substring of the PRE-FIX tree, so this test REDS on the code both review rounds
+    graded — it is not a test written beside a wording edit, it IS the wording edit asserted. The
+    checks run in the control direction first: every needle must still be found in the pre-fix
+    snippet it was cut from (a typo'd needle is an inert ban, and an inert ban is the failure
+    this file bans elsewhere in the document).
+
+    The defect: `_D5_ANY_COUNT_EXPR_RE`'s header claimed ANY count prescription regardless of how
+    it was prefixed and worded, the same block called the reader prefix-independent eleven lines
+    above a paragraph opening "BECAUSE … WAS NOT", and `_d5_count_prescriptions`'s docstring (the
+    first thing a fixer reads about the function) claimed every count command regardless of
+    spelling — while the reader does not read the shapes its own residual block declares. One
+    guard, three present-tense completeness claims refuted in its own block, and this file's rule
+    (`_typed_answers_to_tortoise_cmd`'s closing sentence) is that a guard may be narrow but may
+    not describe itself as complete. #13962's category-A argument is that a lane reads such a
+    sentence as a guarantee and does not check — so the sentence is the defect, not a nit.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    for needle, pre_fix in _D5_RETIRED_OVERCLAIMS:
+        assert needle in pre_fix, (
+            f"retired-over-claim needle {needle!r} is not in the pre-fix snippet {pre_fix!r} — "
+            "the row is inert and would let the completeness claim back in (#13995 review, P2)")
+        assert needle not in source, (
+            f"`tests/test_docs_citation_refs.py` states {needle!r} again. That is a completeness "
+            "claim about `_D5_ANY_COUNT_EXPR_RE`, and the reader does not read the shapes its "
+            "own residual block declares — so the claim is false, and it is precisely the "
+            "false-PASS guarantee #13962 was filed against. State the SHAPE instead: "
+            "`-`-anchored flag words immediately followed by a quoted expression "
+            "(#13995 review, P2)")
+    # …and the replacement must be PRESENT, so this cannot pass by deleting both halves — the
+    # shape sentence lives once on the constant and once on the helper, and each is checked.
+    for where, shape_claim in (
+            ("the constant's header",
+             "`-`-anchored flag words are immediately followed by a quoted"),
+            ("the helper's docstring",
+             "whose flags are `-`-anchored\n    words immediately followed by a quoted")):
+        assert shape_claim in source, (
+            f"the shape sentence that replaced the retired over-claims is gone from {where} — a "
+            "deletion is not a fix; the reader's scope must be stated as the SHAPE it reads "
+            "(#13995 review, P2)")
 
 
 def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have():
