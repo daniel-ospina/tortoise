@@ -297,6 +297,44 @@ def test_a_non_loopback_store_is_refused_without_an_explicit_opt_in(harness):
         harness._assert_loopback(host, "record database", False)
 
 
+def test_a_dsn_whose_host_cannot_be_parsed_is_refused_not_skipped(harness):
+    """⛔ THE DECISION, not the leaf — the guard must DECIDE, not skip.
+
+    `_assert_loopback` was already pinned; the `if host:` in front of it was not,
+    and `host` is `None` for two legal libpq spellings that both reach a REMOTE
+    host — so the guard was skipped exactly when it could not decide, on the path
+    where `run()` seeds that store and `teardown()` deletes rows by `org_id`.
+    """
+    unresolvable = (
+        # URI with the host in the query string (PostgreSQL §34.1.1)
+        "postgresql:///tortoise_record?host=db.prod.example.com",
+        # …and the whitespace conninfo, the other legal spelling
+        "host=db.prod.example.com dbname=tortoise_record",
+    )
+    for dsn in unresolvable:
+        assert harness.urlsplit(dsn).hostname is None, dsn  # ← the SKIP condition
+        with pytest.raises(harness.CannotRun) as refused:
+            harness._assert_local_record_dsn(dsn, False)
+        assert "NON-LOCAL" in str(refused.value)
+        # …and the deliberate act still works, so a real remote run is possible.
+        harness._assert_local_record_dsn(dsn, True)
+
+    for dsn in ("postgresql://u:p@127.0.0.1:5432/tortoise_record",
+                "postgresql://u:p@localhost/tortoise_record"):
+        harness._assert_local_record_dsn(dsn, False)
+    harness._assert_local_record_dsn(None, False)
+
+    # The CALL SITE too: `run()` must go through the decision, or the guard is
+    # one `if host:` away from being skipped again.
+    tree = ast.parse(MODULE_PATH.read_text())
+    run_node = next(n for n in ast.walk(tree)
+                    if isinstance(n, ast.FunctionDef) and n.name == "run")
+    called = {(c.func.attr if isinstance(c.func, ast.Attribute)
+               else getattr(c.func, "id", ""))
+              for c in ast.walk(run_node) if isinstance(c, ast.Call)}
+    assert "_assert_local_record_dsn" in called, sorted(called)
+
+
 def test_a_reordered_poison_moves_the_distance_WITH_the_row(harness):
     """The misalignment the review caught: ids permuted, distances not.
 
@@ -308,7 +346,7 @@ def test_a_reordered_poison_moves_the_distance_WITH_the_row(harness):
     truth_rows = [("a", 0.1), ("b", 0.2), ("c", 0.3)]
     pairs = [("a", 0.1), ("b", 0.2), ("c", 0.3)]
     poisoned = harness.poison(pairs, truth_rows, "order")
-    assert [k for k, _d in poisoned][0] == "b"
+    assert next(k for k, _d in poisoned) == "b"
     cmp_ = harness.compare(truth_rows, [k for k, _d in poisoned],
                            candidate_distances=[d for _k, d in poisoned])
     assert cmp_["order"] == "diverged"
@@ -462,7 +500,7 @@ def test_the_tie_tolerance_is_tight_enough_to_see_a_re_rank(harness):
     bucket width and must still report `diverged`.
     """
     truth_rows = [("a", 0.1), ("b", 0.1 + 2e-6), ("c", 0.5)]
-    assert (0.1 + 2e-6) - 0.1 > harness.TIE_TOL
+    assert harness.TIE_TOL < (0.1 + 2e-6) - 0.1
     cmp_ = harness.compare(truth_rows, ["b", "a", "c"])
     assert cmp_["order"] == "diverged", (
         "a re-rank across two distances just outside TIE_TOL was excused as a "
@@ -603,7 +641,8 @@ def test_the_vector_poison_moves_the_victim_beyond_the_whole_corpus(harness):
         "metric the gated scan arm ranks by — so the poison is invisible there")
     # …and it does not touch any other row.
     assert [r.key for r in perturbed] == [r.key for r in rows]
-    assert all(a.embedding == b.embedding for a, b in zip(perturbed, rows)
+    assert all(a.embedding == b.embedding
+               for a, b in zip(perturbed, rows, strict=True)
                if a.key != "anchor")
 
 

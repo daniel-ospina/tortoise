@@ -64,6 +64,7 @@ Exit codes: ``0`` parity within policy · ``1`` a required comparison diverged �
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -163,9 +164,7 @@ class Row:
             return False
         if self.status in TERMINAL_STATUSES:
             return False
-        if self.outdated:
-            return False
-        return True
+        return not self.outdated
 
 
 def _unit(hot: int, dim: int = DIM) -> list[float]:
@@ -353,7 +352,10 @@ def compare(truth_rows: list[tuple[str, float]], candidate_ids: list[str],
                               f"{len(cand)} candidate ids"}
     elif candidate_distances is not None:
         worst, worst_delta = None, 0.0
-        for key, dist in zip(cand, candidate_distances):
+        # `strict=True` because the branch above already returned when the two
+        # lengths disagree — so it is free here, and it doubles as a second guard
+        # rather than a second spelling of the same truncation.
+        for key, dist in zip(cand, candidate_distances, strict=True):
             if key not in distance_of or dist is None or not math.isfinite(float(dist)):
                 continue
             delta = abs(float(dist) - float(distance_of[key]))
@@ -380,7 +382,7 @@ def compare(truth_rows: list[tuple[str, float]], candidate_ids: list[str],
         def _unmeasurable(d) -> bool:
             return d is None or not math.isfinite(float(d))
 
-        unmeasured = sum(1 for _k, d in zip(cand, candidate_distances)
+        unmeasured = sum(1 for _k, d in zip(cand, candidate_distances, strict=True)
                          if _unmeasurable(d) or _k not in distance_of)
         distance = {"ok": worst_delta <= distance_tol and unmeasured == 0,
                     "max_delta": worst_delta, "worst": worst,
@@ -513,6 +515,31 @@ def _assert_loopback(host: str, what: str, allow_remote: bool) -> None:
         f"--allow-remote-writes if you really mean it.")
 
 
+def _assert_local_record_dsn(dsn: str | None, allow_remote: bool) -> None:
+    """Refuse a record DSN that is not PROVABLY local — including one we cannot parse.
+
+    ⛔ THE DECISION, not just the leaf. ``urlsplit(...).hostname`` is ``None`` for
+    two legal libpq spellings which BOTH reach a remote host — a URI carrying the
+    host in its query string (``postgresql:///db?host=db.example.com``) and the
+    whitespace conninfo form (``host=db.example.com dbname=x``; PostgreSQL's own
+    §34.1.1 admits either). Written as ``host = …; if host:`` the guard therefore
+    SKIPPED exactly when it could not decide, on the path where ``run()`` seeds
+    that store and ``teardown()`` deletes by ``org_id`` — a no-op on the
+    destructive path the README advertises as safety property R1.
+
+    ``tortoise.config.is_loopback_uri`` is this repo's fail-closed predicate for
+    the same question (an absent hostname is NOT loopback, ``tortoise/config.py:375``);
+    this restates its rule with the refusal that names ``--allow-remote-writes``,
+    so an unresolvable host is refused unless the caller opts in deliberately.
+    """
+    if not dsn:
+        return
+    host = urlsplit(dsn).hostname
+    _assert_loopback(
+        host or "<host not resolvable — cannot PROVE it is local>",
+        "record database", allow_remote)
+
+
 def app_role_dsn(dsn: str) -> str:
     parts = urlsplit(dsn)
     query = parse_qs(parts.query)
@@ -558,7 +585,7 @@ class RecordStore:
                 out["pgvector"] = row[0] if row else None
                 cur.execute("SHOW server_version")
                 out["postgres"] = cur.fetchone()[0]
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001, RUF100
             out["error"] = f"{type(e).__name__}: {e}"
         return out
 
@@ -646,10 +673,8 @@ class GraphStore:
         self.g = self.client.select_graph(graph)
 
     def reset(self) -> None:
-        try:
+        with contextlib.suppress(Exception):  # a missing graph is the goal
             self.g.delete()
-        except Exception:  # noqa: BLE001 — a missing graph is the goal
-            pass
         self.g = self.client.select_graph(self.graph_name)
 
     def seed(self, rows: list[Row]) -> None:
@@ -690,7 +715,7 @@ class GraphStore:
                 "CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding) "
                 f"OPTIONS {{dimension: {DIM}, similarityFunction: 'cosine'{extra}}}")
             return "cypher"
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001, RUF100
             if "already" in str(e).lower():
                 return "existing"
             try:
@@ -699,7 +724,7 @@ class GraphStore:
                     f"OPTIONS {{dimension: {DIM}, similarityFunction: 'cosine', "
                     f"'HNSW'{extra}}}")
                 return "procedure"
-            except Exception as e2:  # noqa: BLE001
+            except Exception as e2:  # noqa: BLE001, RUF100
                 if "already" in str(e2).lower():
                     return "existing"
                 raise
@@ -749,7 +774,7 @@ class GraphStore:
                     pretty = (f"{text[0]}.{text[1:3]}.{int(text[3:])}"
                               if text.isdigit() and len(text) == 5 else str(ver))
                     out["falkordb"] = f"{pretty} (module ver {ver})"
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001, RUF100
             out["error"] = f"{type(e).__name__}: {e}"
         return out
 
@@ -811,10 +836,8 @@ class GraphStore:
         return {"rows": distances, "mechanism": mechanism, "trace": trace}
 
     def close(self) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self.client.close()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 # ── the run ─────────────────────────────────────────────────────────────────
@@ -828,9 +851,7 @@ def run(args) -> dict:
     graph = f"graph_13906_parity_{run_id}"
     graph_name = f"g13906parity{run_id}"
 
-    host = urlsplit(args.record_dsn).hostname if args.record_dsn else None
-    if host:
-        _assert_loopback(host, "record database", args.allow_remote_writes)
+    _assert_local_record_dsn(args.record_dsn, args.allow_remote_writes)
     if args.graph_port:
         _assert_loopback(args.graph_host, "graph store", args.allow_remote_writes)
 
@@ -873,7 +894,6 @@ def run(args) -> dict:
         # oracle stays on the unperturbed corpus, which is the point.
         store_rows = perturb_for_vector_poison(rows) if args.poison == "vector" else rows
         store.seed(store_rows)
-        rows_ours = [r for r in rows if r.tenant == "ours"]
 
         # ── record arm ────────────────────────────────────────────────────
         # ⛔ A record-leg FAILURE must arrive as a NAMED divergence, not a
@@ -887,7 +907,7 @@ def run(args) -> dict:
         for qid, qvec in queries:
             try:
                 rec_answers[qid] = record.read(qvec, k)
-            except Exception as e:  # noqa: BLE001 — record_vector's four, by name
+            except Exception as e:  # noqa: BLE001, RUF100 — record_vector's four, by name
                 rec_answers[qid] = []
                 rec_errors[qid] = f"{type(e).__name__}: {e}"
         report["arms"]["record"] = {"driver": "pgvector HNSW, cosine"}
@@ -959,8 +979,8 @@ def run(args) -> dict:
             idx_ids = [key for key, _d in index_answers[qid]["rows"]]
 
             if args.poison in ("id", "order", "recall"):
-                rec_pairs = poison(list(zip(rec_ids, rec_dists)), t_cos,
-                                   args.poison)
+                rec_pairs = poison(list(zip(rec_ids, rec_dists, strict=True)),
+                                   t_cos, args.poison)
                 rec_ids = [key for key, _d in rec_pairs]
                 rec_dists = [d for _key, d in rec_pairs]
             if args.poison == "vector":
@@ -1268,7 +1288,7 @@ def main(argv: list[str] | None = None) -> int:
     except CannotRun as e:
         print(f"cannot run: {e}", file=sys.stderr)
         return 2
-    except Exception as e:  # noqa: BLE001 — see the docstring below
+    except Exception as e:  # noqa: BLE001, RUF100 — see the docstring below
         # ⛔ A DRIVER OR SETUP FAILURE MUST NOT EXIT 1. A missing `psycopg2`, an
         # unreachable Postgres, a refused role, a seeding/teardown/index error —
         # each used to escape as a traceback and exit **1**, which this module's
