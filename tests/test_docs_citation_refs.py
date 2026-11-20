@@ -3741,15 +3741,17 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
 
     What it does NOT decide is stated at the assertion that uses it: a regex equivalent to this
     class but spelled differently (`^[+]$|^[-]$`, a lookahead, a POSIX class) is not recognised —
-    a declared residual, not a claim of closure. ⛔ AND ONE OVER-RECOGNITION SURVIVES, ALSO
-    DECLARED (#14026 review note — MEASURED): `^(-|+)$` is graded as this class while
-    `grep -cE '^(-|+)$'` REFUSES the command outright (`Unmatched ( or \`, rc 2), so it counts
-    nothing at all — a row prescribing it reds on its own returncode guard, not here. It is not
-    repaired because grep's accept/refuse here is positional and order-dependent rather than a
-    property of the branches: `^(+|-)$`, the SAME two branches the other way round, runs and
-    counts `2` (measured, with a `+ at start of expression` warning), so "a branch starting with a
-    quantifier is not a literal" would refuse a spelling this file accepts. ⛔ A LONE SIGN IS NOT
-    THIS CLASS, AND IS REJECTED
+    a declared residual, not a claim of closure. ⛔ AND A LEADING QUANTIFIER IS REJECTED TOO
+    (#14026 review round 2, P2 — MEASURED). POSIX leaves `+`, `*`, `?` and `{` at the START of an
+    expression — or straight after `(` or `|` — UNDEFINED, and GNU grep 3.11 does two different
+    things with it, NEITHER of which is this class: `^(-|+)$` and `^(\-|+)$` make grep REFUSE the
+    whole command (`Unmatched ( or \`, rc 2 — it counts nothing), while `^(+|-)$` and `^(+|\-)$`
+    only WARN (`+ at start of expression`) and then quantify an EMPTY expression, so they match
+    the `-` line and every blank line and never the `+` line — on a file holding just `+` and `x`,
+    `grep -cE '^(+|-)$'` prints 0 where this class prints 1. That silent miscount is the worse
+    direction, so a branch beginning with one of those four characters is not a sign literal: a
+    literal sign is written `\+` or inside a bracket, and `^(-|\+)$` (measured 2) stays accepted.
+    ⛔ A LONE SIGN IS NOT THIS CLASS, AND IS REJECTED
     (#13995 review round 10,
     P2 — MEASURED): this test used to accept `^-$` and `^+$` as "one `+` or one `-`", which is
     false in both directions — `^-$` counts ONLY the removed half (measured `0` on a diff whose
@@ -3792,6 +3794,17 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
         return False
     signs = set()
     for alternative in alternatives:
+        # ⛔ A BRANCH THAT BEGINS WITH A QUANTIFIER IS NOT A SIGN LITERAL (#14026 review round 2,
+        # P2 — MEASURED). POSIX leaves `+`/`*`/`?`/`{` at the start of an expression (and right
+        # after `(` or `|`) UNDEFINED, and GNU grep 3.11 answers two ways, neither of them this
+        # class: after a `|` it REFUSES the command (`grep: Unmatched ( or \(`, rc 2 — nothing is
+        # counted), and in the FIRST branch it only WARNS and then quantifies an EMPTY expression,
+        # so `^(+|-)$` matches the blank line and the `-` line and never the `+` line (measured:
+        # 0 on a file holding just `+` and `x`, where this class gives 1). A silent miscount, not
+        # a refused command — the direction that matters, so it is refused here rather than
+        # declared. A literal sign is written `\+` or inside a bracket; `^(-|\+)$` stays accepted.
+        if alternative[:1] in ("+", "*", "?", "{"):
+            return False
         # ⛔ AN ESCAPE CONSUMES ONE CHARACTER, NOT EVERY BACKSLASH IN THE BRANCH (#14026 review,
         # P2 — MEASURED). `alternative.replace("\\", "")` deleted them ALL, so `^(\\+|\\-)$` —
         # one-or-more LITERAL backslashes, `grep -cE` -> 1 on the 6-line probe — was graded as
@@ -4308,21 +4321,39 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
             "count — as a second prescription it would leave the `== 1` arm GREEN while the row "
             "carried an instrument that does not count this class (#14026 review, P2)")
 
-    # ⛔ ONE OVER-RECOGNITION SURVIVES AND IS PINNED AS A DECLARED RESIDUAL, not left as an
-    # implication of the loops above (#14026 review note). `^(-|+)$` IS graded as this class while
-    # `grep -cE '^(-|+)$'` refuses the command outright — `Unmatched ( or \`, rc 2 (measured) — so
-    # it counts nothing, and a row prescribing it reds on the count command's own returncode guard
-    # rather than shipping a wrong GREEN. The predicate is deliberately NOT tightened here: grep's
-    # accept/refuse on these two spellings is positional, not a property of the branches —
-    # `^(+|-)$`, the same two branches in the other order, RUNS and counts `2` (measured) — so any
-    # rule that refuses one refuses a spelling this file accepts. This assertion exists so the
-    # residual is STATED; if the predicate is ever repaired, it reds here and the docstring at
-    # `_d5_counts_the_blank_class` must be corrected in the same commit (#1469-1470).
-    assert _d5_counts_the_blank_class("^(-|+)$") is True, (
-        "the declared residual `^(-|+)$` is no longer GRADED as the blank class. That may be an "
-        "improvement — but the docstring at `_d5_counts_the_blank_class` names it as the one "
-        "over-recognition this predicate still makes, so update that docstring in the same commit "
-        "instead of leaving a false statement beside the code (#14026 review note)")
+    # ⛔ AND THE LEADING-QUANTIFIER SHAPE IS REFUSED, not declared (#14026 review round 2, P2 —
+    # EACH MEASURED on the 6-line probe, plus a 2-line probe holding just `+` and `x`). POSIX
+    # leaves a quantifier at the START of an expression (or right after `(`/`|`) undefined, and
+    # grep 3.11 answers two ways — REFUSING the command (rc 2, so it counts nothing) or WARNING and
+    # quantifying an EMPTY expression, which matches the `-` line and every blank line and never
+    # the `+` line. Only the first way is caught by the count command's returncode guard, so the
+    # second had to be closed here: with `^(+|-)$` as a row's expression the real
+    # `_blank_line_count("+\n-\n")` returns 1 where this class returns 2 and NOTHING reds.
+    for not_the_class, why in (
+        ("^(-|+)$", "makes grep REFUSE the whole command (`Unmatched ( or \\`, rc 2 — it counts "
+                     "nothing): POSIX leaves a quantifier at the start of a branch undefined"),
+        ("^(\\-|+)$", "is the same refused command with the first branch escaped (rc 2, measured "
+                        "— grep warns `+ at start of expression` and then gives up)"),
+        ("^(+|-)$", "only WARNS and then quantifies an EMPTY expression, so it counts the `-` "
+                     "line AND every blank line and never the `+` line (measured: on a file "
+                     "holding just `+` and `x` it prints 0 where this class prints 1)"),
+    ):
+        assert not _d5_counts_the_blank_class(not_the_class), (
+            f"{not_the_class!r} must NOT be graded as the blank class: it {why}. A leading "
+            "quantifier is not a sign literal — that is the silent-miscount direction, which no "
+            "returncode guard catches (#14026 review round 2, P2)")
+    # …and the same shape's other escaped branch order, which greps RUNS and RUNS WRONG (measured
+    # 2 on the 6-line probe, but the two lines it matches are the `-` line and the blank line).
+    assert not _d5_counts_the_blank_class("^(+|\\-)$"), (
+        "'^(+|\\-)$' must NOT be graded as the blank class: its leading `+` quantifies an empty "
+        "expression, so grep warns and counts the `-` line plus every blank line and never the "
+        "`+` line (#14026 review round 2, P2)")
+    # …and the control that proves the rule does not over-reject: reordered with the sign ESCAPED,
+    # the alternation is this class (grep measures 2, and it matches the `+` and `-` lines).
+    assert _d5_counts_the_blank_class(r"^(-|\+)$"), (
+        "'^(-|\\+)$' counts exactly the blank class (measured 2, matching the `+` and `-` lines) "
+        "— if the leading-quantifier rule has started refusing it, that rule has over-rejected "
+        "a spelling this file accepts (#14026 review round 2, P2)")
 
 
 def test_the_d5_count_reader_reads_the_LONG_spelling_and_the_ABBREVIATION_of_a_flag():
