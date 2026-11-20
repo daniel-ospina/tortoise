@@ -93,7 +93,7 @@ class TestDe2e1FullPassFreshness:
 
             t0 = datetime.now(timezone.utc)  # noqa: UP017
             random.seed(FIXED_SEED)
-            result = f.sdk.dream(full=True)
+            result = f.sdk._dream(full=True)
             t1 = datetime.now(timezone.utc)  # noqa: UP017
 
             assert result["converged_all"] is True
@@ -156,7 +156,7 @@ class TestDe2e1FullPassFreshness:
             raw.query = failing
             random.seed(FIXED_SEED)
             try:
-                f.sdk.dream(full=True)
+                f.sdk._dream(full=True)
                 pytest.fail("expected injected write-back failure to propagate")
             except RuntimeError as exc:
                 assert "injected write-back failure" in str(exc)
@@ -190,7 +190,7 @@ class TestDe2e1FullPassFreshness:
             # operator-less claim has no confidence (no EP runs on it — the
             # trivial stamp is stamp-only by design).
             random.seed(FIXED_SEED)
-            result = f.sdk.dream(full=True)
+            result = f.sdk._dream(full=True)
             assert result["converged_all"] is True
             reachable = [pid for r in f.regions for pid in r.claims]
             for pid in all_claims:
@@ -220,7 +220,7 @@ class TestDe2e3OperatorLessWrite:
 
             t0 = datetime.now(timezone.utc)  # noqa: UP017
             random.seed(FIXED_SEED)
-            result = sdk.dream(dirty_only=True)
+            result = sdk._dream(dirty_only=True)
             t1 = datetime.now(timezone.utc)  # noqa: UP017
 
             assert result["converged"] is True
@@ -248,12 +248,12 @@ class TestDe2e4FreshnessLifecycle:
         try:
             a = _make_claim(sdk, "a")
             b = _make_claim(sdk, "b")
-            sdk.create_operator("IMPL", b["id"], [a["id"]])
-            sdk.set_point_baseline(b["id"], 8.0, 2.0)
+            sdk._create_operator("IMPL", b["id"], [a["id"]])
+            sdk._set_point_baseline(b["id"], 8.0, 2.0)
             random.seed(FIXED_SEED)
-            sdk.dream(dirty_only=True)
+            sdk._dream(dirty_only=True)
 
-            point = sdk.get_point(a["id"])
+            point = sdk._get_point(a["id"])
             assert "lastDreamedAt" in point, (
                 f"get_point must expose lastDreamedAt, got keys "
                 f"{sorted(point.keys())}"
@@ -272,12 +272,12 @@ class TestDe2e4FreshnessLifecycle:
             proj = sdk._get_proj()
             a = _make_claim(sdk, "a")
             b = _make_claim(sdk, "b")
-            sdk.create_operator("IMPL", b["id"], [a["id"]])
-            sdk.set_point_baseline(b["id"], 8.0, 2.0)
+            sdk._create_operator("IMPL", b["id"], [a["id"]])
+            sdk._set_point_baseline(b["id"], 8.0, 2.0)
 
             # First pass: converges + stamps.
             random.seed(FIXED_SEED)
-            sdk.dream(dirty_only=True)
+            sdk._dream(dirty_only=True)
             assert sdk._dirty_roots == set(), "converged pass clears dirty roots"
             stamp_first = _read_stamp(proj, a["id"])
             assert stamp_first is not None
@@ -292,7 +292,7 @@ class TestDe2e4FreshnessLifecycle:
 
             # Promote back → must call _mark_dirty (the fix): a re-enters
             # the dirty roots.
-            res = sdk.promote_point(a["id"])
+            res = sdk._promote_point(a["id"])
             assert res["promoted"] is True, res
             assert a["id"] in sdk._dirty_roots, (
                 "promote_point must mark the promoted claim dirty "
@@ -306,7 +306,7 @@ class TestDe2e4FreshnessLifecycle:
             # Next pass re-stamps + re-derives (dirty ≠ stale; the next pass
             # touches it because it re-entered the dirty set).
             random.seed(FIXED_SEED)
-            result = sdk.dream(dirty_only=True)
+            result = sdk._dream(dirty_only=True)
             assert result["converged"] is True
             assert a["id"] in result["affected_claims"]
             stamp_second = _read_stamp(proj, a["id"])
@@ -328,12 +328,12 @@ class TestDe2e4FreshnessLifecycle:
         sdk, _db = fresh_sdk(prefix="tortoise_epic903_d4_")
         try:
             # Draft is explicit since #1088 — a no-status create_point is LIVE.
-            draft = sdk.create_point("statement", "draft-only claim", dedup=False,
+            draft = sdk._create_point("statement", "draft-only claim", dedup=False,
                                      status="draft")
             assert draft["id"] in sdk._dirty_roots
 
             random.seed(FIXED_SEED)
-            result = sdk.dream(dirty_only=True)
+            result = sdk._dream(dirty_only=True)
             assert result["converged"] is True
             assert result["affected_claims"] == [], (
                 "draft-excluded run produces zero affected claims"
@@ -345,12 +345,12 @@ class TestDe2e4FreshnessLifecycle:
 
             # After promote the claim re-enters/remains dirty and is
             # re-dreamed (draft→promote path).
-            res = sdk.promote_point(draft["id"])
+            res = sdk._promote_point(draft["id"])
             assert res["promoted"] is True, res
             assert draft["id"] in sdk._dirty_roots
 
             random.seed(FIXED_SEED)
-            result2 = sdk.dream(dirty_only=True)
+            result2 = sdk._dream(dirty_only=True)
             assert result2["converged"] is True
             assert draft["id"] not in sdk._dirty_roots, (
                 "post-promote pass re-dreams the claim and clears its root"
@@ -375,7 +375,7 @@ class TestDe2e4FreshnessLifecycle:
                     params={"id": pid, "ts": STAMP_OLD},
                 )
             random.seed(FIXED_SEED)
-            result = f.sdk.dream(dirty_only=True)
+            result = f.sdk._dream(dirty_only=True)
             assert result["converged"] is False, "F3 must fail convergence"
             # Stamps unchanged by the failed run (retention semantics).
             assert _read_stamp(proj, a_id) == STAMP_OLD
@@ -393,7 +393,7 @@ class TestDe2e4FreshnessLifecycle:
         f = f3_nonconvergent()
         try:
             proj = f.sdk._get_proj()
-            result = f.sdk.dream(full=True)
+            result = f.sdk._dream(full=True)
             assert result["converged_all"] is False, "F3 must fail full pass"
             # No claim may carry a stamp from the failed full pass.
             rows = proj.g.query(
@@ -431,10 +431,10 @@ class TestDe2e4FreshnessLifecycle:
             assert f.isolated_claim not in before
 
             # Local mode: a live claim with a real operator neighborhood.
-            res_local = f.sdk.dream(dirty_only=True, stamp_dreamed_at=False)
+            res_local = f.sdk._dream(dirty_only=True, stamp_dreamed_at=False)
             assert res_local["converged"] is True
             # Full mode (includes the operator-less scan path).
-            res_full = f.sdk.dream(full=True, stamp_dreamed_at=False)
+            res_full = f.sdk._dream(full=True, stamp_dreamed_at=False)
             assert res_full["converged_all"] is True
 
             after = stamped_ids()
@@ -467,7 +467,7 @@ class TestLastDreamedAtIndex:
             proj1 = sdk1._get_proj()
             a = _make_claim(sdk1, "idx-a")
             b = _make_claim(sdk1, "idx-b")
-            sdk1.create_operator("IMPL", a["id"], [b["id"]], label="op1")
+            sdk1._create_operator("IMPL", a["id"], [b["id"]], label="op1")
             # The embedded index exists after init.
             rows = proj1.g.query("CALL db.indexes()").result_set
             point_idx = {
@@ -507,7 +507,7 @@ class TestLastDreamedAtIndex:
         f = f2_staleness_regions()
         try:
             random.seed(FIXED_SEED)
-            result = f.sdk.dream(full=True)
+            result = f.sdk._dream(full=True)
             assert "scanned_count" in result
             assert result["scanned_count"] >= 0
         finally:

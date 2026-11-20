@@ -532,10 +532,13 @@ _DOORS: frozenset[str] = frozenset({
     "tortoise/sdk.py:TortoiseSDK._doc_write",
     "tortoise/sdk.py:TortoiseSDK._journal_event_raw_write",
     "tortoise/sdk.py:TortoiseSDK._update_entity",
-    "tortoise/sdk.py:TortoiseSDK.create_point",
-    "tortoise/sdk.py:TortoiseSDK.ingest_corpus",
-    "tortoise/sdk.py:TortoiseSDK.link_source_to_entity",
-    "tortoise/sdk.py:TortoiseSDK.update_point",
+    # #12901 FINAL batch: these four were PRIVATISED (body unchanged, public spelling a
+    # tombstone). The DOOR is the same gate call site — only the enclosing `def` moved to
+    # the underscore spelling, which is what this inventory keys on.
+    "tortoise/sdk.py:TortoiseSDK._create_point",
+    "tortoise/sdk.py:TortoiseSDK._ingest_corpus",
+    "tortoise/sdk.py:TortoiseSDK._link_source_to_entity",
+    "tortoise/sdk.py:TortoiseSDK._update_point",
 })
 
 
@@ -979,7 +982,7 @@ def test_a_live_door_refuses_an_unapproved_pack_and_moves_nothing(
     sdk = dev_only_sdk
 
     with pytest.raises(UnapprovedKindNamespace):
-        sdk.create_point("marketing:contentPerformance", "probe content")
+        sdk._create_point("marketing:contentPerformance", "probe content")
 
     assert _approved(sdk) == frozenset({"dev"}), (
         "the refusal must land before the write: the approved set is unmoved")
@@ -1079,7 +1082,7 @@ def test_the_data_leg_keeps_existing_vocabulary_writable(
         "CREATE (n:Object {id:'o-existing', name:'ExistingProbe', "
         "objectKind:'marketing:product'})")
 
-    created = sdk.create_object("WritableProbe", objectKind="marketing:product")
+    created = sdk._create_object("WritableProbe", objectKind="marketing:product")
 
     assert created and created.get("id"), (
         "the data leg must keep the graph able to write the vocabulary its own "

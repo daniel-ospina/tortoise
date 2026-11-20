@@ -555,7 +555,7 @@ def provision_tenant(body: ProvisionRequest, authorization: str | None = None):
     try:
         # Use registry namespace for org management
         sdk = TortoiseSDK(namespace=REGISTRY_GRAPH)
-        result = sdk.org_create(org_name)
+        result = sdk._org_create(org_name)
         return ProvisionResponse(
             org_id=result["id"],
             org_name=result["name"],

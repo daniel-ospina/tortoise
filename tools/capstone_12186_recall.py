@@ -446,9 +446,9 @@ class _TracedSdk:
         self._sdk = sdk
         self._sink = sink
 
-    def tortoise_fts_query(self, *args, **kwargs):
+    def _tortoise_fts_query(self, *args, **kwargs):
         kwargs.setdefault("leg_trace", self._sink)
-        return self._sdk.tortoise_fts_query(*args, **kwargs)
+        return self._sdk._tortoise_fts_query(*args, **kwargs)
 
 
 def _query_rows(door: str, ctx: dict, query: str, limit: int) -> tuple[list[dict], dict]:
@@ -467,8 +467,8 @@ def _query_rows(door: str, ctx: dict, query: str, limit: int) -> tuple[list[dict
         # decided by the arm's own `TORTOISE_FUSED_RERANK` gate, not by this line —
         # which is why `user_search` is the shipped OFF arm and
         # `user_search_rerank` is the armed one from one env flag apart.
-        rows = ctx["sdk"].tortoise_fts_query(query, entity_type="object",
-                                             limit=limit, leg_trace=trace)
+        rows = ctx["sdk"]._tortoise_fts_query(query, entity_type="object",
+                                              limit=limit, leg_trace=trace)
     from tortoise.exceptions import HybridReadUnavailableError
     from tortoise.search_engine import require_hybrid_read
 
@@ -721,6 +721,25 @@ def mint_rate(pin: dict, by_id: dict, ctx: dict) -> dict:
     return out
 
 
+def _surface_name(declared: str | None) -> str | None:
+    """The door's SURFACE name, from the DECLARED spelling the registry carries.
+
+    ⛔ #12901 privatised 66 `TortoiseSDK` methods (`tools/sdk_privatise.py`), and
+    `tool_registry.py` records the `def` the class actually holds — so the same door
+    this artifact measured and recorded as `tortoise_fts_query` now binds as
+    `_tortoise_fts_query`. The BATCH renamed the spelling, it did NOT retire the door:
+    the method is the same method, reached by the same MCP tool over the same REST
+    route. Comparing the SURFACE name (one leading underscore stripped) keeps this
+    field answering its own question — "is `tortoise_search` still bound to the verb
+    the arms call?" — instead of re-pointing the committed record at a new spelling.
+    Same normaliser, same reason, as `tests/test_surface_manifest.py`'s `_surface_name`.
+    A DUNDER is not a private spelling, so it is returned unchanged.
+    """
+    if declared and declared.startswith("_") and not declared.startswith("__"):
+        return declared[1:]
+    return declared
+
+
 def _user_door_binding() -> dict:
     """The registry binding that makes the measured surface the USER's surface.
 
@@ -734,7 +753,7 @@ def _user_door_binding() -> dict:
     if tool is None:
         return {"tool": "tortoise_search", "present": False}
     rest = getattr(tool, "rest_spec", None)
-    sdk_method = getattr(tool, "sdk_method", None)
+    sdk_method = _surface_name(getattr(tool, "sdk_method", None))
     return {
         "tool": "tortoise_search",
         "present": True,
@@ -1030,7 +1049,7 @@ def run(args: argparse.Namespace) -> int:
         # (`tests/test_rerank_pool.py`'s census refuses an undisclosed re-pick at every
         # site; the ARMS below run the lever ON on purpose and are on its
         # intentional-keep list, with the reason recorded there).
-        sdk.tortoise_fts_query("warm", entity_type="object", limit=1,
+        sdk._tortoise_fts_query("warm", entity_type="object", limit=1,
                               _rerank_candidates=False)
         indexed, waited = wait_indexed(proj, len(rows))
         timings["index_wait_s"] = round(time.time() - t_mark, 1)

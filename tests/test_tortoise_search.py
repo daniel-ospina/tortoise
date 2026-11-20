@@ -137,18 +137,18 @@ def test_search_points_snippet():
 def test_sdk_fts_query_empty(sdk=None):
     if sdk is None:
         sdk = _new_sdk()
-    results = sdk.tortoise_fts_query("hello")
+    results = sdk._tortoise_fts_query("hello")
     assert results == []
 
 
 def test_sdk_fts_query_kind_filter(sdk=None):
     if sdk is None:
         sdk = _new_sdk()
-    sdk.create_point("statement", "quantum computing breakthroughs")
-    sdk.create_point("hypothesis", "quantum decoherence effects")
-    sdk.create_point("statement", "cookie recipe collection")
+    sdk._create_point("statement", "quantum computing breakthroughs")
+    sdk._create_point("hypothesis", "quantum decoherence effects")
+    sdk._create_point("statement", "cookie recipe collection")
 
-    results = sdk.tortoise_fts_query("quantum", kind="hypothesis")
+    results = sdk._tortoise_fts_query("quantum", kind="hypothesis")
     assert len(results) == 1
     assert results[0]["point_kind"] == "hypothesis"
 
@@ -157,22 +157,22 @@ def test_sdk_fts_query_text_matches_all(sdk=None):
     """P2 #49: context filter removed — FTS text query returns all matches."""
     if sdk is None:
         sdk = _new_sdk()
-    sdk.create_point("statement", "quantum computing")
-    sdk.create_point("statement", "quantum gravity")
-    sdk.create_point("statement", "quantum of solace")
+    sdk._create_point("statement", "quantum computing")
+    sdk._create_point("statement", "quantum gravity")
+    sdk._create_point("statement", "quantum of solace")
 
-    results = sdk.tortoise_fts_query("quantum")
+    results = sdk._tortoise_fts_query("quantum")
     assert len(results) >= 2, f"Expected >=2 quantum results, got {len(results)}"
 
 
 def test_sdk_fts_query_ranking_order(sdk=None):
     if sdk is None:
         sdk = _new_sdk()
-    sdk.create_point("statement", "puppies and kittens care")
-    sdk.create_point("statement", "quantum entanglement theory")
-    sdk.create_point("statement", "quantum field theory basics")
+    sdk._create_point("statement", "puppies and kittens care")
+    sdk._create_point("statement", "quantum entanglement theory")
+    sdk._create_point("statement", "quantum field theory basics")
 
-    results = sdk.tortoise_fts_query("quantum physics")
+    results = sdk._tortoise_fts_query("quantum physics")
     if len(results) >= 2:
         top_content = results[0]["content"]
         assert "quantum" in top_content, f"top result should be quantum-related, got: {top_content}"
@@ -182,9 +182,9 @@ def test_sdk_fts_query_limit(sdk=None):
     if sdk is None:
         sdk = _new_sdk()
     for i in range(20):
-        sdk.create_point("statement", f"quantum topic number {i}")
+        sdk._create_point("statement", f"quantum topic number {i}")
 
-    results = sdk.tortoise_fts_query("quantum", limit=5)
+    results = sdk._tortoise_fts_query("quantum", limit=5)
     assert len(results) == 5
 
 
@@ -192,18 +192,18 @@ def test_sdk_fts_query_invalid_limit(sdk=None):
     if sdk is None:
         sdk = _new_sdk()
     with pytest.raises(ValueError, match="limit"):
-        sdk.tortoise_fts_query("test", limit=0)
+        sdk._tortoise_fts_query("test", limit=0)
     with pytest.raises(ValueError, match="limit"):
-        sdk.tortoise_fts_query("test", limit=-1)
+        sdk._tortoise_fts_query("test", limit=-1)
 
 
 def test_sdk_fts_query_invalid_threshold(sdk=None):
     if sdk is None:
         sdk = _new_sdk()
     with pytest.raises(ValueError, match="threshold"):
-        sdk.tortoise_fts_query("test", threshold=-0.1)
+        sdk._tortoise_fts_query("test", threshold=-0.1)
     with pytest.raises(ValueError, match="threshold"):
-        sdk.tortoise_fts_query("test", threshold=1.1)
+        sdk._tortoise_fts_query("test", threshold=1.1)
 
 
 # ── #1348 pool floor ────────────────────────────────────────────────
@@ -212,19 +212,19 @@ def test_sdk_fts_query_pool_size_invalid(sdk=None):
     """pool_size < 1 must raise (#1348)."""
     if sdk is None:
         sdk = _new_sdk()
-    sdk.create_point("statement", "quantum physics test content")
+    sdk._create_point("statement", "quantum physics test content")
     with pytest.raises(ValueError, match="pool_size"):
-        sdk.tortoise_fts_query("quantum", limit=5, pool_size=0)
+        sdk._tortoise_fts_query("quantum", limit=5, pool_size=0)
     with pytest.raises(ValueError, match="pool_size"):
-        sdk.tortoise_fts_query("quantum", limit=5, pool_size=-3)
+        sdk._tortoise_fts_query("quantum", limit=5, pool_size=-3)
     # #1348 upper bound (code-review P2): 1-10000 inclusive, any mode.
     with pytest.raises(ValueError, match="pool_size"):
-        sdk.tortoise_fts_query("quantum", limit=5, pool_size=10001)
+        sdk._tortoise_fts_query("quantum", limit=5, pool_size=10001)
     # Boundary: 10000 is valid.
-    sdk.tortoise_fts_query("quantum", limit=5, pool_size=10000)
+    sdk._tortoise_fts_query("quantum", limit=5, pool_size=10000)
     # Full-scan mode also validates (no silent ignore).
     with pytest.raises(ValueError, match="pool_size"):
-        sdk.tortoise_fts_query(kind="statement", pool_size=0)
+        sdk._tortoise_fts_query(kind="statement", pool_size=0)
 
 
 def test_sdk_fts_query_pool_size_exact_override(sdk=None):
@@ -244,13 +244,13 @@ def test_sdk_fts_query_pool_size_exact_override(sdk=None):
     try:
         _env_clear_floor()
         for i in range(20):
-            sdk.create_point("statement", f"quantum topic number {i}")
+            sdk._create_point("statement", f"quantum topic number {i}")
         # pool_size above limit*2: pool is larger than limit → returned = limit (5).
-        results = sdk.tortoise_fts_query("quantum", limit=5, pool_size=12)
+        results = sdk._tortoise_fts_query("quantum", limit=5, pool_size=12)
         assert len(results) == 5
         # pool_size below limit*2 is an EXACT override (lowers): a 4-item pool
         # can return at most 4 results — NOT limit=5.
-        results = sdk.tortoise_fts_query("quantum", limit=5, pool_size=4)
+        results = sdk._tortoise_fts_query("quantum", limit=5, pool_size=4)
         assert len(results) == 4, f"exact pool_size=4 should cap results at 4, got {len(results)}"
     finally:
         _restore_embedder_get(_orig)
@@ -294,15 +294,15 @@ def test_sdk_fts_query_env_floor_raises_pool(sdk=None):
     if sdk is None:
         sdk = _new_sdk()
     for i in range(20):
-        sdk.create_point("statement", f"quantum topic number {i}")
+        sdk._create_point("statement", f"quantum topic number {i}")
     try:
         os.environ["TORTOISE_POOL_FLOOR"] = "80"
-        results = sdk.tortoise_fts_query("quantum", limit=5)
+        results = sdk._tortoise_fts_query("quantum", limit=5)
         assert len(results) == 5
         # Garbage env value falls back to the product's baked floor (120,
         # #1947/G2) — the returned list is still the caller's limit.
         os.environ["TORTOISE_POOL_FLOOR"] = "not-a-number"
-        results = sdk.tortoise_fts_query("quantum", limit=5)
+        results = sdk._tortoise_fts_query("quantum", limit=5)
         assert len(results) == 5
     finally:
         _env_clear_floor()
@@ -324,14 +324,14 @@ def test_sdk_fts_query_no_env_default_is_baked_120(sdk=None):
     try:
         _env_clear_floor()
         for i in range(20):
-            sdk.create_point("statement", f"quantum topic number {i}")
+            sdk._create_point("statement", f"quantum topic number {i}")
         # No env → baked floor 120 candidate window (limit*2 = 10 at
         # limit=5 is below it); the returned list is still the caller's limit.
-        results = sdk.tortoise_fts_query("quantum", limit=5)
+        results = sdk._tortoise_fts_query("quantum", limit=5)
         assert len(results) == 5
         # pool_size exact override below limit*2 LOWERS the pool (exact, not floor)
         # → at most 4 results from a 4-item pool.
-        results = sdk.tortoise_fts_query("quantum", limit=5, pool_size=4)
+        results = sdk._tortoise_fts_query("quantum", limit=5, pool_size=4)
         assert len(results) == 4
     finally:
         _restore_embedder_get(_orig)
@@ -368,19 +368,19 @@ def test_sdk_fts_query_baked_floor_candidate_window(sdk=None):
     try:
         _env_clear_floor()
         # unset env → baked floor 120: max(limit*2, 120)
-        sdk.tortoise_fts_query("quantum", limit=10)
+        sdk._tortoise_fts_query("quantum", limit=10)
         assert captured["limit"] == 120
-        sdk.tortoise_fts_query("quantum", limit=50)
+        sdk._tortoise_fts_query("quantum", limit=50)
         assert captured["limit"] == 120
         # limit*2 above the floor wins
-        sdk.tortoise_fts_query("quantum", limit=100)
+        sdk._tortoise_fts_query("quantum", limit=100)
         assert captured["limit"] == 200
         # env override still raises (and can exceed the baked floor)
         os.environ["TORTOISE_POOL_FLOOR"] = "300"
-        sdk.tortoise_fts_query("quantum", limit=10)
+        sdk._tortoise_fts_query("quantum", limit=10)
         assert captured["limit"] == 300
         # pool_size remains an EXACT override (lowers below the floor)
-        sdk.tortoise_fts_query("quantum", limit=10, pool_size=4)
+        sdk._tortoise_fts_query("quantum", limit=10, pool_size=4)
         assert captured["limit"] == 4
     finally:
         search_engine.degradation_chain = orig
@@ -393,19 +393,19 @@ def test_sdk_fts_query_full_scan_exempts_floor(sdk=None):
     wins; the RETURNED list is still bounded by the caller's `limit`."""
     if sdk is None:
         sdk = _new_sdk()
-    sdk.create_point("statement", "quantum alpha")
-    sdk.create_point("statement", "quantum beta")
-    sdk.create_point("statement", "quantum gamma")
+    sdk._create_point("statement", "quantum alpha")
+    sdk._create_point("statement", "quantum beta")
+    sdk._create_point("statement", "quantum gamma")
     try:
         os.environ["TORTOISE_POOL_FLOOR"] = "1"
         # limit=2 returned list is 2 (caller's limit wins), NOT capped by the
         # floor=1 (which would return 1 if the floor truncated the pool) and NOT
         # 100000 — the returned list respects the caller's limit.
-        results = sdk.tortoise_fts_query(kind="statement", limit=2)
+        results = sdk._tortoise_fts_query(kind="statement", limit=2)
         assert len(results) == 2
         # The floor never reduces the retrieval pool: limit=5 still returns 3
         # (all points) even with a floor of 1 — full-scan pool is exempt.
-        results = sdk.tortoise_fts_query(kind="statement", limit=5)
+        results = sdk._tortoise_fts_query(kind="statement", limit=5)
         assert len(results) == 3
     finally:
         _env_clear_floor()
@@ -415,26 +415,26 @@ def test_sdk_fts_query_min_confidence(sdk=None):
     if sdk is None:
         sdk = _new_sdk()
     with pytest.raises(ValueError, match="min_confidence"):
-        sdk.tortoise_fts_query("test", min_confidence=-0.1)
+        sdk._tortoise_fts_query("test", min_confidence=-0.1)
     with pytest.raises(ValueError, match="min_confidence"):
-        sdk.tortoise_fts_query("test", min_confidence=1.1)
+        sdk._tortoise_fts_query("test", min_confidence=1.1)
 
 
 def test_sdk_fts_query_invalid_order_by(sdk=None):
     if sdk is None:
         sdk = _new_sdk()
     with pytest.raises(ValueError, match="order_by"):
-        sdk.tortoise_fts_query("test", order_by="invalid")
+        sdk._tortoise_fts_query("test", order_by="invalid")
 
 
 def test_sdk_fts_query_full_scan(sdk=None):
     if sdk is None:
         sdk = _new_sdk()
-    sdk.create_point("statement", "point a")
-    sdk.create_point("statement", "point b")
-    sdk.create_point("hypothesis", "point c")
+    sdk._create_point("statement", "point a")
+    sdk._create_point("statement", "point b")
+    sdk._create_point("hypothesis", "point c")
 
-    results = sdk.tortoise_fts_query(kind="statement")
+    results = sdk._tortoise_fts_query(kind="statement")
     assert len(results) >= 2
     # Full-scan returns all of the kind, match_source should be structural
     if results:
@@ -453,7 +453,7 @@ def test_sdk_fts_query_vector_scores_populated():
     from tortoise.search_engine import SearchResult, SearchScores  # noqa: F401
 
     sdk = _new_sdk()
-    pid = sdk.create_point("statement", "quantum physics research")["id"]
+    pid = sdk._create_point("statement", "quantum physics research")["id"]
 
     # Mock degradation_chain to return vector + FTS fusion
     mock_raw = {
@@ -464,7 +464,7 @@ def test_sdk_fts_query_vector_scores_populated():
     with mock.patch(
         "tortoise.search_engine.degradation_chain", return_value=mock_raw
     ):
-        results = sdk.tortoise_fts_query("quantum")
+        results = sdk._tortoise_fts_query("quantum")
 
     assert len(results) >= 1, f"Expected at least 1 result, got {len(results)}"
     pid_result = next((r for r in results if r["id"] == pid), None)

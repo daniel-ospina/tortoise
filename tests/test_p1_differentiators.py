@@ -31,7 +31,7 @@ def sdk():
 
 
 def _make_point(sdk, **kw):
-    return sdk.create_point(kw.pop("kind", "statement"),
+    return sdk._create_point(kw.pop("kind", "statement"),
                             kw.pop("content", "test content"), **kw)
 
 
@@ -39,7 +39,7 @@ def _make_point(sdk, **kw):
 
 class TestProvenance:
     def test_extracted_from_stored_on_point(self, sdk):
-        p = sdk.create_point("statement", "claim about X",
+        p = sdk._create_point("statement", "claim about X",
                              extractedFrom="doc/01-research.md")
         assert p["extractedFrom"] == "doc/01-research.md"
 
@@ -48,7 +48,7 @@ class TestProvenance:
         fabricate a DOCUMENT (a document is a :Source with documentKind; the
         provenance Source stub has none, D10 #5026)."""
         proj = sdk._get_proj()
-        p = sdk.create_point("statement", "linked claim",
+        p = sdk._create_point("statement", "linked claim",
                              extractedFrom="doc/02-design.md")
         assert p["extractedFrom"] == "doc/02-design.md"
         docs = proj.g.query(
@@ -80,13 +80,13 @@ class TestProvenance:
 
 class TestTemporal:
     def test_valid_from_stored(self, sdk):
-        p = sdk.create_point("statement", "time-bound claim",
+        p = sdk._create_point("statement", "time-bound claim",
                              validFrom="2026-01-01", validTo="2026-12-31")
         assert p["validFrom"] == "2026-01-01"
         assert p["validTo"] == "2026-12-31"
 
     def test_valid_from_only(self, sdk):
-        p = sdk.create_point("statement", "open-ended",
+        p = sdk._create_point("statement", "open-ended",
                              validFrom="2026-06-01")
         assert p["validFrom"] == "2026-06-01"
         assert p.get("validTo") is None
@@ -99,11 +99,11 @@ class TestTemporal:
         # `get_historical_knowledge`'s `_covers` would then cover no instant and the
         # point would be silently unreachable from every temporal query.
         with pytest.raises(ValueError):
-            sdk.create_point("statement", "time-bound claim",
+            sdk._create_point("statement", "time-bound claim",
                              validFrom="2026-06-10", validTo="2026-06-01")
 
     def test_no_temporal_fields_backward_compat(self, sdk):
-        p = sdk.create_point("statement", "no temporal")
+        p = sdk._create_point("statement", "no temporal")
         assert "validFrom" not in p or p.get("validFrom") is None
         # still creates fine
         assert "id" in p
@@ -114,7 +114,7 @@ class TestTemporal:
 class TestStaleness:
     def test_fresh_point_not_stale(self, sdk):
         _make_point(sdk, content="fresh")
-        result = sdk.stale_points(days=30)
+        result = sdk._stale_points(days=30)
         assert result["count"] == 0
 
     def test_stale_point_detected(self, sdk):
@@ -125,7 +125,7 @@ class TestStaleness:
             "MATCH (n:Point {id:$id}) SET n.updatedAt='2020-01-01T00:00:00'",
             params={"id": p["id"]},
         )
-        result = sdk.stale_points(days=30)
+        result = sdk._stale_points(days=30)
         assert result["count"] >= 1
         assert any(s["id"] == p["id"] for s in result["stale"])
 
@@ -137,7 +137,7 @@ class TestStaleness:
                 "MATCH (n:Point {id:$id}) SET n.updatedAt='2020-01-01T00:00:00'",
                 params={"id": p["id"]},
             )
-        result = sdk.stale_points(days=30, limit=3)
+        result = sdk._stale_points(days=30, limit=3)
         assert result["count"] <= 3
 
 
@@ -145,25 +145,25 @@ class TestStaleness:
 
 class TestEntityLinking:
     def test_create_subject(self, sdk):
-        sub = sdk.create_subject("Max", subjectKind="person")
+        sub = sdk._create_subject("Max", subjectKind="person")
         assert sub["name"] == "Max"
         assert sub["subjectKind"] == "person"
         assert "id" in sub
 
     def test_subject_dedup_by_name(self, sdk):
-        sub1 = sdk.create_subject("Alice", subjectKind="person")
-        sub2 = sdk.create_subject("Alice", subjectKind="person")
+        sub1 = sdk._create_subject("Alice", subjectKind="person")
+        sub2 = sdk._create_subject("Alice", subjectKind="person")
         # Same name → merged; IDs may differ in SDK (MERGE uses name key, but we return what exists)
         assert sub1["name"] == sub2["name"]
 
     def test_create_object(self, sdk):
-        obj = sdk.create_object("Chess", objectKind="game")
+        obj = sdk._create_object("Chess", objectKind="game")
         assert obj["name"] == "Chess"
         assert obj["objectKind"] == "game"
 
     def test_object_dedup_by_name(self, sdk):
-        obj1 = sdk.create_object("Python")
-        obj2 = sdk.create_object("Python", objectKind="language")
+        obj1 = sdk._create_object("Python")
+        obj2 = sdk._create_object("Python", objectKind="language")
         assert obj1["name"] == obj2["name"]
 
 
@@ -172,7 +172,7 @@ class TestEntityLinking:
 class TestEntityProjection:
     def test_subject_added_propagates_to_graph(self, sdk):
         proj = sdk._get_proj()
-        sub = sdk.create_subject("Eve")  # noqa: F841
+        sub = sdk._create_subject("Eve")  # noqa: F841
         # Verify Subject node exists in graph
         rows = proj.g.query(
             "MATCH (s:Subject {name:'Eve'}) RETURN s.name, s.subjectKind"
@@ -182,7 +182,7 @@ class TestEntityProjection:
 
     def test_object_registered_propagates_to_graph(self, sdk):
         proj = sdk._get_proj()
-        obj = sdk.create_object("FalkorDB", objectKind="technology")  # noqa: F841
+        obj = sdk._create_object("FalkorDB", objectKind="technology")  # noqa: F841
         rows = proj.g.query(
             "MATCH (o:Object {name:'FalkorDB'}) RETURN o.name, o.objectKind"
         ).result_set
@@ -212,8 +212,8 @@ class TestStubs:
 class TestProvenanceChain:
     def test_provenance_with_matching_subject(self, sdk):
         """Point authoredBy matches a Subject → returns full chain."""
-        sdk.create_subject("pi-agent", subjectKind="agent")
-        p = sdk.create_point("statement", "A claim", authoredBy="pi-agent")
+        sdk._create_subject("pi-agent", subjectKind="agent")
+        p = sdk._create_point("statement", "A claim", authoredBy="pi-agent")
         # The chain is not an EP surface: the posterior gate is opted out, exactly as
         # `_check_confidence_provenance` (mcp_server) does the same for the live door.
         result = sdk.check_confidence(p["id"], include_provenance=True,
@@ -225,8 +225,8 @@ class TestProvenanceChain:
 
     def test_provenance_case_insensitive_match(self, sdk):
         """Case-insensitive authoredBy → Subject matching."""
-        sdk.create_subject("El Dato Team", subjectKind="team")
-        p = sdk.create_point("statement", "B claim", authoredBy="el dato team")
+        sdk._create_subject("El Dato Team", subjectKind="team")
+        p = sdk._create_point("statement", "B claim", authoredBy="el dato team")
         result = sdk.check_confidence(p["id"], include_provenance=True,
             require_calibration=False)['provenance']
         assert result["subject"] is not None
@@ -234,7 +234,7 @@ class TestProvenanceChain:
 
     def test_provenance_no_author(self, sdk):
         """Point without authoredBy → returns point info only."""
-        p = sdk.create_point("statement", "no author claim")
+        p = sdk._create_point("statement", "no author claim")
         result = sdk.check_confidence(p["id"], include_provenance=True,
             require_calibration=False)['provenance']
         assert result["point"]["authoredBy"] == ""
@@ -242,7 +242,7 @@ class TestProvenanceChain:
 
     def test_provenance_no_matching_subject(self, sdk):
         """Point authoredBy has no matching Subject → subject is None."""
-        p = sdk.create_point("statement", "orphan", authoredBy="ghost")
+        p = sdk._create_point("statement", "orphan", authoredBy="ghost")
         result = sdk.check_confidence(p["id"], include_provenance=True,
             require_calibration=False)['provenance']
         assert result["subject"] is None
@@ -256,7 +256,7 @@ class TestProvenanceChain:
     def test_provenance_delegation_chain(self, sdk):
         """Subject with outgoing relationships → delegation list."""
         proj = sdk._get_proj()
-        sub = sdk.create_subject("Alice", subjectKind="person")
+        sub = sdk._create_subject("Alice", subjectKind="person")
         # ponytail: manually create related nodes for delegation test
         proj.g.query(
             "CREATE (r:Role {title:'Engineer'}) "
@@ -267,7 +267,7 @@ class TestProvenanceChain:
             "CREATE (s)-[:HAS_ROLE]->(r)",
             params={"sid": sub["id"]},
         )
-        p = sdk.create_point("statement", "engineered", authoredBy="Alice")
+        p = sdk._create_point("statement", "engineered", authoredBy="Alice")
         result = sdk.check_confidence(p["id"], include_provenance=True,
             require_calibration=False)['provenance']
         assert len(result["delegation"]) >= 1

@@ -27,7 +27,7 @@ def sdk():
     """Create a fresh SDK connected to an isolated test graph."""
     db_path = f"{tempfile.mkdtemp(prefix='tt_211_')}/test.db"
     s = TortoiseSDK(db_path)
-    s.test_guard = lambda: None  # bypass production guard for test graph
+    s._test_guard = lambda: None  # bypass production guard for test graph
     yield s
     s.close()
     shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
@@ -40,8 +40,8 @@ class TestCreateEventAboutEdges:
 
     def test_create_event_wires_about_point(self, sdk):
         """create_event with aboutPoint creates aboutPoint edge."""
-        pt = sdk.create_point("statement", "deploy completed successfully")
-        ev = sdk.create_event("deploy-2026", "deployment",
+        pt = sdk._create_point("statement", "deploy completed successfully")
+        ev = sdk._create_event("deploy-2026", "deployment",
                               aboutPoint=pt["id"])
         proj = sdk._get_proj()
         r = proj.g.query(
@@ -53,8 +53,8 @@ class TestCreateEventAboutEdges:
 
     def test_create_event_wires_about_document(self, sdk):
         """create_event with aboutDocument creates aboutDocument edge."""
-        doc = sdk.create_document("meeting-notes-42", "notes")
-        ev = sdk.create_event("sync-42", "meeting",
+        doc = sdk._create_document("meeting-notes-42", "notes")
+        ev = sdk._create_event("sync-42", "meeting",
                               aboutDocument=doc["id"])
         proj = sdk._get_proj()
         # D10: the document is a :Source keyed url = doc id.
@@ -67,12 +67,12 @@ class TestCreateEventAboutEdges:
 
     def test_create_event_wires_multiple_about_edges(self, sdk):
         """create_event with all four about* params creates all edges."""
-        subj = sdk.create_subject("dave", "engineer")
-        obj = sdk.create_object("release-3", "release")
-        pt = sdk.create_point("statement", "all tests green")
-        doc = sdk.create_document("release-notes-3", "notes")
+        subj = sdk._create_subject("dave", "engineer")
+        obj = sdk._create_object("release-3", "release")
+        pt = sdk._create_point("statement", "all tests green")
+        doc = sdk._create_document("release-notes-3", "notes")
 
-        ev = sdk.create_event("release-event-3", "release",
+        ev = sdk._create_event("release-event-3", "release",
                               aboutSubject=subj["id"],
                               aboutObject=obj["id"],
                               aboutPoint=pt["id"],
@@ -100,8 +100,8 @@ class TestCreateEventAboutEdges:
         fallback (which minted stub Subject nodes named after the id and
         wired spurious aboutSubject edges). The edge must land on the
         canonical node only, with zero stubs."""
-        subj = sdk.create_subject("ida", "engineer")
-        ev = sdk.create_event("prefixed-id-event", "meeting",
+        subj = sdk._create_subject("ida", "engineer")
+        ev = sdk._create_event("prefixed-id-event", "meeting",
                               aboutSubject=subj["id"])
         proj = sdk._get_proj()
         eid = ev["eventId"]
@@ -130,7 +130,7 @@ class TestCreateEventAboutEdges:
         """#1516: a PLAIN-NAME aboutSubject still runs the name fallback
         (creates/resolves the Subject by name) — the guard must only skip
         id-shaped values, not names."""
-        ev = sdk.create_event("name-event", "meeting",
+        ev = sdk._create_event("name-event", "meeting",
                               aboutSubject="brand-new-team")
         proj = sdk._get_proj()
         r = proj.g.query(
@@ -144,8 +144,8 @@ class TestCreateEventAboutEdges:
         """#1516: same invariants for the aboutObject branch (obj-<hex26>)
         — the four about* guards are copy-paste identical, so cover more
         than one to catch a future divergence."""
-        obj = sdk.create_object("gadget-x", "product")
-        ev = sdk.create_event("prefixed-obj-event", "deployment",
+        obj = sdk._create_object("gadget-x", "product")
+        ev = sdk._create_event("prefixed-obj-event", "deployment",
                               aboutObject=obj["id"])
         proj = sdk._get_proj()
         eid = ev["eventId"]
@@ -195,7 +195,7 @@ class TestCreateEventAboutEdges:
             "Subject", minted,
             {"name": "acme", "subjectKind": "company", "status": "live"},
             "SubjectAdded")
-        ev = sdk.create_event("minted-id-event", "meeting", aboutSubject=minted)
+        ev = sdk._create_event("minted-id-event", "meeting", aboutSubject=minted)
         proj = sdk._get_proj()
         # no stub whose name is the identifier
         stub = proj.g.query(
@@ -225,7 +225,7 @@ class TestCreateEventAboutEdges:
         """
         bogus = "sub-0123456789ABCDEF0123456789"
         assert _is_entity_id(bogus) is True, "id-shaped spelling must be refused"
-        ev = sdk.create_event("uppercase-id-event", "meeting",
+        ev = sdk._create_event("uppercase-id-event", "meeting",
                               aboutSubject=bogus)
         proj = sdk._get_proj()
         stub = proj.g.query(
@@ -256,7 +256,7 @@ class TestCreateEventAboutEdges:
         """
         caplog.set_level(logging.WARNING, logger="tortoise.sdk")
         bogus = "sub-0123456789abcdef0123456789"  # valid shape, absent node
-        ev = sdk.create_event("unresolved-id-event", "meeting",
+        ev = sdk._create_event("unresolved-id-event", "meeting",
                               aboutSubject=bogus)
         proj = sdk._get_proj()
         stub = proj.g.query(
@@ -287,8 +287,8 @@ class TestCreateEventAboutEdges:
         on the Subject named `acme`, never on the Event whose eventId is it.
         """
         # an Event whose eventId collides with the aboutSubject value
-        sdk.create_event("first event", "meeting", _server_id="acme")
-        ev = sdk.create_event("second event", "meeting", aboutSubject="acme")
+        sdk._create_event("first event", "meeting", _server_id="acme")
+        ev = sdk._create_event("second event", "meeting", aboutSubject="acme")
         proj = sdk._get_proj()
         # the intended Subject exists and carries the edge
         r = proj.g.query(
@@ -315,8 +315,8 @@ class TestAboutEdgesRegression:
 
     def test_create_event_wires_about_subject_still_works(self, sdk):
         """create_event with aboutSubject still works (pre-existing)."""
-        subj = sdk.create_subject("eve", "pm")
-        ev = sdk.create_event("planning", "meeting",
+        subj = sdk._create_subject("eve", "pm")
+        ev = sdk._create_event("planning", "meeting",
                               aboutSubject=subj["id"],
                               subject="eve")
         proj = sdk._get_proj()
@@ -329,8 +329,8 @@ class TestAboutEdgesRegression:
 
     def test_create_event_wires_about_object_still_works(self, sdk):
         """create_event with aboutObject still works (pre-existing)."""
-        obj = sdk.create_object("component-x", "service")
-        ev = sdk.create_event("deploy-x", "deployment",
+        obj = sdk._create_object("component-x", "service")
+        ev = sdk._create_event("deploy-x", "deployment",
                               aboutObject=obj["id"],
                               subject="frank")
         proj = sdk._get_proj()
@@ -440,8 +440,8 @@ class TestProjApplyAboutMetaKeys:
 
     def test_create_event_wires_about_point_still_works(self, sdk):
         """SDK create_event still wires aboutPoint edge (regression for #486)."""
-        pt = sdk.create_point("statement", "deploy completed successfully")
-        ev = sdk.create_event("deploy-486", "deployment",
+        pt = sdk._create_point("statement", "deploy completed successfully")
+        ev = sdk._create_event("deploy-486", "deployment",
                               aboutPoint=pt["id"])
         proj = sdk._get_proj()
         r = proj.g.query(

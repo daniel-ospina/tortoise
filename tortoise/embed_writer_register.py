@@ -213,14 +213,16 @@ claim and a slogan:
   `projection.entities::_upsert_object`, `projection.entities::_upsert_document`,
   `projection.entities::_upsert_event`, `record_writer::derived_embedding_columns`,
   `cache_projection::fill_missing_row_vectors`, `derived_embedding::encode`,
-  `sdk::create_point`, `sdk::update_point`. ⛔ That list is
+  `sdk::_create_point`, `sdk::_update_point`. ⛔ That list is
   not counted here and is not its own authority — the INSTRUMENT is:
   `tests/test_embed_writer_register.py::test_the_seam_CALL_population_is_the_one_the_register_names`
   re-derives it at HEAD and reds when this sentence loses a member or names one discovery does not
   class that way. (The sentence itself is prose a lane edits — a pin can read it, not rewrite it;
   the red is what makes the edit unavoidable, which is the whole mechanism.) It
   had to be re-derived once already: this paragraph named four of the CALL population
-  (`api::_point`, `projection::_revise_point`, `sdk::create_point`, `sdk::update_point` — none of them
+  (`api::_point`, `projection::_revise_point`, `sdk::create_point`, `sdk::update_point` — the SDK
+  pair now spelled `sdk::_create_point` / `sdk::_update_point` by #12901's FINAL batch, and
+  named here as it read at the time — none of them
   an AST exemplar) while the other five reach the seam by the `encode_for_row` CALL
   branch, one file over — and they do NOT hold the container-key shape (`set_embedding_clause(…)`
   for subject/object/document, a Cypher graph-property SET (`n.embedding=…`) fed from the params
@@ -803,10 +805,10 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
         ),
     ),
     (
-        "tortoise.sdk::ingest_corpus",
+        "tortoise.sdk::_ingest_corpus",
         WriterClass(
             RECOGNISED_PRODUCER,
-            "`tortoise/sdk.py::ingest_corpus` — `self._session_embedding(...)` + "
+            "`tortoise/sdk.py::_ingest_corpus` — `self._session_embedding(...)` + "
             "`set_embedding_clause(\"e\")`, the same canonical chain",
             "#5008",
             stores=("Event",),  # `set_embedding_clause("e")` in both of its write arms

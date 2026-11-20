@@ -195,7 +195,7 @@ def measure(*, replay: bool) -> dict:
                 "legacy retrieval this rank measures; unset it and re-run"
             )
             out["lane_mode"] = {"connected_assembly": connected_assembly}
-            hits = sdk.tortoise_fts_query(
+            hits = sdk._tortoise_fts_query(
                 q["question"],
                 limit=caps["limit"],
                 pool_size=caps["pool_size"],

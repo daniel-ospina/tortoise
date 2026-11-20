@@ -151,11 +151,11 @@ def sdk(tmp_path):
 def _make(s, label: str, name: str) -> str:
     """A throwaway node of ``label``, created through its own public door."""
     if label == "Point":
-        return s.create_point("statement", f"{name} body", name=name)["id"]
+        return s._create_point("statement", f"{name} body", name=name)["id"]
     if label == "Object":
-        return s.create_object(name, "core:strategy")["id"]
+        return s._create_object(name, "core:strategy")["id"]
     if label == "Subject":
-        return s.create_subject(name, "core:organization")["id"]
+        return s._create_subject(name, "core:organization")["id"]
     raise AssertionError(label)
 
 
@@ -288,7 +288,7 @@ def test_a_point_superseded_the_documented_way_may_restate_its_status(sdk):
     """
     old = _make(sdk, "Point", "edge-old")
     new = _make(sdk, "Point", "edge-new")
-    sdk.supersede_point(old, new)
+    sdk._supersede_point(old, new)
     before = _row(sdk, "Point", old)
     assert before[1] is None, (
         "fixture drifted: `supersede_point` is expected to name the successor "
@@ -504,7 +504,7 @@ def test_a_journalled_successorless_supersession_still_rebuilds(tmp_path):
     sdk = TortoiseSDK(str(tmp_path / "t12592r.db"),
                       event_log_path=str(journal))
     try:
-        oid = sdk.create_object("legacy-unsuccessored", "core:strategy")["id"]
+        oid = sdk._create_object("legacy-unsuccessored", "core:strategy")["id"]
         # The PRE-GUARD producer's shape: status only, no carrier.
         sdk._journal_entity_mutation("Object", oid, "supersede",
                                      state={"status": "superseded"})
@@ -1681,7 +1681,7 @@ def test_the_POINT_arms_self_successor_gate_does_not_dispatch_to_the_caller(sdk)
 
         # The gate lives in ``supersede_point``, so the DIRECT door is pinned too.
         with pytest.raises(ValueError) as exc:
-            sdk.supersede_point(node, successor(node))
+            sdk._supersede_point(node, successor(node))
         assert "must differ" in str(exc.value), str(exc.value)
 
     # The genuine self-successor refusal is unchanged, and a DIFFERENT successor
@@ -1791,7 +1791,7 @@ def test_a_SUCCESSOR_that_only_RENDERS_as_the_old_id_is_not_a_self_supersession(
 
         # The DIRECT door is pinned too — it carries its own copy of the gate.
         with pytest.raises(ValueError):
-            sdk.supersede_point(node, successor) if label == "Point" \
+            sdk._supersede_point(node, successor) if label == "Point" \
                 else sdk.supersede_knowledge(node, successor)
 
 
@@ -1892,7 +1892,7 @@ def test_the_ENTRY_ARMS_resolve_every_id_on_the_bytes_the_write_sends(sdk):
     render_live.render_as = live
 
     with pytest.raises(ValueError) as exc:
-        sdk.supersede_point(render_live, _make(sdk, "Point", "render-src-succ"))
+        sdk._supersede_point(render_live, _make(sdk, "Point", "render-src-succ"))
     assert "already terminal" in str(exc.value), (
         f"the source guard read the RENDERED id instead of the base content: "
         f"{exc.value!r}")

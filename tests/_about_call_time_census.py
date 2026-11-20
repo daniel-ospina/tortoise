@@ -424,7 +424,9 @@ CALL_TIME_REL: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "tortoise/sdk.py",
-        "create_direct_edge",
+        # ⛔ #12901 privatised the door (`create_direct_edge` -> `_create_direct_edge`);
+        # the resolver walks the tree, so the entry has to name the `def` it finds.
+        "_create_direct_edge",
         "`rel_type`, `op_type` (IMPL / NAND, `create_operator`'s edge set) — the "
         "existence pre-count and attribute SET for an operator edge",
     ),

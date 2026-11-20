@@ -1299,7 +1299,7 @@ class TestTheArmsConstruction:
         seen = []
 
         class _Sdk:
-            def tortoise_fts_query(self, text, **kwargs):
+            def _tortoise_fts_query(self, text, **kwargs):
                 seen.append(embeddings.EmbeddingModel.get())
                 return []
 

@@ -106,9 +106,9 @@ def fresh_sdk(graph_name=None):
 
 
 def make_point(sdk, content, kind="statement", tier=None):
-    p = sdk.create_point(kind, content, status="live", dedup=False)
+    p = sdk._create_point(kind, content, status="live", dedup=False)
     if tier is not None:
-        sdk.set_point_baseline(p["id"], *tier)
+        sdk._set_point_baseline(p["id"], *tier)
     return p
 
 
@@ -116,7 +116,7 @@ def make_impl_chain(sdk, label="C"):
     """T0 source S -[IMPL]-> unevidenced claim C. Returns (src, claim, op_id)."""
     src = make_point(sdk, f"T0 source supporting {label}", tier=TIER_MAP["T0"])
     claim = make_point(sdk, f"Downstream claim {label}")
-    op = sdk.create_operator("IMPL", src["id"], [claim["id"]])
+    op = sdk._create_operator("IMPL", src["id"], [claim["id"]])
     return src, claim, op["id"]
 
 
@@ -182,7 +182,7 @@ class TestWeightMovesByDeclaredDecay:
         base = resolved_weight(sdk, op_id, claim["id"])
         assert base == pytest.approx(IMPL_BASE_WEIGHT)
 
-        sdk.mitigate_operator(op_id, f"mitigation at {strength}", strength)
+        sdk._mitigate_operator(op_id, f"mitigation at {strength}", strength)
         observed = resolved_weight(sdk, op_id, claim["id"])
 
         expected = base * mitigation_dampening_factor(strength)
@@ -209,7 +209,7 @@ class TestWeightMovesByDeclaredDecay:
         _src, claim, op_id = make_impl_chain(sdk)
 
         conf_unmitigated = get_conf(run_ep(sdk), claim["id"])
-        sdk.mitigate_operator(op_id, "major counter-evidence", 0.50)
+        sdk._mitigate_operator(op_id, "major counter-evidence", 0.50)
         conf_mitigated = get_conf(run_ep(sdk), claim["id"])
 
         assert conf_mitigated < conf_unmitigated, (
@@ -244,7 +244,7 @@ class TestNegativeControl:
         base = resolved_weight(sdk, op_id, claim["id"])
         assert base == pytest.approx(IMPL_BASE_WEIGHT)
 
-        sdk.mitigate_operator(op_id, "significant limitation", 0.30)
+        sdk._mitigate_operator(op_id, "significant limitation", 0.30)
         w_mitigated = resolved_weight(sdk, op_id, claim["id"])
         expected = base * mitigation_dampening_factor(0.30)
         assert w_mitigated == pytest.approx(expected), (
@@ -285,7 +285,7 @@ class TestNonOperatorTargetRefused:
         base = resolved_weight(sdk, other_op, claim["id"])
 
         with pytest.raises(ValueError, match="not an operator"):
-            sdk.mitigate_operator(plain["id"], "must be refused", 0.30)
+            sdk._mitigate_operator(plain["id"], "must be refused", 0.30)
 
         # No weight moved.
         after = resolved_weight(sdk, other_op, claim["id"])
@@ -303,7 +303,7 @@ class TestNonOperatorTargetRefused:
         """
         sdk = fresh_sdk()
         with pytest.raises(ValueError, match="not found"):
-            sdk.mitigate_operator("does-not-exist", "nope", 0.30)
+            sdk._mitigate_operator("does-not-exist", "nope", 0.30)
 
 
 class TestBatchComposition:
@@ -324,7 +324,7 @@ class TestBatchComposition:
         chains = {}
         for strength, label in strengths.items():
             _src, claim, op_id = make_impl_chain(sdk, label=label)
-            sdk.mitigate_operator(op_id, f"mitigation {label}", strength)
+            sdk._mitigate_operator(op_id, f"mitigation {label}", strength)
             chains[op_id] = (claim["id"], strength)
 
         for op_id, (claim_id, strength) in chains.items():
@@ -400,7 +400,7 @@ class TestBatchComposition:
         claims = []
         for strength, label in ((0.10, "a"), (0.30, "b"), (0.50, "c")):
             _src, claim, op_id = make_impl_chain(sdk, label=label)
-            sdk.mitigate_operator(op_id, f"mitigation {label}", strength)
+            sdk._mitigate_operator(op_id, f"mitigation {label}", strength)
             claims.append((claim["id"], op_id))
 
         confidences = run_ep(sdk)
@@ -431,7 +431,7 @@ class TestSingleWriterReadOnlyInstrument:
         """
         sdk = fresh_sdk()
         _src, claim, op_id = make_impl_chain(sdk)
-        sdk.mitigate_operator(op_id, "significant limitation", 0.30)
+        sdk._mitigate_operator(op_id, "significant limitation", 0.30)
         proj = sdk._get_proj()
 
         def snapshot():
@@ -532,13 +532,13 @@ class TestRetractionStopsTheDampener:
         base = resolved_weight(sdk, op_id, claim["id"])
         assert base == pytest.approx(IMPL_BASE_WEIGHT)
 
-        mid = sdk.mitigate_operator(
+        mid = sdk._mitigate_operator(
             op_id, "the lift was from a leaked test set", strength=0.5)["id"]
         assert resolved_weight(sdk, op_id, claim["id"]) == pytest.approx(
             base * mitigation_dampening_factor(0.5))
 
-        sdk.retract_point(mid)
-        assert sdk.get_point(mid)["status"] == "retracted"
+        sdk._retract_point(mid)
+        assert sdk._get_point(mid)["status"] == "retracted"
 
         after = resolved_weight(sdk, op_id, claim["id"])
         assert after == pytest.approx(base), (
@@ -560,13 +560,13 @@ class TestRetractionStopsTheDampener:
         _src, claim, op_id = make_impl_chain(sdk)
 
         conf_before = get_conf(run_ep(sdk), claim["id"])
-        mid = sdk.mitigate_operator(op_id, "major counter-evidence", strength=0.50)["id"]
+        mid = sdk._mitigate_operator(op_id, "major counter-evidence", strength=0.50)["id"]
         conf_mitigated = get_conf(run_ep(sdk), claim["id"])
         assert conf_mitigated < conf_before, (
             f"mitigation must lower the posterior: {conf_before:.4f} -> {conf_mitigated:.4f}"
         )
 
-        sdk.retract_point(mid)
+        sdk._retract_point(mid)
         conf_after = get_conf(run_ep(sdk), claim["id"])
         assert conf_after == pytest.approx(conf_before, abs=1e-3), (
             f"retracting the mitigation must restore the pre-mitigation "
@@ -588,7 +588,7 @@ class TestRetractionStopsTheDampener:
         sdk = fresh_sdk()
         _src, claim, op_id = make_impl_chain(sdk)
         base = resolved_weight(sdk, op_id, claim["id"])
-        mid = sdk.mitigate_operator(op_id, "staged, not yet reviewed", strength=0.50)["id"]
+        mid = sdk._mitigate_operator(op_id, "staged, not yet reviewed", strength=0.50)["id"]
 
         proj = sdk._get_proj()
         proj.g.query(
@@ -613,7 +613,7 @@ class TestRetractionStopsTheDampener:
         sdk = fresh_sdk()
         _src, claim, op_id = make_impl_chain(sdk)
         base = resolved_weight(sdk, op_id, claim["id"])
-        mid = sdk.mitigate_operator(op_id, f"{terminal} mitigation", 0.50)["id"]
+        mid = sdk._mitigate_operator(op_id, f"{terminal} mitigation", 0.50)["id"]
         assert resolved_weight(sdk, op_id, claim["id"]) == pytest.approx(
             base * mitigation_dampening_factor(0.50))
 
@@ -634,7 +634,7 @@ class TestRetractionStopsTheDampener:
         sdk = fresh_sdk()
         _src, claim, op_id = make_impl_chain(sdk)
         base = resolved_weight(sdk, op_id, claim["id"])
-        sdk.mitigate_operator(op_id, "legacy invalidated", 0.50)
+        sdk._mitigate_operator(op_id, "legacy invalidated", 0.50)
         assert resolved_weight(sdk, op_id, claim["id"]) == pytest.approx(
             base * mitigation_dampening_factor(0.50))
 
@@ -665,12 +665,12 @@ class TestMitigationIsBornCurrent:
         sdk = fresh_sdk()
         _src, _claim, op_id = make_impl_chain(sdk)
 
-        reply = sdk.mitigate_operator(op_id, "significant limitation", 0.30)
+        reply = sdk._mitigate_operator(op_id, "significant limitation", 0.30)
         assert reply.get("status") in ("draft", "live"), (
             f"mitigate_operator's reply must carry a current status, got "
             f"{reply.get('status')!r}"
         )
-        assert sdk.get_point(reply["id"])["status"] == reply["status"]
+        assert sdk._get_point(reply["id"])["status"] == reply["status"]
 
     def test_re_mitigating_a_retracted_mitigation_dampens_again(self):
         """The WRITER's idempotency lookup honours the same terminal state.
@@ -689,16 +689,16 @@ class TestMitigationIsBornCurrent:
         _src, claim, op_id = make_impl_chain(sdk)
         base = resolved_weight(sdk, op_id, claim["id"])
 
-        first = sdk.mitigate_operator(op_id, "the lift was from a leaked test set", 0.50)
-        sdk.retract_point(first["id"])
+        first = sdk._mitigate_operator(op_id, "the lift was from a leaked test set", 0.50)
+        sdk._retract_point(first["id"])
         assert resolved_weight(sdk, op_id, claim["id"]) == pytest.approx(base)
 
-        again = sdk.mitigate_operator(op_id, "a clean re-run reproduced the lift", 0.30)
+        again = sdk._mitigate_operator(op_id, "a clean re-run reproduced the lift", 0.30)
         assert again["id"] != first["id"], (
             "a re-assertion must mint a new mitigation — reviving a retracted "
             "one in place would reverse the terminal-state contract"
         )
-        assert sdk.get_point(first["id"])["status"] == "retracted"
+        assert sdk._get_point(first["id"])["status"] == "retracted"
         assert again["status"] in ("draft", "live")
         observed = resolved_weight(sdk, op_id, claim["id"])
         assert observed == pytest.approx(
@@ -821,7 +821,7 @@ class TestTheRetractionIsDurableOnEveryRoute:
         key 6's "never duplicated".
         """
         sdk = fresh_sdk()
-        first = sdk.ingest(_ingest_mitigation_bundle())
+        first = sdk._ingest(_ingest_mitigation_bundle())
         op_id = first["ids"]["connections"][0]
         assert isinstance(op_id, str), first["ids"]["connections"]
         # The dampener READ, not the factor-extraction path: ingest creates its
@@ -835,11 +835,11 @@ class TestTheRetractionIsDurableOnEveryRoute:
         assert compute_operator_weight(proj, op_id) == pytest.approx(
             mitigation_dampening_factor(0.50))
 
-        sdk.retract_point(mid)
-        assert sdk.get_point(mid)["status"] == "retracted"
+        sdk._retract_point(mid)
+        assert sdk._get_point(mid)["status"] == "retracted"
         assert compute_operator_weight(proj, op_id) == pytest.approx(1.0)
 
-        second = sdk.ingest(_ingest_mitigation_bundle())
+        second = sdk._ingest(_ingest_mitigation_bundle())
         assert second["ids"]["connections"] == [op_id], (
             "the operator must dedup — the mitigation is applied to the SAME "
             f"operator: {second['ids']['connections']}")
@@ -877,7 +877,7 @@ class TestTheRetractionIsDurableOnEveryRoute:
         only the row count and the surviving id discriminate.
         """
         sdk = fresh_sdk()
-        first = sdk.ingest(_ingest_mitigation_bundle())
+        first = sdk._ingest(_ingest_mitigation_bundle())
         op_id = first["ids"]["connections"][0]
         assert isinstance(op_id, str), first["ids"]["connections"]
         proj = sdk._get_proj()
@@ -886,7 +886,7 @@ class TestTheRetractionIsDurableOnEveryRoute:
         # case is about: a mitigation Point with no `mitigation_strength` at
         # all (the shape pre-convention imports carry, #9262's neighbour).
         for written, _status, _strength in _ingest_mitigation_rows(sdk, op_id):
-            sdk.delete_point(written)
+            sdk._delete_point(written)
         legacy_id = f"legacy-mit-{uuid.uuid4().hex[:10]}"
         proj.g.query(
             "MATCH (op:Point {id:$op}) "
@@ -904,10 +904,10 @@ class TestTheRetractionIsDurableOnEveryRoute:
             "documented default — that reading is what makes 0.30 its "
             "assertion")
 
-        sdk.retract_point(legacy_id)
+        sdk._retract_point(legacy_id)
         assert compute_operator_weight(proj, op_id) == pytest.approx(1.0)
 
-        sdk.ingest(_ingest_mitigation_bundle(
+        sdk._ingest(_ingest_mitigation_bundle(
             strength=MITIGATION_STRENGTH_DEFAULT, reason=reason))
         rows_after = _ingest_mitigation_rows(sdk, op_id)
         assert len(rows_after) == 1, (
@@ -935,9 +935,9 @@ class TestTheRetractionIsDurableOnEveryRoute:
         sdk = fresh_sdk()
         src, claim, op_id = make_impl_chain(sdk)
         base = resolved_weight(sdk, op_id, claim["id"])
-        mid = sdk.mitigate_operator(
+        mid = sdk._mitigate_operator(
             op_id, "the lift was from a leaked test set", 0.50)["id"]
-        sdk.retract_point(mid)
+        sdk._retract_point(mid)
         assert resolved_weight(sdk, op_id, claim["id"]) == pytest.approx(base)
 
         payload = _mitigates_payload(src["id"], claim["id"], 0.30)
@@ -959,7 +959,7 @@ class TestTheRetractionIsDurableOnEveryRoute:
         assert damped == pytest.approx(base * mitigation_dampening_factor(0.30)), (
             "the hosted commit dropped the re-asserted mitigation: "
             f"base={base}, after re-assertion={damped}")
-        assert sdk.get_point(mid)["status"] == "retracted", (
+        assert sdk._get_point(mid)["status"] == "retracted", (
             "the re-assertion revived the withdrawn node instead of minting")
 
     def test_why_block_names_the_live_mitigation_not_the_withdrawn_one(self):
@@ -977,10 +977,10 @@ class TestTheRetractionIsDurableOnEveryRoute:
         sdk = fresh_sdk()
         _src, claim, op_id = make_impl_chain(sdk)
         base = resolved_weight(sdk, op_id, claim["id"])
-        first = sdk.mitigate_operator(
+        first = sdk._mitigate_operator(
             op_id, "the lift was from a leaked test set", 0.50)["id"]
-        sdk.retract_point(first)
-        second = sdk.mitigate_operator(
+        sdk._retract_point(first)
+        second = sdk._mitigate_operator(
             op_id, "a clean re-run reproduced the lift", 0.30)["id"]
         assert second != first
         assert resolved_weight(sdk, op_id, claim["id"]) == pytest.approx(
@@ -1007,7 +1007,7 @@ class TestTheRetractionIsDurableOnEveryRoute:
         """
         sdk = fresh_sdk()
         _src, claim, op_id = make_impl_chain(sdk)
-        mid = sdk.mitigate_operator(op_id, "leaked test set", 0.50)["id"]
+        mid = sdk._mitigate_operator(op_id, "leaked test set", 0.50)["id"]
 
         def shown():
             return [m["id"] for m in
@@ -1016,10 +1016,10 @@ class TestTheRetractionIsDurableOnEveryRoute:
 
         assert shown() == [mid], "a live mitigation must still be surfaced"
 
-        sdk.retract_point(mid)
+        sdk._retract_point(mid)
         assert shown() == [], "the state view surfaced a RETRACTED mitigation"
 
-        staged = sdk.mitigate_operator(op_id, "staged, not yet reviewed", 0.50)["id"]
+        staged = sdk._mitigate_operator(op_id, "staged, not yet reviewed", 0.50)["id"]
         assert shown() == [staged], "the re-assertion's live mitigation is hidden"
         sdk._get_proj().g.query(
             "MATCH (m:Point {id:$m}) SET m.status = 'draft'", params={"m": staged})
@@ -1036,16 +1036,16 @@ class TestTheRetractionIsDurableOnEveryRoute:
         warning. A warned update became a silent no-op.
         """
         sdk = fresh_sdk()
-        first = sdk.ingest(_ingest_mitigation_bundle())
+        first = sdk._ingest(_ingest_mitigation_bundle())
         op_id = first["ids"]["connections"][0]
         proj = sdk._get_proj()
         mid = _ingest_mitigation_rows(sdk, op_id)[0][0]
         assert compute_operator_weight(proj, op_id) == pytest.approx(
             mitigation_dampening_factor(0.50))
-        sdk.retract_point(mid)
+        sdk._retract_point(mid)
         assert compute_operator_weight(proj, op_id) == pytest.approx(1.0)
 
-        second = sdk.ingest(_ingest_mitigation_bundle(
+        second = sdk._ingest(_ingest_mitigation_bundle(
             strength=0.30, reason="the audit found p1 reliable after all"))
         assert second["ids"]["connections"] == [op_id]
 
@@ -1105,7 +1105,7 @@ class TestTheRetractionIsDurableOnEveryRoute:
         assert resolved_weight(sdk, op_id, claim["id"]) == pytest.approx(
             base * mitigation_dampening_factor(0.50))
 
-        sdk.retract_point(mid)
+        sdk._retract_point(mid)
         assert resolved_weight(sdk, op_id, claim["id"]) == pytest.approx(base)
 
         # (a) the SAME assertion arrives again: a re-delivery, not a re-assertion.
@@ -1148,9 +1148,9 @@ class TestTheRetractionIsDurableOnEveryRoute:
         dec = make_point(sdk, "Re-raise the price or hold it?", kind="decision")
         opt1 = make_point(sdk, "alternative: re-raise", kind="option")
         opt2 = make_point(sdk, "alternative: hold", kind="option")
-        op1 = sdk.create_operator("IMPL", dec["id"], [opt1["id"]])["id"]
-        sdk.create_operator("IMPL", dec["id"], [opt2["id"]])
-        mid = sdk.mitigate_operator(op1, "QA gate + staged rollout", 0.50)["id"]
+        op1 = sdk._create_operator("IMPL", dec["id"], [opt1["id"]])["id"]
+        sdk._create_operator("IMPL", dec["id"], [opt2["id"]])
+        mid = sdk._mitigate_operator(op1, "QA gate + staged rollout", 0.50)["id"]
 
         def named():
             blocks = assemble_why_blocks(proj, [dec["id"]])
@@ -1162,12 +1162,12 @@ class TestTheRetractionIsDurableOnEveryRoute:
             "a live mitigation must still explain its alternative: "
             f"{named()}")
 
-        sdk.retract_point(mid)
+        sdk._retract_point(mid)
         assert named()[opt1["id"]] is None, (
             "the tradeoffs leg presents a WITHDRAWN mitigation as the "
             f"alternative's explanation: {named()}")
 
-        sdk.mitigate_operator(op1, "communicate the delay", 0.30)
+        sdk._mitigate_operator(op1, "communicate the delay", 0.30)
         assert named()[opt1["id"]] == "communicate the delay", (
             "the tradeoffs leg must surface the CURRENT mitigation: " f"{named()}")
 

@@ -222,7 +222,7 @@ def sdk():
 
 
 def _seed_echo(s, session_id: str, i: int, body: str) -> None:
-    s.create_point("event", body, id=f"{session_id}_t{i}", is_episodic=True)
+    s._create_point("event", body, id=f"{session_id}_t{i}", is_episodic=True)
 
 
 def _seed_echo_wall(s, session_id: str, prior_id: str) -> None:
@@ -246,7 +246,7 @@ def _seed_echo_wall(s, session_id: str, prior_id: str) -> None:
     window ahead of it. The fixture therefore holds under BOTH arm states."""
     for i in range(_HOT):
         _seed_echo(s, session_id, i, f"[user] {QUERY} {QUERY} {QUERY} turn {i}")
-    s.create_point("statement", _PRIOR_TEXT, id=prior_id)
+    s._create_point("statement", _PRIOR_TEXT, id=prior_id)
     for i in range(_HOT, _ECHOES):
         _seed_echo(s, session_id, i, f"[user] {QUERY} turn {i}")
 
@@ -278,7 +278,7 @@ def test_echoes_an_order_of_magnitude_above_the_old_window_still_return_the_prio
 
     # The prior IS a candidate of the fused pool — not merely absent because the
     # pool was too shallow. (Same call shape as the OLD over-fetch, wide pool.)
-    deep = _ids(sdk.tortoise_fts_query(
+    deep = _ids(sdk._tortoise_fts_query(
         QUERY, entity_type="point", limit=_POOL, pool_size=_POOL))
     assert "zz_pt_real" in deep, (
         "fixture invalid: the prior must be a fused-pool candidate, "
@@ -287,7 +287,7 @@ def test_echoes_an_order_of_magnitude_above_the_old_window_still_return_the_prio
 
     # OLD path (deleted code, reproduced): ask for limit + _PRIOR_OVERFETCH,
     # then drop this session's echoes and take the first `limit`.
-    old_fetch = sdk.tortoise_fts_query(
+    old_fetch = sdk._tortoise_fts_query(
         QUERY, entity_type="point", limit=_OLD_LIMIT + _OLD_PRIOR_OVERFETCH)
     assert len(old_fetch) == _OLD_LIMIT + _OLD_PRIOR_OVERFETCH, (
         "fixture invalid: the OLD window must be fully consumed by echoes so "
@@ -300,7 +300,7 @@ def test_echoes_an_order_of_magnitude_above_the_old_window_still_return_the_prio
     assert "zz_pt_real" not in _ids(old_fetch), "OLD window leaked the prior"
 
     # NEW path: one opt-in argument, and the prior comes back.
-    new = _ids(sdk.tortoise_fts_query(
+    new = _ids(sdk._tortoise_fts_query(
         QUERY, entity_type="point", limit=_OLD_LIMIT, pool_size=_POOL,
         exclude_turn_echo_session="s1"))
     assert "zz_pt_real" in new, f"prior starved after the fix: {new}"
@@ -322,19 +322,19 @@ def test_exclusion_is_opt_in_and_scoped_to_the_named_session(sdk):
     """
     for i in range(3):
         _seed_echo(sdk, "s1", i, f"[user] {QUERY} turn {i}")
-    sdk.create_point("statement", QUERY, id="pt_real")
+    sdk._create_point("statement", QUERY, id="pt_real")
 
-    default = _ids(sdk.tortoise_fts_query(QUERY, entity_type="point", limit=10))
+    default = _ids(sdk._tortoise_fts_query(QUERY, entity_type="point", limit=10))
     assert {"s1_t0", "s1_t1", "s1_t2"} <= set(default), default
     assert "pt_real" in default, default
 
     # naming ANOTHER session must not touch this capture's rows
-    other = _ids(sdk.tortoise_fts_query(
+    other = _ids(sdk._tortoise_fts_query(
         QUERY, entity_type="point", limit=10, exclude_turn_echo_session="s2"))
     assert other == default, (default, other)
 
     # opting in drops exactly this session's echoes
-    opted = _ids(sdk.tortoise_fts_query(
+    opted = _ids(sdk._tortoise_fts_query(
         QUERY, entity_type="point", limit=10, exclude_turn_echo_session="s1"))
     assert set(opted) == set(default) - {"s1_t0", "s1_t1", "s1_t2"}, opted
     assert "pt_real" in opted
@@ -367,22 +367,22 @@ def test_limit_applies_to_the_already_filtered_candidate_set(sdk):
     going vacuous again. (#10121's reversal of an earlier seeding order is the
     same defect one scorer earlier.)
     """
-    sdk.create_point("statement", _weak_prior("aa"), id="zz_pt_a")
-    sdk.create_point("statement", _weak_prior("bb"), id="zz_pt_b")
+    sdk._create_point("statement", _weak_prior("aa"), id="zz_pt_a")
+    sdk._create_point("statement", _weak_prior("bb"), id="zz_pt_b")
     for i in range(3):
         _seed_echo(sdk, "s1", i, f"[user] {QUERY} {QUERY} turn {i}")
 
     # DISCRIMINATOR, pinned so the fixture cannot silently go vacuous: the page
     # a NON-opting caller gets is entirely echoes, so an after-the-cut filter
     # would have nothing left to return.
-    unfiltered = _ids(sdk.tortoise_fts_query(
+    unfiltered = _ids(sdk._tortoise_fts_query(
         QUERY, entity_type="point", limit=2))
     assert unfiltered, "fixture invalid: the unfiltered page is empty"
     assert not set(unfiltered) & {"zz_pt_a", "zz_pt_b"}, (
         "fixture invalid: a prior must NOT be in the unfiltered page, or an "
         f"after-the-cut filter would pass too — page={unfiltered}")
 
-    rows = _ids(sdk.tortoise_fts_query(
+    rows = _ids(sdk._tortoise_fts_query(
         QUERY, entity_type="point", limit=2, exclude_turn_echo_session="s1"))
     assert len(rows) == 2, rows
     assert set(rows) == {"zz_pt_a", "zz_pt_b"}, rows
@@ -398,10 +398,10 @@ def test_caller_minted_point_in_the_turn_namespace_survives(sdk):
     non-turn kind/content, so an id-shape-only predicate drops it.
     """
     _seed_echo(sdk, "s1", 0, f"[user] {QUERY} turn 0")
-    sdk.create_point("statement", QUERY, id="s1_t9")
-    sdk.create_point("statement", QUERY, id="pt_real")
+    sdk._create_point("statement", QUERY, id="s1_t9")
+    sdk._create_point("statement", QUERY, id="pt_real")
 
-    rows = _ids(sdk.tortoise_fts_query(
+    rows = _ids(sdk._tortoise_fts_query(
         QUERY, entity_type="point", limit=10, exclude_turn_echo_session="s1"))
     assert "s1_t9" in rows, rows
     assert "s1_t0" not in rows, rows
@@ -434,7 +434,7 @@ def _seed_echo_wall_production(sdk, session_id: str, prior_id: str,
     session, then the session keeps talking in text that matches the query more
     densely. Seeding the prior FIRST is kept so the fixture also holds when the
     arm is opted out (the tie fires again there and the oldest row starves)."""
-    sdk.create_point("statement", _PRIOR_TEXT, id=prior_id)
+    sdk._create_point("statement", _PRIOR_TEXT, id=prior_id)
     for i in range(n_echoes):
         _seed_echo(sdk, session_id, i, f"[user] {QUERY} {QUERY} {QUERY} turn {i}")
 
@@ -490,7 +490,7 @@ def test_production_pool_bound_still_starves_the_prior(sdk):
         "update those comments (and this literal) together")
     _seed_echo_wall_production(sdk, "s1", "zz_pt_real", _DOCUMENTED_PROD_POOL + 10)
 
-    prod = _ids(sdk.tortoise_fts_query(
+    prod = _ids(sdk._tortoise_fts_query(
         QUERY, entity_type="point", limit=_OLD_LIMIT,
         exclude_turn_echo_session="s1"))
     assert "zz_pt_real" not in prod, (
@@ -566,13 +566,13 @@ def test_the_pool_bound_starves_the_prior_in_either_arm_state(
     # Candidate, not merely absent: with a pool wider than the corpus the prior
     # IS in the fused set, so what the production window does to it is what this
     # measures.
-    deep = _ids(sdk.tortoise_fts_query(
+    deep = _ids(sdk._tortoise_fts_query(
         QUERY, entity_type="point", limit=_POOL, pool_size=_POOL))
     assert "zz_pt_real" in deep, (
         f"fixture invalid: the prior is not a fused-pool candidate at all "
         f"(arm={arm}, depth={len(deep)})")
 
-    prod = _ids(sdk.tortoise_fts_query(
+    prod = _ids(sdk._tortoise_fts_query(
         QUERY, entity_type="point", limit=_OLD_LIMIT,
         exclude_turn_echo_session="s1"))
     assert "zz_pt_real" not in prod, (
@@ -600,14 +600,14 @@ def test_within_the_pool_the_exclusion_recovers_the_prior_in_production_shape(sd
     # the unfiltered page. If a future fixture change put it back inside, both
     # assertions below would pass against an after-the-cut filter and nothing
     # would red — so state the requirement instead of leaving it implicit.
-    unfiltered = _ids(sdk.tortoise_fts_query(
+    unfiltered = _ids(sdk._tortoise_fts_query(
         QUERY, entity_type="point", limit=_OLD_LIMIT))
     assert unfiltered, "fixture invalid: the unfiltered page is empty"
     assert not set(unfiltered) & {"zz_pt_real"}, (
         "fixture invalid: the prior must NOT be in the unfiltered page, or an "
         f"after-the-cut filter would pass too — page={unfiltered}")
 
-    rows = _ids(sdk.tortoise_fts_query(
+    rows = _ids(sdk._tortoise_fts_query(
         QUERY, entity_type="point", limit=_OLD_LIMIT,
         exclude_turn_echo_session="s1"))
     assert "zz_pt_real" in rows, (

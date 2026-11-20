@@ -1238,4 +1238,4 @@ def wire_holds_role(sdk, holder: str, role_id: str) -> dict:
     # Unreachable from `create_entity` (which refuses BEFORE the write), and kept
     # for every other caller: wiring a self edge is a category error either way.
     refuse_role_self_edge(holder_id, role_id)
-    return sdk.create_edge("holdsRole", holder_id, role_id)
+    return sdk._create_edge("holdsRole", holder_id, role_id)

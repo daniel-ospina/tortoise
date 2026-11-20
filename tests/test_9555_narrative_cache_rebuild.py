@@ -338,7 +338,7 @@ def test_the_event_fold_and_its_replay_cannot_put_the_narrative_on_an_event():
     sdk = TortoiseSDK(graph_name=graph,
                       event_log_path=os.path.join(_tmp, "journal.jsonl"))
     try:
-        ev = sdk.create_event("narrative-event-door", "AgentSession",
+        ev = sdk._create_event("narrative-event-door", "AgentSession",
                               story_arc=NARRATIVE, project="kept-228",
                               sessionId="test-9555-event-fold-session")
         rows = sdk._get_proj().g.query(
@@ -407,7 +407,7 @@ def test_the_tenant_route_cannot_put_the_narrative_back_on_an_event():
 
     sdk = TortoiseSDK(graph_name=f"test_9555_narr_evroute_{uuid.uuid4().hex[:8]}")
     try:
-        ev = sdk.create_event("narrative-event-tenant", "AgentSession")
+        ev = sdk._create_event("narrative-event-tenant", "AgentSession")
         eid = ev["id"]
 
         with pytest.raises(ValueError,
@@ -550,7 +550,7 @@ def test_the_point_clear_removes_the_prose_and_keeps_the_node():
             "the seed did not land the prose on the `:Point` — the clear below "
             f"would prove nothing. Got {rows!r}")
 
-        sdk.update_point(pid, story_arc=None)
+        sdk._update_point(pid, story_arc=None)
 
         rows = proj.g.query(
             "MATCH (n:Point {id:$id}) RETURN n.story_arc, n.content",

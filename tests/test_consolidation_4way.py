@@ -1038,7 +1038,7 @@ class TestS3BatchEnrichment:
         sdk = TortoiseSDK(db)
         try:
             sdk.create_entity("object", "gym", objectKind="core:place")
-            sdk.create_point("statement", "gym at 6pm", id="pt1",
+            sdk._create_point("statement", "gym at 6pm", id="pt1",
                              status="draft")
             sdk._get_proj().g.query(
                 "MATCH (p:Point {id:$pid}), (o:Object {name:$name}) "
@@ -1083,7 +1083,7 @@ class TestS3BatchEnrichment:
         monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/g")
 
         class MockSDK:
-            def tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False, **_ignored):
+            def _tortoise_fts_query(self, query, *, entity_type, limit=3, include_terminal=False, **_ignored):
                 # the REAL callee row shape (#4511): ``point_kind``, not ``kind``
                 return [{"id": "pt-1", "content": "flash is the path",
                          "point_kind": "statement"}]

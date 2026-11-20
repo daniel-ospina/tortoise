@@ -622,7 +622,9 @@ _NON_LITERAL: dict[str, tuple[str, ...]] = {
     # last row decided by the carrier fallback alone (a bare constant MENTION
     # plus any `MATCH` in a 350-line span), which is the same false PASS the
     # `_fetch_object_signals` ordering fix closed for row 17.
-    "sdk.py::TortoiseSDK.supersede_point": (
+    # ⛔ #12901 privatised the reader; §13 row 20 names the `def` (`_supersede_point`),
+    # so the pin must key the same symbol or it pins a row that no longer exists.
+    "sdk.py::TortoiseSDK._supersede_point": (
         'structural_rels = SUPERSEDE_STRUCTURAL_RELS',
         'f"MATCH (old:Point {{id:$old_id}})-[r:{rel}]->(target) "',
     ),
@@ -3069,7 +3071,9 @@ def test_the_door_attribution_refuses_a_door_that_reaches_another_reader():
     )
     for wrong in (
         "mcp_server.py::_preview_supersede",
-        "sdk.py::TortoiseSDK.belief_timeline",
+        # ⛔ #12901 privatised the reader, so the probe id must name the `def`
+        # (`_belief_timeline`) or the non-vacuity guard above refuses it.
+        "sdk.py::TortoiseSDK._belief_timeline",
     ):
         # The READER needs the guard too, not just the door: a reader id that no
         # longer resolves is absent from the index, `_door_distance` returns
@@ -3485,8 +3489,10 @@ def test_the_attribution_predicate_does_not_swallow_the_whole_table():
     )
     # The tripwire must not be satisfied by a predicate that accepts NOTHING:
     # every true attribution is inside this set by construction.
-    assert total >= 31, (
-        f"only {total} pairs are accepted although §13's cells name 31 door "
+    # ⛔ #13899 moved this floor with the table (31 -> 21): the batch retired ten
+    # SDK-door occurrences and re-pointed two, and this figure IS that count.
+    assert total >= 21, (
+        f"only {total} pairs are accepted although §13's cells name 21 door "
         "occurrences (the count the table arm pins) — the predicate has broken the "
         "other way"
     )
@@ -3607,10 +3613,18 @@ def test_every_customer_callable_row_reaches_a_declared_door():
     # `backfill_v25` itself (29 -> 28), and #13448 registered row 45
     # (`ended.py::build_cypher`), whose ONE door is the SDK's (28 -> 29 — its MCP twin
     # cannot pass `ended_scope`, so it is not a door; see that row's reach cell).
+    # ⛔ #13899 then retired ten SDK-door occurrences and re-pointed two (29 -> 21): the
+    # six methods those cells named (`tortoise_fts_query`, `recall_state`,
+    # `recall_subgraph`, `belief_timeline`, `topic_summarize`, `ingest`) all left the
+    # surface, and for rows 1/2/3/4/5/18/19 no live public method reaches the reader
+    # inside the hop budget (`search_knowledge` was measured and does NOT), so their cell
+    # carries no SDK door and the MCP tool is the same reader's door. Rows 37 and 45 KEEP
+    # one, at its live spelling: `write_knowledge_batch` (measured to reach `_ingest`) and
+    # `search_knowledge` (measured to reach `ended.py::build_cypher` via `ended_scope`).
     # A table change moves this numeral with the table.
-    assert attributed >= 29, (
+    assert attributed >= 21, (
         f"only {attributed} door attributions were attempted across the "
-        f"customer-callable rows, and this arm cross-checks against NO fewer than 29 "
+        f"customer-callable rows, and this arm cross-checks against NO fewer than 21 "
         f"hand-counted occurrences — a partial `_doors()` regression (one door KIND "
         f"resolving for only some of its rows) subtracts from `attributed` and "
         f"`expected` alike, so this floor is the only thing that reds on it"

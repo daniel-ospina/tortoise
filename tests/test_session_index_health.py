@@ -41,7 +41,7 @@ def _write_session(corpus, sid, body="User: hi\nAssistant: hello\n", title="T"):
 
 
 def _ingest(sdk, env, **kw):
-    return sdk.ingest_corpus(str(env), eventKind="AgentSession",
+    return sdk._ingest_corpus(str(env), eventKind="AgentSession",
                              extract_metadata=False, **kw)
 
 
@@ -49,7 +49,7 @@ def _ingest(sdk, env, **kw):
 
 
 def test_health_empty_corpus(env, sdk):
-    h = sdk.session_index_health()
+    h = sdk._session_index_health()
     assert h["file_count"] == 0
     assert h["unindexed"] == []
     assert h["indexed_events"] == 0
@@ -58,7 +58,7 @@ def test_health_empty_corpus(env, sdk):
 
 def test_health_absent_corpus(monkeypatch, sdk, tmp_path):
     monkeypatch.setenv("TORTOISE_SESSION_CORPUS", str(tmp_path / "nope"))
-    h = sdk.session_index_health()
+    h = sdk._session_index_health()
     assert h["file_count"] == 0
     assert h["unindexed"] == []
 
@@ -66,7 +66,7 @@ def test_health_absent_corpus(monkeypatch, sdk, tmp_path):
 def test_health_detects_unindexed(env, sdk):
     _write_session(env, "sess-a")
     _write_session(env, "sess-b")
-    h = sdk.session_index_health()
+    h = sdk._session_index_health()
     assert h["file_count"] == 2
     assert len(h["unindexed"]) == 2
     assert h["indexed_events"] == 0
@@ -75,13 +75,13 @@ def test_health_detects_unindexed(env, sdk):
 def test_health_after_index_and_hash_drift(env, sdk):
     f = _write_session(env, "sess-a")
     _ingest(sdk, env)
-    h = sdk.session_index_health()
+    h = sdk._session_index_health()
     assert h["indexed_events"] == 1
     assert h["matched"] == 1
     assert h["unindexed"] == []
     # Change the file -> Event exists but hash differs -> stale
     f.write_text("---\nsessionId: sess-a\ntitle: T2\n---\nUser: changed\n")
-    h2 = sdk.session_index_health()
+    h2 = sdk._session_index_health()
     assert len(h2["stale"]) == 1
     assert h2["matched"] == 0
 
@@ -92,26 +92,26 @@ def test_health_after_index_and_hash_drift(env, sdk):
 def test_reconcile_indexes_missing(env, sdk):
     _write_session(env, "sess-a")
     _write_session(env, "sess-b")
-    rep = sdk.reconcile_sessions(str(env))
+    rep = sdk._reconcile_sessions(str(env))
     assert len(rep["unindexed"]) == 2
     assert rep["reindex"]["ingested"] == 2
-    h = sdk.session_index_health()
+    h = sdk._session_index_health()
     assert h["matched"] == 2
 
 
 def test_reconcile_idempotent(env, sdk):
     _write_session(env, "sess-a")
-    sdk.reconcile_sessions(str(env))
-    rep2 = sdk.reconcile_sessions(str(env))
+    sdk._reconcile_sessions(str(env))
+    rep2 = sdk._reconcile_sessions(str(env))
     assert rep2["unindexed"] == []
     assert rep2["reindex"] == {}  # nothing to do — dedup is the sweep
 
 
 def test_reconcile_reindexes_stale(env, sdk):
     f = _write_session(env, "sess-a")
-    sdk.reconcile_sessions(str(env))
+    sdk._reconcile_sessions(str(env))
     f.write_text("---\nsessionId: sess-a\ntitle: T9\n---\nUser: updated body\n")
-    rep = sdk.reconcile_sessions(str(env))
+    rep = sdk._reconcile_sessions(str(env))
     assert len(rep["stale"]) == 1
     assert rep["reindex"]["updated"] == 1
 
@@ -189,14 +189,14 @@ def test_reconcile_converges_on_crlf_files(env, sdk):
     so CRLF files are not perpetually hash-stale (sweep never converging)."""
     f = env / "crlf.md"
     f.write_bytes(b"---\r\nsessionId: crlf-1\r\ntitle: CRLF\r\n---\r\nUser: hi\r\nAssistant: world\r\n")
-    rep1 = sdk.reconcile_sessions(str(env))
+    rep1 = sdk._reconcile_sessions(str(env))
     assert rep1["reindex"]["ingested"] == 1
     # Health must see it as up-to-date, NOT stale (hash match with ingest)
-    h = sdk.session_index_health()
+    h = sdk._session_index_health()
     assert h["matched"] == 1
     assert h["stale"] == []
     # Second sweep: nothing to do — converged
-    rep2 = sdk.reconcile_sessions(str(env))
+    rep2 = sdk._reconcile_sessions(str(env))
     assert rep2["reindex"] == {}
 
 
@@ -444,12 +444,12 @@ def test_falsy_session_id_coerces_to_match_ingest(env, sdk):
     f = env / "falsy-zero.md"
     f.write_text("---\nsessionId: 0\ntitle: T\n---\nUser: hi\n")
     # Ingest coerces sessionId -> "0" → event_id session_0
-    sdk.ingest_corpus(str(env), eventKind="AgentSession")
-    h = sdk.session_index_health(str(env))
+    sdk._ingest_corpus(str(env), eventKind="AgentSession")
+    h = sdk._session_index_health(str(env))
     assert h["unindexed"] == [], f"falsy sessionId not matched: {h}"
     assert h["duplicates"] == []
     # Second sweep converges (nothing to do)
-    h2 = sdk.session_index_health(str(env))
+    h2 = sdk._session_index_health(str(env))
     assert h2["up_to_date"], h2
 
 def test_extract_session_id_utf8_under_c_locale(env, sdk):
@@ -459,10 +459,10 @@ def test_extract_session_id_utf8_under_c_locale(env, sdk):
     sweep non-convergence."""
     f = env / "utf8-sess.md"
     f.write_bytes("---\nsessionId: utf8-s\ntitle: caf\u00e9\n---\nUser: hi\n".encode("utf-8"))
-    sdk.ingest_corpus(str(env), eventKind="AgentSession")
-    h = sdk.session_index_health(str(env))
+    sdk._ingest_corpus(str(env), eventKind="AgentSession")
+    h = sdk._session_index_health(str(env))
     assert h["unindexed"] == [], f"utf-8 session not matched: {h}"
-    h2 = sdk.session_index_health(str(env))
+    h2 = sdk._session_index_health(str(env))
     assert h2["up_to_date"], h2
 
 
@@ -472,10 +472,10 @@ def test_empty_session_id_with_alt_key_uses_alt(env, sdk):
     derive session_foo, not file_<stem>, or the sweep never converges."""
     f = env / "empty-alt.md"
     f.write_text('---\nsessionId: ""\nsession_id: foo\ntitle: T\n---\nUser: hi\n')
-    sdk.ingest_corpus(str(env), eventKind="AgentSession")
-    h = sdk.session_index_health(str(env))
+    sdk._ingest_corpus(str(env), eventKind="AgentSession")
+    h = sdk._session_index_health(str(env))
     assert h["unindexed"] == [], f"alt-key not matched: {h}"
-    h2 = sdk.session_index_health(str(env))
+    h2 = sdk._session_index_health(str(env))
     assert h2["up_to_date"], h2
 
 
@@ -486,20 +486,20 @@ def test_empty_session_id_falls_back_to_file_stem(env, sdk):
     ingest derives session_file_<stem> and the sweep never converges."""
     f = env / "empty-sid.md"
     f.write_text('---\nsessionId: ""\ntitle: T\n---\nUser: hi\n')
-    sdk.ingest_corpus(str(env), eventKind="AgentSession")
-    h = sdk.session_index_health(str(env))
+    sdk._ingest_corpus(str(env), eventKind="AgentSession")
+    h = sdk._session_index_health(str(env))
     assert h["unindexed"] == [], f"empty sessionId not matched: {h}"
     assert h["duplicates"] == []
     # Second sweep converges
-    h2 = sdk.session_index_health(str(env))
+    h2 = sdk._session_index_health(str(env))
     assert h2["up_to_date"], h2
 
 
 def test_falsy_boolean_session_id_coerces(env, sdk):
     f = env / "falsy-bool.md"
     f.write_text("---\nsessionId: false\ntitle: T\n---\nUser: hi\n")
-    sdk.ingest_corpus(str(env), eventKind="AgentSession")
-    h = sdk.session_index_health(str(env))
+    sdk._ingest_corpus(str(env), eventKind="AgentSession")
+    h = sdk._session_index_health(str(env))
     assert h["unindexed"] == [], f"sessionId:false not matched: {h}"
 
 
@@ -514,7 +514,7 @@ def test_duplicate_session_files_surfaced_and_convergent(env, sdk):
     env.joinpath("b.md").write_text(
         "---\nsessionId: dup-sess\ntitle: B\n---\nUser: yo\n")
 
-    h = sdk.session_index_health()
+    h = sdk._session_index_health()
     assert len(h["duplicates"]) == 1
     d = h["duplicates"][0]
     assert d["session_id"] == "dup-sess"
@@ -523,17 +523,17 @@ def test_duplicate_session_files_surfaced_and_convergent(env, sdk):
     # Only the primary file drives the delta — one unindexed, not two
     assert len(h["unindexed"]) == 1
 
-    rep1 = sdk.reconcile_sessions(str(env))
+    rep1 = sdk._reconcile_sessions(str(env))
     assert rep1["reindex"]["ingested"] == 1   # one primary indexed
     assert rep1["reindex"]["skipped"] == 1    # non-primary copy deduped
 
-    h2 = sdk.session_index_health()
+    h2 = sdk._session_index_health()
     assert h2["matched"] == 1
     assert h2["unindexed"] == [] and h2["stale"] == []
     assert len(h2["duplicates"]) == 1  # still surfaced (corpus condition)
 
     # Second sweep: nothing to do — converged
-    rep2 = sdk.reconcile_sessions(str(env))
+    rep2 = sdk._reconcile_sessions(str(env))
     assert rep2["reindex"] == {}
 
 
@@ -548,7 +548,7 @@ def test_indexed_events_corpus_scoped(env, sdk):
     sdk._get_proj().g.query(
         "CREATE (e:Event {eventId:'session_elsewhere', eventKind:'AgentSession'})"
     )
-    h = sdk.session_index_health()
+    h = sdk._session_index_health()
     assert h["indexed_events"] == 1   # corpus-scoped, not 2
     assert h["matched"] == 1
     assert h["unindexed"] == []

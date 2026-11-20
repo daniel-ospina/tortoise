@@ -298,7 +298,7 @@ def onboarding_node_init_fragment(*, fork: str | None = None,
                                   compact: bool = False,
                                   org_named_edge: bool = True) -> str:
     """Eager-init Cypher suffix — byte-identical for every TeamMeta lane
-    (register_user ×2, create_org, sdk.org_create, provision_tenant),
+    (register_user ×2, create_org, sdk._org_create, provision_tenant),
     the write-time create-on-write seam, and the backfill.
 
     The same string is APPENDED to the lane's existing TeamMeta statement
@@ -479,7 +479,8 @@ def _org_lock(org_id: str) -> threading.Lock:
 #     `_run` plus a class check, on a `projection.guarded_write_handle` bound to
 #     the ORG graph (the projection itself is bound to another one, which is why
 #     the door was skipped in the first place). The five sites are
-#     `tortoise/sdk.py::org_create`, `tortoise/hosted_api.py::provision_tenant`,
+#     `tortoise/sdk.py::_org_create` (privatised by #12901's FINAL batch; the
+#     escape-(3) site is the same function), `tortoise/hosted_api.py::provision_tenant`,
 #     `tortoise/hosted_api.py::register_user` (TWO sites: the self-service arm
 #     and the Supabase-mode arm) and
 #     `tortoise/hosted_api.py::_eager_provision_org_graph`.

@@ -163,7 +163,7 @@ def merge_duplicates(sdk, proj, *, dry_run: bool = True) -> dict:
             stmt_id = info["statements"][0]  # 1:1 issue↔statement
             for obs_id in info["observations"]:
                 try:
-                    sdk.supersede_point(obs_id, stmt_id)
+                    sdk._supersede_point(obs_id, stmt_id)
                     merged += 1
                 except Exception as e:
                     skipped.append(f"{url}: {e}")

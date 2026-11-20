@@ -29,7 +29,7 @@ class TestLifecycleAbsorption:
     def _seed_messages(self, sdk):
         """Run a pass so graph-persisted messages exist (warm-start seeds)."""
         random.seed(FIXED_SEED)
-        return sdk.dream(mode="full")
+        return sdk._dream(mode="full")
 
     def test_supersede_marks_dirty_and_invalidates_surviving_edges(self):
         f = f1_corpus()
@@ -39,7 +39,7 @@ class TestLifecycleAbsorption:
             assert _msg_edges(proj) > 0, "seeds must exist pre-supersede"
             old_id = f.claims["p1"]
             new_id = f.claims["p2"]
-            res = f.sdk.supersede_point(old_id, new_id)
+            res = f.sdk._supersede_point(old_id, new_id)
             assert res["invalidated"] is True
             # #2422: the superseded old point is terminal for EP — a dirty
             # flag would strand forever (never swept). The LIVE successor
@@ -64,7 +64,7 @@ class TestLifecycleAbsorption:
             # post-event graph: a converged pass runs and the surviving node
             # is freshly stamped.
             random.seed(FIXED_SEED)
-            r = f.sdk.dream(mode="full")
+            r = f.sdk._dream(mode="full")
             assert r["converged_all"] is True
             post = proj.g.query(
                 "MATCH (n:Point {id:$id}) RETURN n.confidence, n.lastDreamedAt",
@@ -81,7 +81,7 @@ class TestLifecycleAbsorption:
             proj = f.sdk._get_proj()
             self._seed_messages(f.sdk)
             assert _msg_edges(proj) > 0
-            res = f.sdk.invalidate_point(f.claims["p1"], f.claims["p2"])
+            res = f.sdk._invalidate_point(f.claims["p1"], f.claims["p2"])
             assert res["invalidated"] is True
             # #2422: p1 (flag-outdated, terminal for EP) must not strand in
             # the dirty set; the live successor p2 enters it (W1 contract).
@@ -99,7 +99,7 @@ class TestLifecycleAbsorption:
             assert int(rows[0][0]) == 0, (
                 "invalidate_point must drop both endpoints' seeds")
             random.seed(FIXED_SEED)
-            r = f.sdk.dream(mode="full")
+            r = f.sdk._dream(mode="full")
             assert r["converged_all"] is True
         finally:
             f.sdk.close()
@@ -111,11 +111,11 @@ class TestLifecycleAbsorption:
         sdk, _ = fresh_sdk(prefix="tortoise_epic903_c9merge_")
         try:
             proj = sdk._get_proj()
-            a = sdk.create_point("statement", "dup A", dedup=False,
+            a = sdk._create_point("statement", "dup A", dedup=False,
                                  status="live")["id"]
-            b = sdk.create_point("statement", "dup B", dedup=False,
+            b = sdk._create_point("statement", "dup B", dedup=False,
                                  status="live")["id"]
-            sdk.create_operator("IMPL", a, [b])
+            sdk._create_operator("IMPL", a, [b])
             # Mark b as the dedup candidate and approve the merge.
             proj.g.query(
                 "MATCH (n:Point {id:$id}) SET n.dedup_candidate = true",
@@ -128,7 +128,7 @@ class TestLifecycleAbsorption:
             # The merge cycle re-derived the surviving belief: a converged
             # pass runs without stale-seed crashes.
             random.seed(FIXED_SEED)
-            r = sdk.dream(mode="full")
+            r = sdk._dream(mode="full")
             assert r["converged_all"] is True
         finally:
             sdk.close()

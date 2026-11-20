@@ -63,7 +63,7 @@ def _check(report: dict, cid: str) -> dict | None:
 def test_audit_returns_structured_json_and_exit_codes(sdk):
     """audit() returns {node_count, edge_count, checks, summary, exit_code};
     clean graph → exit_code 0."""
-    report = sdk.audit()
+    report = sdk._audit__svc()
     assert set(report) >= {"node_count", "edge_count", "checks", "summary", "exit_code"}
     assert report["summary"]["clean"] is True
     assert report["exit_code"] == 0
@@ -74,7 +74,7 @@ def test_audit_returns_structured_json_and_exit_codes(sdk):
                         "status:'live', confidence:0.2")
     _edge(sdk, "op1", "p1", "IMPL")
 
-    report = sdk.audit()
+    report = sdk._audit__svc()
     assert report["exit_code"] == 1
     assert report["summary"]["clean"] is False
     assert report["summary"]["total_issues"] > 0
@@ -94,7 +94,7 @@ def test_check1_point_level_sourcekind_legacy(sdk):
     _create(sdk, "op1", "is_operator:true, op_type:'IMPL', pointKind:'statement', status:'live'")
     _edge(sdk, "op1", "ev", "IMPL")
 
-    report = sdk.audit()
+    report = sdk._audit__svc()
     ch = _check(report, "missing_sourceKind")
     assert ch is not None
     assert ch["count"] == 1
@@ -107,7 +107,7 @@ def test_check2_missing_sourcedate(sdk):
     """Point with sourceKind but no sourceDate → low missing_sourceDate."""
     _create(sdk, "ev", "content:'dated', pointKind:'statement', is_operator:false, "
                        "status:'live', sourceKind:'T3'")
-    report = sdk.audit()
+    report = sdk._audit__svc()
     ch = _check(report, "missing_sourceDate")
     assert ch is not None and ch["count"] == 1
     assert ch["samples"][0]["node_id"] == "ev"
@@ -125,7 +125,7 @@ def test_check3_superseded_no_edge_uses_corrects(sdk):
     # legacy-era edge — must NOT satisfy the CORRECTS requirement
     _edge(sdk, "sup", "repl", "SUPERSEDES")
 
-    report = sdk.audit()
+    report = sdk._audit__svc()
     ch = _check(report, "superseded_no_edge")
     assert ch is not None and ch["severity"] == "high"
     assert ch["count"] == 1
@@ -133,7 +133,7 @@ def test_check3_superseded_no_edge_uses_corrects(sdk):
 
     # now write the canonical CORRECTS edge → no longer flagged
     _edge(sdk, "repl", "sup", "CORRECTS")
-    report = sdk.audit()
+    report = sdk._audit__svc()
     ch = _check(report, "superseded_no_edge")
     assert ch is None or ch["count"] == 0
 
@@ -143,7 +143,7 @@ def test_check3_legacy_outdated_flag(sdk):
     CORRECTS edge is flagged too."""
     _create(sdk, "old", "content:'invalidated', pointKind:'statement', "
                         "is_operator:false, status:'live', outdated:true")
-    report = sdk.audit()
+    report = sdk._audit__svc()
     ch = _check(report, "superseded_no_edge")
     assert ch is not None and ch["count"] == 1
 
@@ -156,7 +156,7 @@ def test_check4_superseded_active_edges(sdk):
                         "is_operator:false, status:'live'")
     _edge(sdk, "act", "sup", "IMPL")
 
-    report = sdk.audit()
+    report = sdk._audit__svc()
     ch = _check(report, "superseded_active_edges")
     assert ch is not None and ch["severity"] == "medium"
     assert ch["count"] == 1
@@ -175,7 +175,7 @@ def test_check5_naive_impl_word_boundary(sdk):
     _edge(sdk, "op1", "t1", "IMPL")
     _edge(sdk, "op2", "t2", "IMPL")
 
-    report = sdk.audit()
+    report = sdk._audit__svc()
     ch = _check(report, "impl_instead_of_nand")
     assert ch is not None and ch["severity"] == "low"
     assert ch["count"] == 1  # 'tornado' must NOT match any word boundary
@@ -198,14 +198,14 @@ def test_check6_mitigation_recommended_uses_mitigated_by(sdk):
     # canonical mitigation: (op)-[:mitigated_by]->(m) — outbound from operator
     _edge(sdk, "low", "m", "mitigated_by")
 
-    report = sdk.audit()
+    report = sdk._audit__svc()
     ch = _check(report, "mitigation_recommended")
     # 'low' is mitigated → NOT flagged; only 'mit' is above the threshold → 0
     assert ch is None or ch["count"] == 0
 
     # remove the mitigation → low is flagged, high-confidence 'mit' still not
     _q(sdk, "MATCH (o:Point {id:'low'})-[r:mitigated_by]->() DELETE r")
-    report = sdk.audit()
+    report = sdk._audit__svc()
     ch = _check(report, "mitigation_recommended")
     assert ch is not None and ch["count"] == 1
     assert ch["severity"] == "medium"
@@ -223,7 +223,7 @@ def test_check6b_legacy_mitigates_edge(sdk):
     _edge(sdk, "op", "p", "IMPL")
     _edge(sdk, "op", "m", "mitigates")  # legacy edge type
 
-    report = sdk.audit()
+    report = sdk._audit__svc()
     ch = _check(report, "legacy_mitigates_edge")
     assert ch is not None
     assert ch["count"] == 1
@@ -254,7 +254,7 @@ def test_check7_source_missing_tier(sdk):
     _q(sdk, "MATCH (e:Point {id:'ev2'}), (s:Source {url:'https://example.com/tiered'}) "
             "CREATE (e)-[:extractedFrom]->(s)")
 
-    report = sdk.audit()
+    report = sdk._audit__svc()
     ch = _check(report, "missing_sourceKind_source")
     assert ch is not None and ch["severity"] == "medium"
     assert ch["count"] == 1
@@ -275,7 +275,7 @@ def test_check1_point_backed_by_tiered_source_not_flagged(sdk):
     _q(sdk, "MATCH (e:Point {id:'ev'}), (s:Source {url:'https://example.com/tiered'}) "
             "CREATE (e)-[:extractedFrom]->(s)")
 
-    report = sdk.audit()
+    report = sdk._audit__svc()
     ch1 = _check(report, "missing_sourceKind")
     assert ch1 is None or ch1["count"] == 0
     ch7 = _check(report, "missing_sourceKind_source")
@@ -294,7 +294,7 @@ def test_check1_legacy_point_with_untiered_source_owned_by_check7(sdk):
     _q(sdk, "MATCH (e:Point {id:'ev'}), (s:Source {url:'https://example.com/untiered'}) "
             "CREATE (e)-[:extractedFrom]->(s)")
 
-    report = sdk.audit()
+    report = sdk._audit__svc()
     ch1 = _check(report, "missing_sourceKind")
     assert ch1 is None or ch1["count"] == 0
     ch7 = _check(report, "missing_sourceKind_source")
@@ -314,7 +314,7 @@ def test_check7_kind_resolving_neutral_flagged(sdk):
     _q(sdk, "MATCH (e:Point {id:'ev'}), (s:Source {url:'https://example.com/news'}) "
             "CREATE (e)-[:extractedFrom]->(s)")
 
-    report = sdk.audit()
+    report = sdk._audit__svc()
     ch = _check(report, "missing_sourceKind_source")
     assert ch is not None and ch["count"] == 1
     assert ch["samples"][0]["node_id"] == "https://example.com/news"
@@ -332,7 +332,7 @@ def test_check7_explicit_tier_beats_neutral_kind(sdk):
     _q(sdk, "MATCH (e:Point {id:'ev'}), (s:Source {url:'https://example.com/news-tiered'}) "
             "CREATE (e)-[:extractedFrom]->(s)")
 
-    report = sdk.audit()
+    report = sdk._audit__svc()
     ch = _check(report, "missing_sourceKind_source")
     assert ch is None or ch["count"] == 0
 
@@ -351,7 +351,7 @@ def test_counts_uncapped_samples_capped(sdk):
         _edge(sdk, "op1", f"e{i}", "IMPL")
         _edge(sdk, "op2", f"e{i}", "IMPL")
 
-    report = sdk.audit()
+    report = sdk._audit__svc()
     ch1 = _check(report, "missing_sourceKind")
     assert ch1 is not None and ch1["count"] == 120  # 60 evs × 2 operators
     assert len(ch1["samples"]) == 50
@@ -369,11 +369,11 @@ def test_audit_point_kinds_scope(sdk):
     _create(sdk, "op1", "is_operator:true, op_type:'IMPL', pointKind:'decision', status:'live'")
     _edge(sdk, "op1", "ev", "IMPL")
 
-    scoped = sdk.audit(point_kinds=["statement"])
+    scoped = sdk._audit__svc(point_kinds=["statement"])
     assert scoped["summary"]["clean"] is True
-    all_ = sdk.audit()
+    all_ = sdk._audit__svc()
     assert all_["summary"]["clean"] is False
-    scoped2 = sdk.audit(point_kinds=["decision"])
+    scoped2 = sdk._audit__svc(point_kinds=["decision"])
     assert scoped2["summary"]["clean"] is False
 
 
@@ -383,23 +383,23 @@ def test_real_write_paths_not_flagged(sdk):
     """A graph wired through the SDK (supersede_point → CORRECTS,
     mitigate_operator → mitigated_by, create_source with tier) must not trip
     the canonical checks."""
-    old = sdk.create_point("statement", "old claim", status="live")
-    new = sdk.create_point("statement", "new claim", status="live")
-    other = sdk.create_point("statement", "other claim", status="live")
-    sdk.supersede_point(old["id"], new["id"])  # (new)-[:CORRECTS]->(old), status superseded
+    old = sdk._create_point("statement", "old claim", status="live")
+    new = sdk._create_point("statement", "new claim", status="live")
+    other = sdk._create_point("statement", "other claim", status="live")
+    sdk._supersede_point(old["id"], new["id"])  # (new)-[:CORRECTS]->(old), status superseded
 
-    op = sdk.create_operator("IMPL", new["id"], [other["id"]])
+    op = sdk._create_operator("IMPL", new["id"], [other["id"]])
     _q(sdk, "MATCH (o:Point {id:$id}) SET o.confidence = 0.2",
        params={"id": op["id"]})
-    sdk.mitigate_operator(op["id"], "Relevant because...", strength=0.3)
+    sdk._mitigate_operator(op["id"], "Relevant because...", strength=0.3)
 
     sdk.register_source("https://example.com/tiered", "news", tier="T2")
-    ev = sdk.create_point("statement", "evidence", status="live")
+    ev = sdk._create_point("statement", "evidence", status="live")
     _q(sdk, "MATCH (e:Point {id:$eid}), (s:Source {url:$url}) "
             "CREATE (e)-[:extractedFrom]->(s)",
        params={"eid": ev["id"], "url": "https://example.com/tiered"})
 
-    report = sdk.audit()
+    report = sdk._audit__svc()
     for cid in ("superseded_no_edge", "mitigation_recommended",
                 "missing_sourceKind_source", "superseded_active_edges",
                 "inverted_validity_window"):
@@ -591,7 +591,7 @@ def test_mcp_handler_returns_same_report(sdk, monkeypatch):
         assert report["exit_code"] == 1
         assert any(c["id"] == "mitigation_recommended" for c in report["checks"])
         # matches the SDK surface exactly
-        assert report == sdk.audit()
+        assert report == sdk._audit__svc()
         # scoped call surfaces the point_kinds param
         scoped = ms.tortoise_audit(point_kinds=["nonexistent"])
         assert scoped["summary"]["clean"] is True

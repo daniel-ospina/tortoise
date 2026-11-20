@@ -82,11 +82,11 @@ def sdk(sdk_factory):
 
 def _indicator(sdk, tag: str) -> dict:
     """A measured thing. ``tag`` keeps two worlds apart (name is the identity)."""
-    return sdk.create_object(f"CI pipeline duration [{tag}]", objectKind="workflow")
+    return sdk._create_object(f"CI pipeline duration [{tag}]", objectKind="workflow")
 
 
 def _reading(sdk, indicator, value, *, at, kind="measurement"):
-    return sdk.create_event(
+    return sdk._create_event(
         f"CI run at {at!r}", kind, value=value, unit="minutes",
         startedAt=at, aboutObject=indicator["id"],
     )

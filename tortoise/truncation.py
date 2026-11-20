@@ -94,9 +94,9 @@ derives that list from the tree so this register cannot re-stale — it has
 already shipped wrong twice, both times as a claim about how MANY sites there
 are rather than naming them:
 
-- ``tortoise/sdk.py::tortoise_fts_query`` — the limit-capped search path
+- ``tortoise/sdk.py::_tortoise_fts_query`` — the limit-capped search path
   (``result_ids[:limit]``, no offset and no cursor; ``/v1/search``).
-- ``tortoise/sdk.py::issue_insight`` — ``semantic_hits[:limit]`` over its own
+- ``tortoise/sdk.py::_issue_insight`` — ``semantic_hits[:limit]`` over its own
   default bound of 2, with no offset and no cursor (the
   ``tortoise_issue_insight`` surface).
 - ``tortoise/hosted_api.py::list_points`` — hosted ``GET /v1/points``, a

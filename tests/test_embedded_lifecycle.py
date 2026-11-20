@@ -368,7 +368,7 @@ def test_sdk_close_closes_projection_via_context_manager(monkeypatch, tmp_path):
 
     monkeypatch.setattr(FalkorProjection, "close", recorder)
     with TortoiseSDK(str(tmp_path / "f.db")) as sdk:
-        sdk.get_point("missing-1")  # force lazy projection creation
+        sdk._get_point("missing-1")  # force lazy projection creation
         assert sdk._proj is not None
     assert calls == ["close"]
     assert sdk._t_closed is True
@@ -781,7 +781,7 @@ def test_leaked_sdk_closes_on_gc(tmp_path):
     server down mid-suite."""
     from tortoise.sdk import TortoiseSDK
     sdk = TortoiseSDK(str(tmp_path / "gc_sdk.db"))
-    sdk.get_point("missing-1475")  # force lazy projection creation
+    sdk._get_point("missing-1475")  # force lazy projection creation
     assert sdk._proj is not None
     cli = getattr(sdk._proj.db, "client", sdk._proj.db)
     pid = cli.pid
@@ -855,7 +855,7 @@ def test_team_create_journals_minted_graph(tmp_path, monkeypatch):
     monkeypatch.setenv("TORTOISE_TEST_JOURNAL_FILE", str(journal))
     sdk = TortoiseSDK(str(tmp_path / "team-create.db"))
     try:
-        res = sdk.org_create("journalled")
+        res = sdk._org_create("journalled")
         assert res["graph_name"] == "org_journalled"
         assert "org_journalled" in _read_journal_file(str(journal)), \
             "team_create mint must be journaled (#1686)"
@@ -901,7 +901,7 @@ def test_team_create_leaves_no_graph_when_the_journal_append_fails(
     sdk = TortoiseSDK(str(tmp_path / "team-create-fail.db"))
     try:
         with pytest.raises(RuntimeError, match="forced append failure"):
-            sdk.org_create("unjournalled")
+            sdk._org_create("unjournalled")
         assert "org_unjournalled" not in (sdk._get_proj().db.list_graphs() or []), \
             "team_create must leave no unowned graph when the journal append fails"
         rows = sdk._get_registry().query(
@@ -3943,7 +3943,7 @@ def test_midconstruction_replay_is_a_cotenant_the_last_client_must_see(
     # Construction #1, leaked EXACTLY as test_pack_state.py:791 leaks it: the
     # SDK is built as an unbound temporary and only its projection's reference
     # cycle keeps the server side alive, so a gc.collect() can take it.
-    created = TortoiseSDK(db_path=db_path).org_create("LegacyCo")
+    created = TortoiseSDK(db_path=db_path)._org_create("LegacyCo")
     sock = _json.loads(Path(db_path + ".settings").read_text())["unixsocket"]
     key = os.path.abspath(sock)
     assert os.path.exists(sock), "test setup: construction #1 must be live"
@@ -4029,7 +4029,7 @@ def test_fork_midconstruction_drops_the_inherited_in_flight_claim(
     from tortoise.sdk import TortoiseSDK
 
     db_path = str(tmp_path / "fork_midconstruction.db")
-    created = TortoiseSDK(db_path=db_path).org_create("ForkCo")
+    created = TortoiseSDK(db_path=db_path)._org_create("ForkCo")
     sock = _json.loads(Path(db_path + ".settings").read_text())["unixsocket"]
     key = os.path.abspath(sock)
 
@@ -4145,7 +4145,7 @@ def test_close_path_with_empty_socket_file_emits_no_replay_warning(
     db_path = str(tmp_path / "close_path_no_replay_warning.db")
     sdk = TortoiseSDK(db_path=db_path)
     try:
-        sdk.org_create("ClosePathCo")
+        sdk._org_create("ClosePathCo")
         proj = sdk._get_proj()
         client = getattr(proj.db, "client", proj.db)
         assert client.ping(), "test setup: the server must be live"
@@ -4266,7 +4266,7 @@ def test_replay_gate_line_is_debug_and_never_warning(tmp_path, caplog):
     second = None
     third = None
     try:
-        first.org_create("GateLevelCo")
+        first._org_create("GateLevelCo")
         sock = _json.loads(
             Path(db_path + ".settings").read_text())["unixsocket"]
         assert os.path.exists(sock), "test setup: server #1 must be live"
@@ -4396,7 +4396,7 @@ def test_owner_handoff_failure_keeps_the_in_flight_claim(
     # stop.
     server_pid = None
     try:
-        first.org_create("HandoffCo")
+        first._org_create("HandoffCo")
         sock = _json.loads(
             Path(db_path + ".settings").read_text())["unixsocket"]
         key = os.path.abspath(sock)
@@ -4489,7 +4489,7 @@ def test_owner_handoff_failure_answer_keeps_the_claim_and_the_guard(
     # `try` so the `finally` can never raise `UnboundLocalError`.
     server_pid = None
     try:
-        first.org_create("HandoffFalseCo")
+        first._org_create("HandoffFalseCo")
         sock = _json.loads(
             Path(db_path + ".settings").read_text())["unixsocket"]
         key = os.path.abspath(sock)
@@ -4672,7 +4672,7 @@ def test_owner_handoff_counter_move_cannot_mask_a_failed_write(
     # (see the sibling hand-off tests).
     server_pid = None
     try:
-        first.org_create("HandoffCounterCo")
+        first._org_create("HandoffCounterCo")
         sock = _json.loads(
             Path(db_path + ".settings").read_text())["unixsocket"]
         key = os.path.abspath(sock)

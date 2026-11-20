@@ -124,10 +124,10 @@ def test_factor_direction_blocks_one_leg_and_keeps_the_other():
 
 def test_derived_is_stored_and_asserted_is_absent(lane):
     """Only ``derived`` is persisted — so no migration and no re-stamp."""
-    derived = lane.create_point("statement", "computed from other beliefs",
+    derived = lane._create_point("statement", "computed from other beliefs",
                                 claim_class="derived")
-    authored = lane.create_point("statement", "told to us", claim_class="asserted")
-    default = lane.create_point("statement", "told to us, no argument")
+    authored = lane._create_point("statement", "told to us", claim_class="asserted")
+    default = lane._create_point("statement", "told to us, no argument")
 
     assert _props(lane, derived["id"]).get(cc.PROP) == "derived"
     # Both spellings of the default class store NOTHING: absence IS asserted.
@@ -137,10 +137,10 @@ def test_derived_is_stored_and_asserted_is_absent(lane):
 
 def test_nested_prop_form_is_validated_and_not_persisted_as_asserted(lane):
     """The prop passthrough must not smuggle an unvalidated third class."""
-    pid = lane.create_point("statement", "x", claimClass="derived")["id"]
+    pid = lane._create_point("statement", "x", claimClass="derived")["id"]
     assert _props(lane, pid).get(cc.PROP) == "derived"
     with pytest.raises(ValueError):
-        lane.create_point("statement", "y", claimClass="derivedish")
+        lane._create_point("statement", "y", claimClass="derivedish")
 
 
 def test_unknown_class_refused_with_nothing_written(lane):
@@ -148,7 +148,7 @@ def test_unknown_class_refused_with_nothing_written(lane):
     before = lane._get_proj().g.query(
         "MATCH (n:Point) RETURN count(n)").result_set[0][0]
     with pytest.raises(ValueError):
-        lane.create_point("statement", "z", claim_class="bogus")
+        lane._create_point("statement", "z", claim_class="bogus")
     after = lane._get_proj().g.query(
         "MATCH (n:Point) RETURN count(n)").result_set[0][0]
     assert after == before
@@ -162,20 +162,20 @@ def test_dedup_hit_does_not_restamp_provenance(lane):
     claim as derived (or bury a derived one). Both directions are pinned here,
     so the assertion can fail.
     """
-    first = lane.create_point("statement", "same words", claim_class="derived")
-    again = lane.create_point("statement", "same words", dedup=True)
+    first = lane._create_point("statement", "same words", claim_class="derived")
+    again = lane._create_point("statement", "same words", dedup=True)
     assert again["id"] == first["id"]
     assert _props(lane, first["id"]).get(cc.PROP) == "derived"
 
     # A dedup re-run that NAMES the ASSERTED class must not bury the marker.
-    lane.create_point("statement", "same words", dedup=True,
+    lane._create_point("statement", "same words", dedup=True,
                       claim_class="asserted")
     assert _props(lane, first["id"]).get(cc.PROP) == "derived", (
         "a dedup hit must not re-stamp a derived claim as authored")
 
     # ...and the mirror: naming DERIVED must not promote an authored claim.
-    plain = lane.create_point("statement", "authored words")
-    lane.create_point("statement", "authored words", dedup=True,
+    plain = lane._create_point("statement", "authored words")
+    lane._create_point("statement", "authored words", dedup=True,
                       claim_class="derived")
     assert cc.PROP not in _props(lane, plain["id"]), (
         "a dedup hit must not promote an authored claim to derived")
@@ -184,25 +184,25 @@ def test_dedup_hit_does_not_restamp_provenance(lane):
 # ── 3. the write-path guard ──────────────────────────────────────────────────
 
 def _two(lane, *, src_class, tgt_class):
-    src = lane.create_point("statement", "src", claim_class=src_class)["id"]
-    tgt = lane.create_point("statement", "tgt", claim_class=tgt_class)["id"]
+    src = lane._create_point("statement", "src", claim_class=src_class)["id"]
+    tgt = lane._create_point("statement", "tgt", claim_class=tgt_class)["id"]
     return src, tgt
 
 
 def test_direct_edge_refuses_derived_above_asserted(lane):
     src, tgt = _two(lane, src_class="derived", tgt_class="asserted")
     with pytest.raises(ValueError, match="DERIVED"):
-        lane.create_direct_edge("IMPL", src, tgt)
+        lane._create_direct_edge("IMPL", src, tgt)
     # NAND is the same override in the other direction: it LOWERS the target.
     with pytest.raises(ValueError, match="DERIVED"):
-        lane.create_direct_edge("NAND", src, tgt)
+        lane._create_direct_edge("NAND", src, tgt)
 
 
 def test_nothing_is_wired_when_the_direct_edge_is_refused(lane):
     """The refusal is BEFORE the MERGE — a refused call writes nothing."""
     src, tgt = _two(lane, src_class="derived", tgt_class="asserted")
     with pytest.raises(ValueError):
-        lane.create_direct_edge("IMPL", src, tgt)
+        lane._create_direct_edge("IMPL", src, tgt)
     n = lane._get_proj().g.query(
         "MATCH ()-[r:IMPL|NAND]->() RETURN count(r)").result_set[0][0]
     assert n == 0
@@ -219,49 +219,49 @@ def test_direct_edge_allows_the_legal_wirings(lane):
     for src_class, tgt_class in (("derived", "derived"),
                                  ("asserted", "asserted")):
         src, tgt = _two(lane, src_class=src_class, tgt_class=tgt_class)
-        lane.create_direct_edge("IMPL", src, tgt)   # must not raise
+        lane._create_direct_edge("IMPL", src, tgt)   # must not raise
         assert _factor(lane, src, tgt) is not None
     # Corroboration is stated one-way: the asserted claim feeds the derived.
     a_src, d_tgt = _two(lane, src_class="asserted", tgt_class="derived")
-    lane.create_direct_edge("IMPL", a_src, d_tgt, direction="->")
+    lane._create_direct_edge("IMPL", a_src, d_tgt, direction="->")
     assert _factor(lane, a_src, d_tgt) is not None
     # The same wiring asked for BIDIRECTIONALLY flows the override leg too.
     a2, d2 = _two(lane, src_class="asserted", tgt_class="derived")
     with pytest.raises(ValueError, match="DERIVED"):
-        lane.create_direct_edge("IMPL", a2, d2)
+        lane._create_direct_edge("IMPL", a2, d2)
 
 
 def test_create_operator_refuses_derived_source_over_asserted(lane):
     src, tgt = _two(lane, src_class="derived", tgt_class="asserted")
     with pytest.raises(ValueError, match="DERIVED"):
-        lane.create_operator("IMPL", src, [tgt])
+        lane._create_operator("IMPL", src, [tgt])
     with pytest.raises(ValueError, match="DERIVED"):
-        lane.create_operator("NAND", src, [tgt])
+        lane._create_operator("NAND", src, [tgt])
     # An asserted source over a derived input is fine — stated one-way.
     a_src, d_tgt = _two(lane, src_class="asserted", tgt_class="derived")
-    lane.create_operator("IMPL", a_src, [d_tgt], direction="->")
+    lane._create_operator("IMPL", a_src, [d_tgt], direction="->")
     # ...but the same operator requested BIDIRECTIONALLY flows the override leg.
     a2, d2 = _two(lane, src_class="asserted", tgt_class="derived")
     with pytest.raises(ValueError, match="DERIVED"):
-        lane.create_operator("IMPL", a2, [d2])
+        lane._create_operator("IMPL", a2, [d2])
 
 
 def test_supersede_refuses_a_derived_successor(lane):
     """Supersession IS an override — a computed claim never terminalises one."""
-    old = lane.create_point("statement", "authored belief")["id"]
-    new = lane.create_point("statement", "computed replacement",
+    old = lane._create_point("statement", "authored belief")["id"]
+    new = lane._create_point("statement", "computed replacement",
                             claim_class="derived")["id"]
     with pytest.raises(ValueError, match="DERIVED"):
-        lane.supersede_point(old, new)
+        lane._supersede_point(old, new)
     # Refused BEFORE any mutation: the predecessor is still live.
     assert _props(lane, old).get("status") == "live"
 
 
 def test_supersede_allows_a_derived_predecessor(lane):
     """Replacing a computed claim with a corrected one is legal."""
-    old = lane.create_point("statement", "v1", claim_class="derived")["id"]
-    new = lane.create_point("statement", "v2", claim_class="derived")["id"]
-    lane.supersede_point(old, new)
+    old = lane._create_point("statement", "v1", claim_class="derived")["id"]
+    new = lane._create_point("statement", "v2", claim_class="derived")["id"]
+    lane._supersede_point(old, new)
     assert _props(lane, old).get("status") == "superseded"
 
 
@@ -292,15 +292,15 @@ def test_supersede_repoint_refuses_a_derived_source_over_the_successor(lane):
     the exact wiring ``create_operator`` refuses. Pre-fix the supersede
     reported success and the graph held the refused factor.
     """
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    new = lane.create_point("statement", "authored v2")["id"]
-    src = lane.create_point("statement", "computed source",
+    new = lane._create_point("statement", "authored v2")["id"]
+    src = lane._create_point("statement", "computed source",
                             claim_class="derived")["id"]
-    op = lane.create_operator("IMPL", src, [old], direction="->")
+    op = lane._create_operator("IMPL", src, [old], direction="->")
 
     with pytest.raises(ValueError, match="DERIVED") as _exc:
-        lane.supersede_point(old, new)
+        lane._supersede_point(old, new)
     # The ordered arm PROVED the source slot (all-int idx, ``ep.py``'s own
     # ``ORDER BY coalesce(r.idx, 0), c.id``), so the message asserts it instead
     # of hedging — and it must NOT borrow the candidate arm's caveat.
@@ -316,7 +316,7 @@ def test_supersede_repoint_refuses_a_derived_source_over_the_successor(lane):
     assert _operator_rows(lane, new) == []
     # The door the re-point was imitating keeps refusing the same wiring.
     with pytest.raises(ValueError, match="DERIVED"):
-        lane.create_operator("IMPL", src, [new], direction="->")
+        lane._create_operator("IMPL", src, [new], direction="->")
 
 
 def test_supersede_repoint_refuses_a_derived_claim_in_the_source_slot(lane):
@@ -327,18 +327,18 @@ def test_supersede_repoint_refuses_a_derived_claim_in_the_source_slot(lane):
     class outright, so this is the raw producer shape). Re-pointing moves the
     computed claim into the factor's SOURCE slot above asserted targets.
     """
-    old = lane.create_point("statement", "v1")["id"]
-    t1 = lane.create_point("statement", "authored target 1")["id"]
-    t2 = lane.create_point("statement", "authored target 2")["id"]
-    op = lane.create_operator("IMPL", old, [t1, t2], direction="->")
+    old = lane._create_point("statement", "v1")["id"]
+    t1 = lane._create_point("statement", "authored target 1")["id"]
+    t2 = lane._create_point("statement", "authored target 2")["id"]
+    op = lane._create_operator("IMPL", old, [t1, t2], direction="->")
     lane._get_proj().g.query(
         "MATCH (n:Point) WHERE n.id=$id SET n.claimClass='derived'",
         params={"id": old})
-    new = lane.create_point("statement", "computed v2",
+    new = lane._create_point("statement", "computed v2",
                             claim_class="derived")["id"]
 
     with pytest.raises(ValueError, match="DERIVED"):
-        lane.supersede_point(old, new)
+        lane._supersede_point(old, new)
 
     assert _props(lane, old).get("status") == "live"
     assert _operator_rows(lane, old) == [[op["id"], "IMPL", 0]]
@@ -353,14 +353,14 @@ def test_supersede_repoint_judges_the_leg_that_flows(lane):
     Judging the source slot's class alone (ignoring the direction) would refuse
     this — the inversion the predicate exists to prevent.
     """
-    src = lane.create_point("statement", "authored source")["id"]
-    old = lane.create_point("statement", "computed v1",
+    src = lane._create_point("statement", "authored source")["id"]
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    op = lane.create_operator("NAND", src, [old], direction="->")
-    new = lane.create_point("statement", "computed v2",
+    op = lane._create_operator("NAND", src, [old], direction="->")
+    new = lane._create_point("statement", "computed v2",
                             claim_class="derived")["id"]
 
-    assert lane.supersede_point(old, new)["edges_transferred"] == 1
+    assert lane._supersede_point(old, new)["edges_transferred"] == 1
     assert _operator_rows(lane, new) == [[op["id"], "NAND", 1]]
     assert _operator_rows(lane, old) == []
 
@@ -389,20 +389,20 @@ def test_supersede_repoint_lets_a_same_class_supersede_through_a_null_idx(lane):
     with ``src`` tie-broken first it is exactly derived-source-over-asserted-
     successor, i.e. the illegal factor, not an exemption).
     """
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    src = lane.create_point("statement", "computed source",
+    src = lane._create_point("statement", "computed source",
                             claim_class="derived")["id"]
-    op = lane.create_operator("IMPL", src, [old], direction="->")
+    op = lane._create_operator("IMPL", src, [old], direction="->")
     lane._get_proj().g.query(
         "MATCH (op:Point {id:$op})-[r:IMPL|NAND]->() REMOVE r.idx",
         params={"op": op["id"]})
     # COMPUTED successor: same class on both sides, so the guard has nothing to
     # say under ANY candidate source assignment.
-    new = lane.create_point("statement", "computed v2",
+    new = lane._create_point("statement", "computed v2",
                             claim_class="derived")["id"]
 
-    assert lane.supersede_point(old, new)["edges_transferred"] == 1
+    assert lane._supersede_point(old, new)["edges_transferred"] == 1
     # The slot MOVES and the absent ``idx`` stays absent — 2a reads ``idx``
     # opaquely, exactly as it preserves a string one.
     assert _operator_rows(lane, new) == [[op["id"], "IMPL", None]]
@@ -439,22 +439,22 @@ def test_supersede_repoint_refuses_an_idx_less_derived_over_asserted(lane):
     Pre-fix this is RED: the door took ``continue``, so the supersede returned
     success and ``pytest.raises`` cannot pass.
     """
-    src = lane.create_point("statement", "computed source",
+    src = lane._create_point("statement", "computed source",
                             claim_class="derived",
                             id="0000000001-aaaaaaaaaaaa")["id"]
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    op = lane.create_operator("IMPL", src, [old], direction="->")
+    op = lane._create_operator("IMPL", src, [old], direction="->")
     # The legacy / pre-guard / migrated shape: NO ``idx`` on any slot edge. This
     # is a missing property, not a value any writer had to forge.
     lane._get_proj().g.query(
         "MATCH (op:Point {id:$op})-[r:IMPL]->() REMOVE r.idx",
         params={"op": op["id"]})
-    new = lane.create_point("statement", "authored v2",
+    new = lane._create_point("statement", "authored v2",
                             id="0000000002-bbbbbbbbbbbb")["id"]
 
     with pytest.raises(ValueError, match="DERIVED"):
-        lane.supersede_point(old, new)
+        lane._supersede_point(old, new)
 
     # Refused BEFORE any mutation, and the refused wiring is not in the graph.
     assert _props(lane, old).get("status") == "live"
@@ -488,11 +488,11 @@ def test_supersede_repoint_lets_a_same_class_supersede_through_a_string_idx(
     witness the fail-open. `…refuses_a_raw_written_slot_idx` and
     `…refuses_when_a_string_idx_outranks_the_source` are the cases that do.
     """
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    src = lane.create_point("statement", "computed source",
+    src = lane._create_point("statement", "computed source",
                             claim_class="derived")["id"]
-    op = lane.create_operator("IMPL", src, [old], direction="->")
+    op = lane._create_operator("IMPL", src, [old], direction="->")
     # Re-stamp ONE slot's idx as a string — no door writes this shape, which is
     # exactly why it is the raw one a foreign writer leaves behind.
     lane._get_proj().g.query(
@@ -500,14 +500,14 @@ def test_supersede_repoint_lets_a_same_class_supersede_through_a_string_idx(
         "SET r.idx = $to",
         params={"op": op["id"], "from": int_slot, "to": str_idx})
 
-    new = lane.create_point("statement", "computed v2",
+    new = lane._create_point("statement", "computed v2",
                             claim_class="derived")["id"]
 
     # Same class on both sides: the guard has nothing to say, so the supersede
     # must go through and carry the predecessor's slot — idx VALUE and type
     # preserved, as 2a reads ``idx`` opaquely.
     moved_idx = str_idx if int_slot == 1 else 1
-    assert lane.supersede_point(old, new)["edges_transferred"] == 1
+    assert lane._supersede_point(old, new)["edges_transferred"] == 1
     assert _operator_rows(lane, new) == [[op["id"], "IMPL", moved_idx]]
     assert _operator_rows(lane, old) == []
 
@@ -542,20 +542,20 @@ def test_supersede_repoint_refuses_a_raw_written_slot_idx(lane, raw_idx):
     carve-out engine, 2026-10-31), i.e. the layout IS mixed, the door takes the
     candidate arm, and the pre-fix blanket skip let the supersede through.
     """
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    src = lane.create_point("statement", "computed source",
+    src = lane._create_point("statement", "computed source",
                             claim_class="derived")["id"]
-    op = lane.create_operator("IMPL", src, [old], direction="->")
+    op = lane._create_operator("IMPL", src, [old], direction="->")
     lane._get_proj().g.query(
         "MATCH (op:Point {id:$op})-[r:IMPL]->() WHERE r.idx = 1 "
         "SET r.idx = $to",
         params={"op": op["id"], "to": raw_idx})
     # The successor is AUTHORED — issue #10195's reproduction, plus the layout.
-    new = lane.create_point("statement", "authored v2")["id"]
+    new = lane._create_point("statement", "authored v2")["id"]
 
     with pytest.raises(ValueError, match="DERIVED") as _exc:
-        lane.supersede_point(old, new)
+        lane._supersede_point(old, new)
 
     # ONE non-``int`` ``idx`` beside an ``int`` one is a MIXED layout: the slot
     # order the loader reads is the engine's CROSS-TYPE grouping, which this door
@@ -599,21 +599,21 @@ def test_supersede_repoint_refuses_when_a_string_idx_outranks_the_source(lane):
     So a mixed-type layout is NOT ordered: every input is a candidate source and
     any overriding assignment refuses.
     """
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    src = lane.create_point("statement", "computed source",
+    src = lane._create_point("statement", "computed source",
                             claim_class="derived")["id"]
     # Predecessor at the int slot 0, the other input at 1 — then make the SECOND
     # slot a string, i.e. the type mix a hand/foreign writer leaves behind.
-    op = lane.create_operator("IMPL", old, [src], direction="->")
+    op = lane._create_operator("IMPL", old, [src], direction="->")
     lane._get_proj().g.query(
         "MATCH (op:Point {id:$op})-[r:IMPL]->(n:Point {id:$tgt}) "
         "SET r.idx = '1'",
         params={"op": op["id"], "tgt": src})
-    new = lane.create_point("statement", "authored v2")["id"]
+    new = lane._create_point("statement", "authored v2")["id"]
 
     with pytest.raises(ValueError, match="DERIVED") as _exc:
-        lane.supersede_point(old, new)
+        lane._supersede_point(old, new)
 
     # int ``0`` beside str ``'1'`` — the CROSS-TYPE arm, and the refusal says so.
     assert "MIXED types" in str(_exc.value), _exc.value
@@ -641,11 +641,11 @@ def test_supersede_repoint_refuses_a_uniformly_non_int_slot_layout(lane):
     through and minted exactly that factor with no verdict, no warning, no
     record (#10195 review P2).
     """
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    src = lane.create_point("statement", "computed source",
+    src = lane._create_point("statement", "computed source",
                             claim_class="derived")["id"]
-    op = lane.create_operator("IMPL", src, [old], direction="->")
+    op = lane._create_operator("IMPL", src, [old], direction="->")
     # BOTH slots re-stamped as strings — the door's ordered set is all-int only.
     lane._get_proj().g.query(
         "MATCH (op:Point {id:$op})-[r:IMPL]->() SET r.idx = '1'",
@@ -654,10 +654,10 @@ def test_supersede_repoint_refuses_a_uniformly_non_int_slot_layout(lane):
         "MATCH (op:Point {id:$op})-[r:IMPL]->(n:Point {id:$src}) SET r.idx = '0'",
         params={"op": op["id"], "src": src})
     # The successor is AUTHORED — issue #10195's reproduction, plus the layout.
-    new = lane.create_point("statement", "authored v2")["id"]
+    new = lane._create_point("statement", "authored v2")["id"]
 
     with pytest.raises(ValueError, match="DERIVED") as _exc:
-        lane.supersede_point(old, new)
+        lane._supersede_point(old, new)
 
     # ⛔ THE STATED CAUSE IS THE DOOR'S OWN CHOICE, not an engine limitation
     # (#10418 review P3). Both slots are strings, i.e. ONE type group — the
@@ -705,21 +705,21 @@ def test_supersede_repoint_judges_a_duplicated_slot_idx(lane):
     makes the SHAPE decide the verdict instead of the draw (a flaky test that
     fails on a random 12-hex draw is not a coverage guarantee).
     """
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    src = lane.create_point("statement", "computed source",
+    src = lane._create_point("statement", "computed source",
                             claim_class="derived",
                             id="0000000001-aaaaaaaaaaaa")["id"]
-    op = lane.create_operator("IMPL", src, [old], direction="->")
+    op = lane._create_operator("IMPL", src, [old], direction="->")
     # Collapse the target slot onto position 0: two inputs, one ``idx``.
     lane._get_proj().g.query(
         "MATCH (op:Point {id:$op})-[r:IMPL]->() WHERE r.idx = 1 SET r.idx = 0",
         params={"op": op["id"]})
-    new = lane.create_point("statement", "authored v2",
+    new = lane._create_point("statement", "authored v2",
                             id="0000000002-bbbbbbbbbbbb")["id"]
 
     with pytest.raises(ValueError, match="DERIVED"):
-        lane.supersede_point(old, new)
+        lane._supersede_point(old, new)
 
     assert _props(lane, old).get("status") == "live"
     assert _props(lane, new).get("status") == "live"
@@ -743,22 +743,22 @@ def test_supersede_repoint_takes_the_loaders_tie_break_the_other_way(lane):
     the reason given on the case above — ``ids.ulid()`` has a random 12-hex
     suffix, so creation order is not id order inside one millisecond.
     """
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    src = lane.create_point("statement", "computed source",
+    src = lane._create_point("statement", "computed source",
                             claim_class="derived",
                             id="0000000002-bbbbbbbbbbbb")["id"]
-    op = lane.create_operator("IMPL", src, [old], direction="->")
+    op = lane._create_operator("IMPL", src, [old], direction="->")
     # The same collapse: two inputs, one ``idx``.
     lane._get_proj().g.query(
         "MATCH (op:Point {id:$op})-[r:IMPL]->() WHERE r.idx = 1 SET r.idx = 0",
         params={"op": op["id"]})
-    new = lane.create_point("statement", "authored v2",
+    new = lane._create_point("statement", "authored v2",
                             id="0000000001-aaaaaaaaaaaa")["id"]
 
     # No raise: ``new`` outranks ``src`` at the tied idx, it is the source the
     # loader reads, and asserted-over-derived is the legal direction.
-    assert lane.supersede_point(old, new)["edges_transferred"] == 1
+    assert lane._supersede_point(old, new)["edges_transferred"] == 1
     assert _operator_rows(lane, new) == [[op["id"], "IMPL", 0]]
     assert _operator_rows(lane, old) == []
 
@@ -780,10 +780,10 @@ def test_supersede_repoint_judges_every_stored_direction(lane):
     while the ``<-`` leg is exactly ``derived_over_asserted`` (the load side
     reports it when it reads that row). The door must refuse either way.
     """
-    src = lane.create_point("statement", "authored source")["id"]
-    old = lane.create_point("statement", "computed v1",
+    src = lane._create_point("statement", "authored source")["id"]
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    op = lane.create_operator("NAND", src, [old], direction="->")
+    op = lane._create_operator("NAND", src, [old], direction="->")
     # A SECOND node under the SAME operator id — the raw-write shape, and the
     # way this codebase already models a non-unique Point id — carrying the
     # other stored direction and its own copy of the operator's slot edges.
@@ -795,11 +795,11 @@ def test_supersede_repoint_judges_every_stored_direction(lane):
         "MATCH (op)-[r:NAND]->(i) "
         "CREATE (dup)-[:NAND {idx: r.idx}]->(i)",
         params={"op": op["id"]})
-    new = lane.create_point("statement", "computed v2",
+    new = lane._create_point("statement", "computed v2",
                             claim_class="derived")["id"]
 
     with pytest.raises(ValueError, match="re-pointing the OPERATOR"):
-        lane.supersede_point(old, new)
+        lane._supersede_point(old, new)
 
     # Refused BEFORE any mutation, and the refused wiring is not in the graph.
     assert _props(lane, old).get("status") == "live"
@@ -820,16 +820,16 @@ def test_supersede_repoint_leaves_an_alreadyDecided_operator_alone(lane):
     (``derived --IMPL-->`` a successor that is asserted), so only the carve-out
     stands between this call and a false refusal.
     """
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    src = lane.create_point("statement", "computed source",
+    src = lane._create_point("statement", "computed source",
                             claim_class="derived")["id"]
-    op = lane.create_operator("IMPL", src, [old], direction="->",
+    op = lane._create_operator("IMPL", src, [old], direction="->",
                               label="alreadyDecided")
-    new = lane.create_point("statement", "authored v2")["id"]
+    new = lane._create_point("statement", "authored v2")["id"]
 
     # No raise: the operator is not re-pointed, so no rebuilt layout exists.
-    assert lane.supersede_point(old, new)["edges_transferred"] == 0
+    assert lane._supersede_point(old, new)["edges_transferred"] == 0
     assert _operator_rows(lane, old) == [[op["id"], "IMPL", 1]]
     assert _operator_rows(lane, new) == []
 
@@ -874,20 +874,20 @@ def test_supersede_repoint_judges_a_flag_less_operator(lane):
     Pre-fix this is RED: the supersede returned success, so ``pytest.raises``
     cannot pass.
     """
-    src = lane.create_point("statement", "computed source",
+    src = lane._create_point("statement", "computed source",
                             claim_class="derived")["id"]
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    op = lane.create_operator("IMPL", src, [old], direction="->")
+    op = lane._create_operator("IMPL", src, [old], direction="->")
     # The legacy / migrated operator shape: ``op_type`` present, the boolean
     # flag never written or dropped by a migration — a MISSING property.
     lane._get_proj().g.query(
         "MATCH (n:Point {id:$id}) REMOVE n.is_operator",
         params={"id": op["id"]})
-    new = lane.create_point("statement", "authored v2")["id"]
+    new = lane._create_point("statement", "authored v2")["id"]
 
     with pytest.raises(ValueError, match="DERIVED"):
-        lane.supersede_point(old, new)
+        lane._supersede_point(old, new)
 
     # Refused BEFORE any mutation: neither point terminalised, the edge is still
     # at the predecessor with its slot position, and nothing reached the
@@ -914,18 +914,18 @@ def test_supersede_repoint_carries_a_flag_less_operator_edge_with_its_slot(
     the mirror stays on the dead prior, and one ``DirectEdgeRepoint`` is
     emitted for an operator edge.
     """
-    src = lane.create_point("statement", "computed source",
+    src = lane._create_point("statement", "computed source",
                             claim_class="derived")["id"]
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    op = lane.create_operator("IMPL", src, [old], direction="->")
+    op = lane._create_operator("IMPL", src, [old], direction="->")
     lane._get_proj().g.query(
         "MATCH (n:Point {id:$id}) REMOVE n.is_operator",
         params={"id": op["id"]})
-    new = lane.create_point("statement", "computed v2",
+    new = lane._create_point("statement", "computed v2",
                             claim_class="derived")["id"]
 
-    lane.supersede_point(old, new)
+    lane._supersede_point(old, new)
 
     # The slot position survived, and the operator's SUPPORT mirror followed.
     assert _operator_shaped_rows(lane, old) == []
@@ -960,18 +960,18 @@ def test_supersede_repoint_judges_a_stored_op_type_outside_the_pair(
 
     Pre-fix RED: the supersede succeeded.
     """
-    src = lane.create_point("statement", "computed source",
+    src = lane._create_point("statement", "computed source",
                             claim_class="derived")["id"]
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    op = lane.create_operator("IMPL", src, [old], direction="->")
+    op = lane._create_operator("IMPL", src, [old], direction="->")
     lane._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.op_type=$t",
         params={"id": op["id"], "t": stored_op_type})
-    new = lane.create_point("statement", "authored v2")["id"]
+    new = lane._create_point("statement", "authored v2")["id"]
 
     with pytest.raises(ValueError, match="DERIVED"):
-        lane.supersede_point(old, new)
+        lane._supersede_point(old, new)
 
     assert _props(lane, old).get("status") == "live"
     assert _operator_shaped_rows(lane, old) == [[op["id"], "IMPL", 1]]
@@ -1001,22 +1001,22 @@ def test_supersede_repoint_judges_the_REL_TYPE_when_the_stored_op_type_is_weaker
     deterministic (the stored value is in the pair, so there is no row-order
     coin flip): the union below is what makes it refuse.
     """
-    src = lane.create_point("statement", "authored source")["id"]
-    old = lane.create_point("statement", "computed v1",
+    src = lane._create_point("statement", "authored source")["id"]
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
     # Legal AS WRITTEN (``->`` is the corroboration leg). The absent-direction
     # shape is then restored by the raw write below — that is the legacy form.
-    op = lane.create_operator("IMPL", src, [old], direction="->")
+    op = lane._create_operator("IMPL", src, [old], direction="->")
     # A stored mechanism the node does not actually carry, and no direction:
     # the rel type 2a re-points is the ONLY record of the real mechanism.
     lane._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.op_type='NAND' REMOVE n.direction",
         params={"id": op["id"]})
-    new = lane.create_point("statement", "computed v2",
+    new = lane._create_point("statement", "computed v2",
                             claim_class="derived")["id"]
 
     with pytest.raises(ValueError, match="re-pointing the OPERATOR") as _exc:
-        lane.supersede_point(old, new)
+        lane._supersede_point(old, new)
 
     # The mechanism that BLOCKS is the one the edge carries — named, so the
     # caller is not told about a NAND they will not find.
@@ -1047,10 +1047,10 @@ def test_supersede_repoint_judges_BOTH_mechanisms_of_a_legacy_operator(lane):
     order (the assertable half): there the supersede succeeded and minted
     ``derived --IMPL--> asserted`` with no verdict, no warning, no record.
     """
-    src = lane.create_point("statement", "authored source")["id"]
-    old = lane.create_point("statement", "computed v1",
+    src = lane._create_point("statement", "authored source")["id"]
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    op = lane.create_operator("IMPL", src, [old], direction="->")
+    op = lane._create_operator("IMPL", src, [old], direction="->")
     # 2a transfers ``IMPL|NAND`` edges and nothing narrower.
     lane._get_proj().g.query(
         "MATCH (op:Point {id:$op}), (old:Point {id:$old}) "
@@ -1059,11 +1059,11 @@ def test_supersede_repoint_judges_BOTH_mechanisms_of_a_legacy_operator(lane):
     lane._get_proj().g.query(
         "MATCH (n:Point {id:$id}) REMOVE n.op_type, n.direction",
         params={"id": op["id"]})
-    new = lane.create_point("statement", "computed v2",
+    new = lane._create_point("statement", "computed v2",
                             claim_class="derived")["id"]
 
     with pytest.raises(ValueError, match="re-pointing the OPERATOR"):
-        lane.supersede_point(old, new)
+        lane._supersede_point(old, new)
 
     assert _props(lane, old).get("status") == "live"
     assert _props(lane, new).get("status") == "live"
@@ -1087,10 +1087,10 @@ def test_supersede_repoint_survives_a_non_string_stored_direction(lane):
     the derived target under the asserted source. RED pre-fix with
     ``TypeError`` — which is not a ``ValueError``, so ``pytest.raises`` fails.
     """
-    src = lane.create_point("statement", "authored source")["id"]
-    old = lane.create_point("statement", "computed v1",
+    src = lane._create_point("statement", "authored source")["id"]
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    op = lane.create_operator("IMPL", src, [old], direction="->")
+    op = lane._create_operator("IMPL", src, [old], direction="->")
     # The same operator id on a SECOND node — #7822's non-unique-id shape —
     # carrying a numeric ``direction`` and its own slot edge into the prior.
     lane._get_proj().g.query(
@@ -1101,11 +1101,11 @@ def test_supersede_repoint_survives_a_non_string_stored_direction(lane):
         "MATCH (dup:Point {id:$op}), (old:Point {id:$old}) "
         "WHERE dup.direction = 1 CREATE (dup)-[:IMPL {idx:1}]->(old)",
         params={"op": op["id"], "old": old})
-    new = lane.create_point("statement", "computed v2",
+    new = lane._create_point("statement", "computed v2",
                             claim_class="derived")["id"]
 
     with pytest.raises(ValueError, match="re-pointing the OPERATOR"):
-        lane.supersede_point(old, new)
+        lane._supersede_point(old, new)
 
     assert _props(lane, old).get("status") == "live"
     assert _props(lane, new).get("status") == "live"
@@ -1144,17 +1144,17 @@ def test_supersede_repoint_refuses_a_derived_over_asserted_direct_edge(lane):
     ``create_direct_edge(IMPL, new, t)`` refuses that exact pair, i.e. the
     write-path invariant the module states was false for a reachable door.
     """
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    new = lane.create_point("statement", "authored v2")["id"]  # asserted
-    t = lane.create_point("statement", "computed peer",
+    new = lane._create_point("statement", "authored v2")["id"]  # asserted
+    t = lane._create_point("statement", "computed peer",
                           claim_class="derived")["id"]
-    lane.create_direct_edge("IMPL", old, t)
+    lane._create_direct_edge("IMPL", old, t)
     before = _direct_rows(lane, old)
     assert before and before[0][0] == old and before[0][3] == t, before
 
     with pytest.raises(ValueError, match="DERIVED") as _exc:
-        lane.supersede_point(old, new)
+        lane._supersede_point(old, new)
     _msg = str(_exc.value)
     # It names the SURFACE it refused on, so the caller is not sent looking at
     # ``create_direct_edge`` for a call they never made.
@@ -1171,7 +1171,7 @@ def test_supersede_repoint_refuses_a_derived_over_asserted_direct_edge(lane):
     # And the wiring the re-point would have minted is one the creation door
     # refuses — the invariant this arm was breaking.
     with pytest.raises(ValueError, match="DERIVED"):
-        lane.create_direct_edge("IMPL", new, t)
+        lane._create_direct_edge("IMPL", new, t)
 
 
 def test_supersede_repoint_refuses_the_filed_shape_over_a_pre_guard_edge(lane):
@@ -1184,15 +1184,15 @@ def test_supersede_repoint_refuses_the_filed_shape_over_a_pre_guard_edge(lane):
     the raw helper because the write path refuses to create it TODAY. The
     re-point must not launder that pre-guard edge into a fresh successor.
     """
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    new = lane.create_point("statement", "computed v2",
+    new = lane._create_point("statement", "computed v2",
                             claim_class="derived")["id"]
-    t = lane.create_point("statement", "authored target")["id"]  # asserted
+    t = lane._create_point("statement", "authored target")["id"]  # asserted
     _raw_direct_edge(lane, old, t, direction="bidirectional")
 
     with pytest.raises(ValueError, match="DERIVED") as _exc:
-        lane.supersede_point(old, new)
+        lane._supersede_point(old, new)
     assert "re-pointing the IMPL edge" in str(_exc.value)
 
     assert _props(lane, old).get("status") == "live"
@@ -1210,20 +1210,20 @@ def test_supersede_repoint_still_carries_the_legal_class_transfers(lane):
     leaves open.
     """
     # (A) derived successor, derived far endpoint — same class.
-    a_old = lane.create_point("statement", "a v1", claim_class="derived")["id"]
-    a_new = lane.create_point("statement", "a v2", claim_class="derived")["id"]
-    a_t = lane.create_point("statement", "a peer", claim_class="derived")["id"]
-    lane.create_direct_edge("IMPL", a_old, a_t)
-    lane.supersede_point(a_old, a_new)
+    a_old = lane._create_point("statement", "a v1", claim_class="derived")["id"]
+    a_new = lane._create_point("statement", "a v2", claim_class="derived")["id"]
+    a_t = lane._create_point("statement", "a peer", claim_class="derived")["id"]
+    lane._create_direct_edge("IMPL", a_old, a_t)
+    lane._supersede_point(a_old, a_new)
     assert _direct_rows(lane, a_old) == []
     assert _direct_rows(lane, a_new)[0][0] == a_new
 
     # (B) authored successor over an AUTHORED far endpoint.
-    b_old = lane.create_point("statement", "b v1", claim_class="derived")["id"]
-    b_new = lane.create_point("statement", "b v2")["id"]
-    b_t = lane.create_point("statement", "b target")["id"]  # asserted
+    b_old = lane._create_point("statement", "b v1", claim_class="derived")["id"]
+    b_new = lane._create_point("statement", "b v2")["id"]
+    b_t = lane._create_point("statement", "b target")["id"]  # asserted
     _raw_direct_edge(lane, b_old, b_t, direction="bidirectional")
-    lane.supersede_point(b_old, b_new)
+    lane._supersede_point(b_old, b_new)
     assert _direct_rows(lane, b_new)[0][0] == b_new
 
     # (C) ``<-`` from a derived predecessor onto an ASSERTED target: the only
@@ -1232,12 +1232,12 @@ def test_supersede_repoint_still_carries_the_legal_class_transfers(lane):
     # with an asserted successor every pairing passes and the case would pin
     # nothing about the direction token, since a both-ways (or forward) reading
     # of this edge is what a direction-blind guard refuses.
-    c_old = lane.create_point("statement", "c v1", claim_class="derived")["id"]
-    c_new = lane.create_point("statement", "c v2",
+    c_old = lane._create_point("statement", "c v1", claim_class="derived")["id"]
+    c_new = lane._create_point("statement", "c v2",
                               claim_class="derived")["id"]
-    c_t = lane.create_point("statement", "c corroborator")["id"]
-    lane.create_direct_edge("IMPL", c_old, c_t, direction="<-")
-    lane.supersede_point(c_old, c_new)
+    c_t = lane._create_point("statement", "c corroborator")["id"]
+    lane._create_direct_edge("IMPL", c_old, c_t, direction="<-")
+    lane._supersede_point(c_old, c_new)
     _rows = _direct_rows(lane, c_new)
     assert _rows and _rows[0][0] == c_new and _rows[0][2] == "<-", _rows
 
@@ -1252,16 +1252,16 @@ def test_supersede_repoint_refuses_the_INCOMING_edge(lane):
     endpoint is judged as the SOURCE; a swap that inverted would be silently
     fail-open for every incoming edge, so this pins it.
     """
-    t = lane.create_point("statement", "computed corroborator",
+    t = lane._create_point("statement", "computed corroborator",
                           claim_class="derived")["id"]
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    new = lane.create_point("statement", "authored v2")["id"]  # asserted
-    lane.create_direct_edge("IMPL", t, old)
+    new = lane._create_point("statement", "authored v2")["id"]  # asserted
+    lane._create_direct_edge("IMPL", t, old)
     assert _direct_rows(lane, old)[0][0] == t
 
     with pytest.raises(ValueError, match="DERIVED") as _exc:
-        lane.supersede_point(old, new)
+        lane._supersede_point(old, new)
     _msg = str(_exc.value)
     # The message names the wiring it judged (``t -> new``), not the edge's
     # pre-supersede orientation.
@@ -1282,9 +1282,9 @@ def test_supersede_repoint_survives_a_far_endpoint_with_no_id(lane):
     — a traceback aborting a supersede the guard is not about (#10195 review
     P3's lesson, one arm over).
     """
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    new = lane.create_point("statement", "computed v2",
+    new = lane._create_point("statement", "computed v2",
                             claim_class="derived")["id"]
     lane._get_proj().g.query(
         "MATCH (old:Point {id:$old}) "
@@ -1292,7 +1292,7 @@ def test_supersede_repoint_survives_a_far_endpoint_with_no_id(lane):
         "[:IMPL {direction: 'bidirectional'}]->(old)",
         params={"old": old})
 
-    lane.supersede_point(old, new)  # must not raise
+    lane._supersede_point(old, new)  # must not raise
 
     assert _props(lane, new).get("status") == "live"
     assert _direct_rows(lane, old) == []
@@ -1317,19 +1317,19 @@ def test_supersede_repoint_survives_a_unhashable_stored_direction(lane):
     ``test_supersede_repoint_reads_a_junk_direction_as_both_ways``). This test
     pins only the no-``TypeError`` half, on a same-class fixture.
     """
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    new = lane.create_point("statement", "computed v2",
+    new = lane._create_point("statement", "computed v2",
                             claim_class="derived")["id"]
-    t = lane.create_point("statement", "computed peer",
+    t = lane._create_point("statement", "computed peer",
                           claim_class="derived")["id"]
-    lane.create_direct_edge("IMPL", old, t)
+    lane._create_direct_edge("IMPL", old, t)
     lane._get_proj().g.query(
         "MATCH (a:Point {id:$a})-[r:IMPL]->(b:Point {id:$b}) "
         "SET r.direction = ['sideways']",
         params={"a": old, "b": t})
 
-    lane.supersede_point(old, new)  # must not raise
+    lane._supersede_point(old, new)  # must not raise
 
     assert _direct_rows(lane, new)[0][0] == new
 
@@ -1376,17 +1376,17 @@ def test_supersede_repoint_and_create_direct_edge_agree_on_a_directionless_NAND(
     first assertion. So the finding is not "known false" by decree — the test
     is bound to the fact that makes it false.
     """
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    new = lane.create_point("statement", "authored v2")["id"]  # asserted
-    t = lane.create_point("statement", "computed peer",
+    new = lane._create_point("statement", "authored v2")["id"]  # asserted
+    t = lane._create_point("statement", "computed peer",
                           claim_class="derived")["id"]
-    lane.create_direct_edge("NAND", old, t)   # no direction given
+    lane._create_direct_edge("NAND", old, t)   # no direction given
     # The door's canonical form is WRITTEN: absent never reaches disk.
     assert _direct_rows(lane, old)[0][2] == "unidirectional", \
         _direct_rows(lane, old)
 
-    lane.supersede_point(old, new)            # must not raise
+    lane._supersede_point(old, new)            # must not raise
 
     _rows = _direct_rows(lane, new)
     assert _rows and _rows[0][0] == new, _rows
@@ -1394,7 +1394,7 @@ def test_supersede_repoint_and_create_direct_edge_agree_on_a_directionless_NAND(
     # …and the creation door ACCEPTS the pair the re-point left behind, so the
     # re-point mints nothing that door would refuse — the invariant the P2
     # said was broken.
-    res = lane.create_direct_edge("NAND", new, t)
+    res = lane._create_direct_edge("NAND", new, t)
     # The door accepted the edge the transfer already wrote — not a fresh one
     # beside it (an accept that silently created a second edge would otherwise
     # be indistinguishable here).
@@ -1404,34 +1404,34 @@ def test_supersede_repoint_and_create_direct_edge_agree_on_a_directionless_NAND(
     # doors, so "the two doors agree" is pinned in the REFUSE direction too —
     # without this the test passes if the re-point arm skips the row entirely
     # or reads an absent direction as `-` (no leg flows ⇒ no refusal).
-    b_old = lane.create_point("statement", "computed v3",
+    b_old = lane._create_point("statement", "computed v3",
                               claim_class="derived")["id"]
-    b_t = lane.create_point("statement", "computed peer 2",
+    b_t = lane._create_point("statement", "computed peer 2",
                             claim_class="derived")["id"]
-    lane.create_direct_edge("NAND", b_old, b_t, direction="<-")
+    lane._create_direct_edge("NAND", b_old, b_t, direction="<-")
     with pytest.raises(ValueError, match="re-pointing the NAND edge"):
-        lane.supersede_point(b_old, new)  # '<-' flows b_t(derived) -> new(asserted)
+        lane._supersede_point(b_old, new)  # '<-' flows b_t(derived) -> new(asserted)
     with pytest.raises(ValueError, match="DERIVED"):
         # The CREATION door's own refusal (its message names the surface it is,
         # ``create_direct_edge(NAND)`` — not the re-point's).
-        lane.create_direct_edge("NAND", new, b_t, direction="<-")
+        lane._create_direct_edge("NAND", new, b_t, direction="<-")
 
     # …and an ABSENT direction is judged as the edge TYPE's default (NAND ->
     # ``unidirectional``, ONE leg), never as "no leg flows": a raw/pre-guard
     # direction-less NAND whose forward leg crosses the boundary must be
     # refused too (``-`` here is the fail-open this pins — measured green on a
     # mutant that maps absent to ``-``).
-    c_old = lane.create_point("statement", "computed v4",
+    c_old = lane._create_point("statement", "computed v4",
                               claim_class="derived")["id"]
-    c_new = lane.create_point("statement", "computed v5",
+    c_new = lane._create_point("statement", "computed v5",
                               claim_class="derived")["id"]
-    c_t = lane.create_point("statement", "authored target 2")["id"]
+    c_t = lane._create_point("statement", "authored target 2")["id"]
     lane._get_proj().g.query(
         "MATCH (a:Point {id:$a}), (b:Point {id:$b}) MERGE (a)-[r:NAND]->(b)",
         params={"a": c_old, "b": c_t})  # NO direction property on disk
     assert _direct_rows(lane, c_old)[0][2] == ""
     with pytest.raises(ValueError, match="re-pointing the NAND edge") as _aexc:
-        lane.supersede_point(c_old, c_new)
+        lane._supersede_point(c_old, c_new)
     # The ABSENT arm is the ONE place the refusal still renders a ``judged``
     # token (a present value is returned verbatim, so the parenthetical would
     # only duplicate it). Without this assertion the branch is unpinned: an
@@ -1454,16 +1454,16 @@ def test_supersede_repoint_carries_an_absent_NAND_forward_leg(lane):
     would ship. Measured: this test is GREEN on the shipped reading and RED
     under an ``absent -> "bidirectional"`` mutant.
     """
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    new = lane.create_point("statement", "authored v2")["id"]  # asserted
-    t = lane.create_point("statement", "computed peer",
+    new = lane._create_point("statement", "authored v2")["id"]  # asserted
+    t = lane._create_point("statement", "computed peer",
                           claim_class="derived")["id"]
     lane._get_proj().g.query(
         "MATCH (a:Point {id:$a}), (b:Point {id:$b}) MERGE (a)-[r:NAND]->(b)",
         params={"a": old, "b": t})  # NO direction property on disk
 
-    lane.supersede_point(old, new)  # must not raise
+    lane._supersede_point(old, new)  # must not raise
 
     # The edge transferred AND still carries no direction token.
     assert _direct_rows(lane, new) == [[new, "NAND", "", t]], _direct_rows(
@@ -1486,7 +1486,7 @@ def test_supersede_repoint_deletes_a_self_loop_onto_an_op_type_successor(lane):
     superseded point, its ``derived -> asserted`` leg flowing — the E2E-11.6
     "zero direct edges remain incident" contract broken.
     """
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
     lane._get_proj().g.query(
         "MATCH (o:Point {id:$old}) "
@@ -1495,7 +1495,7 @@ def test_supersede_repoint_deletes_a_self_loop_onto_an_op_type_successor(lane):
     lane._get_proj().g.query(
         "CREATE (n:Point {id: 777}) SET n.op_type = 'IMPL'")
 
-    lane.supersede_point(old, 777)  # must not raise
+    lane._supersede_point(old, 777)  # must not raise
 
     assert _direct_rows(lane, old) == [], _direct_rows(lane, old)
 
@@ -1512,9 +1512,9 @@ def test_supersede_repoint_judges_a_non_string_id_far_endpoint(lane):
     illegal wiring was ALLOWED for ``id=777`` while the identical wiring with
     ``id='777'`` was refused.
     """
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    new = lane.create_point("statement", "computed v2",
+    new = lane._create_point("statement", "computed v2",
                             claim_class="derived")["id"]
     lane._get_proj().g.query(
         "MATCH (old:Point {id:$old}) "
@@ -1522,7 +1522,7 @@ def test_supersede_repoint_judges_a_non_string_id_far_endpoint(lane):
         params={"old": old})
 
     with pytest.raises(ValueError, match="DERIVED"):
-        lane.supersede_point(old, new)
+        lane._supersede_point(old, new)
     assert _props(lane, new).get("status") == "live"
 
 
@@ -1542,50 +1542,50 @@ def test_supersede_repoint_reads_a_junk_direction_as_both_ways(lane):
     the guard is not about" is pinned too.
     """
     # (a) the override on the backward leg must be REFUSED.
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    new = lane.create_point("statement", "authored v2")["id"]  # asserted
-    t = lane.create_point("statement", "computed peer",
+    new = lane._create_point("statement", "authored v2")["id"]  # asserted
+    t = lane._create_point("statement", "computed peer",
                           claim_class="derived")["id"]
-    lane.create_direct_edge("NAND", old, t, direction="->")
+    lane._create_direct_edge("NAND", old, t, direction="->")
     lane._get_proj().g.query(
         "MATCH (a:Point {id:$a})-[r:NAND]->(b:Point {id:$b}) "
         "SET r.direction = ['sideways']",
         params={"a": old, "b": t})
     with pytest.raises(ValueError, match="re-pointing the NAND edge"):
-        lane.supersede_point(old, new)
+        lane._supersede_point(old, new)
     assert _props(lane, new).get("status") == "live"
 
     # (a2) the HASHABLE half of the same rule: ``direction_flows`` reads ``3``
     # as both ways, so the backward leg must be judged too (a branch that sent a
     # hashable junk value to the type default would be the same fail-open).
-    h_old = lane.create_point("statement", "computed h1",
+    h_old = lane._create_point("statement", "computed h1",
                               claim_class="derived")["id"]
-    h_new = lane.create_point("statement", "authored h2")["id"]  # asserted
-    h_t = lane.create_point("statement", "computed h peer",
+    h_new = lane._create_point("statement", "authored h2")["id"]  # asserted
+    h_t = lane._create_point("statement", "computed h peer",
                             claim_class="derived")["id"]
-    lane.create_direct_edge("NAND", h_old, h_t, direction="->")
+    lane._create_direct_edge("NAND", h_old, h_t, direction="->")
     lane._get_proj().g.query(
         "MATCH (a:Point {id:$a})-[r:NAND]->(b:Point {id:$b}) "
         "SET r.direction = 3",
         params={"a": h_old, "b": h_t})
     with pytest.raises(ValueError, match="re-pointing the NAND edge"):
-        lane.supersede_point(h_old, h_new)
+        lane._supersede_point(h_old, h_new)
     assert _props(lane, h_new).get("status") == "live"
 
     # (b) …and the same-class transfer is not aborted by the junk token.
-    same_old = lane.create_point("statement", "computed s1",
+    same_old = lane._create_point("statement", "computed s1",
                                  claim_class="derived")["id"]
-    same_new = lane.create_point("statement", "computed s2",
+    same_new = lane._create_point("statement", "computed s2",
                                  claim_class="derived")["id"]
-    same_t = lane.create_point("statement", "computed s peer",
+    same_t = lane._create_point("statement", "computed s peer",
                                claim_class="derived")["id"]
-    lane.create_direct_edge("NAND", same_old, same_t, direction="->")
+    lane._create_direct_edge("NAND", same_old, same_t, direction="->")
     lane._get_proj().g.query(
         "MATCH (a:Point {id:$a})-[r:NAND]->(b:Point {id:$b}) "
         "SET r.direction = ['sideways']",
         params={"a": same_old, "b": same_t})
-    lane.supersede_point(same_old, same_new)  # must not raise
+    lane._supersede_point(same_old, same_new)  # must not raise
     _rows = _direct_rows(lane, same_new)
     assert _rows and _rows[0][0] == same_new, _rows
 
@@ -1626,19 +1626,19 @@ def test_supersede_repoint_judges_a_junk_direction_through_the_ONE_normalizer(
     ``test_the_repoint_door_carries_no_door_local_direction_filter``; this test
     pins the refusal MESSAGE.
     """
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    new = lane.create_point("statement", "authored v2")["id"]  # asserted
-    t = lane.create_point("statement", "computed peer",
+    new = lane._create_point("statement", "authored v2")["id"]  # asserted
+    t = lane._create_point("statement", "computed peer",
                           claim_class="derived")["id"]
-    lane.create_direct_edge("NAND", old, t, direction="->")
+    lane._create_direct_edge("NAND", old, t, direction="->")
     lane._get_proj().g.query(
         "MATCH (a:Point {id:$a})-[r:NAND]->(b:Point {id:$b}) "
         "SET r.direction = ['sideways']",
         params={"a": old, "b": t})
 
     with pytest.raises(ValueError, match="re-pointing the NAND edge") as _exc:
-        lane.supersede_point(old, new)
+        lane._supersede_point(old, new)
     _msg = str(_exc.value)
     assert "direction ['sideways']" in _msg, _msg
     assert "judged ['sideways']" not in _msg, (
@@ -1657,18 +1657,18 @@ def test_supersede_repoint_judges_a_junk_direction_through_the_ONE_normalizer(
     # "unhashable": ``3`` is read as both ways by ``direction_flows``, and the
     # message must name the stored value rather than substituting the
     # mutual-default token for it.
-    h_old = lane.create_point("statement", "computed h1",
+    h_old = lane._create_point("statement", "computed h1",
                               claim_class="derived")["id"]
-    h_new = lane.create_point("statement", "authored h2")["id"]
-    h_t = lane.create_point("statement", "computed h peer",
+    h_new = lane._create_point("statement", "authored h2")["id"]
+    h_t = lane._create_point("statement", "computed h peer",
                             claim_class="derived")["id"]
-    lane.create_direct_edge("NAND", h_old, h_t, direction="->")
+    lane._create_direct_edge("NAND", h_old, h_t, direction="->")
     lane._get_proj().g.query(
         "MATCH (a:Point {id:$a})-[r:NAND]->(b:Point {id:$b}) "
         "SET r.direction = 3",
         params={"a": h_old, "b": h_t})
     with pytest.raises(ValueError, match="re-pointing the NAND edge") as _hexc:
-        lane.supersede_point(h_old, h_new)
+        lane._supersede_point(h_old, h_new)
     _hmsg = str(_hexc.value)
     assert "direction 3" in _hmsg, _hmsg
     assert "judged 3" not in _hmsg, _hmsg
@@ -1708,7 +1708,7 @@ def test_the_repoint_door_carries_no_door_local_direction_filter():
     ``tests/test_9079_handle_write_authority.py`` records for the same idiom.
     """
     tree = ast.parse(textwrap.dedent(inspect.getsource(
-        TortoiseSDK.supersede_point)))
+        TortoiseSDK._supersede_point)))
     _assigns = [
         node for node in ast.walk(tree)
         if isinstance(node, (ast.Assign, ast.AnnAssign))
@@ -1757,9 +1757,9 @@ def test_supersede_repoint_reads_a_non_string_id_endpoints_own_marker(lane):
     exists to prevent — the guard must be neither a fail-open nor a fail-closed
     on an axis it cannot resolve.
     """
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    new = lane.create_point("statement", "computed v2",
+    new = lane._create_point("statement", "computed v2",
                             claim_class="derived")["id"]
     lane._get_proj().g.query(
         "MATCH (old:Point {id:$old}) "
@@ -1767,7 +1767,7 @@ def test_supersede_repoint_reads_a_non_string_id_endpoints_own_marker(lane):
         "[:IMPL {direction: 'bidirectional'}]->(old)",
         params={"old": old})
 
-    lane.supersede_point(old, new)  # must not raise
+    lane._supersede_point(old, new)  # must not raise
 
     assert _direct_rows(lane, new), _direct_rows(lane, new)
 
@@ -1782,11 +1782,11 @@ def test_supersede_repoint_refuses_the_backward_leg_too(lane):
     successor would stand at the source position the predecessor occupied, and
     the flowing leg would be exactly ``derived -> asserted``.
     """
-    old = lane.create_point("statement", "computed v1",
+    old = lane._create_point("statement", "computed v1",
                             claim_class="derived")["id"]
-    new = lane.create_point("statement", "computed v2",
+    new = lane._create_point("statement", "computed v2",
                             claim_class="derived")["id"]
-    t = lane.create_point("statement", "authored target")["id"]
+    t = lane._create_point("statement", "authored target")["id"]
     _raw_direct_edge(lane, old, t, direction="unidirectional")
 
     # ``->`` flows source -> target only, i.e. ``new``(derived) -> ``t``
@@ -1795,19 +1795,19 @@ def test_supersede_repoint_refuses_the_backward_leg_too(lane):
     # must transfer — so the verdict here is a statement about the direction
     # token, not about the class pair alone.
     with pytest.raises(ValueError, match="DERIVED"):
-        lane.supersede_point(old, new)
+        lane._supersede_point(old, new)
     assert _direct_rows(lane, new) == []
 
-    mirror_old = lane.create_point("statement", "computed m1",
+    mirror_old = lane._create_point("statement", "computed m1",
                                    claim_class="derived")["id"]
-    mirror_new = lane.create_point("statement", "computed m2",
+    mirror_new = lane._create_point("statement", "computed m2",
                                    claim_class="derived")["id"]
     _raw_direct_edge(lane, mirror_old, t, direction="unidirectional")
     lane._get_proj().g.query(
         "MATCH (a:Point {id:$a})-[r:IMPL]->(b:Point {id:$b}) "
         "SET r.direction = '<-'",
         params={"a": mirror_old, "b": t})
-    lane.supersede_point(mirror_old, mirror_new)  # must not raise
+    lane._supersede_point(mirror_old, mirror_new)  # must not raise
     assert _direct_rows(lane, mirror_new), _direct_rows(lane, mirror_new)
 
 
@@ -1821,9 +1821,9 @@ def test_supersede_repoint_does_not_judge_a_non_point_far_endpoint(lane):
     is what decides.
     """
     for far_id in ("subj-1", 900):
-        old = lane.create_point("statement", f"computed v1 {far_id}",
+        old = lane._create_point("statement", f"computed v1 {far_id}",
                                 claim_class="derived")["id"]
-        new = lane.create_point("statement", f"computed v2 {far_id}",
+        new = lane._create_point("statement", f"computed v2 {far_id}",
                                 claim_class="derived")["id"]
         lane._get_proj().g.query(
             "MATCH (old:Point {id:$old}) "
@@ -1831,7 +1831,7 @@ def test_supersede_repoint_does_not_judge_a_non_point_far_endpoint(lane):
             "[:IMPL {direction: 'bidirectional'}]->(old)",
             params={"old": old, "sid": far_id})
 
-        lane.supersede_point(old, new)  # must not raise
+        lane._supersede_point(old, new)  # must not raise
         assert _direct_rows(lane, new), (far_id, _direct_rows(lane, new))
 
 
@@ -1853,24 +1853,24 @@ def test_supersede_repoint_judges_a_non_string_id_successor(lane):
             params={"a": source, "b": target})
 
     # (a) the override must be refused.
-    a_src = lane.create_point("statement", "authored source")["id"]
-    a_old = lane.create_point("statement", "computed v1",
+    a_src = lane._create_point("statement", "authored source")["id"]
+    a_old = lane._create_point("statement", "computed v1",
                               claim_class="derived")["id"]
     _raw(a_src, a_old)
     lane._get_proj().g.query(
         "CREATE (n:Point {id: 777, claimClass: 'derived'})")
     with pytest.raises(ValueError, match="DERIVED"):
-        lane.supersede_point(a_old, 777)
+        lane._supersede_point(a_old, 777)
 
     # (b) the same-class transfer must still go through.
-    b_old = lane.create_point("statement", "computed b1",
+    b_old = lane._create_point("statement", "computed b1",
                               claim_class="derived")["id"]
-    b_t = lane.create_point("statement", "computed b peer",
+    b_t = lane._create_point("statement", "computed b peer",
                             claim_class="derived")["id"]
     _raw(b_old, b_t)
     lane._get_proj().g.query(
         "CREATE (n:Point {id: 778, claimClass: 'derived'})")
-    lane.supersede_point(b_old, 778)  # must not raise
+    lane._supersede_point(b_old, 778)  # must not raise
 
 
 # ── 4. the EP-load backstop ──────────────────────────────────────────────────
@@ -1933,10 +1933,10 @@ def test_ep_backstop_classifies_the_slot_ep_actually_uses(lane):
     fire, so it would block the corroboration leg and let the derived->asserted
     one flow, i.e. let the computed claim push belief INTO the authored one.
     """
-    authored = lane.create_point("statement", "asserted source")["id"]
-    derived = lane.create_point("statement", "derived input")["id"]
-    other = lane.create_point("statement", "second asserted input")["id"]
-    op = lane.create_operator("IMPL", authored, [derived, other])
+    authored = lane._create_point("statement", "asserted source")["id"]
+    derived = lane._create_point("statement", "derived input")["id"]
+    other = lane._create_point("statement", "second asserted input")["id"]
+    op = lane._create_operator("IMPL", authored, [derived, other])
     # The class is stamped AFTER creation — a raw write, the way a bulk or
     # projection producer (and any pre-guard graph) can — because the door
     # refuses a class-mixed bidirectional wiring.
@@ -1966,9 +1966,9 @@ def test_read_of_a_non_point_type_refuses_the_class_filter(lane):
     Silently ignoring the filter would return the rows the caller asked to
     exclude (every document is unmarked = asserted), which reads as an answer.
     """
-    lane.create_point("statement", "zebra point", claim_class="derived")
+    lane._create_point("statement", "zebra point", claim_class="derived")
     with pytest.raises(ValueError, match="Point property"):
-        lane.tortoise_fts_query("zebra", entity_type="document",
+        lane._tortoise_fts_query("zebra", entity_type="document",
                                 claim_class="asserted")
 
 
@@ -1980,25 +1980,25 @@ def test_ingest_partial_absorb_cannot_wire_a_derived_source(lane):
     refuses to write. Without the guard there a derived source is wired above
     an asserted input and the caller is told the connection succeeded.
     """
-    derived = lane.create_point("statement", "derived source",
+    derived = lane._create_point("statement", "derived source",
                                 claim_class="derived")["id"]
-    first = lane.create_point("statement", "first input",
+    first = lane._create_point("statement", "first input",
                               claim_class="derived")["id"]
     # Legal at creation time (both endpoints computed).
-    lane.create_operator("IMPL", derived, [first], promote_source=False)
+    lane._create_operator("IMPL", derived, [first], promote_source=False)
     # The first input later becomes AUTHORED — a legitimate transition the
     # write guard cannot intercept.
     lane._get_proj().g.query(
         "MATCH (n:Point) WHERE n.id=$id REMOVE n.claimClass",
         params={"id": first})
-    asserted = lane.create_point("statement", "asserted input")["id"]
+    asserted = lane._create_point("statement", "asserted input")["id"]
     bundle = {
         "points": [], "entities": [], "sources": [],
         "connections": [{"from": derived, "to": [asserted, first],
                           "operator": "IMPL", "reify": True}],
     }
     with pytest.raises(ValueError, match="DERIVED"):
-        lane.ingest(bundle, promotion_policy="auto")
+        lane._ingest(bundle, promotion_policy="auto")
 
 
 def test_ingest_partial_absorb_allows_a_non_point_target(lane):
@@ -2011,19 +2011,19 @@ def test_ingest_partial_absorb_allows_a_non_point_target(lane):
     here are ONLY Objects: a derived Point target would make the readmission
     legal for the wrong reason.
     """
-    derived = lane.create_point("statement", "derived source",
+    derived = lane._create_point("statement", "derived source",
                                 claim_class="derived")["id"]
     obj1, obj2 = "obj-2351-ingest-1", "obj-2351-ingest-2"
     for oid in (obj1, obj2):
         lane._get_proj().g.query(
             "CREATE (o:Object {id:$id, name:'thing'})", params={"id": oid})
-    lane.create_operator("IMPL", derived, [obj1], promote_source=False)
+    lane._create_operator("IMPL", derived, [obj1], promote_source=False)
     bundle = {
         "points": [], "entities": [], "sources": [],
         "connections": [{"from": derived, "to": [obj1, obj2],
                           "operator": "IMPL", "reify": True}],
     }
-    lane.ingest(bundle, promotion_policy="auto")   # must not raise
+    lane._ingest(bundle, promotion_policy="auto")   # must not raise
 
 
 def test_ep_backstop_leaves_same_class_factors_alone(lane):
@@ -2038,12 +2038,12 @@ def test_ep_backstop_leaves_same_class_factors_alone(lane):
 
 def test_read_filter_separates_the_classes(lane):
     """``claim_class=`` filters, and reports each hit's class."""
-    d = lane.create_point("statement", "zebra computed claim",
+    d = lane._create_point("statement", "zebra computed claim",
                           claim_class="derived")["id"]
-    a = lane.create_point("statement", "zebra authored claim")["id"]
+    a = lane._create_point("statement", "zebra authored claim")["id"]
 
-    derived_hits = lane.tortoise_fts_query("zebra", claim_class="derived")
-    asserted_hits = lane.tortoise_fts_query("zebra", claim_class="asserted")
+    derived_hits = lane._tortoise_fts_query("zebra", claim_class="derived")
+    asserted_hits = lane._tortoise_fts_query("zebra", claim_class="asserted")
 
     assert {r["id"] for r in derived_hits} == {d}
     # The authored set includes the UNMARKED claim — absence IS asserted, which
@@ -2056,9 +2056,9 @@ def test_read_filter_separates_the_classes(lane):
 
 def test_read_without_the_param_is_unchanged(lane):
     """``None`` = no filter AND no key — byte-identical for every old caller."""
-    d = lane.create_point("statement", "zebra claim", claim_class="derived")
-    a = lane.create_point("statement", "zebra claim 2")
-    rows = lane.tortoise_fts_query("zebra")
+    d = lane._create_point("statement", "zebra claim", claim_class="derived")
+    a = lane._create_point("statement", "zebra claim 2")
+    rows = lane._tortoise_fts_query("zebra")
     assert rows
     assert {r["id"] for r in rows} == {d["id"], a["id"]}, "None must not filter"
     for row in rows:
@@ -2073,23 +2073,23 @@ def test_the_write_guard_judges_the_leg_that_flows(lane):
     and admitted ``<-`` INTO a derived target (whose flowing leg is exactly the
     derived->asserted push). The door and the EP backstop must agree.
     """
-    derived = lane.create_point("statement", "computed",
+    derived = lane._create_point("statement", "computed",
                                 claim_class="derived")["id"]
-    asserted = lane.create_point("statement", "authored")["id"]
+    asserted = lane._create_point("statement", "authored")["id"]
 
     # `<-` from a DERIVED source: the asserted claim corroborates it. Legal.
-    lane.create_direct_edge("IMPL", derived, asserted, direction="<-")
-    lane.create_operator("IMPL", derived, [asserted], direction="<-")
+    lane._create_direct_edge("IMPL", derived, asserted, direction="<-")
+    lane._create_operator("IMPL", derived, [asserted], direction="<-")
 
     # `<-` INTO a derived target: the flowing leg is derived -> asserted.
     with pytest.raises(ValueError, match="DERIVED"):
-        lane.create_direct_edge("IMPL", asserted, derived, direction="<-")
+        lane._create_direct_edge("IMPL", asserted, derived, direction="<-")
     with pytest.raises(ValueError, match="DERIVED"):
-        lane.create_operator("IMPL", asserted, [derived], direction="<-")
+        lane._create_operator("IMPL", asserted, [derived], direction="<-")
 
     # `->` is the mirror: the derived SOURCE is the one that may not push.
     with pytest.raises(ValueError, match="DERIVED"):
-        lane.create_direct_edge("IMPL", derived, asserted, direction="->")
+        lane._create_direct_edge("IMPL", derived, asserted, direction="->")
 
 
 def test_a_derived_claim_may_be_wired_to_a_non_point_endpoint(lane):
@@ -2100,13 +2100,13 @@ def test_a_derived_claim_may_be_wired_to_a_non_point_endpoint(lane):
     writable (owner ruling #7813) — and told the caller to mark the Object
     derived, which no door can do (#2351 review P1).
     """
-    derived = lane.create_point("statement", "computed",
+    derived = lane._create_point("statement", "computed",
                                 claim_class="derived")["id"]
     obj = "obj-2351-endpoint"
     lane._get_proj().g.query(
         "CREATE (o:Object {id:$id, name:'thing'})", params={"id": obj})
-    lane.create_direct_edge("IMPL", derived, obj)
-    lane.create_operator("IMPL", derived, [obj])
+    lane._create_direct_edge("IMPL", derived, obj)
+    lane._create_operator("IMPL", derived, [obj])
 
 
 def test_ep_backstop_does_not_read_a_non_point_target_as_asserted(lane):
@@ -2122,9 +2122,9 @@ def test_ep_backstop_does_not_read_a_non_point_target_as_asserted(lane):
     obj = "obj-2351-ep-impl-target"
     lane._get_proj().g.query(
         "CREATE (o:Object {id:$id, name:'thing'})", params={"id": obj})
-    derived = lane.create_point("statement", "computed",
+    derived = lane._create_point("statement", "computed",
                                 claim_class="derived")["id"]
-    op = lane.create_operator("IMPL", derived, [obj])
+    op = lane._create_operator("IMPL", derived, [obj])
     factor = _factor(lane, op["id"], obj)
     assert factor is not None, "the factor must be built"
     assert factor[5] == "bidirectional", (
@@ -2145,9 +2145,9 @@ def test_ep_backstop_keeps_a_nand_attack_on_a_non_point_endpoint(lane):
     obj = "obj-2351-ep-nand-target"
     lane._get_proj().g.query(
         "CREATE (o:Object {id:$id, name:'thing'})", params={"id": obj})
-    derived = lane.create_point("statement", "computed",
+    derived = lane._create_point("statement", "computed",
                                 claim_class="derived")["id"]
-    op = lane.create_operator("NAND", derived, [obj], direction="->")
+    op = lane._create_operator("NAND", derived, [obj], direction="->")
     ep = TortoiseEP(lane._get_proj())
     factors = ep._affected_factors({obj}, skipped=ep._last_skipped_factors)
     reasons = [sk.get("reason") for sk in ep._last_skipped_factors]
@@ -2166,9 +2166,9 @@ def test_ep_backstop_does_not_narrow_a_direct_edge_to_a_non_point(lane):
     obj = "obj-2351-ep-direct-target"
     lane._get_proj().g.query(
         "CREATE (o:Object {id:$id, name:'thing'})", params={"id": obj})
-    derived = lane.create_point("statement", "computed",
+    derived = lane._create_point("statement", "computed",
                                 claim_class="derived")["id"]
-    lane.create_direct_edge("IMPL", derived, obj)
+    lane._create_direct_edge("IMPL", derived, obj)
     factor = _factor(lane, derived, obj)
     assert factor is not None, "the direct-edge factor must be built"
     assert factor[5] == "bidirectional", (
@@ -2201,9 +2201,9 @@ def test_ep_backstop_judges_the_override_on_an_idx_less_operator(lane):
     derived input is provably ``input_ids[0]``; ``op_idx_known`` is still false
     because an operator is idx-unknown as soon as ANY input edge lacks ``idx``.
     """
-    src = lane.create_point("statement", "computed source")["id"]
-    tgt = lane.create_point("statement", "authored target")["id"]
-    op = lane.create_operator("IMPL", src, [tgt], direction="->")
+    src = lane._create_point("statement", "computed source")["id"]
+    tgt = lane._create_point("statement", "authored target")["id"]
+    op = lane._create_operator("IMPL", src, [tgt], direction="->")
     # The class and the missing idx are written AFTER creation — the
     # pre-guard / bulk-written / migrated shape the backstop exists for.
     lane._get_proj().g.query(
@@ -2233,9 +2233,9 @@ def test_ep_backstop_narrows_rather_than_nukes_an_idx_less_factor(lane):
     one). On a ``<->`` factor the override leg is blocked and the reverse leg
     survives, which is exactly the behaviour the idx-full path already has.
     """
-    src = lane.create_point("statement", "computed source")["id"]
-    tgt = lane.create_point("statement", "authored target")["id"]
-    op = lane.create_operator("IMPL", src, [tgt])  # bidirectional
+    src = lane._create_point("statement", "computed source")["id"]
+    tgt = lane._create_point("statement", "authored target")["id"]
+    op = lane._create_operator("IMPL", src, [tgt])  # bidirectional
     lane._get_proj().g.query(
         "MATCH (n:Point) WHERE n.id=$id SET n.claimClass='derived'",
         params={"id": src})
@@ -2301,9 +2301,9 @@ def test_ep_backstop_parity_between_idx_present_and_idx_absent(
                   else "zzz-derived-10364")
     asserted_id = ("zzz-asserted-10364" if derived_sorts_first
                    else "aaa-asserted-10364")
-    lane.create_point("statement", "computed claim", id=derived_id)
-    lane.create_point("statement", "authored claim", id=asserted_id)
-    op = lane.create_operator("IMPL", derived_id, [asserted_id],
+    lane._create_point("statement", "computed claim", id=derived_id)
+    lane._create_point("statement", "authored claim", id=asserted_id)
+    op = lane._create_operator("IMPL", derived_id, [asserted_id],
                               direction="<->")
     # The class is written AFTER creation: the write door refuses this wiring
     # outright, and the backstop exists for the shapes that predate or bypass
@@ -2355,14 +2355,14 @@ def test_ep_source_slot_guard_still_stands_down_on_an_idx_less_operator(lane):
     out).
     """
     def _wire(suffix: str, *, keep_idx: bool) -> tuple[str, str, str]:
-        draft_src = lane.create_point(
+        draft_src = lane._create_point(
             "statement", "draft source", status="draft",
             id=f"aaa-draft-source-{suffix}")["id"]
-        t1 = lane.create_point("statement", "target one",
+        t1 = lane._create_point("statement", "target one",
                                id=f"mmm-target-{suffix}")["id"]
-        t2 = lane.create_point("statement", "target two",
+        t2 = lane._create_point("statement", "target two",
                                id=f"zzz-target-{suffix}")["id"]
-        op = lane.create_operator("IMPL", draft_src, [t1, t2],
+        op = lane._create_operator("IMPL", draft_src, [t1, t2],
                                   direction="->", promote_source=False)
         # The operator starts draft too — stand in for the #785 promote flow
         # making the OPERATOR live while its source stays draft.
@@ -2407,19 +2407,19 @@ def test_ingest_partial_absorb_canonicalizes_an_absent_nand_direction(lane):
     made the ingest door see a back-leg that never flows and REFUSE a wiring
     ``create_operator`` accepts for the identical edge shape (#2351 review P2).
     """
-    src = lane.create_point("statement", "authored source")["id"]
-    computed = lane.create_point("statement", "computed input",
+    src = lane._create_point("statement", "authored source")["id"]
+    computed = lane._create_point("statement", "computed input",
                                  claim_class="derived")["id"]
-    other = lane.create_point("statement", "second input")["id"]
+    other = lane._create_point("statement", "second input")["id"]
     # Legal at creation: NAND with a one-way direction flows source→target
     # only, i.e. asserted → derived, which is the CORROBORATION leg.
-    lane.create_operator("NAND", src, [computed], direction="->")
+    lane._create_operator("NAND", src, [computed], direction="->")
     bundle = {
         "points": [], "entities": [], "sources": [],
         "connections": [{"from": src, "to": [computed, other],
                           "operator": "NAND", "reify": True}],
     }
-    lane.ingest(bundle, promotion_policy="auto")   # must not raise
+    lane._ingest(bundle, promotion_policy="auto")   # must not raise
 
 
 def test_the_class_filter_runs_before_the_limit(lane):
@@ -2430,11 +2430,11 @@ def test_the_class_filter_runs_before_the_limit(lane):
     asserted row is given the stronger match so a post-cut filter returns
     nothing rather than passing by luck.
     """
-    asserted = lane.create_point(
+    asserted = lane._create_point(
         "statement", "zebra zebra zebra zebra zebra authored")["id"]
-    derived = lane.create_point("statement", "zebra computed",
+    derived = lane._create_point("statement", "zebra computed",
                                 claim_class="derived")["id"]
-    rows = lane.tortoise_fts_query("zebra", claim_class="derived", limit=1)
+    rows = lane._tortoise_fts_query("zebra", claim_class="derived", limit=1)
     assert [r["id"] for r in rows] == [derived], (
         f"the filter must run before ``limit``; got {[r['id'] for r in rows]!r} "
         f"(asserted={asserted!r})")
@@ -2448,9 +2448,9 @@ def test_operator_with_no_targets_is_not_a_derived_override(lane):
     an empty COLLECTION of targets — a derived source with nothing to override
     is a legal call.
     """
-    pid = lane.create_point("statement", "computed",
+    pid = lane._create_point("statement", "computed",
                             claim_class="derived")["id"]
-    op = lane.create_operator("IMPL", pid, [])
+    op = lane._create_operator("IMPL", pid, [])
     assert op["id"]
 
 
@@ -2462,15 +2462,15 @@ def test_update_point_refuses_the_class_outright(lane):
     claim became AUTHORED and the override guard stopped refusing it) or
     resurrected it after a clear. The door refuses every spelling instead.
     """
-    pid = lane.create_point("statement", "computed",
+    pid = lane._create_point("statement", "computed",
                             claim_class="derived")["id"]
     for spelling in ("claimClass", "claim_class"):
         with pytest.raises(ValueError, match="written by create_point"):
-            lane.update_point(pid, **{spelling: "asserted"})
+            lane._update_point(pid, **{spelling: "asserted"})
         with pytest.raises(ValueError, match="written by create_point"):
-            lane.update_point(pid, **{spelling: "derived"})
+            lane._update_point(pid, **{spelling: "derived"})
         with pytest.raises(ValueError, match="written by create_point"):
-            lane.update_point(pid, **{spelling: "junk"})
+            lane._update_point(pid, **{spelling: "junk"})
     assert _props(lane, pid).get(cc.PROP) == "derived", (
         "a refused update must not change the stored class")
 
@@ -2490,7 +2490,7 @@ def test_update_entity_cannot_restamp_or_clear_the_class(lane):
     which is why it REDS when the ``reject_claim_class`` flag is removed from
     this door.
     """
-    pid = lane.create_point("statement", "computed claim",
+    pid = lane._create_point("statement", "computed claim",
                             claim_class="derived")["id"]
     for spelling in ("claimClass", "claim_class"):
         for bad in ("asserted", None, "bogus"):
@@ -2513,9 +2513,9 @@ def test_single_input_factor_is_not_reported_as_an_override(lane):
     single-input factor is dropped and misreported as an override that cannot
     exist (the write surface guards the same conflation).
     """
-    pid = lane.create_point("statement", "computed",
+    pid = lane._create_point("statement", "computed",
                             claim_class="derived")["id"]
-    op = lane.create_operator("IMPL", pid, [], direction="->")
+    op = lane._create_operator("IMPL", pid, [], direction="->")
     ep = TortoiseEP(lane._get_proj())
     factors = ep._affected_factors({pid}, skipped=ep._last_skipped_factors)
     reasons = [sk.get("reason") for sk in ep._last_skipped_factors]
@@ -2543,7 +2543,7 @@ def test_class_marker_survives_a_rebuild(tmp_path):
             "the marker must be DECLARED, not merely restored by the open-set "
             "passthrough — an undeclared prop logs drift on every rebuild "
             "(#2795), and nothing else pins the declaration")
-        pid = sdk.create_point("statement", "computed",
+        pid = sdk._create_point("statement", "computed",
                                claim_class="derived")["id"]
         assert _props(sdk, pid).get(cc.PROP) == "derived"
         sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
@@ -2564,15 +2564,15 @@ def test_degraded_fallback_tier_honours_the_class_filter(lane, monkeypatch):
     """
     from tortoise import search_engine
 
-    derived = lane.create_point("statement", "zebra derived claim",
+    derived = lane._create_point("statement", "zebra derived claim",
                                 claim_class="derived")["id"]
-    asserted = lane.create_point("statement", "zebra asserted claim")["id"]
+    asserted = lane._create_point("statement", "zebra asserted claim")["id"]
 
     def _all_legs_failed(*_a, **_k):
         return {}  # every strategy failed ⇒ the in-memory TF-IDF tier
 
     monkeypatch.setattr(search_engine, "degradation_chain", _all_legs_failed)
-    rows = lane.tortoise_fts_query("zebra", claim_class="derived")
+    rows = lane._tortoise_fts_query("zebra", claim_class="derived")
     ids = {r.get("id") for r in rows}
     assert ids and ids == {derived}, (
         f"the degraded tier must still exclude the asserted claim, got {ids!r}")
@@ -2584,9 +2584,9 @@ def test_degraded_fallback_tier_honours_the_class_filter(lane, monkeypatch):
 def test_read_surface_is_a_param_not_a_new_tool():
     """Indicator 3 is +0 MCP tools: the seam is a kwarg on an existing read."""
     assert "claim_class" in inspect.signature(
-        TortoiseSDK.tortoise_fts_query).parameters
+        TortoiseSDK._tortoise_fts_query).parameters
     assert "claim_class" in inspect.signature(
-        TortoiseSDK.create_point).parameters
+        TortoiseSDK._create_point).parameters
 
 
 def test_supersede_operator_slot_survives_a_unhashable_OPERATOR_direction(lane):
@@ -2603,19 +2603,19 @@ def test_supersede_operator_slot_survives_a_unhashable_OPERATOR_direction(lane):
     type's default. `_canonical_direction(op_type, '<->')` returns `'<->'`
     verbatim, so the stand-in flows through the existing predicate unchanged.
     """
-    old = lane.create_point("statement", "operator-slot v1",
+    old = lane._create_point("statement", "operator-slot v1",
                             claim_class="derived")["id"]
-    new = lane.create_point("statement", "operator-slot v2",
+    new = lane._create_point("statement", "operator-slot v2",
                             claim_class="derived")["id"]
-    t = lane.create_point("statement", "operator-slot peer",
+    t = lane._create_point("statement", "operator-slot peer",
                           claim_class="derived")["id"]
-    op = lane.create_operator("IMPL", old, [t], direction="->")
+    op = lane._create_operator("IMPL", old, [t], direction="->")
     lane._get_proj().g.query(
         "MATCH (o:Point {id:$id}) SET o.direction = ['sideways']",
         params={"id": op["id"]},
     )
 
-    lane.supersede_point(old, new)  # must not raise
+    lane._supersede_point(old, new)  # must not raise
 
     assert _props(lane, new).get("status") == "live"
 
@@ -2634,18 +2634,18 @@ def test_supersede_operator_slot_reads_a_junk_OPERATOR_direction_as_both_ways(la
     `test_supersede_repoint_reads_a_junk_direction_as_both_ways` (2a-DIRECT): the
     two arms of the same door must not drift, and both halves are pinned on each.
     """
-    old = lane.create_point("statement", "operator-slot v1",
+    old = lane._create_point("statement", "operator-slot v1",
                             claim_class="derived")["id"]
-    new = lane.create_point("statement", "operator-slot asserted v2")["id"]
-    t = lane.create_point("statement", "operator-slot peer",
+    new = lane._create_point("statement", "operator-slot asserted v2")["id"]
+    t = lane._create_point("statement", "operator-slot peer",
                           claim_class="derived")["id"]
-    op = lane.create_operator("NAND", old, [t], direction="->")
+    op = lane._create_operator("NAND", old, [t], direction="->")
     lane._get_proj().g.query(
         "MATCH (o:Point {id:$id}) SET o.direction = ['sideways']",
         params={"id": op["id"]},
     )
 
     with pytest.raises(ValueError, match="re-pointing the OPERATOR"):
-        lane.supersede_point(old, new)
+        lane._supersede_point(old, new)
 
     assert _props(lane, new).get("status") == "live"

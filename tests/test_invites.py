@@ -27,7 +27,7 @@ class TestInvitePrimitives:
 
 
     def test_membership_create_validates_role(self, sdk):
-        team = sdk.org_create("role-team")
+        team = sdk._org_create("role-team")
         from tortoise.exceptions import ControlPlaneError
         with pytest.raises(ControlPlaneError):
             sdk._membership_create(team["id"], "u2", "not-a-role")

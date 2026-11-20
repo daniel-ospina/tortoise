@@ -21,7 +21,7 @@ class SessionContinuity:
         # #7983: the SCAN is not a caller read (it would mark the whole
         # observation stock read, f -> ~1), but the findings it PRINTS below are
         # served content, so those five are recorded as reads.
-        prior = self.sdk.query(kind="observation", _record_reads=False)
+        prior = self.sdk._query(kind="observation", _record_reads=False)
         
         summary = []
         # Get last 5 findings from any session
@@ -43,7 +43,7 @@ class SessionContinuity:
     def capture(self, content, kind="observation", **props):
         """Capture a finding during the session."""
         # P1 #49: use session_id property instead of deprecated context
-        point = self.sdk.create_point(kind, content, 
+        point = self.sdk._create_point(kind, content, 
             session_id=self.session_id,
             captured_at=datetime.now().isoformat(),
             **props)
@@ -56,7 +56,7 @@ class SessionContinuity:
             print(f"\nCaptured {len(self.findings)} findings from this session.")
             # Run confidence on new findings
             try:
-                result = self.sdk.compute_confidence()
+                result = self.sdk._compute_confidence()
                 print(f"Confidence updated: {result.get('iterations', '?')} iterations")
             except CalibrationError as e:
                 # #344: never swallow calibration failures — uncalibrated EP

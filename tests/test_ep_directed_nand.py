@@ -20,14 +20,14 @@ from tortoise.ep import TortoiseEP
 
 
 def make_point(sdk, content, kind="statement"):
-    return sdk.create_point(kind, content, status="live")  # #780 default excludes drafts
+    return sdk._create_point(kind, content, status="live")  # #780 default excludes drafts
 
 
 def make_operator(sdk, source_id, target_id, op_type="IMPL", direction=None):
     kwargs = {}
     if direction is not None:
         kwargs["direction"] = direction
-    return sdk.create_operator(op_type, source_id, [target_id], **kwargs)
+    return sdk._create_operator(op_type, source_id, [target_id], **kwargs)
 
 
 def set_evidence(sdk, pid, alpha, beta):
@@ -68,9 +68,9 @@ def test_nand_defaults_to_bidirectional(sdk):
     # #12067: one pair carries at most ONE mechanism, so the IMPL probe uses its
     # own target — this test is about the DIRECTION default, not about the pair.
     d = make_point(sdk, "d")
-    nand = sdk.create_operator("NAND", a["id"], [b["id"]])
-    impl = sdk.create_operator("IMPL", a["id"], [d["id"]])
-    directed = sdk.create_operator("NAND", a["id"], [c["id"]], direction="unidirectional")
+    nand = sdk._create_operator("NAND", a["id"], [b["id"]])
+    impl = sdk._create_operator("IMPL", a["id"], [d["id"]])
+    directed = sdk._create_operator("NAND", a["id"], [c["id"]], direction="unidirectional")
     proj = sdk._get_proj()
     d_nand = proj.g.query(
         "MATCH (o:Point {id:$id}) RETURN o.direction", params={"id": nand["id"]}
@@ -264,7 +264,7 @@ def test_directed_nary_nand_source_to_targets_only(sdk):
     make_operator(sdk, s["id"], t1["id"], "IMPL")
     make_operator(sdk, s["id"], t2["id"], "IMPL")
     # directed n-ary NAND: src attacks both targets
-    sdk.create_operator("NAND", src["id"], [t1["id"], t2["id"]],
+    sdk._create_operator("NAND", src["id"], [t1["id"], t2["id"]],
                         direction="unidirectional")
 
     from tortoise.ep import TortoiseEP

@@ -1668,11 +1668,11 @@ def test_dedup_script_dry_run(dedup_sdk):
 
     proj = dedup_sdk._get_proj()
     sdk = dedup_sdk
-    sdk.create_point("observation", "old unkeyed claim",
+    sdk._create_point("observation", "old unkeyed claim",
                      github_url="https://github.com/acme/repo1/issues/1",
                      github_repo="acme/repo1", github_number=1,
                      github_state="open", source="github")
-    sdk.create_point("statement", "[acme/repo1] Issue 1\n\nbody",
+    sdk._create_point("statement", "[acme/repo1] Issue 1\n\nbody",
                      externalId="github:issue:acme/repo1#1",
                      github_url="https://github.com/acme/repo1/issues/1",
                      github_repo="acme/repo1", github_number=1,
@@ -1694,11 +1694,11 @@ def test_dedup_script_opt_in_merge(dedup_sdk):
 
     proj = dedup_sdk._get_proj()
     sdk = dedup_sdk
-    obs = sdk.create_point("observation", "old unkeyed claim",
+    obs = sdk._create_point("observation", "old unkeyed claim",
                            github_url="https://github.com/acme/repo1/issues/1",
                            github_repo="acme/repo1", github_number=1,
                            github_state="open", source="github")
-    stmt = sdk.create_point("statement", "[acme/repo1] Issue 1\n\nbody",
+    stmt = sdk._create_point("statement", "[acme/repo1] Issue 1\n\nbody",
                             externalId="github:issue:acme/repo1#1",
                             github_url="https://github.com/acme/repo1/issues/1",
                             github_repo="acme/repo1", github_number=1,
@@ -1721,11 +1721,11 @@ def test_dedup_script_leave_as_is_by_default(dedup_sdk):
 
     proj = dedup_sdk._get_proj()
     sdk = dedup_sdk
-    sdk.create_point("observation", "old unkeyed claim",
+    sdk._create_point("observation", "old unkeyed claim",
                      github_url="https://github.com/acme/repo1/issues/1",
                      github_repo="acme/repo1", github_number=1,
                      github_state="open", source="github")
-    sdk.create_point("statement", "[acme/repo1] Issue 1\n\nbody",
+    sdk._create_point("statement", "[acme/repo1] Issue 1\n\nbody",
                      externalId="github:issue:acme/repo1#1",
                      github_url="https://github.com/acme/repo1/issues/1",
                      github_repo="acme/repo1", github_number=1,

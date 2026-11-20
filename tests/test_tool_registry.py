@@ -355,8 +355,8 @@ class TestRegistryEquivalence:
         # door `index_sources_from_directory` in front of it, so the sentinel names
         # BOTH: the private door proves the AST walk still descends into the renamed
         # method, and the public name proves the exclusion follows the LIVE binding.
-        assert {"ingest_corpus", "_index_directory",
-                "index_sources_from_directory", "org_create"} <= operator_only
+        assert {"_ingest_corpus", "_index_directory",
+                "index_sources_from_directory", "_org_create"} <= operator_only
         for method in sorted(operator_only):
             for entry in by_method.get(method, []):
                 assert entry.http_policy is False, (
@@ -916,50 +916,50 @@ def _http_excluded_error():
     ...
 
 def tortoise_probe_reader():
-    return _safe(_quota_gated(_get_org_sdk().create_point, "points"))
+    return _safe(_quota_gated(_get_org_sdk()._create_point, "points"))
 
 def tortoise_probe_alias():
     sdk = _get_org_sdk()
-    return _safe(_quota_gated(sdk.create_point, "points"))
+    return _safe(_quota_gated(sdk._create_point, "points"))
 
 def tortoise_probe_fs():
-    return _safe(_get_org_sdk().ingest_corpus, "/tmp")
+    return _safe(_get_org_sdk()._ingest_corpus, "/tmp")
 
 def tortoise_probe_org():
-    return _safe(_get_org_sdk().org_create, "team")
+    return _safe(_get_org_sdk()._org_create, "team")
 
 def tortoise_probe_guarded_excluded():
     if _transport_is_http():
         return _http_excluded_error()
-    return _safe(_quota_gated(_get_org_sdk().create_point, "points"))
+    return _safe(_quota_gated(_get_org_sdk()._create_point, "points"))
 
 def tortoise_probe_unguarded_excluded():
-    return _safe(_quota_gated(_get_org_sdk().create_point, "points"))
+    return _safe(_quota_gated(_get_org_sdk()._create_point, "points"))
 
 def tortoise_probe_dynamic_table():
     handlers = {}
-    return handlers["create_point"]()
+    return handlers["_create_point"]()
 
 def tortoise_probe_wrap_dynamic():
     return _safe(_quota_gated(dispatch["x"], "points"))
 
 def tortoise_probe_resolve_then_call():
-    h = _TABLE["create_point"]
+    h = _TABLE["_create_point"]
     return h()
 
 def tortoise_probe_getattr_then_call():
-    fn = getattr(_get_org_sdk(), "create_point")
+    fn = getattr(_get_org_sdk(), "_create_point")
     return fn()
 
 def tortoise_probe_conditional_guard(n):
     if n == 0:
         return _http_excluded_error()
-    return _safe(_quota_gated(_get_org_sdk().create_point, "points"))
+    return _safe(_quota_gated(_get_org_sdk()._create_point, "points"))
 
 def tortoise_probe_dead_guard():
     if False:
         return _http_excluded_error()
-    return _safe(_quota_gated(_get_org_sdk().create_point, "points"))
+    return _safe(_quota_gated(_get_org_sdk()._create_point, "points"))
 
 def _transport_is_http():
     ...
@@ -970,14 +970,14 @@ def _require_stdio():
 def tortoise_probe_helper_guard():
     if _transport_is_http():
         return _require_stdio()
-    return _safe(_get_org_sdk().ingest_corpus, "/tmp")
+    return _safe(_get_org_sdk()._ingest_corpus, "/tmp")
 
 def tortoise_probe_get_dispatch():
-    h = _HANDLERS.get("create_point")
+    h = _HANDLERS.get("_create_point")
     return h()
 
 def _probe_helper():
-    return _get_org_sdk().create_point
+    return _get_org_sdk()._create_point
 
 _probe_alias = _probe_helper
 
@@ -985,7 +985,7 @@ def tortoise_probe_alias_helper():
     return _probe_alias()
 
 def _passed_handle_do(client):
-    return client.create_point
+    return client._create_point
 
 def tortoise_probe_passed_handle():
     return _passed_handle_do(_get_org_sdk())
@@ -993,21 +993,21 @@ def tortoise_probe_passed_handle():
 def tortoise_probe_inverted_guard():
     if not _transport_is_http():
         return _http_excluded_error()
-    return _safe(_get_org_sdk().create_point, "x")
+    return _safe(_get_org_sdk()._create_point, "x")
 '''
 
 _BARE_IMPORT_SRC = '''
-from tortoise.sdk import create_point
+from tortoise.sdk import _create_point
 import tortoise.sdk as sdk
 
 def _get_org_sdk():
     ...
 
 def tortoise_probe_bare_import():
-    return create_point("x")
+    return _create_point("x")
 
 def tortoise_probe_module_alias():
-    return sdk.create_point("x")
+    return sdk._create_point("x")
 '''
 
 _SDK_HELPER_DELEGATION_SRC = '''
@@ -1031,8 +1031,15 @@ class TortoiseSDK:
 # test bound to a live ledger would red the build on exactly the action the guard
 # itself instructs ("delete the ledger entry").
 _LEDGER_TOOL = "tortoise_probe_ledgered"
-_LEDGER_DECLARED = "query"
-_LEDGER_OTHER = "recall_state"
+_LEDGER_DECLARED = "_query"
+# ⛔ `_LEDGER_OTHER` MUST BE A **PUBLIC** METHOD, and #12901 forced this choice: the
+# ledger's reached half is compared against the PUBLIC reach set (`public_reached` — a
+# private helper call is not a binding claim), so a private spelling here makes the
+# reached comparison vacuously equal an empty recorded set and
+# `test_T3_divergence_ledger_records_the_reached_set` would pass over a dead conjunct.
+# `recall_state` held this slot until the batch privatised it to `_recall_state`; the
+# slot now takes an approved method, which is what a real binding claim always is.
+_LEDGER_OTHER = "list_knowledge"
 
 
 def _ledger_src(reaches: str) -> str:
@@ -1074,8 +1081,8 @@ class TestCapabilityModel:
             sdk_filesystem_methods, sdk_graph_mutators, sdk_operator_only_mutators,
         )
         mutators = sdk_graph_mutators()
-        assert {"create_point", "delete", "update"} <= mutators
-        assert not ({"query", "get_point", "list_pointkinds"} & mutators)
+        assert {"_create_point", "_delete", "_update"} <= mutators
+        assert not ({"_query", "_get_point", "_list_pointkinds"} & mutators)
         # over-inclusion sentinel: control-plane READS are not mutators. `apikey_list`
         # was here until #4282 deleted it; `apikey_verify` was the surviving read in the
         # same family until #12901 wave 2 privatised it, so the sentinel now names the
@@ -1086,21 +1093,21 @@ class TestCapabilityModel:
         # #11609 batch 2: the walker is `_index_directory` and its public door is
         # `index_sources_from_directory`; the sentinel names both so the derivation
         # cannot go vacuous by following only one of them.
-        assert {"ingest_corpus", "_index_directory",
+        assert {"_ingest_corpus", "_index_directory",
                 "index_sources_from_directory"} <= fs
-        assert not ({"_probe_embedded_busy", "session_index_health"} & fs)
+        assert not ({"_probe_embedded_busy", "_session_index_health"} & fs)
         op = sdk_operator_only_mutators()
         # #12901 wave 2 closed the public control-plane doors; each body survives as the
         # private seam its hosted caller now uses, so the sentinel names the SEAMS.
-        assert {"org_create", "_membership_create", "_apikey_revoke",
+        assert {"_org_create", "_membership_create", "_apikey_revoke",
                 "_invitation_revoke"} <= op
         assert not ({"org_list", "graph_list", "_apikey_verify"} & op)
 
     def test_handler_operations_reads_value_passed_and_alias_forms(self):
         """`_get_org_sdk().<m>` as a passed value and via an alias are both seen."""
         from tool_surface_capabilities import handler_operations
-        assert "create_point" in handler_operations("tortoise_create_point").operations
-        assert "compute_confidence" in handler_operations("tortoise_compute_confidence").operations
+        assert "_create_point" in handler_operations("tortoise_create_point").operations
+        assert "_compute_confidence" in handler_operations("tortoise_compute_confidence").operations
 
     def test_operator_only_and_filesystem_capabilities_are_http_excluded(self):
         from tool_surface_capabilities import (
@@ -1223,19 +1230,19 @@ class TestCapabilityModel:
         )
 
         from tortoise.tool_registry import _rw
-        entry = _probe("tortoise_probe_inverted_guard", "create_point",
+        entry = _probe("tortoise_probe_inverted_guard", "_create_point",
                        annotations=_rw(), http_policy=False)
         assert not handler_self_guards("tortoise_probe_inverted_guard", _PROBE_SRC)
         assert write_classification_violations([entry], _PROBE_SRC)
 
     def test_T1_bare_import_and_module_alias_fail(self):
-        """`from tortoise.sdk import create_point` and `import tortoise.sdk as s;
-        s.create_point` are both statically resolvable writes."""
+        """`from tortoise.sdk import _create_point` and `import tortoise.sdk as s;
+        s._create_point` are both statically resolvable writes."""
         from tool_surface_capabilities import write_classification_violations
 
         from tortoise.tool_registry import _ro
         for probe in ("tortoise_probe_bare_import", "tortoise_probe_module_alias"):
-            entry = _probe(probe, "query", annotations=_ro(), http_policy=True)
+            entry = _probe(probe, "_query", annotations=_ro(), http_policy=True)
             assert write_classification_violations([entry], _BARE_IMPORT_SRC), probe
 
     def test_T4_per_site_duplicate_weight_fails(self):
@@ -1246,8 +1253,8 @@ class TestCapabilityModel:
             "def _get_org_sdk(): ...\n"
             "def _safe(fn, *a, **k): ...\n"
             "def _quota_gated(fn, *a, **k): ...\n"
-            "def a(): return _quota_gated(_get_org_sdk().create_point, abuse_weight=1)\n"
-            "def b(): return _quota_gated(_get_org_sdk().create_point)\n"
+            "def a(): return _quota_gated(_get_org_sdk()._create_point, abuse_weight=1)\n"
+            "def b(): return _quota_gated(_get_org_sdk()._create_point)\n"
         )
         assert wrap_site_violations(src)
 
@@ -1257,7 +1264,7 @@ class TestCapabilityModel:
 
         from tortoise.tool_registry import _ro
         for probe in ("tortoise_probe_reader", "tortoise_probe_alias"):
-            entry = _probe(probe, "query", annotations=_ro(), http_policy=True)
+            entry = _probe(probe, "_query", annotations=_ro(), http_policy=True)
             assert write_classification_violations([entry], _PROBE_SRC), probe
 
     def test_T1_exempted_tool_without_self_guard_fails(self):
@@ -1265,9 +1272,9 @@ class TestCapabilityModel:
         from tool_surface_capabilities import write_classification_violations
 
         from tortoise.tool_registry import _rw
-        unguarded = _probe("tortoise_probe_unguarded_excluded", "create_point",
+        unguarded = _probe("tortoise_probe_unguarded_excluded", "_create_point",
                            annotations=_rw(), http_policy=False)
-        guarded = _probe("tortoise_probe_guarded_excluded", "create_point",
+        guarded = _probe("tortoise_probe_guarded_excluded", "_create_point",
                          annotations=_rw(), http_policy=False)
         assert write_classification_violations([unguarded], _PROBE_SRC)
         assert not write_classification_violations([guarded], _PROBE_SRC)
@@ -1293,7 +1300,7 @@ class TestCapabilityModel:
         from tortoise.tool_registry import MAINTENANCE_TIER, _ro, _rw
         # Same handler as the clean entry above — the self-guard is real.
         for tier, ann in (("read", _ro()), (MAINTENANCE_TIER, _rw())):
-            demoted = _probe("tortoise_probe_guarded_excluded", "create_point",
+            demoted = _probe("tortoise_probe_guarded_excluded", "_create_point",
                              annotations=ann, http_policy=False, risk=tier)
             violations = write_classification_violations([demoted], _PROBE_SRC)
             assert any("but its handler reaches write(s)" in v for v in violations), (
@@ -1305,7 +1312,7 @@ class TestCapabilityModel:
                                   if "but its handler reaches write(s)" in v]
         # The writing tiers are what the same handler is SUPPOSED to carry.
         for tier in ("destructive", "write"):
-            kept = _probe("tortoise_probe_guarded_excluded", "create_point",
+            kept = _probe("tortoise_probe_guarded_excluded", "_create_point",
                           annotations=_rw(), http_policy=False, risk=tier)
             assert not [v for v in write_classification_violations([kept], _PROBE_SRC)
                         if "but its handler reaches write(s)" in v], (
@@ -1318,7 +1325,7 @@ class TestCapabilityModel:
 
         from tortoise.tool_registry import _ro
         for probe in ("tortoise_probe_fs", "tortoise_probe_org"):
-            entry = _probe(probe, "query", annotations=_ro(), http_policy=True)
+            entry = _probe(probe, "_query", annotations=_ro(), http_policy=True)
             assert privileged_exposure_violations([entry], _PROBE_SRC), probe
 
     def test_T3_stale_binding_and_missing_handler_fail(self):
@@ -1330,11 +1337,11 @@ class TestCapabilityModel:
                        annotations=_ro(), http_policy=True)
         assert any("does not resolve" in v
                    for v in binding_resolution_violations([stale]))
-        handlerless = _probe("tortoise_no_handler_at_all", "query",
+        handlerless = _probe("tortoise_no_handler_at_all", "_query",
                              annotations=_ro(), http_policy=True)
         assert any("no module-level handler" in v
                    for v in binding_resolution_violations([handlerless]))
-        dynamic = _probe("tortoise_probe_dynamic_table", "query",
+        dynamic = _probe("tortoise_probe_dynamic_table", "_query",
                          annotations=_ro(), http_policy=True)
         assert any("dispatch" in v
                    for v in binding_resolution_violations([dynamic], _PROBE_SRC))
@@ -1347,7 +1354,7 @@ class TestCapabilityModel:
         from tortoise.tool_registry import _ro
         for probe in ("tortoise_probe_resolve_then_call",
                       "tortoise_probe_getattr_then_call"):
-            entry = _probe(probe, "query", annotations=_ro(), http_policy=True)
+            entry = _probe(probe, "_query", annotations=_ro(), http_policy=True)
             violations = binding_resolution_violations([entry], _PROBE_SRC)
             assert any("dispatch" in v for v in violations), (probe, violations)
 
@@ -1376,7 +1383,7 @@ class TestCapabilityModel:
         from tool_surface_capabilities import binding_resolution_violations
 
         from tortoise.tool_registry import _ro
-        handlerless = _probe("tortoise_no_handler_at_all", "query",
+        handlerless = _probe("tortoise_no_handler_at_all", "_query",
                              annotations=_ro(), http_policy=True)
         violations = binding_resolution_violations([handlerless])
         assert any("no module-level handler" in v for v in violations), violations
@@ -1390,10 +1397,10 @@ class TestCapabilityModel:
         from tool_surface_capabilities import binding_resolution_violations
 
         from tortoise.tool_registry import _ro
-        diverged = _probe("tortoise_probe_reader", "query",
+        diverged = _probe("tortoise_probe_reader", "_query",
                           annotations=_ro(), http_policy=True)
         violations = binding_resolution_violations([diverged], _PROBE_SRC)
-        assert any("never" in v and "query" in v for v in violations), violations
+        assert any("never" in v and "_query" in v for v in violations), violations
 
     def test_T3_divergence_ledger_cannot_outlive_its_defect(self, monkeypatch):
         """The ledger is exact in BOTH directions: a repaired divergence must red
@@ -1423,7 +1430,7 @@ class TestCapabilityModel:
             _LEDGER_TOOL: tsc.DeclaredBindingDivergence(
                 _LEDGER_DECLARED, frozenset({_LEDGER_OTHER}), "synthetic"),
         })
-        drifted = _probe(_LEDGER_TOOL, "get_point",
+        drifted = _probe(_LEDGER_TOOL, "_get_point",
                          annotations=_ro(), http_policy=True)
         violations = tsc.binding_resolution_violations(
             [drifted], _ledger_src(_LEDGER_OTHER))
@@ -1471,7 +1478,7 @@ class TestCapabilityModel:
         from tortoise.tool_registry import _rw
         for probe in ("tortoise_probe_conditional_guard",
                       "tortoise_probe_dead_guard"):
-            entry = _probe(probe, "create_point", annotations=_rw(), http_policy=False)
+            entry = _probe(probe, "_create_point", annotations=_rw(), http_policy=False)
             assert not handler_self_guards(probe, _PROBE_SRC), probe
             assert write_classification_violations([entry], _PROBE_SRC), probe
         # a helper-delegated guard DOES count (no false-red)
@@ -1493,17 +1500,17 @@ class TestCapabilityModel:
         assert exemption_set_violations(served) == []
         # A read tier carrying a writer annotation — exactly the #4474 defect —
         # is caught on the readOnlyHint half.
-        rogue = _probe("tortoise_rogue_writer", "query", annotations=_rw(),
+        rogue = _probe("tortoise_rogue_writer", "_query", annotations=_rw(),
                        http_policy=False, risk="read")
         assert exemption_set_violations([rogue])
         # The reverse direction: a declared writer behind a read annotation.
-        reverse = _probe("tortoise_rogue_reader", "query", annotations=_ro(),
+        reverse = _probe("tortoise_rogue_reader", "_query", annotations=_ro(),
                          http_policy=False, risk="write")
         assert exemption_set_violations([reverse])
         # `maintenance` is the third state and must NOT be read as either: the
         # writer annotation is correct there (it does refresh stored state), so
         # a maintenance probe with the derived hints is clean …
-        maint_ok = _probe("tortoise_probe_maint", "query", annotations=_rw(),
+        maint_ok = _probe("tortoise_probe_maint", "_query", annotations=_rw(),
                           http_policy=True, risk="maintenance")
         assert exemption_set_violations([maint_ok]) == []
         # … while a `writes` permission that disagrees with the tier is caught on
@@ -1529,7 +1536,7 @@ class TestCapabilityModel:
         )
         # a renamed tool name is no longer live → dead-name violation
         renamed = dict(DECLARED_WRITE_SURFACE_MAP)
-        renamed["create_point"] = "tortoise_create_point_RENAMED"
+        renamed["_create_point"] = "tortoise_create_point_RENAMED"
         assert any("non-existent" in v
                    for v in write_surface_map_violations(renamed))
         # a declared method whose wrap site is gone → inverse violation
@@ -1558,7 +1565,7 @@ class TestCapabilityModel:
         from tool_surface_capabilities import binding_resolution_violations
 
         from tortoise.tool_registry import _ro
-        entry = _probe("tortoise_probe_get_dispatch", "query",
+        entry = _probe("tortoise_probe_get_dispatch", "_query",
                        annotations=_ro(), http_policy=True)
         violations = binding_resolution_violations([entry], _PROBE_SRC)
         assert any("dispatch" in v for v in violations), violations
@@ -1573,8 +1580,8 @@ class TestCapabilityModel:
 
         from tortoise.tool_registry import _ro
         for probe in ("tortoise_probe_alias_helper", "tortoise_probe_passed_handle"):
-            assert "create_point" in handler_operations(probe, _PROBE_SRC).operations
-            entry = _probe(probe, "query", annotations=_ro(), http_policy=True)
+            assert "_create_point" in handler_operations(probe, _PROBE_SRC).operations
+            entry = _probe(probe, "_query", annotations=_ro(), http_policy=True)
             assert write_classification_violations([entry], _PROBE_SRC), probe
 
     def test_sdk_mutator_closure_follows_module_helpers(self):
@@ -1595,7 +1602,7 @@ class TestCapabilityModel:
             "    x = 1\n"
             "    if _transport_is_http():\n"
             "        return _http_excluded_error()\n"
-            "    return _safe(_get_org_sdk().create_point, 'x')\n"
+            "    return _safe(_get_org_sdk()._create_point, 'x')\n"
         )
         assert handler_self_guards("tortoise_probe_benign", src)
 
@@ -1611,7 +1618,7 @@ class TestCapabilityModel:
         from tool_surface_capabilities import declared_set_violations
 
         from tortoise.tool_registry import TOOL_REGISTRY
-        without_dream = [e for e in TOOL_REGISTRY if e.sdk_method != "dream"]
+        without_dream = [e for e in TOOL_REGISTRY if e.sdk_method != "_dream"]
         assert any("no tool binding" in v or "does not resolve" in v
                    for v in declared_set_violations(without_dream))
         # a synthetic SDK lacking a declared method fails resolution
@@ -1953,10 +1960,10 @@ class TestCapabilityModel:
         from tool_surface_capabilities import privileged_exposure_violations
 
         from tortoise.tool_registry import _ro, _rw
-        declared = _probe("tortoise_probe_fs", "ingest_corpus",
+        declared = _probe("tortoise_probe_fs", "_ingest_corpus",
                           annotations=_ro(), http_policy=True)
         assert privileged_exposure_violations([declared], _PROBE_SRC)
-        unguarded = _probe("tortoise_probe_unguarded_excluded", "ingest_corpus",
+        unguarded = _probe("tortoise_probe_unguarded_excluded", "_ingest_corpus",
                            annotations=_rw(), http_policy=False)
         assert privileged_exposure_violations([unguarded], _PROBE_SRC)
 
@@ -1993,9 +2000,9 @@ class TestCapabilityModel:
             "def _get_org_sdk(): ...\n"
             "def _safe(fn, *a, **k): ...\n"
             "def tortoise_probe_readthrough():\n"
-            "    return _safe(_get_org_sdk().compute_confidence)\n"
+            "    return _safe(_get_org_sdk()._compute_confidence)\n"
         )
-        entry = _probe("tortoise_probe_readthrough", "compute_confidence",
+        entry = _probe("tortoise_probe_readthrough", "_compute_confidence",
                        annotations=_ro(), http_policy=True)
         assert write_classification_violations([entry], src) == []
 
@@ -2018,10 +2025,10 @@ class TestCapabilityModel:
             "        return False\n"
             "    if _transport_http_stub():\n"
             "        return _http_excluded_error()\n"
-            "    return _safe(_get_org_sdk().create_point, 'x')\n"
+            "    return _safe(_get_org_sdk()._create_point, 'x')\n"
         )
         assert not handler_self_guards("tortoise_excl_writer", stub_src)
-        excl = _probe("tortoise_excl_writer", "create_point", annotations=_rw(),
+        excl = _probe("tortoise_excl_writer", "_create_point", annotations=_rw(),
                       http_policy=False)
         assert write_classification_violations([excl], stub_src)
 
@@ -2029,10 +2036,10 @@ class TestCapabilityModel:
             "def _get_org_sdk(): ...\n"
             "def _safe(fn, *a, **k): ...\n"
             "def tortoise_merged_read():\n"
-            "    h = _TABLE.get('cp') or _get_org_sdk().update_point\n"
+            "    h = _TABLE.get('cp') or _get_org_sdk()._update_point\n"
             "    return h()\n"
         )
-        merged = _probe("tortoise_merged_read", "query", annotations=_ro(),
+        merged = _probe("tortoise_merged_read", "_query", annotations=_ro(),
                         http_policy=True)
         assert binding_resolution_violations([merged], wrapper_src)
 
@@ -2130,7 +2137,7 @@ class TestReadTierCannotHideAnOutOfBoundaryWrite:
         # accessor its handler actually reaches now — probing `query` would test a
         # binding that no longer exists and pass vacuously.
         monkeypatch.setitem(
-            tsc.OUT_OF_BOUNDARY_MUTATORS, "paginated_query",
+            tsc.OUT_OF_BOUNDARY_MUTATORS, "_paginated_query",
             "probe: pretend a mutation lives outside sdk.py")
         violations = tsc.write_classification_violations(tsc.served_registry())
         assert any("out-of-boundary mutation" in v and "tortoise_query" in v
@@ -2141,7 +2148,7 @@ class TestReadTierCannotHideAnOutOfBoundaryWrite:
         # half can fail — probing a read-only op and asserting a writer is absent
         # would be vacuous (review P2: it was, on the first cut).
         monkeypatch.setitem(
-            tsc.OUT_OF_BOUNDARY_MUTATORS, "create_point",
+            tsc.OUT_OF_BOUNDARY_MUTATORS, "_create_point",
             "probe: pretend a mutation lives outside sdk.py")
         violations = tsc.write_classification_violations(tsc.served_registry())
         assert not any("out-of-boundary mutation" in v
@@ -2172,7 +2179,7 @@ class TestReadTierCannotHideAnOutOfBoundaryWrite:
         # #10602: tortoise_query now reaches `paginated_query`, not `query` — the
         # probe must name the accessor the handler ACTUALLY reaches, or the arm
         # looks vacuous while the binding it was written for is gone.
-        monkeypatch.setitem(tsc.OUT_OF_BOUNDARY_MUTATORS, "paginated_query",
+        monkeypatch.setitem(tsc.OUT_OF_BOUNDARY_MUTATORS, "_paginated_query",
                             "probe: pretend a mutation lives outside sdk.py")
         # A REAL entry (so the handler resolution is real) moved to the
         # `maintenance` tier — exactly the re-tiering a lane might attempt.

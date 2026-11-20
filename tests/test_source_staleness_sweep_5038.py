@@ -96,9 +96,9 @@ def test_a_revised_source_names_exactly_the_nodes_read_from_the_old_version():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        p1 = sdk.create_point("statement", "alpha claim", extractedFrom="src.txt")
-        p2 = sdk.create_point("statement", "beta claim", extractedFrom="src.txt")
-        sdk.link_source_to_entity("src.txt", "ev-1", "Event")
+        p1 = sdk._create_point("statement", "alpha claim", extractedFrom="src.txt")
+        p2 = sdk._create_point("statement", "beta claim", extractedFrom="src.txt")
+        sdk._link_source_to_entity("src.txt", "ev-1", "Event")
 
         fresh = source_staleness(proj.g, "src.txt")
         assert fresh["status"] == "current", fresh
@@ -144,10 +144,10 @@ def test_a_link_made_after_the_revision_is_current_not_stale():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        old = sdk.create_point("statement", "read at h1", extractedFrom="src.txt")
+        old = sdk._create_point("statement", "read at h1", extractedFrom="src.txt")
 
         _set_hash(proj, "h2")
-        new = sdk.create_point("statement", "read at h2", extractedFrom="src.txt")
+        new = sdk._create_point("statement", "read at h2", extractedFrom="src.txt")
 
         sweep = source_staleness(proj.g, "src.txt")
         by_node = {lk["node"]: lk for lk in sweep["links"]}
@@ -180,9 +180,9 @@ def test_an_unversioned_source_reports_unknown_and_no_targets():
     try:
         proj = sdk._get_proj()
         proj.g.query("CREATE (ev:Event {id:'ev-2', eventId:'ev-2', name:'Loose'})")
-        p = sdk.create_point("statement", "from an unversioned source",
+        p = sdk._create_point("statement", "from an unversioned source",
                              extractedFrom="never-seen.txt")
-        sdk.link_source_to_entity("never-seen.txt", "ev-2", "Event")
+        sdk._link_source_to_entity("never-seen.txt", "ev-2", "Event")
 
         sweep = source_staleness(proj.g, "never-seen.txt")
         assert sweep["current"] == ""
@@ -244,12 +244,12 @@ def test_a_property_free_references_link_is_not_a_target():
     try:
         proj = _fixture(sdk, content_hash="h1")
         # an anchored derivation link (the only class the anchor marks)
-        sdk.link_source_to_entity("src.txt", "ev-1", "Event")
+        sdk._link_source_to_entity("src.txt", "ev-1", "Event")
         # an Object MENTION link: no anchor by design
-        sdk.link_source_to_entity("src.txt", "obj-1", "Object")
+        sdk._link_source_to_entity("src.txt", "obj-1", "Object")
         # a Source -> Source containment link: also property-free
         proj.g.query("CREATE (d:Source {url:'doc-1', sourceKind:'document'})")
-        sdk.link_source_to_entity("src.txt", "doc-1", "Source")
+        sdk._link_source_to_entity("src.txt", "doc-1", "Source")
 
         rows = {lk["node"]: lk for lk in source_staleness(proj.g, "src.txt")["links"]}
         assert set(rows) == {"ev-1"}, (
@@ -274,8 +274,8 @@ def test_the_sweep_writes_nothing_and_is_stable_across_reads():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        p = sdk.create_point("statement", "a claim", extractedFrom="src.txt")
-        sdk.link_source_to_entity("src.txt", "ev-1", "Event")
+        p = sdk._create_point("statement", "a claim", extractedFrom="src.txt")
+        sdk._link_source_to_entity("src.txt", "ev-1", "Event")
 
         first = source_staleness(proj.g, "src.txt")
         second = source_staleness(proj.g, "src.txt")
@@ -332,7 +332,7 @@ def test_cli_source_mode_reports_the_same_read():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        p = sdk.create_point("statement", "a claim", extractedFrom="src.txt")
+        p = sdk._create_point("statement", "a claim", extractedFrom="src.txt")
         _set_hash(proj, "h2")
 
         buf = io.StringIO()
@@ -397,11 +397,11 @@ def test_a_second_source_is_not_swept_and_its_nodes_are_not_targets():
         proj.g.query(
             "CREATE (ev:Event {id:'ev-other', eventId:'ev-other', name:'Other', "
             "eventKind:'meeting'})")
-        mine = sdk.create_point("statement", "mine", extractedFrom="src.txt")
-        theirs = sdk.create_point("statement", "theirs",
+        mine = sdk._create_point("statement", "mine", extractedFrom="src.txt")
+        theirs = sdk._create_point("statement", "theirs",
                                   extractedFrom="other.txt")
-        sdk.link_source_to_entity("src.txt", "ev-1", "Event")
-        sdk.link_source_to_entity("other.txt", "ev-other", "Event")
+        sdk._link_source_to_entity("src.txt", "ev-1", "Event")
+        sdk._link_source_to_entity("other.txt", "ev-other", "Event")
 
         _set_hash(proj, "h2")
 
@@ -437,7 +437,7 @@ def test_an_unanchored_event_derivation_reads_unknown_neither_dropped_nor_a_targ
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        sdk.link_source_to_entity("src.txt", "ev-1", "Event")   # anchored
+        sdk._link_source_to_entity("src.txt", "ev-1", "Event")   # anchored
         proj.g.query("CREATE (ev:Event {id:'ev-legacy', eventId:'ev-legacy', "
                      "name:'Legacy', eventKind:'meeting'})")
         # a bare derivation edge, exactly what create_edge / the ops backfill mint
@@ -492,8 +492,8 @@ def test_an_unreadable_link_class_degrades_the_sweep_to_unknown_never_current():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        p = sdk.create_point("statement", "a claim", extractedFrom="src.txt")
-        sdk.link_source_to_entity("src.txt", "ev-1", "Event")
+        p = sdk._create_point("statement", "a claim", extractedFrom="src.txt")
+        sdk._link_source_to_entity("src.txt", "ev-1", "Event")
         _set_hash(proj, "h2")
 
         healthy = source_staleness(proj.g, "src.txt")
@@ -629,7 +629,7 @@ def test_links_are_sorted_so_two_reads_of_an_unchanged_graph_agree():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        sdk.create_point("statement", "zzz", extractedFrom="src.txt")  # id unknown
+        sdk._create_point("statement", "zzz", extractedFrom="src.txt")  # id unknown
         proj.g.query("CREATE (p:Point {id:'b-b', statement:'b', "
                      "kind:'statement', createdAt:'2024-01-01'})")
         proj.g.query("CREATE (p:Point {id:'a-a', statement:'a', "
@@ -686,7 +686,7 @@ def test_an_anchored_document_derivation_is_a_target_and_names_its_url():
         proj.g.query(
             "CREATE (doc:Source {url:'doc-1', sourceKind:'document', "
             "title:'doc-1', ingestedAt:'2024-01-01'})")
-        sdk.link_source_to_entity("src.txt", "doc-1", "Document")
+        sdk._link_source_to_entity("src.txt", "doc-1", "Document")
         # the anchor landed on the LINK, from the source's hash at link time
         anchored = proj.g.query(
             "MATCH (:Source {url:'src.txt'})-[r:references]->(:Source {url:'doc-1'}) "
@@ -799,7 +799,7 @@ def test_all_extracted_from_rows_precede_all_references_rows():
         proj.g.query(
             "MATCH (p:Point {id:'zzz-point'}), (s:Source {url:'src.txt'}) "
             "CREATE (p)-[:extractedFrom {sourceVersion:'h1'}]->(s)")
-        sdk.link_source_to_entity("src.txt", "ev-1", "Event")
+        sdk._link_source_to_entity("src.txt", "ev-1", "Event")
 
         sweep = source_staleness(proj.g, "src.txt")
         vias = [lk["via"] for lk in sweep["links"]]
@@ -820,7 +820,7 @@ def test_an_incomplete_sweep_exits_non_zero():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        sdk.create_point("statement", "a claim", extractedFrom="src.txt")
+        sdk._create_point("statement", "a claim", extractedFrom="src.txt")
 
         class _Broken:
             def __init__(self, graph):
@@ -865,7 +865,7 @@ def test_a_link_with_no_anchor_against_a_versioned_source_reads_unknown():
     try:
         proj = sdk._get_proj()
         # link first (auto-created stub, no hash), materialize the source after
-        p = sdk.create_point("statement", "linked before materialization",
+        p = sdk._create_point("statement", "linked before materialization",
                              extractedFrom="late.txt")
         sdk.register_source("late.txt", "document", contentHash="h1")
 
@@ -972,7 +972,7 @@ def test_a_whitespace_only_version_is_absent_not_an_operand():
                      "name:'W', eventKind:'meeting'})")
         sdk.register_source("https://ws.example/doc", "document",
                           contentHash="   ")
-        sdk.link_source_to_entity("https://ws.example/doc", "ev-ws", "Event")
+        sdk._link_source_to_entity("https://ws.example/doc", "ev-ws", "Event")
         anchored = proj.g.query(
             "MATCH (:Source {url:'https://ws.example/doc'})-"
             "[r:references]->(:Event {id:'ev-ws'}) "
@@ -1025,7 +1025,7 @@ def test_the_verdict_aggregates_the_references_class_too():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        sdk.link_source_to_entity("src.txt", "ev-1", "Event")
+        sdk._link_source_to_entity("src.txt", "ev-1", "Event")
         _set_hash(proj, "h2")
 
         sweep = source_staleness(proj.g, "src.txt")
@@ -1169,9 +1169,9 @@ def test_a_withheld_link_is_counted_not_silent():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        sdk.link_source_to_entity("src.txt", "ev-1", "Event")
+        sdk._link_source_to_entity("src.txt", "ev-1", "Event")
         proj.g.query("CREATE (d:Source {url:'doc-1', sourceKind:'document'})")
-        sdk.link_source_to_entity("src.txt", "doc-1", "Source")
+        sdk._link_source_to_entity("src.txt", "doc-1", "Source")
 
         sweep = source_staleness(proj.g, "src.txt")
         assert sweep["counts"]["withheld"] == 1, sweep["counts"]
@@ -1223,7 +1223,7 @@ def test_a_blank_but_present_anchor_stays_judged_and_reads_unknown():
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h2")
-        sdk.link_source_to_entity("src.txt", "ev-1", "Event")
+        sdk._link_source_to_entity("src.txt", "ev-1", "Event")
         proj.g.query("CREATE (d:Source {url:'doc-ws', sourceKind:'document'})")
         proj.g.query(
             "MATCH (s:Source {url:'src.txt'}), (d:Source {url:'doc-ws'}) "
@@ -1290,10 +1290,10 @@ def test_the_withheld_count_covers_both_classes_and_is_unread_on_failure(
     sdk = TortoiseSDK(_tmp("test.db"))
     try:
         proj = _fixture(sdk, content_hash="h1")
-        sdk.link_source_to_entity("src.txt", "ev-1", "Event")   # judged
-        sdk.link_source_to_entity("src.txt", "obj-1", "Object")  # withheld: identity
+        sdk._link_source_to_entity("src.txt", "ev-1", "Event")   # judged
+        sdk._link_source_to_entity("src.txt", "obj-1", "Object")  # withheld: identity
         proj.g.query("CREATE (d:Source {url:'doc-1', sourceKind:'document'})")
-        sdk.link_source_to_entity("src.txt", "doc-1", "Source")  # withheld: ambiguous
+        sdk._link_source_to_entity("src.txt", "doc-1", "Source")  # withheld: ambiguous
 
         sweep = source_staleness(proj.g, "src.txt")
         assert sweep["counts"]["withheld"] == 2, sweep["counts"]

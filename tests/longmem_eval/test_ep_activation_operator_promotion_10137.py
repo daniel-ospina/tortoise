@@ -72,7 +72,7 @@ def sdk():
 
 
 def _claim(sdk: TortoiseSDK, text: str, status: str) -> str:
-    return sdk.create_point("statement", text, dedup=False, status=status)["id"]
+    return sdk._create_point("statement", text, dedup=False, status=status)["id"]
 
 
 def _operator_status(sdk: TortoiseSDK, oid: str) -> str | None:
@@ -84,7 +84,7 @@ def _operator_status(sdk: TortoiseSDK, oid: str) -> str | None:
 
 
 def _confidence(sdk: TortoiseSDK, pid: str) -> float | None:
-    return epa.read_confidence(sdk.get_point(pid) or {})
+    return epa.read_confidence(sdk._get_point(pid) or {})
 
 
 def _assert_contributed(sdk, manifest, conclusion, oid) -> None:
@@ -127,8 +127,8 @@ def test_an_operator_minted_over_live_claims_moves_its_conclusion(sdk):
     promotion sweep had no candidate and the factor never existed."""
     premise = _claim(sdk, "premise", "live")
     conclusion = _claim(sdk, "conclusion", "live")
-    sdk.set_point_baseline(premise, 6.0, 2.0)
-    oid = sdk.create_operator(
+    sdk._set_point_baseline(premise, 6.0, 2.0)
+    oid = sdk._create_operator(
         "IMPL", premise, [conclusion],
         direction="unidirectional", promote_source=False,
     )["id"]
@@ -155,8 +155,8 @@ def test_a_resumed_ingest_operator_is_promoted_on_the_next_pass(sdk):
     )
 
     # …the resumed ingest writes the operator over claims pass 1 already made live
-    sdk.set_point_baseline(premise, 6.0, 2.0)
-    oid = sdk.create_operator(
+    sdk._set_point_baseline(premise, 6.0, 2.0)
+    oid = sdk._create_operator(
         "IMPL", premise, [conclusion],
         direction="unidirectional", promote_source=False,
     )["id"]
@@ -179,8 +179,8 @@ def test_an_all_draft_graph_still_promotes_its_operators(sdk):
     claims are all draft reaches the same state it reached before."""
     premise = _claim(sdk, "premise", "draft")
     conclusion = _claim(sdk, "conclusion", "draft")
-    sdk.set_point_baseline(premise, 6.0, 2.0)
-    oid = sdk.create_operator(
+    sdk._set_point_baseline(premise, 6.0, 2.0)
+    oid = sdk._create_operator(
         "IMPL", premise, [conclusion],
         direction="unidirectional", promote_source=False,
     )["id"]
@@ -207,8 +207,8 @@ def test_the_gate_promotes_an_operator_once(sdk):
     """
     premise = _claim(sdk, "premise", "live")
     conclusion = _claim(sdk, "conclusion", "live")
-    sdk.set_point_baseline(premise, 6.0, 2.0)
-    oid = sdk.create_operator(
+    sdk._set_point_baseline(premise, 6.0, 2.0)
+    oid = sdk._create_operator(
         "IMPL", premise, [conclusion],
         direction="unidirectional", promote_source=False,
     )["id"]
@@ -272,7 +272,7 @@ def test_the_gate_still_refuses_an_operator_with_a_draft_endpoint(sdk):
     """
     premise = _claim(sdk, "premise", "live")
     conclusion = _claim(sdk, "conclusion", "draft")
-    oid = sdk.create_operator(
+    oid = sdk._create_operator(
         "IMPL", premise, [conclusion],
         direction="unidirectional", promote_source=False,
     )["id"]
@@ -307,8 +307,8 @@ def test_the_gate_refuses_a_terminal_endpoint(sdk):
     """
     premise = _claim(sdk, "premise", "live")
     conclusion = _claim(sdk, "conclusion", "live")
-    sdk.retract_point(conclusion)
-    oid = sdk.create_operator(
+    sdk._retract_point(conclusion)
+    oid = sdk._create_operator(
         "IMPL", premise, [conclusion],
         direction="unidirectional", promote_source=False,
     )["id"]
@@ -359,7 +359,7 @@ def test_the_gate_refuses_a_status_less_operator(sdk):
     """
     premise = _claim(sdk, "premise", "live")
     conclusion = _claim(sdk, "conclusion", "live")
-    oid = sdk.create_operator(
+    oid = sdk._create_operator(
         "IMPL", premise, [conclusion],
         direction="unidirectional", promote_source=False,
     )["id"]
@@ -398,7 +398,7 @@ def test_the_gate_refuses_a_status_less_operator(sdk):
         "OperatorPromoted and a JSONL replay applies it again"
     )
     assert events.count("OperatorPromoted") == 0
-    assert "status" not in (sdk.get_point(oid) or {}), (
+    assert "status" not in (sdk._get_point(oid) or {}), (
         "the sweep WROTE a status onto a legacy operator instead of leaving it"
     )
 
@@ -503,13 +503,13 @@ def test_the_gate_reads_every_operator_edge_not_just_impl(sdk):
     """
     premise = _claim(sdk, "premise", "live")
     conclusion = _claim(sdk, "conclusion", "live")
-    oid = sdk.create_operator(
+    oid = sdk._create_operator(
         "IMPL", premise, [conclusion],
         direction="unidirectional", promote_source=False,
     )["id"]
-    result = sdk.mitigate_operator(oid, "a caveat a human has since withdrawn")
+    result = sdk._mitigate_operator(oid, "a caveat a human has since withdrawn")
     mid = result.get("point_id") or result.get("id")
-    sdk.retract_point(mid)
+    sdk._retract_point(mid)
 
     marked: list[str] = []
     promoted = epa._promote_operator_row(
@@ -541,7 +541,7 @@ def test_on_input_marks_only_factor_point_endpoints(sdk):
     """
     premise = _claim(sdk, "premise", "live")
     conclusion = _claim(sdk, "conclusion", "live")
-    oid = sdk.create_operator(
+    oid = sdk._create_operator(
         "IMPL", premise, [conclusion],
         direction="unidirectional", promote_source=False,
     )["id"]
@@ -553,7 +553,7 @@ def test_on_input_marks_only_factor_point_endpoints(sdk):
         "(:Event {id:'evt-10137', status:'live'})", params={"o": oid},
     )
     # ...and a mitigation, so a non-factor EDGE TYPE is present too.
-    result = sdk.mitigate_operator(oid, "a caveat")
+    result = sdk._mitigate_operator(oid, "a caveat")
     mid = result.get("point_id") or result.get("id")
 
     marked: list[str] = []

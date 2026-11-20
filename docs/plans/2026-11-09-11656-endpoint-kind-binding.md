@@ -58,12 +58,12 @@ issue's own target.** Measured:
 |---|---|
 | `create_operator` | `create_operator(op_type, src, [dst], label=<predicate>)` — and `ingest`'s reified arm |
 | `create_edge` / `create_about_edge` | the structural predicates only |
-| **`create_direct_edge`** | **`link_entities` (`sdk.py::TortoiseSDK.link_entities`)**: `if upper in ("IMPL","NAND") and operator is not True:` → `create_direct_edge(upper, from, to, …, label=label, …)`. **`ingest` reaches it too** (`sdk.py::TortoiseSDK.ingest`, the "operator-less per §8" arm) |
+| **`create_direct_edge`** | **`link_entities` (`sdk.py::TortoiseSDK.link_entities`)**: `if upper in ("IMPL","NAND") and operator is not True:` → `create_direct_edge(upper, from, to, …, label=label, …)`. **`ingest` reaches it too** (`sdk.py::TortoiseSDK._ingest`, the "operator-less per §8" arm) |
 
 `create_direct_edge` takes `label` and validates **nothing** about declarations or kinds — its guards are
 `op_type ∈ {IMPL,NAND}`, endpoints differ, confidence range, direction, endpoint exists / not-operator /
 not-terminal, and the claim-class override. `undeclared_relation` fires only in `create_operator`
-(`sdk.py::TortoiseSDK.create_operator`).
+(`sdk.py::TortoiseSDK._create_operator`).
 
 **And the direct door is the *dominant* shape, not a corner.** `_point_mediated_route` (`sdk.py::TortoiseSDK._point_mediated_route`)
 reifies only when a `:Point` is involved — *"`Object↔Object` keeps the direct shape … `Point↔Object` is
@@ -74,8 +74,8 @@ Point-involved** (`agent-ops:groundedIn` via `pointKinds: rationale`, `product-s
 `useCase→feature` via `pointKinds: useCase`) — so **36 of the 38** take the direct shape through
 `link_entities` and through `ingest` alike, and **the other 2 are reified by `ingest` only**. ⛔ The Point gate
 is `ingest`'s, not `create_direct_edge`'s: `_effective_route` is called only inside `ingest`/its helpers
-(`sdk.py::TortoiseSDK.ingest` and its `_check_endpoints` / `_check_endpoint_race` helpers), and `create_direct_edge`'s own docstring says so — *"`ingest()` adds the
-terminal-endpoint guard below PLUS the Point-mediated route gate (#8499)"* (`sdk.py::TortoiseSDK.create_direct_edge`, its docstring). So
+(`sdk.py::TortoiseSDK._ingest` and its `_check_endpoints` / `_check_endpoint_race` helpers), and `create_direct_edge`'s own docstring says so — *"`ingest()` adds the
+terminal-endpoint guard below PLUS the Point-mediated route gate (#8499)"* (`sdk.py::TortoiseSDK._create_direct_edge`, its docstring). So
 `link_entities` writes those 2 as direct edges today — one `Object→Point`, one `Point→Object` — which is why pin 14's
 `link_entities` arm must cover a Point-bearing pair in **both** directions. ⚠️ The earlier "32 of 35" figure was the
 **non-`Subject`** count relabelled (35 − 3 `Subject`), which absorbed the four non-`Subject` non-Object rows.
@@ -102,8 +102,8 @@ So a declared IMPL label over a mismatched **direct-shape** pair is writable tod
      the fold's own code names (*"the structural-edge lane's `ownedBy`/`hasPart`/`dependsOn`/… (#9553
      class 4)"*, `projection/__init__.py::FalkorProjection._rebuild_all_replay`);
    - **`create_direct_edge`** does **not** put its label in the rel type: it writes
-     `rel_type = op_type  # IMPL / NAND` (`sdk.py::TortoiseSDK.create_direct_edge`) and carries the declared predicate as an edge
-     **property** — `attrs["label"] = label` (`sdk.py::TortoiseSDK.create_direct_edge`), restored by this fold through
+     `rel_type = op_type  # IMPL / NAND` (`sdk.py::TortoiseSDK._create_direct_edge`) and carries the declared predicate as an edge
+     **property** — `attrs["label"] = label` (`sdk.py::TortoiseSDK._create_direct_edge`), restored by this fold through
      `DIRECT_EDGE_ATTR_KEYS` (`projection/edges.py::DIRECT_EDGE_ATTR_KEYS`, applied in the fold at `projection/__init__.py::FalkorProjection._rebuild_all_replay`).
 
    ⇒ the rule at this fold must read the predicate as **`ev["label"]` when present, else `ev["edge_type"]`**.
@@ -223,8 +223,8 @@ a superset (measured: `kind_forms_for('dev:issue')` has `issue` but not `pm:issu
 
 | site | source |
 |---|---|
-| `create_operator` | the existing per-label probe (`sdk.py::TortoiseSDK.create_operator`) — add the kind property to its `RETURN`, the same zero-extra-round-trip shape `#2351` uses for `claimClass` |
-| `create_direct_edge` | its own existing probe (`sdk.py::TortoiseSDK.create_direct_edge`) returns **five** columns — `id, is_operator, status, outdated, claimClass` (unpacked as `_label, is_op, status, outdated`, with `claimClass` aggregated separately) — so add the kind property as a **sixth** |
+| `create_operator` | the existing per-label probe (`sdk.py::TortoiseSDK._create_operator`) — add the kind property to its `RETURN`, the same zero-extra-round-trip shape `#2351` uses for `claimClass` |
+| `create_direct_edge` | its own existing probe (`sdk.py::TortoiseSDK._create_direct_edge`) returns **five** columns — `id, is_operator, status, outdated, claimClass` (unpacked as `_label, is_op, status, outdated`, with `claimClass` aggregated separately) — so add the kind property as a **sixth** |
 | `create_edge` / `create_about_edge` | `_resolve_entity` already returns `properties` (consumed for the `aboutDocument` refusal at `projection/edges.py::_EdgeHandlers.create_edge`) |
 | `_create_edges` (operator fold) | it already resolves the descriptor's endpoints |
 | **`DirectEdgeCreated` fold** | its per-label endpoint probe (`projection/__init__.py::FalkorProjection._rebuild_all_replay`, the pass-2b `DirectEdgeCreated` fold) returns **only `p.id`** — the label sweep supplies the node LABEL (`Point`/`Object`/`Subject`/`Event`), not the kind property. It must add the kind property to that `RETURN`, the same shape as the two rows above; without it the rule is called with no kind and the fold's gate reports `unknown_kind` for every record |
@@ -238,7 +238,7 @@ a superset (measured: `kind_forms_for('dev:issue')` has `issue` but not `pm:issu
 
 `list_relations()` is whole-catalog and already reached on every labelled `create_operator` — through
 `pack_registry.declared_relation_predicates()` (#2766), which `create_operator` calls at
-`sdk.py::TortoiseSDK.create_operator` when it builds the declared set —
+`sdk.py::TortoiseSDK._create_operator` when it builds the declared set —
 so the rows are free; the missing piece is `relations_for_namespaces(names) -> rows`, honouring
 `ResolvedPackSet`'s **tri-state** (`None` ⇒ catalog union; `frozenset()` ⇒ deliberately empty; a set ⇒
 recorded ∪ data). Reuse `pack_state.resolved_pack_set_for_graph` — it exists for bare-graph seams.
@@ -301,7 +301,7 @@ does not install still decides the level. The label leg never reaches this seam 
 **four** production readers, and two of them are D5's own job:
 
 - `domain_validators.py::_portfolio_mark_contract` — one pack's portfolio shape.
-- `sdk._resolve_traversal_path` (`sdk.py::TortoiseSDK._resolve_traversal_path`; the live call is in `sdk.py::TortoiseSDK.tortoise_fts_query`) — **kind pair → `{predicate, fromKind, toKind}`**,
+- `sdk._resolve_traversal_path` (`sdk.py::TortoiseSDK._resolve_traversal_path`; the live call is in `sdk.py::TortoiseSDK._tortoise_fts_query`) — **kind pair → `{predicate, fromKind, toKind}`**,
   i.e. exactly `allowed_relations(from_kind, to_kind)`. ⛔ **Not reusable as the gate** (bare-suffix,
   first-match-wins, returns one relation) — but it must be **named**, or a lane will implement D5 twice.
 - `value_extractor._relation_endpoint_refs` (`value_extractor.py::_relation_endpoint_refs`) — the kind→kind adjacency, called twice inside

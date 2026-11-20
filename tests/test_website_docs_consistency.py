@@ -352,7 +352,10 @@ def _extraction_write_calls() -> list[ast.Call]:
                 if (
                     isinstance(sub, ast.Call)
                     and isinstance(sub.func, ast.Attribute)
-                    and sub.func.attr == "create_point"
+                    # #12901 FINAL batch: `create_point` was PRIVATISED to
+                    # `_create_point` (body unchanged); the extraction write is the
+                    # same call, so the pin follows the spelling the class holds.
+                    and sub.func.attr in ("create_point", "_create_point")
                 ):
                     out.append(sub)
     return out

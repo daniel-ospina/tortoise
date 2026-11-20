@@ -39,9 +39,9 @@ def test_calibration_pipeline_e2e(sdk):
     """End-to-end: Source → Points → calibrate_summary → EP passes."""
     src_url = "https://doi.org/10.1234/systematic-review"
     # Create Point with extractedFrom — this creates a Source node
-    p1 = sdk.create_point("statement", "X causes Y",
+    p1 = sdk._create_point("statement", "X causes Y",
                           credibility="gold", extractedFrom=src_url)
-    p2 = sdk.create_point("statement", "Y prevents Z",
+    p2 = sdk._create_point("statement", "Y prevents Z",
                           extractedFrom=src_url)
     # Set credibilityTier on the Source so p2 inherits it
     proj = sdk._get_proj()
@@ -51,16 +51,16 @@ def test_calibration_pipeline_e2e(sdk):
     )
     
     # Link them
-    sdk.create_operator("IMPL", p1["id"], [p2["id"]])
+    sdk._create_operator("IMPL", p1["id"], [p2["id"]])
     
     # calibrate_summary shows calibrated
-    summary = sdk.calibrate_summary()
+    summary = sdk._calibrate_summary()
     calibrated_ids = {item["id"] for item in summary if item["calibrated"]}
     assert p1["id"] in calibrated_ids  # explicit credibility="gold"
     # p2 not yet calibrated — source inheritance happens inside compute_confidence
     
     # EP with gate passes
-    result = sdk.compute_confidence(require_calibration=True)
+    result = sdk._compute_confidence(require_calibration=True)
     assert result["converged"] is True
 
 
@@ -74,25 +74,25 @@ def test_require_calibration_raises(sdk):
     promoted (create_operator / update_point draft→live) before the
     fail-closed gate applies to them.
     """
-    sdk.create_point("statement", "Uncalibrated claim", status="live")
-    sdk.create_point("statement", "Another uncalibrated", status="live")
+    sdk._create_point("statement", "Uncalibrated claim", status="live")
+    sdk._create_point("statement", "Another uncalibrated", status="live")
     
     with pytest.raises(CalibrationError, match="uncalibrated"):
-        sdk.compute_confidence(require_calibration=True)
+        sdk._compute_confidence(require_calibration=True)
 
 
 def test_require_calibration_partial(sdk):
     """One calibrated, one live-uncalibrated → still raises."""
-    p1 = sdk.create_point("statement", "Calibrated", credibility="gold")
+    p1 = sdk._create_point("statement", "Calibrated", credibility="gold")
     # Live uncalibrated point — a DRAFT would be excluded from the gate
     # (#780/PR #1212); since #1088 a no-status create is LIVE, so the live
     # status is stated explicitly here.
-    sdk.create_point("statement", "Not calibrated", status="live")
+    sdk._create_point("statement", "Not calibrated", status="live")
     
-    sdk.create_operator("IMPL", p1["id"], [sdk.create_point("statement", "target")["id"]])
+    sdk._create_operator("IMPL", p1["id"], [sdk._create_point("statement", "target")["id"]])
     
     with pytest.raises(CalibrationError):
-        sdk.compute_confidence(require_calibration=True)
+        sdk._compute_confidence(require_calibration=True)
 
 
 def test_require_calibration_default(sdk):
@@ -103,9 +103,9 @@ def test_require_calibration_default(sdk):
     running EP on topology alone; a calibrated graph succeeds.
     """
     # Uncalibrated LIVE graph → fail-closed under the flipped default.
-    sdk.create_point("statement", "Uncalibrated claim", status="live")
+    sdk._create_point("statement", "Uncalibrated claim", status="live")
     with pytest.raises(CalibrationError, match="calibrate_summary"):
-        sdk.compute_confidence()  # default True
+        sdk._compute_confidence()  # default True
 
     # Companion: a calibrated graph succeeds under the default. The gate is
     # graph-wide, so this needs a fresh graph (the uncalibrated point above
@@ -113,10 +113,10 @@ def test_require_calibration_default(sdk):
     import tempfile
     s2 = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_calib_"), "test.db"))
     try:
-        p1 = s2.create_point("statement", "Calibrated claim", credibility="gold")
-        p2 = s2.create_point("statement", "Related claim", credibility="gold")
-        s2.create_operator("IMPL", p1["id"], [p2["id"]])
-        result = s2.compute_confidence()  # default True, graph is calibrated
+        p1 = s2._create_point("statement", "Calibrated claim", credibility="gold")
+        p2 = s2._create_point("statement", "Related claim", credibility="gold")
+        s2._create_operator("IMPL", p1["id"], [p2["id"]])
+        result = s2._compute_confidence()  # default True, graph is calibrated
         assert result["converged"] is True
     finally:
         s2.close()
@@ -131,21 +131,21 @@ def test_require_calibration_ignores_drafts(sdk):
     must not demand calibration of points EP will never use — the gate guards
     live evidence only.
     """
-    sdk.create_point("statement", "Draft staging claim", status="draft")
-    sdk.create_point("statement", "Another draft", status="draft")
+    sdk._create_point("statement", "Draft staging claim", status="draft")
+    sdk._create_point("statement", "Another draft", status="draft")
     # Draft-only graph → gate passes (nothing live to calibrate); EP finds
     # no live factors and returns a no-op result instead of raising.
-    result = sdk.compute_confidence(require_calibration=True)
+    result = sdk._compute_confidence(require_calibration=True)
     assert result.get("diagnostic") == "no_factors"
 
     # Mixed: one live uncalibrated point still fails closed.
     import tempfile
     s2 = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="tt_calib_"), "test.db"))
     try:
-        s2.create_point("statement", "Draft staging claim", status="draft")
-        s2.create_point("statement", "Live uncalibrated", status="live")
+        s2._create_point("statement", "Draft staging claim", status="draft")
+        s2._create_point("statement", "Live uncalibrated", status="live")
         with pytest.raises(CalibrationError, match="uncalibrated"):
-            s2.compute_confidence(require_calibration=True)
+            s2._compute_confidence(require_calibration=True)
     finally:
         s2.close()
 
@@ -154,7 +154,7 @@ def test_require_calibration_ignores_drafts(sdk):
 
 def test_calibrate_summary_empty(sdk):
     """Empty graph returns empty list."""
-    summary = sdk.calibrate_summary()
+    summary = sdk._calibrate_summary()
     assert isinstance(summary, list)
 
 
@@ -162,9 +162,9 @@ def test_calibrate_summary_source_hint(sdk):
     """Uncalibrated Point with Source → suggestion mentions Source."""
     # Create a Source node via _link_source (creates Source + extractedFrom edge)
     src_url = "https://example.com/blog-post"
-    p = sdk.create_point("statement", "Claim from blog", extractedFrom=src_url)  # noqa: F841
+    p = sdk._create_point("statement", "Claim from blog", extractedFrom=src_url)  # noqa: F841
     
-    summary = sdk.calibrate_summary()
+    summary = sdk._calibrate_summary()
     uncal = [s for s in summary if not s["calibrated"]]
     assert len(uncal) >= 1
     # The suggestion should mention Source since the Point has an extractedFrom edge
@@ -182,8 +182,8 @@ def test_create_point_credibility(sdk):
     evidence body at the weakest registered weight. A weak refutation must be
     able to move it — a 10:1 self-declared prior could not (0.9091 -> 0.8992).
     """
-    p = sdk.create_point("statement", "Gold tier claim", credibility="gold")
-    point = sdk.get_point(p["id"])
+    p = sdk._create_point("statement", "Gold tier claim", credibility="gold")
+    point = sdk._get_point(p["id"])
     assert point.get("ep_alpha") == pytest.approx(1.0 + AUTHOR_ASSERTION_WEAK_PC)
     assert point.get("ep_beta") == 1
     assert point.get("baseline_set") is True
@@ -192,11 +192,11 @@ def test_create_point_credibility(sdk):
 
 def test_create_point_dedup_no_overwrite(sdk):
     """Dedup doesn't overwrite existing baseline."""
-    p1 = sdk.create_point("statement", "X", credibility="gold", dedup=True)
+    p1 = sdk._create_point("statement", "X", credibility="gold", dedup=True)
     # Same content, different credibility — dedup returns existing
-    p2 = sdk.create_point("statement", "X", credibility="unverified", dedup=True)
+    p2 = sdk._create_point("statement", "X", credibility="unverified", dedup=True)
     assert p1["id"] == p2["id"]
-    point = sdk.get_point(p1["id"])
+    point = sdk._get_point(p1["id"])
     # original authored-assertion body preserved (same weak body for every word,
     # so this asserts the marker/label rather than a word-specific number)
     assert point.get("ep_alpha") == pytest.approx(1.0 + AUTHOR_ASSERTION_WEAK_PC)
@@ -205,8 +205,8 @@ def test_create_point_dedup_no_overwrite(sdk):
 
 def test_create_point_no_credibility(sdk):
     """Omit credibility → Beta(1,1), baseline_set=false."""
-    p = sdk.create_point("statement", "No credibility set")
-    point = sdk.get_point(p["id"])
+    p = sdk._create_point("statement", "No credibility set")
+    point = sdk._get_point(p["id"])
     # baseline_set should be false/missing
     assert point.get("baseline_set") in (None, False)
 
@@ -215,9 +215,9 @@ def test_create_point_no_credibility(sdk):
 
 def test_set_baseline_persistence(sdk):
     """Baseline survives graph round-trip (persisted to node)."""
-    p = sdk.create_point("statement", "Will be baselined")
-    sdk.set_point_baseline(p["id"], 8, 2)
-    point = sdk.get_point(p["id"])
+    p = sdk._create_point("statement", "Will be baselined")
+    sdk._set_point_baseline(p["id"], 8, 2)
+    point = sdk._get_point(p["id"])
     assert point.get("ep_alpha") == 8
     assert point.get("ep_beta") == 2
     assert point.get("baseline_set") is True
@@ -228,7 +228,7 @@ def test_set_baseline_persistence(sdk):
 def test_source_inheritance(sdk):
     """Source T1 → Point gets Beta(5,1) via inheritance (validated model)."""
     # Create Point with extractedFrom — this creates a Source node
-    p = sdk.create_point("statement", "Inherited claim", 
+    p = sdk._create_point("statement", "Inherited claim", 
                          extractedFrom="https://doi.org/10.1234/peer-reviewed")
     proj = sdk._get_proj()
     # Set credibilityTier on the auto-created Source
@@ -238,7 +238,7 @@ def test_source_inheritance(sdk):
     )
     
     sdk._apply_source_inheritance(recency_decay=1.0)
-    point = sdk.get_point(p["id"])
+    point = sdk._get_point(p["id"])
     # T1 = (5, 1) per docs/ep-source-credibility-experiment.md §1.1 (stale (8,2) removed)
     assert point.get("ep_alpha") == 5
     assert point.get("ep_beta") == 1
@@ -256,7 +256,7 @@ def test_source_inheritance_multi_source(sdk):
     url2 = "https://example.com/anecdotal"
     
     # Create Point with both Sources via _link_source
-    p = sdk.create_point("statement", "Multi-source claim")
+    p = sdk._create_point("statement", "Multi-source claim")
     proj = sdk._get_proj()
     proj._link_source(p["id"], url1)
     proj._link_source(p["id"], url2)
@@ -272,7 +272,7 @@ def test_source_inheritance_multi_source(sdk):
     )
     
     sdk._apply_source_inheritance(recency_decay=1.0)
-    point = sdk.get_point(p["id"])
+    point = sdk._get_point(p["id"])
     assert point.get("ep_alpha") == 6  # log-scale aggregation: 1 + 4*1 + 1*1
     assert point.get("ep_beta") == 1
     assert point.get("baseline_source") == BASELINE_SOURCE_INHERITED
@@ -282,22 +282,22 @@ def test_source_inheritance_multi_source(sdk):
 
 def test_baseline_set_flag(sdk):
     """credibility → baseline_set=true, omit → baseline_set=false."""
-    p1 = sdk.create_point("statement", "With credibility", credibility="high")
-    p2 = sdk.create_point("statement", "Without credibility")
+    p1 = sdk._create_point("statement", "With credibility", credibility="high")
+    p2 = sdk._create_point("statement", "Without credibility")
     
-    assert sdk.get_point(p1["id"]).get("baseline_set") is True
-    assert sdk.get_point(p2["id"]).get("baseline_set") in (None, False)
+    assert sdk._get_point(p1["id"]).get("baseline_set") is True
+    assert sdk._get_point(p2["id"]).get("baseline_set") in (None, False)
 
 
 # ── Non-evidence kinds don't block gate ─────────────────────────
 
 def test_non_evidence_kinds_ignored_by_gate(sdk):
     """Diary/checkpoint points with no baseline shouldn't block EP."""
-    sdk.create_point("diary", "Today's note")
-    p = sdk.create_point("statement", "A claim", credibility="medium")  # noqa: F841
+    sdk._create_point("diary", "Today's note")
+    p = sdk._create_point("statement", "A claim", credibility="medium")  # noqa: F841
     
     # Gate should pass — diary is not an evidence kind
-    result = sdk.compute_confidence(require_calibration=True)
+    result = sdk._compute_confidence(require_calibration=True)
     assert result["converged"] is True
 
 
@@ -309,17 +309,17 @@ def test_dream_require_calibration_raises(sdk):
     # Since #1088 a no-status create_point is LIVE, and a DRAFT is excluded
     # from the #1157 gate (#780/PR #1212), so the point must be explicitly
     # live for the gate to see it.
-    sdk.create_point("statement", "Uncalibrated claim", status="live")
+    sdk._create_point("statement", "Uncalibrated claim", status="live")
 
     with pytest.raises(CalibrationError, match="dream.*uncalibrated"):  # noqa: RUF043
-        sdk.dream(require_calibration=True)
+        sdk._dream(require_calibration=True)
 
 
 def test_dream_gated_passes_when_calibrated(sdk):
     """dream(require_calibration=True) runs on a calibrated graph."""
-    p = sdk.create_point("statement", "Calibrated", credibility="gold")
-    sdk.create_operator("IMPL", p["id"],
-                        [sdk.create_point("statement", "target",
+    p = sdk._create_point("statement", "Calibrated", credibility="gold")
+    sdk._create_operator("IMPL", p["id"],
+                        [sdk._create_point("statement", "target",
                                           credibility="gold")["id"]])
 
     # Mark dirty so the dream path actually runs EP work
@@ -330,17 +330,17 @@ def test_dream_gated_passes_when_calibrated(sdk):
         r[0] for r in proj.g.query(
             "MATCH (n:Point) WHERE n.is_operator = false RETURN n.id").result_set)
 
-    result = sdk.dream(dirty_only=True, require_calibration=True)
+    result = sdk._dream(dirty_only=True, require_calibration=True)
     assert result["converged"] is True
 
 
 def test_get_confidence_require_calibration_raises(sdk):
     """get_confidence(require_calibration=True) on uncalibrated graph raises
     CalibrationError (#1157) — the per-claim read is an EP surface."""
-    p = sdk.create_point("statement", "Uncalibrated claim", status="live")
+    p = sdk._create_point("statement", "Uncalibrated claim", status="live")
 
     with pytest.raises(CalibrationError, match="get_confidence.*uncalibrated"):  # noqa: RUF043
-        sdk.get_confidence(p["id"], require_calibration=True)
+        sdk._get_confidence(p["id"], require_calibration=True)
 
 
 def test_ep_require_calibration_env_default(sdk, monkeypatch):
@@ -350,16 +350,16 @@ def test_ep_require_calibration_env_default(sdk, monkeypatch):
     explicit compute_confidence surface keeps its own (still-False) default;
     #344 flips it separately."""
     monkeypatch.setenv("TORTOISE_EP_REQUIRE_CALIBRATION", "1")
-    p = sdk.create_point("statement", "Uncalibrated claim", status="live")
+    p = sdk._create_point("statement", "Uncalibrated claim", status="live")
 
     # #1157 surfaces refuse by default (no explicit arg)
     with pytest.raises(CalibrationError, match="dream"):
-        sdk.dream()
+        sdk._dream()
     with pytest.raises(CalibrationError, match="get_confidence"):
-        sdk.get_confidence(p["id"])
+        sdk._get_confidence(p["id"])
 
     # Explicit False is still the documented escape hatch on dream
-    result = sdk.dream(require_calibration=False)
+    result = sdk._dream(require_calibration=False)
     assert result["converged"] is True
 
 
@@ -372,13 +372,13 @@ def test_ep_require_calibration_env_default(sdk, monkeypatch):
 
 def _anchored_subgraph(sdk, *, calibrated_target=True):
     """Anchor A <-(op)- target B, both live; B calibrated unless told not to."""
-    p1 = sdk.create_point("statement", "Anchor A", credibility="gold",
+    p1 = sdk._create_point("statement", "Anchor A", credibility="gold",
                           status="live")
-    p2 = sdk.create_point(
+    p2 = sdk._create_point(
         "statement", "Target B",
         credibility="gold" if calibrated_target else None,
         status="live")
-    op = sdk.create_operator("IMPL", p1["id"], [p2["id"]])
+    op = sdk._create_operator("IMPL", p1["id"], [p2["id"]])
     return p1, p2, op
 
 
@@ -390,9 +390,9 @@ def test_foreign_uncalibrated_point_does_not_block_anchored_run(sdk):
     this caller; now it runs the selection it was asked for.
     """
     p1, _p2, _op = _anchored_subgraph(sdk)
-    sdk.create_point("statement", "Foreign uncalibrated", status="live")
+    sdk._create_point("statement", "Foreign uncalibrated", status="live")
 
-    result = sdk.compute_confidence(anchors=[p1["id"]],
+    result = sdk._compute_confidence(anchors=[p1["id"]],
                                     require_calibration=True)
     assert result["converged"] is True
     assert p1["id"] in result["confidences"]
@@ -408,11 +408,11 @@ def test_uncalibrated_point_inside_selection_still_blocks(sdk):
     p1, p2, _op = _anchored_subgraph(sdk, calibrated_target=False)
 
     with pytest.raises(CalibrationError, match="uncalibrated") as exc:
-        sdk.compute_confidence(anchors=[p1["id"]], require_calibration=True)
+        sdk._compute_confidence(anchors=[p1["id"]], require_calibration=True)
     assert p2["id"] in str(exc.value)
 
     # The explicit opt-out is untouched.
-    result = sdk.compute_confidence(anchors=[p1["id"]],
+    result = sdk._compute_confidence(anchors=[p1["id"]],
                                     require_calibration=False)
     assert result["converged"] is True
 
@@ -428,14 +428,14 @@ def test_uncalibrated_point_beyond_the_selected_operators_still_blocks(sdk):
     ``_select_subgraph``'s operators alone misses C; this test pins the exact
     scope, so it fails if the gate is narrowed to those endpoints.
     """
-    a = sdk.create_point("statement", "A", credibility="gold", status="live")
-    b = sdk.create_point("statement", "B", credibility="gold", status="live")
-    c = sdk.create_point("statement", "C", status="live")  # uncalibrated
-    sdk.create_operator("IMPL", a["id"], [b["id"]])
-    sdk.create_operator("IMPL", b["id"], [c["id"]])
+    a = sdk._create_point("statement", "A", credibility="gold", status="live")
+    b = sdk._create_point("statement", "B", credibility="gold", status="live")
+    c = sdk._create_point("statement", "C", status="live")  # uncalibrated
+    sdk._create_operator("IMPL", a["id"], [b["id"]])
+    sdk._create_operator("IMPL", b["id"], [c["id"]])
 
     with pytest.raises(CalibrationError, match="uncalibrated") as exc:
-        sdk.compute_confidence(anchors=[a["id"]], max_hops=1,
+        sdk._compute_confidence(anchors=[a["id"]], max_hops=1,
                                require_calibration=True)
     assert c["id"] in str(exc.value)
 
@@ -456,11 +456,11 @@ def test_terminal_uncalibrated_point_does_not_block(sdk):
     pinned directly by ``test_legacy_draft_and_terminal_points_do_not_block``
     and ``test_require_calibration_ignores_drafts``.
     """
-    sdk.create_point("statement", "Live calibrated", credibility="gold",
+    sdk._create_point("statement", "Live calibrated", credibility="gold",
                      status="live")
-    sdk.create_point("statement", "Dead uncalibrated", status="superseded")
+    sdk._create_point("statement", "Dead uncalibrated", status="superseded")
 
-    result = sdk.compute_confidence(require_calibration=True)
+    result = sdk._compute_confidence(require_calibration=True)
     assert isinstance(result, dict)
 
 
@@ -474,17 +474,17 @@ def test_outdated_flag_point_does_not_block(sdk):
     ``outdated`` half — the whole-graph query is asserted directly below, and
     that list is empty ONLY because of the flag (measured).
     """
-    sdk.create_point("statement", "Live calibrated", credibility="gold",
+    sdk._create_point("statement", "Live calibrated", credibility="gold",
                      status="live")
-    dead = sdk.create_point("statement", "Flagged uncalibrated",
+    dead = sdk._create_point("statement", "Flagged uncalibrated",
                             status="live")
-    corrector = sdk.create_point("statement", "Corrector", credibility="gold",
+    corrector = sdk._create_point("statement", "Corrector", credibility="gold",
                                  status="live")
-    sdk.invalidate_point(dead["id"], corrector["id"])
-    assert sdk.get_point(dead["id"])["outdated"] is True
+    sdk._invalidate_point(dead["id"], corrector["id"])
+    assert sdk._get_point(dead["id"])["outdated"] is True
 
     assert dead["id"] not in sdk._uncalibrated_ep_participants(None)
-    result = sdk.compute_confidence(require_calibration=True)
+    result = sdk._compute_confidence(require_calibration=True)
     assert isinstance(result, dict)
 
 
@@ -513,11 +513,11 @@ def test_no_arg_gate_scopes_to_the_dirty_roots(sdk):
     posture and the caller was frozen.
     """
     a, _b, _op = _anchored_subgraph(sdk)  # my own calibrated dirty roots
-    foreign = sdk.create_point("statement", "Foreign uncalibrated",
+    foreign = sdk._create_point("statement", "Foreign uncalibrated",
                                status="live")
     _make_foreign(sdk, foreign["id"])
 
-    result = sdk.compute_confidence(require_calibration=True)
+    result = sdk._compute_confidence(require_calibration=True)
     assert a["id"] in result["confidences"]
 
 
@@ -528,14 +528,14 @@ def test_no_arg_gate_still_raises_for_an_uncalibrated_dirty_root(sdk):
     stays in the gate's scope: narrowing the scope never excuses the run's
     own seed. ``require_calibration=False`` remains the only bypass.
     """
-    sdk.create_point("statement", "Uncalibrated root", status="live")
+    sdk._create_point("statement", "Uncalibrated root", status="live")
 
     with pytest.raises(CalibrationError, match="uncalibrated"):
-        sdk.compute_confidence(require_calibration=True)
+        sdk._compute_confidence(require_calibration=True)
 
     # The documented opt-out is untouched, and it does not gate.
     assert isinstance(
-        sdk.compute_confidence(require_calibration=False), dict)
+        sdk._compute_confidence(require_calibration=False), dict)
 
 
 def test_dream_local_scopes_to_the_dirty_roots(sdk):
@@ -545,21 +545,21 @@ def test_dream_local_scopes_to_the_dirty_roots(sdk):
     foreign uncalibrated point must not refuse the drain.
     """
     _anchored_subgraph(sdk)
-    foreign = sdk.create_point("statement", "Foreign uncalibrated",
+    foreign = sdk._create_point("statement", "Foreign uncalibrated",
                                status="live")
     _make_foreign(sdk, foreign["id"])
 
-    result = sdk.dream(dirty_only=True, mode="local",
+    result = sdk._dream(dirty_only=True, mode="local",
                        require_calibration=True)
     assert result["mode"] == "local"
 
 
 def test_dream_local_still_raises_for_an_uncalibrated_root(sdk):
     """#7739: a local dream still fails closed on its own uncalibrated root."""
-    sdk.create_point("statement", "Uncalibrated root", status="live")
+    sdk._create_point("statement", "Uncalibrated root", status="live")
 
     with pytest.raises(CalibrationError, match=r"dream.*uncalibrated"):
-        sdk.dream(dirty_only=True, mode="local", require_calibration=True)
+        sdk._dream(dirty_only=True, mode="local", require_calibration=True)
 
 
 def test_dream_local_gate_covers_the_passs_reexpansion(sdk):
@@ -580,11 +580,11 @@ def test_dream_local_gate_covers_the_passs_reexpansion(sdk):
     # is a dirty root, so the remaining points look like another lane's work.
     chain = []
     for i in range(7):
-        chain.append(sdk.create_point(
+        chain.append(sdk._create_point(
             "statement", f"hop {i}", status="live",
             credibility="gold" if i < 6 else None))
     for i in range(len(chain) - 1):
-        sdk.create_operator("IMPL", chain[i]["id"], [chain[i + 1]["id"]])
+        sdk._create_operator("IMPL", chain[i]["id"], [chain[i + 1]["id"]])
     for p in chain[1:]:
         _make_foreign(sdk, p["id"])
 
@@ -594,14 +594,14 @@ def test_dream_local_gate_covers_the_passs_reexpansion(sdk):
     assert target["id"] not in sdk._ep_run_scope([chain[0]["id"]], 3)
 
     with pytest.raises(CalibrationError, match="dream") as exc:
-        sdk.dream(dirty_only=True, mode="local", max_hops=3,
+        sdk._dream(dirty_only=True, mode="local", max_hops=3,
                   require_calibration=True)
     assert target["id"] in str(exc.value), (
         "the gate must fail closed on a point the pass consumes")
 
     # …and the pass really does consume it — this is the write the gate is
     # protecting, so the scope above is not merely conservative.
-    sdk.dream(dirty_only=True, mode="local", max_hops=3,
+    sdk._dream(dirty_only=True, mode="local", max_hops=3,
               require_calibration=False)
     assert target["id"] in sdk._get_ep()._last_affected
 
@@ -619,13 +619,13 @@ def test_dream_whole_graph_modes_keep_whole_graph_scope(sdk):
     a stated boundary, not an oversight.
     """
     _anchored_subgraph(sdk)
-    foreign = sdk.create_point("statement", "Foreign uncalibrated",
+    foreign = sdk._create_point("statement", "Foreign uncalibrated",
                                status="live")
     _make_foreign(sdk, foreign["id"])
 
     for mode in ("full", "stale-first"):
         with pytest.raises(CalibrationError, match="dream"):
-            sdk.dream(mode=mode, require_calibration=True)
+            sdk._dream(mode=mode, require_calibration=True)
 
 
 def test_get_confidence_scopes_to_the_claim(sdk):
@@ -640,24 +640,24 @@ def test_get_confidence_scopes_to_the_claim(sdk):
     guard is kept; only its scope narrows), and a dirty claim still gets its
     lazy dream gated on the pass's own seeds.
     """
-    mine = sdk.create_point("statement", "Mine calibrated",
+    mine = sdk._create_point("statement", "Mine calibrated",
                             credibility="gold", status="live")
-    foreign = sdk.create_point("statement", "Foreign uncalibrated",
+    foreign = sdk._create_point("statement", "Foreign uncalibrated",
                                status="live")
-    sdk.create_operator("IMPL", mine["id"], [foreign["id"]])
+    sdk._create_operator("IMPL", mine["id"], [foreign["id"]])
     # The claim is clean (no lazy dream) and the foreign point is not a dirty
     # root: the read must answer from the claim's own params.
     _make_foreign(sdk, foreign["id"])
     _make_foreign(sdk, mine["id"])
 
-    result = sdk.get_confidence(mine["id"], require_calibration=True)
+    result = sdk._get_confidence(mine["id"], require_calibration=True)
     assert "mean" in result
 
-    uncal = sdk.create_point("statement", "Uncalibrated claim",
+    uncal = sdk._create_point("statement", "Uncalibrated claim",
                              status="live")
     with pytest.raises(CalibrationError,
                        match=r"get_confidence.*uncalibrated"):
-        sdk.get_confidence(uncal["id"], require_calibration=True)
+        sdk._get_confidence(uncal["id"], require_calibration=True)
 
 
 def test_get_confidence_dirty_claim_still_gates_its_dream(sdk):
@@ -667,15 +667,15 @@ def test_get_confidence_dirty_claim_still_gates_its_dream(sdk):
     when the claim is a dirty root, ``get_confidence`` dreams, and that pass
     consumes the connected uncalibrated point — so it must refuse, naming it.
     """
-    mine = sdk.create_point("statement", "Mine calibrated",
+    mine = sdk._create_point("statement", "Mine calibrated",
                             credibility="gold", status="live")
-    foreign = sdk.create_point("statement", "Foreign uncalibrated",
+    foreign = sdk._create_point("statement", "Foreign uncalibrated",
                                status="live")
-    sdk.create_operator("IMPL", mine["id"], [foreign["id"]])
+    sdk._create_operator("IMPL", mine["id"], [foreign["id"]])
     assert mine["id"] in sdk._dirty_roots
 
     with pytest.raises(CalibrationError, match="dream") as exc:
-        sdk.get_confidence(mine["id"], require_calibration=True)
+        sdk._get_confidence(mine["id"], require_calibration=True)
     assert foreign["id"] in str(exc.value)
 
 
@@ -721,7 +721,7 @@ def _make_legacy_point(sdk, content, **props):
     #3154 do not, and EP admits them on purpose — which is why the gate must
     see them too.
     """
-    p = sdk.create_point("statement", content, **props)
+    p = sdk._create_point("statement", content, **props)
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) REMOVE n.is_operator", params={"id": p["id"]})
     absent = sdk._get_proj().g.query(
@@ -739,13 +739,13 @@ def test_legacy_point_with_absent_is_operator_is_gated(sdk):
     (#7478). Pre-fix this returned normally because the audit summary's
     ``n.is_operator = false`` matches ZERO rows on a property-ABSENT node.
     """
-    anchor = sdk.create_point("statement", "Anchor", credibility="gold",
+    anchor = sdk._create_point("statement", "Anchor", credibility="gold",
                               status="live")
     legacy = _make_legacy_point(sdk, "Legacy target", status="live")
-    sdk.create_operator("IMPL", anchor["id"], [legacy["id"]])
+    sdk._create_operator("IMPL", anchor["id"], [legacy["id"]])
 
     with pytest.raises(CalibrationError, match="uncalibrated") as exc:
-        sdk.compute_confidence(anchors=[anchor["id"]],
+        sdk._compute_confidence(anchors=[anchor["id"]],
                                require_calibration=True)
     assert legacy["id"] in str(exc.value)
 
@@ -756,8 +756,8 @@ def test_legacy_point_with_absent_is_operator_is_gated(sdk):
     assert stamped[0][0] is None
 
     # The documented opt-out still runs, and shows the stamp the gate blocked.
-    sdk.compute_confidence(anchors=[anchor["id"]], require_calibration=False)
-    assert sdk.get_point(legacy["id"])["confidence"] is not None
+    sdk._compute_confidence(anchors=[anchor["id"]], require_calibration=False)
+    assert sdk._get_point(legacy["id"])["confidence"] is not None
 
 
 def test_guidance_the_error_offers_lists_the_point_it_named(sdk):
@@ -773,10 +773,10 @@ def test_guidance_the_error_offers_lists_the_point_it_named(sdk):
     legacy = _make_legacy_point(sdk, "Legacy needing guidance", status="live")
 
     with pytest.raises(CalibrationError, match="calibrate_summary") as exc:
-        sdk.compute_confidence(require_calibration=True)
+        sdk._compute_confidence(require_calibration=True)
     assert legacy["id"] in str(exc.value)
 
-    rows = {row["id"]: row for row in sdk.calibrate_summary()}
+    rows = {row["id"]: row for row in sdk._calibrate_summary()}
     assert legacy["id"] in rows, sorted(rows)
     assert rows[legacy["id"]]["calibrated"] is False
     assert "set_point_baseline" in rows[legacy["id"]]["suggestion"]
@@ -791,7 +791,7 @@ def test_guidance_lists_every_consumed_shape_the_gate_demands(sdk):
     must therefore list each — including the hybrid ``create_point(op_type=...)``
     node, whose ``is_operator = false`` the audit has always matched.
     """
-    hybrid = sdk.create_point("statement", "Hybrid", op_type="NAND",
+    hybrid = sdk._create_point("statement", "Hybrid", op_type="NAND",
                               status="live")
     sdk._get_proj().g.query(
         "CREATE (n:Point {id:'legacy-op-9063', pointKind:'statement', "
@@ -799,7 +799,7 @@ def test_guidance_lists_every_consumed_shape_the_gate_demands(sdk):
     sdk._get_proj().g.query(
         "CREATE (n:Point {pointKind:'statement', status:'live'})")
 
-    ids = {row["id"] for row in sdk.calibrate_summary()}
+    ids = {row["id"] for row in sdk._calibrate_summary()}
     assert hybrid["id"] in ids
     assert "legacy-op-9063" in ids
     # An id-less node is not a remedy a caller can run (and not a participant).
@@ -820,7 +820,7 @@ def test_legacy_point_outside_the_selection_does_not_block(sdk):
     _make_foreign(sdk, legacy["id"])
     assert legacy["id"] not in sdk._ep_run_scope([anchor["id"]], None)
 
-    result = sdk.compute_confidence(anchors=[anchor["id"]],
+    result = sdk._compute_confidence(anchors=[anchor["id"]],
                                     require_calibration=True)
     assert anchor["id"] in result["confidences"]
 
@@ -832,7 +832,7 @@ def test_legacy_draft_and_terminal_points_do_not_block(sdk):
     (#780/#7739), so neither is a blocker on the whole-graph surface — the
     predicate reads the same ``_live_only`` EP does, not a status literal.
     """
-    sdk.create_point("statement", "Live calibrated", credibility="gold",
+    sdk._create_point("statement", "Live calibrated", credibility="gold",
                      status="live")
     _make_legacy_point(sdk, "Legacy draft", status="draft")
     _make_legacy_point(sdk, "Legacy dead", status="superseded")
@@ -841,7 +841,7 @@ def test_legacy_draft_and_terminal_points_do_not_block(sdk):
     # half: both legacy points are uncalibrated evidence Points by every other
     # clause, and neither is demanded.
     assert sdk._uncalibrated_ep_participants(None) == []
-    assert isinstance(sdk.compute_confidence(require_calibration=True), dict)
+    assert isinstance(sdk._compute_confidence(require_calibration=True), dict)
 
 
 def test_non_evidence_kind_is_still_not_gated(sdk):
@@ -853,11 +853,11 @@ def test_non_evidence_kind_is_still_not_gated(sdk):
     ruled in, it changes ``_CALIBRATION_EVIDENCE_KINDS`` — and this test fails
     on purpose, as the record that the change is a decision and not a cleanup.
     """
-    goal = sdk.create_point("goal", "Ship it", credibility=None, status="live")
-    sdk.create_point("statement", "Live calibrated", credibility="gold",
+    goal = sdk._create_point("goal", "Ship it", credibility=None, status="live")
+    sdk._create_point("statement", "Live calibrated", credibility="gold",
                      status="live")
 
-    assert isinstance(sdk.compute_confidence(require_calibration=True), dict)
+    assert isinstance(sdk._compute_confidence(require_calibration=True), dict)
     row = sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) RETURN coalesce(n.baseline_set, false)",
         params={"id": goal["id"]}).result_set
@@ -873,10 +873,10 @@ def test_set_point_baseline_refuses_a_non_point(sdk):
     NULL — a caller could believe a node was calibratable when it was not, and
     the in-memory prior diverged from the graph.
     """
-    subj = sdk.create_subject("subject B")
+    subj = sdk._create_subject("subject B")
 
     with pytest.raises(ValueError, match=r":Subject"):
-        sdk.set_point_baseline(subj["id"], 3.0, 1.0)
+        sdk._set_point_baseline(subj["id"], 3.0, 1.0)
 
     row = sdk._get_proj().g.query(
         "MATCH (n:Subject {id:$id}) RETURN n.baseline_set, n.ep_alpha, n.ep_beta",
@@ -888,20 +888,20 @@ def test_set_point_baseline_refuses_a_non_point(sdk):
 
 def test_set_point_baseline_refuses_an_event(sdk):
     """#9063: same refusal on the other epistemic labels (':Event' here)."""
-    ev = sdk.create_event("launch", "occurrence")
+    ev = sdk._create_event("launch", "occurrence")
     with pytest.raises(ValueError, match=r":Event"):
-        sdk.set_point_baseline(ev["id"], 2.0, 1.0)
+        sdk._set_point_baseline(ev["id"], 2.0, 1.0)
     assert ev["id"] not in sdk._evidence
 
 
 def test_set_point_baseline_still_writes_a_point(sdk):
     """#9063 regression guard: the honest-writer path writes and reports."""
-    p = sdk.create_point("statement", "Calibratable", status="live")
-    result = sdk.set_point_baseline(p["id"], 4.0, 2.0)
+    p = sdk._create_point("statement", "Calibratable", status="live")
+    result = sdk._set_point_baseline(p["id"], 4.0, 2.0)
 
     assert result["claim_id"] == p["id"]
     assert result["alpha"] == 4.0 and result["beta"] == 2.0
-    assert sdk.get_point(p["id"])["baseline_set"] is True
+    assert sdk._get_point(p["id"])["baseline_set"] is True
     assert sdk._evidence[p["id"]] == (4.0, 2.0)
 
 
@@ -924,7 +924,7 @@ def test_legacy_op_type_only_operator_is_gated(sdk):
         "op_type:'NAND', status:'live'})")
 
     assert sdk._uncalibrated_ep_participants(None) == ["legacy-op-9063"]
-    sdk.set_point_baseline("legacy-op-9063", 2.0, 1.0)
+    sdk._set_point_baseline("legacy-op-9063", 2.0, 1.0)
     assert sdk._uncalibrated_ep_participants(None) == []
 
 
@@ -936,17 +936,17 @@ def test_point_with_absent_point_kind_is_gated(sdk):
     clause: the run stamped ``confidence 0.508845603290434`` on such a node
     while the gate's allow-list dropped it (``NULL IN [...]`` is NULL).
     """
-    anchor = sdk.create_point("statement", "Anchor", credibility="gold",
+    anchor = sdk._create_point("statement", "Anchor", credibility="gold",
                               status="live")
-    kindless = sdk.create_point("statement", "Kind-less target",
+    kindless = sdk._create_point("statement", "Kind-less target",
                                status="live")
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) REMOVE n.pointKind",
         params={"id": kindless["id"]})
-    sdk.create_operator("IMPL", anchor["id"], [kindless["id"]])
+    sdk._create_operator("IMPL", anchor["id"], [kindless["id"]])
 
     with pytest.raises(CalibrationError, match="uncalibrated") as exc:
-        sdk.compute_confidence(anchors=[anchor["id"]],
+        sdk._compute_confidence(anchors=[anchor["id"]],
                                require_calibration=True)
     assert kindless["id"] in str(exc.value)
 
@@ -977,23 +977,23 @@ def test_empty_point_kind_is_gated_like_an_absent_one(sdk):
     Both gate arms are asserted, because they are two queries: the whole-graph
     form and the scoped (``ids=…``) form #7739 hands ``compute_confidence``.
     """
-    anchor = sdk.create_point("statement", "Anchor", credibility="gold",
+    anchor = sdk._create_point("statement", "Anchor", credibility="gold",
                               status="live")
-    empty = sdk.create_point("", "Empty kind target", status="live")
-    assert sdk.get_point(empty["id"])["pointKind"] == ""
-    sdk.create_operator("IMPL", anchor["id"], [empty["id"]])
+    empty = sdk._create_point("", "Empty kind target", status="live")
+    assert sdk._get_point(empty["id"])["pointKind"] == ""
+    sdk._create_operator("IMPL", anchor["id"], [empty["id"]])
 
     assert sdk._uncalibrated_ep_participants(None) == [empty["id"]]
     # the SCOPED arm is a different query and must agree (#7739)
     assert sdk._uncalibrated_ep_participants({empty["id"]}) == [empty["id"]]
     # …and so must the AUDIT surface it used to disagree with
-    row = {r["id"]: r for r in sdk.calibrate_summary()}[empty["id"]]
+    row = {r["id"]: r for r in sdk._calibrate_summary()}[empty["id"]]
     assert row["calibrated"] is False
     assert "set_point_baseline" in row["suggestion"]
 
     # The consumed node is refused BEFORE the run stamps it — the #7478 class.
     with pytest.raises(CalibrationError, match="uncalibrated") as exc:
-        sdk.compute_confidence(anchors=[anchor["id"]],
+        sdk._compute_confidence(anchors=[anchor["id"]],
                                require_calibration=True)
     assert empty["id"] in str(exc.value)
     stamped = sdk._get_proj().g.query(
@@ -1002,9 +1002,9 @@ def test_empty_point_kind_is_gated_like_an_absent_one(sdk):
     assert stamped == [[None, None]]
 
     # Fail-closed AND satisfiable: the node is a :Point, so the writer closes it.
-    sdk.set_point_baseline(empty["id"], 2.0, 1.0)
+    sdk._set_point_baseline(empty["id"], 2.0, 1.0)
     assert sdk._uncalibrated_ep_participants(None) == []
-    sdk.compute_confidence(anchors=[anchor["id"]], require_calibration=True)
+    sdk._compute_confidence(anchors=[anchor["id"]], require_calibration=True)
 
 
 def test_whitespace_only_point_kind_is_gated_like_an_absent_one(sdk):
@@ -1024,7 +1024,7 @@ def test_whitespace_only_point_kind_is_gated_like_an_absent_one(sdk):
     assert sdk._uncalibrated_ep_participants(None) == ["blank-kind-9592"]
     assert sdk._uncalibrated_ep_participants({"blank-kind-9592"}) == [
         "blank-kind-9592"]
-    sdk.set_point_baseline("blank-kind-9592", 2.0, 1.0)
+    sdk._set_point_baseline("blank-kind-9592", 2.0, 1.0)
     assert sdk._uncalibrated_ep_participants(None) == []
 
 
@@ -1058,15 +1058,15 @@ def test_truthy_non_boolean_baseline_flag_is_still_demanded(sdk):
     FALSY flag such as ``0`` was already demanded by the old form — that half is
     unchanged.)
     """
-    p = sdk.create_point("statement", "String flag", status="live")
+    p = sdk._create_point("statement", "String flag", status="live")
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.baseline_set = 'true'",
         params={"id": p["id"]})
 
     assert sdk._uncalibrated_ep_participants(None) == [p["id"]]
-    assert sdk.get_point(p["id"])["baseline_set"] == "true"
+    assert sdk._get_point(p["id"])["baseline_set"] == "true"
 
-    row = {r["id"]: r for r in sdk.calibrate_summary()}[p["id"]]
+    row = {r["id"]: r for r in sdk._calibrate_summary()}[p["id"]]
     assert row["calibrated"] is False
     assert "set_point_baseline" in row["suggestion"]
 
@@ -1082,29 +1082,29 @@ def test_flag_without_an_alpha_is_still_demanded(sdk):
     ``Beta(1, 1)`` — the #7478 class this gate exists to refuse, and identical
     on ``origin/main``. ``set_point_baseline`` satisfies it (it writes both).
     """
-    p = sdk.create_point("statement", "Flag without alpha", credibility="gold")
+    p = sdk._create_point("statement", "Flag without alpha", credibility="gold")
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.baseline_set = true, n.ep_alpha = null",
         params={"id": p["id"]})
 
     assert sdk._uncalibrated_ep_participants(None) == [p["id"]]
-    row = {r["id"]: r for r in sdk.calibrate_summary()}[p["id"]]
+    row = {r["id"]: r for r in sdk._calibrate_summary()}[p["id"]]
     assert row["calibrated"] is False
-    sdk.set_point_baseline(p["id"], 3.0, 1.0)
+    sdk._set_point_baseline(p["id"], 3.0, 1.0)
     assert sdk._uncalibrated_ep_participants(None) == []
 
     # The BETA half is the same defect one property over: ``_hydrate_evidence``
     # loads ``(3.0, None)`` and EP dies on ``ev[1] - 1.0`` with a bare
     # ``TypeError`` (#9275), so the gate must refuse it with its own diagnosable
     # error rather than let the run crash.
-    q = sdk.create_point("statement", "Alpha without beta", status="live")
+    q = sdk._create_point("statement", "Alpha without beta", status="live")
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.baseline_set = true, n.ep_alpha = 3.0, "
         "n.ep_beta = null", params={"id": q["id"]})
     assert q["id"] in sdk._uncalibrated_ep_participants(None)
-    assert {r["id"]: r for r in sdk.calibrate_summary()}[q["id"]][
+    assert {r["id"]: r for r in sdk._calibrate_summary()}[q["id"]][
         "calibrated"] is False
-    sdk.set_point_baseline(q["id"], 2.0, 1.0)
+    sdk._set_point_baseline(q["id"], 2.0, 1.0)
     assert sdk._uncalibrated_ep_participants(None) == []
 
 
@@ -1118,7 +1118,7 @@ def test_mis_cased_evidence_kind_is_demanded(sdk):
     gate and audit disagreeing, in the fail-open direction. Non-evidence kinds
     (``assessment``) stay out of the universe either way.
     """
-    p = sdk.create_point("Statement", "Mis-cased kind", status="live")
+    p = sdk._create_point("Statement", "Mis-cased kind", status="live")
     # …and EVERY whitespace padding, not just a space: ``trim()`` strips space
     # only on this engine, so a tab/newline/CR/VT/FF/NBSP-padded kind escaped an
     # exact-membership check while EP — which reads no kind at all — consumed
@@ -1133,7 +1133,7 @@ def test_mis_cased_evidence_kind_is_demanded(sdk):
     padded = []
     for k in ("\tstatement\t", "\nstatement", "\rstatement\r",
               "\x0bstatement", "\x0cstatement", "\u00a0statement"):
-        node = sdk.create_point("statement", f"Padded kind {k!r}", status="live")
+        node = sdk._create_point("statement", f"Padded kind {k!r}", status="live")
         sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) SET n.pointKind = $k",
             params={"id": node["id"], "k": k})
@@ -1141,15 +1141,15 @@ def test_mis_cased_evidence_kind_is_demanded(sdk):
     want = sorted([p["id"]] + [n["id"] for n in padded], key=str)
 
     assert sdk._uncalibrated_ep_participants(None) == want
-    row = {r["id"]: r for r in sdk.calibrate_summary()}[p["id"]]
+    row = {r["id"]: r for r in sdk._calibrate_summary()}[p["id"]]
     assert row["calibrated"] is False
     assert "set_point_baseline" in row["suggestion"]
 
-    a = sdk.create_point("ASSESSMENT", "Mis-cased assessment", status="live")
+    a = sdk._create_point("ASSESSMENT", "Mis-cased assessment", status="live")
     assert a["id"] not in sdk._uncalibrated_ep_participants(None)
 
     for n in [*padded, p]:
-        sdk.set_point_baseline(n["id"], 3.0, 1.0)
+        sdk._set_point_baseline(n["id"], 3.0, 1.0)
     assert sdk._uncalibrated_ep_participants(None) == []
 
 
@@ -1188,19 +1188,19 @@ def test_id_less_point_does_not_break_the_whole_graph_query(sdk):
     sdk._get_proj().g.query(
         "CREATE (n:Point {pointKind:'statement', is_operator:false, "
         "status:'live', content:'no id'})")
-    anchor = sdk.create_point("statement", "Anchor", credibility="gold",
+    anchor = sdk._create_point("statement", "Anchor", credibility="gold",
                               status="live")
-    target = sdk.create_point("statement", "Target", status="live")
-    sdk.create_operator("IMPL", anchor["id"], [target["id"]])
+    target = sdk._create_point("statement", "Target", status="live")
+    sdk._create_operator("IMPL", anchor["id"], [target["id"]])
 
     with pytest.raises(CalibrationError, match="uncalibrated") as exc:
-        sdk.compute_confidence(anchors=[anchor["id"]],
+        sdk._compute_confidence(anchors=[anchor["id"]],
                                require_calibration=True)
     assert target["id"] in str(exc.value)
 
     # A numeric id is the same hand-written-graph class: ``key=str`` keeps the
     # message from raising on a mixed-type list.
-    numeric = sdk.create_point("statement", "Numeric id", status="live")
+    numeric = sdk._create_point("statement", "Numeric id", status="live")
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.id = 42", params={"id": numeric["id"]})
 
@@ -1208,7 +1208,7 @@ def test_id_less_point_does_not_break_the_whole_graph_query(sdk):
     assert full == sorted([target["id"], 42], key=str)
     # The guidance surface makes the same exclusion: ``set_point_baseline(None)``
     # is not a remedy a caller can run.
-    rows = {row["id"]: row for row in sdk.calibrate_summary()}
+    rows = {row["id"]: row for row in sdk._calibrate_summary()}
     assert None not in rows
     # …and its remedy for the numeric id must be the numeric id, not its repr as
     # a quoted string: ``set_point_baseline('42', …)`` names no node, so since
@@ -1216,7 +1216,7 @@ def test_id_less_point_does_not_break_the_whole_graph_query(sdk):
     # dict) and either way the gate keeps refusing — the same "advice that
     # cannot resolve" loop this PR closed for source-linked points.
     assert "set_point_baseline(42," in rows[42]["suggestion"]
-    sdk.set_point_baseline(42, 3.0, 1.0)
+    sdk._set_point_baseline(42, 3.0, 1.0)
     assert 42 not in sdk._uncalibrated_ep_participants(None)
     # The existence probe's invariant: it may answer with ANY one of the
     # offenders, but it must never answer "nothing" while something is there
@@ -1235,7 +1235,7 @@ def test_set_point_baseline_refuses_a_non_epistemic_node(sdk):
     sdk.register_source("https://example.org/9063", "web", tier="T1")
 
     with pytest.raises(ValueError, match=r":Source"):
-        sdk.set_point_baseline("https://example.org/9063", 4.0, 2.0)
+        sdk._set_point_baseline("https://example.org/9063", 4.0, 2.0)
     assert "https://example.org/9063" not in sdk._evidence
 
 
@@ -1252,7 +1252,7 @@ def test_set_point_baseline_refuses_an_id_that_names_no_node(sdk):
     there is no node at all.
     """
     with pytest.raises(ValueError, match=r"no node with id 'ghost-9262'"):
-        sdk.set_point_baseline("ghost-9262", 5.0, 2.0)
+        sdk._set_point_baseline("ghost-9262", 5.0, 2.0)
     # No phantom seat: the in-memory map is a mirror of the graph, and the
     # graph holds nothing (#9063's rule, applied to the absent-id path).
     assert "ghost-9262" not in sdk._evidence
@@ -1261,8 +1261,8 @@ def test_set_point_baseline_refuses_an_id_that_names_no_node(sdk):
     # …and the refusal did not silence the writer: the same call on a point
     # that exists still stores, so the refusal cannot become a gate that can
     # never be satisfied.
-    p = sdk.create_point("statement", "Real claim", status="live")
-    assert sdk.set_point_baseline(p["id"], 5.0, 2.0)["claim_id"] == p["id"]
+    p = sdk._create_point("statement", "Real claim", status="live")
+    assert sdk._set_point_baseline(p["id"], 5.0, 2.0)["claim_id"] == p["id"]
     assert sdk._evidence[p["id"]] == (5.0, 2.0)
     assert sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) RETURN n.baseline_set, n.ep_alpha",
@@ -1295,12 +1295,12 @@ def test_compute_confidence_survives_an_unaddressable_id(sdk):
     g.query("MATCH (s:Source {url:'https://example.org/9262-idless'}) "
             "CREATE (n:Point {pointKind:'statement', status:'live', "
             "content:'id-less claim'})-[:extractedFrom]->(s)")
-    real = sdk.create_point("statement", "addressable claim", status="live")
+    real = sdk._create_point("statement", "addressable claim", status="live")
     g.query("MATCH (n:Point {id:$id}), (s:Source {url:'https://example.org/"
             "9262-addressable'}) CREATE (n)-[:extractedFrom]->(s)",
             params={"id": real["id"]})
 
-    result = sdk.compute_confidence(require_calibration=False)
+    result = sdk._compute_confidence(require_calibration=False)
     assert result["converged"] is True
     assert None not in sdk._evidence
     # …and the derivation did not invent a baseline for the id-less point…
@@ -1338,7 +1338,7 @@ def test_mitigate_operator_refuses_an_idless_mitigation(sdk):
     no false ``{}`` success is returned.
     """
     g = sdk._get_proj().g
-    op = sdk.create_point("statement", "operator claim", status="live",
+    op = sdk._create_point("statement", "operator claim", status="live",
                           is_operator=True, op_type="IMPL")
     g.query("MATCH (op:Point {id:$id}) CREATE (m:Point {pointKind:'statement', "
             "content:'[MITIGATION] legacy', status:'live', is_operator:false})"
@@ -1349,7 +1349,7 @@ def test_mitigate_operator_refuses_an_idless_mitigation(sdk):
 
     with pytest.raises(UnaddressableClaimError,
                        match=r"mitigation Point with no id"):
-        sdk.mitigate_operator(op["id"], "second reason", strength=0.5)
+        sdk._mitigate_operator(op["id"], "second reason", strength=0.5)
     # ⛔ THE PIN IS THE ``pytest.raises`` ABOVE, AND SPECIFICALLY ITS CLASS —
     # not the two assertions below. Both of them are UNCHANGED since #9262 and
     # both held BEFORE this fix too: the old ``{}`` success wrote no
@@ -1381,16 +1381,16 @@ def test_guidance_for_a_source_linked_legacy_point_actually_works(sdk):
     sdk.register_source(src, "web", tier="T1")
     p = _make_legacy_point(sdk, "Legacy sourced claim", status="live",
                            extractedFrom=src)
-    row = {r["id"]: r for r in sdk.calibrate_summary()}[p["id"]]
+    row = {r["id"]: r for r in sdk._calibrate_summary()}[p["id"]]
     assert row["calibrated"] is False
     assert "compute_confidence" in row["suggestion"]
 
     # The advice, taken verbatim: the gate must now let the run through and the
     # inheritance must land a baseline on the legacy point.
-    sdk.create_point("statement", "Calibrated companion", credibility="gold",
+    sdk._create_point("statement", "Calibrated companion", credibility="gold",
                      status="live")
-    sdk.compute_confidence(require_calibration=True)
-    assert sdk.get_point(p["id"])["baseline_set"] is True
+    sdk._compute_confidence(require_calibration=True)
+    assert sdk._get_point(p["id"])["baseline_set"] is True
     assert sdk._uncalibrated_ep_participants(None) == []
 
 
@@ -1415,16 +1415,16 @@ def test_guidance_does_not_offer_an_advice_inheritance_will_refuse(sdk):
         "n.ep_beta = null", params={"id": p["id"]})
 
     assert sdk._uncalibrated_ep_participants(None) == [p["id"]]
-    row = {r["id"]: r for r in sdk.calibrate_summary()}[p["id"]]
+    row = {r["id"]: r for r in sdk._calibrate_summary()}[p["id"]]
     assert row["calibrated"] is False
     assert "set_point_baseline" in row["suggestion"]
     assert "compute_confidence" not in row["suggestion"]
 
     # Take the advice: the gate clears, and the frozen row is NOT recomputed
     # (`baseline_set`/`ep_alpha` were already set by the writer).
-    sdk.set_point_baseline(p["id"], 3.0, 1.0)
+    sdk._set_point_baseline(p["id"], 3.0, 1.0)
     assert sdk._uncalibrated_ep_participants(None) == []
-    got = sdk.get_point(p["id"])
+    got = sdk._get_point(p["id"])
     assert got["ep_alpha"] == 3.0 and got["ep_beta"] == 1.0
 
 
@@ -1444,7 +1444,7 @@ def test_guidance_reports_the_blocking_row_of_a_duplicate_id(sdk):
         "CREATE (n:Point {id:'fanout-9063', pointKind:'statement', status:'live'})")
 
     assert sdk._uncalibrated_ep_participants(None) == ["fanout-9063"]
-    rows = [r for r in sdk.calibrate_summary() if r["id"] == "fanout-9063"]
+    rows = [r for r in sdk._calibrate_summary() if r["id"] == "fanout-9063"]
     assert len(rows) == 1
     assert rows[0]["calibrated"] is False
     assert "set_point_baseline" in rows[0]["suggestion"]
@@ -1476,11 +1476,11 @@ def test_guidance_prefers_the_advice_that_can_actually_clear_a_frozen_id(sdk):
         params={"src": src})
 
     assert sdk._uncalibrated_ep_participants(None) == ["frozen-fan-9063"]
-    row = {r["id"]: r for r in sdk.calibrate_summary()}["frozen-fan-9063"]
+    row = {r["id"]: r for r in sdk._calibrate_summary()}["frozen-fan-9063"]
     assert "set_point_baseline" in row["suggestion"]
 
     # Take the advice — it resolves for the whole fan-out.
-    sdk.set_point_baseline("frozen-fan-9063", 3.0, 1.0)
+    sdk._set_point_baseline("frozen-fan-9063", 3.0, 1.0)
     assert sdk._uncalibrated_ep_participants(None) == []
 
 
@@ -1510,14 +1510,14 @@ def test_an_uncalibratable_id_is_excluded_from_both_arms(sdk):
         sdk._get_proj().g.query(
             "CREATE (n:Point {id:$i, pointKind:'statement', status:'live'})",
             params={"i": ident})
-    plain = sdk.create_point("statement", "Plain neighbour", status="live")
+    plain = sdk._create_point("statement", "Plain neighbour", status="live")
     # These are RESOLVABLE, so they must stay in the universe — measured:
     # ``create_point`` ACCEPTS an NBSP-padded id, the labelled equality finds
     # it, and ``set_point_baseline`` satisfies it. Excluding it made the gate
     # pass while EP stamped the node (a fail-open origin/main did not have).
-    nbsp = sdk.create_point("statement", "NBSP padded", status="live",
+    nbsp = sdk._create_point("statement", "NBSP padded", status="live",
                             id="\u00a0nbsp-9063\u00a0")
-    inner = sdk.create_point("statement", "Inner space", status="live",
+    inner = sdk._create_point("statement", "Inner space", status="live",
                              id="inner space 9063")
     # A hand-written ARRAY id is neither resolvable nor hashable; it must not
     # turn the gate into a Python TypeError.
@@ -1528,16 +1528,16 @@ def test_an_uncalibratable_id_is_excluded_from_both_arms(sdk):
     assert found == sorted([plain["id"], inner["id"], nbsp["id"]], key=str)
     assert sdk._uncalibrated_ep_participants(
         set(ids) | {plain["id"], inner["id"], nbsp["id"]}) == found
-    audit_ids = {r["id"] for r in sdk.calibrate_summary()}
+    audit_ids = {r["id"] for r in sdk._calibrate_summary()}
     assert not (set(ids) & audit_ids)
     assert inner["id"] in audit_ids and nbsp["id"] in audit_ids
 
     # …and the NBSP id's remedy actually lands.
-    sdk.set_point_baseline(nbsp["id"], 3.0, 1.0)
+    sdk._set_point_baseline(nbsp["id"], 3.0, 1.0)
     assert sdk._uncalibrated_ep_participants(None) == sorted(
         [plain["id"], inner["id"]], key=str)
     with pytest.raises(CalibrationError):
-        sdk.compute_confidence(require_calibration=True)
+        sdk._compute_confidence(require_calibration=True)
 
 
 def test_refusal_never_claims_a_point_is_not_a_point(sdk):
@@ -1556,11 +1556,11 @@ def test_refusal_never_claims_a_point_is_not_a_point(sdk):
     sdk._get_proj().g.query(
         "CREATE (n:Point {id:'', pointKind:'statement', status:'live'})")
 
-    assert sdk.set_point_baseline("", 2.0, 1.0)["claim_id"] == ""
+    assert sdk._set_point_baseline("", 2.0, 1.0)["claim_id"] == ""
     with pytest.raises(ValueError, match=r":Source, not a :Point"):
         # Control: the guard still fires on a real label mismatch.
         sdk.register_source("https://example.org/9063-refuse", "web", tier="T1")
-        sdk.set_point_baseline("https://example.org/9063-refuse", 2.0, 1.0)
+        sdk._set_point_baseline("https://example.org/9063-refuse", 2.0, 1.0)
 
 
 
@@ -1577,12 +1577,12 @@ def test_out_of_contract_kind_shapes_do_not_abort_the_gate(sdk):
     whitespace-padded and mis-cased STRING kinds stay IN it: they are consumed
     claims like any other.
     """
-    numeric = sdk.create_point(42, "Numeric kind", status="live")
+    numeric = sdk._create_point(42, "Numeric kind", status="live")
     # #9287: an ASCII-padded kind is no longer writable through the door, so the
     # imported-row path is the one that reaches the gate (see
     # ``tests/test_9287_invisible_kind_write_door.py``). The property under test
     # — the gate normalises it rather than aborting — is unchanged.
-    padded = sdk.create_point("statement", "Padded kind", status="live")
+    padded = sdk._create_point("statement", "Padded kind", status="live")
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.pointKind = ' statement'",
         params={"id": padded["id"]})
@@ -1590,13 +1590,13 @@ def test_out_of_contract_kind_shapes_do_not_abort_the_gate(sdk):
     # (and therefore a bare normalisation) RAISES on a list in this engine, so
     # without the type guard this single hand-written row turned every gated
     # surface into an opaque ResponseError — a graph origin/main ran on fine.
-    arr = sdk.create_point("statement", "Array kind", status="live")
+    arr = sdk._create_point("statement", "Array kind", status="live")
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.pointKind = ['statement']",
         params={"id": arr["id"]})
-    cal = sdk.create_point("statement", "Calibrated companion", status="live",
+    cal = sdk._create_point("statement", "Calibrated companion", status="live",
                            credibility="gold")
-    sdk.set_point_baseline(cal["id"], 3.0, 1.0)
+    sdk._set_point_baseline(cal["id"], 3.0, 1.0)
 
     found = sdk._uncalibrated_ep_participants(None)
     assert padded["id"] in found
@@ -1604,16 +1604,16 @@ def test_out_of_contract_kind_shapes_do_not_abort_the_gate(sdk):
     assert arr["id"] not in found
 
     with pytest.raises(CalibrationError) as exc:
-        sdk.compute_confidence(require_calibration=True)
+        sdk._compute_confidence(require_calibration=True)
     assert padded["id"] in str(exc.value)
     assert "ResponseError" not in type(exc.value).__name__
 
-    sdk.set_point_baseline(padded["id"], 3.0, 1.0)
+    sdk._set_point_baseline(padded["id"], 3.0, 1.0)
     assert sdk._uncalibrated_ep_participants(None) == []
 
     # And the run itself still works on that graph (the assertion above would
     # pass even if the query raised inside a caller that swallows it).
-    sdk.compute_confidence(require_calibration=True)
+    sdk._compute_confidence(require_calibration=True)
 
 
 # ── #9275 — an unaddressable claim refuses the RUN, not the ordering ────────
@@ -1635,11 +1635,11 @@ def test_id_less_claim_refuses_the_run_before_it_stamps(sdk):
     repaired by ``set_point_baseline`` — the message has to carry the repair
     query instead of an id.
     """
-    anchor = sdk.create_point("statement", "Anchor", status="live")
-    claim = sdk.create_point("statement", "Claim", status="live")
-    sdk.set_point_baseline(anchor["id"], 3.0, 1.0)
-    sdk.set_point_baseline(claim["id"], 3.0, 1.0)
-    op = sdk.create_operator("IMPL", anchor["id"], [claim["id"]])
+    anchor = sdk._create_point("statement", "Anchor", status="live")
+    claim = sdk._create_point("statement", "Claim", status="live")
+    sdk._set_point_baseline(anchor["id"], 3.0, 1.0)
+    sdk._set_point_baseline(claim["id"], 3.0, 1.0)
+    op = sdk._create_operator("IMPL", anchor["id"], [claim["id"]])
 
     proj = sdk._get_proj()
     proj.g.query("CREATE (n:Point {pointKind:'statement', status:'live', "
@@ -1650,7 +1650,7 @@ def test_id_less_claim_refuses_the_run_before_it_stamps(sdk):
         params={"o": op["id"]})
 
     with pytest.raises(UnaddressableClaimError) as exc:
-        sdk.compute_confidence()
+        sdk._compute_confidence()
     message = str(exc.value)
     assert "is NULL" in message
     # WHICH guard fired matters: this fixture's operator IS seeded, so the
@@ -1696,11 +1696,11 @@ def test_an_id_that_is_not_a_string_is_ordered_not_crashed(sdk):
     now total (``key=str``, the same guard the calibration gate's own sorted
     message uses) and the claim is computed like any other.
     """
-    anchor = sdk.create_point("statement", "Anchor", status="live")
-    claim = sdk.create_point("statement", "Claim", status="live")
-    sdk.set_point_baseline(anchor["id"], 3.0, 1.0)
-    sdk.set_point_baseline(claim["id"], 3.0, 1.0)
-    sdk.create_operator("IMPL", anchor["id"], [claim["id"]])
+    anchor = sdk._create_point("statement", "Anchor", status="live")
+    claim = sdk._create_point("statement", "Claim", status="live")
+    sdk._set_point_baseline(anchor["id"], 3.0, 1.0)
+    sdk._set_point_baseline(claim["id"], 3.0, 1.0)
+    sdk._create_operator("IMPL", anchor["id"], [claim["id"]])
 
     proj = sdk._get_proj()
     proj.g.query("MATCH (n:Point {id:$id}) SET n.id = 42",
@@ -1739,10 +1739,10 @@ def test_id_less_factor_input_refuses_even_when_the_operator_is_not_seeded(sdk):
     rejecting the issue's option 3 was meant to prevent.
     """
     proj = sdk._get_proj()
-    seed = sdk.create_point("statement", "Seed", status="live")
-    sibling = sdk.create_point("statement", "Sibling", status="live")
+    seed = sdk._create_point("statement", "Seed", status="live")
+    sibling = sdk._create_point("statement", "Sibling", status="live")
     for p in (seed, sibling):
-        sdk.set_point_baseline(p["id"], 3.0, 1.0)
+        sdk._set_point_baseline(p["id"], 3.0, 1.0)
     # A legacy operator: op_type only, is_operator NOT true — _bfs_select_operators
     # matches `is_operator = true`, so this operator is never in the seed set.
     proj.g.query("CREATE (o:Point {id:'op-9275', pointKind:'operator', "
@@ -1759,14 +1759,14 @@ def test_id_less_factor_input_refuses_even_when_the_operator_is_not_seeded(sdk):
     # touch it — which is how the ordering (guard before the first write) is
     # observable on THIS path too. It is baseline-free, so the pre-write would
     # overwrite it.
-    witness = sdk.create_point("statement", "Witness", status="live")
+    witness = sdk._create_point("statement", "Witness", status="live")
     read = ("MATCH (n:Point {id:$id}) "
             "RETURN n.ep_alpha, n.ep_beta, n.posterior_alpha, n.posterior_beta")
     before = proj.g.query(read, params={"id": witness["id"]}).result_set[0]
     assert before[0] != 7.0
 
     with pytest.raises(UnaddressableClaimError) as exc:
-        sdk.compute_confidence(require_calibration=False,
+        sdk._compute_confidence(require_calibration=False,
                                evidence={witness["id"]: (7.0, 2.0)})
     assert "factor's inputs" in str(exc.value)
     after = proj.g.query(read, params={"id": witness["id"]}).result_set[0]
@@ -1796,8 +1796,8 @@ def test_numeric_id_claims_survive_the_trivial_stamp_and_the_window_path(sdk):
     # Trivial-stamp path: two anchors, NEITHER wired to an operator or a direct
     # edge, so `seed_ids` is empty and `_trivial_stamp` returns both ids — a
     # mixed-type set for `sorted(stamped, key=str)`.
-    named = sdk.create_point("statement", "Loose claim", status="live")
-    numeric = sdk.create_point("statement", "Numeric loose claim", status="live")
+    named = sdk._create_point("statement", "Loose claim", status="live")
+    numeric = sdk._create_point("statement", "Numeric loose claim", status="live")
     proj.g.query("MATCH (n:Point {id:$id}) SET n.id = 77",
                  params={"id": numeric["id"]})
     out = sdk._get_dreamer().dream([named["id"], 77])
@@ -1806,10 +1806,10 @@ def test_numeric_id_claims_survive_the_trivial_stamp_and_the_window_path(sdk):
 
     # Window path: both claims reachable through an operator, so the stale-first
     # pass accumulates a mixed-type affected set across its batches.
-    other = sdk.create_point("statement", "Windowed", status="live")
+    other = sdk._create_point("statement", "Windowed", status="live")
     for p in (named, other):
-        sdk.set_point_baseline(p["id"], 3.0, 1.0)
-    sdk.create_operator("IMPL", named["id"], [other["id"]])
+        sdk._set_point_baseline(p["id"], 3.0, 1.0)
+    sdk._create_operator("IMPL", named["id"], [other["id"]])
     window = sdk._get_dreamer().dream_window(budget=50)
     assert window["mode"] == "stale-first"
     assert 77 in window["affected_claims"]
@@ -1831,12 +1831,12 @@ def test_the_id_less_refusal_commits_no_evidence_pre_write(sdk):
     visible even when there are no operators / affected claims"), which is what
     makes the pre-write's commitment observable at all.
     """
-    anchor = sdk.create_point("statement", "Anchor", status="live")
-    claim = sdk.create_point("statement", "Claim", status="live")
-    witness = sdk.create_point("statement", "Witness", status="live")
-    sdk.set_point_baseline(anchor["id"], 3.0, 1.0)
-    sdk.set_point_baseline(claim["id"], 3.0, 1.0)
-    op = sdk.create_operator("IMPL", anchor["id"], [claim["id"]])
+    anchor = sdk._create_point("statement", "Anchor", status="live")
+    claim = sdk._create_point("statement", "Claim", status="live")
+    witness = sdk._create_point("statement", "Witness", status="live")
+    sdk._set_point_baseline(anchor["id"], 3.0, 1.0)
+    sdk._set_point_baseline(claim["id"], 3.0, 1.0)
+    op = sdk._create_operator("IMPL", anchor["id"], [claim["id"]])
 
     proj = sdk._get_proj()
     proj.g.query("CREATE (n:Point {pointKind:'statement', status:'live', "
@@ -1854,7 +1854,7 @@ def test_the_id_less_refusal_commits_no_evidence_pre_write(sdk):
     assert before[0] != 7.0
 
     with pytest.raises(UnaddressableClaimError):
-        sdk.compute_confidence(factors=[op["id"]],
+        sdk._compute_confidence(factors=[op["id"]],
                                evidence={witness["id"]: (7.0, 2.0)},
                                require_calibration=False)
 
@@ -1876,11 +1876,11 @@ def test_an_id_less_operator_is_inert_but_not_fatal(sdk):
     refusal is therefore keyed on the INPUT arm only.
     """
     proj = sdk._get_proj()
-    a = sdk.create_point("statement", "A", status="live")
-    b = sdk.create_point("statement", "B", status="live")
+    a = sdk._create_point("statement", "A", status="live")
+    b = sdk._create_point("statement", "B", status="live")
     for p in (a, b):
-        sdk.set_point_baseline(p["id"], 3.0, 1.0)
-    sdk.create_operator("IMPL", a["id"], [b["id"]])
+        sdk._set_point_baseline(p["id"], 3.0, 1.0)
+    sdk._create_operator("IMPL", a["id"], [b["id"]])
     # The id-less OPERATOR shape: is_operator true, no id, wired to both claims.
     proj.g.query("CREATE (o:Point {pointKind:'operator', is_operator:true, "
                  "op_type:'IMPL', status:'live'})")
@@ -1891,7 +1891,7 @@ def test_an_id_less_operator_is_inert_but_not_fatal(sdk):
                  "WHERE o.id IS NULL AND o.is_operator = true "
                  "CREATE (o)-[:IMPL {idx:1}]->(b)", params={"b": b["id"]})
 
-    out = sdk.compute_confidence(require_calibration=False)
+    out = sdk._compute_confidence(require_calibration=False)
     assert out["converged"] is True
     stamped = dict(proj.g.query(
         "MATCH (n:Point) WHERE n.id IS NOT NULL "
@@ -1915,18 +1915,18 @@ def test_the_refusal_names_a_non_point_offender_and_its_repair_finds_it(sdk):
     the label set, the second-key caveat, and a probe that actually finds it.
     """
     proj = sdk._get_proj()
-    anchor = sdk.create_point("statement", "Anchor", status="live")
-    claim = sdk.create_point("statement", "Claim", status="live")
-    sdk.set_point_baseline(anchor["id"], 3.0, 1.0)
-    sdk.set_point_baseline(claim["id"], 3.0, 1.0)
-    op = sdk.create_operator("IMPL", anchor["id"], [claim["id"]])
+    anchor = sdk._create_point("statement", "Anchor", status="live")
+    claim = sdk._create_point("statement", "Claim", status="live")
+    sdk._set_point_baseline(anchor["id"], 3.0, 1.0)
+    sdk._set_point_baseline(claim["id"], 3.0, 1.0)
+    op = sdk._create_operator("IMPL", anchor["id"], [claim["id"]])
     # A real id-less population: an :Event keyed on eventId, with no `id`.
     proj.g.query("CREATE (e:Event {eventId:'evt-9275'})")
     proj.g.query("MATCH (o:Point {id:$o}), (e:Event {eventId:'evt-9275'}) "
                  "CREATE (o)-[:IMPL {idx:2}]->(e)", params={"o": op["id"]})
 
     with pytest.raises(UnaddressableClaimError) as exc:
-        sdk.compute_confidence()
+        sdk._compute_confidence()
     message = str(exc.value)
     assert ":Event" in message and "eventId" in message
 
@@ -1949,11 +1949,11 @@ def _dash_edge_fixture(sdk, direction):
     either way and the test would prove nothing.
     """
     proj = sdk._get_proj()
-    a = sdk.create_point("statement", "A", status="live")
-    b = sdk.create_point("statement", "B", status="live")
+    a = sdk._create_point("statement", "A", status="live")
+    b = sdk._create_point("statement", "B", status="live")
     for p in (a, b):
-        sdk.set_point_baseline(p["id"], 3.0, 1.0)
-    sdk.create_operator("IMPL", a["id"], [b["id"]])
+        sdk._set_point_baseline(p["id"], 3.0, 1.0)
+    sdk._create_operator("IMPL", a["id"], [b["id"]])
     proj.g.query("CREATE (n:Point {pointKind:'statement', status:'live'})")
     proj.g.query(
         "MATCH (x:Point {id:$b}), (n:Point) WHERE n.id IS NULL "
@@ -1994,7 +1994,7 @@ def test_a_receive_only_out_of_scope_null_input_does_not_refuse(sdk, direction):
     sending = (fwd and factor[2][0] is None) or (bwd and factor[2][1] is None)
     assert ep._null_input_sends(factor) is sending is False
 
-    out = sdk.compute_confidence(anchors=[a["id"]], require_calibration=False)
+    out = sdk._compute_confidence(anchors=[a["id"]], require_calibration=False)
     assert out["converged"] is True
     with_null = proj.g.query(
         "MATCH (n:Point {id:$i}) RETURN n.posterior_alpha, n.posterior_beta",
@@ -2006,8 +2006,8 @@ def test_a_receive_only_out_of_scope_null_input_does_not_refuse(sdk, direction):
     # "posterior is not None" assertion cannot distinguish it (a baseline stamp
     # satisfies that either way).
     proj.g.query("MATCH (n:Point) WHERE n.id IS NULL DETACH DELETE n")
-    sdk.set_point_baseline(a["id"], 3.0, 1.0)
-    out2 = sdk.compute_confidence(anchors=[a["id"]], require_calibration=False)
+    sdk._set_point_baseline(a["id"], 3.0, 1.0)
+    out2 = sdk._compute_confidence(anchors=[a["id"]], require_calibration=False)
     assert out2["converged"] is True
     without_null = proj.g.query(
         "MATCH (n:Point {id:$i}) RETURN n.posterior_alpha, n.posterior_beta",
@@ -2025,7 +2025,7 @@ def test_a_null_input_that_sends_still_refuses_the_run(sdk):
     _proj, a, _b, ep, factor = _dash_edge_fixture(sdk, "<-")
     assert ep._null_input_sends(factor) is True
     with pytest.raises(UnaddressableClaimError):
-        sdk.compute_confidence(anchors=[a["id"]], require_calibration=False)
+        sdk._compute_confidence(anchors=[a["id"]], require_calibration=False)
 
 
 def test_an_nary_operator_with_every_id_present_does_not_refuse(sdk):
@@ -2039,12 +2039,12 @@ def test_an_nary_operator_with_every_id_present_does_not_refuse(sdk):
     first.
     """
     proj = sdk._get_proj()
-    a = sdk.create_point("statement", "NaryA", status="live")
-    b = sdk.create_point("statement", "NaryB", status="live")
-    c = sdk.create_point("statement", "NaryC", status="live")
+    a = sdk._create_point("statement", "NaryA", status="live")
+    b = sdk._create_point("statement", "NaryB", status="live")
+    c = sdk._create_point("statement", "NaryC", status="live")
     for p in (a, b, c):
-        sdk.set_point_baseline(p["id"], 3.0, 1.0)
-    sdk.create_operator("IMPL", a["id"], [b["id"], c["id"]])
+        sdk._set_point_baseline(p["id"], 3.0, 1.0)
+    sdk._create_operator("IMPL", a["id"], [b["id"], c["id"]])
 
     ep = sdk._get_ep()
     factors = ep._affected_factors(ep._affected_claims([a["id"]], 2))
@@ -2052,7 +2052,7 @@ def test_an_nary_operator_with_every_id_present_does_not_refuse(sdk):
     assert nary, f"no n-ary factor assembled: {factors}"
     assert all(ep._null_input_sends(f) is False for f in nary)
 
-    out = sdk.compute_confidence(anchors=[a["id"]], require_calibration=False)
+    out = sdk._compute_confidence(anchors=[a["id"]], require_calibration=False)
     assert out["converged"] is True
     stamped = proj.g.query(
         "MATCH (n:Point) WHERE n.id IN $ids AND n.posterior_alpha IS NOT NULL "
@@ -2110,8 +2110,8 @@ def test_an_id_less_claim_in_scope_is_refused_even_when_it_only_receives(sdk):
     under `->`.
     """
     proj = sdk._get_proj()
-    a = sdk.create_point("statement", "InScopeA", status="live")
-    sdk.set_point_baseline(a["id"], 3.0, 1.0)
+    a = sdk._create_point("statement", "InScopeA", status="live")
+    sdk._set_point_baseline(a["id"], 3.0, 1.0)
     proj.g.query("CREATE (n:Point {pointKind:'statement', status:'live'})")
     proj.g.query(
         # `direction` is read from the OPERATOR node (`_affected_factors` Batch

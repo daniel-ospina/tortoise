@@ -146,10 +146,10 @@ def test_contested_non_decisive_even_when_converged(tmp_path, ep_variance
         # With an explicit status the word is the weak body alone
         # (Beta(1.1, 1), variance 0.080 > 0.04) — the test's intent (a weak
         # conflicting NAND → CONTESTED) is preserved under the ruled rule.
-        ev = sdk.create_point(kind="evidence", content="weak contradictory "
+        ev = sdk._create_point(kind="evidence", content="weak contradictory "
                              "probe", credibility="unverified",
                              status="live")
-        sdk.create_operator("NAND", ev["id"], [claims[0].id],
+        sdk._create_operator("NAND", ev["id"], [claims[0].id],
                             direction="unidirectional")
         store._arm.decide_cycles = 1
         out = store._arm.ep_terminal_outcome(
@@ -203,7 +203,7 @@ def test_lp_engine_convergence_boundary_documented(tmp_path, ep_variance
     lp = _store(tmp_path, "lp-001")
     try:
         sdk = lp._arm._sdk(lp._scenario)
-        cc = sdk.compute_confidence(factors=None, anchors=None)
+        cc = sdk._compute_confidence(factors=None, anchors=None)
         assert cc.get("converged") is True  # engine converges lp today
         out = lp._arm.ep_terminal_outcome(
             lp._scenario, variance_threshold=ep_variance)

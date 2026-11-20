@@ -116,30 +116,39 @@ class TestSafeWrapper:
 
 
 class _StubQuerySDK:
-    """Minimal SDK double for the query-family handlers (Epic #888)."""
+    """Minimal SDK double for the query-family handlers (Epic #888).
+
+    ⛔ THE STUB SPEAKS THE PRIVATE SPELLING (#12901 final batch). The handlers reach
+    `sdk._query` / `sdk._paginated_query` / `sdk._query_points_by_tag` /
+    `sdk._tortoise_fts_query` because those four names left the public surface, so a double
+    that kept the public `def`s would raise `AttributeError` inside `_safe` and every
+    assertion here would read a masked error instead of a call. The `self.calls` LABELS are
+    deliberately left as the reader-facing operation words — they are strings the assertions
+    compare, not attributes anything dispatches on.
+    """
 
     def __init__(self):
         self.calls = []
         self.points = [{"id": f"p{i}"} for i in range(5)]
         self.tag_points = [{"id": f"t{i}"} for i in range(3)]
 
-    def query(self, kind=None, **kwargs):
+    def _query(self, kind=None, **kwargs):
         self.calls.append(("query", kind, kwargs))
         return self.points
 
-    def paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
+    def _paginated_query(self, kind=None, skip=0, limit=20, **kwargs):
         self.calls.append(("paginated_query", kind, skip, limit, kwargs))
         total = len(self.points)
         return {"results": self.points[skip:skip + limit], "total": total,
                 "hasMore": skip + limit < total}
 
-    def query_points_by_tag(self, tag, *, _record_reads=True):
+    def _query_points_by_tag(self, tag, *, _record_reads=True):
         # #7983: the real accessor takes the read-ledger opt-out, so the double
         # must too — a paginated caller passes `_record_reads=False`.
         self.calls.append(("query_points_by_tag", tag, _record_reads))
         return self.tag_points
 
-    def tortoise_fts_query(self, query=None, **kwargs):
+    def _tortoise_fts_query(self, query=None, **kwargs):
         self.calls.append(("fts", query, kwargs))
         return []
 
@@ -446,7 +455,11 @@ class TestToolFunctions:
             # #12941: the double tracks the REAL signature — `get_point` grew an
             # opt-in `served_out` sink, and `tortoise_get_operator` reads through
             # the same caller-facing form `tortoise_get_point` does.
-            def get_point(self, id, *, served_out=None):
+            # ⛔ #12901: the seam the door reads is PRIVATE (`_get_point`) — the public
+            # name left the surface, so a double that still spells it publicly raises
+            # `AttributeError` inside `_safe` and this arm would assert over an error
+            # envelope instead of the domain refusal it exists to pin.
+            def _get_point(self, id, *, served_out=None):
                 return {"id": id, "is_operator": False}
 
         monkeypatch.setattr(mcp_mod, "_get_org_sdk", lambda: _StubSDK())
@@ -911,7 +924,7 @@ class TestEventsTools:
 
         db = os.path.join(str(tmp_path), "evt.db")
         sdk = TortoiseSDK(db)
-        sdk.create_point("statement", "hello from mcp")
+        sdk._create_point("statement", "hello from mcp")
         monkeypatch.setattr("tortoise.mcp_server._get_org_sdk", lambda: sdk)
         token = _transport_mode.set("stdio")
         try:
@@ -939,7 +952,7 @@ class TestEventsTools:
         from tortoise.sdk import TortoiseSDK
 
         sdk = TortoiseSDK(os.path.join(str(tmp_path), "evt3.db"))
-        p = sdk.create_point("statement", "retract me")
+        p = sdk._create_point("statement", "retract me")
         monkeypatch.setattr("tortoise.mcp_server._get_org_sdk", lambda: sdk)
         token = _transport_mode.set("stdio")
         try:

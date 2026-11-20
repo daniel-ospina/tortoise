@@ -93,7 +93,7 @@ def test_a_non_str_content_is_refused_by_name(sup):
 
     for bad in (None, 123, 4.5, b"bytes", ["a"], {"x": 1}, True):
         with pytest.raises(TypeError) as exc:
-            sdk.create_point("statement", bad)
+            sdk._create_point("statement", bad)
         msg = str(exc.value)
         assert "create_point" in msg, f"must name the surface: {msg}"
         assert "content" in msg, f"must name the argument: {msg}"
@@ -112,14 +112,14 @@ def test_a_refused_call_writes_nothing_and_journals_nothing(sup):
     assert _point_count(sdk) == 0
 
     with pytest.raises(TypeError):
-        sdk.create_point("statement", None, confidence=0.42, dedup=False)
+        sdk._create_point("statement", None, confidence=0.42, dedup=False)
 
     assert _point_count(sdk) == 0, "a refused create wrote a Point"
     assert _journal_lines(events) == [], "a refused create journaled a record"
     # ...and the door still works right after the refusal.
     with mock.patch(_EMBED_PATCH, _embed_a):
-        pid = sdk.create_point("statement", "a real claim").get("id")
-    assert sdk.get_point(pid)["content"] == "a real claim"
+        pid = sdk._create_point("statement", "a real claim").get("id")
+    assert sdk._get_point(pid)["content"] == "a real claim"
 
 
 def test_an_empty_string_is_still_a_valid_content(sup):
@@ -132,7 +132,7 @@ def test_an_empty_string_is_still_a_valid_content(sup):
     """
     _events, sdk = sup
     with mock.patch(_EMBED_PATCH, _embed_a):
-        pid = sdk.create_point("statement", "").get("id")
+        pid = sdk._create_point("statement", "").get("id")
 
     rows = sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) RETURN n.content, n.content_hash",
@@ -145,7 +145,7 @@ def test_a_valid_str_content_is_unaffected(sup):
     """No-regression pin: the guard must not touch the ordinary path."""
     events, sdk = sup
     with mock.patch(_EMBED_PATCH, _embed_a):
-        res = sdk.create_point("statement", "the release is on Friday")
+        res = sdk._create_point("statement", "the release is on Friday")
 
     assert res["id"]
     assert res["content"] == "the release is on Friday"

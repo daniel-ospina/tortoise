@@ -294,7 +294,7 @@ def query_prior_research(domain: str) -> list[dict]:
     # Projection init is lazy — a missing/unreachable DB surfaces here,
     # not at construction; degrade instead of crashing (#343).
     try:
-        return sdk.query(kind=domain)
+        return sdk._query(kind=domain)
     except _UNAVAILABLE_ERRORS as e:
         _log_unavailable(reason=e)
         return []
@@ -337,7 +337,7 @@ def query_existing_strategies() -> list[dict]:
     if sdk is None:
         return []
     try:
-        return sdk.query(kind="strategy")
+        return sdk._query(kind="strategy")
     except _UNAVAILABLE_ERRORS as e:
         _log_unavailable(reason=e)
         return []
@@ -353,8 +353,8 @@ def query_existing_visions(point_kind: str | None = None) -> list[dict]:
         return []
     try:
         if point_kind:
-            return sdk.query(kind=point_kind)
-        return sdk.query(kind="vision")
+            return sdk._query(kind=point_kind)
+        return sdk._query(kind="vision")
     except _UNAVAILABLE_ERRORS as e:
         _log_unavailable(reason=e)
         return []
@@ -379,7 +379,7 @@ def write_claim(
     if confidence is not None:
         props["confidence"] = float(confidence)
     try:
-        return sdk.create_point(kind, content, **props)
+        return sdk._create_point(kind, content, **props)
     except _UNAVAILABLE_ERRORS as e:
         # Constructed, but the DB is unreachable — a down daemon still reports
         # the OUTAGE term (`degraded`), distinct from a set-up gap (#3832).
@@ -406,7 +406,7 @@ def status() -> dict:
             "message": _NOT_CONFIGURED_MESSAGE,
         }
     try:
-        chain = sdk.summarize_structure()
+        chain = sdk._summarize_structure()
     except _UNAVAILABLE_ERRORS as e:
         # SDK constructed but the DB is unreachable on first use — report
         # unavailability instead of masking it as available (#343). This is the
@@ -455,7 +455,7 @@ def _create_with_retry(sdk, kind: str, content: str, **props) -> dict:
 
     for attempt in range(3):
         try:
-            return sdk.create_point(kind, content, **props)
+            return sdk._create_point(kind, content, **props)
         except Exception as e:
             if "locked" in str(e).lower() and attempt < 2:
                 time.sleep(0.1 * (2**attempt))

@@ -165,7 +165,7 @@ def _write(sdk: TortoiseSDK, session_id: str, turns: list[str]):
 def _retrieve(sdk: TortoiseSDK, query: str):
     """One read through the product surface; returns (hits, leg_trace)."""
     trace: list[dict] = []
-    hits = sdk.recall_state(query, limit=10, leg_trace=trace)
+    hits = sdk._recall_state(query, limit=10, leg_trace=trace)
     return {h["id"]: h for h in hits}, trace
 
 

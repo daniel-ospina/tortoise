@@ -264,7 +264,7 @@ def test_a_bundle_naming_the_adopted_holder_is_not_a_born_terminal_mint(sdk):
     assert not any("resolves into a terminal status" in m for m in msgs), msgs
     assert not any("born terminal" in m for m in msgs), msgs
 
-    client.ingest(bundle)
+    client._ingest(bundle)
     ids = _name_ids(proj, "Object", "Legacy")
     assert len(ids) == 1 and ids[0], (
         f"the bundle did not adopt the id-less carrier: {ids}")
@@ -308,13 +308,13 @@ def test_a_bundle_declaring_an_array_status_is_refused_at_validation(sdk):
     assert not any("would store status" in m for m in msgs), msgs
     assert any("must be a plain string" in m for m in msgs), msgs
     with pytest.raises(BundleValidationError):
-        client.ingest(bundle)
+        client._ingest(bundle)
     assert _name_ids(proj, "Object", "Legacy") == [None], (
         "the refused bundle partially committed — the id-less carrier was "
         "stamped before the array status was rejected")
 
     # …and the ADOPT itself is unaffected when the declared status is a WORD.
-    client.ingest({"entities": [{"ref": "a", "type": "object",
+    client._ingest({"entities": [{"ref": "a", "type": "object",
                                  "name": "Legacy", "status": "live"}]})
     ids = _name_ids(proj, "Object", "Legacy")
     assert len(ids) == 1 and ids[0], (
@@ -384,7 +384,7 @@ def test_delete_then_recreate_the_same_name_yields_two_entities(sdk):
                          is_episodic=False)
     (first,) = _name_ids(proj, "Object", "Acme")
 
-    client.delete_entity(first)
+    client._delete_entity__svc(first)
     client.create_entity("object", "Acme", objectKind="core:strategy",
                          is_episodic=False)
     holders = _name_ids(proj, "Object", "Acme")
@@ -713,7 +713,7 @@ def test_a_declared_objecttype_object_still_folds_the_work_item_status(sdk):
     client.create_entity("object", "Widget", is_episodic=False)
     (oid,) = _name_ids(proj, "Object", "Widget")
 
-    client.create_event("widget closed", "github.issue.closed",
+    client._create_event("widget closed", "github.issue.closed",
                         object="Widget", objectType="Object",
                         is_episodic=False)
 
@@ -752,7 +752,7 @@ def test_an_event_may_mention_a_name_two_live_entities_hold(sdk):
     assert sorted(_name_ids(proj, "Object", "Dup")) == ["id-dup-a", "id-dup-b"], (
         "fixture did not produce the legal two-carrier state")
 
-    client.create_event("mentions a doubly-held name", "note",
+    client._create_event("mentions a doubly-held name", "note",
                         aboutObject="Dup", _server_id="ev-dup",
                         is_episodic=False)
     eid = "ev-dup"
@@ -799,7 +799,7 @@ def test_a_bare_mention_mints_nothing_and_drops_its_link(sdk):
     proj = client._get_proj()
 
     with collect_non_folded() as entries:
-        client.create_event("meeting with a tool", "meeting",
+        client._create_event("meeting with a tool", "meeting",
                             subject="Agent Pi",
                             object="Docs Thing",
                             uses=[{"name": "Tool X", "kind": "core:tool"}],
@@ -851,7 +851,7 @@ def test_a_bare_mention_mints_nothing_and_drops_its_link(sdk):
                          _server_id="id-docs-thing", is_episodic=False)
     client.create_entity("object", "Tool X", objectKind="core:tool",
                          _server_id="id-tool-x", is_episodic=False)
-    client.create_event("meeting with a tool", "meeting",
+    client._create_event("meeting with a tool", "meeting",
                         subject="Agent Pi",
                         object="Docs Thing",
                         uses=[{"name": "Tool X", "kind": "core:tool"}],
@@ -1142,7 +1142,7 @@ def test_a_participants_fallback_wires_only_the_resolved_performer(sdk):
                          is_episodic=False)
     client.create_entity("subject", "Twinned", _server_id="sub-b",
                          is_episodic=False)
-    client.create_event("standup", "meeting", subject="Twinned",
+    client._create_event("standup", "meeting", subject="Twinned",
                         _server_id="ev-twinned", is_episodic=False)
     assert {r[0] for r in proj.g.query(
         "MATCH (s:Subject)-[:participatesIn]->(e:Event {eventId:'ev-twinned'})"
@@ -1153,7 +1153,7 @@ def test_a_participants_fallback_wires_only_the_resolved_performer(sdk):
     # One live carrier: the edge is wired on THAT id, never re-derived by name.
     client.create_entity("subject", "Solo", _server_id="sub-solo",
                          is_episodic=False)
-    client.create_event("solo standup", "meeting", subject="Solo",
+    client._create_event("solo standup", "meeting", subject="Solo",
                         _server_id="ev-solo", is_episodic=False)
     assert {r[0] for r in proj.g.query(
         "MATCH (s:Subject)-[:participatesIn]->(e:Event {eventId:'ev-solo'})"
@@ -1269,7 +1269,7 @@ def test_a_mention_of_a_superseded_name_does_not_mint_an_incarnation(sdk):
                             if r.get("type") in ("ObjectRegistered",
                                                  "SubjectAdded")]
 
-    client.create_event("ev-after-retire", "meeting", uses=["Retired"],
+    client._create_event("ev-after-retire", "meeting", uses=["Retired"],
                         _server_id="ev-after-retire", is_episodic=False)
 
     # 1. NO second incarnation — live or otherwise.
@@ -1377,7 +1377,7 @@ def test_a_lifecycle_event_on_a_terminal_only_object_is_a_recorded_no_op(
     # The DOOR writes the event (no ghost minted, nothing registered) and the
     # miss it records is the bounded, reported one.
     with collect_non_folded() as entries:
-        client.create_event("ev-life-buried", "venture:disbursement",
+        client._create_event("ev-life-buried", "venture:disbursement",
                             object="Buried", _server_id="ev-life-buried",
                             is_episodic=False)
     shapes = [e.shape for e in entries]

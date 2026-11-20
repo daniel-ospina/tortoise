@@ -97,17 +97,17 @@ def _make_candidate(sdk, tmp, *, tx=D2_TX, session=T2):
     """
     _mine(sdk, D1_TX, "rv-d1", T1, str(tmp))
     prior = _prior_id(sdk)
-    sdk.promote_point(prior)
+    sdk._promote_point(prior)
     _mine(sdk, tx, "rv-d2", session, str(tmp))
     cands = sdk.review_link_candidates("dedup", candidate_type="temporal")
     assert cands, "expected a temporal correction candidate"
     cid = cands[0]["id"]
-    props = sdk.get_point(cid)
+    props = sdk._get_point(cid)
     return cid, prior, props.get("batch_id")
 
 
 def _props(sdk, point_id):
-    return sdk.get_point(point_id)
+    return sdk._get_point(point_id)
 
 
 def _seed_candidate(sdk, cid, prior_id):
@@ -285,7 +285,7 @@ class TestVerdictMapping:
 
     def test_reject_retracts_an_already_live_candidate(self, sdk, tmp_path):
         cid, _prior, _batch = _make_candidate(sdk, tmp_path)
-        sdk.promote_point(cid)  # live, but not yet decided by the layer
+        sdk._promote_point(cid)  # live, but not yet decided by the layer
         VerdictLayer(sdk).decide(cid, VERDICT_REJECT)
         assert _props(sdk, cid)["status"] == "retracted"
 
@@ -392,7 +392,7 @@ class TestVerdictMapping:
         layer = VerdictLayer(sdk)
         layer.mark_queued("rv-race")
         monkeypatch.setattr(
-            sdk, "promote_point",
+            sdk, "_promote_point",
             lambda pid: {"id": pid, "promoted": False, "blocked": True,
                          "reason": "batch_quarantined"})
         with pytest.raises(ValueError, match="could not be promoted"):
@@ -496,7 +496,7 @@ def test_keep_rolls_the_review_write_back_when_the_promote_RAISES(sdk, monkeypat
         stamped.update(_props(sdk, point_id))
         raise ValueError(f"No point {point_id!r}")
 
-    monkeypatch.setattr(sdk, "promote_point", refuse)
+    monkeypatch.setattr(sdk, "_promote_point", refuse)
 
     with pytest.raises(ValueError, match="No point"):
         VerdictLayer(sdk).decide("rv-a", VERDICT_KEEP)
@@ -535,7 +535,7 @@ def test_the_rollback_restores_the_prior_stamps_rather_than_clearing_them(
     def refuse(point_id):
         raise ValueError(f"No point {point_id!r}")
 
-    monkeypatch.setattr(sdk, "promote_point", refuse)
+    monkeypatch.setattr(sdk, "_promote_point", refuse)
 
     with pytest.raises(ValueError, match="No point"):
         VerdictLayer(sdk).decide("rv-a", VERDICT_KEEP)
@@ -702,7 +702,7 @@ def test_an_unreadable_classification_read_leaves_the_review_write_alone(
     def refuse(point_id):
         raise ValueError(f"No point {point_id!r}")
 
-    monkeypatch.setattr(sdk, "promote_point", refuse)
+    monkeypatch.setattr(sdk, "_promote_point", refuse)
     _proxied_projection(sdk, monkeypatch, fail_on=LIFECYCLE_FANOUT_QUERY)
 
     with pytest.raises(ValueError, match="No point"):
@@ -729,7 +729,7 @@ def test_a_failed_rollback_logs_and_does_not_mask_the_promote_error(
     def refuse(point_id):
         raise ValueError(f"No point {point_id!r}")
 
-    monkeypatch.setattr(sdk, "promote_point", refuse)
+    monkeypatch.setattr(sdk, "_promote_point", refuse)
     _proxied_projection(sdk, monkeypatch, fail_on="$prior")
 
     with caplog.at_level(logging.WARNING, logger="tortoise.review_verdicts"), \
@@ -820,7 +820,7 @@ def test_a_fanout_row_of_unexpected_width_does_not_replace_the_promote_error(
     def refuse(point_id):
         raise ValueError(f"No point {point_id!r}")
 
-    monkeypatch.setattr(sdk, "promote_point", refuse)
+    monkeypatch.setattr(sdk, "_promote_point", refuse)
     proxy = _proxied_projection(sdk, monkeypatch, row_width=width)
 
     with pytest.raises(ValueError, match="No point"):

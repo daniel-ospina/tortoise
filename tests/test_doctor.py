@@ -86,7 +86,7 @@ def _seed_db(db_path: str, content: str, attempts: int = 3) -> None:
     for _i in range(attempts):
         try:
             sdk = TortoiseSDK(db_path=db_path)
-            sdk.create_point(kind="observation", content=content)
+            sdk._create_point(kind="observation", content=content)
             sdk.close()
             return
         except Exception:
@@ -3366,7 +3366,7 @@ class TestDoctorPath:
         """--path <file> resolves to that embedded DB and runs."""
         db_path = os.path.join(str(tmp_path), "doctor.db")
         sdk = TortoiseSDK(db_path=db_path)
-        sdk.create_point(kind="decision", content="Doctor smoke check")
+        sdk._create_point(kind="decision", content="Doctor smoke check")
         sdk.close()
 
         rc = _run_doctor(["--path", db_path])

@@ -235,7 +235,7 @@ class TestTheCreateDoors:
     def test_create_event_alias_refuses_too(self, sdk, status):
         """`create_event` relays through `create_entity(type='event')` — one guard."""
         with pytest.raises(ValueError, match=":Event"):
-            sdk.create_event(f"Alias-{status}", "deployment", status=status)
+            sdk._create_event(f"Alias-{status}", "deployment", status=status)
 
     def test_create_refuses_the_outdated_flag(self, sdk):
         with pytest.raises(ValueError, match=":Event"):
@@ -270,7 +270,7 @@ class TestTheUpdateDoor:
     """
 
     def _multi_label(self, sdk, name, *, event_id: bool, status="live"):
-        node = sdk.create_point("statement", name, status=status)
+        node = sdk._create_point("statement", name, status=status)
         pid = (node.get("node") or {}).get("id") or node.get("id")
         g = sdk._get_proj().g
         g.query("MATCH (p:Point {id:$p}) SET p:Event", params={"p": pid})
@@ -318,7 +318,7 @@ class TestTheUpdateDoor:
         """
         holder = sdk.create_entity("object", "taken-name")["node"]["id"]
         assert holder
-        pid = sdk.create_point("statement", "rename-target", status="draft")["id"]
+        pid = sdk._create_point("statement", "rename-target", status="draft")["id"]
         g = sdk._get_proj().g
         g.query("MATCH (p:Point {id:$p}) SET p:Object", params={"p": pid})
         before = self._state(sdk, pid)
@@ -347,7 +347,7 @@ class TestTheUpdateDoor:
         """`update()` is the documented alias of `update_knowledge()`."""
         eid = _event(sdk, name="Aliased")
         with pytest.raises(ValueError, match=":Event"):
-            sdk.update(eid, status="superseded")
+            sdk._update(eid, status="superseded")
 
     def test_nested_props_cannot_slip_past_the_guard(self, sdk):
         """T1 — the MCP `props={…}` convention flattens before the guard runs."""
@@ -396,7 +396,7 @@ class TestTheLifecycleDoors:
     """
 
     def _multi_label(self, sdk, name):
-        pid = sdk.create_point("statement", name)["id"]
+        pid = sdk._create_point("statement", name)["id"]
         sdk._get_proj().g.query(
             "MATCH (p:Point {id:$p}) SET p:Event", params={"p": pid})
         return pid
@@ -409,27 +409,27 @@ class TestTheLifecycleDoors:
     def test_retract_refuses_a_multi_label_event(self, sdk):
         pid = self._multi_label(sdk, "RetractEvent")
         with pytest.raises(ValueError, match=":Event"):
-            sdk.retract_point(pid)
+            sdk._retract_point(pid)
         assert self._state(sdk, pid) != "retracted"
 
     def test_invalidate_refuses_a_multi_label_event(self, sdk):
         pid = self._multi_label(sdk, "InvalidateEvent")
-        replacement = sdk.create_point("statement", "Replacement")["id"]
+        replacement = sdk._create_point("statement", "Replacement")["id"]
         with pytest.raises(ValueError, match=":Event"):
-            sdk.invalidate_point(pid, replacement)
+            sdk._invalidate_point(pid, replacement)
         assert self._state(sdk, pid) != "outdated"
 
     def test_supersede_refuses_a_multi_label_event(self, sdk):
         pid = self._multi_label(sdk, "SupersedeEvent")
-        replacement = sdk.create_point("statement", "Successor")["id"]
+        replacement = sdk._create_point("statement", "Successor")["id"]
         with pytest.raises(ValueError, match=":Event"):
-            sdk.supersede_point(pid, replacement)
+            sdk._supersede_point(pid, replacement)
         assert self._state(sdk, pid) != "superseded"
 
     def test_an_ordinary_point_still_terminalizes(self, sdk):
         """No over-block: the guard is label-scoped, not a blanket refusal."""
-        pid = sdk.create_point("statement", "PlainPoint")["id"]
-        sdk.retract_point(pid)
+        pid = sdk._create_point("statement", "PlainPoint")["id"]
+        sdk._retract_point(pid)
         assert self._state(sdk, pid) == "retracted"
 
     def test_an_event_that_only_shares_the_id_does_not_block_the_point(
@@ -445,11 +445,11 @@ class TestTheLifecycleDoors:
         from tortoise.api import EventAPI
         from tortoise.log import EventLog
 
-        pid = sdk.create_point("statement", "SharedId")["id"]
+        pid = sdk._create_point("statement", "SharedId")["id"]
         api = EventAPI(EventLog(os.path.join(sdk._test_root, "ev.jsonl")),
                        initiated_by="user", projection=sdk._get_proj())
         api.add_event(pid, "deployment")
-        sdk.retract_point(pid)
+        sdk._retract_point(pid)
         assert self._state(sdk, pid) == "retracted"
 
 
@@ -1216,7 +1216,7 @@ class TestTheBundleValidationDoor:
                                 "status": "superseded"}]}
         assert sdk._validate_bundle(bundle) == [], (
             "Phase 1 and the writer must read the same content")
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
         after = sdk._get_proj().g.query(
             "MATCH (n:Point) RETURN count(n)").result_set[0][0]
         assert after == before + 1, "the :Object ingest did not land"
@@ -1633,7 +1633,7 @@ class TestTheGuardDoesNotOverBlock:
     """
 
     def test_a_point_still_takes_a_terminal_status(self, sdk):
-        pid = sdk.create_point("statement", "a claim", status="live")["id"]
+        pid = sdk._create_point("statement", "a claim", status="live")["id"]
         sdk.update_knowledge(pid, status="superseded",
                           supersededBy="the successor")
         row = sdk._get_proj().g.query(
@@ -1643,7 +1643,7 @@ class TestTheGuardDoesNotOverBlock:
 
     def test_a_point_still_refuses_an_undeclared_status(self, sdk):
         """The Point door validates through the SHARED four-word door (#11824 S0)."""
-        pid = sdk.create_point("statement", "a claim", status="live")["id"]
+        pid = sdk._create_point("statement", "a claim", status="live")["id"]
         # #11824 S0: the message comes from `lifecycle_vocabulary`, which every
         # knowledge kind now shares — same refusal, one home, and its third part
         # names the words that ARE accepted.
@@ -1676,7 +1676,7 @@ class TestTheGuardDoesNotOverBlock:
         it is the one this door refuses without one.
         """
         if label == "Point":
-            node = sdk.create_point("statement", "bare", status="live")["id"]
+            node = sdk._create_point("statement", "bare", status="live")["id"]
         elif label == "Object":
             node = sdk.create_entity("object", "BarePolicy",
                                      objectKind="policy")["node"]["id"]

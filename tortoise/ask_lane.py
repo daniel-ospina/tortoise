@@ -562,7 +562,7 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
         fusion_k = ask_env_int(ASK_FUSION_K_ENV, 60)                    # A3
         leg_trace: list[dict] = []
         try:
-            hits = sdk.tortoise_fts_query(
+            hits = sdk._tortoise_fts_query(
                 question, limit=caps["limit"],
                 pool_size=caps["pool_size"], include_terminal=True,
                 leg_trace=leg_trace,
@@ -587,7 +587,7 @@ def run_ask_lane(sdk: TortoiseSDK, question: str, *,
 
         # 3. Annotation (batch raise → AskRetrievalUnavailable).
         try:
-            annotated = sdk.annotate_ask_hits(hits)
+            annotated = sdk._annotate_ask_hits(hits)
         except AskRetrievalUnavailable:
             raise
         except Exception as e:  # noqa: BLE001, RUF100

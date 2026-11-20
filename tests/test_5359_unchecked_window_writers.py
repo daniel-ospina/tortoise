@@ -120,7 +120,7 @@ def test_create_point_refuses_an_inverted_caller_window(sdk):
     before = sdk._get_proj().g.query(
         "MATCH (n:Point) RETURN count(n)").result_set[0][0]
     with pytest.raises(ValueError, match="inverted validity window"):
-        sdk.create_point("statement", "inverted", validFrom=LATE, validTo=EARLY)
+        sdk._create_point("statement", "inverted", validFrom=LATE, validTo=EARLY)
     after = sdk._get_proj().g.query(
         "MATCH (n:Point) RETURN count(n)").result_set[0][0]
     assert after == before, "a refused create left a partial write behind"
@@ -135,21 +135,21 @@ def test_create_point_accepts_legal_windows(sdk):
     (2) *Does the fixture reach it?*  Yes — each window is created through
         ``create_point`` and read back off the node.
     """
-    ordered = sdk.create_point("statement", "ordered",
+    ordered = sdk._create_point("statement", "ordered",
                                validFrom="2026-01-01", validTo="2026-12-31")
     assert (ordered["validFrom"], ordered["validTo"]) == (
         "2026-01-01", "2026-12-31")
 
-    lone_start = sdk.create_point("statement", "open-ended",
+    lone_start = sdk._create_point("statement", "open-ended",
                                   validFrom="2026-06-01")
     assert lone_start["validFrom"] == "2026-06-01"
     assert lone_start.get("validTo") is None
 
-    lone_end = sdk.create_point("statement", "open-start", validTo="2026-06-01")
+    lone_end = sdk._create_point("statement", "open-start", validTo="2026-06-01")
     assert lone_end.get("validFrom") is None
     assert lone_end["validTo"] == "2026-06-01"
 
-    equal = sdk.create_point("statement", "zero-length",
+    equal = sdk._create_point("statement", "zero-length",
                              validFrom=MID, validTo=MID)
     assert (equal["validFrom"], equal["validTo"]) == (MID, MID)
 
@@ -172,10 +172,10 @@ def test_update_point_refuses_inversion_against_stored_start(sdk):
         legal ``create_point``, then the opposite edge is moved by the real
         ``update_point``.
     """
-    p = sdk.create_point("statement", "future start", validFrom=LATE)
+    p = sdk._create_point("statement", "future start", validFrom=LATE)
     pid = p["id"]
     with pytest.raises(ValueError, match="inverted validity window"):
-        sdk.update_point(pid, validTo=EARLY)
+        sdk._update_point(pid, validTo=EARLY)
     stored = _props(sdk, pid)
     assert stored["validFrom"] == LATE
     assert "validTo" not in stored, "a refused update still wrote validTo"
@@ -193,10 +193,10 @@ def test_update_point_refuses_inversion_against_stored_end(sdk):
     (2) *Does the fixture reach it?*  Yes — a legal lone-``validTo`` create
         followed by the real ``update_point`` moving the start.
     """
-    p = sdk.create_point("statement", "early end", validTo=EARLY)
+    p = sdk._create_point("statement", "early end", validTo=EARLY)
     pid = p["id"]
     with pytest.raises(ValueError, match="inverted validity window"):
-        sdk.update_point(pid, validFrom=LATE)
+        sdk._update_point(pid, validFrom=LATE)
     stored = _props(sdk, pid)
     assert stored["validTo"] == EARLY
     assert "validFrom" not in stored, "a refused update still wrote validFrom"
@@ -214,19 +214,19 @@ def test_update_point_accepts_legal_edges_and_clears(sdk):
     (2) *Does the fixture reach it?*  Yes — every step is driven through
         ``update_point`` and read back.
     """
-    p = sdk.create_point("statement", "legal moves")
+    p = sdk._create_point("statement", "legal moves")
     pid = p["id"]
 
-    sdk.update_point(pid, validFrom=EARLY)
-    sdk.update_point(pid, validTo=LATE)
+    sdk._update_point(pid, validFrom=EARLY)
+    sdk._update_point(pid, validTo=LATE)
     assert _props(sdk, pid)["validTo"] == LATE
 
     # Clearing the end (None removes the property) re-opens the window, so a
     # start AFTER the old end is now legal — a guard that merged the cleared
     # bound as "absent, use stored" would wrongly refuse this.
-    sdk.update_point(pid, validTo=None)
+    sdk._update_point(pid, validTo=None)
     assert "validTo" not in _props(sdk, pid)
-    sdk.update_point(pid, validFrom=AFTER)
+    sdk._update_point(pid, validFrom=AFTER)
     assert _props(sdk, pid)["validFrom"] == AFTER
 
 
@@ -246,13 +246,13 @@ def test_update_point_refuses_inversion_on_any_sibling_node(sdk):
         raw query for the same id, so both are matched by the real
         ``update_point``.
     """
-    p = sdk.create_point("statement", "fan-out", validFrom=EARLY)
+    p = sdk._create_point("statement", "fan-out", validFrom=EARLY)
     pid = p["id"]
     _raw_point(sdk, pid, vt=EARLY)  # sibling: open start, early end
     assert _node_count(sdk, pid) == 2
 
     with pytest.raises(ValueError, match="inverted validity window"):
-        sdk.update_point(pid, validFrom=LATE)
+        sdk._update_point(pid, validFrom=LATE)
     stored = [row[0] for row in sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) RETURN n.validFrom",
         params={"id": pid}).result_set]
@@ -293,10 +293,10 @@ def test_legacy_inverted_window_stays_readable_and_repairable(sdk):
 
     # Aggravating the inversion is refused...
     with pytest.raises(ValueError, match="inverted validity window"):
-        sdk.update_point(pid, validTo="2026-05-01")
+        sdk._update_point(pid, validTo="2026-05-01")
     assert _props(sdk, pid)["validTo"] == EARLY
     # ... repairing it is allowed.
-    sdk.update_point(pid, validTo=AFTER)
+    sdk._update_point(pid, validTo=AFTER)
     assert _props(sdk, pid)["validTo"] == AFTER
 
 
@@ -325,7 +325,7 @@ def test_mining_temporal_wire_refuses_a_start_that_inverts_stored_end(sdk):
         with a lone ``validTo`` (legal at create time), then the real
         ``_temporal_wire`` post-pass runs over its id.
     """
-    p = sdk.create_point("decision", "we decided X", status="draft",
+    p = sdk._create_point("decision", "we decided X", status="draft",
                          validTo=EARLY)
     pid = p["id"]
     with pytest.raises(ValueError, match="inverted validity window"):
@@ -343,7 +343,7 @@ def test_mining_temporal_wire_still_stamps_a_legal_start(sdk):
     (2) *Does the fixture reach it?*  Yes — the real post-pass runs over a
         draft decision point with no ``validTo``.
     """
-    p = sdk.create_point("decision", "we decided Y", status="draft")
+    p = sdk._create_point("decision", "we decided Y", status="draft")
     pid = p["id"]
     report = _temporal_wire(sdk, [pid], LATE)
     assert report is not None

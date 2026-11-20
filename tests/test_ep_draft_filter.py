@@ -47,15 +47,15 @@ def posterior_mean(sdk: TortoiseSDK, pid: str) -> float:
 def make_leak_graph(sdk: TortoiseSDK):
     """s (live, strong) IMPL l (live, neutral) via live operator O1;
     live operator O2 (leak) wired l IMPL d where d is DRAFT."""
-    s = sdk.create_point("statement", "strong source", status="live")
-    l = sdk.create_point("statement", "live claim", status="live")  # noqa: E741
-    d = sdk.create_point("statement", "draft leak target",
+    s = sdk._create_point("statement", "strong source", status="live")
+    l = sdk._create_point("statement", "live claim", status="live")  # noqa: E741
+    d = sdk._create_point("statement", "draft leak target",
                          status="draft")  # #1088: draft is explicit now
     set_evidence(sdk, s["id"], 8.0, 1.0)
     set_evidence(sdk, l["id"], 1.0, 1.0)
     set_evidence(sdk, d["id"], 12.0, 1.0)  # strong draft — would pull l if leaked
-    o1 = sdk.create_operator("IMPL", s["id"], [l["id"]])
-    o2 = sdk.create_operator("IMPL", l["id"], [d["id"]])  # leak: live op -> draft
+    o1 = sdk._create_operator("IMPL", s["id"], [l["id"]])
+    o2 = sdk._create_operator("IMPL", l["id"], [d["id"]])  # leak: live op -> draft
     return {"s": s["id"], "l": l["id"], "d": d["id"], "o1": o1["id"], "o2": o2["id"]}
 
 
@@ -88,11 +88,11 @@ def test_de2e4_leak_filter_causal(sdk, tmp_path):
 
     # Control: fresh graph WITHOUT the leak operator (separate DB).
     ctrl = TortoiseSDK(db_path=str(tmp_path / "ctrl.db"))
-    c = ctrl.create_point("statement", "strong source", status="live")
-    lc = ctrl.create_point("statement", "live claim", status="live")
+    c = ctrl._create_point("statement", "strong source", status="live")
+    lc = ctrl._create_point("statement", "live claim", status="live")
     set_evidence(ctrl, c["id"], 8.0, 1.0)
     set_evidence(ctrl, lc["id"], 1.0, 1.0)
-    o1c = ctrl.create_operator("IMPL", c["id"], [lc["id"]])
+    o1c = ctrl._create_operator("IMPL", c["id"], [lc["id"]])
     run_ep(ctrl, [o1c["id"]])
     ctrl_mean = posterior_mean(ctrl, lc["id"])
 
@@ -132,14 +132,14 @@ def test_de2e4_include_draft_reenables_identically(sdk, tmp_path):
 
     # Identical topology, all nodes live from creation (separate DB).
     ctrl = TortoiseSDK(db_path=str(tmp_path / "ctrl.db"))
-    s2 = ctrl.create_point("statement", "strong source", status="live")
-    l2 = ctrl.create_point("statement", "live claim", status="live")
-    d2 = ctrl.create_point("statement", "draft leak target", status="live")
+    s2 = ctrl._create_point("statement", "strong source", status="live")
+    l2 = ctrl._create_point("statement", "live claim", status="live")
+    d2 = ctrl._create_point("statement", "draft leak target", status="live")
     set_evidence(ctrl, s2["id"], 8.0, 1.0)
     set_evidence(ctrl, l2["id"], 1.0, 1.0)
     set_evidence(ctrl, d2["id"], 12.0, 1.0)
-    o1b = ctrl.create_operator("IMPL", s2["id"], [l2["id"]])
-    o2b = ctrl.create_operator("IMPL", l2["id"], [d2["id"]])
+    o1b = ctrl._create_operator("IMPL", s2["id"], [l2["id"]])
+    o2b = ctrl._create_operator("IMPL", l2["id"], [d2["id"]])
     run_ep(ctrl, [o1b["id"], o2b["id"]])
     promoted = posterior_mean(ctrl, l2["id"])
     assert inclusive == pytest.approx(promoted, abs=1e-6), (
@@ -150,11 +150,11 @@ def test_de2e4_include_draft_reenables_identically(sdk, tmp_path):
 # ── Call site 1: TortoiseEP._affected_claims / _affected_factors ──
 
 def test_affected_claims_excludes_draft_operators_and_targets(sdk):
-    s = sdk.create_point("statement", "s", status="live")
-    live_t = sdk.create_point("statement", "live target", status="live")
-    draft_t = sdk.create_point("statement", "draft target", status="draft")
-    live_op = sdk.create_operator("IMPL", s["id"], [live_t["id"]])
-    draft_op = sdk.create_operator("IMPL", s["id"], [draft_t["id"]],
+    s = sdk._create_point("statement", "s", status="live")
+    live_t = sdk._create_point("statement", "live target", status="live")
+    draft_t = sdk._create_point("statement", "draft target", status="draft")
+    live_op = sdk._create_operator("IMPL", s["id"], [live_t["id"]])
+    draft_op = sdk._create_operator("IMPL", s["id"], [draft_t["id"]],
                                    promote_source=False)
     ep = sdk._get_ep()
     affected = ep._affected_claims([live_op["id"], draft_op["id"]],
@@ -177,10 +177,10 @@ def test_affected_claims_excludes_draft_operators_and_targets(sdk):
 def test_affected_factors_strips_draft_input_ids(sdk):
     """A LIVE operator with one draft input keeps its live inputs; if all
     inputs are draft it becomes degenerate and is skipped."""
-    live_a = sdk.create_point("statement", "a", status="live")
-    live_b = sdk.create_point("statement", "b", status="live")
-    draft_c = sdk.create_point("statement", "c", status="draft")
-    op = sdk.create_operator("IMPL", live_a["id"], [live_b["id"], draft_c["id"]])
+    live_a = sdk._create_point("statement", "a", status="live")
+    live_b = sdk._create_point("statement", "b", status="live")
+    draft_c = sdk._create_point("statement", "c", status="draft")
+    op = sdk._create_operator("IMPL", live_a["id"], [live_b["id"], draft_c["id"]])
     ep = sdk._get_ep()
     affected = ep._affected_claims([op["id"]], include_draft=False)
     factors = ep._affected_factors(affected, include_draft=False)
@@ -189,9 +189,9 @@ def test_affected_factors_strips_draft_input_ids(sdk):
     assert set(f[2]) == {live_a["id"], live_b["id"]}
 
     # All-draft operator (created with promote_source=False): excluded.
-    d1 = sdk.create_point("statement", "d1", status="draft")
-    d2 = sdk.create_point("statement", "d2", status="draft")
-    op2 = sdk.create_operator("IMPL", d1["id"], [d2["id"]], promote_source=False)
+    d1 = sdk._create_point("statement", "d1", status="draft")
+    d2 = sdk._create_point("statement", "d2", status="draft")
+    op2 = sdk._create_operator("IMPL", d1["id"], [d2["id"]], promote_source=False)
     affected2 = ep._affected_claims([op2["id"]], include_draft=False)
     assert affected2 == set() or all(
         f[0] != op2["id"] for f in ep._affected_factors(affected2, include_draft=False)
@@ -202,12 +202,12 @@ def test_affected_factors_strips_draft_input_ids(sdk):
 
 def test_extract_svbp_factors_excludes_drafts(sdk):
     proj = sdk._get_proj()
-    s = sdk.create_point("statement", "s", status="live")
-    a = sdk.create_point("statement", "a", status="live")
-    b = sdk.create_point("statement", "b", status="live")
-    d = sdk.create_point("statement", "d", status="draft")
-    sdk.create_operator("IMPL", s["id"], [a["id"], b["id"]])
-    draft_op = sdk.create_operator("IMPL", s["id"], [d["id"], a["id"]],
+    s = sdk._create_point("statement", "s", status="live")
+    a = sdk._create_point("statement", "a", status="live")
+    b = sdk._create_point("statement", "b", status="live")
+    d = sdk._create_point("statement", "d", status="draft")
+    sdk._create_operator("IMPL", s["id"], [a["id"], b["id"]])
+    draft_op = sdk._create_operator("IMPL", s["id"], [d["id"], a["id"]],
                                    promote_source=False)
 
     factors, _ = proj.extract_svbp_factors()  # default: exclude drafts
@@ -227,12 +227,12 @@ def test_extract_svbp_factors_excludes_drafts(sdk):
 def test_bfs_select_operators_excludes_drafts(sdk):
     from tortoise.analyze import _bfs_select_operators
     proj = sdk._get_proj()
-    s = sdk.create_point("statement", "s", status="live")
-    a = sdk.create_point("statement", "a", status="live")
-    b = sdk.create_point("statement", "b", status="live")
-    d = sdk.create_point("statement", "d", status="draft")
-    live_op = sdk.create_operator("IMPL", s["id"], [a["id"], b["id"]])
-    draft_op = sdk.create_operator("IMPL", s["id"], [d["id"], b["id"]],
+    s = sdk._create_point("statement", "s", status="live")
+    a = sdk._create_point("statement", "a", status="live")
+    b = sdk._create_point("statement", "b", status="live")
+    d = sdk._create_point("statement", "d", status="draft")
+    live_op = sdk._create_operator("IMPL", s["id"], [a["id"], b["id"]])
+    draft_op = sdk._create_operator("IMPL", s["id"], [d["id"], b["id"]],
                                    promote_source=False)
 
     ops, _ = _bfs_select_operators(proj, [s["id"]], include_draft=False)
@@ -249,11 +249,11 @@ def test_bfs_select_operators_excludes_drafts(sdk):
 
 
 def test_select_subgraph_excludes_drafts(sdk):
-    s = sdk.create_point("statement", "s", status="live")
-    a = sdk.create_point("statement", "a", status="live")
-    d = sdk.create_point("statement", "d", status="draft")
-    live_op = sdk.create_operator("IMPL", s["id"], [a["id"]])
-    draft_op = sdk.create_operator("IMPL", s["id"], [d["id"]], promote_source=False)
+    s = sdk._create_point("statement", "s", status="live")
+    a = sdk._create_point("statement", "a", status="live")
+    d = sdk._create_point("statement", "d", status="draft")
+    live_op = sdk._create_operator("IMPL", s["id"], [a["id"]])
+    draft_op = sdk._create_operator("IMPL", s["id"], [d["id"]], promote_source=False)
 
     ops, _ = sdk._select_subgraph([s["id"]], include_draft=False)
     assert live_op["id"] in ops
@@ -271,28 +271,28 @@ def test_select_subgraph_excludes_drafts(sdk):
 # ── create_operator(promote_source=False) — draft operator nodes ──
 
 def test_create_operator_promote_source_false_writes_draft_operator(sdk):
-    a = sdk.create_point("statement", "A", status="draft")
-    b = sdk.create_point("statement", "B", status="draft")
-    op = sdk.create_operator("IMPL", a["id"], [b["id"]], promote_source=False)
+    a = sdk._create_point("statement", "A", status="draft")
+    b = sdk._create_point("statement", "B", status="draft")
+    op = sdk._create_operator("IMPL", a["id"], [b["id"]], promote_source=False)
     assert op.get("status") == "draft", (
         "extraction operator node must carry status:'draft'"
     )
-    assert sdk.get_point(a["id"]).get("status") == "draft", (
+    assert sdk._get_point(a["id"]).get("status") == "draft", (
         "promote_source=False must NOT auto-promote the source (#131 bypass)"
     )
-    assert sdk.get_point(b["id"]).get("status") == "draft"
+    assert sdk._get_point(b["id"]).get("status") == "draft"
 
 
 def test_create_operator_default_promotes_source(sdk):
     """Back-compat: promote_source=True (default) preserves #131 promotion."""
-    a = sdk.create_point("statement", "A")
-    b = sdk.create_point("statement", "B")
+    a = sdk._create_point("statement", "A")
+    b = sdk._create_point("statement", "B")
     # #1088: the #131 clause now fills only a NEVER-SET status, so make the
     # source genuinely NULL (legacy shape) — otherwise live-as-default makes
     # the promotion assertion vacuous.
     sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) SET n.status = NULL", params={"id": a["id"]})
-    op = sdk.create_operator("IMPL", a["id"], [b["id"]])
+    op = sdk._create_operator("IMPL", a["id"], [b["id"]])
     # #5089: the operator node is born 'live' on the default posture. It used to be
     # born with NO status, which excluded it from the STRICT grounding selector
     # while a rebuild produced 'live' (projection/entities.py coalesce) — so the
@@ -305,7 +305,7 @@ def test_create_operator_default_promotes_source(sdk):
     assert op.get("status") == "live", (
         "#5089: the default door writes the status the replay reproduces"
     )
-    assert sdk.get_point(a["id"]).get("status") == "live"
+    assert sdk._get_point(a["id"]).get("status") == "live"
 
 
 def test_create_operator_draft_status_survives_event_payload(sdk, tmp_path):
@@ -325,9 +325,9 @@ def test_create_operator_draft_status_survives_event_payload(sdk, tmp_path):
 
     sdk2 = TortoiseSDK(db_path=str(tmp_path / "t.db"),
                        event_log_path=str(tmp_path / "events.jsonl"))
-    a = sdk2.create_point("statement", "A")
-    b = sdk2.create_point("statement", "B")
-    op = sdk2.create_operator("IMPL", a["id"], [b["id"]], promote_source=False)
+    a = sdk2._create_point("statement", "A")
+    b = sdk2._create_point("statement", "B")
+    op = sdk2._create_operator("IMPL", a["id"], [b["id"]], promote_source=False)
     log = json.loads(sdk2._get_event_log().load())[-1] if hasattr(
         sdk2._get_event_log(), "load"
     ) else None
@@ -353,9 +353,9 @@ def test_create_operator_draft_status_survives_event_payload(sdk, tmp_path):
 def test_draft_seed_runs_nothing(sdk):
     """A draft claim used as a plain-point seed must run nothing: affected
     set empty, run() early-returns (0, True)."""
-    s = sdk.create_point("statement", "s", status="live")
-    d = sdk.create_point("statement", "draft seed", status="draft")
-    op = sdk.create_operator("IMPL", s["id"], [d["id"]])
+    s = sdk._create_point("statement", "s", status="live")
+    d = sdk._create_point("statement", "draft seed", status="draft")
+    op = sdk._create_operator("IMPL", s["id"], [d["id"]])
     ep = sdk._get_ep()
     affected = ep._affected_claims([d["id"]], include_draft=False)
     assert affected == set(), (
@@ -372,13 +372,13 @@ def test_live_seed_does_not_cross_draft_operator_bridge(sdk):
     """Live claim s --live op O1--> live l1, plus s --DRAFT op D--> live l2
     with a live operator O3 on l2 (l2's own chain): seeding s must NOT reach
     l2 through D, so neither l2 nor O3's factor enters the affected set."""
-    s = sdk.create_point("statement", "s", status="live")
-    l1 = sdk.create_point("statement", "l1", status="live")
-    l2 = sdk.create_point("statement", "l2", status="live")
-    c3 = sdk.create_point("statement", "c3", status="live")
-    o1 = sdk.create_operator("IMPL", s["id"], [l1["id"]])
-    d = sdk.create_operator("IMPL", s["id"], [l2["id"]], promote_source=False)
-    o3 = sdk.create_operator("IMPL", l2["id"], [c3["id"]])
+    s = sdk._create_point("statement", "s", status="live")
+    l1 = sdk._create_point("statement", "l1", status="live")
+    l2 = sdk._create_point("statement", "l2", status="live")
+    c3 = sdk._create_point("statement", "c3", status="live")
+    o1 = sdk._create_operator("IMPL", s["id"], [l1["id"]])
+    d = sdk._create_operator("IMPL", s["id"], [l2["id"]], promote_source=False)
+    o3 = sdk._create_operator("IMPL", l2["id"], [c3["id"]])
     ep = sdk._get_ep()
     affected = ep._affected_claims([s["id"]], include_draft=False)
     assert l1["id"] in affected
@@ -399,13 +399,13 @@ def test_live_seed_does_not_cross_draft_operator_bridge(sdk):
 def test_directional_factor_skipped_when_draft_source_stripped(sdk):
     """Non-bidirectional operator whose idx-0 SOURCE is draft: skipping beats
     renumbering a live target into the source slot (direction inversion)."""
-    draft_src = sdk.create_point("statement", "draft source", status="draft")
-    t1 = sdk.create_point("statement", "t1", status="live")
-    t2 = sdk.create_point("statement", "t2", status="live")
+    draft_src = sdk._create_point("statement", "draft source", status="draft")
+    t1 = sdk._create_point("statement", "t1", status="live")
+    t2 = sdk._create_point("statement", "t2", status="live")
     # promote_source=False keeps the source draft; the operator node starts
     # draft too — simulate the #785 promote flow making the OPERATOR live
     # while its source stays draft (reachable via update_point/manual write).
-    op = sdk.create_operator("IMPL", draft_src["id"], [t1["id"], t2["id"]],
+    op = sdk._create_operator("IMPL", draft_src["id"], [t1["id"], t2["id"]],
                              direction="unidirectional", promote_source=False)
     sdk._get_proj().g.query(
         "MATCH (o:Point {id:$id}) SET o.status = 'live'",
@@ -428,8 +428,8 @@ def test_unary_operator_factor_kept_when_not_draft_caused(sdk):
     """A genuinely unary operator (created with empty target_ids) keeps its
     factor when the <2-input state is NOT draft-caused — matches pre-PR
     behavior (_update_factor no-ops it) and keeps include_draft parity."""
-    a = sdk.create_point("statement", "a", status="live")
-    op = sdk.create_operator("IMPL", a["id"], [])
+    a = sdk._create_point("statement", "a", status="live")
+    op = sdk._create_operator("IMPL", a["id"], [])
     ep = sdk._get_ep()
     factors = ep._affected_factors({a["id"]}, include_draft=False)
     assert any(f[0] == op["id"] for f in factors), (
@@ -455,8 +455,8 @@ def test_compute_confidence_live_invariant_with_draft_subgraph(sdk, tmp_path):
 
     leak_sdk, leak_ids = build(True, str(tmp_path / "leak.db"))
     ctrl_sdk, ctrl_ids = build(False, str(tmp_path / "ctrl.db"))
-    leak_res = leak_sdk.compute_confidence(factors=[leak_ids["o1"], leak_ids["o2"]])
-    ctrl_res = ctrl_sdk.compute_confidence(factors=[ctrl_ids["o1"]])
+    leak_res = leak_sdk._compute_confidence(factors=[leak_ids["o1"], leak_ids["o2"]])
+    ctrl_res = ctrl_sdk._compute_confidence(factors=[ctrl_ids["o1"]])
     l_leak = leak_res["confidences"][leak_ids["l"]]["mean"]
     l_ctrl = ctrl_res["confidences"][ctrl_ids["l"]]["mean"]
     assert l_leak == pytest.approx(l_ctrl, abs=1e-9), (
@@ -485,13 +485,13 @@ def test_compute_confidence_live_invariant_with_draft_subgraph(sdk, tmp_path):
 # depend on which way the implicit default goes.
 
 def test_6105_degenerate_draft_target_reported_not_silently_dropped(sdk):
-    blocker = sdk.create_point("statement", "blocker", status="live")
-    goal = sdk.create_point("statement", "GOAL - pure target", status="draft")
+    blocker = sdk._create_point("statement", "blocker", status="live")
+    goal = sdk._create_point("statement", "GOAL - pure target", status="draft")
     set_evidence(sdk, blocker["id"], 8.0, 1.0)
     set_evidence(sdk, goal["id"], 1.0, 1.0)
-    op = sdk.create_operator("NAND", blocker["id"], [goal["id"]])
+    op = sdk._create_operator("NAND", blocker["id"], [goal["id"]])
 
-    res = sdk.compute_confidence(factors=[op["id"]])
+    res = sdk._compute_confidence(factors=[op["id"]])
 
     # The healthy-looking report that hid the dropped arm...
     assert res["converged"] is True
@@ -505,19 +505,19 @@ def test_6105_degenerate_draft_target_reported_not_silently_dropped(sdk):
     assert {i["id"]: i["status"] for i in entry["inputs"]} == {
         blocker["id"]: "live", goal["id"]: "draft"}
     # The GOAL never voted — no posterior was ever written for it.
-    assert sdk.get_point(goal["id"]).get("posterior_alpha") is None
+    assert sdk._get_point(goal["id"]).get("posterior_alpha") is None
 
 
 def test_6105_skipped_factors_stash_resets_between_runs(sdk):
     """The stash is run-set state: reset at entry like _last_affected /
     _last_truncated, so a clean run never reports a previous run's skips."""
-    blocker = sdk.create_point("statement", "blocker", status="live")
-    goal = sdk.create_point("statement", "draft goal", status="draft")
-    op = sdk.create_operator("NAND", blocker["id"], [goal["id"]])
+    blocker = sdk._create_point("statement", "blocker", status="live")
+    goal = sdk._create_point("statement", "draft goal", status="draft")
+    op = sdk._create_operator("NAND", blocker["id"], [goal["id"]])
     # A DISJOINT clean component (2 live inputs — nothing to strip).
-    a = sdk.create_point("statement", "a", status="live")
-    b = sdk.create_point("statement", "b", status="live")
-    clean = sdk.create_operator("IMPL", a["id"], [b["id"]])
+    a = sdk._create_point("statement", "a", status="live")
+    b = sdk._create_point("statement", "b", status="live")
+    clean = sdk._create_operator("IMPL", a["id"], [b["id"]])
 
     ep = sdk._get_ep()
     ep.run([op["id"]])
@@ -533,10 +533,10 @@ def test_6105_skip_diagnostics_are_precise(sdk):
     and not reported; a directional operator whose source was stripped reports
     its own reason. The read-only scope callers (no sink) stay side-effect
     free."""
-    a = sdk.create_point("statement", "a", status="live")
-    b = sdk.create_point("statement", "b", status="live")
-    c = sdk.create_point("statement", "c", status="draft")
-    partial = sdk.create_operator("IMPL", a["id"], [b["id"], c["id"]])
+    a = sdk._create_point("statement", "a", status="live")
+    b = sdk._create_point("statement", "b", status="live")
+    c = sdk._create_point("statement", "c", status="draft")
+    partial = sdk._create_operator("IMPL", a["id"], [b["id"], c["id"]])
 
     ep = sdk._get_ep()
     seen: list[dict] = []
@@ -549,10 +549,10 @@ def test_6105_skip_diagnostics_are_precise(sdk):
 
     # Directional operator with a stripped idx-0 source — skipped for a
     # different reason (renumbering would invert the direction).
-    draft_src = sdk.create_point("statement", "draft source", status="draft")
-    t1 = sdk.create_point("statement", "t1", status="live")
-    t2 = sdk.create_point("statement", "t2", status="live")
-    op = sdk.create_operator("IMPL", draft_src["id"], [t1["id"], t2["id"]],
+    draft_src = sdk._create_point("statement", "draft source", status="draft")
+    t1 = sdk._create_point("statement", "t1", status="live")
+    t2 = sdk._create_point("statement", "t2", status="live")
+    op = sdk._create_operator("IMPL", draft_src["id"], [t1["id"], t2["id"]],
                              direction="unidirectional", promote_source=False)
     sdk._get_proj().g.query(
         "MATCH (o:Point {id:$id}) SET o.status = 'live'",
@@ -601,17 +601,17 @@ def test_6105_skip_diagnostics_are_precise(sdk):
 # `not skipped_factors` alone is satisfied by a run that scored nothing.
 
 def test_6107_plainly_created_target_is_live_and_not_degenerate(sdk):
-    blocker = sdk.create_point("statement", "blocker")           # no status
-    goal = sdk.create_point("statement", "GOAL - pure target")   # no status
-    assert sdk.get_point(blocker["id"])["status"] == "live"
-    assert sdk.get_point(goal["id"])["status"] == "live", (
+    blocker = sdk._create_point("statement", "blocker")           # no status
+    goal = sdk._create_point("statement", "GOAL - pure target")   # no status
+    assert sdk._get_point(blocker["id"])["status"] == "live"
+    assert sdk._get_point(goal["id"])["status"] == "live", (
         "a plainly-created point must be EP-visible (#1088/#6107)"
     )
     set_evidence(sdk, blocker["id"], 8.0, 1.0)
     set_evidence(sdk, goal["id"], 1.0, 1.0)
 
-    op = sdk.create_operator("NAND", blocker["id"], [goal["id"]])
-    res = sdk.compute_confidence(factors=[op["id"]])
+    op = sdk._create_operator("NAND", blocker["id"], [goal["id"]])
+    res = sdk._compute_confidence(factors=[op["id"]])
 
     # The run DID work — positive evidence, not just the absence of a skip.
     # `not skipped_factors` is also true of a run that selected nothing
@@ -623,6 +623,6 @@ def test_6107_plainly_created_target_is_live_and_not_degenerate(sdk):
     assert res.get("diagnostic") is None, res.get("diagnostic")
     # ...and the TARGET actually votes. This is the assertion the measured
     # map failed: the goal held no confidence while the run reported healthy.
-    scored = sdk.get_point(goal["id"])
+    scored = sdk._get_point(goal["id"])
     assert scored.get("posterior_alpha") is not None
     assert scored.get("confidence") is not None
