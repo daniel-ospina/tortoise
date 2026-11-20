@@ -4044,29 +4044,43 @@ def test_the_warmup_revert_guidance_names_both_red_states():
 
 
 def test_the_route_b_landing_precondition_lives_where_the_operator_reads_it():
-    """#13941: "do not land this before the unset is performed and verified" must not live only in a PR.
+    """#13941: the transition is the requirement, and the LANDING is its precondition — both in the runbook.
 
-    The owner's direction check on #13941 recorded, on the PR, that the route-(b)
-    state is exit-1 by construction while the Fly secret lives — and a PR comment
-    is exactly the artifact the next lane does NOT read. The failure mode it guards
-    is measured, not hypothetical: the branch's own evidence block reported green
-    because its fixture omitted the live name, and merging that direction ahead of
-    the transition re-blocks EVERY deploy while the change reads as a fix.
+    The direction check on #13941 recorded, on the PR, that the route-(b) state is
+    exit-1 by construction while the Fly secret lives — and a PR comment is exactly
+    the artifact the next lane does NOT read. The failure mode is measured, not
+    hypothetical: the branch's evidence block once reported green because its
+    fixture omitted the live name.
 
-    So the precondition is stated in the runbook's operator section, and pinned
-    here: a future edit that drops the sentence (to "simplify" the section, or to
-    delete it with the paragraph it sits under) reds instead of quietly
-    re-authorising a land-before-transition.
+    ⛔ The requirement is NOT "do not land this before the unset", which is what this
+    docstring and the sentence it pinned said until review round 3 — that reading is
+    inverted. `main`'s duplicate pair is exit **2**, which NO bypass reaches
+    (`deploy-hosted.yml:743` gates RC=1 only), so the transition's own step 2 (a
+    release carrying `[env]`) cannot run until the duplicate is gone (#13923:
+    *"Steps 2-4 are blocked until the duplicate is removed"*). The landing is the
+    precondition OF the transition; what must not be read as done is the exit-1
+    state it lands in.
+
+    So both halves are stated in the runbook's operator section and pinned here: a
+    future edit that drops either sentence reds instead of quietly re-authorising
+    "merge it and the release train is fine".
     """
     section = _embedder_warmup_runbook_section()
     # Non-vacuity: a section read that picked up the wrong region must not pass.
     assert "TORTOISE_EMBEDDER_WARMUP" in section, "the section reader found the wrong region"
-    assert "must not land before the transition is PERFORMED AND VERIFIED" in section, (
-        "the runbook no longer states that this route-(b) direction may not land before the "
-        "unset is performed and verified. That sentence is the only place an operator (or a "
-        "lane that reads the runbook instead of PR comments) learns that merging it ahead of "
-        "the transition leaves every deploy refused at exit 1 — the state #13941's owner "
-        "direction check measured."
+    assert "the transition must be PERFORMED AND VERIFIED" in section, (
+        "the runbook no longer states that the route-(b) transition must be performed and "
+        "verified — without it the exit-1 state reads as the finished repair."
+    )
+    assert "PRECONDITION of the transition" in section, (
+        "the runbook no longer states that removing the duplicate is the PRECONDITION of "
+        "the transition. Without it the section reads as 'do not land this until the "
+        "unset', which is inverted: exit-2 has NO bypass, so no deploy can carry `[env]` "
+        "to the box while the duplicate stands (#13923 steps 2-4)."
+    )
+    assert "not the green one" in section, (
+        "the runbook no longer warns that the landed state is the BYPASSABLE class and "
+        "not a green one — the exact misreading the three measured exit codes exist for."
     )
 
 

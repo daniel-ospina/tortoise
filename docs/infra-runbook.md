@@ -4469,10 +4469,15 @@ The quotes above are bound to the messages the gate **actually prints** by
 `tests/test_fly_secret_drift.py::test_the_warmup_revert_guidance_names_both_red_states`, so a reworded
 violation reds here instead of leaving the runbook quoting a sentence no operator will ever see.
 
-⛔ **And this direction must not land before the transition is PERFORMED AND VERIFIED.** A merged
-`fly-toml-env` declaration while the secret lives leaves every deploy refused — exit **1**
-(`STALE DECLARATION … also a Fly secret`), cleared only by a per-run bypass — so the branch reads as
-"the gate is fine now" while it is the gate holding the release train. ⛔ **A green suite is not that
+⛔ **And the transition must be PERFORMED AND VERIFIED — but it cannot START from `main`, and that is
+the requirement the LANDING satisfies.** While the manifest is
+unparseable (`main`'s duplicate pair) every `deploy-hosted` run dies at exit **2**, and exit 2 has no
+bypass at all (`deploy-hosted.yml:743` gates RC=1 only) — so no release can carry `[env]` to the box
+and #13923's steps 2–4 cannot begin. Its own status comment states it: *"Steps 2-4 are
+blocked until the duplicate is removed."* Removing the duplicate is therefore the PRECONDITION of the transition,
+not a substitute for it: land the dedupe, dispatch the deploy with
+`skip-fly-secret-provenance`, then `flyctl secrets unset`, then re-measure. ⛔ What must not happen is
+anyone reading the exit-1 state as done — it is the bypassable class, not the green one. ⛔ **A green suite is not that
 verification:** the three states measure differently and only one is green — `main`'s duplicate pair
 is exit **2** (`manifest unusable`, NOT bypassable), this route-(b) declaration is exit **1**, and
 `fly-only:#13674` with the `[env]` row removed is exit **0** (#13941's owner direction check, measured
