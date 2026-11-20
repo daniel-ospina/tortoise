@@ -3562,50 +3562,162 @@ def _reserved_members_paragraph() -> str:
     return " ".join(block)
 
 
+def _declared_gap_paragraph() -> str:
+    """The manifest's `DECLARED GAP` paragraph — the `fly-only:` entries with NO ruling.
+
+    Same reader shape as `_reserved_members_paragraph` — from the paragraph's
+    opening until the next block separator (a bare `#`) — so it follows the file
+    rather than a line range that drifts under every edit above it. The heading is
+    matched on `⚠️ ONE DECLARED GAP` rather than on `DECLARED GAP` alone: the
+    RESERVED paragraph above refers to "a DECLARED GAP", so the bare phrase would
+    anchor this reader INSIDE the contract paragraph and silently read the wrong
+    block.
+
+    Returns `""` when the paragraph is ABSENT, which is the correct and expected
+    end state once every `fly-only:` member carries its recorded ruling: the
+    paragraph exists only while a gap does.
+    """
+    lines = REAL_MANIFEST.read_text().splitlines()
+    heading = next(
+        (index for index, line in enumerate(lines) if "⚠️ ONE DECLARED GAP" in line),
+        None,
+    )
+    if heading is None:
+        return ""
+    block: list[str] = []
+    for line in [lines[heading], *lines[heading + 1:]]:
+        stripped = line.lstrip("#").strip()
+        if not stripped:
+            break
+        block.append(stripped)
+    return " ".join(block)
+
+
 def test_the_reserved_member_paragraph_names_every_fly_only_member():
-    """The OTHER paragraph that enumerates the `fly-only:` members (the uncovered twin).
+    """The contract paragraph and the gap paragraph must not be traded for each other.
 
-    The defect is read off the ARTIFACT, not off a review label: this manifest
-    declares a THIRD `fly-only:` member (`TORTOISE_EMBEDDER_WARMUP`, `#13674`)
-    while this paragraph still said the members are `#661` and `#13209`,
-    *"each with its own recorded ruling"* — false for a member whose ruling is
-    requested and not yet recorded, and contradicted by the `ENTRY-POINT FOR A
-    REVIEWER` paragraph a few lines below it, which names all three and says the
-    third is *not* pre-cleared. Two paragraphs about one set, disagreeing. The
-    same paragraph had already drifted once the same way (`#13209`'s commit
-    updated it when it added the second member), so prose is why it recurs: no
-    test read it, while the `ENTRY-POINT FOR A REVIEWER` paragraph beside it has
-    had a reader since `#13370`.
+    Two failures, both read off the ARTIFACT rather than off a review label.
 
-    Both halves are derived FROM the manifest — never a list in the test: every
-    `fly-only:` member's issue REF must be named here (this paragraph names issues,
-    not variables), and the spelled-out count must equal the number of members. It
-    reds on the pre-fix paragraph in BOTH directions (the missing ref, and `TWO`
-    against three).
+    (1) The paragraph drifted: it declared `#661` and `#13209` while this manifest
+    also declared a third `fly-only:` member (`TORTOISE_EMBEDDER_WARMUP`, `#13674`),
+    contradicting the `ENTRY-POINT FOR A REVIEWER` paragraph a few lines below it
+    which names all three. Prose is why it recurs — no test read it while the
+    entry-point paragraph has had a reader since `#13370`.
+
+    (2) The repair for (1) then did the one thing the paragraph must never allow:
+    it REPLACED the contract sentence *"each with its own recorded ruling"* with
+    *"their rulings do NOT all exist yet"*, i.e. it amended the reservation to
+    admit a member that does not satisfy it — and this test pinned the weakened
+    wording (#13814 review P2). That is the failure mode worth guarding hardest:
+    the sentence is what makes `fly-only:` mean "a ruling exists" rather than
+    "nobody declared a source" (`unmanaged`, the #4126 defect), and a guard that
+    accepts the amended version locks the weakening in.
+
+    So the properties asserted here are:
+
+    * the contract sentence is present in the RESERVED paragraph, **unqualified** —
+      a "not yet recorded" / "do not all exist" / "without a recorded ruling"
+      qualifier inside it REDS, however it is re-wrapped;
+    * an unruled member is declared in its OWN `DECLARED GAP` paragraph, which
+      states that the entry is not a member of the ruled set;
+    * the two paragraphs PARTITION this manifest's `fly-only:` refs — no ref in
+      both (two paragraphs contradicting each other), none in neither (a member
+      whose status nobody declared);
+    * each paragraph's spelled count equals its own set, so a declared gap that is
+      silently promoted, or a member silently dropped, reds on the artifact
+      disagreeing with itself.
+
+    Every ref and both counts are derived FROM the manifest — never a list in the
+    test. Measured reds: against the pre-#13674 manifest it reds on the missing
+    ref (`#13674`); against the weakened paragraph it introduced it reds on the
+    contract sentence and on the "not yet recorded" qualifier inside it.
     """
     sources = _manifest_sources(REAL_MANIFEST)
     refs = sorted({source.split(":", 1)[1] for source in sources.values() if source.startswith("fly-only:")})
     assert refs, "the shipped manifest declares no fly-only: name — the reader is wrong"
 
     reserved = _reserved_members_paragraph()
-    missing = [ref for ref in refs if ref not in reserved]
-    assert not missing, (
-        "the manifest's RESERVED-members paragraph does not name every `fly-only:` "
-        "member's issue, so it states a membership set that is no longer true — and "
-        "its own sentence about the recorded rulings is then false for every member "
-        f"it omits: {missing}\n--- paragraph ---\n{reserved}"
+    gap = _declared_gap_paragraph()
+
+    # (1) The contract sentence, unqualified. The forbidden spellings are the
+    #     weakenings themselves, not a paraphrase of them: each one is a phrase
+    #     that admits an unruled member into the set the sentence defines.
+    assert "each with its own recorded ruling" in reserved.lower(), (
+        "the RESERVED-members paragraph no longer carries the contract sentence "
+        "'each with its own recorded ruling', so the reservation no longer says what "
+        "it reserves for — a `fly-only:` entry whose ruling does not exist would then "
+        f"be indistinguishable from `unmanaged`:\n--- paragraph ---\n{reserved}"
+    )
+    weakenings = (
+        "not yet recorded",
+        "do not all exist",
+        "not all exist",
+        "without a recorded ruling",
+        "no recorded ruling",
+    )
+    present = [phrase for phrase in weakenings if phrase in reserved.lower()]
+    assert not present, (
+        "the RESERVED-members paragraph QUALIFIES its own contract sentence, i.e. it "
+        "has been amended to admit a member that does not satisfy it — the reservation "
+        "is then unfalsifiable and `fly-only:` collapses towards `unmanaged`. An "
+        "unruled member belongs in the separate DECLARED GAP paragraph; the contract "
+        f"sentence stays unqualified. Offending phrase(s): {present}\n"
+        f"--- paragraph ---\n{reserved}"
+    )
+
+    # (2) Partition: each `fly-only:` ref is either ruled (named above the
+    #     separator) or a declared gap (named below it) — never both, never neither.
+    ruled_refs = [ref for ref in refs if ref in reserved]
+    gap_refs = [ref for ref in refs if ref in gap]
+    both = [ref for ref in refs if ref in reserved and ref in gap]
+    assert not both, (
+        "a `fly-only:` ref is named as a RULED member and as a DECLARED GAP at the "
+        "same time, so the manifest states two different things about one entry — "
+        "the two paragraphs disagree, which is how the members list drifted before: "
+        f"{both}\n--- reserved ---\n{reserved}\n--- gap ---\n{gap}"
+    )
+    undeclared = [ref for ref in refs if ref not in reserved and ref not in gap]
+    assert not undeclared, (
+        "the manifest declares `fly-only:` ref(s) that appear neither in the "
+        "RESERVED-members paragraph (the ruled set) nor in the DECLARED GAP "
+        "paragraph (the unruled ones), so the artifact no longer says whether their "
+        "rulings exist — which is the whole content of the token. Declare the "
+        f"ruling (a reviewer reads it) or the gap: {undeclared}\n"
+        f"--- reserved ---\n{reserved}\n--- gap ---\n{gap}"
     )
 
     number_words = {"ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5, "SIX": 6}
-    match = re.search(r"\b(ONE|TWO|THREE|FOUR|FIVE|SIX)\b\s+members?\b", reserved, re.IGNORECASE)
-    assert match, (
-        "the RESERVED-members paragraph no longer states how many members it is "
-        f"describing: {reserved!r}"
+    member_match = re.search(r"\b(ONE|TWO|THREE|FOUR|FIVE|SIX)\b\s+members?\b", reserved, re.IGNORECASE)
+    assert member_match, (
+        "the RESERVED-members paragraph no longer states how many members the RULED "
+        f"set is, so its count can drift unnoticed: {reserved!r}"
     )
-    stated = number_words[match.group(1).upper()]
-    assert stated == len(refs), (
-        f"the RESERVED-members paragraph says {match.group(1).upper()} member(s), but the "
-        f"manifest declares {len(refs)} `fly-only:` issue ref(s): {refs}"
+    stated_members = number_words[member_match.group(1).upper()]
+    assert stated_members == len(ruled_refs), (
+        f"the RESERVED-members paragraph says {member_match.group(1).upper()} ruled "
+        f"member(s), but {len(ruled_refs)} `fly-only:` ref(s) are named there and are "
+        f"not declared gaps: {ruled_refs}"
+    )
+
+    # (3) The gap paragraph is present exactly when a gap exists, and its count is
+    #     its own: a partial revert that deletes the member but keeps the paragraph
+    #     (or promotes it without deleting the paragraph) reds here.
+    if not gap_refs:
+        assert not gap, (
+            "the manifest carries a DECLARED GAP paragraph while no `fly-only:` ref "
+            "is declared a gap — the paragraph is stale, and a stale paragraph is "
+            f"what a reader trusts instead of re-measuring: {gap!r}"
+        )
+        return
+    gap_match = re.search(r"\b(ONE|TWO|THREE|FOUR|FIVE|SIX)\b\s+DECLARED\b", gap, re.IGNORECASE)
+    assert gap_match, (
+        "the DECLARED GAP paragraph no longer states how many gaps it is describing, "
+        f"so a second unruled member could join it unnoticed: {gap!r}"
+    )
+    stated_gaps = number_words[gap_match.group(1).upper()]
+    assert stated_gaps == len(gap_refs), (
+        f"the DECLARED GAP paragraph says {gap_match.group(1).upper()} gap(s), but "
+        f"{len(gap_refs)} `fly-only:` ref(s) are named there: {gap_refs}"
     )
 
 

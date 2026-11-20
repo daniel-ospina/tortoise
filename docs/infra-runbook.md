@@ -4454,6 +4454,17 @@ reference states the precedence explicitly.)
 That is fail-closed and intended: the exception exists for a REAL out-of-band secret, so its removal
 is a visible revert rather than a silent staleness.
 
+⛔ **A revert is not one line, and its guards RED rather than passing quietly.** Deleting this name's
+declaration alone — or deleting it together with `fly secrets unset` but leaving the prose — leaves
+three guards red: `test_shipped_manifest_matches_the_real_workflow_and_recorded_debt`,
+`test_the_reserved_member_paragraph_names_every_fly_only_member` and
+`test_the_reviewer_entry_point_names_every_fly_only_member`. They re-derive the member counts from
+`fly-managed-secrets.txt` itself, so the deletion has to carry its prose: drop the manifest's
+`⚠️ ONE DECLARED GAP` paragraph (the one naming `#13674`) and change the reviewer entry point's
+`THREE names` to `TWO`. Read those reds as the guards working, not as a regression — measured at
+#13814's head by deleting the entry line alone, which gives `3 failed, 141 passed` on
+`tests/test_fly_secret_drift.py`.
+
 ⚠️ **The `fly-only:` ruling is still owed.** `#13674` records the lever's emergency nature but does not
 carry the `OVERRIDES:` marker the token's contract requires (`.github/scripts/fly-managed-secrets.txt:51-54`,
 `:81-90`), so the ref is checkable by **shape only** until that ruling lands on the issue. Measured
