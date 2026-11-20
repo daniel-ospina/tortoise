@@ -320,6 +320,18 @@ SWEEP_NAMES = 66
 #: name: 0`. Both sides' histories above are preserved because each row is still owned by the head
 #: that measured it; only THIS pin is this tree's.
 #:
+#: RE-CUT AGAIN → (11833, "c115acaf5bbb4163"), +2 over the (11831, …) measured at the merge
+#: `027d9b3cd69` (`origin/main` `a296e6741e5`), and both are the SAME shape: a citation PIN ROW that
+#: quotes the statement it pins, in `tests/test_github_indexer.py`. The sweep counts the quoted
+#: `.query(` in that string literal under its `string 'query' on untyped receiver` row, so a pin row
+#: added for an `entities.py` citation moves this number without a receiver appearing anywhere.
+#: Measured by bisection on this branch, one head at a time with `--repin`, never by arithmetic:
+#: `027d9b3cd69` → 11831 · `3f3db6a3df2` → 11831 · `8f7dadd61d8` → 11832 (its
+#: `("entities.py", 6444, 6449): ("row = self.g.query(", ").result_set"),`) · `1cb0eccf53a` → 11833
+#: (its `("entities.py", 6449, 6454)` row, same quoted text). ⛔ This is the DECLARED shape, not a
+#: relaxation: both rows are `tests/` strings, no SDK-holding receiver is added, and the typed-reference
+#: count is `0` on this tree, measured. The alternative — a pin table that may not quote the line it
+#: pins — would force every citation row to lose its evidence so a name-based sweep stays quiet.
 #: `main`'s own block, kept as the history of the -1:
 #: RE-CUT DOWN 11822 → (11821, "abf4a5c65f380206") by the #14003 lane, and the move is a REMOVED
 #: call site rather than a new shape: `tests/test_12941_read_your_writes.py:803` was the LAST site
@@ -330,7 +342,7 @@ SWEEP_NAMES = 66
 #: Direction matters and is the reason this is safe to take: a residue that SHRINKS cannot hide a new
 #: reference shape, and `typed references still pointing at a public name: 0` on this tree says no
 #: typed site replaced it. Measured with `--repin` on THIS tree, never by arithmetic on the last pin.
-SWEEP_RESIDUE = (11831, "0a42bc1bd08ae831")
+SWEEP_RESIDUE = (11833, "c115acaf5bbb4163")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
