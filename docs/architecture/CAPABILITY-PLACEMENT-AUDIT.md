@@ -283,7 +283,8 @@ The inventory below is the union. `d` = the label's record table in `cache_proje
 HOME — ⚠️ **not a tier**: `cache_tier` is a column on `public.point` only, and `cache_projection.py:3841`
 applies the tier predicate `if table == "point"`, so a `record_only` row-tier is mechanically expressible for
 `:Point` alone and every other label needs its own migration — §5.3's third precondition); `—` = graph-only
-bookkeeping with **no record table** (relevant in §5.2).
+bookkeeping with **no `NODE_TABLES` record table** (relevant in §5.2; ⚠️ the qualifier is load-bearing —
+`:GraphEvent` has a stream table, `public.journal_event`, that is not a `NODE_TABLES` row — §6.3).
 
 | # | shape (label) | written by | record table | node count in the measured corpus |
 |---|---|---|---|---|
@@ -391,13 +392,13 @@ propagation, the **variable-length hop walk**, the fulltext index or HNSW in SQL
 
 ⚠️ **The two rows this table used to cite for EP were DEAD CODE, and that is how the live walk stayed missed.**
 An earlier revision presented `propagation.py:81`/`:86` as *"EP propagation over belief edges"* — the shape's
-strongest citation, and its only EP one. Both are inside `_compute_confidence`, which has no production caller
+strongest citation, and its only EP-**walk** one. Both are inside `_compute_confidence`, which has no production caller
 (the method says so itself, `:72`; `tests/test_bfs_audit.py` is the audit of exactly that). The **live** walk
 is `ep.py:1620-1632`, driven by `EPISTEMIC_LABELS` (`live.py:667`) — label-parametric over **four** labels,
 which is why a `:Point` grep never found it. The verdict never rested on the dead pair (row 2's `graph`
-verdict is the walk, and the walk is live), but the evidence did, and a census whose only EP citation is dead
-code is the failure mode this document exists to prevent. The dead pair is **named rather than deleted**, so
-this correction stays visible.
+verdict is the walk, and the walk is live), but the evidence did, and a census whose only EP-**walk** citation
+is dead code is the failure mode this document exists to prevent. The dead pair is **named rather than
+deleted**, so this correction stays visible.
 
 ⚠️ **A correction this census needed against itself.** An earlier draft cited
 `domain_validators.py:106`–`:244` as one "kind filters, no walk" row and quoted a query
@@ -641,7 +642,7 @@ explicitly *a placement decision of their own*") and did not claim it; **this do
 
 | shape | readers (`file:line`) | capability |
 |---|---|---|
-| `:GraphEventMeta` | `event_store.py:557`, `:657`; `hosted_backup.py:842`; `sdk.py:15750`; `webhook_delivery.py:1052` (the head fallback) (reads); `event_store.py:491`/`:738` are the `MERGE`s and `event_store.py:1103` a `MATCH … SET m.first_seq` **RMW** that advance or restore the watermark; and `hosted_backup.py:914` (`MERGE (m:GraphEventMeta) SET m.last_seq = $last, m.first_seq = $first`) is the **restore** writer, named here because §2.6's rule points at this row as its home and an earlier pass left it out of both (⚠️ written with the file on every cite — a bare `:491` after `webhook_delivery.py:1052` is that file's `rid` params line, a `:738` there is a deadline loop and a `:1103` a docstring) | **none** |
+| `:GraphEventMeta` | `event_store.py:557`, `:657`; `hosted_backup.py:844` (`MATCH (m:GraphEventMeta) RETURN max(m.last_seq), max(m.first_seq)`); `sdk.py:15787` (`MATCH (m:GraphEventMeta) RETURN m.first_seq` — the 410/expired watermark arm of the feed, NOT `:15750`, which is `ChangeFeedDegraded`'s message assembly and names no node); `webhook_delivery.py:1060` (the head fallback — ⚠️ this cite was `:1052` when the census merged and the code has since drifted +8; re-derived here); `event_store.py:491`/`:738` are the `MERGE`s and `event_store.py:1103` a `MATCH … SET m.first_seq` **RMW** that advance or restore the watermark; and `hosted_backup.py:916` (`MERGE (m:GraphEventMeta) SET m.last_seq = $last, m.first_seq = $first`) is the **restore** writer, named here because §2.6's rule points at this row as its home and an earlier pass left it out of both (⚠️ written with the file on every cite — a bare `:491` after `webhook_delivery.py:1060` reads as THAT file's `_write_receipt` def, not as this file's `MERGE`; a bare `:738` there is a deadline loop and a `:1103` a docstring) | **none** |
 | `:EpMeta` | `sdk.py:36091`; `ep.py:473` | **none** |
 | `:Meta` | `residency.py:244`, `:292`; `sdk.py:61594` (reads); `residency.py:298` is a `DETACH DELETE` scoped by an IDENTITY key only (`MATCH (n:Meta {key:$key})`) — see the criterion note under this table. ⚠️ **LOWER BOUND, not a census**: three more live sites — a WHOLE-NODE read `MATCH (n:Meta {key:$key}) RETURN properties(n)` at `projection/__init__.py:2004` (the body of `read_config_reset`, def `:1996`, beside the `sdk.py` `:61587` read this row already carries (written as two code spans: the same address the slot above names); ⚠️ the SDK delegate `sdk.py:61614` (`_config_reset_state`) is NOT a door here — `git grep '_config_reset_state'` at this head returns the `def` and no caller), an existence probe `MATCH (m:Meta {key:'event_fts_v2'}) RETURN 1` at `projection/__init__.py:21990`, and a SECOND identity-key-scoped `DETACH DELETE` at `projection/__init__.py:2042` (the same shape as `residency.py:298`) | **none** |
 | `:WhySnapshot` | `why_snapshot.py:237` (read); `:303-304` is `_drop` — `MATCH (w:WhySnapshot) WHERE w.point_id IN $ids DELETE w`, ORPHAN cleanup scoped by IDS THE CALLER ALREADY HOLDS (not retention, and not time-scoped); `:350-351` is the retention prune — `WHERE w.assembled_at < $cutoff WITH w LIMIT 5000 DELETE w` (time-scoped) | **none** |
