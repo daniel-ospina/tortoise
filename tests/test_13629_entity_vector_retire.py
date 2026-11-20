@@ -10032,18 +10032,16 @@ def test_the_fourth_legs_container_arm_asks_the_whole_family():
         # the key is not what rules the first out (measured at this head, `[("embedding",
         # _encode(ev), 1)]` and `[("embedding", 1, 1)]` carry the same key and leg 3 answers only
         # the live-valued one) — its constant `v[1]` is. Kept in the sample so the redundancy
-        # claim is measured over them too rather than silently skipped. They have NO end-to-end
-        # row, and that is CORRECT rather than a gap: neither places the VECTOR at a top-level key
-        # (`[("embedding", 1, 1)]` produces `{'embedding': 1}` — the property IS the key, and only
-        # its constant VALUE keeps it from being a store), so there is nothing for the stop arm to
-        # refuse — the tool docstring's "neither row belongs to this
-        # arm's question" (`_CONTAINER_CALLS_ANSWERED_UPSTREAM`). ⛔ DO NOT point these at
-        # `test_the_stop_arm_must_not_store_the_vector`, as an earlier revision of this comment
-        # did: measured at this head, that test contains NO tuple literal with `"embedding"` in
-        # slot 1 at all, and its only `("embedding", 1, 1)` sits in a LIVE-VALUED comprehension
-        # (`iter([("embedding", 1, 1)])`, a real store) — a different shape from the constant-`v[1]`
-        # pair sampled here. A pointer a reader cannot follow is the defect this block exists to
-        # remove, not a citation.
+        # claim is measured over them too rather than silently skipped. Neither is a store —
+        # measured: `[("embedding", 1, 1)]` yields `{'embedding': 1}` (the property IS the key;
+        # its VALUE is a constant), and `[(1, "embedding", _encode(ev))]` yields `{1: 'embedding'}`
+        # (key `1`, value not the vector). ⛔ THEY HAVE NO END-TO-END ROW EITHER: an earlier revision
+        # of this comment pointed at `test_the_stop_arm_must_not_store_the_vector` as the home of
+        # their end-to-end rows, which is false for both — measured at this head, that test spells
+        # `[(1, "embedding", _encode(ev))]` NOWHERE, and its one `("embedding", 1, 1)` sits in a
+        # `for k, _i in iter(...)` destructuring, not the `{v[0]: v[1]}` pair this sample asks
+        # about. The pointer is DELETED rather than corrected: a pointer a reader cannot follow is
+        # the defect this block exists to remove.
         '[("embedding", 1, 1)]',
         '[(1, "embedding", _encode(ev))]',
     )
