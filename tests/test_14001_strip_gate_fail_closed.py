@@ -512,6 +512,23 @@ DEFEATED_RESOLVER_ROWS = (
         return None
     _write(props)
 """),
+    # a MASKED ask (`not gate(...) is True`) discarded, and a second guard out-voting it
+    ("masked-ask-discarded", """
+    if not _derived_mirror_required("object"):
+        props.pop("embedding", None)
+    if not _derived_mirror_required("object") is True:
+        props["embedding"] = _encode(ev)
+    _write(props)
+"""),
+    ("masked-ask-before-clean-guard", """
+    if not _derived_mirror_required("object") is True:
+        props["embedding"] = _encode(ev)
+        return None
+    if not _derived_mirror_required("object"):
+        props.pop("embedding", None)
+        return None
+    _write(props)
+"""),
     # a `{**…}` WRAPPER over a half-read mapping: the pairs list carries keys=None, which a
     # `is None` guard reads as a proof — the wrapper, not the callee, was the leak
     ("wrapper-over-half-read-mapping", """
