@@ -65,9 +65,13 @@ import sys
 # #5128 (the repo's entry-point contract): refuse a <3.12 interpreter HERE, before the
 # rest of the imports, so a stale local `python3` fails LOUDLY with a remedy instead of
 # with whichever 3.12-only construct happens to trip first. This tool was ADDED by #12901
-# and carried no guard: `tests/test_entry_point_python_guard.py` walks every entry point in
-# `tools/`, so the omission was caught the moment the file became a required-surface
-# subject rather than a lane scratch script.
+# and its floor check sat BELOW the import block, with a message that named no remedy —
+# so the #5128 arms read it as `_guard_index(...) -> None` plus a missing invocation, and
+# `tests/test_entry_point_python_guard.py` redded both. Moved above the imports, and the
+# remedy is now named. (⛔ It was never ABSENT: an earlier cut of this comment said
+# "carried no guard", which contradicted the measured state — a guard in the wrong place
+# is not a missing guard, and the distinction is the one the #5128 position arm exists for
+# — #13899 re-cut review, P2.)
 if sys.version_info < (3, 12):  # noqa: UP036 -- intentional RUNTIME guard
     print(
         f"tools/sdk_privatise.py requires Python >= 3.12 (got "
@@ -82,7 +86,6 @@ import ast
 import hashlib
 import re
 import subprocess
-import sys
 import warnings
 from collections import Counter, defaultdict
 from dataclasses import dataclass
