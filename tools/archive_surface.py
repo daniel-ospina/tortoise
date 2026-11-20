@@ -250,6 +250,7 @@ def live_surface(root: Path | None = None) -> dict:
             "would grade a different package than the manifest it read, and report CLEAN. "
             "Install this checkout (editable) or fix PYTHONPATH first"
         )
+    package_files = _package_modules(root)
     return {
         "tools": {entry.name for entry in TOOL_REGISTRY},
         "methods": {
@@ -262,7 +263,15 @@ def live_surface(root: Path | None = None) -> dict:
         # Every module the package tree carries (`tortoise/**/*.py`), repo-relative. An
         # archived `module` symbol must not appear here: a file under `tortoise/` is
         # importable and ships in the wheel.
-        "modules": _package_modules(root),
+        "modules": package_files,
+        # …and the subset of those dotted names whose OWN file carries a BODY. `live_return`
+        # reads this so "the module shipped" asks the same question arm 1 asks when it decides
+        # what LEFT (`_modules_with_a_body`): a scaffolding-only `__init__.py` is importable
+        # but carries nothing, and counting it as the module's return made the archive route
+        # arm 1 prints unusable for a module→package split (review C-F2).
+        "modules_with_a_body": _modules_with_a_body(
+            package_files, lambda path: _file_text(root, path)
+        ),
     }
 
 
@@ -615,10 +624,23 @@ def live_return(entry: dict, surface: dict) -> str | None:
         # A whole module archived from INSIDE the package. Its file must be GONE from the
         # package tree: `tortoise/archived/x.py` is importable as `tortoise.archived.x` and
         # ships in the wheel, which is the opposite of "not available".
+        #
+        # ⛔ CONTENT, not the path set — the same rule arm 1 uses to decide what LEFT. A module
+        # split into a package (`x.py` → `x/__init__.py` carrying only a docstring, the body in
+        # `x/sub.py`) leaves `x/__init__.py` importable while `x`'s own body moved; grading that
+        # as "the module came back" made the archive route arm 1 PRESCRIBES (archive the old
+        # path, then delete it again) refused by this arm after it was carried out — one
+        # legitimate refactor, two arms, no in-CI waiver, so the red had no route out (review
+        # C-F2). `modules_with_a_body` is absent only on a synthetic surface built without it,
+        # where the old path-set answer is the only one available.
         base = symbol.replace(".", "/")
+        carriers = surface.get("modules_with_a_body")
         for candidate in (f"{base}.py", f"{base}/__init__.py", f"{base}.pyi"):
-            if candidate in surface.get("modules", set()):
-                return candidate
+            if candidate not in surface.get("modules", set()):
+                continue
+            if carriers is not None and symbol not in carriers:
+                continue  # scaffolding only: the name resolves, the module's BODY is not here
+            return candidate
     return None
 
 
@@ -1268,19 +1290,37 @@ def shrink_violations(
     for key in sorted(set(waivers) - used):
         kind, symbol = key
         if kind == MODULE:
-            # ⛔ THE ARCHIVE IS NOT THE ARM-1 RECORD, so `base_entries` is the wrong question and
-            # its answer was false in the ORDINARY case: a module present at the base AND here
-            # printed "does not record `tortoise.x` (module) at all" while the same run listed it
-            # on both sides. A `module` removal is answered by the PACKAGE TREE (arm 1 above), so
-            # ask the set that decides; the round-3 wording split just never reached this branch
-            # (review F2 of PR #14039, the same "the verdict was right, the stated fact was
-            # false" class the sibling branch was fixed for).
-            why = (
-                f"{base_label} carries `{symbol}` ({kind}) and this tree still carries it, so "
-                "nothing was removed for it to waive"
-                if symbol in base_modules
-                else f"{base_label} carries no `{symbol}` ({kind}) module at all"
-            )
+            # ⛔ THE ARCHIVE IS NOT THE ARM-1 RECORD, so `base_entries` alone is the wrong
+            # question and its answer was false in the ORDINARY case: a module present at the
+            # base AND here printed "does not record `tortoise.x` (module) at all" while the
+            # same run listed it on both sides. A `module` removal is answered by the PACKAGE
+            # TREE (arm 1 above), so ask that first; the round-3 wording split just never
+            # reached this branch (review F2 of PR #14039, the same "the verdict was right, the
+            # stated fact was false" class the sibling branch was fixed for).
+            #
+            # ⛔ AND NOT THE TREE *INSTEAD* OF THE ROW: an ARCHIVED module is a row at the base
+            # and a module on NEITHER side, so answering only from the package tree flipped the
+            # same falsity one branch over — "carries no `tortoise.gone` (module) at all" over a
+            # base manifest that records it (measured: `test_a_waiver_for_a_row_that_never_LEFT_
+            # says_so_without_claiming_the_base_lacks_it` reds). The three answers are distinct
+            # facts and each states its own: the ROW is here, the LIVE module is here, neither.
+            if key in base_entries:
+                why = (
+                    f"{base_label} records `{symbol}` ({kind}) and this tree still carries it, "
+                    "so nothing was removed for it to waive"
+                )
+            elif symbol in base_modules:
+                why = (
+                    f"{base_label} carries `{symbol}` ({kind}) and this tree still carries it, "
+                    "so nothing was removed for it to waive"
+                )
+            elif symbol in head_modules:
+                why = (
+                    f"{base_label} carries no `{symbol}` ({kind}) and this tree does — that is "
+                    "an ADDITION, so nothing was removed for it to waive"
+                )
+            else:
+                why = f"{base_label} carries no `{symbol}` ({kind}) at all"
         elif key in base_entries:
             # The base DOES record it and it is still here: the stated fact must not claim
             # otherwise (review round 3 — "does not record `symbol` at all" was false on this

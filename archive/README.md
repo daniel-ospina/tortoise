@@ -224,7 +224,10 @@ make this the case that goes wrong:
    `git checkout <base-sha> -- <path>` → `archive module <dotted.path> --batch <slug> --reason
    <text>` → delete it again in the same batch. Archiving AFTER the deletion cannot work.
 2. **A renamed or moved file is the same case.** The old dotted path is the symbol that left the
-   product; archive the OLD path and treat the new one as new code.
+   product; archive the OLD path and treat the new one as new code. Splitting `x.py` into a
+   package (`x/__init__.py` carrying only a docstring, the body in `x/sub.py`) is the same case
+   and the same route: archive `x` FIRST. The scaffolding-only `__init__.py` left behind does
+   not read as the module coming back, so carrying out this route clears both arms.
 
 The gate that reads this is `check --base-ref` (bare `--base-ref` = the default branch), which
 compares the MERGE BASE's module set with this tree's and grades an `__init__.py` by its

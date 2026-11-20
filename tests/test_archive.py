@@ -1787,3 +1787,90 @@ def test_a_waiver_for_a_row_that_never_LEFT_says_so_without_claiming_the_base_la
     assert waived, problems
     assert "still carries it" in waived[0], waived[0]
     assert "does not record" not in waived[0], waived[0]
+
+
+# ── 12. the module→package split: arm 1's remedy must clear arm 2 (review C-F2) ─────
+
+def _head_sha(root: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def _surface_with_bodies(tree: Path) -> dict:
+    """The live surface `check` reads, built from a scratch tree — paths AND body-carriers.
+
+    `modules_with_a_body` is the half that makes "the module came back" ask the same question
+    arm 1 asks when it decides what LEFT, so a surface built without it exercises the old
+    path-set rule and cannot prove this one.
+    """
+    paths = arch._package_modules(tree)
+    return {
+        "tools": set(),
+        "methods": set(),
+        "forward": set(),
+        "sdk_retired": set(),
+        "modules": paths,
+        "modules_with_a_body": arch._modules_with_a_body(
+            paths, lambda path: arch._file_text(tree, path)
+        ),
+    }
+
+
+def test_a_module_split_into_a_package_can_be_archived(tree: Path) -> None:
+    """Review C-F2: carrying out arm 1's own REMEDY must clear the other arm.
+
+    The split is ordinary code: `tortoise/x.py` becomes a package whose `__init__.py` is a
+    docstring and whose body lives in `x/sub.py`. That `__init__.py` is importable, so
+    `live_return`'s module branch used to call the archived module "shipped again" — one
+    legitimate refactor met two arms that disagreed, and the route arm 1 PRINTS could never be
+    completed: archiving was refused after it was prescribed, with no in-CI waiver.
+    """
+    (tree / "tortoise" / "x.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/x.py")
+    base = _head_sha(tree)
+
+    (tree / "tortoise" / "x").mkdir()
+    (tree / "tortoise" / "x" / "__init__.py").write_text(
+        '"""The x package."""\n', encoding="utf-8"
+    )
+    (tree / "tortoise" / "x" / "sub.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "rm", "-q", "tortoise/x.py"], cwd=tree, check=True)
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref=base)
+    assert any("tortoise.x: MODULE REMOVED" in p for p in problems), (
+        f"the module's own body left with `x.py` and no other arm can see it: {problems}"
+    )
+
+    # …now carry out the remedy the violation printed: record the module, then grade again.
+    entry = _archive_module(tree, "tortoise.x")
+    _commit(tree, "archive")
+
+    assert arch.shrink_violations(tree, base_ref=base) == [], (
+        "the row arm 1 demands reds arm 2: the archive row exists and arm 1 is satisfied"
+    )
+    assert arch.surface_violations([entry], _surface_with_bodies(tree)) == [], (
+        "the archive arm refuses the row the shrink arm PRESCRIBED — a scaffolding-only "
+        "`__init__.py` is not the module coming back, and grading it as one left a "
+        "module→package split with no route out of the red"
+    )
+
+
+def test_a_module_reappearing_as_a_PACKAGE_WITH_A_BODY_is_still_a_return(tree: Path) -> None:
+    """The contrast the scaffolding rule needs: a re-exporting `__init__.py` IS the module.
+
+    Without this direction "skip every `__init__.py`" would pass the test above while archived
+    code shipped again through a package's own front door.
+    """
+    entry = _archive_module(tree, "tortoise.y")
+    (tree / "tortoise" / "y").mkdir()
+    (tree / "tortoise" / "y" / "__init__.py").write_text(
+        "from tortoise.y.sub import VALUE\n\n__all__ = ['VALUE']\n", encoding="utf-8"
+    )
+    (tree / "tortoise" / "y" / "sub.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    problems = arch.surface_violations([entry], _surface_with_bodies(tree))
+    assert any("tortoise.y" in p and "REAPPEARED" in p for p in problems), (
+        f"the package's `__init__.py` carries statements, so the module shipped again: {problems}"
+    )
