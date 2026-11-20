@@ -1836,7 +1836,7 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     of hard-blocking the deploy in CI.
 
     ⛔ The exit code IS pinned now, and the policy is NOT "any violation fails":
-    `open_route_b` (defined at :1905) records the route-(b) transitions that are OPEN,
+    `open_route_b` (defined at :1904) records the route-(b) transitions that are OPEN,
     and for a name in it a `STALE DECLARATION` carrying the `which shadows [env]`
     clause is tolerated and the code pinned to 1 — with a withheld-shadow control
     that must come back 0, so the two fixtures cannot collapse into one run. Every
@@ -2230,9 +2230,10 @@ _READER_NEEDLE = {
     "entrypoint.sh": "TORTOISE_EMBEDDER_WARMUP",
 }
 #: A numbered reader entry STARTS a new claim, so its symbol is its own. Two
-#: spellings, because the two artifacts are: the manifest's `#   1. …` inside a
-#: comment block, and the runbook's `> 1. …` inside a blockquote. The ordinal is
-#: CAPTURED, because the prose below binds its range cites to it.
+#: spellings are tolerated — a `#   1. …` comment block (the manifest's old copy, gone
+#: with the `fly-only:#13674` block) and a `> 1. …` blockquote (the runbook, the only
+#: copy left). The ordinal is CAPTURED, because the prose below binds its range cites
+#: to it.
 _READER_ENTRY_ORDINAL_RE = re.compile(r"^\s*(?:#|>)?\s*(\d+)\.\s")
 #: The sentence that ENDS the numbered claims in both artifacts: the prose after
 #: it names no function, so nothing in it may inherit reader 5's symbol.
@@ -2242,7 +2243,8 @@ _READER_SYMBOL_RESET_RE = re.compile(
     r"function names? (?:above )?are the invariant", re.IGNORECASE
 )
 #: The sentence that names, BY ORDINAL, which readers a pair of range cites below
-#: belongs to — the manifest says "Readers 2 and 3", the runbook "Number 2 and 3".
+#: belongs to — the runbook says "Number 2 and 3" (the manifest's "Readers 2 and 3" copy
+#: went with the block this change deletes).
 #: Without this the ranges could only be needle-checked, and the needle passes a
 #: range re-pinned onto ANY flag-reading line, the wrong reader included.
 _READER_ORDINAL_SENTENCE_RE = re.compile(r"(?:Readers?|Numbers?)\s+(\d+)\s+and\s+(\d+)")
@@ -2585,11 +2587,15 @@ def _reader_citations(
         f"actually cites): {misdirected}. The entries were reordered or renumbered under "
         f"sentences that still describe the old reader"
     )
-    # Non-vacuity, PER ARTIFACT: the two artifacts bind identity differently, so the
-    # requirement is passed in by the caller that knows which sentences its copy carries
-    # (the runbook states `Number 4 … the production pre-warm`; the manifest names each
-    # entry's file inline and binds 2/3 with `Readers 2 and 3`). Without this, deleting
-    # the binding sentence silently removes the only check on number reuse.
+    # Non-vacuity, PER ARTIFACT: identity is bound by DIFFERENT sentences, so the
+    # requirement is passed in by the caller that knows which sentences its copy carries.
+    # The runbook states `Number 4 … the production pre-warm` and binds 2/3 with
+    # `Number 2 and 3`; the manifest's copy (which named each entry's file inline and
+    # bound 2/3 with `Readers 2 and 3`) went with the `fly-only:#13674` block this change
+    # deletes, so the parameter stays at ONE caller on purpose — a future artifact must
+    # pass `identity_claims_required` for itself rather than inherit the runbook's arm.
+    # Without it, deleting the binding sentence silently removes the only check on
+    # number reuse.
     assert claims or not identity_claims_required, (
         f"{artifact}: the section no longer says which reader sits at which NUMBER (the "
         f"'Number N is …' sentence, or a '<class> (N, M)' group), so nothing binds entry "
@@ -3538,10 +3544,9 @@ def _declared_gap_paragraph() -> str:
     rather than a line range that drifts under every edit above it. The heading is
     matched as `⚠️ <COUNT> DECLARED GAP(S)` at the start of the stripped line —
     `re.match` is start-anchored, so a prose line that merely CONTAINS "ONE
-    DECLARED GAP" still does not anchor — rather than on `DECLARED GAP` alone: the
-    RESERVED paragraph above refers to "a DECLARED GAP", so the bare phrase would
-    anchor this reader INSIDE the contract paragraph and silently read the wrong
-    block. ⛔ The COUNT is part of the anchor, not the literal `ONE`: a correctly
+    DECLARED GAP" still does not anchor — rather than on `DECLARED GAP` alone. ⛔ The
+    COUNT is part of the anchor, not the literal `ONE` — that part stands on its own: a
+    correctly
     declared second gap heads its paragraph `⚠️ TWO DECLARED GAPS`, and pinning
     `ONE` made that artifact red while demanding a gap it had already declared
     (#13814 review rounds 10-11).
