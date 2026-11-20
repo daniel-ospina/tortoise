@@ -7598,6 +7598,10 @@ class _EntityHandlers:
         # caller's own dict is left alone because the live door journals it. ⛔ BOTH labels
         # are asked, not `source` alone (#13854 review): this is `_upsert_document`'s
         # `:Source {url}` key space, so one counter's stop is evidence about half the node.
+        # That does not cross the census's union rule (`_fold_consults_gate`'s
+        # ⛔ COVERAGE IS A UNION ACROSS WRITERS): it requires each served type to be asked
+        # about by SOME writer, never a cross-product, and asking MORE can only under-strip
+        # (a graph copy the record no longer serves), never lose one the record keeps.
         _extra = ev
         if not _derived_mirror_required("document") and not _derived_mirror_required("source"):
             _extra = dict(ev)
