@@ -8274,6 +8274,77 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ AND THE SAME FAMILY RE-ORDERED (`#13788` round 12, measured): `sorted(...)` and
+        #    `reversed(...)` RETURN THE SAME ELEMENTS, so a view behind either places the same
+        #    pair `/` the same key. The container-call family was spelled out at FOUR seams with
+        #    FOUR different member sets and neither name appeared in any of them, so 21 of 100
+        #    generated rows CERTIFIED while the writer, executed, landed the vector:
+        #
+        #      props.update(sorted({"embedding": _encode(ev)}.items()))                   CERTIFIED
+        #      props |= dict(list(reversed({"a": ("embedding", _encode(ev))}.values())))  CERTIFIED
+        #      props |= {k: _encode(ev) for k, _v in reversed({("embedding", 1): 1}.keys())}  CERTIFIED
+        #
+        #    `_CONTAINER_CALLS` is the ONE include list the four seams now share, and `sorted`'s
+        #    `key=`/`reverse=` re-order without re-selecting, so the keyword row below is the
+        #    same store too (that is why the arm does not filter keywords).
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(sorted({"embedding": _encode(ev)}.items()))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict(list(reversed({"a": ("embedding", _encode(ev))}.values())))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in reversed({("embedding", _encode(ev)): 1}.keys())}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict(sorted({"embedding": _encode(ev)}.items(), reverse=True))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(sorted([("embedding", _encode(ev))]))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict.fromkeys(sorted({"embedding": 1}), _encode(ev))
+        return None
+    _write(props)
+""",
+        # ⛔ AND `iter(...)`, the same pass-through one call over (`#13788` round 12, measured):
+        #    `iter(x)` yields x's elements, so it belongs to `_CONTAINER_CALLS` with `list`/`sorted`.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(iter({"embedding": _encode(ev)}.items()))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in iter([("embedding", _encode(ev))])}
+        return None
+    _write(props)
+""",
     )
     # ⛔ AN EMPTIED TUPLE IS A GREEN TEST ASSERTING NOTHING (`#13788`, measured by the review
     # of this branch). These tuples run to hundreds of lines and a careless trim — or a bad
@@ -9540,6 +9611,43 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= dict.fromkeys({"embedding_model": 1}, _encode(ev))
+        return None
+    _write(props)
+""",
+        # ⛔ AND THE RE-ORDERING FAMILY MUST NOT SWALLOW A NON-STORE (`#13788` round 12).
+        #    `sorted`/`reversed` are unwrapped because they keep the ELEMENTS, so the two
+        #    narrowings every other arm applies still decide: a scalar value is not a pair, and a
+        #    pair keyed by a different property places nothing. Certifying both is what keeps the
+        #    include list from becoming a blanket "anything sorted is a store".
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(sorted({"a": 1, "b": 2}.values()))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict(sorted([("embedding_model", _encode(ev))]))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(sorted([("embedding", None)]))
+        return None
+    _write(props)
+""",
+        # …and a KEY-VIEW read as a keys source places no vector even when the KEY it yields is
+        # a pair: `{k: _encode(ev) for k in sorted({("embedding", 1): 1}.keys())}` keys the new
+        # mapping BY the pair (measured: nothing lands under `embedding`), so it is an honest
+        # write-stop and the refusal above must not become "any view of a pair is a store".
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in sorted({("embedding", 1): 1}.keys())}
         return None
     _write(props)
 """,

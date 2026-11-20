@@ -1102,6 +1102,43 @@ def _callee_name(call) -> str:
 #: each re-open the hole.
 _STATEMENT_RUNNERS = ("run", "query", "execute", "write")
 
+#: Callee names that RETURN THE SAME ELEMENTS they are given, so a wrapper of this family never
+#: changes WHICH element the check sees — `list`, `tuple`, `set` (re-columned), `sorted` (re-ordered),
+#: `reversed` (re-ordered) and `iter` (the one-shot view of the same elements). ⛔ ONE INCLUDE LIST, ASKED AT EVERY SEAM THAT UNWRAPS A CONTAINER
+#: (`#13788` round 12, measured): the family used to be spelled out FOUR times with four different
+#: member sets, and the two names missing from all four — `sorted`/`reversed` — CERTIFIED a stop arm
+#: that STORES the vector, 21 of 100 generated rows, each runtime-checked:
+#:
+#:     props.update(sorted({"embedding": _encode(ev)}.items()))            CERTIFIED, stores
+#:     props |= dict(list(reversed({"a": ("embedding", _encode(ev))}.values())))  CERTIFIED, stores
+#:     props |= {k: _encode(ev) for k, _v in reversed({("embedding", _encode(ev)): 1}.keys())}
+#:     props.update(iter({"embedding": _encode(ev)}.items()))                       CERTIFIED, stores
+#:
+#: The documented residual licensed it by calling `sorted(...)`/`iter(...)` "a call whose arguments
+#: this module cannot read" — FALSE for this shape: each takes ONE readable source and yields exactly
+#: that source's elements (in an order, or as an iterator). A call-result residual is still the right
+#: answer for `zip(NAMES, VALUES)` and `map(f, …)`, which DERIVE new elements the module cannot pair
+#: statically, and for `filter(pred, …)`, which may DROP them; it was never a reason to skip a
+#: wrapper that passes the same elements through.
+_CONTAINER_CALLS = ("list", "tuple", "set", "sorted", "reversed", "iter")
+
+
+def _container_call_operand(node):
+    """The operand of a container wrapper that yields the SAME ELEMENTS, else `None`.
+
+    Keywords are not filtered: `list`/`tuple`/`set`/`reversed` take none, and `sorted`'s
+    `key=`/`reverse=` re-order without re-selecting, so for the *element* question this arm asks,
+    every one of them is transparent. (The callee itself is still matched by name — this is an
+    include list, and a project helper of the same name is the caller's own spelling of it.)
+    """
+    import ast
+
+    if not isinstance(node, ast.Call) or len(node.args) != 1:
+        return None
+    if _callee_name(node) not in _CONTAINER_CALLS:
+        return None
+    return node.args[0]
+
 
 def _runs_statements(call) -> bool:
     """Does this call hand its arguments to something that executes them?"""
@@ -1896,9 +1933,14 @@ def _pairs_operand_stores_the_vector(node, alias_keys: frozenset[str] = frozense
     ⛔ WHAT THIS DELIBERATELY DOES NOT DO — the two halves that are a DIFFERENT rule:
     a container of MAPPINGS (`[{…}]`) is NOT an iterable of pairs (`dict.__ior__` rejects it
     with a `ValueError`), so it is not recognized here; and a pairs iterable BUILT BY A CALL
-    WHOSE ARGUMENTS THIS MODULE CANNOT READ (`zip(NAMES, VALUES)`, `map(...)`, `sorted(...)`,
-    `iter(...)`) is the stated residual — extracting a pair out of a call result is data flow
-    this module does not do, and it is disclosed here rather than left to be rediscovered.
+    WHOSE ARGUMENTS THIS MODULE CANNOT READ (`zip(NAMES, VALUES)`, `map(f, …)`, `filter(pred, …)`)
+    is the stated residual — those DERIVE new elements (a pairing, a projection, a selection),
+    which is data flow this module does not do, and it is disclosed here rather than left to be
+    rediscovered. ⛔ `sorted(...)` AND `iter(...)` USED TO BE IN THAT LIST AND ARE NOT ANY MORE
+    (`#13788` round 12, measured): neither derives anything — each takes ONE readable source and
+    yields exactly that source's elements, in an order or as an iterator, so they are PASS-THROUGH
+    wrappers of the family `_CONTAINER_CALLS` names, and declaring them residual was the license
+    that left 21 of 100 generated rows CERTIFIED while the writer stored the vector.
     ⛔ "A CALL" DOES NOT INCLUDE A COMPREHENSION, and this list used to say "a generator
     expression" (`#13788`, corrected by the review of `e5ee00efb`, measured there): the
     `GeneratorExp`/`ListComp`/`SetComp` arm below scans `elt` and the generators, so an
@@ -2083,14 +2125,15 @@ def _pairs_operand_stores_the_vector(node, alias_keys: frozenset[str] = frozense
                 or any(_pairs_operand_stores_the_vector(generator.iter, alias_keys=alias_keys)
                        for generator in node.generators))
     if isinstance(node, ast.Call):
-        name = _callee_name(node)
         # ⛔ `set(...)` IS THE SAME PAIRS ITERABLE (`#13788`, measured at `6504b28f`):
         # `set([("embedding", vec)])` places the key exactly as the list literal does — the
         # `_pairs_store_the_vector` docstring already says a SET literal is an iterable of pairs
         # — yet this arm named only `list`/`tuple`, while three sibling arms name `set` too. Six
         # matrix rows measured it CERTIFIED beside its refused twin.
-        if name in ("list", "tuple", "set") and len(node.args) == 1 and not node.keywords:
-            return _operand_stores_the_vector(node.args[0], alias_keys=alias_keys)
+        # ⛔ AND THE FAMILY IS ONE INCLUDE LIST NOW (`#13788` round 12): `sorted`/`reversed` only
+        # RE-ORDER the elements, so they place the same pair — see `_CONTAINER_CALLS`.
+        if (operand := _container_call_operand(node)) is not None:
+            return _operand_stores_the_vector(operand, alias_keys=alias_keys)
         # ⛔ THE ITEMS VIEW IS THE SAME PAIRS ITERABLE (`#13788`, measured at `40db94f1`):
         # `update({"embedding": vec}.items())` and the comprehension over it
         # (`{k: v for k, v in {"embedding": vec}.items()}`) both place the key and both
@@ -2290,9 +2333,10 @@ def _source_holds_the_store_anywhere(node) -> bool:
     if isinstance(node, ast.Starred):
         return _source_holds_the_store_anywhere(node.value)
     if isinstance(node, ast.Call):
-        name = _callee_name(node)
-        if name in ("list", "tuple") and len(node.args) == 1 and not node.keywords:
-            return _source_holds_the_store_anywhere(node.args[0])
+        # ⛔ ONE INCLUDE LIST (`#13788` round 12): `sorted`/`reversed` re-order the same
+        # elements, so a store behind either is the same store this scan exists to find.
+        if (operand := _container_call_operand(node)) is not None:
+            return _source_holds_the_store_anywhere(operand)
         if (isinstance(node.func, ast.Attribute) and node.func.attr == "copy"
                 and not node.args and not node.keywords):
             return _source_holds_the_store_anywhere(node.func.value)
@@ -2888,8 +2932,10 @@ def _comprehension_source_yields(source, _depth: int = 0):
         return resolved or None
     if isinstance(source, ast.Call):
         name = _callee_name(source)
-        if name in ("list", "tuple", "set") and len(source.args) == 1 and not source.keywords:
-            return _comprehension_source_yields(source.args[0], _depth + 1)
+        # ⛔ ONE INCLUDE LIST (`#13788` round 12): a `sorted(...)`/`reversed(...)` source yields
+        # the same elements as the source it wraps, so it is unwrapped like `list`/`tuple`/`set`.
+        if (operand := _container_call_operand(source)) is not None:
+            return _comprehension_source_yields(operand, _depth + 1)
         # ⛔ A MAPPING BUILDER'S KEYS ARE ITS OPERAND'S KEYS (`#13788`, measured). The note
         # that used to stand here said a `dict(...)` arm was redundant because `_own_walk`
         # answers the inner call — that is FALSE for this call: the inner literal's VALUE is a
@@ -3201,9 +3247,8 @@ def _sequence_options(node, _depth: int = 0):
     copied = _transparent_copy_operand(node)
     if copied is not None:
         return _sequence_options(copied, _depth + 1)
-    if (isinstance(node, ast.Call) and not node.keywords and len(node.args) == 1
-            and _callee_name(node) in ("list", "tuple", "set")):
-        return _sequence_options(node.args[0], _depth + 1)
+    if (operand := _container_call_operand(node)) is not None:
+        return _sequence_options(operand, _depth + 1)
     # ⛔ A MAPPING'S VIEW IS A SEQUENCE, AND IT BELONGS IN THIS RESOLVER (`#13788` review
     #    round 10, P1, measured). `_mapping_items_pairs` now answers `.items()`/`.values()`,
     #    but the wrappers this resolver owns are asked BEFORE any caller reaches it, so
