@@ -16721,12 +16721,16 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     # review, P2). The I7 pair above closed this class for two anchors and left this
     # equally bindable clause unbound: the row states `:45867` as CURRENT
     # ("the same grep also hits `:45867`"), and REVERTING the re-derivation to the
-    # pre-fix `:45728` reddened NOTHING — the delta adds no `def test_`, so this selection is
-    # the same at `4747fb570e`: `pytest tests/test_7949_capstone_measure.py -k 'D5 and not
+    # pre-fix `:45728` reddened NOTHING — the delta added no `def test_` at `4747fb570e`, so this
+    # selection was the same there: `pytest tests/test_7949_capstone_measure.py -k 'D5 and not
     # current_claim' -q` -> `3 passed` (the `current_claim` census arm this branch added is
-    # excluded so the selector keeps its `4747fb570e` size — `-k D5` alone selects 4 at this
-    # head), plus `pytest tests/test_12184_shifted_cites.py -q` -> `14 passed`, i.e.
-    # `17 passed` and no red. ⛔ The `20 passed` an earlier cut printed is DELETED: it measures 17.
+    # that delta's ONLY `def test_`, and it is excluded so the selector keeps its `4747fb570e`
+    # size — `-k D5` alone selects 4 at this head), plus `pytest
+    # tests/test_12184_shifted_cites.py -q` -> `14 passed`, i.e. `17 passed` and no red.
+    # ⛔ The `20 passed` an earlier cut printed is DELETED: it measures 17.
+    # ⛔ An earlier cut said "the delta adds no `def test_`" as a PRESENT-tense premise, which
+    # the addition two clauses later falsifies (#13879 review round 6, P3) — the exclusion
+    # exists BECAUSE that arm was added, so the premise is stated with its head.
     # Both parts were measured unique at that head: the regex matches the D5 row once,
     # and the needle occurs in `sdk.py` once — so this pins the ADDRESS, not just a
     # number that happens to sit on the line.
