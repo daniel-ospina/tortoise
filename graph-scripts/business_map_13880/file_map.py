@@ -1095,8 +1095,13 @@ def write_map(doc: dict) -> int:
         for line in repeated[:10]:
             print(f"  ! {line}", file=sys.stderr)
         if not repeated:
-            print("  (…each of those markers was re-reported above, in this "
-                  "run's own `!!` lines)", file=sys.stderr)
+            # ⛔ THE DECLINED CLASS HAS NO MARKER, so it must not be told one
+            # exists — the sentence directly above says "NO marker exists", and a
+            # reader who believes otherwise lands on bullet 3's "keep its marker
+            # in `written`", a line that can never clear itself (#13913 review
+            # round 20).
+            print("  (…each of those was re-reported above, in this run's own "
+                  "`!!` lines)", file=sys.stderr)
         # ⛔ THE REMEDY IS PER CLASS. The marker-bearing lines (a landed write
         # whose follow-up step failed), the `unbound endpoint` lines and the
         # `create_edge returned created=` lines (both writes that never happened,
