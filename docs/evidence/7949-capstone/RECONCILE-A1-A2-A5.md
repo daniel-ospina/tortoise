@@ -826,8 +826,13 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — �
 # ⚠️ The third file was added after this record was written, so the earlier "TWO files … 59"
 # was true of the head this block was first measured on (`e49788706a`, which reads 2 files /
 # 59 lines / 62 occurrences) and is re-measured here rather than left stale.
-git grep -o 'result\["relations"\]' -- tests/ | wc -l    # 66 OCCURRENCES on this merge (63 lines + the 3
-                                                          # doubly-named ones below). ⛔ A count is only
+git grep -o 'result\["relations"\]' -- tests/ | wc -l    # ⛔ NO COUNT IS TYPED HERE EITHER (#13802 review,
+                                                          # round 18, P2 — MEASURED: the figure this line
+                                                          # carried was already stale, because THIS PR adds
+                                                          # occurrences in its own guard file, so any total
+                                                          # written here is a claim about a head that is not
+                                                          # yours). The `-o` count is lines PLUS the
+                                                          # doubly-named ones below. ⛔ A count is only
                                                           # as good as the BASE it was taken at, and the
                                                           # earlier text's pair belonged to a different
                                                           # base than the sentence it sat on claimed: its

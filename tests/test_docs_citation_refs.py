@@ -2048,12 +2048,17 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # real sentences in RECONCILE-A1-A2-A5.md, about a DIFFERENT command) were then refused.
     # This anchor is the `-- tortoise/` SHORTHAND FOR THAT DIFF, and the backticks are what
     # identifies it as a command spelling rather than a flag on any `git` invocation.
-    r"|`-- tortoise/`"
+    r"|\**`-- tortoise/`\**"
     # ⛔ AND THE TREE'S OTHER SUBJECT NOUNS (#13802 review, round 13, P2 — MEASURED: the SAME
     # verb and the SAME answer were refused on `set` and GREEN on `diff`/`files`/`paths`/
     # `directory`, every one of them a noun this pattern's own ANSWER alternation carries, so
     # the stated residual — "a noun outside both lists" — did not describe them)
-    r"|`?tortoise/`?\s+(?:set|side|part|diff|files?|paths?|directory|tree|subtree|"
+    # ⛔ AND EMPHASIS AROUND THE ANCHOR ITSELF (#13802 review, round 18, P1 — MEASURED: the
+    # pattern tolerated emphasis around the VERB and before the ANSWER but not around the
+    # anchor, so `The **`tortoise/`** set prints NOTHING` and `**`-- tortoise/`** prints
+    # NOTHING` were GREEN here while the detector read the second — the exact
+    # "detector-read, ban-blind" shape, on the rail where this ban is the only arm)
+    r"|\**`?tortoise/`?\**\s+(?:set|side|part|diff|files?|paths?|directory|tree|subtree|"
     r"module\s+set|delta|changes?)(?:\s*\([^)]{0,90}\))?[^`]{0,40}?"
     # ⛔ AND THE INDIRECT REFERENCE (#13802 review, round 5, P2 — MEASURED). The guarded
     # document states the answer WITHOUT repeating the command: "at THIS head the command
@@ -2198,7 +2203,7 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # one requires an ANSWER to open a clause and `tortoise/` to follow inside the same
     # sentence, so ordinary prose that merely begins with `Nothing` is untouched. The
     # emptiness-only cut of round 13 covered ONE direction of the two — that is round 16's fix.
-    r"|(?:^|[.;:!?]\s|\n)(?:NOTHING|Nothing|EMPTY|Empty|NONE|None|ZERO|Zero|`?\[\]`?"
+    r"|(?:^|[.;:!?]\s|\n)[*_`]{0,3}(?:NOTHING|Nothing|EMPTY|Empty|NONE|None|ZERO|Zero|`?\[\]`?"
     r"|both\s+(?:files?|paths?|modules?|entries)"
     r"|(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:files?|paths?|modules?|"
     # ⛔ AND THE OTHER COUNT NOUNS ARE IN THIS CLASS TOO (#13802 review, cycle 9, P2 —
@@ -2238,7 +2243,11 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # general verb class above — a verb the generic class knows and THIS family does not is the
     # same hole in the verb-before-path direction)
     r"|is|are|gets|returns|yields|prints|adds|removes|edits|reports?|gives|outputs?|shows?"
-    r"|answers?|resolves?|reveals?|reads?|comes? back)\s+"
+    r"|answers?|resolves?|reveals?|reads?|comes? back)"
+    # ⛔ WITH THE SAME INSERTION TOLERANCE FAMILY A CARRIES (#13802 review, round 18, P2 —
+    # MEASURED: `This diff carries, at this head, no `tortoise/` path at all` and
+    # `This diff carries (measured at this head) no …` were GREEN while the bare form red)
+    r"(?:,\s*[^,.;\n]{1,30},|\s*\([^)]{0,90}\))?\s+"
     r"(?:no|zero|only)\s+`?tortoise/[^`]*`?"
     # ⛔ AND THE SYMBOL VERBS IN THEIR OWN ALTERNATIVE (`` cannot anchor before `-` or `→`,
     # which is why putting them in the list above left them blind — MEASURED, round 17)
@@ -2445,6 +2454,15 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "`-- tortoise/` gives no tortoise/",
         "`-- tortoise/` -> no `tortoise/hosted_api.py`",
         "`-- tortoise/` : no tortoise/",
+        # ⛔ AND EMPHASIS AROUND THE ANCHOR, AND INSERTIONS IN FAMILY C (#13802 review, round 18 —
+        # the pattern tolerated emphasis around the VERB and before the ANSWER but not around
+        # the ANCHOR, so `**`-- tortoise/`** prints NOTHING` was GREEN here while the detector
+        # read it; family C had none of family A's insertion tolerance)
+        "The **`tortoise/`** set prints NOTHING at this head.",
+        "**`-- tortoise/`** prints NOTHING at this head.",
+        "This diff carries, at this head, no `tortoise/` path at all.",
+        "This diff carries (measured at this head) no `tortoise/` path at all.",
+        "`None` is what the `tortoise/` set holds at this head.",
         "`-- tortoise/` (run at this head) prints nothing",
         "The `tortoise/` set (measured with `git diff --name-only origin/main...HEAD -- tortoise/`) is empty",
         # ⛔ AND THE FOUR FORMS THE DETECTOR READ WHILE THIS BAN DID NOT (#13802 review,
