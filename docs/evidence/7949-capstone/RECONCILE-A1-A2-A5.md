@@ -778,15 +778,18 @@ git grep -n 'result\["relations"\]' -- tortoise/        # at this record's merge
                                                           # (§0 above). (⚠️ the `-- tortoise/` scope is
                                                           # the claim: unscoped it also matches the
                                                           # reader below)
-git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — THREE files on this merge,
-                                                          # 63 LINES (`-c` counts lines per file; re-measured
-                                                          # on the merged tree, where the two finder lines below
-                                                          # add their own matches):
+git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — ⛔ NO COUNT AND NO FILE TOTAL IS TYPED HERE
+                                                          # (#13802 review, round 17, P2 — MEASURED: the count this line carried was stale
+                                                          # at the head being merged, because THIS PR adds a match in its own guard file —
+                                                          # a total written here counts itself. `-c` counts lines per file; the per-file
+                                                          # figures below hold, and the command is the reading:
                                                           # tests/test_10999_batch_story_relations.py —
                                                           # 56 — assertions on the channel; tests/eval/
                                                           # write_path/test_write_path_relation_lane.py
                                                           # — 3 — and tests/test_7949_capstone_measure.py
                                                           # — 4 — SOURCE-TEXT scans and one prose comment, not
+                                                          # (and THIS PR's own guard file adds ONE more match,
+                                                          #   which is why the totals above are not typed),
                                                           # consumers: one is the `extractor_v2.py` scan
                                                           # (`:15427`) that derives the doc's cite, two are the
                                                           # ⛔ NEITHER side of this merge's conflict printed this

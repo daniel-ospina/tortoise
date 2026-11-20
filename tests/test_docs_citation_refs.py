@@ -2220,8 +2220,17 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # verb and the path, so an ordinary sentence ("this diff carries `tortoise/x.py`
     # because …") is untouched.
     r"|\b(?:carries|touches|has|holds|contains|includes|names|lists|reads|changes"
-    r"|is|are|gets|returns|yields|prints|adds|removes|edits)\s+"
+    # ⛔ AND EVERY VERB THE REST OF THIS PATTERN CARRIES (#13802 review, round 17, P2 —
+    # MEASURED: with `reports|gives|outputs|shows|=|:|->|→`, `no `tortoise/hosted_api.py`` was
+    # detector-read and ban-blind, because this family's list was written separately from the
+    # general verb class above — a verb the generic class knows and THIS family does not is the
+    # same hole in the verb-before-path direction)
+    r"|is|are|gets|returns|yields|prints|adds|removes|edits|reports?|gives|outputs?|shows?"
+    r"|answers?|resolves?|reveals?|reads?|comes? back)\s+"
     r"(?:no|zero|only)\s+`?tortoise/[^`]*`?"
+    # ⛔ AND THE SYMBOL VERBS IN THEIR OWN ALTERNATIVE (`` cannot anchor before `-` or `→`,
+    # which is why putting them in the list above left them blind — MEASURED, round 17)
+    r"|\s(?:=|:|->|→)\s+(?:no|zero|only)\s+`?tortoise/[^`]*`?"
     r"(?:\s+(?:paths?|files?|modules?|edits?)\b)?"
     r"|\b(?:carries|touches|has|holds|contains|includes|names|lists)\s+"
     r"`?tortoise/[^`]*`?\s+(?:paths?|files?|modules?)\b"
@@ -2409,6 +2418,13 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "`-- tortoise/` returns the empty set at this head",
         "`-- tortoise/` prints the empty list at this head",
         "the `tortoise/` set holds the empty set at this head",
+        # ⛔ AND `no <path>` BEHIND EVERY VERB THE PATTERN CARRIES (#13802 review, round 17, P2 —
+        # MEASURED: `reports|gives|outputs|shows` and the symbol verbs `=`/`:`/`->`/`→` left
+        # `no `tortoise/hosted_api.py`` detector-read and ban-blind)
+        "`-- tortoise/` reports no `tortoise/hosted_api.py`",
+        "`-- tortoise/` gives no tortoise/",
+        "`-- tortoise/` -> no `tortoise/hosted_api.py`",
+        "`-- tortoise/` : no tortoise/",
         "`-- tortoise/` (run at this head) prints nothing",
         "The `tortoise/` set (measured with `git diff --name-only origin/main...HEAD -- tortoise/`) is empty",
         # ⛔ AND THE FOUR FORMS THE DETECTOR READ WHILE THIS BAN DID NOT (#13802 review,
