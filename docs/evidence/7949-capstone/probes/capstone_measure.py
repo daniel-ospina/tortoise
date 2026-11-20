@@ -4235,6 +4235,15 @@ def measure_e6(*, packs_dir: Path | str | None = None,
     Returns a measurement, never a verdict: ``build_e6_row`` turns it into a row. A pack
     registry that cannot be loaded is reported as an ``error`` (a NAMED gap, never zeros —
     the same rule the A-row census follows), so the rest of the table is still scored.
+
+    ⛔ ``load_errors`` IS CARRIED, and it is not a detail (#11695 review P1). The registry
+    ISOLATES a pack whose manifest fails validation and records it there, so that pack's
+    declared rows silently LEAVE ``population.declared`` — and the row would then read
+    ``unbound_and_unexplained = 0`` GREEN over a population that excluded a whole pack,
+    which is exactly the false PASS §3.8's floor exists to prevent. The floor cannot catch
+    it: measured with one manifest corrupted, the population fell 45 -> 41, still above the
+    floor of 30, and every other cell read clean. A population that is not "every declared
+    row across the installed packs" is therefore REFUSED rather than scored.
     """
     census_tool = _pack_census_module()
     relative = os.path.relpath(Path(packs_dir or (ROOT / PACKS_DIR)), ROOT)
@@ -4247,6 +4256,7 @@ def measure_e6(*, packs_dir: Path | str | None = None,
         "defects": [], "unbound_and_unexplained": 0,
         "written": {"direct": 0, "mediated": 0, "none": 0, "unmeasured": 0},
         "written_source": "",
+        "load_errors": {},
         "error": None,
     }
     try:
@@ -4265,7 +4275,12 @@ def measure_e6(*, packs_dir: Path | str | None = None,
                 rows.append((pack, surface, row))
     population = census.get("population") or {}
     pnia = census_tool.RELATION_PREDICATE_NOT_IN_ALLOWLIST
+    # An isolated pack's rows are NOT in `packs`, so they are not in `declared` either — see
+    # this function's docstring. Carried rather than dropped, and the row refuses on it.
+    load_errors = census.get("load_errors") or {}
     measurement.update({
+        "load_errors": ({str(pack): str(reason) for pack, reason in load_errors.items()}
+                        if isinstance(load_errors, dict) else {"<census>": str(load_errors)}),
         "packs": population.get("packs", len(packs)),
         "relations": population.get("relations", 0),
         "hierarchies": population.get("hierarchies", 0),
@@ -4300,7 +4315,7 @@ def measure_e6(*, packs_dir: Path | str | None = None,
 
 
 def e6_outcome(*, declared: int, unbound: int, bars: dict,
-               measured: bool = True) -> dict:
+               measured: bool = True, population_complete: bool = True) -> dict:
     """E6: ``unbound_and_unexplained = 0``, over a population floored at 30 rows.
 
     ⛔ THE FLOOR IS THE POINT, and it refuses the false PASS at the top of the row: a
@@ -4311,13 +4326,24 @@ def e6_outcome(*, declared: int, unbound: int, bars: dict,
     """
     floor = bars["floors"]["e6_declared_rows"]
     limit = bars["E6"]["unbound_max"]
+    # ⛔ TWO REFUSALS, both of them "the population is not the registered one": under the
+    # floor, and a pack set the registry could not fully load (`population_complete`). The
+    # second is not redundant — measured, one isolated pack leaves 41 rows, above the floor,
+    # and the only trace would be a smaller denominator.
     below = measured and declared < floor
-    return outcome(measured=measured, below_floor=below,
-                   passed=(measured and not below and unbound <= limit),
-                   bar=(f"unbound_and_unexplained = {limit} (population floor {floor} "
-                        f"declared rows)"),
-                   value=(f"unbound_and_unexplained={unbound} of declared={declared}"
-                          if measured else "unmeasured"))
+    incomplete = measured and not population_complete
+    bar = (f"unbound_and_unexplained = {limit} (population floor {floor} declared rows; a "
+           f"pack set the registry could not fully load is REFUSED)")
+    if not measured:
+        value = "unmeasured"
+    elif incomplete:
+        value = (f"unbound_and_unexplained={unbound} of declared={declared} — but the pack "
+                 f"set did not fully load, so this is NOT the registered population")
+    else:
+        value = f"unbound_and_unexplained={unbound} of declared={declared}"
+    return outcome(measured=measured, below_floor=(below or incomplete),
+                   passed=(measured and not below and not incomplete and unbound <= limit),
+                   bar=bar, value=value)
 
 
 def build_e6_row(e6: dict, *, bars: dict) -> dict:
@@ -4328,9 +4354,11 @@ def build_e6_row(e6: dict, *, bars: dict) -> dict:
     declared rows that bind nothing and explain nothing, and `written` is `A1`'s subject.
     """
     measured = not e6.get("error")
+    load_errors = e6.get("load_errors") or {}
     result = e6_outcome(declared=e6.get("declared") or 0,
                         unbound=e6.get("unbound_and_unexplained") or 0,
-                        bars=bars, measured=measured)
+                        bars=bars, measured=measured,
+                        population_complete=not load_errors)
     verdict = verdict_word(result)
     # The pointer is chosen by the FINDING, not by the row: a measured defect names the
     # issue that owns binding a declared row (#11484), while a row that could not be scored
@@ -4352,6 +4380,17 @@ def build_e6_row(e6: dict, *, bars: dict) -> dict:
                   f"({e6.get('error')}), so E6's population is UNMEASURED and the row "
                   f"is not scored — a registry that reports zero declared rows would "
                   f"otherwise read GREEN over a subject that is not there. {beside}")
+    elif load_errors:
+        isolated = "; ".join(f"{pack} ({reason})"
+                             for pack, reason in sorted(load_errors.items()))
+        detail = (f"⛔ the registry ISOLATED {len(load_errors)} pack(s), so the population "
+                  f"below is NOT every declared row across the installed packs and the row "
+                  f"is REFUSED rather than scored: {isolated}. An isolated pack's "
+                  f"declarations leave `population.declared` silently, and the floor cannot "
+                  f"see it — measured, one corrupted manifest dropped 45 rows to 41, still "
+                  f"above the floor of 30, with every other cell clean. declared="
+                  f"{e6.get('declared')} with unbound_and_unexplained="
+                  f"{e6.get('unbound_and_unexplained')}. {beside}")
     else:
         population = (f"declared={e6.get('declared')} "
                       f"({e6.get('relations')} relations + {e6.get('hierarchies')} "
@@ -4391,12 +4430,13 @@ def build_e6_row(e6: dict, *, bars: dict) -> dict:
         "denominator": (e6.get("declared") if measured else None),
         "blocked_by": blocked_by,
         "written": written,
+        "load_errors": load_errors,
         "note": (f"{result['value']}; bar {result['bar']}; {detail}"),
     }
 
 
 def score_e5(sessions: list[str], out_path: Path) -> dict:
-    """Re-score the #7947 arms over the corpus's CURRENT gold; return the numbers."
+    """Re-score the #7947 arms over the corpus's CURRENT gold; return the numbers.
 
     The re-score is what makes E5 a measurement of the CORPUS THIS RUN FROZE (the
     gold is part of ``fixtures_hash``) rather than a citation of a 2026-10-18
@@ -4843,6 +4883,10 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
                 "unbound": e6["defects"],
                 "written": e6["written"],
                 "written_source": e6["written_source"],
+                # ⛔ A pack the registry ISOLATED is why the row refuses; carrying the map
+                # means a reader of the RECORD can see which pack left the denominator
+                # instead of inferring it from a smaller population.
+                "load_errors": e6.get("load_errors") or {},
                 "outcome": e6_row["outcome"],
                 "bar": e6_row["bar"],
                 "error": e6.get("error"),

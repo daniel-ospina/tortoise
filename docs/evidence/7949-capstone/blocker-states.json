@@ -1,7 +1,7 @@
 {
   "schema": "capstone-blocker-states-v1",
-  "checked_at": "2026-11-02T14:22:24Z",
-  "source": "gh issue view <N> --json state,closedAt  — one call per issue, RE-READ at 2026-11-02T14:22:24Z (all five states a row depends on: 5333 OPEN, 9736 OPEN, 10360 OPEN, 9596 OPEN, 5087 OPEN; the six CLOSED states re-confirmed unchanged)",
+  "checked_at": "2026-11-20T20:38:28Z",
+  "source": "gh issue view <N> --json state,closedAt  — one call per issue, RE-READ at 2026-11-20T20:38:28Z (all five states a row depends on: 5333 OPEN, 9736 OPEN, 10360 OPEN, 9596 OPEN, 5087 OPEN; the six CLOSED states re-confirmed unchanged; and #11695's two E6 pointers: 11484 OPEN, 11496 OPEN)",
   "why": "V12 of tools/capstone_verdict_check.py: a row's `blocked_by` is a provenance POINTER, and a pointer at CLOSED work is stale evidence by construction. Until #10537 the checker verified only the pointer's FORM (`#NNN`), so three of the five rows of the shipped table named issues that had already closed while the gate printed `structurally sound` (E2<-9775 two days late, E4<-8503 nine days, E5<-9738 that morning). The states live in this committed record rather than a network call so the check stays pure, offline and deterministic in CI; a lane refreshes it from the tracker when it re-measures and commits it WITH the measurement it verifies, so the state that decides a row is reviewed in the same diff as the row.",
   "refresh": "For each issue a row cites: `gh issue view <N> --json state,closedAt`, then update checked_at. A record that is present but malformed is a usage error (exit 2), never a silent disarm.",
   "blockers": {
@@ -70,6 +70,18 @@
       "closed_at": "2026-10-22T05:34:35Z",
       "title": "measure(extractor-v4): E4 on the real extraction leg — the planted-operator corpus wired AND persisted, no monkeypatch (#7949)",
       "cited_by": "the REFUSAL record's E4 row — historical cause, same exemption"
+    },
+    "#11484": {
+      "state": "OPEN",
+      "closed_at": null,
+      "title": "feat(7949/C10): DERIVE the structural write vocabulary from core+packs, per graph — a pack-declared object relation must be writable as an edge, not just an IMPL label",
+      "cited_by": "E6 (a declared row that binds no write path, #11695)"
+    },
+    "#11496": {
+      "state": "OPEN",
+      "closed_at": null,
+      "title": "capstone(7949): the closing walk — re-derive the ten rows from their artifacts at one head, and decide whether the epic may close",
+      "cited_by": "E6 (a population that could not be scored at this head — under the floor, or a pack set the registry could not fully load, #11695)"
     }
   }
 }

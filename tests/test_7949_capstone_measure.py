@@ -1259,6 +1259,43 @@ def test_e6_refuses_below_its_population_floor_and_never_scores_an_absent_subjec
     assert "boom" in broken["note"], broken["note"]
 
 
+def test_e6_refuses_when_the_registry_isolated_a_pack():
+    """⛔ The pack set that did not fully load is NOT the registered population (#11695 P1).
+
+    `PackRegistry.load_all` ISOLATES a pack whose manifest fails validation and records it in
+    `load_errors`; the pack's declared rows then leave `population.declared` silently. The
+    floor cannot catch that — measured with one corrupted manifest: 45 declared rows dropped
+    to 41, still above the floor of 30, every other cell clean, and the row read **GREEN**.
+    That is the false PASS over a wrongly-loaded subject §3.8's floor exists to prevent, one
+    layer down, so the producer carries `load_errors` and refuses on it.
+
+    Non-vacuity: a build of `build_e6_row` that ignored `load_errors` (the shape before the
+    review) returns PASS/GREEN here and reds the first two assertions.
+    """
+    measured = {"declared": 41, "unbound_and_unexplained": 0, "defects": [],
+                "relations": 35, "hierarchies": 6, "packs": 6, "writable": 40,
+                "declaration_only": 1, "predicate_not_in_allowlist": 0,
+                "packs_dir": "packs", "census_tool": "fixture", "error": None,
+                "written": {"direct": 9, "mediated": 31, "none": 1, "unmeasured": 0},
+                "written_source": "fixture",
+                "load_errors": {"project-management": "relation 'onBoard' declares no "
+                                                    "semantics"}}
+    row = measure.build_e6_row(measured, bars=BARS)
+    assert row["outcome"] == "REFUSED", row
+    assert row["verdict"] == "BLOCKED", row
+    assert row["blocked_by"] == measure.E6_POPULATION_OWNER, row
+    assert "ISOLATED" in row["note"] and "project-management" in row["note"], row["note"]
+    assert row["load_errors"] == measured["load_errors"], row
+    # …and the clean case still scores, so the refusal is about the load and not the shape.
+    clean = {**measured, "declared": 45, "packs": 7, "relations": 39,
+             "load_errors": {}}
+    assert measure.build_e6_row(clean, bars=BARS)["verdict"] == "GREEN"
+    # The real tree is the clean case, and this pin says so rather than assuming it.
+    assert measure.measure_e6()["load_errors"] == {}, (
+        "the tree's own packs no longer load cleanly — E6 is REFUSED at this head, which "
+        "is a finding about the packs, not about this pin")
+
+
 def test_the_emitted_e6_row_is_accepted_by_the_verdict_gate():
     """The row this producer emits is scoreable — `#11673` bought exactly that much.
 
@@ -1276,12 +1313,20 @@ def test_the_emitted_e6_row_is_accepted_by_the_verdict_gate():
               "corpus": {"sha256": "sha256:" + "d" * 64},
               "run": {"status": "COMPLETED", "steps_observed": list(cvc.STEPS)},
               "rows": rows}
+    # ⛔ EVERY finding is checked, by its WHERE. Filtering on the message text (``"E6" in
+    # msg``) only ever matches V2's own messages — V3–V12 name the row by ``where``
+    # (``rows[E6]``) and their text says e.g. "numerator 0 outside 1..45" — so a text
+    # filter would let a V4/V5/V6/V7/V12 refusal of the emitted row ship green (#11695
+    # review P2, measured: a row with ``numerator: 0`` produces a V5 on ``rows[E6]`` that
+    # the text filter could not see).
     findings = cvc.check(record, repo=_build_gate_repo(), require_green=False)
-    e6_findings = [(code, msg) for code, _w, msg in findings.items
-                   if "E6" in msg or code in ("V2",)]
+    e6_findings = [(code, where, msg) for code, where, msg in findings.items
+                   if where == "rows[E6]" or "E6" in msg]
     assert not e6_findings, (
         f"the gate refused the emitted E6 row: {e6_findings} — `E6` is a RECOGNISED "
         f"criterion, so a produced row must pass V1–V12 exactly as an `E`-row does")
+    # …and the record-level arms must be clean too, or the pin proves nothing about the row.
+    assert not [f for f in findings.items if f[0] in ("V1", "V2")], findings.items
 
 
 def test_a_green_row_on_a_missing_artifact_is_refused():
