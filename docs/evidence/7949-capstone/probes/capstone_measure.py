@@ -4238,9 +4238,9 @@ def _e6_key(pack: str, surface: str, row: dict) -> tuple:
 def _e6_census_rows(census: dict) -> list[tuple[str, str, dict]]:
     """Every declared row of every pack, as ``(pack, surface, row)``.
 
-    ⛔ BOTH surfaces, from ONE place: the population, the defect scan and the beside column all
-    read this, so "the metric spans the ROWS of both surfaces" is a property of the code rather
-    than of three loops that happen to agree today.
+    ⛔ BOTH surfaces, from ONE place: the defect scan reads this, and the beside column iterates
+    `E6_SURFACES` beside it (it reads the COMMITTED artifact, not the live census), so "the metric
+    spans the ROWS of both surfaces" is a property of the code, not of two loops agreeing today.
     """
     rows: list[tuple[str, str, dict]] = []
     for pack, block in (census.get("packs") or {}).items():
