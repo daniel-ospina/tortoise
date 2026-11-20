@@ -1362,6 +1362,56 @@ def test_part_d_findings_match_an_independent_recomputation() -> None:
         )
 
 
+def test_the_recomputation_still_FLAGS_a_disagreeing_row() -> None:
+    """D2/D2b's live sets are EMPTY, so pin the RULE on synthetic rows.
+
+    ⛔ `unsupported == set()` and `clause_only == set()` above are pins about the CORPUS —
+    since #12901's final batch no row in Part D disagrees with its citation, so both are
+    empty and a `_recompute_citation_sets` that returned empty sets for EVERY input would
+    satisfy them. The arm that could not fail is the one that used to find a real defect,
+    so the rule is exercised here on a row built to disagree in each direction, and on a
+    row that is supported only beyond its citation's first clause. Delete either branch in
+    `_recompute_citation_sets` and this test reds (#13899 re-cut review, P2 — the deletion
+    was the finding; `test_a_truncated_citation_is_rejected_by_the_build` drives the
+    GENERATOR's rule on a real truncated fixture and does not cover this one).
+    """
+    disagreeing = {
+        "tortoise_synthetic_unsupported": {
+            "tool": "tortoise_synthetic_unsupported",
+            "quote": "→ `alpha`, `beta`",
+            "dest": "gamma",
+            "named": ["alpha", "beta"],
+            "prefix": ["alpha", "beta"],
+        },
+    }
+    unsupported, clause_only, ambiguous = _recompute_citation_sets(disagreeing)
+    assert unsupported == {"tortoise_synthetic_unsupported"}, (
+        "a row whose Destination its citation never names must be D2-unsupported; the "
+        f"recomputation returned {sorted(unsupported)}"
+    )
+    assert clause_only == set(), sorted(clause_only)
+    assert ambiguous == {"tortoise_synthetic_unsupported"}, (
+        "two named destinations must be D3-ambiguous — the same row is both, and the "
+        "`elif` is what makes D2b skip it"
+    )
+
+    beyond_first_clause = {
+        "tortoise_synthetic_clause": {
+            "tool": "tortoise_synthetic_clause",
+            "quote": "→ `alpha`; `beta`",
+            "dest": "beta",
+            "named": ["alpha", "beta"],
+            "prefix": ["alpha"],
+        },
+    }
+    unsupported2, clause_only2, _ = _recompute_citation_sets(beyond_first_clause)
+    assert unsupported2 == set(), sorted(unsupported2)
+    assert clause_only2 == {"tortoise_synthetic_clause"}, (
+        "a Destination named only in the FIRST clause must be D2b clause-only; the "
+        f"recomputation returned {sorted(clause_only2)}"
+    )
+
+
 def test_part_d_rendered_cells_are_pinned_to_the_recomputation() -> None:
     r"""Every Part D cell and every Part D count is compared to a recomputation (P1).
 
@@ -2357,10 +2407,17 @@ def test_approved_row_that_reflows_fails_the_build_instead_of_truncating_its_mem
     import tools.bridge_table as bt
 
     real = bt.APPROVED_DOC.read_text(encoding="utf-8")
-    cell = _ROW_14_MEMBERS
-    assert cell in real, "row 14's Absorbs cell is not in the doc — this test is stale"
+    # ⛔ THE STALENESS ASSERT GUARDS WHAT THIS TEST MUTATES. It used to check
+    # `_ROW_14_MEMBERS` while the mutation and every assertion below operate on ROW 21
+    # (`operator_action, annotate_operator, mitigate_operator |`), which reds as "stale"
+    # the day someone edits row 14 — a row this test never touches — and leaves a
+    # reworded row 21 with only the unrelated row-count message to explain the red
+    # (#13899 re-cut review, P2).
+    row_21_cell = "operator_action, annotate_operator, mitigate_operator |"
+    assert row_21_cell in real, (
+        "row 21's Absorbs cell is not in the doc — this test is stale")
     wrapped = real.replace(
-        "operator_action, annotate_operator, mitigate_operator |",
+        row_21_cell,
         "operator_action, annotate_operator,\nmitigate_operator |",
         1,
     )
@@ -2654,8 +2711,9 @@ def test_a_row_shaped_continuation_cannot_replace_the_row_above_it(
         "owner-approved doc is exactly what must not reach the artifact"
     )
 
-    # ---- MUTATION: both round-3 guards contribute nothing. The later row replaces row 21,
-    # `annotate_operator` leaves it, and the defect returns — green, in the artifact.
+    # ---- MUTATION: both round-3 guards contribute nothing. The later row replaces row 14
+    # (`annotate_operator` is what left ROW 21; the fixture now truncates ROW 14 — #13899
+    # re-cut review, P2), and the defect returns — green, in the artifact.
     _disable_the_round_3_guards(monkeypatch)
     menu_off, _, errs_off = bt._approved_state()
     assert errs_off == [], f"the mutation did not disable the guards: {errs_off}"
@@ -3063,8 +3121,10 @@ def _restore_the_round_4_predicate(monkeypatch) -> None:
     monkeypatch.setattr(bt, "_is_member_list", round_4_predicate)
 
 
-# ⛔ #12901 FINAL batch: the fixture MOVED from row 14 (`manage_source_trust`) to row 14
-# (`manage_source_trust`). Row 21 absorbed `mitigate_operator`, which was privatised, so a
+# ⛔ #12901 FINAL batch: the fixture MOVED from row 21 (`adjust_relationship`) to row 14
+# (`manage_source_trust`) — the earlier cut of this note said "from row 14 … to row 14",
+# which its own next sentence refutes (#13899 re-cut review, P2). Row 21 absorbed
+# `mitigate_operator`, which was privatised, so a
 # truncation there no longer changes the artifact — the false claim the shape tests exist
 # to catch had nowhere left to appear, and every one of them failed with "the mutation did
 # not reproduce the defect" instead of passing vacuously. Row 14 still carries it:
@@ -3743,11 +3803,12 @@ def test_a_reworded_header_cannot_disarm_the_row_reflow_guard(
     monkeypatch.setattr(bt, "OUT", out)
 
     # The row parse is untouched — which is exactly why the header count is the only thing
-    # that can see this. The wrap has TRUNCATED row 21, and no ROW error reports it.
+    # that can see this. The wrap has TRUNCATED ROW 14 (the fixture moved off row 21 in
+    # #12901's final batch — #13899 re-cut review, P2), and no ROW error reports it.
     menu, closures, row_errors = bt._approved_state()
     assert len(menu) == bt.APPROVED_MIN_ROWS, f"{len(menu)} rows parsed, expected all of them"
     assert "set_source_tier" not in menu[_ROW_14_DEST]["members"], (
-        "this shape is supposed to truncate row 21 — if it no longer does, the test no "
+        "this shape is supposed to truncate row 14 — if it no longer does, the test no "
         "longer reproduces the defect"
     )
     assert row_errors == [], (
