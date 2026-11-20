@@ -212,6 +212,28 @@ Six more of the same class, each fixed here and each MEASURED before the fix:
   exposed to it. The transport wait bound is now widened once, in the fixture, for
   every arm; the ``sources_state`` projection stub stays for what it actually is —
   that tool's own control-plane dependency.
+
+A THIRD REVIEW ROUND (r8) — what it changed
+===========================================
+
+Two findings, both *claim vs assertion* rather than product defects, both fixed by
+making the fixture and the assertion measure the same thing:
+
+* ``test_review_link_candidates_answers_both_directions`` asserted that the
+  operator's TARGET was proposed — but the seed CONNECTS that pair, and
+  ``sdk._review_add`` skips connected pairs, so the row's verdict came from an
+  unengineered pair clearing the 0.72 similarity band. Measured consequence: the
+  same test code red on a box without the embeddings extra and green on one with
+  it (the TF-IDF fallback scores a template-sharing pair far below 0.72). The
+  seed now carries an engineered pair — verbatim wording that scores 1.000 under
+  BOTH the embedding cosine and the TF-IDF fallback — and the row asserts both
+  halves: that pair IS proposed, and the above-band pair joined by the seeded
+  IMPL operator is NOT (which is what makes the ``connected`` skip falsifiable).
+* ``_PlainText`` was a guard with no reddening row: ``_text_of`` renders a dict
+  too, so reverting the sentinel to the pre-r6 ``{"_text": …}`` left the file
+  green. Both ``deletion`` token refusals now assert the WIRE SHAPE
+  (``isinstance(out, str) and not isinstance(out, dict)``), which reds on exactly
+  that revert.
 """
 
 from __future__ import annotations
@@ -346,12 +368,25 @@ class _PlainText(str):
     ``{"_text": text}``, and that dict satisfied ``isinstance(out, dict)`` plus
     ``"error" not in out`` — so a *text* refusal could pass a *structured-payload*
     arm (`#13886` r6, F2). A string can satisfy neither.
+
+    ⛔ The guard is only guard-shaped if a revert REDS something. The two
+    ``deletion`` token arms assert ``isinstance(out, str) and not
+    isinstance(out, dict)``, because ``_text_of`` renders both forms and would
+    otherwise pass on the dict this subclass exists to prevent (`#13886` r8, F2).
     """
 
 
 def _text_of(out):
     """The refusal WORDING of a non-JSON answer, or the JSON rendering of a
-    structured one — what the two `deletion` token cases read."""
+    structured one — what the two `deletion` token cases read.
+
+    ⛔ The two renderings are NOT interchangeable, and this helper must never be
+    used to tell them apart: it renders a dict as well as a str, so a text
+    refusal that regressed to ``{"_text": …}`` still "contains" its wording.
+    The two token cases therefore ALSO assert the wire shape
+    (``isinstance(out, str) and not isinstance(out, dict)``) — that is the half
+    that reds on the regression (`#13886` r8, F2).
+    """
     if isinstance(out, str):
         return str(out)
     return json.dumps(out, default=str)
@@ -469,8 +504,18 @@ def seeded(tmp_path, monkeypatch):
     s["calibrated"] = sdk.create_point(
         "statement", "A calibrated seeded claim for the confidence arm.",
         credibility="high")["id"]
+    # ⛔ The operator's TARGET restates the SOURCE verbatim ON PURPOSE.
+    # `review_link_candidates(mode='add')` skips pairs that already share a
+    # connection (`sdk._review_add`: `if frozenset((a, b)) in connected:
+    # continue`), so a connected pair can only make that skip FALSIFIABLE if
+    # its similarity clears the 0.72 band — otherwise "not proposed" is
+    # indistinguishable from "scored too low" and deleting the skip reds
+    # nothing (`#13886` r8, F1). Verbatim wording scores 1.000 under BOTH
+    # scorers (bge-small cosine, and the TF-IDF fallback `_encode` degrades to
+    # when the embeddings extra is absent — #399), so no box can change the
+    # verdict.
     s["claim2"] = sdk.create_point(
-        "statement", "A second seeded claim, the operator's target.")["id"]
+        "statement", "The capstone V2 lane proves payloads, not statuses.")["id"]
     # ── the `check_confidence(topic=…)` seed ───────────────────────────────
     # That arm dispatches to `belief_timeline`, which RESOLVES the topic as an
     # ENTITY and returns the `decision` Points `aboutObject`-linked to it. A Point
@@ -489,6 +534,23 @@ def seeded(tmp_path, monkeypatch):
     s["source"] = sdk.register_source("https://example.test/a", "web")["id"]
     s["event"] = sdk.create_event("Deploy", eventKind="core:action")["id"]
     s["operator"] = sdk.create_operator("IMPL", s["claim"], [s["claim2"]])["id"]
+    # ── the `review_link_candidates` seed ─────────────────────────────────
+    # A related-but-UNCONNECTED pair the add arm must PROPOSE. The pre-r8 row
+    # asserted `claim2` — the operator's target — so the pair it named is
+    # excluded BY CONSTRUCTION and its pass rested on some other pair clearing
+    # 0.72 incidentally, i.e. on the box having the embedding model (measured:
+    # the same test code, `1 failed, 122 passed` on one box and `123 passed` on
+    # another at a docstring-only head — `#13886` r7 ISSUE 2 / r8 F1). This
+    # pair is engineered instead: verbatim wording ⇒ similarity 1.000 under
+    # the embedding cosine AND under the TF-IDF fallback, and no edge between
+    # the two, so "proposed" is the product's answer on every box.
+    s["review_pair"] = [
+        sdk.create_point(
+            "statement",
+            "A related-pair statement seeded for the link-candidate arm.",
+        )["id"]
+        for _ in range(2)
+    ]
     s["session"] = "sess-capstone-1"
     sdk.create_event("capstone session", eventKind="AgentSession",
                      session_id=s["session"], agent_name="capstone")
@@ -1326,6 +1388,14 @@ class TestWritesAreReadableBack:
         status, out = door.call("tortoise_delete",
                                 {"id": s["claim2"], "confirmation": token})
         assert status == 200
+        # ⛔ The WIRE SHAPE, not only the wording (`#13886` r8, F2). This
+        # refusal is a bare-string answer, and `_text_of` renders a dict too —
+        # so before this line, reverting `_tool_payload`'s `_PlainText` to the
+        # pre-r6 `{"_text": text}` left the row GREEN (measured: 2 passed, the
+        # file's red count unchanged). A `str` refusal is precisely what must
+        # not satisfy a structured-payload arm; assert that here.
+        assert isinstance(out, str) and not isinstance(out, dict), (
+            f"a TEXT refusal must not arrive as a structured payload: {out!r}")
         assert "different item" in _text_of(out), out
         status, still = door.call("tortoise_get_entity",
                                   {"id": s["claim2"], "type": "point"})
@@ -1340,6 +1410,8 @@ class TestWritesAreReadableBack:
                                 {"id": s["claim"],
                                  "confirmation": "not-a-token"})
         assert status == 200
+        assert isinstance(out, str) and not isinstance(out, dict), (
+            f"a TEXT refusal must not arrive as a structured payload: {out!r}")
         assert "not a deletion confirmation token" in _text_of(out), out
         status, still = door.call("tortoise_get_entity",
                                   {"id": s["claim"], "type": "point"})
@@ -2032,26 +2104,53 @@ class TestRelationshipsAndRemainingReads:
 
     def test_review_link_candidates_answers_both_directions(self, seeded):
         """`add` is a LIST OF CANDIDATES, so a key-presence check proves only
-        that the envelope exists (`#13886` r6, F3). The seeded claim pair is
-        semantically related and unconnected, so the arm must PROPOSE it: an
-        endpoint of an `add` row is the seeded claim, and that row names the
-        relation it suggests. `prune` stays empty — nothing superseded is
-        seeded — and is asserted as the list a crash would break."""
+        that the envelope exists (`#13886` r6, F3).
+
+        ⛔ BOTH halves are ENGINEERED, because an incidental pass is not a
+        measurement (`#13886` r8, F1 — the pre-r8 version of this row named
+        `claim2`, which the seed CONNECTS via the IMPL operator, so
+        `_review_add` excludes that pair by construction and the row's verdict
+        came from an unengineered pair clearing the 0.72 band: measured RED on a
+        box without the embeddings extra and GREEN on one with it, same test
+        code):
+
+        * ``review_pair`` — verbatim-identical, NO edge ⇒ the arm must PROPOSE
+          it, naming the relation it suggests. Verbatim wording scores 1.000
+          under the bge-small cosine AND under the TF-IDF fallback, so the
+          assertion holds on a keyword-only box too;
+        * ``{claim, claim2}`` — also verbatim-identical, but joined by the seeded
+          IMPL ⇒ it must NOT be proposed. That is the ``connected`` skip in
+          ``sdk._review_add``; with the pair BELOW the band (as it was before
+          r8) removing the skip reddened nothing.
+
+        `prune` stays empty — nothing superseded is seeded — and is asserted as
+        the list a crash would break."""
         door, s, _ = seeded
         status, out = door.call("tortoise_review_link_candidates", {})
         assert status == 200
         assert isinstance(out, dict), out
         add = out.get("add")
         assert isinstance(add, list) and add, out
-        endpoints = {member for row in add if isinstance(row, dict)
-                     for member in (row.get("from"), row.get("to"))}
-        assert s["claim2"] in endpoints, (
-            "the seeded unconnected pair is not proposed by the link-candidate "
-            f"read: {out}")
-        proposed = [row for row in add if isinstance(row, dict)
-                    and s["claim2"] in (row.get("from"), row.get("to"))]
-        assert proposed, out
+
+        def _rows_touching(point_id):
+            return [row for row in add if isinstance(row, dict)
+                    and point_id in (row.get("from"), row.get("to"))]
+
+        left, right = s["review_pair"]
+        proposed = [row for row in _rows_touching(left)
+                    if right in (row.get("from"), row.get("to"))]
+        assert proposed, (
+            "the seeded UNCONNECTED pair is not proposed by the link-candidate "
+            f"read (left={left} right={right}): {out}")
         assert all(row.get("suggested_relation") for row in proposed), out
+
+        connected_pairs = [row for row in _rows_touching(s["claim"])
+                           if s["claim2"] in (row.get("from"),
+                                              row.get("to"))]
+        assert not connected_pairs, (
+            "a pair that ALREADY shares the seeded IMPL operator was proposed "
+            f"as a missing connection — the `connected` skip is not holding: "
+            f"{connected_pairs}")
         assert isinstance(out.get("prune"), list), out
         assert out["prune"] == [], out
 
