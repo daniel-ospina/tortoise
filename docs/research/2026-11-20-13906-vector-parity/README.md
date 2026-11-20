@@ -256,6 +256,19 @@ review record); reproduced here before it was touched. No gated comparison chang
 | **H1** `run()` wrote `host = urlsplit(args.record_dsn).hostname; if host:` — and `hostname` is `None` for **two legal libpq spellings that both reach a remote host** (`postgresql:///db?host=db.example.com`, PostgreSQL §34.1.1's query-string form, and the whitespace conninfo `host=db.example.com dbname=x`). The guard was therefore SKIPPED exactly when it could not decide, on the path that seeds that store and deletes rows by `org_id` — a no-op on the destructive path R1 advertises. It also inverted `tortoise.config.is_loopback_uri`'s fail-closed rule (`tortoise/config.py:375`: an absent hostname is NOT loopback) | measured both spellings: `urlsplit(dsn).hostname is None` | the decision is now `_assert_local_record_dsn()` — a DSN whose host cannot be resolved is REFUSED unless `--allow-remote-writes`, with the unresolvable host named in the refusal; pinned by `test_a_dsn_whose_host_cannot_be_parsed_is_refused_not_skipped`, which also AST-reads `run()` so the call site cannot go back to `if host:` (mutant: restore the old shape → **1 failed, 35 passed**) |
 | **H2** `agent-infra-ci / lint` was red at this head with **18** ruff findings, all in this PR's own two files (8× `RUF100` for a `BLE001`-only `noqa` where this repo spells both codes, 4× `B905`, 2× `SIM105`, plus `SIM103`/`F841`/`RUF015`/`SIM300`) | `ruff 0.16.4` (the `python-ci.yml` pin) over both files | all 18 fixed; `ruff check` → **All checks passed**. Not a required context (so it never blocked the merge), but it is this change's own new code |
 
+### Round 7: a falsifier that certifies itself from a run that could not look
+
+The attestation review at the previous head found no fail-open defect in the gated
+comparison, and two defects in what the instrument CLAIMS about itself. Both were
+reproduced here before being touched, and neither changes a measured value — all
+five committed artifacts still replay **bit-identically** through the verdict
+(verified, because the new field is present only in the state it describes).
+
+| finding | verified how | fix |
+|---|---|---|
+| **I1** the falsifier's own proof was minted from runs that never looked: `poison_status = "POISON DETECTED" if not ok` counted EVERY failure as a detection, including the cannot-measure ones this verdict already names. Six queries each carrying `record_error` (a `VectorShortfall` — the #13911 shape) printed `poison: POISON DETECTED` and exited **1**, byte-identical to a real detection, while the poison was never exercised on a gated arm. §6's recipe collapses the three readings into one `echo exit=$?` | reproduced DB-free: six `record_error` entries → `POISON DETECTED`, exit 1 | three readings, three answers: **POISON DETECTED** (a failure from a MEASURED arm — a mixed run still counts), **POISON UNMEASURED …** → exit **2** (the same class as every other cannot-run), **POISON NOT DETECTED — HARNESS BLIND** → exit 1. Pinned by `test_a_poisoned_run_that_could_not_measure_is_not_a_detection` and `…_exits_2` (the exit code, not only the word) |
+| **I2** the index-arm refusal had no pin, so the inert form the `_require_index_arm` docstring says was removed could come back silently: reintroducing `if ready and mechanisms != ["index"]` left **35/35 green**. Consequence: a timed-out `wait_index_ready` publishes `run_vector_query HNSW` over `mechanisms: ["scan_fallback"]` — the SCAN's numbers under the index's name, the arm #13911 is diagnosed from — while the gated arms are unaffected, so nothing reds | mutant: 35/35 green | the decision is a named seam (`_require_index_arm`, the `_scan_arm` treatment), pinned DB-free across five `(mechanisms, ready)` cases — a timed-out readiness REFUSES, since it is the case the guard exists for — plus an AST read of `run()` so the call site cannot inline the `if` again (mutant: restore the inert form → **1 failed**) |
+
 ### The two evidence errors this section exists to correct
 
 Both were in the **previous revision of this document**, and both are the
@@ -302,7 +315,7 @@ done
 ```
 
 DB-free comparator pins: `uv run python tools/test_lane.py run --
-tests/test_vector_parity_13906.py -q` → **36 passed**.
+tests/test_vector_parity_13906.py -q` → **39 passed**.
 
 ## 7. What this artifact does NOT establish
 
