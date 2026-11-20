@@ -927,3 +927,79 @@ def test_a_verdict_over_an_oracle_shorter_than_k_is_not_parity(harness):
     assert ok["ok"] is True, ok["failures"]
     no_width = harness._verdict({"queries": [entry]}, poisoned=None)
     assert no_width["ok"] is True, no_width["failures"]
+
+
+def test_the_float64_oracle_agrees_with_a_float32_store(harness):
+    """The README's PRECISION cell had no producer — this is the producer.
+
+    ⛔ MEASURED, NOT ASSERTED. The README claimed "float32 vs float64 agreement
+    was checked explicitly (the fp32 oracle and the fp64 oracle returned the same
+    top-10 on the probe query)" while `truth()` has ONE numeric path —
+    `np.asarray(a, dtype=float)` — and no field in any committed artifact
+    recorded the comparison: a measurement named in prose and performed nowhere.
+    The claim is not cosmetic either: the stores do NOT share the oracle's
+    precision (the graph writes `vecf32(...)`, the record column is
+    `vector(1024)`), so a near tie that float32 rounds the other way would
+    reorder the top-k and the record arm would then red for a PRECISION reason
+    while the harness reported it as a store defect.
+
+    So the round trip is performed here, on the corpus this harness actually
+    seeds and every query it actually asks, in the one posture CI can run it —
+    no stores. The comparison goes through the harness's OWN `compare()`, so
+    the acceptable outcome is not "bit-identical" (it is not, and must not be
+    asserted) but the rung's tie policy: the same ids, and any permutation
+    inside one distance bucket rather than across buckets.
+
+    ⛔ WHY IT CANNOT BE VACUOUS: `as_f32` is guarded by a non-vacuity assert
+    (float32 rounding must change at least one coordinate), so the identity
+    mutant — `as_f32` returning its argument, which would compare float64 with
+    float64 and pass while measuring nothing — reds. What the assert buys is the
+    same thing `--poison vector` buys on the live stores: a comparison that has
+    only ever seen agreement has not been shown able to see disagreement, and
+    `compare()`'s ability to red on a changed id set and on a cross-bucket
+    re-order is pinned separately (`test_a_missing_id_is_reported_as_recall_loss`,
+    `test_a_cross_distance_permutation_IS_a_divergence`).
+    """
+    import numpy as np
+
+    rows = harness.build_corpus(seed=13906)
+    queries = harness._queries(rows, 6)
+    k = 10
+
+    def as_f32(vec):
+        # A float32 store does not keep float64: cast down and read back as the
+        # float64 the oracle consumes, i.e. exactly what the store holds.
+        return np.asarray(vec, dtype=np.float32).astype(float).tolist()
+
+    rounded = [
+        harness.Row(key=row.key,
+                    embedding=None if row.embedding is None else as_f32(row.embedding),
+                    status=row.status, outdated=row.outdated,
+                    updated_at=row.updated_at, tenant=row.tenant)
+        for row in rows
+    ]
+    assert any(row.embedding is not None and len(row.embedding) == harness.DIM
+               for row in rounded), "the rounded corpus is empty — nothing measured"
+    # ⛔ NON-VACUITY: `as_f32` must actually CAST. If it degenerated to a no-op
+    # the whole test would compare float64 with float64 and pass while measuring
+    # nothing — the "green about nothing" shape this file keeps closing.
+    assert any(a != b for a, b in zip(
+        [r.embedding for r in rows if r.embedding is not None],
+        [r.embedding for r in rounded if r.embedding is not None], strict=True)), (
+        "float32 rounding changed no coordinate — the comparison measured "
+        "float64 against itself")
+
+    for name, query in queries:
+        reference = harness.truth(rows, query, k, metric="cosine")
+        candidate = harness.truth(rounded, as_f32(query), k, metric="cosine")
+        diff = harness.compare(
+            reference,
+            [key for key, _ in candidate],
+            candidate_distances=[distance for _, distance in candidate])
+        assert diff["ids_equal"], (
+            f"{name}: rounding the corpus and the query to float32 changed WHICH "
+            f"rows the oracle ranks, so a float32 store reds the record arm for a "
+            f"precision reason rather than a defect: {diff}")
+        assert diff["order"] != "diverged", (
+            f"{name}: float32 rounding moved a row ACROSS a distance bucket — a "
+            f"re-order, not the tie permutation the rung allows: {diff}")
