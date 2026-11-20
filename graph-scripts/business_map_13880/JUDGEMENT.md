@@ -36,14 +36,18 @@ rails, reapers and PR bodies). Filing those would be filing the process, not the
 | **Product & market** | `Tortoise` (product), `the agent-memory market` (market), five competitors (Graphiti, Neo4j Agent Memory, GraphRAG, Supermemory, Letta/Cognee) | `product-strategy:product` / `:market` / `:competitor` |
 | **Funding strategy** | six programmes (a16z Speedrun SR008, YC W2027, ERA W'27, Techstars Spring 2027, EF The Bridge, HF0) + the deadline-cluster, priority-sequence, density and ruled-out findings | `venture:program` + `statement` Points |
 | **Unit economics** | Supabase's MAU floor, Identity Platform's banded rate, the DeepSeek supplier price spread, the paid-vs-free overage asymmetry | `statement` Points about the product |
-| **Product & architecture decisions** | 13 decisions as **Events** (`eventKind: decision`): the beta gate measurement, the "interested" population definition, unlimited graphs (Gate #2), the two per-account storage dimensions (#11758), nodes retired as the pricing unit (#4495/#5331), fleet memory = the hosted graph, the hosted deployment postponement, EXTRACTOR-V4 §S3 (phase 2 receives the S1 narrative), the v3.37 status model ("good > easy"), the graph-as-tool-argument reopen rule, generic measurement text, no capture caps (#4010), and the business-map law itself | `Event` + `aboutObject` / `produces` |
+| **Product & architecture decisions** | 14 decisions as **Events** (`eventKind: decision`): the beta gate measurement, the "interested" population definition, unlimited graphs (Gate #2), the two per-account storage dimensions (#11758), nodes retired as the pricing unit (#4495/#5331), fleet memory = the hosted graph, the hosted deployment postponement, EXTRACTOR-V4 §S3 (phase 2 receives the S1 narrative), the v3.37 status model ("good > easy"), the graph-as-tool-argument reopen rule, generic measurement text, no capture caps (#4010), the Wave-1 exit gate's withdrawal of the `aha test`, and the business-map law itself | `Event` + `aboutObject` / `produces` |
 | **Standing constraints** | 4 `standard` Objects: no per-graph caps / no node-count pricing; the MCP+SDK surface needs owner approval; no capture caps; the record is truth and the graph is a derived cache | `standard` |
 | **Architecture claims** | 12 `statement` Points: record-vs-graph, the journal is not knowledge, decision-is-an-Event, goal-is-an-Object, role-vs-member, document-is-a-Source, the 91→27 surface consolidation, retention doctrine | `statement` |
 | **Competitive findings** | the single-write-door finding **plus the three findings that REFUTE it** (Graphiti's three APIs, Neo4j's batch/streaming shapes, GraphRAG's batch pipeline), Supermemory's missing as-of search | `statement` + `NAND` operators |
 | **Who acts** | `Premise Labs` (organization), `Daniel Ospina` (naturalPerson), `epistemic-team` (team), `owner` (role — `holdsRole`, not `memberOf`) | `Subject` |
 | **Where it came from** | six documents as `Source` nodes, each `authoredBy` its author and `references` what it governs | `Source` |
 
-The map is **79 nodes / 96 edges**. Deliberate shape choices:
+The map is **78 nodes / 101 edges** — 4 `Subject` · 27 `Object` · 6 `Source` · 14 `Event` ·
+27 `Point`, and 51 operator edges (`IMPL`/`NAND`) plus 50 structural ones. Those are the
+numbers `business_map.json` actually contains; `--dry-run` prints the per-kind census
+and the edge total from the same file, so a drift here is visible without counting by
+hand. Deliberate shape choices:
 
 - **A decision is an Event, never a Point** — so a query for *why* walks the timeline, and the belief
   layer stays about states.

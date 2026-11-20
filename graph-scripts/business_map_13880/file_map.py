@@ -30,9 +30,17 @@ USAGE
 
 `--dry-run` needs no credentials and no network. `--write` needs
 `TORTOISE_MCP_API_KEY` and `FALKORDB_CLOUD_URI` in the environment (on the lane
-box: `set -a; . /home/cmux/businessmap.env; set +a`). It is resumable: ids are
-persisted to `state.json` after every write and re-resolved by name on retry, so
-re-running after a transport death converges instead of duplicating.
+box: `set -a; . /home/cmux/businessmap.env; set +a`). It is resumable from
+`state.json`: ids are persisted after every write and the `written` markers skip
+what already landed, so a re-run after a transport death picks up where it
+stopped.
+
+⚠️ WHAT RESUME DOES NOT COVER, stated here because the earlier version of this
+paragraph claimed it did: there is NO name lookup, so a kill in the window
+between a successful `mcp.call` and the `mark()` that persists its id loses that
+id, and the re-run creates a **duplicate** subject/object/source/event (points
+pass `dedup=True`, so they are the one exception). Recovery is manual: delete the
+duplicate, or add its id to `state.json` before re-running.
 
 ⛔ It never deletes, supersedes or mitigates anything. Mitigations are
 0.10-0.50 and must be written one at a time; this map needs none.
@@ -317,7 +325,8 @@ class Mcp:
                                if isinstance(err.get("data"), dict) else None)
                 if retry_after:
                     # "the work may still complete" — wait the advertised delay,
-                    # then re-issue. Every write here is idempotent (see README).
+                    # then re-issue. The write MAY have landed (points dedup;
+                    # the rest would duplicate — see the module docstring).
                     time.sleep(min(120, float(retry_after) + 1))
                     continue
                 raise RuntimeError(f"{tool} refused: {err}")
@@ -416,7 +425,7 @@ def write_map(doc: dict) -> int:
             st["written"].append(marker)
         save_state(st)
 
-    def _resolve(self, item_ref: str, name: str, res: dict, what: str) -> str:
+    def _resolve(item_ref: str, name: str, res: dict, what: str) -> str:
         """The id the write returned — or a refusal, never a plausible stand-in.
 
         A name is not an id: binding an edge endpoint to a name writes an edge
@@ -567,11 +576,6 @@ def verify(doc: dict) -> int:
     for row in q("MATCH ()-[e]->() RETURN type(e), count(*) AS c ORDER BY c DESC"):
         print(f"  {row[0]:<16} {row[1]}")
 
-    expected = (len(doc["subjects"]) + len(doc["objects"]) + len(doc["sources"])
-                + len(doc["events"]) + len(doc["points"]))
-    got = q("MATCH (n) RETURN count(n) AS c")[0][0]
-    print(f"\nnodes: expected ~{expected}, found {got}")
-
     print("== the goal cascade, with its edges (does the map answer a question?)")
     for row in q("MATCH (a:Object)-[r]->(b:Object) WHERE a.objectKind = 'goal' "
                  "RETURN coalesce(a.name,''), type(r), coalesce(r.label,''), coalesce(b.name,'')"):
@@ -582,7 +586,63 @@ def verify(doc: dict) -> int:
                  "RETURN coalesce(e.content,'')  , type(r), coalesce(o.name, o.url, o.content, '')"):
         print(f"  {row[0][:70]}... -[{row[1]}]-> {row[2][:44]}")
 
-    return 0 if got >= expected * 0.9 else 1
+    # ── the verdict ───
+    # ⛔ A COUNT OVER THE WHOLE GRAPH IS NOT A VERIFICATION OF THIS MAP. The
+    # first version compared `MATCH (n) RETURN count(n)` against this map's own
+    # size with a 10% tolerance (`got >= expected * 0.9`), which reports a
+    # GREEN LIGHT for a run that wrote 71 of 78 nodes — the exact false PASS
+    # this filer was already fixed for on the `isError` repair. And "all nodes,
+    # no edges" filed a graph that answers no question, while the edge count was
+    # printed and never asserted.
+    #
+    # So: the ids this run WROTE are the expectation (from `state.json`), each one
+    # must resolve, and the edge count BETWEEN those nodes must be exact. No
+    # tolerance — a missing node is a missing node.
+    written = sorted({v for v in (load_state().get("ids") or {}).values()
+                      if isinstance(v, str) and v})
+    if not written:
+        print("no ids in state.json — nothing this map can be verified against "
+              "(a whole-graph count would not answer it)", file=sys.stderr)
+        return 2
+    found: set[str] = set()
+    for i in range(0, len(written), 200):
+        lit = "[" + ",".join(json.dumps(x) for x in written[i:i + 200]) + "]"
+        found |= {row[0] for row in q(f"MATCH (n) WHERE n.id IN {lit} RETURN n.id") if row}
+    lit = "[" + ",".join(json.dumps(x) for x in written) + "]"
+    edges_got = q(f"MATCH (a)-[e]->(b) WHERE a.id IN {lit} AND b.id IN {lit} "
+                  f"RETURN count(e) AS c")[0][0]
+
+    problems = verify_problems(written, found, edges_got, len(doc["edges"]))
+    if problems:
+        for p in problems:
+            print(f"  ✗ {p}", file=sys.stderr)
+        print(f"\nREAD-BACK FAILED — {len(problems)} problem(s) above", file=sys.stderr)
+        return 1
+    print(f"\nread-back OK — {len(written)}/{len(written)} written nodes resolve, "
+          f"{edges_got}/{len(doc['edges'])} edges between them")
+    return 0
+
+
+def verify_problems(written: list[str], found: set[str], edges_got: int,
+                    edges_expected: int) -> list[str]:
+    """What the read-back found MISSING — the exact set, never a tolerated ratio.
+
+    Pure so the verdict is testable without a graph. A tolerance here is the
+    defect: `got >= expected * 0.9` prints a green light for a run that silently
+    lost 10% of the map, and a lost node is exactly what `--verify` exists to
+    find.
+    """
+    problems: list[str] = []
+    missing = [x for x in written if x not in found]
+    if missing:
+        problems.append(
+            f"{len(missing)} of {len(written)} written node id(s) are NOT in the graph "
+            f"(missing {missing[:5]}{' …' if len(missing) > 5 else ''})")
+    if edges_got != edges_expected:
+        problems.append(
+            f"{edges_got} edge(s) between the map's nodes, expected {edges_expected} "
+            f"({edges_expected - edges_got} not filed)")
+    return problems
 
 
 def main() -> int:
