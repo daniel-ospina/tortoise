@@ -6812,8 +6812,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # the four suites GREEN. Measured with it, per statement (cycle 5): the two claims the
     # first cut covered red, and the OTHER TWO — the `grep` output and the mid clause — stayed
     # green at 458 passed, so a half-done move was still reachable. All FOUR are asserted here
-    # because D5 is one markdown LINE carrying 266 cite-shaped `:N` tokens (the `~50` these
-    # comments used to say was about five times low, `266/50 ≈ 5.3`, not a tenfold one —
+    # because D5 is one markdown LINE carrying 265 cite-shaped `:N` tokens (the `~50` these
+    # comments used to say was about five times low, `265/50 ≈ 5.3`, not a tenfold one —
     # #13900 review, finding 5): a row cannot separate two
     # statements on one line, and an arm that covers half of them reports a guarantee it does
     # not hold. The number comes from the SOURCE, so a source move nobody re-derived reds too.
@@ -16492,10 +16492,10 @@ def test_every_bundle_table_row_carries_its_headers_cell_count():
 
 
 def test_the_D5_row_is_still_one_table_row():
-    """D5 is the row this bundle re-derives 266 cite-shaped tokens on at this head, and it is
+    """D5 is the row this bundle re-derives 265 cite-shaped tokens on at this head, and it is
     ONE line. ⛔ THAT FIGURE IS A READING, NOT A PIN, AND IT IS NOW READ: the arm below derives
     the line's own count and compares it with every `<n> cite-shaped` sentence in this file, so
-    any commit moving the line off `266` reds instead of leaving four comments behind (a
+    any commit moving the line off `265` reds instead of leaving four comments behind (a
     mutated figure was measured GREEN before that arm existed — #13802 review, round 27, P2).
     ⛔ The merge that brought `origin/main` in took THIS branch's row (its own 16 review rounds
     and the pins that read it live here), so the branch row's count is the one that holds; a
@@ -16706,7 +16706,7 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #: D5's PRESENT-TENSE anchors, each bound to the line of the tree it names. ⛔ The clause
 #: below had NO reader before this pin, which is why it rotted while the suite was green
 #: (#13602 review, finding 1): a `_pin_row_failures` row asserts the number appears
-#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 266 cite-shaped tokens at
+#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 265 cite-shaped tokens at
 #: this head, so any
 #: occurrence satisfied every row — including the historical ones — and a number asserted
 #: as CURRENT could name prose, a comment or an unrelated statement indefinitely. These
@@ -16735,10 +16735,10 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     ),
     # ⛔ THE QUOTA GUARD, BOUND TO ITS OWN SENTENCE (#13845 review, finding 1, P1). The
     # `_pin_row_failures` row for this line was satisfied by ANY `:N` on it, and the D5 row
-    # carries 266 cite-shaped `:N` tokens at this head (re-derived from the row this branch
+    # carries 265 cite-shaped `:N` tokens at this head (re-derived from the row this branch
     # ships, at the merge that brought `origin/main` in; measured here with
     # `len(re.findall(r":\d{2,}", <the `| **D5**` line>)` — the `~50` this comment used to
-    # say was about five times low (`266/50 ≈ 5.3`), which is the same rot one layer up) — so `:20329`
+    # say was about five times low (`265/50 ≈ 5.3`), which is the same rot one layer up) — so `:20329`
     # was "read" from an unrelated clause denoting a
     # DIFFERENT file (the `sdk.py` empty-gate return dict sits on `:20311` too), while the
     # sentence's own guard number stayed at the stale `:20245` and nothing graded it. This
@@ -16829,8 +16829,8 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     `the caller does not ask for the anchor.`) and the anchor triple `:21540`/`:21498`/
     `:28543` (the tree's are `:21604`/`:21562`/`:28607`; those three are `proj, self,`,
     a comment, and prose). Every one of them was GREEN here, because no row could see a
-    number that shared a line with 266 others (the `~50` this sentence used to say
-    was about five times low — `266/50 ≈ 5.3`: #13900 review, finding 5).
+    number that shared a line with 265 others (the `~50` this sentence used to say
+    was about five times low — `265/50 ≈ 5.3`: #13900 review, finding 5).
 
     ⛔ A reader who re-verifies the way the document instructs is what this protects: the
     document handed them two different answers for ONE statement on the SAME line.
@@ -16946,18 +16946,31 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
                          "a document that carries two"):
         assert _stale_count not in text, (
             f"D5 states {_stale_count!r} about `04-plan.md`. A count is a head-bound "
-            "figure and this arm has already been wrong in both directions; name the "
-            "PAIRS instead (`sdk.py:28682` -> `:28718` and the I7 range "
-            "`:15262-15339` -> `:15346-15423`), which the document CARRIES at this head — "
-            "and whether that file sits in the diff is `git diff --numstat"
-            " origin/main...HEAD` at the head you merge, never a claim typed here "
-            "(#13750 review, cycle 3; #13746 review round 2, finding 6)")
-    for _pair in ("`sdk.py:28682` → `:28718`", ":15262-15339` → `:15346-15423`"):
-        assert _pair in text, (
-            f"D5 no longer names the re-point pair {_pair} that `04-plan.md` carries at "
-            "this head. Both ends are pinned here because the range's TARGET was once "
-            "typed as the base's own value while its SOURCE was already re-derived "
-            "(#13750 review, cycle 3)")
+            "figure and this arm has already been wrong in both directions; state a "
+            "re-point by its PAIR, or state that the file is not in the diff — and whether "
+            "it is is `git diff --numstat origin/main...HEAD` at the head you merge, never a "
+            "claim typed here (#13750 review, cycle 3; #13746 review round 2, finding 6)")
+    # ⛔ THE CHIMERA IS REFUSED, IN EVERY SPELLING (#13879 review, cycles 3-4 — MEASURED).
+    # This arm used to REQUIRE the pair "`sdk.py:28682` -> `:28718` and the I7 range
+    # `:15262-15339` -> `:15346-15423`" as the pair `04-plan.md` carries, and both halves were
+    # false at the merged head: the range reads IDENTICALLY on `origin/main` and here because
+    # `main` made that move (a pair whose halves come from two different heads is a CHIMERA),
+    # and `04-plan.md` is not in this diff at all (`git diff --numstat origin/main...HEAD --
+    # …/04-plan.md` prints nothing). A pin that REQUIRES the false claim is green over it,
+    # which is the class this row exists to close — so the pin now refuses the pair-list
+    # spelling instead. A REGEX, not a literal: the row writes its pair-lists in BOTH arrow
+    # conventions (`->` and `→`) and does not always backtick the target, so a literal caught
+    # ONE spelling and let three through (mutation-verified, #13879 review cycle 4).
+    assert re.search(r":15262-15339`?\s*(?:→|->)\s*`?:15346-15423", text) is None, (
+        "D5 names the I7 range's move as one of THIS diff's re-points. It is not one: those "
+        "two readings are identical on `origin/main` and at this head, because `main` made "
+        "that move — a pair whose two halves come from two different heads is the chimera "
+        "D5 exists to forbid (#13879 review, cycle 3)")
+    assert "is the pair `04-plan.md` carries at this head" not in text, (
+        "D5 still claims `04-plan.md` carries a re-point pair at this head, while the file is "
+        "not in this diff (`git diff --numstat origin/main...HEAD -- …/04-plan.md` prints "
+        "nothing). State the two facts instead: the file is absent from the diff, and its own "
+        "row reads the address below (#13879 re-cut)")
     assert "sdk.py:28935" in text, (
         "D5 no longer names `sdk.py:28935`, the value `04-plan.md`'s own row carries at "
         "this head (`grep -n 'declared_relation_predicates()' "
