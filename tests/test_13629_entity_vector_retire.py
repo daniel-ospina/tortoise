@@ -10033,8 +10033,10 @@ def test_the_fourth_legs_container_arm_asks_the_whole_family():
         # _encode(ev), 1)]` and `[("embedding", 1, 1)]` carry the same key and leg 3 answers only
         # the live-valued one) — its constant `v[1]` is. Kept in the sample so the redundancy
         # claim is measured over them too rather than silently skipped. They have NO end-to-end
-        # row, and that is CORRECT rather than a gap: neither places a top-level key, so there is
-        # nothing for the stop arm to refuse — the tool docstring's "neither row belongs to this
+        # row, and that is CORRECT rather than a gap: neither places the VECTOR at a top-level key
+        # (`[("embedding", 1, 1)]` produces `{'embedding': 1}` — the property IS the key, and only
+        # its constant VALUE keeps it from being a store), so there is nothing for the stop arm to
+        # refuse — the tool docstring's "neither row belongs to this
         # arm's question" (`_CONTAINER_CALLS_ANSWERED_UPSTREAM`). ⛔ DO NOT point these at
         # `test_the_stop_arm_must_not_store_the_vector`, as an earlier revision of this comment
         # did: measured at this head, that test contains NO tuple literal with `"embedding"` in

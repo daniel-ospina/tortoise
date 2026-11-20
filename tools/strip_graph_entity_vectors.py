@@ -1167,14 +1167,16 @@ def _container_call_operand(node):
 #: 3-tuple makes the pairs rule abstain, so this arm is the SOLE decider for that class — 12 rows
 #: at this seam (`list`/`tuple` nested rows were refused at BOTH heads: those names were never
 #: subtracted). The 12 rows certified at BOTH heads are the two extras spellings that place no
-#: top-level key at all (`[("embedding", 1, 1)]` — constant value; `[(1, "embedding", …)]` —
+#: top-level VECTOR at all (`[("embedding", 1, 1)]` — constant value; `[(1, "embedding", …)]` —
 #: property bound to key `1`), so certification is correct there and neither row belongs to this
-#: arm's question.
+#: arm's question. ⛔ NOT "no top-level key": `[("embedding", 1, 1)]` produces
+#: `{'embedding': 1}` — the property IS the key, and what makes it not a store is that its VALUE
+#: is a constant rather than the vector.
 #:
 #: ⛔ THE FIRST REPAIR ROUND READ "0 verdicts moved" AND THAT WAS A SAMPLE ARTEFACT: its rows spell
 #: the filter DIRECTLY in the clause (`sorted([(…, 1)]) if v`), and some other term of the `|=`
 #: chain refuses that form with or without this arm. It also claimed the two index-1 extras rows
-#: were a pre-existing hole; measured here through the same gate they place no top-level key, so
+#: were a pre-existing hole; measured here through the same gate they place no top-level vector, so
 #: they are not a store to certify. The rows are kept (they pin the class) and the NESTED spellings
 #: are the ones that pin this arm.
 #:
