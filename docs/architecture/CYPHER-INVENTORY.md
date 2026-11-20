@@ -66,7 +66,7 @@ the box, are:
 | mode | statement sites | files | note |
 |---|---|---|---|
 | product surface (this census) | **1316** | **99** | `tortoise/**/*.py`, test modules excluded |
-| every tracked surface (`--all-surface`) | **9,170** | **842** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,077 / 9,082 / 9,097 / 9,110 / 9,132 / 9,150 here, and only `9,170` reproduces at this tree — the 2,439 files it scanned include this lane's three (`#13557`/`#13558`); the number beside this row names the tree it does) |
+| every tracked surface (`--all-surface`) | **9,102** | **836** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,077 / 9,082 / 9,097 / 9,110 / 9,132 / 9,150 / 9,170 here, and only `9,102` reproduces at this tree — the 2,507 files it scans are `main`'s 2,439 plus `#12901`'s 66 archived method bodies (`archive/sdk-methods/12901-sdk-final/*.py`, which carry no door site), `tools/sdk_privatise.py` and the sweep's own test; the `#13557`/`#13558` three are already inside `main`'s 2,439. The number beside this row names the tree it does) |
 
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
 here. **This document therefore does not adopt it, and does not reconcile TO it.** It replaces it
@@ -244,9 +244,9 @@ where the folded part was.
 
 | sites | file |
 |---|---|
-| 384 | `tortoise/sdk.py` |
-| 240 | `tortoise/hosted_api.py` |
-| 92 | `tortoise/projection/__init__.py` |
+| 386 | `tortoise/sdk.py` |
+| 242 | `tortoise/hosted_api.py` |
+| 93 | `tortoise/projection/__init__.py` |
 | 54 | `tortoise/projection/entities.py` |
 | 42 | `tortoise/projection/edges.py` |
 | 32 | `tortoise/hosted_backup.py` |
@@ -450,8 +450,8 @@ product — the true door sites are all still here, and the `unresolved` bucket 
 really do hand a door a statement this reader cannot follow.
 
 §1's `rg` reconciliation is re-quoted from the tool at this tree (door **1,632 / 108** whole-text,
-verb **2,365 / 147**, bare **1,638 / 109**), and the `--all-surface` row re-derived: **9,170 / 842**
-across **2,439** scanned files. Appendix A is regenerated with `--markdown`, and `--check` prints
+verb **2,365 / 147**, bare **1,638 / 109**), and the `--all-surface` row re-derived: **9,102 / 836**
+across **2,507** scanned files. Appendix A is regenerated with `--markdown`, and `--check` prints
 **`25 pinned counts match`**. ⚠️ The two paragraphs below describe each parent's cut against ITS OWN
 base, so their numbers are relative and no longer the table's — the tables and pins carry THIS one.
 
