@@ -3881,10 +3881,13 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
     DECLARED SUPERSET, not an equivalence (#13995 review rounds 13 and 16, P3, MEASURED): a POSIX
     bracket has no escapes, so the `\` is a MEMBER, and `^[+\-]$` counts `3` on a probe that
     carries a `\` line where the class counts 2. Accepted because it is a spelling a document
-    plausibly writes, with the cost (one impossible diff line) stated rather than implied. It is
-    NOT a universal: a bracket mixing two backslashes or an inside RANGE (`` `^[-+\]$` ``, which
-    grep runs and counts `3`) is REFUSED here — the safe direction, and a residual this sentence
-    declares rather than a guarantee it makes. Three spellings are NOT among them, all measured: `^[\-+]$` (the
+    plausibly writes, with the cost (one impossible diff line) stated rather than implied. Two
+    backslashes can still pass (`^[\+\-]$` counts `3` — the same superset, not a separate case).
+    The REAL bound, and it is narrower in one direction only (#13995 review round 17, P3,
+    MEASURED): an inside RANGE (`[a-z]`), a DESCENDING range (`^[\-+]$`, which grep refuses with
+    `Invalid range end`) and a backslash that TRAILS the content (`^[-+\]$`) are all refused — the
+    safe direction. Accepted brackets are exactly those whose members are `+`, `-` and at most a
+    literal `\`, so an accepted spelling counts `2` or `3` and never more. Three spellings are NOT among them, all measured: `^[\-+]$` (the
     DESCENDING range `\`–`+`: `grep: Invalid range end`, rc 2, and this test now refuses it too),
     `^(?:\+|-)$` (POSIX ERE has no non-capturing group: `warning: ? at start of expression`,
     counts `1` under `-E` and `0` under BRE) and `^+$`/`^-$` (one sign, half the class). What it
