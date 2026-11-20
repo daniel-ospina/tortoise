@@ -4000,6 +4000,23 @@ surfaces:
   # file, so it matches no SOURCE_PATTERN) nor tortoise/sdk.py selects anything
   # narrower, and the hook it pins lives in the read funnel every surface uses.
   - test_read_ledger.py
+  # #14011: the per-node USAGE signal (`tortoise/usage_signal.py`) and the SDK hook
+  # that feeds it. `core` is the right arm for the same reason the row above states,
+  # MEASURED the same way rather than inferred:
+  #
+  #   select(['tortoise/usage_signal.py'], 'pull_request', m)                  -> ['core']
+  #   select(['tests/test_usage_signal.py'], 'pull_request', m)                -> ['core']
+  #   select([module, test], 'pull_request', m)                                -> ['core']
+  #
+  # `usage_signal.py` matches no SOURCE_PATTERNS row, and the test file falls through
+  # `select()`'s `tests/` fallback, so both resolve to `core` — whose fallback MEMBER
+  # LIST did not contain this file, so a module-only diff ran the guard of nothing it
+  # touches. ⛔ Without this row `tools/ci_selection.py --integrity` exits 1 with
+  # `manifest drift: ['test_usage_signal.py']`, which is the REQUIRED
+  # `manifest-integrity` leg — red on `main` too, so this registration is also
+  # #14070's fix. The PR body's own verification command
+  # (`TORTOISE_TEST_CARVE_OUT=1`) is inert for this file: it is NOT in `carve_out:`.
+  - test_usage_signal.py
   - test_5509_name_keyed_identity_reads.py
   - test_7925_route_parity.py
   # #6211: `tortoise/ep.py` and `tortoise/sdk.py` are SHARED_MODULES, so a
@@ -14966,6 +14983,7 @@ durations:
   test_oauth_consent_jti_store.py: 0.1
   test_onboarding_session_recording_parity.py: 1.8  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 2.6
   test_read_ledger.py: 1.0  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.6
+  test_usage_signal.py: 2.0  # new in #14011 / #14065 (registered by #14072) — the #3400/#4348 trap: this row cannot carry a junit reading because the file was in NO surface until this change, so no push-to-main sweep ever ran it (`durations_captured_at` above predates the file landing). It takes the header's flat `DEFAULT_FAST_WEIGHT`, NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration beside `test_read_ledger.py` is what puts the file in `fast_pool()`, and `--integrity`'s 0.90 coverage check stays green either way, so only this row records the weight — `tools/ci_selection.py --integrity` is the authority for the coverage and `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. Hermetic (a `tmp_path` stream and checkpoint, no DB, no graph, no docker, no network, no model call): the six cycle-3 guards — the prefix fingerprint captured BEFORE the body read (an in-place rewrite during a refresh is detected next time and replays from cold), `window_days` as part of the checkpoint identity, `capped` re-derived from the stream's tail rather than latched, a zero-serve / window-emptied / line-skipped roll-up refusing at the door, the write-side torn-tail newline repair, `MAX_LINE_BYTES`, and the ops door's exit code being identical in both output modes. ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin.
   test_run_affected.py: 9.9  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 8.8
   test_s3_prior_ablation.py: 2.5  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 1.2
   test_sdk_surface_declaration.py: 2.1  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 2.4

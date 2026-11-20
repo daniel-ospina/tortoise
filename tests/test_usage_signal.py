@@ -39,6 +39,21 @@ named test goes RED):
   every node is "unserved" and the caller silently reverts to creation recency.
 * **Accept a checkpoint that disables its own prefix check** (``head_len = 0``) →
   ``test_a_forged_checkpoint_cannot_disable_the_prefix_check`` RED.
+* **Open the door on a roll-up the window emptied** (drop ``not self.entries`` from
+  :attr:`UsageReading.orderable`) →
+  ``test_a_window_that_prunes_everything_refuses`` RED. ``served_total`` is
+  CUMULATIVE, so it cannot see a roll-up ``prune()`` has emptied.
+* **Certify a coordinate as unserved after pruning** (drop ``or self.pruned`` from
+  :meth:`UsageReading.unserved_keys`) →
+  ``test_a_pruned_rollup_refuses_to_certify_any_key_as_unserved`` RED — pruning
+  deletes the entry and leaves nothing to tell "pruned" from "never served".
+* **Trust a checkpoint written by the pre-window code** (``CHECKPOINT_VERSION`` back
+  to 1) → ``test_a_pre_fix_checkpoint_is_a_cache_miss_so_the_fix_is_retroactive``
+  RED — the missing ``window_days`` field read as ``None`` and MATCHED an unbounded
+  caller, so the upgrade inherited a fold another window had destroyed.
+* **Re-open the path to decide ``capped``** (use ``_tail_is_capped`` in ``refresh``)
+  → ``test_the_capped_verdict_is_derived_from_the_read_descriptor`` RED — the fold
+  would be certified by a file the refresh never read.
 """
 
 from __future__ import annotations
@@ -1212,6 +1227,38 @@ def test_the_pruning_window_is_part_of_the_checkpoint_identity(stream: Path) -> 
     )
 
 
+def test_a_pre_fix_checkpoint_is_a_cache_miss_so_the_fix_is_retroactive(
+    stream: Path,
+) -> None:
+    """⛔ AN UPGRADE MUST NOT INHERIT A PRUNED FOLD WRITTEN BY THE PREVIOUS CODE.
+
+    The pre-PR writer pruned when a window was in effect but wrote NO `window_days`
+    into the checkpoint. `_deserialise` reads a missing field as `None`, which
+    `_checkpoint_matches` then MATCHED against an unbounded caller's `None` — so
+    the unbounded read EXTENDED a fold another window had already destroyed,
+    permanently, because the checkpoint kept matching. The format bump makes every
+    pre-PR checkpoint a cache MISS, which is what `CHECKPOINT_VERSION` is for.
+    """
+    _serve(stream, "Point", ["ancient"], at=_at(1))
+    usage_signal.refresh(stream, now=datetime(2026, 1, 20, tzinfo=UTC), window_days=2)
+
+    ckpt = usage_signal.checkpoint_path(stream)
+    payload = json.loads(ckpt.read_text(encoding="utf-8"))
+    # The pre-PR on-disk shape: no `window_days` field, and the pre-PR version.
+    payload.pop("window_days", None)
+    payload["version"] = 1
+    ckpt.write_text(json.dumps(payload), encoding="utf-8")
+
+    unbounded = usage_signal.refresh(stream, window_days=None)
+
+    assert unbounded.replayed is True, "a pre-PR checkpoint was extended, not replayed"
+    assert unbounded.pruned == 0
+    assert unbounded.serve_count("Point", "ancient") == 1, (
+        "a coordinate still in the stream read as 'no opinion' because the upgrade "
+        "inherited a windowed fold"
+    )
+
+
 def test_the_write_path_repairs_a_torn_tail(stream: Path) -> None:
     """A batch appended onto a torn final line must not concatenate into it.
 
@@ -1256,6 +1303,64 @@ def test_a_counter_with_no_serves_refuses(stream: Path) -> None:
     assert "no serves observed" in (got.refusal_reason() or "")
 
 
+def test_a_window_that_prunes_everything_refuses(stream: Path) -> None:
+    """⛔ A WINDOW WIDER THAN THE STREAM'S AGE IS NOT "RECENTLY QUIET".
+
+    `served_total` is CUMULATIVE and `prune()` never decrements it, so a bounded
+    read whose surviving set is empty reported `orderable=True` with
+    `served_total == 1`: `unserved_keys` then declared EVERY candidate unserved and
+    the caller took its creation-recency tie-break — verbatim the outcome
+    `refusal_reason` says this door exists to prevent, reached through the
+    documented tuning knob instead of through never observing. `window_days=0` is
+    refused for the same reason; a window this wide now reaches the same refusal.
+    """
+    _serve(stream, "Point", ["hot"], at=_at(1))
+
+    got = usage_signal.refresh(
+        stream, now=datetime(2026, 1, 20, tzinfo=UTC), window_days=2
+    )
+
+    assert got.entries == {}
+    assert got.pruned == 1
+    assert got.served_total == 1, "the guard must not be `served_total == 0`"
+    assert got.orderable is False
+    assert got.coldest_first() == []
+    assert got.unserved_keys(["hot", "never-served"]) == [], (
+        "every candidate declared unserved is the creation-recency fallback"
+    )
+    assert got.serve_count("Point", "hot") == 0, "a refused reading answers no number"
+    assert "surviving roll-up entries" in (got.refusal_reason() or "")
+    assert "creation-recency" in (got.refusal_reason() or "")
+
+
+def test_a_pruned_rollup_refuses_to_certify_any_key_as_unserved(stream: Path) -> None:
+    """⛔ PRUNING ERASES THE DIFFERENCE BETWEEN "pruned" AND "never served".
+
+    `prune()` deletes the entry and records only a watermark, so a candidate absent
+    from `entries` may have been served (before `pruned_before`) or may never have
+    been served, and no field of the reading distinguishes them. Certifying either
+    is a claim the stream does not support, so the signal certifies none of them —
+    the caller keeps its own tie-break, which is the safe direction (an unfilled
+    candidate is not ordered cold).
+    """
+    _serve(stream, "Point", ["ancient"], at=_at(1))
+    _serve(stream, "Point", ["recent"], at="2026-01-03T23:00:00+00:00")
+
+    got = usage_signal.refresh(
+        stream, now=datetime(2026, 1, 4, tzinfo=UTC), window_days=2
+    )
+
+    assert got.pruned == 1
+    assert got.orderable is True, "a PARTIAL pruning is still orderable"
+    assert got.entry("Point", "recent") is not None
+    assert got.unserved_keys(["ancient", "brand-new"], label="Point") == []
+
+    # …and with nothing pruned the same call answers, so the guard is not vacuous.
+    unbounded = usage_signal.refresh(stream, window_days=None)
+    assert unbounded.pruned == 0
+    assert unbounded.unserved_keys(["brand-new"], label="Point") == ["brand-new"]
+
+
 def test_an_incomplete_counter_refuses(stream: Path) -> None:
     """A skipped line is the only trace of a lost `capped` marker.
 
@@ -1273,6 +1378,12 @@ def test_an_incomplete_counter_refuses(stream: Path) -> None:
     assert got.orderable is False
     assert got.coldest_first() == []
     assert "INCOMPLETE" in (got.refusal_reason() or "")
+    # ⛔ THE REMEDY IS NAMED, because this refusal is PERMANENT for the stream: the
+    # unparseable line is a complete line now, so it folds as a skip for ever. An
+    # operator told "refused" with no way out deletes the checkpoint, which cannot
+    # help — a cold replay re-reads the same line.
+    assert "Rotate the stream" in (got.refusal_reason() or "")
+    assert "deleting the checkpoint does not" in (got.refusal_reason() or "")
 
 
 def test_capped_clears_when_recording_resumes(
@@ -1299,6 +1410,34 @@ def test_capped_clears_when_recording_resumes(
     assert got.served_total > 0
     assert got.orderable is True, "recording resumed but the door still refused"
     assert got.capped is False
+
+
+def test_the_capped_verdict_is_derived_from_the_read_descriptor(
+    stream: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """⛔ THE READER MUST NOT RE-OPEN THE PATH TO DECIDE `capped`.
+
+    `_checkpoint_matches` insists the fold is described by the one descriptor the
+    refresh read and nothing else. A by-path tail read can describe a file the fold
+    never saw (a rotation between the read and the check) and would then certify a
+    `capped` verdict about another file — the same class of defect the pre-body
+    prefix capture removed for the fingerprint.
+    """
+    monkeypatch.setenv(usage_signal.USAGE_MAX_BYTES_ENV, "300")
+    usage_signal._warned.clear()
+    _serve(stream, "Point", ["p1", "p2"], at=_at(1))
+    _serve(stream, "Point", ["p3", "p4"], at=_at(2))  # hits the bound
+    assert usage_signal._tail_is_capped(stream) is True
+
+    def _no_path_reads(_target: Path) -> bool:  # pragma: no cover — must not run
+        raise AssertionError("refresh re-opened the stream path to decide `capped`")
+
+    monkeypatch.setattr(usage_signal, "_tail_is_capped", _no_path_reads)
+
+    got = usage_signal.refresh(stream)
+
+    assert got.capped is True
+    assert got.orderable is False
 
 
 def test_a_record_line_over_the_bound_is_dropped(stream: Path) -> None:

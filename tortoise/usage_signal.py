@@ -99,6 +99,24 @@ the whole consumed prefix every call is the full replay this module exists to
 avoid. The stream's contract is APPEND-ONLY (``O_APPEND``); a `copytruncate`
 rotation must delete the checkpoint.
 
+⚠️ **A SECOND RESIDUAL, ON THE FROZEN-COUNTER TRACE — named for the same reason.**
+The door refuses an INCOMPLETE counter, and ``lines_skipped`` catches the shape that
+leaves a COMPLETE unparseable line behind. Two shapes leave no such line, so nothing
+in the stream's content can reveal them: a TORN final fragment (never consumed, and
+``_tail_of_bytes_is_capped`` reads an unparseable tail as "not capped" — the next
+write attempt heals it, so that window is one write attempt wide), and a marker
+write that FAILED OUTRIGHT (``ENOSPC`` is both the likeliest cause and correlated
+with hitting the byte cap: serves are dropped, no marker exists, ``capped`` stays
+``False`` and ``lines_skipped`` stays ``0``, so the pass would rank live nodes
+cold). Both need the stream ROTATED; deleting the checkpoint cannot help. Tracked
+in #14084.
+
+⚠️ **A CHECKPOINT IS KEYED BY PARTITION, NOT BY WINDOW.** Two callers alternating
+``window_days`` therefore mismatch the checkpoint on every switch and replay from
+cold — correct (the mismatch is fail-closed, and it is exactly what the identity is
+for), but O(stream) per switch, up to ``USAGE_MAX_BYTES``. One window per stream is
+the shape this module is built for.
+
 ⚠️ **AN EMPTY READING IS NOT "NOTHING IS HOT".** A freshly armed signal reports
 ``served_total == 0`` because nothing has been *observed* yet, not because
 nothing was used. A missing stream, an EMPTY stream (a `copytruncate` rotation
@@ -174,7 +192,17 @@ EVENT_UNRESOLVED = "unresolved"
 #: Checkpoint format version. A checkpoint written by another version is IGNORED
 #: (replayed from cold), never migrated: it is a cache, and a cache that cannot
 #: be read is a miss.
-CHECKPOINT_VERSION = 1
+#:
+#: ⛔ BUMPED TO 2 TOGETHER WITH the `window_days` fold identity, because the bump
+#: is not cosmetic: a version-1 checkpoint carries NO `window_days` field, and
+#: `_deserialise` reads a missing field as ``None`` — which `_checkpoint_matches`
+#: then compared successfully against an UNBOUNDED caller's ``None``. The pre-PR
+#: writer DID prune (when `refresh(window_days=…)` or the env set a window) and
+#: persisted the pruned `entries`, so on upgrade an unbounded read silently
+#: EXTENDED a fold another window had already destroyed — permanently, because
+#: the checkpoint kept matching. Without the bump the fix is not retroactive and
+#: the very defect it removes survives the upgrade it ships with.
+CHECKPOINT_VERSION = 2
 
 #: A single event line longer than this is dropped, for the ledger's reason: the
 #: bound is not what prevents interleaving (one `O_APPEND` write per batch is) —
@@ -410,7 +438,23 @@ def _tail_is_capped(target: Path) -> bool:
             chunk = fh.read()
     except OSError:  # pragma: no cover
         return False
-    for raw in reversed(chunk.split(b"\n")):
+    return _tail_of_bytes_is_capped(chunk)
+
+
+def _tail_of_bytes_is_capped(chunk: bytes) -> bool:
+    """Is the LAST non-empty line of `chunk` our `capped` marker?
+
+    ⛔ THE READ SIDE USES THIS ONE, over the bytes THIS REFRESH ALREADY READ, not
+    a fresh open of the path. `_checkpoint_matches` insists the fold is described
+    by the one descriptor it read and nothing else; a by-path tail read can
+    describe a file the fold never saw (a rotation between the read and the
+    check), so the reader would certify a `capped` verdict about another file.
+    The tail is bounded exactly as the writer's is, so this stays O(1).
+    """
+    if not chunk:
+        return False
+    back = min(len(chunk), MAX_LINE_BYTES + 64)
+    for raw in reversed(chunk[-back:].split(b"\n")):
         line = raw.strip()
         if not line:
             continue
@@ -783,13 +827,26 @@ class UsageReading:
         ``False`` for a CAPPED counter (frozen — ordering it would rank live
         nodes as cold and evict the hottest), for a POOLED one (more than one
         tenant's traffic in one roll-up — ordering it scores one tenant on
-        another's reads), and for a STALE one (no stream).
+        another's reads), for a STALE one (no stream), for one that has observed
+        NO serve yet, for one whose roll-up has NO SURVIVING ENTRIES (the pruning
+        window emptied it — `served_total` is cumulative and cannot see that), and
+        for an INCOMPLETE one (a line it could not read).
         """
         return not (
             self.capped
             or self.pooled
             or self.stale
             or self.served_total == 0
+            # ⛔ A ROLL-UP WITH NO SURVIVING ENTRIES HAS NOTHING TO SPEAK FOR, and
+            # `served_total` cannot see that: it is CUMULATIVE and `prune()` never
+            # decrements it. A window wider than the stream's age therefore left
+            # `entries == {}` with `served_total > 0`, so the door opened over an
+            # empty roll-up and `unserved_keys` declared EVERY candidate unserved
+            # — the creation-recency fallback this module exists to remove,
+            # reached through the documented tuning knob instead of through never
+            # observing. `window_days=0` is refused for exactly this reason; a
+            # window this wide now reaches the same refusal.
+            or not self.entries
             or self.lines_skipped > 0
         )
 
@@ -810,21 +867,38 @@ class UsageReading:
                 f"because a different tenant read it"
             )
         if self.lines_skipped > 0:
-            # ⛔ A LOST LINE IS THE ONLY TRACE OF A LOST `capped` MARKER. A torn
-            # marker that no later append heals re-opens the frozen-counter door
-            # with nothing else to notice it, so an incomplete counter refuses for
-            # the same reason a capped one does: this signal may not decide
-            # evictions it cannot account for.
+            # ⛔ WHAT THIS GUARD COVERS, STATED NO WIDER THAN IT IS: a COMPLETE
+            # line that no longer parses — which is what a torn write leaves
+            # behind once the writer's newline repair has turned the fragment into
+            # a line of its own. It does NOT cover two neighbouring shapes, and
+            # saying otherwise is what would stop the next reader from looking:
+            # a TORN final fragment (never consumed, so it never reaches this
+            # counter, and `_tail_of_bytes_is_capped` reads an unparseable tail as
+            # "not capped" — the next write attempt heals it), and a marker write
+            # that FAILED OUTRIGHT (the cap branch's `except Exception` warns once
+            # and returns 0, so ENOSPC — correlated with hitting the byte cap —
+            # drops serves with no marker and no trace at all). Both are named as
+            # a residual in the module docstring and tracked in #14084.
             return (
                 f"{self.lines_skipped} unreadable stream line(s) — the counter is "
                 f"INCOMPLETE, and a lost `capped` marker is indistinguishable from a "
-                f"stream that never capped"
+                f"stream that never capped. Rotate the stream to clear it: deleting "
+                f"the checkpoint does not, because a cold replay re-reads the same "
+                f"line"
             )
         if self.served_total == 0:
             return (
                 "no serves observed yet — an armed-but-quiet counter has no opinion, "
                 "and treating every candidate as unserved is the creation-recency "
                 "fallback this signal exists to remove"
+            )
+        if not self.entries:
+            return (
+                f"no surviving roll-up entries — {self.pruned:,} entr(ies) last "
+                f"served at or before {self.pruned_before} were pruned by the "
+                f"{USAGE_WINDOW_DAYS_ENV} window, so this reading cannot speak for "
+                f"any coordinate, and treating every candidate as unserved is the "
+                f"creation-recency fallback this signal exists to remove"
             )
         return None
 
@@ -959,8 +1033,18 @@ class UsageReading:
         ⛔ ``[]`` on a refused reading. On a STALE one this would otherwise declare
         **every** candidate unserved — precisely the creation-recency fallback this
         module exists to remove, delivered with no marker at all.
+
+        ⛔ ``[]`` ALSO ONCE ANYTHING HAS BEEN PRUNED, and for the same reason:
+        pruning DELETES the entry ("not served since :attr:`pruned_before`", which
+        is not "unserved"), and it leaves nothing behind to tell the two apart — a
+        candidate absent from ``entries`` may have been pruned or may never have
+        been served, and no field of this reading distinguishes them. Certifying
+        either answer would be a claim the stream does not support, so the honest
+        answer is that this signal declines to certify any of them; the caller
+        keeps its own tie-break, which is the safe direction (an unfilled
+        candidate is not ordered cold).
         """
-        if not self.orderable:
+        if not self.orderable or self.pruned:
             return []
         if label is None:
             seen = {key for (_t, _lbl, key) in self.entries}
@@ -1040,8 +1124,8 @@ def _deserialise(payload: Any) -> _State | None:
 
     ⛔ EVERY FIELD IS VALIDATED, INCLUDING THE ONE CROSS-FIELD INVARIANT the
     prefix check depends on: ``head_len == min(offset, HEAD_FINGERPRINT_BYTES)``.
-    A version-1 checkpoint whose fields are each individually valid but which
-    says ``head_len = 0`` makes ``_state_matches_stream`` short-circuit and
+    A checkpoint whose fields are each individually valid but which says
+    ``head_len = 0`` makes ``_state_matches_stream`` short-circuit and
     disable prefix verification entirely — the only check that catches an
     in-place, same-size replacement. Verified: without that invariant, editing
     only the checkpoint's ``head_len`` merged a replaced stream's history onto
@@ -1228,28 +1312,6 @@ def _file_lock(target: Path) -> Iterator[None]:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
             with contextlib.suppress(Exception):
                 handle.close()
-
-
-def _head_sha_from(fh: Any, nbytes: int) -> str | None:
-    """sha256 of the first `nbytes` bytes of an OPEN descriptor (position restored).
-
-    Reading through the caller's descriptor is what makes the fingerprint describe
-    the bytes actually folded — see `_checkpoint_matches`.
-    """
-    if nbytes <= 0:
-        return None
-    try:
-        here = fh.tell()
-        fh.seek(0)
-        head = fh.read(nbytes)
-        fh.seek(here)
-    except (OSError, ValueError):  # pragma: no cover — a closed/odd handle
-        return None
-    if len(head) < nbytes:
-        # The stream is shorter than the prefix it was fingerprinted over — it was
-        # truncated. A short read is not a partial match.
-        return None
-    return hashlib.sha256(head).hexdigest()
 
 
 def _stream_exists(target: Path) -> bool:
@@ -1670,8 +1732,12 @@ def refresh(
                 # ⛔ RE-DERIVED, not OR-ed into a latch. `or` kept `capped` True
                 # for ever after the bound was raised — while the stream
                 # demonstrably recorded again — and printed "STOPPED recording", a
-                # message that had become false.
-                state.capped = _tail_is_capped(target)
+                # message that had become false. Derived from the bytes READ from
+                # this refresh's own descriptor (`chunk` runs to EOF), never from a
+                # fresh open of the path: the paragraph above `_checkpoint_matches`
+                # insists the fold is described by the one descriptor it read, and
+                # a by-path tail read can describe a file the fold never saw.
+                state.capped = _tail_of_bytes_is_capped(chunk)
             # An idle refresh — no new bytes and nothing pruned — leaves the
             # checkpoint alone: rewriting the whole entry map on a no-op made a
             # per-pass scorer pay O(entries) for nothing.
@@ -1796,17 +1862,20 @@ def _main(argv: list[str] | None = None) -> int:
         )
     if got.refusal_reason():
         # ⛔ NOT A SUCCESS EXIT. A cron/check reading only the exit code saw 0 on a
-        # capped or pooled counter in the human path while `--json` returned 2 —
-        # and `served_total > 0` short-circuited the guard below, so the two doors
-        # disagreed about the same reading.
+        # capped or pooled counter in the human path while `--json` returned 2, so
+        # the two doors disagreed about the same reading. Both now key on
+        # `refusal_reason()` — which is non-`None` exactly on the complement of
+        # `orderable` — so this door and `--json` cannot drift apart again.
         print(f"⛔ NOT ORDERABLE : {got.refusal_reason()}")
         return 2
-    if not got.served_total:
-        print(
-            "⚠️ no serves folded yet — an armed-but-quiet signal measures nothing. This "
-            "is a MEASUREMENT WINDOW, not a finding about the corpus."
-        )
-        return 2
+    # ⛔ NO `if not got.served_total:` BRANCH HERE ANY MORE. It was unreachable and
+    # its rationale was inverted: `refusal_reason()` refuses a zero-serve reading
+    # (`served_total == 0` is one of its branches), so the human door returned 2 on
+    # the line above and never reached it. Deleting it loses no message — the
+    # "armed-but-quiet counter has no opinion" sentence IS the refusal text printed
+    # by the branch above — and it also stops the note from claiming a
+    # measurement window over a MISSING or EMPTY stream, which a bare
+    # `served_total == 0` test could not tell apart.
     order = got.coldest_first(a.label)
     shown = order[: max(0, a.top)]
     print(f"\ncoldest first ({len(shown)} of {len(order):,}):")
