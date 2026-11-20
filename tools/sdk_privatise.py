@@ -320,22 +320,6 @@ SWEEP_NAMES = 66
 #: name: 0`. Both sides' histories above are preserved because each row is still owned by the head
 #: that measured it; only THIS pin is this tree's.
 #:
-#: RE-CUT AGAIN → (11833, "c115acaf5bbb4163"), +2 over the (11831, …) measured at the merge
-#: `027d9b3cd69` (`origin/main` `a296e6741e5`), and the rows are the SEED-DOOR pins added for
-#: `#13899`'s repair, in `tests/test_onboarding_seed.py`. Measured by bisection on this branch, one
-#: head at a time with `--repin`, never by arithmetic: `027d9b3cd69` → 11831 · `3f3db6a3df2` → 11831 ·
-#: `8f7dadd61d8` → 11832 · `1cb0eccf53a` → 11833. The rows across `3f3db6a3df2` → `1cb0eccf53a`,
-#: measured with the tool's own `--check` row dump (not inferred): `surface.create_edge` ABSENT → **2**,
-#: `surface.create_subject` 6 → **7**, and `urlsplit(str(r.url)).query` 1 → **0** — net **+2**. All
-#: three are ordinary-word receivers on objects no typing can decide (a seed surface, a URL result),
-#: which is the declared allowance this pin exists to make visible; no SDK-holding receiver is added
-#: and the typed-reference count is `0` on this tree, measured.
-#: ⛔ CORRECTION (this block's first version named a DIFFERENT cause and was refuted by measurement
-#: before it merged): it claimed two citation PIN ROWS in `tests/test_github_indexer.py` quoting
-#: `row = self.g.query(` had been counted. They cannot be — `_STRING_PLAIN` (`^([A-Za-z_][A-Za-z0-9_]*)$`)
-#: only admits a BARE identifier and the row is emitted in the `getattr/setattr/hasattr` branch, so a
-#: pin row emits no residue at all (measured: a file holding only that row → `{}`), and that file's
-#: residue set is identical on both sides of the move.
 #: `main`'s own block, kept as the history of the -1:
 #: RE-CUT DOWN 11822 → (11821, "abf4a5c65f380206") by the #14003 lane, and the move is a REMOVED
 #: call site rather than a new shape: `tests/test_12941_read_your_writes.py:803` was the LAST site
@@ -346,6 +330,19 @@ SWEEP_NAMES = 66
 #: Direction matters and is the reason this is safe to take: a residue that SHRINKS cannot hide a new
 #: reference shape, and `typed references still pointing at a public name: 0` on this tree says no
 #: typed site replaced it. Measured with `--repin` on THIS tree, never by arithmetic on the last pin.
+#:
+#: RE-CUT AGAIN → (11833, "c115acaf5bbb4163") by the two onboarding-seed PINS this branch adds
+#: (`tests/test_onboarding_seed.py`, `#13971` review round 8): they call
+#: `surface.create_subject(...)` and `surface.create_edge(...)` on the seed surface, which are
+#: ordinary-word receivers on an untyped `surface` — the shape this counter exists to report, not
+#: a typed SDK site. `+1` each (11831 → 11833), counted per row on this tree with `--repin`; the
+#: rows are the two new tests' own calls, so the move is attributable line-for-line.
+#: ⛔ A FIRST READING OF THIS DELTA attributed the +2 to the `tests/test_github_indexer.py`
+#: citation rows added for the moved `entities.py` addresses, on the theory that a pin row
+#: QUOTES its statement and so re-counts the `.query(` inside the string. That is wrong on this
+#: tree and is marked here so it is not re-applied: those rows are unchanged across the move, and
+#: the two rows that actually differ are `surface.create_subject` (6 → 7) and
+#: `surface.create_edge` (1 → 2), both in the seed pins below.
 SWEEP_RESIDUE = (11833, "c115acaf5bbb4163")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so

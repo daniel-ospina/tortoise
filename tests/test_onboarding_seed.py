@@ -366,9 +366,14 @@ def test_every_door_the_seed_calls_is_published_by_both_real_surfaces():
                           inspect.getsource(seed_module)))
     assert {"create_subject", "create_edge"} <= used, (
         f"the seed no longer calls the doors this pin exists for: {sorted(used)}")
+    # ⛔ THE READ DOOR IS CALLED THROUGH A HELPER, so the `surface.<name>` scan cannot see it:
+    # `find_subject_by_name(surface, …)` → `_run(handle, …)` → `handle.query(…)`, and the
+    # module's own header lists `query` as part of the required handle surface. Name it here
+    # rather than trusting the scan, or dropping `query` from a surface reds nothing.
+    required = used | {"query"}
 
     for surface_cls in (hosted_api._OrgSeedSurface, selfhost._SdkSeedSurface):
-        missing = sorted(name for name in used if not hasattr(surface_cls, name))
+        missing = sorted(name for name in required if not hasattr(surface_cls, name))
         assert not missing, (
             f"{surface_cls.__name__} does not publish {missing}, which "
             f"`tortoise/onboarding/seed.py` calls as `surface.{missing[0]}(…)` — a seed "
