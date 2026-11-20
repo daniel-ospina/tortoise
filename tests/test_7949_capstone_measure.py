@@ -16693,6 +16693,22 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
         "hosted_api",
         "if count + est > max_points:",
     ),
+    # ⛔ THE I7 SPAN'S `#13841` RE-POINT (this PR). `04-plan.md` and the `_i7` arms above
+    # were re-derived for `#13841`'s `+18`; D5's row kept only the earlier `+66` pair, so
+    # nothing graded the CURRENT span and a reader got the pre-`#13841` numbers as the
+    # present tense. These two bind the row's `nodes_used`/`max_nodes` prose to the tree.
+    (
+        "the I7 `nodes_used` read",
+        r"its `nodes_used` read at `:(?P<n>\d+)`",
+        "hosted_api",
+        "nodes_used = await asyncio.to_thread(",
+    ),
+    (
+        "the I7 `max_nodes` read",
+        r"and its `max_nodes` at `:(?P<n>\d+)`",
+        "hosted_api",
+        'max_nodes = org.get("max_points")',
+    ),
 )
 
 #: The one D5 clause that states THREE current anchors in one sentence. Kept separate
@@ -16797,14 +16813,21 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
             f"D5 states {_stale_count!r} about `04-plan.md`. A count is a head-bound "
             "figure and this arm has already been wrong in both directions; name the "
             "PAIRS instead (`sdk.py:28682` -> `:28718` and the I7 range "
-            "`:15262-15339` -> `:15328-15405`), which the document CARRIES at this head — "
+            "`:15346-15423`), which `04-plan.md` DOES carry at this head — the older "
+            "`:15262-15339` -> `:15328-15405` pair is HISTORY the same row keeps "
+            "(#13841 moved it by a further +18) — "
             "and whether that file sits in the diff is `git diff --numstat"
             " origin/main...HEAD` at the head you merge, never a claim typed here "
             "(#13750 review, cycle 3; #13746 review round 2, finding 6)")
-    for _pair in ("`sdk.py:28682` → `:28718`", ":15262-15339` → `:15328-15405`"):
+    for _pair, _carried in (
+            ("`sdk.py:28682` → `:28718`", "`04-plan.md` carries at THIS head"),
+            (":15346-15423`", "`04-plan.md` carries at THIS head (`#13841`'s `+18`)"),
+            (":15262-15339` → `:15328-15405`",
+             "HISTORY — the head `main`'s `#13674`/`#13819` `+66` produced, which the "
+             "same row keeps and which `04-plan.md` does NOT carry at this head")):
         assert _pair in text, (
-            f"D5 no longer names the re-point pair {_pair} that `04-plan.md` carries at "
-            "this head. Both ends are pinned here because the range's TARGET was once "
+            f"D5 no longer names {_pair!r}, which is {_carried}. Both ends are pinned "
+            "here because the range's TARGET was once "
             "typed as the base's own value while its SOURCE was already re-derived "
             "(#13750 review, cycle 3)")
     assert "sdk.py:28718" in text, (
