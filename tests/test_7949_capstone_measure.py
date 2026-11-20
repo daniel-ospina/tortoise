@@ -15915,8 +15915,9 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         if n:
             per_file[relpath.removeprefix("docs/evidence/7949-capstone/")] = n
     #: The probe's count moved 10 -> 19 with `#11695`'s E6 producer comments, which name the
-    #: `hierarchies[]` surface the metric spans; the note in the record is re-derived with it.
-    assert per_file == {"PRE-REGISTRATION.md": 23, "preregistration.json": 9,
+    #: `hierarchies[]` surface the metric spans, and the record's own §10.39 entry adds one
+    #: more to `PRE-REGISTRATION.md` (23 -> 24); the note in the record is re-derived with them.
+    assert per_file == {"PRE-REGISTRATION.md": 24, "preregistration.json": 9,
                         "probes/capstone_measure.py": 19}, (
         f"the bundle's hasPart/hierarchies mentions are {per_file} — the record's §5 "
         "self-matching note states them per file; re-derive the note (and this map) "
