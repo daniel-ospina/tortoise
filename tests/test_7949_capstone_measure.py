@@ -16904,11 +16904,15 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         assert _stale_count not in text, (
             f"D5 states {_stale_count!r} about `04-plan.md`. A count is a head-bound "
             "figure and this arm has already been wrong in both directions; name the "
-            "PAIRS instead — `sdk.py:28682` -> `:28718` and `:15346-15423`, which the "
-            "document CARRIES at this head, plus the retired `:15262-15339` -> "
-            "`:15328-15405`, which the row marks HISTORY — "
-            "and whether that file sits in the diff is `git diff --numstat"
-            " origin/main...HEAD` at the head you merge, never a claim typed here "
+            "PAIRS instead — and name them as the D5 ROW's, not `04-plan.md`'s: "
+            "`sdk.py:28682` -> `:28718` and the retired I7 pair `:15262-15339` -> "
+            "`:15328-15405`. ⛔ `04-plan.md` carries `sdk.py:28718` (the pair's TARGET, "
+            "not its base) and the I7 range `:15346-15423` at this head, and it does not "
+            "carry `:15262` at all — measured while correcting this message, whose "
+            "earlier cut called those pairs the document's and was false for two of "
+            "them. What this arm asserts about that file is its DIFF MEMBERSHIP "
+            "(`git diff --numstat origin/main...HEAD` at the head you merge), never a "
+            "claim typed here "
             "(#13750 review, cycle 3; #13746 review round 2, finding 6)")
     # ⛔ WHAT THIS ARM GRADES, AND WHAT IT DELIBERATELY DOES NOT (#13879 review).
     #
