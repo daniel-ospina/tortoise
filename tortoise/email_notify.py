@@ -563,27 +563,30 @@ def _onboarding_from() -> str:
     return _env("RESEND_ONBOARDING_FROM_EMAIL") or ONBOARDING_FROM_DEFAULT
 
 
-async def _send_onboarding_attempt(email: str, greeting: str,
-                                   org_id: str) -> dict:
-    """One attempt + one 0.5s retry on transient-only. Raises only into the
-    caller's retry loop via the returned status — never leaks exceptions."""
-    html_body = _onboarding_html(greeting, ONBOARDING_BOOK_URL)
-    text_body = _onboarding_text(greeting, ONBOARDING_BOOK_URL)
+async def _send_rendered(to: str, subject: str, html_body: str, text_body: str,
+                         *, idempotency_key: str, label: str,
+                         from_addr: str | None = None,
+                         timeout: float = 15.0) -> dict:
+    """THE send posture, in one place: one POST, one 0.5s transient retry, and a
+    refunded budget slot on failure. Never raises.
+
+    ⛔ Shared, not copied (#14038 review, P3). The onboarding offer and the
+    capacity notice carried the same 25-line body, differing only in copy,
+    sender, timeout and label — so the next fix to the #1138 reserve/refund rule
+    or to the retry predicate would have landed in one and not the other, and the
+    notice path three months from now would double-spend a slot on exactly the
+    failure the other half had learned to refund.
+    """
     last_err: Exception | None = None
     for attempt in (0, 1):
         try:
             result = await _send_resend(
-                email, ONBOARDING_SUBJECT, html_body, text_body,
-                idempotency_key=f"onboarding:{org_id}",
-                from_addr=_onboarding_from(),
-                # Awaited inside the provisioning request — bounded so a slow
-                # provider can never stretch the edge fn's retry deadline.
-                timeout=3.0,
-            )
+                to, subject, html_body, text_body,
+                idempotency_key=idempotency_key, from_addr=from_addr,
+                timeout=timeout)
             message_id = (result or {}).get("id")
-            logger.info(
-                "email notify: onboarding offer accepted by provider "
-                "(team %s, msg %s)", org_id, message_id)
+            logger.info("email notify: %s accepted by provider (%s, msg %s)",
+                        label, to, message_id)
             return {"status": "sent", "message_id": message_id}
         except Exception as e:  # noqa: BLE001, RUF100
             last_err = e
@@ -591,11 +594,25 @@ async def _send_onboarding_attempt(email: str, greeting: str,
                 await asyncio.sleep(0.5)
                 continue
             break
-    logger.warning(
-        "email notify: onboarding offer email failed for team %s (%s)",
-        org_id, redact_safe(last_err))
+    logger.warning("email notify: %s failed for %s (%s)",
+                   label, to, redact_safe(last_err))
     refund_send_slot()  # #1138: provider rejected/failed the POST — free the slot
     return {"status": "failed"}
+
+
+async def _send_onboarding_attempt(email: str, greeting: str,
+                                   org_id: str) -> dict:
+    """The onboarding offer's render + send, through the shared posture."""
+    return await _send_rendered(
+        email, ONBOARDING_SUBJECT,
+        _onboarding_html(greeting, ONBOARDING_BOOK_URL),
+        _onboarding_text(greeting, ONBOARDING_BOOK_URL),
+        idempotency_key=f"onboarding:{org_id}",
+        label=f"onboarding offer (team {org_id})",
+        from_addr=_onboarding_from(),
+        # Awaited inside the provisioning request — bounded so a slow provider
+        # can never stretch the edge fn's retry deadline.
+        timeout=3.0)
 
 
 async def send_onboarding_offer_email(email: str,
@@ -659,26 +676,9 @@ async def send_notice_email(to: str, subject: str, html_body: str,
             "email notify: %s email for %s SKIPPED — send budget exhausted (%s)",
             label, to, reason)
         return {"status": "skipped", "reason": reason}
-    last_err: Exception | None = None
-    for attempt in (0, 1):
-        try:
-            result = await _send_resend(
-                to, subject, html_body, text_body,
-                idempotency_key=idempotency_key, timeout=timeout)
-            message_id = (result or {}).get("id")
-            logger.info("email notify: %s email accepted by provider (%s, msg %s)",
-                        label, to, message_id)
-            return {"status": "sent", "message_id": message_id}
-        except Exception as e:  # noqa: BLE001, RUF100
-            last_err = e
-            if attempt == 0 and _is_transient(e):
-                await asyncio.sleep(0.5)
-                continue
-            break
-    logger.warning("email notify: %s email failed for %s (%s)",
-                   label, to, redact_safe(last_err))
-    refund_send_slot()  # #1138: provider rejected/failed the POST — free the slot
-    return {"status": "failed"}
+    return await _send_rendered(
+        to, subject, html_body, text_body, idempotency_key=idempotency_key,
+        label=f"{label} email", timeout=timeout)
 
 
 def recipient_first_name(display_name: str | None, email: str | None,

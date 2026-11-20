@@ -2019,6 +2019,16 @@ def read_dimension(dimension: str, org_id: str) -> MeterReading | None:
     also cannot be used to bypass a cap — enforcement stays in
     :func:`enforce_allowances` and reads the meters through its own path.
 
+    ⛔ THE DIMENSION'S OWN AGE BOUND APPLIES (:func:`_stale`), because a reading
+    the gate itself will not act on must not be reported as a figure either. A
+    stale gauge describes a graph that may no longer exist — the gate treats it as
+    UNARMED (#13102 P0-1) — and a customer-facing notice built on it would state
+    "you are at 100 %" from a number nobody can defend, on a one-shot send that
+    cannot be corrected (#14038 review, P2: measured — a 5-day-old 110 MB reading
+    against a 102 MB allowance produced a 100 % notice while the gate's own
+    `_stale` verdict was True). An unterminated/unparseable `measured_at` counts
+    as stale, the same rule `_stale` applies.
+
     ``None`` means NO USABLE READING, and it deliberately folds three states that
     a *gating* decision must keep apart (``ABSENT`` — nobody has measured this
     window yet / a meter fault / a dimension with no meter). A consumer that
@@ -2046,6 +2056,13 @@ def read_dimension(dimension: str, org_id: str) -> MeterReading | None:
             org_id, dim.dimension, exc_info=True)
         return None
     if reading is None or reading is ABSENT:
+        return None
+    if _stale(reading, dim):
+        _logger.warning(
+            "allowance read (no refusal): team=%s dimension=%s has a reading "
+            "older than its %ss bound (measured_at=%r) — reporting NO reading",
+            org_id, dim.dimension, dim.stale_after_seconds,
+            reading.measured_at)
         return None
     return reading
 

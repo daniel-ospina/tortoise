@@ -773,24 +773,15 @@ def resolve_org_limits(org_id: str) -> dict:
         raise QuotaCheckError("resolve_org_limits requires a org_id")
     from tortoise.supabase_control import (  # noqa: I001
         _QUOTA_SELECT,
-        _ORG_ADDITIVE_0015_TIER,
-        _ORG_ADDITIVE_2040_TIER,
-        _ORG_ADDITIVE_BILLING_TIER,
-        _ORG_ADDITIVE_DKL_TIER,
-        _ORG_ADDITIVE_IMPORT_TIER,
-        # #13998: the capacity-notice mark rides the same select, so its own tier
-        # must be in the ladder — otherwise a schema missing only this column
-        # fails the whole read and the ladder drops REAL data tiers to recover
-        # from a column nothing on this path consumes.
-        _ORG_ADDITIVE_STORAGE_NOTICE_TIER,
-        # #2406's onboarding marker rides _QUOTA_SELECT too, so its tier is
-        # equally load-bearing here. Without it a schema one migration behind
-        # (20260907000001 absent) keeps `onboarding_email_sent_at` in EVERY rung
-        # — including the terminal base-only one — so every attempt 400s and the
-        # read raises instead of degrading, the exact #1832 class. Found by
-        # `test_13998_capacity_notice.py::test_every_quota_select_ladder_is_complete`
-        # (#13998 review, same finding as the two `hosted_api` ladders).
-        _ORG_ADDITIVE_ONBOARDING_TIER,
+        # #13998: ONE ordered ladder, imported rather than re-spelled here
+        # (`_ORG_ADDITIVE_TIERS` in supabase_control, newest migration first). It
+        # carries BOTH columns that ride `_QUOTA_SELECT` beyond the base set —
+        # the #13998 capacity-notice mark and #2406's onboarding marker — so a
+        # schema one migration behind degrades just the new column instead of
+        # 400ing every rung down to the terminal base-only read (#1832's class).
+        # Pinned by
+        # `test_13998_capacity_notice.py::test_every_quota_select_ladder_is_complete`.
+        _ORG_ADDITIVE_TIERS,
         _orgs_row_fail_soft,
         get_control_plane, is_supabase_enabled,
     )
@@ -807,13 +798,7 @@ def resolve_org_limits(org_id: str) -> dict:
         # #1832 class).
         row = _orgs_row_fail_soft(
             get_control_plane(), org_id, select=_QUOTA_SELECT,
-            additive_tiers=[_ORG_ADDITIVE_STORAGE_NOTICE_TIER,
-                            _ORG_ADDITIVE_ONBOARDING_TIER,
-                            _ORG_ADDITIVE_2040_TIER,
-                            _ORG_ADDITIVE_IMPORT_TIER,
-                            _ORG_ADDITIVE_DKL_TIER,
-                            _ORG_ADDITIVE_0015_TIER,
-                            _ORG_ADDITIVE_BILLING_TIER],
+            additive_tiers=list(_ORG_ADDITIVE_TIERS),
         )
         if row is None:
             raise OrgNotFoundError(

@@ -172,10 +172,43 @@ _ORG_ADDITIVE_ONBOARDING_TIER = ["onboarding_email_sent_at"]
 
 # #13998 capacity-notice high-water mark (20261120000001 — the NEWEST additive
 # migration): its OWN tier, dropped FIRST, so a schema one migration behind
-# degrades just the mark (read as unset → at most one best-effort notice per
-# pass, collapsed by the provider Idempotency-Key) while every older additive
-# stays readable. Written by the service-role seam only — no RLS change.
+# degrades just the mark while every older additive stays readable. Written by
+# the service-role seam only — no RLS change.
+#
+# ⛔ THE LADDER DROPS THE TIER; IT DOES NOT MAKE THE SEND SAFE. Reading the mark
+# as unset is right for the QUOTA path (which is what the ladder protects) and
+# wrong for the NOTICE path, which OWNS this column: without a readable ledger
+# every pass would re-send the same one-shot notice, and the provider key only
+# collapses a replay of the SAME threshold. So `capacity_notice.read_account`
+# deliberately has NO ladder behind it and reports `notice-mark-unavailable`
+# instead of sending — an earlier comment here claimed a "best-effort notice per
+# pass" that no code implements (#14038 review, P2).
 _ORG_ADDITIVE_STORAGE_NOTICE_TIER = ["storage_notice_pct"]
+
+#: THE ORDERED LADDER, one owner (#14038 review, P1). Every `_orgs_row_fail_soft`
+#: caller over `_QUOTA_SELECT` must pass the tiers in NEWEST-migration-first
+#: order, because `_orgs_row_fail_soft` drops `tier[0]`, then `tier[0..1]`, … and a
+#: column added to `_ORG_ADDITIVE_SELECT` without its tier in a caller's list
+#: survives EVERY rung — the for-else then re-raises and the read is a 500 on a
+#: schema one migration behind, instead of a degrade of the one new column.
+#:
+#: ⛔ THAT IS EXACTLY WHAT HAPPENED (#14038): `storage_notice_pct` was appended to
+#: `_ORG_ADDITIVE_SELECT` and TWO of the five ladders (`_session_user_org`,
+#: `_agent_recover_flow` in ``hosted_api``) were missed — a session-authed
+#: management lockout and a key-recovery lockout under drift, both green in tests
+#: because no test drifts those two sites. So the ladder is now declared ONCE
+#: here and every call site passes ``list(_ORG_ADDITIVE_TIERS)``: a future
+#: additive column cannot be added to the select without landing in this tuple,
+#: and a call site cannot spell a subset by accident.
+_ORG_ADDITIVE_TIERS: tuple[list[str], ...] = (
+    _ORG_ADDITIVE_STORAGE_NOTICE_TIER,   # 20261120000001
+    _ORG_ADDITIVE_ONBOARDING_TIER,       # 20260907000001
+    _ORG_ADDITIVE_2040_TIER,             # 20260830000001
+    _ORG_ADDITIVE_IMPORT_TIER,           # 20260817000001
+    _ORG_ADDITIVE_DKL_TIER,              # 20260813000005
+    _ORG_ADDITIVE_0015_TIER,             # 0015
+    _ORG_ADDITIVE_BILLING_TIER,          # 0012 — OLDER than 0015, dropped LAST
+)
 
 # Combined quota read (primary query) — the healthy path stays ONE round-trip.
 _QUOTA_SELECT = _ORG_BASE_SELECT + _ORG_ADDITIVE_SELECT
@@ -1080,12 +1113,7 @@ def resolve_api_key(cp, token: str) -> dict | None:
 
     org_row = _orgs_row_fail_soft(
         cp, org_id, select=_QUOTA_SELECT,
-        additive_tiers=[_ORG_ADDITIVE_STORAGE_NOTICE_TIER,
-                         _ORG_ADDITIVE_ONBOARDING_TIER,
-                         _ORG_ADDITIVE_2040_TIER,
-                         _ORG_ADDITIVE_IMPORT_TIER,
-                         _ORG_ADDITIVE_DKL_TIER, _ORG_ADDITIVE_0015_TIER,
-                         _ORG_ADDITIVE_BILLING_TIER])
+        additive_tiers=list(_ORG_ADDITIVE_TIERS))
     if org_row is None:
         # Key's org vanished — fail closed (401), never authenticate.
         return None
@@ -1527,12 +1555,7 @@ def org_by_id(cp, org_id: str) -> dict | None:
                 "backup_enabled", "backup_latest_at", "backup_restored_at",
                 "created_at", "deleted_at", "grace_hours"]
             + _ORG_ADDITIVE_SELECT,
-        additive_tiers=[_ORG_ADDITIVE_STORAGE_NOTICE_TIER,  # newest first
-                         _ORG_ADDITIVE_ONBOARDING_TIER,
-                         _ORG_ADDITIVE_2040_TIER,
-                         _ORG_ADDITIVE_IMPORT_TIER,
-                         _ORG_ADDITIVE_DKL_TIER, _ORG_ADDITIVE_0015_TIER,
-                         _ORG_ADDITIVE_BILLING_TIER])
+        additive_tiers=list(_ORG_ADDITIVE_TIERS))
 
 
 # ── Session-key mint writes (E2E-2 round-trip: mint → api_keys → resolve) ──

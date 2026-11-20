@@ -16,14 +16,18 @@ Nothing here touches the network: the provider POST is always a fake.
 """
 from __future__ import annotations
 
-import asyncio
 import ast
+import asyncio
 import pathlib
 import re
 import threading
+from contextlib import suppress
+from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 
+from tests.fake_control_plane import FakeControlPlane
 from tortoise import capacity_notice as cn
 from tortoise import email_notify
 from tortoise import supabase_control as sc
@@ -31,7 +35,6 @@ from tortoise.supabase_control import (
     org_storage_notice_pct,
     set_org_storage_notice_pct,
 )
-from tests.fake_control_plane import FakeControlPlane
 
 FIXTURES = pathlib.Path(__file__).parent / "fixtures"
 ROOT = pathlib.Path(__file__).parent.parent
@@ -224,27 +227,38 @@ def test_the_docs_link_is_the_zero_hop_canonical_origin():
             assert retired not in copy.text, (threshold, retired)
 
 
-def test_the_add_capacity_cta_lands_on_the_billing_tab():
-    """`#/billing` is a REAL deep link, not a guess.
+def test_the_cta_offers_capacity_and_never_a_tier():
+    """#13998 requirement 2 / #13989 policy 4, as a guard that reads the DESTINATION.
 
-    The dashboard resolves a hash against `KNOWN_TABS`
-    (`website/apps/dashboard/src/main.jsx`); a tab rename would make the CTA land
-    on the Overview with the hash silently ignored, so this pins the two halves
-    against each other rather than against a constant.
+    A URL string can satisfy any guard while the page it opens sells the one thing
+    the email must not offer: the first cut pointed at the dashboard's `#/billing`
+    tab, which is a real deep link AND a `<h3>Plans</h3>` grid of upgrade buttons
+    (#14038 review, P1). There is no capacity-purchase route in the product yet,
+    so the honest destination is a capacity REQUEST — and the guard's job is to
+    red if a later lane quietly points the CTA back at an app page that offers
+    tiers.
     """
     url = cn.add_capacity_url()
-    assert url.endswith("/#/billing")
-    main_jsx = (pathlib.Path(__file__).resolve().parents[1]
-                / "website/apps/dashboard/src/main.jsx").read_text()
-    known = re.search(r"const KNOWN_TABS = \[([^\]]*)\]", main_jsx)
-    assert known, "KNOWN_TABS moved — re-pin this guard against its new home"
-    assert "'billing'" in known.group(1)
+    assert url.startswith("mailto:"), (
+        f"the CTA now points at {url!r} — an app route that offers a tier change "
+        "is exactly what #13998 forbids; if a capacity/add-on surface has landed, "
+        "pin THIS test to it deliberately")
+    for forbidden in ("#/billing", "pricing", "upgrade", "plan"):
+        assert forbidden not in url.lower()
+    assert "subject=" in url, "the request must arrive already classified"
 
 
-def test_add_capacity_url_follows_the_one_app_origin(monkeypatch):
-    """Staging/preview must not mail a production link (#11767's rule)."""
-    monkeypatch.setenv("EMAIL_LINK_BASE_URL", "https://staging.example.test")
-    assert cn.add_capacity_url() == "https://staging.example.test/#/billing"
+def test_the_capacity_request_address_is_a_published_support_contact():
+    """The mailto must be an address the product already publishes.
+
+    Pinned against its published home rather than a bare string, so an address
+    that gets retired reds here instead of mailing a black hole.
+    """
+    doc = (pathlib.Path(__file__).resolve().parents[1]
+           / "docs/quickstart-cloud.md").read_text()
+    assert cn.CAPACITY_REQUEST_EMAIL in doc, (
+        f"{cn.CAPACITY_REQUEST_EMAIL!r} is no longer in docs/quickstart-cloud.md "
+        "— re-derive the published support address before mailing it")
 
 
 # ── the tense rule (the only latitude this module takes with the copy) ──────
@@ -259,7 +273,8 @@ def test_the_two_thresholds_differ_only_in_n_and_tense():
     eighty_lines = eighty.text.splitlines()
     full_lines = full.text.splitlines()
     assert len(eighty_lines) == len(full_lines)
-    differing = [(a, b) for a, b in zip(eighty_lines, full_lines) if a != b]
+    differing = [(a, b) for a, b in zip(eighty_lines, full_lines, strict=True)
+                 if a != b]
     assert len(differing) == 3, differing
     for a, b in differing:
         # `{n}` and tense are the ONLY permitted differences: normalise the
@@ -542,6 +557,261 @@ def test_an_uncertifiable_enumeration_sends_nothing():
 
 # ── the control-plane ledger itself ─────────────────────────────────────────
 
+class TestDriftAndStaleness:
+    """The review round's four behavioural fixes, each pinned by its own case."""
+
+    def test_a_stale_gauge_is_not_a_reading(self, monkeypatch):
+        """The gate treats a stale gauge as UNARMED; the notice must not state a
+        figure from one (#14038 review, P3 — a 5-day-old 110 MB reading against a
+        102 MB allowance produced a 100 % notice while the gate's own `_stale`
+        verdict was True).
+
+        One staleness rule, not two: `read_dimension` applies the dimension's own
+        `stale_after_seconds` through the SAME `_stale` the gating path uses.
+        """
+        from tortoise import allowance_gate as ag
+
+        def declare(measured_at):
+            """Point the graph_storage dimension at a fake meter with this stamp."""
+            meter = lambda org_id: ag.MeterReading(  # noqa: E731
+                used=110.0, measured_at=measured_at, estimated=True)
+            monkeypatch.setattr(
+                ag, "DIMENSIONS",
+                tuple(
+                    ag.AllowanceDimension(
+                        dimension=d.dimension, limit_key=d.limit_key,
+                        unit=d.unit, stale_after_seconds=86_400,
+                        meter=meter if d.dimension == cn.DIMENSION else d.meter)
+                    for d in ag.DIMENSIONS))
+
+        five_days_ago = (datetime.now(UTC) - timedelta(days=5)).isoformat()
+        for measured_at, expected in ((five_days_ago, None),
+                                      (datetime.now(UTC).isoformat(), 110.0),
+                                      (None, None)):
+            declare(measured_at)
+            reading = ag.read_dimension(cn.DIMENSION, ORG_ID)
+            if expected is None:
+                assert reading is None, measured_at
+            else:
+                assert reading is not None and reading.used == expected
+
+    def test_a_stale_reading_sends_nothing(self):
+        """End to end: a gauge the gate would not act on produces no email.
+
+        The notice reads `no-reading`, so nothing is stated and — because every
+        exit but `sent` leaves the mark alone — nothing is stamped.
+        """
+        cp = _fake_cp()
+        send = _Sender()
+        with patch("tortoise.quota.resolve_org_limits", lambda org_id: _limits(102)), \
+             patch("tortoise.allowance_gate.read_dimension",
+                   lambda dimension, org_id: None):
+            out = asyncio.run(cn.sweep_pass(
+                cp=cp, send=send, enumerate_orgs=lambda: [_org_row()]))
+        assert out["statuses"].get("no-reading") == 1
+        assert send.calls == []
+        assert cp.tables["organizations"][0]["storage_notice_pct"] is None
+
+    def test_an_unmigrated_ledger_column_sends_nothing(self):
+        """Code deployed before the migration: the mark read raises, so the pass
+        reports `notice-mark-unavailable` and sends NOTHING (#14038 review, P3).
+
+        Sending without a ledger would re-send the same one-shot notice on every
+        6-hourly pass; the provider key cannot make that safe (it names a
+        threshold, not a pass).
+        """
+        cp = _fake_cp()
+        cp.tables["organizations"][0]["storage_notice_pct"] = ""
+        send = _Sender()
+
+        def exploding_read(cp_, org_id):
+            raise RuntimeError("column storage_notice_pct does not exist")
+
+        from unittest.mock import patch
+        with patch.object(cn, "read_account", exploding_read):
+            out = asyncio.run(cn.sweep_pass(
+                cp=cp, send=send, enumerate_orgs=lambda: [_org_row()]))
+        assert out["statuses"].get("notice-mark-unavailable") == 1
+        assert send.calls == []
+
+    def test_the_mark_is_re_read_immediately_before_sending(self):
+        """A concurrent stamp between the gauge read and the send must suppress
+        the send (#14038 review, P2: two processes could otherwise deliver 100 %
+        then 80 %).
+        """
+        cp = _fake_cp(storage_notice_pct=100)      # stamped by a peer already
+        send = _Sender()
+        account = cn.Account(org_id=ORG_ID, email="dana@acme.example",
+                             name="Acme", notice_pct=None)  # …but we read stale
+        out = asyncio.run(cn.notify_account(
+            ORG_ID, cp=cp, account=account, send=send,
+            limits=_limits(102), reading=_Reading(90.0)))
+        assert out["status"] == "already-notified"
+        assert out["notified"] == 100
+        assert send.calls == []
+
+    def test_a_fully_notified_account_costs_no_gauge_read(self):
+        """The top mark is the whole ledger: skip the two sync gauge reads."""
+        cp = _fake_cp(storage_notice_pct=100)
+        send = _Sender()
+        from unittest.mock import patch
+
+        def must_not_be_called(*a, **k):
+            raise AssertionError("the gauge was read for a fully-notified account")
+
+        with patch.object(cn, "evaluate", must_not_be_called):
+            out = asyncio.run(cn.notify_account(
+                ORG_ID, cp=cp,
+                account=cn.Account(org_id=ORG_ID, email="d@acme.example",
+                                   name="Acme", notice_pct=100),
+                send=send))
+        assert out["status"] == "already-notified"
+        assert send.calls == []
+
+
+class TestSweepPass:
+    """The pass itself: burst guard, liveness, and what it learns from one run."""
+
+    def test_a_soft_deleted_org_is_neither_emailed_nor_stamped(self):
+        """The enumeration deliberately includes soft-deleted orgs (they can still
+        be BILLED); a customer email must not (#14038 review, P2 — and the copy
+        would say "nothing is lost or deleted" to an org inside its grace window).
+        """
+        cp = _fake_cp(deleted_at="2026-11-19T00:00:00+00:00")
+        send = _Sender()
+        from unittest.mock import patch
+        with patch("tortoise.quota.resolve_org_limits", lambda org_id: _limits(102)), \
+             patch("tortoise.allowance_gate.read_dimension",
+                   lambda dimension, org_id: _Reading(103.0)):
+            summary = asyncio.run(cn.sweep_pass(
+                cp=cp, send=send,
+                enumerate_orgs=lambda: [_org_row(
+                    deleted_at="2026-11-19T00:00:00+00:00")]))
+        assert summary["statuses"].get("deleted-org") == 1
+        assert send.calls == []
+        assert cp.tables["organizations"][0]["storage_notice_pct"] is None
+
+    def test_the_burst_guard_defers_and_the_frontier_still_moves(self):
+        """A capped pass walks the WHOLE enumeration and stops SENDING — so the
+        next pass starts with a smaller unstamped population.
+
+        This is the property that makes the cap safe where the removed
+        enumeration cap was not: a prefix re-processes, a send frontier moves
+        (#14038 review, P2).
+        """
+        rows = [_org_row(id=f"team-{i:02d}") for i in range(5)]
+        for row in rows:
+            row["email"] = f"{row['id']}@acme.example"
+        cp = FakeControlPlane({"organizations": rows})
+        sent: list[str] = []
+
+        async def send(copy):
+            sent.append(copy.text[:0])
+            return {"status": "sent", "message_id": f"m{len(sent)}"}
+
+        from unittest.mock import patch
+        with patch("tortoise.quota.resolve_org_limits",
+                   lambda org_id: {**_limits(102), "org_id": org_id}), \
+             patch("tortoise.allowance_gate.read_dimension",
+                   lambda dimension, org_id: _Reading(103.0)):
+            first = asyncio.run(cn.sweep_pass(
+                cp=cp, send=send, max_sends=2,
+                enumerate_orgs=lambda: [dict(r) for r in rows]))
+            assert first["sent"] == 2
+            assert first["checked"] == 5, "the cap must not shorten the walk"
+            assert first["statuses"]["deferred"] == 3
+            stamped = sum(1 for r in cp.tables["organizations"]
+                          if r["storage_notice_pct"] == 100)
+            assert stamped == 2
+            second = asyncio.run(cn.sweep_pass(
+                cp=cp, send=send, max_sends=2,
+                enumerate_orgs=lambda: [dict(r) for r in rows]))
+            assert second["sent"] == 2, (
+                "a deferred account must be reached by a later pass — the "
+                "frontier, not a stuck prefix")
+        assert len(sent) == 4
+
+    def test_a_gauge_that_was_never_written_is_named_in_the_summary(self):
+        """`no-reading` for the whole fleet is the shape of a stopped gauge
+        (BACKUP_SWEEP_ENABLED off), and it must not read as "nobody is near
+        capacity" (#14038 review, P2).
+        """
+        cp = _fake_cp()
+        send = _Sender()
+        from unittest.mock import patch
+        with patch("tortoise.quota.resolve_org_limits", lambda org_id: _limits(102)), \
+             patch("tortoise.allowance_gate.read_dimension",
+                   lambda dimension, org_id: None):
+            summary = asyncio.run(cn.sweep_pass(
+                cp=cp, send=send, enumerate_orgs=lambda: [_org_row()]))
+        assert summary["statuses"]["no-reading"] == 1
+        assert summary["checked"] == 1
+        assert send.calls == []
+
+
+class TestHostedWiring:
+    """The two server-side facts: the kill switch and the mode guard.
+
+    #14038 review, P2: the wrapper's docstrings asserted both, and nothing
+    executed them — an inverted `notices_enabled()` or a dropped mode guard
+    would have shipped green.
+    """
+
+    def test_the_kill_switch_short_circuits_before_any_read(self, monkeypatch):
+        import tortoise.hosted_api as api
+
+        monkeypatch.setenv("TORTOISE_CAPACITY_NOTICE", "0")
+        called = []
+        monkeypatch.setattr(cn, "sweep_pass",
+                            lambda **k: called.append(1))
+        assert asyncio.run(api._capacity_notice_sweep_pass()) == {"enabled": False}
+        assert called == []
+
+    def test_registry_mode_is_skipped_not_swept(self, monkeypatch):
+        import tortoise.hosted_api as api
+        from tortoise import supabase_control
+
+        monkeypatch.delenv("TORTOISE_CAPACITY_NOTICE", raising=False)
+        monkeypatch.setattr(supabase_control, "is_supabase_enabled",
+                            lambda: False)
+        called = []
+        monkeypatch.setattr(cn, "sweep_pass",
+                            lambda **k: called.append(1))
+        assert asyncio.run(api._capacity_notice_sweep_pass()) == {
+            "enabled": True, "skipped": "registry-mode"}
+        assert called == []
+
+    def test_a_raising_pass_cannot_end_the_loop(self, monkeypatch):
+        """#5381: the observable invariant is that a SUBSEQUENT iteration actually
+        runs — the evidence `_event_retention_loop`'s own contract asks for.
+        """
+        import tortoise.hosted_api as api
+
+        calls: list[int] = []
+
+        async def flaky() -> dict:
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("boom")
+            return {"checked": 0, "sent": 0, "statuses": {}}
+
+        monkeypatch.setattr(api, "_capacity_notice_sweep_pass", flaky)
+
+        async def drive() -> None:
+            task = asyncio.create_task(
+                api._capacity_notice_sweep_loop(0.01, first_delay=0))
+            for _ in range(200):
+                await asyncio.sleep(0.01)
+                if len(calls) >= 3:
+                    break
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+        asyncio.run(drive())
+        assert len(calls) >= 3, calls
+
+
 class TestNoticeMark:
     def test_unset_then_cas_stamp(self):
         cp = _fake_cp()
@@ -791,38 +1061,64 @@ def _call_sites() -> list[tuple[str, int, set[str], set[str]]]:
     return sites
 
 
-def test_every_quota_select_ladder_names_the_storage_notice_tier():
-    """⛔ #13998 review 3 (BLOCKING): a `_QUOTA_SELECT` caller must name EVERY tier.
+def test_every_quota_select_ladder_uses_the_one_shared_tuple():
+    """⛔ #13998 review 3 (BLOCKING), re-stated against the shared ladder.
 
     `_QUOTA_SELECT` is `_ORG_BASE_SELECT + _ORG_ADDITIVE_SELECT`, and this PR
     added `storage_notice_pct` to the additive list. The ladder only drops a
     column that appears in a NAMED tier, so a caller that omits a tier keeps that
     column on its terminal base-only rung, 400s there, and raises —
-    `hosted_api.py:9741-9743` records exactly what that cost the last time
-    (HTTP 500 on `/v1/team`, `/v1/team/keys`, `/v1/sessions`,
-    `/v1/onboarding/state`), and `_agent_recover_flow`'s comment says the
-    recovery emergency path *"must not 500 on migration skew"*.
+    `hosted_api.py` records what that cost the last time (HTTP 500 on `/v1/team`,
+    `/v1/team/keys`, `/v1/sessions`, `/v1/onboarding/state`), and
+    `_agent_recover_flow` is the key-recovery emergency path.
 
-    Measured at the pre-fix head: `_session_user_org` (`hosted_api.py:9736`) and
-    `_agent_recover_flow` (`hosted_api.py:35768`) named NONE of the storage-notice
-    tier (and no `_QUOTA_SELECT` caller named `_ORG_ADDITIVE_ONBOARDING_TIER`
-    outside `supabase_control.py`, so `quota.resolve_org_limits` had the same
-    hole for the #2406 marker). Nothing in the repo parsed these call sites, so
-    no suite could have caught it.
+    Measured at the pre-fix head: `_session_user_org` and `_agent_recover_flow`
+    named NONE of the storage-notice tier, and no `_QUOTA_SELECT` caller outside
+    `supabase_control.py` named `_ORG_ADDITIVE_ONBOARDING_TIER` — so
+    `quota.resolve_org_limits` had the same hole for the #2406 marker. The first
+    fix respelled the tier list at each site, which is the same defect one
+    migration later; this asserts the ONE owner instead: a call site passes the
+    shared tuple, and the tuple covers every declared tier
+    (`test_the_shared_ladder_covers_every_declared_tier`).
     """
-    tiers = _additive_tiers()
     wants_all = {"_QUOTA_SELECT", "_ORG_ADDITIVE_SELECT", "storage_notice_pct"}
     checked = 0
-    missing: list[str] = []
+    wrong: list[str] = []
     for path, line, select_tokens, tiers_named in _call_sites():
         if not (select_tokens & wants_all):
             continue
         checked += 1
-        for name in sorted(tiers):
-            if name not in tiers_named:
-                missing.append(f"{path}:{line} omits {name}")
+        if "_ORG_ADDITIVE_TIERS" not in tiers_named:
+            wrong.append(
+                f"{path}:{line} passes a hand-spelled ladder "
+                f"({sorted(tiers_named) or 'empty'}) instead of "
+                "list(_ORG_ADDITIVE_TIERS) — a site list goes stale the next "
+                "time a column is added, which IS the #13998 blocker")
     assert checked >= 4, f"only {checked} ladder call sites found — the scan broke"
-    assert missing == [], "\n".join(missing)
+    assert wrong == [], "\n".join(wrong)
+
+
+def test_the_shared_ladder_covers_every_declared_tier():
+    """`_ORG_ADDITIVE_TIERS` must name every tier, newest-migration FIRST.
+
+    The tuple is the one place the ladder is spelled, so a new additive column
+    whose tier is declared but not appended here is dead the moment it lands: the
+    ladder would never drop it, and every rung 400s. Pinned as an ordered
+    equality against the tier constants themselves, newest-first, so an insertion
+    at the wrong end (oldest dropped first) also reds.
+    """
+    members = [tuple(t) for t in sc._ORG_ADDITIVE_TIERS]
+    assert members, "the shared ladder is empty — the scan is broken, not green"
+    assert len(set(members)) == len(members), f"duplicate tier in {members}"
+    # newest-first: the #13998 mark's tier is the newest additive migration.
+    assert members[0] == tuple(sc._ORG_ADDITIVE_STORAGE_NOTICE_TIER), (
+        f"the ladder must drop the NEWEST migration's tier first; it starts "
+        f"with {members[0]} — {members}")
+    assert members[-1] == tuple(sc._ORG_ADDITIVE_BILLING_TIER), members
+    declared = {tuple(v) for v in _additive_tiers().values()}
+    assert set(members) == declared, (
+        "the shared ladder and the declared tiers disagree — a tier was "
+        f"declared but not appended (or removed): {sorted(declared - set(members))}")
 
 
 def test_every_ladder_module_imports_the_tiers_it_names():

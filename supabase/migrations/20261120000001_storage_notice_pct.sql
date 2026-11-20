@@ -5,9 +5,9 @@
 -- (`tortoise/capacity_notice.py`) may be sent AT MOST ONCE PER THRESHOLD PER
 -- ACCOUNT, EVER. This column is that ledger.
 --
---   organizations.storage_notice_pct  (integer, nullable) — the HIGHEST
---     threshold ever notified for this account (80 or 100), stamped only after
---     the provider ACCEPTS the send.
+--   organizations.storage_notice_pct  (integer, nullable) — the HIGHEST threshold ever
+--     notified for this account (80 or 100), stamped only after the provider
+--     ACCEPTS the send.
 --
 -- ⛔ The table is `organizations`, NOT `teams`. `teams` was renamed by
 -- 20260915000001_tenancy_team_to_org.sql:50 (`ALTER TABLE public.teams RENAME
@@ -38,7 +38,10 @@
 -- A SKIPPED OR FAILED SEND NEVER STAMPS — so the mark never swallows a notice
 -- the customer has not received. That is also what makes the send-budget guard
 -- (#1138) a graceful ramp on the first fleet-wide pass: past the daily cap the
--- remaining accounts are skipped, unstamped, and retried on a later pass.
+-- remaining accounts are skipped, unstamped, and retried on a later pass, and the
+-- per-pass send cap (TORTOISE_CAPACITY_NOTICE_MAX_SENDS, default 25) keeps the
+-- sweep from spending the whole shared budget in one burst ahead of
+-- customer-blocking mail.
 --
 -- Additive + idempotent (IF NOT EXISTS) — the same `ALTER TABLE … ADD COLUMN IF
 -- NOT EXISTS` pattern as 20260907000001, applied to the post-rename table name
@@ -55,6 +58,13 @@
 -- columns, and a nullable int carries no instant at all (this mark is a policy
 -- watermark, not a clock reading).
 --
+-- ⛔ A PRECONDITION THIS MIGRATION CANNOT PROVIDE: the gauge the notices read has
+-- ONE production writer, the backup sweep (`backup_sweep.py` →
+-- `record_graph_storage`), which `BACKUP_SWEEP_ENABLED` leaves OFF unless the
+-- deploy's secret conjunction is present. With it off every account reads
+-- `no-reading` and no notice is ever sent — silently, except for the pass's own
+-- INFO line, which counts `no-reading` for exactly this reason.
+--
 -- ⚠️ Deploy ORDER: this migration must apply BEFORE the capacity-notice sweep
 -- ships. If the column is absent:
 --   · the orgs-row readers (`supabase_control.resolve_api_key` / `org_by_id`,
@@ -62,10 +72,11 @@
 --     as unset — the #1096 ladder drops `_ORG_ADDITIVE_STORAGE_NOTICE_TIER`
 --     (newest first) and every older additive column stays readable. No 500.
 --   · `capacity_notice.read_account` selects the mark DIRECTLY (one read, so the
---     mark and the address are one snapshot) and therefore raises; `sweep_pass`
---     isolates the failure per account, so the pass logs one warning per account
---     and sends nothing — a quiet no-op for the sweep, never a 500, and never a
---     notice that could not be stamped.
+--     mark and the address are one snapshot) and therefore raises; the account is
+--     reported as `notice-mark-unavailable` — a NAMED status, not a silent skip —
+--     and NOTHING is sent. That is deliberate: sending without a ledger would
+--     re-send the same one-shot notice on every pass, and the provider key only
+--     collapses a replay of the SAME threshold.
 -- Nothing here is a licence to ship without applying it: the sweep is the ONLY
 -- path that tells a customer they are near their cap.
 -- ============================================================================
