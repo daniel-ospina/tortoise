@@ -319,6 +319,13 @@ class _NoPayload:
 
     ``result`` is kept so an arm can assert the WIRE shape it observed
     (``isError is False``) instead of asserting the helper's opinion of it.
+
+    The spec is why NO wire reading can do better: ``CallToolResult.content`` is a
+    required ``ContentBlock[]``, ``structuredContent`` is OPTIONAL, and a
+    successful empty result may legitimately use an empty ``content`` array
+    (MCP schema, ``tools/call``). So "empty payload" and "no payload" are the same
+    wire shape — the arms that care are driven against SEEDED content, and the
+    two that genuinely answer nothing assert this sentinel.
     """
 
     __slots__ = ("result",)
