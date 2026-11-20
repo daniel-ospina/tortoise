@@ -143,8 +143,9 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # incomparable at the pin — measured at this head: 211 comparable, 119 of them drifted, plus
     # those three (`sdk.py:57617`, `search_engine.py:7196`, `:7198`) = 122 of the 214. ⛔ The
     # earlier form of this comment said "the seam above it is line-neutral, so nothing moved" and
-    # carried `57276`: the seam wrap sits above the cite, and the statement has moved +147 since
-    # the head this pin was written at, so the token moves WITH the line — a pin whose token and
+    # carried `57276`: the seam wrap sits above the cite, and the statement has moved +341 since
+    # the head this pin was written at (+147 to the pre-`#13833` tip, then `main`'s `#13833` a
+    # further 194), so the token moves WITH the line — a pin whose token and
     # target disagree cannot red on the stale cite it exists to catch (#13750 VGATE).
     (_AUDIT, '`sdk.py:57617` passes `"event"`', _SDK, 57617, 'entity_type="event"'),
     (_AUDIT, "`audit.py:817`", _AU, 817, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),

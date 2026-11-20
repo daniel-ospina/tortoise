@@ -1412,8 +1412,10 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # (#13807), so these values are no longer a delta against `main`; the rows
     # stay because the re-derivation is the pin's own documented remedy either
     # way, and the note records WHY the numbers are where they are.
-    # Both sides are updated together: the pin here and the §1 table in
-    # `docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md`.
+    # The §1 table in `docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md`
+    # already carried the +14 (it landed there in #13807 / `9cd31e8227`), so this
+    # commit brings the PIN into line with the brief rather than editing both —
+    # and the pin asserts the brief's own number, so the two cannot drift apart.
     ("tortoise/projection/__init__.py", 21018, '("Object", "name", "FULLTEXT")',
      "`tortoise/projection/__init__.py:21018`"),
     ("tortoise/projection/__init__.py", 21461, "def _create_fulltext_index(",
