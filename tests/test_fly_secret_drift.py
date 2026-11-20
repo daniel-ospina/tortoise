@@ -1975,10 +1975,18 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
         f"route-(b) transition — that is a real defect, not the recorded interval:\n{foreign}"
     )
     if stale:
+        # ONE assert, because there is one predicate. The message carries BOTH diagnoses,
+        # because the other state it can meet — `not an assigned key in fly.toml's [env]
+        # table`, i.e. the `[env]` row was deleted — is a real state with a real fix, not a
+        # renamed gate message, and it reds HERE first (measured: deleting that row never
+        # reaches a later membership assert, which is why none is re-asserted below).
         assert "which shadows [env]" in stale[0], (
             "the tolerated STALE for the open transition is no longer the shadow refusal, so "
-            "this test would tolerate a DIFFERENT breakage of the same name. The runbook quotes "
-            "this message; re-derive it from the gate before widening this:\n"
+            "this test would tolerate a DIFFERENT breakage of the same name. Two states reach "
+            "here: (a) the gate RENAMED its message — re-derive it from the gate and update the "
+            "runbook, do not widen this; (b) it says `not an assigned key in fly.toml's [env] "
+            "table`, which means the `[env]` ROW IS GONE — restore "
+            "`TORTOISE_EMBEDDER_WARMUP = \"0\"` in fly.toml [env].\n"
             f"{stale[0]}"
         )
         assert r.returncode == 1, (
@@ -2163,12 +2171,11 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     #     two of them lived here until review round 5, dead, with messages that could
     #     never print. Do not reintroduce a second route assert: extend that guard.
     embedder_warmup = "TORTOISE_EMBEDDER_WARMUP"
-    assert embedder_warmup in env_keys, (
-        "TORTOISE_EMBEDDER_WARMUP is declared `fly-toml-env` but is not an "
-        "assigned key in fly.toml [env] — the versioned source the declaration "
-        "names is gone, so the value would only exist as the Fly secret that "
-        "shadows it (#13923 carries the transition)"
-    )
+    # ⛔ The `[env]`-row membership is NOT re-asserted here. `env_keys` is computed by the
+    # same `fly_toml_env_keys` the gate's `fly-toml-env` arm uses, so a deleted `[env]` row
+    # reds FIRST as the tolerance's `not an assigned key` refusal (which now carries the
+    # restore instruction) — an assert here could never be the one that fires, and that is
+    # the dead-assert class review round 5 removed a few lines above this comment.
     assert embedder_warmup not in workflow_refs, (
         "TORTOISE_EMBEDDER_WARMUP must stay OUT of the deploy payload — a value "
         "the deploy sets is not version-controlled config and not an emergency "
@@ -3795,8 +3802,10 @@ def test_the_reserved_member_paragraph_keeps_the_recorded_ruling_precondition():
     # rulings exist yet."). The rule's words are then still there while the
     # paragraph states the rule is already false — the same unfalsifiable state, and
     # the assertion above passes it. This arm enforces the sentence's QUALIFICATION
-    # directly — no manifest prose promises it since #13926 deleted the note that
-    # used to ("the sentence must be present UNQUALIFIED …"), so do not re-derive the
+    # directly — and no manifest prose promises it any more, because THIS change deleted
+    # the note that used to ("the sentence must be present UNQUALIFIED …"; it lived in the
+    # `ONE DECLARED GAP` paragraph of the `fly-only:#13674` block, which landed seven
+    # minutes AFTER #13926 merged — #13926 never touched it), so do not re-derive the
     # contract from a citation that is gone: the check IS the contract. Measured on
     # this tree: that wording passes the assertion above and reds only here.
     #

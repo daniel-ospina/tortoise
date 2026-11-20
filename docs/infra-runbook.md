@@ -4417,7 +4417,7 @@ operator who read the line above as "CI defends this" would never run it.
 >
 > ⛔ **What that arm does NOT cover.** Its region stops at the "When to flip it" sentence, so the three
 > timing/cold-load cites further down this section — the `_prewarm_embedder` window in `entrypoint.sh`,
-> the readiness bound in `embeddings.py`, and the boot override beside it — are read by NO test and rot
+> the cold-load timing in `embeddings.py`, and the boot override beside it — are read by NO test and rot
 > silently: re-pinning one to a neighbouring line leaves the suite green (measured). The manifest
 > paragraph that used to disclose this went with the `fly-only:` block, so the disclosure lives here now.
 >
