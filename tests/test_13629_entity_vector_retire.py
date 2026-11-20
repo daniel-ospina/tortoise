@@ -7,7 +7,7 @@ that fails OPEN the day someone deletes a branch.
 
 | test | claim it falsifies | it goes RED when … |
 |---|---|---|
-| `test_the_retired_population_is_the_four_labels_and_never_point` | the population is the issue's four labels | `:Point` enters the set a destructive tool iterates |
+| `test_the_retired_population_is_every_served_label_including_point` | the population is EVERY served label (five, `:Point` included since `#13971`) | a label leaves the set a destructive tool iterates |
 | `test_affected_entity_types_is_derived_and_source_serves_document` | the `entity_type` consequence is DERIVED | a second spelling of the label↔type map appears (the `#11405` two-of-five cell) |
 | `test_the_census_prints_the_unmatched_count_including_zero` | "**including zero**" | a parity row omits `graph_only` when it is 0 |
 | `test_a_graph_only_vector_blocks_the_label_and_names_it` | a graph-only vector is a REFUSAL | the label reads `PARITY` while the graph holds the only copy |
@@ -70,6 +70,15 @@ from tools import strip_graph_entity_vectors as strip
 #: that monkeypatched the package-qualified one would patch a module the code under
 #: test never calls — the patch would appear to work and assert nothing.
 parity = strip.parity
+
+#: The declared population, in the tool's own order — **derived, never re-spelled**. A
+#: label entering `RETIRED` (`#13971` added `:Point`) must not mean hunting hard-coded
+#: label lists through this file: an assertion that outlives its population is either
+#: edited in a hurry or silently weakened, and both are worse than deriving it. The
+#: assertions below say what they MEAN ("every declared label except the one planned")
+#: and this list answers.
+DECLARED_LABELS = [label for _t, label, _k in parity.RETIRED]
+DECLARED_EXCEPT_OBJECT = sorted(lbl for lbl in DECLARED_LABELS if lbl != "Object")
 
 
 def _census_strip():
@@ -265,18 +274,25 @@ def _execute(graph, plan, **over):
 # ── the population ──────────────────────────────────────────────────────────
 
 
-def test_the_retired_population_is_the_four_labels_and_never_point():
-    """`#13629`'s population, and its scope boundary, in one place.
+def test_the_retired_population_is_every_served_label_including_point():
+    """`#13971`'s population, and the reversal it records, in one place.
 
-    `:Point` is owned by the armed cutover and `#13330`; the issue's brief forbids
-    touching it. A destructive tool whose population grew by one label would strip the
-    Point vectors `#5004` calls record truth, so the exclusion is asserted BY NAME
-    rather than as a count that a future edit could preserve while widening the set.
+    `:Point` was OUT of this set under `#13629` (`NOT_IN_SCOPE == ("Point",)`), because
+    the armed cutover and `#13330` owned it while its record coverage was unproven and
+    every writer still mirrored it unconditionally. `#13971` removes both conditions:
+    coverage for `point`/`operator` is measurable from a fresh process and every declared
+    `:Point` writer asks that same predicate. The exclusion is therefore no longer
+    asserted — what IS asserted is that the population is COMPLETE, so a future edit
+    cannot silently drop a label from a destructive tool's set either.
     """
     assert [label for _t, label, _k in parity.RETIRED] == [
-        "Object", "Subject", "Event", "Source"]
-    assert "Point" not in {label for _t, label, _k in parity.RETIRED}
-    assert parity.NOT_IN_SCOPE == ("Point",)
+        "Object", "Subject", "Event", "Source", "Point"]
+    # Every served type addresses a planned label — the population is the whole vocabulary.
+    from tortoise.security import ENTITY_TYPE_LABELS
+
+    assert set(ENTITY_TYPE_LABELS.values()) == {label for _t, label, _k in parity.RETIRED}
+    # …and nothing is declared out of scope now, by NAME rather than by count.
+    assert parity.NOT_IN_SCOPE == ()
 
 
 def test_affected_entity_types_is_derived_and_source_serves_document():
@@ -1577,7 +1593,7 @@ def test_the_writer_population_comes_from_the_REGISTER_not_only_the_fold_map(
     for outside in ("tortoise.sdk::_session_event_write",
                     "tortoise.sdk::_embedding_repair_attempt",
                     "tortoise.sdk::_event_raw_write_door",
-                    "tortoise.sdk::ingest_corpus",
+                    "tortoise.sdk::_ingest_corpus",
                     "tortoise.session_indexer::main"):
         assert outside in writers, outside
 
@@ -2122,6 +2138,80 @@ def test_the_plan_refuses_a_SHORT_record_for_the_MEASURED_reason(stores, monkeyp
     blocked = row["blocked_reason"]
     assert _counts_sentence(1, 3) in blocked, blocked
     assert "has not proved" not in blocked, blocked
+
+
+def test_the_plan_is_STRIP_READY_for_POINT_from_a_fresh_process(stores, monkeypatch):
+    """`#13971` acceptance: `strip_ready: True` for `point` FROM A FRESH PROCESS, with the
+    reason naming BOTH counts, and with the WRITER half GENUINELY CLOSED.
+
+    ⛔ NO `_fold_consults_gate` MONKEYPATCH — that is the whole difference between this pin
+    and the two `#13796` tests above. Those drive the writer check closed on purpose,
+    because on that tree every label still had a writer that stored `embedding` without
+    asking; a `:Point` pin written the same way would certify `strip_ready` while the gate
+    it is about was stubbed out. `#13971` gates `:Point`'s five declared writers, so the
+    REAL census runs here and is part of what this pin certifies.
+
+    The denominator comes from `_Projection`, i.e. from the graph handle this run already
+    holds — never from a constant — so a supplier that asked the wrong question reds here.
+    """
+    graph, record = stores
+    for key in ("pt-1", "pt-2"):
+        graph.add("Point", key)
+        record.holds("point", key)
+    _fresh_record_leg(monkeypatch, record_vectors=2)
+
+    plan = strip.build_plan(
+        g=graph, record_dsn="postgresql://localhost/record", org_id="org",
+        graph_id="graph", graph_name="g", graph_uri="docker://x/g",
+        labels=["Point"], batch=strip.DEFAULT_BATCH,
+        graph_population=strip.graph_vector_population(_Projection(graph)))
+
+    row = plan["labels"][0]
+    assert row["strip_ready"] is True, row["blocked_reason"]
+    assert plan["ready"] is True
+    # The READY reason is the MEASUREMENT, and it names both counts for `point`.
+    assert _counts_sentence(2, 2, label="point") in row["readiness_reason"], (
+        row["readiness_reason"])
+    # ⛔ BOTH `:Point` TYPES WERE CLEARED. One label, two populations (`point`,
+    # `operator`): a gate that cleared one half would strip into a writer the other half
+    # still feeds, which is the `#13854` rule for `:Source` arriving one label over.
+    assert "point" in row["readiness_reason"]
+    assert "operator" in row["readiness_reason"]
+    # …and the writer half is the real census's answer, not a stub: every declared
+    # `:Point` writer asks the gate, INCLUDING the fold the register cannot enumerate.
+    assert "calls the gate" in row["readiness_reason"], row["readiness_reason"]
+
+
+def test_the_plan_refuses_a_SHORT_record_for_POINT_and_names_both_counts(stores, monkeypatch):
+    """`#13971` FALSIFIER: with the record short of the graph for `point`, the plan refuses
+    and names both counts.
+
+    Parity is held OPEN on purpose — every graph key is readable in the record — so the
+    only arm left that can refuse is the COVERAGE comparison. A stripper that refused with
+    "has not proved" would be unable to tell an unbackfilled deployment from a tested one,
+    which is the `#13796` defect; one that did not refuse would delete the only copy.
+    """
+    graph, record = stores
+    for key in ("pt-1", "pt-2", "pt-3"):
+        graph.add("Point", key)
+        record.holds("point", key)
+    # …but the record's own aggregate holds ONE vector against a graph that serves three.
+    _fresh_record_leg(monkeypatch, record_vectors=1)
+
+    plan = strip.build_plan(
+        g=graph, record_dsn="postgresql://localhost/record", org_id="org",
+        graph_id="graph", graph_name="g", graph_uri="docker://x/g",
+        labels=["Point"], batch=strip.DEFAULT_BATCH,
+        graph_population=strip.graph_vector_population(_Projection(graph)))
+
+    row = plan["labels"][0]
+    assert row["strip_ready"] is False, (
+        "a short record certified a `:Point` strip — the graph holds vectors the record "
+        f"cannot answer with ({row})")
+    blocked = row["blocked_reason"]
+    assert _counts_sentence(1, 3, label="point") in blocked, blocked
+    assert "has not proved" not in blocked, blocked
+    assert plan["ready"] is False
 
 
 # ── #13796: the CLIs must hand the gate THEIR OWN measurement context ───────
@@ -3243,7 +3333,7 @@ def test_expect_empty_does_not_acknowledge_a_NARROWED_scope(stores, monkeypatch)
     assert narrowed["total_nodes"] == 0
     result = _execute(graph, narrowed, expect_empty=True)
     assert result["empty"] is True
-    assert result["unmeasured_by_label"] == ["Event", "Source", "Subject"]
+    assert result["unmeasured_by_label"] == DECLARED_EXCEPT_OBJECT
     assert strip.result_exit_code(result) == 5, (
         "an empty NARROWED plan published exit 0 over three unstripped labels")
 
@@ -3515,14 +3605,14 @@ def test_a_narrowed_census_certifies_only_the_labels_it_measured(stores):
     record.holds("object", "obj-1")
     report = _census(graph, labels=["Object"])
     assert report["population"] == ["Object"]
-    assert report["declared_population"] == ["Object", "Subject", "Event", "Source"]
+    assert report["declared_population"] == DECLARED_LABELS
     assert report["narrowed"] is True
     text = parity.render(report, "g")
     assert "every label MEASURED (Object)" in text
     assert "NARROWED" in text
     # …and the un-measured labels are NAMED as unmeasured, never silently omitted.
     narrowed_line = text.split("NARROWED", 1)[1]
-    for absent in ("Event", "Source", "Subject"):
+    for absent in DECLARED_EXCEPT_OBJECT:
         assert absent in narrowed_line
 
 
@@ -3738,7 +3828,7 @@ def test_a_narrowed_execution_records_the_labels_it_did_not_touch(stores, monkey
     record.holds("object", "obj-1")
     plan = _plan(graph, labels=["Object"])
     result = _execute(graph, plan)
-    assert result["unmeasured_by_label"] == ["Event", "Source", "Subject"]
+    assert result["unmeasured_by_label"] == DECLARED_EXCEPT_OBJECT
     assert result["removed"] == 1
 
 
@@ -3773,11 +3863,12 @@ def test_a_narrowed_execution_is_not_exit_0(stores, monkeypatch):
     assert strip.result_exit_code(acknowledged) == 0
 
     # A plan that covers EVERY declared label is unaffected: nothing was left unmeasured.
-    for label, key in (("Event", "ev-1"), ("Source", "src-1"), ("Subject", "subj-1")):
+    for label, key in (("Event", "ev-1"), ("Source", "src-1"), ("Subject", "subj-1"),
+                       ("Point", "pt-1")):
         graph.add(label, key)
         record.holds(label.lower(), key)
     whole = _plan(graph)
-    assert sorted(whole["declared_population"]) == ["Event", "Object", "Source", "Subject"]
+    assert sorted(whole["declared_population"]) == sorted(DECLARED_LABELS)
     assert strip.result_exit_code(_execute(graph, whole)) == 0
 
 
@@ -4265,7 +4356,7 @@ def test_the_preview_renders_every_label_and_the_digest(stores):
     record.holds("object", "obj-1")
     plan = _plan(graph)
     text = strip.render_plan(plan)
-    for label in ("Object", "Subject", "Event", "Source"):
+    for label in DECLARED_LABELS:
         assert label in text
     assert plan["digest"] in text
     assert "PREVIEW — nothing was removed" in text
@@ -10306,7 +10397,7 @@ def test_a_live_census_without_its_declaration_cannot_be_narrowed_by_the_PLAN(
 
     monkeypatch.setattr(strip.parity, "census", _census_without_the_declaration)
     result = _execute(graph, plan)
-    assert result["unmeasured_by_label"] == ["Event", "Source", "Subject"]
+    assert result["unmeasured_by_label"] == DECLARED_EXCEPT_OBJECT
     assert strip.result_exit_code(result) == 5, (
         "a narrowed sweep published exit 0 from the plan's own declaration")
 

@@ -304,14 +304,15 @@ PLAN_VERSION = 3
 #: The labels this tool copies, in the order they are reported: the CENSUS's own
 #: declared population (`entity_vector_parity_census.RETIRED`, imported rather than
 #: restated — a second spelling of the key map is what `#9553` records silently filing
-#: no row for a whole Event arm) PLUS `:Point`, appended last.
+#: no row for a whole Event arm). That tuple covers all five labels, `:Point` included.
 #:
-#: ⛔ WHY `:Point` IS HERE AND NOT IN `RETIRED`. That tuple is the population a
-#: DESTRUCTIVE tool iterates — `strip_graph_entity_vectors` REMOVEs every vector its
-#: plan names — so widening it would widen the strip, which is exactly why the census
-#: declares `:Point` in `NOT_IN_SCOPE` and a pin asserts its absence BY NAME. THIS
-#: tool only FILLS (`UPDATE … WHERE embedding IS NULL`), so the same label is safe
-#: here and `#13685`'s scope comment asks for it. ⚠️ Its measured `fillable` on
+#: ⛔ `:Point` USED TO BE APPENDED HERE BY HAND, and `#13971` removed the duplicate. The
+#: reason it was appended was that `RETIRED` — the population a DESTRUCTIVE tool
+#: iterates — excluded it (`NOT_IN_SCOPE`), so this fill-only tool had to add it itself.
+#: `#13971` moved `:Point` INTO `RETIRED` (the record's coverage is measurable and every
+#: `:Point` writer is gated on that same predicate), so appending it again would run the
+#: fill twice for one label and make this constant disagree with the population it says
+#: it derives from. ⚠️ Its measured `fillable` on
 #: production was **0** (`Point graph=31,610 record=36,942 unmatched=16,982 existing=
 #: 14,628`, the `record=` figure being the TENANT-WIDE readable count as the tool
 #: reported it before `#13647` narrowed that field to the label's graph keys; the
@@ -321,12 +322,7 @@ PLAN_VERSION = 3
 #: and harmless rather than a fix for a copyable gap — see the module docstring. One
 #: population, derived once, and
 #: `tests/test_13685_entity_vector_backfill.py` iterates THIS constant.
-BACKFILLED: tuple[tuple[str, str, str], ...] = (
-    *parity.RETIRED,
-    # `chk_point_node_key_is_contract_key`: `node_key = id`, exactly as for the
-    # object/subject twins since `#9881`.
-    ("point", "Point", "id"),
-)
+BACKFILLED: tuple[tuple[str, str, str], ...] = (*parity.RETIRED,)
 
 #: Rows per `UPDATE`. Small enough that one `IN $keys` graph read and one statement
 #: stay far UNDER FalkorDB's `RESULTSET_SIZE` (the silent truncation

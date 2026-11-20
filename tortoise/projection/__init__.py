@@ -7506,6 +7506,7 @@ from tortoise.projection.entities import (  # noqa: E402, I001
     BELIEF_PROPS,
     _belief_bool_value_ok,
     _belief_prop_value_ok,
+    _derived_mirror_required,
     _EntityHandlers,
     _is_persistable_prop_value,
     _PERSISTABLE_MAX_DEPTH,
@@ -17439,6 +17440,21 @@ class FalkorProjection(
             if (sp.get("content_hash") is not None
                     and pid not in journal_hash_write):
                 gap["content_hash"] = sp["content_hash"]
+            # ⛔ `#13971`: the SNAPSHOT's vector is restored as a MIRROR, so it goes the
+            # same way the fold's store does. This pass exists for a graph-only (synthetic)
+            # id whose JOURNAL carries no vector; the vector it restores comes from the
+            # pre-wipe snapshot. With the record's coverage for `point` measured true, the
+            # record holds that vector — that is what "coverage" means here — so writing it
+            # back into the graph would re-add exactly what a strip removed, and nothing
+            # reads the property any more (`#13330` retired the in-graph index). Asked
+            # through the fold's ONE predicate: an UNVERIFIED or unreadable answer keeps
+            # the restore, so a deployment that still needs the graph copy is untouched.
+            # The removal is spelled `pop("embedding")` because the strip's writer census
+            # reads the stop by that exact literal (`tools/strip_graph_entity_vectors.py::
+            # _removes_embedding`), and a form it cannot read would report this writer as
+            # STILL EMITTING forever.
+            if not _derived_mirror_required("point"):
+                sp.pop("embedding", None)
             emb = sp.get("embedding")
             # #4305 review P2: only a numeric vector is writable through
             # `vecf32()`. A corrupt/legacy store value (non-iterable, a string,

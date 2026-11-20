@@ -94,8 +94,17 @@ def _derived_mirror_required(entity_type: str) -> bool:
     fold from crashing if the record's arming module cannot be imported, which is
     a WRITE-path fault and must never take a write down.
 
-    ⛔ AND THIS GUARDS THE **DERIVED** ENTITY VECTORS ONLY. A `:Point`'s vector is
-    RECORD TRUTH (`#5004`) and is never derived, so nothing here may touch it.
+    ⛔ AND THIS GUARDS THE **DERIVED** ENTITY VECTORS, PLUS THE `:Point` MIRROR AT EVERY
+    WRITER **EXCEPT THE JOURNAL FOLD** (#13971). A `:Point`'s vector IS record truth
+    (`#5004`), and the test that decides which writers ask is **"is this copy the redundant
+    one?"**: the live capture, the SDK door, the snapshot restore and
+    `hosted_backup.restore_graph` all place a copy the record already holds, so with
+    coverage measured true they stop — the graph property is unread (`#13330` retired the
+    in-graph `:Point` index) and re-writing it would undo a strip (`#13610` option 2's
+    "write it back on the next call" race). ⛔ `_upsert_point_props` is the exception ON
+    PURPOSE: it is the journal fold, its vector is the JOURNAL's own record truth, and
+    `MIRROR_RETIRED_LABELS` must not contain `point` so that fold keeps writing the dense
+    leg a named fallback.
 
     ⛔ IT IS ALSO THE ASK FOR THE WRITERS OUTSIDE THIS MODULE (#13626), and that is
     why it is imported rather than re-spelled: `sdk::_update_entity`,
@@ -2976,6 +2985,17 @@ class _EntityHandlers:
         # an old journal still replays and still yields vectors.
         # #331 (review r4): only embed real content — an empty string
         # produced a junk vector in the HNSW index.
+        # ⛔ AND THIS ARM DELIBERATELY DOES **NOT** ASK THE MIRROR GATE (#13971). A
+        # `:Point`'s vector is JOURNAL RECORD TRUTH (`#5004`): this fold is what makes
+        # `derived == replay(journal)` hold, and dropping the restore breaks it the moment
+        # the record is the only copy. Two shipped pins state the decision —
+        # `record_vector.MIRROR_RETIRED_LABELS` must NOT contain `point`
+        # (`test_13610_graph_vector_copy.py::
+        # test_a_verified_label_whose_fold_still_writes_the_graph_keeps_the_fallback`), and
+        # that set must equal the labels the folds stop writing. The consequence is stated
+        # rather than hidden: a `rebuild_all` re-materialises the journal's vectors, so
+        # `tools.strip_graph_entity_vectors.py` must be re-run after a rebuild. Every OTHER
+        # `:Point` writer — capture, SDK door, snapshot restore, `restore_graph` — asks.
         elif not op and p.get("content"):
         # #5008: through the EMBED gate — an identifier-only text earns no vector.
             try:

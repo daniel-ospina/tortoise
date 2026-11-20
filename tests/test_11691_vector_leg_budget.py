@@ -298,9 +298,10 @@ def test_the_record_leg_is_bound_by_the_reads_own_budget(monkeypatch, armed):
         f"bound is not bounding the caller's wall clock")
 
     # (3) THE FAILURE IS NAMED AND THE FALLBACK IS THE NAMED ONE. ⛔ `point` is a
-    #     VERIFIED-GATED label whose fold NEVER stops writing the graph copy
-    #     (`record_vector.MIRROR_RETIRED_LABELS` is `{object, subject}` — only those
-    #     two folds consult `mirror_required`), so its graph is a complete,
+    #     COVERAGE-GATED label (`record_vector.COVERAGE_GATED_LABELS`) whose JOURNAL FOLD
+    #     never stops writing the graph copy — `point` is deliberately absent from
+    #     `record_vector.MIRROR_RETIRED_LABELS` (`{object, subject, event, document,
+    #     source}`, `#13971`), so its graph is a complete,
     #     still-fed cohort and NOT a frozen one: the read must fall back to it and
     #     NAME that (`#4999`), exactly the acceptance (a)+(b) `#11691` set.
     #     ⛔ Carrying the no-fallback CONTRACT over to this label emptied the dense

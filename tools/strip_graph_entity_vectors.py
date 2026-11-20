@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""#13629 step 3 — strip `embedding` from `:Object`/`:Subject`/`:Event`/`:Source` nodes.
+"""#13629 step 3 — strip `embedding` from `:Object`/`:Subject`/`:Event`/`:Source`/`:Point`
+nodes.
+
+`:Point` joined the population in `#13971` (see `entity_vector_parity_census.RETIRED`
+for why the old exclusion was reversed, and the `:Point` paragraph below).
 
 **A PREVIEW IS THE DEFAULT. There is no `--dry-run`: the ABSENCE of `--execute` is
 the preview.** The preview reads both stores, prints the exact population it would
@@ -61,8 +65,11 @@ raises MID-RUN cannot be refused — earlier batches are already stripped. That 
     `tortoise.hosted_backup::restore_graph` (all five labels) and, for `:Event`, by five
     more `sdk`/`session_indexer` writers. Every one of those re-adds the vector on the next
     call, so the requirement this gate enforces is **every declared writer of the label
-    asks the gate** — not "the fold does". The gate therefore refuses all four labels
-    today, INCLUDING after #13617 lands. When the coverage predicate is present it names
+    asks the gate** — not "the fold does". The gate therefore refused all four entity
+    labels until `#13854` closed them, and it refuses `:Point` today: `#13971` gates that
+    label's writers (`_upsert_point_props`, `_write_capture_turns`, `_update_entity`,
+    `_rebuild_all_replay`, `restore_graph`) on the SAME measured predicate. When the
+    coverage predicate is present it names
     each un-cleared writer; while the predicate is ABSENT it returns before that walk, so
     it names the requirement rather than the writers. That is the
     true state of a two-pronged retirement, and it is a satisfiable one: as each
@@ -156,8 +163,15 @@ journal IS mandatory: those rows are the transcript, and a rebuild that resurrec
 is the failure. Here a rebuild that re-derives a vector is the SEQUENCED re-write, and
 the write gate above is what keeps it from happening by accident.
 
-⚠️ **The graph-side `:Point` vector is NOT in scope** — the armed cutover and `#13330`
-own it, and `#13629`'s brief forbids touching it. The population is
+⚠️ **The graph-side `:Point` vector IS in scope since `#13971`** — it joined
+`entity_vector_parity_census.RETIRED` once its record coverage became measurable from a
+fresh process and every writer of the label was gated on that same predicate. It is the
+largest reclaimable block left (37,158 stored vectors, ≈67 MB), the in-graph `:Point`
+HNSW index is RETIRED (`#13330`) so nothing reads the property, and `#5004`'s "a Point
+vector is RECORD TRUTH" is now the reason the graph copy is a redundant MIRROR — not a
+reason to keep it. The tool's own refusals still apply: it will not strip `:Point`
+unless the record's coverage for `point`/`operator` MEASURES true in this process and
+every declared `:Point` writer asks the gate. The population remains
 `entity_vector_parity_census.RETIRED` and nothing else.
 
 Usage::
@@ -325,6 +339,19 @@ FOLD_MODULE = "tortoise.projection.entities"
 FOLD_WRITERS: dict[str, tuple[str, ...]] = {
     "Object": ("_upsert_object",),
     "Subject": ("_upsert_subject",),
+    # ⛔ `:Point` IS DELIBERATELY ABSENT (#13971), and that is a RECORDED EXCEPTION, not an
+    # oversight. `_upsert_point_props` is the journal fold: its vector is the JOURNAL's own
+    # record truth (`#5004`), so it must restore what the journal holds or
+    # `derived == replay(journal)` goes false. Two shipped pins state the product decision:
+    # `record_vector.MIRROR_RETIRED_LABELS` must NOT contain `point`, and that set must equal
+    # the labels the folds stop writing
+    # (`tests/test_13610_graph_vector_copy.py::
+    # test_a_verified_label_whose_fold_still_writes_the_graph_keeps_the_fallback`). The
+    # consequence is stated in the tool's own refusal text rather than hidden: a
+    # `rebuild_all` re-materialises the journal's `:Point` vectors, so the strip is an
+    # operator action that has to be RE-RUN after a rebuild. Every other `:Point` writer —
+    # the live capture, the SDK update door, the snapshot restore and `restore_graph` — asks
+    # the gate, so a strip is not undone by an ordinary create or update.
     "Event": ("_upsert_event", "_event_plain_merge"),
     # ⛔ NOT `_event_plain_merge`: it MERGEs `(s:Source {url:$id})` but every `embedding`
     # touch in it is on `e` (`clear_embedding(..., "e", ...)` and
@@ -4948,6 +4975,18 @@ def render_plan(plan: dict) -> str:
         "  --execute --plan <this file> --confirm-plan-digest "
         f"{plan['digest']}",
     ]
+    if any(row["label"] == "Point" for row in plan["labels"]):
+        # ⛔ THE CAVEAT IS PRINTED, NOT HELD IN A COMMENT (`#13971`). `:Point` is the one
+        # label whose JOURNAL FOLD keeps writing the graph copy by decision
+        # (`record_vector.MIRROR_RETIRED_LABELS` must not contain `point`), so a rebuild
+        # re-materialises what this plan removes. An operator who is not told that reads the
+        # next rebuild as "the strip silently failed".
+        lines += [
+            "",
+            "⚠️ `:Point` durability: a `rebuild_all` REPLAYS the journal, which re-adds "
+            "every journalled `:Point` vector — re-run this tool after a rebuild. Ordinary "
+            "creates and updates do not re-add it (all four live writers ask the gate).",
+        ]
     measured = plan.get("population") or [r["label"] for r in plan["labels"]]
     declared = plan.get("declared_population") or measured
     dropped = sorted(set(declared) - set(measured))
@@ -5764,7 +5803,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="record tenant graph")
     parser.add_argument("--label", action="append", default=None,
                         choices=[label for _, label, _ in parity.RETIRED],
-                        help="plan only this label (repeatable); default: all four")
+                        help="plan only this label (repeatable); default: all five")
     parser.add_argument("--batch", type=int, default=None,
                         help="nodes per removal statement (default: the plan's recorded "
                              f"batch on --execute, else {DEFAULT_BATCH})")

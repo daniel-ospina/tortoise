@@ -77,7 +77,7 @@ comes from the component that owns it:
 * **record side** — `node_key`, the record's one identity column across every table
   (`NodeSnapshot`'s key, `node_identity`'s PK component, and the column the
   `chk_*_node_key_is_contract_key` constraints pin). Since `#9881` it IS the id for
-  `object`/`subject`, so one column serves all four labels.
+  `object`/`subject`, so one column serves all five labels.
 
 ## What a refusal looks like, and why it is not a failure of the instrument
 
@@ -160,26 +160,47 @@ import turn_parity_census as census_mod
 
 CensusError = census_mod.CensusError
 
-#: The labels this issue retires, in the order they are reported, with the graph
+#: The labels this tool retires, in the order they are reported, with the graph
 #: property that IDENTIFIES a node of that label.
 #:
 #: ⛔ `:Source` is ONE label serving TWO caller-facing `entity_type`s (`source` and
-#: `document`, `tortoise/security.ENTITY_TYPE_LABELS`), and `:Point` is deliberately
-#: ABSENT: the armed cutover and `#13330` own it, and `#13629`'s brief forbids
-#: touching it. Adding it here would silently widen a destructive tool's population —
-#: which is why the population is a module-level constant a test iterates rather than
-#: a list assembled at a call site.
+#: `document`, `tortoise/security.ENTITY_TYPE_LABELS`) and `:Point` is ONE label serving
+#: TWO as well (`point`, `operator`) — which is why the write gate asks a label's every
+#: type and retires it only when all of them stop (`#13854` for `:Source`, `#13971` for
+#: `:Point`). This population is a module-level constant a test iterates rather than a
+#: list assembled at a call site, because it is the population a DESTRUCTIVE tool
+#: iterates.
+#:
+#: ⛔ `:Point` JOINED THIS TUPLE IN `#13971`, AND IT IS A DELIBERATE REVERSAL of the
+#: `#13629` scope boundary that used to be pinned here (`NOT_IN_SCOPE == ("Point",)`).
+#: The boundary existed because the armed cutover and `#13330` owned `:Point` *while the
+#: record's coverage for it was unproven and the label was still being mirrored by
+#: ungated writers*. Both conditions are gone: the record holds ~37,099 point vectors
+#: (PARITY after `#13685`), the in-graph `:Point` HNSW index is RETIRED (`#13330`) so
+#: nothing reads the property, and `#13971` gates every declared `:Point` writer on the
+#: same measured predicate the entity labels use — so `#5004`'s "a Point vector is RECORD
+#: TRUTH" is exactly the reason the GRAPH copy is a mirror that may go, not a reason to
+#: keep it. The tool still refuses to strip a label whose record coverage does not
+#: measure true in its own process (`strip_readiness`), so the reversal cannot delete a
+#: vector the record cannot answer with.
 RETIRED: tuple[tuple[str, str, str], ...] = (
     # (record table, graph label, graph identity property)
     ("object", "Object", "id"),
     ("subject", "Subject", "id"),
     ("event", "Event", "eventId"),
     ("source", "Source", "url"),
+    # `chk_point_node_key_is_contract_key` (`#9881`): a Point's `id` IS its record
+    # `node_key`, exactly as for the object/subject twins — so the identity join this
+    # census performs (`node_key = ANY(text keys)`) reads the same node.
+    ("point", "Point", "id"),
 )
 
-#: `:Point` — named so `test_the_population_excludes_point` can assert its absence by
-#: name instead of by count. `#13629`'s scope boundary, in one place.
-NOT_IN_SCOPE: tuple[str, ...] = ("Point",)
+#: The declared labels this tool does NOT cover. ⛔ EMPTY ON PURPOSE SINCE `#13971`, and
+#: kept as a NAME rather than deleted so a future scope reduction has to edit a pinned
+#: constant instead of quietly dropping a label from `RETIRED`: every served label
+#: (`point`, `operator`, `event`, `subject`, `document`, `object`, `source`) is measured
+#: here now, so the honest value is "none".
+NOT_IN_SCOPE: tuple[str, ...] = ()
 
 #: Keyset page size for the graph leg. Must sit well UNDER FalkorDB's
 #: `RESULTSET_SIZE` (default 10_000) so a page is never truncated, and the store's own
@@ -451,7 +472,8 @@ def read_graph_vector_keys(g: Any, label: str, key_prop: str) -> dict:
 
 #: The record leg's TWO statements. `node_key` is the record's one identity column
 #: (`NodeSnapshot`'s key, and the column the `chk_*_node_key_is_contract_key`
-#: constraints pin), so the same pair serves all four labels.
+#: constraints pin — including `chk_point_node_key_is_contract_key`), so the same pair
+#: serves all five labels.
 #:
 #: ⛔ NEITHER IS AN UNBOUNDED FULL-TABLE FETCH, and that is a correctness property, not
 #: a performance one. The first statement is ONE aggregate row (counts only); the second
@@ -590,7 +612,7 @@ def read_record_vector_keys(record_dsn: str, org_id: str, graph_id: str,
 
 
 def _quote_record_table(table: str) -> str:
-    """``table`` as a Postgres identifier, refused unless it is one of the four.
+    """``table`` as a Postgres identifier, refused unless it is one of the declared five.
 
     The table name is interpolated into SQL, so it is validated against the closed
     population the module declares rather than escaped: an allowlist is what
@@ -704,7 +726,7 @@ def census(*, g: Any, record_dsn: str, org_id: str, graph_id: str,
     is already complete).
 
     ⛔ AND ``population`` IS THE MEASURED SET, never the declared one. A `--label Object`
-    run certifies Object and NOTHING ELSE; reporting the declared four while querying
+    run certifies Object and NOTHING ELSE; reporting the declared five while querying
     one is the "a gate reports a pass without having looked" class this module exists
     to refuse (`#11112`).
     """
@@ -890,7 +912,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="record tenant graph")
     parser.add_argument("--label", action="append", default=None,
                         choices=[label for _, label, _ in RETIRED],
-                        help="census only this label (repeatable); default: all four")
+                        help="census only this label (repeatable); default: all five")
     parser.add_argument("--json", default=None, help="write the full report here")
     parser.add_argument("--require-ready", action="store_true",
                         help="exit 4 unless the graph is at parity AND every label's "

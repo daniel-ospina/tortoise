@@ -3370,6 +3370,19 @@ def _write_capture_turns(
         text = turn_texts[i]
         text_hash = _content_hash(text)
         turn_hashes.append(text_hash)
+        # ⛔ `#13971`: the graph copy of a turn's vector is a MIRROR, not the store. The
+        # RECORD owns a Point's vector (`#5004`), the in-graph `:Point` HNSW index is
+        # RETIRED (`#13330`) so nothing reads this property, and once the record's
+        # coverage for `point` is measured true every capture would otherwise re-add
+        # 37k vectors the operator just stripped. Asked through the fold's ONE predicate,
+        # in the encode-guard shape `#13826`'s census reads as a write-stop — an
+        # unconditional store with a late gate would still place the vector. A `False`
+        # answer leaves `emb` None, whose CYPHER arm (`turn.emb IS NOT NULL`) then falls to
+        # the PRESERVE/CLEAR pair: an unchanged text keeps whatever the node holds (nothing,
+        # after a strip) and a changed text clears it — never a vector written back.
+        embedding = None
+        if _derived_mirror_required("point"):
+            embedding = turn_embs[i]
         turn_rows.append({
             "id": _capture_turn_id(session_id, i, turn_offset),
             "c": text,
@@ -3386,7 +3399,7 @@ def _write_capture_turns(
             "speaker": _capture_turn_role_text(text)[0],
             "s": "draft",
             "ch": text_hash,
-            "emb": turn_embs[i],
+            "emb": embedding,
         })
 
     # #7405 (audit G8): the batched turn store rides the SAME bounded write
@@ -56188,6 +56201,18 @@ class TortoiseSDK:
                     props.pop("embedding", None)
                 if (label == "Source" and not _derived_mirror_required("document")
                         and not _derived_mirror_required("source")):
+                    props = dict(_props_base)
+                    props.pop("embedding", None)
+                # ⛔ AND `:Point` (#13971), on BOTH of its types. `:Point` is ONE label
+                # serving TWO caller-facing entity types (`point`, `operator`,
+                # `tortoise/security.ENTITY_TYPE_LABELS`), and this door can land on
+                # either — so the vector is retired only when BOTH counters answer stop,
+                # exactly the `:Source` rule directly above. `#5004`'s "a Point vector is
+                # RECORD TRUTH" is why the graph copy is a redundant MIRROR once the
+                # record covers it (`#13330` retired the in-graph index, so nothing reads
+                # the property), not a reason to keep re-writing it.
+                if (label == "Point" and not _derived_mirror_required("point")
+                        and not _derived_mirror_required("operator")):
                     props = dict(_props_base)
                     props.pop("embedding", None)
                 # #4649: a canonical label's identity is an OR-SET, not one key.
