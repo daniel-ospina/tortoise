@@ -34,6 +34,10 @@ assert _spec and _spec.loader
 filer = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(filer)
 
+#: The real transport class, captured before any test monkeypatches `filer.Mcp`
+#: (a stub that rebuilt itself through the patched name recursed forever).
+_RealMcp = filer.Mcp
+
 
 class _StubMcp:
     """The transport, replaced: every write returns a fresh id."""
@@ -44,7 +48,7 @@ class _StubMcp:
     def initialize(self) -> None:  # pragma: no cover - no session to open
         return None
 
-    def call(self, tool: str, args: dict) -> dict:
+    def call(self, tool: str, args: dict, **_kw) -> dict:
         self._n += 1
         return {"structuredContent": {"id": f"{tool}:{self._n}"}}
 
@@ -52,8 +56,40 @@ class _StubMcp:
 class _IdlessMcp(_StubMcp):
     """A transport whose write succeeded without returning an id."""
 
-    def call(self, tool: str, args: dict) -> dict:
+    def call(self, tool: str, args: dict, **_kw) -> dict:
         return {"structuredContent": {"name": args.get("name") or args.get("content")}}
+
+
+class _EdgeRefusingMcp:
+    """Nodes and points land; every edge write is REFUSED the way this server
+    does it — a SUCCESSFUL result whose payload is an error dict.
+
+    The refusal is injected at `_post`, so the REAL `Mcp.call` path decides what
+    a refusal is: a stub that swallowed `call()` would pass this test while the
+    shipped detection was broken.
+    """
+
+    def __init__(self, *_args, **_kw) -> None:
+        self._n = 0
+        self._inner = _RealMcp("not-a-real-key")
+
+        def _post(body: dict):
+            tool = (body.get("params") or {}).get("name")
+            self._n += 1
+            if tool in ("tortoise_create_edge", "tortoise_create_operator"):
+                return (200, {"jsonrpc": "2.0", "id": body.get("id"), "result": {
+                    "structuredContent": {"error": "quota exceeded for operators",
+                                          "code": "ERR_QUOTA"}}}, {})
+            return (200, {"jsonrpc": "2.0", "id": body.get("id"), "result": {
+                "structuredContent": {"id": f"{tool}:{self._n}"}}}, {})
+
+        self._inner._post = _post
+
+    def initialize(self) -> None:  # pragma: no cover - no session to open
+        return None
+
+    def call(self, tool: str, args: dict, **kw) -> dict:
+        return self._inner.call(tool, args, **kw)
 
 
 @pytest.fixture()
@@ -132,15 +168,23 @@ def test_validate_refuses_an_orphan(map_doc):
 
 
 def _row_for(doc: dict, ref: str) -> list[str]:
-    """The identity row `verify()` reads back for one declared ref."""
+    """The identity row `verify()` reads back for one declared ref.
+
+    Derived from the same authority the writer uses: an Event is keyed on the
+    `name` its door writes, not on `content` (which the Event door takes as a
+    prop, not as a parameter).
+    """
     item = filer.doc_by_ref(doc, ref)
-    row = ["", "", ""]  # name, url, content — `filer.IDENTITY_PROPS` order
-    if "url" in item:
-        row[1] = item["url"]
-    elif "name" in item:
-        row[0] = item["name"]
+    if any(e["ref"] == ref for e in doc["events"]):
+        prop, value = "name", filer.event_name(item)
+    elif "url" in item:
+        prop, value = "url", item["url"]
+    elif "content" in item:
+        prop, value = "content", item["content"]
     else:
-        row[2] = item["content"]
+        prop, value = "name", item["name"]
+    row = ["", "", ""]  # `filer.IDENTITY_PROPS` order
+    row[filer.IDENTITY_PROPS.index(prop)] = value
     return row
 
 
@@ -173,7 +217,7 @@ def test_every_write_uses_the_surface_spelling(tmp_path, monkeypatch, map_doc, c
     sent: dict[str, list[dict]] = {}
 
     class _Recording(_StubMcp):
-        def call(self, tool: str, args: dict) -> dict:
+        def call(self, tool: str, args: dict, **_kw) -> dict:
             sent.setdefault(tool, []).append(dict(args))
             return super().call(tool, args)
 
@@ -236,6 +280,82 @@ def test_the_signature_pin_reads_the_real_surface():
 
     accepted, required = signatures["tortoise_create_event"]
     assert required == {"name", "eventKind"}
+
+
+def test_a_refusal_payload_without_isError_raises(monkeypatch):
+    """The refusal channel `isError` does NOT carry.
+
+    This server's handlers return `_SafeError(...)`, a dict subclass, so a
+    quota/validation refusal arrives as a SUCCESSFUL result whose payload is
+    `{"error": …}` with `isError: false`. Reading `isError` alone marked refused
+    edge writes as filed — #13880's false PASS one layer down.
+
+    Mutant: drop the payload arm of `_refusal` — this returns the error dict as
+    a successful call.
+    """
+    mcp = filer.Mcp("not-a-real-key")
+    monkeypatch.setattr(
+        mcp, "_post",
+        lambda body: (200, {"jsonrpc": "2.0", "result": {
+            "structuredContent": {"error": "quota exceeded", "code": "ERR_QUOTA"},
+        }}, {}),
+    )
+    with pytest.raises(RuntimeError, match="FAILED: quota exceeded"):
+        mcp.call("tortoise_create_edge", {})
+
+
+def test_a_refused_edge_is_not_marked_as_written(tmp_path, monkeypatch, map_doc, capsys):
+    """A refused edge is a FAILURE: exit 1, recorded in `state.json`, never
+    marked `written` (a marked failure is skipped forever on resume).
+
+    Mutant: `mark(marker)` inside `try` with no refusal check.
+    """
+    monkeypatch.setattr(filer, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _EdgeRefusingMcp)
+
+    assert filer.write_map(map_doc) == 1
+    state = json.loads((tmp_path / "state.json").read_text())
+    assert state["failed"], "the refusal vanished"
+    assert not [m for m in state["written"] if m.startswith("edge:")]
+    capsys.readouterr()
+
+
+def test_a_non_idempotent_write_is_not_retried(monkeypatch):
+    """`retry_safe=False` stops on a 5xx instead of re-issuing.
+
+    `create_operator` is explicitly NOT idempotent — a retry writes a SECOND
+    operator and EP double-counts it (#10849, `tool_registry.py`) — so the door
+    must report the UNKNOWN outcome, not retry it.
+
+    Mutant: ignore `retry_safe` and take the retry arm — `_post` is called more
+    than once and the write is silently duplicated.
+    """
+    mcp = filer.Mcp("not-a-real-key")
+    calls = []
+
+    def _post(_body):
+        calls.append(1)
+        raise filer.urllib.error.URLError("connection reset")
+
+    monkeypatch.setattr(mcp, "_post", _post)
+    with pytest.raises(RuntimeError, match="outcome UNKNOWN"):
+        mcp.call("tortoise_create_operator", {}, retry_safe=False)
+    assert len(calls) == 1, f"retried a non-idempotent write {len(calls)} times"
+
+
+def test_the_event_identity_is_the_name_its_door_writes(map_doc):
+    """`map_identities` keys an Event on `name`, the property the Event door is
+    REQUIRED to write — not on `content`, which it only takes as a prop.
+
+    Mutant: key Events on `content` — a correctly filed map then reports 14
+    missing nodes and `--verify` refuses forever (#13913 review).
+    """
+    names = {value for prop, value in filer.map_identities(map_doc) if prop == "name"}
+    event_names = {filer.event_name(e) for e in map_doc["events"]}
+    assert event_names <= names, sorted(event_names - names)
+    contents = {value for prop, value in filer.map_identities(map_doc) if prop == "content"}
+    assert not (event_names & contents)
 
 
 def test_the_readback_verdict_is_identity_scoped_not_a_count(map_doc):

@@ -298,8 +298,20 @@ class Mcp:
             # some transports answer 202/204 with an error-ish shape
             self._post({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
-    def call(self, tool: str, args: dict) -> dict:
-        """Call one tool, with the transport's own retry contract honoured."""
+    def call(self, tool: str, args: dict, *, retry_safe: bool = True) -> dict:
+        """Call one tool, refusing to retry a write that is not idempotent.
+
+        `retry_safe=False` is for the tools whose registry entry says a repeat
+        writes a SECOND node (`tortoise_create_operator`: "a retry of
+        `create_operator` writes a SECOND operator over the same endpoints …
+        the duplicate double-counts the claim's EP weight", #10849; and
+        `tortoise_create_event`, risk=write with no idempotency declaration).
+        On a transport death the outcome is UNKNOWN, so the call STOPS: a retry
+        would duplicate a write the door cannot undo, and a silent success
+        claim would be the false PASS again. `state.json` is left untouched, so
+        a re-run re-resolves by name and only writes what `--verify` shows is
+        missing.
+        """
         for attempt in range(6):
             self._next_id += 1
             try:
@@ -315,6 +327,8 @@ class Mcp:
                 except json.JSONDecodeError:
                     payload = {"raw": body}
             except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                if not retry_safe:
+                    raise RuntimeError(_unknown(tool, exc)) from exc
                 if attempt == 5:
                     raise RuntimeError(f"{tool}: transport died — {exc}") from exc
                 time.sleep(min(60, 5 * (attempt + 1)))
@@ -326,13 +340,18 @@ class Mcp:
                                if isinstance(err.get("data"), dict) else None)
                 if retry_after:
                     # "the work may still complete" — wait the advertised delay,
-                    # then re-issue. Every write here is idempotent (see README).
+                    # then re-issue. Only for a write whose repeat converges.
+                    if not retry_safe:
+                        raise RuntimeError(_unknown(tool, err))
                     time.sleep(min(120, float(retry_after) + 1))
                     continue
                 raise RuntimeError(f"{tool} refused: {err}")
-            if code >= 500 and attempt < 5:
-                time.sleep(min(60, 5 * (attempt + 1)))
-                continue
+            if code >= 500:
+                if not retry_safe:
+                    raise RuntimeError(_unknown(tool, f"HTTP {code}"))
+                if attempt < 5:
+                    time.sleep(min(60, 5 * (attempt + 1)))
+                    continue
             if not payload:
                 raise RuntimeError(f"{tool}: empty response (HTTP {code})")
             result = payload.get("result", payload)
@@ -344,9 +363,11 @@ class Mcp:
             # run of this map against a degraded API "wrote" all 78 nodes by
             # falling back to each item's own name as its id, and only the
             # Falkor read-back (`--verify`: 0 nodes) showed nothing existed.
-            if result.get("isError"):
-                msg = _text(result) or "no reason given"
+            msg = _refusal(result) if isinstance(result, dict) else None
+            if msg:
                 if ("wait budget" in msg or "retry" in msg.lower()) and attempt < 2:
+                    if not retry_safe:
+                        raise RuntimeError(_unknown(tool, msg))
                     # A degraded data plane does not heal inside one call: two
                     # retries, then abort the RUN so the caller can re-probe.
                     # Grinding through six 60s backoffs per node would spend the
@@ -356,6 +377,30 @@ class Mcp:
                 raise RuntimeError(f"{tool} FAILED: {msg[:400]}")
             return result
         raise RuntimeError(f"{tool}: gave up after 6 attempts")
+
+
+def _unknown(tool: str, reason: object) -> str:
+    return (f"{tool}: outcome UNKNOWN ({reason}) — this write is NOT idempotent, so "
+            "it is not retried; re-run and let --verify decide what landed")
+
+
+def _refusal(result: dict) -> str | None:
+    """The reason, when a `tools/call` result reports a refusal — BOTH channels.
+
+    The spec's `isError` flag is not the only one. This server's handlers return
+    `_SafeError(...)` — a dict SUBCLASS whose wire shape is unchanged — so a
+    validation or quota refusal arrives as a SUCCESSFUL result whose payload is
+    `{"error": …}` with `isError: false` (`mcp_server.py`'s `_SafeError`
+    docstring: "the wire shape is unchanged"). Reading `isError` alone therefore
+    marked refused EDGE writes as filed, which is #13880's false PASS one layer
+    down.
+    """
+    if result.get("isError"):
+        return _text(result) or "no reason given"
+    payload = _json_of(result)
+    if isinstance(payload, dict) and payload.get("error"):
+        return str(payload["error"])
+    return None
 
 
 def _text(result: dict) -> str:
@@ -491,7 +536,8 @@ def write_map(doc: dict) -> int:
         if e.get("startedAt"):
             props["startedAt"] = e["startedAt"]
         res = mcp.call("tortoise_create_event",
-                       {"name": event_name(e), "eventKind": e["eventKind"], "props": props})
+                       {"name": event_name(e), "eventKind": e["eventKind"], "props": props},
+                       retry_safe=False)
         ids[e["ref"]] = _resolve(e["ref"], e["content"], res, "event")
         mark(f"event:{e['ref']}")
         print(f"  event    {e['ref']:<34} -> {ids[e['ref']]}")
@@ -531,7 +577,7 @@ def write_map(doc: dict) -> int:
                     args["semantics"] = e["label"]
                 if e.get("direction"):
                     args["direction"] = e["direction"]
-                mcp.call("tortoise_create_operator", args)
+                mcp.call("tortoise_create_operator", args, retry_safe=False)
             else:
                 mcp.call("tortoise_create_edge",
                          {"source_id": src, "target_id": dst,
@@ -575,8 +621,11 @@ CLEAN_GRAPH = "org_3326a01ea34ae595d84de5d8f9_g_311d79c684de4d0e8953d189ed"
 
 
 #: The properties an item's identity lives in — the map declares exactly one
-#: per node (a Subject/Object carries `name`, a Source carries `url`, an Event
-#: and a Point carry `content`).
+#: per node (a Subject/Object/Event carries `name`, a Source carries `url`, a
+#: Point carries `content`). ⛔ An Event is keyed on `name`, not `content`: the
+#: only Event door is `tortoise_create_event(name, eventKind, props)`, so `name`
+#: is the one property it is GUARANTEED to write (#13913 review — keying Events
+#: on `content` made `--verify` refuse a correctly-filed map).
 IDENTITY_PROPS = ("name", "url", "content")
 
 
@@ -597,7 +646,7 @@ def map_identities(doc: dict) -> list[tuple[str, str]]:
     for s in doc["sources"]:
         out.append(("url", s["url"]))
     for e in doc["events"]:
-        out.append(("content", e["content"]))
+        out.append(("name", event_name(e)))
     for p in doc["points"]:
         out.append(("content", p["content"]))
     return out

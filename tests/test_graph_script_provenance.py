@@ -305,11 +305,17 @@ def test_a_nested_script_is_in_the_corpus_and_cannot_escape_the_partition(tmp_pa
 
 def test_the_price_trigger_fires_on_the_real_stale_tier_scripts():
     """The trigger is measured against the REAL gap the issue names, not only a
-    synthetic fixture: these files assert non-canonical tiers as ours."""
+    synthetic fixture: these files assert non-canonical tiers as ours.
+
+    Scanned the way the GATE scans (recursive, relative keys) — a flat `glob`
+    here would disagree with `violations()` the moment a price-naming script is
+    nested, and would then false-red a correct declaration (#13913 review).
+    """
     detected = {
-        path.name
-        for path in sorted(GRAPH_SCRIPTS.glob("*.py"))
-        if names_a_price(path.read_text(encoding="utf-8", errors="replace"))
+        path.relative_to(GRAPH_SCRIPTS).as_posix()
+        for path in sorted(GRAPH_SCRIPTS.rglob("*.py"))
+        if "__pycache__" not in path.parts
+        and names_a_price(path.read_text(encoding="utf-8", errors="replace"))
     }
     assert detected >= PRICE_BEARING_SCRIPTS, (
         f"declared price-bearing but the trigger does not fire: "
