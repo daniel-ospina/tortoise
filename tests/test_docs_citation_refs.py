@@ -578,11 +578,20 @@ def test_the_real_docs_tree_is_not_empty():
 #: ⛔ THE `<` RESIDUAL IS ATTACHED TO THE INPUT THAT HAS IT (#13921 review, finding 3, MEASURED).
 #: This paragraph used to say "the cost of a tag probe on an UNTERMINATED `<` run (measured 28
 #: characters -> 0.19 s, growing about x1.7 per character)" — and a bare `<` run is not that
-#: input: 200 `<` takes 0.0010 s and scales ~n^2 like every other pair above. The exponential
+#: input: 200 `<` takes 0.0018 s and scales ~n^2 like every other pair above (the `_TAG` probe
+#: scans the run and fails, then the bare `<` unit takes one character). The exponential
 #: belongs to a tag that OPENS and never CLOSES with a QUOTE inside it, `<a` + a run of `'`, where
-#: the quoted branch and the catch-all both consume each quote: MEASURED at this head n=20 ->
-#: 0.0018 s, 24 -> 0.0124, 26 -> 0.0321, 28 -> 0.0841, 32 -> 0.5815 s (a x1.6-1.7 step per
-#: character). That residual is DECLARED, not fixed, and it is pinned by its own timing witness at
+#: the quoted branch and the catch-all both consume each quote. ⛔ THE BRACKET PAIR'S SIBLING
+#: OVERLAP IS NOW GONE (#13921 review, finding 1 — disjoint branches, flat at every n); the TAG's
+#: is the one that REMAINS, and it is DECLARED. MEASURED at this head on the exact input the
+#: timing row below uses (`"`-- tortoise/`" + "<a" + "'" * n`, three runs, min): n=20 ->
+#: 0.0016 s, 24 -> 0.0110, 26 -> 0.0290, 28 -> 0.0758, 32 -> 0.5192 s (a x1.6-1.7 step per
+#: character). ⛔ THESE FIGURES ARE STATED HERE AND NOWHERE ELSE (#13921 review, finding 3):
+#: the timing row below used to restate them and the two copies had drifted 2.3x apart —
+#: 0.194 s vs 0.0841 s for the SAME input at the SAME head — which is exactly the rot the module
+#: docstring records for a count typed into prose. That row now POINTS HERE; if you re-measure,
+#: correct this line and do not start a second copy.
+#: That residual is DECLARED, not fixed, and it is pinned by its own timing witness at
 #: the `< 2.0 s` row, which uses the SAME input (`"<a" + "'" * 28`) — a future reader who guards
 #: "a `<` run" would guard the wrong shape and conclude the residual was closed. Otherwise the
 #: measured cost is flat: 8/16/28/40/80/200 spaces and 40 repeated units of each kind ->
@@ -1753,7 +1762,9 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             f"the arm SKIPPED {_refuted!r} — a lead punctuation mark after the verb and a "
             "separator run longer than four are the SAME answer; each returned `[]` before "
             "this fix (#13900 review, cycle 10, P2)")
-    # ⛔ AND THE FOUR SEPARATOR UNITS, EACH PINNED (#13900 review, cycles 9-13). The unit list IS
+    # ⛔ AND THE SIX SEPARATOR UNITS, EACH PINNED (#13900 review, cycles 9-13; the count is SIX,
+    # not the FOUR this header carried — `_OPEN_BRACKET` and `_OPEN_TAG` are units too, as the
+    # constant block states and the rows above witness — #13921 review, finding 3). The unit list IS
     # the closure, so a unit with no witness is a claim and not a test. Non-vacuity is MEASURED
     # against `ff83caa198`'s own function, not asserted, and the ABBREVIATION rows below are SPLIT
     # by what that measurement said: five returned `[]` there (repaired holes), one was already
@@ -1862,6 +1873,22 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             f"an UNTERMINATED `<` ended the separator on subject {_subject!r} — `_OPEN_TAG` is "
             "the unit that admits it, `_TAG` requires the `>`, and `<` is a character "
             "`origin/main`'s gap already had (#13921 review, finding 1)")
+    # ⛔ AND THE ADMISSION THE LOOKAHEAD USED TO REFUSE GETS ITS OWN WITNESS (#13921 review,
+    # finding 2, MEASURED). No row in this file varied on the `<` shape whose `>` IS reachable but
+    # which `_TAG` cannot parse, so restoring the dropped lookahead reddened nothing — the same
+    # "a unit with no witness is a claim and not a test" failure as the `break` below. `_TAG`'s
+    # catch-all excludes `"`, so an UNBALANCED `"` is exactly that shape: `_OPEN_TAG` must take the
+    # bare `<` and let the walk continue. MEASURED at `8f108b5211` these three returned `[]`;
+    # with the bare `<` they grade. Non-vacuity, EXECUTED: restoring
+    # `_OPEN_TAG = r"<(?![^>\n]*>)"` reds this assertion.
+    for _refuted in ('<">', '<…!">', '<"-$>→'):
+        _seen_tag = _typed_answers_to_tortoise_cmd(
+            "`-- tortoise/`" + _refuted + " prints TWO paths", "-- tortoise/")
+        assert _seen_tag, (
+            f"a `<` whose `>` is reachable but which `_TAG` cannot parse refused the separator: "
+            f"separator {_refuted!r} returned `[]` — `_OPEN_TAG` must take the bare `<`, because "
+            "its lookahead asserted more than \"_TAG failed\" and dropped an admission `origin/main` "
+            "had (#13921 review, finding 2)")
     # ⛔ AND THE RETRY EARNS ITS OWN WITNESS, WHICH ONLY A VERB *INSIDE* A UNIT CAN GIVE
     # (#13921 review, F2/F4, MEASURED). Reducing the scan to its FIRST candidate reddened nothing
     # in this file, because under the old anchor the first candidate was already the occurrence's
@@ -1874,8 +1901,13 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     # because the inner `:` there produces an unclassifiable head and the classifier skips it. The
     # tag row is a genuine `_TAG` witness (deleting `_TAG` reds it) and it pins that a verb inside
     # a quoted attribute is not TAKEN — but a reader who strengthens the retry's removal test
-    # against it would test nothing, so: a slice full-match instead of the boundary list is
-    # reddened by the `[is]` row alone.
+    # against it would test nothing. ⛔ AND THE `[is]` ROW IS MASKED, so "reddened by the `[is]` row
+    # alone" was FALSE (#13921 review, finding 5, MEASURED — corrected here): with the guard
+    # removed the FIRST red in file order is the LIVE-DOCUMENT row (`assert not _typed`, which
+    # takes 5 spurious answers on 05-verify.md), then `R&D == []` and both `unreached` rows, and
+    # only then `[is]`. The property IS caught — but a fixer who strengthens the removal test
+    # "against the `[is]` row alone" is working against a claim this suite does not demonstrate,
+    # which is the over-stated-attribution class this file already records for `_BRACKET`.
     for _inner, _row in (("[is]", "`-- tortoise/` [is] prints TWO paths"),
                          ('<span title="a: b">',
                           '`-- tortoise/`<span title="a: b">prints TWO paths')):
@@ -1885,6 +1917,20 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
             f"{_seen_inner!r} — a separator full-match cannot tell a unit boundary from a "
             "position inside a unit, because a unit's lookahead cannot see past the slice it is "
             "given (#13921 review, F4)")
+    # ⛔ AND THE `break` GETS A WITNESS, BECAUSE DELETING IT REDS NO OTHER ROW (#13921 review,
+    # finding 4, MEASURED). That line is load-bearing: it is what restores ONE answer per command
+    # occurrence now that the verb scan starts at the command rather than at the end of the
+    # separator. Hence the count, not just the first answer — a two-verb sentence must yield
+    # exactly ONE pair. MEASURED: with the `break` this is `1`, without it `2` (the same sentence
+    # answered twice, which the live-document arm would then read as two typed verdicts). No row
+    # in this file moved when the `break` was deleted, which is this file's own rule — "a unit
+    # with no witness is a claim and not a test" — failing in the direction that matters.
+    _seen_twice = _typed_answers_to_tortoise_cmd(
+        "`-- tortoise/` : prints ONE path : returns TWO paths", "-- tortoise/")
+    assert len(_seen_twice) == 1, (
+        f"one command occurrence produced {len(_seen_twice)} answers, expected 1: "
+        f"{_seen_twice!r} — the per-occurrence `break` is gone, so a second verb in the same "
+        "separator run is graded as a second ANSWER (#13921 review, finding 4)")
     # ⛔ A SOFT BREAK IS CROSSED INSIDE A UNIT TOO, AND EACH UNIT KIND GETS ITS OWN WITNESS
     # (#13900 review, verification round, P2, MEASURED). The comment beside `_TAG` / `_BRACKET`
     # says "three holes, each reproduced on the LIVE document" — and before this block NOTHING
@@ -1923,9 +1969,12 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         "`-- tortoise/`\n\nprints ONE path at this head", "-- tortoise/") == [], (
         "the gap crossed a BLANK line — a paragraph break is the boundary, and crossing it "
         "joins two unrelated clauses (over-block side)")
-    # …and the run stays LINEAR when no verb follows, which is what `7557a52cf5` measured as
-    # exponential in the earlier ambiguous form. Bounded here so a regression reds instead of
-    # hanging: 28 spaces is the size that took 15.8 s there.
+    # …and a no-verb run is BOUNDED, which is all this row claims — it is NOT LINEAR, and
+    # `_GAP_UNIT`'s block records the five points that say so: each start is scanned TWICE (the
+    # closing unit, then its lookahead), so the run is ~n^2 (#13921 review, finding 3: this line
+    # said LINEAR 1,300 lines from a paragraph that says NOT LINEAR). `7557a52cf5` measured the
+    # earlier ambiguous form as EXPONENTIAL; bounded here so a regression reds instead of hanging,
+    # 28 spaces being the size that took 15.8 s there.
     import time as _time
     _t0 = _time.monotonic()
     _typed_answers_to_tortoise_cmd("`-- tortoise/`" + " " * 28 + "no verb here", "-- tortoise/")
@@ -1934,14 +1983,17 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         "longer than 2 s, and at `d38f9152af` 24 spaces alone took 15.8 s (measured)")
     # ⛔ AND THE SAME BOUND FOR AN AMBIGUOUS UNIT, WHICH THE SPACES ROW CANNOT SEE (#13900
     # review, verification round, P2, MEASURED). Spaces are unambiguous, so timing them proves
-    # nothing about the alternations that ARE ambiguous: `\\.` and `[^\]\n]` both consume a
-    # backslash-led pair, and the tag catch-all admits `'` that the quoted branch also consumes.
-    # MEASURED growth of an unterminated `<a''''…` run (no verb, so the gap is fully explored):
-    # n=20 0.004 s, n=24 0.024 s, n=26 0.068 s, n=28 0.194 s — ≈×1.7 per character.
+    # nothing about the alternations that ARE ambiguous. This row pins the TAG's remaining
+    # overlap — its catch-all admits `'` that the quoted branch also consumes, so an unterminated
+    # `<a''''…` run stays exponential. ⛔ ONE OF THE TWO IS NOW FIXED (#13921 review, finding 1):
+    # the bracket pair's overlap is gone and is flat, so THIS is the only exponential left.
+    # ⛔ THE FIGURES ARE NOT RESTATED HERE — the declared-residual paragraph beside `_BRACKET`
+    # states this exact input's measured growth, and this row points there because two copies had
+    # drifted 2.3x apart (#13921 review, finding 3).
     # ⚠️ DECLARED RESIDUAL, not a fixed hole: that cost is EXPONENTIAL in the run length and is
-    # left as one, deliberately — making the alternations disjoint (excluding `\` and `'` from
-    # the single-character classes) CHANGES which inputs parse and is therefore a behaviour change
-    # this cycle did not measure. What is pinned is that it does not get WORSE, and what is
+    # left as one, DELIBERATELY — excluding `'` from the tag catch-all changes which inputs parse
+    # and has NOT been measured (unlike the bracket pair, which was measured and fixed). What is
+    # pinned is that it does not get WORSE, and what is
     # declared is that it exists: the live tree's slowest file is 16.7 ms and 855 files take
     # ~1.0 s, so the hazard is a future document with a long unterminated tag or label, not today's
     # tree. A `docs/` file that reds this row is a RESOURCE regression to be measured, not a red
@@ -1950,8 +2002,9 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     _typed_answers_to_tortoise_cmd("`-- tortoise/`<a" + "'" * 28, "-- tortoise/")
     assert _time.monotonic() - _t0 < 2.0, (
         "an ambiguous UNIT's alternatives exploded — an unterminated 28-character tag run took "
-        "longer than 2 s; measured 0.194 s at this head, growing ≈×1.7 per character "
-        "(#13900 review, verification round, P2)")
+        "longer than 2 s; the declared-residual paragraph beside `_BRACKET` states this input's "
+        "measured growth and why only the TAG's overlap is left — read it there, not here "
+        "(#13921 review, finding 3)")
     # ⛔ AND THE PUNCTUATION CYCLE 9 MEASURED UNGRADED (#13900 review, cycle 9, P1): each of
     # these returned `[]` when the separator was an enumerated character class.
     for _refuted in ("`-- tortoise/` — prints ONE path at this head.",
