@@ -250,13 +250,13 @@ place (`kind`, `symbol`, `file`, `archived_from`, `archived_at`, `sources`, `blo
 tombstone field is what an append-only record does, so it is not a rewrite). Passing `--base-ref`
 needs no special handling for a restore, because the two legitimate shapes are both green:
 
-* **a restore** — the row and its frozen file go (steps 3-4 below) and the SYMBOL is live again:
+- **a restore** — the row and its frozen file go (steps 3-4 below) and the SYMBOL is live again:
   in `TOOL_REGISTRY`, on `TortoiseSDK`, or importable from `tortoise/`. The code is back in the
   product, so nothing the archive promised is missing — and the row CANNOT stay, because the
   other direction reds an archived symbol that is live again. The frozen bytes remain readable in
   git history at the deletion commit (`git log -- archive/<kind>s/…`). This is why the arm is
   safe in CI: the CI job runs it with `--base-ref` on every PR, and a restore is green there.
-* **a stated waiver** — `--allow-archive-shrink <kind>:<symbol>
+- **a stated waiver** — `--allow-archive-shrink <kind>:<symbol>
   --allow-archive-shrink-reason <why>`, for a drop that is neither a restore nor a mistake, and
   it goes in the PR body. It needs `--base-ref` (the arm it waives) and it is a LOCAL-SHELL
   record: **CI passes no waiver flag, deliberately** — every non-restore deletion has a record
