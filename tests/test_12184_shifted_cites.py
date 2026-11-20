@@ -892,7 +892,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # and 333 by the PRE-`#13833` tip (`:57423`), 527 by this one (`:57617`).
     # 59 -> 61 at the #13793 fix lane: the two `:Document` docstring addresses §5's #12915 move
     # names (`:37339` / `:37381`) had NO pin at all — both shipped one line high (on the `:Source`
-    # lines `:37339`/`:37381`) and `git grep -n '37143\|37144' -- tests docs` reached only the prose
+    # lines `:37338`/`:37380`) and `git grep -n '37143\|37144' -- tests docs` reached only the prose
     # sites, so no mutant reddened anything. Same shape as the `:6989` and `sdk.py:28008` rows above.
     # The arm is an anti-SHRINK arm, so it moves with a documented ADDITION, never with a deletion.
     assert len(_PINS) == 61
