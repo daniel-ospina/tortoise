@@ -432,7 +432,10 @@ def test_a_marker_without_an_id_is_AMBIGUOUS_not_re_created(tmp_path, monkeypatc
     """
     stale = {"ids": {}, "written": [], "failed": []}
     for e in map_doc["events"]:
-        stale["written"].append(f"event:{e['ref']}")
+        # the marker the WRITER records (`item_marker`), not a hand-built
+        # `event:<ref>`: a marker the map does not declare is refused earlier
+        # by the orphan arm, which is a different refusal than this one.
+        stale["written"].append(filer.item_marker("events", e))
     path = tmp_path / "state.json"
     path.write_text(json.dumps(stale))
     monkeypatch.setattr(filer, "STATE_PATH", path)
@@ -562,10 +565,20 @@ def test_validate_refuses_an_orphan(map_doc):
     assert any("no edges — an orphan node is invisible" in e for e in errs), errs
 
 
-def _row_of(ident: tuple[str, str, str]) -> list[str]:
-    """A read-back row for one (label, property, value) identity."""
+def _row_of(ident: tuple[str, str, str], extra: dict[str, str] | None = None
+            ) -> list[str]:
+    """A read-back row for one (label, property, value) identity.
+
+    `extra` carries the OTHER identity properties the engine also writes on that
+    node. It matters for an Event: `create_event` stores `name` AND `content`, so
+    a row holding exactly one identity is a shape the graph never produces — and
+    a read-back tested only against that shape cannot see the arm that counts
+    identities instead of endpoints (#13913 review round 9).
+    """
     row = [ident[0], "", "", ""]  # label + `filer.IDENTITY_PROPS` order
     row[1 + filer.IDENTITY_PROPS.index(ident[1])] = ident[2]
+    for prop, value in (extra or {}).items():
+        row[1 + filer.IDENTITY_PROPS.index(prop)] = value
     return row
 
 
@@ -575,8 +588,22 @@ def _row_for(doc: dict, ref: str) -> list[str]:
     Taken from the same authority the writer uses (`identity_by_ref`), so the row
     carries the LABEL as its first column: a value alone cannot say what kind of
     node carries it, and the read-back must read the kind (#13913 round 5).
+
+    ⛔ AND IT CARRIES THE EVENT'S OTHER IDENTITY. `tortoise_create_event` writes
+    `name` and `content` (both are `IDENTITY_PROPS`), so the engine's Event row is
+    a TWO-identity row. A fixture that gives it one cannot exercise the operator
+    arm's endpoint counting — measured: the live shape reddened four tests before
+    that arm was fixed (#13913 review round 9).
     """
-    return _row_of(filer.identity_by_ref(doc)[ref])
+    ident = filer.identity_by_ref(doc)[ref]
+    extra: dict[str, str] = {}
+    if ident[0] == "Event":
+        event = filer.doc_by_ref(doc, ref)
+        extra["content"] = event["content"]
+        # keep the declared identity on its own property even if `content` was
+        # the identity somehow (it is not for an Event, but do not assume)
+        extra.pop(ident[1], None)
+    return _row_of(ident, extra)
 
 
 def _node_rows(doc: dict) -> list[list[str]]:
@@ -821,7 +848,12 @@ def _edge_rows(doc: dict,
     operators: list[list] = []
     op_index: dict[str, list] = {}
     for e in doc["edges"]:
-        a, b = _row_of(idents[e["from"]]), _row_of(idents[e["to"]])
+        a = _row_of(idents[e["from"]],
+                    ({"content": filer.doc_by_ref(doc, e["from"])["content"]}
+                     if idents[e["from"]][0] == "Event" else None))
+        b = _row_of(idents[e["to"]],
+                    ({"content": filer.doc_by_ref(doc, e["to"])["content"]}
+                     if idents[e["to"]][0] == "Event" else None))
         if "op" in e:
             nid = op_index.setdefault(e["from"] + "|" + e["to"], [f"op{len(op_index)}"])
             # idx 0 IS the source, idx >= 1 ARE the targets (the fold writes one
@@ -1684,3 +1716,69 @@ def test_the_bare_invocation_is_not_success(monkeypatch):
     """A runbook passing the mode through an empty variable must not read 0."""
     monkeypatch.setattr(filer.sys, "argv", ["file_map.py"])
     assert filer.main() == 2
+
+
+def test_an_EDITED_node_identity_is_refused_not_silently_skipped(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """A node marker carries the declared IDENTITY, so an edit re-files or stops.
+
+    Keyed on `f"subject:{ref}"`, an edit to the declaration (a renamed Subject, a
+    corrected Point content) left the marker unchanged: the resume made ZERO calls
+    and printed `all nodes and edges written` with exit 0 while the graph kept the
+    OLD value (measured). The same silent skip the edge markers were hardened
+    against, one arm over (#13913 review round 9).
+
+    Mutant: `item_marker` back to `f"{section}:{item['ref']}"` — run 2 exits 0
+    with zero calls, which is the silent skip this refuses.
+    """
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _RecordingMcp)
+    _RecordingMcp.instances.clear()
+    assert filer.write_map(map_doc) == 0
+    capsys.readouterr()
+
+    subject = map_doc["subjects"][0]
+    renamed = dict(subject, name=subject["name"] + " (renamed)")
+    assert filer.item_marker("subjects", renamed) != filer.item_marker("subjects", subject)
+    edited = dict(map_doc, subjects=[renamed if s is subject else s
+                                     for s in map_doc["subjects"]])
+
+    assert filer.write_map(edited) == 2, "the edited node must be refused, not skipped"
+    err = capsys.readouterr().err
+    assert "NODES" in err and "never updates or deletes" in err, err
+    assert _RecordingMcp.instances[-1].calls == [], (
+        "the refused run wrote through the door instead of stopping at the guard")
+
+
+def test_the_ORPHAN_remedy_warns_that_re_marking_an_operator_duplicates_it(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """The printed remedy must not mint the duplicate it is meant to prevent.
+
+    "Remove those entries from state.json and re-run" is correct for a structural
+    edge and WRONG for an operator: `tortoise_create_operator` has no existence
+    check, so the re-run writes a SECOND operator over a pair that already carries
+    one (#10849) — measured on a direction correction: one extra
+    `tortoise_create_operator` call, exit 0. The remedy now says the existing
+    operator must be deleted first.
+
+    Mutant: the bare "remove those entries (KEEP the ids) and re-run" text — the
+    operator warning assertion reds.
+    """
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _RecordingMcp)
+    _RecordingMcp.instances.clear()
+    assert filer.write_map(map_doc) == 0
+    capsys.readouterr()
+
+    op = next(e for e in map_doc["edges"] if "op" in e)
+    flipped = dict(op, direction="<-" if op.get("direction") != "<-" else "->")
+    edited = dict(map_doc, edges=[flipped if e is op else e for e in map_doc["edges"]])
+
+    assert filer.write_map(edited) == 2
+    err = capsys.readouterr().err
+    assert "OPERATOR" in err, err
+    assert "SECOND operator" in err and "never deletes" in err, err
