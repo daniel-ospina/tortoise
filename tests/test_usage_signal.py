@@ -1130,3 +1130,251 @@ def test_a_checkpoint_whose_tenants_disagree_with_its_entries_is_a_cache_miss(
     assert got.replayed is True, "a self-contradicting checkpoint was trusted"
     assert got.pooled is True
     assert got.coldest_first() == []
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Cycle-3 findings, pinned
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_an_in_place_rewrite_during_a_refresh_is_detected_next_time(
+    stream: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The prefix is captured BEFORE the body read, so a rewrite launders nothing.
+
+    ⛔ Taking the fingerprint AFTER folding let it certify bytes the fold never saw.
+    Measured on the pre-fix code: four coordinates the stream did not contain were
+    reported as current, `orderable=True`, permanently — inode, size and the
+    re-read prefix all agreed with themselves, so nothing ever re-checked, while a
+    cold replay of the same file showed a different set.
+
+    Capturing first means such a rewrite leaves the OLD digest in the checkpoint,
+    the next refresh mismatches, and the fold replays from cold: fail-closed and
+    self-healing.
+    """
+    _serve(stream, "Point", ["old1", "old2"], at=_at(1))
+    usage_signal.refresh(stream)
+
+    real_consume = usage_signal._consume
+
+    def _rewrite_then_consume(state, chunk, *, partition):
+        # A same-inode `copytruncate` landing between the prefix read and the save.
+        with open(stream, "w", encoding="utf-8") as fh:
+            for key in ("new1", "new2", "new3"):
+                fh.write(
+                    json.dumps(
+                        {"at": _at(9), "event": "serve", "label": "Point", "key": key}
+                    )
+                    + "\n"
+                )
+        return real_consume(state, chunk, partition=partition)
+
+    _serve(stream, "Point", ["old3"], at=_at(2))
+    monkeypatch.setattr(usage_signal, "_consume", _rewrite_then_consume)
+    usage_signal.refresh(stream)
+    monkeypatch.setattr(usage_signal, "_consume", real_consume)
+
+    healed = usage_signal.refresh(stream)
+    cold = usage_signal.refresh(stream, force=True)
+
+    assert healed.replayed is True, "a rewrite during the previous refresh was laundered"
+    assert sorted(e.key for e in healed.entries.values()) == sorted(
+        e.key for e in cold.entries.values()
+    ), "the healed reading disagrees with a cold replay of the same file"
+    assert healed.serve_count("Point", "old1") == 0
+
+
+def test_the_pruning_window_is_part_of_the_checkpoint_identity(stream: Path) -> None:
+    """A windowed fold must not hand its pruning to the next unbounded caller.
+
+    `tenant` is bound into the checkpoint identity because it is a fold parameter
+    that changes which events are read. `window_days` is the same kind of
+    parameter and it DESTROYS entries, so a windowed read written into the shared
+    cache was inherited by an unbounded caller with no replay: `serve_count`
+    returned 0 for a coordinate whose serve was still in the stream and
+    `coldest_first` omitted it — so the node read as "no opinion" and the caller's
+    creation-recency tie-break took over.
+    """
+    _serve(stream, "Point", ["ancient"], at=_at(1))
+    _serve(stream, "Point", ["fresh"], at="2026-01-04T23:00:00+00:00")
+    now = datetime(2026, 1, 5, tzinfo=UTC)
+
+    windowed = usage_signal.refresh(stream, now=now, window_days=2)
+    assert windowed.serve_count("Point", "ancient") == 0
+
+    unbounded = usage_signal.refresh(stream, now=now, window_days=None)
+
+    assert unbounded.replayed is True, "the unbounded caller inherited a windowed fold"
+    assert unbounded.pruned == 0
+    assert unbounded.serve_count("Point", "ancient") == 1, (
+        "a coordinate still in the stream read as 'no opinion' because another "
+        "caller had pruned it"
+    )
+
+
+def test_the_write_path_repairs_a_torn_tail(stream: Path) -> None:
+    """A batch appended onto a torn final line must not concatenate into it.
+
+    ⛔ THE WRITE-SIDE GUARD, which had no test. Without the newline repair the
+    fragment and the batch's first line merge, that record is LOST — while
+    `record_serves` still reports the serve it "delivered", breaking the
+    what-landed-not-what-was-intended contract that number exists for. Measured on
+    the unguarded code: returns 1, lands 0, `served_total` 0.
+    """
+    _serve(stream, "Point", ["p1"], at=_at(1))
+    with open(stream, "a", encoding="utf-8") as fh:
+        fh.write('{"at":"2026-01-02T00:00:00+00:00","event":"serve","label":"Po')  # no newline
+
+    assert _serve(stream, "Point", ["p2"], at=_at(3)) == 1
+
+    got = usage_signal.refresh(stream)
+    # ⚠️ Assert on the ENTRIES, not `serve_count`: the torn fragment is a skipped
+    # line, and an INCOMPLETE counter now refuses at the door — which would make
+    # the accessor return 0 whether or not the serve landed. The conflation of
+    # "refused" with "not there" is the bug this assertion exists to avoid.
+    assert [e.key for e in got.entries.values() if e.label == "Point"] == ["p1", "p2"], (
+        "the serve was reported but never landed"
+    )
+    assert got.served_total == 2
+
+
+def test_a_counter_with_no_serves_refuses(stream: Path) -> None:
+    """An armed-but-quiet counter has no opinion — and must not say the opposite.
+
+    `orderable=True` here made `unserved_keys` declare EVERY candidate unserved:
+    the creation-recency fallback this signal exists to remove, delivered from a
+    reading the cache would treat as healthy.
+    """
+    _serve(stream, "Point", ["p1"], at=_at(1))
+    usage_signal.refresh(stream, tenant="someone-else")
+
+    got = usage_signal.refresh(stream, tenant="someone-else")
+
+    assert got.served_total == 0
+    assert got.orderable is False
+    assert got.unserved_keys(["a", "b"]) == []
+    assert "no serves observed" in (got.refusal_reason() or "")
+
+
+def test_an_incomplete_counter_refuses(stream: Path) -> None:
+    """A skipped line is the only trace of a lost `capped` marker.
+
+    A torn marker that no later append heals re-opens the frozen-counter door with
+    nothing else to notice it, so an incomplete counter refuses for the same reason
+    a capped one does.
+    """
+    _serve(stream, "Point", ["p1"], at=_at(1))
+    with open(stream, "a", encoding="utf-8") as fh:
+        fh.write("{not json\n")
+
+    got = usage_signal.refresh(stream)
+
+    assert got.lines_skipped == 1
+    assert got.orderable is False
+    assert got.coldest_first() == []
+    assert "INCOMPLETE" in (got.refusal_reason() or "")
+
+
+def test_capped_clears_when_recording_resumes(
+    stream: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The remedy the warning names must actually work.
+
+    ⛔ A LATCHED `capped` refused for ever after the bound was raised — while the
+    stream demonstrably recorded again — and printed "STOPPED recording", a message
+    that had become false. The writer re-decides its marker from the file's tail
+    for exactly this reason; the reader now does too.
+    """
+    monkeypatch.setenv(usage_signal.USAGE_MAX_BYTES_ENV, "300")
+    usage_signal._warned.clear()
+    _serve(stream, "Point", ["p1", "p2"], at=_at(1))
+    _serve(stream, "Point", ["p3", "p4"], at=_at(2))  # hits the bound
+    assert usage_signal.refresh(stream).capped is True
+
+    monkeypatch.setenv(usage_signal.USAGE_MAX_BYTES_ENV, str(1024 * 1024))
+    assert _serve(stream, "Point", ["p5"], at=_at(3)) == 1
+
+    got = usage_signal.refresh(stream)
+
+    assert got.served_total > 0
+    assert got.orderable is True, "recording resumed but the door still refused"
+    assert got.capped is False
+
+
+def test_a_record_line_over_the_bound_is_dropped(stream: Path) -> None:
+    """`MAX_LINE_BYTES` keeps one record inside a page (the torn-write bound)."""
+    huge = "h" * (usage_signal.MAX_LINE_BYTES + 100)
+
+    assert usage_signal.record_serves("Source", [{"url": huge}], at=_at(1), path=stream) == 0
+    assert not stream.exists() or stream.stat().st_size == 0
+    assert usage_signal.refresh(stream).served_total == 0
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The ops door — every state, both output modes, one exit code
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def _cli(*argv: str, capsys: pytest.CaptureFixture[str], json_mode: bool) -> int:
+    args = ["--stream", *argv]
+    if json_mode:
+        args.append("--json")
+    capsys.readouterr()
+    return usage_signal._main(args)
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [("healthy", 0), ("no_serves", 2), ("pooled", 2), ("empty", 2), ("missing", 2)],
+)
+def test_the_ops_door_exits_the_same_in_both_modes(
+    name: str, expected: int, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """⛔ The exit code must not depend on which output mode was asked for.
+
+    A cron/check reads the exit code, and the cycle-2 fix that made a refusal exit
+    2 in the human path was **unpinned**: nothing called `_main` at all, so
+    reverting it left the suite green.
+    """
+    stream = tmp_path / "s.jsonl"
+    if name == "healthy":
+        _serve(stream, "Point", ["p1"], at=_at(1))
+    elif name == "no_serves":
+        # A stream that recorded an UNRESOLVABLE row and no serve: nothing was
+        # observed, so the counter has no opinion (and is not stale).
+        usage_signal.record_serves(
+            "Source", [{"sourcePath": "/not-a-url"}], at=_at(1), path=stream
+        )
+    elif name == "pooled":
+        _serve(stream, "Point", ["p1"], at=_at(1))
+        usage_signal.record_serves(
+            "Point", [{"id": "o"}], at=_at(2), path=stream, tenant_id="org-2"
+        )
+    elif name == "empty":
+        stream.write_text("", encoding="utf-8")
+    # "missing" leaves the file absent
+
+    human = _cli(str(stream), capsys=capsys, json_mode=False)
+    machine = _cli(str(stream), capsys=capsys, json_mode=True)
+
+    assert human == machine == expected, f"{name}: human={human} json={machine}"
+
+
+def test_the_ops_door_can_name_the_unpartitioned_namespace(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--tenant ''` is the `None` partition; without it an operator had no way in."""
+    stream = tmp_path / "s.jsonl"
+    _serve(stream, "Point", ["mine"], at=_at(1))
+    usage_signal.record_serves(
+        "Point", [{"id": "theirs"}], at=_at(2), path=stream, tenant_id="org-2"
+    )
+    assert usage_signal.refresh(stream).pooled is True
+
+    capsys.readouterr()
+    rc = usage_signal._main(["--stream", str(stream), "--tenant", ""])
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "mine" in out
+    assert "theirs" not in out
