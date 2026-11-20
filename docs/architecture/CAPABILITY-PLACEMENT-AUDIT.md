@@ -99,23 +99,26 @@ produced the `96 of 218` this header carried before the `#13124` review**, which
 naming "a file that does not exist at `ccb49741b2ec`" when in fact all 31 files exist there** and which
 was itself measured false; a range cite counts once, by its **start** line), which dedupes the **328** as-written spellings to 223 — **105**
 collisions — each pair compared as `git show <head>:<path> | sed -n '<N>p'` against the pin, text for
-text; **all 214 comparable ones resolve at BOTH heads** — every written path resolves to a module that
-exists at `ccb49741b2ec` — and **the nine that are NOT comparable are this branch's own**: `sdk.py:57694`, whose
+text; **all 217 comparable ones resolve at BOTH heads** — every written path resolves to a module that
+exists at `ccb49741b2ec` — and **the ten that are NOT comparable are this branch's own**: `sdk.py:57694`, whose
 written line sits past the pin's `sdk.py` (56,415 lines there; `git show ccb49741b2ec:tortoise/sdk.py
 | wc -l`), `sdk.py` `:61594`/`:61614` (the `:Meta` read and its `_config_reset_state` delegate, likewise
 past it — written as two code spans so they are resolved but not counted twice), `sdk.py:58561`,
 `:57910` and `:57912` (three reader cites re-derived at this head, which sits past the pin's `sdk.py`
-end), and `search_engine.py`'s `:7196`/`:7198`, whose written lines sit past the pin's `search_engine.py`
-(7,071 lines there; `git show ccb49741b2ec:tortoise/search_engine.py | wc -l`) — and `hosted_api.py`'s `:50935` (the `s.actor_user_id = $uid` condition, whose written line sits past the pin's `hosted_api.py`, 49,851 lines there) — all nine re-derived at
-a head that has since grown. So the drift is **122 of the 214 comparable, plus six of those nine pairs** (the three that do not exist at `main` either are `sdk.py`'s `:61594`/`:61614` and `hosted_api.py`'s `:50935`), and
+end), `sdk.py` `:61587` (the `read_config_reset` read the `:Meta` row below carries, likewise written as two
+code spans — past BOTH the pin's `sdk.py` and `main`'s), and `search_engine.py`'s `:7196`/`:7198`, whose written lines sit past the pin's `search_engine.py`
+(7,071 lines there; `git show ccb49741b2ec:tortoise/search_engine.py | wc -l`) — and `hosted_api.py`'s `:50935` (the `s.actor_user_id = $uid` condition, whose written line sits past the pin's `hosted_api.py`, 49,851 lines there) — all ten re-derived at
+a head that has since grown. So the drift is **125 of the 217 comparable, plus six of those ten pairs** (the four that do not exist at `main` either are `sdk.py`'s `:61594`/`:61614`/`:61587` and `hosted_api.py`'s `:50935`), and
 the ratio below counts them rather than pretending it compares them. ⛔ **That is a fact about the drift, not a licence to
 re-derive from a symbol.**
 **The drift is 128 of those 223.** ⚠️ **These counts are a parsing decision, and this header states which
 one it took**: the 223 counts unique `(resolved path, start line)` pairs over `path.py:NNNN` spellings
-written as ONE token. The document also writes one pair as two code spans
-(`` `cache_projection.py` `:2485` ``, a `main`-set address listed above); it is resolved but not counted,
-and counting that form gives **224 pairs and 129 drifters**. So the basis must travel with the figure —
-128 and 129 are one measurement under two counting decisions, not two findings. ⚠️ **An earlier form of
+written as ONE token. The document also writes four pairs as two code spans
+(`` `cache_projection.py` `:2485` ``, a `main`-set address listed above, plus
+`` `projection/entities.py` `:5765` ``, `` `sdk.py` `:2917` `` and `` `sdk.py` `:61587` ``); they are resolved
+but not counted by the one-token rule, and counting that form gives **227 pairs and 131 drifters**. So the
+basis must travel with the figure — 128 and 131 are one measurement under two counting decisions, not two
+findings. ⚠️ **An earlier form of
 this paragraph sat in the MIDDLE of the sentence it qualifies**, between `103` and `collisions`, so the
 sentence read "…to 211 — 103 … collisions —" around a full paragraph; its alternative basis then quoted a
 numerator that could not move. Text inserted without re-reading the line it lands in is the same defect
@@ -600,7 +603,7 @@ explicitly *a placement decision of their own*") and did not claim it; **this do
 | `:EpMeta` | `sdk.py:36091`; `ep.py:473` | **none** |
 | `:Meta` | `residency.py:244`, `:292`; `sdk.py:61594` (reads); `residency.py:298` is a `DETACH DELETE` scoped by an IDENTITY key only (`MATCH (n:Meta {key:$key})`) — see the criterion note under this table. ⚠️ **LOWER BOUND, not a census**: three more live sites — a WHOLE-NODE read `MATCH (n:Meta {key:$key}) RETURN properties(n)` at `projection/__init__.py:2004` (the body of `read_config_reset`, def `:1996`, beside the `sdk.py` `:61587` read this row already carries (written as two code spans: the same address the slot above names); ⚠️ the SDK delegate `sdk.py:61614` (`_config_reset_state`) is NOT a door here — `git grep '_config_reset_state'` at this head returns the `def` and no caller), an existence probe `MATCH (m:Meta {key:'event_fts_v2'}) RETURN 1` at `projection/__init__.py:21990`, and a SECOND identity-key-scoped `DETACH DELETE` at `projection/__init__.py:2042` (the same shape as `residency.py:298`) | **none** |
 | `:WhySnapshot` | `why_snapshot.py:237` (read); `:303-304` is `_drop` — `MATCH (w:WhySnapshot) WHERE w.point_id IN $ids DELETE w`, ORPHAN cleanup scoped by IDS THE CALLER ALREADY HOLDS (not retention, and not time-scoped); `:350-351` is the retention prune — `WHERE w.assembled_at < $cutoff WITH w LIMIT 5000 DELETE w` (time-scoped) | **none** |
-| `:CommitRecord` | `hosted_api.py:22973-22989` (the live commit path's read — it consumes `x.value_nodes_declared` as a predicate); `commit_idempotency.py:57` (read), `:65` — `MATCH … SET r.status=$status RETURN r.session_id, r.status, r.write_ops_billed, r.written_at, r.value_nodes_declared`, a **read-modify-write** (`CommitRecordStore.update` consumes all five returned columns, so `RMW` is the right word — an earlier draft called it read-free, which was wrong), and `:194` — the idempotency `DELETE`, whose `WHERE r.status = 'partial' AND coalesce(r.write_ops_billed, 0) = 0 AND r.value_nodes_declared IS NULL` **consumes three node properties as predicates**, so by this table's own criterion it is a reader (an earlier draft called it "not a read"); `hosted_api.py:21691-21692` (`MATCH (r:CommitRecord …)` then `SET r.telemetry=$t, r.budget_warn=$warn`) and `:23760-23761` (`SET r.write_ops_billed=1`, a LITERAL — not a parameter) have **no `RETURN`** and assign parameters/literals, so they read nothing of the node and are WRITERS (§1 row 13). ⚠️ Three drafts of this row called writers readers, then over-corrected `commit_idempotency.py:65` to read-free, then called `:194` read-free; the table now separates read / RMW / predicate-consuming DELETE / writer, site by site | **none** |
+| `:CommitRecord` | `hosted_api.py:22973-22989` (the live commit path's read — it consumes `x.value_nodes_declared` as a predicate); `commit_idempotency.py:57` (read), `:65` — `MATCH … SET r.status=$status RETURN r.session_id, r.status, r.write_ops_billed, r.written_at, r.value_nodes_declared`, a **read-modify-write** (`CommitRecordStore.update` consumes all five returned columns, so `RMW` is the right word — an earlier draft called it read-free, which was wrong), and `:194` — the idempotency `DELETE`, whose `WHERE r.status = 'partial' AND coalesce(r.write_ops_billed, 0) = 0 AND r.value_nodes_declared IS NULL` **consumes three node properties as predicates**, so by this table's own criterion it is a reader (an earlier draft called it "not a read"); `hosted_api.py:22436-22437` (`MATCH (r:CommitRecord …)` then `SET r.telemetry=$t, r.budget_warn=$warn`) and `:24592-24593` (`SET r.write_ops_billed=1`, a LITERAL — not a parameter) have **no `RETURN`** and assign parameters/literals, so they read nothing of the node and are WRITERS (§1 row 13). ⚠️ Three drafts of this row called writers readers, then over-corrected `commit_idempotency.py:65` to read-free, then called `:194` read-free; the table now separates read / RMW / predicate-consuming DELETE / writer, site by site | **none** |
 | `:DeliveryReceipt` | `webhook_delivery.py:475` (`RETURN properties(r)`); `:502` is the `MAX_RECEIPTS` `DETACH DELETE`, `:487` the CREATE — see the criterion note under this table | **none** |
 | `:Batch` | `mining.py:94`, `:178`; `projection/__init__.py:14295` | **none** |
 | `:PipelineStage` | `pipeline.py:349` (read); `:685`/`:731`/`:754-756` are `SET` statements — writes with no read of the node, not `RMW` and not reads | **none** |
@@ -989,8 +992,8 @@ contrast.)
   (`hosted_api.py:22982-22985`). The four siblings are named across three reads — `entity_links_attempted` by the retrofit audit alone:
   the session LIST (`hosted_api.py:24790`, `:24791`, `:24797`, `:24801`), the retrofit audit
   (`session_schema.py:860-861`, `:916-917`) and the session-DETAIL point lookup (`sdk.py:57910-57934`);
-  `harness`'s NAMED readers are the filter-and-counts at `hosted_api.py:25703`/`:25708` **plus four id-keyed
-  point lookups** (`:10132`, `:12693`, `:25151`, `:25822`) — plus the three sibling projections named just
+  `harness`'s NAMED readers are the filter-and-counts at `hosted_api.py:26535`/`:26540` **plus four id-keyed
+  point lookups** (`:10693`, `:13322`, `:25151`, `:26654`) — plus the three sibling projections named just
   above (`hosted_api.py:24790`, `sdk.py:57912`, `session_schema.py:861`).
   Every one is a point lookup, a property guard or a sibling column — capability **`none`** — which is why
   the verdict is `record_only` on the CAPABILITY rule, never on the false premise "unread". Moving them is a
