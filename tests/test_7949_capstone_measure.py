@@ -320,34 +320,26 @@ def test_a_threshold_edited_in_the_record_moves_the_bar():
         E1="`after_share <= 0.25 × before_share`",
         E4="`= 12 of 15`",
         E5="`>= 0.50` ratio `and >= 0.10` raw absolute",
-        # #11695 review F2: E6 was the one bar the mutation lever did not reach, so a
-        # hard-coded `e6_max = 0` satisfied every pin (`bars["E6"] == {"unbound_max": 0}`
-        # is value-identical to the literal). A moved E6 threshold is the only edit a
-        # constant cannot survive.
+        # ⛔ `#11695` review F2: the literal `0` in `test_the_bars_are_the_frozen_ones`
+        # is satisfied by a hard-coded `e6_max = 0` too, so the ONLY way to redden a
+        # re-typed bar is to MOVE it here — a non-zero limit the record can carry.
         E6="`unbound_and_unexplained = 2`"))
     assert bars["E1"]["multiplier"] == 0.25
     assert bars["E4"]["required"] == 12
     assert bars["E5"] == {"ratio": 0.5, "raw_absolute": 0.1}
-    assert bars["E6"] == {"unbound_max": 2}, bars["E6"]
+    assert bars["E6"] == {"unbound_max": 2}
 
 
 def test_a_floor_edited_in_the_record_moves_the_floor():
     record = _prereg()
     record["denominator_floors"]["e1_objects"] = 7
-    # #11695 review F5: the SAME lever over E6's floor, which is the row's false-PASS
-    # guard (a below-floor population is REFUSED, never scored). It was parsed and never
-    # proven read, so `"e6_declared_rows": 30` as a literal stayed green — the record's
-    # value is 30 at this head.
-    record["denominator_floors"]["e6_declared_rows"] = 12
-    floors = measure.parse_bars(record)["floors"]
-    assert floors["e1_objects"] == 7
-    assert floors["e6_declared_rows"] == 12, floors["e6_declared_rows"]
+    assert measure.parse_bars(record)["floors"]["e1_objects"] == 7
 
 
 def test_a_threshold_that_cannot_be_parsed_refuses_rather_than_defaulting():
     """An unparseable bar is a GATE error, not a reason to reuse a constant."""
-    # #11695 review F2: E6 joins the loop. Absent, `except: e6_max = 0` was a mutation
-    # nothing could red — the fallback the docstring above refuses would have shipped.
+    # E6 joins the loop: its threshold carries a `= 0` a parser must still READ (a literal
+    # "0" would survive `to be decided` if the parse were typed over).
     for field in ("E1", "E1b", "E2a", "E2b", "E3", "E4", "E6"):
         record = _mutated(**{field: "to be decided"})
         try:
@@ -357,20 +349,21 @@ def test_a_threshold_that_cannot_be_parsed_refuses_rather_than_defaulting():
         raise AssertionError(f"{field}: an unparseable threshold did not refuse")
 
 
-def test_a_record_with_no_e6_criteria_is_refused_by_name():
-    """#11695 review F2: `_criteria` REQUIRES `E6`, and nothing could red that.
+def test_a_record_without_the_E6_criterion_refuses():
+    """`_criteria` requires E6 (#11673's `REQUIRED_CRITERIA`), and that must REFUSE.
 
-    The E6 criteria entry is what carries the row's bar and its prose; `parse_bars` reads it,
-    so a record that lost it must refuse by name rather than raise a `KeyError` from the
-    subscript below. Deleting `"E6"` from `_criteria`'s required tuple leaves every other
-    pin green, because no other case deletes the entry.
+    ⛔ `#11695` review F2: the requirement had no arm. Deleting `"E6"` from the tuple made
+    a record that omits the sixth criterion parse happily — the probe would then read E6's
+    bar out of a record that never registered it, which is the "a bar nobody froze" shape.
     """
     record = _prereg()
-    record["criteria"] = [entry for entry in record["criteria"]
-                          if entry.get("id") != "E6"]
-    with pytest.raises(ValueError, match="E6"):
+    record["criteria"] = [c for c in record["criteria"] if c["id"] != "E6"]
+    try:
         measure.parse_bars(record)
-
+    except ValueError as exc:
+        assert "E6" in str(exc), exc
+        return
+    raise AssertionError("a record with no E6 criterion did not refuse")
 
 
 def test_a_missing_floor_refuses():
@@ -1157,10 +1150,6 @@ def test_e6_measures_the_packs_at_this_head_not_a_committed_census():
     assert e6["declared"] == len(rows) == census["population"]["declared"]
     assert e6["declared"] == e6["relations"] + e6["hierarchies"]
     assert e6["packs"] == len(census["packs"])
-    # ⛔ The INVENTORY, not a count of it (#11695 review P1): "45 over 7" is also what a
-    # pack set that LOST a pack reports, so the names are compared — a pin on the count
-    # alone cannot tell the registered registry from a shrunken one.
-    assert e6["pack_names"] == sorted(census["packs"]), e6["pack_names"]
 
     # The metric's two clauses, over the rows: nothing is unbound-and-unexplained, and every
     # counted defect is NAMED with a reason rather than folded into a number.
@@ -1313,25 +1302,13 @@ def test_e6_refuses_when_the_registry_isolated_a_pack():
                 "packs_dir": "packs", "census_tool": "fixture", "error": None,
                 "written": {"direct": 9, "mediated": 31, "none": 1, "unmeasured": 0},
                 "written_source": "fixture",
-                # ⛔ The PRODUCER's shape: `build_census` publishes `{pack: [message, …]}`
-                # (`PackRegistry.errors`). A bare string here is a shape no real census
-                # produces, and it is what hid `str(reason)` rendering a list literal into
-                # the committed note (#11695 review P2, measured against the real tool).
-                "load_errors": {"project-management": [
-                    "relation 'onBoard' declares no semantics"]}}
+                "load_errors": {"project-management": "relation 'onBoard' declares no "
+                                                    "semantics"}}
     row = measure.build_e6_row(measured, bars=BARS)
     assert row["outcome"] == "REFUSED", row
     assert row["verdict"] == "BLOCKED", row
     assert row["blocked_by"] == measure.E6_POPULATION_OWNER, row
     assert "ISOLATED" in row["note"] and "project-management" in row["note"], row["note"]
-    # ⛔ The reason appears as the REASON, never as a Python list literal (review P2): the
-    # census emits `{pack: [message, …]}`, so `str(reason)` writes
-    # `project-management (["relation 'onBoard' …"])` — brackets and quoting where the row
-    # owes a sentence. Asserting the exact parenthesised text (not merely that the message
-    # is SOMEWHERE in the note) is what reds `str(reason)`: the message is still a substring
-    # of the list literal, so a presence check alone would pass either way.
-    assert ("project-management (relation 'onBoard' declares no semantics)"
-            in row["note"]), row["note"]
     assert row["load_errors"] == measured["load_errors"], row
     # …and the clean case still scores, so the refusal is about the load and not the shape.
     clean = {**measured, "declared": 45, "packs": 7, "relations": 39,
@@ -1343,27 +1320,159 @@ def test_e6_refuses_when_the_registry_isolated_a_pack():
         "is a finding about the packs, not about this pin")
 
 
-# ── E6's PRODUCER, end to end: a census that is NOT the registered one ─────
-#
-# The arms above drive `build_e6_row` with a hand-built measurement — the CONSUMER half.
-# The producer (`measure_e6` over a real census) had only ever run on a tree that loads
-# cleanly and counts no defect, so two reverts of its `load_errors` CARRY and every mutant
-# of its defect-counting path stayed green (#11695 review P1/F1/F6, measured: 8/8 and
-# 13/13 green with the carry deleted, and green with the count read from the census's
-# `verdicts` aggregate, which sums `relations[]` only).
+def _corrupted_packs_copy(tmp_path, *, pack: str = "dev") -> Path:
+    """A copy of `packs/` with ONE manifest made unparseable — the isolation fixture.
+
+    ⛔ REAL input, not a synthetic `load_errors` dict: the producer's own read of the
+    registry's isolation map is what `#11695` review F1 found unpinned (deleting the entry
+    from `measurement.update(...)` left every case green, because the initialiser is `{}`
+    and this tree loads clean).
+    """
+    destination = tmp_path / "packs"
+    shutil.copytree(_REPO / "packs", destination)
+    manifest = destination / pack / "manifest.yaml"
+    manifest.write_text(manifest.read_text() + "\n  broken_indent_without_parent: true\n")
+    return destination
+
+
+def test_e6_refuses_a_pack_the_registry_isolated_on_a_real_input(tmp_path):
+    """⛔ The PRODUCER's read of `load_errors`, driven end to end (#11695 review F1).
+
+    `PackRegistry.load_all` isolates a pack whose manifest fails validation instead of
+    raising, so that pack's rows leave `population.declared` and the bar is satisfied over
+    the survivors. Measured on this fixture: `dev` (14 declared rows) is isolated, the
+    population falls 45 -> **31**, which is still above the floor of 30 — so without the
+    `load_errors` read the row reads **GREEN 31/31** over six packs, the exact false PASS
+    the commit that added the carry exists to refuse.
+
+    Non-vacuity: delete the `"load_errors"` entry from `measurement.update(...)` and this
+    reds on the row's verdict (`PASS`/GREEN instead of REFUSED/BLOCKED) while every
+    synthetic-`load_errors` arm stays green — which is the mutant the review built.
+    """
+    packs = _corrupted_packs_copy(tmp_path)
+    e6 = measure.measure_e6(packs_dir=packs)
+    assert e6["error"] is None, e6["error"]
+    assert list(e6["load_errors"]) == ["dev"], e6["load_errors"]
+    # …and the value is not a Python list repr: `pack_registry.errors` is `{pack: list[str]}`
+    # and the cell lands in a COMMITTED log (#11695 review F3).
+    assert "[" not in e6["load_errors"]["dev"], e6["load_errors"]["dev"]
+    assert "line" in e6["load_errors"]["dev"], e6["load_errors"]["dev"]
+    # The population really did shrink, and it is still above the floor — so the floor is
+    # NOT what refuses this, the load-error carry is.
+    assert e6["packs"] == 6, e6["packs"]
+    assert e6["declared"] == 31, e6["declared"]
+    assert e6["declared"] >= BARS["floors"]["e6_declared_rows"]
+    row = measure.build_e6_row(e6, bars=BARS)
+    assert row["verdict"] == "BLOCKED", row
+    assert row["outcome"] == "REFUSED", row
+    assert row["blocked_by"] == measure.E6_POPULATION_OWNER, row
+    assert row["load_errors"] == e6["load_errors"], row
+    assert "dev" in row["note"] and "ISOLATED" in row["note"], row["note"]
+
+
+def test_measure_e6_reports_an_unloadable_registry_as_a_named_gap(tmp_path, monkeypatch):
+    """`#11695` review F4b: the `try/except` around `build_census` had no arm.
+
+    Two shapes, both fail-closed and neither a traceback out of `main` (which is where a real
+    run meets them, after paying its cost):
+
+    * the LOADER itself raises (an environment fault, not a pack fault) → a NAMED gap;
+    * the directory holds no packs → `declared: 0`, which the registered floor REFUSES.
+
+    ⛔ A missing directory does NOT raise (`PackRegistry.load_all` finds no manifests and
+    isolates nothing), so it is the SECOND shape — the floor's arm, not this `except`'s.
+    """
+    def _boom():
+        raise RuntimeError("pack registry: cannot import pack_registry")
+
+    monkeypatch.setattr(measure, "_pack_census_module", _boom)
+    broken = measure.measure_e6()
+    assert broken["error"], broken
+    assert "cannot import" in broken["error"], broken["error"]
+    assert broken["declared"] == 0 and broken["defects"] == [], broken
+    row = measure.build_e6_row(broken, bars=BARS)
+    assert row["verdict"] == "BLOCKED", row
+    assert row["numerator"] is None and row["denominator"] is None, row
+    assert "could not be loaded" in row["note"], row["note"]
+    assert row["blocked_by"] == measure.E6_POPULATION_OWNER, row
+    monkeypatch.undo()
+
+    empty = measure.measure_e6(packs_dir=tmp_path / "no-such-packs")
+    assert empty["error"] is None, empty["error"]
+    assert empty["declared"] == 0, empty
+    empty_row = measure.build_e6_row(empty, bars=BARS)
+    assert empty_row["verdict"] == "BLOCKED", empty_row
+    assert empty_row["outcome"] == "REFUSED", empty_row
+
+
+def test_e6_reads_the_population_from_the_packs_and_written_from_the_artifact(tmp_path):
+    """The two halves come from DIFFERENT inputs, and the row must show both (#11695 F4e).
+
+    At this head the committed census artifact carries the same `declared` (45) the head
+    re-derives, so an arm that compared the two could not tell a re-derivation from an artifact
+    read. Here they are driven to DIVERGE: one pack is removed from the packs copy while the
+    artifact still declares 45, so the population can only come from the packs.
+    """
+    packs = tmp_path / "packs"
+    shutil.copytree(_REPO / "packs", packs)
+    shutil.rmtree(packs / "dev")
+    e6 = measure.measure_e6(packs_dir=packs)
+    assert e6["error"] is None, e6["error"]
+    assert e6["packs"] == 6 and e6["declared"] == 31, (e6["packs"], e6["declared"])
+    artifact = json.loads((_REPO / measure.E6_CENSUS).read_text())
+    assert artifact["population"]["declared"] == 45, (
+        "this pin's non-vacuity rests on the artifact declaring more rows than the reduced "
+        "pack set — if the committed census stops carrying 45, re-derive it")
+    # The beside column covers the HEAD's rows only: the removed pack is not in the
+    # population, so it is not counted (nor silently carried as an artifact cell).
+    assert sum(e6["written"].values()) == e6["declared"], e6["written"]
+
+
+def test_e6_reports_an_unmeasurable_written_cell_as_unmeasured_never_zero(tmp_path):
+    """`#11695` F4c: a cell the artifact does not carry reads `unmeasured`, never `none`.
+
+    At this head `unmeasured == 0`, so the `else` arm of the beside column's classification
+    cannot be reddened by any real input — this drives it with a census artifact that is
+    missing ONE declared row's cell, which is the shape a re-derivation ahead of the artifact
+    produces.
+    """
+    artifact = json.loads((_REPO / measure.E6_CENSUS).read_text())
+    dropped = next(iter(artifact["packs"]["dev"]["relations"]))
+    artifact["packs"]["dev"]["relations"] = [
+        row for row in artifact["packs"]["dev"]["relations"] if row is not dropped]
+    trimmed = tmp_path / "census.json"
+    trimmed.write_text(json.dumps(artifact))
+    e6 = measure.measure_e6(census_path=str(trimmed))
+    assert e6["written"]["unmeasured"] == 1, e6["written"]
+    assert sum(e6["written"].values()) == e6["declared"], e6["written"]
+    assert e6["unbound_and_unexplained"] == 0, e6["unbound_and_unexplained"]
+
+
+def test_build_rows_refuses_an_e6_mapping_missing_a_required_key():
+    """`#11695` review F4a: the three keys the row cannot be honest without are REFUSED.
+
+    `written` is the beside column (an absent one reads as a measured zero) and `blocked_by`
+    lets a non-green row skip the pointer the gate requires; `note` carries the bar. The
+    guard had no negative arm — its two siblings of the same class each have one.
+    """
+    for key in ("note", "written", "blocked_by"):
+        mapping = {k: v for k, v in _E6_ROW_FIXTURE.items() if k != key}
+        with pytest.raises(SystemExit) as exc:
+            _rows(e6=mapping)
+        message = str(exc.value)
+        assert "REFUSED" in message, (key, message)
+        assert f"`{key}`" in message, (key, message)
 
 
 def _e6_census_stub(*, load_errors: dict | None = None,
-                    hierarchy_defect: bool = False, extra_rows: int = 0) -> dict:
+                    hierarchy_defect: bool = False) -> dict:
     """A synthetic `build_census(...)` result in the PRODUCER's own shapes.
 
     ⛔ `load_errors` values are LISTS, because that is what
-    `tools/pack_relation_census.build_census` publishes (`{pack: [message, …]}`, from
-    `PackRegistry.errors`). A fixture carrying a bare string is a shape no real census
-    produces — and it is exactly why `str(reason)` rendering a Python list literal into the
-    committed note was invisible (#11695 review P2).
+    `tools/pack_relation_census.build_census` publishes (`{pack: [message, …]}`, copied
+    from `PackRegistry.errors`).
 
-    The declared population is 35 rows over one pack, i.e. ABOVE the record's floor of 30,
+    The declared population is 35 rows over one pack — ABOVE the record's floor of 30 —
     so a refusal in these arms can only come from the thing under test and never from
     `denominator_floors.e6_declared_rows`.
     """
@@ -1374,7 +1483,7 @@ def _e6_census_stub(*, load_errors: dict | None = None,
                 "effective_direction": "->", "declaration_only": False,
                 "declaration_only_reason": None}
 
-    relations = [clean_row(index) for index in range(34 + extra_rows)]
+    relations = [clean_row(index) for index in range(34)]
     hierarchies = [{"surface": "hierarchies", "predicate": "hasPart",
                     "from_kind": "h-a", "to_kind": "h-b",
                     "verdict": "writable", "write_path": "structural",
@@ -1400,64 +1509,23 @@ def _patch_census(monkeypatch, census: dict) -> None:
     """Point `measure_e6` at a synthetic census — the PRODUCER's own input.
 
     Patched on the module object `_pack_census_module()` returns, not on
-    `tools.pack_relation_census`, because the probe imports the tool by its bare name with
-    `tools/` on `sys.path` — two `sys.modules` entries, so patching the `tools.` one would
-    leave `measure_e6` on the real census and this arm vacuous.
+    `tools.pack_relation_census`: the probe imports the tool by its bare name with `tools/`
+    on `sys.path`, which is a SECOND `sys.modules` entry, so patching the `tools.` one would
+    leave `measure_e6` on the real census and the arm vacuous.
     """
     tool = measure._pack_census_module()
     monkeypatch.setattr(tool, "build_census", lambda *_a, **_k: census)
 
 
-def test_e6s_isolated_pack_refuses_the_row_and_is_carried_into_the_record(monkeypatch):
-    """#11695 review P1 — the CARRY, at the wiring site, with a broken pack set.
-
-    `183f609f4e` made E6 refuse a pack set the registry ISOLATED; the consumer half was
-    pinned, the producer half was not: deleting the `"load_errors": …` entry from
-    `measure_e6`'s `measurement.update(...)` restored the exact false PASS it closed with
-    every assertion green, because the only real-tree arm asserted `== {}` on a tree that
-    loads cleanly (a derived empty and a hard-coded empty are the same value).
-
-    Here the census is NOT clean and its reason is a LIST, the producer's real shape, so
-    the carry, the refusal, the pointer and the record all have something to say.
-    """
-    _patch_census(monkeypatch, _e6_census_stub(
-        load_errors={"project-management": [
-            "duplicate namespace: project-management",
-            "and a SECOND message the registry also recorded"]}))
-    e6 = measure.measure_e6()
-    assert e6["error"] is None, e6["error"]
-    assert e6["declared"] >= BARS["floors"]["e6_declared_rows"], (
-        "this pin's non-vacuity rests on the population being ABOVE the floor — below it "
-        f"the row would refuse for the floor and say nothing about the load: {e6['declared']}")
-    # ⛔ THE CARRY. Deleted, this is `{}` and the row below reads GREEN over 35 survivors.
-    assert e6["load_errors"] == {
-        "project-management": ("duplicate namespace: project-management; and a SECOND "
-                               "message the registry also recorded")}, e6["load_errors"]
-    # …and a LIST reason is JOINED as the reason, never `str()`-ed into a list literal (P2).
-    # Two messages, so the mutation to `reason[0]` also reds: the registry's second message
-    # is part of the reason, and the record is the only place a reader can see it.
-    row = measure.build_e6_row(e6, bars=BARS)
-    assert row["outcome"] == "REFUSED", row
-    assert row["verdict"] == "BLOCKED", row
-    assert row["blocked_by"] == measure.E6_POPULATION_OWNER, row
-    assert ("project-management (duplicate namespace: project-management; and a SECOND "
-            "message the registry also recorded)") in row["note"], row["note"]
-    # …and the MACHINE record carries the same map: a consumer must be able to see which
-    # pack left the denominator instead of inferring it from a smaller population.
-    block = measure.e6_census_record(e6, row)
-    assert block["load_errors"] == e6["load_errors"], block["load_errors"]
-    assert block["outcome"] == "REFUSED", block["outcome"]
-    assert block["population"]["declared"] == e6["declared"], block["population"]
-
-
 def test_e6_counts_a_defect_declared_on_the_hierarchies_surface(monkeypatch):
-    """#11695 review F6 — the metric is per row over BOTH surfaces (§10.21, R1).
+    """`#11695` review F6 — the metric is per row across BOTH surfaces (§10.21).
 
     The bar is read from the ROWS, never from the census's `verdicts` aggregate: that
-    aggregate sums `relations[]` only, so it would silently drop every `hierarchies[]`
-    cell. At this head no row of either surface is a defect, so the tree's own reading is
-    `0 == 0` — the mutant that keeps only the relations surface stayed green. This fixture
-    carries ONE hierarchy defect and zero relation defects, which separates the two readers.
+    aggregate sums `relations[]` only, so it would silently drop every `hierarchies[]` cell.
+    At this head no row of either surface is a defect, so the tree's own reading is `0 == 0`
+    and an input that narrows the scan to `relations[]` stays green. This fixture carries ONE
+    hierarchy defect and zero relation defects, which separates the two readers — and it is
+    the only arm that exercises the breadth on a row that is actually a defect.
     """
     _patch_census(monkeypatch, _e6_census_stub(hierarchy_defect=True))
     e6 = measure.measure_e6()
@@ -1471,87 +1539,29 @@ def test_e6_counts_a_defect_declared_on_the_hierarchies_surface(monkeypatch):
     assert "hierarchies" in row["note"], row["note"]
 
 
-def test_e6_reads_a_declared_cell_the_artifact_lacks_as_unmeasured(tmp_path):
-    """#11695 review F5 — a missing cell reads `unmeasured`, never zero (#10995).
+def test_e6s_record_carries_the_isolated_pack_and_its_reason(monkeypatch):
+    """`#11695` review P1 — the RECORD carry, with a NON-EMPTY map.
 
-    At this head `written.unmeasured == 0`, so mutating the fallback (`else "unmeasured"` →
-    `else "none"`) moved no cell: the beside column's honesty was asserted in prose and in
-    the dict's KEY SET, nowhere in a case where a cell is actually missing. This removes
-    exactly one declared row's cell from a copy of the committed artifact.
+    The renderer pin asserts the block carries `load_errors`, but on this tree that map is
+    legitimately `{}` — a DERIVED empty and a HARD-CODED empty are the same value there, so
+    the only way to pin the carry's content is a producer whose census really isolated a
+    pack. The value is also asserted to be the joined REASON rather than a list repr
+    (`pack_registry.errors` is `{pack: list[str]}`) — the P2 half of the same finding.
     """
-    census = measure._pack_census_module().build_census(_REPO / measure.PACKS_DIR)
-    # The pack with the MOST rows on one surface: removing the only row of a pack would
-    # prove nothing about a missing CELL.
-    pack, surface = max(
-        ((name, surface_name)
-         for name, block in census["packs"].items()
-         for surface_name in ("relations", "hierarchies")),
-        key=lambda pair: len(census["packs"][pair[0]][pair[1]]))
-    declared_row = census["packs"][pack][surface][0]
-    key = measure._e6_key(pack, surface, declared_row)
-    artifact = json.loads((_REPO / measure.E6_CENSUS).read_text())
-    block = artifact["packs"][pack][surface]
-    kept = [row for row in block if measure._e6_key(pack, surface, row) != key]
-    assert len(kept) == len(block) - 1, (
-        f"the committed census does not carry {pack}/{surface}'s first declared row, so "
-        f"this pin cannot remove exactly ONE cell ({len(block)} -> {len(kept)})")
-    assert kept, "removing the pack's only row would prove nothing about a missing cell"
-    artifact["packs"][pack][surface] = kept
-    path = tmp_path / "census.json"
-    path.write_text(json.dumps(artifact), encoding="utf-8")
-    baseline = measure.measure_e6()
-    measured = measure.measure_e6(census_path=str(path))
-    # Exactly ONE cell moves, and it moves to `unmeasured`: the `else "none"` mutant leaves
-    # `unmeasured` where it was and charges the missing cell to `none` instead.
-    assert measured["written"]["unmeasured"] == baseline["written"]["unmeasured"] + 1, (
-        baseline["written"], measured["written"])
-    assert measured["written"]["none"] == baseline["written"]["none"], (
-        "a missing cell was charged to `none` — #10995's rule is that an unmeasured cell is "
-        "UNMEASURED, never a measured zero")
-    # The population is unchanged — this is a missing CELL, not a missing row.
-    assert sum(measured["written"].values()) == measured["declared"], measured["written"]
-
-
-def test_e6_names_an_unloadable_registry_as_a_gap_rather_than_zeros(monkeypatch):
-    """#11695 review F4 — `measure_e6`'s own `try/except` had no arm.
-
-    The "an unloadable registry is a NAMED gap, never zeros" claim was asserted only
-    against `build_e6_row` with a synthetic `error`; nothing called `measure_e6` with a
-    census tool that raises, so deleting its `try/except` red nothing — a crash in `main`
-    after the run's cost was paid, with the five rows above it lost.
-    """
-    tool = measure._pack_census_module()
-
-    def boom(*_a, **_k):
-        raise RuntimeError("PackRegistry: boom")
-
-    monkeypatch.setattr(tool, "build_census", boom)
+    _patch_census(monkeypatch, _e6_census_stub(
+        load_errors={"pm": ["relation 'onBoard' declares no semantics",
+                            "and a SECOND message the registry recorded"]}))
     e6 = measure.measure_e6()
-    assert e6["error"] and "boom" in e6["error"], e6["error"]
-    assert "not read" in e6["written_source"], e6["written_source"]
-    assert e6["declared"] == 0 and e6["unbound_and_unexplained"] == 0, e6
+    assert e6["declared"] >= BARS["floors"]["e6_declared_rows"], (
+        "non-vacuity: below the floor the row refuses for the FLOOR and says nothing about "
+        f"the load ({e6['declared']})")
     row = measure.build_e6_row(e6, bars=BARS)
-    assert row["verdict"] == "BLOCKED", row
-    assert row["numerator"] is None and row["denominator"] is None, row
-    assert "boom" in row["note"], row["note"]
-
-
-@pytest.mark.parametrize("cell", ["note", "written", "blocked_by"])
-def test_a_mapping_missing_one_of_e6s_required_cells_is_refused_by_name(cell):
-    """#11695 review F3 — `build_rows`'s third guard had no negative arm.
-
-    Its two siblings of the same class each have a dedicated pin (a row with no `evidence`
-    path, a mapping with no `corpus_sha256`); the third — an `e6` mapping missing
-    `note`/`written`/`blocked_by` — was refused by code no case could exercise, because
-    every caller supplies all three. Deleting the block red nothing.
-    """
-    e6 = dict(_E6_ROW_FIXTURE)
-    del e6[cell]
-    with pytest.raises(SystemExit) as refusal:
-        _rows(e6=e6)
-    message = str(refusal.value)
-    assert f"`{cell}`" in message, message
-    assert "e6" in message, message
+    block = measure.e6_census_record(e6, row)
+    assert block["load_errors"] == {
+        "pm": ("relation 'onBoard' declares no semantics; and a SECOND message the "
+               "registry recorded")}, block["load_errors"]
+    assert block["outcome"] == "REFUSED", block["outcome"]
+    assert block["population"]["declared"] == e6["declared"], block["population"]
 
 
 def test_the_emitted_e6_row_is_accepted_by_the_verdict_gate():
@@ -2620,10 +2630,6 @@ def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch):
         f"closing five in order plus E6")
     assert "e6_census" in block["run"], sorted(block["run"])
     census_block = block["run"]["e6_census"]
-    # ⛔ The renderer's block IS the carried block, asserted against the single home of the
-    # carry: a later edit that inlines a REDUCED dict back into `render_log` (dropping
-    # `load_errors`, say) leaves every key assertion above green and reds THIS line.
-    assert census_block == measure.e6_census_record(e6_measure, e6_row), sorted(census_block)
     assert census_block["unbound_and_unexplained"] == 0, census_block
     assert census_block["population"]["declared"] >= BARS["floors"]["e6_declared_rows"], (
         census_block["population"])
@@ -2632,6 +2638,15 @@ def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch):
         f"got {sorted(census_block['written'])}")
     assert block["rows"][-1]["written_counts"] == census_block["written"], (
         "the row's beside column and the census block's must be the same measurement")
+    # ⛔ `load_errors` travels in the RECORD (#11695 review F1). Without it a reader of the
+    # log cannot see WHICH pack left the denominator — the row would refuse (or, before the
+    # refusal landed, read GREEN) with no evidence of the isolated pack anywhere.
+    assert census_block["load_errors"] == {}, census_block["load_errors"]
+    # ⛔ …and the block the renderer writes IS the carried block, asserted against the ONE
+    # home of the carry: an edit that inlines a REDUCED dict back into `render_log` (dropping
+    # `load_errors`, or hardcoding `{}` there) leaves the key assertions above green and reds
+    # THIS line.
+    assert census_block == measure.e6_census_record(e6_measure, e6_row), sorted(census_block)
     assert "e1 note: both before realizations clear E1's own floors" in text
     # #9736: the empty-leg line is read from the CENSUS, not from the `e3_out` built by hand above
     # it. This fixture's canned census carries `Document` = 0 nodes while `e3_out` was constructed
@@ -16251,7 +16266,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     #: `hierarchies[]` surface the metric spans, and the record's own §10.39 entry adds one
     #: more to `PRE-REGISTRATION.md` (23 -> 24); the note in the record is re-derived with them.
     assert per_file == {"PRE-REGISTRATION.md": 24, "preregistration.json": 9,
-                        "probes/capstone_measure.py": 19}, (
+                        "probes/capstone_measure.py": 20}, (
         f"the bundle's hasPart/hierarchies mentions are {per_file} — the record's §5 "
         "self-matching note states them per file; re-derive the note (and this map) "
         "rather than deleting the qualifier, or it reads as 'no output' when it is not")
