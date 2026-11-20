@@ -33,9 +33,12 @@ from that map (`tools/capstone_state_value.py`: `verdict = j.get("verdict") or
 "unjudged"`). For a run of this shape the tally is therefore a **constant of the
 verdict file** — 3 right · 3 wrong, whatever the product returned — and the six
 `verdict`/`because` pairs in `run-before.json` are byte-identical to `.Q1`–`.Q6`
-of that file. Its `_provenance` names the packet it was read from: graph
-`capstone13038_20261117t184234z`, product `446bd09a` — a different run, at a
-different product. Nothing about `9e9fc232` entered the verdicts.
+of that file. Its `_provenance` names the packet it was read from —
+`docs/evidence/13038-capstone/judge-packet.json`, graph
+`capstone13038_20261117t184234z` — and that packet's own
+`header.provenance.product.commit` is `446bd09a`: a different run, at a different
+product. (`_provenance` itself carries no product commit; the attribution is one
+hop away, in the packet.) Nothing about `9e9fc232` entered the verdicts.
 
 So read this board as a **comparison reference** — which is what the instrument's
 documented `--judge file` mode provides — and not as evidence that this product
@@ -49,9 +52,9 @@ Four disclosures that bound any use of it:
   is a re-used baseline; where it disagrees with this run's payload, the payload
   wins — the third and fourth bullets are two clauses that do, and the boards
   themselves are left as the instrument emitted them.
-- **The retrieval read path was degraded in every retrieval read.** Of the 13
-  reads carrying a `read_status`, 11 are `degraded`; the other 2 are the leg-less
-  `ended_scope` searches (Q5, Q6), which run no legs at all and report
+- **The read path was degraded in every read that ran a retrieval leg.** Of the
+  13 reads carrying a `read_status`, 11 are `degraded`; the other 2 are the
+  leg-less `ended_scope` searches (Q5, Q6), which run no legs at all and report
   `available` for that reason alone. Per leg: `vector` 11/11 (`load_timeout`,
   `load_in_flight`), `fallback` 9/9, `fts` 4/11. The instrument says explicitly
   that a row failing because unrelated content came back is the read path, not
