@@ -14,7 +14,7 @@ aboutObjects: "SEARCH-ARCHITECTURE.md §3, §6.1; #11642; #13220; #13610; #5004;
 # Dense-leg query parity — both stores, one corpus, four readers (#13906)
 
 **Instrument:** `tools/vector_parity_13906.py` · **Comparator pins:**
-`tests/test_vector_parity_13906.py` (58 DB-free tests) · **Artifacts, this
+`tests/test_vector_parity_13906.py` (59 DB-free tests) · **Artifacts, this
 directory:** `parity-run.json`, `poison-{id,order,recall,vector}.json`.
 
 The question this answers, in one sentence: **for the same tenant data and the
@@ -303,9 +303,19 @@ the same destructive path, one indirection further out.
 | finding | verified how | fix |
 |---|---|---|
 | **L1** `_record_dsn_hosts` enumerated the two host-bearing keys libpq knows (`host`, `hostaddr`) and returned them. libpq has a THIRD way to learn the dialled address: `parseServiceInfo` fills every option the conninfo left UNSET from `pg_service.conf`, so a **loopback** DSN with `service=prod` dials that entry's `hostaddr` — and `PGSERVICE` in the environment does the same to a DSN that never mentions it. The guard PASSED all three, and inconsistent with itself: the conninfo spelling `service=prod …` was refused, but only because it named no host | measured with libpq itself — `psql` names the host it tries, service file carrying `hostaddr=203.0.113.9`: `?service=prod` → **203.0.113.9**, `?host=127.0.0.1&service=prod` → **203.0.113.9**, `PGSERVICE=prod` + plain loopback → **203.0.113.9**; the control without a service dialled 127.0.0.1 | a `service` in either spelling, or `PGSERVICE` in the environment, is reported as `RECORD_DSN_SERVICE` — a sentinel no loopback predicate accepts — so it is refused unless `--allow-remote-writes`, exactly like a host that cannot be resolved. Pinned by `test_a_service_dsn_cannot_prove_it_is_local` (4 DSN spellings + the env form + the control that the same DSNs are local again without it) and by three new entries in the `remote` tuple; mutants: ignore the URI `service` → **2 red**, ignore `PGSERVICE` → **1 red**, ignore the conninfo keyword → **1 red** |
-| **M1** `detected = any(f for f in failures if f not in unmeasured)` answered "was this failure MEASURED", never "was it measured ON THE ARM THE POISON MOVES". `--poison id\|order\|recall` rewrite only the RECORD candidate list (`rec_pairs = poison(…, rec_ids, …)`); `--poison vector` perturbs the rows the GRAPH is seeded with. So a real, measured divergence on the OTHER required arm printed `POISON DETECTED` for a corruption the run never applied to it — the round-7 self-certification one door over. **And** BLIND shared exit **1** with DETECTED, so §6's one-bit recipe read "the harness is blind about this corruption" as "the poison was caught" | reproduced DB-free on the reachable entries: a corrupt `graph_scan` with `--poison id` → `POISON DETECTED`, exit 1; a fully green run with `--poison vector` → `POISON NOT DETECTED`, exit 1 — byte-identical to a real detection in the one field the recipe reads | `POISON_REACH` maps each poison to the arms it can actually move, `_verdict` records which arm every failure came from, and `detected` requires the arm to be in that set; a measured divergence on an UNREACHED arm is now BLIND (not "UNMEASURED" — the instrument did look, at the wrong thing), and BLIND exits **3**. Pinned by `test_a_poison_is_only_detected_on_the_arm_it_reaches` (both directions, so a one-sided pin cannot pass), `test_a_blind_run_does_not_share_the_detected_exit_code` (calls `main`), and `test_an_empty_candidate_list_is_not_perfect_agreement` |
-| **M2** `_cross_recall` published `recall: 1.0` over an EMPTY candidate list — the same "an empty answer is not a passed check" class `compare()`'s recall was already fixed for. A raised record leg answers `[]`, so its artifact rows read as PERFECT agreement over zero rows | read the code; `_cross_recall([], ["a"])` → `1.0` | `None` over an empty `a` (artifacts unaffected: every committed run's `a` is non-empty, and all five still replay bit-identically). Pinned by `test_an_empty_candidate_list_is_not_perfect_agreement` |
-| **M3** the corpus comment and this document's edge table said "the graph side gets its own graph" for the second-tenant rows. `seed_foreign_tenant()` exists only on `RecordStore` and `GraphStore.seed` skips every `tenant != "ours"` row — no second cypher graph is ever created | read the code | the comment and §2's row now say RECORD-ONLY and name the graph leg's tenancy behaviour as untested, rather than implying the edge was measured on both |
+
+### Round 9b: the poison must be seen on the arm it MOVES
+
+Landed as `8d4bccf960` by the concurrent lane editing the same function; given its
+own heading and its own labels because these three rows were merged INTO Round 9's
+table above, whose rows are already `L1`, and the round after it reuses `M1`–`M4`.
+A reader (or a later lane citing "M1") could not tell which finding was meant.
+
+| finding | verified how | fix |
+|---|---|---|
+| **O1** `detected = any(f for f in failures if f not in unmeasured)` answered "was this failure MEASURED", never "was it measured ON THE ARM THE POISON MOVES". `--poison id\|order\|recall` rewrite only the RECORD candidate list (`rec_pairs = poison(…, rec_ids, …)`); `--poison vector` perturbs the rows the GRAPH is seeded with. So a real, measured divergence on the OTHER required arm printed `POISON DETECTED` for a corruption the run never applied to it — the round-7 self-certification one door over. **And** BLIND shared exit **1** with DETECTED, so §6's one-bit recipe read "the harness is blind about this corruption" as "the poison was caught" | reproduced DB-free on the reachable entries: a corrupt `graph_scan` with `--poison id` → `POISON DETECTED`, exit 1; a fully green run with `--poison vector` → `POISON NOT DETECTED`, exit 1 — byte-identical to a real detection in the one field the recipe reads | `POISON_REACH` maps each poison to the arms it can actually move, `_verdict` records which arm every failure came from, and `detected` requires the arm to be in that set; a measured divergence on an UNREACHED arm is now BLIND (not "UNMEASURED" — the instrument did look, at the wrong thing), and BLIND exits **3**. Pinned by `test_a_poison_is_only_detected_on_the_arm_it_reaches` (both directions, so a one-sided pin cannot pass), `test_a_blind_run_does_not_share_the_detected_exit_code` (calls `main`), and `test_an_empty_candidate_list_is_not_perfect_agreement` |
+| **O2** `_cross_recall` published `recall: 1.0` over an EMPTY candidate list — the same "an empty answer is not a passed check" class `compare()`'s recall was already fixed for. A raised record leg answers `[]`, so its artifact rows read as PERFECT agreement over zero rows | read the code; `_cross_recall([], ["a"])` → `1.0` | `None` over an empty `a` (artifacts unaffected: every committed run's `a` is non-empty, and all five still replay bit-identically). Pinned by `test_an_empty_candidate_list_is_not_perfect_agreement` |
+| **O3** the corpus comment and this document's edge table said "the graph side gets its own graph" for the second-tenant rows. `seed_foreign_tenant()` exists only on `RecordStore` and `GraphStore.seed` skips every `tenant != "ours"` row — no second cypher graph is ever created | read the code | the comment and §2's row now say RECORD-ONLY and name the graph leg's tenancy behaviour as untested, rather than implying the edge was measured on both |
 
 ### Round 10: the guard read the string libpq parses, but not where each parser STOPS
 
@@ -384,7 +394,7 @@ done
 ```
 
 DB-free comparator pins: `uv run python tools/test_lane.py run --
-tests/test_vector_parity_13906.py -q` → **58 passed**.
+tests/test_vector_parity_13906.py -q` → **59 passed**.
 
 Falsifier exit codes — the recipe above reads them, so they are part of the
 contract, not decoration:

@@ -719,11 +719,18 @@ def _record_dsn_hosts(dsn: str) -> list[str]:
 
     Every host this returns must be loopback. `[]` means the DSN (and the
     environment) name no host at all — the caller refuses that
-    (`RECORD_DSN_NO_HOST`); it does not treat it as local. A `#` in a URI, or a
-    conninfo that cannot be tokenised, is REFUSED the same way instead of
-    `#` is not special to libpq, and the URI branch splits the query by libpq's
-    rule (first `?` to end of string), so a query hidden behind a `#` is still
-    seen.
+    (`RECORD_DSN_NO_HOST`); it does not treat it as local. Two shapes are refused
+    the same way rather than resolved (this sentence previously carried two
+    contradictory clauses after a hand merge, which is exactly the kind of record
+    that invites the next lane to "tidy" the refusal away):
+
+    * a `#` BEFORE the query — `RECORD_DSN_AMBIGUOUS`, because Python and libpq
+      disagree about where the authority ends;
+    * a conninfo the keyword scanner cannot resolve — `RECORD_DSN_NO_HOST`.
+
+    A `#` AFTER the `?` is NOT special to libpq: the query is read from the first
+    `?` to the end of the string, so a parameter that a `urlsplit`-based reader
+    would hide behind a fragment is still seen here.
     """
     try:
         if "://" in dsn:
@@ -782,14 +789,18 @@ def _assert_local_record_dsn(dsn: str | None, allow_remote: bool) -> None:
         _assert_loopback(host, "record database", allow_remote)
 
 
-def _quote_conninfo_value(value: str) -> str:
+def _quote_conninfo_value(value: str | None) -> str:
     """Quote one conninfo VALUE the way libpq reads it — only when it must be.
 
     libpq's whitespace form takes `keyword = value`, where the value is quoted
-    with single quotes (backslash escaping) when it carries whitespace or a quote.
-    Re-joining bare tokens loses that quoting, so `password='p w'` came back as
-    `password=p w` and libpq refused the string.
+    with single quotes (backslash escaping) when it is empty or carries
+    whitespace, a quote or a backslash. Re-joining bare tokens loses that quoting,
+    so `password='p w'` came back as `password=p w` and libpq refused the string
+    (`missing "=" after "w"`) — a DSN the guard had just certified as local.
+    `None` is a bare keyword (no `=`), which re-emits as itself.
     """
+    if value is None:
+        return ""
     if value == "" or any(char.isspace() or char in ("'", "\\") for char in value):
         escaped = value.replace("\\", "\\\\").replace("'", "\\'")
         return f"'{escaped}'"
@@ -828,16 +839,26 @@ def app_role_dsn(dsn: str) -> str:
         # `head` is kept VERBATIM — never re-serialized — so `postgresql:///db`
         # keeps all three slashes.
         return f"{head}?{urlencode(params, quote_via=quote)}"
-    kept = []
-    for token in shlex.split(dsn):
-        key, sep_eq, value = token.partition("=")
-        if key == "options":
+    pairs: list[tuple[str, str | None]] = []
+    tokens = shlex.split(dsn)
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "=" and pairs:            # spaced form: `key = value`
+            key, _ = pairs.pop()
+            pairs.append((key, tokens[i + 1] if i + 1 < len(tokens) else ""))
+            i += 2
             continue
-        # ⛔ RE-EMIT THE VALUE QUOTED. `" ".join(shlex.split(dsn))` turned
-        # `password='p w'` into `password=p w`, which libpq rejects outright
-        # (`missing "=" after "w"`) — a DSN the guard had certified as local.
-        kept.append(f"{key}={_quote_conninfo_value(value)}" if sep_eq else token)
-    return " ".join([*kept, f"options={_quote_conninfo_value(options)}"])
+        key, sep, value = token.partition("=")
+        if sep and not value and i + 1 < len(tokens) and tokens[i + 1] == "=":
+            pairs.append((key, tokens[i + 2] if i + 2 < len(tokens) else ""))
+            i += 3
+            continue
+        pairs.append((key, value if sep else None))
+        i += 1
+    rebuilt = [f"{k}={_quote_conninfo_value(v)}" for k, v in pairs if k != "options"]
+    rebuilt.append(f"options={_quote_conninfo_value(options)}")
+    return " ".join(rebuilt)
 
 
 def _require_hnsw_indexdef(indexdefs: list[str], *, label: str = "point",
