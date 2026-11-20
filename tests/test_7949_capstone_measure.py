@@ -16717,11 +16717,16 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #:
 #: ⛔ SCOPE, stated because an over-claim here was CAUGHT BY REVIEW (#13602, cycle 2): the
 #: `_honours` clauses are NOT repeated here. D5 states that symbol FOUR times, in four
-#: currency spellings, and ALL FOUR already have readers — the derived-literal arm at
-#: `:6798`-`:6801` asserts each of the four (the symbol derived at `:6794`), and the `05-verify.md`
-#: pin row at `:6314` reaches the `is at` one independently. Repeating them would add no
+#: currency spellings, and ALL FOUR already have readers — the derived-literal arm asserts
+#: each of the four (`_honours_line = next(...)`, then the `for _claim in (` loop over it), and
+#: the `05-verify.md` pin row that reaches the `is at` one independently. Repeating them would add no
 #: failure mode and would leave this file asserting twice, in contradictory terms, whether
-#: that clause ever had a reader. THREE things here are new coverage: the
+#: that clause ever had a reader. ⛔ NO LINE NUMBERS in that sentence: it used to type the arm's
+#: range and its `next(...)` line, and that locator rotted silently at `84b94ad74f6` (an
+#: `origin/main` merge in this branch's own history) when the arm moved — NOTHING redded,
+#: because no sweep reads a `tests/…:<line>` token, which is the exact rot the D5 cell
+#: prescribes against. The arm is named by `_honours_line` instead. THREE things here are new
+#: coverage: the
 #: `dedup_reviewed IS NULL` clause below, the three-anchor sentence in `_D5_TRIPLE_RE`
 #: (whose distinct failure mode is a number swapped onto ANOTHER anchor's slot, which no
 #: per-line row can see), and the quota-guard row added for #13845, whose failure mode is
