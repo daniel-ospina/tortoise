@@ -1180,13 +1180,15 @@ def test_r7_the_instrument_note_is_DERIVED_from_the_kinds_it_measured(monkeypatc
     assert "eval ingest lane" in note, note
 
     # A population of turns only: the note must not invent a chunk writer either.
-    turns_only = mod._instrument_note({"event": 10})
+    turns_only = mod._instrument_note(
+        {"event": 10}, {"aboutObject_edges": 0, "turns_with_aboutObject": 0})
     assert "10 event / 0 session-transcript" in turns_only, turns_only
     assert "12606" not in turns_only
     assert "eval ingest lane" in turns_only
 
     # An EMPTY breakdown measured nothing about writers — say so, do not attribute.
-    empty = mod._instrument_note({})
+    empty = mod._instrument_note({}, {"aboutObject_edges": 0,
+                                      "turns_with_aboutObject": 0})
     assert "says nothing" in empty, empty
     assert "eval ingest lane" not in empty
 
@@ -2047,3 +2049,138 @@ def test_c10_no_kinds_but_events_is_not_reported_as_only_event(monkeypatch):
     body = _instrument(monkeypatch, {"g": _MixedKinds(sessions=2, turns=5)})
     assert body["contains_targets_by_kind"] == {"event": 5, "statement": 3}
     assert "carries only `event` targets" not in body["note"], body["note"]
+
+
+# ── #13919 review cycle 11 ──────────────────────────────────────────────────
+def test_c11_attachment_that_is_NOT_turn_level_does_not_answer_the_gate():
+    """C11 (P2): the affirmative arm was selected on an ANY-LABEL edge count.
+
+    ``aboutObject_edges`` is ``MATCH ()-[r:aboutObject]->()`` — any source label —
+    while the #4211 question is about the TURN→Object arm. The SDK's own capture path
+    writes ``Session→Object`` and the live population carries 1,042 ``Event→Object``
+    edges, so "edges present, zero turn-level" is an ordinary shape. Measured before the
+    fix: ``_instrument_note({"event": 22, "session-transcript": 3},
+    {"aboutObject_edges": 2, "turns_with_aboutObject": 0})`` printed *"`aboutObject` IS
+    present … So the writers … DID run an entity-link pass … answered AFFIRMATIVELY"*
+    with ``0 turn(s) carrying one`` in the SAME sentence — the artifact refuting its own
+    claim, and the wrong answer to the gate question.
+    """
+    note = mod._instrument_note({"event": 22, "session-transcript": 3},
+                                {"aboutObject_edges": 2, "turns_with_aboutObject": 0})
+    assert "ANY-LABEL" in note, note
+    assert "NOT answered affirmatively" in note, note
+    assert "AFFIRMATIVELY for them" not in note, (
+        "the trust question is about TURN→Object attachment and this population has "
+        f"none; the note still answered it affirmatively: {note}")
+    assert "2 edge(s)" in note, note
+
+    # The turn-level shape is still affirmative — otherwise the fix has merely inverted
+    # the bug (a pin that only checks the negative cannot tell the two apart).
+    affirmative = mod._instrument_note(
+        {"event": 22}, {"aboutObject_edges": 2, "turns_with_aboutObject": 2})
+    assert "AFFIRMATIVELY for them" in affirmative, affirmative
+    assert "ANY-LABEL" not in affirmative, affirmative
+
+
+def test_c11_a_note_cannot_print_None_for_the_edge_count_it_did_not_read():
+    """C11 (P3 residual of the cycle-9 fix): ``totals`` had a default.
+
+    Called without it, ``about`` was ``None`` and the sentence rendered
+    "`aboutObject_edges` reads None here, so that 0 describes THEIR output" — a zero
+    asserted about a key the run never read, reachable straight through the signature
+    that the docstring already called *required*. The parameter is now required AND a
+    totals dict that lacks the key is named as unread instead of printed as a number.
+    """
+    note = mod._instrument_note({"event": 10}, {})
+    assert "None" not in note, note
+    assert "did not read `aboutObject_edges`" in note, note
+    assert "so that 0 describes THEIR output" not in note, (
+        f"a note with no edge reading asserted a zero: {note}")
+
+
+def test_c11_the_console_names_the_queries_that_raised(monkeypatch, tmp_path, capsys):
+    """C11 (P3): the ⛔ "queries that RAISED" line read ``counts`` and could never print.
+
+    ``queries_failed`` lives on the arm's BODY (``measure_store``/``measure_live``: a
+    list; ``measure_writer``: ``{before, after}``), never on ``counts``, so
+    ``c.get("queries_failed")`` was always ``None``: a partial read reached the receipt
+    and the console said nothing about it — the cycle-6 lesson going unseen by the one
+    reader who runs the tool by hand.
+    """
+    monkeypatch.setattr(mod, "measure_store", lambda *a, **k: {
+        "graph": "g", "counts": {"turns_total": 8},
+        "queries_failed": ["turns_with_aboutObject"],
+        "unmeasurable": "1 of 39 queries raised (turns_with_aboutObject)"})
+    out = tmp_path / "r.json"
+    mod.main(["--arms", "store", "--out", str(out)])
+    printed = capsys.readouterr().out
+    assert "queries that RAISED" in printed, printed
+    assert "turns_with_aboutObject" in printed, printed
+
+    # The writer's mapping shape must NOT print the ⛔ marker when both halves are clean
+    # (`{"before": [], "after": []}` is truthy — the naive read would cry wolf on every
+    # green writer run, which is how a ⛔ marker stops meaning anything).
+    assert mod._raised_queries({"queries_failed": {"before": [], "after": []}}) is None
+    assert mod._raised_queries({"queries_failed": []}) is None
+    assert mod._raised_queries({"queries_failed": {"before": ["turns_total"],
+                                                  "after": []}}) == {
+        "before": ["turns_total"]}
+
+
+def test_c11_every_published_count_has_its_query_in_the_same_arm():
+    """C11 (P2): a `counts` key with no `queries` entry, and a `queries` entry whose
+    value was renamed away.
+
+    `8f7e1b508b` re-keyed a COUNT (`event_session_ids_distinct` →
+    `event_attached_session_ids_distinct`) when the unfiltered reading got its own
+    query, and left each arm's `queries` block keyed with the OLD name while the block
+    still stored the ATTACHED Cypher. Two failures in one artefact of record: a
+    published number with no recorded query, and a `queries` entry named for a reading
+    the ledger says was never taken (the discipline `cycle_8_ledger_correction` installs
+    — "a ledger sentence that describes a QUERY must agree with the `queries` block" —
+    needs the block to be keyed by the value it produced). Neither direction was pinned,
+    so neither could red.
+    """
+    receipt = _receipt()
+    for arm in ("store", "writer", "live"):
+        block = receipt["arms"][arm]
+        counts, queries = set(block["counts"]), set(block["queries"])
+        no_query = sorted(counts - queries)
+        no_count = sorted(queries - counts)
+        assert not no_query, (
+            f"{arm}: published key(s) with NO recorded query in the same arm: "
+            f"{no_query} — a number nobody can re-derive")
+        assert not no_count, (
+            f"{arm}: recorded quer(ies) for a key this arm does not publish: "
+            f"{no_count} — the value was renamed away from its own Cypher, so a reader "
+            "re-deriving from `queries` reads a reading that was never taken")
+
+
+def test_c11_no_ledger_entry_repeats_itself():
+    """C11 (P3): a clause pasted TWICE into `post_measurement_revision`.
+
+    `round_7_census_and_gate.not_in_this_receipt.sessions_with_gt1_contains_point`
+    carried the same ~330-character sentence twice, the second time interrupting its own
+    continuation — an edit artefact in the artefact of record. Harmless to the numbers,
+    and invisible to every pin, because nothing read the ledger's SHAPE rather than its
+    claims.
+    """
+    import re
+
+    def strings(node):
+        if isinstance(node, dict):
+            for value in node.values():
+                yield from strings(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from strings(value)
+        elif isinstance(node, str):
+            yield node
+
+    repeated: list[tuple[str, int]] = []
+    for text in strings(_receipt().get("post_measurement_revision") or {}):
+        parts = [p.strip() for p in re.split(r"(?<=[.:;])\s+", text) if p.strip()]
+        for part in set(parts):
+            if parts.count(part) > 1:
+                repeated.append((part[:90], parts.count(part)))
+    assert not repeated, f"a ledger entry repeats a sentence verbatim: {repeated}"

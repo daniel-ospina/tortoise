@@ -667,8 +667,11 @@ def _redact_argv(argv: list[str]) -> list[str]:
     8): ``allow_abbrev`` defaults to True, so ``--live-ur`` is accepted by the parser and
     then not recognised here, and the abbreviated flag's value went into the receipt
     verbatim. Fixed at both ends: the parser now sets ``allow_abbrev=False`` (so the
-    recorded flag is canonical too), and ``redact_me`` carries the URI values this run
-    actually resolved, so any token CONTAINING one is redacted whatever spelled it.
+    recorded flag is canonical too), and ``_redact_uri_in_token`` — applied to every
+    token that is not a recognised flag — redacts any token CONTAINING a URI with
+    userinfo, whatever spelled the flag. (This paragraph used to name a ``redact_me``
+    parameter that does not exist: prose the code contradicts, in the very docstring
+    that documents a credential-leak fix.)
     """
     out: list[str] = []
     redact_next = False
@@ -879,7 +882,7 @@ def measure_instrument(uri: str) -> dict:
     })
 
 
-def _instrument_note(kinds: dict[str, int], totals: dict[str, int] | None = None) -> str:
+def _instrument_note(kinds: dict[str, int], totals: dict[str, int]) -> str:
     """The instrument arm's attribution, derived from what it MEASURED.
 
     ⛔ ``totals`` IS REQUIRED FOR A TRUE NOTE (#13919 cycle 9). The previous signature
@@ -890,6 +893,16 @@ def _instrument_note(kinds: dict[str, int], totals: dict[str, int] | None = None
     ``totals`` and 0 in its own ``note``. A generated field must not assert a number it
     did not read; that is the ``role_evidence``/``~/.zshrc:48`` class this PR has
     already fixed twice.
+
+    ⛔ AND THE GATE QUESTION IS THE TURN ONE (#13919 cycle 11). ``aboutObject_edges`` is
+    an ANY-LABEL count (``MATCH ()-[r:aboutObject]->()``), so "the edge is present" does
+    not answer "is there an edge for the arm to walk from a TURN" — the SDK's own capture
+    path writes ``Session->Object`` and the live population carries 1,042
+    ``Event->Object`` edges, so a graph can hold attachments and zero turn-level ones.
+    Branching on ``about > 0`` alone answered the gate AFFIRMATIVELY in that shape while
+    the same sentence printed ``0 turn(s) carrying one``. ``turns_with_aboutObject`` is
+    now what selects the affirmative arm, exactly as ``turn_n`` selects the event-only
+    one below.
 
     The attribution itself is from #13919 round 7: the note used to name one writer for
     the whole population, "the fixture seeder ... writes the Session->turn CONTAINS
@@ -910,28 +923,58 @@ def _instrument_note(kinds: dict[str, int], totals: dict[str, int] | None = None
     source check that stopped at ``ingest.py`` and missed its successor.
     """
     total = sum(kinds.values())
+    about = totals.get("aboutObject_edges")
+    turns_about = totals.get("turns_with_aboutObject")
     if not total:
         return ("no CONTAINS targets were measured, so this run says nothing about "
                 "which writer produced the population")
-    totals = totals or {}
-    about = totals.get("aboutObject_edges")
+    if not isinstance(about, int):
+        # ⛔ A note generated from a MISSING reading cannot name the reading (#13919
+        # cycle 11 residual, the same class as the cycle-9 fix one signature up): the
+        # old default left ``about`` None and the sentence printed "`aboutObject_edges`
+        # reads None here, so that 0 describes THEIR output" — a zero asserted about a
+        # key this run never read. The parameter is now required, and a caller that
+        # still has no reading gets prose that says so instead of a number.
+        return (
+            "this run did not read `aboutObject_edges`, so this note says nothing about "
+            "whether the entity-link edge is present — the kind breakdown measured here "
+            f"is ({', '.join(f'{k}={v}' for k, v in kinds.items())}); read the key "
+            "before attributing the population to a writer")
     parts = ", ".join(f"{kind}={cnt}" for kind, cnt in kinds.items())
     turn_n = kinds.get("event", 0)
     chunk_n = kinds.get("session-transcript", 0)
 
-    if isinstance(about, int) and about > 0:
-        # ⛔ The edge IS present. State the MEASURED count and do NOT reason about a
-        # zero this run did not observe.
+    if about > 0 and isinstance(turns_about, int) and turns_about > 0:
+        # ⛔ The edge IS present AT THE TURN LEVEL — the shape the #4211 question is
+        # about. State the MEASURED counts and do NOT reason about a zero this run did
+        # not observe.
         return (
             f"CONTAINS targets by kind, MEASURED here: {parts} ({total} total; "
             f"{turn_n} event / {chunk_n} session-transcript). `aboutObject` IS present "
             f"on this population: {about} edge(s), with "
-            f"{totals.get('turns_with_aboutObject')} turn(s) carrying one. So the "
+            f"{turns_about} turn(s) carrying one. So the "
             "writers behind these stores DID run an entity-link pass — `#2165` "
             "(R8)/E7-D7 in `tools/longmem_eval/ingest_v2.py` is one of them — and the "
             "#4211 question ('is there an edge for the arm to walk') is answered "
             "AFFIRMATIVELY for them. The product's own capture path is what the "
             "`writer` arm measures separately.")
+
+    if about > 0:
+        # ⛔ The edge exists, but NOT off a turn (#13919 cycle 11). `aboutObject_edges`
+        # is any-label, so Session->Object / Event->Object attachments land here while
+        # `turns_with_aboutObject` is 0 — and the #4211 question, which is about the
+        # TURN->Object arm, is then NOT answered affirmatively. The old branch answered
+        # it affirmatively from the any-label count and printed "0 turn(s) carrying
+        # one" in the same sentence: a claim the artifact's own number refutes.
+        return (
+            f"CONTAINS targets by kind, MEASURED here: {parts} ({total} total; "
+            f"{turn_n} event / {chunk_n} session-transcript). `aboutObject` IS present "
+            f"as an ANY-LABEL count ({about} edge(s)), but "
+            f"{turns_about if isinstance(turns_about, int) else 'no'} turn(s) carry "
+            "one — so those attachments hang off Session/Event/claim Points, and the "
+            "#4211 question ('is there an edge for the arm to walk from a TURN') is "
+            "NOT answered affirmatively by this population. The product's own capture "
+            "path is what the `writer` arm measures separately.")
 
     # ⛔ THREE branches, selected on what was MEASURED (#13919 cycle 10). Selecting on
     # `chunk_n` alone made the `else` arm assert "carries only `event` targets" for ANY
@@ -1471,6 +1514,28 @@ def _could_not_measure(body) -> str | None:
     return None
 
 
+def _raised_queries(body) -> list | dict | None:
+    """The queries that RAISED on this arm, or ``None`` when every one answered.
+
+    ⛔ ``queries_failed`` is a BODY field, never a ``counts`` key (#13919 cycle 11). The
+    console read ``c.get("queries_failed")`` — ``c`` being the counts dict — so the ⛔
+    line could not print on any run: a partial read produced a receipt that DID carry
+    the key while the human-facing output stayed silent about it, which is the "a
+    partial read is not a measurement" fix going unseen.
+
+    The writer arm publishes ``{"before": [...], "after": [...]}``, which is truthy
+    even when both lists are empty, so a mapping is filtered before it is believed —
+    otherwise the ⛔ marker would print on every clean writer run and stop meaning
+    anything.
+    """
+    if not isinstance(body, dict):
+        return None
+    failed = body.get("queries_failed")
+    if isinstance(failed, dict):
+        failed = {k: v for k, v in failed.items() if v} or None
+    return failed or None
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0],
                                 allow_abbrev=False)
@@ -1629,8 +1694,10 @@ def main(argv: list[str] | None = None) -> int:
         print("  objects by kind         :", c.get("object_kinds"))
         print("  session created_at span :", c.get("session_created_at_range"))
         print("  CONTAINS targets by kind:", c.get("contains_targets_by_kind"))
-        if c.get("queries_failed"):
-            print("  ⛔ queries that RAISED   :", c.get("queries_failed"))
+        # ⛔ Read the BODY, not `counts` — and let the helper filter the writer arm's
+        # always-truthy `{before: [], after: []}` mapping (#13919 cycle 11).
+        if (raised := _raised_queries(body)):
+            print("  ⛔ queries that RAISED  :", raised)
         print("  events/w-aboutObject    :", c.get("events_total"), "/",
               c.get("events_with_aboutObject"))
         if body.get("delta_this_run"):
