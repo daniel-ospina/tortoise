@@ -10035,9 +10035,11 @@ def test_the_fourth_legs_container_arm_asks_the_whole_family():
         # claim is measured over them too rather than silently skipped. Neither is a store —
         # measured: `[("embedding", 1, 1)]` yields `{'embedding': 1}` (the property IS the key;
         # its VALUE is a constant), and `[(1, "embedding", _encode(ev))]` yields `{1: 'embedding'}`
-        # (key `1`, value not the vector). ⛔ THEY HAVE NO END-TO-END ROW EITHER: an earlier revision
-        # of this comment pointed at `test_the_stop_arm_must_not_store_the_vector` as the home of
-        # their end-to-end rows, which is false for both — measured at this head, that test spells
+        # (key `1`, value not the vector) — so there is nothing for the stop arm to refuse, as the
+        # tool docstring puts it (`strip_graph_entity_vectors.py`: "neither row belongs to this
+        # arm's question"). ⛔ THEY HAVE NO END-TO-END ROW EITHER: an earlier revision of this
+        # comment pointed at `test_the_stop_arm_must_not_store_the_vector` as the home of their
+        # end-to-end rows, which is false for both — measured at this head, that test spells
         # `[(1, "embedding", _encode(ev))]` NOWHERE, and its one `("embedding", 1, 1)` sits in a
         # `for k, _i in iter(...)` destructuring, not the `{v[0]: v[1]}` pair this sample asks
         # about. The pointer is DELETED rather than corrected: a pointer a reader cannot follow is
