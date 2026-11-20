@@ -597,7 +597,9 @@ def test_a_MIXED_run_does_not_call_its_OWN_lines_an_EARLIER_run(
 
     Mutant: `carried`'s snapshot and the `reobserved` filter are REDUNDANT —
     either alone prevents the mislabel — so mutating either ONE stays green
-    (measured both ways at #13950 review round 36: 133 passed each). Remove BOTH
+    (measured both ways at #13950 review round 36, and re-measured at this
+    head after the `Retry-After` row was added: each stays fully green — no
+    row reds). Remove BOTH
     (compute `carried` from `st["failed"]` AND drop the filter) and the original
     bug is back: this row reds, together with
     `test_a_re_observed_failure_is_reported_ONCE_not_under_two_HEADINGS`.
@@ -2646,15 +2648,25 @@ def test_an_exhausted_TRANSPORT_is_an_UNKNOWN_outcome_by_TYPE(monkeypatch):
     # the LAST attempt. `_DeadBody.read` raises `IncompleteRead`, so this leaves
     # through the handler's `attempt == 5` arm rather than the `not retry_safe`
     # one above it — and a bare `RuntimeError` there makes the summary say "NOT
-    # written" over a request that WAS sent. REVERTING THAT ARM ALONE LEAVES
-    # EVERY OTHER ROW GREEN (measured at #13950 review round 34), so this drive
-    # is the arm's only pin; without it the docstring's "either arm" is false.
+    # written" over a request that WAS sent.
+    # ⛔ THE TYPE AND THE POST COUNT ARE NOT ENOUGH TO PIN IT (measured at #13950
+    # review round 5): deleting that arm drops the 6th iteration to the `continue`
+    # below it and then out of the loop, so the POST-LOOP raise answers with the
+    # same `UnknownOutcome` after the same 6 posts — the whole suite stayed green.
+    # The two things that separate the arm from the post-loop raise are pinned
+    # here instead: it must not sleep a SIXTH time (the post-loop reach sleeps
+    # 30 s for an attempt nobody makes, the defect #13950 review round 2 fixed on
+    # the sibling arms), and its message must keep the STATUS CODE (the post-loop
+    # one says `gave up after 6 attempts` and drops it, so the operator loses
+    # "which door refused me").
     posts: list[int] = []
+    dead_sleeps: list[float] = []
 
     def _post_dead_body(_body):
         posts.append(1)
         raise urllib_error.HTTPError("http://x", 503, "x", {}, _DeadBody())
 
+    monkeypatch.setattr(filer.time, "sleep", lambda s: dead_sleeps.append(s))
     mcp2 = _RealMcp("not-a-real-key")
     monkeypatch.setattr(mcp2, "_post", _post_dead_body)
     with pytest.raises(filer.UnknownOutcome) as dead:
@@ -2664,6 +2676,63 @@ def test_an_exhausted_TRANSPORT_is_an_UNKNOWN_outcome_by_TYPE(monkeypatch):
         f"{type(dead.value).__name__}, which `write_once` does not classify")
     assert len(posts) == 6, (
         f"a retryable 5xx was POSTed {len(posts)} times")
+    assert len(dead_sleeps) == 5, (
+        f"the exhausted unreadable-body arm slept {len(dead_sleeps)} times for "
+        f"{len(posts)} posts — the 6th sleep is taken for an attempt that is "
+        f"never made: {dead_sleeps}")
+    assert "503" in str(dead.value), (
+        "the exhausted unreadable-body arm dropped the HTTP status from its "
+        f"message, so the operator cannot tell which door refused it: {dead.value}")
+
+
+def test_an_UNREADABLE_body_still_honours_the_RETRY_AFTER_HEADER(monkeypatch):
+    """The body died; the advice sent beside it did not.
+
+    `Retry-After` arrives as a HEADER, on the same response whose body may be the
+    very thing that cannot be read (a proxy truncation, a reset mid-body). This
+    arm slept its own 5-second ramp and discarded the advertised delay, so a door
+    that asked for 30 s was re-hit 5 s later — on the one arm where the header is
+    the only channel left (#13950 review round 5, measured: `6` posts, sleeps
+    `[5, 10, 15, 20, 25]` against `Retry-After: 30`). Every other retry arm was
+    fixed for the same gap; this is the last one.
+
+    Mutants, each measured: revert the sleep to
+    `time.sleep(min(60, 5 * (attempt + 1)))` -> the `30` and `900` rows red;
+    drop the `min(120, max(1.0, wait))` floor/cap -> the `0.001` and `900` rows
+    red; read `Retry-After` from `payload` (which does not exist here) -> the `30`
+    row reds.
+    """
+    sleeps: list[float] = []
+    posts: list[int] = []
+    monkeypatch.setattr(filer.time, "sleep", lambda s: sleeps.append(s))
+
+    def drive(advertised: str | None):
+        sleeps.clear()
+        posts.clear()
+        hdrs = email.message.Message()
+        if advertised is not None:
+            hdrs["Retry-After"] = advertised
+
+        def _post(_b, _h=hdrs):
+            posts.append(1)
+            raise urllib_error.HTTPError("http://x", 503, "x", _h, _DeadBody())
+
+        mcp = _RealMcp("not-a-real-key")
+        monkeypatch.setattr(mcp, "_post", _post)
+        with pytest.raises(filer.UnknownOutcome):
+            mcp.call("tortoise_create_subject", {})
+        return list(sleeps), len(posts)
+
+    # The advertised delay is honoured on every wait, and no 6th wait is taken.
+    assert drive("30") == ([30.0] * 5, 6), drive("30")
+    # The RFC's other grammar form reaches the same converter through this channel.
+    assert drive("Fri, 31 Dec 2099 23:59:59 GMT") == ([120] * 5, 6), drive("date")
+    # The same 1 s floor and 120 s cap every other retry arm applies.
+    assert drive("0.001") == ([1.0] * 5, 6), drive("0.001")
+    assert drive("0") == ([5, 10, 15, 20, 25], 6), drive("0")
+    assert drive("900") == ([120] * 5, 6), drive("900")
+    # No advice at all: the client's own ramp, and the run still gives up.
+    assert drive(None) == ([5, 10, 15, 20, 25], 6), drive(None)
 
 
 def test_a_SUB_SECOND_retry_after_is_FLOORED(monkeypatch):

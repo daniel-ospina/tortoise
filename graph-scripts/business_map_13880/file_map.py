@@ -524,6 +524,21 @@ class Mcp:
                         raise UnknownOutcome(
                             _unknown(tool, f"HTTP {code} body unreadable: "
                                      f"{read_exc}")) from read_exc
+                    # ⛔ THE ADVICE ARRIVES BESIDE THE BODY THAT DIED, SO READ IT
+                    # ANYWAY. `headers` is already normalised to a `dict` above,
+                    # and `Retry-After` is what the middleware sends WITH the
+                    # status line — the one channel that survives an unreadable
+                    # body, because the body is exactly what could not be read.
+                    # This arm slept its own 5-second ramp and dropped the
+                    # advertised 30 s (#13950 review round 5, measured): the
+                    # server's intent is honoured on every other retry arm, so
+                    # dropping it here was the only place the client
+                    # over-requested a door that had just asked it to wait.
+                    # Same floor and cap as the status arm: a `0`/fractional
+                    # value must not become a hammer, and `headers` carries no
+                    # body to fall back to.
+                    wait = _retry_after_seconds(headers)
+                    wait = min(120, max(1.0, wait)) if wait else None
                     if attempt == 5:
                         # ⛔ AN UNCLASSIFIED `RuntimeError` HERE IS NOT A "NOT
                         # WRITTEN": the request was SENT and the status line came
@@ -533,10 +548,20 @@ class Mcp:
                         # and called it "NOT written", contradicting the ledger
                         # (#13950 review round 4). `_unknown` is what makes the
                         # line and the type agree.
+                        # ⛔ AND THIS ARM IS NOT THE POST-LOOP RAISE. Both are
+                        # `UnknownOutcome`, so only two observable differences
+                        # pin it: this one never sleeps a SIXTH time, and its
+                        # message keeps the status code (the post-loop raise says
+                        # `gave up after 6 attempts`, losing it). Both are
+                        # asserted in
+                        # `test_an_exhausted_TRANSPORT_is_an_UNKNOWN_outcome_by_TYPE`
+                        # — measured at #13950 review round 5, deleting the arm
+                        # left every row green until those two were pinned.
                         raise UnknownOutcome(
                             _unknown(tool, f"HTTP {code} body unreadable: "
                                      f"{read_exc}")) from read_exc
-                    time.sleep(min(60, 5 * (attempt + 1)))
+                    time.sleep(wait if wait is not None
+                               else min(60, 5 * (attempt + 1)))
                     continue
                 try:
                     payload = json.loads(body)
