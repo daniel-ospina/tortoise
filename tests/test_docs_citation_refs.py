@@ -3107,37 +3107,72 @@ _D5_BLANK_COUNT_RE = re.compile(
 #: ⛔ WHAT IT STILL DOES NOT READ, stated because a guard may be narrow but may not describe
 #: itself as complete — this file's own rule (`_typed_answers_to_tortoise_cmd`'s closing
 #: sentence, cited by NAME rather than by line because the number is exactly what rots). Every
-#: bullet is MEASURED as `[]` from `_d5_count_prescriptions`, and every one is a second
-#: BLANK-class prescription when appended to the row:
-#:   * an UNQUOTED expression — `grep -cE ^[+-]$`;
-#:   * flags written AFTER the expression — `grep '^\+$' -c`;
-#:   * a count performed by another tool — `rg -c '^\+$'`, `awk`;
-#:   * a value ATTACHED to a flag that IS the expression — `grep -c -e'^[+-]$'`, `grep -ce'^[+-]$'`,
-#:     `grep -c'^[+-]$'`, `grep --count --regexp='^[+-]$'` (the attached quoted value is read as
-#:     the FLAG's argument, so no expression follows it);
-#:   * a value SEPARATED from its flag by a bare token — `grep -c -m 2 '^[+-]$'`,
-#:     `grep -c -A 2 '^[+-]$'`, `grep -c -f /tmp/pats '^[+-]$'`. The bare token ends the run, so
-#:     the command is unseen. ⛔ Admitting a bare token to the run was REJECTED as a fix: for
-#:     `-f` the positional argument is a FILE, not the expression, so reading it would report a
-#:     count of something the command does not count — a false RED on a correct document, which
-#:     is the failure mode this file treats as the worse one;
-#:   * an expression built by CONCATENATION — `grep -cE '^'"[+-]"'$'` is read only up to its
-#:     first quoted fragment (`^`), so a class constraint living in the tail is invisible. This
-#:     is NOT uniformly a gap (`"^[+-]$"''` reads the whole class, because the class is inside
-#:     the first quoted fragment) — which is exactly why it is listed as a shape to check rather
-#:     than dismissed.
+#: bullet is MEASURED as `[]` from `_d5_count_prescriptions`, in TWO groups that the previous
+#: wording wrongly merged (#13995 review round 3, P2):
+#:
+#: A. SHAPES THAT REALLY ARE BLANK-CLASS PRESCRIPTIONS, and that this reader does not see — so
+#:    a second one appended to the row leaves the arm GREEN, exactly as #13962's mutants did:
+#:      * an UNQUOTED expression — `grep -cE ^[+-]$`;
+#:      * flags written AFTER the expression — `grep '^\+$' -c`;
+#:      * an expression ATTACHED to a flag that takes one — `grep -c -e'^[+-]$'`,
+#:        `grep -ce'^[+-]$'`, `grep --count --regexp='^[+-]$'` (the attached quoted value is
+#:        read as the FLAG's argument, so no expression follows it);
+#:      * a value SEPARATED from its flag by a bare token — `grep -c -m 2 '^[+-]$'`,
+#:        `grep -c -A 2 '^[+-]$'`. The bare token ends the run, so the command is unseen.
+#:        ⛔ Admitting a bare token was REJECTED as a fix: for `-f` the positional argument is a
+#:        FILE, so reading it would report a count of something the command does not count — a
+#:        false RED on a correct document, the failure mode this file treats as the worse one;
+#:      * a count performed by another tool — `rg -c '^\+$'`, `awk`;
+#:      * an expression built by CONCATENATION — `grep -cE '^'"[+-]"'$'` is read only up to its
+#:        first quoted fragment (`^`), so a class constraint living in the tail is invisible.
+#:        This is NOT uniform (`"^[+-]$"''` reads the whole class, because the class is inside
+#:        the first quoted fragment) — which is why it is listed as a shape to check rather
+#:        than dismissed.
+#:
+#: B. SHAPES THAT ARE **NOT A COUNT PRESCRIPTION AT ALL**, pinned `[]` so that a future widening
+#:    cannot start treating one as a prescription — a maintainer who trusted the previous
+#:    "every one is a second BLANK-class prescription" lead-in would have widened to catch them
+#:    and introduced a false RED (#13995 review round 3, P2 — each MEASURED with `grep` on a
+#:    4-line sample, non-zero exit and nothing counted):
+#:      * `grep -c'^[+-]$'` and `grep -c, '^[+-]$'` — INVALID: `-c` takes no argument, so the
+#:        attached text is parsed as more options (`grep: invalid option`);
+#:      * `grep -c -f /tmp/pats '^[+-]$'` — `-f` supplies the PATTERN, so the quoted token is a
+#:        FILE operand (`No such file or directory`), not an expression;
+#:      * `grep -ec 'x'` and `grep -e'c'` — here `c` belongs to `-e`'s pattern, not to a count
+#:        flag. `_requests_a_count` scans a short cluster left to right and STOPS at a flag that
+#:        takes an argument, so both are correctly not counts.
 #: One shape is seen but NOT classifiable, which is a different thing and is said separately so
-#: the list above is not read as covering it: an expression held in a shell variable
+#: the lists above are not read as covering it: an expression held in a shell variable
 #: (`grep -cE "$RE"` IS read — its expression arrives as `$RE`, which no class test can
 #: classify). Each of these carries a second prescription this reader cannot grade, so "exactly
 #: one BLANK-class count command" is a claim about count commands whose quoted expression the
 #: reader can SEE — never a claim that the class is prescribed once in the document.
+#:
+#: ⛔ AND THE FLAG WORD IS A FLAG TOKEN, NOT A BAG OF CHARACTERS (#13995 review round 3, P2 —
+#: MEASURED, and this one was a REGRESSION against `origin/main`). While the word was
+#: `[^\s'\"]*` it admitted the CLOSING BACKTICK, `,`, `)` and `;`, so the character separating
+#: the command from the next quoted token was swallowed INTO the flag word and the
+#: quote-adjacency requirement was defeated: the prose `` `grep -c`, '^[+-]$' `` — a sentence
+#: saying what the row does NOT mean — was read as a second BLANK-class prescription and redded
+#: a correct document (`prescribes 2 BLANK-line count commands`). `grep -c[A-Za-z]* '…'`, the
+#: reader this replaced, returned `[]` for it. The word is now a plausible flag TOKEN
+#: (`--`, or `-`/`--` then an alphanumeric then `[A-Za-z0-9_=./-]*`), which still expresses
+#: `-c`, `-Ec`, `--count`, `--color=never`, `-C3`, `-m2`, and — with the attached quoted value
+#: below — `--include='*.py'`.
 _D5_ANY_COUNT_EXPR_RE = re.compile(
-    r"grep\s+(?P<flags>-{1,2}[^\s'\"]*(?:'[^']*'|\"[^\"]*\")?"
-    r"(?:\s+-{1,2}[^\s'\"]*(?:'[^']*'|\"[^\"]*\")?)*)\s+"
+    r"grep\s+(?P<flags>(?:--|-{1,2}[A-Za-z0-9][A-Za-z0-9_=./-]*)(?:'[^']*'|\"[^\"]*\")?"
+    r"(?:\s+(?:--|-{1,2}[A-Za-z0-9][A-Za-z0-9_=./-]*)(?:'[^']*'|\"[^\"]*\")?)*)\s+"
     r"(?:\$)?(?P<quote>['\"])(?P<expr>[^'\"]+)(?P=quote)"
 )
 _D5_BLANK_CLASS_EXPR_RE = re.compile(r"\^(?:\\[+-]|\[[-+]+\])\$")
+
+#: GNU grep's short flags that TAKE AN ARGUMENT: `-e`/`-f` (pattern source), `-m` (max count),
+#: `-A`/`-B`/`-C` (context), `-d` (directories action), `-D` (devices action). A `c` after one
+#: of these belongs to THAT flag's argument, not to the count flag (`-ec` is `-e c`), so the
+#: count scan stops there. `-D` was missing until #13995's round-3 verification measured
+#: `_requests_a_count("-Dc")` returning True while the docstring said "the short flags that take
+#: an argument" — the list is the whole set, not a sample.
+_ARG_TAKING_SHORT_FLAGS = "efmABCdD"
 
 
 def _requests_a_count(flags: str) -> bool:
@@ -3146,15 +3181,30 @@ def _requests_a_count(flags: str) -> bool:
     Word by word, because the flag run is not always ONE word: the measured spellings split it
     as `-c -E`, `-c --` and `-c --color=never`. A whole-run test (`-` then `[\w-]*c[\w-]*`
     anchored at both ends) reads the single-word forms and NOT the split one — the defect this
-    function exists for, one size smaller. `c` is a count flag in GNU grep's short set and
-    nothing else there means count, so a short word containing `c` IS a count request; a long
-    flag must be the one long spelling, `--count` — which is why `--` (end of flags) and
-    `--color=never` are correctly NOT counts, and why `-C3` (context) is not either.
+    function exists for, one size smaller.
+
+    ⛔ A SHORT CLUSTER IS SCANNED LEFT TO RIGHT AND STOPS AT A FLAG THAT TAKES AN ARGUMENT
+    (#13995 review round 3, P2 — MEASURED). "a short word containing `c`" was false in the
+    other direction: `-ec` is `-e` with the pattern `c`, not a count, and reading it as one
+    would pair the NEXT quoted token to a command that counts nothing. Once a flag that takes
+    an argument is seen — the WHOLE set lives on `_ARG_TAKING_SHORT_FLAGS`, not enumerated here
+    so this sentence cannot go stale the way a list does — the rest of the word is its argument
+    (`-A2`), so the scan ends there. `c` before such a flag is still a count (`-cA2`, `-ce`).
+    A long flag is a count only
+    as the one long spelling, `--count` — which is why `--` (end of flags) and `--color=never`
+    are correctly not counts.
     """
-    return any(
-        word == "--count" or (word.startswith("-") and not word.startswith("--") and "c" in word[1:])
-        for word in flags.split()
-    )
+    for word in flags.split():
+        if word == "--count":
+            return True
+        if word.startswith("--") or not word.startswith("-"):
+            continue
+        for char in word[1:]:
+            if char == "c":
+                return True
+            if char in _ARG_TAKING_SHORT_FLAGS:
+                break  # the remainder of this word is that flag's argument
+    return False
 
 
 def _d5_count_prescriptions(bundle: str) -> list[str]:
@@ -3329,22 +3379,19 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
             f"(#13995 review round 2). Seen: {seen!r}")
 
     # ⛔ AND THE RESIDUALS THE COMMENT DECLARES ARE PINNED AS RESIDUALS (#13995 review round 2,
-    # P2 — MEASURED). Each of these is a legal count of the BLANK class, and each is INVISIBLE
-    # to the reader — so a second BLANK-class prescription spelled this way leaves the arm
-    # green. They are asserted `[]` rather than fixed because the fix that would read them
-    # (`-f`'s positional is a FILE, not a pattern; `-e'…'` attaches the pattern to the flag)
-    # cannot tell those apart without parsing the shell, and a guess there reports a false RED
-    # on a correct document — the worse direction. Pinning `[]` is what makes the comment's
-    # list falsifiable: a future widening that starts reading one of them reds HERE, and the
-    # author then either keeps it (and deletes the bullet) or narrows again.
+    # P2 — MEASURED; split into the comment's two groups in round 3). GROUP A is real BLANK-class
+    # prescriptions the reader does not see, so a second one appended to the row leaves the arm
+    # green. They are asserted `[]` rather than fixed because reading them cannot be done without
+    # parsing the shell, and a guess there reports a false RED on a correct document — the worse
+    # direction. Pinning `[]` is what makes the comment's list falsifiable: a future widening that
+    # starts reading one of them reds HERE, and the author then either deletes the bullet or
+    # narrows again.
     for residual in (
         "grep -c -e'^\\+$'",              # value attached to `-e`, i.e. the pattern itself
         "grep -ce'^\\+$'",                # …same, combined into one short-flag word
-        "grep -c'^\\+$'",                 # …same, with no separating space at all
         "grep --count --regexp='^\\+$'",  # the long spelling of the same attachment
         "grep -c -m 2 '^\\+$'",           # a value SEPARATED by a bare token
         "grep -c -A 2 '^\\+$'",           # …same, context flag
-        "grep -c -f /tmp/pats '^\\+$'",    # …same, and here the positional is a FILE
         "grep -cE ^\\+$",                 # unquoted expression
         "grep '^\\+$' -c",                # flags AFTER the expression
     ):
@@ -3353,6 +3400,41 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
             "but the comment on that constant lists it as a shape the reader does not read, so "
             "delete the bullet (or narrow the reader again) in the same commit instead of "
             "leaving a false statement beside the code (#13995 review round 2, P2)")
+
+    # ⛔ GROUP B is NOT a count prescription at all — and the pins say so with a MEASUREMENT, not
+    # with a label, because round 2's comment called `grep -c'^\+$'` "the same, with no
+    # separating space" and that is false: `-c` takes no argument, so `grep -c'^[+-]$'` exits 2
+    # with `grep: invalid option` and counts nothing (#13995 review round 3, P2). They are pinned
+    # `[]` so a future widening cannot start certifying an invalid command as a prescription.
+    for not_a_prescription in (
+        "grep -c'^\\+$'",                # `-c` takes no argument -> invalid option, exit 2
+        "grep -c, '^\\+$'",              # …same, the `,` is parsed as another option
+        "grep -c -f /tmp/pats '^\\+$'",   # `-f` supplies the PATTERN; the quoted token is a FILE
+        "grep -ec '^\\+$'",              # `-e` takes `c` as ITS pattern; this is not a count
+        "grep -e'c' '^\\+$'",            # …same, attached
+    ):
+        assert _d5_count_prescriptions(f"a command: `{not_a_prescription}`\n") == [], (
+            f"{not_a_prescription!r} is not a count of anything and must not be read as a "
+            "prescription — widen this and a correct document can red (#13995 review round 3)")
+
+    # ⛔ AND PROSE THAT MERELY NAMES THE COUNT COMMAND IS NOT A PRESCRIPTION — the regression
+    # round 3 caught, measured against the reader it replaced. While the flag word was a bag of
+    # characters (`[^\s'\"]*`) it swallowed the CLOSING BACKTICK, `,`, `)` and `;`, so the quote
+    # ADJACENCY rule was defeated and a sentence saying what the row does NOT mean was read as a
+    # second BLANK-class prescription — a FALSE RED on a correct document (`prescribes 2
+    # BLANK-line count commands`), where `grep -c[A-Za-z]* '…'` returned `[]`. These five shapes
+    # are that regression's control.
+    for prose in (
+        "`grep -c`, '^\\+$'",
+        "(`grep -c`) '^\\+$'",
+        "`grep -c`; '^\\+$'",
+        "grep -c, '^\\+$'",
+        '`grep -c`, "^\\+$"',
+    ):
+        assert _d5_count_prescriptions(f"⚠️ a count like {prose} is not what this row means.\n") == [], (
+            f"{prose!r} names a command inside prose and carries no expression of its own; "
+            "reading the NEXT quoted token as its pattern is a false RED on a correct document "
+            "(#13995 review round 3, P2)")
 
     # …and CONCATENATION is the one residual that is neither read nor unread: the first quoted
     # fragment IS read, and everything after it is not — which is what makes a class constraint
