@@ -112,10 +112,12 @@ the ratio below counts them rather than pretending it compares them. ⛔ **That 
 re-derive from a symbol.**
 **The drift is 127 of those 223.** ⚠️ **These counts are a parsing decision, and this header states which
 one it took**: the 223 counts unique `(resolved path, start line)` pairs over `path.py:NNNN` spellings
-written as ONE token. The document also writes three pairs as two code spans
+written as ONE token. The document also writes five pairs as two code spans
 (`` `cache_projection.py` `:2485` ``, a `main`-set address listed above, plus
-`` `sdk.py` `:2917` `` and `` `sdk.py` `:61587` ``); they are resolved but not counted by the one-token rule,
-and counting that form gives **227 pairs and 130 drifters**. So the
+`` `sdk.py` `:2917` ``, `` `sdk.py` `:61587` ``, `` `sdk.py` `:61594` `` and
+`` `projection/entities.py` `:5765` ``); four of them are resolved but not counted by the one-token rule —
+`` `sdk.py` `:61594` `` is ALSO written one-token, in the `:Meta` row of §2.7, so it is one of the 223
+already — and counting that form gives **227 pairs and 130 drifters**. So the
 basis must travel with the figure — 127 and 129 are one measurement under two counting decisions, not two
 findings. ⚠️ **An earlier form of
 this paragraph sat in the MIDDLE of the sentence it qualifies**, between `103` and `collisions`, so the
