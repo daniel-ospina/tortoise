@@ -567,6 +567,13 @@ def _imports_of(source: str) -> set[str]:
                 found.add(
                     node.module if node.level == 0 else f"tortoise.{node.module}"
                 )
+                # ⛔ `from tortoise import sdk` imports the SUBMODULE
+                # `tortoise.sdk`; recording only `tortoise` left that spelling
+                # invisible, which is a third way to reach a store client.
+                if node.level == 0:
+                    found.update(
+                        f"{node.module}.{alias.name}" for alias in node.names
+                    )
             elif node.level:
                 # `from . import x` — resolve each alias under the package.
                 found.update(f"tortoise.{alias.name}" for alias in node.names)
@@ -634,6 +641,12 @@ def test_the_no_graph_guard_catches_relative_imports() -> None:
     }
     assert _imports_of("import redis\n") == {"redis"}
     assert _imports_of("from . import read_ledger\n") == {"tortoise.read_ledger"}
+    # ⛔ AND the package-spelling of a SUBMODULE: `from tortoise import sdk`
+    # reaches `tortoise.sdk` without ever naming it as a module path.
+    assert _imports_of("from tortoise import sdk\n") == {
+        "tortoise",
+        "tortoise.sdk",
+    }
 
 
 def test_recording_never_raises_on_a_broken_path(tmp_path: Path) -> None:
@@ -1130,3 +1143,109 @@ def test_a_checkpoint_whose_tenants_disagree_with_its_entries_is_a_cache_miss(
     assert got.replayed is True, "a self-contradicting checkpoint was trusted"
     assert got.pooled is True
     assert got.coldest_first() == []
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The window bound: a refusal must be AUDIBLE, never byte-identical to "unset"
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_a_non_positive_window_is_not_a_silent_unbounded_rollup(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ #14011 review finding 3: `0` / `-1` read as "not configured".
+
+    The `ValueError` arm already warns that a mistyped bound leaves the roll-up
+    UNBOUNDED; the numeric arm returned `None` without a word, so
+    `WINDOW_DAYS=0` produced a reading byte-identical to no window at all
+    (`pruned=0`, `pruned_before=None`) while the roll-up kept every entry — the
+    quiet direction on the one parameter whose job is bounding memory.
+    """
+    import logging
+
+    for raw in ("0", "-1", "0.0"):
+        monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, raw)
+        usage_signal._warned.clear()
+        caplog.clear()
+
+        with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+            assert usage_signal._window_days() is None
+
+        assert any(
+            "UNBOUNDED" in record.getMessage() for record in caplog.records
+        ), (
+            f"{usage_signal.USAGE_WINDOW_DAYS_ENV}={raw} was silently accepted as "
+            f"'no window' — the operator is never told the roll-up is unbounded"
+        )
+
+
+def test_a_positive_window_is_returned_and_warns_about_nothing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The other polarity: the warning belongs to bad values, not to every call."""
+    import logging
+
+    monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, "7")
+    usage_signal._warned.clear()
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+        assert usage_signal._window_days() == 7.0
+
+    assert not caplog.records
+
+    # …and UNSET is the documented default: no window, and no warning either.
+    monkeypatch.delenv(usage_signal.USAGE_WINDOW_DAYS_ENV)
+    with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+        assert usage_signal._window_days() is None
+
+    assert not caplog.records
+
+
+def test_the_funnel_hands_the_pool_guard_its_record_reads_flag() -> None:
+    """The funnel must PASS `_record_reads`, not a literal the helper is tested on.
+
+    `_usage_record_served`'s own parameter is exercised elsewhere, but the call
+    site is what decides whether a candidate pool becomes a serve. A mutant that
+    replaces the argument with a literal `True` at the funnel keeps every
+    behavioural test green — a node the caller never saw is then marked USED,
+    which is the flattering direction for a residency score. Structural because
+    reaching the funnel behaviourally needs a live graph.
+    """
+    import ast
+
+    from tortoise import sdk as sdk_module
+
+    tree = ast.parse(Path(sdk_module.__file__).read_text(encoding="utf-8"))
+    parents: dict[object, object] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    sites: list[tuple[object, list[object]]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == "_usage_record_served":
+            chain: list[object] = []
+            cursor: object = node
+            while cursor in parents:
+                cursor = parents[cursor]
+                chain.append(cursor)
+            sites.append((node, chain))
+
+    assert len(sites) == 1, (
+        f"expected exactly ONE `_usage_record_served` call site (the FTS funnel); "
+        f"found {len(sites)}"
+    )
+    call, _chain = sites[0]
+    assert len(call.args) == 3, (
+        "the funnel's call must pass (label, rows, _record_reads); a shortened "
+        "call drops the pool guard"
+    )
+    third = call.args[2]
+    assert isinstance(third, ast.Name) and third.id == "_record_reads", (
+        "the funnel passes something other than `_record_reads` as the serve "
+        "guard — a candidate POOL would be counted as served"
+    )

@@ -324,7 +324,23 @@ def _window_days() -> float | None:
             raw,
         )
         return None
-    return days if days > 0 else None
+    if days <= 0:
+        # ⛔ AND NEITHER IS A NON-POSITIVE ONE (#14011 review finding 3). This arm
+        # used to `return None` without a word, so `WINDOW_DAYS=0` (or `-1`) was
+        # byte-identical to NOT CONFIGURED — `pruned=0`, `pruned_before=None` —
+        # while the roll-up ran unbounded. That is the same quiet direction the
+        # typo arm above exists to refuse, on the one parameter whose job is
+        # bounding memory. Prune-everything at `0` would be a different reading
+        # (`pruned_before` would have to be "now"), so this refuses instead.
+        _warn_once(
+            "window",
+            "usage signal: %s=%r is not a positive day count — the roll-up is "
+            "running UNBOUNDED (every entry kept); fix the value to bound it",
+            USAGE_WINDOW_DAYS_ENV,
+            raw,
+        )
+        return None
+    return days
 
 
 def _warn_once(key: str, msg: str, *args: object) -> None:
