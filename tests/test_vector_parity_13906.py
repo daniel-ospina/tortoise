@@ -1831,7 +1831,17 @@ def test_the_record_arm_refuses_a_database_without_its_hnsw_index(harness):
     called = {(c.func.attr if isinstance(c.func, ast.Attribute)
                else getattr(c.func, "id", ""))
               for c in ast.walk(schema) if isinstance(c, ast.Call)}
-    assert "_require_hnsw_indexdef" in called, sorted(called)
+    # ⛔ ROUTED THROUGH THE VALIDITY SEAM (`_require_valid_hnsw`), which is what
+    # makes `indisvalid` part of the decision — and that seam must reach the shape
+    # decision, or the chain is broken one level up instead of re-inlined.
+    assert "_require_valid_hnsw" in called, sorted(called)
+    valid_seam = next(n for n in ast.walk(tree)
+                      if isinstance(n, ast.FunctionDef)
+                      and n.name == "_require_valid_hnsw")
+    seam_calls = {(c.func.attr if isinstance(c.func, ast.Attribute)
+                   else getattr(c.func, "id", ""))
+                  for c in ast.walk(valid_seam) if isinstance(c, ast.Call)}
+    assert "_require_hnsw_indexdef" in seam_calls, sorted(seam_calls)
     run_node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
                     and n.name == "run")
     keys = _arms_dict_keys(run_node, "record")
@@ -1839,6 +1849,142 @@ def test_the_record_arm_refuses_a_database_without_its_hnsw_index(harness):
     assert "index" in keys, (
         "arms.record does not record the index it measured — the driver name is "
         "an unverified claim without it")
+    assert "plan" in keys, (
+        "arms.record does not record the PLAN the read got — an index that is "
+        "listed (or even valid) is not an index that answered")
+
+
+HNSW_COSINE = ("CREATE INDEX record_hnsw_index ON public.point USING hnsw "
+               "(embedding_vec public.vector_cosine_ops)")
+
+
+def test_an_INVALID_index_is_not_an_index_the_record_arm_may_use(harness):
+    """`pg_index.indisvalid` is the field the SERVER consults; `indexdef` is not.
+
+    ⛔ THE GUARD PROVED A LISTING AND CALLED IT A MEASUREMENT. `pg_indexes` exposes
+    only `indexdef` (PG 16 §54.11) — no validity column — while `pg_index.indisvalid`
+    is what the planner consults: *"False means the index is possibly incomplete …
+    it cannot safely be used for queries"* (§53.26). An index left invalid by a
+    failed or crashed `CREATE INDEX CONCURRENTLY` carries an `indexdef` that is
+    byte-identical to a healthy one's, so the pre-fix guard ACCEPTED it and the
+    record arm published `"pgvector HNSW, cosine"` over whatever plan it got.
+
+    The remedy differs from the absent-index case (REINDEX, not CREATE INDEX),
+    so the refusal must NAME the invalidity rather than say "no index".
+    """
+    assert harness._require_valid_hnsw(
+        [("record_hnsw_index", HNSW_COSINE, True)]) == (
+            "record_hnsw_index", HNSW_COSINE)
+
+    # ⛔ THE DEFECT: a healthy-looking indexdef with indisvalid = false.
+    with pytest.raises(harness.CannotRun) as refused:
+        harness._require_valid_hnsw([("record_hnsw_index", HNSW_COSINE, False)])
+    message = str(refused.value)
+    assert "INVALID" in message and "indisvalid" in message, message
+    assert "REINDEX" in message, (
+        f"the refusal must name the remedy that differs from a missing index: {message}")
+
+    # an INVALID decoy must not make an absent index look like a validity problem
+    with pytest.raises(harness.CannotRun) as absent:
+        harness._require_valid_hnsw(
+            [("bt", "CREATE INDEX bt ON public.point USING btree (id)", False)])
+    assert "INVALID" not in str(absent.value), str(absent.value)
+
+    # …and a VALID index wins even when an invalid one is also present: the
+    # decision is per-index, not "any invalid row poisons the database".
+    assert harness._require_valid_hnsw(
+        [("stale", HNSW_COSINE, False),
+         ("live", HNSW_COSINE.replace("record_hnsw_index", "live"), True)]) == (
+            "live", HNSW_COSINE.replace("record_hnsw_index", "live"))
+
+
+def test_a_SEQ_SCAN_is_not_an_index_measurement(harness):
+    """A listed, VALID, correctly-shaped index is still not an index that ANSWERED.
+
+    ⛔ pgvector's own README (Troubleshooting → *"Why isn't a query using an
+    index?"*): *"if the table is small, a table scan may be faster"*, and *"By
+    default, pgvector performs exact nearest neighbor search, which provides
+    perfect recall."* This harness seeds ~55 rows — the small-table case — and its
+    ORACLE is an exact scan, so a Seq Scan reproduces the oracle verbatim and would
+    publish `recall 1.000` under the index's name.
+
+    Measured in review before this pin: a verified `record_hnsw_index` plus a
+    record leg answering the oracle gave `EXIT: 0`, PARITY, with the ANN leg
+    possibly never running. Grading the plan is what closes it, and the direction
+    is fail-CLOSED: an unmeasurable arm becomes `cannot run`/exit 2, never green.
+    """
+    index = ("Index Scan", "record_hnsw_index")
+    # the shape pgvector produces, under the Limit node — NOT at the root
+    served = [
+        {"Node Type": "Limit", "Plan": {
+            "Node Type": "Index Scan", "Index Name": "record_hnsw_index",
+            "Relation Name": "point"}},
+    ]
+    assert harness._require_index_plan(
+        harness._plan_nodes(served), "record_hnsw_index") == (
+            "Index Scan on record_hnsw_index")
+
+    # ⛔ THE DEFECT: the index is verified, and the plan does not use it.
+    seq_scan = [
+        {"Node Type": "Limit", "Plan": {
+            "Node Type": "Seq Scan", "Relation Name": "point"}},
+    ]
+    with pytest.raises(harness.CannotRun) as refused:
+        harness._require_index_plan(harness._plan_nodes(seq_scan),
+                                    "record_hnsw_index")
+    assert "SEQ SCAN" in str(refused.value), str(refused.value)
+
+    # a Seq Scan UNDER an index scan is still a scan of the table
+    nested = [
+        {"Node Type": "Index Scan", "Index Name": "record_hnsw_index",
+         "Relation Name": "point", "Plans": [
+             {"Node Type": "Seq Scan", "Relation Name": "point"}]},
+    ]
+    with pytest.raises(harness.CannotRun):
+        harness._require_index_plan(harness._plan_nodes(nested),
+                                    "record_hnsw_index")
+
+    # ⛔ AND A DIFFERENT INDEX IS NOT THE VERIFIED ONE. A btree/pkey index that
+    # happens to answer the ORDER BY would report the ANN index's name over a
+    # non-ANN plan.
+    other = [{"Node Type": "Index Scan", "Index Name": "point_pkey",
+              "Relation Name": "point"}]
+    with pytest.raises(harness.CannotRun) as wrong:
+        harness._require_index_plan(harness._plan_nodes(other),
+                                    "record_hnsw_index")
+    assert "record_hnsw_index" in str(wrong.value), str(wrong.value)
+
+    # the honest residual: with no verified name the check cannot bind, and saying
+    # "Index Scan on <something>" is the most it can claim
+    assert harness._require_index_plan(
+        harness._plan_nodes(served), None) == "Index Scan on record_hnsw_index"
+    assert index in {(n["Node Type"], n["Index Name"])
+                     for n in harness._plan_nodes(served) if "Index Name" in n}
+
+
+def test_the_plan_check_explains_the_RECORD_LEG_s_own_statement(harness):
+    """⛔ AN EXPLAIN OF A RE-SPELLED SELECT PROVES SOMETHING ABOUT THE RE-SPELLING.
+
+    The reviewed defect is one indirection out of K5: `require_schema` proved an
+    index was LISTED while a seq scan answered. A plan check that re-builds the
+    SELECT inside the harness would repeat it exactly — it would pin the harness's
+    spelling, not the leg's statement. So `RecordStore.assert_index_scan` must
+    ask `tortoise.record_vector` for the statement (`knn_statement`, the ONE
+    definition `vector_search` also runs).
+    """
+    tree = ast.parse(MODULE_PATH.read_text())
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)
+              and n.name == "assert_index_scan")
+    called = {(c.func.attr if isinstance(c.func, ast.Attribute)
+               else getattr(c.func, "id", ""))
+              for c in ast.walk(fn) if isinstance(c, ast.Call)}
+    assert "knn_statement" in called, sorted(called)
+    # …and the EXPLAIN is of THAT text, never of a string literal SELECT
+    assert "EXPLAIN (FORMAT JSON) " in MODULE_PATH.read_text()
+
+    # the record store must also refuse through the seam, not inline the decision
+    assert "_require_index_plan" in called, sorted(called)
+
 
 def test_the_uri_authority_is_a_failover_list_not_one_host(harness):
     """`urlsplit().hostname` answers HALF the question libpq asks.
