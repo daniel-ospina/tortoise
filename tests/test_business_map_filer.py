@@ -716,9 +716,17 @@ def test_the_LAYER2_and_MECHANISM_vocabularies_are_the_SHIPPED_ones():
     one file over. `_SHIPPED_*` is bound BY THE IMPORT, so `is` proves the import
     is the source.
 
-    Mutants, each measured RED: (a) delete the `try:` import leg — `_SHIPPED_*` is
-    then unbound, so this raises `AttributeError` instead of passing; (b) add a
-    word to either fallback literal — the `^` message names it.
+    Mutant, measured RED: delete the `try:` import leg — `_SHIPPED_*` is then
+    unbound, so this raises `AttributeError` instead of passing.
+
+    ⛔ AND THE OTHER MUTANT THIS DOCSTRING USED TO CLAIM IS NOT ONE (review of this
+    PR, P3). "Add a word to either fallback literal" cannot red HERE: with the
+    import resolving, `SEMANTICS`/`OP_TYPES` are built from `_SHIPPED_*` and never
+    read `_FALLBACK_*` at all, so the `^` message stays empty and the row is
+    green. The literals are the DEAD fallback for a box where the import fails,
+    and only in that case does the `^` message name the drift. Declared, not
+    claimed — an unreachable mutant is the same defect the identity pins above
+    close, one layer out.
     """
     from tortoise.ep import MECHANISM_REL_TYPES
     from tortoise.pack_registry import SEMANTICS_VALUES
