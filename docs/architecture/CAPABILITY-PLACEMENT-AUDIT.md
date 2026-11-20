@@ -51,18 +51,14 @@ squash commit `c06d6289e9`, and `ccb49741b2ec` is reachable as `refs/pull/13095/
 'refs/pull/13095/head:ccb49741b2ec'`), so every cite the census wrote can be opened there.
 ⚠️ **That is no longer true of EVERY cite below, and the honest fix is to name both heads rather than to
 pick one.** A later pass has re-derived a **named** set of addresses at `main`; they are enumerated in one
-place in this header (the sixteen, below, plus this revision's own group and the eight the `#13124` review
-found outside it) and they open at **`ae54df166d`**, the `main` this revision was integrated onto — `.py`
-lines DID move under it (`#13290` re-derived the `search_engine.py` group), so the head is named here rather
-than inferred, and every entry below was re-opened AT IT. **The rule a reader applies is mechanical, and it
-is exact for the addresses IN the `main` group of that enumeration: an address in it opens at `main` `ae54df166d`.**
-⚠️ **The enumeration has since grown entries that name a DIFFERENT head, and the scope of this sentence is the
-`main` group only.** Outside it are: this revision's own group (which carries, besides §2.1's EP and §2.7's
-watermark addresses, the whole-node pair, the §2.5 `:Tag` family and the `session_source_prose_migration`
-reader row), the `#13124` eight, §2.5's five, the `projection/__init__.py` fulltext declaration block, the
-`mcp_server.py` entity-type pair, row 13's four writer addresses, and the sixteen the `#13083` follow-up
-re-derived — every one of those was opened at the head its own sentence names (THIS head, or the integration
-head that sentence names), and NOT at `ae54df166d`. ⏐ **So read the entry, never this sentence, for them;
+place in this header. **The `main` group is exactly two things: the sixteen below, and the `goal_judgement.py`:1128 entry (which its own sentence names at `main`, and whose line is identical at both heads)** — those open at
+**`ae54df166d`**, the `main` this revision was integrated onto. `.py` lines DID move under it (`#13290`
+re-derived the `search_engine.py` group), so the head is named here rather than inferred, and every entry of
+that group was re-opened AT IT. **The rule a reader applies is mechanical, and it is exact for the addresses
+IN the `main` group of that enumeration: an address in it opens at `main` `ae54df166d`.**
+⚠️ **Every OTHER entry in this enumeration was opened at THIS head, and each says so where it is listed**:
+this revision's own group (whose members are enumerated under it), the `#13124` eight, §2.5's five, and the
+four EP/watermark addresses §2.1 and §2.7 carry. ⛔ **So read the entry, never this sentence, for those;
 and an entry that names no head at all is a GAP in the enumeration, not a licence to read `ae54df166d`
 into it.** ⛔ **There
 is no rule for an address OUTSIDE it — open the line, never infer its head.** Such an address was *written*
