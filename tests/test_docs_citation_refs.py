@@ -3090,10 +3090,11 @@ _D5_BLANK_COUNT_RE = re.compile(
 #: express a bare `--` (a letter is required after the dashes) nor `--flag=value` (`=` is outside
 #: `[\w-]`), and its quote could not express `$'…'` — so the last three mutants above were
 #: invisible to it while its own paragraph called the claim "every count command spelled
-#: `grep <flags> '<expr>'`". The flag word is now `-`-ANCHORED and otherwise OPEN, and may
-#: carry an ATTACHED quoted value (`--include='*.py'`, `--color='never'`), which is a flag's
-#: own argument and not the expression beside it. The expression may be single-, double- or
-#: ANSI-C-quoted.
+#: `grep <flags> '<expr>'`". The flag word is now a flag TOKEN rather than an open character
+#: class — the note at the foot of this block records what that fixed and why an open class was
+#: a false RED — and it may carry an ATTACHED quoted value (`--include='*.py'`,
+#: `--color='never'`), which is a flag's own argument and not the expression beside it. The
+#: expression may be single-, double- or ANSI-C-quoted.
 #:
 #: ⛔ AND THE BOUNDARY IS THE MATCH'S, NOT THE TOKEN'S (#13995 review round 2, P2 — MEASURED).
 #: The round-1 wording said the run "keeps a non-flag token (a filename, a revision) out of the
@@ -3105,10 +3106,13 @@ _D5_BLANK_COUNT_RE = re.compile(
 #: were.
 #:
 #: ⛔ WHAT IT STILL DOES NOT READ, stated because a guard may be narrow but may not describe
-#: itself as complete — this file's own rule (`_typed_answers_to_tortoise_cmd`'s closing
-#: sentence, cited by NAME rather than by line because the number is exactly what rots). Every
-#: bullet is MEASURED as `[]` from `_d5_count_prescriptions`, in TWO groups that the previous
-#: wording wrongly merged (#13995 review round 3, P2):
+#: itself as complete — this file's own rule (the "Said plainly because a guard may be narrow"
+#: sentence in `_typed_answers_to_tortoise_cmd`'s docstring, cited by FUNCTION NAME rather than by
+#: line because the number is exactly what rots, and by the sentence's own opening words because
+#: "closing sentence" was wrong: the docstring continues past it). Every
+#: bullet is MEASURED against `_d5_count_prescriptions` — `[]` for all but the concatenation,
+#: which is pinned at its FIRST FRAGMENT (`['^']`), as its own bullet says — in TWO groups that
+#: the previous wording wrongly merged (#13995 review round 3, P2):
 #:
 #: A. SHAPES THAT REALLY ARE BLANK-CLASS PRESCRIPTIONS, and that this reader does not see — so
 #:    a second one appended to the row leaves the arm GREEN, exactly as #13962's mutants did:
@@ -3208,14 +3212,14 @@ def _requests_a_count(flags: str) -> bool:
 
 
 def _d5_count_prescriptions(bundle: str) -> list[str]:
-    """The EXPRESSION of every `grep` count command in `bundle` whose flags are `-`-anchored
+    r"""The EXPRESSION of every `grep` count command in `bundle` whose flags are `-`-anchored
     words immediately followed by a quoted expression.
 
     ⛔ THAT IS A SHAPE, NOT A CLAIM ABOUT SPELLING, and the sentence it replaces claimed the other
     thing (banned by `test_the_d5_count_reader_does_not_describe_itself_as_complete` —
     #13995 review, P2). The count commands this does NOT read are named in
     `_D5_ANY_COUNT_EXPR_RE`'s residual block above (an unquoted expression; a flag
-    whose argument is a SEPARATE word — `grep -m 2 -c '^+$'`, `grep -f FILE -c '^+$'`; a pattern
+    whose argument is a SEPARATE word — `grep -m 2 -c '^\+$'`, `grep -f FILE -c '^\+$'`; a pattern
     attached to its own flag — `-e'…'`; flags after the expression; another tool; a concatenation
     past its first fragment), and every one of them is pinned in
     `test_the_d5_count_reader_sees_one_command_however_it_is_spelled` — as `[]` for all but the
@@ -3461,6 +3465,25 @@ _D5_RETIRED_OVERCLAIMS = (
 )
 
 
+def _comment_block_above(source: str, anchor: str) -> str:
+    """The contiguous run of comment lines sitting immediately above `anchor` in `source`.
+
+    ⛔ SCOPED ON PURPOSE (#13995 review round 4, P2 — MEASURED). The shape sentence below is
+    asserted PRESENT so that deleting it cannot pass, and a whole-file search cannot carry that:
+    the needle is also a plain literal in the assertion that checks it, so the row was satisfied
+    by its own source text and a mutant that deleted the sentence from the constant's header
+    stayed GREEN (agent-infra#3442 rule 3 — an assertion whose value cannot vary under the
+    mutation it claims to guard). Handing the check only the comment block that IS the header
+    leaves the needle one possible location: the region under test.
+    """
+    lines = source.splitlines()
+    at = next(i for i, line in enumerate(lines) if line.startswith(anchor))
+    first = at
+    while first and lines[first - 1].lstrip().startswith("#"):
+        first -= 1
+    return "\n".join(lines[first:at])
+
+
 def test_the_d5_count_reader_does_not_describe_itself_as_complete():
     """#13995 — the reader's prose may not promise more than its own residual list gives.
 
@@ -3494,13 +3517,21 @@ def test_the_d5_count_reader_does_not_describe_itself_as_complete():
             "`-`-anchored flag words immediately followed by a quoted expression "
             "(#13995 review, P2)")
     # …and the replacement must be PRESENT, so this cannot pass by deleting both halves — the
-    # shape sentence lives once on the constant and once on the helper, and each is checked.
-    for where, shape_claim in (
+    # shape sentence lives once on the constant and once in the helper's own docstring, and each
+    # is checked IN ITS OWN REGION (#13995 review round 4, P2 — MEASURED). The previous cut searched
+    # the WHOLE file for both needles; the constant's needle is a plain literal ~450 lines below the
+    # header it guards, so it also occurred in this assertion's own tuple and the row was satisfied
+    # by its own source text — deleting the sentence from the constant's header left it GREEN
+    # (agent-infra#3442 rule 3). Scoping each haystack to the region under test makes the needle's
+    # only possible location the region it grades.
+    for where, haystack, shape_claim in (
             ("the constant's header",
+             _comment_block_above(source, "_D5_ANY_COUNT_EXPR_RE = re.compile("),
              "`-`-anchored flag words are immediately followed by a quoted"),
             ("the helper's docstring",
+             _d5_count_prescriptions.__doc__ or "",
              "whose flags are `-`-anchored\n    words immediately followed by a quoted")):
-        assert shape_claim in source, (
+        assert shape_claim in haystack, (
             f"the shape sentence that replaced the retired over-claims is gone from {where} — a "
             "deletion is not a fix; the reader's scope must be stated as the SHAPE it reads "
             "(#13995 review, P2)")
