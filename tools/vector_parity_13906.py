@@ -350,6 +350,28 @@ def poison(candidate_ids: list[str], truth_rows: list[tuple[str, float]],
 
 # ── stores ──────────────────────────────────────────────────────────────────
 
+LOOPBACK = {"127.0.0.1", "localhost", "::1", "host.docker.internal"}
+
+
+def _assert_loopback(host: str, what: str, allow_remote: bool) -> None:
+    """Refuse to SEED a non-loopback store without an explicit opt-in.
+
+    ⛔ This harness WRITES: it creates an organization, a graph row, node
+    identities and `point` rows, then deletes them. Handed a production DSN by
+    accident, the writes land in the record — so the default is that both stores
+    are local, the refusal names which one is not, and `--allow-remote-writes` is
+    the deliberate act. A guard that only warned would be a guard that gets
+    scrolled past.
+    """
+    if allow_remote or host in LOOPBACK:
+        return
+    raise SystemExit(
+        f"refusing to seed a NON-LOCAL {what} ({host}): this harness writes "
+        f"(org, graph, node_identity, point rows) and deleting them afterwards "
+        f"does not make the write safe if the run is interrupted. Pass "
+        f"--allow-remote-writes if you really mean it.")
+
+
 def app_role_dsn(dsn: str) -> str:
     parts = urlsplit(dsn)
     query = parse_qs(parts.query)
@@ -624,6 +646,12 @@ def run(args) -> dict:
     org = f"org_13906_parity_{run_id}"
     graph = f"graph_13906_parity_{run_id}"
     graph_name = f"g13906parity{run_id}"
+
+    host = urlsplit(args.record_dsn).hostname if args.record_dsn else None
+    if host:
+        _assert_loopback(host, "record database", args.allow_remote_writes)
+    if args.graph_port:
+        _assert_loopback(args.graph_host, "graph store", args.allow_remote_writes)
 
     record = None
     store = None
@@ -914,6 +942,10 @@ def main(argv: list[str] | None = None) -> int:
                     default=None,
                     help="corrupt the candidate side on purpose; a run that "
                          "still reports parity is a BLIND harness")
+    ap.add_argument("--allow-remote-writes", action="store_true",
+                    help="permit seeding a NON-loopback store; this harness "
+                         "writes (org/graph/point rows) and only its cleanup "
+                         "makes that transient")
     ap.add_argument("--keep", action="store_true",
                     help="leave the seeded tenant/graph behind (debugging)")
     ap.add_argument("--json-out", default=None)
