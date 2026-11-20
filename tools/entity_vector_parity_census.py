@@ -181,7 +181,8 @@ CensusError = census_mod.CensusError
 #: census is the authority on when the `point` half closes, and `operator`'s half does NOT
 #: close from a count at all: its graph denominator is the whole `:Point` label while its
 #: record numerator is the operator subset, so the comparison is unreachable until the
-#: denominator is kind-aware — see `record_vector`'s `coverage` and the stripper's header),
+#: denominator is kind-aware — see `record_vector`'s `Coverage` / `_record_vector_count` and
+#: the stripper's header),
 #: the in-graph `:Point` HNSW index is
 #: RETIRED (`#13330`) so nothing reads the property, and `#13971` gates the two writers that
 #: place a genuinely redundant copy (the SDK update door and the DR restore) on the same
