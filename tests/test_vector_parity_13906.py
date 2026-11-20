@@ -1252,13 +1252,22 @@ def test_a_straddling_pair_fails_CLOSED_never_as_a_tie(harness):
     straddle a bucket boundary (`4.999e-7` -> bucket 0, `5.001e-7` -> bucket 1)
     are placed in DIFFERENT groups, so a swap between them is reported
     `diverged` even though the two are far inside the tolerance. Measured, not
-    assumed — and pinned because the fix a reader would reach for is the wrong
-    one: comparing the pair against `TIE_TOL` directly instead of bucketing is
-    strictly MORE permissive (a bucket is exactly `TIE_TOL` wide, so anything
-    bucketed together is inside the tolerance), and that moves the error into
-    the direction that matters — a genuine cross-distance re-rank excused as a
-    PASS. This pin holds the fail-closed direction in place, so widening it
-    reds here rather than passing silently.
+    assumed, and NOT exotic: a same-bucket span is at most `TIE_TOL`, while
+    about half of the in-tolerance pairs straddle a boundary (99,771 of 200,000
+    samples).
+
+    ⛔ The pin holds BOTH ends of the policy, with two probes that catch
+    DIFFERENT mutations — measured, not assumed: the straddling probe above is
+    what reds a WIDENED bucket (at `round(dist / (2 * TIE_TOL))` its two
+    distances land in the same bucket, so the expected `diverged` becomes a
+    `tie`), and the far-apart probe below is what reds a tolerance that is not a
+    width at all — a RELATIVE one (`1e-4 * max(da, db)`) or a bucket widened far
+    enough (10x) that a `2 * TIE_TOL` gap is swallowed. So `abs(da - db) <=
+    TIE_TOL` directly, the repair a reader reaches for, only ever ADDS `tie`s for
+    pairs already inside the tolerance: it cannot excuse a re-rank wider than
+    `TIE_TOL`, and it leaves every genuine cross-distance pin in this file green
+    (measured) — it reds only the straddling probe, which is why the prose around
+    the bucket names WIDENING as the dangerous repair and not that one.
     """
     near_a, near_b = 4.999e-7, 5.001e-7
     assert abs(near_a - near_b) < harness.TIE_TOL, (
@@ -1271,8 +1280,22 @@ def test_a_straddling_pair_fails_CLOSED_never_as_a_tie(harness):
                            ["b", "a", "c"])
     assert cmp_["order"] == "diverged", (
         "a sub-tolerance pair is now excused as a `tie` — the bucket rounding "
-        "was replaced by a direct tolerance comparison, which is strictly more "
-        "permissive and can turn a real cross-distance re-rank into a PASS")
+        "was replaced by something more permissive than a `TIE_TOL`-wide "
+        "bucket, so pairs that are the same distance by this module's own "
+        "definition now read as a PASS")
+    # ...and a pair this far apart must NEVER be a `tie`. Measured: this probe
+    # stays `diverged` under a 2x/3x/4x WIDENED bucket (that mutation is caught
+    # by the straddling probe above), and it is the probe that reds a tolerance
+    # which is not a fixed width at all — relative (`1e-4 * max(da, db)`) or a
+    # bucket wide enough (10x) to swallow a `2 * TIE_TOL` gap. Both are a PASS
+    # over a re-rank two whole tolerances wide.
+    wide = harness.compare([("a", 0.1), ("b", 0.1 + 2 * harness.TIE_TOL),
+                            ("c", 0.5)], ["b", "a", "c"])
+    assert wide["order"] == "diverged", (
+        "two distances `2 * TIE_TOL` apart were excused as a `tie` — the tie "
+        "relation is no longer a fixed width (a relative tolerance, or a bucket "
+        "widened far enough to swallow the gap), which turns a genuine "
+        "cross-distance re-rank into a PASS")
 
 
 def test_the_vector_poison_is_applied_at_SEED_time(harness):
@@ -1290,6 +1313,20 @@ def test_the_vector_poison_is_applied_at_SEED_time(harness):
     defect this module already closed for `_scan_arm` and `require_index` — "a
     literal inside `run()` no DB-free pin can reach" — so it is closed the same
     way: the body is READ.
+
+    ⛔ PRESENCE IS NOT PLACEMENT, and this pin learned that the hard way. A first
+    draft collected the names handed to ANY `*.seed(...)` and intersected them
+    with the perturbation's result — so it could not see the RECEIVER or the
+    ORDER, and both of the mutants below stayed 82/82 green:
+      B3  move the perturbation AFTER `store.seed(...)` (the arm re-reads the
+          unpoisoned rows the moment the store is already seeded)
+      B4  send the perturbation to `record.seed(...)` and seed the GRAPH with the
+          unperturbed rows (the oracle is poisoned, the arm under test is not)
+    Both are the defect this pin names. So it now asserts the RECEIVER is the
+    graph `store`, that the assignment PRECEDES the `store.seed(...)` statement,
+    and that the ORACLE still receives the unperturbed `rows`. This is the same
+    rule the teardown pin states: "`run()` calls `reset()` SOMEWHERE" is not
+    "the teardown runs".
     """
     tree = ast.parse(MODULE_PATH.read_text())
     run = next(node for node in ast.walk(tree)
@@ -1301,27 +1338,48 @@ def test_the_vector_poison_is_applied_at_SEED_time(harness):
         "`run()` must call `perturb_for_vector_poison` exactly once, found "
         f"{len(perturbs)} — zero means the poison is never applied")
 
-    # ...and it must be the value the STORE is seeded with, under the
-    # `args.poison == "vector"` condition, not a result computed elsewhere.
-    seed_arg_names: list[str] = []
+    # the name the perturbation is bound to, and WHERE that binding happens
+    carrier: str | None = None
+    carrier_line = -1
     for node in ast.walk(run):
-        if (isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "seed"
-                and node.args and isinstance(node.args[0], ast.Name)):
-            seed_arg_names.append(node.args[0].id)
-    carriers = {
-        target.id
-        for node in ast.walk(run) if isinstance(node, ast.Assign)
-        for target in node.targets if isinstance(target, ast.Name)
-        and any(sub is perturbs[0] for sub in ast.walk(node.value))
-    }
-    assert carriers, (
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(sub is perturbs[0] for sub in ast.walk(node.value)):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                carrier, carrier_line = target.id, node.lineno
+    assert carrier is not None, (
         "`perturb_for_vector_poison(...)` is not assigned to a name in `run()` — "
-        "its result has nowhere to go, so the seed cannot receive it")
-    assert carriers & set(seed_arg_names), (
-        "the perturbed rows never reach a `seed(...)` call: `run()` seeds "
-        f"{seed_arg_names!r} but the perturbation lands in {sorted(carriers)!r}. "
-        "Applying the vector poison AFTER the arms are read leaves the arm "
-        "measuring unpoisoned data, so the poison can never be detected")
+        "its result has nowhere to go, so no seed can receive it")
+
+    # every `.seed(<name>)` call in `run()`, by RECEIVER, with its position
+    seeds: list[tuple[str, str | None, int]] = [
+        (getattr(node.func.value, "id", ""),
+         node.args[0].id if node.args and isinstance(node.args[0], ast.Name) else None,
+         node.lineno)
+        for node in ast.walk(run)
+        if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "seed"
+        and node.args
+    ]
+    graph_seeds = [(arg, line) for recv, arg, line in seeds if recv == "store"]
+    assert graph_seeds, (
+        "`run()` never seeds the graph `store` — the arm under test would measure "
+        f"nothing. Seeding calls found: {seeds!r}")
+    assert [arg for arg, _line in graph_seeds] == [carrier], (
+        f"the graph `store` is seeded with {[arg for arg, _ in graph_seeds]!r} "
+        f"but the vector poison lands in {carrier!r} — the perturbation must be "
+        "the value the STORE is seeded with, not a result computed elsewhere")
+    assert graph_seeds[0][1] > carrier_line, (
+        f"the perturbation (line {carrier_line}) is applied AFTER "
+        f"`store.seed(...)` (line {graph_seeds[0][1]}) — the arm then measures "
+        "the UNPOISONED rows, so the vector poison can never be detected "
+        "(measured on this harness's first attempt: POISON NOT DETECTED)")
+    oracle = [(arg, line) for recv, arg, line in seeds if recv == "record"]
+    assert oracle and all(arg == "rows" for arg, _line in oracle), (
+        f"the ORACLE must stay on the unperturbed corpus; `record.seed` receives "
+        f"{[arg for arg, _ in oracle]!r} — poisoning the oracle too measures "
+        "nothing, because both legs are then read from the same wrong data")
 
 
 def test_a_none_distance_is_not_a_verified_one(harness):

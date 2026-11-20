@@ -382,12 +382,21 @@ def compare(truth_rows: list[tuple[str, float]], candidate_ids: list[str],
     # TIE_TOL)` is COARSER than "within `TIE_TOL` of each other": two distances
     # 2e-10 apart that straddle a bucket boundary (4.999e-7 and 5.001e-7 round to
     # 0 and 1) land in different buckets, so a swap between them reports
-    # `diverged` — measured on this harness, not assumed. The error is
-    # one-directional and that is the point: a bucket is exactly `TIE_TOL` wide,
-    # so anything bucketed TOGETHER is inside the tolerance, which means this
-    # rounding can produce a false RED but never a false `tie`. Tolerating the
-    # straddle instead would move the error into the direction that matters —
-    # a genuine cross-distance re-rank excused as a PASS. Pinned by
+    # `diverged` — measured on this harness, and NOT a rare corner: a same-bucket
+    # span is at most `TIE_TOL`, while about half of the in-tolerance pairs
+    # straddle a boundary (measured 99,771 of 200,000 samples).
+    #
+    # The error is one-directional, and THAT is the point: a bucket is exactly
+    # `TIE_TOL` wide, so anything bucketed TOGETHER is inside the tolerance, which
+    # means this rounding can produce a false RED but never a false `tie`.
+    #
+    # ⛔ AND THE REPAIR THAT WOULD BREAK IT IS **WIDENING**, not "comparing
+    # directly". Replacing the buckets with `abs(da - db) <= TIE_TOL` only ever
+    # ADDS `tie`s for pairs already inside the tolerance, so it cannot excuse a
+    # re-rank wider than `TIE_TOL` (measured: it leaves every genuine
+    # cross-distance pin green). The fail-open risk is multiplying this bucket's
+    # width — `round(dist / (2 * TIE_TOL))` excuses a re-rank between distances one
+    # whole `TIE_TOL` apart as a `tie`, i.e. as a PASS. Pinned from both sides by
     # `test_a_straddling_pair_fails_CLOSED_never_as_a_tie`.
     tie_groups: dict[float, set[str]] = {}
     for key, dist in truth_rows:
