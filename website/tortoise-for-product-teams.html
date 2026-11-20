@@ -270,17 +270,16 @@
        line with one short word alone. Both are overridden here: one left edge
        and one measure.
 
-       ⛔ NOT literally "one vertical step" at every width, and the comment that
-       used to say so was wrong: `margin-top: 1.5rem` is on `.hero-sub` and on
-       the links row, but `#beat-hero .cta-start` only gets its 1.5rem inside
-       `@media (max-width: 760px)` (:592), and the global reset zeroes
-       `.hero-sub`'s `margin-bottom` — so on desktop the sub → CTA gap is 0
-       while h1 → sub and CTA → links are 24px. That is pre-existing (main is
-       identical), and it is deliberately NOT "fixed" here: the hero is
+       ⛔ NOT literally "one vertical step", and the comment that used to say
+       so was wrong. Measured in Chromium at 1440x900 and 768: h1 → sub is 24px
+       (`.hero-sub { margin-top: 1.5rem }`), sub → CTA is 32px (`#beat-hero
+       .cta-start { margin-top: 2rem }` in its BASE rule, which the narrow block
+       restates as 1.5rem), and CTA → links is 24px. So the column has one left
+       edge and one measure but TWO vertical steps. That is pre-existing (main
+       is identical) and is deliberately NOT "fixed" here: the hero is
        height-constrained and `safe center` (:~120) is what keeps its 5rem
-       `padding-top` clear of the fixed Login pill, so adding 24px to the
-       desktop stack is a layout change that needs a measured pass, not a
-       drive-by in a copy PR. */
+       `padding-top` clear of the fixed Login pill, so normalising the step is a
+       layout change that needs a measured pass, not a drive-by in a copy PR. */
     #beat-hero .doc-copy { text-align: left; }
     #beat-hero .hero-sub {
       margin-top: 1.5rem;           /* the copy column's step */
@@ -344,7 +343,13 @@
       white-space: nowrap;
     }
     #beat-hero .hero-links a:not(:last-child)::after {
-      content: "\00b7";
+      /* The `·` is generated content inside an <a>, and generated content
+         participates in NAME-FROM-CONTENT: the plain `content: "\00b7"` made
+         every link's accessible name read "Browse the docs → ·" and put the
+         dot inside the click target. The second value is CSS ALT TEXT, which
+         removes it from the name (Chrome 97+/Safari 16+); browsers without the
+         syntax degrade to exactly the previous behaviour. */
+      content: "\00b7" / "";
       margin-left: 0.5rem;
       color: var(--text-dim);
     }
@@ -457,11 +462,13 @@
        resolve to the SAME number for the lead and for the prose below it.
        Markup: `<p class="lead"><span>…</span></p>`. */
     #beat-intro .lead {
-      /* 36px below the lead against 20px between body paragraphs. Declared as
-         `margin-bottom` and left to collapse against the next paragraph's
-         `margin-top: 1.25rem` — which is `max(2.25rem, 1.25rem)`, so the 36px
-         is what renders. A value under 1.25rem here would be dead. */
-      margin-bottom: 2.25rem;
+      /* 36px below the lead, against 20px between body paragraphs. The intro's
+         three <p> are DIRECT CHILDREN of `.beat`, a flex column, and FLEX-ITEM
+         MARGINS DO NOT COLLAPSE — the gap is `margin-bottom` PLUS the next
+         paragraph's `margin-top: 1.25rem`, so 1rem gives 16 + 20 = 36px.
+         (2.25rem was here first and rendered 56px, not the 36px its comment
+         claimed; measured in Chromium at 320/390/768/900/1440.) */
+      margin-bottom: 1rem;
       /* Same orphan rule as the hero subtitle: at ~768px this breaks into
          611.8 / 129.4 ("dependencies." alone) without it. */
       text-wrap: balance;
