@@ -197,7 +197,25 @@ SWEEP_NAMES = 66
 #: check green, and this PR does not FIX it: the four are base-owned and out of this PR's scope.
 #: Measured here, so the next lane does not have to re-derive it:
 #:   `typed references` on the merge parent = 4; on this tree = 4 (this PR adds NONE).
-SWEEP_RESIDUE = (11794, "d26b6f638a612643")
+#: RE-PINNED → (11804, "e0c67cf6a5e97d20") by the lane that found `main` RED on `surface-guard` and
+#: traced it to this pin, not to a typed reference. ⛔ `surface-guard` is NOT in the
+#: `DEFERRABLE_LEGS` set (`python-ci.yml:5457`), so its red is never excused as main's own and it reds
+#: the REQUIRED `python-ci-gate` for every open PR — measured on `44747206237`: `surface-guard`
+#: failure, `ci-introduced-failure` success, `python-ci-gate` failure. So this is a fleet-wide block,
+#: and the pin is the only arm still red: `typed references still pointing at a public name: 0` on
+#: this tree (that half was repaired separately).
+#: The move is +10 from the pin, and all ten rows are one new file, `#13950`'s (`959c030659`)
+#: `tests/test_business_map_filer.py` — plain `dict.update(...)` on a parsed map document, which is
+#: the same documented ordinary-word edge as `declared_markers.update` and
+#: `retired_vector_labels.update` above, not a reference to a retired public name:
+#:   * `d['points'][0].update` 3, `d['events'][0].update` 1, `d['subjects'][0].update` 1 — the
+#:     `(lambda d: d[…][0].update(…), "<reason>")` mutant table (`:677`, `:680`, `:681`);
+#:   * `next((e for e in d['edges'] if 'op' in e).update` 4 and
+#:     `next((o for o in d['objects'] if …).update` 1 — the same table's edge/object mutants
+#:     (`:682`, `:685`, `:1344`, `:1346`).
+#: Each was attributed by re-running `edits_for` on that one file, never by arithmetic: the row set
+#: on the pinned tree was diffed against this one per file, and this file is the ONLY delta.
+SWEEP_RESIDUE = (11804, "e0c67cf6a5e97d20")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
