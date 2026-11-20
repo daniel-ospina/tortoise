@@ -196,6 +196,7 @@ import hashlib
 import os
 import re
 import subprocess
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -2866,7 +2867,35 @@ def _false_filter_property_restatements(doc: str) -> list[str]:
     ⛔ Not "every re-wording" — the pattern is a bounded token test and the declared escapes at the
     pattern are restatements it does not match (#13853 review round 19/20).
     """
-    return [m.group(0) for m in _FALSE_FILTER_PROPERTY_RE.finditer(doc)]
+    return [m.group(0) for m in _FALSE_FILTER_PROPERTY_RE.finditer(_fold_unicode(doc))]
+
+
+def _fold_unicode(text: str) -> str:
+    """`text` in compatibility form with every format character (Cf) removed.
+
+    ⛔ THE LOOKALIKE AXIS (#13948 review round 30, P2 — MEASURED), the same class as rounds 26-29
+    one layer down: the folds compared CODEPOINTS, so a character that renders as the one the ban
+    names was a different character to it.
+
+    * A FORMAT character (Cf) INSIDE a token split the needle: `char\u200bacter` made the ledger
+      row `… first non-space character is \`#\`` unmatchable while a reader sees it verbatim —
+      MEASURED `[]` (escape) for both bans.
+    * A COMPATIBILITY character was not folded at all: a fullwidth `\uff03` is `#` on screen and
+      was invisible to the shape arm — MEASURED `[]`.
+
+    NFKC normalises the compatibility forms (fullwidth, ligatures, superscripts) to their canonical
+    spelling and Cf is dropped, so what a READER sees is what the arms grade. Applied to the
+    document AND to every needle, and to the shape arm's haystack, so no arm is left on the raw
+    codepoints the way rounds 26-29 each left one behind.
+
+    ⛔ STILL OUT, declared: a CHARACTER SUBSTITUTION that changes the spelling (`chαracter` with a
+    Greek alpha, a combining diacritic on a letter) is a different word, not a mark, and is the
+    declared semantic residual — not something a normalisation can close.
+    """
+    return "".join(
+        ch for ch in unicodedata.normalize("NFKC", text)
+        if unicodedata.category(ch) != "Cf"
+    )
 
 
 def _norm_for_ban(text: str) -> str:
@@ -2886,12 +2915,19 @@ def _norm_for_ban(text: str) -> str:
       artifact — at `84b94ad74f`, the head the D5 cell grades, the document itself wraps a
       sentence mid-clause: `git show 84b94ad74f:docs/epics/…/05-verify.md | sed -n '131,132p'`.
 
-    ⛔ SO THE FOLD IS TOTAL, NOT ENUMERATED: everything that is not a letter or a digit is
-    collapsed to one space on BOTH sides. Case, line breaks, commas and every other mark are
-    the SAME axis — the layout of an unchanged sentence — and closing them one mark per review
-    round is how this cell spent rounds 26-28. MEASURED: the strict fold still reports `[]` for
-    every row against the real `05-verify.md` (no false red), and each mutant of it REDS the
-    cells that carry its controls.
+    ⛔ SO THE FOLD IS TOTAL, NOT ENUMERATED: NFKC first, then Cf removed, then EVERYTHING that is
+    not a letter or a digit is DROPPED on both sides. Case, line breaks, commas, and every other
+    mark are the SAME axis — the layout of an unchanged sentence — and closing them one mark per
+    review round is how this cell spent rounds 26-30.
+
+    ⛔ WHY SPACING IS DROPPED AND NOT COLLAPSED TO A SPACE (#13948 review round 31, P2 —
+    MEASURED): collapsing preserved the need for a space where the needle has one, so an invisible
+    format character SITTING WHERE THE SPACE IS (`at\u00adthis`, a soft hyphen at a line break)
+    removed the separator and the needle stopped matching — 28 measured escapes, mid-token and
+    between words alike. With the spacing dropped from BOTH sides, whether the document has a
+    space, a soft hyphen, or nothing there is the same. MEASURED: `[]` for every row against the
+    real `05-verify.md` (no false red), and zero escapes over newline / tab / comma / em dash /
+    NBSP / ZWSP / soft hyphen / LRM / BOM, inside a token and in place of the space.
 
     ⛔ WHAT IS STILL NOT CAUGHT, DECLARED rather than chased: a SEMANTIC escape — re-wording the
     noun, the copula or the verb, or reordering the clause — is outside what any normalisation
@@ -2901,7 +2937,7 @@ def _norm_for_ban(text: str) -> str:
     claim is prose. If a future round finds another MECHANICAL escape it is a bug in this fold;
     a re-worded claim is the declared residual and belongs to the human-read arm.
     """
-    return re.sub(r"[^0-9a-z]+", " ", text.lower())
+    return re.sub(r"[^0-9a-z]+", "", _fold_unicode(text).lower())
 
 
 def _false_filter_descriptions(doc: str) -> list[str]:
@@ -3027,7 +3063,13 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
             ("… whose first non-space character is '#' — a comment …",
              "character is '#'"),
             ("… whose first non-space character is \"#\" — a comment …",
-             "character is \"#\"")):
+             "character is \"#\""),
+            # ⛔ AND THE COMPATIBILITY LOOKALIKE (#13948 review round 30, P2 — MEASURED): a
+            # fullwidth `＃` is `#` on screen and was invisible to this arm, because the pattern's
+            # `#` is a literal codepoint and the haystack was never normalised. `_fold_unicode`
+            # makes NFKC the arm's input, so every fullwidth/compatibility spelling is graded.
+            ("… whose first non-space character is ＃ — a comment …",
+             "character is #")):
         assert _false_filter_property_restatements(probe) == [expected], (
             "the shape ban no longer matches the property it exists to retire when it is "
             f"RE-WORDED ({probe!r} → {_false_filter_property_restatements(probe)!r}), so a "
@@ -3129,6 +3171,17 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
         assert _false_filter_descriptions(spelling.replace(" is ", " — is ", 1)) == [spelling], (
             "the ledger ban misses its own row with an em dash inserted — the fold must be total "
             "over punctuation, not comma-only (#13948 review round 29)")
+        # ⛔ AND THE LOOKALIKE / INVISIBLE AXES (#13948 review rounds 30-31, both MEASURED): a
+        # format character INSIDE a token split the needle (`char\u200bacter`), and one SITTING
+        # WHERE THE SPACE IS (`at\u00adthis`) removed the separator — both left the arm green.
+        word, rest = spelling.split(" ", 1)
+        assert _false_filter_descriptions(word[:2] + "\u200b" + word[2:] + " " + rest) == [spelling], (
+            "the ledger ban misses its own row with a zero-width space inside a word "
+            "(#13948 review round 30)")
+        assert _false_filter_descriptions(
+            word + "\u00ad" + rest) == [spelling], (
+            "the ledger ban misses its own row with a soft hyphen in place of a space "
+            "(#13948 review round 31)")
 
     # (4) MECHANISM: the premise of (1), executed rather than reasoned about — and executed
     # with the patterns the DOCUMENT states, so a document that states a different filter is
@@ -3300,6 +3353,13 @@ def test_the_D5_row_types_no_verdict_about_the_head_being_merged():
         assert _d5_head_bound_verdicts(marked), (
             f"the per-head-verdict ban misses {marked!r} with a mark inserted — the fold must be "
             "total over punctuation, not comma-only (#13948 review round 29)")
+    # ⛔ And the invisible/lookalike axes, as in the ledger cell (#13948 review rounds 30-31).
+    for invisible in ("at this head the FIRST of them prints a pa\u200bth",
+                      "at\u00adthis head the FIRST of them prints a path",
+                      "at this head the FIRST of them prints a pa＃th"):
+        assert _d5_head_bound_verdicts(invisible), (
+            f"the per-head-verdict ban misses {invisible!r} — an invisible format character or a "
+            "compatibility lookalike must be folded (#13948 review rounds 30-31)")
 
 
 def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
