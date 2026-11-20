@@ -2122,7 +2122,7 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # `prints now nothing`, `is still empty` and 1260 of 1536 verb×modifier×answer cells were
     # detector-only, and on the `set`/deictic anchor NEITHER arm saw them)
     r"now|still|actually|also)\s+)?"
-    r"(?:,\s*[^,.;\n]{1,30},)?\s*"
+    r"(?:,\s*[^,.;\n]{1,30},|\s*[—–]\s*[^.;\n]{1,30}?\s*[—–])?\s*"
     # ⛔ AND A PARENTHETICAL (#13802 review, round 14, P2 — MEASURED: `(run at this head)`
     # between the command and the verb, and `set (measured with `git diff …`) is empty`,
     # were GREEN in BOTH arms while the comma and bare forms were refused)
@@ -2131,7 +2131,11 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     r"(?:(?:us|them|you)\s+)?(?:back\s+)?"
     # ⛔ AND `no longer`, the ordinary English spelling of the emptiness reversal (#13802
     # review, round 12, P2 — `is no longer empty` was GREEN through both arms)
-    r"(?:(?:NOT|not|no\s+longer|NO\s+LONGER)\s+)?[*_]{0,3}"
+    # ⛔ AND A BACKTICK AFTER THE EMPHASIS (#13802 review, round 20, P1 — MEASURED: the verb's
+    # `[*_`]{0,3}` spends its budget on `**`, leaving the backtick that opens the answer
+    # unconsumed — `**prints** `NOTHING`` was GREEN while the detector read it, the
+    # detector-read/ban-blind shape again)
+    r"(?:(?:NOT|not|no\s+longer|NO\s+LONGER)\s+)?[*_`]{0,3}"
     # AND THE ANSWER FORMS that detector knows, in the same widening: `one path` as
     # readily as `exactly two`, `both modules` as readily as `TWO modules`, and a
     # MODIFIED membership count ("the two COMMENT-ONLY modules") as readily as a bare one.
@@ -2218,7 +2222,7 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # one requires an ANSWER to open a clause and `tortoise/` to follow inside the same
     # sentence, so ordinary prose that merely begins with `Nothing` is untouched. The
     # emptiness-only cut of round 13 covered ONE direction of the two — that is round 16's fix.
-    r"|(?:^|[.;:!?]\s|\n)[*_`]{0,3}(?:NOTHING|Nothing|EMPTY|Empty|NONE|None|ZERO|Zero|`?\[\]`?"
+    r"|(?:^|[.;:!?]\s|\n)(?:there\s+(?:is|are)\s+)?[*_`]{0,3}(?:NOTHING|Nothing|EMPTY|Empty|NONE|None|ZERO|Zero|`?\[\]`?"
     r"|both\s+(?:files?|paths?|modules?|entries)"
     r"|(?:one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:files?|paths?|modules?|"
     # ⛔ AND THE OTHER COUNT NOUNS ARE IN THIS CLASS TOO (#13802 review, cycle 9, P2 —
@@ -2478,6 +2482,14 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         "This diff carries, at this head, no `tortoise/` path at all.",
         "This diff carries (measured at this head) no `tortoise/` path at all.",
         "`None` is what the `tortoise/` set holds at this head.",
+        # ⛔ AND THE PRODUCTS THE ENUMERATED CLASSES MISSED (#13802 review, round 20 — emphasis
+        # on the VERB plus a backticked answer left the backtick unconsumed; the em dash is this
+        # corpus's own house punctuation for the same slot; and `There is …` puts a copula in
+        # front of the answer-first arm)
+        "`-- tortoise/` **prints** `NOTHING` at this head.",
+        "`-- tortoise/` **_prints_** `two` paths at this head.",
+        "The `-- tortoise/` set prints — at this head — NOTHING.",
+        "There is NOTHING in the `tortoise/` set at this head.",
         # ⛔ AND THE THREE AXES ROUND 18 LEFT OPEN (#13802 review, round 19, P1 — every one
         # MEASURED GREEN at the round-18 head, RED here). Round 18 wrote a `\**` class where
         # this file's own contract says `[*_`]{0,3}`, and it put that class BEFORE the space
