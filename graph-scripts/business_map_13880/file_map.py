@@ -24,13 +24,14 @@ WHY THIS SHAPE
 
 USAGE
 -----
-    uv run --with redis --with requests python file_map.py --dry-run
-    uv run --with redis --with requests python file_map.py --verify
-    uv run --with redis --with requests python file_map.py --write
+    uv run python graph-scripts/business_map_13880/file_map.py --dry-run
+    uv run --with redis python graph-scripts/business_map_13880/file_map.py --verify
+    uv run python graph-scripts/business_map_13880/file_map.py --write
 
-`--dry-run` needs no credentials and no network. `--write` needs
-`TORTOISE_MCP_API_KEY` and `FALKORDB_CLOUD_URI` in the environment (on the lane
-box: `set -a; . /home/cmux/businessmap.env; set +a`). It is resumable: ids are
+`--dry-run` needs no credentials and no network. `--verify` needs
+`FALKORDB_CLOUD_URI` (and the optional `redis` package). `--write` needs
+`TORTOISE_MCP_API_KEY` in the environment (on the lane box: `set -a; .
+/home/cmux/businessmap.env; set +a`). It is resumable: ids are
 persisted to `state.json` after every write and re-resolved by name on retry, so
 re-running after a transport death converges instead of duplicating.
 
@@ -39,12 +40,20 @@ re-running after a transport death converges instead of duplicating.
 """
 from __future__ import annotations
 
+import sys
+
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"graph-scripts/business_map_13880/file_map.py requires Python "
+        f">= 3.12 (got {sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        "`uv run python graph-scripts/business_map_13880/file_map.py`"
+    )
+
 import argparse
 import contextlib
 import json
 import os
 import pathlib
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -416,7 +425,7 @@ def write_map(doc: dict) -> int:
             st["written"].append(marker)
         save_state(st)
 
-    def _resolve(self, item_ref: str, name: str, res: dict, what: str) -> str:
+    def _resolve(item_ref: str, name: str, res: dict, what: str) -> str:
         """The id the write returned — or a refusal, never a plausible stand-in.
 
         A name is not an id: binding an edge endpoint to a name writes an edge
@@ -539,6 +548,79 @@ def doc_by_ref(doc: dict, ref: str) -> dict:
 CLEAN_GRAPH = "org_3326a01ea34ae595d84de5d8f9_g_311d79c684de4d0e8953d189ed"
 
 
+#: The properties an item's identity lives in — the map declares exactly one
+#: per node (a Subject/Object carries `name`, a Source carries `url`, an Event
+#: and a Point carry `content`).
+IDENTITY_PROPS = ("name", "url", "content")
+
+
+def map_identities(doc: dict) -> list[tuple[str, str]]:
+    """Every node the map declares, as the (property, value) that identifies it.
+
+    ⛔ Identity, not a COUNT. The pre-fix read-back counted nodes anywhere in
+    the graph and passed at 90% of the expected total, so a graph holding 71
+    unrelated nodes and none of the map was a PASS — and a run that wrote every
+    node and zero edges was a PASS too. A count cannot tell the map from
+    anything else; the identity can.
+    """
+    out: list[tuple[str, str]] = []
+    for s in doc["subjects"]:
+        out.append(("name", s["name"]))
+    for o in doc["objects"]:
+        out.append(("name", o["name"]))
+    for s in doc["sources"]:
+        out.append(("url", s["url"]))
+    for e in doc["events"]:
+        out.append(("content", e["content"]))
+    for p in doc["points"]:
+        out.append(("content", p["content"]))
+    return out
+
+
+def _row_identities(row: list) -> set[tuple[str, str]]:
+    return {(prop, value) for prop, value in zip(IDENTITY_PROPS, row, strict=False)
+            if value}
+
+
+def presence(doc: dict, node_rows: list, edge_rows: list) -> tuple[list, int]:
+    """Which declared identities the graph holds, and how many declared edges
+    join two of them.
+
+    Pure, so the verdict can be exercised without a database: `verify()` is the
+    only thing that needs Falkor, and its arithmetic is the part that was wrong.
+    """
+    present: set[tuple[str, str]] = set()
+    for row in node_rows:
+        present |= _row_identities(row)
+    missing = [(prop, value) for prop, value in map_identities(doc)
+               if (prop, value) not in present]
+    joined = 0
+    for row in edge_rows:
+        if _row_identities(row[:3]) & present and _row_identities(row[3:]) & present:
+            joined += 1
+    return missing, joined
+
+
+def verdict(doc: dict, node_rows: list, edge_rows: list) -> int:
+    """0 only when every declared node AND every declared edge reads back."""
+    missing, joined = presence(doc, node_rows, edge_rows)
+    total = len(map_identities(doc))
+    expected_edges = len(doc["edges"])
+    print(f"\nnodes: {total - len(missing)}/{total} declared identities present")
+    print(f"edges: {joined}/{expected_edges} declared edges join two present nodes")
+    if missing:
+        print(f"MISSING — {len(missing)} declared node(s) are not in the graph:",
+              file=sys.stderr)
+        for prop, value in missing[:20]:
+            print(f"  - {prop}: {value[:70]!r}", file=sys.stderr)
+        if len(missing) > 20:
+            print(f"  … and {len(missing) - 20} more", file=sys.stderr)
+    if joined < expected_edges:
+        print(f"EDGES SHORT — {expected_edges - joined} declared edge(s) are absent "
+              "(an unjoined map is filed but not findable)", file=sys.stderr)
+    return 0 if not missing and joined >= expected_edges else 1
+
+
 def verify(doc: dict) -> int:
     # optional dep, only needed for --verify
     import redis
@@ -567,11 +649,6 @@ def verify(doc: dict) -> int:
     for row in q("MATCH ()-[e]->() RETURN type(e), count(*) AS c ORDER BY c DESC"):
         print(f"  {row[0]:<16} {row[1]}")
 
-    expected = (len(doc["subjects"]) + len(doc["objects"]) + len(doc["sources"])
-                + len(doc["events"]) + len(doc["points"]))
-    got = q("MATCH (n) RETURN count(n) AS c")[0][0]
-    print(f"\nnodes: expected ~{expected}, found {got}")
-
     print("== the goal cascade, with its edges (does the map answer a question?)")
     for row in q("MATCH (a:Object)-[r]->(b:Object) WHERE a.objectKind = 'goal' "
                  "RETURN coalesce(a.name,''), type(r), coalesce(r.label,''), coalesce(b.name,'')"):
@@ -582,7 +659,12 @@ def verify(doc: dict) -> int:
                  "RETURN coalesce(e.content,'')  , type(r), coalesce(o.name, o.url, o.content, '')"):
         print(f"  {row[0][:70]}... -[{row[1]}]-> {row[2][:44]}")
 
-    return 0 if got >= expected * 0.9 else 1
+    node_rows = q("MATCH (n) RETURN coalesce(n.name,''), coalesce(n.url,''), "
+                  "coalesce(n.content,'')")
+    edge_rows = q("MATCH (a)-[e]->(b) RETURN coalesce(a.name,''), coalesce(a.url,''), "
+                  "coalesce(a.content,''), coalesce(b.name,''), coalesce(b.url,''), "
+                  "coalesce(b.content,'')")
+    return verdict(doc, node_rows, edge_rows)
 
 
 def main() -> int:
