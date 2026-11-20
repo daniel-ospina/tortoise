@@ -546,23 +546,33 @@ def test_the_real_docs_tree_is_not_empty():
 #:      returned `[]` — a claim left GREEN. `&` is a character `origin/main`'s gap already
 #:      admitted, and a closure that drops a form the previous rule had is a regression wearing
 #:      a widening's clothes.
-#:   5. an UNTERMINATED bracket — `_OPEN_BRACKET` below, a `[` with no reachable `]`;
-#:   6. an UNTERMINATED tag — `_OPEN_TAG` below, a `<` with no reachable `>`, which is what a bare
-#:      `<` in a separator is and which `_TAG` alone refused (#13921 review, finding 1).
+#:   5. an UNTERMINATED bracket — `_OPEN_BRACKET` below, a `[` with no `]` (bare or ESCAPED)
+#:      reachable from it;
+#:   6. an UNTERMINATED tag — `_OPEN_TAG` below, a `<` that `_TAG` cannot parse. That INCLUDES a
+#:      `<` with no reachable `>` (which is what a bare `<` in a separator is) but is NOT limited
+#:      to it: `_TAG`'s catch-all excludes `"`, so `<"` with a later `>` also reaches here
+#:      (#13921 review, finding 2, MEASURED — the previous wording said "no reachable `>`", which
+#:      was a smaller unit than the code needs and than `origin/main` had).
 #:
-#: ⛔ TWO SAME-FIRST-CHARACTER PAIRS, AND THE LOOKAHEAD IS WHAT KEEPS EACH PAIR DISJOINT — BUT NOT
-#: WHAT KEEPS THE RUN LINEAR (#13921 review, finding 4, MEASURED). `_BRACKET`/`_OPEN_BRACKET` both
-#: begin `[` and `_TAG`/`_OPEN_TAG` both begin `<`, so the reason this block used to give — "each
-#: kind begins with a unique first character" — is FALSE, and a stale reason in this file is the
-#: defect class it keeps reviewing itself for. (`_OPEN_TAG` makes this TWO pairs, not one: the
-#: previous revision of this paragraph called `[` "the ONE same-first-character pair", and the
-#: `<` hole below is what that miscount was hiding.) The real reason each pair is disjoint is
-#: that the SECOND branch matches only when the first cannot: `_BRACKET` requires a reachable `]`
-#: and `_OPEN_BRACKET` is guarded by `(?![^\]\n]*\])`; `_TAG` requires the `>`, is tried FIRST,
-#: and `_OPEN_TAG` is guarded by `(?![^>\n]*>)`. The one input where either pair can both start
-#: is a run whose interior crosses a soft break (`[a\n]`, `<span\ntitle="a">`): the closing unit
-#: takes it whole while the lookahead, being line-bounded, cannot see the closer — a bounded
-#: residual shared by both pairs, not an exponential.
+#: ⛔ TWO SAME-FIRST-CHARACTER PAIRS, AND ORDER — NOT A LOOKAHEAD — IS WHAT KEEPS EACH PAIR
+#: DISJOINT. AND WHAT KEEPS THE RUN FROM BEING EXPONENTIAL IS EACH UNIT'S OWN BRANCHES, NOT EITHER
+#: (#13921 review, findings 1-4, MEASURED). `_BRACKET`/`_OPEN_BRACKET` both begin `[` and
+#: `_TAG`/`_OPEN_TAG` both begin `<`, so the reason this block used to give — "each kind begins with
+#: a unique first character" — is FALSE, and a stale reason in this file is the defect class it
+#: keeps reviewing itself for. (`_OPEN_TAG` makes this TWO pairs, not one: the previous revision of
+#: this paragraph called `[` "the ONE same-first-character pair", and the `<` hole below is what
+#: that miscount was hiding.) The real reason each pair is disjoint is that the SECOND branch
+#: matches only when the first cannot: `_BRACKET` is tried first and requires a closer, and
+#: `_OPEN_BRACKET` is that test NEGATED — same interior, escape included,
+#: `(?!(?:\\.|[^\\\]\n])*\])`; `_TAG` is tried first and requires the `>`, and `_OPEN_TAG` is
+#: a bare `<` with NO guard at all, because for that pair the ORDER alone is the guard. ⛔ An earlier
+#: revision of this paragraph said "the lookahead is what keeps each pair disjoint" and named a
+#: `_OPEN_TAG` lookahead that THIS ROUND DELETED — the tag half of that sentence described code
+#: that no longer existed, one commit after the sentence was written (#13921 review, finding 3).
+#: The one input where the BRACKET pair can both start is a run whose interior crosses a soft
+#: break (`[a\n]`): the closing unit takes it whole while the lookahead, being line-bounded, cannot
+#: see the closer — a bounded residual that is the BRACKET pair's alone, not shared, and not an
+#: exponential.
 #: ⛔ AND THE RUN IS **NOT** LINEAR — the word this block used to carry, on the strength of a
 #: single 200-point reading (#13921 review, finding 4). MEASURED at this head: 200 × `[` ->
 #: 0.0014 s, 400 -> 0.0037, 800 -> 0.0144, 1600 -> 0.0559, 3200 -> 0.2248 s — about x3.9 per
@@ -623,12 +633,23 @@ _TAG = (r'<(?:"(?:[^"\n]|' + _SOFT + r')*"|\'(?:[^\'\n]|' + _SOFT + r')*\''
 #: every `[`, where the single-pass gap this replaced could skip it. MEASURED through that
 #: walk, `[` + 20 backslashes took 0.0196 s, 24 -> 0.0973, 28 -> 0.5960, 32 -> 3.8566 s
 #: (≈x1.6 per character, i.e. a hang with no diagnostic and no witness that reds), and
-#: 0.00004 s flat at every one of them once the pair is disjoint — the walk's boundary list
-#: IDENTICAL on those rows and the ANSWER identical on every bracket witness row (`[\]`,
-#: `[a\]b]`, `[a\]b`, `[^note]`, `[12]`, `[]`, `[x `), `[a\]b]` still ONE label. Disjoint
-#: branches is the remedy the ReDoS literature prescribes for exactly this shape (each
-#: character parses one way); an atomic group would mask the ambiguity without removing it.
-_BRACKET = r"\[(?:\\.|[^\\\]\n]|" + _SOFT + r")*\]"
+#: 0.00004 s flat at every one of them once the pair is disjoint. Disjoint branches is the
+#: remedy the ReDoS literature prescribes for exactly this shape (each character parses one
+#: way); an atomic group would mask the ambiguity without removing it.
+#: ⛔ AND THE CLOSER HAS TWO ALTERNATIVES, `\]` OR AN ESCAPED `\]` (#13921 review, finding 1 of
+#: the NEXT round, MEASURED). Excluding `\` from the catch-all moves a backslash from
+#: ORDINARY CHARACTER to ESCAPE INTRODUCER, so `[a\]` — a label whose closer is written `\]` —
+#: stopped closing: `_BRACKET` consumed `a` then `\]` as an escape and ran out of text, so the
+#: walk stopped and `origin/main` (which graded it THROUGH the very ambiguity being removed) had
+#: an admission this head did not. MEASURED on a 30,941-case punctuation sweep of the ABBREVIATION
+#: subject, where a bare word character cannot sit in the gap at all: head differed from
+#: `origin/main` on exactly FOUR rows and every one was `[` + a word + `\]` (`[a\]`, `[1\]`,
+#: `[x\]`, `[b\]`); with the escaped closer below the same sweep differs on ZERO. So the closer
+#: is not decoration — it is what keeps this unit's ADMISSIONS equal to the rule it replaced,
+#: while the repetition alone stays disjoint so the exponent stays gone (measured flat at 800
+#: backslashes, and `[\]`-runs get FASTER, not slower, because the label now closes on the
+#: first try instead of failing and re-scanning).
+_BRACKET = r"\[(?:\\.|[^\\\]\n]|" + _SOFT + r")*(?:\]|\\\])"
 #: ⛔ ONE GAP, UNITS ONLY — NO PROSE (#13900 verification, MEASURED). A prose-crossing gap
 #: was tried and it flags FIVE live-document sentences, two of them QUOTATIONS of refuted
 #: claims ("`prints nothing` would over-claim") which the arm's contract says must not be read
@@ -642,11 +663,16 @@ _BRACKET = r"\[(?:\\.|[^\\\]\n]|" + _SOFT + r")*\]"
 #: they are (#13921 review, F2/P1-1) — what the retry fixes is a listed verb sitting INSIDE the
 #: separator (`is`, a URL's `:`), not a word between the command and the verb.
 #: ⛔ AND THE LOOKAHEAD MUST LEARN THE SAME INTERIOR AS `_BRACKET` (#13921 review, finding 1).
-#: `(?![^\]\n]*\])` counts a `\` as ORDINARY, so it asks "is a `]` reachable?" under a
-#: different grammar from the unit it guards, and the two disagree on `[a\]b]`-shaped input —
-#: the very residual this pair exists to keep bounded. The pair therefore moves TOGETHER: the
-#: one-constant variant (`_BRACKET` widened alone) stops matching `[\]` and `[a\]b`, so the walk
-#: would stop dead on those two shapes (MEASURED: `[\]` went graded -> `[]`).
+#: `(?![^\]\n]*\])` counted a `\` as ORDINARY, so it asked "is a `]` reachable?" under a
+#: different grammar from the unit it guards. ⛔ THE SHAPE WHERE THAT BITES IS `[a\]`, NOT
+#: `[a\]b]` AS AN EARLIER FORM OF THIS COMMENT SAID (#13921 review, finding 2 of the next round,
+#: MEASURED): `[a\]b]` grades under EVERY variant including `origin/main`, because `_BRACKET` is
+#: tried first and takes it whole, so the two grammars' disagreement on it is INERT; and `[a\]b`
+#: is `[]` under every variant including `origin/main`, because the unclosed label exposes a word
+#: character to the declared prose stop. Naming those two is what hid the row that does bite. The
+#: pair therefore moves TOGETHER: with `_BRACKET`'s catch-all excluding `\` and the lookahead
+#: still counting `\` as ordinary, `[\]` goes graded -> `[]` (MEASURED) — the one-constant form
+#: is the regression, which is why the two constants are one edit.
 _OPEN_BRACKET = r"\[(?!(?:\\.|[^\\\]\n])*\])"
 #: ⛔ AND AN UNTERMINATED TAG IS ONE TOO (#13921 review, finding 1, MEASURED). `_TAG` requires a
 #: closing `>`, so BEFORE this constant a bare `<` matched NOTHING in the alternation and the
@@ -1855,6 +1881,23 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
         f"`{_full_subject}` [ prints TWO paths", _full_subject), (
         "an UNTERMINATED `[` ended the separator — `_OPEN_BRACKET` is the unit that admits it, "
         "and `[` is a character `origin/main`'s gap already had (#13921 review, F4)")
+    # ⛔ AND A LABEL CLOSED BY AN ESCAPED `]` IS STILL ONE LABEL (#13921 review, finding 1 of the
+    # NEXT round, MEASURED). Making `_BRACKET`'s repetition disjoint moved `\` from ORDINARY
+    # CHARACTER to ESCAPE INTRODUCER, so `[a\]` stopped closing and the walk stopped on it: this
+    # row returned `[]` while `origin/main` AND the previous head `8f108b5211` both graded it —
+    # a dropped admission of exactly the class the `&` row and `_OPEN_TAG` were added under, in
+    # the file's own named bad direction. MEASURED on a 30,941-case punctuation sweep of the
+    # ABBREVIATION subject (where a bare word character cannot sit in the gap at all): this head
+    # differed from `origin/main` on FOUR rows, all `[` + a word + `\]`, and on ZERO once the
+    # closer learned the escaped form. ⛔ NON-VACUITY, EXECUTED: deleting the `\\\]` closer
+    # alternative reds this row; it is the ONLY row that sees it, because every other bracket
+    # witness closes with a bare `]`.
+    for _escaped in ("[a\\]", "[1\\]", "[x\\]"):
+        assert _typed_answers_to_tortoise_cmd(
+            f"`` `-- tortoise/` {_escaped} prints TWO paths", "-- tortoise/"), (
+            f"the arm SKIPPED {_escaped!r} — a label closed by an ESCAPED `]` is one unit, and "
+            "`origin/main` graded this shape; excluding `\\` from `_BRACKET`'s catch-all without "
+            "widening its closer drops it (#13921 review, finding 1 of the next round)")
     # ⛔ AN UNTERMINATED `<` IS THE SAME CLASS, AND IT WAS STILL OPEN (#13921 review, finding 1,
     # MEASURED). `_TAG` requires a closing `>`, so a bare `<` matched NOTHING in the unit list and
     # the separator walk stopped on it: `` `-- tortoise/` < prints TWO paths `` returned `[]` at
