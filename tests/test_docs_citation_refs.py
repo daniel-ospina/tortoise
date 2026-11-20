@@ -3176,14 +3176,13 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # the peer head and here. ⛔ NO COUNT IS TYPED FOR THE WITNESS TUPLE, ON PURPOSE: an earlier
     # draft said "61 of the 192", the figure did not reproduce under any reading of "that arm",
     # and the `192` was not this head's tuple length either way it is counted — the same
-    # typed-figure rot this file polices about itself, caught by #13802 review round 28, P3,
-    # whose correction then re-typed that `192` as the PARENT head's tuple length — HISTORY,
-    # and false at that head too — and whose own correction of THAT typed a FRESH reading of
-    # that head's tuple under a sentence declaring that no count was typed. ⛔ THAT READING WAS
-    # NOT REFUTED: its figures reproduced, and it was removed for typing them (#13802 review,
-    # round 29, P2); the round-29 re-review then refuted only the ordinal and the universal
-    # around it. ⛔ NO numeral in this note is a count of either tuple's length, and none is
-    # re-derived.
+    # typed-figure rot this file polices about itself, caught by #13802 review round 28, P3.
+    # ⛔ THE CORRECTION CHAIN IS DELIBERATELY NOT RESTATED (#13802 review, round 29): it was
+    # re-worded in consecutive rounds and each wording drew a fresh finding, so the chain stops
+    # here rather than being re-worded again. That history lives in the commit messages, not in
+    # this note, and no claim about an earlier head's tuple is made here. What remains is the
+    # rule and its one measured fact: no count of THIS head's tuple is typed anywhere in this
+    # note, and none is re-derived from a figure quoted in it.
     r"(?:\s+there)?(?:\s*,?\s*(?:\([^)]{0,90}\)|[\w/-]+),?){0,8}\s*[*_`]{0,3}\s*"
     # ⛔ THE VERB CLASS IS THE DETECTOR'S OWN LIST (#13802 review, round 5, P2; merge-round
     # review, P1): `reports exactly two paths` and `yields `tortoise/x.py`` were green
