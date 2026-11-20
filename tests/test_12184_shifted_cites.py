@@ -156,6 +156,12 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:2452`", _AU, 2452, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2463`", _AU, 2463, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`mcp_server.py:5184`", _MCP, 5184, "entity_type=entity_type"),
+    # ⛔ §2.5's `:Tag` traversal row cites `mcp_server.py:11281` and, until this row, NOTHING read
+    # it (`grep -rn 11281 tests/` -> nothing): the audit document's header promises a reader for
+    # every entry it re-derives, and this one had none. `:11280` is the `g.query(` call; the
+    # document cites the query LITERAL's first line, which is `:11281` (its siblings in the same
+    # paragraph follow the same convention — `sdk.py:31347` is the literal while `:31346` is the call).
+    (_AUDIT, "`mcp_server.py:11281`", _MCP, 11281, "OPTIONAL MATCH (t)<-[:TAGGED]-(q)"),
     (_AUDIT, "`:5654`", _MCP, 5654, "entity_type=entity_type"),
     (_AUDIT, "`:8206`", _MCP, 8206, "entity_type=entity_type"),
     (_AUDIT, "`:6974-6990`", _PI, 6974, "_FULLTEXT_INDEX_LABEL_FIELDS"),
@@ -317,6 +323,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2452`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2463`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:5184`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:11281`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5654`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8206`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6974-6990`'): 1,
@@ -940,7 +947,10 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # 61 -> 62 at the #13854 fix lane: the vector-index-parity plan's reader row was re-pointed to
     # `hosted_backup.py:1548` (a comment) for `_index_has_is_operator()`, which is `:2666` at this head
     # — and that document had NO pin at all, so nothing would have reddened the next rotation of it.
-    assert len(_PINS) == 62
+    # 62 -> 63 after #13879's merge: §2.5's `:Tag` row cites `mcp_server.py:11281`, re-derived from the
+    # pin-head `10730`, and NOTHING read it — the same class as the `:6989` and `hosted_backup.py:2666`
+    # rows above.
+    assert len(_PINS) == 63
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:

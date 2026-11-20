@@ -16963,7 +16963,7 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # heads — `main` made that move, so both ends read identically at `origin/main` and
     # here.
     # ⛔ RE-MEASURED at the `origin/main` `ef1d6f7561` merge (the `#13879` lane's second
-    # re-cut): `main`'s `#13940`/`#13948` re-derived `04-plan.md`'s own row to
+    # re-cut): `main`'s `#13854` (issue `#13826`) re-derived `04-plan.md`'s own row to
     # `sdk.py:28935` while this PR waited, so the file is now NOT in this diff at all —
     # `git diff --numstat origin/main...HEAD -- …/04-plan.md` prints NOTHING — and the
     # `sdk.py:28718` -> `sdk.py:28935` move is MAIN's, not a re-point this branch makes.
