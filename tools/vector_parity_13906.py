@@ -64,10 +64,10 @@ Exit codes: ``0`` parity within policy · ``1`` a required comparison diverged �
 BLIND). ⛔ 3 rather than 1 on purpose: §6's repro recipe is one `echo exit=$?`
 per poison, and a blind harness that shares `1` with "diverged" reads as
 "poison confirmed" — the one bit the falsifier's proof rests on ·
-``4`` cannot run here: the interpreter is below the 3.12 floor, refused by the
-guard above the imports. A second cannot-run code rather than a reuse of ``2``
-because 2 is a state the tool REPORTS after it loaded, and because 0/1/2/3 are
-every one of them a reading §6's one-bit recipe already consumes — 4 is the
+``4`` cannot run here: the #5128 interpreter guard refused (Python < 3.12),
+with the message on stderr — see the guard below `__future__`. A separate code
+from ``2`` on purpose: 2 is a state the tool REPORTS after it loaded, and
+0/1/2/3 are each a reading §6's one-bit recipe already consumes, so 4 is the
 only non-answer left. This table and §6 of the artifact README are the same
 contract and are pinned EQUAL by
 `test_every_exit_code_the_tool_can_take_is_documented_in_both_tables`.
