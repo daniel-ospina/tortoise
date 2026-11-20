@@ -124,7 +124,7 @@ def _seed_baseline(sdk, old_pt_id: str) -> None:
     """The superseded side the hosted write phase receives: an old live
     statement point and an old live Object, both written by an EARLIER
     session (the commit under test only carries the supersession records)."""
-    sdk.create_point("statement", OLD_PT_CONTENT, id=old_pt_id, status="live")
+    sdk._create_point("statement", OLD_PT_CONTENT, id=old_pt_id, status="live")
     sdk.create_entity("object", OLD_OBJECT_NAME, objectKind=OBJECT_KIND)
 
 
@@ -425,7 +425,7 @@ def test_hosted_commit_supersede_prior_already_terminal_is_noop(tmp_path, marker
         # The successor's CONTENT already exists as a dead node, so the
         # branch's create_point(dedup=True) re-keys the successor onto it and
         # the write would raise on the TARGET leg of the same guard.
-        sdk.create_point("statement", NEW_PT_CONTENT, id=new_pt_id)
+        sdk._create_point("statement", NEW_PT_CONTENT, id=new_pt_id)
         _ = g.query(
             "MATCH (p:Point {id:$id}) SET p.status = 'deprecated'",
             params={"id": new_pt_id},
@@ -444,7 +444,7 @@ def test_hosted_commit_supersede_prior_already_terminal_is_noop(tmp_path, marker
         # ``supersede_point`` — whose #7822 guard refuses on ANY terminal row,
         # turning this arm back into the #3366 fail-closed 500. Both probes
         # must therefore classify the whole fan-out.
-        sdk.create_point("statement", OLD_PT_CONTENT + " [dup]", id=old_pt_id)
+        sdk._create_point("statement", OLD_PT_CONTENT + " [dup]", id=old_pt_id)
         dup_rows = g.query(
             "MATCH (p:Point {id:$id}) RETURN ID(p)", params={"id": old_pt_id},
         ).result_set
@@ -566,8 +566,8 @@ def test_hosted_commit_reports_a_dropped_window_fold(tmp_path):
     )
     _seed_baseline(sdk, old_pt_id)
     # The successor's content already exists — and is DEAD.
-    sdk.create_point("statement", NEW_PT_CONTENT, id=new_pt_id, status="live")
-    sdk.retract_point(new_pt_id)
+    sdk._create_point("statement", NEW_PT_CONTENT, id=new_pt_id, status="live")
+    sdk._retract_point(new_pt_id)
     payload, plan = _commit_payload_and_plan(old_pt_id, new_pt_id,
                                             when="2026-01-01")
 

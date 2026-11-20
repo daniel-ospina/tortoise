@@ -788,7 +788,7 @@ class TestBackfillScript:
             # _iter_teams enumeration (TortoiseSDK() → control_plane) — a
             # namespace="registry" SDK would write to registry_control_plane
             # and the backfill would never see the team.
-            created = TortoiseSDK(db_path=db_path).org_create("LegacyCo")
+            created = TortoiseSDK(db_path=db_path)._org_create("LegacyCo")
             org_id, legacy_graph = created["id"], created["graph_name"]
             assert legacy_graph == "org_LegacyCo"
             sdk_legacy = TortoiseSDK(db_path=db_path, namespace=org_id)

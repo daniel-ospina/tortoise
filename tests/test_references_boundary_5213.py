@@ -95,7 +95,7 @@ def test_create_edge_mints_an_unanchored_derivation_link():
     try:
         proj = _fixture(sdk)
         for target_id in ("ev-1", "doc-1"):
-            res = sdk.create_edge("references", "src.txt", target_id)
+            res = sdk._create_edge("references", "src.txt", target_id)
             assert res["edge"] == {
                 "relation": "references", "from": "src.txt", "to": target_id,
             }
@@ -129,7 +129,7 @@ def test_a_bare_escape_hatch_edge_pre_empts_the_provenance_anchor():
         proj = _fixture(sdk)
 
         # (1) escape hatch first → the provenance writer cannot repair it.
-        sdk.create_edge("references", "src.txt", "ev-1")
+        sdk._create_edge("references", "src.txt", "ev-1")
         proj.link_source_to_event("src.txt", "ev-1")
         assert _anchor_exists(proj, "id", "ev-1") is False, (
             "the provenance writer anchored an edge that already existed — the "
@@ -148,7 +148,7 @@ def test_a_bare_escape_hatch_edge_pre_empts_the_provenance_anchor():
         assert _anchor_exists(proj, "id", "ev-1") is True, (
             "the provenance writer did not anchor a new derivation link"
         )
-        sdk.create_edge("references", "src.txt", "ev-1")
+        sdk._create_edge("references", "src.txt", "ev-1")
         assert _anchor_exists(proj, "id", "ev-1") is True, (
             "an idempotent re-MERGE through the escape hatch dropped an existing "
             "anchor — the generic path must be property-free, never destructive"
@@ -171,7 +171,7 @@ def test_the_escape_hatch_offers_no_way_to_supply_the_anchor():
     from tortoise.projection.edges import _EdgeHandlers
 
     entry_points = {
-        "TortoiseSDK.create_edge": TortoiseSDK.create_edge,
+        "TortoiseSDK.create_edge": TortoiseSDK._create_edge,
         "mcp_server.tortoise_create_edge": mcp_server.tortoise_create_edge,
         "_EdgeHandlers.create_edge": _EdgeHandlers.create_edge,
     }

@@ -1035,6 +1035,53 @@ def _require_served_restore_labels(
     return strip, frozenset(strip_edges)
 
 
+#: The labels a coverage-gated ``embedding`` can be attached to, in the order the
+#: writer census scans them. ``:Point``/``:Operator`` are deliberately absent — a
+#: ``:Point``'s vector is RECORD TRUTH (`#5004`) and is never gated.
+_GATED_RESTORE_LABELS: tuple[str, ...] = ("Object", "Subject", "Event", "Source")
+
+
+def _gated_labels_of(node_labels) -> list[str]:
+    """The gated labels a restored node actually carries (order-stable, deduped)."""
+    present = set(node_labels or ())
+    return [label for label in _GATED_RESTORE_LABELS if label in present]
+
+
+def _restore_retires_vector(node_labels) -> bool:
+    """ONE decision for a node: may its restored vector be dropped?
+
+    ⛔ ``all``, NOT ``any`` (#13854 review, F4). The vector serves EVERY gated label
+    the node carries, so it may go only when each of them says stop. ``:Source`` is
+    the shape this rule was first written for — its vector serves both ``document``
+    and ``source``, two populations — and a ``:Subject`` that also carries
+    ``:Object`` is the same node with the same property. The two errors are not
+    symmetric: keeping a redundant vector costs bytes on a rare restore, while
+    dropping one the record does not hold costs the vector — the `#11395` outcome
+    no writer may produce.
+
+    A node with NO gated label answers ``False``, and so does one carrying a label no
+    gate covers — ``:Point``'s vector is RECORD TRUTH (`#5004`) and never gated — or an
+    unreadable/unknown answer, because the predicate behind it is conservative.
+    """
+    from tortoise.projection.entities import _derived_mirror_required
+
+    # ⛔ A NON-GATED label means the vector may not be a mirror at all (#13854 review, P1):
+    # a restored ``:Point:Object`` node carries its Point's RECORD-TRUTH vector, so the
+    # ``object`` counter's stop is not authority over it. Keep it, and report nothing.
+    if set(node_labels or ()) - set(_GATED_RESTORE_LABELS):
+        return False
+    if "Object" in node_labels and _derived_mirror_required("object"):
+        return False
+    if "Subject" in node_labels and _derived_mirror_required("subject"):
+        return False
+    if "Event" in node_labels and _derived_mirror_required("event"):
+        return False
+    if "Source" in node_labels and (_derived_mirror_required("document")
+                                    or _derived_mirror_required("source")):
+        return False
+    return bool(_gated_labels_of(node_labels))
+
+
 def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
                   allow_unserved_vectors: bool = False) -> dict:
     """Rebuild the graph from a logical dump into graph handle ``g``.
@@ -1174,6 +1221,91 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
      strip_edge_vector_indexes) = _require_served_restore_labels(
         node_rows, edge_rows,
         allow_unserved_vectors=allow_unserved_vectors)
+
+    # ── #13626: the WRITE-STOP for the coverage-gated labels' vectors ──
+    # A restore re-materialises a dump, so it is a WRITER of `embedding` on every label it
+    # carries — the census names it for `:Object`, `:Subject`, `:Event` and `:Source`
+    # (`tortoise.embed_writer_register` declares `stores` for all five), and a strip that
+    # ignored it would be undone by the next disaster-recovery restore.
+    #
+    # ⛔ WHY THIS DOES NOT WEAKEN THE RESTORE. `mirror_required` answers True in EVERY
+    # unknown — an unarmed deployment, an unresolvable record DSN, and (the case that
+    # matters at DR time) NO TENANT on this call at all. A restore is a maintenance verb,
+    # not a request, so it normally holds no tenant scope and the gate answers "keep the
+    # vector": the dump is re-materialised verbatim, exactly as before. The gate can only
+    # answer False when THIS tenant's record has proved it holds the label's vectors, i.e.
+    # when the graph copy is redundant and the record remains the serving store — and
+    # even then only the vector is dropped: the node, its labels and every other property
+    # are written, and the drop is REPORTED (below/returned) rather than silent.
+    #
+    # ⛔ `:Source` ASKS BOTH OF ITS TYPES AND DROPS ONLY WHEN BOTH SAY STOP. `:Source` is
+    # one node whose vector serves two `entity_type`s (`document` and `source`), and the
+    # record's two counts are taken over two different populations, so either answer alone
+    # is evidence about only half of it. The conservative combination is the safe one here
+    # because the two errors are not symmetric: keeping a redundant vector costs bytes on a
+    # restore that happens rarely, while dropping one the record does not hold costs the
+    # vector — the `#11395` outcome no writer may produce.
+    #
+    # ⛔ AND THAT IS THE RULE FOR EVERY CO-LABELLED NODE, NOT ONLY `:Source` (#13854 review,
+    # F4). A `:Subject` can also carry `:Object` (`sdk.py`'s `_sibling`), and the SAME
+    # argument applies verbatim: the one vector serves both halves, so either answer alone
+    # is evidence about one half. The pops below used to be four INDEPENDENT `if`s — i.e.
+    # OR across the labels a node carries, where every other writer of this contract drops
+    # on AND — so a restored `:Object:Subject` node with `object` verified and `subject`
+    # unverified came back with no graph vector while the record may not hold one, the
+    # exact "vector in neither store" state `_update_entity`'s per-label rebinding exists
+    # to prevent. `_restore_retires_vector` is that ONE decision.
+    #
+    # ⛔ THE VECTOR IS POPPED FROM `node_rows` ITSELF, not from a copy, because TWO write
+    # passes read these rows: the CREATE loop (which stores `props` verbatim, including a
+    # plain-list `embedding`) and the `vecf32` pass. A decision taken in one of them would
+    # leave the other storing the vector — the strip-race this whole change closes, one
+    # pass over. Popping here makes the two passes agree BY CONSTRUCTION, and an absent
+    # vector makes the CREATE write no property and drops the row from the `vecf32` pass.
+    retired_vectors = 0
+    retired_vector_labels: set[str] = set()
+    # The ONE predicate, asked through the fold's helper so an unreadable arming module
+    # answers "keep the vector" rather than taking a DR verb down.
+    from tortoise.projection.entities import _derived_mirror_required
+    for _node_id, node_labels, node_props in node_rows:
+        if not isinstance(node_props.get(EMBEDDING_PROPERTY), list):
+            continue
+        # ⛔ ONE DECISION FOR THE NODE, THEN the per-label arms (#13854 review, F4). The
+        # guard is `all(...)` over EVERY gated label this node carries; the arms below it
+        # are the census's grammar — `tools/strip_graph_entity_vectors.py` reads a
+        # write-stop as `if <THIS label's ask>: pop("embedding")`, so a shape that only
+        # ASKS inside a helper would be a writer the census must report as STILL EMITTING.
+        # They therefore ask once more each, and the duplication can only ever be
+        # fail-CLOSED: a predicate that flipped between the two asks on one node would skip
+        # a retirement, never take one the guard refused.
+        if not _restore_retires_vector(node_labels):
+            continue
+        # ⛔ THE LITERAL `"embedding"`, not this module's `EMBEDDING_PROPERTY` — the
+        # strip's writer census reads the removed property BY NAME
+        # (`tools/strip_graph_entity_vectors.py::_removes_embedding` accepts `pop("embedding")`
+        # and does not resolve a constant), and a form it cannot read is a writer it must
+        # report as STILL EMITTING — i.e. a label refused a strip it is entitled to.
+        if "Object" in node_labels and not _derived_mirror_required("object"):
+            node_props.pop("embedding", None)
+        if "Subject" in node_labels and not _derived_mirror_required("subject"):
+            node_props.pop("embedding", None)
+        if "Event" in node_labels and not _derived_mirror_required("event"):
+            node_props.pop("embedding", None)
+        if ("Source" in node_labels
+                and not _derived_mirror_required("document")
+                and not _derived_mirror_required("source")):
+            node_props.pop("embedding", None)
+        if not isinstance(node_props.get(EMBEDDING_PROPERTY), list):
+            retired_vectors += 1
+            # ⛔ THE LABELS THAT ANSWERED STOP, not every label on the node (#13854
+            # review, P3). The list is operator-facing (the result field and the log
+            # line), so reporting `Point`/`Subject` for a `:Subject:Object` node whose
+            # only stop was `object` is a wrong diagnosis after a DR restore even though
+            # no stored byte was wrong. The guard above is the reason this set is exact:
+            # a node that retires here had EVERY gated label it carries answer stop, so
+            # this set is non-empty by construction — no placeholder fallback, which would
+            # only ever MASK a divergence between the guard and this reporter.
+            retired_vector_labels.update(_gated_labels_of(node_labels))
 
     # The function REBUILDS a graph — it does not merge into one. Rejecting a
     # dirty target keeps the returned counts coherent (they describe the dump's
@@ -1477,6 +1609,21 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
         # nothing was dropped (review round 7, finding 4).
         result["dropped_vectors"] = dropped_vectors
         result["dropped_vector_labels"] = dropped_vector_labels
+    if retired_vectors:
+        # #13626: the coverage gate answered "the record already holds these", so the
+        # restore kept every node and its other properties and did not re-create the
+        # vector. Returned AND logged, exactly as `dropped_edges`/`dropped_vectors` are:
+        # a caller reading only `nodes`/`edges` must not be the only record of it. These
+        # are deliberately NOT folded into `dropped_vectors` — that key means "a vector no
+        # read path serves, dropped by the repair-on-read path", whose remedy (relabel +
+        # re-embed) is the opposite of this one (the vector is SERVED, from the record).
+        result["retired_vectors"] = retired_vectors
+        result["retired_vector_labels"] = sorted(retired_vector_labels)
+        logger.info(
+            "restore_graph: %d node vector(s) on %s NOT re-created — the record has "
+            "proved it holds this tenant's vectors for those labels (#13610 option 2); "
+            "the nodes and all other properties were restored",
+            retired_vectors, sorted(retired_vector_labels))
     return result
 
 

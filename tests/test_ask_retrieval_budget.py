@@ -522,10 +522,10 @@ class _FakeSDK:
     def _get_proj(self):
         return _FakeProj()
 
-    def tortoise_fts_query(self, query, **kwargs):
+    def _tortoise_fts_query(self, query, **kwargs):
         self.query_kwargs = kwargs
         return _hits(self.n_hits, words=4000)
-    def annotate_ask_hits(self, hits, **kwargs):
+    def _annotate_ask_hits(self, hits, **kwargs):
         return [dict(h) for h in hits]
 
 
@@ -643,12 +643,12 @@ class _BenchFakeSDK:
     def __init__(self, n_hits: int = 400):
         self.n_hits = n_hits
 
-    def tortoise_fts_query(self, query, **kwargs):
+    def _tortoise_fts_query(self, query, **kwargs):
         content = (_BENCH_WORDS * 4)[:590]
         return [{"id": f"h{i}", "content": content, "session_id": f"s{i}"}
                 for i in range(self.n_hits)]
 
-    def annotate_ask_hits(self, hits, **kwargs):
+    def _annotate_ask_hits(self, hits, **kwargs):
         return [dict(h) for h in hits]
 
 
@@ -723,9 +723,9 @@ class _KwargRecordingSDK(_BenchFakeSDK):
         super().__init__(n_hits=n_hits)
         self.calls: list[dict] = []
 
-    def tortoise_fts_query(self, query, **kwargs):
+    def _tortoise_fts_query(self, query, **kwargs):
         self.calls.append(kwargs)
-        return super().tortoise_fts_query(query, **kwargs)
+        return super()._tortoise_fts_query(query, **kwargs)
 
 
 def test_ask_lane_pins_the_selection_instant_to_the_question_date(monkeypatch):

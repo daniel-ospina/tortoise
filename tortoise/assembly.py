@@ -4517,7 +4517,7 @@ def _decorate_real_rows(sdk, hits: list[dict]) -> list[dict]:
     """
     import contextlib as _contextlib
     with _contextlib.suppress(Exception):
-        hits = sdk.annotate_ask_hits(hits)
+        hits = sdk._annotate_ask_hits(hits)
     with _contextlib.suppress(Exception):
         from tortoise.search_engine import fetch_point_epistemic_state
         ids = [h.get("id") for h in hits if h.get("id")]

@@ -149,7 +149,7 @@ def two_tenant_lane(tmp_path, monkeypatch):
     reg = TortoiseSDK(db_path=db_path, namespace="registry")
     tenants: dict[str, dict] = {}
     for name in ("a", "b"):
-        org = reg.org_create(f"org-{name}")
+        org = reg._org_create(f"org-{name}")
         # `org_update` was one of the 26 methods #4282 deleted. It was SETUP
         # here and no assertion in either leg consumes a quota cap, so the
         # line is dropped rather than re-aimed at the registry graph: a cap

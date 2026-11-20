@@ -126,9 +126,9 @@ def fresh_sdk():
 
 
 def make_point(sdk, content, tier=None):
-    p = sdk.create_point("statement", content, status="live", dedup=False)
+    p = sdk._create_point("statement", content, status="live", dedup=False)
     if tier is not None:
-        sdk.set_point_baseline(p["id"], *tier)
+        sdk._set_point_baseline(p["id"], *tier)
     return p
 
 
@@ -136,7 +136,7 @@ def make_impl_chain(sdk, label="claim"):
     """T0 source S -[IMPL]-> unevidenced claim C. Returns (src, claim, op_id)."""
     src = make_point(sdk, f"T0 source for {label}", tier=(10, 1))
     claim = make_point(sdk, f"Downstream {label}")
-    op = sdk.create_operator("IMPL", src["id"], [claim["id"]])
+    op = sdk._create_operator("IMPL", src["id"], [claim["id"]])
     return src, claim, op["id"]
 
 
@@ -199,7 +199,7 @@ def _impl_settled(rating):
     try:
         _src, claim, op_id = make_impl_chain(sdk)
         if rating is not None:
-            sdk.annotate_operator(op_id, **rating)
+            sdk._annotate_operator(op_id, **rating)
         return resolved_weight(sdk, op_id, claim["id"]), get_conf(run_ep(sdk), claim["id"])
     finally:
         sdk.close()
@@ -212,10 +212,10 @@ def _nand_settled(rating):
         src = make_point(sdk, "T0 supporting source", tier=(10, 1))
         attacker = make_point(sdk, "T0 attacking source", tier=(10, 1))
         claim = make_point(sdk, "Contested claim")
-        sdk.create_operator("IMPL", src["id"], [claim["id"]])
-        nand = sdk.create_operator("NAND", attacker["id"], [claim["id"]])
+        sdk._create_operator("IMPL", src["id"], [claim["id"]])
+        nand = sdk._create_operator("NAND", attacker["id"], [claim["id"]])
         if rating is not None:
-            sdk.annotate_operator(nand["id"], **rating)
+            sdk._annotate_operator(nand["id"], **rating)
         return resolved_weight(sdk, nand["id"], claim["id"]), get_conf(run_ep(sdk), claim["id"])
     finally:
         sdk.close()
@@ -228,10 +228,10 @@ def _contested_settled(reinforce):
         src = make_point(sdk, "T0 supporting source", tier=(10, 1))
         attacker = make_point(sdk, "T0 attacking source", tier=(10, 1))
         claim = make_point(sdk, "Contested claim")
-        impl = sdk.create_operator("IMPL", src["id"], [claim["id"]])
-        sdk.create_operator("NAND", attacker["id"], [claim["id"]])
+        impl = sdk._create_operator("IMPL", src["id"], [claim["id"]])
+        sdk._create_operator("NAND", attacker["id"], [claim["id"]])
         if reinforce:
-            sdk.annotate_operator(impl["id"], **BEST)
+            sdk._annotate_operator(impl["id"], **BEST)
         return get_conf(run_ep(sdk), claim["id"])
     finally:
         sdk.close()

@@ -49,9 +49,9 @@ def _sdk(tmp_path: Path) -> TortoiseSDK:
 
 def _operator(sdk: TortoiseSDK) -> str:
     """Two Points and the operator bridging them; returns the operator id."""
-    a = sdk.create_point("evidence", "6131 probe point A")
-    b = sdk.create_point("evidence", "6131 probe point B")
-    op = sdk.create_operator("IMPL", source_id=a["id"], target_ids=[b["id"]])
+    a = sdk._create_point("evidence", "6131 probe point A")
+    b = sdk._create_point("evidence", "6131 probe point B")
+    op = sdk._create_operator("IMPL", source_id=a["id"], target_ids=[b["id"]])
     assert op["is_operator"] is True, op
     return op["id"]
 
@@ -61,14 +61,14 @@ def test_operator_is_a_point_so_update_relabels_it_in_place(tmp_path: Path) -> N
     sdk = _sdk(tmp_path)
     op_id = _operator(sdk)
 
-    out = sdk.update(op_id, label="competesWith")
+    out = sdk._update(op_id, label="competesWith")
 
     # It stays an OPERATOR — i.e. it took the Point arm, not the entity arm.
     assert out.get("is_operator") is True, out
     assert out.get("op_type") == "IMPL", out
     assert out.get("label") == "competesWith", out
     # ...and the edit is durable, not just echoed back.
-    assert (sdk.get_point(op_id) or {}).get("label") == "competesWith"
+    assert (sdk._get_point(op_id) or {}).get("label") == "competesWith"
 
 
 def test_operator_is_deletable_through_the_generic_verb(tmp_path: Path) -> None:
@@ -76,17 +76,17 @@ def test_operator_is_deletable_through_the_generic_verb(tmp_path: Path) -> None:
     sdk = _sdk(tmp_path)
     op_id = _operator(sdk)
 
-    assert sdk.delete(op_id) is True
-    assert not sdk.get_point(op_id), "the operator survived delete()"
+    assert sdk._delete(op_id) is True
+    assert not sdk._get_point(op_id), "the operator survived delete()"
 
 
 def test_control_a_plain_point_still_deletes_through_the_same_verb(tmp_path: Path) -> None:
     """Control: makes the operator claims non-vacuous — the verb was not narrowed."""
     sdk = _sdk(tmp_path)
-    a = sdk.create_point("evidence", "6131 plain control point")
+    a = sdk._create_point("evidence", "6131 plain control point")
 
-    assert sdk.delete(a["id"]) is True
-    assert not sdk.get_point(a["id"])
+    assert sdk._delete(a["id"]) is True
+    assert not sdk._get_point(a["id"])
 
 
 def test_the_readable_surfaces_name_the_generic_verbs() -> None:
@@ -101,22 +101,22 @@ def test_the_readable_surfaces_name_the_generic_verbs() -> None:
     use.
     """
     for fn, needle in (
-        (TortoiseSDK.delete, "operator"),
+        (TortoiseSDK._delete, "operator"),
         # NOT the bare word "operator": that matches vacuously elsewhere in
         # `update.__doc__` (`create_operator`, `<operator_id>`), so deleting the
         # whole operator paragraph left all five tests GREEN (review cycle 3,
         # P2). Pin the distinctive CLAIM instead of a word that happens to recur.
-        (TortoiseSDK.update, "edits an existing operator edge in place"),
-        (TortoiseSDK.update, "belongs to the operator-mutation vocabulary"),
-        (TortoiseSDK.update, "list_relations"),
+        (TortoiseSDK._update, "edits an existing operator edge in place"),
+        (TortoiseSDK._update, "belongs to the operator-mutation vocabulary"),
+        (TortoiseSDK._update, "list_relations"),
         # The DISCLOSURE itself, not just the pointer to the vocabulary. Pinning
         # only "list_relations" let the P2 regression return: a reviewer replaced
         # this whole sentence with a neutral one that still said
         # "list_relations()" and all five tests stayed green. These two needles
         # pin the two facts the disclosure exists to state — that no declaredness
         # check runs here, and that the label is therefore stored silently.
-        (TortoiseSDK.update, "no declaredness check"),
-        (TortoiseSDK.update, "installs the label silently"),
+        (TortoiseSDK._update, "no declaredness check"),
+        (TortoiseSDK._update, "installs the label silently"),
     ):
         # Collapse whitespace before matching: a docstring is wrapped to the
         # line length, so a needle that spans a wrap ("performs no\n        declaredness

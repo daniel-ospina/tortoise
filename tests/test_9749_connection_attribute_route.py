@@ -108,7 +108,7 @@ def test_promoted_point_pair_refuses_the_attribute(sdk, key, value):
 
     # Phase 1 must also be ZERO-mutation, and Phase 2 must agree.
     with pytest.raises(BundleValidationError) as exc:
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert key in exc.value.violations[0]["message"]
     assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == 0, (
         "the refusal must not commit the bundle's points"
@@ -125,7 +125,7 @@ def test_explicit_operator_spelling_refuses_the_attribute(sdk):
     msg = violations[0]["message"]
     assert "confidence" in msg and "operator route" in msg, msg
     with pytest.raises(BundleValidationError):
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
     assert _count(sdk, "MATCH (n:Point) RETURN count(n)") == 0
 
 
@@ -143,7 +143,7 @@ def test_mitigation_route_refuses_the_attribute_too(sdk):
 def test_a_point_pair_without_the_attributes_still_ingests(sdk):
     """The refusal is scoped to the attributes: the plain promoted spelling
     keeps working (it reifies and warns, #8499)."""
-    res = sdk.ingest(_points_pair())
+    res = sdk._ingest(_points_pair())
     assert res["created"]["connections"] == 1
     assert _count(sdk, "MATCH (n:Point {is_operator:true}) RETURN count(n)") == 1
     assert any(w.startswith("point_mediated_route:")
@@ -161,7 +161,7 @@ def test_direct_route_writes_confidence_and_weight(sdk):
                             "direction": "unidirectional"})
     assert sdk._validate_bundle(bundle) == []
 
-    sdk.ingest(bundle)
+    sdk._ingest(bundle)
 
     rows = _g(sdk).query(
         "MATCH (a:Object {name:'Object A'})-[r:IMPL]->(b:Object {name:'Object B'}) "
@@ -191,7 +191,7 @@ def test_direct_route_with_subject_pair_also_stores_the_value(sdk):
                          "confidence": 0.4}],
     }
     assert sdk._validate_bundle(bundle) == []
-    sdk.ingest(bundle)
+    sdk._ingest(bundle)
     assert _count(
         sdk,
         "MATCH (:Subject {name:'Subject A'})-[r:IMPL]->(:Subject {name:'Subject B'}) "
@@ -206,7 +206,7 @@ def test_direct_route_range_check_still_applies(sdk):
     assert len(violations) == 1, violations
     assert "must be a number in [0, 1]" in violations[0]["message"]
     with pytest.raises(BundleValidationError):
-        sdk.ingest(_objects_pair({"confidence": 1.7}))
+        sdk._ingest(_objects_pair({"confidence": 1.7}))
 
 
 def test_direct_route_attributes_survive_rebuild(tmp_path):
@@ -219,7 +219,7 @@ def test_direct_route_attributes_survive_rebuild(tmp_path):
     sdk = TortoiseSDK(os.path.join(str(tmp_path), "durable.db"),
                       event_log_path=str(events / "events.jsonl"))
     try:
-        sdk.ingest(_objects_pair({"confidence": 0.6, "weight": 0.3,
+        sdk._ingest(_objects_pair({"confidence": 0.6, "weight": 0.3,
                                   "label": "supports"}))
         query = (
             "MATCH (:Object {name:'Object A'})-[r:IMPL]->"

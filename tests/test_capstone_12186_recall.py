@@ -876,7 +876,7 @@ def test_the_user_door_note_states_the_arguments_the_doors_do_not_default_to(art
     from tortoise.sdk import TortoiseSDK
 
     sdk_entity = inspect.signature(
-        TortoiseSDK.tortoise_fts_query).parameters["entity_type"].default
+        TortoiseSDK._tortoise_fts_query).parameters["entity_type"].default
     assert sdk_entity == door_entity, (
         f"the REST door inherits `entity_type` from the SDK ({sdk_entity!r}), which no "
         f"longer matches the MCP door ({door_entity!r}) — the note's \"both doors "
@@ -1026,7 +1026,7 @@ def test_the_arms_pass_the_arguments_the_door_notes_say_they_do():
     """
     def _record(arms_seen: list, door_calls: list):
         class _Sdk:
-            def tortoise_fts_query(self, query, **kwargs):
+            def _tortoise_fts_query(self, query, **kwargs):
                 door_calls.append({"query": query, **kwargs})
                 return []
 

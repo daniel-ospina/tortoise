@@ -172,9 +172,9 @@ def _prepare() -> None:
 
 
 def _fresh_point(sdk, key: str, content: str) -> str:
-    point = sdk.create_point("claim", content, key=key, dedup=False)
+    point = sdk._create_point("claim", content, key=key, dedup=False)
     point_id = point["id"] if isinstance(point, dict) else point
-    sdk.update_point(point_id, status="live")
+    sdk._update_point(point_id, status="live")
     return point_id
 
 
@@ -184,7 +184,7 @@ def test_parity_a_record_served_read_equals_the_cache_answer():
     sdk = _sdk()
     point_id = _fresh_point(sdk, "T7970-PARITY",
                             "the record serves anchored reads")
-    cache_props = sdk.get_point(point_id)
+    cache_props = sdk._get_point(point_id)
 
     record_props = _write_and_read_record(point_id, cache_props)
     diff = rs.parity_difference(cache_props, record_props, label="Point")
@@ -208,13 +208,13 @@ def test_s9_the_record_answers_with_the_cache_destroyed():
     _prepare()
     sdk = _sdk()
     point_id = _fresh_point(sdk, "T7970-S9", "the record outlives the cache")
-    cache_props = sdk.get_point(point_id)
+    cache_props = sdk._get_point(point_id)
     record_props = _write_and_read_record(point_id, cache_props)
 
     # DESTROY the cache's copy. The graph is now unable to answer this id.
     sdk._get_proj().g.query(
         "MATCH (p:Point {id:$id}) DETACH DELETE p", params={"id": point_id})
-    assert sdk.get_point(point_id) == {}, "the cache copy was not destroyed"
+    assert sdk._get_point(point_id) == {}, "the cache copy was not destroyed"
 
     def _cache_was_touched():  # pragma: no cover - must never run here
         raise AssertionError("the cache was consulted while serving S9")

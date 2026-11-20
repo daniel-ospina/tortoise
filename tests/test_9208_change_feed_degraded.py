@@ -165,7 +165,7 @@ def test_a_refused_store_write_is_a_visible_loss_not_an_empty_poll(
     sdk = armed_sdk
     _refuse_the_store_leg(monkeypatch)
 
-    point = sdk.create_point("statement", "the change feed write is refused")
+    point = sdk._create_point("statement", "the change feed write is refused")
 
     # The LOSS, established before the visibility is judged: the mutation landed
     # (so this is not a failed write) and the store holds nothing (so the event
@@ -214,7 +214,7 @@ def test_the_row_write_swallow_is_not_silent_either(armed_sdk, monkeypatch):
 
     monkeypatch.setattr(_GuardedGraph, "query", query)
 
-    point = sdk.create_point("statement", "the append itself is refused")
+    point = sdk._create_point("statement", "the append itself is refused")
 
     assert _point_landed(sdk, point["id"]), (
         "best-effort is the contract: `_emit_event` must not crash the mutation")
@@ -288,7 +288,7 @@ def test_a_healthy_feed_answers_and_leaves_a_row(armed_sdk):
     """
     sdk = armed_sdk
 
-    point = sdk.create_point("statement", "the change feed survives the armed door")
+    point = sdk._create_point("statement", "the change feed survives the armed door")
 
     assert _graph_events(sdk) == 1, (
         "one create_point must leave exactly one :GraphEvent row")
@@ -321,7 +321,7 @@ def test_the_refusal_tells_the_OPERATOR_what_to_do_not_the_caller(
         "a healthy process reports NO degraded feeds")
 
     _refuse_the_store_leg(monkeypatch)
-    sdk.create_point("statement", "lost while the store leg was refused")
+    sdk._create_point("statement", "lost while the store leg was refused")
 
     rows = event_store.degraded_graphs()
     assert len(rows) == 1, rows
@@ -363,11 +363,11 @@ def test_a_later_success_does_not_un_degrade_the_feed(armed_sdk, monkeypatch):
     """
     sdk = armed_sdk
     _refuse_the_store_leg(monkeypatch)
-    sdk.create_point("statement", "lost while the store leg was refused")
+    sdk._create_point("statement", "lost while the store leg was refused")
     assert event_store.degraded(sdk._get_proj()) is not None
 
     monkeypatch.undo()  # the refusal stops: the store is healthy again
-    sdk.create_point("statement", "written after recovery")
+    sdk._create_point("statement", "written after recovery")
     assert _graph_events(sdk) == 1, "the recovered write must land"
 
     with pytest.raises(ChangeFeedDegraded):
@@ -412,7 +412,7 @@ def test_an_unverifiable_append_is_reported_as_unverified_not_as_a_loss(
 
     monkeypatch.setattr(_GuardedGraph, "query", query)
 
-    sdk.create_point("statement", "append and read-back both fail")
+    sdk._create_point("statement", "append and read-back both fail")
 
     state = event_store.degraded(sdk._get_proj())
     assert state is not None
@@ -498,7 +498,7 @@ def test_the_emit_hook_never_raises_even_when_the_recorder_fails(
 
     monkeypatch.setattr(event_store, "record_degraded", explode)
 
-    point = sdk.create_point("statement", "the recorder explodes")
+    point = sdk._create_point("statement", "the recorder explodes")
     assert _point_landed(sdk, point["id"]), (
         "a broken recorder must not turn a landed mutation into a reported "
         "failure")
@@ -807,11 +807,11 @@ def test_a_dead_feed_on_one_graph_does_not_refuse_another(tmp_path, monkeypatch)
             "per-store key from a per-graph one")
 
         _refuse_the_store_leg(monkeypatch)
-        dead.create_point("statement", "lost on the degraded graph")
+        dead._create_point("statement", "lost on the degraded graph")
         assert event_store.degraded(dead._get_proj()) is not None
         monkeypatch.undo()  # tenant_b's graph must see a WORKING store leg
 
-        point = healthy.create_point("statement", "this graph's feed is fine")
+        point = healthy._create_point("statement", "this graph's feed is fine")
         assert _graph_events(healthy) == 1
         reply = healthy.poll_events()
         assert [e["type"] for e in reply["events"]] == ["PointAdded"]
@@ -864,11 +864,11 @@ def test_two_stores_under_one_graph_name_do_not_share_a_state(tmp_path,
         assert dead._get_proj()._path != healthy._get_proj()._path
 
         _refuse_the_store_leg(monkeypatch)
-        dead.create_point("statement", "lost in the first store")
+        dead._create_point("statement", "lost in the first store")
         assert event_store.degraded(dead._get_proj()) is not None
         monkeypatch.undo()
 
-        healthy.create_point("statement", "fine in the second store")
+        healthy._create_point("statement", "fine in the second store")
         assert _graph_events(healthy) == 1
         assert [e["type"] for e in healthy.poll_events()["events"]] == [
             "PointAdded"]

@@ -594,9 +594,9 @@ def superseded(tmp_path):
     events.mkdir()
     sdk = TortoiseSDK(str(tmp_path / "j7369.db"),
                       event_log_path=str(events / "events.jsonl"))
-    old = sdk.create_point("statement", "the old claim")["id"]
-    new = sdk.create_point("statement", "the new claim")["id"]
-    sdk.supersede_point(old, new)
+    old = sdk._create_point("statement", "the old claim")["id"]
+    new = sdk._create_point("statement", "the new claim")["id"]
+    sdk._supersede_point(old, new)
     yield events, sdk, old, new
     sdk.close()
 

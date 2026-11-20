@@ -1711,7 +1711,7 @@ class TestTheThirdDoorExists:
     def test_create_direct_edge_takes_a_declared_label(self):
         from tortoise.sdk import TortoiseSDK
 
-        params = inspect.signature(TortoiseSDK.create_direct_edge).parameters
+        params = inspect.signature(TortoiseSDK._create_direct_edge).parameters
         assert "label" in params, "the direct door takes the declared predicate, so it IS a declared-relation writer"
         assert "from_kind" not in params and "to_kind" not in params
 
@@ -1719,7 +1719,7 @@ class TestTheThirdDoorExists:
         """Nothing at this door inspects kinds today — the gate is what #11656 adds there."""
         from tortoise.sdk import TortoiseSDK
 
-        source = inspect.getsource(TortoiseSDK.create_direct_edge)
+        source = inspect.getsource(TortoiseSDK._create_direct_edge)
         for absent in ("kind_pair_verdict", "undeclared_relation", "expand_kind"):
             assert absent not in source, (
                 f"`{absent}` now appears in create_direct_edge — re-derive §1.2: either the gate landed "
@@ -1741,12 +1741,12 @@ class TestTheThirdDoorExists:
 
         linking = inspect.getsource(TortoiseSDK.link_entities)
         assert 'upper in ("IMPL", "NAND") and operator is not True' in linking
-        assert "label=label" in _call_window(linking, "self.create_direct_edge("), (
+        assert "label=label" in _call_window(linking, "self._create_direct_edge("), (
             "`link_entities` no longer passes the caller's `label` into `create_direct_edge` — the door would "
             "then be reachable with no declared predicate, and §1.1's 33-of-35 direct-shape count is void"
         )
 
-        ingest = inspect.getsource(TortoiseSDK.ingest)
+        ingest = inspect.getsource(TortoiseSDK._ingest)
         # ⛔ LEADING NEWLINE, not a bare substring. `sdk.py` also carries
         # `if _request_route == "direct" and _route == "operator":` — `_request_route` ENDS IN `_route`,
         # so the needle matches INSIDE it (not at the end of the line) — so a bare `in` check stayed green
@@ -1758,7 +1758,7 @@ class TestTheThirdDoorExists:
             "`_route == \"direct\"` at a statement boundary. A substring test here is satisfied by the "
             "`_request_route` decoy above it, which is why this anchor is newline-delimited"
         )
-        assert "label=label" in _call_window(ingest, "self.create_direct_edge("), (
+        assert "label=label" in _call_window(ingest, "self._create_direct_edge("), (
             "`ingest`'s direct route no longer passes `label` into `create_direct_edge` — the second public "
             "path to the door is gone and the delta §1.1 counts would have to be re-derived"
         )
@@ -2257,7 +2257,7 @@ class TestTheDocsAreDiscoverableAndResolve:
         )
         # The control: a citation that DOES resolve must stay clean, or the row above would pass on any input.
         assert _unresolved_python_citations(
-            "see `sdk.py::TortoiseSDK.create_direct_edge`", "synthetic"
+            "see `sdk.py::TortoiseSDK._create_direct_edge`", "synthetic"
         ) == []
         # …and the citation FORM itself, quoted as prose in both docs, is excused by NAME, not by shape.
         assert _unresolved_python_citations("cite as `path.py::symbol`", "synthetic") == []

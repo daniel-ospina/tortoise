@@ -47,9 +47,9 @@ def _plant_claim(sdk, content: str, *, alpha: float, beta: float,
                  kind: str = "statement") -> dict:
     """Plant one measured belief point (kind statement/decision) + a support
     edge + persisted posterior."""
-    ev = sdk.create_point("evidence", f"{content} [supporting record]")
-    claim = sdk.create_point(kind, content)
-    sdk.create_operator("IMPL", ev["id"], [claim["id"]])
+    ev = sdk._create_point("evidence", f"{content} [supporting record]")
+    claim = sdk._create_point(kind, content)
+    sdk._create_operator("IMPL", ev["id"], [claim["id"]])
     _set_posterior(sdk, claim["id"], alpha, beta)
     _set_posterior(sdk, ev["id"], 12.0, 1.0)
     return {"claim": claim["id"], "support": ev["id"]}
@@ -62,8 +62,8 @@ def _plant_contested(sdk, content: str, counter_content: str, *,
     """Plant a CONTESTED-but-believed claim (α=2 β=0.7 → mean .74, variance
     .052 > CONTESTED_VARIANCE_THRESHOLD) with an active NAND counter."""
     planted = _plant_claim(sdk, content, alpha=alpha, beta=beta, kind=kind)
-    counter = sdk.create_point("statement", counter_content)
-    sdk.create_operator("NAND", counter["id"], [planted["claim"]])
+    counter = sdk._create_point("statement", counter_content)
+    sdk._create_operator("NAND", counter["id"], [planted["claim"]])
     _set_posterior(sdk, counter["id"], counter_alpha, counter_beta)
     return {**planted, "counter": counter["id"]}
 
@@ -71,11 +71,11 @@ def _plant_contested(sdk, content: str, counter_content: str, *,
 def _plant_superseded(sdk, old_content: str, new_content: str) -> dict:
     """Plant a REAL superseded chain via supersede_point (CORRECTS edge,
     status stamp, validTo) with posteriors."""
-    old = sdk.create_point("statement", old_content)
-    new = sdk.create_point("statement", new_content)
+    old = sdk._create_point("statement", old_content)
+    new = sdk._create_point("statement", new_content)
     _set_posterior(sdk, old["id"], 4.0, 1.0)
     _set_posterior(sdk, new["id"], 12.0, 1.0)
-    sdk.supersede_point(old["id"], new["id"])
+    sdk._supersede_point(old["id"], new["id"])
     return {"old": old["id"], "successor": new["id"]}
 
 
@@ -104,7 +104,7 @@ def test_contested_belief_surfaces_flag_first_with_variance_and_nand():
         {"role": "assistant", "content": "Let me check."},
         {"role": "user", "content": "Has it shipped?"},
     ]
-    r = sdk.volunteer_context(window, session_id="sess_acme", why=True)
+    r = sdk._volunteer_context(window, session_id="sess_acme", why=True)
     assert r["degraded_reason"] is None
     assert set(r) == {"pointers", "why", "surfaced", "block", "degraded_reason"}
     pids = [p["id"] for p in r["pointers"]]
@@ -129,7 +129,7 @@ def test_contested_belief_surfaces_flag_first_with_variance_and_nand():
     assert f"point/{planted['claim']}" in r["block"]
     # Deterministic + stateless (0 new nodes).
     count_before = _point_count(sdk)
-    r2 = sdk.volunteer_context(window, session_id="sess_acme", why=True)
+    r2 = sdk._volunteer_context(window, session_id="sess_acme", why=True)
     assert r2 == r
     assert _point_count(sdk) == count_before
 
@@ -144,7 +144,7 @@ def test_superseded_predecessor_never_surfaces_as_current():
     # Window touches the OLD claim's content directly.
     window = [{"role": "user", "content": "What was that tier pricing of "
                                           "ninety nine dollars about?"}]
-    r = sdk.volunteer_context(window, session_id="sess_tier", why=True)
+    r = sdk._volunteer_context(window, session_id="sess_tier", why=True)
     # The superseded predecessor may surface ONLY flagged superseded — it
     # never reads as the current belief; its "see what changed" dig-deeper
     # pointer names the successor.
@@ -164,7 +164,7 @@ def test_superseded_predecessor_never_surfaces_as_current():
             assert entry["supersession"]["status"] != "superseded"
     # Current-view query about the NEW belief surfaces the LIVE successor —
     # never the old claim as current.
-    r2 = sdk.volunteer_context(
+    r2 = sdk._volunteer_context(
         [{"role": "user", "content": "What does tier pricing cost now?"}],
         session_id="sess_tier2", why=False)
     live = [p["id"] for p in r2["pointers"]]
@@ -180,14 +180,14 @@ def test_clean_empty_never_degradation_and_below_notability():
     sdk = _fresh_sdk()
     # Fresh graph: single UNMEASURED point (neutral 0.5 — below the 0.7
     # gate): the reflex must stay silent, clean-empty, never degraded.
-    sdk.create_point("statement", "Orion migration plan draft v1")
-    r = sdk.volunteer_context(
+    sdk._create_point("statement", "Orion migration plan draft v1")
+    r = sdk._volunteer_context(
         [{"role": "user", "content": "What is the Orion migration plan?"}],
         session_id="sess_fresh", why=True)
     assert r == {"pointers": [], "why": [], "surfaced": [],
                  "block": "", "degraded_reason": None}
     # Courtesy turn — silent without noise.
-    r2 = sdk.volunteer_context(
+    r2 = sdk._volunteer_context(
         [{"role": "user", "content": "Thanks, that helps a lot."}])
     assert r2["degraded_reason"] is None and r2["pointers"] == []
 
@@ -446,9 +446,9 @@ def test_contested_but_relevant_boost_clears_gate_only_when_touched():
     sdk = _fresh_sdk()
     # Balanced-but-contested dispute (mean .5, variance .05): the claim and
     # its counterargument both live; neither clears the 0.7 floor.
-    claim = sdk.create_point("statement", "Orion rollout targets end of month")
-    counter = sdk.create_point("statement", "Orion rollout already slipped to next quarter")
-    sdk.create_operator("NAND", counter["id"], [claim["id"]])
+    claim = sdk._create_point("statement", "Orion rollout targets end of month")
+    counter = sdk._create_point("statement", "Orion rollout already slipped to next quarter")
+    sdk._create_operator("NAND", counter["id"], [claim["id"]])
     _set_posterior(sdk, claim["id"], 2.0, 2.0)      # mean .5 — contested
     _set_posterior(sdk, counter["id"], 2.0, 2.0)
     proj = sdk._get_proj()
@@ -561,7 +561,7 @@ def test_zero_llm_read_path_no_provider_key(monkeypatch):
     sdk = _fresh_sdk()
     planted = _plant_contested(
         sdk, "widgetco deal closes next friday", "widgetco deal is postponed")
-    r = sdk.volunteer_context(
+    r = sdk._volunteer_context(
         [{"role": "user", "content": "When does the Widget Co deal close?"}],
         session_id="sess_zero", why=True)
     assert r["degraded_reason"] is None
@@ -576,9 +576,9 @@ def test_sdk_validates_before_any_graph_work():
     sdk = _fresh_sdk()
     proj_before = sdk._get_proj()
     with pytest.raises(VolunteerValidationError):
-        sdk.volunteer_context([])
+        sdk._volunteer_context([])
     with pytest.raises(VolunteerValidationError):
-        sdk.volunteer_context(
+        sdk._volunteer_context(
             [{"role": "user", "content": "hi"}], max_pointers=99)
     assert sdk._get_proj() is proj_before  # nothing was torn down
 
@@ -604,7 +604,7 @@ def test_injected_block_marks_a_contested_pointer_flag_first():
         {"role": "assistant", "content": "Let me check."},
         {"role": "user", "content": "Has it shipped?"},
     ]
-    r = sdk.volunteer_context(window, session_id="sess_acme_flag", why=True)
+    r = sdk._volunteer_context(window, session_id="sess_acme_flag", why=True)
     bullet = next((line for line in r["block"].splitlines()
                    if f"point/{planted['claim']}" in line), None)
     assert bullet is not None, f"contested claim must ride the block: {r['block']!r}"

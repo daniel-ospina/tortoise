@@ -45,7 +45,7 @@ BAD_BUNDLE = {
 class TestBundleValidationError:
     def test_carries_all_violations(self, sdk):
         with pytest.raises(BundleValidationError) as exc:
-            sdk.ingest(BAD_BUNDLE)
+            sdk._ingest(BAD_BUNDLE)
         e = exc.value
         assert e.violations, "must carry at least one violation"
         for v in e.violations:
@@ -55,7 +55,7 @@ class TestBundleValidationError:
 
     def test_as_dict_wire_shape(self, sdk):
         with pytest.raises(BundleValidationError) as exc:
-            sdk.ingest(BAD_BUNDLE)
+            sdk._ingest(BAD_BUNDLE)
         d = exc.value.as_dict()
         assert d["code"] == "ERR_BUNDLE_INVALID"
         assert d["violations"] == exc.value.violations
@@ -67,7 +67,7 @@ class TestBundleValidationError:
 
 class TestSafeSpecialCasing:
     def test_violations_survive_safe(self, sdk):
-        r = _transport(lambda: m._safe(sdk.ingest, BAD_BUNDLE))
+        r = _transport(lambda: m._safe(sdk._ingest, BAD_BUNDLE))
         assert r["code"] == m.ERR_BUNDLE_INVALID
         assert "violations" in r
         assert r["violations"], "violations must survive the MCP boundary"
@@ -78,7 +78,7 @@ class TestSafeSpecialCasing:
     def test_ordering_bundle_before_generic(self, sdk):
         # A BundleValidationError must NEVER fall through to the generic
         # {error}-only Phase-2 shape.
-        r = _transport(lambda: m._safe(sdk.ingest, BAD_BUNDLE))
+        r = _transport(lambda: m._safe(sdk._ingest, BAD_BUNDLE))
         assert "code" in r and r["code"] == m.ERR_BUNDLE_INVALID
         assert "violations" in r
 
@@ -152,7 +152,7 @@ class TestPhase2Error:
 
         sdkmod.TortoiseSDK._check_item_shape = flaky
         try:
-            r = _transport(lambda: m._safe(sdk.ingest, bundle))
+            r = _transport(lambda: m._safe(sdk._ingest, bundle))
             assert "code" not in r, "Phase-2 shape has no code"
             assert r["batch_id"] == expected_bid, \
                 "Phase-2 error carries the computed batch_id"
@@ -178,7 +178,7 @@ class TestPhase2Error:
 
         sdkmod.TortoiseSDK._get_proj = flaky
         try:
-            r = _transport(lambda: m._safe(sdk.ingest, {
+            r = _transport(lambda: m._safe(sdk._ingest, {
                 "points": [{"kind": "statement", "content": "A", "ref": "pA"}],
                 "connections": [],
             }))

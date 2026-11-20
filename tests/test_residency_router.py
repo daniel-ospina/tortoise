@@ -351,7 +351,7 @@ class TestReadPathEndToEnd:
             coord = declared_key("Point", "p-1")
             self._declare_partial(sdk, coord)
             out: dict = {}
-            rows = sdk.tortoise_fts_query(
+            rows = sdk._tortoise_fts_query(
                 None, kind="no_such_kind", read_status_out=out, limit=5,
                 _residency_key=coord)
             assert rows == []
@@ -372,7 +372,7 @@ class TestReadPathEndToEnd:
         try:
             self._declare_partial(sdk, declared_key("Point", "p-other"))
             out: dict = {}
-            rows = sdk.tortoise_fts_query(
+            rows = sdk._tortoise_fts_query(
                 None, kind="no_such_kind", read_status_out=out, limit=5,
                 _residency_key=declared_key("Point", "p-1"))
             assert rows == []
@@ -395,7 +395,7 @@ class TestReadPathEndToEnd:
         try:
             self._declare_partial(sdk, declared_key("Point", "p-1"))
             out: dict = {}
-            sdk.tortoise_fts_query(
+            sdk._tortoise_fts_query(
                 None, kind="no_such_kind", read_status_out=out, limit=5)
             assert out[RESIDENCY_FIELD] == RESIDENCY_NOT_HOT
         finally:

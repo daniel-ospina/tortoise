@@ -82,13 +82,13 @@ def _make_point(sdk, content, kind="statement"):
     # test_ep_directional's sweep) — status="live" is explicit for intent;
     # create_point's implicit status is live since #1088 (it was draft from
     # #943).
-    return sdk.create_point(kind, content, status="live")
+    return sdk._create_point(kind, content, status="live")
 
 
 def _run_ep(sdk):
     """Run EP to convergence over the graph's operators (no-arg path: local
     EP over the dirty roots, exactly what a self-hosted 'dream' would do)."""
-    result = sdk.compute_confidence()
+    result = sdk._compute_confidence()
     assert result["converged"] is True, f"EP did not converge: {result}"
     assert result["iterations"] > 0, f"EP ran zero iterations: {result}"
 
@@ -104,16 +104,16 @@ def _claim_surfaces(sdk, pid, query_text):
     proj = sdk._get_proj()
     graph = proj.g
     # (1) get_confidence → TortoiseEP posterior read.
-    gc = sdk.get_confidence(pid, require_calibration=False)
+    gc = sdk._get_confidence(pid, require_calibration=False)
     # (2) annotate_ep_batch — the search annotation primitive.
     ann = annotate_ep_batch(graph, [pid])[pid]
     # (3) search surface (full-scan by kind + by-query, w4 off so the raw
     #     annotate number is what rides; W4 projects the same belief anyway).
-    hits = sdk.tortoise_fts_query(
+    hits = sdk._tortoise_fts_query(
         query_text, entity_type="point", limit=50, w4_enrich=False)
     search_hit = next((h for h in hits if h.get("id") == pid), None)
     # (4) recall surface.
-    recall = sdk.recall_state(query_text, limit=50)
+    recall = sdk._recall_state(query_text, limit=50)
     recall_hit = next((r for r in recall if r.get("id") == pid), None)
     # (5) persisted n.confidence property.
     rows = graph.query(
@@ -149,10 +149,10 @@ class TestCrossSurfaceAgreement:
         try:
             # Source with a strong true baseline (T0: 10:1 → mean ~0.909).
             src = _make_point(sdk, "Quokka patrol source one zzqx")
-            sdk.set_point_baseline(src["id"], 10.0, 1.0)
+            sdk._set_point_baseline(src["id"], 10.0, 1.0)
             # The decided option (decision kind → outside the #1157 gate).
             opt = _make_point(sdk, "Quokka patrol schedule approved zzqx", kind="decision")
-            sdk.create_operator("IMPL", src["id"], [opt["id"]],
+            sdk._create_operator("IMPL", src["id"], [opt["id"]],
                                 direction="unidirectional")
             _run_ep(sdk)
 
@@ -183,14 +183,14 @@ class TestCrossSurfaceAgreement:
         try:
             # Attacker with a strong true baseline NANDs the option down.
             attacker = _make_point(sdk, "Quokka patrol attacker source zzqx")
-            sdk.set_point_baseline(attacker["id"], 10.0, 1.0)
+            sdk._set_point_baseline(attacker["id"], 10.0, 1.0)
             # Mild support so the option starts near neutral before the NAND.
             weak = _make_point(sdk, "Quokka patrol weak support zzqx")
-            sdk.set_point_baseline(weak["id"], 1.1, 1.0)
+            sdk._set_point_baseline(weak["id"], 1.1, 1.0)
             opt = _make_point(sdk, "Quokka patrol budget expanded zzqx", kind="decision")
-            sdk.create_operator("IMPL", weak["id"], [opt["id"]],
+            sdk._create_operator("IMPL", weak["id"], [opt["id"]],
                                 direction="unidirectional")
-            sdk.create_operator("NAND", attacker["id"], [opt["id"]])
+            sdk._create_operator("NAND", attacker["id"], [opt["id"]])
             _run_ep(sdk)
 
             pid = opt["id"]
@@ -274,7 +274,7 @@ class TestGraphRankerPriorOnlyParity:
         # #2199/#2262: a decide part born WITHOUT an explicit status lands
         # LIVE with the system-default prior Beta(3,1) (mean 0.75) — and no
         # n.confidence until an EP run flushes it.
-        return sdk.create_point("decision", content)["id"]
+        return sdk._create_point("decision", content)["id"]
 
     def test_graphranker_signal_reads_prior_mean_before_any_flush(self):
         """GraphRanker's signal read (the order_by='confidence' sort key and
@@ -326,7 +326,7 @@ class TestGraphRankerPriorOnlyParity:
             # (0.5). Repeated query tokens make it strictly more relevant, so
             # the relevance base-order puts it first — only the confidence
             # sort can lift the prior-only claim above it.
-            low = sdk.create_point(
+            low = sdk._create_point(
                 "decision",
                 "quokka patrol prioronly zzqx quokka patrol prioronly zzqx "
                 "quokka patrol prioronly zzqx neutral",
@@ -341,7 +341,7 @@ class TestGraphRankerPriorOnlyParity:
             # what made "no belief" and "a measured 0.5" the same sort key.
             assert signals[low]["confidence"] is None
             assert signals[low]["ep_state"] == "absent"
-            hits = sdk.tortoise_fts_query(
+            hits = sdk._tortoise_fts_query(
                 "quokka patrol prioronly zzqx", entity_type="point",
                 limit=50, order_by="confidence", w4_enrich=False,
             )
@@ -379,7 +379,7 @@ class TestAnalyzePriorOnlyParity:
         # #2199/#2262: a decide part born without an explicit status lands
         # LIVE with the system-default prior Beta(3,1) (mean 0.75) and NO
         # n.confidence until an EP flush.
-        return sdk.create_point("decision", content)["id"]
+        return sdk._create_point("decision", content)["id"]
 
     def test_most_uncertain_reports_prior_mean_not_neutral(self):
         sdk = _fresh_sdk()
@@ -445,7 +445,7 @@ class TestAnalyzePriorOnlyParity:
         sdk = _fresh_sdk()
         try:
             pid = _make_point(sdk, "Quokka integerprior weakest zzqx")["id"]
-            sdk.set_point_baseline(pid, 2, 1)  # ints — no float cast
+            sdk._set_point_baseline(pid, 2, 1)  # ints — no float cast
             proj = sdk._get_proj()
             stored = proj.g.query(
                 "MATCH (n:Point {id:$id}) RETURN n.ep_alpha, n.ep_beta, "
@@ -484,7 +484,7 @@ class TestAnalyzePriorOnlyParity:
         sdk = _fresh_sdk()
         try:
             pid = _make_point(sdk, "Quokka integerprior timeline zzqx")["id"]
-            sdk.set_point_baseline(pid, 2, 1)
+            sdk._set_point_baseline(pid, 2, 1)
             proj = sdk._get_proj()
             expected = annotate_ep_batch(proj.g, [pid])[pid].confidence_mean
             assert expected == pytest.approx(2 / 3, abs=1e-4), expected

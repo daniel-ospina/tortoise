@@ -38,7 +38,7 @@ from tortoise.ep import TortoiseEP
 
 
 def make_point(sdk: TortoiseSDK, content: str, kind: str = "statement") -> dict:
-    return sdk.create_point(kind, content, status="live")  # EP tests model live claims (#780 default excludes drafts)
+    return sdk._create_point(kind, content, status="live")  # EP tests model live claims (#780 default excludes drafts)
 
 
 def make_direct_edge(sdk: TortoiseSDK, src_id: str, tgt_id: str,
@@ -383,8 +383,8 @@ def test_mixed_operator_and_direct_edges(sdk):
     set_evidence(sdk, b["id"], 1.0, 1.0)   # neutral — direct-edge target
     set_evidence(sdk, ctrl["id"], 1.0, 1.0)  # neutral — operator target
     # Operator-mediated: s IMPL a, s IMPL ctrl
-    sdk.create_operator("IMPL", s["id"], [a["id"]])
-    sdk.create_operator("IMPL", s["id"], [ctrl["id"]])
+    sdk._create_operator("IMPL", s["id"], [a["id"]])
+    sdk._create_operator("IMPL", s["id"], [ctrl["id"]])
     # Operator-less: direct a IMPL b
     make_direct_edge(sdk, a["id"], b["id"], "IMPL", direction="bidirectional")
 

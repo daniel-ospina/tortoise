@@ -896,7 +896,7 @@ class TestRegistryLaneWebhookProvisioning:
                             lambda self, sid: FIXTURE_SUB)
         # someone else took the name in the meantime
         _make = __import__("tortoise.hosted_api", fromlist=["_make_sdk"])
-        _make._make_sdk(namespace="registry").org_create("Second Org")
+        _make._make_sdk(namespace="registry")._org_create("Second Org")
         pre = "c" * 26
         r = _post_signed(registry_client,
                          _checkout_event(pre, org_name="Second Org",

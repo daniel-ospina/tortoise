@@ -1163,9 +1163,18 @@ def test_rendered_citations_are_present_and_maximal() -> None:
     beta = (ROOT / "docs" / "product" / "beta-sdk-surface.md").read_text(encoding="utf-8")
     cites = _part_d_citations()
     # Non-vacuity: a corpus that shrank to nothing cannot fail the loop below.
-    assert len(cites) >= 20, (
-        f"only {len(cites)} citations rendered — the corpus shrank, and an empty or tiny "
-        "corpus makes every maximality assertion below vacuous"
+    # ⛔ #12901 FINAL batch cut this corpus from 20+ rows to 3 — the cited rows belonged to
+    # SDK methods that were privatised, and a citation exists only where a beta disposition
+    # row names a row's destination. The floor is therefore pinned at the new EXACT set
+    # rather than lowered to a number: a further shrink (or a silent swap) reds by NAME,
+    # which a `>= 3` floor would not catch.
+    assert set(cites) == {
+        "tortoise_assess_source",
+        "tortoise_set_source_tier",
+        "tortoise_mine_conversations",
+    }, (
+        f"the citation corpus changed or shrank to {sorted(cites)} — every maximality "
+        "assertion below is only as strong as this corpus"
     )
     bad = [f"{t}: {q[:90]!r}" for t, q in cites.items() if not _is_maximal(q, beta)]
     assert not bad, (
@@ -1187,7 +1196,10 @@ def test_a_truncated_citation_is_rejected_by_the_build(monkeypatch) -> None:
     import tools.bridge_table as bt
 
     beta = (ROOT / "docs" / "product" / "beta-sdk-surface.md").read_text(encoding="utf-8")
-    full = _part_d_citations()["tortoise_get_source_reliability"]
+    # #12901 FINAL batch: `tortoise_get_source_reliability` lost its row, so the fixture
+    # is its sibling — the SAME beta cell, reached by `tortoise_assess_source`, whose
+    # `reads via \`list_sources\`` clause is what decides the row's destination.
+    full = _part_d_citations()["tortoise_assess_source"]
     cut = full[: full.index(";")]
     assert cut != full, "the truncation fixture is no longer truncating anything"
     assert cut in beta, "the truncated fixture is no longer a substring of the doc"
@@ -1196,14 +1208,14 @@ def test_a_truncated_citation_is_rejected_by_the_build(monkeypatch) -> None:
         "no longer demonstrates a mid-clause cut"
     )
 
-    # 1. The predicate. `tortoise_get_source_reliability` is exactly the row that needs
-    #    this clause: without it the row reads as supported by `manage_source_trust`.
+    # 1. The predicate. `tortoise_assess_source` is exactly the row that needs this
+    #    clause: without it the row reads as supported by `manage_source_trust`.
     assert not bt._maximal(cut, beta), "`_maximal` accepted a mid-clause truncation"
     assert bt._maximal(full, beta), "`_maximal` rejected its own maximal citation"
 
     # 2. The wired path — the guard must fail the BUILD, not merely exist.
     before = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
-    bad = {"tortoise_get_source_reliability": {"doc": "beta-sdk-surface.md", "quote": cut}}
+    bad = {"tortoise_assess_source": {"doc": "beta-sdk-surface.md", "quote": cut}}
     errs = bt._citation_errors(bad)
     assert any("TRUNCATED CITATION" in e for e in errs), (
         f"`_citation_errors` did not flag the truncation: {errs}"
@@ -1303,17 +1315,21 @@ def test_part_d_findings_match_an_independent_recomputation() -> None:
     rows = _recompute_citation_rows()
     unsupported, clause_only, ambiguous = _recompute_citation_sets(rows)
 
-    # Non-vacuity, and the named failure mode this rule exists to produce: the clause-only
-    # row must be present, so a rule that reports "nothing" is a broken rule.
-    assert clause_only == {"tortoise_get_source_reliability"}, (
-        "expected exactly the `get_source_reliability` row to be supported only beyond its "
-        f"citation's first clause; computed {sorted(clause_only)}"
+    # ⛔ #12901 FINAL batch moved all three of these sets. The clause-only row
+    # (`get_source_reliability`) was privatised, as were every row that disagreed with its
+    # citation (`tortoise_invalidate`, `paginated_query`, `query`, `query_points_by_tag`),
+    # so D2b and D2 are now EMPTY and the pin says so rather than dropping the read — an
+    # emptied finding is a fact about the corpus, and the recomputation below still has to
+    # reproduce it. The non-vacuity guarantee moves to D3, which still has two rows, and to
+    # `test_a_truncated_citation_is_rejected_by_the_build`, which drives the rule on a real
+    # truncated fixture instead of relying on a live unsupported row existing.
+    assert clause_only == set(), (
+        "a row is supported only beyond its citation's first clause again — pin it "
+        f"deliberately; computed {sorted(clause_only)}"
     )
-    assert unsupported, "no citation disagrees with its row — the audit found nothing"
-    assert unsupported == {
-        "tortoise_invalidate", "tortoise_paginated_query",
-        "tortoise_query", "tortoise_query_points_by_tag",
-    }, f"D2 membership changed: {sorted(unsupported)}"
+    assert unsupported == set(), (
+        f"D2 membership changed: {sorted(unsupported)} — pin the new set deliberately"
+    )
     # The destination-anchor rule removed the three prose false positives; a regression to
     # scanning the whole post-arrow segment re-adds them here.
     # #3904 dropped `tortoise_operator_action` from this set — NOT a map edit racing the
@@ -1322,11 +1338,11 @@ def test_part_d_findings_match_an_independent_recomputation() -> None:
     # `none declared`. The row's destination moved from a phantom method to no method, so
     # its citation stopped being ambiguous. This literal is the pin doing its job (see the
     # docstring): the change was noticed and attributed, which is what it exists to force.
+    # The surviving D3 rows: the beta cell that names THREE members and two targets, still
+    # cited by both routed tools. This is what keeps the recomputation non-vacuous now that
+    # D2/D2b are empty.
     assert ambiguous == {
-        "tortoise_annotate_operator", "tortoise_assess_source", "tortoise_belief_timeline",
-        "tortoise_get_source_reliability", "tortoise_mitigate_operator",
-        "tortoise_session_context",
-        "tortoise_set_source_tier",
+        "tortoise_assess_source", "tortoise_set_source_tier",
     }, f"D3 membership changed: {sorted(ambiguous)}"
     # #11609 Phase 2 removed `tortoise_provenance` from the set: its SDK binding is no
     # longer live (the method retired into `check_confidence`), so its row stopped naming
@@ -1344,6 +1360,56 @@ def test_part_d_findings_match_an_independent_recomputation() -> None:
             f"  listed but not implied: {sorted(have - want)}\n"
             f"  implied but not listed: {sorted(want - have)}"
         )
+
+
+def test_the_recomputation_still_FLAGS_a_disagreeing_row() -> None:
+    """D2/D2b's live sets are EMPTY, so pin the RULE on synthetic rows.
+
+    ⛔ `unsupported == set()` and `clause_only == set()` above are pins about the CORPUS —
+    since #12901's final batch no row in Part D disagrees with its citation, so both are
+    empty and a `_recompute_citation_sets` that returned empty sets for EVERY input would
+    satisfy them. The arm that could not fail is the one that used to find a real defect,
+    so the rule is exercised here on a row built to disagree in each direction, and on a
+    row that is supported only beyond its citation's first clause. Delete either branch in
+    `_recompute_citation_sets` and this test reds (#13899 re-cut review, P2 — the deletion
+    was the finding; `test_a_truncated_citation_is_rejected_by_the_build` drives the
+    GENERATOR's rule on a real truncated fixture and does not cover this one).
+    """
+    disagreeing = {
+        "tortoise_synthetic_unsupported": {
+            "tool": "tortoise_synthetic_unsupported",
+            "quote": "→ `alpha`, `beta`",
+            "dest": "gamma",
+            "named": ["alpha", "beta"],
+            "prefix": ["alpha", "beta"],
+        },
+    }
+    unsupported, clause_only, ambiguous = _recompute_citation_sets(disagreeing)
+    assert unsupported == {"tortoise_synthetic_unsupported"}, (
+        "a row whose Destination its citation never names must be D2-unsupported; the "
+        f"recomputation returned {sorted(unsupported)}"
+    )
+    assert clause_only == set(), sorted(clause_only)
+    assert ambiguous == {"tortoise_synthetic_unsupported"}, (
+        "two named destinations must be D3-ambiguous — the same row is both, and the "
+        "`elif` is what makes D2b skip it"
+    )
+
+    beyond_first_clause = {
+        "tortoise_synthetic_clause": {
+            "tool": "tortoise_synthetic_clause",
+            "quote": "→ `alpha`; `beta`",
+            "dest": "beta",
+            "named": ["alpha", "beta"],
+            "prefix": ["alpha"],
+        },
+    }
+    unsupported2, clause_only2, _ = _recompute_citation_sets(beyond_first_clause)
+    assert unsupported2 == set(), sorted(unsupported2)
+    assert clause_only2 == {"tortoise_synthetic_clause"}, (
+        "a Destination named only in the FIRST clause must be D2b clause-only; the "
+        f"recomputation returned {sorted(clause_only2)}"
+    )
 
 
 def test_part_d_rendered_cells_are_pinned_to_the_recomputation() -> None:
@@ -1532,30 +1598,36 @@ def test_the_named_failure_mode_is_visible_in_the_document() -> None:
 def test_doc_citations_do_not_drop_a_shared_sdk_method(tmp_path, monkeypatch) -> None:
     """A method declared by two registry tools must cite BOTH (latent drop, P2-5).
 
-    `tortoise_get_point` and `tortoise_get_operator` both declare `get_point`. Keying the
-    method->tool lookup by a plain dict kept only the LAST tool, so a disposition row naming
-    `get_point` would cite one tool and silently drop the other. No disposition row names
-    `get_point` TODAY, so the defect is latent — which is exactly why a synthetic row is the
-    only way to exercise the fix and keep it from regressing.
+    `tortoise_get_point` and `tortoise_get_operator` both declare the same SDK method.
+    Keying the method->tool lookup by a plain dict kept only the LAST tool, so a disposition
+    row naming that method would cite one tool and silently drop the other. No disposition
+    row names it TODAY, so the defect is latent — which is exactly why a synthetic row is
+    the only way to exercise the fix and keep it from regressing.
+
+    ⛔ #12901 FINAL batch renamed the binding: the registry now declares `_get_point` (the
+    surface spelling was privatised, bodies unchanged), so the fixture names the binding
+    the registry ACTUALLY has. The rule under test is unchanged — it is about two tools
+    sharing one `sdk_method`, not about which spelling that method has.
     """
     sys.path.insert(0, str(ROOT))
     import tools.bridge_table as bt
 
-    declared = sorted(r["name"] for r in bt._registry_rows() if r["sdk_method"] == "get_point")
-    assert len(declared) >= 2, f"expected >=2 registry tools declaring `get_point`, got {declared}"
+    shared = "_get_point"
+    declared = sorted(r["name"] for r in bt._registry_rows() if r["sdk_method"] == shared)
+    assert len(declared) >= 2, f"expected >=2 registry tools declaring `{shared}`, got {declared}"
 
     synthetic = tmp_path / "beta.md"
     synthetic.write_text(
         "| names | count | dest |\n"
         "|---|---|---|\n"
-        "| `get_point` | 1 | → `get_entity`. |\n",
+        f"| `{shared}` | 1 | → `get_entity`. |\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(bt, "BETA_DOC", synthetic)
     cites = bt._doc_citations()
     missing = [n for n in declared if n not in cites]
     assert not missing, (
-        f"the shared `get_point` binding dropped {missing} from the citations — the "
+        f"the shared `{shared}` binding dropped {missing} from the citations — the "
         "method->tool lookup is last-wins again"
     )
 
@@ -1625,16 +1697,15 @@ def test_d4_records_the_two_4513_rows_that_were_open() -> None:
     """#4513's own two open rows, pinned to the approved menu's answer.
 
     §1 (`annotate_operator`) and §2 (`belief_timeline`) were both filed as needing a
-    ruling because beta's prose clause is ambiguous. The approved menu is NOT
-    ambiguous about either, and the artifact must say so — that is what stops the next
-    lane from re-litigating them from the clause alone:
+    ruling because beta's prose clause is ambiguous. The approved menu was NOT ambiguous
+    about either, and the artifact said so — that is what stopped the next lane from
+    re-litigating them from the clause alone.
 
-    * `annotate_operator` is named in `adjust_relationship`'s own Absorbs cell (row 21),
-      so the map's `adjust_relationship` is the approved reading and the citation's
-      `update_knowledge` is refuted — row 17's split absorbs it for `promote_point`
-      and `set_point_baseline`, NOT for annotation.
-    * `belief_timeline`'s `poll_events` reading ("where they are a timeline") is
-      refuted: row 8 `poll_events` absorbs `events_poll` and nothing else.
+    ⛔ #12901 FINAL batch: BOTH of those SDK methods were privatised, so neither tool is a
+    disputed row any more and §D4 stopped rendering them. The section did not empty — the
+    two surviving rows are the `manage_source_trust` pair, and they carry the same two
+    claims #4513 needed: an approved home is NAMED (so the map's destination reads `row`),
+    and a rival the citation names is REFUTED. The fixture moves; the rule does not.
     """
     doc = (ROOT / "docs" / "product" / "bridge-table.md").read_text(encoding="utf-8")
     rows = _d4_rows(doc)
@@ -1642,44 +1713,28 @@ def test_d4_records_the_two_4513_rows_that_were_open() -> None:
         encoding="utf-8"
     )
 
-    annotate = rows["tortoise_annotate_operator"]
-    assert "`adjust_relationship` (row 21)" in annotate[1], (
-        "§D4 does not name the approved row that absorbs `annotate_operator`: "
-        f"{annotate[1]!r} — the row the owner reviews must be visible"
-    )
-    assert annotate[3].strip("*") == "row", (
-        "the approved menu places `annotate_operator` in `adjust_relationship`, so its "
-        f"reading of the map's destination must be `row`, got {annotate[3]!r}"
-    )
-    assert "`update_knowledge` — **refuted**" in annotate[4], (
-        "§D4 must refute the citation's `update_knowledge` reading for "
-        f"`annotate_operator`: {annotate[4]!r}"
-    )
+    for tool in ("tortoise_assess_source", "tortoise_set_source_tier"):
+        row = rows[tool]
+        assert "`manage_source_trust` (row 14)" in row[1], (
+            f"§D4 does not name the approved row that absorbs `{tool}`: "
+            f"{row[1]!r} — the row the owner reviews must be visible"
+        )
+        assert row[3].strip("*") == "row", (
+            f"the approved menu places `{tool}` in `manage_source_trust`, so its reading "
+            f"of the map's destination must be `row`, got {row[3]!r}"
+        )
+        # The rival the beta cell names ("reads via `list_sources`") is refuted — the
+        # `row`/`refuted` pair is #4513's whole point, and it survives the batch intact.
+        assert "`list_knowledge` — **refuted**" in row[4], (
+            f"§D4 must refute the citation's `list_knowledge` reading for `{tool}`: "
+            f"{row[4]!r}"
+        )
 
-    timeline = rows["tortoise_belief_timeline"]
-    assert "`poll_events` — **refuted**" in timeline[4], (
-        "§D4 must refute `poll_events` for `belief_timeline` — that is #4513 §2's "
-        f"open question, answered by the approved doc: {timeline[4]!r}"
-    )
-    assert "`recall_beliefs` (row 3)" in timeline[1], (
-        f"§D4 does not name `belief_timeline`'s approved home: {timeline[1]!r}"
-    )
-    # ...and its DESTINATION is a disagreement, not silence: the approved doc DOES absorb
-    # `belief_timeline` (row 3), it just never names the map's `check_confidence`. Reading
-    # that as `unstated` told the owner the row was "not named by" a menu whose quoted
-    # row, three lines below, names it — and it understated a contradiction it exists to
-    # disclose (#4513 review, P1).
-    assert timeline[3].strip("*") == "rehomed", (
-        "`belief_timeline` has an approved home (row 3) but not at the map's destination, so "
-        f"its destination is a DISAGREEMENT, not `unstated`: got {timeline[3]!r}"
-    )
-
-    # Both claims are about the doc, so they are re-checked against the doc itself.
+    # The claims are about the doc, so they are re-checked against the doc itself.
     assert (
-        "| 21 | `adjust_relationship` | operator_action, annotate_operator, "
-        "mitigate_operator |" in approved_doc
-    )
-    assert "| 8 | `poll_events` | events_poll |" in approved_doc
+        "| 14 | `manage_source_trust` | assess_source, get_source_reliability, "
+        "set_source_tier |" in approved_doc
+    ), "the approved menu's row 14 changed — the home above has no evidence any more"
 
 
 def test_d4_never_calls_a_row_unnamed_while_naming_its_home() -> None:
@@ -1955,22 +2010,26 @@ def test_approved_menu_guard_fails_closed_when_a_member_moves_after_the_em_dash(
     import tools.bridge_table as bt
 
     real = bt.APPROVED_DOC.read_text(encoding="utf-8")
+    # ⛔ #12901 FINAL batch: the fixture moves to row 14 for the same reason as the shape
+    # tests above — `annotate_operator`/`mitigate_operator` were privatised, so a misplaced
+    # list there no longer changes the artifact. `set_source_tier` is DISPUTED, so dropping
+    # it after the dash still produces the false "no approved row absorbs it" reading.
     moved = real.replace(
-        "| 21 | `adjust_relationship` | operator_action, annotate_operator, mitigate_operator |",
-        "| 21 | `adjust_relationship` | operator_action, mitigate_operator — "
-        "annotate_operator also |",
+        _ROW_14,
+        "| 14 | `manage_source_trust` | assess_source, get_source_reliability — "
+        "set_source_tier also |",
     )
-    assert moved != real, "row 21 is not in the doc — test is stale"
+    assert moved != real, "row 14 is not in the doc — test is stale"
     path = tmp_path / "member-after-dash.md"
     path.write_text(moved, encoding="utf-8")
     monkeypatch.setattr(bt, "APPROVED_DOC", path)
 
     menu, closures, _ = bt._approved_state()
-    assert "annotate_operator" not in menu["adjust_relationship"]["members"], (
+    assert "set_source_tier" not in menu[_ROW_14_DEST]["members"], (
         "the misplaced list must be the failure under test, so the member is gone here"
     )
     errs = bt._approved_errors(menu, closures)
-    assert errs and "AFTER" in errs[0] and "annotate_operator" in errs[0], (
+    assert errs and "AFTER" in errs[0] and "set_source_tier" in errs[0], (
         f"a current tool name in the cell's prose did not fail the build: {errs}"
     )
 
@@ -2348,10 +2407,17 @@ def test_approved_row_that_reflows_fails_the_build_instead_of_truncating_its_mem
     import tools.bridge_table as bt
 
     real = bt.APPROVED_DOC.read_text(encoding="utf-8")
-    cell = "operator_action, annotate_operator, mitigate_operator |"
-    assert cell in real, "row 21's Absorbs cell is not in the doc — this test is stale"
+    # ⛔ THE STALENESS ASSERT GUARDS WHAT THIS TEST MUTATES. It used to check
+    # `_ROW_14_MEMBERS` while the mutation and every assertion below operate on ROW 21
+    # (`operator_action, annotate_operator, mitigate_operator |`), which reds as "stale"
+    # the day someone edits row 14 — a row this test never touches — and leaves a
+    # reworded row 21 with only the unrelated row-count message to explain the red
+    # (#13899 re-cut review, P2).
+    row_21_cell = "operator_action, annotate_operator, mitigate_operator |"
+    assert row_21_cell in real, (
+        "row 21's Absorbs cell is not in the doc — this test is stale")
     wrapped = real.replace(
-        "operator_action, annotate_operator, mitigate_operator |",
+        row_21_cell,
         "operator_action, annotate_operator,\nmitigate_operator |",
         1,
     )
@@ -2433,10 +2499,21 @@ def _assert_an_orphaned_continuation_fails_the_build(
     `_APPROVED_ROW` only proves the line ENDS in `|`; it is not a completeness test. When a
     wrap leaves a `|` at the end of line 1 the row prefix still matches, `cells` is split
     from line 1 alone, and the continuation matches no row pattern — so it was never
-    inspected at all. Measured on the real doc, row 21, both callers of this helper built
-    GREEN (`rows=23`, `row_errors=[]`, `main()` → 0) and wrote an artifact asserting
-    `tortoise_mitigate_operator` "*(no approved row names it)*" / **refuted** — the same
-    false claim about the owner-approved doc the P1 was raised for, with no diagnostic.
+    inspected at all. The members on the wrapped remainder SILENTLY LEAVE the row, and the
+    artifact then states the opposite of the owner-approved doc with no diagnostic.
+
+    ⛔ #12901 FINAL batch re-cut the FIXTURE, not the rule. It was row 21
+    (`adjust_relationship`, absorbing `mitigate_operator`), and the false claim was
+    `tortoise_mitigate_operator` "*(no approved row names it)*" / **refuted**. That SDK
+    method has since been privatised, so `tortoise_mitigate_operator` now reaches its
+    destination regardless of the row and stripping the member no longer changes the
+    artifact — the mutation stopped reproducing the defect and this helper said so
+    ("the mutation did not reproduce the defect — the test proves nothing") instead of
+    passing vacuously. The fixture moves to row 14 (`manage_source_trust`), which still
+    carries the whole defect: `tortoise_assess_source` is a DISPUTED row (D2/D2b/D3), so
+    its D4 reading is rendered from this menu, and losing its only home makes the artifact
+    state **refuted** / "*(no approved row names it)*" about a row the owner's own doc
+    absorbs. Verified against the built artifact, not assumed.
 
     The mutation is in the test, so the guard cannot rot into a tautology: with the orphan
     test DISABLED (every body line reads as a separator) the exact same document parses,
@@ -2447,11 +2524,13 @@ def _assert_an_orphaned_continuation_fails_the_build(
     import tools.bridge_table as bt
 
     real = bt.APPROVED_DOC.read_text(encoding="utf-8")
-    cell = "operator_action, annotate_operator, mitigate_operator |"
-    assert cell in real, "row 21's Absorbs cell is not in the doc — this test is stale"
-    wrapped = real.replace(
-        cell, cell.replace("mitigate_operator |", continuation), 1
+    cell = (
+        "| 14 | `manage_source_trust` | "
+        "assess_source, get_source_reliability, set_source_tier |"
     )
+    members = "assess_source, get_source_reliability, set_source_tier |"
+    assert cell in real, "row 14's Absorbs cell is not in the doc — this test is stale"
+    wrapped = real.replace(cell, cell.replace(members, continuation), 1)
     assert wrapped != real, f"the wrap {continuation!r} did not change the doc"
     path = tmp_path / "row-orphaned.md"
     path.write_text(wrapped, encoding="utf-8")
@@ -2465,12 +2544,12 @@ def _assert_an_orphaned_continuation_fails_the_build(
         f"every row is still syntactically a row here ({len(menu)} parsed) — the orphan "
         "line is the ONLY evidence, which is why the body, not the row regex, decides"
     )
-    assert "mitigate_operator" not in menu["adjust_relationship"]["members"], (
-        "this shape is supposed to TRUNCATE row 21 — if it no longer does, the test no "
+    assert "assess_source" not in menu["manage_source_trust"]["members"], (
+        "this shape is supposed to TRUNCATE row 14 — if it no longer does, the test no "
         "longer reproduces the defect"
     )
     assert len(row_errors) == 1, f"the orphan line was not reported exactly once: {row_errors}"
-    assert "ORPHANED continuation line after row 21 (`adjust_relationship`)" in row_errors[0], (
+    assert "ORPHANED continuation line after row 14 (`manage_source_trust`)" in row_errors[0], (
         f"the diagnostic does not name the row the wrap truncated: {row_errors[0]!r}"
     )
     errs = bt._approved_errors(menu, closures, row_errors)
@@ -2482,7 +2561,7 @@ def _assert_an_orphaned_continuation_fails_the_build(
     assert bt.main() == 1, f"the wrap {continuation!r} did not fail the build"
     err = capsys.readouterr().err
     assert "BRIDGE TABLE BUILD FAILURE" in err, err
-    assert "ORPHANED continuation line after row 21" in err, err
+    assert "ORPHANED continuation line after row 14" in err, err
     assert not out.exists(), (
         f"the build failed but still wrote {out.name} — a false refutation of the "
         "owner-approved doc is exactly what must not reach the artifact"
@@ -2497,11 +2576,16 @@ def _assert_an_orphaned_continuation_fails_the_build(
     assert row_errors_off == [], (
         f"the mutation did not disable the orphan test: {row_errors_off}"
     )
-    assert "mitigate_operator" not in menu_off["adjust_relationship"]["members"]
+    assert "assess_source" not in menu_off["manage_source_trust"]["members"]
     assert bt.main() == 0, "with the orphan test disabled this document MUST build green"
     written = out.read_text(encoding="utf-8")
-    assert "| `tortoise_mitigate_operator` | `adjust_relationship` | *(no approved row names it)*" in written, (
-        "the mutation did not reproduce the defect — the test proves nothing"
+    assert (
+        "| `tortoise_assess_source` | `manage_source_trust` | *(no approved row names it)*"
+        " | *(none)* | **refuted** |" in written
+    ), (
+        "the mutation did not reproduce the defect — the test proves nothing. The "
+        "artifact no longer refutes `tortoise_assess_source`, so either the fixture row "
+        "stopped being disputed or the reading stopped being rendered from this menu."
     )
     out.unlink()
 
@@ -2517,7 +2601,8 @@ def test_orphaned_continuation_line_that_starts_with_a_pipe_fails_the_build(
     line keeps looking like table syntax (#8930 review, round 2, P1).
     """
     _assert_an_orphaned_continuation_fails_the_build(
-        tmp_path, monkeypatch, capsys, "|\n| mitigate_operator |"
+        tmp_path, monkeypatch, capsys,
+        "|\n| assess_source, get_source_reliability, set_source_tier |"
     )
 
 
@@ -2532,7 +2617,8 @@ def test_orphaned_continuation_line_without_a_pipe_fails_the_build(
     green with `rows=23`/`row_errors=[]` before the fix (#8930 review, round 2, P1).
     """
     _assert_an_orphaned_continuation_fails_the_build(
-        tmp_path, monkeypatch, capsys, "|\nmitigate_operator |"
+        tmp_path, monkeypatch, capsys,
+        "|\nassess_source, get_source_reliability, set_source_tier |"
     )
 
 
@@ -2566,28 +2652,46 @@ def _disable_the_round_3_guards(monkeypatch) -> None:
 def test_a_row_shaped_continuation_cannot_replace_the_row_above_it(
     tmp_path, monkeypatch, capsys
 ) -> None:
-    """Shape 1 — a wrap whose continuation is ITSELF a row RE-REGISTERED as row 21.
+    """Shape 1 — a wrap whose continuation is ITSELF a row RE-REGISTERED as the same row.
 
-    `…annotate_operator, |` ⏎ `| 21 | `adjust_relationship` | mitigate_operator |` ⏎ `| 22 | …`
+    `…assess_source, get_source_reliability, |` ⏎ `| 14 | `manage_source_trust` | assess_source,
+    get_source_reliability |` ⏎ `| 15 | …` — the shape is what this pins, not the row number:
+    #12901's final batch moved the fixture off row 21, and the rule it exercises is unchanged.
 
     Both lines are legal table rows and both are legal table syntax, so the body test had
     nothing to say: the row loop matched the continuation, and `menu[name] = {…}` is an
-    unconditional assign keyed by NAME, so the one-member remainder silently REPLACED the
-    complete row. Measured before the fix: `main()` → 0, artifact WRITTEN, 23 rows parsed,
-    `row_errors == []`, `tortoise_annotate_operator` rendered "*(no approved row names it)*"
+    unconditional assign keyed by NAME, so the TWO-member remainder (`assess_source,
+    get_source_reliability`) silently REPLACED row 14's complete THREE-member cell — the
+    overwrite keeps only what it names, and `set_source_tier` is not among them.
+    Measured before the fix: `main()` → 0, artifact WRITTEN, 23 rows parsed,
+    `row_errors == []`, the truncated row's own tool rendered "*(no approved row names it)*"
     / **refuted**, and the section count moved 5/7/0 → 4/7/1. Nothing bounded duplicates —
     the count guard checks only for MISSING row numbers (#8930 review, round 3, P1).
+    ⛔ The MEASURED example above was taken on row 21 (`tortoise_annotate_operator`); the
+    fixture is row 14 since #12901's final batch. What decides whether a truncation is
+    OBSERVABLE is D4 dispute-set membership — §D4 renders only DISPUTED rows, so only THEIR
+    cells' members can make the artifact state "*(no approved row names it)*" — and that is
+    the same batch's second effect rather than an independent fact: privatising row 21's
+    methods re-pointed their registry `sdk_method` to `_annotate_operator` /
+    `_mitigate_operator`, spellings no beta-doc disposition row cites, so those tools stopped
+    being CITED and therefore stopped being DISPUTED. Privacy of the SDK `def` is not the test
+    (row 14's are private too — `_assess_source`, `_set_source_tier`, which still cite because
+    their bindings were never re-pointed); the RE-POINT is, and it is why privatising a
+    disputed method can silently take its cell out of the artifact (#13965 review, P2).
+    Measured with the body guards off: truncating row 21 changes 0 artifact lines, row 14
+    changes 15 — and restoring the pre-#12901 bindings puts `tortoise_annotate_operator` and
+    `tortoise_mitigate_operator` back in the disputed set (2 rows -> 4).
     """
     sys.path.insert(0, str(ROOT))
     import tools.bridge_table as bt
 
     real = bt.APPROVED_DOC.read_text(encoding="utf-8")
-    cell = "operator_action, annotate_operator, mitigate_operator |"
-    assert cell in real, "row 21's Absorbs cell is not in the doc — this test is stale"
+    cell = _ROW_14_MEMBERS
+    assert cell in real, "row 14's Absorbs cell is not in the doc — this test is stale"
     edited = real.replace(
         cell,
-        "operator_action, annotate_operator, |\n"
-        "| 21 | `adjust_relationship` | mitigate_operator |",
+        "assess_source, get_source_reliability, |\n"
+        "| 14 | `manage_source_trust` | assess_source, get_source_reliability |",
         1,
     )
     assert edited != real, "the row-shaped continuation did not change the doc"
@@ -2599,16 +2703,16 @@ def test_a_row_shaped_continuation_cannot_replace_the_row_above_it(
         f"every line here is shaped like a row ({len(menu)} parsed) — which is why the "
         "row's IDENTITY, not its shape, is the datum"
     )
-    assert "mitigate_operator" not in menu["adjust_relationship"]["members"], (
+    assert "set_source_tier" not in menu[_ROW_14_DEST]["members"], (
         "the discarded row must contribute NOTHING — merging it is the same truncation "
         "from the other side"
     )
-    assert "annotate_operator" in menu["adjust_relationship"]["members"], (
+    assert "assess_source" in menu[_ROW_14_DEST]["members"], (
         "the row the doc states must survive intact"
     )
     assert len(row_errors) == 1, f"the repeated row was not reported exactly once: {row_errors}"
-    assert "approved row 21 (`adjust_relationship`) in" in row_errors[0], row_errors[0]
-    assert "REUSES both the number 21 and the name `adjust_relationship`" in row_errors[0], (
+    assert "approved row 14 (`manage_source_trust`) in" in row_errors[0], row_errors[0]
+    assert "REUSES both the number 14 and the name `manage_source_trust`" in row_errors[0], (
         f"the diagnostic does not name both occurrences: {row_errors[0]!r}"
     )
     assert bt._approved_errors(menu, closures, row_errors)[0] == row_errors[0], (
@@ -2619,24 +2723,29 @@ def test_a_row_shaped_continuation_cannot_replace_the_row_above_it(
     assert bt.main() == 1, "a row-shaped continuation did not fail the build"
     err = capsys.readouterr().err
     assert "BRIDGE TABLE BUILD FAILURE" in err, err
-    assert "approved row 21 (`adjust_relationship`)" in err, err
+    assert "approved row 14 (`manage_source_trust`)" in err, err
     assert not out.exists(), (
         f"the build failed but still wrote {out.name} — a false refutation of the "
         "owner-approved doc is exactly what must not reach the artifact"
     )
 
-    # ---- MUTATION: both round-3 guards contribute nothing. The later row replaces row 21,
-    # `annotate_operator` leaves it, and the defect returns — green, in the artifact.
+    # ---- MUTATION: both round-3 guards contribute nothing. The later row replaces row 14
+    # (`annotate_operator` is what left ROW 21; the fixture now truncates ROW 14 — #13899
+    # re-cut review, P2), and the defect returns — green, in the artifact.
     _disable_the_round_3_guards(monkeypatch)
     menu_off, _, errs_off = bt._approved_state()
     assert errs_off == [], f"the mutation did not disable the guards: {errs_off}"
-    assert menu_off["adjust_relationship"]["members"] == {
-        "adjust_relationship",
-        "mitigate_operator",
-    }, f"the mutation did not reproduce the overwrite: {menu_off['adjust_relationship']}"
+    # With the guards off the LATER row wins, so row 14 is left with only the members the
+    # replacement carries — `set_source_tier` is gone, which is the truncation from the
+    # other side, and the artifact then refutes its disputed row.
+    assert menu_off[_ROW_14_DEST]["members"] == {
+        _ROW_14_DEST,
+        "assess_source",
+        "get_source_reliability",
+    }, f"the mutation did not reproduce the overwrite: {menu_off[_ROW_14_DEST]}"
     assert bt.main() == 0, "with the guards disabled this document MUST build green"
     written = out.read_text(encoding="utf-8")
-    assert "| `tortoise_annotate_operator` | `adjust_relationship` | *(no approved row names it)*" in written, (
+    assert "| `tortoise_set_source_tier` | `manage_source_trust` | *(no approved row names it)*" in written, (
         "the mutation did not reproduce the false refutation — the test proves nothing"
     )
     out.unlink()
@@ -2708,12 +2817,21 @@ def test_a_repeated_row_name_cannot_overwrite_another_rows_members(
 ) -> None:
     """Shape 3 — the same NAME on a different number, which no number bound can see.
 
-    `menu` is keyed by name, so this is the overwrite from the other side: row 21's cell is
-    replaced by the new row's and `annotate_operator` / `mitigate_operator` lose their
-    approved home. Renumbering hides it from the missing-number check too, so before the fix
-    the ONLY thing that fired was the anonymous row count ("only 22 approved rows parsed") —
-    a diagnostic that names no row and states no cause, on a document that is otherwise
-    shaped perfectly (#8930 review, round 3, P1).
+    `menu` is keyed by name, so this is the overwrite from the other side: the tracked row's
+    cell is replaced by the new row's, which keeps only the members IT names. The overwriting
+    row is `| 24 | `manage_source_trust` | set_source_tier |`, so `set_source_tier` is the
+    member the overwrite CARRIES; what loses its approved home is `assess_source` (and
+    `get_source_reliability`) — `assess_source` is what the assert below checks, and
+    `get_source_reliability` goes the same way. Measured on this
+    mutation with the round-3 guards disabled: `menu["manage_source_trust"]` is `lineno == 24`
+    with members `{"manage_source_trust", "set_source_tier"}`. The shape is the same on row 21
+    before #12901's final batch and on row 14 since; only the surviving member differs.
+    Renumbering leaves the count at 23, so no count bound can see the repeat, and the only
+    complaint left is the anonymous MISSING-NUMBER one — "approved row number(s) 14 are
+    missing", parsed 23 rows numbered 1-24 — which names a number but not the cause, on a
+    document that is otherwise shaped perfectly (#8930 review, round 3, P1; prose corrected
+    in #13965, where the sentence quoted a count message — "only 22 approved rows parsed" —
+    that this fixture cannot produce: 23 rows parse).
     """
     sys.path.insert(0, str(ROOT))
     import tools.bridge_table as bt
@@ -2722,16 +2840,16 @@ def test_a_repeated_row_name_cannot_overwrite_another_rows_members(
     row23 = next((ln for ln in real.splitlines() if ln.startswith("| 23 |")), "")
     assert row23, "row 23 is not in the doc — this test is stale"
     edited = real.replace(
-        row23, row23 + "\n| 24 | `adjust_relationship` | mitigate_operator |", 1
+        row23, row23 + "\n| 24 | `manage_source_trust` | set_source_tier |", 1
     )
     assert edited != real, "the repeated row name did not change the doc"
     _, out = _edited_doc(tmp_path, monkeypatch, edited, "dup-name-other-number")
 
     menu, closures, row_errors = bt._approved_state()
     assert row_errors and row_errors[0].startswith(
-        "approved row 24 (`adjust_relationship`) in"
+        "approved row 24 (`manage_source_trust`) in"
     ), f"the repeated name was not named first: {row_errors}"
-    assert "REUSES the name `adjust_relationship` of row 21" in row_errors[0], (
+    assert "REUSES the name `manage_source_trust` of row 14" in row_errors[0], (
         f"the diagnostic does not name both occurrences: {row_errors[0]!r}"
     )
     assert bt._approved_errors(menu, closures, row_errors)[0] == row_errors[0], (
@@ -2740,26 +2858,26 @@ def test_a_repeated_row_name_cannot_overwrite_another_rows_members(
     monkeypatch.setattr(sys, "argv", ["bridge_table.py"])
     assert bt.main() == 1, "a repeated row name did not fail the build"
     err = capsys.readouterr().err
-    assert "approved row 24 (`adjust_relationship`)" in err, err
+    assert "approved row 24 (`manage_source_trust`)" in err, err
     assert not out.exists(), "the build failed but still wrote the artifact"
 
-    # ---- MUTATION: no guard fires at all; the row 21 cell is simply GONE, and the only
+    # ---- MUTATION: no guard fires at all; the row 14 cell is simply GONE, and the only
     # diagnostic left is the anonymous row count — the failure this guard replaces.
     _disable_the_round_3_guards(monkeypatch)
     menu_off, _, errs_off = bt._approved_state()
     assert errs_off == [], f"the mutation did not disable the guards: {errs_off}"
-    assert menu_off["adjust_relationship"]["lineno"] == 24, (
-        f"the mutation must reproduce the overwrite, got {menu_off['adjust_relationship']}"
+    assert menu_off[_ROW_14_DEST]["lineno"] == 24, (
+        f"the mutation must reproduce the overwrite, got {menu_off[_ROW_14_DEST]}"
     )
-    assert "annotate_operator" not in menu_off["adjust_relationship"]["members"]
+    assert "assess_source" not in menu_off[_ROW_14_DEST]["members"]
     assert len(menu_off) == bt.APPROVED_MIN_ROWS, (
         f"the count is unchanged ({len(menu_off)}) — a repeat that only RENAMES leaves no "
         "count to see"
     )
     assert bt.main() == 1, "the numbered-sequence bound is still the backstop"
     err_off = capsys.readouterr().err
-    assert "row number(s) 21 are missing" in err_off, err_off
-    assert "REUSES" not in err_off and "adjust_relationship" not in err_off, (
+    assert "row number(s) 14 are missing" in err_off, err_off
+    assert "REUSES" not in err_off and "manage_source_trust" not in err_off, (
         "the pre-fix diagnostic named the offending row after all — then this mutation is "
         f"not the behaviour it claims to fix: {err_off}"
     )
@@ -2780,10 +2898,10 @@ def test_a_continuation_after_a_blank_line_still_fails_the_build(
     import tools.bridge_table as bt
 
     real = bt.APPROVED_DOC.read_text(encoding="utf-8")
-    cell = "operator_action, annotate_operator, mitigate_operator |"
-    assert cell in real, "row 21's Absorbs cell is not in the doc — this test is stale"
+    cell = _ROW_14_MEMBERS
+    assert cell in real, "row 14's Absorbs cell is not in the doc — this test is stale"
     edited = real.replace(
-        cell, cell.replace("mitigate_operator |", "|\n\nmitigate_operator |"), 1
+        cell, cell.replace("set_source_tier |", "|\n\nmitigate_operator |"), 1
     )
     assert edited != real, "the blank-line wrap did not change the doc"
     _, out = _edited_doc(tmp_path, monkeypatch, edited, "continuation-after-blank")
@@ -2792,10 +2910,10 @@ def test_a_continuation_after_a_blank_line_still_fails_the_build(
     assert len(menu) == bt.APPROVED_MIN_ROWS, (
         f"every row still parses here ({len(menu)}) — the fragment is the only evidence"
     )
-    assert "mitigate_operator" not in menu["adjust_relationship"]["members"]
+    assert "set_source_tier" not in menu[_ROW_14_DEST]["members"]
     assert len(row_errors) == 1, f"the fragment was not reported exactly once: {row_errors}"
     assert (
-        "ORPHANED continuation line after row 21 (`adjust_relationship`), on the far side "
+        "ORPHANED continuation line after row 14 (`manage_source_trust`), on the far side "
         "of a BLANK line" in row_errors[0]
     ), f"the diagnostic does not name the row and the blank: {row_errors[0]!r}"
     assert "'mitigate_operator |'" in row_errors[0], row_errors[0]
@@ -2805,17 +2923,17 @@ def test_a_continuation_after_a_blank_line_still_fails_the_build(
     assert bt.main() == 1, "a continuation across a blank line did not fail the build"
     err = capsys.readouterr().err
     assert "BRIDGE TABLE BUILD FAILURE" in err, err
-    assert "after row 21 (`adjust_relationship`)" in err, err
+    assert "after row 14 (`manage_source_trust`)" in err, err
     assert not out.exists(), "the build failed but still wrote the artifact"
 
     # ---- MUTATION: the body test contributes nothing; the same false artifact returns.
     _disable_the_round_3_guards(monkeypatch)
     menu_off, _, errs_off = bt._approved_state()
     assert errs_off == [], f"the mutation did not disable the guards: {errs_off}"
-    assert "mitigate_operator" not in menu_off["adjust_relationship"]["members"]
+    assert "set_source_tier" not in menu_off[_ROW_14_DEST]["members"]
     assert bt.main() == 0, "with the guards disabled this document MUST build green"
     written = out.read_text(encoding="utf-8")
-    assert "| `tortoise_mitigate_operator` | `adjust_relationship` | *(no approved row names it)*" in written, (
+    assert "| `tortoise_set_source_tier` | `manage_source_trust` | *(no approved row names it)*" in written, (
         "the mutation did not reproduce the false refutation — the test proves nothing"
     )
     out.unlink()
@@ -2837,18 +2955,18 @@ def test_a_separator_shaped_continuation_still_fails_the_build(
     import tools.bridge_table as bt
 
     real = bt.APPROVED_DOC.read_text(encoding="utf-8")
-    cell = "operator_action, annotate_operator, mitigate_operator |"
-    assert cell in real, "row 21's Absorbs cell is not in the doc — this test is stale"
-    edited = real.replace(cell, cell.replace("mitigate_operator |", "|\n|---|---|---|"), 1)
+    cell = _ROW_14_MEMBERS
+    assert cell in real, "row 14's Absorbs cell is not in the doc — this test is stale"
+    edited = real.replace(cell, cell.replace("set_source_tier |", "|\n|---|---|---|"), 1)
     assert edited != real, "the separator-shaped continuation did not change the doc"
     _, out = _edited_doc(tmp_path, monkeypatch, edited, "separator-shaped")
 
     menu, closures, row_errors = bt._approved_state()
     assert len(menu) == bt.APPROVED_MIN_ROWS
-    assert "mitigate_operator" not in menu["adjust_relationship"]["members"]
+    assert "set_source_tier" not in menu[_ROW_14_DEST]["members"]
     assert len(row_errors) == 1, f"the separator fragment was not reported once: {row_errors}"
     assert (
-        "SEPARATOR-shaped line after row 21 (`adjust_relationship`)" in row_errors[0]
+        "SEPARATOR-shaped line after row 14 (`manage_source_trust`)" in row_errors[0]
     ), f"the diagnostic does not name the row: {row_errors[0]!r}"
     assert "'|---|---|---|'" in row_errors[0], row_errors[0]
     assert bt._approved_errors(menu, closures, row_errors)[0] == row_errors[0]
@@ -2857,7 +2975,7 @@ def test_a_separator_shaped_continuation_still_fails_the_build(
     assert bt.main() == 1, "a separator-shaped continuation did not fail the build"
     err = capsys.readouterr().err
     assert "BRIDGE TABLE BUILD FAILURE" in err, err
-    assert "after row 21 (`adjust_relationship`)" in err, err
+    assert "after row 14 (`manage_source_trust`)" in err, err
     assert not out.exists(), "the build failed but still wrote the artifact"
 
     # ---- MUTATION: the body test contributes nothing; the same false artifact returns.
@@ -2866,7 +2984,7 @@ def test_a_separator_shaped_continuation_still_fails_the_build(
     assert errs_off == [], f"the mutation did not disable the guards: {errs_off}"
     assert bt.main() == 0, "with the guards disabled this document MUST build green"
     written = out.read_text(encoding="utf-8")
-    assert "| `tortoise_mitigate_operator` | `adjust_relationship` | *(no approved row names it)*" in written, (
+    assert "| `tortoise_set_source_tier` | `manage_source_trust` | *(no approved row names it)*" in written, (
         "the mutation did not reproduce the false refutation — the test proves nothing"
     )
     out.unlink()
@@ -2892,10 +3010,10 @@ def test_a_pipe_less_continuation_after_a_blank_line_still_fails_the_build(
     import tools.bridge_table as bt
 
     real = bt.APPROVED_DOC.read_text(encoding="utf-8")
-    cell = "operator_action, annotate_operator, mitigate_operator |"
-    assert cell in real, "row 21's Absorbs cell is not in the doc — this test is stale"
+    cell = _ROW_14_MEMBERS
+    assert cell in real, "row 14's Absorbs cell is not in the doc — this test is stale"
     edited = real.replace(
-        cell, cell.replace("mitigate_operator |", "|\n\nmitigate_operator"), 1
+        cell, cell.replace("set_source_tier |", "|\n\nmitigate_operator"), 1
     )
     assert edited != real, "the pipe-less blank-line wrap did not change the doc"
     _, out = _edited_doc(tmp_path, monkeypatch, edited, "pipe-less-after-blank")
@@ -2904,10 +3022,10 @@ def test_a_pipe_less_continuation_after_a_blank_line_still_fails_the_build(
     assert len(menu) == bt.APPROVED_MIN_ROWS, (
         f"every row still parses here ({len(menu)}) — the bare remainder is the only evidence"
     )
-    assert "mitigate_operator" not in menu["adjust_relationship"]["members"]
+    assert "set_source_tier" not in menu[_ROW_14_DEST]["members"]
     assert len(row_errors) == 1, f"the bare fragment was not reported exactly once: {row_errors}"
     assert (
-        "ORPHANED continuation line after row 21 (`adjust_relationship`), on the far side "
+        "ORPHANED continuation line after row 14 (`manage_source_trust`), on the far side "
         "of a BLANK line" in row_errors[0]
     ), f"the diagnostic does not name the row and the blank: {row_errors[0]!r}"
     assert "'mitigate_operator'" in row_errors[0], (
@@ -2920,17 +3038,17 @@ def test_a_pipe_less_continuation_after_a_blank_line_still_fails_the_build(
     assert bt.main() == 1, "a pipe-less continuation across a blank line did not fail the build"
     err = capsys.readouterr().err
     assert "BRIDGE TABLE BUILD FAILURE" in err, err
-    assert "after row 21 (`adjust_relationship`)" in err, err
+    assert "after row 14 (`manage_source_trust`)" in err, err
     assert not out.exists(), "the build failed but still wrote the artifact"
 
     # ---- MUTATION: the body test contributes nothing; the same false artifact returns.
     _disable_the_round_3_guards(monkeypatch)
     menu_off, _, errs_off = bt._approved_state()
     assert errs_off == [], f"the mutation did not disable the guards: {errs_off}"
-    assert "mitigate_operator" not in menu_off["adjust_relationship"]["members"]
+    assert "set_source_tier" not in menu_off[_ROW_14_DEST]["members"]
     assert bt.main() == 0, "with the guards disabled this document MUST build green"
     written = out.read_text(encoding="utf-8")
-    assert "| `tortoise_mitigate_operator` | `adjust_relationship` | *(no approved row names it)*" in written, (
+    assert "| `tortoise_set_source_tier` | `manage_source_trust` | *(no approved row names it)*" in written, (
         "the mutation did not reproduce the false refutation — the test proves nothing"
     )
     out.unlink()
@@ -2951,12 +3069,12 @@ def test_a_fragment_that_is_not_the_first_line_after_the_close_still_fails_the_b
     import tools.bridge_table as bt
 
     real = bt.APPROVED_DOC.read_text(encoding="utf-8")
-    cell = "operator_action, annotate_operator, mitigate_operator |"
-    assert cell in real, "row 21's Absorbs cell is not in the doc — this test is stale"
+    cell = _ROW_14_MEMBERS
+    assert cell in real, "row 14's Absorbs cell is not in the doc — this test is stale"
     edited = real.replace(
         cell,
         cell.replace(
-            "mitigate_operator |",
+            "set_source_tier |",
             "|\n\nThat table above is the write half.\n\nmitigate_operator",
         ),
         1,
@@ -2968,13 +3086,13 @@ def test_a_fragment_that_is_not_the_first_line_after_the_close_still_fails_the_b
     assert len(menu) == bt.APPROVED_MIN_ROWS, (
         f"every row still parses here ({len(menu)}) — the fragment is the only evidence"
     )
-    assert "mitigate_operator" not in menu["adjust_relationship"]["members"]
+    assert "set_source_tier" not in menu[_ROW_14_DEST]["members"]
     assert len(row_errors) == 1, (
         "the fragment behind a prose line was not reported exactly once — the intervening "
         f"paragraph still shadows it: {row_errors}"
     )
     assert (
-        "ORPHANED continuation line after row 21 (`adjust_relationship`)" in row_errors[0]
+        "ORPHANED continuation line after row 14 (`manage_source_trust`)" in row_errors[0]
     ), f"the diagnostic does not name the row the wrap truncated: {row_errors[0]!r}"
     assert "'mitigate_operator'" in row_errors[0], row_errors[0]
     assert "That table above is the write half" not in row_errors[0], (
@@ -2986,17 +3104,17 @@ def test_a_fragment_that_is_not_the_first_line_after_the_close_still_fails_the_b
     assert bt.main() == 1, "a fragment behind a prose line did not fail the build"
     err = capsys.readouterr().err
     assert "BRIDGE TABLE BUILD FAILURE" in err, err
-    assert "after row 21 (`adjust_relationship`)" in err, err
+    assert "after row 14 (`manage_source_trust`)" in err, err
     assert not out.exists(), "the build failed but still wrote the artifact"
 
     # ---- MUTATION: the body test contributes nothing; the same false artifact returns.
     _disable_the_round_3_guards(monkeypatch)
     menu_off, _, errs_off = bt._approved_state()
     assert errs_off == [], f"the mutation did not disable the guards: {errs_off}"
-    assert "mitigate_operator" not in menu_off["adjust_relationship"]["members"]
+    assert "set_source_tier" not in menu_off[_ROW_14_DEST]["members"]
     assert bt.main() == 0, "with the guards disabled this document MUST build green"
     written = out.read_text(encoding="utf-8")
-    assert "| `tortoise_mitigate_operator` | `adjust_relationship` | *(no approved row names it)*" in written, (
+    assert "| `tortoise_set_source_tier` | `manage_source_trust` | *(no approved row names it)*" in written, (
         "the mutation did not reproduce the false refutation — the test proves nothing"
     )
     out.unlink()
@@ -3030,16 +3148,31 @@ def _restore_the_round_4_predicate(monkeypatch) -> None:
     monkeypatch.setattr(bt, "_is_member_list", round_4_predicate)
 
 
-def _row_21_broken_at(real: str, line1_cell: str, remainder: str) -> str:
-    """Row 21's cell cut so `remainder` lands on its own line, past a BLANK line.
+# ⛔ #12901 FINAL batch: the fixture MOVED from row 21 (`adjust_relationship`) to row 14
+# (`manage_source_trust`) — the earlier cut of this note said "from row 14 … to row 14",
+# which its own next sentence refutes (#13899 re-cut review, P2). Row 21 absorbed
+# `mitigate_operator`, which was privatised, so a
+# truncation there no longer changes the artifact — the false claim the shape tests exist
+# to catch had nowhere left to appear, and every one of them failed with "the mutation did
+# not reproduce the defect" instead of passing vacuously. Row 14 still carries it:
+# `tortoise_assess_source` and `tortoise_set_source_tier` are DISPUTED rows (D2/D2b/D3), so
+# their D4 readings are rendered from this menu and losing a member makes the artifact
+# state **refuted** / "*(no approved row names it)*" about a row the owner's own doc
+# absorbs.
+_ROW_14 = "| 14 | `manage_source_trust` | assess_source, get_source_reliability, set_source_tier |"
+_ROW_14_MEMBERS = "assess_source, get_source_reliability, set_source_tier |"
+_ROW_14_DEST = "manage_source_trust"
+
+
+def _row_14_broken_at(real: str, line1_cell: str, remainder: str) -> str:
+    """Row 14's cell cut so `remainder` lands on its own line, past a BLANK line.
 
     The row's trailing `|` stays on line 1, which is the shape that was measured: the row
     still parses as a legal table row, with a TRUNCATED `Absorbs` cell.
     """
-    row = "| 21 | `adjust_relationship` | operator_action, annotate_operator, mitigate_operator |"
-    assert row in real, "row 21's row is not in the doc — this test is stale"
-    broken = f"| 21 | `adjust_relationship` | {line1_cell} |\n\n{remainder}\n"
-    edited = real.replace(row, broken, 1)
+    assert _ROW_14 in real, "row 14's row is not in the doc — this test is stale"
+    broken = f"| 14 | `manage_source_trust` | {line1_cell} |\n\n{remainder}\n"
+    edited = real.replace(_ROW_14, broken, 1)
     assert edited != real, "the break did not change the doc"
     return edited
 
@@ -3070,17 +3203,17 @@ def _the_break_fails_closed(
         f"every row still parses here ({len(menu)}) — the remainder is the ONLY evidence, "
         "which is why the body, not the row regex, has to decide"
     )
-    members = menu["adjust_relationship"]["members"]
+    members = menu[_ROW_14_DEST]["members"]
     for member in sorted(lost):
         assert member not in members, (
-            f"this spelling is supposed to TRUNCATE row 21 and drop `{member}` — if it no "
+            f"this spelling is supposed to TRUNCATE row 14 and drop `{member}` — if it no "
             "longer does, the test no longer reproduces the defect"
         )
     assert len(row_errors) == 1, (
         f"the remainder was not reported exactly once (the guard answers `False` for it): "
         f"{row_errors}"
     )
-    assert "ORPHANED continuation line after row 21 (`adjust_relationship`)" in row_errors[0], (
+    assert "ORPHANED continuation line after row 14 (`manage_source_trust`)" in row_errors[0], (
         f"the diagnostic does not name the row the wrap truncated: {row_errors[0]!r}"
     )
     assert repr(remainder) in row_errors[0], (
@@ -3095,7 +3228,7 @@ def _the_break_fails_closed(
     assert bt.main() == 1, f"the remainder {remainder!r} did not fail the build"
     err = capsys.readouterr().err
     assert "BRIDGE TABLE BUILD FAILURE" in err, err
-    assert "after row 21 (`adjust_relationship`)" in err, err
+    assert "after row 14 (`manage_source_trust`)" in err, err
     assert not out.exists(), (
         "the build failed but still wrote the artifact — a false refutation of the "
         "owner-approved doc is exactly what must not reach it"
@@ -3108,10 +3241,17 @@ def _the_break_fails_closed(
     assert errs_off == [], f"the mutation did not restore round 4's behaviour: {errs_off}"
     assert bt.main() == 0, "with round 4's predicate this document MUST build green"
     written = out.read_text(encoding="utf-8")
+    # Whichever disputed tool this spelling drops is the one the artifact then refutes.
+    refuted_tool = (
+        "tortoise_assess_source" if "assess_source" in lost else "tortoise_set_source_tier"
+    )
     assert (
-        "| `tortoise_mitigate_operator` | `adjust_relationship` | *(no approved row names it)*"
+        f"| `{refuted_tool}` | `manage_source_trust` | *(no approved row names it)*"
         in written
-    ), "the mutation did not reproduce the false refutation — the test proves nothing"
+    ), (
+        "the mutation did not reproduce the false refutation — the test proves nothing. "
+        f"Expected the artifact to refute {refuted_tool}."
+    )
     out.unlink()
 
 
@@ -3129,7 +3269,7 @@ def test_a_leading_comma_remainder_fails_the_build(tmp_path, monkeypatch, capsys
     import tools.bridge_table as bt
 
     real = bt.APPROVED_DOC.read_text(encoding="utf-8")
-    remainder = ", annotate_operator, mitigate_operator"
+    remainder = ", get_source_reliability, set_source_tier"
     # NOT VACUOUS: the predicate is what changes, and it must say yes to this spelling.
     assert bt._is_member_list(remainder, bt._known_names()), (
         f"the member-list test still answers `False` for a leading comma: {remainder!r}"
@@ -3138,10 +3278,10 @@ def test_a_leading_comma_remainder_fails_the_build(tmp_path, monkeypatch, capsys
         tmp_path,
         monkeypatch,
         capsys,
-        edited=_row_21_broken_at(real, "operator_action", remainder),
+        edited=_row_14_broken_at(real, "assess_source", remainder),
         name="leading-comma",
         remainder=remainder,
-        lost={"annotate_operator", "mitigate_operator"},
+        lost={"get_source_reliability", "set_source_tier"},
     )
 
 
@@ -3156,18 +3296,18 @@ def test_a_trailing_period_remainder_fails_the_build(tmp_path, monkeypatch, caps
     import tools.bridge_table as bt
 
     real = bt.APPROVED_DOC.read_text(encoding="utf-8")
-    remainder = "mitigate_operator."
+    remainder = "set_source_tier."
     assert bt._is_member_list(remainder, bt._known_names()), remainder
     _the_break_fails_closed(
         tmp_path,
         monkeypatch,
         capsys,
-        edited=_row_21_broken_at(
-            real, "operator_action, annotate_operator", remainder
+        edited=_row_14_broken_at(
+            real, "assess_source, get_source_reliability", remainder
         ),
         name="trailing-period",
         remainder=remainder,
-        lost={"mitigate_operator"},
+        lost={"set_source_tier"},
     )
 
 
@@ -3181,18 +3321,18 @@ def test_an_emphasis_remainder_fails_the_build(tmp_path, monkeypatch, capsys) ->
     import tools.bridge_table as bt
 
     real = bt.APPROVED_DOC.read_text(encoding="utf-8")
-    remainder = "**mitigate_operator**"
+    remainder = "**set_source_tier**"
     assert bt._is_member_list(remainder, bt._known_names()), remainder
     _the_break_fails_closed(
         tmp_path,
         monkeypatch,
         capsys,
-        edited=_row_21_broken_at(
-            real, "operator_action, annotate_operator", remainder
+        edited=_row_14_broken_at(
+            real, "assess_source, get_source_reliability", remainder
         ),
         name="emphasis",
         remainder=remainder,
-        lost={"mitigate_operator"},
+        lost={"set_source_tier"},
     )
 
 
@@ -3207,7 +3347,7 @@ def test_an_inline_annotation_remainder_fails_the_build(tmp_path, monkeypatch, c
     import tools.bridge_table as bt
 
     real = bt.APPROVED_DOC.read_text(encoding="utf-8")
-    remainder = "mitigate_operator *(operator-only)*"
+    remainder = "set_source_tier *(operator-only)*"
     assert "*(operator-only)*" in real, (
         "the doc no longer uses an inline `*(…)` annotation — this test is stale"
     )
@@ -3216,12 +3356,12 @@ def test_an_inline_annotation_remainder_fails_the_build(tmp_path, monkeypatch, c
         tmp_path,
         monkeypatch,
         capsys,
-        edited=_row_21_broken_at(
-            real, "operator_action, annotate_operator", remainder
+        edited=_row_14_broken_at(
+            real, "assess_source, get_source_reliability", remainder
         ),
         name="inline-annotation",
         remainder=remainder,
-        lost={"mitigate_operator"},
+        lost={"set_source_tier"},
     )
 
 
@@ -3241,7 +3381,8 @@ def test_a_mid_token_break_fails_the_build(tmp_path, monkeypatch, capsys) -> Non
     import tools.bridge_table as bt
 
     real = bt.APPROVED_DOC.read_text(encoding="utf-8")
-    remainder = "ate_operator"
+    # row 14's `set_source_tier`, cut mid-token: the largest green slice measured.
+    remainder = "set_source_ti"
     assert remainder not in bt._known_names(), (
         "this shape only proves anything if the truncated token is NOT a known name"
     )
@@ -3250,12 +3391,12 @@ def test_a_mid_token_break_fails_the_build(tmp_path, monkeypatch, capsys) -> Non
         tmp_path,
         monkeypatch,
         capsys,
-        edited=_row_21_broken_at(
-            real, "operator_action, annotate_operator, mitig", remainder
+        edited=_row_14_broken_at(
+            real, "assess_source, get_source_reliability, set_source_ti", remainder
         ),
         name="mid-token",
         remainder=remainder,
-        lost={"mitigate_operator"},
+        lost={"set_source_tier"},
     )
 
 
@@ -3323,7 +3464,7 @@ def test_the_normalised_member_list_test_still_leaves_real_prose_green(
     assert row_errors == [], f"the planted prose tripped the widened guard: {row_errors}"
     assert len(menu) == bt.APPROVED_MIN_ROWS == 23, len(menu)
     assert len(closures) == bt.APPROVED_MIN_CLOSURES, closures
-    assert "mitigate_operator" in menu["adjust_relationship"]["members"], (
+    assert "set_source_tier" in menu[_ROW_14_DEST]["members"], (
         "the planted prose cost the parse a row or a member"
     )
 
@@ -3386,9 +3527,9 @@ def test_ordinary_post_table_prose_stays_green(tmp_path, monkeypatch, capsys) ->
     assert row_errors == [], f"the prose in the gap tripped a guard: {row_errors}"
     assert len(menu) == bt.APPROVED_MIN_ROWS == 23, len(menu)
     assert len(closures) == bt.APPROVED_MIN_CLOSURES, closures
-    # Row 21 is untouched here, and its third member is still read — the prose block did not
+    # Row 14 is untouched here, and its third member is still read — the prose block did not
     # cost the parse a row, which is what a false positive would look like from a distance.
-    assert "mitigate_operator" in menu["adjust_relationship"]["members"]
+    assert "set_source_tier" in menu[_ROW_14_DEST]["members"]
 
     # NOT VACUOUS: every planted paragraph really is a COMMA LIST, so the green above is the
     # fragment test answering NO rather than the prose never reaching it. (The predicate's
@@ -3421,13 +3562,13 @@ def test_the_fragment_predicate_is_a_member_list_test_not_a_pipe_or_comma_test()
     known = bt._known_names()
     # FRAGMENTS — a bare member list, in every spelling a reflow produces.
     for fragment in (
-        "mitigate_operator",
+        "set_source_tier",
         "mitigate_operator,",  # a trailing comma kept from the cell
         "mitigate_operator, annotate_operator",
         "`mitigate_operator`, `annotate_operator`,",
         "operator_action, annotate_operator, mitigate_operator",  # row 21's own cell
         "| mitigate_operator |",  # pipe-bounded: the round-3 spelling, unchanged
-        "mitigate_operator |",
+        "set_source_tier |",
         # Round 5: the SAME list, decorated. Each of these was measured building green.
         ", annotate_operator, mitigate_operator",  # the cell's separator kept at the head
         "mitigate_operator.",  # a sentence period on the last name
@@ -3489,8 +3630,8 @@ def test_the_real_approved_doc_parses_every_row_with_no_row_error(monkeypatch) -
         "the real doc must raise no approved-menu error at all"
     )
     assert len(closures) == bt.APPROVED_MIN_CLOSURES, closures
-    # Row 21 is complete in the real doc, so the guard must see its third member.
-    assert "mitigate_operator" in menu["adjust_relationship"]["members"]
+    # Row 14 is complete in the real doc, so the guard must see its third member.
+    assert "set_source_tier" in menu[_ROW_14_DEST]["members"]
     # ...and the entry point the gate runs agrees.
     monkeypatch.setattr(sys, "argv", ["bridge_table.py", "--check"])
     assert bt.main() == 0, "--check went red on the unmodified approved doc"
@@ -3667,11 +3808,11 @@ def test_a_reworded_header_cannot_disarm_the_row_reflow_guard(
     import tools.bridge_table as bt
 
     real = bt.APPROVED_DOC.read_text(encoding="utf-8")
-    cell = "operator_action, annotate_operator, mitigate_operator |"
-    assert cell in real, "row 21's Absorbs cell is not in the doc — this test is stale"
+    cell = _ROW_14_MEMBERS
+    assert cell in real, "row 14's Absorbs cell is not in the doc — this test is stale"
 
     # Two plausible owner edits, and BOTH are needed to reproduce it: re-column the header
-    # (so the body pass never arms) and wrap row 21 leaving `|` at the end of line 1 (so
+    # (so the body pass never arms) and wrap ROW 14 leaving `|` at the end of line 1 (so
     # the row still reads as complete and only the body test could see the remainder).
     mutated = real.replace("| # | Tool | Absorbs |", "| # | Tool | Absorbs | Notes |")
     assert mutated != real, "the approved header is not in the doc — this test is stale"
@@ -3679,7 +3820,7 @@ def test_a_reworded_header_cannot_disarm_the_row_reflow_guard(
         "both approved tables must be re-columned here, so the count guard sees zero"
     )
     mutated = mutated.replace(
-        cell, "operator_action, annotate_operator, |\n| mitigate_operator |", 1
+        cell, "assess_source, get_source_reliability, |\n| set_source_tier |", 1
     )
     path = tmp_path / "header-reworded.md"
     path.write_text(mutated, encoding="utf-8")
@@ -3688,11 +3829,12 @@ def test_a_reworded_header_cannot_disarm_the_row_reflow_guard(
     monkeypatch.setattr(bt, "OUT", out)
 
     # The row parse is untouched — which is exactly why the header count is the only thing
-    # that can see this. The wrap has TRUNCATED row 21, and no ROW error reports it.
+    # that can see this. The wrap has TRUNCATED ROW 14 (the fixture moved off row 21 in
+    # #12901's final batch — #13899 re-cut review, P2), and no ROW error reports it.
     menu, closures, row_errors = bt._approved_state()
     assert len(menu) == bt.APPROVED_MIN_ROWS, f"{len(menu)} rows parsed, expected all of them"
-    assert "mitigate_operator" not in menu["adjust_relationship"]["members"], (
-        "this shape is supposed to truncate row 21 — if it no longer does, the test no "
+    assert "set_source_tier" not in menu[_ROW_14_DEST]["members"], (
+        "this shape is supposed to truncate row 14 — if it no longer does, the test no "
         "longer reproduces the defect"
     )
     assert row_errors == [], (
@@ -3723,8 +3865,14 @@ def test_a_reworded_header_cannot_disarm_the_row_reflow_guard(
     )
     assert bt.main() == 0, "with the header bound neutered this document MUST build green"
     written = out.read_text(encoding="utf-8")
-    assert "no approved row absorbs `mitigate_operator`" in written, (
-        "the mutation did not reproduce the defect — the test proves nothing"
+    # The observable that survives the #12901 FINAL batch: the truncated row's lost,
+    # DISPUTED member is refuted in the owner-facing §D4 reading.
+    assert (
+        "| `tortoise_set_source_tier` | `manage_source_trust` | *(no approved row names it)*"
+        in written
+    ), (
+        "the mutation did not reproduce the defect — the test proves nothing. The artifact "
+        "no longer refutes `tortoise_set_source_tier`."
     )
     out.unlink()
 
@@ -3735,10 +3883,17 @@ def test_a_pipe_inside_the_absorbs_cell_cannot_truncate_it(tmp_path, monkeypatch
     Only `len(cells) < 3` was an error, so a pipe written inside the `Absorbs` cell split
     it into a fourth cell and `cells[2]` became a SHORTER member list — while the physical
     line still ends in `|`, so the row reads as complete and every other guard stays green
-    (23 rows, gapless, closures and split untouched). Row 17's split reworded with a raw
-    pipe is the realistic spelling: `supersede_knowledge` leaves the successors, flipping
-    `tortoise_invalidate` from `successor` (support) to `rehomed` (a disagreement) in the
-    owner-facing table, with no diagnostic (#8930 review, P2b).
+    (23 rows, gapless, closures and split untouched). The realistic spelling is a row's
+    split reworded with a raw pipe, which leaves members on the far side of it and flips
+    the owner-facing verdict for each of them, with no diagnostic (#8930 review, P2b).
+
+    ⛔ #12901 FINAL batch: the fixture is row 14 (`manage_source_trust`). It was row 17
+    (`revise_knowledge`), whose lost successor flipped `tortoise_invalidate` from
+    `successor` to `rehomed` — but that SDK method was privatised, so `tortoise_invalidate`
+    is no longer a DISPUTED row and §D4 stopped rendering it, leaving the mutation half
+    with nothing to observe. Row 14 still carries the defect end to end:
+    `tortoise_set_source_tier` is disputed, so losing its member makes the artifact state
+    **refuted** / "*(no approved row names it)*" about a row the owner's doc absorbs.
 
     The mutation half disables the shape test and shows the same document building green
     with the truncated membership in the written artifact.
@@ -3747,10 +3902,12 @@ def test_a_pipe_inside_the_absorbs_cell_cannot_truncate_it(tmp_path, monkeypatch
     import tools.bridge_table as bt
 
     real = bt.APPROVED_DOC.read_text(encoding="utf-8")
-    clause = "splits this into `update_knowledge` + `supersede_knowledge`"
-    assert clause in real, "row 17's split clause is not in the doc — this test is stale"
+    assert _ROW_14 in real, "row 14 is not in the doc — this test is stale"
     mutated = real.replace(
-        clause, "splits this into `update_knowledge` | `supersede_knowledge`", 1
+        _ROW_14,
+        "| 14 | `manage_source_trust` | assess_source, | "
+        "get_source_reliability, set_source_tier |",
+        1,
     )
     assert mutated != real, "the mutation did not change the doc"
     path = tmp_path / "pipe-in-cell.md"
@@ -3760,11 +3917,11 @@ def test_a_pipe_inside_the_absorbs_cell_cannot_truncate_it(tmp_path, monkeypatch
     monkeypatch.setattr(bt, "OUT", out)
 
     # What the OLD parse would have read: the truncated cell, against the whole row.
-    row17 = next(line for line in mutated.splitlines() if line.startswith("| 17 |"))
-    cells = [c.strip() for c in row17.strip().strip("|").split("|")]
+    row14 = next(line for line in mutated.splitlines() if line.startswith("| 14 |"))
+    cells = [c.strip() for c in row14.strip().strip("|").split("|")]
     assert len(cells) == 4, f"the pipe did not split the cell: {len(cells)} cell(s)"
-    assert "supersede_knowledge" in row17, "the row still states the successor..."
-    assert "supersede_knowledge" not in cells[2], (
+    assert "set_source_tier" in row14, "the row still states the lost member..."
+    assert "set_source_tier" not in cells[2], (
         "...and `cells[2]` is where it is CUT OFF — that truncation is the defect"
     )
 
@@ -3772,12 +3929,12 @@ def test_a_pipe_inside_the_absorbs_cell_cannot_truncate_it(tmp_path, monkeypatch
     assert len(menu) == bt.APPROVED_MIN_ROWS - 1, (
         f"the row must be DROPPED, not silently truncated — {len(menu)} rows parsed"
     )
-    assert "revise_knowledge" not in menu
+    assert "manage_source_trust" not in menu
     assert len(row_errors) == 1, f"the extra cell was not reported exactly once: {row_errors}"
     assert "parses to 4 cell(s)" in row_errors[0], (
         f"the diagnostic does not report the cell count: {row_errors[0]!r}"
     )
-    assert "row 17 (`revise_knowledge`)" in row_errors[0], (
+    assert "row 14 (`manage_source_trust`)" in row_errors[0], (
         f"the diagnostic does not name the row: {row_errors[0]!r}"
     )
     assert bt._approved_errors(menu, closures, row_errors)[0] == row_errors[0], (
@@ -3795,24 +3952,35 @@ def test_a_pipe_inside_the_absorbs_cell_cannot_truncate_it(tmp_path, monkeypatch
     )
 
     # ---- MUTATION: disable the shape test. Same document, and the truncation lands in the
-    # artifact as a `rehomed` verdict the approved doc does not support.
+    # artifact as a `refuted` verdict the approved doc does not support.
     monkeypatch.setattr(bt, "_cell_count_error", lambda *a, **k: None)
     menu_off, _, row_errors_off = bt._approved_state()
     assert row_errors_off == [], f"the mutation did not disable the shape test: {row_errors_off}"
     assert len(menu_off) == bt.APPROVED_MIN_ROWS
-    assert menu_off["revise_knowledge"]["successors"] == ["update_knowledge"], (
+    # The row is KEPT, with only the members that sit on the near side of the pipe — which
+    # is the silent truncation the shape guard exists to refuse.
+    assert menu_off["manage_source_trust"]["members"] == {
+        "manage_source_trust",
+        "assess_source",
+    }, (
         "the mutation did not reproduce the truncation — the test proves nothing: "
-        f"{menu_off['revise_knowledge']['successors']!r}"
+        f"{menu_off['manage_source_trust']!r}"
     )
     assert bt.main() == 0, "with the shape test disabled this document MUST build green"
     written = out.read_text(encoding="utf-8")
-    invalidate_row = next(
-        (ln for ln in written.splitlines() if ln.startswith("| `tortoise_invalidate` |")), ""
+    # The §D4 READING row, not the Part-B map row — both start with the tool name, and the
+    # reading is the one carrying the approved-home column the truncation falsifies.
+    tier_row = next(
+        (ln for ln in written.splitlines()
+         if ln.startswith("| `tortoise_set_source_tier` |") and ln.count("|") == 7), ""
     )
-    assert invalidate_row, "§D4 no longer renders `tortoise_invalidate` — test is stale"
-    verdict_cell = [c.strip() for c in invalidate_row.strip().strip("|").split("|")][4]
-    assert verdict_cell == "**rehomed**", (
-        "the mutation did not flip the destination verdict the lost successor supported: "
-        f"{invalidate_row}"
+    assert tier_row, "§D4 no longer renders `tortoise_set_source_tier` — test is stale"
+    assert "*(no approved row names it)*" in tier_row, (
+        "the mutation did not reproduce the false refutation: " + tier_row
+    )
+    verdict_cell = [c.strip() for c in tier_row.strip().strip("|").split("|")][4]
+    assert verdict_cell == "**refuted**", (
+        "the mutation did not flip the destination verdict the lost member supported: "
+        f"{tier_row}"
     )
     out.unlink()

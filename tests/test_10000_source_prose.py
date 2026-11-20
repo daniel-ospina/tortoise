@@ -678,14 +678,14 @@ def test_the_display_prefix_is_not_indexed(sdk):
     assert DISPLAY_PREFIX.strip() not in \
         rows["session:sess-prefix-migration"][1], rows
 
-    hits = [r["id"] for r in sdk.tortoise_fts_query(
+    hits = [r["id"] for r in sdk._tortoise_fts_query(
         "session capture topics", entity_type="source")]
     assert hits == [], (
         "a source query made only of the display prefix matched a captured "
         f"session — the prefix is in the index: {hits}")
 
     # …and the session is still findable by a word it actually used.
-    found = [r["id"] for r in sdk.tortoise_fts_query(
+    found = [r["id"] for r in sdk._tortoise_fts_query(
         "QUOKKA", entity_type="source")]
     assert "session:sess-prefix-migration" in found, found
 
@@ -715,13 +715,13 @@ def test_an_acknowledgement_only_session_still_derives_and_is_findable(sdk):
     assert not ({"user", "assistant", "speaker"} & set(topics)), (
         "the stopword-only fallback re-admitted the transcript's own framing "
         f"labels into the lexicon (and so into the index): {topics!r}")
-    found = [r["id"] for r in sdk.tortoise_fts_query(
+    found = [r["id"] for r in sdk._tortoise_fts_query(
         "yes", entity_type="source")]
     assert "session:sess-ack-only" in found, (topics, found)
     # …and the constant pair is NOT in the index: under the OR-union it would
     # make every acknowledgement-only session match a query for "user" — the
     # same class of defect the display prefix is kept out of `_searchText` for.
-    framing_hits = [r["id"] for r in sdk.tortoise_fts_query(
+    framing_hits = [r["id"] for r in sdk._tortoise_fts_query(
         "user", entity_type="source")]
     assert "session:sess-ack-only" not in framing_hits, (topics, framing_hits)
 
@@ -754,7 +754,7 @@ def test_an_acknowledgement_only_session_still_derives_and_is_findable(sdk):
     # …and it is findable by a word it actually used. `go`/`ok` are not
     # RediSearch stopwords, so the OR-union leg matches them.
     assert "session:sess-short-words" in [
-        r["id"] for r in sdk.tortoise_fts_query("go", entity_type="source")]
+        r["id"] for r in sdk._tortoise_fts_query("go", entity_type="source")]
 
     # ⛔ NEGATIVE CONTROL — the widening must stop at "tokens actually present".
     # The two arms above pin the derivation in ONE direction only ("a non-empty
@@ -852,7 +852,7 @@ def test_a_role_word_that_is_also_a_content_word_survives(sdk):
         f"words is unfindable through the Source FTS index: {written!r}")
     assert written[0], written
     assert "session:sess-role-words" in [
-        r["id"] for r in sdk.tortoise_fts_query("tool", entity_type="source")]
+        r["id"] for r in sdk._tortoise_fts_query("tool", entity_type="source")]
 
 
 def test_the_lexicon_does_not_depend_on_the_transcript_word_order():
@@ -964,7 +964,7 @@ def test_a_non_latin_transcript_still_derives_and_is_findable(sdk):
         f"two derived columns split: {row!r}")
     assert "пятниц" in row[1], row
 
-    found = [r["id"] for r in sdk.tortoise_fts_query("пятницу",
+    found = [r["id"] for r in sdk._tortoise_fts_query("пятницу",
                                                      entity_type="source")]
     assert "session:sess-cyrillic-10000" in found, (
         f"the Cyrillic session is not findable by a word it used: {row!r} -> {found}")
@@ -1044,7 +1044,7 @@ def test_a_digit_only_transcript_still_derives_and_is_findable(sdk):
         "the indexed value is not the lexicon the display value carries — the "
         f"two derived columns split: {row!r}")
 
-    found = [r["id"] for r in sdk.tortoise_fts_query("100",
+    found = [r["id"] for r in sdk._tortoise_fts_query("100",
                                                     entity_type="source")]
     assert "session:sess-digits-10000" in found, (
         f"the digit-only session is not findable by a number it used: {row!r} -> {found}")

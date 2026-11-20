@@ -86,8 +86,8 @@ def test_off_by_default_adds_no_changes_key(monkeypatch, sdk_factory, tmp_path):
     monkeypatch.delenv("TORTOISE_CHANGE_FEED", raising=False)
     sdk = sdk_factory(tmp_path)
     try:
-        p = sdk.create_point("statement", "off")
-        sdk.update_point(p["id"], content="off-v2")
+        p = sdk._create_point("statement", "off")
+        sdk._update_point(p["id"], content="off-v2")
         resp = sdk.poll_events()
         assert set(resp) == {"events", "next_cursor"}, resp
         assert "changes" not in resp
@@ -102,8 +102,8 @@ def test_off_by_default_keeps_revisions_out_of_the_store(monkeypatch, sdk_factor
     monkeypatch.delenv("TORTOISE_CHANGE_FEED", raising=False)
     sdk = sdk_factory(tmp_path)
     try:
-        p = sdk.create_point("statement", "before")
-        sdk.update_point(p["id"], content="after")
+        p = sdk._create_point("statement", "before")
+        sdk._update_point(p["id"], content="after")
         assert [e["type"] for e in _graph_events(sdk._get_proj())] == ["PointAdded"]
     finally:
         sdk.close()
@@ -113,7 +113,7 @@ def test_falsey_spellings_are_off(monkeypatch, sdk_factory, tmp_path):
     monkeypatch.setenv("TORTOISE_CHANGE_FEED", "0")
     sdk = sdk_factory(tmp_path)
     try:
-        sdk.create_point("statement", "x")
+        sdk._create_point("statement", "x")
         assert "changes" not in sdk.poll_events()
     finally:
         sdk.close()
@@ -125,9 +125,9 @@ def test_revision_reaches_the_store_when_enabled(monkeypatch, sdk_factory, tmp_p
     monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
     sdk = sdk_factory(tmp_path)
     try:
-        p = sdk.create_point("statement", "v1")
-        sdk.update_point(p["id"], content="v2")
-        sdk.update_point(p["id"], validTo="2030-01-01T00:00:00+00:00")
+        p = sdk._create_point("statement", "v1")
+        sdk._update_point(p["id"], content="v2")
+        sdk._update_point(p["id"], validTo="2030-01-01T00:00:00+00:00")
         rows = [e for e in _graph_events(sdk._get_proj())
                 if e["type"] == "PointRevised"]
         assert len(rows) == 2, rows
@@ -148,8 +148,8 @@ def test_revision_type_is_filterable_when_enabled(monkeypatch, sdk_factory, tmp_
     monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
     sdk = sdk_factory(tmp_path)
     try:
-        p = sdk.create_point("statement", "v1")
-        sdk.update_point(p["id"], content="v2")
+        p = sdk._create_point("statement", "v1")
+        sdk._update_point(p["id"], content="v2")
         assert "PointRevised" in [e["type"] for e in sdk.poll_events()["events"]]
         resp = sdk.poll_events(types=["PointRevised"])
         assert [e["type"] for e in resp["events"]] == ["PointRevised"]
@@ -169,7 +169,7 @@ def test_revision_type_is_nameable_even_when_off(monkeypatch, sdk_factory, tmp_p
     monkeypatch.delenv("TORTOISE_CHANGE_FEED", raising=False)
     sdk = sdk_factory(tmp_path)
     try:
-        sdk.create_point("statement", "v1")
+        sdk._create_point("statement", "v1")
         resp = sdk.poll_events(types=["PointRevised"])
         assert set(resp) == {"events", "next_cursor"}, resp
         assert resp["events"] == []
@@ -244,10 +244,10 @@ def test_validity_only_revision_reports_no_content(monkeypatch, sdk_factory, tmp
     monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
     sdk = sdk_factory(tmp_path)
     try:
-        p = sdk.create_point("statement", "v1")
-        sdk.update_point(p["id"], content="v2")
-        sdk.update_point(p["id"], validTo="2030-01-01T00:00:00+00:00")
-        sdk.update_point(p["id"], content="v3")
+        p = sdk._create_point("statement", "v1")
+        sdk._update_point(p["id"], content="v2")
+        sdk._update_point(p["id"], validTo="2030-01-01T00:00:00+00:00")
+        sdk._update_point(p["id"], content="v3")
         deltas = _group(sdk.poll_events()["changes"], p["id"])["changes"]
         assert [d["change"] for d in deltas] == [
             "created", "revised", "revised", "revised"]
@@ -265,13 +265,13 @@ def test_poll_events_changes_returns_per_claim_deltas(monkeypatch, sdk_factory, 
     monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
     sdk = sdk_factory(tmp_path)
     try:
-        p = sdk.create_point("statement", "v1")
-        sdk.update_point(p["id"], content="v2")
-        sdk.update_point(p["id"], content="v3")
-        ev = sdk.create_point("statement", "supporting")
-        sdk.create_operator("IMPL", p["id"], [ev["id"]])
-        succ = sdk.create_point("statement", "successor")
-        sdk.supersede_point(p["id"], succ["id"])
+        p = sdk._create_point("statement", "v1")
+        sdk._update_point(p["id"], content="v2")
+        sdk._update_point(p["id"], content="v3")
+        ev = sdk._create_point("statement", "supporting")
+        sdk._create_operator("IMPL", p["id"], [ev["id"]])
+        succ = sdk._create_point("statement", "successor")
+        sdk._supersede_point(p["id"], succ["id"])
 
         resp = sdk.poll_events()
         assert "changes" in resp
@@ -308,8 +308,8 @@ def test_retraction_reports_its_own_kind(monkeypatch, sdk_factory, tmp_path):
     monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
     sdk = sdk_factory(tmp_path)
     try:
-        p = sdk.create_point("statement", "doomed")
-        sdk.retract_point(p["id"])
+        p = sdk._create_point("statement", "doomed")
+        sdk._retract_point(p["id"])
         g = _group(sdk.poll_events()["changes"], p["id"])
         assert [c["change"] for c in g["changes"]] == ["created", "retracted"]
         assert g["changes"][1]["after"] == {"status": "retracted"}
@@ -327,9 +327,9 @@ def test_hard_delete_is_not_reported_as_a_retraction(monkeypatch, sdk_factory,
     monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
     sdk = sdk_factory(tmp_path)
     try:
-        p = sdk.create_point("statement", "doomed")
-        sdk.retract_point(p["id"])
-        assert sdk.delete_point(p["id"]) is True
+        p = sdk._create_point("statement", "doomed")
+        sdk._retract_point(p["id"])
+        assert sdk._delete_point(p["id"]) is True
         deltas = _group(sdk.poll_events()["changes"], p["id"])["changes"]
         assert [d["change"] for d in deltas] == [
             "created", "retracted", "deleted"]
@@ -351,8 +351,8 @@ def test_hard_delete_of_a_live_point_keeps_the_deleted_kind(monkeypatch,
     monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
     sdk = sdk_factory(tmp_path)
     try:
-        p = sdk.create_point("statement", "live then gone")
-        sdk.delete_point(p["id"])
+        p = sdk._create_point("statement", "live then gone")
+        sdk._delete_point(p["id"])
         deltas = _group(sdk.poll_events()["changes"], p["id"])["changes"]
         assert [d["change"] for d in deltas] == ["created", "deleted"]
         assert deltas[1]["after"] == {}
@@ -376,8 +376,8 @@ def test_hard_delete_marker_records_the_write_not_the_reader(
     monkeypatch.delenv("TORTOISE_CHANGE_FEED", raising=False)
     sdk = sdk_factory(tmp_path)
     try:
-        p = sdk.create_point("statement", "gone")
-        assert sdk.delete_point(p["id"]) is True
+        p = sdk._create_point("statement", "gone")
+        assert sdk._delete_point(p["id"]) is True
         rows = [e for e in _graph_events(sdk._get_proj())
                 if e["type"] == "PointRetracted"]
         assert len(rows) == 1, rows
@@ -391,9 +391,9 @@ def test_evidence_add_is_news_for_both_endpoints(monkeypatch, sdk_factory, tmp_p
     monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
     sdk = sdk_factory(tmp_path)
     try:
-        src = sdk.create_point("statement", "claim")
-        tgt = sdk.create_point("statement", "evidence")
-        op = sdk.create_operator("IMPL", src["id"], [tgt["id"]])
+        src = sdk._create_point("statement", "claim")
+        tgt = sdk._create_point("statement", "evidence")
+        op = sdk._create_operator("IMPL", src["id"], [tgt["id"]])
         changes = sdk.poll_events()["changes"]
         for cid in (src["id"], tgt["id"], op["id"]):
             assert "evidence-added" in _kinds(changes, cid), cid
@@ -406,11 +406,11 @@ def test_handler_annotations_report_before_after(monkeypatch, sdk_factory, tmp_p
     monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
     sdk = sdk_factory(tmp_path)
     try:
-        a = sdk.create_point("statement", "a")
-        b = sdk.create_point("statement", "b")
-        op = sdk.create_operator("IMPL", a["id"], [b["id"]])
-        sdk.annotate_operator(op["id"], 0.5, 0.5, 0.5, 0.5)
-        sdk.annotate_operator(op["id"], 0.9, 0.5, 0.5, 0.5)
+        a = sdk._create_point("statement", "a")
+        b = sdk._create_point("statement", "b")
+        op = sdk._create_operator("IMPL", a["id"], [b["id"]])
+        sdk._annotate_operator(op["id"], 0.5, 0.5, 0.5, 0.5)
+        sdk._annotate_operator(op["id"], 0.9, 0.5, 0.5, 0.5)
         ann = [c for c in _group(sdk.poll_events()["changes"], op["id"])["changes"]
                if c["change"] == "annotated"]
         assert len(ann) == 2
@@ -427,9 +427,9 @@ def test_cursor_scopes_the_feed(monkeypatch, sdk_factory, tmp_path):
     monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
     sdk = sdk_factory(tmp_path)
     try:
-        p = sdk.create_point("statement", "v1")
+        p = sdk._create_point("statement", "v1")
         cursor = sdk.poll_events()["next_cursor"]     # consumed the create
-        sdk.update_point(p["id"], content="v2")
+        sdk._update_point(p["id"], content="v2")
         resp = sdk.poll_events(after=cursor)
         assert [c["change"] for c in _group(resp["changes"], p["id"])["changes"]] == [
             "revised",
@@ -449,7 +449,7 @@ def test_unknown_type_and_shapeless_payload_are_skipped(monkeypatch, sdk_factory
     try:
         from tortoise import event_store
         proj = sdk._get_proj()
-        sdk.create_point("statement", "known")
+        sdk._create_point("statement", "known")
         event_store.ensure_event_schema(proj)
         event_store.append_event(proj, event_store.next_seq(proj),
                                  "SomeFutureEvent", {"id": "future"}, "ev-future")
@@ -590,7 +590,7 @@ def test_capture_auto_promotion_of_an_unset_status_claim_is_reported(
     monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
     sdk = sdk_factory(tmp_path)
     try:
-        p = sdk.create_point("statement", "unset then promoted")
+        p = sdk._create_point("statement", "unset then promoted")
         proj = sdk._get_proj()
         # the capture writer mints claims WITHOUT a status on the legacy path
         proj.g.query("MATCH (n:Point {id:$id}) REMOVE n.status",
@@ -613,9 +613,9 @@ def test_supersede_is_news_about_the_superseded_claim(monkeypatch, sdk_factory,
     monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
     sdk = sdk_factory(tmp_path)
     try:
-        old = sdk.create_point("statement", "old")
-        new = sdk.create_point("statement", "new")
-        sdk.supersede_point(old["id"], new["id"])
+        old = sdk._create_point("statement", "old")
+        new = sdk._create_point("statement", "new")
+        sdk._supersede_point(old["id"], new["id"])
         changes = sdk.poll_events()["changes"]
         assert _kinds(changes, old["id"])[-1] == "superseded"
         assert _kinds(changes, new["id"]) == ["created"]
@@ -647,7 +647,7 @@ def test_existing_mcp_tool_relays_the_field_without_a_surface_change(
     monkeypatch.setattr("tortoise.mcp_server._get_org_sdk", lambda: sdk)
     token = _transport_mode.set("stdio")
     try:
-        p = sdk.create_point("statement", "mcp relay")
+        p = sdk._create_point("statement", "mcp relay")
         monkeypatch.delenv("TORTOISE_CHANGE_FEED", raising=False)
         assert "changes" not in tortoise_events_poll()
         monkeypatch.setenv("TORTOISE_CHANGE_FEED", "on")
@@ -680,8 +680,8 @@ def test_a_hard_delete_written_unswitched_still_folds_as_a_delete(
     monkeypatch.delenv("TORTOISE_CHANGE_FEED", raising=False)
     sdk = sdk_factory(tmp_path)
     try:
-        p = sdk.create_point("statement", "gone")
-        assert sdk.delete_point(p["id"]) is True
+        p = sdk._create_point("statement", "gone")
+        assert sdk._delete_point(p["id"]) is True
         # …now the READER switches the feed on over the same store.
         monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
         assert _kinds(sdk.poll_events()["changes"], p["id"]) == ["created", "deleted"]
@@ -702,8 +702,8 @@ def test_the_update_promote_door_is_reported_as_a_promotion(
     monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
     sdk = sdk_factory(tmp_path)
     try:
-        p = sdk.create_point("statement", "drafty", status="draft")
-        sdk.update_point(p["id"], status="live")
+        p = sdk._create_point("statement", "drafty", status="draft")
+        sdk._update_point(p["id"], status="live")
         groups = {g["id"]: g["changes"] for g in sdk.poll_events()["changes"]}
         promote = [d for d in groups[p["id"]] if d["change"] == "promoted"]
         assert promote, groups[p["id"]]
@@ -724,10 +724,10 @@ def test_one_annotation_call_is_one_delta(monkeypatch, sdk_factory, tmp_path):
     monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
     sdk = sdk_factory(tmp_path)
     try:
-        src = sdk.create_point("statement", "claim")
-        tgt = sdk.create_point("statement", "evidence")
-        op = sdk.create_operator("IMPL", src["id"], [tgt["id"]])
-        sdk.annotate_operator(op["id"], 0.9, 0.8, 0.7, 0.6)
+        src = sdk._create_point("statement", "claim")
+        tgt = sdk._create_point("statement", "evidence")
+        op = sdk._create_operator("IMPL", src["id"], [tgt["id"]])
+        sdk._annotate_operator(op["id"], 0.9, 0.8, 0.7, 0.6)
         kinds = _kinds(sdk.poll_events()["changes"], op["id"])
         assert kinds.count("annotated") == 1, kinds
         assert "revised" not in kinds, kinds
@@ -755,9 +755,9 @@ def test_a_recreated_point_is_reported_as_a_second_creation(monkeypatch, sdk_fac
     monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
     sdk = sdk_factory(tmp_path)
     try:
-        first = sdk.create_point("statement", "resurrect-me")
-        sdk.delete_point(first["id"])
-        sdk.create_point("statement", "resurrect-me", id=first["id"])
+        first = sdk._create_point("statement", "resurrect-me")
+        sdk._delete_point(first["id"])
+        sdk._create_point("statement", "resurrect-me", id=first["id"])
         changes = sdk.poll_events()["changes"]
         kinds = _kinds(changes, first["id"])
         assert kinds == ["created", "deleted", "created"], kinds
@@ -874,12 +874,12 @@ def test_indicator_1_point_revised_has_store_parity_under_the_switch(
         return [e["type"] for e in _graph_events(sdk._get_proj())]
 
     def _drive(sdk):
-        claim = sdk.create_point("statement", "v1")
-        sdk.update_point(claim["id"], content="v2")   # the gated record
-        succ = sdk.create_point("statement", "successor")
-        sdk.supersede_point(claim["id"], succ["id"])
-        doomed = sdk.create_point("statement", "doomed")
-        sdk.retract_point(doomed["id"])
+        claim = sdk._create_point("statement", "v1")
+        sdk._update_point(claim["id"], content="v2")   # the gated record
+        succ = sdk._create_point("statement", "successor")
+        sdk._supersede_point(claim["id"], succ["id"])
+        doomed = sdk._create_point("statement", "doomed")
+        sdk._retract_point(doomed["id"])
 
     monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
     on = sdk_factory(tmp_path)
@@ -922,17 +922,17 @@ def test_indicator_2_one_call_reports_content_validity_status_and_ep(
         # A DRAFT claim, so the promote door is reachable at all: a point is
         # created `live`, and `update_point(status="live")` on an already-live
         # point is a recorded no-op (it emits nothing).
-        p = sdk.create_point("statement", "v1", status="draft")
-        sdk.update_point(p["id"], content="v2")
-        sdk.update_point(p["id"], content="v3")
-        sdk.update_point(p["id"], validTo="2030-01-01T00:00:00+00:00")
-        sdk.update_point(p["id"], status="live")     # the promote door
-        ev = sdk.create_point("statement", "evidence")
-        op = sdk.create_operator("IMPL", p["id"], [ev["id"]])
-        sdk.annotate_operator(op["id"], 0.5, 0.5, 0.5, 0.5)
-        sdk.annotate_operator(op["id"], 0.9, 0.5, 0.5, 0.5)
-        succ = sdk.create_point("statement", "successor")
-        sdk.supersede_point(p["id"], succ["id"])
+        p = sdk._create_point("statement", "v1", status="draft")
+        sdk._update_point(p["id"], content="v2")
+        sdk._update_point(p["id"], content="v3")
+        sdk._update_point(p["id"], validTo="2030-01-01T00:00:00+00:00")
+        sdk._update_point(p["id"], status="live")     # the promote door
+        ev = sdk._create_point("statement", "evidence")
+        op = sdk._create_operator("IMPL", p["id"], [ev["id"]])
+        sdk._annotate_operator(op["id"], 0.5, 0.5, 0.5, 0.5)
+        sdk._annotate_operator(op["id"], 0.9, 0.5, 0.5, 0.5)
+        succ = sdk._create_point("statement", "successor")
+        sdk._supersede_point(p["id"], succ["id"])
 
         resp = sdk.poll_events()                     # ONE call
         deltas = _group(resp["changes"], p["id"])["changes"]
@@ -989,10 +989,10 @@ def test_indicator_3_a_consumer_answers_the_audit_question_from_changes_only(
     monkeypatch.setenv("TORTOISE_CHANGE_FEED", "1")
     sdk = sdk_factory(tmp_path)
     try:
-        p = sdk.create_point("statement", "v1")
-        sdk.update_point(p["id"], content="v2")
-        succ = sdk.create_point("statement", "successor")
-        sdk.supersede_point(p["id"], succ["id"])
+        p = sdk._create_point("statement", "v1")
+        sdk._update_point(p["id"], content="v2")
+        succ = sdk._create_point("statement", "successor")
+        sdk._supersede_point(p["id"], succ["id"])
 
         changes = sdk.poll_events()["changes"]       # the ONLY input read
 
@@ -1026,10 +1026,10 @@ def test_indicator_3_a_consumer_answers_the_audit_question_from_changes_only(
         assert "superseded" not in history(succ["id"])
 
         # ...and a destroyed claim is reported GONE, not as its last status.
-        destroyed = sdk.create_point("statement", "gone")
-        sdk.update_point(destroyed["id"], content="gone-v2")
-        sdk.retract_point(destroyed["id"])
-        sdk.delete_point(destroyed["id"])
+        destroyed = sdk._create_point("statement", "gone")
+        sdk._update_point(destroyed["id"], content="gone-v2")
+        sdk._retract_point(destroyed["id"])
+        sdk._delete_point(destroyed["id"])
         changes = sdk.poll_events()["changes"]
         assert history(destroyed["id"])[-1] == "deleted"
         assert belief(destroyed["id"]) == (None, None)

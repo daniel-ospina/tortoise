@@ -40,7 +40,7 @@ class TestCheckpoint:
         assert result["duplicates"] == 0
 
         # Verify points exist
-        points = sdk.query(kind="checkpoint-item")
+        points = sdk._query(kind="checkpoint-item")
         assert len(points) == 3
 
     def test_dedup_duplicates(self, sdk):
@@ -52,7 +52,7 @@ class TestCheckpoint:
         assert result["filed"] == 1
         assert result["duplicates"] == 1
 
-        points = sdk.query(kind="checkpoint-item")
+        points = sdk._query(kind="checkpoint-item")
         assert len(points) == 1
 
     def test_empty_items(self, sdk):
@@ -149,7 +149,7 @@ class TestCheckpoint:
         assert [v["index"] for v in exc.value.violations] == [1, 3]
         for v in exc.value.violations:
             assert {"section", "index", "message"} <= set(v)
-        assert sdk.query(kind="checkpoint-item") == [], (
+        assert sdk._query(kind="checkpoint-item") == [], (
             "a refused batch must not write the valid items around the bad ones")
 
     def test_malformed_container_and_non_dict_item_are_named(self, sdk):
@@ -290,7 +290,7 @@ class TestCheckpoint:
 
 class TestDiary:
     def test_write_read(self, sdk):
-        p = sdk.diary_write("pi-agent", "SESSION:2026-07-19|built.checkpoint|★★★",
+        p = sdk._diary_write("pi-agent", "SESSION:2026-07-19|built.checkpoint|★★★",
                             topic="general", wing="test_wing")
         assert p["pointKind"] == "diary"
         assert p["authoredBy"] == "pi-agent"
@@ -306,8 +306,8 @@ class TestDiary:
 
     # flake: known redislite lifecycle issue (#176)
     def test_multi_agent_isolation(self, sdk):
-        sdk.diary_write("agent-a", "entry a1")
-        sdk.diary_write("agent-b", "entry b1")
+        sdk._diary_write("agent-a", "entry a1")
+        sdk._diary_write("agent-b", "entry b1")
 
         a_entries = sdk.list_knowledge("diary", agent="agent-a", limit=10)
         b_entries = sdk.list_knowledge("diary", agent="agent-b", limit=10)
@@ -319,7 +319,7 @@ class TestDiary:
 
     def test_read_respects_last_n(self, sdk):
         for i in range(5):
-            sdk.diary_write("agent-c", f"entry {i}")
+            sdk._diary_write("agent-c", f"entry {i}")
         entries = sdk.list_knowledge("diary", agent="agent-c", limit=3)
         assert len(entries) == 3
 
@@ -328,7 +328,7 @@ class TestDiary:
 
 class TestStatus:
     def test_connected_and_counts(self, sdk):
-        sdk.create_point("statement", "hello")
+        sdk._create_point("statement", "hello")
         result = sdk.graph_overview("status")
         assert result["connected"] is True
         assert "Point" in result["counts"]
@@ -373,33 +373,33 @@ More content.
         return tmp_path
 
     def test_ingests_all(self, sdk, corpus_dir):
-        result = sdk.ingest_corpus(str(corpus_dir))
+        result = sdk._ingest_corpus(str(corpus_dir))
         assert result["ingested"] == 3
         assert result["updated"] == 0
         assert result["skipped"] == 0
 
     def test_reingest_unchanged_skipped(self, sdk, corpus_dir):
         # #330: byte-identical re-ingest must count as skipped, not updated
-        sdk.ingest_corpus(str(corpus_dir))
-        result = sdk.ingest_corpus(str(corpus_dir))
+        sdk._ingest_corpus(str(corpus_dir))
+        result = sdk._ingest_corpus(str(corpus_dir))
         assert result["ingested"] == 0
         assert result["updated"] == 0
         assert result["skipped"] == 3
 
     def test_reingest_changed_updates(self, sdk, corpus_dir):
         # #330: a changed file counts as updated (not skipped)
-        sdk.ingest_corpus(str(corpus_dir))
+        sdk._ingest_corpus(str(corpus_dir))
         (corpus_dir / "doc1.md").write_text("---\ntitle: Changed\n---\nnew body\n")
-        result = sdk.ingest_corpus(str(corpus_dir))
+        result = sdk._ingest_corpus(str(corpus_dir))
         assert result["updated"] == 1
         assert result["skipped"] == 2
         assert result["ingested"] == 0
 
     def test_reingest_new_doc_ingested(self, sdk, corpus_dir):
         # #330: a genuinely new doc still counts as ingested
-        sdk.ingest_corpus(str(corpus_dir))
+        sdk._ingest_corpus(str(corpus_dir))
         (corpus_dir / "doc3.md").write_text("---\ntitle: Doc Three\n---\n# Three\n")
-        result = sdk.ingest_corpus(str(corpus_dir))
+        result = sdk._ingest_corpus(str(corpus_dir))
         assert result["ingested"] == 1
         assert result["skipped"] == 3
         assert result["updated"] == 0
@@ -407,12 +407,12 @@ More content.
     def test_reingest_legacy_no_hash_backfills(self, sdk, corpus_dir):
         # #330: legacy events without a stored file_hash must update + backfill
         # (NOT crash, NOT skip) — simulate pre-upgrade data.
-        sdk.ingest_corpus(str(corpus_dir))
+        sdk._ingest_corpus(str(corpus_dir))
         proj = sdk._get_proj()
         proj.g.query(
             "MATCH (e:Event {eventId:'doc1.md'}) REMOVE e.file_hash"
         )
-        result = sdk.ingest_corpus(str(corpus_dir))
+        result = sdk._ingest_corpus(str(corpus_dir))
         assert result["updated"] == 1, f"legacy no-hash event should update+backfill, got {result}"
         assert result["skipped"] == 2
         row = proj.g.query(
@@ -424,8 +424,8 @@ More content.
         # #330: AgentSession mode — identical file counts as skipped
         p = tmp_path / "s.md"
         p.write_text("---\ntitle: S1\n---\ncontent here\n")
-        sdk.ingest_corpus(str(tmp_path), eventKind="AgentSession")
-        result = sdk.ingest_corpus(str(tmp_path), eventKind="AgentSession")
+        sdk._ingest_corpus(str(tmp_path), eventKind="AgentSession")
+        result = sdk._ingest_corpus(str(tmp_path), eventKind="AgentSession")
         assert result["skipped"] == 1, f"expected 1 skipped, got {result}"
         assert result["updated"] == 0
 
@@ -433,9 +433,9 @@ More content.
         # #330: AgentSession mode — changed file counts as updated
         p = tmp_path / "s.md"
         p.write_text("---\ntitle: S2\n---\nphase one content\n")
-        sdk.ingest_corpus(str(tmp_path), eventKind="AgentSession")
+        sdk._ingest_corpus(str(tmp_path), eventKind="AgentSession")
         p.write_text("---\ntitle: S2\n---\nphase two content\n")
-        result = sdk.ingest_corpus(str(tmp_path), eventKind="AgentSession")
+        result = sdk._ingest_corpus(str(tmp_path), eventKind="AgentSession")
         assert result["updated"] == 1, f"expected 1 updated, got {result}"
         assert result["skipped"] == 0
 
@@ -446,7 +446,7 @@ More content.
         content = "a b c d e f g"
         p = tmp_path / "s.md"
         p.write_text(content)
-        sdk.ingest_corpus(str(tmp_path), eventKind="AgentSession")
+        sdk._ingest_corpus(str(tmp_path), eventKind="AgentSession")
         proj = sdk._get_proj()
         import hashlib as _h
         h = _h.sha256(content.encode()).hexdigest()
@@ -455,7 +455,7 @@ More content.
             params={"h": h},
         ).result_set
         assert row and not row[0][0], "fixture failed: event should have no keywords"
-        r2 = sdk.ingest_corpus(str(tmp_path), eventKind="AgentSession")
+        r2 = sdk._ingest_corpus(str(tmp_path), eventKind="AgentSession")
         assert r2["skipped"] == 1, f"keyword-less unchanged file should skip, got {r2}"
         assert r2["updated"] == 0
 
@@ -465,9 +465,9 @@ More content.
         p = tmp_path / "s.md"
         p.write_text("---\ntitle: S3\n---\nresume content\n")
         prog = str(tmp_path / "progress.json")
-        r1 = sdk.ingest_corpus(str(tmp_path), eventKind="AgentSession", progress_file=prog)
+        r1 = sdk._ingest_corpus(str(tmp_path), eventKind="AgentSession", progress_file=prog)
         assert r1["ingested"] == 1
-        r2 = sdk.ingest_corpus(str(tmp_path), eventKind="AgentSession", progress_file=prog)
+        r2 = sdk._ingest_corpus(str(tmp_path), eventKind="AgentSession", progress_file=prog)
         assert r2["skipped"] == 1, f"resumed files should be skipped, got {r2}"
         assert r2["updated"] == 0
         # Progress file still tracks the completed file
@@ -480,11 +480,11 @@ More content.
 class TestIngestPathValidation:
     def test_relative_dir_rejected(self, sdk):
         with pytest.raises(ValueError, match="Unsafe ingest directory"):
-            sdk.ingest_corpus("relative/corpus")
+            sdk._ingest_corpus("relative/corpus")
 
     def test_dotdot_dir_rejected(self, sdk, tmp_path):
         with pytest.raises(ValueError, match="Unsafe ingest directory"):
-            sdk.ingest_corpus(str(tmp_path / ".." / "etc"))
+            sdk._ingest_corpus(str(tmp_path / ".." / "etc"))
 
     def test_base_dir_enforced(self, sdk, tmp_path, monkeypatch):
         base = tmp_path / "base"
@@ -495,20 +495,20 @@ class TestIngestPathValidation:
         outside.mkdir()
         monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(base))
         # inside base: ok (no .md files → 0 ingested, no raise)
-        result = sdk.ingest_corpus(str(inside))
+        result = sdk._ingest_corpus(str(inside))
         assert result["ingested"] == 0
         # outside base: rejected
         with pytest.raises(ValueError, match="Unsafe ingest directory"):
-            sdk.ingest_corpus(str(outside))
+            sdk._ingest_corpus(str(outside))
 
     def test_progress_file_validation(self, sdk, tmp_path, monkeypatch):
         corpus = tmp_path / "corpus"
         corpus.mkdir()
         monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", str(corpus))
         with pytest.raises(ValueError, match="progress_file"):
-            sdk.ingest_corpus(str(corpus), progress_file="relative.json")
+            sdk._ingest_corpus(str(corpus), progress_file="relative.json")
         with pytest.raises(ValueError, match="progress_file"):
-            sdk.ingest_corpus(str(corpus), progress_file=str(tmp_path / ".." / "x.json"))
+            sdk._ingest_corpus(str(corpus), progress_file=str(tmp_path / ".." / "x.json"))
 
 
 # ── create_point dedup regression (#80) ─────────────────────────
@@ -522,18 +522,18 @@ def test_create_point_dedup_without_first_dedup(sdk):
     content = "dedup-regression-test-#80"
 
     # 1) Create WITHOUT dedup — pre-fix this would NOT store content_hash
-    p1 = sdk.create_point("statement", content)
+    p1 = sdk._create_point("statement", content)
     assert p1["id"]
 
     # 2) Create same content WITH dedup — must return the SAME id
-    p2 = sdk.create_point("statement", content, dedup=True)
+    p2 = sdk._create_point("statement", content, dedup=True)
     assert p2["id"] == p1["id"], (
         f"dedup=True should return existing point id. "
         f"Got {p2['id']!r}, expected {p1['id']!r}"
     )
 
     # 3) Verify content_hash is actually stored on p1
-    point = sdk.get_point(p1["id"])
+    point = sdk._get_point(p1["id"])
     from tortoise.sdk import _content_hash
     assert point.get("content_hash") == _content_hash(content), (
         "content_hash should be stored on every new point (#80)"
@@ -573,7 +573,7 @@ class TestCheckpointDedupObservability:
 
 class TestConnectIssueObjectsAboutObject:
     def test_connect_issue_objects_uses_about_object(self, sdk):
-        ev = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s1")
+        ev = sdk._create_event("AgentSession", eventKind="AgentSession", session_id="s1")
         meta = {"issues": [{"id": "12", "title": "fix thing", "repo": "acme/app",
                             "number": 12, "url": "https://github.com/acme/app/issues/12"}]}
         n = sdk._connect_issue_objects(ev["eventId"], meta)
@@ -591,7 +591,7 @@ class TestConnectIssueObjectsAboutObject:
             params={"t": "INSTANTIATES"}).result_set[0][0] == 0
 
     def test_connect_issue_objects_idempotent(self, sdk):
-        ev = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s1")
+        ev = sdk._create_event("AgentSession", eventKind="AgentSession", session_id="s1")
         meta = {"issues": [{"id": "12", "title": "fix thing", "repo": "acme/app",
                             "number": 12, "url": "https://github.com/acme/app/issues/12"}]}
         assert sdk._connect_issue_objects(ev["eventId"], meta) == 1
@@ -602,7 +602,7 @@ class TestConnectIssueObjectsAboutObject:
             "MATCH (o:Object) RETURN count(*)").result_set[0][0] == 1
 
     def test_connect_issue_objects_defensive_number(self, sdk):
-        ev = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s1")
+        ev = sdk._create_event("AgentSession", eventKind="AgentSession", session_id="s1")
         meta = {"issues": [{"id": "13", "title": "odd", "repo": "acme/app",
                             "number": "N/A", "url": "https://github.com/acme/app/issues/13"}]}
         assert sdk._connect_issue_objects(ev["eventId"], meta) == 1  # no crash
@@ -622,7 +622,7 @@ class TestConnectIssueObjectsAboutObject:
         replay reproduces it), and its id is a MINTED one — never the name,
         never a digest of it.
         """
-        ev = sdk.create_event("AgentSession", eventKind="AgentSession", session_id="s1")
+        ev = sdk._create_event("AgentSession", eventKind="AgentSession", session_id="s1")
         meta = {
             "issues": [{"title": "no ids here"}],        # neither id nor number
             "prs": ["just-a-string-pr"],                 # bare string item
@@ -671,9 +671,9 @@ class TestConnectIssueObjectsAboutObject:
         assert len(long_name) > 200
 
         # writer 1 — registered entity, journaled, MERGE-by-name.
-        sdk.create_object(long_name, objectKind="issue")
+        sdk._create_object(long_name, objectKind="issue")
         # writer 2 — the session-indexing lane's aboutObject writer.
-        ev = sdk.create_event("AgentSession", eventKind="AgentSession",
+        ev = sdk._create_event("AgentSession", eventKind="AgentSession",
                               session_id="s3574")
         sdk._connect_issue_objects(ev["eventId"], {"issues": [{"title": long_name}]})
 

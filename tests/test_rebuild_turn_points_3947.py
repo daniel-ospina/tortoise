@@ -170,7 +170,7 @@ def test_replayed_point_keeps_is_episodic(tmp_path):
     log_path = str(tmp_path / "events" / "sdk.jsonl")
     sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
     try:
-        pid = sdk.create_point("event", "[user] episodic turn",
+        pid = sdk._create_point("event", "[user] episodic turn",
                                is_episodic=True)["id"]
         proj = sdk._get_proj()
         assert proj.g.query("MATCH (n:Point {id:$id}) RETURN n.is_episodic",

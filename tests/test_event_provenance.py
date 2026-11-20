@@ -24,7 +24,7 @@ def sdk():
     # Remove old test db if it exists
     db_path = f"{tempfile.mkdtemp(prefix='tt_122_')}/test.db"
     s = TortoiseSDK(db_path)
-    s.test_guard = lambda: None  # bypass production guard for test graph
+    s._test_guard = lambda: None  # bypass production guard for test graph
     yield s
     s.close()
     shutil.rmtree(os.path.dirname(db_path), ignore_errors=True)
@@ -52,7 +52,7 @@ class TestUsesProducesEdges:
         The subject is REGISTERED first: since #3590 D1 the fold resolves a
         mention instead of minting it, so an unregistered name would wire
         nothing (see the retirement pin at the end of this class)."""
-        sdk.create_subject("alice", "engineer")
+        sdk._create_subject("alice", "engineer")
         proj = sdk._get_proj()
         proj.apply({
             "type": "EventRecorded",
@@ -79,7 +79,7 @@ class TestUsesProducesEdges:
 
         The object is REGISTERED first (#3590 D1: the fold resolves a mention,
         it does not mint it)."""
-        sdk.create_object("release-v1.0", "release")
+        sdk._create_object("release-v1.0", "release")
         proj = sdk._get_proj()
         proj.apply({
             "type": "EventRecorded",
@@ -106,8 +106,8 @@ class TestUsesProducesEdges:
         """_upsert_event with uses list creates uses edges.
 
         Both `uses[]` targets are REGISTERED first (#3590 D1)."""
-        sdk.create_object("dataset-a", "dataset")
-        sdk.create_object("dataset-b", "dataset")
+        sdk._create_object("dataset-a", "dataset")
+        sdk._create_object("dataset-b", "dataset")
         proj = sdk._get_proj()
         proj.apply({
             "type": "EventRecorded",
@@ -129,7 +129,7 @@ class TestUsesProducesEdges:
 
     def test_uses_single_string(self, sdk):
         """_upsert_event with uses as a single string works."""
-        sdk.create_object("paper-xyz", "paper")
+        sdk._create_object("paper-xyz", "paper")
         proj = sdk._get_proj()
         proj.apply({
             "type": "EventRecorded",
@@ -153,8 +153,8 @@ class TestUsesProducesEdges:
         Both targets are REGISTERED first (#3590 D1), so the count this pins
         is really about the edge MERGE rather than about how many stubs the
         fold could have minted."""
-        sdk.create_object("a", "dataset")
-        sdk.create_object("b", "dataset")
+        sdk._create_object("a", "dataset")
+        sdk._create_object("b", "dataset")
         proj = sdk._get_proj()
         proj.apply({
             "type": "EventRecorded",
@@ -223,8 +223,8 @@ class TestUsesProducesEdges:
 
     def test_create_event_wires_about_subject(self, sdk):
         """create_event with aboutSubject creates aboutSubject edge."""
-        subj = sdk.create_subject("dave", "engineer")
-        ev = sdk.create_event("deploy", "deployment",
+        subj = sdk._create_subject("dave", "engineer")
+        ev = sdk._create_event("deploy", "deployment",
                               aboutSubject=subj["id"],
                               subject="dave")
         proj = sdk._get_proj()
@@ -237,8 +237,8 @@ class TestUsesProducesEdges:
 
     def test_create_event_wires_about_object(self, sdk):
         """create_event with aboutObject creates aboutObject edge."""
-        obj = sdk.create_object("artifact-v2", "release")
-        ev = sdk.create_event("publish", "publication",
+        obj = sdk._create_object("artifact-v2", "release")
+        ev = sdk._create_event("publish", "publication",
                               aboutObject=obj["id"],
                               subject="eve")
         proj = sdk._get_proj()
@@ -257,18 +257,18 @@ class TestWasDerivedFrom:
 
     def test_create_derivation(self, sdk):
         """create_derivation creates wasDerivedFrom edge."""
-        src = sdk.create_object("source-data", "dataset")
-        dst = sdk.create_object("derived-report", "report")
-        result = sdk.create_derivation(src["id"], dst["id"])
+        src = sdk._create_object("source-data", "dataset")
+        dst = sdk._create_object("derived-report", "report")
+        result = sdk._create_derivation(src["id"], dst["id"])
         assert result["derived"] is True
         assert result["src"] == src["id"]
         assert result["dst"] == dst["id"]
 
     def test_was_derived_from_edge_exists(self, sdk):
         """Verify wasDerivedFrom edge exists in graph."""
-        src = sdk.create_object("raw-log", "log")
-        dst = sdk.create_object("summary", "summary")
-        sdk.create_derivation(src["id"], dst["id"])
+        src = sdk._create_object("raw-log", "log")
+        dst = sdk._create_object("summary", "summary")
+        sdk._create_derivation(src["id"], dst["id"])
         proj = sdk._get_proj()
         r = proj.g.query(
             "MATCH (dst:Object {id:$did})-[w:wasDerivedFrom]->(src:Object {id:$sid}) "
@@ -279,8 +279,8 @@ class TestWasDerivedFrom:
 
     def test_was_derived_from_via_create_edge(self, sdk):
         """create_edge with wasDerivedFrom also works."""
-        src = sdk.create_object("csv-export-122", "file")
-        dst = sdk.create_object("json-transform-122", "file")
+        src = sdk._create_object("csv-export-122", "file")
+        dst = sdk._create_object("json-transform-122", "file")
         proj = sdk._get_proj()
         ok = proj.create_edge(dst["id"], src["id"], "wasDerivedFrom")
         assert ok is True
@@ -295,16 +295,16 @@ class TestWasDerivedFrom:
         """#213: partOf has no producer — create_edge with partOf raises ValueError.
         hasPart is the canonical composition edge; inverse is implicit via
         reverse traversal (MATCH (child)<-[:hasPart]-(parent))."""
-        src = sdk.create_object("parent-doc-213", "document")
-        child = sdk.create_object("child-section-213", "document")
+        src = sdk._create_object("parent-doc-213", "document")
+        child = sdk._create_object("child-section-213", "document")
         proj = sdk._get_proj()
         with pytest.raises(ValueError, match="Unknown predicate: partOf"):
             proj.create_edge(child["id"], src["id"], "partOf")
 
     def test_haspart_create_edge_still_works(self, sdk):
         """#213: hasPart via create_edge continues to work — canonical composition."""
-        parent = sdk.create_object("parent-doc-213", "document")
-        child = sdk.create_object("child-section-213", "document")
+        parent = sdk._create_object("parent-doc-213", "document")
+        child = sdk._create_object("child-section-213", "document")
         proj = sdk._get_proj()
         ok = proj.create_edge(parent["id"], child["id"], "hasPart")
         assert ok is True
@@ -373,11 +373,11 @@ class TestRecencyModulation:
     def test_compute_confidence_accepts_recency_decay(self, sdk):
         """compute_confidence accepts recency_decay parameter."""
         # Create a simple claim + operator
-        p = sdk.create_point("statement", "test claim")
-        sdk.set_point_baseline(p["id"], 1, 1)  # #344: neutral baseline (gate active)
-        op = sdk.create_operator("IMPL", p["id"], [p["id"]])  # noqa: F841
+        p = sdk._create_point("statement", "test claim")
+        sdk._set_point_baseline(p["id"], 1, 1)  # #344: neutral baseline (gate active)
+        op = sdk._create_operator("IMPL", p["id"], [p["id"]])  # noqa: F841
         # Should not raise — recency_decay is accepted
-        result = sdk.compute_confidence(recency_decay=0.95)
+        result = sdk._compute_confidence(recency_decay=0.95)
         assert "iterations" in result
         assert "converged" in result
 
@@ -405,7 +405,7 @@ class TestRecencyModulation:
         expected_ts = calendar.timegm((2024, 1, 1, 0, 0, 0))
 
         # Create point and source with timezone-naive ingestedAt
-        p = sdk.create_point("statement", "tz-naive claim",
+        p = sdk._create_point("statement", "tz-naive claim",
                              extractedFrom=url)
         proj = sdk._get_proj()
         proj.g.query(
@@ -416,7 +416,7 @@ class TestRecencyModulation:
 
         sdk._apply_source_inheritance(recency_decay=recency_decay)
 
-        pt = sdk.get_point(p["id"])
+        pt = sdk._get_point(p["id"])
 
         # Compute expected decay: T1 = (5, 1), alpha' = 1 + (5-1)*decay
         now_ts = datetime.now(timezone.utc).timestamp()  # noqa: UP017
@@ -436,21 +436,21 @@ class TestComputeReputation:
 
     def test_no_events_returns_neutral(self, sdk):
         """Subject with no events gets neutral 0.5 reputation."""
-        subj = sdk.create_subject("new-user", "user")
-        rep = sdk.compute_reputation(subj["id"])
+        subj = sdk._create_subject("new-user", "user")
+        rep = sdk._compute_reputation(subj["id"])
         assert rep["mean"] == 0.5
         assert rep["total_events"] == 0
 
     def test_reputation_by_name(self, sdk):
         """compute_reputation works with subject name too."""
-        sdk.create_subject("frank", "engineer")
-        rep = sdk.compute_reputation("frank")
+        sdk._create_subject("frank", "engineer")
+        rep = sdk._compute_reputation("frank")
         assert rep["mean"] == 0.5
 
     def test_reputation_from_event_outcomes(self, sdk):
         """Subject with IMPL-only events gets high reputation."""
         proj = sdk._get_proj()
-        subj = sdk.create_subject("grace", "analyst")
+        subj = sdk._create_subject("grace", "analyst")
         # Create an event with subject grace
         proj.apply({
             "type": "EventRecorded",
@@ -460,30 +460,30 @@ class TestComputeReputation:
             "subject": "grace",
         })
         # Create a Point and connect Event → IMPL → Point
-        p1 = sdk.create_point("observation", "market up")
+        p1 = sdk._create_point("observation", "market up")
         # Direct event-to-point IMPL
         proj.g.query(
             "MATCH (e:Event {eventId:'ev-r1'}), (p:Point {id:$pid}) "
             "CREATE (e)-[:IMPL]->(p)",
             params={"pid": p1["id"]},
         )
-        rep = sdk.compute_reputation(subj["id"])
+        rep = sdk._compute_reputation(subj["id"])
         assert rep["mean"] > 0.5
         assert rep["total_events"] >= 1
         assert rep["impl_count"] >= 1
 
     def test_reputation_uses_beta_prior(self, sdk):
         """Reputation uses Beta(1+impl, 1+nand) — starts at 0.5."""
-        subj = sdk.create_subject("heidi", "reviewer")
-        rep = sdk.compute_reputation(subj["id"])
+        subj = sdk._create_subject("heidi", "reviewer")
+        rep = sdk._compute_reputation(subj["id"])
         assert rep["alpha"] == 1.0
         assert rep["beta"] == 1.0
         assert rep["mean"] == 0.5
 
     def test_reputation_returns_structured_result(self, sdk):
         """Result has all expected fields."""
-        subj = sdk.create_subject("ivan", "tester")
-        rep = sdk.compute_reputation(subj["id"])
+        subj = sdk._create_subject("ivan", "tester")
+        rep = sdk._compute_reputation(subj["id"])
         for key in ["mean", "total_events", "impl_count", "nand_count",
                      "alpha", "beta", "outcomes"]:
             assert key in rep, f"Missing key: {key}"
@@ -496,7 +496,7 @@ class TestComputeReputation:
         1 IMPL + 1 NAND → 2/4 = 0.5; add a 2nd IMPL → 3/5 = 0.6.
         """
         proj = sdk._get_proj()
-        subj = sdk.create_subject("judy", "reviewer")
+        subj = sdk._create_subject("judy", "reviewer")
 
         def _add_outcome(event_id: str, rel: str, point_id: str):
             proj.apply({
@@ -512,13 +512,13 @@ class TestComputeReputation:
                 params={"eid": event_id, "pid": point_id},
             )
 
-        p1 = sdk.create_point("observation", "market up")
-        p2 = sdk.create_point("observation", "market down")
+        p1 = sdk._create_point("observation", "market up")
+        p2 = sdk._create_point("observation", "market down")
 
         # 1 IMPL + 1 NAND → Beta(2, 2) → mean 0.5
         _add_outcome("ev-mix-1", "IMPL", p1["id"])
         _add_outcome("ev-mix-2", "NAND", p2["id"])
-        rep = sdk.compute_reputation(subj["id"])
+        rep = sdk._compute_reputation(subj["id"])
         assert rep["impl_count"] == 1
         assert rep["nand_count"] == 1
         assert rep["total_events"] == 2
@@ -531,9 +531,9 @@ class TestComputeReputation:
         assert any(o["outcome"] == "IMPL" for o in rep["outcomes"])
 
         # Add a 2nd IMPL → Beta(3, 2) → mean 0.6
-        p3 = sdk.create_point("observation", "market up again")
+        p3 = sdk._create_point("observation", "market up again")
         _add_outcome("ev-mix-3", "IMPL", p3["id"])
-        rep = sdk.compute_reputation(subj["id"])
+        rep = sdk._compute_reputation(subj["id"])
         assert rep["impl_count"] == 2
         assert rep["nand_count"] == 1
         assert rep["total_events"] == 3
@@ -553,7 +553,7 @@ class TestComputeReputation:
         add a 2nd NAND → 1/4 = 0.25.
         """
         proj = sdk._get_proj()
-        subj = sdk.create_subject("karl", "auditor")
+        subj = sdk._create_subject("karl", "auditor")
 
         def _add_outcome(event_id: str, rel: str, point_id: str):
             proj.apply({
@@ -570,9 +570,9 @@ class TestComputeReputation:
             )
 
         # 1 NAND → Beta(1, 2) → mean 0.3333
-        p1 = sdk.create_point("observation", "false claim")
+        p1 = sdk._create_point("observation", "false claim")
         _add_outcome("ev-nand-1", "NAND", p1["id"])
-        rep = sdk.compute_reputation(subj["id"])
+        rep = sdk._compute_reputation(subj["id"])
         assert rep["impl_count"] == 0
         assert rep["nand_count"] == 1
         assert rep["total_events"] == 1
@@ -583,9 +583,9 @@ class TestComputeReputation:
         assert all(o["outcome"] == "NAND" for o in rep["outcomes"])
 
         # Add a 2nd NAND → Beta(1, 3) → mean 0.25
-        p2 = sdk.create_point("observation", "another false claim")
+        p2 = sdk._create_point("observation", "another false claim")
         _add_outcome("ev-nand-2", "NAND", p2["id"])
-        rep = sdk.compute_reputation(subj["id"])
+        rep = sdk._compute_reputation(subj["id"])
         assert rep["impl_count"] == 0
         assert rep["nand_count"] == 2
         assert rep["total_events"] == 2
@@ -623,7 +623,7 @@ class TestComputeReputation:
             "eventKind": "analysis",
             "subject": "alice-work",
         })
-        p_a = sdk.create_point("observation", "A's analysis")
+        p_a = sdk._create_point("observation", "A's analysis")
         proj.g.query(
             "MATCH (e:Event {eventId:'ev-152-a'}), (p:Point {id:$pid}) "
             "CREATE (e)-[:IMPL]->(p)",
@@ -638,7 +638,7 @@ class TestComputeReputation:
             "eventKind": "review",
             "subject": "alice",
         })
-        p_b = sdk.create_point("observation", "B's review")
+        p_b = sdk._create_point("observation", "B's review")
         proj.g.query(
             "MATCH (e:Event {eventId:'ev-152-b'}), (p:Point {id:$pid}) "
             "CREATE (e)-[:IMPL]->(p)",
@@ -646,7 +646,7 @@ class TestComputeReputation:
         )
 
         # compute_reputation('alice') must match by id first → Subject A only
-        rep = sdk.compute_reputation("alice")
+        rep = sdk._compute_reputation("alice")
         assert rep["total_events"] == 1
         assert rep["impl_count"] == 1
         assert rep["nand_count"] == 0
@@ -664,13 +664,13 @@ class TestSupersedePointStructuralTransfer:
     def test_structural_edges_transferred_on_supersede(self, sdk):
         """Old point's aboutSubject edge transfers to new point."""
         proj = sdk._get_proj()
-        subj = sdk.create_point("statement", "subject anchor")
-        old_pt = sdk.create_point("statement", "old claim")
-        new_pt = sdk.create_point("statement", "new claim")
+        subj = sdk._create_point("statement", "subject anchor")
+        old_pt = sdk._create_point("statement", "old claim")
+        new_pt = sdk._create_point("statement", "new claim")
         # Wire aboutSubject edge FROM old point TO subject (direct edge on the Point)
         proj.create_about_edge(old_pt["id"], subj["id"], "aboutSubject")
         # Supersede: edges must transfer from old point to new point
-        result = sdk.supersede_point(old_pt["id"], new_pt["id"])
+        result = sdk._supersede_point(old_pt["id"], new_pt["id"])
         assert result.get("edges_transferred", 0) >= 1
         # New point now has the aboutSubject edge
         r = proj.g.query(
@@ -692,18 +692,18 @@ class TestSupersedePointStructuralTransfer:
         raises (the #432 terminal-state guard: superseded is terminal), so no
         duplicate edge writes can occur."""
         proj = sdk._get_proj()
-        subj = sdk.create_point("statement", "subject")
-        old_pt = sdk.create_point("statement", "old")
-        new_pt = sdk.create_point("statement", "new")
+        subj = sdk._create_point("statement", "subject")
+        old_pt = sdk._create_point("statement", "old")
+        new_pt = sdk._create_point("statement", "new")
         # Wire aboutSubject edge FROM old point TO subject
         proj.create_about_edge(old_pt["id"], subj["id"], "aboutSubject")
 
-        sdk.supersede_point(old_pt["id"], new_pt["id"])
+        sdk._supersede_point(old_pt["id"], new_pt["id"])
         # Second supersede: the old point is now terminal ('superseded') —
         # the guard rejects the transition (#432), guaranteeing no duplicates.
         import pytest
         with pytest.raises(ValueError, match="already terminal"):
-            sdk.supersede_point(old_pt["id"], new_pt["id"])
+            sdk._supersede_point(old_pt["id"], new_pt["id"])
         # Verify exactly 1 aboutSubject edge on new point (no duplicates)
         r = proj.g.query(
             "MATCH (new:Point {id:$nid})-[a:aboutSubject]->(s:Point {id:$sid}) "
@@ -716,13 +716,13 @@ class TestSupersedePointStructuralTransfer:
         """wasDerivedFrom edge transfers to the superseding Point (#150)."""
         proj = sdk._get_proj()
         # Create source point and a derived point
-        src = sdk.create_point("statement", "source data")
-        derived = sdk.create_point("statement", "derived claim")
-        new_pt = sdk.create_point("statement", "new derived claim")
+        src = sdk._create_point("statement", "source data")
+        derived = sdk._create_point("statement", "derived claim")
+        new_pt = sdk._create_point("statement", "new derived claim")
         # Wire wasDerivedFrom on derived point: (derived)-[:wasDerivedFrom]->(src)
         proj.create_edge(derived["id"], src["id"], "wasDerivedFrom")
         # Supersede the derived point
-        result = sdk.supersede_point(derived["id"], new_pt["id"])
+        result = sdk._supersede_point(derived["id"], new_pt["id"])
         # Verify wasDerivedFrom edge now connects new_pt -> src
         r = proj.g.query(
             "MATCH (new:Point {id:$nid})-[w:wasDerivedFrom]->(s:Point {id:$sid}) "
@@ -746,7 +746,7 @@ class TestComputeReputationNegative:
 
     def test_unknown_subject_returns_neutral(self, sdk):
         """Non-existent subject returns neutral 0.5."""
-        result = sdk.compute_reputation("nonexistent-subject")
+        result = sdk._compute_reputation("nonexistent-subject")
         assert result.get("mean", 0) == 0.5
 
     def test_reputation_excludes_an_outdated_nand_target(self, sdk):
@@ -759,9 +759,9 @@ class TestComputeReputationNegative:
         edge on the terminal point, which is the state the ``outdated`` filter
         exists for.
         """
-        subj = sdk.create_subject("nand-outdated-agent", "reviewer")
-        claim = sdk.create_point("statement", "claim that failed")
-        new_claim = sdk.create_point("statement", "corrected claim")
+        subj = sdk._create_subject("nand-outdated-agent", "reviewer")
+        claim = sdk._create_point("statement", "claim that failed")
+        new_claim = sdk._create_point("statement", "corrected claim")
 
         proj = sdk._get_proj()
         proj.apply({
@@ -771,9 +771,9 @@ class TestComputeReputationNegative:
             "eventKind": "review",
             "subject": subj["name"],
         })
-        sdk.create_direct_edge("NAND", "ev-out-1", claim["id"],
+        sdk._create_direct_edge("NAND", "ev-out-1", claim["id"],
                                promote_source=False)
-        sdk.invalidate_point(claim["id"], new_claim["id"])
+        sdk._invalidate_point(claim["id"], new_claim["id"])
 
         # Witness — the NAND really landed on the (now outdated) target.
         landed = proj.g.query(
@@ -783,7 +783,7 @@ class TestComputeReputationNegative:
         ).result_set[0][0]
         assert landed == 1, "the event's NAND edge was not written; the filter below is untested"
 
-        result = sdk.compute_reputation(subj["id"])
+        result = sdk._compute_reputation(subj["id"])
         assert result["nand_count"] == 0
         assert result["total_events"] == 0
         assert result["mean"] == 0.5
@@ -797,9 +797,9 @@ class TestComputeReputationNegative:
         successor). Measured before #8622: the edge was deleted and this read
         was neutral.
         """
-        subj = sdk.create_subject("nand-transfer-agent", "reviewer")
-        claim = sdk.create_point("statement", "claim that was wrong")
-        successor = sdk.create_point("statement", "corrected claim")
+        subj = sdk._create_subject("nand-transfer-agent", "reviewer")
+        claim = sdk._create_point("statement", "claim that was wrong")
+        successor = sdk._create_point("statement", "corrected claim")
 
         proj = sdk._get_proj()
         proj.apply({
@@ -809,11 +809,11 @@ class TestComputeReputationNegative:
             "eventKind": "review",
             "subject": subj["name"],
         })
-        sdk.create_direct_edge("NAND", "ev-out-2", claim["id"],
+        sdk._create_direct_edge("NAND", "ev-out-2", claim["id"],
                                promote_source=False)
-        assert sdk.compute_reputation(subj["id"])["nand_count"] == 1
+        assert sdk._compute_reputation(subj["id"])["nand_count"] == 1
 
-        result = sdk.supersede_point(claim["id"], successor["id"])
+        result = sdk._supersede_point(claim["id"], successor["id"])
         assert result["edges_transferred"] == 1
 
         targets = [r[0] for r in proj.g.query(
@@ -826,7 +826,7 @@ class TestComputeReputationNegative:
         ).result_set
         assert not stranded, stranded
 
-        after = sdk.compute_reputation(subj["id"])
+        after = sdk._compute_reputation(subj["id"])
         assert after["nand_count"] == 1
         assert after["total_events"] == 1
         assert after["outcomes"][0]["point_id"] == successor["id"]
@@ -837,13 +837,13 @@ class TestCreateEventNegative:
 
     def test_create_event_empty_uses(self, sdk):
         """Event with no uses/produces works."""
-        ev = sdk.create_event("empty-1", "meeting")
+        ev = sdk._create_event("empty-1", "meeting")
         assert ev is not None
         assert ev.get("id") or ev.get("eventId")
 
     def test_create_event_none_subject(self, sdk):
         """Event with None subject doesn't crash."""
-        ev = sdk.create_event("none-1", "meeting", aboutSubject=None, aboutObject=None)
+        ev = sdk._create_event("none-1", "meeting", aboutSubject=None, aboutObject=None)
         assert ev is not None
 
 
@@ -859,49 +859,49 @@ class TestNegativePaths:
 
     def test_create_derivation_nonexistent_src(self, sdk):
         """create_derivation with non-existent src returns derived=False."""
-        dst = sdk.create_object("valid-dst", "dataset")
-        result = sdk.create_derivation("nonexistent-src-id", dst["id"])
+        dst = sdk._create_object("valid-dst", "dataset")
+        result = sdk._create_derivation("nonexistent-src-id", dst["id"])
         assert result["derived"] is False
         assert result["src"] == "nonexistent-src-id"
         assert result["dst"] == dst["id"]
 
     def test_create_derivation_nonexistent_dst(self, sdk):
         """create_derivation with non-existent dst returns derived=False."""
-        src = sdk.create_object("valid-src", "dataset")
-        result = sdk.create_derivation(src["id"], "nonexistent-dst-id")
+        src = sdk._create_object("valid-src", "dataset")
+        result = sdk._create_derivation(src["id"], "nonexistent-dst-id")
         assert result["derived"] is False
         assert result["src"] == src["id"]
         assert result["dst"] == "nonexistent-dst-id"
 
     def test_create_derivation_both_nonexistent(self, sdk):
         """create_derivation with both IDs non-existent returns derived=False."""
-        result = sdk.create_derivation("bad-src", "bad-dst")
+        result = sdk._create_derivation("bad-src", "bad-dst")
         assert result["derived"] is False
 
     # ── supersede_point with bad IDs ──────────────────────────────────
 
     def test_supersede_point_nonexistent_old(self, sdk):
         """supersede_point with non-existent old_id → ValueError (#432 transition guard)."""
-        new_pt = sdk.create_point("statement", "valid new point")
+        new_pt = sdk._create_point("statement", "valid new point")
         with pytest.raises(ValueError, match="No point"):
-            sdk.supersede_point("nonexistent-old-id", new_pt["id"])
+            sdk._supersede_point("nonexistent-old-id", new_pt["id"])
 
     def test_supersede_point_nonexistent_new(self, sdk):
         """supersede_point with non-existent new_id → ValueError (#432: no phantom successor)."""
-        old_pt = sdk.create_point("statement", "valid old point")
+        old_pt = sdk._create_point("statement", "valid old point")
         with pytest.raises(ValueError, match="No point"):
-            sdk.supersede_point(old_pt["id"], "nonexistent-new-id")
+            sdk._supersede_point(old_pt["id"], "nonexistent-new-id")
 
     def test_supersede_point_both_nonexistent(self, sdk):
         """supersede_point with both IDs non-existent → ValueError (old miss, #432)."""
         with pytest.raises(ValueError, match="No point"):
-            sdk.supersede_point("nonexistent-old", "nonexistent-new")
+            sdk._supersede_point("nonexistent-old", "nonexistent-new")
 
     def test_supersede_point_same_id(self, sdk):
         """supersede_point with old==new → ValueError (#432: successor must differ)."""
-        pt = sdk.create_point("statement", "self-superseding point")
+        pt = sdk._create_point("statement", "self-superseding point")
         with pytest.raises(ValueError, match="same|differ"):  # noqa: RUF043
-            sdk.supersede_point(pt["id"], pt["id"])
+            sdk._supersede_point(pt["id"], pt["id"])
 
     # ── compute_reputation with all-superseded claims ─────────────────
 
@@ -917,9 +917,9 @@ class TestNegativePaths:
         the state this filter exists for — so the fixture is built through the
         public write path rather than by raw Cypher.
         """
-        subj = sdk.create_subject("all-superseded-agent", "analyst")
-        claim = sdk.create_point("statement", "superseded claim")
-        replacement = sdk.create_point("statement", "replacement claim")
+        subj = sdk._create_subject("all-superseded-agent", "analyst")
+        claim = sdk._create_point("statement", "superseded claim")
+        replacement = sdk._create_point("statement", "replacement claim")
 
         # Agent performs an event that IMPLs the claim
         proj = sdk._get_proj()
@@ -930,10 +930,10 @@ class TestNegativePaths:
             "eventKind": "analysis",
             "subject": subj["name"],
         })
-        sdk.create_direct_edge("IMPL", "ev-sup-all", claim["id"],
+        sdk._create_direct_edge("IMPL", "ev-sup-all", claim["id"],
                                promote_source=False)
         # Invalidate, do NOT supersede: the edge stays on the now-outdated claim.
-        sdk.invalidate_point(claim["id"], replacement["id"])
+        sdk._invalidate_point(claim["id"], replacement["id"])
 
         # Witness — a no-op write must not be able to pass this test vacuously.
         landed = proj.g.query(
@@ -944,7 +944,7 @@ class TestNegativePaths:
         assert landed == 1, "the event's IMPL edge was not written; the filter below is untested"
 
         # Reputation should be neutral — outdated claim excluded
-        rep = sdk.compute_reputation(subj["id"])
+        rep = sdk._compute_reputation(subj["id"])
         assert rep["mean"] == 0.5
         assert rep["total_events"] == 0
         assert rep["impl_count"] == 0
@@ -961,9 +961,9 @@ class TestNegativePaths:
         cannot simply stay behind either. Consequence, pinned here: the subject's
         event supports the LIVE successor and remains part of the score.
         """
-        subj = sdk.create_subject("superseded-transfer-agent", "analyst")
-        claim = sdk.create_point("statement", "claim to be superseded")
-        replacement = sdk.create_point("statement", "replacement claim")
+        subj = sdk._create_subject("superseded-transfer-agent", "analyst")
+        claim = sdk._create_point("statement", "claim to be superseded")
+        replacement = sdk._create_point("statement", "replacement claim")
         proj = sdk._get_proj()
         proj.apply({
             "type": "EventRecorded",
@@ -977,10 +977,10 @@ class TestNegativePaths:
             "CREATE (e)-[:IMPL]->(p)",
             params={"pid": claim["id"]},
         )
-        before = sdk.compute_reputation(subj["id"])
+        before = sdk._compute_reputation(subj["id"])
         assert before["total_events"] == 1
 
-        result = sdk.supersede_point(claim["id"], replacement["id"])
+        result = sdk._supersede_point(claim["id"], replacement["id"])
         assert result["edges_transferred"] == 1
 
         # The edge followed the successor, and nothing is left on the prior.
@@ -994,7 +994,7 @@ class TestNegativePaths:
         ).result_set
         assert not stranded, stranded
 
-        after = sdk.compute_reputation(subj["id"])
+        after = sdk._compute_reputation(subj["id"])
         assert after["total_events"] == 1
         assert after["impl_count"] == 1
         assert after["outcomes"][0]["point_id"] == replacement["id"]
@@ -1003,10 +1003,10 @@ class TestNegativePaths:
 
     def test_create_operator_composed_of_creates_has_part_edges(self, sdk):
         """create_operator with 'composedOf' is valid and creates hasPart edges."""
-        src = sdk.create_point("statement", "whole concept")
-        t1 = sdk.create_point("statement", "part A")
-        t2 = sdk.create_point("statement", "part B")
-        op = sdk.create_operator("composedOf", src["id"], [t1["id"], t2["id"]])
+        src = sdk._create_point("statement", "whole concept")
+        t1 = sdk._create_point("statement", "part A")
+        t2 = sdk._create_point("statement", "part B")
+        op = sdk._create_operator("composedOf", src["id"], [t1["id"], t2["id"]])
         assert op["is_operator"] is True
         assert op["op_type"] == "composedOf"
         # Verify hasPart edges exist from operator to all inputs
@@ -1020,9 +1020,9 @@ class TestNegativePaths:
 
     def test_create_operator_contains_creates_has_part_edges(self, sdk):
         """create_operator with 'contains' is valid and creates hasPart edges."""
-        src = sdk.create_point("statement", "container")
-        t1 = sdk.create_point("statement", "contained item")
-        op = sdk.create_operator("contains", src["id"], [t1["id"]])
+        src = sdk._create_point("statement", "container")
+        t1 = sdk._create_point("statement", "contained item")
+        op = sdk._create_operator("contains", src["id"], [t1["id"]])
         assert op["is_operator"] is True
         assert op["op_type"] == "contains"
         proj = sdk._get_proj()
@@ -1035,9 +1035,9 @@ class TestNegativePaths:
 
     def test_create_operator_wraps_creates_has_part_edges(self, sdk):
         """create_operator with 'wraps' is valid and creates hasPart edges."""
-        src = sdk.create_point("statement", "wrapper")
-        t1 = sdk.create_point("statement", "wrapped content")
-        op = sdk.create_operator("wraps", src["id"], [t1["id"]])
+        src = sdk._create_point("statement", "wrapper")
+        t1 = sdk._create_point("statement", "wrapped content")
+        op = sdk._create_operator("wraps", src["id"], [t1["id"]])
         assert op["is_operator"] is True
         assert op["op_type"] == "wraps"
         proj = sdk._get_proj()
@@ -1050,11 +1050,11 @@ class TestNegativePaths:
 
     def test_create_operator_decomposes_into_creates_has_part_edges(self, sdk):
         """create_operator with 'decomposesInto' is valid and creates hasPart edges."""
-        src = sdk.create_point("statement", "decomposable whole")
-        t1 = sdk.create_point("statement", "sub-item 1")
-        t2 = sdk.create_point("statement", "sub-item 2")
-        t3 = sdk.create_point("statement", "sub-item 3")
-        op = sdk.create_operator("decomposesInto", src["id"], [t1["id"], t2["id"], t3["id"]])
+        src = sdk._create_point("statement", "decomposable whole")
+        t1 = sdk._create_point("statement", "sub-item 1")
+        t2 = sdk._create_point("statement", "sub-item 2")
+        t3 = sdk._create_point("statement", "sub-item 3")
+        op = sdk._create_operator("decomposesInto", src["id"], [t1["id"], t2["id"], t3["id"]])
         assert op["is_operator"] is True
         assert op["op_type"] == "decomposesInto"
         proj = sdk._get_proj()
@@ -1067,16 +1067,16 @@ class TestNegativePaths:
 
     def test_create_operator_invalid_type_raises_value_error(self, sdk):
         """create_operator with unrecognized op_type raises ValueError."""
-        p1 = sdk.create_point("statement", "point 1")
-        p2 = sdk.create_point("statement", "point 2")
+        p1 = sdk._create_point("statement", "point 1")
+        p2 = sdk._create_point("statement", "point 2")
         with pytest.raises(ValueError, match="op_type must be"):
-            sdk.create_operator("invalidType", p1["id"], [p2["id"]])
+            sdk._create_operator("invalidType", p1["id"], [p2["id"]])
 
     def test_create_operator_missing_points_raises_value_error(self, sdk):
         """create_operator referencing non-existent Points raises ValueError."""
-        p1 = sdk.create_point("statement", "existing point")
+        p1 = sdk._create_point("statement", "existing point")
         with pytest.raises(ValueError, match="do not exist"):
-            sdk.create_operator("IMPL", p1["id"], ["nonexistent-point-id"])
+            sdk._create_operator("IMPL", p1["id"], ["nonexistent-point-id"])
 
     # ── create_event with uses containing empty strings ───────────────
 
@@ -1086,8 +1086,8 @@ class TestNegativePaths:
         `valid-input` is REGISTERED first (#3590 D1 — a mention is resolved,
         never minted), so the surviving edge is the one the fold can actually
         wire; an empty string is not a writable MERGE key at all."""
-        sdk.create_object("valid-input", "dataset")
-        ev = sdk.create_event("ev-empty-uses", "analysis",
+        sdk._create_object("valid-input", "dataset")
+        ev = sdk._create_event("ev-empty-uses", "analysis",
                               uses=["", "valid-input", ""],
                               subject="test-agent")
         assert ev is not None
@@ -1206,7 +1206,7 @@ class TestStubEntityIdIsNotTheName:
         for Subject.
         """
         # Create a proper Subject with the canonical id via SDK
-        subj = sdk.create_subject("existing-agent", "tester")
+        subj = sdk._create_subject("existing-agent", "tester")
         proj = sdk._get_proj()
         # Now create an event referencing the same subject name
         proj.apply({
@@ -1256,7 +1256,7 @@ def live_sdk_212():
     )
     try:
         s = TortoiseSDK()
-        s.test_guard()  # ensures we're not on production
+        s._test_guard()  # ensures we're not on production
         # Clean the test graph before each test
         proj = s._get_proj()
         proj.g.query("MATCH (n) DETACH DELETE n")
@@ -1279,9 +1279,9 @@ class TestParticipatesInEdges:
         sdk = live_sdk_212
         proj = sdk._get_proj()
         # Create subjects first (they need id properties)
-        alice = sdk.create_subject("alice", "tester")
-        bob = sdk.create_subject("bob", "reviewer")
-        carol = sdk.create_subject("carol", "observer")
+        alice = sdk._create_subject("alice", "tester")
+        bob = sdk._create_subject("bob", "reviewer")
+        carol = sdk._create_subject("carol", "observer")
         # Create event with participants list
         proj.apply({
             "type": "EventRecorded",
@@ -1307,7 +1307,7 @@ class TestParticipatesInEdges:
         """Re-applying same event does not duplicate participatesIn edges."""
         sdk = live_sdk_212
         proj = sdk._get_proj()
-        alice = sdk.create_subject("alice", "tester")
+        alice = sdk._create_subject("alice", "tester")
         event = {
             "type": "EventRecorded",
             "id": "ev-212-2",
@@ -1331,7 +1331,7 @@ class TestParticipatesInEdges:
         sdk = live_sdk_212
         proj = sdk._get_proj()
         # Create subject first
-        sdk.create_subject("dave", "engineer")
+        sdk._create_subject("dave", "engineer")
         proj.apply({
             "type": "EventRecorded",
             "id": "ev-212-3",
@@ -1370,8 +1370,8 @@ class TestParticipatesInEdges:
         """participatesIn edges are queryable in both directions."""
         sdk = live_sdk_212
         proj = sdk._get_proj()
-        alice = sdk.create_subject("alice-212", "tester")
-        bob = sdk.create_subject("bob-212", "reviewer")
+        alice = sdk._create_subject("alice-212", "tester")
+        bob = sdk._create_subject("bob-212", "reviewer")
         proj.apply({
             "type": "EventRecorded",
             "id": "ev-212-5",
@@ -1400,7 +1400,7 @@ class TestParticipatesInEdges:
         """participatesIn edge is separate from performs — both can co-exist."""
         sdk = live_sdk_212
         proj = sdk._get_proj()
-        alice = sdk.create_subject("alice-212b", "tester")
+        alice = sdk._create_subject("alice-212b", "tester")
         proj.apply({
             "type": "EventRecorded",
             "id": "ev-212-6",

@@ -202,7 +202,7 @@ def test_create_entity_document_does_not_diverge_live_vs_rebuild():
 
     sdk, log = _journaled_sdk()
     try:
-        sdk.create_event("evt-9419", "sessionCaptured", object="doc-9419.md",
+        sdk._create_event("evt-9419", "sessionCaptured", object="doc-9419.md",
                          objectType="Document")
         proj = sdk._get_proj()
         live = _ingested_at(proj, "doc-9419.md")
@@ -235,7 +235,7 @@ def test_the_single_clock_stamp_never_becomes_an_event_property():
     """
     sdk, _log = _journaled_sdk()
     try:
-        ev = sdk.create_event("evt-9419-ts", "sessionCaptured", object="doc-9419-ts.md",
+        ev = sdk._create_event("evt-9419-ts", "sessionCaptured", object="doc-9419-ts.md",
                               objectType="Document")
         rows = sdk._get_proj().g.query(
             "MATCH (e:Event {eventId:$eid}) RETURN e.ts",

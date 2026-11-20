@@ -299,7 +299,7 @@ def test_capture_aboutobject_edges_survive_rebuild_all(hosted_lane):
     sdk = ha._make_sdk(namespace=hosted_lane.org)
     try:
         proj = sdk._get_proj()
-        sdk.create_object("test/repo#42", objectKind="pm:issue")
+        sdk._create_object("test/repo#42", objectKind="pm:issue")
         r = sdk._capture_session(CONV, session_id="s-4240-capture")
         assert r.get("ok") is True, r
 
@@ -356,7 +356,7 @@ def test_relink_aboutobject_edge_survives_rebuild_all(hosted_lane):
             "no referenced entity yet — the Session pass must be an honest no-match"
 
         # Index completes → the WorkItem Object materializes.
-        sdk.create_object("test/repo#42", objectKind="pm:issue")
+        sdk._create_object("test/repo#42", objectKind="pm:issue")
         ha._relink_sessions_after_index(org)
 
         live = _about_edges(proj)
@@ -408,7 +408,7 @@ def test_live_only_capture_loses_aboutobject_edges_without_the_journal(
     sdk = ha._make_sdk(namespace=hosted_lane.org)
     try:
         proj = sdk._get_proj()
-        sdk.create_object("test/repo#42", objectKind="pm:issue")
+        sdk._create_object("test/repo#42", objectKind="pm:issue")
         r = sdk._capture_session(CONV, session_id="s-4240-liveonly")
         assert r.get("ok") is True, r
 
@@ -460,7 +460,7 @@ def test_unwritable_journal_is_disclosed_and_counted(tmp_path, monkeypatch):
 
     sdk = ha._make_sdk(namespace=org)
     try:
-        sdk.create_object("test/repo#42", objectKind="pm:issue")
+        sdk._create_object("test/repo#42", objectKind="pm:issue")
         r = sdk._capture_session(CONV, session_id="s-4240-unwritable")
         assert r.get("status") == "partial", r
         assert r.get("points") == [], (
@@ -566,7 +566,7 @@ def test_capture_after_a_failed_non_capture_write_reports_no_journal_warning(
     try:
         events.chmod(0o500)
         # A NON-capture write whose journal append fails — the counter moves.
-        sdk.create_object("test/repo#5632", objectKind="pm:issue")
+        sdk._create_object("test/repo#5632", objectKind="pm:issue")
         events.chmod(0o700)
         before = sdk._journal_write_failures
         assert before > 0, (
@@ -620,7 +620,7 @@ def test_hosted_capture_after_a_failed_non_capture_write_reports_no_warning(
             armed["on"] = False
             events.chmod(0o500)
             try:
-                sdk.create_object("test/repo#5632", objectKind="pm:issue")
+                sdk._create_object("test/repo#5632", objectKind="pm:issue")
             finally:
                 events.chmod(0o700)
             # Bind the baseline HERE — AFTER the non-capture failure and

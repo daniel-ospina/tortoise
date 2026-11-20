@@ -165,7 +165,7 @@ def main() -> int:
             if not words:
                 continue
             try:
-                sdk.tortoise_fts_query(
+                sdk._tortoise_fts_query(
                     " ".join(words), limit=a.limit,
                     # #12297: recorded-baseline probe — its numbers are
                     # pre-lever, so the armed rerank would silently add a model

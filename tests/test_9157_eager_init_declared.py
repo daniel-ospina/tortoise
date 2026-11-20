@@ -91,7 +91,7 @@ def test_the_eager_init_create_reaches_the_projection_write_handle(sdk, monkeypa
     """
     seen = _spy_on_handle_writes(monkeypatch)
 
-    sdk.org_create("declared-lane")
+    sdk._org_create("declared-lane")
 
     init = [(cypher, lane) for cypher, lane, _proj in seen if _is_eager_init(cypher)]
     assert init, (
@@ -118,7 +118,7 @@ def test_the_declared_write_lands_on_the_org_graph_it_names(sdk, monkeypatch):
     """
     seen = _spy_on_handle_writes(monkeypatch)
 
-    result = sdk.org_create("right-graph")
+    result = sdk._org_create("right-graph")
     graph_name = sdk._get_registry().query(
         "MATCH (t:Team {id:$id}) RETURN t.graph_name", params={"id": result["id"]}
     ).result_set[0][0]
@@ -158,7 +158,7 @@ def test_org_create_still_mints_with_the_write_handle_guard_ARMED(armed_sdk,
         "cannot tell a declaration from an unguarded write"
     )
 
-    result = armed_sdk.org_create("armed-lane")
+    result = armed_sdk._org_create("armed-lane")
 
     assert result["id"], result
     graph_name = armed_sdk._get_registry().query(

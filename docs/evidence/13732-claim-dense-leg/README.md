@@ -237,7 +237,7 @@ prints, so a bare `apply --journal <path>` is argparse-rejected.
 | `leg_trace` showing `mechanism: pgvector` from the record | **not measured**; asserted structurally (`check_arm`) so a run that cannot show it refuses — including a leg that RAN and **DEGRADED** (`ran=True, degraded=True`, the engine's shape for a failed query), which `ran` alone cannot see. ⛔ **The cohort it needs is now produced by the run** (#13830): the seed writes through the journaled door, so `record_dense` is measurable — the arm being measurable is NOT the arm having been measured |
 | detectable effect for n = 786 stated before the verdict | ✅ **done** — §1, committed and pinned |
 | a signal's own isolated delta, never bundled | ✅ by construction — the three arms are the isolation; the pre-registration forbids adding a signal to an arm |
-| `object`/`subject` still withheld (run the pinning test) | ⛔ **the named test does not exist in this tree.** `test_object_and_subject_still_have_no_record_served_dense_leg` was not found by `grep -rn` anywhere under `tests/`. The posture it names was **reversed by landed work**: `record_vector.LABEL_SERVED` carries `object` and `subject` since `#13422`/PR #13466, and `MIRROR_RETIRED_LABELS = {"object", "subject"}` is the set whose graph copy is retired. That is the owner's 2026-11-17 answer on `#13220` — *"if indexing improves search for Object/Subject/Event of course we want that … in Postgres and the search aligned with that"*. The brief's instruction is stale, and following it would have reversed a landed decision inside a measurement tool. What holds instead: **no graph vector index is created on any label** (V1, PR #11481), pinned structurally by `TestContradictionTest` |
+| `object`/`subject` still withheld (run the pinning test) | ⛔ **the named test does not exist in this tree.** `test_object_and_subject_still_have_no_record_served_dense_leg` was not found by `grep -rn` anywhere under `tests/`. The posture it names was **reversed by landed work**: `record_vector.LABEL_SERVED` carries `object` and `subject` since `#13422`/PR #13466, and `MIRROR_RETIRED_LABELS = {"object", "subject", "event", "document", "source"}` is the set whose graph copy is retired. That is the owner's 2026-11-17 answer on `#13220` — *"if indexing improves search for Object/Subject/Event of course we want that … in Postgres and the search aligned with that"*. The brief's instruction is stale, and following it would have reversed a landed decision inside a measurement tool. What holds instead: **no graph vector index is created on any label** (V1, PR #11481), pinned structurally by `TestContradictionTest` |
 | `dod_5090_probe.py` still 3 MET / 1 PARTIAL | ✅ re-run at this head (see the PR body) |
 
 ## 5. What the next lane does
@@ -316,8 +316,9 @@ replay, so a repair command there could not work. If `record_declined` is non-ze
 a real journal.
 
 ⛔ **And `record_dsn_fingerprint` says WHICH store.** `--dsn "$TORTOISE_RECORD_DSN"` names the
-variable, not the value, so the artifact publishes the DSN's 8-hex fingerprint (`record_writer.dsn_fingerprint`,
-#2903/#2796 — a secret must never enter an artifact) beside the commands. Compare it against the
+variable, not the value, so the artifact publishes the DSN's 8-hex fingerprint
+(`record_writer.dsn_fingerprint`, #2903/#2796 — a secret must never enter an artifact) beside the
+commands. Compare it against the
 fingerprint of the DSN in your shell before pasting the fold: a shell that exports a *different*
 record folds this population into a store nobody measured, silently.
 

@@ -258,11 +258,11 @@ class TestShapeBDeleteThenRegister:
     def _build(self, tmp_path, events):
         db = str(tmp_path / "shared.db")
         s1 = TortoiseSDK(db)  # journal-less: the creation is unjournaled
-        oid = s1.create_object("K7", objectKind="core:other")["id"]
+        oid = s1._create_object("K7", objectKind="core:other")["id"]
         s1.close()
         s2 = TortoiseSDK(db, event_log_path=str(events / "events.jsonl"))
-        s2.delete_entity(oid)
-        s2.create_object("K7", objectKind="core:other")
+        s2._delete_entity__svc(oid)
+        s2._create_object("K7", objectKind="core:other")
         return s2, oid
 
     def test_shape_b_matches_live_and_delete_miss_is_exempt(self, env,
@@ -463,7 +463,7 @@ class TestNonFoldedSetIsAsserted:
         healthy run reports a non-empty set.
         REACHABLE: a normal SDK-created point, applied through the journal."""
         sdk, events = env
-        sdk.create_point(content="hello", kind="statement")
+        sdk._create_point(content="hello", kind="statement")
         r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
         assert r["ok"] is True, r["divergence"]
         assert r["non_folded_count"] == 0
@@ -722,7 +722,7 @@ class TestReReviewRoundTwo:
         """
         sdk, events = env
         oid = sdk.create_entity("object", name="GONE")["node"]["id"]
-        sdk.delete_entity(oid)
+        sdk._delete_entity__svc(oid)
         _raw(events, type="ObjectSuperseded", name="GONE",
              supersedes_by="other", event_id="e-gone")
         proj = sdk._get_proj()
@@ -765,7 +765,7 @@ class TestReReviewRoundTwo:
         """
         sdk, events = env
         oid = sdk.create_entity("object", name="GONE2")["node"]["id"]
-        sdk.delete_entity(oid)
+        sdk._delete_entity__svc(oid)
         _raw(events, type="ObjectSuperseded", name="GONE2", id="o-junk",
              supersedes_by="other", event_id="e-gone2")
         proj = sdk._get_proj()
@@ -1003,9 +1003,9 @@ class TestReReviewRoundThree:
         it is the pre-existing, warned parity gap. What this pins is that an
         ACCEPTED journal stays REPLAYABLE."""
         sdk, events = env
-        p1 = sdk.create_point(content="old", kind="statement")["id"]
-        p2 = sdk.create_point(content="new", kind="statement")["id"]
-        sdk.supersede_point(p1, p2)
+        p1 = sdk._create_point(content="old", kind="statement")["id"]
+        p2 = sdk._create_point(content="new", kind="statement")["id"]
+        sdk._supersede_point(p1, p2)
         live = sorted(
             (r[0], r[1]) for r in sdk._get_proj().g.query(
                 "MATCH (p:Point) RETURN p.id, p.status").result_set)
@@ -1031,9 +1031,9 @@ class TestReReviewRoundThree:
         `apply()`, refusing a recovery.
         REACHABLE: a real `invalidate_point` journal (the #2488 writer)."""
         sdk, events = env
-        p1 = sdk.create_point(content="a", kind="statement")["id"]
-        p2 = sdk.create_point(content="b", kind="statement")["id"]
-        sdk.invalidate_point(p1, p2)
+        p1 = sdk._create_point(content="a", kind="statement")["id"]
+        p2 = sdk._create_point(content="b", kind="statement")["id"]
+        sdk._invalidate_point(p1, p2)
         proj = _drive("rebuild_all", tmp_path, events, _fresh(tmp_path, "ra2"))
         got = proj.g.query("MATCH (p:Point) RETURN p.id").result_set
         assert {r[0] for r in got} == {p1, p2}, got
@@ -1070,7 +1070,7 @@ class TestReReviewRoundThree:
         REACHABLE: a hand-written state op naming a non-canonical label for an
         id that IS a live Point."""
         sdk, events = env
-        p1 = sdk.create_point(content="x", kind="statement")["id"]
+        p1 = sdk._create_point(content="x", kind="statement")["id"]
         _raw(events, type="EntityMutated", op="restatus", label="Widget",
              id=p1, state={"status": "archived"}, event_id="e-r3-widget")
         r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
@@ -1084,7 +1084,7 @@ class TestReReviewRoundThree:
         `SET`), so the reference fold must too.
         REACHABLE: `op=restatus` with no `state` key, on a REAL Point."""
         sdk, events = env
-        p1 = sdk.create_point(content="x", kind="statement")["id"]
+        p1 = sdk._create_point(content="x", kind="statement")["id"]
         _raw(events, type="EntityMutated", op="restatus", label="Point",
              id=p1, event_id="e-r3-nostate")
         r = check_consistency(str(events / "events.jsonl"), sdk._get_proj())
@@ -2273,7 +2273,7 @@ class TestApplyPathTerminalizerMissIsRecorded:
     """The shared consumer (`apply_journal_point_restamp`) records the miss."""
 
     def _seed_missing_target(self, sdk, events, *, kind="PointSuperseded"):
-        sdk.create_point("statement", "kept", status="live")
+        sdk._create_point("statement", "kept", status="live")
         rec = {"type": kind, "id": "never-created-id", "event_id": "ghost-1"}
         if kind == "PointSuperseded":
             rec["new_id"] = "also-never-created"

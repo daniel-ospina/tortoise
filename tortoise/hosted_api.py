@@ -4660,7 +4660,7 @@ async def _dream_worker(org_id: str, key: str | None = None) -> None:
                 # drain is LOCAL mode (W1; never silently full — the I1
                 # precedence table governs; scheduled stale-first passes call
                 # /v1/dream with mode="stale-first" explicitly).
-                result = sdk.dream(dirty_only=True, mode="local")
+                result = sdk._dream(dirty_only=True, mode="local")
                 # #8099: precompute the why-blocks this pass made true, so the
                 # push below READS them instead of assembling per event. Runs
                 # INSIDE the lock and INSIDE the pool item on purpose: it is a
@@ -14124,7 +14124,7 @@ async def create_object(body: CreateObjectRequest, request: Request,
         # worker thread so THIS pinned call cannot freeze the single event loop
         # while it runs. Same asyncio.to_thread pattern as /v1/search;
         # response and error semantics are unchanged.
-        node = await asyncio.to_thread(sdk.create_object, body.name, **props)
+        node = await asyncio.to_thread(sdk._create_object, body.name, **props)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("create_object failed")
@@ -14182,7 +14182,7 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
         # a stored kind to the default.
         _kind = ({"subjectKind": _skind} if _skind is not None else {})
         node = await asyncio.to_thread(
-            sdk.create_subject, body.name, **_kind)
+            sdk._create_subject, body.name, **_kind)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("create_subject failed")
@@ -14242,7 +14242,7 @@ async def create_point(body: CreatePointRequest, request: Request, org: dict = D
             # not clear; `update_knowledge` does.
             if body.goalState is not None:
                 _author_props["goalState"] = body.goalState
-            out = sdk.create_point(
+            out = sdk._create_point(
                 content=body.content,
                 kind=body.kind,
                 tags=body.tags,
@@ -14997,13 +14997,13 @@ async def dream(
         # SDK's close.
         with _dream_lock(_dk):
             if mode is not None:
-                result = sdk.dream(mode=mode, budget=budget)
+                result = sdk._dream(mode=mode, budget=budget)
             elif full:
-                result = sdk.dream(full=True)
+                result = sdk._dream(full=True)
             else:
                 if queued_roots:
                     sdk._mark_dirty(queued_roots)
-                result = sdk.dream(dirty_only=True)
+                result = sdk._dream(dirty_only=True)
             # #8099 (review F2): EVERY belief-moving dream pass refreshes the
             # why-block cache, not only the write-triggered drain. Indicator 3's
             # "a point whose belief moved in a dream is pushed with the
@@ -15042,7 +15042,7 @@ async def dream_health(
     # `finally: sdk.close()`, cancelling the request would close the projection
     # on the LOOP while the worker was still inside the scan (CPython #87185 —
     # the same race `_run_dream_on_pool` was built to remove).
-    return await _run_with_close(_DREAM_EXECUTOR, sdk.dream_health_check, sdk)
+    return await _run_with_close(_DREAM_EXECUTOR, sdk._dream_health_check, sdk)
 
 
 @app.get("/v1/search")
@@ -15168,7 +15168,7 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
             # stalls and became a 3.7–14.6 s answer. Same callable, same result;
             # only WHERE it runs changes.
             results = await _read_offload(
-                lambda: sdk.tortoise_fts_query(
+                lambda: sdk._tortoise_fts_query(
                     q, limit=limit, read_status_out=status_out,
                     _truncation_out=trunc_out),
                 op="search")
@@ -15270,7 +15270,7 @@ async def topic_summary(
         # thread so the event loop stays free. #10602: on the dedicated,
         # BOUNDED read lane (same as /v1/search), not the shared pool.
         result = await _read_offload(
-            lambda: sdk.topic_summarize(
+            lambda: sdk._topic_summarize(
                 topic,
                 max_seeds=max_seeds, max_hops=max_hops,
                 include_relationships=include_relationships,
@@ -20738,7 +20738,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     _capture_mint_failed = False
     if not session_existed or (retry_failed_capture and not store_only):
         try:
-            event = sdk.create_event(
+            event = sdk._create_event(
                 f"session_{session_id}",
                 "sessionCaptured",
                 _server_id=_session_capture_event_id(session_id),
@@ -23319,7 +23319,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         # writer remaps the identity onto `:Source`) — it is what marks this a
         # derivation link, so it takes the `sourceVersion` anchor. See
         # `edges.py::_DERIVATION_REFERENCES_LABELS`.
-        sdk.link_source_to_entity(url, doc_id, "Document")
+        sdk._link_source_to_entity(url, doc_id, "Document")
     for session_url in session_urls:
         for external_url in external_urls:
             proj.g.query(
@@ -23422,7 +23422,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # BEFORE this successor is minted, so a refusal leaves no orphan
             # for this point.
             _prevalidate_supersede_window(sdk, pr, now=now)
-            _written = sdk.create_point(
+            _written = sdk._create_point(
                 pr.point.pointKind, pr.point.content, dedup=True, id=pid,
                 status=pr.point.status, confidence=pr.point.confidence,
                 c_cal=pr.point.c_cal, quote=pr.point.quote,
@@ -23573,7 +23573,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             # supersede leg's note above (an explicit None would CLEAR it).
             if _mention_props:
                 point_props["mentions"] = _mention_props
-            _written = sdk.create_point(
+            _written = sdk._create_point(
                 pr.point.pointKind, pr.point.content, dedup=True, id=pid,
                 status=pr.point.status, confidence=pr.point.confidence,
                 c_cal=pr.point.c_cal, quote=pr.point.quote,
@@ -27949,7 +27949,7 @@ async def _create_org_registry_lane(sdk, name: str, user: dict) -> dict:
         # all-NULL key provision (create_onboarding_org's #1716 keyless
         # parity). The old default minted a tt_ key whose plaintext was
         # never returned — a dead credential counted against max_api_keys.
-        result = sdk.org_create(name, mint_key=False,
+        result = sdk._org_create(name, mint_key=False,
                                  owner_user_id=user["user_id"])
     except Exception as e:
         if isinstance(e, ControlPlaneError) and "already exists" in str(e):
@@ -37986,7 +37986,7 @@ async def session_context(org: dict = Depends(get_current_org_gated)):  # noqa: 
     # `asyncio.to_thread` pattern, so the error mapping below is unchanged.
     sdk = await _data_sdk_offloaded(org)
     try:
-        return await asyncio.to_thread(sdk.session_context)
+        return await asyncio.to_thread(sdk._session_context)
     except Exception:
         # #750.5: never leak internals to the client — log, return generic.
         logging.getLogger("tortoise.api").exception("session_context failed")
@@ -38217,7 +38217,7 @@ async def volunteer_context(
         # search + why-block assembly) — never on the event loop.
         result = await asyncio.wait_for(
             asyncio.to_thread(
-                sdk.volunteer_context,
+                sdk._volunteer_context,
                 window,
                 body.session_id, body.prior_context,
                 body.min_confidence, body.max_pointers, body.why,
@@ -38281,7 +38281,7 @@ async def issue_insight(title: str, body: str | None = None,
     sdk = await _data_sdk_offloaded(org)
     try:
         return await asyncio.to_thread(
-            sdk.issue_insight, title=title, body=body, repo=repo, limit=limit)
+            sdk._issue_insight, title=title, body=body, repo=repo, limit=limit)
     except Exception:
         logging.getLogger("tortoise.api").exception("issue_insight failed")
         raise HTTPException(status_code=500, detail="Insight unavailable")  # noqa: B904
@@ -40711,10 +40711,10 @@ class _OrgSeedSurface:
         subjectKind = named_kind(subjectKind)
         if subjectKind is not None:
             props["subjectKind"] = subjectKind
-        return self._sdk.create_subject(name, **props)
+        return self._sdk._create_subject(name, **props)
 
     def create_edge(self, relation, from_id, to_id):
-        return self._sdk.create_edge(relation, from_id, to_id)
+        return self._sdk._create_edge(relation, from_id, to_id)
 
 
 def _next_onboarding_step(org_id: str, proj) -> str | None:
@@ -41319,7 +41319,7 @@ async def _create_onboarding_org_lane(org: dict, name: str,
         # #1716 keyless parity + #1748 owner Membership for the session
         # user (org_create now creates it — without it the keyless
         # sub-org is an unmintable orphan).
-        result = sdk.org_create(name, mint_key=False,
+        result = sdk._org_create(name, mint_key=False,
                                  owner_user_id=owner_user_id)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Team create failed: {e}")  # noqa: B904
@@ -48500,7 +48500,7 @@ def _provision_new_org_from_checkout(sdk, org_id: str, meta: dict) -> str:
         # Registry (selfhost) lane — sdk is the registry SDK passed by the
         # route (never None in registry mode).
         try:
-            result = sdk.org_create(org_name, mint_key=False,
+            result = sdk._org_create(org_name, mint_key=False,
                                      owner_user_id=user_id,
                                      idempotency_key=org_id)
         except Exception as e:
@@ -48510,7 +48510,7 @@ def _provision_new_org_from_checkout(sdk, org_id: str, meta: dict) -> str:
             _logger.warning(
                 "webhook: org name %r was taken; provisioning as %r (team %s)",
                 org_name, alt, org_id)
-            result = sdk.org_create(alt, mint_key=False,
+            result = sdk._org_create(alt, mint_key=False,
                                      owner_user_id=user_id,
                                      idempotency_key=org_id)
         return result["id"]
@@ -50884,7 +50884,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 197 tracked files (736 distinct
+# ABSOLUTE line number from 197 tracked files (734 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

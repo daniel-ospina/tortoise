@@ -10339,6 +10339,17 @@ ROWED_BY_THIS_FOLD = (
     # The row is here for the same reason as the one above: the ENTRY-RULE pin iterates this
     # EXPLICIT tuple, so a file nobody listed has no row and nothing reds.
     "test_capstone_12186_recall.py",
+    # #13826 — the write gate's falsifiers: every writer of a coverage-gated label asks
+    # `record_vector.mirror_required`, keeping the ROW and never the VECTOR on the stop arm.
+    # A file this fold ADDED, and it shipped with NO surface registration and NO
+    # `durations:` row at all — the #13854 review's blocking finding, found by rebuilding
+    # `integrity()`'s predicate from the head manifest rather than by reading the diff.
+    # Listed here for the reason every row above states: the ENTRY-RULE pin iterates this
+    # EXPLICIT tuple, so a file nobody listed has no row and nothing reds. ⛔ The missing
+    # registration was the more expensive half: `select()` computes `test_files` FROM the
+    # surfaces, so an unregistered file is never SELECTED, and its 11 falsifiers would have
+    # been dead weight even after the red check was silenced.
+    "test_13826_write_gate.py",
     # #13036 row V2 (PR #13886) - the capstone payload contract for the live MCP
     # surface, a file this fold ADDED. Dual-registered `api` + `core`: the `core`
     # row is the SELECTION half (a diff whose only python change is this file takes

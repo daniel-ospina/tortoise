@@ -44,7 +44,7 @@ def sdk(tmp_path):
 
 def make_point(sdk: TortoiseSDK, content: str) -> str:
     """A live :Point claim (EP tests model live claims; #780 excludes drafts)."""
-    return sdk.create_point("statement", content, status="live")["id"]
+    return sdk._create_point("statement", content, status="live")["id"]
 
 
 def make_labeled_node(sdk: TortoiseSDK, label: str, node_id: str,
@@ -172,7 +172,7 @@ def test_event_operator_target_receives_posterior(sdk):
     event = make_labeled_node(sdk, "Event", "evt-7853-a", "an event")
     set_evidence(sdk, src, 12.0, 1.0)
     # create_operator admits (s:Point OR s:Event) endpoints today.
-    sdk.create_operator("IMPL", src, [event], direction="bidirectional")
+    sdk._create_operator("IMPL", src, [event], direction="bidirectional")
 
     run_ep(sdk, [src, event])
 
@@ -186,7 +186,7 @@ def test_event_operator_source_is_discovered_when_seeded(sdk):
     src = make_point(sdk, "strong source")
     event = make_labeled_node(sdk, "Event", "evt-7853-b", "an event")
     set_evidence(sdk, src, 12.0, 1.0)
-    sdk.create_operator("IMPL", src, [event], direction="bidirectional")
+    sdk._create_operator("IMPL", src, [event], direction="bidirectional")
 
     ep = sdk._get_ep()
     affected = ep._affected_claims([event], max_hops=2)
@@ -219,7 +219,7 @@ def test_point_operator_path_still_propagates(sdk):
     src = make_point(sdk, "strong source")
     tgt = make_point(sdk, "plain target")
     set_evidence(sdk, src, 12.0, 1.0)
-    sdk.create_operator("IMPL", src, [tgt], direction="bidirectional")
+    sdk._create_operator("IMPL", src, [tgt], direction="bidirectional")
 
     run_ep(sdk, [src, tgt])
 
@@ -233,7 +233,7 @@ def test_unrelated_node_stays_neutral(sdk):
     tgt = make_point(sdk, "plain target")
     bystander = make_labeled_node(sdk, "Event", "evt-7853-bystander", "bystander")
     set_evidence(sdk, src, 12.0, 1.0)
-    sdk.create_operator("IMPL", src, [tgt], direction="bidirectional")
+    sdk._create_operator("IMPL", src, [tgt], direction="bidirectional")
 
     run_ep(sdk, [src, tgt])
 
@@ -302,7 +302,7 @@ def _direct_edge_target_outcome(tmp_path, label: str, shape: str) -> tuple:
         edges = [(src, pivot), (pivot, target)]
     else:
         # A real factor, so the run does not early-return before write-back.
-        sdk.create_operator("IMPL", src, [make_point(sdk, "op target")],
+        sdk._create_operator("IMPL", src, [make_point(sdk, "op target")],
                             direction="bidirectional")
         edges = [(src, target)]
     set_evidence(sdk, src, 12.0, 1.0)
@@ -409,7 +409,7 @@ def test_non_point_belief_write_survives_rebuild(tmp_path):
     sdk = TortoiseSDK(db, event_log_path=log_path)
     try:
         proj = sdk._get_proj()
-        src = sdk.create_point("statement", "strong source",
+        src = sdk._create_point("statement", "strong source",
                                status="live")["id"]
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.ep_alpha=12.0, n.ep_beta=1.0, "
@@ -418,7 +418,7 @@ def test_non_point_belief_write_survives_rebuild(tmp_path):
         # can re-materialise the node the belief write targets).
         event = sdk.create_entity("event", "an event",
                                   eventKind="test")["node"]["id"]
-        sdk.create_operator("IMPL", src, [event], direction="bidirectional")
+        sdk._create_operator("IMPL", src, [event], direction="bidirectional")
         sdk._get_ep().run([src, event], max_hops=2,
                           evidence={src: (12.0, 1.0)})
 
@@ -773,14 +773,14 @@ def test_consistency_healthy_non_point_belief_is_not_non_folded(tmp_path):
     sdk = TortoiseSDK(db, event_log_path=log_path)
     try:
         proj = sdk._get_proj()
-        src = sdk.create_point("statement", "strong source",
+        src = sdk._create_point("statement", "strong source",
                                status="live")["id"]
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.ep_alpha=12.0, n.ep_beta=1.0, "
             "n.baseline_set=true", params={"id": src})
         event = sdk.create_entity("event", "an event",
                                   eventKind="test")["node"]["id"]
-        sdk.create_operator("IMPL", src, [event], direction="bidirectional")
+        sdk._create_operator("IMPL", src, [event], direction="bidirectional")
         sdk._get_ep().run([src, event], max_hops=2,
                           evidence={src: (12.0, 1.0)})
         proj.rebuild_all(str(events), confirm_destructive=True)
@@ -808,9 +808,9 @@ def test_compute_confidence_writeback_persists_full_precision_for_non_point(sdk)
     src = make_point(sdk, "strong source")
     event = make_labeled_node(sdk, "Event", "evt-7853-wb", "an event")
     set_evidence(sdk, src, 12.0, 1.0)
-    sdk.create_operator("IMPL", src, [event], direction="bidirectional")
+    sdk._create_operator("IMPL", src, [event], direction="bidirectional")
 
-    res = sdk.compute_confidence(evidence={src: (12.0, 1.0)},
+    res = sdk._compute_confidence(evidence={src: (12.0, 1.0)},
                                  require_calibration=False)
     mean = res["confidences"].get(event, {}).get("mean")
     assert mean is not None, res
@@ -835,7 +835,7 @@ def test_dream_writeback_persists_full_precision_for_non_point(sdk):
     src = make_point(sdk, "strong source")
     event = make_labeled_node(sdk, "Event", "evt-7853-dream", "an event")
     set_evidence(sdk, src, 12.0, 1.0)
-    sdk.create_operator("IMPL", src, [event], direction="bidirectional")
+    sdk._create_operator("IMPL", src, [event], direction="bidirectional")
 
     dreamer = sdk._get_dreamer()
     dreamer._ep_run_batch(proj, [src, event], 2, stamp=True,
@@ -870,11 +870,11 @@ def test_dream_coverage_denominator_includes_non_point_operator_input(sdk):
     ev = make_labeled_node(sdk, "Event", "evt-coverage-7853", "an event")
     # A ternary IMPL operator: two live :Points keep it past the selector's
     # derived-liveness gate; the :Event is the newly-admitted input.
-    sdk.create_operator("IMPL", a, [b, ev], direction="bidirectional")
+    sdk._create_operator("IMPL", a, [b, ev], direction="bidirectional")
     sdk._dirty_roots.clear()
     sdk._dirty_roots.add(a)
 
-    local = sdk.dream(mode="local", require_calibration=False)
+    local = sdk._dream(mode="local", require_calibration=False)
 
     assert ev in local["affected_claims"], (
         "precondition: the widened run set must admit the :Event operator "
@@ -884,7 +884,7 @@ def test_dream_coverage_denominator_includes_non_point_operator_input(sdk):
         "`_window_closure` denominator did not widen with "
         "`_affected_claims`")
 
-    full = sdk.dream(mode="full", require_calibration=False)
+    full = sdk._dream(mode="full", require_calibration=False)
     assert 0.0 <= full["coverage"] <= 1.0, (
         f"full coverage {full['coverage']} exceeds the 1.0 bound — the "
         "`_reachable_claim_count` denominator did not widen with the run set")
@@ -1493,13 +1493,13 @@ def test_content_comparison_sees_a_non_point_belief_divergence(tmp_path):
     sdk = TortoiseSDK(db, event_log_path=log_path)
     try:
         proj = sdk._get_proj()
-        src = sdk.create_point("statement", "strong source", status="live")["id"]
+        src = sdk._create_point("statement", "strong source", status="live")["id"]
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.ep_alpha=12.0, n.ep_beta=1.0, "
             "n.baseline_set=true", params={"id": src})
         event = sdk.create_entity("event", "an event",
                                   eventKind="test")["node"]["id"]
-        sdk.create_operator("IMPL", src, [event], direction="bidirectional")
+        sdk._create_operator("IMPL", src, [event], direction="bidirectional")
         sdk._get_ep().run([src, event], max_hops=2,
                           evidence={src: (12.0, 1.0)})
         proj.rebuild_all(str(events), confirm_destructive=True)
