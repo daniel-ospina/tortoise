@@ -130,7 +130,16 @@ SWEEP_NAMES = 66
 #: `._tortoise_fts_query(`: that receiver is a SUBSCRIPT, so the sweep could not type it and had
 #: REPORTED it as residue — the re-key removes that one row. Measured with `--repin` on this tree,
 #: not arithmetic.
-SWEEP_RESIDUE = (11757, "7a53ce4f33a41246")
+#: RE-PINNED AGAIN → (11758, 3b0765cfdbe87b0d) by the RE-CUT that merged `origin/main`
+#: `290912f303` INTO `feat/12901-sdk-final-c` (#13899). Exactly ONE row moved, and it is the
+#: sweep's own documented edge rather than a defect: `declared_markers.update` — a plain `set`
+#: `.update(…)` in `graph-scripts/business_map_13880/file_map.py:752`, a file `main` gained with
+#: `#13880` (`update` is one of the 47 ordinary words other objects answer to, so a
+#: name-scoped rewrite would have been sabotage). Diffed row-by-row between the pre-cut head and
+#: the merged tree: `'declared_markers.update': 0 -> 1`, every other key identical. It stays
+#: REPORTED, never rewritten; the pin moves so the count answers about the tree that exists.
+#: Measured with `--repin`, not arithmetic.
+SWEEP_RESIDUE = (11758, "3b0765cfdbe87b0d")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
