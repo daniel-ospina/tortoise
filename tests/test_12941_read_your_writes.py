@@ -114,7 +114,7 @@ def _sdk_class():
             # P1-1), so it is counted separately from the query: a cold open is a
             # connect + index ensure, and on a stopped graph it RAISES before the
             # record is ever asked. Asserting only "no query ran" left the
-            # mutation that hoists `self._get_proj()` to the top of `get_point`
+            # mutation that hoists `self._get_proj()` to the top of `_get_point`
             # invisible — measured GREEN (23 passed) by mutation.
             self.handle_opens = 0
 
