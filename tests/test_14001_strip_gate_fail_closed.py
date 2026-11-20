@@ -562,8 +562,24 @@ DEFEATED_RESOLVER_ROWS = (
     # assignment target, so ONLY the `global`-declaration arm poisons it. The two rows below pin
     # the MUTATOR and the ONE-SCOPE-IN spellings; without this row the plain form the defect was
     # MEASURED on had no regression pin, so an ordering change in the own-scope loop could re-open
-    # it with every row here still green (measured: disabling the own-scope dynamic arm reds THIS
-    # row alone, 26 of 27 siblings still pass).
+    # it with every row here still green. Re-measure when a row joins the table: `32 of 33` is the
+    # count at the row set below, and it is `32 of 33 ROWS`, not "32 of 33 siblings" — the table
+    # holds 33 rows INCLUDING this one, so it has 32 siblings and every one of them passes.
+    # ⛔ THE COUNT MOVED ONCE ALREADY: it read "30 of 31" until `#14057` added the two
+    # `masked-ask-*` rows and no sibling re-measure followed, which is exactly the rot this line
+    # warns about. Re-measured here at 33 rows: 1 failed, 58 passed of the file's 59 tests.
+    # ⛔ NAME THE MUTANT BY ITS TEXT, AND COUNT THE CANDIDATES FIRST — this comment has already
+    # sent one reviewer at the wrong arm. `poisoned |= _scope_declarations` appears FOUR times and
+    # TWO of them are in the own-scope loop: the subscript-write arm (line ~4666) and the
+    # `_dynamic_namespace_mutation` arm right below it (~4671). Disarming the SECOND also prints
+    # exactly "1 failed, 58 passed" — it reds `globals-mutator-rebinding` instead — so the bare
+    # count does not distinguish the right mutation from the wrong one. The mutant is the FIRST of
+    # the two: the `poisoned |= _scope_declarations` whose very next non-comment line is
+    # `elif isinstance(sub, ast.Call) and _dynamic_namespace_mutation(sub):`, in the branch that
+    # poisons on `_dynamic_namespace_write(target)`. Disarm THAT to `pass` and the file must print
+    # `1 failed, 58 passed` with the single failing id
+    # `test_the_resolver_bypasses_are_closed[globals-subscript-rebinding]`. Any other failing id is
+    # the wrong arm. Disarm-then-RESTORE, and never transcribe the number from a review.
     ("globals-subscript-rebinding", """
     global gk
     gk = "x"
