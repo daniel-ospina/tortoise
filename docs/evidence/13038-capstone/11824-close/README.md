@@ -67,9 +67,9 @@ ancestry, that is:
 
 These were **already in** `9e9fc232`, so they cannot account for the delta and
 should not be credited with it: the currency rule reading the position axis
-(#13034 / #13075, merged 2026-11-17), `goalState`↔`status` consistency (#13035 /
-#13065, merged 2026-11-17), and plans-vs-events (#13100 / #13115, merged
-2026-11-17). Note #13034 itself is still **OPEN** — its measured fix (the
+(#13034 / #13075, merged 2026-11-17), `goalState`↔`status` consistency
+(#13035 / #13065, merged 2026-11-17), and plans-vs-events (#13100 / #13115,
+merged 2026-11-17). Note #13034 itself is still **OPEN** — its measured fix (the
 predicate reading the position axis) shipped in #13075.
 
 ## How to re-run
