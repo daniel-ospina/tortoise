@@ -16734,6 +16734,48 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     ),
 )
 
+#: The labels `_D5_CURRENT_CLAIMS` must still carry, one per entry. Compared as a SET, never
+#: as a count: a count in a comment about a list that grows is the head-bound figure this
+#: file forbids, while a set reds on BOTH a dropped entry and a duplicated label.
+#: ⛔ WHY THIS EXISTS AT ALL (#13879 review, cycle 2 — MEASURED): the tuple's only reader is
+#: the loop in `test_the_D5_row_is_still_one_table_row`, so it walks whatever entries it
+#: FINDS and a SHORTER tuple is silently green. Deleting the I7 `nodes_used` entry left
+#: `len(_D5_CURRENT_CLAIMS)` at 4 and `pytest -k D5 -q` at `3 passed`, no red — so the
+#: loop's own remediation text ("re-derive the sentence …, do not drop it") enforced
+#: nothing, and the one direction a reviewer or fixer under pressure can take — convert a
+#: graded present-tense number back to an ungraded one — had no gate at all.
+_D5_CURRENT_CLAIM_LABELS = frozenset({
+    "the file's ONLY `dedup_reviewed IS NULL`",
+    "the quota guard `if count + est > max_points:`",
+    "the I7 `nodes_used` read",
+    "the I7 `max_nodes` read",
+    "the `sdk.py` import's OTHER hit",
+})
+
+
+def test_every_D5_current_claim_is_still_present() -> None:
+    """No `_D5_CURRENT_CLAIMS` entry may be dropped or duplicated without a red.
+
+    The tuple's own reader walks the entries it finds, so a shorter tuple reads as green:
+    dropping the I7 `nodes_used` entry left the whole D5 set at `3 passed` (#13879 review,
+    cycle 2). This compares labels against the declared set, so a DROP reds, a duplicate
+    reds (the set comparison alone cannot see one), and an ADDITION must declare its label
+    in the same commit — the set is the census, and a census that is not compared is prose.
+    """
+    labels = [label for label, _pattern, _source_key, _needle in _D5_CURRENT_CLAIMS]
+    dropped = sorted(_D5_CURRENT_CLAIM_LABELS - set(labels))
+    undeclared = sorted(set(labels) - _D5_CURRENT_CLAIM_LABELS)
+    assert not dropped and not undeclared, (
+        f"`_D5_CURRENT_CLAIMS` and its declared label set disagree — dropped={dropped}, "
+        f"added_without_declaring={undeclared}. A dropped entry converts a graded "
+        "present-tense number back to an ungraded one with NO red anywhere, so re-derive "
+        "the entry for this head rather than removing it; a new entry declares its label "
+        "in `_D5_CURRENT_CLAIM_LABELS` in the SAME commit (#13879 review, cycle 2)")
+    assert len(labels) == len(_D5_CURRENT_CLAIM_LABELS), (
+        f"`_D5_CURRENT_CLAIMS` carries {len(labels)} entries for "
+        f"{len(_D5_CURRENT_CLAIM_LABELS)} declared labels — a duplicate label satisfies the "
+        f"set comparison while one entry is never read: {labels}")
+
 #: The one D5 clause that states THREE current anchors in one sentence. Kept separate
 #: because its shape (three numbers, three named anchors) is what makes it checkable: the
 #: number and the anchor it is attached to are read by the SAME regex, so a re-point that
