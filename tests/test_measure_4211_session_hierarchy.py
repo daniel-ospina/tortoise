@@ -472,11 +472,14 @@ def test_n5_and_n7_the_receipt_carries_the_omitted_count_and_the_module_digests(
 
     monkeypatch.setattr(mod, "measure_store", lambda *a, **k: {"skipped": "not here"})
     out = tmp_path / "receipt.json"
-    assert mod.main(["--arms", "store", "--out", str(out)]) == 0
+    # F1: a skip measured NOTHING, so it is an UNMEASURABLE run (exit 2), not a
+    # completed capture. The measured half of the receipt still has to carry N5/N7.
+    assert mod.main(["--arms", "store", "--out", str(out)]) == 2
     receipt = json.loads(out.read_text())
     assert receipt["instrument"]["measured_through"] == digests
     # a skip recorded only inside the arm body is now also a top-level warning
     assert any(w.startswith("store: skipped") for w in receipt["warnings"])
+    assert "not here" in receipt["unmeasurable"]["arms"]["store"]
 
 
 def test_n8_the_default_arm_set_cannot_write(monkeypatch, tmp_path):
@@ -563,10 +566,12 @@ def test_a_refused_writer_run_is_exit_2_not_a_completed_capture(monkeypatch, tmp
 
 def _fake_arms(monkeypatch):
     ran: list[str] = []
+    # A MEASURED body: these pins are about the arm SET, and a skip would (correctly)
+    # make the run unmeasurable — see the F1 pins below for that half.
     for name in ("measure_store", "measure_live", "measure_instrument",
                  "measure_corpus", "measure_writer"):
         monkeypatch.setattr(mod, name, lambda *a, _n=name, **k: (
-            ran.append(_n) or {"skipped": "faked"}))
+            ran.append(_n) or {"measured": True}))
     return ran
 
 
@@ -604,3 +609,128 @@ def test_a_typo_in_arms_is_refused_not_measured_as_nothing(monkeypatch, tmp_path
     assert rc != 0, "a typo in --arms was accepted as a measurement"
     assert not out.exists()
     assert ran == []
+
+
+# ── F1: a run that measured NOTHING is not a measurement ──────────────────
+#
+# Five refusal paths (`store` absent, graph not in the file, `TORTOISE_DB_URI` not
+# exported, no capture journal, graph not on the instance) returned a bare
+# `{"skipped": …}`, so `main`'s hoist collected nothing and control reached `return 0`.
+# Two consequences, both fixed here: "I measured nothing" was reported to a
+# `--out <receipt> || exit 1` caller as a finished capture, and — because the receipt had
+# no `unmeasurable` — `_publish` was willing to REPLACE the committed receipt with the
+# empty artefact.
+
+def test_f1_every_skipped_arm_is_a_top_level_unmeasurable_and_exit_2(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(mod, "measure_store", lambda *a, **k: {
+        "skipped": "store not found at ~/.tortoise/tortoise.db"})
+    monkeypatch.setattr(mod, "measure_corpus", lambda d: {
+        "skipped": "no session events under /nope"})
+    out = tmp_path / "r.json"
+    rc = mod.main(["--arms", "store,corpus", "--out", str(out)])
+    assert rc == 2, (
+        "a run whose every arm skipped measured NOTHING and must not read as success")
+    receipt = json.loads(out.read_text())
+    assert set(receipt["unmeasurable"]["arms"]) == {"store", "corpus"}
+    assert "store not found" in receipt["unmeasurable"]["arms"]["store"]
+
+
+def test_f1_a_skipped_run_cannot_replace_the_committed_receipt(monkeypatch, tmp_path):
+    """`_publish` protects a good receipt only when `unmeasurable` is set, so a
+    skip-only run took the plain write. The tool's own documented re-run command targets
+    the committed receipt, so one `--arms store` on a box without the Mac's embedded
+    store would replace a 1,353-line measured artefact with a skip line, at exit 0."""
+    good = {"issue": 4211, "arms": {"store": {"counts": {"turns_total": 8}}}}
+    out = tmp_path / "receipt.json"
+    out.write_text(json.dumps(good) + "\n")
+    monkeypatch.setattr(mod, "measure_store", lambda *a, **k: {"skipped": "store not found"})
+    rc = mod.main(["--arms", "store", "--out", str(out)])
+    assert rc == 2
+    assert json.loads(out.read_text()) == good, "the measured receipt was replaced"
+    sibling = tmp_path / "receipt.unmeasurable.json"
+    assert "store not found" in json.loads(sibling.read_text())["unmeasurable"]["arms"]["store"]
+
+
+def test_f1_a_measured_arm_beside_a_skipped_one_still_exits_2(monkeypatch, tmp_path):
+    """The verdict is per-RUN, not per-arm: half a measurement is not a measurement."""
+    monkeypatch.setattr(mod, "measure_corpus", lambda d: {
+        "stats": {"files": 1, "records": 1}, "sessions": 1, "turns_distinct": 2,
+        "turns_naming_a_ref_distinct": 0, "sessions_with_gt1_turn": 1})
+    monkeypatch.setattr(mod, "measure_store", lambda *a, **k: {"skipped": "not here"})
+    out = tmp_path / "r.json"
+    assert mod.main(["--arms", "store,corpus", "--out", str(out)]) == 2
+    receipt = json.loads(out.read_text())
+    assert receipt["arms"]["corpus"]["sessions"] == 1
+    assert list(receipt["unmeasurable"]["arms"]) == ["store"]
+
+
+# ── F2: a credential never reaches a receipt ──────────────────────────────
+
+def test_f2_no_arm_serialises_the_raw_uri_or_a_slice_of_it():
+    """`measure_live`/`measure_instrument` wrote `"uri": uri` verbatim and the writer
+    wrote `uri.rsplit("/", 1)[-1]`, which on a PATH-LESS URI returns the whole authority.
+    The receipt is committed under `docs/scoping/receipts/`, so either spelling is a
+    credential-in-git path."""
+    offenders = [ln for ln in _TOOL.read_text(encoding="utf-8").splitlines()
+                 if not ln.lstrip().startswith("#")
+                 and ('"uri": uri' in ln or '"uri_graph": uri.rsplit' in ln)]
+    assert offenders == [], f"the raw URI is still serialised at {offenders}"
+
+
+def test_f2_the_read_arms_redact_the_password_and_the_writer_records_the_graph(monkeypatch):
+    monkeypatch.setattr(mod, "_open_live", lambda uri: (
+        _FakeDB({"tortoise": _FakeLiveGraph()}), {"graph": "tortoise"}))
+    live = mod.measure_live("docker://:hunter2@localhost:1/tortoise")
+    assert "hunter2" not in json.dumps(live)
+    assert live["uri"] == "docker://localhost:1/tortoise", (
+        "the host/port/graph survive the redaction, the userinfo does not")
+
+    inst = mod.measure_instrument("docker://:hunter2@localhost:1/x")
+    assert "hunter2" not in json.dumps(inst)
+
+    # A path-less URI (`_parse_uri` supports it) made `rsplit("/", 1)[-1]` return
+    # ':hunter2@db.example:6379' — reachable via --allow-non-ephemeral-writes.
+    target, _refusal = mod._writer_target("docker://:hunter2@db.example:6379")
+    assert target["graph"] == "tortoise"
+    assert "hunter2" not in json.dumps(target)
+
+
+# ── F3: the provenance is what SUPPLIED the URI, not a literal ────────────
+
+def test_f3_the_uri_source_is_what_supplied_the_uri_not_a_hardcoded_profile(
+        monkeypatch, tmp_path):
+    """`role_evidence.uri_source` was the literal '~/.zshrc:48' while the URI came from
+    `--live-uri`, so a re-run published a receipt asserting a provenance nothing read."""
+    monkeypatch.setattr(mod, "_open_live", lambda uri: (
+        _FakeDB({"tortoise": _FakeLiveGraph()}), {"graph": "tortoise"}))
+    assert "~/.zshrc:48" not in \
+        mod.measure_live("docker://:@localhost:1/tortoise")["role_evidence"]["uri_source"]
+    assert mod.measure_live(
+        "docker://:@localhost:1/tortoise",
+        uri_source="--live-uri (test)")["role_evidence"]["uri_source"] == "--live-uri (test)"
+
+    provided = tmp_path / "provided.json"
+    assert mod.main(["--arms", "live", "--live-uri", "docker://:@localhost:1/tortoise",
+                     "--out", str(provided)]) == 0
+    assert json.loads(provided.read_text())["arms"]["live"]["role_evidence"][
+        "uri_source"].startswith("--live-uri")
+
+    defaulted = tmp_path / "defaulted.json"
+    assert mod.main(["--arms", "live", "--out", str(defaulted)]) == 0
+    src = json.loads(defaulted.read_text())["arms"]["live"]["role_evidence"]["uri_source"]
+    assert "built-in DEFAULT_LIVE_URI" in src and "NOT measured" in src, (
+        "the default's provenance is asserted by the constant and must say so")
+
+
+# ── F4: the sentence a reader acts on carries the TRUE count ──────────────
+
+def test_f4_the_shrunken_denominator_names_the_true_count_not_the_truncated_list(
+        monkeypatch):
+    """`skipped_on_error` is truncated to 25, so with 30 raising graphs the prose said
+    '25 of 30 graphs raised' while `graphs_skipped_on_error` in the same body said 30."""
+    graphs = {f"g{i}": _FakeInstrumentGraph(1, 6, raise_on="aboutObject") for i in range(30)}
+    body = _instrument(monkeypatch, graphs)
+    assert body["graphs_skipped_on_error"] == 30
+    assert len(body["skipped_on_error"]) == 25          # the list really is truncated
+    assert body["unmeasurable"].startswith("30 of 30 graphs raised"), body["unmeasurable"]

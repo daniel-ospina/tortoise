@@ -25,9 +25,11 @@ ARMS
                 no ref at all, and every turn naming it. Measures BEFORE and AFTER and
                 reports the DELTA — a replay proves nothing about a writer, so a run
                 that replays a known session reports ``unmeasurable`` instead of numbers.
-``live``        the graph ``~/.zshrc:48`` configures (``docker://:@localhost:16379/tortoise``)
-                — labelled as exactly that, because the receipt can prove the URI string
-                lives in a shell profile and nothing more. Read-only (``ro_query``).
+``live``        the graph the caller names (default ``docker://:@localhost:16379/tortoise``,
+                the URI string recorded at ``~/.zshrc:48``). ⛔ the tool does NOT read a
+                shell profile: ``role_evidence.uri_source`` records what actually
+                SUPPLIED the URI (``--live-uri``, or the built-in constant), so the
+                receipt never asserts a provenance it did not measure. Read-only.
 ``instrument``  every graph in that container holding Sessions + episodic turns, aggregated.
                 This is the REGIME THE CENSUS MEASURED, at scale — those stores are written
                 by the fixture seeder (``tools/ask_spotcheck.seed_capture_turn_store``), which
@@ -59,9 +61,11 @@ in ``arms.writer.non_ephemeral_write_override``.
 Exit codes: 0 = MEASURED (whatever the numbers are), 2 = could not measure — the reason is
 in the receipt's TOP-LEVEL ``unmeasurable`` block, which is written whenever ANY arm could
 not measure: a replayed writer, a graph that raised during the census, an unreadable node
-count. A ``--out`` receipt is never replaced by an unmeasurable run (it writes
-``<name>.unmeasurable.json`` beside it), so a re-run scripted as ``--out <receipt> ||
-exit 1`` cannot overwrite the receipt it failed to reproduce.
+count, or a ``skipped`` arm (a store that is not on this box, a graph that is not in the
+file, no ``TORTOISE_DB_URI``, no capture journal) — a skip measured NOTHING, so it is a
+refusal, never a completed capture. A ``--out`` receipt is never replaced by an
+unmeasurable run (it writes ``<name>.unmeasurable.json`` beside it), so a re-run scripted
+as ``--out <receipt> || exit 1`` cannot overwrite the receipt it failed to reproduce.
 
 Definition discipline (#4211 review round 1): a *turn* is
 ``coalesce(p.is_episodic,false)=true AND p.pointKind='event'`` — the product's own
@@ -463,7 +467,31 @@ def _open_live(uri: str):
                     password=spec["password"] or None), spec
 
 
-def measure_live(uri: str) -> dict:
+def _redact_uri(uri: str) -> str:
+    """Re-emit a DB URI with its userinfo STRIPPED — never a credential in a receipt.
+
+    #4211 review F2: ``measure_live`` and ``measure_instrument`` recorded the
+    ``--live-uri`` STRING verbatim, and both are reachable with a credentialed URI (a
+    re-run against the hosted surface the PR itself declares UNMEASURED). The receipt
+    is committed under ``docs/scoping/receipts/``, so verbatim is a
+    credential-in-git path. OWASP's logging guidance is to strip the URL userinfo;
+    ``_writer_target`` already re-emits host/port/graph only, and this is the same
+    mechanic for the two read arms that also serialise a URI.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+    try:
+        parts = urlsplit(uri)
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
+        return "<unparseable-uri>"
+    if not host:
+        return "<unparseable-uri>"
+    return urlunsplit((parts.scheme, f"{host}:{port}" if port else host,
+                       parts.path, "", ""))
+
+
+def measure_live(uri: str, uri_source: str | None = None) -> dict:
     db, spec = _open_live(uri)
     names = [n for n in db.connection.execute_command("GRAPH.LIST")]
     if spec["graph"] not in names:
@@ -486,17 +514,23 @@ def measure_live(uri: str) -> dict:
         else:
             counts[key] = _clean([list(r) for r in rows])
     return _note_unreadable_emptiness({
-        "uri": uri,
+        # Redacted: host/port/graph survive, the userinfo does not (F2).
+        "uri": _redact_uri(uri),
         "graph": spec["graph"],
         "read_only": f"ro_query={bool(ro)}",
         # What the artifact can actually prove about the role of this graph:
         "role_evidence": {
-            "uri_source": "~/.zshrc:48",
+            # ⛔ MEASURED, not assumed: `~/.zshrc:48` was a string literal, so a re-run
+            # with `--live-uri` published a receipt asserting a provenance nothing in
+            # the run read (#4211 review F3). This says what actually supplied it.
+            "uri_source": uri_source or "unspecified — measure_live() called directly, "
+                                        "not through main()",
             "graphs_on_instance": len(names),
-            "note": "this receipt proves the URI STRING lives in a shell profile and "
-                    "records this graph's contents. It does NOT prove this is the "
-                    "product's turn store — see 'instrument' for the 60 sibling graphs "
-                    "on the same instance that hold turns.",
+            "note": "uri_source says what SUPPLIED the URI; it does not prove where "
+                    "that came from, and this tool never reads a shell profile. The "
+                    "receipt records this graph's contents. It does NOT prove this is "
+                    "the product's turn store — see 'instrument' for the 60 sibling "
+                    "graphs on the same instance that hold turns.",
         },
         "counts": counts,
         "empty_or_absent": _is_empty(counts),
@@ -576,7 +610,8 @@ def measure_instrument(uri: str) -> dict:
         for kind, cnt in r["contains_targets_by_kind"]:
             kinds[str(kind)] = kinds.get(str(kind), 0) + cnt
     return _mark_shrunken_denominator({
-        "uri": uri,
+        # Redacted: host/port/graph survive, the userinfo does not (F2).
+        "uri": _redact_uri(uri),
         "graphs_on_instance": len(names),
         "graphs_with_turn_store": inspected,
         "graphs_without_turn_store": len(filtered),
@@ -616,13 +651,23 @@ def measure_instrument(uri: str) -> dict:
 
 
 def _mark_shrunken_denominator(body: dict) -> dict:
-    """A graph that RAISED is not a graph that was measured: say so at the arm level."""
+    """A graph that RAISED is not a graph that was measured: say so at the arm level.
+
+    ⛔ The COUNT comes from ``graphs_skipped_on_error`` — the authoritative total — not
+    from ``skipped_on_error``, which the census truncates to 25. Reading the truncated
+    list made the sentence say "25 of 173 graphs raised" beside a field a few lines
+    above it that said 30, under-stating the incompleteness in the one sentence a
+    reader acts on (#4211 review F4).
+    """
     errors = body.get("skipped_on_error") or []
-    if errors:
+    total = body.get("graphs_skipped_on_error")
+    if total is None:  # a body that predates the counter still reports its list
+        total = len(errors)
+    if total:
         named = ", ".join(e["graph"] for e in errors[:5])
-        more = "…" if len(errors) > 5 else ""
+        more = "…" if total > len(errors[:5]) else ""
         body["unmeasurable"] = (
-            f"{len(errors)} of {body.get('graphs_on_instance')} graphs raised during the "
+            f"{total} of {body.get('graphs_on_instance')} graphs raised during the "
             f"census ({named}{more}), so the aggregates are a SHRUNKEN denominator — "
             "'0 aboutObject in N of N' is NOT reproducible from this run")
     return body
@@ -782,7 +827,11 @@ def measure_writer(*, allow_non_ephemeral: bool = False) -> dict:
             # indistinguishable in the artefact. Never the password.
             "target": target,
             "non_ephemeral_write_override": bool(refusal and allow_non_ephemeral),
-            "uri_graph": uri.rsplit("/", 1)[-1],
+            # ⛔ The PARSED graph segment, never `uri.rsplit("/", 1)[-1]`: on a
+            # path-less URI (`docker://:pw@db:6379`, a shape `_parse_uri` supports) the
+            # slice answers the whole AUTHORITY, so the password reached the receipt
+            # from the one arm whose own `target` block omits it (#4211 review F2).
+            "uri_graph": target["graph"],
             "sdk": "TortoiseSDK() against TORTOISE_DB_URI",
             "object_mint": {"name": "test/repo#42", "kind": "pm:issue",
                             "advisory": obj.get("kind_layer_routed")
@@ -930,7 +979,10 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--store", default=DEFAULT_STORE)
     ap.add_argument("--store-graph", default=DEFAULT_STORE_GRAPH)
-    ap.add_argument("--live-uri", default=DEFAULT_LIVE_URI)
+    # None (not the constant) so the receipt can say what SUPPLIED the URI (#4211 F3).
+    ap.add_argument("--live-uri", default=None,
+                    help=f"the read-only instance to measure (default: the built-in "
+                         f"{DEFAULT_LIVE_URI!r})")
     ap.add_argument("--sessions-dir", default=DEFAULT_SESSIONS_DIR)
     ap.add_argument("--arms", default=DEFAULT_ARMS,
                     help="comma-separated subset of store,writer,live,instrument,corpus "
@@ -997,6 +1049,14 @@ def main(argv: list[str] | None = None) -> int:
         "arms": {},
         "warnings": [],
     }
+    live_uri = args.live_uri or DEFAULT_LIVE_URI
+    # ⛔ What actually supplied it — a measured fact, not the constant's comment.
+    live_uri_source = (
+        "--live-uri (the caller passed this URI; nothing in this run proves where it "
+        "came from)" if args.live_uri else
+        f"built-in DEFAULT_LIVE_URI {DEFAULT_LIVE_URI!r} (documented at ~/.zshrc:48, "
+        "but this tool reads no shell profile, so that provenance is asserted by the "
+        "constant and NOT measured)")
     try:
         if "store" in arms:
             receipt["arms"]["store"] = measure_store(args.store, args.store_graph)
@@ -1004,9 +1064,9 @@ def main(argv: list[str] | None = None) -> int:
             receipt["arms"]["writer"] = measure_writer(
                 allow_non_ephemeral=args.allow_non_ephemeral_writes)
         if "live" in arms:
-            receipt["arms"]["live"] = measure_live(args.live_uri)
+            receipt["arms"]["live"] = measure_live(live_uri, uri_source=live_uri_source)
         if "instrument" in arms:
-            receipt["arms"]["instrument"] = measure_instrument(args.live_uri)
+            receipt["arms"]["instrument"] = measure_instrument(live_uri)
         if "corpus" in arms:
             receipt["arms"]["corpus"] = measure_corpus(args.sessions_dir)
     except Exception as exc:
@@ -1023,17 +1083,33 @@ def main(argv: list[str] | None = None) -> int:
     # documented contract (0 = measured) reads the top-level block, and a replay that
     # exits 0 is accepted as a SUCCESSFUL measurement by any `|| exit 1` caller — the
     # flag being nested is what let a replayed run publish an earlier run's numbers.
+    # ⛔ A `skipped` arm measured NOTHING, so it belongs in the same verdict: five
+    # refusal paths (store absent, graph not in the file, no TORTOISE_DB_URI, no capture
+    # journal, graph not on the instance) returned a bare `{"skipped": …}`, collected
+    # nothing here, and reached `return 0` — i.e. a run that performed NO measurement
+    # reported itself as a completed capture to a `--out <receipt> || exit 1` caller, and
+    # (having no `unmeasurable`) was allowed to REPLACE the committed receipt with the
+    # empty artefact (#4211 review F1).
+    def _could_not_measure(body) -> str | None:
+        if not isinstance(body, dict):
+            return None
+        if body.get("unmeasurable"):
+            return body["unmeasurable"]
+        if body.get("skipped") and "counts" not in body:
+            return body["skipped"]
+        return None
+
     unmeasurable_arms = {
-        arm: body["unmeasurable"]
+        arm: reason
         for arm, body in receipt["arms"].items()
-        if isinstance(body, dict) and body.get("unmeasurable")
+        if (reason := _could_not_measure(body))
     }
     if unmeasurable_arms:
         receipt["unmeasurable"] = {
             "arms": unmeasurable_arms,
-            "note": "at least one arm could not measure; where an arm still reports "
-                    "numbers they describe PRE-EXISTING graph content, never this "
-                    "run's capture",
+            "note": "at least one arm could not measure; a 'skipped' arm measured "
+                    "nothing at all, and where an arm still reports numbers they "
+                    "describe PRE-EXISTING graph content, never this run's capture",
         }
 
     receipt["warnings"] = _collect_warnings(receipt)
