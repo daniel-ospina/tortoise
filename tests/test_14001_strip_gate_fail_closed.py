@@ -76,7 +76,7 @@ def _record_write(*args, **kwargs) -> None:
 _HANDED: list = []
 
 
-def _oracle(body: str, extra: str = "") -> dict:
+def _oracle(body: str, extra: str = "", call_kwargs: dict | None = None) -> dict:
     """EXECUTE the writer with the gate answering STOP and report whether the vector lands.
 
     ⛔ THIS IS THE MEASUREMENT, NOT A SECOND OPINION. Every fail-open in this series was proved
@@ -84,6 +84,11 @@ def _oracle(body: str, extra: str = "") -> dict:
     `_derived_mirror_required` answering `False` (the arm a strip can actually race) and
     `_encode` returning the sentinel. `props` is a plain dict, so `props["embedding"] is
     VECTOR` answers "did this writer store the property on the stop arm" exactly.
+
+    ⛔ `call_kwargs` IS PART OF THE WRITER'S CONTRACT, not a harness convenience: a stop arm that
+    forwards a CALLER-SUPPLIED mapping to the write channel (`_write({**props, **extra})`) places
+    the vector exactly when that mapping carries it, so an oracle that only ever passes `None`
+    cannot see the store — the caller argument is the measurement.
     """
     source = "def _upsert_object(props, ev" + extra + "):\n" + body
     namespace: dict = {
@@ -106,7 +111,7 @@ def _oracle(body: str, extra: str = "") -> dict:
     props: dict = {}
     _HANDED.clear()
     with contextlib.suppress(Exception):   # a raising writer placed what it placed
-        namespace["_upsert_object"](props, {"x": 1})
+        namespace["_upsert_object"](props, {"x": 1}, **(call_kwargs or {}))
     handed = any(isinstance(item, dict) and item.get("embedding") is VECTOR
                  for item in _HANDED)
     return {"lands": props.get("embedding") is VECTOR or handed, "props": props}
@@ -705,6 +710,81 @@ DEFEATED_RESOLVER_ROWS = (
         return None
     _write(props)
 """),
+    # ⛔ THE RECEIVER IS AN AXIS LIKE THE BINDING FORM (`#14001`, measured by the review of this
+    # branch): every arm above required a CALL named `globals`/`locals`/`vars`, so a NAME bound
+    # to the namespace carried the same write past all of them. Measured CERTIFIED at the head
+    # that closed the binding-form axis; these rows are the receivers axis.
+    ("namespace-alias-subscript", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        ns = globals()
+        ns["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-alias-chain", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        ns = globals()
+        nn = ns
+        nn["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-alias-mutator", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        ns = globals()
+        ns.update({"gk": "embedding"})
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-alias-ior", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        ns = globals()
+        ns |= {"gk": "embedding"}
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-alias-tuple-target", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        ns, _z = globals(), 1
+        ns["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-alias-in-class-body", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        class _C:
+            ns = globals()
+            ns["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-unbound-setitem", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        dict.__setitem__(globals(), "gk", "embedding")
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
 )
 
 
@@ -798,7 +878,32 @@ REBUILD_RESIDUAL_ROWS = (
         return None
     _write(props)
 """),
+    # ⛔ THE CALLER-SUPPLIED MAPPING IS PART OF THE SAME FAMILY (`#14001`, measured by the
+    # review of this branch): `_write({**props, **extra})` hands the write channel whatever the
+    # caller passed, so it stores whenever `extra` carries the property. The 13629 fixture that
+    # called this an "honest control" is now `over_refused` for the same reason; `_oracle` takes
+    # the caller argument so the row can be measured rather than assumed.
+    ("rebuilt-mapping-extra-unpack", """
+    if not _derived_mirror_required("object"):
+        _write({**props, **extra})
+        return None
+    _write(props)
+"""),
+    ("rebuilt-mapping-extra-bitor", """
+    if not _derived_mirror_required("object"):
+        _write(props | extra)
+        return None
+    _write(props)
+"""),
 )
+
+#: The caller argument each row's writer needs — `**extra` is a LANDER only when the caller's
+#: mapping carries the property, so the pin has to supply one (a `None`/absent caller argument
+#: would make the row's oracle clean and the pin vacuous).
+REBUILD_CALLER_KWARGS = {
+    "rebuilt-mapping-extra-unpack": {"extra": {"embedding": VECTOR}},
+    "rebuilt-mapping-extra-bitor": {"extra": {"embedding": VECTOR}},
+}
 
 
 @pytest.mark.parametrize("case,arm", REBUILD_RESIDUAL_ROWS,
@@ -811,9 +916,12 @@ def test_the_rebuild_residual_is_PINNED_as_a_known_fail_open(tmp_path, monkeypat
     expression that can evaluate to a mapping, in every position); the positional attempt is
     recorded in the withdrawn-rule note in `_stop_arm_places_the_property`.
     """
-    assert _oracle(arm)["lands"] is True, (
+    extra = ", extra=None" if case in REBUILD_CALLER_KWARGS else ""
+    caller = REBUILD_CALLER_KWARGS.get(case)
+    assert _oracle(arm, extra, caller)["lands"] is True, (
         f"`{case}` no longer stores the vector, so it documents nothing")
-    gated, _why = _gate(tmp_path, monkeypatch, arm, f"rebuild_residual_{case.replace('-', '_')}")
+    gated, _why = _gate(tmp_path, monkeypatch, arm,
+                        f"rebuild_residual_{case.replace('-', '_')}", extra)
     assert gated is True, (
         f"`{case}` is CLOSED — good news, but it must not change silently: delete this pin and "
         "move the row into DEFEATED_RESOLVER_ROWS")
