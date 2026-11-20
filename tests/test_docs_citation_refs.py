@@ -2968,7 +2968,7 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
         "(#13853 review round 20, P2)")
     assert len(_false_filter_property_restatements(wide_gap)) == 1, (
         "the shape ban's 400-character window is not in effect: a false property stated with a "
-        "~210-character gap between the noun and the copula passes, which is the escape round 19 "
+        "~240-character gap after the noun (copula index 273) passes, which is the escape round 19 "
         "fixed and round 20 measured as unpinned (#13853 review round 20, P2)")
     # ...and the QUALIFIER keeps an honest sentence legal, which is the other half round 18
     # measured as a false red: naming the marker in any wording exempts the sentence.
