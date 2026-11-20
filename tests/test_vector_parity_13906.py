@@ -796,9 +796,12 @@ def test_a_conninfo_token_starting_with_equals_cannot_spin_forever(harness):
         assert rebuilt.startswith(dsn), (dsn, rebuilt)
 
 
-@pytest.mark.parametrize("trailing", [1, 3], ids=["one", "three"])
+@pytest.mark.parametrize(
+    ("trailing", "padding"),
+    [(1, ""), (3, ""), (1, " "), (1, "  "), (1, "\t"), (1, "\n")],
+    ids=["one", "three", "one+space", "one+2spaces", "one+tab", "one+newline"])
 def test_a_value_ending_in_an_ODD_backslash_is_quoted_before_options_is_appended(
-        harness, trailing):
+        harness, trailing, padding):
     """⛔ THE APPEND IS PART OF THE REBUILD, SO THE LAST VALUE MUST BE CLOSED.
 
     `app_role_dsn` appends ` options='-c role=…'` to whatever `_drop_options_pairs`
@@ -824,7 +827,14 @@ def test_a_value_ending_in_an_ODD_backslash_is_quoted_before_options_is_appended
     `No escaped character`), which is exactly how the spelling stayed out of the
     existing byte-preservation pin's `spellings` tuple.
     """
-    dsn = "host=127.0.0.1 dbname=x" + "\\" * trailing
+    # ⛔ `padding` IS PART OF THE SHAPE, not decoration. `app_role_dsn` appends
+    # after `dsn.strip()`, so a guard counted on the UNSTRIPPED tail sees
+    # whitespace (an even, zero-length run) and returns the bytes verbatim — then
+    # the `.strip()` removes exactly the space the trailing backslash was
+    # escaping, reinstating the corruption. Measured in review on all of
+    # `" "`, `"  "`, `"\t"`, `"\n"`; the guard now counts the STRIPPED tail, and
+    # each spelling is asserted here so the whitespace form cannot regress alone.
+    dsn = "host=127.0.0.1 dbname=x" + "\\" * trailing + padding
     rebuilt = harness.app_role_dsn(dsn)
 
     before = harness._conninfo_pairs(dsn)
