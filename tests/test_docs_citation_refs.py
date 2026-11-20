@@ -2920,6 +2920,48 @@ def _comment_filter(payload: str, include: str, exclude: str) -> str:
         capture_output=True, text=True, check=False).stdout
 
 
+#: The count command the D5 cell prescribes for the blank-line class, as the cell spells it.
+#: The EXPRESSION is read out of the document and executed, never re-spelled here: the claim
+#: under test is what `grep` does with the expression THAT SENTENCE carries (#13956 review, P2).
+_D5_BLANK_COUNT_RE = re.compile(
+    r"`git diff origin/main\.\.\.HEAD \\\| grep -cE '(?P<expr>[^']+)'` is the command "
+    r"that counts the BLANK ones at YOUR head")
+
+
+def _d5_blank_count_expression() -> str:
+    """The blank-line count expression as `05-verify.md` states it.
+
+    Loud on zero or many. Zero would make every assertion below vacuous — an inert arm of
+    exactly the kind (3) refuses for the ledger rows — and MANY would silently grade the
+    first of two prescriptions, which is how a cell ends up asserting one command while its
+    reader follows another.
+    """
+    bundle = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
+              / "05-verify.md").read_text(encoding="utf-8")
+    found = _D5_BLANK_COUNT_RE.findall(bundle)
+    assert len(found) == 1, (
+        "05-verify.md no longer states exactly one `git diff … | grep -cE '<expr>'` command "
+        f"bound to the BLANK-line class (found {found!r}), so this arm executes nothing")
+    return found[0]
+
+
+def _blank_line_count(diff: str) -> int:
+    """The document's blank-line count command, executed on `diff`.
+
+    Same discipline as `_comment_filter`, and the reason this arm is not a text ban: the
+    text ban for this class cannot see a VALUE change under a stable spelling — the rot this
+    cell records for constants ("a symbol can keep its NAME and change its VALUE"). Running
+    the expression the sentence carries is what reds when the instrument narrows while the
+    wording stays.
+    """
+    out = subprocess.run(
+        ["grep", "-cE", _d5_blank_count_expression()], input=diff,
+        capture_output=True, text=True, check=False)
+    assert out.returncode in (0, 1), (
+        f"grep refused the document's own expression: {out.stderr!r}")
+    return int(out.stdout.strip() or 0)
+
+
 def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have():
     """The `#`-only grep was described as something the filter cannot be (#13853 round 16).
 
@@ -3178,6 +3220,28 @@ def test_the_D5_row_types_no_verdict_about_the_head_being_merged():
         assert _d5_head_bound_verdicts(probe) == [spelling], (
             f"the ban's own row {spelling!r} is not detected when injected, so editing it "
             "(even by one character) turns this arm inert")
+
+    # (5) THE COUNT COMMAND ITSELF, executed (#13956 review, P2). The cell names the class it
+    # drops as "a diff line that is just `+` or `-`", and prescribes a count for it. The
+    # spelling that stood at `a03c1dd163e` matched only blank ADDED lines: over a diff whose
+    # only change is a blank REMOVED line it printed `0`, which is precisely the false
+    # negative this cell exists to prevent ("a blank-line-ONLY change is invisible to it").
+    # Arm (1) bans the WORDING that said so; this arm holds the instrument, because a regex
+    # can narrow under a correct sentence and no text ban can see that.
+    assert _blank_line_count("+\n") == 1, (
+        "the document's count command no longer counts a blank ADDED line")
+    assert _blank_line_count(" a\n-\n b\n") == 1, (
+        "the document's count command does not count a blank REMOVED line, which is half "
+        "the class the cell names (\"a diff line that is just `+` or `-`\") and the shape "
+        "the superseded spelling read as `0` (#13956 review, P2)")
+    assert _blank_line_count("+\n-\n") == 2, (
+        "the count command does not count both directions of the blank class, so the "
+        "document prescribes an instrument narrower than the class it names")
+    # The class it says it does NOT count still is not counted — the sentence claims that
+    # boundary, so it is held to it rather than left as prose.
+    assert _blank_line_count("++i\n--counter\n+- 2)\n") == 0, (
+        "the count command now reaches the sign-opening class, while the sentence says it "
+        "counts the blank one ONLY — one of the two is wrong")
 
 
 def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
