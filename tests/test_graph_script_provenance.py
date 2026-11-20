@@ -278,6 +278,31 @@ def test_the_corpus_is_a_declared_partition():
 # ── (b) a price-naming script carries a marker AND the canonical source ────
 
 
+def test_a_nested_script_is_in_the_corpus_and_cannot_escape_the_partition(tmp_path):
+    """#13880: the corpus is RECURSIVE, and a nested script cannot escape it.
+
+    The corpus's first nested script (`graph-scripts/business_map_13880/file_map.py`)
+    was invisible to a flat `glob`, so the gate reported clean over a file it had
+    never read — a corpus that can grow invisibly is the fail-open.
+
+    Mutant: revert `scan()` to `root.glob("*.py")` — `nested/unclassified.py`
+    leaves the corpus and the UNCLASSIFIED assertion goes green, i.e. the gate
+    certifies a script it never saw.
+    """
+    (tmp_path / "nested").mkdir()
+    _write(tmp_path / "nested", "unclassified.py", "import sys\n")
+    _write(tmp_path, "flat.py", MARKED_BUT_STALE)
+
+    result = scan(tmp_path)
+    assert "nested/unclassified.py" in result.corpus, result.corpus
+    assert "flat.py" in result.corpus
+
+    problems = violations(tmp_path, unmarked=frozenset(), price_bearing=frozenset())
+    assert any(p.startswith("UNCLASSIFIED nested/unclassified.py") for p in problems), (
+        problems
+    )
+
+
 def test_the_price_trigger_fires_on_the_real_stale_tier_scripts():
     """The trigger is measured against the REAL gap the issue names, not only a
     synthetic fixture: these files assert non-canonical tiers as ours."""
