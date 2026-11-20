@@ -45,13 +45,13 @@ documented `--judge file` mode provides — and not as evidence that this produc
 scored 3/6. What this run *is* evidence for is the payloads in `run-before.json`:
 what `9e9fc232` returned, call by call.
 
-Four disclosures that bound any use of it:
+Five disclosures that bound any use of it:
 
 - **The judge was `--judge file`, not a fresh reader.** `run-before.json` →
   `judge: {mode: "file", file: "…/verdicts-baseline.json"}`. The verdict prose
-  is a re-used baseline; where it disagrees with this run's payload, the payload
-  wins — the third and fourth bullets are two clauses that do, and the boards
-  themselves are left as the instrument emitted them.
+  is a re-used baseline; where it disagrees with this run's payload the payload
+  wins. It disagrees in four places — the three bullets below name them — and the
+  boards keep the baseline's lines, because they are what that judge emitted.
 - **The read path was degraded in every read that ran a retrieval leg.** Of the
   13 reads carrying a `read_status`, 11 are `degraded`; the other 2 are the
   leg-less `ended_scope` searches (Q5, Q6), which run no legs at all and report
@@ -59,13 +59,15 @@ Four disclosures that bound any use of it:
   `load_in_flight`), `fallback` 9/9, `fts` 4/11. The instrument says explicitly
   that a row failing because unrelated content came back is the read path, not
   the model.
-- **Q5's baseline prose is refuted by this run's own payload.** It says — in the
-  board's table row and detail, and in `run-before.json` →
-  `rows[Q5].because` — that *"the only row served for the cancelled call carried
-  status 'live' as a current result"*. This run's payload for that row records
+- **Q5's baseline prose is refuted twice over — its `because` and its `cause`.**
+  The `because` says *"the only row served for the cancelled call carried status
+  'live' as a current result"*, while this run's payload for that row records
   `served_for_the_cancelled_call: []` and `the_cancelled_plan.status: null`:
-  nothing was served for the cancelled call, and the plan's status is null, not
-  `live`.
+  nothing was served for that call, and the plan's status is null, not `live`.
+  The `cause` says #13034's currency predicate *"serves the cancelled plan as
+  current"* in default scope, while both default-scope Q5 searches return 0 rows
+  — the plan is served only by the `ended_scope` read and by id — and #13075's
+  fix is already in the before product (see the attribution table).
 - **Q1's baseline `cause` names a leg this run never ran.** It attributes the
   failure partly to *"the `valid_time` leg reporting `state_read_incomplete`"*,
   but Q1's three calls run `vector` / `fts` / `structural` / `fallback` only —
@@ -76,6 +78,10 @@ Four disclosures that bound any use of it:
   posture table says. What Q1's payload does support is the rest of that
   sentence: the object search returned 0 rows, and the point search reports
   `read_status=degraded` on `fallback` / `fts` / `vector`.
+- **Q6's baseline `cause` claims the withdrawn claim needs `include_terminal`:**
+  *"the withdrawn claim is reachable only via include_terminal"*. This run's
+  `ended_scope` read serves it with `include_terminal: false` — the retracted
+  beach-club claim and the superseded Q3 decision, both terminal statuses.
 
 **A fresh-judged 3/6 does exist — at a different product.** `13302/README.md`
 records `bf3a7b8e77bf` (the parent commit of #13302) scored by a fresh reader at
@@ -97,7 +103,12 @@ ok", which the numbers do not support once the **reason tokens** are read
 alongside the counts: `vector` `["ok"]` 9/9; `fts` `["ok", "empty_results"]` 9/9;
 `structural` **`["empty_results"]` 9 of 9**; `valid_time` `["no-stale-entries",
 "no-prefer-latest-intent"]` 5/5 with no `ok` at all. Only `vector` reported `ok`
-on every one of its runs.
+on every one of its runs. And 4 of the 13 searches reported no legs at all
+(`retrieval: keyword_only`, `legs: []`): Q1 `current commitments`, Q5 `ended`,
+Q6 `has anything we relied on been withdrawn` and Q6 `ended` — which is why the
+posture reads `searches: 13` while each leg reports 9 runs. Q1's two object
+searches took different paths inside this one run: `current commitments`
+`keyword_only` with no legs, `onboarding flow` `hybrid` with three.
 
 ⚠️ **The read path is not clean either — but the instrument's own wording for why
 is wrong on this run.** Six row-level signals fire, two each on Q1, Q5 and Q6
@@ -147,7 +158,9 @@ its own 5/1 board for the *same* commit. That product is a **#13302 branch head
 so it is not a prior state of `main` and this bundle is not a regression claim;
 and its product differs from this bundle's before arm, so it cannot be the
 baseline here. The 5/1 → 6/0 step inside `13302/` and the 3 → 6 step here are two
-different comparisons, and in both the moving row at the same product is Q1.
+different comparisons: in `13302/` the row that moves at a fixed product is Q1;
+here three rows move (Q1, Q5, Q6) across two different products, and only the
+Q5/Q6 half is attributed.
 
 Among slices **absent from the before product** — a necessary condition for
 explaining the delta, never proof that a slice did — ancestry gives:
@@ -212,8 +225,9 @@ cannot carry its own `sha256` and still be unchanged by carrying it.
   them is in the delta and not attributed here.
 - **The before arm's verdicts are not this product's**, so the 3 in 3 → 6 is a
   comparison reference rather than a measurement. The measured half of the before
-  arm is its payloads, and two baseline clauses (Q5's, Q1's `cause`) are
-  contradicted by them — the payload wins, and both are named in `## Before`.
+  arm is its payloads, and four baseline clauses (Q5's `because` and `cause`, Q1's
+  `cause`, Q6's `cause`) are contradicted by them — the payload wins, and all four
+  are named in `## Before`.
 - **One payload signal is unverified and belongs here rather than in a
   conclusion.** `run-after.json` → `rows[Q6].calls[0]` asks
   `search('has anything we relied on been withdrawn', point,
