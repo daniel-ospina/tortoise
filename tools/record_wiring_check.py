@@ -1003,6 +1003,17 @@ def _calls_by_scope(tree: ast.AST) -> list[tuple[ast.AST, ast.Call]]:
     return found
 
 
+def _is_parameter(scope: ast.AST, name: str) -> bool:
+    """Is `name` a parameter of this function, whatever its default? (#14002)
+
+    The forwarding shape every door uses: the chokepoint's decision arrives as an
+    argument and is passed straight through, so its provenance is the CALLER's
+    write, not a value this scope invented. `_parameters` answers the same
+    question; this reads as intent at the one call site that needs it.
+    """
+    return name in _parameters(scope)
+
+
 def _parameters(scope: ast.AST) -> dict[str, ast.expr | None]:
     """`{parameter: default-or-None}` for one function signature."""
     args = getattr(scope, "args", None)
@@ -1042,6 +1053,302 @@ def _name_origin(scope: ast.AST, name: str) -> tuple[str, str]:
     if assigned:
         return "other", ", ".join(sorted({ast.unparse(v) for v in assigned}))
     return "unknown", ""
+
+
+def _calls_with_enclosing_tests(
+        scope: ast.AST) -> list[tuple[ast.Call, list[ast.expr]]]:
+    """`(call, [tests of every enclosing `if`])` within ONE scope's own body.
+
+    Per-scope for the reason :func:`_calls_by_scope` exists — `ast.walk` would
+    let a nested helper's statements inherit the outer function's guards.
+
+    ⚠️ It does NOT record WHICH BRANCH (body vs `orelse`) the call sits in, and it
+    cannot honestly: `journal_skipped = False` appends, so a rule demanding the
+    BODY would be wrong for every correct tree. What it proves is that the append
+    is *behind the decision at all* — an append moved out of the guard is
+    unconditionally reachable again. Which branch is right is pinned by
+    behaviour, in `tests/test_14002_record_only_journal.py`. Stated because a
+    check that overstates what it proves is a false PASS one level up.
+    """
+    found: list[tuple[ast.Call, list[ast.expr]]] = []
+
+    def visit(node: ast.AST, tests: list[ast.expr]) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.Lambda)):
+                continue  # a nested scope's guards are not this one's
+            if isinstance(child, ast.If):
+                visit(child, [*tests, child.test])
+                continue
+            if isinstance(child, ast.Call):
+                found.append((child, tests))
+            visit(child, tests)
+
+    visit(scope, [])
+    return found
+
+
+def _names_in(node: ast.AST) -> set[str]:
+    """Every `ast.Name` id referenced under `node` (including attribute roots)."""
+    return {child.id for child in ast.walk(node)
+            if isinstance(child, ast.Name)}
+
+
+def _call_names_in(node: ast.AST) -> set[str]:
+    """The callee name of every call under `node`, INCLUDING `node` itself.
+
+    `ast.walk(node)` yields `node` first, so an assignment whose value IS the
+    call (`x = record_owns_position(…)`) is seen — which
+    :func:`_calls_by_scope` deliberately is not, because it starts from the
+    CHILDREN of what it is given. Using the wrong one made fact 1 of
+    :func:`the_chokepoint_skips_the_append` red on a correct tree: the shape it
+    was written for (`x = a or helper()`) is a BoolOp, not a bare Call.
+    """
+    names: set[str] = set()
+    for child in ast.walk(node):
+        if isinstance(child, ast.Call):
+            name = _call_name(child)
+            if name:
+                names.add(name)
+    return names
+
+
+def _is_append_call(call: ast.Call) -> bool:
+    """An append that yields an ORDINAL: `<journal>.append(…)` or a bare `append()`.
+
+    ⛔ The bare form is NOT `any function called append`: `record_sink.append(x)`,
+    `list.append`, `self._pending.append(rec)` all return `None` and none of them
+    is the journal. So the receiver form is delegated to
+    :func:`_is_journal_append` (which checks the JOURNAL'S name), and the bare
+    form is accepted only because it is the injected callable `live_write.write`
+    takes as `append=` — the SDK's wrapper exists precisely so a door can count
+    append failures AROUND the append.
+    """
+    if _is_journal_append(call):
+        return True
+    return isinstance(call.func, ast.Name) and call.func.id == _APPEND_NAME
+
+
+def the_chokepoint_skips_the_append(module_path: Path | None = None) -> list[str]:
+    """⛔ IS THE JOURNAL APPEND ACTUALLY BEHIND THE CUTOVER DECISION? (#14002).
+
+    THE DEFECT THIS HOLDS SHUT. The fix for #14002 is that a CUT-OVER graph's
+    write does not touch the JSONL — the record owns the ordinal, so there must
+    not be a second allocator to agree with. Three ways that fix can be deleted
+    while every other claim of this gate still holds, and all of them are silent:
+
+    * the decision is replaced by a constant (``journal_skipped = False``) — the
+      tree compiles, the append still happens, and the concurrency wedge returns
+      exactly as it was;
+    * the decision is kept and the append moved OUT of its guard — one line, and
+      the file grows again while the flag and the counter both look right;
+    * the decision is kept and dropped at the FORWARDING site — the seam then
+      reads a ``seq=None`` it cannot tell from the #9307 unproven state, and
+      every write on a cut-over graph is refused (`position_unverifiable`).
+
+    Four facts, each independently falsifiable, all read from SOURCE (an import
+    would execute the tree under test — and `live_write` imports half the
+    package):
+
+    1. ``live_write.write`` binds a name from a call whose callee ends in
+       ``record_owns_position``;
+    2. the module-level helper it calls ACTUALLY ASKS THE RECORD (its own body
+       reaches a ``*record_owns_position`` call) — a helper answering a constant
+       satisfies fact 1 and is the same defect as no helper;
+    3. every journal ``append`` call in ``write`` sits inside an ``if`` whose test
+       references that bound name — including the injected-callable form;
+    4. the ``project(…)`` call in ``write`` forwards ``journal_skipped=<name>``.
+
+    Fact 4's sibling for the other doors is
+    :func:`journal_skip_forwarding_problems`, which reads the same property at
+    every package call site of ``write_live_record``.
+    """
+    path = module_path or (PACKAGE / "live_write.py")
+    try:
+        rel = path.relative_to(REPO_ROOT).as_posix()
+    except ValueError:
+        # A caller handed a file OUTSIDE the tree (a test's mutated copy): the
+        # rule is about SOURCE, so the path only labels the problem.
+        rel = path.name
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+    except (OSError, SyntaxError, UnicodeDecodeError) as exc:
+        return [f"{rel}: cannot be read to answer the journal-skip question ({exc})"]
+
+    functions = {node.name: node for node in tree.body
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    problems: list[str] = []
+    door = functions.get("write")
+    if door is None:
+        # The chokepoint's name is the contract every door calls; a rename is a
+        # change to that contract, not an internal detail.
+        return [f"{rel}: `write` is gone — the chokepoint cannot be inspected"]
+
+    # ── fact 1: the decision is MEASURED, not assumed ────────────────────────
+    skipped: set[str] = set()
+    for name, values in _assigned_targets_in(door).items():
+        for value in values:
+            if any(callee.endswith("record_owns_position")
+                   for callee in _call_names_in(value)):
+                skipped.add(name)
+    if not skipped:
+        problems.append(
+            f"{rel}: `write` never binds a name from `*record_owns_position(…)` "
+            "— the append is not conditional on the record owning the ordinal, "
+            "so a cut-over graph keeps TWO allocators and the "
+            "`position_divergence` wedge returns under concurrent writers "
+            "(#14002)")
+
+    # ── fact 2: the helper ANSWERS FROM the record, and RETURNS it ──────────
+    # ⛔ CALLING IS NOT RETURNING (#14002 review cycle 4, P2). This fact used to
+    # accept any helper whose body reached a `*record_owns_position` call, so
+    # `record_owns_position(...)` followed by `return False` — the whole fix
+    # disabled — satisfied it, and no DB-free leg drove the real helper either
+    # (every chokepoint leg monkeypatches it), so the suite stayed green. The
+    # returned EXPRESSION must now contain the call, which is the shape a
+    # "plant the call, answer a constant" edit cannot fake.
+    helpers = {name for name in functions if name.endswith("record_owns_position")}
+    if helpers:
+        for helper in helpers:
+            node = functions[helper]
+            returns = [child for child in ast.walk(node)
+                       if isinstance(child, ast.Return) and child.value is not None]
+            answers = [ret for ret in returns
+                       if any((_call_name(call) or "").endswith(
+                                  "record_owns_position")
+                              for call in ast.walk(ret.value)
+                              if isinstance(call, ast.Call))]
+            if not answers:
+                problems.append(
+                    f"{rel}: `{helper}` never RETURNS the record's own "
+                    "`record_owns_position(…)` answer — a helper that calls it "
+                    "and answers a constant (or a bare `return False`) skips the "
+                    "append for every graph, or appends on every graph, while "
+                    "this gate and every DB-free leg stay green (#14002)")
+
+    # ── fact 3: the append is behind the decision ────────────────────────────
+    for call, tests in _calls_with_enclosing_tests(door):
+        if not _is_append_call(call):
+            continue
+        referencing = [test for test in tests if _names_in(test) & skipped]
+        if not referencing:
+            problems.append(
+                f"{rel}:{call.lineno} appends to the journal OUTSIDE the "
+                f"cutover guard — `{_call_name(call)}` is reached whether or "
+                "not the record owns the ordinal, which reintroduces the "
+                "second allocator the cutover removes (#14002)")
+
+    # ── fact 4: the decision REACHES the seam ────────────────────────────────
+    forwarded = False
+    for scope, call in _calls_by_scope(door):
+        if scope is not door:
+            continue
+        func = call.func
+        if not (isinstance(func, ast.Name) and func.id == "project"):
+            continue
+        bound = {kw.arg: kw.value for kw in call.keywords if kw.arg}
+        value = bound.get("journal_skipped")
+        if value is not None and (_names_in(value) & skipped):
+            forwarded = True
+    if not forwarded:
+        problems.append(
+            f"{rel}: `write` calls `project(…)` without forwarding "
+            "`journal_skipped=<the decision>` — the seam cannot tell \"no line, "
+            "the counter owns the number\" from the #9307 unproven state, so "
+            "EVERY write on a cut-over graph is refused "
+            "(`position_unverifiable`) while the append is correctly skipped "
+            "(#14002)")
+    return problems
+
+
+def journal_skip_forwarding_problems(tree: ast.AST, rel: str) -> list[str]:
+    """The per-module half of :func:`live_call_sites_forward_the_journal_skip`.
+
+    Synthetic-module shaped (like :func:`position_problems_for_module`), because
+    a rule that only ever runs against a complying tree cannot be proven to fire.
+
+    ⛔ A CONSTANT IS NOT A FORWARD (#14002 review, P2). Certifying on the
+    KEYWORD'S PRESENCE alone let three mutants through — `journal_skipped=False`,
+    `=True`, `=None` — and each is a real defect: a hard-coded ``False``
+    re-creates the exact loss shape this change exists to prevent (the chokepoint
+    skips the append, so the seam sees `seq=None`, reads it as the #9307
+    unproven state, refuses `position_unverifiable`, and the write is in neither
+    store — with the gate printing `WIRED`), and a hard-coded ``True`` forces
+    allocation on a graph that is not cut over. The value must be a NAME, the
+    same rule :func:`the_chokepoint_skips_the_append` fact 4 applies at the
+    chokepoint.
+    """
+    modules, functions = _record_bindings(tree)
+    problems: list[str] = []
+    for scope, call in _calls_by_scope(tree):
+        owner, name = _resolve_record_call(call, modules, functions)
+        if owner is None or name != _LIVE_DOOR:
+            continue
+        bound = {kw.arg: kw.value for kw in call.keywords if kw.arg}
+        value = bound.get("journal_skipped")
+        if value is None:
+            problems.append(
+                f"{rel}:{call.lineno} calls {_LIVE_DOOR}() without "
+                "`journal_skipped=` — on a cut-over graph the caller has no "
+                "journal line to hand the seam, and a seam that is not told so "
+                "refuses the write as `position_unverifiable` (counted, WARNed, "
+                "permanent). Forward the chokepoint's own decision (#14002)")
+            continue
+        if not isinstance(value, ast.Name):
+            problems.append(
+                f"{rel}:{call.lineno} calls {_LIVE_DOOR}() with "
+                f"journal_skipped={ast.unparse(value)!r} — a CONSTANT is not the "
+                "chokepoint's decision: `False` re-creates the two-allocator "
+                "loss (the append is skipped and the seam refuses the write as "
+                "`position_unverifiable`, so it lands in neither store) and "
+                "`True` forces allocation on a graph that is not cut over. "
+                "Forward the name the chokepoint bound (#14002)")
+            continue
+        # ⛔ A NAME IS NOT PROVENANCE EITHER (#14002 review cycle 3, P3). A door
+        # can bind a LOCAL constant (`journal_skipped = True`) a few lines above
+        # the call and forward that name — the same two defects, one assignment
+        # away, with the gate green. So the name must be either a PARAMETER of the
+        # enclosing door (the forwarding shape the SDK uses) or bound in that
+        # scope from a call whose callee is the chokepoint's decision.
+        if _is_parameter(scope, value.id):
+            continue
+        origins = _assigned_targets_in(scope).get(value.id, [])
+        if any(callee.endswith("record_owns_position")
+               for origin in origins for callee in _call_names_in(origin)):
+            continue
+        problems.append(
+            f"{rel}:{call.lineno} forwards `{value.id}` as `journal_skipped`, but "
+            f"`{value.id}` is neither a parameter of {_function_name(scope)}() nor "
+            "bound from the chokepoint's `*record_owns_position(…)` decision in "
+            "this scope — a locally bound constant is the same defect as a "
+            "literal: `False` skips the append and gets every cut-over write "
+            "refused, `True` forces allocation on a graph that is not cut over "
+            "(#14002)")
+    return problems
+
+
+def live_call_sites_forward_the_journal_skip() -> list[str]:
+    """Every package door forwards the CUTOVER DECISION to the live seam.
+
+    Sibling of :func:`live_call_sites_pass_the_ordinal`, one flag over: that
+    check holds every door to handing the seam the append's ordinal, and this one
+    holds every door to telling it when there IS no ordinal because the record
+    owns the position (#14002). They fail in opposite directions — a dropped
+    ordinal writes a row-less record, a dropped skip refuses every write on a
+    cut-over graph — and both are invisible without a static read of the call
+    sites.
+    """
+    problems = the_chokepoint_skips_the_append()
+    for path in _iter_package_modules():
+        if path.stem in _RECORD_STEMS:
+            continue
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        except (OSError, SyntaxError, UnicodeDecodeError):
+            continue  # `find_production_callers` already reports this
+        problems.extend(journal_skip_forwarding_problems(tree, rel))
+    return problems
 
 
 def check() -> tuple[int, dict[str, object]]:
@@ -1089,7 +1396,8 @@ def check() -> tuple[int, dict[str, object]]:
     position_problems = (live_door_writes_the_journals_position()
                          + live_call_sites_pass_the_ordinal()
                          + production_callers_defer_the_position()
-                         + the_door_reads_the_allocate_flag())
+                         + the_door_reads_the_allocate_flag()
+                         + live_call_sites_forward_the_journal_skip())
 
     report: dict[str, object] = {
         "production_callers": callers,

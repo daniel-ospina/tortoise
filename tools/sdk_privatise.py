@@ -375,7 +375,17 @@ SWEEP_NAMES = 66
 #: nothing in this merge adds a row of its own. ⛔ That attribution is three measurements, not an
 #: arithmetic check: the +1 is named because `main`'s OWN tree prints it, not because 11834 − 11833
 #: equals 1.
-SWEEP_RESIDUE = (11834, "0253a625dee4ed86")
+#:
+#: MERGED AGAIN (`origin/main` `d4a8dddc4e5`, #14022/#14032/#14043/#14050) — re-measured on THIS
+#: tree, three readings each on its own tree and none carried: this branch's pre-merge head
+#: `321f0961e65` prints (11834, "…"), `origin/main` `d4a8dddc4e5` prints (11829, "…") against its
+#: OWN pin of 11821 — i.e. `main` itself is 8 rows off its pin here and `--check` exits 1 on
+#: `main`'s tree, a `main`-side datum this PR does not fix and does not hide — and the MERGED tree
+#: prints (11841, "53273cee50de5834"). Composition, MEASURED row-by-row by diffing the sorted row
+#: sets of `main`'s tree against this one (not inferred): the merged tree is this PR's 12 rows over
+#: `main` — `proj.g.query` 3637 → 3642 (+5), `g.query` 1490 → 1492 (+2), `surface.create_subject`
+#: 4 → 7 (+3), `surface.create_edge` 0 → 2 (+2) — with every other row identical to `main`'s.
+SWEEP_RESIDUE = (11841, "53273cee50de5834")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
