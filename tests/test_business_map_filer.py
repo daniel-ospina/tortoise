@@ -1056,6 +1056,12 @@ def test_a_structural_edge_the_door_DECLINED_is_not_marked_written(
     assert "do NOT add a marker to `written`" in err, err
     # …and the line is reported ONCE, not once in-loop and again as "STILL
     # unresolved" (the same line twice reads as two failures).
+    # ⛔ The header counts MARKERS, not lines: the dedupe is marker-keyed, so a
+    # line count could exceed what is listed and the parenthetical would claim a
+    # line was printed that was not (#13913 review round 19).
+    assert "edge(s) were DECLINED" in err, err
+    # The exception class has no marker either: bullet 3 must say what to do.
+    assert "If NO marker for this line is in `written` at all" in err, err
     one = structural[0]
     assert err.count(one) == 1, (
         f"the declined edge is reported more than once ({err.count(one)}x): "
@@ -1095,6 +1101,43 @@ def test_a_re_observed_failure_is_reported_ONCE_not_under_two_HEADINGS(
     assert err.count(marker) == 1, (
         f"{marker!r} is reported {err.count(marker)}x — once in-loop and again "
         "as an earlier run's line reads as two failures")
+
+
+def test_the_carried_header_COUNTS_MARKERS_not_lines(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """Two lines over one marker is ONE unresolved marker.
+
+    The "STILL unresolved" header counted `carried` LINES while the dedupe below
+    is marker-keyed, so a marker with an earlier `unbound endpoint` line and an
+    earlier `created=False` line advertised `2 failure(s)` and then listed them —
+    the count disagreeing with the marker it belongs to, and the parenthetical
+    claiming a line was printed that was not (#13913 review round 19).
+
+    Mutant: `len(carried)` in the header — this reds.
+    """
+    state_path = tmp_path / "state.json"
+    structural = [e for e in map_doc["edges"] if "op" not in e]
+    assert structural
+    marker = filer.edge_marker(structural[0])
+    state_path.write_text(json.dumps({
+        "ids": {item["ref"]: f"id:{item['ref']}"
+                for section in ("subjects", "objects", "sources", "events", "points")
+                for item in map_doc[section]},
+        "written": [marker],
+        "unconfirmed": [],
+        "failed": [
+            f"{marker}: unbound endpoint sub:nobody/sub:nobody",
+            f"{marker}: create_edge returned created=False — the edge was NOT written",
+        ],
+    }))
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _StubMcp)
+
+    assert filer.write_map(map_doc) == 1
+    err = capsys.readouterr().err
+    assert "1 marker(s) from an earlier run" in err, err
+    assert "2 marker(s) from an earlier run" not in err, err
 
 
 def test_a_non_idempotent_write_is_not_retried(monkeypatch):
