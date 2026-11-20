@@ -1370,6 +1370,32 @@ def test_the_receipts_headline_figures_are_pinned():
         "the turn discriminator — if this changes, re-read that finding")
 
 
+#: The attribution the receipt used to assert, and that its own numbers refute
+#: (#13919 rounds 7-8). Kept as a literal so a hand-edit BACK to it is a red test.
+_REFUTED_ATTRIBUTION = "those stores are written by the fixture seeder"
+
+
+def test_the_receipts_instrument_note_is_RE_DERIVED_from_its_own_breakdown():
+    """The note is the one field in the artifact no other pin could hold.
+
+    Rounds 7-8 corrected it by hand in three places (the note, a comment, the module
+    docstring) because they were applied to an artifact that predates the fix. "It
+    happens to be byte-equal today" is not a pin: the note is now DERIVED by
+    ``_instrument_note()``, so the artifact's copy is checked against that derivation
+    over the artifact's OWN ``contains_targets_by_kind``. A hand-edit back to the
+    refuted single-writer attribution — the sentence that sent a reader to the wrong
+    writer for a third of the population — is a red test, not a silent regression.
+    """
+    inst = _receipt()["arms"]["instrument"]
+    assert _REFUTED_ATTRIBUTION not in inst["note"], (
+        "the artifact still asserts the attribution its own contains_targets_by_kind "
+        "refutes")
+    assert inst["note"] == mod._instrument_note(inst["contains_targets_by_kind"]), (
+        "the receipt's note is NOT the derivation of the breakdown it publishes — "
+        "either it was hand-edited, or it predates _instrument_note() and must be "
+        "re-derived")
+
+
 # ── round-7 item 4: the exit-2 contract names BOTH paths ──────────────────
 
 def test_the_exit_contract_names_where_a_PRE_ARM_refusal_puts_its_reason(tmp_path):
