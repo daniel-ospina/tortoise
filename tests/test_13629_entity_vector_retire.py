@@ -1574,10 +1574,18 @@ def test_the_writer_population_comes_from_the_REGISTER_not_only_the_fold_map(
     assert "tortoise.hosted_backup::restore_graph" in writers
     assert "tortoise.projection.entities::_upsert_event" in writers
     # The five `:Event` writers that are NOT folds — the population the fold map alone misses.
+    # ⛔ THE SDK NAMES HERE ARE THE REGISTER'S SEAMS, NOT THE RETIRED PUBLIC METHODS.
+    # `#13899` privatised `ingest_corpus` to `sdk.py::_ingest_corpus` and moved the register
+    # entry with it (`tortoise/embed_writer_register.py`, the `RECOGNISED_PRODUCER` row whose
+    # reason quotes `self._session_embedding(...)`); this loop kept the public spelling and so
+    # asserted a name that no longer exists — measured red on `main` at `ef1d6f7561`, where
+    # `_writers_for("Event")` contains `tortoise.sdk::_ingest_corpus` and not this id. Name the
+    # seam the register names: `ingest_corpus` is retired (#12901), so a pin on it cannot be
+    # satisfied by any repair, only by resurrecting a method the retirement removed.
     for outside in ("tortoise.sdk::_session_event_write",
                     "tortoise.sdk::_embedding_repair_attempt",
                     "tortoise.sdk::_event_raw_write_door",
-                    "tortoise.sdk::ingest_corpus",
+                    "tortoise.sdk::_ingest_corpus",
                     "tortoise.session_indexer::main"):
         assert outside in writers, outside
 
