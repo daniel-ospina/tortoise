@@ -1117,9 +1117,13 @@ def write_map(doc: dict) -> int:
         repeated = [line for line in carried
                     if line.split(": ", 1)[0] not in reobserved]
         if carried:
-            print(f"\n{len(carried)} failure(s) from an earlier run are STILL unresolved "
-                  "(their markers were not re-written this run) — see state.json",
-                  file=sys.stderr)
+            # ⛔ COUNT MARKERS, NOT LINES: the dedupe below is marker-keyed, so a
+            # count of LINES can exceed what is listed and the parenthetical then
+            # claims a line was printed that was not (#13913 review round 19).
+            markers_carried = {line.split(": ", 1)[0] for line in carried}
+            print(f"\n{len(markers_carried)} marker(s) from an earlier run are "
+                  "STILL unresolved (their markers were not re-written this run) "
+                  "— see state.json", file=sys.stderr)
         else:
             print(f"\n{len(declined)} edge(s) were DECLINED by the door — nothing "
                   "was written for them (see `failed` in state.json)",
@@ -1127,7 +1131,8 @@ def write_map(doc: dict) -> int:
         for line in repeated[:10]:
             print(f"  ! {line}", file=sys.stderr)
         if not repeated:
-            print("  (…all of them were re-observed and printed above)", file=sys.stderr)
+            print("  (…each of those markers was re-reported above, in this "
+                  "run's own `!!` lines)", file=sys.stderr)
         # ⛔ THE REMEDY IS PER CLASS. The marker-bearing lines (a landed write
         # whose follow-up step failed), the `unbound endpoint` lines and the
         # `create_edge returned created=` lines (both writes that never happened,
@@ -1151,7 +1156,9 @@ def write_map(doc: dict) -> int:
               "line from `failed` and keep its marker in `written`; if it is wrong "
               "(e.g. a mechanism inversion, which `--verify` cannot see), delete "
               "the node in the graph, then delete its marker from `written` and "
-              "this line from `failed`, and re-run.\n"
+              "this line from `failed`, and re-run. If NO marker for this line is "
+              "in `written` at all — an exception before the write, say — the "
+              "write did not land: delete the line and re-run.\n"
               "    Never delete `state.json` to clear these — a re-run would "
               "re-issue every non-idempotent write.", file=sys.stderr)
         # A failure whose marker the map no longer declares can never be
