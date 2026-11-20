@@ -16689,14 +16689,15 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
         "hosted_api",
         "if count + est > max_points:",
     ),
-    # ⛔ THE `sdk.py` EMPTY-GATE RETURN DICT, the clause that shares `:20311` with the row
-    # above — and the reason this row exists (#13878 review, P1). A blanket "+18 on every
-    # `:20311` on the D5 line" re-point hit BOTH occurrences and turned this CORRECT cite
-    # into `:20329`, which is `errors: list[str] = []`. Every arm stayed green: the quota
+    # ⛔ THE `sdk.py` EMPTY-GATE RETURN DICT, the clause that SHARED `:20311` with the row
+    # above until the fix moved that row to `:20329` — and the reason this row exists
+    # (#13878 review, P1). A blanket "+18 on every `:20311` on the D5 line" re-point hit
+    # BOTH then-occurrences and turned this CORRECT cite into `:20329`, which is
+    # `errors: list[str] = []`. Every arm stayed green: the quota
     # guard row still found its own number, the dict clause was read by nothing, and the
     # two numbers happened to be the SAME at one head — which is exactly what made the
     # blanket replace look safe. This row binds the dict clause to its own sentence, so the
-    # two `:20311` occurrences can never again be re-pointed as one.
+    # two cites that once shared `:20311` can never again be re-pointed as one.
     (
         "the `sdk.py` empty-gate return dict",
         r"the empty-gate return dict it was quoting \([^)]*\) is at `:(?P<n>\d+)`",
@@ -16855,13 +16856,27 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         "docstring lines are the +18 HALF of the +84 (#13878 review, F2). Unattributed, the "
         "+18 gets credited to whatever commit is nearest — which is how it was credited to "
         "`#13845`.")
-    assert "inserted its D5 formatting guard" not in text, (
-        "D5 describes the +18 as a commit that 'inserted its D5 formatting guard'. No commit "
-        "did that: the 18 lines are `819a473cd4`'s `Embedder check (#13674)` docstring "
-        "paragraph (`git diff --numstat 819a473cd4^ 819a473cd4 -- tortoise/hosted_api.py` -> "
-        "`18 0`), and a doc-only commit cannot move a line in that module — which is why "
-        "`#13845` (`8bdd34c631`, three doc/test files, no `hosted_api.py`) is not the source "
-        "(#13878 review, F2). Name the commit and what it inserted.")
+    # ⛔ THIS GUARD READ THE WRONG ARTIFACT (#13878 review, cycle 4 — measured). It used to
+    # assert the phrase was absent from `text`, which is `d5[0]`: the ONE markdown line of
+    # `05-verify.md`'s D5 row. That line NEVER carried the phrase at any commit on this
+    # branch, so the assertion could not fire — a vacuous guard over the very defect it was
+    # written for. The wording that actually shipped lived in THIS FILE's own comment, and
+    # the form D5 carried credited the +18 to that same commit in a parenthetical. Both are
+    # now forbidden in the artifact that carried them.
+    _own_prose = Path(__file__).read_text(encoding="utf-8")
+    assert "#13845" + "`'s +18" not in _own_prose, (
+        "this file's comment credited the +18 to `#13845`. No commit did that: the 18 lines "
+        "are `819a473cd4`'s `Embedder check (#13674)` docstring paragraph "
+        "(`git diff --numstat 819a473cd4^ 819a473cd4 -- tortoise/hosted_api.py` -> `18 0`), "
+        "and `#13845` (`8bdd34c631`) touches three doc/test files and no `hosted_api.py` "
+        "(#13878 review, F2).")
+    assert not re.search(r"#13845`'s \+18", text), (
+        "D5 credits the +18 to `#13845`. It is `819a473cd4`'s (`#13841`): a doc-only commit "
+        "cannot move a line in `hosted_api.py` (#13878 review, F2).")
+    assert "#13841" in text, (
+        "D5 no longer attributes the +18 to `#13841` (`819a473cd4`, the `Embedder check "
+        "(#13674)` docstring paragraph). Naming the RIGHT commit is half the fix — the other "
+        "half is that D5 does not credit the wrong one (#13878 review, F2).")
     assert "sdk.py:28718" in text, (
         "D5 no longer names `sdk.py:28718`, the value `04-plan.md`'s own row carries at "
         "this head (`grep -n 'declared_relation_predicates()' "
