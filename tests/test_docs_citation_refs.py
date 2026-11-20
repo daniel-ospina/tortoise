@@ -2795,7 +2795,14 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
 #: The tuple below bans the rows the round-16 review MEASURED; on its own it misses the same
 #: false property RE-WORDED. Measured on the merged document: replacing "whose first non-space
 #: character **after that marker** is `#`" with "whose first non-space character is `#`"
-#: matched no row and left the suite green (466 passed). `_FALSE_FILTER_PROPERTY_RE` grades the
+#: matched no row of the ledger tuple and left that arm green. ⛔ **the count that stood here
+#: (`466 passed`) is DELETED (#13948 review, P2)**: it named no head, and it cannot be reproduced
+#: — this file collects a couple of dozen tests, so the figure was some OTHER run's total, which is
+#: the head-bound class this very file bans, sitting in the sentence that bans it. The witness is
+#: now a COMMAND, re-derivable at any head: apply the re-wording above to `05-verify.md` and run
+#: `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_docs_citation_refs.py -k comment_filter` —
+#: measured at #13948's head: `1 failed, 23 deselected`, so the arm that reds is this cell and not
+#: a neighbour. `_FALSE_FILTER_PROPERTY_RE` grades the
 #: SHAPE in the spellings the pattern below covers. It does NOT close the class: the declared
 #: escapes at the pattern are real, and the sentence that used to sit here ("the property cannot
 #: come back in different words") was itself the over-claim round 19 reded.
@@ -2865,8 +2872,13 @@ def _document_filter_patterns(doc: str) -> list[tuple[str, str]]:
     ⛔ THE PATTERNS ARE READ OUT OF THE DOCUMENT, NEVER MIRRORED HERE (#13853 review round 17,
     P2-1). This helper did not exist: the arm hardcoded the pair, so the document could state
     a DIFFERENT filter and the mechanism assertions stayed green — measured on the merged
-    document, changing the D5 cell's `[[:space:]]*` to `[[:space:]]+` left 466 passed while
-    the document no longer described the filter its own examples run. The document is the
+    document, changing the D5 cell's `[[:space:]]*` to `[[:space:]]+` left that arm green while
+    the document no longer described the filter its own examples run. ⛔ **the `466 passed` that
+    stood here is DELETED for the reason the other one is (#13948 review, P2)**: it named no head
+    and no population, and it cannot be reproduced — the file is a couple of dozen tests, so that
+    total belongs to some other run. Re-derive the witness by mutation instead: after that edit,
+    `TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_docs_citation_refs.py -k comment_filter`
+    reds `1 failed, 23 deselected` (measured at #13948's head). The document is the
     artifact under test, so the patterns it states are the ones executed.
     """
     return sorted(set(_FILTER_PIPELINE_RE.findall(doc)))
