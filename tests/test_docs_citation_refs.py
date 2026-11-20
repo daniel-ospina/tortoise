@@ -3873,7 +3873,8 @@ def _d5_class_members(char_class: str) -> set[str] | None:
             #   * an escaped `-` with any character after it is refused as a RANGE. grep agrees
             #     only where that range DESCENDS — `grep -cE` refuses `^[\-+]$` and `^[+\-+]$`
             #     with `Invalid range end`, rc 2 — while an ASCENDING one grep RUNS: `^[+\-z]$`
-            #     -> rc 0, count `3` (measured), and this helper still answers `None`, an
+            #     is `{+}` plus the range `\`..`z`, exits 0, and counts the `+` and the `\` lines
+            #     of the 6-line probe (`2`, measured) — and this helper still answers `None`, an
             #     over-refusal in the safe direction rather than agreement with grep;
             #   * an escaped `-` in the LAST position is consumed as the member `-`, which is
             #     what keeps `[+\-]` accepted — it also matches a lone `\`, so it counts `3` on
