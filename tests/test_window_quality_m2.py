@@ -3174,14 +3174,21 @@ def test_the_record_state_is_bound_to_whether_the_evictor_invalidates_the_snapsh
         "claim rather than editing this pin")
     delete_path = src[src.index("def _delete_nodes"):]
     delete_path = delete_path[:delete_path.find("\ndef ", 10) if "\ndef " in delete_path[10:] else len(delete_path)]
-    # ⛔ CALL-SHAPED, not a bare token (review round 1, P2): `in delete_path` is
-    # satisfied by the name appearing in a comment, or by a call wrapped in `if False:`.
-    # ⚠️ The ORDER (invalidate AFTER the statement, never before) is deliberately NOT
-    # pinned here. It is a behaviour, and it is pinned behaviourally where it belongs —
-    # `test_cache_eviction_evictor_pins.py::test_the_snapshot_is_invalidated_AFTER_the_
-    # statement_not_before`, which records the statement/invalidation order on a fake
-    # graph. A textual "the call is below the statement" check would be satisfied by the
-    # helper DEFINITION sitting above it while every call sat below, i.e. a pin that
+    # ⚠️ THIS IS A PRESENCE CHECK ON THE NAME, and the comment says so rather than
+    # claiming more (review round 2 measured that "call-shaped" was unearned: a call
+    # wrapped in `if False:`, or commented out, still satisfies it). What a substring
+    # can honestly bind is "this module still has the invalidation wired into the delete
+    # path at all" — which is what makes the record's Finding-6 correction true.
+    # ⛔ WHAT IS *NOT* PINNED HERE, deliberately, and where it lives instead:
+    #   * that the invalidation actually RUNS, and that it runs AFTER the statement
+    #     (never before) — `test_cache_eviction_evictor_pins.py::
+    #     test_the_snapshot_is_invalidated_AFTER_the_statement_not_before`, plus the
+    #     three other order/gate pins beside it, which record statement-versus-
+    #     invalidation order on a fake graph and were each mutation-verified;
+    #   * that a zero-row delete invalidates nothing, a failed invalidation is `False`,
+    #     and `None` never overwrites a real answer — the same file.
+    # A textual "the call is below the statement" assertion here would be satisfied by
+    # the helper DEFINITION sitting above it while every call sat below: a pin that
     # passes on the very refactor it looks like it forbids.
     assert "_invalidate_degraded_snapshot(" in delete_path, (
         "`cache_evictor._delete_nodes` no longer CALLS the snapshot invalidation — an "
@@ -3193,16 +3200,24 @@ def test_the_record_state_is_bound_to_whether_the_evictor_invalidates_the_snapsh
         "the record still says the evictor never invalidates `fallback_snapshot` — "
         "#13123 landed, so that callout is stale and a reader would take the shipped "
         "path for one that serves demoted nodes")
-    # ⛔ PARAGRAPH-SCOPED, not two independent substring tests (review round 1, P2).
-    # `"#13123" in readme and "landed" in readme` was satisfied by the two words
-    # appearing anywhere — the record mentions #13123 in more than one place, so a
-    # reworded or partially-removed correction stayed green. The sentence that carries
-    # the correction must carry BOTH: which issue, and its state.
-    paragraphs = [p for p in readme.split("\n\n") if "#13123" in p]
-    assert any("landed" in p for p in paragraphs), (
-        "no paragraph that names #13123 states that it LANDED — the record's Finding 6 "
-        "correction (and the verdict paragraph that relies on it) must say the "
-        "eviction-path invalidation exists, in the same place it names the issue")
+    # ⛔ BOUND TO THE FINDING-6 PARAGRAPH ITSELF, not "some paragraph that mentions
+    # #13123" (review round 2 measured that: the record names the issue in TWO places and
+    # BOTH say "landed", so replacing the Finding-6 correction with "still tracked
+    # separately" left the `any(...)` form green). The correction site is the paragraph
+    # that describes the shipped gap; that paragraph must still describe it AND state its
+    # state. If the describing sentence is removed, the anchor disappears and this reds —
+    # which is correct: the place a reader learns the gap existed is the place it must
+    # learn it was closed.
+    sites = [p for p in readme.split("\n\n")
+             if "The same gap existed in shipped code" in p]
+    assert sites, (
+        "the record's Finding-6 paragraph ('The same gap existed in shipped code') is "
+        "gone — re-derive where the gap is described and where its state is stated, "
+        "rather than editing this pin")
+    assert "#13123" in sites[0] and "has since landed" in sites[0], (
+        "the paragraph that describes the shipped eviction gap no longer states that "
+        "#13123 LANDED — a reader then takes the shipped path for one that serves "
+        f"demoted nodes. Paragraph: {sites[0][:200]!r}")
 
 
 def test_every_published_arrow_is_bound_to_the_cell_it_reports(artifact):

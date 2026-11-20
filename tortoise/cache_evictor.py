@@ -641,10 +641,15 @@ def _delete_nodes(
     ⛔ ``snapshot_out`` CARRIES THE OUTCOME ACROSS A RAISE. Without it the abort path
     cannot report the invalidation it performed (or failed to perform): the tuple never
     reaches the caller, so the report would say ``None`` — "not applicable" — about a
-    statement whose effect is explicitly unverified. The mapping is filled in on EVERY
-    route and the caller reads it in a ``finally``-shaped way (``evict`` reads it after
-    the handler runs), so a failed invalidation on a raising statement is
-    indistinguishable from a failed invalidation on a successful one: both are ``False``.
+    statement whose effect is explicitly unverified. A failed invalidation on a raising
+    statement is then indistinguishable from a failed invalidation on a successful one:
+    both are ``False``.
+
+    ⛔ THE MAPPING IS FILLED ON EVERY ROUTE THAT RUNS A STATEMENT — including the raising
+    one — but NOT on the empty-payload return at the top, where no statement is issued and
+    nothing is filled. A caller must read it with ``.get(...)`` and must not treat an empty
+    mapping as an answer (``evict`` guards with ``snapshot_outcome.get(...) is not None``,
+    which is correct for both reasons: absent and ``None`` both mean "no answer here").
     """
     payload = [{"id": c.node_id, "key": c.key} for c in rows if c.key is not None]
     if not payload:
@@ -1107,12 +1112,18 @@ def evict(
             delete_unverified = True
             after_measured = False
             bytes_measured = False
-            # ⛔ THE INVALIDATION'S OWN OUTCOME SURVIVES THE RAISE. `snapshot_outcome`
-            # was filled before the re-raise, so a statement that removed nothing and
-            # raised reports `None` (nothing to invalidate) while one that could have
-            # removed rows reports `True`/`False` — never the blanket `None` the abort
-            # path used to imply.
-            if snapshot_outcome:
+            # ⛔ GUARD ON THE VALUE, NOT THE DICT (review round 2, P1 — measured).
+            # `_invalidate(needed=False)` deliberately publishes `None` ("nothing removed,
+            # so nothing needed invalidating"). Guarding on the dict alone therefore let a
+            # LATER pass that removed 0 rows blank what an EARLIER pass proved: measured
+            # pass 1 deleting 2 rows with a FAILED invalidation, pass 2 removing 0 and its
+            # re-count raising → report said `deleted=2`, `nodes_evicted=2`,
+            # `degraded_snapshot_invalidated=None`, and no "could NOT be invalidated"
+            # sentence — a failed invalidation erased from the machine-readable surface on
+            # the very exit this channel was added for. `None` means "needed nothing", so
+            # it must never overwrite a real answer; this mirrors the normal path's
+            # `if snapshot_invalidated is not None:`.
+            if snapshot_outcome.get("invalidated") is not None:
                 degraded_snapshot_invalidated = snapshot_outcome["invalidated"]
             # ⛔ `deleted` counts EARLIER passes at this point — this pass's own rows
             # are not in it yet. Saying "after {len(deleted)} node(s) were already

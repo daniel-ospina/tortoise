@@ -407,9 +407,13 @@ def main(argv: list[str] | None = None) -> int:
             False: ("the degraded snapshot of THIS process could NOT be invalidated — "
                     "a node this run removed may still be served here until the "
                     "snapshot TTL expires"),
-            None: ("the degraded snapshot of THIS process was NOT invalidated and the "
-                   "metric does not say whether it needed to be (the delete "
-                   "statement's effect is UNVERIFIED — see `delete_unverified`)"),
+            # `None` is the field's "no node was removed, so no invalidation was
+            # needed" — NOT an unknown. Unreachable with `report.deleted` non-empty on
+            # every path we know of (a pass that removed rows publishes True/False, on
+            # the success route and on the raising one); kept because a future route that
+            # sets neither must not turn this message into a traceback.
+            None: ("no snapshot invalidation was needed for this run (nothing it "
+                   "removed required one)"),
         }[outcome]
         print(
             f"#13123: {len(report.deleted)} node(s) were removed; {state}. The "

@@ -1475,3 +1475,66 @@ def test_a_FAILED_invalidation_on_the_raise_path_is_reported_as_FALSE(monkeypatc
     assert "could NOT be invalidated" in report.reason, (
         "the metric says the invalidation failed and the reason does not — the field's "
         "own contract says the prose carries it, and the abort exit skipped it")
+
+
+class _SecondPassSurvivorFails(_FakeGraph):
+    """Pass 1 deletes rows; pass 2 removes 0 (a peer won) and its SURVIVOR read raises.
+
+    ⛔ The survivor read is the load-bearing detail, and the first version of this fixture
+    got it wrong (its own mutation test caught that: the pin stayed green with the bug
+    reinstated). A failure on the post-delete RE-COUNT is caught by `evict`'s later
+    re-measure guard, which never reads `snapshot_outcome`; only a failure INSIDE
+    `_delete_nodes` reaches the abort branch that does. Removing 0 rows is what makes
+    `_delete_nodes` run the survivor query at all (`removed != len(payload)`), so this
+    pass both publishes `snapshot_out["invalidated"] = None` and then raises — the exact
+    two-step that overwrites an earlier pass's real answer.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.deletes_seen = 0
+        self.fail_survivors = False
+
+    def query(self, statement: str, params=None):
+        if "DETACH DELETE" in statement:
+            self.deletes_seen += 1
+            if self.deletes_seen == 2:
+                self.delete_removes = 0          # a peer evicted the rest
+                self.fail_survivors = True
+        if "RETURN id(n)" in statement and self.fail_survivors:
+            raise RuntimeError("transport blip on the survivor read")
+        return super().query(statement, params=params)
+
+
+def test_a_later_pass_that_needed_NOTHING_cannot_erase_an_earlier_pass_s_answer(monkeypatch):
+    """`None` means "nothing to invalidate", so it must never overwrite True/False.
+
+    ⛔ MEASURED (review round 2): with the abort path guarding on the dict instead of the
+    value, pass 1 deleting 2 rows with a FAILED invalidation and pass 2 removing 0 then
+    aborting produced `deleted=2`, `nodes_evicted=2`,
+    `degraded_snapshot_invalidated=None` — and no "could NOT be invalidated" sentence.
+    A monitor keyed on `is False` saw nothing on the one exit where an evicted node may
+    still be served.
+    """
+    graph = _SecondPassSurvivorFails(nodes=10)
+    log = _InvalidationLog(graph, raises=True)
+    _patch_invalidation(monkeypatch, log)
+
+    report = evict(
+        _assessment(), _FakeClient(), graph,
+        population=POPULATION, selector=lambda g, limit, pop: _candidates(limit),
+        record_probe=_record, dry_run=False,
+        policy=EvictionPolicy(max_nodes=1, batch_size=2, max_passes=5),
+    )
+
+    # The pass really did delete, then abort on the second re-count.
+    assert report.deleted, "this test needs a pass that removed rows; none did"
+    assert len(log.calls) == 1, (
+        f"expected exactly one invalidation (pass 1's, which failed); got {log.calls} — "
+        f"if pass 2 also invalidated, the zero-row gate is broken")
+    assert report.metric()["degraded_snapshot_invalidated"] is False, (
+        "a later pass that removed 0 rows (so needed no invalidation) ERASED an earlier "
+        "pass's FAILED invalidation from the metric — `None` is 'nothing to invalidate', "
+        "never 'no answer'")
+    assert "could NOT be invalidated" in report.reason, (
+        "the abort path dropped the failure sentence as well as the value")
