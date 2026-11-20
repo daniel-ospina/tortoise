@@ -16973,16 +16973,31 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         assert _stale_count not in text, (
             f"D5 states {_stale_count!r} about `04-plan.md`. A count is a head-bound "
             "figure and this arm has already been wrong in both directions; name the "
-            "PAIRS instead (`sdk.py:28682` -> `:28913` and the I7 range "
-            "`:15262-15339` -> `:15346-15423`), which the document CARRIES at this head — "
+            "PAIRS instead (`sdk.py:28718` -> `sdk.py:28913`, the measured pair), which "
+            "the document CARRIES at this head — "
             "and whether that file sits in the diff is `git diff --numstat"
             " origin/main...HEAD` at the head you merge, never a claim typed here "
             "(#13750 review, cycle 3; #13746 review round 2, finding 6)")
-    for _pair in ("`sdk.py:28682` → `:28913`", ":15262-15339` → `:15346-15423`"):
+    # ⛔ THE PAIR IS THE MEASURED ONE, AND ONLY ONE (#13879 review, cycle 3 — MEASURED).
+    # This loop used to pin `sdk.py:28682` -> `:28913` AND the I7 range
+    # `:15262-15339` -> `:15346-15423` as "the pair 04-plan.md carries at this head". Both
+    # halves were false: the diff's OLD side is `sdk.py:28718` (never `:28682`, which no
+    # head the document was read at carries), and `:15346-15423` is on BOTH sides —
+    # `main` made that move — so naming it as this diff's pair was a CHIMERA of two
+    # heads. The pin was green over it, which is exactly the class it exists to close, so
+    # it now pins the measured pair and REFUSES the chimera.
+    for _pair in ("`sdk.py:28718` → `sdk.py:28913`",):
         assert _pair in text, (
-            f"D5 no longer names {_pair!r}. Both ends are pinned here because the range's "
-            "TARGET was once typed as the base's own value while its SOURCE was already "
-            "re-derived (#13750 review, cycle 3)")
+            f"D5 no longer names {_pair!r}, the one re-point `04-plan.md` carries in this "
+            "diff (`git diff origin/main...HEAD -- …/04-plan.md` is `1 1`; the OLD side "
+            "reads `sdk.py:28718`, the new `sdk.py:28913`) — re-derive the pair, do not "
+            "drop it (#13879 review, cycle 3)")
+    # and the chimera is refused, not merely absent from the message above
+    assert ":15262-15339` → `:15346-15423" not in text, (
+        "D5 names the I7 range as one of THIS diff's re-points. It is not one: "
+        "`:15346-15423` reads identically on `origin/main` and at this head, because "
+        "`main` made that move — a pair whose two halves come from two different heads "
+        "is the chimera D5 exists to forbid (#13879 review, cycle 3)")
     assert "sdk.py:28913" in text, (
         "D5 no longer names `sdk.py:28913`, the value `04-plan.md`'s own row carries at "
         "this head (`grep -n 'declared_relation_predicates()' "
