@@ -185,7 +185,12 @@ def test_write_map_refuses_a_state_whose_ids_are_item_identities(tmp_path, monke
         for item in map_doc[section]:
             _prop, value = filer.declared_identity(item)
             stale["ids"][item["ref"]] = value            # an identity, not an id
-    stale["written"] = [f"{section[:-1]}:{item['ref']}"
+    # ⛔ CURRENT MARKERS ON PURPOSE: the pre-fix spelling (`subject:<ref>`) is an
+    # ORPHAN, which a later guard refuses first — so a regression in `named`
+    # stayed invisible (measured: `named = []` left the suite green, and the run
+    # still returned 2 through the orphan arm). With `item_marker` the ONLY guard
+    # that can refuse this state is the one under test (#13913 review round 17).
+    stale["written"] = [filer.item_marker(section, item)
                         for section in ("subjects", "objects", "sources", "events", "points")
                         for item in map_doc[section]]
     path = tmp_path / "state.json"
@@ -551,7 +556,22 @@ def test_save_state_is_ATOMIC_and_leaves_no_temp(tmp_path, monkeypatch):
     non-idempotent writes the record exists to protect.
     """
     monkeypatch.setattr(filer, "STATE_PATH", tmp_path / "state.json")
+    # ⛔ THE REPLACE IS THE PROPERTY, NOT THE CONTENT: a plain `write_text`
+    # satisfies every content assertion above (`measured: replacing the temp-file
+    # + `os.replace` with `STATE_PATH.write_text(...)` left the suite green`), and
+    # it is exactly the run that a kill truncates. So the atomic step is
+    # observed, not inferred (#13913 review round 17).
+    replaced = []
+    real_replace = filer.os.replace
+
+    def _replace(src, dst):
+        replaced.append((str(src), str(dst)))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(filer.os, "replace", _replace)
     filer.save_state({"ids": {"a": "1"}, "written": ["x"], "failed": []})
+    assert replaced, "save_state did not replace atomically"
+    assert replaced[-1][1] == str(tmp_path / "state.json"), replaced
     assert json.loads((tmp_path / "state.json").read_text())["written"] == ["x"]
     assert list(tmp_path.glob("*.tmp")) == []
 
@@ -822,6 +842,141 @@ def test_a_verdict_refuses_a_WRONG_mechanism_and_a_WRONG_target(map_doc):
         "declared edge")
 
 
+def test_an_UNBOUND_endpoint_is_recorded_as_a_failure(tmp_path, monkeypatch, map_doc,
+                                                      capsys):
+    """The `unbound endpoint` line is the ONLY record of a skipped declared edge.
+
+    Silencing the append (leaving the `continue`) skips the edge with no failure
+    and no marker, so the run reports `all nodes and edges written` over a
+    declared edge that was never attempted — measured: the mutant left the suite
+    green and the line's only test references asserted the REMEDY text, never the
+    code that produces the line (#13913 review round 17).
+
+    Mutant: `failures.append(f"{marker}: unbound endpoint …")` → `pass`.
+    """
+    # ⛔ AN EVENT, NOT A POINT: a point whose marker is present but whose id is
+    # absent is RE-WRITTEN (the points loop has no ambiguity guard), so it gets an
+    # id and the unbound arm is never reached — measured, which is why the first
+    # version of this row read rc 0. An Event is the ref a resume can legitimately
+    # hold without an id (the AMBIGUOUS ledger), and its declared edge then hits
+    # `unbound endpoint`.
+    victim = next(e["ref"] for e in map_doc["events"]
+                  if any(d["from"] == e["ref"] or d["to"] == e["ref"]
+                         for d in map_doc["edges"]))
+    declared = next(e for e in map_doc["edges"]
+                    if e["from"] == victim or e["to"] == victim)
+    marker = filer.edge_marker(declared)
+    victim_item = next(e for e in map_doc["events"] if e["ref"] == victim)
+    state = {"ids": {}, "written": [], "failed": [], "unconfirmed": []}
+    for section in ("subjects", "objects", "sources", "events", "points"):
+        for item in map_doc[section]:
+            if item["ref"] != victim:
+                state["ids"][item["ref"]] = f"id:{item['ref']}"
+    state["written"] = [filer.item_marker(section, item)
+                        for section in ("subjects", "objects", "sources", "events", "points")
+                        for item in map_doc[section]]
+    state["unconfirmed"] = [filer.item_marker("events", victim_item)]
+    state["written"] += [filer.edge_marker(e) for e in map_doc["edges"]
+                         if e is not declared]
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps(state))
+    monkeypatch.setattr(filer, "STATE_PATH", path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _StubMcp)
+
+    filer.write_map(map_doc)
+    err = capsys.readouterr().err
+    state = json.loads(path.read_text())
+    assert [f for f in state["failed"] if "unbound endpoint" in f], state["failed"]
+    assert marker not in state["written"], "an unattempted edge was marked as written"
+    assert "unbound endpoint" in err, err
+
+
+def test_direction_of_is_the_DOOR_s_resolver_not_a_transcription(monkeypatch):
+    """`direction_of` must CALL the shipped resolver, not merely agree with it.
+
+    With the import made to fail, `_fallback_direction` takes over and every row
+    still passes — because the comparison test compares the fallback's own
+    expectations, so the two became the same object (measured: injecting
+    `raise ImportError` before the import left the suite green). A sentinel on
+    the real resolver is the only thing that proves the import is the source
+    (#13913 review round 17).
+
+    Mutant: drop the import and return `_fallback_direction(edge)` — this reds.
+    """
+    import tortoise.sdk as sdk
+
+    seen = []
+
+    def _sentinel(op_type, direction, semantics):
+        seen.append((op_type, direction, semantics))
+        return "SENTINEL"
+
+    monkeypatch.setattr(sdk.TortoiseSDK, "_effective_direction",
+                        staticmethod(_sentinel))
+    got = filer.direction_of({"op": "IMPL", "direction": "->", "label": "supports"})
+    assert got == "SENTINEL", got
+    assert seen == [("IMPL", "->", "supports")], seen
+
+
+def test_presence_normalises_the_EXPECTED_direction_too(monkeypatch, map_doc):
+    """The expected-side alias is inert today and load-bearing the moment a
+    resolver answers with the MODEL spelling.
+
+    `want = DIRECTION_ALIASES.get(want, want)` was unpinned: deleting it left the
+    suite green, because `direction_of` answers `->`/`<->` for every edge this map
+    declares. A resolver answering `bidirectional` (the model token) against a
+    graph storing `<->` would then report a correctly filed edge ABSENT
+    (#13913 review round 17).
+
+    Mutant: `want = want` — this reds.
+    """
+    edge_rows, op_rows = _edge_rows(map_doc)
+    # the STORED row must carry the alias-normalised spelling, so this needs an
+    # edge whose declared direction resolves to `<->` (a `->` edge would red for
+    # the wrong reason)
+    declared = next(e for e in map_doc["edges"]
+                    if "op" in e and filer.direction_of(e) == "<->")
+    triple = (declared["op"], declared["from"], declared["to"])
+    assert triple not in filer.presence(
+        map_doc, _node_rows(map_doc), edge_rows, op_rows)[1]
+
+    monkeypatch.setattr(filer, "direction_of", lambda _e: "bidirectional")
+    assert triple not in filer.presence(
+        map_doc, _node_rows(map_doc), edge_rows, op_rows)[1], (
+        "the model spelling `bidirectional` was not normalised to the stored one")
+
+
+def test_a_NON_MISMATCH_warning_is_not_a_mechanism_mismatch(tmp_path, monkeypatch,
+                                                            map_doc, capsys):
+    """`create_operator` also returns `undeclared_relation` warnings.
+
+    Without the `code == "mechanism_mismatch"` filter the census reports them AS a
+    mismatch: exit 1, the inverted-mechanism wording, and the remedy "delete the
+    node in the graph" — for a warning that says nothing about the mechanism
+    (#13913 review round 17).
+
+    Mutant: `if isinstance(warn, dict)` with no code test — this reds.
+    """
+    class _OtherWarning(_StubMcp):
+        def call(self, tool: str, args: dict, **_kw) -> dict:
+            if tool == "tortoise_create_operator":
+                return {"structuredContent": {
+                    "id": "op-id",
+                    "warnings": [{"code": "undeclared_relation",
+                                  "message": "relation `supports` is undeclared"}]}}
+            return super().call(tool, args, **_kw)
+
+    state_path = tmp_path / "state.json"
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _OtherWarning)
+    assert filer.write_map(map_doc) == 0
+    err = capsys.readouterr().err
+    assert "mechanism_mismatch" not in err, err
+    assert not json.loads(state_path.read_text())["failed"]
+
+
 def test_a_200_body_that_is_not_a_tool_result_is_an_UNKNOWN_outcome(monkeypatch):
     """The arm that catches a proxy/an error page on a 2xx had no row of its own.
 
@@ -912,7 +1067,7 @@ def test_MAIN_refuses_a_map_that_VALIDATE_rejected(tmp_path, monkeypatch, map_do
     monkeypatch.setattr(filer, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
 
-    for mode in ("--dry-run", "--write"):
+    for mode in ("--dry-run", "--write", "--verify"):
         monkeypatch.setattr(filer.sys, "argv", ["file_map.py", mode])
         assert filer.main() == 2, f"{mode} accepted a map validate() refused"
         assert not calls, f"{mode} reached the transport: {calls[:3]}"
@@ -1149,6 +1304,56 @@ def test_a_non_idempotent_write_is_not_retried(monkeypatch):
         assert len(posts) == 1, (
             f"a retry-shaped answer re-issued a non-idempotent write {len(posts)} "
             f"times: {body}")
+
+
+@pytest.mark.parametrize("status", [504, 503, 429, 500])
+def test_a_5xx_or_429_ERROR_ENVELOPE_is_not_a_refusal(monkeypatch, status):
+    """The STATUS decides the origin, not the body shape.
+
+    The `error` arm used to sit ABOVE the status arm, so a 5xx/408/429 carrying a
+    JSON-RPC `error` envelope — which the control-plane middleware emits
+    (`mcp_auth`: `_jsonrpc_error(..., status=503, headers={"Retry-After": …})`) —
+    matched the refusal channel by SHAPE and retired a non-idempotent intent:
+    measured with a real `urllib.error.HTTPError(504, {"error": ...})` and
+    `retry_safe=False`, run 1 left the marker out of `written` AND `unconfirmed`,
+    and run 2 POSTed `create_operator` again over endpoints the upstream may have
+    written (#10849). It is also EXACTLY ONE POST: a retry of a non-idempotent
+    write is the same double-count (#13913 review round 17).
+
+    Mutant: move the `error` arm back above the status arm, or delete the 5xx
+    arm's `not retry_safe` guard — the first reds this row's outcome, the second
+    its post count.
+    """
+    mcp = _RealMcp("not-a-real-key")
+    posts = []
+
+    def _post(_body):
+        posts.append(1)
+        return status, {"jsonrpc": "2.0", "id": 1,
+                        "error": {"code": -32000,
+                                  "message": "upstream request timeout"}}, {}
+
+    monkeypatch.setattr(mcp, "_post", _post)
+    with pytest.raises(filer.UnknownOutcome) as excinfo:
+        mcp.call("tortoise_create_operator", {}, retry_safe=False)
+    assert "UNKNOWN" in str(excinfo.value), excinfo.value
+    assert len(posts) == 1, f"a non-idempotent write was POSTed {len(posts)} times"
+
+
+def test_a_RETRY_AFTER_HEADER_is_the_back_off_when_the_body_names_none(monkeypatch):
+    """The middleware answers `Retry-After` in a HEADER, and `call()` discarded it.
+
+    `code, payload, _ = self._post(...)` threw away the third element, so the
+    only back-off the server actually sent was ignored and a repeatable write
+    waited the client's own guess instead (#13913 review round 17).
+
+    Mutant: ignore the headers (`_retry_after_seconds(headers)` → `None`).
+    """
+    assert filer._retry_after_seconds({"retry-after": "7"}) == 7.0
+    assert filer._retry_after_seconds({"Retry-After": "0.5"}) == 0.5
+    assert filer._retry_after_seconds({}) is None
+    assert filer._retry_after_seconds(None) is None
+    assert filer._retry_after_seconds({"retry-after": "soon"}) is None
 
 
 def test_the_event_identity_is_the_name_its_door_writes(map_doc):
@@ -2667,6 +2872,11 @@ def test_the_carried_failure_prints_the_ONE_remedy_that_clears_it(
     assert filer.write_map(map_doc) == 1
     err = capsys.readouterr().err
     assert "delete this line from `failed`" in err, err
+    # ⛔ THE LINE ITSELF: printing "N failure(s) … are STILL unresolved" while
+    # naming NONE of them leaves the diagnosis only in `state.json`, and a resume
+    # then reports a number the operator cannot act on (measured: `for line in
+    # repeated[:10]` → `for line in []` left the suite green) (#13913 round 17).
+    assert marker in err, ("the carried failure's own line was not printed", err)
     assert "Never delete `state.json`" in err, err
     # The remedy is PER CLASS: a marker-bearing line and an `unbound endpoint`
     # line have different exits, and one text for both is a wrong instruction.

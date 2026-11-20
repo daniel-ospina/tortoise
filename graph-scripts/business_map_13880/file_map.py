@@ -418,7 +418,7 @@ class Mcp:
         for attempt in range(6):
             self._next_id += 1
             try:
-                code, payload, _ = self._post({
+                code, payload, headers = self._post({
                     "jsonrpc": "2.0", "id": self._next_id, "method": "tools/call",
                     "params": {"name": tool, "arguments": args},
                 })
@@ -493,28 +493,28 @@ class Mcp:
                 raise UnknownOutcome(
                     f"{tool}: HTTP {code} body is not a JSON-RPC object "
                     f"({type(payload).__name__}) — the write is UNCONFIRMED")
-            err = (payload or {}).get("error")
-            if err:
-                data = err.get("data") if isinstance(err, dict) else None
-                retry_after = data.get("retry_after") if isinstance(data, dict) else None
-                if retry_after:
-                    # "the work may still complete" — wait the advertised delay,
-                    # then re-issue. Only for a write whose repeat converges.
-                    if not retry_safe:
-                        raise UnknownOutcome(_unknown(tool, err))
-                    time.sleep(min(120, float(retry_after) + 1))
-                    continue
-                raise Refusal(f"{tool} refused: {err}")
-            # ⛔ 408/429 ARE NOT PRE-HANDLER REFUSALS: a timeout may have been
-            # read and acted on, and a rate limiter can sit INSIDE the door
-            # (measured: a 429 un-recorded an operator intent and the resume wrote
-            # a SECOND operator). They take the retryable/UNKNOWN path (#13913
-            # review round 7).
+            # ⛔ 408/429 ARE NOT PRE-HANDLER REFUSALS, AND THE STATUS SAYS SO —
+            # NOT THE BODY SHAPE: a timeout may have been read and acted on, and
+            # a rate limiter can sit INSIDE the door (measured: a 429
+            # un-recorded an operator intent and the resume wrote a SECOND
+            # operator). This arm used to sit BELOW the `error` arm, so a
+            # 504/429/5xx carrying a JSON-RPC `error` envelope — which the
+            # control-plane middleware emits (`mcp_auth`: `_jsonrpc_error(...,
+            # status=503, headers={"Retry-After": …})`) — matched the refusal
+            # channel by SHAPE and retired a non-idempotent intent: measured, a
+            # 504 whose body is `{"error": "upstream request timeout"}` left the
+            # marker out of `written` AND `unconfirmed`, and the next run POSTed
+            # `create_operator` again over endpoints the upstream may have
+            # written (#10849). Status first (#13913 review round 17).
             if code >= 500 or code in (408, 429):
                 if not retry_safe:
                     raise UnknownOutcome(_unknown(tool, f"HTTP {code}"))
                 if attempt < 5:
-                    time.sleep(min(60, 5 * (attempt + 1)))
+                    # The back-off can ride a HEADER only: the middleware
+                    # answers `Retry-After` in headers and `call()` used to
+                    # discard the third element of `_post`'s result.
+                    wait = _retry_after_seconds(headers)
+                    time.sleep(min(120, wait) if wait else min(60, 5 * (attempt + 1)))
                     continue
                 # ⛔ The SIXTH attempt used to FALL THROUGH: a gateway's error
                 # body is not a JSON-RPC `result`, so `_refusal` found nothing
@@ -530,6 +530,18 @@ class Mcp:
             # round 6). A 2xx/3xx that carries no readable tool result is the
             # opposite case — the server accepted the call and the outcome is
             # genuinely unknown.
+            err = (payload or {}).get("error")
+            if err:
+                data = err.get("data") if isinstance(err, dict) else None
+                retry_after = data.get("retry_after") if isinstance(data, dict) else None
+                if retry_after:
+                    # "the work may still complete" — wait the advertised delay,
+                    # then re-issue. Only for a write whose repeat converges.
+                    if not retry_safe:
+                        raise UnknownOutcome(_unknown(tool, err))
+                    time.sleep(min(120, float(retry_after) + 1))
+                    continue
+                raise Refusal(f"{tool} refused: {err}")
             if 400 <= code < 500:
                 raise Refusal(
                     f"{tool} refused: HTTP {code} — the write did not land "
@@ -619,6 +631,25 @@ class Refusal(RuntimeError):
 def _unknown(tool: str, reason: object) -> str:
     return (f"{tool}: outcome UNKNOWN ({reason}) — this write is NOT idempotent, so "
             "it is not retried; re-run and let --verify decide what landed")
+
+
+def _retry_after_seconds(headers: object) -> float | None:
+    """The `Retry-After` a transport answered with, in seconds (or None).
+
+    `mcp_auth`'s control-plane answers carry the back-off as a HEADER
+    (`headers={"Retry-After": …}`) while their JSON-RPC body's `data` may hold
+    none, so reading only `data["retry_after"]` ignored the server's own advice.
+    """
+    if not isinstance(headers, dict):
+        return None
+    for key, value in headers.items():
+        if str(key).lower() != "retry-after":
+            continue
+        try:
+            return max(0.0, float(value))
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def _mechanism_mismatch(result: dict) -> str | None:
@@ -975,7 +1006,12 @@ def write_map(doc: dict) -> int:
             continue
         src, dst = ids.get(e["from"]), ids.get(e["to"])
         if not src or not dst:
+            # ⛔ PRINTED, not merely recorded: this is the ONLY trace of a
+            # declared edge that was never attempted, and a failure that exists
+            # only in `state.json` is one an operator reads about after the run
+            # has already reported what it did (#13913 review round 17).
             failures.append(f"{marker}: unbound endpoint {e['from']}/{e['to']}")
+            print(f"  !! {failures[-1]}", file=sys.stderr)
             continue
         try:
             if "op" in e:
