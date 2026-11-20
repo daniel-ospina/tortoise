@@ -667,31 +667,38 @@ def _conninfo_hosts(dsn: str) -> tuple[list[str], set[str]]:
 def _split_uri(dsn: str) -> tuple[str, str]:
     """(text-before-the-query, query) split by LIBPQ's rule, not Python's.
 
-    ⛔ libpq finds the AUTHORITY FIRST — everything after `://` up to the first
-    `/` (or the end of the string) — and only searches for the `?` separator in
-    what FOLLOWS it. A `?` INSIDE the authority is therefore part of the
-    userinfo/password, not a query separator. Measured with `PQconninfoParse`
-    (and `psql` dials it):
+    ⛔ TWO BOUNDARIES, IN THIS ORDER — measured with `PQconninfoParse` (and
+    `psql` dials what it reports), never read off a grammar:
+
+    1. the USERINFO ends at the LAST `@` in the region before the first `/`;
+    2. the AUTHORITY ends at the first `/` AFTER that userinfo, **or** at the
+       first `?` after it when no `/` intervenes — that `?` starts the query.
+
+    So a `?` INSIDE the userinfo/password is NOT a separator, while a pathless
+    authority is STILL followed by a query:
 
         postgresql://127.0.0.1:p?ss@203.0.113.9:1/db
-            -> user='127.0.0.1', password='p?ss', host='203.0.113.9', port='1'
+            -> user='127.0.0.1', password='p?ss', host='203.0.113.9'  (query: none)
+        postgresql://127.0.0.1:5432?host=db.prod.example.com
+            -> host='db.prod.example.com'                            (a query!)
 
-    while splitting at the first `?` anywhere truncates the authority to
-    `127.0.0.1`, so the guard certifies a REMOTE store as local — the same
-    "where does the authority end" disagreement as the `#` case, resolved in the
-    unsafe direction. The same rule fixes the inverse over-block: a loopback DSN
-    whose PASSWORD contains a `?` (`postgresql://u:pa?ss@127.0.0.1/db`) is local.
+    ⛔ EACH HALF-FIX IS A BUG. Splitting at the first `?` anywhere truncates the
+    authority inside a password, so the guard certifies a REMOTE store as local.
+    Treating the authority as "to the first `/` or the end" makes a PATHLESS
+    URI's `?host=` / `?hostaddr=` / `?service=` invisible, which does the same
+    thing one spelling over. Both directions are pinned.
     """
     scheme_end = dsn.find("://")
     rest = dsn[scheme_end + 3:] if scheme_end != -1 else dsn
+    offset = scheme_end + 3 if scheme_end != -1 else 0
     slash = rest.find("/")
-    authority = rest if slash == -1 else rest[:slash]
-    tail = "" if slash == -1 else rest[slash:]
-    query_at = tail.find("?")
+    pre_slash = rest if slash == -1 else rest[:slash]
+    at = pre_slash.rfind("@")
+    after_userinfo = 0 if at == -1 else at + 1
+    query_at = rest.find("?", after_userinfo)
     if query_at == -1:
         return dsn, ""
-    cut = (scheme_end + 3 if scheme_end != -1 else 0) + len(authority) + query_at
-    return dsn[:cut], tail[query_at + 1:]
+    return dsn[: offset + query_at], rest[query_at + 1:]
 
 
 def _uri_hosts(dsn: str) -> tuple[list[str], set[str]]:
@@ -941,13 +948,16 @@ def app_role_dsn(dsn: str) -> str:
         # userinfo, not a query separator — `partition("?")` would cut the DSN in
         # the middle of the password and hand libpq a different connection.
         head, raw_query = _split_uri(dsn)
-        sep = "?" if raw_query or head != dsn else ""
+        # `head` already EXCLUDES the query, so the rebuild below always adds
+        # exactly one `?` — a pathless URI (`postgresql://127.0.0.1:5432?host=x`)
+        # used to keep its own `?` in `head` and receive a second one, which libpq
+        # rejects with `extra key/value separator`.
         # ⛔ `parse_qsl` DECODES `+` AS A SPACE; libpq does not. A password or an
         # `application_name` carrying a literal `+` would silently change under the
         # app's own connection, so the pairs are split here and percent-decoded
         # only — exactly the decoding libpq does.
         params = []
-        for pair in raw_query.split("&") if sep else []:
+        for pair in raw_query.split("&") if raw_query else []:
             if not pair:
                 continue
             key, _, value = pair.partition("=")
