@@ -2089,7 +2089,7 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     #   * `[env]` (`TORTOISE_EMBEDDER_WARMUP = "1"` added to `fly.toml`) -> the
     #     `not in env_keys` assertion below is NOT the first red: the GATE refuses
     #     that shape (`STALE DECLARATION … is an assigned key in fly.toml's [env]
-    #     table`, `check-fly-secret-drift.py:1389-1394`), so this test reds earlier
+    #     table`, `check-fly-secret-drift.py:1393-1398`), so this test reds earlier
     #     on `assert "STALE DECLARATION" not in r.stdout`. Kept anyway — the reason
     #     the #13209 `workflow_secret_refs` belt above is kept: the gate and this
     #     file are different readers, and a divergence in either should red HERE.

@@ -4482,7 +4482,7 @@ carry the `OVERRIDES:` marker the token's contract requires (`.github/scripts/fl
 → **0**, and the **marker form** (`**OVERRIDES:**`) occurs **exactly once** anywhere on the issue — in a
 self-described **proposal** that says writing it here would be forging the ruling. Quote the **marker
 form**, not the string: "the string appears nowhere" is false, and a RUNNING TOTAL of the bare string is
-unstable — it increments with every comment about it, ruling or not (measured **6** at `d63e5a9e8e`'s
+unstable — it increments with every comment about it, ruling or not (measured **6** at `252ce3e011`'s
 head and **7** a minute later when this PR's own status comment counted itself, and **20** at
 `e5df6714a2`'s as the review rounds added mentions — so quote it only WITH its head, or quote the
 anchored line-form count the manifest block publishes instead).
