@@ -1616,7 +1616,17 @@ def test_the_readback_query_columns_are_DERIVED_from_IDENTITY_PROPS(monkeypatch)
             queries.append(cypher)
             return [0, []]
 
-    fake = types.SimpleNamespace(from_url=lambda _uri: _Graph())
+    # The read-back client is BOUNDED (#13953), so this fake has to accept the
+    # resolver's kwargs and is the one place they can be asserted without a socket:
+    # a regression to the unbounded `from_url(uri)` reds BOTH this and the tree-wide
+    # guard in `test_bounded_raw_clients_3065.py`.
+    from_kwargs: list[dict] = []
+
+    def _from_url(_uri, **kwargs):
+        from_kwargs.append(kwargs)
+        return _Graph()
+
+    fake = types.SimpleNamespace(from_url=_from_url)
     monkeypatch.setitem(sys.modules, "redis", fake)
     monkeypatch.setenv("FALKORDB_CLOUD_URI", "redis://example.invalid:6379/0")
 
@@ -1640,6 +1650,11 @@ def test_the_readback_query_columns_are_DERIVED_from_IDENTITY_PROPS(monkeypatch)
     op_q = next(q for q in queries if "o.is_operator = true" in q)
     for prop in filer.IDENTITY_PROPS:
         assert f"coalesce(x.{prop},'')" in op_q, op_q
+
+    # …and the read-back cannot hang: `redis.from_url` defaults the read bound to
+    # `None`, which is the #3065/#8118 unbounded `recv()` (#13953).
+    assert from_kwargs and from_kwargs[0].get("socket_timeout") is not None, (
+        f"the read-back client was constructed with no read bound: {from_kwargs}")
 
 
 def test_an_UNREADABLE_body_is_an_UNKNOWN_outcome_not_a_refusal(monkeypatch):

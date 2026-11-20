@@ -743,6 +743,7 @@ _EXPECTED_TOOL_SITES = {
     "apps/graph-viz/server/main.py": 1,          # the viz boot client (bound via its builder)
     "graph-scripts/audit_graph.py": 1,           # the shallow audit's shared client
     "graph-scripts/audit_graph_deep.py": 1,      # the deep audit's shared client
+    "graph-scripts/business_map_13880/file_map.py": 1,  # #13953: the fill-in's read-back `redis.from_url` (#13913 landed it unbounded, and this row was missed with it — the guard found the offender while the inventory stayed green on absence). Bound with `**_bounded_server_socket_kwargs()`, the same resolver the sibling graph-scripts take.
     "graph-scripts/context_removal_audit.py": 1,  # pre-existing 5s/120s literals
     "graph-scripts/merge_endometriosis.py": 1,   # the one-off data merge
     "graph-scripts/parity_sample.py": 1,         # pre-existing 5s/120s literals

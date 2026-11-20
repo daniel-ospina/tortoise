@@ -1609,7 +1609,17 @@ def verify(doc: dict) -> int:
     if not uri:
         print("FALKORDB_CLOUD_URI is not set — cannot read back", file=sys.stderr)
         return 2
-    r = redis.from_url(uri)
+    # ⛔ BOUNDED (#13953, the #3065/#8118 class): `redis.from_url(uri)` leaves
+    # `socket_timeout=None`, which is not "redis-py's default" but the unbounded `recv()`
+    # written down — a stalled engine parks this read-back forever at 0% CPU, on the one
+    # arm whose whole job is to verify an artifact. The policy is the product's, not this
+    # script's: the shared resolver keeps the knob env-tunable
+    # (`TORTOISE_DB_SOCKET_TIMEOUT` / `TORTOISE_DB_SOCKET_CONNECT_TIMEOUT`) and pins the
+    # retry multiplier too. It is imported HERE rather than at module scope because that
+    # keeps `--dry-run`/`--write` (which never touch FalkorDB) free of the handle.
+    from tortoise.projection import _bounded_server_socket_kwargs
+
+    r = redis.from_url(uri, **_bounded_server_socket_kwargs())
 
     def q(cypher: str):
         res = r.execute_command("GRAPH.QUERY", CLEAN_GRAPH, cypher)
