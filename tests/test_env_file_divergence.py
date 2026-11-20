@@ -94,13 +94,13 @@ def _isolated(monkeypatch, tmp_path):
     # "DEFAULT_DB_PATH", …)`). The pinned path deliberately does not exist, and THAT
     # is what makes these tests hermetic: `doctor`'s pre-init arm grades a MISSING
     # target without opening it (`⚠️ … no Tortoise DB at …`, the expected #5815 first
-    # run), so no store is ever opened. ⛔ ONE ROW NEEDED THE SAME PIN FOR THE SAME REASON:
+    # run), so no store is ever opened. ⛔ ONE ROW IS NOT A `doctor` ROW — ITS PIN PINS IT, NOT THE FIXTURE:
     # `test_the_daemons_refusal_is_still_the_one_the_user_sees` builds an SDK, and
-    # `TortoiseSDK.__init__` DOES call `_probe_embedded_busy` (`sdk.py:14094`) — so it takes
-    # `_isolated` too, and on the pinned path the absent `<db_path>.settings` returns first
-    # (`sdk.py:14194-14195`). ⚠️ Unpinned, that row resolved to the REAL `~/.tortoise/tortoise.db`
-    # (measured), so that registry's CONTENTS chose the arm: a dead pid returned at `:14211-14212`,
-    # a live one raises `EmbeddedStoreBusyError` — #13867 Root 1, the red this PR removes.
+    # `TortoiseSDK.__init__` DOES call `_probe_embedded_busy` (`sdk.py:14094`). Pinned, the absent
+    # `<db_path>.settings` returns first (`sdk.py:14194-14195`) — and THAT PIN, not naming
+    # `_isolated` (`autouse=True`, :53), is what makes the row hermetic. Unpinned it resolves to
+    # the REAL `~/.tortoise/tortoise.db` (measured), so that registry's CONTENTS choose the arm:
+    # pidfile missing/dead -> `:14201-14202`/`:14211-14212`; LIVE holder -> `:14216` (#13867 Root 1).
     import tortoise.config as _config
     monkeypatch.setattr(_config, "DEFAULT_DB_PATH",
                         str(tmp_path / "canonical" / "tortoise.db"))
