@@ -1715,6 +1715,18 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # pin is selected. Pinned by
              # tests/test_published_artifact_canary.py::test_a_tool_only_diff_selects_this_pin.
              "tools/published_artifact_canary.py",
+             # #4211 / #13919 review: the session-hierarchy re-measurement instrument.
+             # Same silent-drop class as the row above, and MEASURED before this entry:
+             # `--changed-files tools/measure_4211_session_hierarchy.py --event
+             # pull_request` -> `surfaces: []` (the path is dropped by
+             # `_keep_changed`), so the PR that adds the tool's own falsifiability pins
+             # ran them on nothing — the tool's 0/2 exit contract, its turn-key filters
+             # and its denominator accounting were all unguarded on exactly the diff
+             # that changed them. With the entry: `surfaces=['core']` and the suite is
+             # selected. Pinned by
+             # tests/test_measure_4211_session_hierarchy.py::
+             # test_a_tool_only_diff_selects_this_pin.
+             "tools/measure_4211_session_hierarchy.py",
              # #9607: `tortoise/quadrature.py` is registered in `onboarding` (its
              # /docs formula guard lives there), and a SOURCE_PATTERNS match
              # REPLACES the `core` fallback (#2938) — so without this entry the

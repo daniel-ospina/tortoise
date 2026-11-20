@@ -25,14 +25,6 @@ ARMS
                 no ref at all, and every turn naming it. Measures BEFORE and AFTER and
                 reports the DELTA — a replay proves nothing about a writer, so a run
                 that replays a known session reports ``unmeasurable`` instead of numbers.
-
-                ⛔ THIS IS THE ONLY ARM THAT WRITES, so it is NOT in the default set
-                (``--arms`` defaults to ``DEFAULT_ARMS``) and it REFUSES a graph whose
-                name does not look ephemeral (``--allow-non-ephemeral-writes`` is the
-                deliberate override). ``TORTOISE_DB_URI`` is the product's own
-                connection string, not a test-only variable: a bare run must never be
-                able to annotate a served graph with ``m4211-*`` sessions, a claim Point
-                and the Object ``test/repo#42`` that every later census would count.
 ``live``        the graph ``~/.zshrc:48`` configures (``docker://:@localhost:16379/tortoise``)
                 — labelled as exactly that, because the receipt can prove the URI string
                 lives in a shell profile and nothing more. Read-only (``ro_query``).
@@ -53,14 +45,12 @@ Usage
       uv run python tools/measure_4211_session_hierarchy.py \\
         --out docs/scoping/receipts/2026-11-19-4211-hierarchy-remeasure.json
 
-Exit codes:
-    0 = every arm that RAN produced a measurement. A skip BEFORE measuring (no store
-        file on this box, no capture journal, no graph of that name) is NOT a failure —
-        it is recorded in the receipt's ``warnings``.
-    2 = at least one arm ran and could NOT measure. The reason is in the receipt's
-        TOP-LEVEL ``unmeasurable`` block (hoisted from ``arms.<arm>.unmeasurable`` so
-        the documented pointer resolves), and an unmeasurable run does NOT overwrite an
-        existing ``--out`` receipt — it is written beside it as ``<out>.unmeasurable``.
+Exit codes: 0 = MEASURED (whatever the numbers are), 2 = could not measure — the reason is
+in the receipt's TOP-LEVEL ``unmeasurable`` block, which is written whenever ANY arm could
+not measure: a replayed writer, a graph that raised during the census, an unreadable node
+count. A ``--out`` receipt is never replaced by an unmeasurable run (it writes
+``<name>.unmeasurable.json`` beside it), so a re-run scripted as ``--out <receipt> ||
+exit 1`` cannot overwrite the receipt it failed to reproduce.
 
 Definition discipline (#4211 review round 1): a *turn* is
 ``coalesce(p.is_episodic,false)=true AND p.pointKind='event'`` — the product's own
@@ -71,6 +61,7 @@ is visible instead of silent.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import math
@@ -154,28 +145,26 @@ QUERIES: list[tuple[str, str]] = [
      "MATCH (:Session)-[:CONTAINS]->(p:Point) "
      "RETURN p.pointKind AS pointKind, coalesce(p.is_episodic, false) AS episodic, "
      "count(*) AS n ORDER BY n DESC"),
-    # ⛔ #4211 review R1: every key whose NAME says *turn* applies the turn filter, and
-    # the every-CONTAINS-point question is asked SEPARATELY rather than published under
-    # a turn label. Without the filter a session holding 1 turn + 1 claim Point counted
-    # as "more than one turn", so the gate's own falsifier ("sessions_with_gt1_*_turn"
-    # ≈ 0) could never fire on the graph it was written to test.
-    ("sessions_with_gt1_turn",
-     "MATCH (s:Session)-[:CONTAINS]->(p:Point) "
-     f"WHERE {TURN} "
+    # ⛔ A key NAMED `*turn*` applies the turn discriminator, and the any-kind reading is
+    # reported BESIDE it (``sessions_with_gt1_contains_point``) — the same discipline as
+    # ``turns_total`` / ``episodic_points_any_kind`` above. Without the filter these keys
+    # count a session's claim Points and its 'session-transcript' Point as turns, so on a
+    # graph of one turn + one claim Point per session the gate's own falsifier
+    # (``sessions_with_gt1_contains_turn ≈ 0``) could never fire.
+    ("sessions_with_gt1_contains_turn",
+     f"MATCH (s:Session)-[:CONTAINS]->(p:Point) WHERE {TURN} "
      "WITH s, count(DISTINCT p) AS c WHERE c > 1 RETURN count(*) AS n"),
     ("sessions_with_gt1_contains_point",
      "MATCH (s:Session)-[:CONTAINS]->(p:Point) "
      "WITH s, count(DISTINCT p) AS c WHERE c > 1 RETURN count(*) AS n"),
     ("sessions_with_gt1_entity_linked_turn",
-     "MATCH (s:Session)-[:CONTAINS]->(p:Point)-[:aboutObject]->(:Object) "
-     f"WHERE {TURN} "
+     f"MATCH (s:Session)-[:CONTAINS]->(p:Point)-[:aboutObject]->(:Object) WHERE {TURN} "
      "WITH s, count(DISTINCT p) AS c WHERE c > 1 RETURN count(*) AS n"),
     ("sessions_with_gt1_aboutObject_edge",
      "MATCH (s:Session)-[:aboutObject]->(o:Object) "
      "WITH s, count(DISTINCT o) AS c WHERE c > 1 RETURN count(*) AS n"),
-    ("turns_per_session_max_avg",
-     "MATCH (s:Session)-[:CONTAINS]->(p:Point) "
-     f"WHERE {TURN} "
+    ("turns_per_session_contains_max_avg",
+     f"MATCH (s:Session)-[:CONTAINS]->(p:Point) WHERE {TURN} "
      "WITH s, count(DISTINCT p) AS c RETURN max(c) AS max_c, "
      "toFloat(sum(c)) / count(s) AS avg_c"),
     # Which WRITER generation wrote a Session: the current capture writes
@@ -265,15 +254,36 @@ def _run_queries(g) -> dict:
     return out
 
 
-def _is_empty(counts: dict) -> bool:
+def _is_empty(counts: dict) -> bool | None:
     """A graph with no nodes is INDISTINGUISHABLE from a mistyped/absent graph name.
 
     ``select_graph()`` CREATES a graph on demand on both engines, so a typo yields
     exactly the zero shape a verdict of "there is nothing to walk" would report.
     The caller must name that state instead of publishing zeros as a measurement.
+
+    ``None`` means UNKNOWN: ``nodes_by_label`` itself failed, so emptiness was never
+    read. It is never folded into ``False`` ("not empty") — that would let a graph
+    whose node read timed out publish its zeros as a measurement, the same fail-open
+    class as an arm silently dropping a graph (`_note_unreadable_emptiness`).
     """
     nodes = counts.get("nodes_by_label")
+    if isinstance(nodes, dict) and nodes.get("error"):
+        return None
     return not nodes or nodes == []
+
+
+def _failed_keys(counts: dict) -> list[str]:
+    """Which queries the arm could not run — published so completeness is checkable."""
+    return [k for k, v in counts.items() if isinstance(v, dict) and v.get("error")]
+
+
+def _note_unreadable_emptiness(body: dict) -> dict:
+    """An unreadable node count makes the arm UNMEASURABLE, not non-empty."""
+    if body.get("empty_or_absent", False) is None:
+        body["unmeasurable"] = (
+            "nodes_by_label raised, so whether this graph is empty is UNKNOWN — the "
+            "counts beside it cannot be read as a measurement of a graph that was read")
+    return body
 
 
 def _sha256(path: Path) -> str | None:
@@ -309,48 +319,6 @@ def _module_digests() -> dict:
     return {rel: _sha256(_REPO_ROOT / rel) for rel in MEASURED_THROUGH}
 
 
-#: The per-graph queries the ``instrument`` arm runs, NAMED so a failure is attributed
-#: to the query that raised instead of to "this graph" (#4211 review R2).
-INSTRUMENT_QUERIES: list[tuple[str, str]] = [
-    ("sessions_total", "MATCH (s:Session) RETURN count(s)"),
-    ("turns_total", f"MATCH (p:Point) WHERE {TURN} RETURN count(p)"),
-    ("contains_edges", "MATCH (:Session)-[r:CONTAINS]->(:Point) RETURN count(r)"),
-    ("contains_distinct_pairs",
-     "MATCH (s:Session)-[:CONTAINS]->(p:Point) "
-     "RETURN count(DISTINCT s.id + '|' + p.id)"),
-    ("contains_duplicate_pairs",
-     "MATCH (s:Session)-[r:CONTAINS]->(p:Point) "
-     "WITH s, p, count(r) AS c WHERE c > 1 RETURN count(*)"),
-    ("aboutObject_edges", "MATCH ()-[r:aboutObject]->() RETURN count(r)"),
-    ("turns_with_aboutObject",
-     "MATCH (p:Point)-[:aboutObject]->(:Object) "
-     f"WHERE {TURN} RETURN count(DISTINCT p)"),
-    ("contains_targets_by_kind",
-     "MATCH (:Session)-[:CONTAINS]->(p:Point) "
-     "RETURN p.pointKind, count(*) ORDER BY count(*) DESC"),
-]
-_INSTRUMENT_BY_KEY = dict(INSTRUMENT_QUERIES)
-
-
-class _QueryError(Exception):
-    """A named per-graph query raised — attributed, never swallowed (#4211 R2)."""
-
-    def __init__(self, key: str, exc: Exception):
-        self.key = key
-        self.exc = exc
-        super().__init__(f"{key}: {type(exc).__name__}: {exc}")
-
-
-def _q(g, key: str, *, rows: bool = False):
-    try:
-        result = g.query(_INSTRUMENT_BY_KEY[key]).result_set
-    except Exception as exc:
-        raise _QueryError(key, exc) from exc
-    if rows:
-        return [list(r) for r in result]
-    return result[0][0] if result else 0
-
-
 def _head(rows: list[dict], limit: int) -> tuple[list[dict], int]:
     """(kept, omitted) — the omitted count is PUBLISHED, so the aggregate stays
     re-derivable from the artefact (#4211 N5: 25 of 60 rows were cut with no marker)."""
@@ -361,7 +329,7 @@ def _every_graph_has_fewer_turns_than_contains(rows: list[dict]) -> bool | None:
     """``None`` over an EMPTY population.
 
     ``all([])`` is ``True``, so the old expression asserted "every graph satisfies X"
-    with zero graphs measured — the same state this module refuses three functions up
+    with zero graphs measured — the same state this module refuses a few functions up
     (``_is_empty``) (#4211 review N4).
     """
     if not rows:
@@ -424,7 +392,7 @@ def measure_store(db_path: str, graph_name: str) -> dict:
                     "graphs_in_file": len(names)}
         g = db.select_graph(graph_name)
         counts = _run_queries(g)
-        return {
+        return _note_unreadable_emptiness({
             "source": str(src),
             "source_sha256": source["sha256"],
             "source_bytes": source["bytes"],
@@ -435,17 +403,16 @@ def measure_store(db_path: str, graph_name: str) -> dict:
             "copy_s": round(time.time() - t0, 2),
             "counts": counts,
             "empty_or_absent": _is_empty(counts),
+            "queries_failed": _failed_keys(counts),
             "queries": dict(QUERIES),
-        }
+        })
     finally:
         # Close the embedded server BEFORE the directory it lives in is deleted —
         # ``rmtree`` under a still-running child is the shape that writes no owner
         # record for the reaper (#4211 review N2, second half).
         if db is not None:
-            try:
+            with contextlib.suppress(Exception):
                 db.close()
-            except Exception:
-                pass
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
@@ -493,7 +460,7 @@ def measure_live(uri: str) -> dict:
             counts[key] = _clean(rows[0][0])
         else:
             counts[key] = _clean([list(r) for r in rows])
-    return {
+    return _note_unreadable_emptiness({
         "uri": uri,
         "graph": spec["graph"],
         "read_only": f"ro_query={bool(ro)}",
@@ -508,39 +475,12 @@ def measure_live(uri: str) -> dict:
         },
         "counts": counts,
         "empty_or_absent": _is_empty(counts),
+        "queries_failed": _failed_keys(counts),
         "queries": dict(QUERIES),
-    }
+    })
 
 
 # ── ARM `instrument`: every graph on the instance that holds a turn store ──
-
-def _instrument_row(g, name: str) -> dict | None:
-    """One graph's row, or ``None`` for the TWO legitimate exclusions.
-
-    #4211 review R2: a query that RAISES must not be the same event as "this graph
-    holds no turn store". Both used to be one ``except Exception: continue``, so an
-    errored graph left BOTH the numerator and the denominator of "0 aboutObject in N
-    of N" while the aggregate still read as a complete census. Failures now raise
-    ``_QueryError`` (attributed to the query by name); only the two filters below
-    return ``None`` and they are counted separately.
-    """
-    if not _q(g, "sessions_total"):
-        return None                       # legitimately: no :Session at all
-    sessions = _q(g, "sessions_total")
-    if not _q(g, "turns_total"):
-        return None                       # legitimately: Sessions, but no turns
-    return {
-        "graph": name,
-        "sessions": sessions,
-        "turns": _q(g, "turns_total"),
-        "contains_edges": _q(g, "contains_edges"),
-        "contains_distinct_pairs": _q(g, "contains_distinct_pairs"),
-        "contains_duplicate_pairs": _q(g, "contains_duplicate_pairs"),
-        "aboutObject_edges": _q(g, "aboutObject_edges"),
-        "turns_with_aboutObject": _q(g, "turns_with_aboutObject"),
-        "contains_targets_by_kind": _q(g, "contains_targets_by_kind", rows=True),
-    }
-
 
 def measure_instrument(uri: str) -> dict:
     """Aggregate every graph on the instance holding Sessions + episodic turns.
@@ -552,36 +492,70 @@ def measure_instrument(uri: str) -> dict:
     """
     db, _spec = _open_live(uri)
     names = [n for n in db.connection.execute_command("GRAPH.LIST")]
-    rows: list[dict] = []
+    rows = []
+    filtered: list[dict] = []
     errors: list[dict] = []
+    inspected = 0
     for n in names:
+        g = db.select_graph(n)
         try:
-            row = _instrument_row(db.select_graph(n), n)
-        except _QueryError as exc:
-            errors.append({"graph": n, "query": exc.key,
-                           "error": f"{type(exc.exc).__name__}: {exc.exc}"})
+            sess = g.query("MATCH (s:Session) RETURN count(s)").result_set[0][0]
+            if not sess:
+                filtered.append({"graph": n, "reason": "no :Session"})
+                continue
+            turns = g.query(f"MATCH (p:Point) WHERE {TURN} RETURN count(p)"
+                            ).result_set[0][0]
+            if not turns:
+                filtered.append({"graph": n, "reason": "no turn Point"})
+                continue
+            contains = g.query("MATCH (:Session)-[r:CONTAINS]->(:Point) "
+                               "RETURN count(r)").result_set[0][0]
+            # Multiplicity guard on the biggest number this arm publishes: a
+            # double-wired CONTAINS (the #12244 write-bug class the gate cites) would
+            # inflate a raw row count undetected. Pairs are measured, not inferred.
+            pairs = g.query("MATCH (s:Session)-[:CONTAINS]->(p:Point) "
+                            "RETURN count(DISTINCT s.id + '|' + p.id)"
+                            ).result_set[0][0]
+            dupes = g.query("MATCH (s:Session)-[r:CONTAINS]->(p:Point) "
+                            "WITH s, p, count(r) AS c WHERE c > 1 RETURN count(*)"
+                            ).result_set[0][0]
+            about = g.query("MATCH ()-[r:aboutObject]->() RETURN count(r)"
+                            ).result_set[0][0]
+            turn_about = g.query("MATCH (p:Point)-[:aboutObject]->(:Object) "
+                                 f"WHERE {TURN} RETURN count(DISTINCT p)"
+                                 ).result_set[0][0]
+            kinds = g.query("MATCH (:Session)-[:CONTAINS]->(p:Point) "
+                            "RETURN p.pointKind, count(*) ORDER BY count(*) DESC"
+                            ).result_set
+            inspected += 1
+            rows.append({"graph": n, "sessions": sess, "turns": turns,
+                         "contains_edges": contains,
+                         "contains_distinct_pairs": pairs,
+                         "contains_duplicate_pairs": dupes,
+                         "aboutObject_edges": about,
+                         "turns_with_aboutObject": turn_about,
+                         "contains_targets_by_kind": [list(r) for r in kinds]})
+        except Exception as exc:
+            # ⛔ NEVER a silent drop: an exception on ANY of the eight queries removes
+            # this graph from `rows`, hence from every total AND from the denominator
+            # that makes "0 aboutObject in N of N" mean anything. The graph is named,
+            # and a non-empty list makes the aggregate UNMEASURABLE rather than a
+            # complete census with a shrunken denominator.
+            errors.append({"graph": n, "error": f"{type(exc).__name__}: {exc}"})
             continue
-        except Exception as exc:          # noqa: BLE001 — select_graph itself failed
-            errors.append({"graph": n, "query": "select_graph",
-                           "error": f"{type(exc).__name__}: {exc}"})
-            continue
-        if row is not None:
-            rows.append(row)
     total = lambda k: sum(r[k] for r in rows)  # noqa: E731
     kinds: dict[str, int] = {}
     for r in rows:
         for kind, cnt in r["contains_targets_by_kind"]:
             kinds[str(kind)] = kinds.get(str(kind), 0) + cnt
-    per_graph, omitted = _head(
-        sorted(rows, key=lambda r: -(r["sessions"] + r["turns"])), 25)
-    body = {
+    return _mark_shrunken_denominator({
         "uri": uri,
         "graphs_on_instance": len(names),
-        "graphs_with_turn_store": len(rows),
-        "graphs_excluded_no_turn_store": len(names) - len(rows) - len(errors),
-        # Every graph that ERRORED, with the query that raised: these are in NEITHER
-        # side of the aggregate, so their absence must be visible (#4211 R2).
-        "errors": errors,
+        "graphs_with_turn_store": inspected,
+        "graphs_without_turn_store": len(filtered),
+        "graphs_skipped_on_error": len(errors),
+        "skipped_without_turn_store": filtered[:25],
+        "skipped_on_error": errors[:25],
         "totals": {
             "sessions": total("sessions"),
             "turns": total("turns"),
@@ -597,20 +571,33 @@ def measure_instrument(uri: str) -> dict:
         "graphs_with_zero_aboutObject": sum(1 for r in rows if not r["aboutObject_edges"]),
         "every_graph_has_fewer_turns_than_contains":
             _every_graph_has_fewer_turns_than_contains(rows),
-        "per_graph": per_graph,
-        "per_graph_omitted": omitted,
+        "per_graph": _head(sorted(rows, key=lambda r: -(r["sessions"] + r["turns"])),
+                           25)[0],
+        "per_graph_omitted": _head(
+            sorted(rows, key=lambda r: -(r["sessions"] + r["turns"])), 25)[1],
+        "denominator_note": "graphs_on_instance = graphs_with_turn_store + "
+                            "graphs_without_turn_store + graphs_skipped_on_error; a "
+                            "non-zero error count makes every aggregate above a "
+                            "SHRUNKEN denominator, never a complete census. "
+                            "`per_graph_omitted` says how many rows the list does not "
+                            "carry, so the aggregate stays re-derivable",
         "note": "these stores are written by the fixture seeder "
                 "(tools/ask_spotcheck.seed_capture_turn_store), which writes the "
                 "Session->turn CONTAINS edges but does NOT run the entity-link pass — "
                 "so 0 aboutObject here is the SEEDER's shape, not the writer's",
-    }
+    })
+
+
+def _mark_shrunken_denominator(body: dict) -> dict:
+    """A graph that RAISED is not a graph that was measured: say so at the arm level."""
+    errors = body.get("skipped_on_error") or []
     if errors:
+        named = ", ".join(e["graph"] for e in errors[:5])
+        more = "…" if len(errors) > 5 else ""
         body["unmeasurable"] = (
-            f"{len(errors)} graph(s) ERRORED and are in NEITHER side of the aggregate "
-            f"(first: {errors[0]['graph']} / {errors[0]['query']}: "
-            f"{errors[0]['error']}) — the '0 of {len(rows)}' counts only the graphs "
-            "that answered, so it cannot be read as a complete census. Re-run, or read "
-            "per_graph together with errors.")
+            f"{len(errors)} of {body.get('graphs_on_instance')} graphs raised during the "
+            f"census ({named}{more}), so the aggregates are a SHRUNKEN denominator — "
+            "'0 aboutObject in N of N' is NOT reproducible from this run")
     return body
 
 
@@ -694,12 +681,12 @@ def _writer_target(uri: str) -> tuple[dict | None, str | None]:
     """(target, refusal) — refuse rather than WRITE into a graph we cannot prove is a
     lane's throwaway (#4211 review N8).
 
-    The module already refuses in the READ arms when the target is not what the caller
-    thinks it is (``measure_store``/``measure_live`` will not ``select_graph()`` and
-    publish invented zeros). The arm that MUTATES had no equivalent check while being
-    in the DEFAULT set: ``TORTOISE_DB_URI`` is the product's connection string, so a
-    bare run annotated whatever graph it named with fixture sessions that every later
-    census — including the one this tool exists to unlock — would count.
+    The READ arms already refuse when the target is not what the caller thinks it is
+    (they will not ``select_graph()`` and publish the zeros it would invent). The arm
+    that MUTATES had no equivalent check while being in the DEFAULT set:
+    ``TORTOISE_DB_URI`` is the product's connection string, so a bare run annotated
+    whatever graph it named with fixture sessions that every later census — including
+    the one this tool exists to unlock — would count.
     """
     try:
         spec = _parse_uri(uri)
@@ -708,8 +695,8 @@ def _writer_target(uri: str) -> tuple[dict | None, str | None]:
     target = {"host": spec["host"], "port": spec["port"], "graph": spec["graph"]}
     if not _looks_ephemeral(spec["graph"]):
         return target, (
-            f"refusing to WRITE into graph {spec['graph']!r} on {spec['host']}:{spec['port']} "
-            "— the writer arm mints 3 fixture sessions ('m4211-*'), one shared claim "
+            f"refusing to WRITE into graph {spec['graph']!r} on {spec['host']}:{spec['port']}"
+            " — the writer arm mints 3 fixture sessions ('m4211-*'), one shared claim "
             "Point and the Object 'test/repo#42' into whatever graph TORTOISE_DB_URI "
             "names, and every later census would then count them. The graph name must "
             f"contain one of {EPHEMERAL_GRAPH_MARKERS}; pass "
@@ -763,8 +750,8 @@ def measure_writer(*, allow_non_ephemeral: bool = False) -> dict:
             # `uri_graph` alone, so a lane container and a served store were
             # indistinguishable in the artefact. Never the password.
             "target": target,
-            "uri_graph": uri.rsplit("/", 1)[-1],
             "non_ephemeral_write_override": bool(refusal and allow_non_ephemeral),
+            "uri_graph": uri.rsplit("/", 1)[-1],
             "sdk": "TortoiseSDK() against TORTOISE_DB_URI",
             "object_mint": {"name": "test/repo#42", "kind": "pm:issue",
                             "advisory": obj.get("kind_layer_routed")
@@ -866,49 +853,46 @@ def measure_corpus(sessions_dir: str) -> dict:
     }
 
 
-def _unmeasurable_reasons(receipt: dict) -> list[str]:
-    """Every arm's own reason, HOISTED to the block the docstring points at.
-
-    #4211 review R3: the replay branch set ``arms.writer.unmeasurable`` while the
-    documented contract says the reason is in the receipt's top-level ``unmeasurable``
-    block, and ``main`` returned 0 either way — so ``… || exit 1`` accepted a replay as
-    a measurement and overwrote the good receipt with it.
-    """
-    out = []
-    for arm, body in (receipt.get("arms") or {}).items():
-        if isinstance(body, dict) and body.get("unmeasurable"):
-            out.append(f"{arm}: {body['unmeasurable']}")
-    return out
-
-
 def _collect_warnings(receipt: dict) -> list[str]:
-    """Populate ``warnings`` — it was initialised and never written (#4211 R2)."""
+    """Populate ``warnings`` — it was initialised and never written (#4211 R2/N5).
+
+    A skip recorded only inside an arm body is invisible to a reader who looks at the
+    receipt's summary fields.
+    """
     out = []
     for arm, body in (receipt.get("arms") or {}).items():
         if isinstance(body, dict) and body.get("skipped"):
             out.append(f"{arm}: skipped — {body['skipped']}")
-    inst = receipt.get("arms", {}).get("instrument")
+    inst = (receipt.get("arms") or {}).get("instrument")
     if isinstance(inst, dict) and inst.get("per_graph_omitted"):
         out.append(f"instrument: per_graph carries {len(inst['per_graph'])} of "
                    f"{inst['graphs_with_turn_store']} rows; "
                    f"{inst['per_graph_omitted']} omitted (totals still cover all of them)")
-    for reason in _unmeasurable_reasons(receipt):
-        out.append(f"unmeasurable — {reason}")
     return out
 
 
-def _write_receipt(out: str, receipt: dict, *, measured: bool) -> str:
-    """Write the artefact; an UNMEASURABLE run never replaces a good one.
+def _publish(receipt: dict, out: str | None) -> Path | None:
+    """Write the receipt — but an UNMEASURABLE run never replaces a good one.
 
-    Returns the path actually written. ``<out>.unmeasurable`` is the sibling a failed
-    run lands in when ``<out>`` already exists (#4211 review R3).
+    A re-run is commonly scripted ``… --out <receipt> || exit 1``. If the re-run cannot
+    measure (a replay, a raising graph) it must not overwrite the receipt it failed to
+    reproduce: the unmeasurable artifact goes to ``<name>.unmeasurable.json`` beside it,
+    and the path actually written is printed.
     """
-    p = Path(out)
-    if not measured and p.exists():
-        p = p.with_name(p.name + ".unmeasurable")
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(receipt, indent=1, allow_nan=False) + "\n")
-    return str(p)
+    if not out:
+        return None
+    target = Path(out)
+    if receipt.get("unmeasurable") and target.exists():
+        try:
+            prior = json.loads(target.read_text())
+        except Exception:
+            prior = None
+        if isinstance(prior, dict) and not prior.get("unmeasurable"):
+            target = target.with_suffix(".unmeasurable" + target.suffix)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(receipt, indent=1, allow_nan=False) + "\n")
+    print(f"receipt: {target}")
+    return target
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -940,7 +924,8 @@ def main(argv: list[str] | None = None) -> int:
             "note": "code_head is the tree this run STARTED from; it may predate the "
                     "commit that carries this file, so the sha256 is what a re-run keys "
                     "on. measured_through pins the product modules the numbers come "
-                    "THROUGH, so an SDK move is distinguishable from a graph move",
+                    "THROUGH (the writer/corpus arms call into them), so an SDK move "
+                    "is distinguishable from a graph move",
         },
         "purpose": "does a session-hierarchy structure exist for the #4211 "
                    "candidate-expansion arm to walk?",
@@ -983,25 +968,29 @@ def main(argv: list[str] | None = None) -> int:
             "error": f"{type(exc).__name__}: {exc}",
             "traceback": traceback.format_exc()[-3000:],
         }
-        receipt["warnings"] = _collect_warnings(receipt)
-        if args.out:
-            print(f"receipt: {_write_receipt(args.out, receipt, measured=False)}")
+        _publish(receipt, args.out)
         print(f"UNMEASURABLE: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
 
-    # R3: the reason goes to the TOP-LEVEL block the docstring points at, and the
-    # process exits 2 — a replay is not a measurement, and `… || exit 1` must see it.
-    reasons = _unmeasurable_reasons(receipt)
-    if reasons:
+    # An arm that could not measure is a TOP-LEVEL verdict, not a nested note. The
+    # documented contract (0 = measured) reads the top-level block, and a replay that
+    # exits 0 is accepted as a SUCCESSFUL measurement by any `|| exit 1` caller — the
+    # flag being nested is what let a replayed run publish an earlier run's numbers.
+    unmeasurable_arms = {
+        arm: body["unmeasurable"]
+        for arm, body in receipt["arms"].items()
+        if isinstance(body, dict) and body.get("unmeasurable")
+    }
+    if unmeasurable_arms:
         receipt["unmeasurable"] = {
-            "arms": reasons,
-            "note": "at least one arm RAN and could not measure; the numbers beside it "
-                    "describe the graph's PRE-EXISTING content, not this run",
+            "arms": unmeasurable_arms,
+            "note": "at least one arm could not measure; where an arm still reports "
+                    "numbers they describe PRE-EXISTING graph content, never this "
+                    "run's capture",
         }
+
     receipt["warnings"] = _collect_warnings(receipt)
-    measured = not reasons
-    if args.out:
-        print(f"receipt: {_write_receipt(args.out, receipt, measured=measured)}")
+    _publish(receipt, args.out)
 
     for arm in ("store", "writer", "live"):
         body = receipt["arms"].get(arm)
@@ -1017,17 +1006,16 @@ def main(argv: list[str] | None = None) -> int:
         print("  CONTAINS edges / pairs  :", c.get("contains_edges"), "/",
               c.get("contains_distinct_pairs"), "dupes:",
               c.get("contains_duplicate_pairs"))
-        # The label says what the number now is (R1): the first is TURN-filtered, the
-        # second is every CONTAINS-wired Point, printed so the divergence is visible
-        # rather than silently standing in for a turn count.
-        print("  sessions w/ >1 turn     :", c.get("sessions_with_gt1_turn"),
-              " (->1 CONTAINS point:", c.get("sessions_with_gt1_contains_point"), ")")
-        print("  turns/session max, avg  :", c.get("turns_per_session_max_avg"))
+        print("  sessions w/ >1 turn     :", c.get("sessions_with_gt1_contains_turn"))
+        print("  sessions w/ >1 CONTAINS pt:", c.get("sessions_with_gt1_contains_point"),
+              "(any point kind — the difference above is NOT a turn count)")
         print("  aboutObject by endpoint :", c.get("aboutObject_by_endpoint"))
         print("  turns w/ aboutObject    :", c.get("turns_with_aboutObject"))
-        print("  CONTAINS targets by kind:", c.get("contains_targets_by_kind"))
         print("  objects by kind         :", c.get("object_kinds"))
         print("  session created_at span :", c.get("session_created_at_range"))
+        print("  CONTAINS targets by kind:", c.get("contains_targets_by_kind"))
+        if c.get("queries_failed"):
+            print("  ⛔ queries that RAISED   :", c.get("queries_failed"))
         print("  events/w-aboutObject    :", c.get("events_total"), "/",
               c.get("events_with_aboutObject"))
         if body.get("delta_this_run"):
@@ -1038,12 +1026,18 @@ def main(argv: list[str] | None = None) -> int:
     if isinstance(inst, dict) and "totals" in inst:
         print("\n== arm instrument (all turn-store graphs on the instance) ==")
         print("  graphs with a turn store:", inst["graphs_with_turn_store"], "of",
-              inst["graphs_on_instance"], "| excluded (no turn store):",
-              inst.get("graphs_excluded_no_turn_store"), "| ERRORED:",
-              len(inst.get("errors") or []))
+              inst["graphs_on_instance"], "(filtered:",
+              inst.get("graphs_without_turn_store"), "raised:",
+              inst.get("graphs_skipped_on_error"), ")")
         print("  totals                  :", inst["totals"])
         print("  graphs with 0 aboutObject:", inst["graphs_with_zero_aboutObject"])
         print("  CONTAINS targets by kind:", inst["contains_targets_by_kind"])
+        print("  per_graph rows / omitted:", len(inst.get("per_graph") or []), "/",
+              inst.get("per_graph_omitted"))
+        print("  every graph turns<=CONTAINS:",
+              inst.get("every_graph_has_fewer_turns_than_contains"))
+        if inst.get("skipped_on_error"):
+            print("  ⛔ graphs that RAISED    :", inst["skipped_on_error"])
     corp = receipt["arms"].get("corpus")
     if isinstance(corp, dict) and "stats" in corp:
         print("\n== arm corpus (~/.tortoise/session-events) ==")
@@ -1053,9 +1047,10 @@ def main(argv: list[str] | None = None) -> int:
         print("  turns distinct          :", corp["turns_distinct"])
         print("  turns naming a ref      :", corp["turns_naming_a_ref_distinct"])
         print("  sessions w/ >1 turn     :", corp["sessions_with_gt1_turn"])
-    if not measured:
-        for reason in reasons:
-            print(f"UNMEASURABLE: {reason}", file=sys.stderr)
+    if receipt.get("unmeasurable"):
+        print("\nUNMEASURABLE — at least one arm could not measure:", file=sys.stderr)
+        for arm, reason in (receipt["unmeasurable"].get("arms") or {}).items():
+            print(f"  {arm}: {reason}", file=sys.stderr)
         return 2
     return 0
 

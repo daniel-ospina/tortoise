@@ -1327,5 +1327,26 @@
    "ref_density_note": "a turn 'names a ref' when the PRODUCTION resolver session_link.extract_refs matches; it can still resolve to nothing if no matching Object exists in the graph"
   }
  },
+ "post_measurement_revision": {
+  "why": "The #13919 review found three defects that are fixed in the tool AFTER this run: (1) the three keys named *turn* did not apply the turn discriminator; (2) the `instrument` arm silently dropped a graph on ANY query error, so a shrunken denominator was indistinguishable from a clean census; (3) an unmeasurable run exited 0 behind a NESTED flag. The numbers above were produced by the revision at instrument.sha256 088b7de91e0a (code_head 447180bbc0), which is no longer the file at HEAD. They are NOT retro-edited: a measured artifact records what the instrument that produced it computed.",
+  "values_a_rerun_on_this_population_would_change": {
+   "writer.turns_per_session_contains_max_avg": "published [[9, 8.33333333333333]] (every CONTAINS-wired Point counted); with the turn filter it is [[8, 7.333333333333333]], derived from arms.writer.per_session (contains_turns 8/8/6 vs contains_points_all_kinds 9/9/7 — the 3 statement Points listed in arms.writer.counts.contains_targets_by_kind)",
+   "sessions_with_gt1_contains_turn": "UNCHANGED on this population: store 1 and writer 3 are the same filtered or unfiltered, because every session here CONTAINS at least six turn Points (arms.writer.per_session contains_turns 8/8/6; the store's 27 CONTAINS targets are all pointKind='event')",
+   "sessions_with_gt1_entity_linked_turn": "UNCHANGED on this population for the same reason (writer 2, store 0)"
+  },
+  "denominator_not_retroactively_verifiable": "the instrument arm reported graphs_with_turn_store 60 of 173 and carried NO skipped/error field, so whether any of the 113 unmeasured graphs RAISED a query is UNKNOWN for this run. '0 aboutObject in 60 of 60' is a true statement about the 60 measured graphs; from this artifact alone it is not a statement that the denominator was complete. The tool now publishes graphs_without_turn_store, graphs_skipped_on_error and skipped_on_error, and marks the arm unmeasurable when that last list is non-empty.",
+  "action": "re-running the instrument regenerates this receipt. No re-run was performed by the review fix: the population it measured (a 1538-session embedded store and a 60-graph instance on another host) is not present on the fixing host, and substituting a different population would be a different measurement.",
+  "second_review_round": {
+   "why": "A SECOND review round at the same head (#13919) found seven further defects, all fixed in the tool AFTER this run. None is retro-applied: a measured artifact records what the instrument that produced it computed.",
+   "not_in_this_receipt": {
+    "object_kinds": "the Object kind mix (the body's 'dev:issue x 469 / pm:audit_entry / artifact / 0 pm:issue') had NO query in QUERIES, so the inference 'no indexer wrote these => legacy population' is NOT reproducible from this artifact. `object_kinds` now exists; a re-run carries it. The body claim is marked as an unsupported inference for THIS receipt.",
+    "session_created_at_range": "same for 'created_at spanning 2026-08-10 -> 2026-09-18': min/max were never asked. `session_created_at_range` now exists.",
+    "per_graph_omitted": "per_graph was cut to 25 of the 60 measured rows with no marker (len(per_graph)=25, graphs_with_turn_store=60). The current tool publishes `per_graph_omitted`; this run did not.",
+    "every_graph_has_fewer_turns_than_contains": "true here over a non-empty population, so the value stands; the defect was `all([])` returning true over ZERO graphs, which this run did not exercise."
+   },
+   "provenance_defects_fixed": "source_sha256 hashed the COPY after the embedded engine opened it while source_bytes read the ORIGINAL (now one pass over the original, plus `copy_matches_source`); the store arm imported the redislite client directly (redis-guard pattern 2) and never closed the server before rmtree (now through `tortoise.FalkorDB`, closed first); the writer arm mutated whatever TORTOISE_DB_URI named while sitting in the DEFAULT arm set (now opt-in, refusing a non-ephemeral graph name, recording host/port/graph but never the password); the receipt pinned only the tool's bytes (now `instrument.measured_through` = sha256 of tortoise/sdk.py and tortoise/session_link.py).",
+   "action": "unchanged: re-running the instrument regenerates this receipt; the population it measured is not present on the fixing host, and substituting a different one would be a different measurement."
+  }
+ },
  "warnings": []
 }
