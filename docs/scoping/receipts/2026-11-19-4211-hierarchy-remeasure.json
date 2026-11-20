@@ -1,0 +1,1433 @@
+{
+ "issue": 4211,
+ "measured_at": "2026-11-20T01:40:01Z",
+ "code_head": "447180bbc0cfe27384f8ce544fe87b0418d3094a",
+ "instrument": {
+  "path": "tools/measure_4211_session_hierarchy.py",
+  "sha256": "088b7de91e0ae8b0ebf7aafa81674d9ed55c7bbb8bc8c220ede492007998bb53",
+  "argv": [
+   "--out",
+   "docs/scoping/receipts/2026-11-19-4211-hierarchy-remeasure.json"
+  ],
+  "note": "code_head is the tree this run STARTED from; it may predate the commit that carries this file, so the sha256 is what a re-run keys on"
+ },
+ "purpose": "does a session-hierarchy structure exist for the #4211 candidate-expansion arm to walk?",
+ "definitions": {
+  "turn": "coalesce(p.is_episodic,false)=true AND p.pointKind='event'",
+  "hierarchy_linked_turn": "a turn Point reachable from its Session via (:Session)-[:CONTAINS]->(:Point) \u2014 the edge the scoping doc's arm walks",
+  "entity_linked_turn": "a turn Point carrying (:Point)-[:aboutObject]->(:Object) \u2014 entity attachment, NOT the hierarchy",
+  "event_level_attachment": "an :Event carries a session_id PROPERTY, so (:Event)-[:aboutObject]->(:Object) is a session->entity attachment with NO Session->Object edge; counted separately, never folded into the Session counts"
+ },
+ "edges_the_arm_could_walk": {
+  "contains": "the hierarchy (Session -> turns) the scoping doc's arm uses",
+  "aboutObject": "entity attachment; the edge the #4211 gate names. NOT the hierarchy \u2014 a graph can have one and not the other"
+ },
+ "arms": {
+  "store": {
+   "source": "/Users/danielospina/.tortoise/tortoise.db",
+   "source_sha256": "6bc03049acf5f3261c3bf576f37d4876f144818d788320e71320908362bd2d04",
+   "source_bytes": 48680518,
+   "read_only_copy": "/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/m4211-store-w43dwkjv/store.db",
+   "graph": "tortoise",
+   "graphs_in_file": 4708,
+   "copy_s": 38.95,
+   "counts": {
+    "nodes_by_label": [
+     [
+      "Event",
+      10526
+     ],
+     [
+      "Source",
+      9014
+     ],
+     [
+      "GraphEvent",
+      3762
+     ],
+     [
+      "Session",
+      1538
+     ],
+     [
+      "Object",
+      518
+     ],
+     [
+      "Point",
+      204
+     ],
+     [
+      "Subject",
+      26
+     ],
+     [
+      "Tag",
+      4
+     ],
+     [
+      "Meta",
+      3
+     ],
+     [
+      "Batch",
+      1
+     ],
+     [
+      "EpMeta",
+      1
+     ],
+     [
+      "GraphEventMeta",
+      1
+     ]
+    ],
+    "edges_by_type": [
+     [
+      "references",
+      8969
+     ],
+     [
+      "aboutObject",
+      1290
+     ],
+     [
+      "INPUT",
+      66
+     ],
+     [
+      "IMPL",
+      56
+     ],
+     [
+      "CONTAINS",
+      27
+     ],
+     [
+      "NAND",
+      10
+     ],
+     [
+      "performs",
+      8
+     ],
+     [
+      "produces",
+      8
+     ],
+     [
+      "CORRECTS",
+      8
+     ],
+     [
+      "participatesIn",
+      5
+     ],
+     [
+      "related",
+      2
+     ],
+     [
+      "uses",
+      1
+     ]
+    ],
+    "aboutObject_by_endpoint": [
+     [
+      "Event",
+      [
+       "Object"
+      ],
+      1290
+     ]
+    ],
+    "points_total": 204,
+    "turns_total": 27,
+    "episodic_points_any_kind": 27,
+    "turns_with_aboutObject": 0,
+    "nonepisodic_points_with_aboutObject": 0,
+    "sessions_total": 1538,
+    "sessions_with_aboutObject": 0,
+    "contains_edges": 27,
+    "contains_distinct_pairs": 27,
+    "contains_duplicate_pairs": 0,
+    "sessions_with_contains": 1,
+    "contains_targets_by_kind": [
+     [
+      "event",
+      true,
+      27
+     ]
+    ],
+    "sessions_with_gt1_contains_turn": 1,
+    "sessions_with_gt1_entity_linked_turn": 0,
+    "sessions_with_gt1_aboutObject_edge": 0,
+    "turns_per_session_contains_max_avg": [
+     [
+      27,
+      27.0
+     ]
+    ],
+    "session_signature": [
+     [
+      [
+       "id",
+       "created_at",
+       "turn_count"
+      ],
+      1537
+     ],
+     [
+      [
+       "id",
+       "created_at",
+       "turn_count",
+       "is_episodic",
+       "capture_ok",
+       "capture_extractor"
+      ],
+      1
+     ]
+    ],
+    "session_turn_count_sum": 17934.0,
+    "objects_total": 518,
+    "objects_with_gt1_turn": 0,
+    "objects_reaching_gt1_session": 0,
+    "objects_with_point_attachment": 0,
+    "objects_with_any_attachment": 469,
+    "events_total": 10526,
+    "events_with_aboutObject": 1042,
+    "events_without_session_id": 1557,
+    "events_with_aboutObject_missing_session_id": 0,
+    "objects_reaching_gt1_event": 211,
+    "event_objects_total_distinct": 469,
+    "event_attached_session_ids_distinct": 1042
+   },
+   "empty_or_absent": false,
+   "queries": {
+    "nodes_by_label": "MATCH (n) UNWIND labels(n) AS l RETURN l AS label, count(*) AS n ORDER BY n DESC",
+    "edges_by_type": "MATCH ()-[r]->() RETURN type(r) AS edge, count(*) AS n ORDER BY n DESC",
+    "aboutObject_by_endpoint": "MATCH (s)-[r:aboutObject]->(o) UNWIND labels(s) AS sl RETURN sl AS src_label, labels(o) AS dst_labels, count(*) AS n ORDER BY n DESC",
+    "points_total": "MATCH (p:Point) RETURN count(p) AS n",
+    "turns_total": "MATCH (p:Point) WHERE coalesce(p.is_episodic,false)=true AND p.pointKind='event' RETURN count(p) AS n",
+    "episodic_points_any_kind": "MATCH (p:Point) WHERE coalesce(p.is_episodic, false) = true RETURN count(p) AS n",
+    "turns_with_aboutObject": "MATCH (p:Point)-[:aboutObject]->(:Object) WHERE coalesce(p.is_episodic,false)=true AND p.pointKind='event' RETURN count(DISTINCT p) AS n",
+    "nonepisodic_points_with_aboutObject": "MATCH (p:Point)-[:aboutObject]->(:Object) WHERE coalesce(p.is_episodic, false) = false RETURN count(DISTINCT p) AS n",
+    "sessions_total": "MATCH (s:Session) RETURN count(s) AS n",
+    "sessions_with_aboutObject": "MATCH (s:Session)-[:aboutObject]->(:Object) RETURN count(DISTINCT s) AS n",
+    "contains_edges": "MATCH (:Session)-[r:CONTAINS]->(:Point) RETURN count(r) AS n",
+    "contains_distinct_pairs": "MATCH (s:Session)-[:CONTAINS]->(p:Point) RETURN count(DISTINCT s.id + '|' + p.id) AS n",
+    "contains_duplicate_pairs": "MATCH (s:Session)-[r:CONTAINS]->(p:Point) WITH s, p, count(r) AS c WHERE c > 1 RETURN count(*) AS n",
+    "sessions_with_contains": "MATCH (s:Session)-[:CONTAINS]->(:Point) RETURN count(DISTINCT s) AS n",
+    "contains_targets_by_kind": "MATCH (:Session)-[:CONTAINS]->(p:Point) RETURN p.pointKind AS pointKind, coalesce(p.is_episodic, false) AS episodic, count(*) AS n ORDER BY n DESC",
+    "sessions_with_gt1_contains_turn": "MATCH (s:Session)-[:CONTAINS]->(p:Point) WITH s, count(DISTINCT p) AS c WHERE c > 1 RETURN count(*) AS n",
+    "sessions_with_gt1_entity_linked_turn": "MATCH (s:Session)-[:CONTAINS]->(p:Point)-[:aboutObject]->(:Object) WITH s, count(DISTINCT p) AS c WHERE c > 1 RETURN count(*) AS n",
+    "sessions_with_gt1_aboutObject_edge": "MATCH (s:Session)-[:aboutObject]->(o:Object) WITH s, count(DISTINCT o) AS c WHERE c > 1 RETURN count(*) AS n",
+    "turns_per_session_contains_max_avg": "MATCH (s:Session)-[:CONTAINS]->(p:Point) WITH s, count(DISTINCT p) AS c RETURN max(c) AS max_c, toFloat(sum(c)) / count(s) AS avg_c",
+    "session_signature": "MATCH (s:Session) WITH keys(s) AS k, count(*) AS n RETURN k, n ORDER BY n DESC",
+    "session_turn_count_sum": "MATCH (s:Session) RETURN sum(coalesce(s.turn_count, 0)) AS n",
+    "objects_total": "MATCH (o:Object) RETURN count(o) AS n",
+    "objects_with_gt1_turn": "MATCH (t:Point)-[:aboutObject]->(o:Object) WITH o, count(DISTINCT t) AS c WHERE c > 1 RETURN count(*) AS n",
+    "objects_reaching_gt1_session": "MATCH (s:Session)-[:aboutObject]->(o:Object) WITH o, count(DISTINCT s) AS c WHERE c > 1 RETURN count(*) AS n",
+    "objects_with_point_attachment": "MATCH (o:Object) WHERE (:Point)-[:aboutObject]->(o) RETURN count(o) AS n",
+    "objects_with_any_attachment": "MATCH (o:Object) WHERE ()-[:aboutObject]->(o) RETURN count(o) AS n",
+    "events_total": "MATCH (e:Event) RETURN count(e) AS n",
+    "events_with_aboutObject": "MATCH (e:Event)-[:aboutObject]->(:Object) RETURN count(DISTINCT e) AS n",
+    "event_attached_session_ids_distinct": "MATCH (e:Event)-[:aboutObject]->(:Object) RETURN count(DISTINCT e.session_id) AS n",
+    "events_without_session_id": "MATCH (e:Event) WHERE e.session_id IS NULL RETURN count(e) AS n",
+    "events_with_aboutObject_missing_session_id": "MATCH (e:Event)-[:aboutObject]->(:Object) WHERE e.session_id IS NULL RETURN count(e) AS n",
+    "objects_reaching_gt1_event": "MATCH (:Event)-[:aboutObject]->(o:Object) WITH o, count(*) AS c WHERE c > 1 RETURN count(*) AS n",
+    "event_objects_total_distinct": "MATCH (:Event)-[:aboutObject]->(o:Object) RETURN count(DISTINCT o) AS n"
+   }
+  },
+  "writer": {
+   "uri_graph": "m4211_hierarchy_r6",
+   "sdk": "TortoiseSDK() against TORTOISE_DB_URI",
+   "object_mint": {
+    "name": "test/repo#42",
+    "kind": "pm:issue",
+    "advisory": null
+   },
+   "captures": {
+    "m4211-ref-2of8": {
+     "ok": true,
+     "turns": 8,
+     "extraction_mode": "llm:mock",
+     "errors": [],
+     "warnings": [
+      "point 'the new strategy is durable' has no resolvable source turn (no quote match)"
+     ]
+    },
+    "m4211-noref": {
+     "ok": true,
+     "turns": 8,
+     "extraction_mode": "llm:mock",
+     "errors": [],
+     "warnings": []
+    },
+    "m4211-ref-6of6": {
+     "ok": true,
+     "turns": 6,
+     "extraction_mode": "llm:mock",
+     "errors": [],
+     "warnings": []
+    }
+   },
+   "per_session": {
+    "m4211-ref-2of8": {
+     "contains_turns": 8,
+     "contains_points_all_kinds": 9,
+     "entity_linked_turns": 2,
+     "session_aboutObject_edges": 1,
+     "shared_points": 0
+    },
+    "m4211-noref": {
+     "contains_turns": 8,
+     "contains_points_all_kinds": 9,
+     "entity_linked_turns": 0,
+     "session_aboutObject_edges": 0,
+     "shared_points": 1
+    },
+    "m4211-ref-6of6": {
+     "contains_turns": 6,
+     "contains_points_all_kinds": 7,
+     "entity_linked_turns": 6,
+     "session_aboutObject_edges": 1,
+     "shared_points": 1
+    }
+   },
+   "counts": {
+    "nodes_by_label": [
+     [
+      "Point",
+      23
+     ],
+     [
+      "Event",
+      4
+     ],
+     [
+      "Source",
+      3
+     ],
+     [
+      "Session",
+      3
+     ],
+     [
+      "GraphEvent",
+      2
+     ],
+     [
+      "Object",
+      2
+     ],
+     [
+      "Meta",
+      1
+     ],
+     [
+      "GraphEventMeta",
+      1
+     ],
+     [
+      "EpMeta",
+      1
+     ]
+    ],
+    "edges_by_type": [
+     [
+      "CONTAINS",
+      25
+     ],
+     [
+      "aboutObject",
+      11
+     ],
+     [
+      "references",
+      3
+     ],
+     [
+      "extractedFrom",
+      1
+     ]
+    ],
+    "aboutObject_by_endpoint": [
+     [
+      "Point",
+      [
+       "Object"
+      ],
+      9
+     ],
+     [
+      "Session",
+      [
+       "Object"
+      ],
+      2
+     ]
+    ],
+    "points_total": 23,
+    "turns_total": 22,
+    "episodic_points_any_kind": 22,
+    "turns_with_aboutObject": 8,
+    "nonepisodic_points_with_aboutObject": 1,
+    "sessions_total": 3,
+    "sessions_with_aboutObject": 2,
+    "contains_edges": 25,
+    "contains_distinct_pairs": 25,
+    "contains_duplicate_pairs": 0,
+    "sessions_with_contains": 3,
+    "contains_targets_by_kind": [
+     [
+      "event",
+      true,
+      22
+     ],
+     [
+      "statement",
+      false,
+      3
+     ]
+    ],
+    "sessions_with_gt1_contains_turn": 3,
+    "sessions_with_gt1_entity_linked_turn": 2,
+    "sessions_with_gt1_aboutObject_edge": 0,
+    "turns_per_session_contains_max_avg": [
+     [
+      9,
+      8.33333333333333
+     ]
+    ],
+    "session_signature": [
+     [
+      [
+       "id",
+       "created_at",
+       "turn_count",
+       "is_episodic",
+       "turn_max_index",
+       "capture_redactions",
+       "entity_links_attempted",
+       "entity_links_created",
+       "capture_ok",
+       "capture_extractor"
+      ],
+      2
+     ],
+     [
+      [
+       "id",
+       "created_at",
+       "turn_count",
+       "is_episodic",
+       "turn_max_index",
+       "capture_redactions",
+       "capture_ok",
+       "capture_extractor"
+      ],
+      1
+     ]
+    ],
+    "session_turn_count_sum": 22.0,
+    "objects_total": 2,
+    "objects_with_gt1_turn": 1,
+    "objects_reaching_gt1_session": 1,
+    "objects_with_point_attachment": 2,
+    "objects_with_any_attachment": 2,
+    "events_total": 4,
+    "events_with_aboutObject": 0,
+    "events_without_session_id": 4,
+    "events_with_aboutObject_missing_session_id": 0,
+    "objects_reaching_gt1_event": 0,
+    "event_objects_total_distinct": 0,
+    "event_attached_session_ids_distinct": 0
+   },
+   "counts_before_any_write": {
+    "nodes_by_label": [
+     [
+      "Meta",
+      1
+     ]
+    ],
+    "edges_by_type": null,
+    "aboutObject_by_endpoint": null,
+    "points_total": 0,
+    "turns_total": 0,
+    "episodic_points_any_kind": 0,
+    "turns_with_aboutObject": 0,
+    "nonepisodic_points_with_aboutObject": 0,
+    "sessions_total": 0,
+    "sessions_with_aboutObject": 0,
+    "contains_edges": 0,
+    "contains_distinct_pairs": 0,
+    "contains_duplicate_pairs": 0,
+    "sessions_with_contains": 0,
+    "contains_targets_by_kind": null,
+    "sessions_with_gt1_contains_turn": 0,
+    "sessions_with_gt1_entity_linked_turn": 0,
+    "sessions_with_gt1_aboutObject_edge": 0,
+    "turns_per_session_contains_max_avg": [
+     [
+      null,
+      null
+     ]
+    ],
+    "session_signature": null,
+    "session_turn_count_sum": 0.0,
+    "objects_total": 0,
+    "objects_with_gt1_turn": 0,
+    "objects_reaching_gt1_session": 0,
+    "objects_with_point_attachment": 0,
+    "objects_with_any_attachment": 0,
+    "events_total": 0,
+    "events_with_aboutObject": 0,
+    "event_attached_session_ids_distinct": 0,
+    "events_without_session_id": 0,
+    "events_with_aboutObject_missing_session_id": 0,
+    "objects_reaching_gt1_event": 0,
+    "event_objects_total_distinct": 0
+   },
+   "delta_this_run": {
+    "points_total": 23,
+    "turns_total": 22,
+    "contains_edges": 25,
+    "sessions_total": 3,
+    "turns_with_aboutObject": 8,
+    "sessions_with_aboutObject": 2,
+    "objects_total": 2
+   },
+   "queries": {
+    "nodes_by_label": "MATCH (n) UNWIND labels(n) AS l RETURN l AS label, count(*) AS n ORDER BY n DESC",
+    "edges_by_type": "MATCH ()-[r]->() RETURN type(r) AS edge, count(*) AS n ORDER BY n DESC",
+    "aboutObject_by_endpoint": "MATCH (s)-[r:aboutObject]->(o) UNWIND labels(s) AS sl RETURN sl AS src_label, labels(o) AS dst_labels, count(*) AS n ORDER BY n DESC",
+    "points_total": "MATCH (p:Point) RETURN count(p) AS n",
+    "turns_total": "MATCH (p:Point) WHERE coalesce(p.is_episodic,false)=true AND p.pointKind='event' RETURN count(p) AS n",
+    "episodic_points_any_kind": "MATCH (p:Point) WHERE coalesce(p.is_episodic, false) = true RETURN count(p) AS n",
+    "turns_with_aboutObject": "MATCH (p:Point)-[:aboutObject]->(:Object) WHERE coalesce(p.is_episodic,false)=true AND p.pointKind='event' RETURN count(DISTINCT p) AS n",
+    "nonepisodic_points_with_aboutObject": "MATCH (p:Point)-[:aboutObject]->(:Object) WHERE coalesce(p.is_episodic, false) = false RETURN count(DISTINCT p) AS n",
+    "sessions_total": "MATCH (s:Session) RETURN count(s) AS n",
+    "sessions_with_aboutObject": "MATCH (s:Session)-[:aboutObject]->(:Object) RETURN count(DISTINCT s) AS n",
+    "contains_edges": "MATCH (:Session)-[r:CONTAINS]->(:Point) RETURN count(r) AS n",
+    "contains_distinct_pairs": "MATCH (s:Session)-[:CONTAINS]->(p:Point) RETURN count(DISTINCT s.id + '|' + p.id) AS n",
+    "contains_duplicate_pairs": "MATCH (s:Session)-[r:CONTAINS]->(p:Point) WITH s, p, count(r) AS c WHERE c > 1 RETURN count(*) AS n",
+    "sessions_with_contains": "MATCH (s:Session)-[:CONTAINS]->(:Point) RETURN count(DISTINCT s) AS n",
+    "contains_targets_by_kind": "MATCH (:Session)-[:CONTAINS]->(p:Point) RETURN p.pointKind AS pointKind, coalesce(p.is_episodic, false) AS episodic, count(*) AS n ORDER BY n DESC",
+    "sessions_with_gt1_contains_turn": "MATCH (s:Session)-[:CONTAINS]->(p:Point) WITH s, count(DISTINCT p) AS c WHERE c > 1 RETURN count(*) AS n",
+    "sessions_with_gt1_entity_linked_turn": "MATCH (s:Session)-[:CONTAINS]->(p:Point)-[:aboutObject]->(:Object) WITH s, count(DISTINCT p) AS c WHERE c > 1 RETURN count(*) AS n",
+    "sessions_with_gt1_aboutObject_edge": "MATCH (s:Session)-[:aboutObject]->(o:Object) WITH s, count(DISTINCT o) AS c WHERE c > 1 RETURN count(*) AS n",
+    "turns_per_session_contains_max_avg": "MATCH (s:Session)-[:CONTAINS]->(p:Point) WITH s, count(DISTINCT p) AS c RETURN max(c) AS max_c, toFloat(sum(c)) / count(s) AS avg_c",
+    "session_signature": "MATCH (s:Session) WITH keys(s) AS k, count(*) AS n RETURN k, n ORDER BY n DESC",
+    "session_turn_count_sum": "MATCH (s:Session) RETURN sum(coalesce(s.turn_count, 0)) AS n",
+    "objects_total": "MATCH (o:Object) RETURN count(o) AS n",
+    "objects_with_gt1_turn": "MATCH (t:Point)-[:aboutObject]->(o:Object) WITH o, count(DISTINCT t) AS c WHERE c > 1 RETURN count(*) AS n",
+    "objects_reaching_gt1_session": "MATCH (s:Session)-[:aboutObject]->(o:Object) WITH o, count(DISTINCT s) AS c WHERE c > 1 RETURN count(*) AS n",
+    "objects_with_point_attachment": "MATCH (o:Object) WHERE (:Point)-[:aboutObject]->(o) RETURN count(o) AS n",
+    "objects_with_any_attachment": "MATCH (o:Object) WHERE ()-[:aboutObject]->(o) RETURN count(o) AS n",
+    "events_total": "MATCH (e:Event) RETURN count(e) AS n",
+    "events_with_aboutObject": "MATCH (e:Event)-[:aboutObject]->(:Object) RETURN count(DISTINCT e) AS n",
+    "event_attached_session_ids_distinct": "MATCH (e:Event)-[:aboutObject]->(:Object) RETURN count(DISTINCT e.session_id) AS n",
+    "events_without_session_id": "MATCH (e:Event) WHERE e.session_id IS NULL RETURN count(e) AS n",
+    "events_with_aboutObject_missing_session_id": "MATCH (e:Event)-[:aboutObject]->(:Object) WHERE e.session_id IS NULL RETURN count(e) AS n",
+    "objects_reaching_gt1_event": "MATCH (:Event)-[:aboutObject]->(o:Object) WITH o, count(*) AS c WHERE c > 1 RETURN count(*) AS n",
+    "event_objects_total_distinct": "MATCH (:Event)-[:aboutObject]->(o:Object) RETURN count(DISTINCT o) AS n"
+   },
+   "per_session_queries": {
+    "contains_turns": "MATCH (:Session {id:$sid})-[:CONTAINS]->(p:Point) WHERE coalesce(p.is_episodic,false)=true AND p.pointKind='event' RETURN count(DISTINCT p)",
+    "contains_points_all_kinds": "MATCH (:Session {id:$sid})-[:CONTAINS]->(p:Point) RETURN count(DISTINCT p)",
+    "entity_linked_turns": "MATCH (:Session {id:$sid})-[:CONTAINS]->(p:Point)-[:aboutObject]->(:Object) WHERE coalesce(p.is_episodic,false)=true AND p.pointKind='event' RETURN count(DISTINCT p)",
+    "session_aboutObject_edges": "MATCH (:Session {id:$sid})-[:aboutObject]->(:Object) RETURN count(*)",
+    "shared_points": "MATCH (:Session {id:$sid})-[:CONTAINS]->(p:Point) WITH p MATCH (s2:Session)-[:CONTAINS]->(p) WITH p, count(DISTINCT s2) AS c WHERE c > 1 RETURN count(DISTINCT p)"
+   }
+  },
+  "live": {
+   "uri": "docker://:@localhost:16379/tortoise",
+   "graph": "tortoise",
+   "read_only": "ro_query=True",
+   "role_evidence": {
+    "uri_source": "~/.zshrc:48",
+    "graphs_on_instance": 173,
+    "note": "this receipt proves the URI STRING lives in a shell profile and records this graph's contents. It does NOT prove this is the product's turn store \u2014 see the 'instrument' arm for the sibling graphs on this instance that hold turns (that arm is the one that COUNTS them; this block publishes only `graphs_on_instance`, which is a different number and is measured)."
+   },
+   "counts": {
+    "nodes_by_label": [
+     [
+      "GraphEvent",
+      10742
+     ],
+     [
+      "Point",
+      10518
+     ],
+     [
+      "Source",
+      61
+     ],
+     [
+      "Tag",
+      16
+     ],
+     [
+      "MpProbe",
+      13
+     ],
+     [
+      "PackInstall",
+      5
+     ],
+     [
+      "evidence",
+      5
+     ],
+     [
+      "Document",
+      2
+     ],
+     [
+      "Meta",
+      2
+     ],
+     [
+      "EpMeta",
+      1
+     ],
+     [
+      "Event",
+      1
+     ],
+     [
+      "Evidence",
+      1
+     ],
+     [
+      "GraphEventMeta",
+      1
+     ],
+     [
+      "ProbeQ",
+      1
+     ],
+     [
+      "__w",
+      1
+     ]
+    ],
+    "edges_by_type": [
+     [
+      "IMPL",
+      14305
+     ],
+     [
+      "INPUT",
+      10506
+     ],
+     [
+      "NAND",
+      1345
+     ],
+     [
+      "extractedFrom",
+      73
+     ],
+     [
+      "CORRECTS",
+      54
+     ],
+     [
+      "SUPPORTS",
+      52
+     ],
+     [
+      "hasPart",
+      47
+     ],
+     [
+      "mitigated_by",
+      45
+     ],
+     [
+      "measures",
+      40
+     ],
+     [
+      "TAGGED",
+      20
+     ],
+     [
+      "addresses",
+      19
+     ],
+     [
+      "SOURCE",
+      18
+     ],
+     [
+      "TARGET",
+      18
+     ],
+     [
+      "dependsOn",
+      17
+     ],
+     [
+      "references",
+      17
+     ],
+     [
+      "refutes",
+      17
+     ],
+     [
+      "related",
+      16
+     ],
+     [
+      "supports",
+      15
+     ],
+     [
+      "refutes_in_part",
+      5
+     ],
+     [
+      "MEASURES",
+      4
+     ],
+     [
+      "REFUTES",
+      3
+     ],
+     [
+      "BLOCKS",
+      2
+     ],
+     [
+      "blocks",
+      1
+     ]
+    ],
+    "aboutObject_by_endpoint": null,
+    "points_total": 10518,
+    "turns_total": 0,
+    "episodic_points_any_kind": 0,
+    "turns_with_aboutObject": 0,
+    "nonepisodic_points_with_aboutObject": 0,
+    "sessions_total": 0,
+    "sessions_with_aboutObject": 0,
+    "contains_edges": 0,
+    "contains_distinct_pairs": 0,
+    "contains_duplicate_pairs": 0,
+    "sessions_with_contains": 0,
+    "contains_targets_by_kind": null,
+    "sessions_with_gt1_contains_turn": 0,
+    "sessions_with_gt1_entity_linked_turn": 0,
+    "sessions_with_gt1_aboutObject_edge": 0,
+    "turns_per_session_contains_max_avg": [
+     [
+      null,
+      null
+     ]
+    ],
+    "session_signature": null,
+    "session_turn_count_sum": 0.0,
+    "objects_total": 0,
+    "objects_with_gt1_turn": 0,
+    "objects_reaching_gt1_session": 0,
+    "objects_with_point_attachment": 0,
+    "objects_with_any_attachment": 0,
+    "events_total": 1,
+    "events_with_aboutObject": 0,
+    "events_without_session_id": 1,
+    "events_with_aboutObject_missing_session_id": 0,
+    "objects_reaching_gt1_event": 0,
+    "event_objects_total_distinct": 0,
+    "event_attached_session_ids_distinct": 0
+   },
+   "empty_or_absent": false,
+   "queries": {
+    "nodes_by_label": "MATCH (n) UNWIND labels(n) AS l RETURN l AS label, count(*) AS n ORDER BY n DESC",
+    "edges_by_type": "MATCH ()-[r]->() RETURN type(r) AS edge, count(*) AS n ORDER BY n DESC",
+    "aboutObject_by_endpoint": "MATCH (s)-[r:aboutObject]->(o) UNWIND labels(s) AS sl RETURN sl AS src_label, labels(o) AS dst_labels, count(*) AS n ORDER BY n DESC",
+    "points_total": "MATCH (p:Point) RETURN count(p) AS n",
+    "turns_total": "MATCH (p:Point) WHERE coalesce(p.is_episodic,false)=true AND p.pointKind='event' RETURN count(p) AS n",
+    "episodic_points_any_kind": "MATCH (p:Point) WHERE coalesce(p.is_episodic, false) = true RETURN count(p) AS n",
+    "turns_with_aboutObject": "MATCH (p:Point)-[:aboutObject]->(:Object) WHERE coalesce(p.is_episodic,false)=true AND p.pointKind='event' RETURN count(DISTINCT p) AS n",
+    "nonepisodic_points_with_aboutObject": "MATCH (p:Point)-[:aboutObject]->(:Object) WHERE coalesce(p.is_episodic, false) = false RETURN count(DISTINCT p) AS n",
+    "sessions_total": "MATCH (s:Session) RETURN count(s) AS n",
+    "sessions_with_aboutObject": "MATCH (s:Session)-[:aboutObject]->(:Object) RETURN count(DISTINCT s) AS n",
+    "contains_edges": "MATCH (:Session)-[r:CONTAINS]->(:Point) RETURN count(r) AS n",
+    "contains_distinct_pairs": "MATCH (s:Session)-[:CONTAINS]->(p:Point) RETURN count(DISTINCT s.id + '|' + p.id) AS n",
+    "contains_duplicate_pairs": "MATCH (s:Session)-[r:CONTAINS]->(p:Point) WITH s, p, count(r) AS c WHERE c > 1 RETURN count(*) AS n",
+    "sessions_with_contains": "MATCH (s:Session)-[:CONTAINS]->(:Point) RETURN count(DISTINCT s) AS n",
+    "contains_targets_by_kind": "MATCH (:Session)-[:CONTAINS]->(p:Point) RETURN p.pointKind AS pointKind, coalesce(p.is_episodic, false) AS episodic, count(*) AS n ORDER BY n DESC",
+    "sessions_with_gt1_contains_turn": "MATCH (s:Session)-[:CONTAINS]->(p:Point) WITH s, count(DISTINCT p) AS c WHERE c > 1 RETURN count(*) AS n",
+    "sessions_with_gt1_entity_linked_turn": "MATCH (s:Session)-[:CONTAINS]->(p:Point)-[:aboutObject]->(:Object) WITH s, count(DISTINCT p) AS c WHERE c > 1 RETURN count(*) AS n",
+    "sessions_with_gt1_aboutObject_edge": "MATCH (s:Session)-[:aboutObject]->(o:Object) WITH s, count(DISTINCT o) AS c WHERE c > 1 RETURN count(*) AS n",
+    "turns_per_session_contains_max_avg": "MATCH (s:Session)-[:CONTAINS]->(p:Point) WITH s, count(DISTINCT p) AS c RETURN max(c) AS max_c, toFloat(sum(c)) / count(s) AS avg_c",
+    "session_signature": "MATCH (s:Session) WITH keys(s) AS k, count(*) AS n RETURN k, n ORDER BY n DESC",
+    "session_turn_count_sum": "MATCH (s:Session) RETURN sum(coalesce(s.turn_count, 0)) AS n",
+    "objects_total": "MATCH (o:Object) RETURN count(o) AS n",
+    "objects_with_gt1_turn": "MATCH (t:Point)-[:aboutObject]->(o:Object) WITH o, count(DISTINCT t) AS c WHERE c > 1 RETURN count(*) AS n",
+    "objects_reaching_gt1_session": "MATCH (s:Session)-[:aboutObject]->(o:Object) WITH o, count(DISTINCT s) AS c WHERE c > 1 RETURN count(*) AS n",
+    "objects_with_point_attachment": "MATCH (o:Object) WHERE (:Point)-[:aboutObject]->(o) RETURN count(o) AS n",
+    "objects_with_any_attachment": "MATCH (o:Object) WHERE ()-[:aboutObject]->(o) RETURN count(o) AS n",
+    "events_total": "MATCH (e:Event) RETURN count(e) AS n",
+    "events_with_aboutObject": "MATCH (e:Event)-[:aboutObject]->(:Object) RETURN count(DISTINCT e) AS n",
+    "event_attached_session_ids_distinct": "MATCH (e:Event)-[:aboutObject]->(:Object) RETURN count(DISTINCT e.session_id) AS n",
+    "events_without_session_id": "MATCH (e:Event) WHERE e.session_id IS NULL RETURN count(e) AS n",
+    "events_with_aboutObject_missing_session_id": "MATCH (e:Event)-[:aboutObject]->(:Object) WHERE e.session_id IS NULL RETURN count(e) AS n",
+    "objects_reaching_gt1_event": "MATCH (:Event)-[:aboutObject]->(o:Object) WITH o, count(*) AS c WHERE c > 1 RETURN count(*) AS n",
+    "event_objects_total_distinct": "MATCH (:Event)-[:aboutObject]->(o:Object) RETURN count(DISTINCT o) AS n"
+   }
+  },
+  "instrument": {
+   "uri": "docker://:@localhost:16379/tortoise",
+   "graphs_on_instance": 173,
+   "graphs_with_turn_store": 60,
+   "totals": {
+    "sessions": 2411,
+    "turns": 24999,
+    "contains_edges": 37605,
+    "contains_distinct_pairs": 37605,
+    "contains_duplicate_pairs": 0,
+    "aboutObject_edges": 0,
+    "turns_with_aboutObject": 0
+   },
+   "contains_targets_by_kind": {
+    "event": 24999,
+    "session-transcript": 12606
+   },
+   "graphs_with_any_aboutObject": 0,
+   "graphs_with_zero_aboutObject": 60,
+   "every_graph_has_fewer_turns_than_contains": true,
+   "per_graph": [
+    {
+     "graph": "org_default__default__58bf7951",
+     "sessions": 57,
+     "turns": 616,
+     "contains_edges": 927,
+     "contains_distinct_pairs": 927,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       616
+      ],
+      [
+       "session-transcript",
+       311
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__71017276",
+     "sessions": 49,
+     "turns": 614,
+     "contains_edges": 923,
+     "contains_distinct_pairs": 923,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       614
+      ],
+      [
+       "session-transcript",
+       309
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__7e00a6cb",
+     "sessions": 62,
+     "turns": 564,
+     "contains_edges": 852,
+     "contains_distinct_pairs": 852,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       564
+      ],
+      [
+       "session-transcript",
+       288
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__e47becba",
+     "sessions": 53,
+     "turns": 550,
+     "contains_edges": 827,
+     "contains_distinct_pairs": 827,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       550
+      ],
+      [
+       "session-transcript",
+       277
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__7161e7e2",
+     "sessions": 48,
+     "turns": 550,
+     "contains_edges": 827,
+     "contains_distinct_pairs": 827,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       550
+      ],
+      [
+       "session-transcript",
+       277
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__e9327a54",
+     "sessions": 50,
+     "turns": 533,
+     "contains_edges": 803,
+     "contains_distinct_pairs": 803,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       533
+      ],
+      [
+       "session-transcript",
+       270
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__89941a93",
+     "sessions": 51,
+     "turns": 528,
+     "contains_edges": 793,
+     "contains_distinct_pairs": 793,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       528
+      ],
+      [
+       "session-transcript",
+       265
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__51a45a95",
+     "sessions": 50,
+     "turns": 529,
+     "contains_edges": 795,
+     "contains_distinct_pairs": 795,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       529
+      ],
+      [
+       "session-transcript",
+       266
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__4c36ccef",
+     "sessions": 49,
+     "turns": 521,
+     "contains_edges": 783,
+     "contains_distinct_pairs": 783,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       521
+      ],
+      [
+       "session-transcript",
+       262
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__35a27287",
+     "sessions": 51,
+     "turns": 519,
+     "contains_edges": 780,
+     "contains_distinct_pairs": 780,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       519
+      ],
+      [
+       "session-transcript",
+       261
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__32260d93",
+     "sessions": 46,
+     "turns": 524,
+     "contains_edges": 789,
+     "contains_distinct_pairs": 789,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       524
+      ],
+      [
+       "session-transcript",
+       265
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__d7c942c3",
+     "sessions": 49,
+     "turns": 520,
+     "contains_edges": 782,
+     "contains_distinct_pairs": 782,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       520
+      ],
+      [
+       "session-transcript",
+       262
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__b5ef892d",
+     "sessions": 52,
+     "turns": 516,
+     "contains_edges": 775,
+     "contains_distinct_pairs": 775,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       516
+      ],
+      [
+       "session-transcript",
+       259
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__58ef2f1c",
+     "sessions": 50,
+     "turns": 518,
+     "contains_edges": 780,
+     "contains_distinct_pairs": 780,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       518
+      ],
+      [
+       "session-transcript",
+       262
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__71315a70",
+     "sessions": 53,
+     "turns": 514,
+     "contains_edges": 772,
+     "contains_distinct_pairs": 772,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       514
+      ],
+      [
+       "session-transcript",
+       258
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__6ade9755",
+     "sessions": 51,
+     "turns": 513,
+     "contains_edges": 774,
+     "contains_distinct_pairs": 774,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       513
+      ],
+      [
+       "session-transcript",
+       261
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__195a1a1b",
+     "sessions": 46,
+     "turns": 515,
+     "contains_edges": 773,
+     "contains_distinct_pairs": 773,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       515
+      ],
+      [
+       "session-transcript",
+       258
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__1e043500",
+     "sessions": 50,
+     "turns": 510,
+     "contains_edges": 767,
+     "contains_distinct_pairs": 767,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       510
+      ],
+      [
+       "session-transcript",
+       257
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__8a2466db",
+     "sessions": 50,
+     "turns": 508,
+     "contains_edges": 766,
+     "contains_distinct_pairs": 766,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       508
+      ],
+      [
+       "session-transcript",
+       258
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__830ce83f",
+     "sessions": 47,
+     "turns": 511,
+     "contains_edges": 768,
+     "contains_distinct_pairs": 768,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       511
+      ],
+      [
+       "session-transcript",
+       257
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__gpt4_fa19884c",
+     "sessions": 46,
+     "turns": 507,
+     "contains_edges": 763,
+     "contains_distinct_pairs": 763,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       507
+      ],
+      [
+       "session-transcript",
+       256
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__6d550036",
+     "sessions": 47,
+     "turns": 505,
+     "contains_edges": 761,
+     "contains_distinct_pairs": 761,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       505
+      ],
+      [
+       "session-transcript",
+       256
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__6f9b354f",
+     "sessions": 50,
+     "turns": 500,
+     "contains_edges": 753,
+     "contains_distinct_pairs": 753,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       500
+      ],
+      [
+       "session-transcript",
+       253
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__afdc33df",
+     "sessions": 46,
+     "turns": 502,
+     "contains_edges": 754,
+     "contains_distinct_pairs": 754,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       502
+      ],
+      [
+       "session-transcript",
+       252
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__gpt4_f49edff3",
+     "sessions": 47,
+     "turns": 498,
+     "contains_edges": 748,
+     "contains_distinct_pairs": 748,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       498
+      ],
+      [
+       "session-transcript",
+       250
+      ]
+     ]
+    }
+   ],
+   "note": "CONTAINS targets by kind, MEASURED here: event=24999, session-transcript=12606 (37605 total; 24999 event / 12606 session-transcript). This population is not one writer's output \u2014 `tortoise/retrieval.py` records that `session-transcript` is written only by the eval ingest lane, and `tools/ask_spotcheck.py::seed_capture_turn_store` hardcodes `\"k\": \"event\"`, so it writes none of them. Neither the seeder nor the eval ingest V1 leg (`tools/longmem_eval/ingest.py`, zero `aboutObject` writes) runs the entity-link pass, and `aboutObject_edges` reads 0 here, so that 0 describes THEIR output. \u26d4 It does NOT describe the whole eval lane: its V2 leg (`tools/longmem_eval/ingest_v2.py`) DOES write the edge by its own parity route (#2165/E7-D7, gated on `about_entities`), so a census that reads 0 here also measures the ABSENCE OF v2 EXTRACTION OUTPUT in these graphs. The product's own capture path is what the `writer` arm measures, before and after, on a fresh graph."
+  },
+  "corpus": {
+   "source": "/Users/danielospina/.tortoise/session-events",
+   "stats": {
+    "files": 106,
+    "records": 123033,
+    "parse_errors": 0,
+    "records_without_text": 0,
+    "turn_occurrences": 1138974,
+    "turn_occurrences_with_ref": 252417
+   },
+   "sessions": 73792,
+   "turns_distinct": 736509,
+   "turns_naming_a_ref_distinct": 176802,
+   "sessions_with_gt1_turn": 73095,
+   "sessions_with_gt1_ref_turn": 37014,
+   "sessions_with_any_ref_turn": 57474,
+   "max_turns_per_session": 1940,
+   "records_per_session": 1.667,
+   "ref_density_note": "a turn 'names a ref' when the PRODUCTION resolver session_link.extract_refs matches; it can still resolve to nothing if no matching Object exists in the graph"
+  }
+ },
+ "post_measurement_revision": {
+  "why": "The #13919 review found three defects that are fixed in the tool AFTER this run: (1) the three keys named *turn* did not apply the turn discriminator; (2) the `instrument` arm silently dropped a graph on ANY query error, so a shrunken denominator was indistinguishable from a clean census; (3) an unmeasurable run exited 0 behind a NESTED flag. The numbers above were produced by the revision at instrument.sha256 088b7de91e0a (code_head 447180bbc0), which is no longer the file at HEAD. They are NOT retro-edited: a measured artifact records what the instrument that produced it computed.",
+  "values_a_rerun_on_this_population_would_change": {
+   "writer.turns_per_session_contains_max_avg": "published [[9, 8.33333333333333]] (every CONTAINS-wired Point counted); with the turn filter it is [[8, 7.333333333333333]], derived from arms.writer.per_session (contains_turns 8/8/6 vs contains_points_all_kinds 9/9/7 \u2014 the 3 statement Points listed in arms.writer.counts.contains_targets_by_kind)",
+   "sessions_with_gt1_contains_turn": "UNCHANGED on this population: store 1 and writer 3 are the same filtered or unfiltered, because every session here CONTAINS at least six turn Points (arms.writer.per_session contains_turns 8/8/6; the store's 27 CONTAINS targets are all pointKind='event')",
+   "sessions_with_gt1_entity_linked_turn": "UNCHANGED on this population for the same reason (writer 2, store 0)"
+  },
+  "denominator_not_retroactively_verifiable": "the instrument arm reported graphs_with_turn_store 60 of 173 and carried NO skipped/error field, so whether any of the 113 unmeasured graphs RAISED a query is UNKNOWN for this run. '0 aboutObject in 60 of 60' is a true statement about the 60 measured graphs; from this artifact alone it is not a statement that the denominator was complete. The tool now publishes graphs_without_turn_store, graphs_skipped_on_error and skipped_on_error, and marks the arm unmeasurable when that last list is non-empty.",
+  "action": "re-running the instrument regenerates this receipt. No re-run was performed by the review fix: the population it measured (a 1538-session embedded store and a 60-graph instance on another host) is not present on the fixing host, and substituting a different population would be a different measurement.",
+  "second_review_round": {
+   "why": "A SECOND review round at the same head (#13919) found seven further defects, all fixed in the tool AFTER this run. None is retro-applied: a measured artifact records what the instrument that produced it computed.",
+   "not_in_this_receipt": {
+    "object_kinds": "the Object kind mix (the body's 'dev:issue x 469 / pm:audit_entry / artifact / 0 pm:issue') had NO query in QUERIES, so the inference 'no indexer wrote these => legacy population' is NOT reproducible from this artifact. `object_kinds` now exists; a re-run carries it. The body claim is marked as an unsupported inference for THIS receipt.",
+    "session_created_at_range": "same for 'created_at spanning 2026-08-10 -> 2026-09-18': min/max were never asked. `session_created_at_range` now exists.",
+    "per_graph_omitted": "per_graph was cut to 25 of the 60 measured rows with no marker (len(per_graph)=25, graphs_with_turn_store=60). The current tool publishes `per_graph_omitted`; this run did not.",
+    "every_graph_has_fewer_turns_than_contains": "true here over a non-empty population, so the value stands; the defect was `all([])` returning true over ZERO graphs, which this run did not exercise.",
+    "pair_count_guard": "the round-2 multiplicity guard -- `contains_distinct_pairs` / `contains_duplicate_pairs`, re-measured above as 37,605 = 37,605 with 0 duplicates -- was itself NULL-BLIND: the query counted `DISTINCT s.id + '|' + p.id`, and a Point with no `id` property concatenates to null, so `count(DISTINCT null)` is 0. On any graph whose Points carry no id (the fixture-seeder shape this arm measures) the column reads 0 pairs beside a non-zero edge count and the duplicate check reports 0 unconditionally. MEASURED on an embedded fixture (one Session, one pointKind='event' Point with no id, one duplicate CONTAINS): 2 edges -> id-concat 0, `WITH DISTINCT s, p` 1. Fixed to node identity in both copies (the query set and the census arm). This run's own 37,605/37,605 is UNAFFECTED (those Points carry ids), and remains as measured."
+   },
+   "provenance_defects_fixed": "source_sha256 hashed the COPY after the embedded engine opened it while source_bytes read the ORIGINAL (now one pass over the original, plus `copy_matches_source`); the store arm imported the redislite client directly (redis-guard pattern 2) and never closed the server before rmtree (now through `tortoise.FalkorDB`, closed first); the writer arm mutated whatever TORTOISE_DB_URI named while sitting in the DEFAULT arm set (now opt-in, refusing a non-ephemeral graph name, recording host/port/graph but never the password); the receipt pinned only the tool's bytes (now `instrument.measured_through` = sha256 of tortoise/sdk.py and tortoise/session_link.py).",
+   "action": "unchanged: re-running the instrument regenerates this receipt; the population it measured is not present on the fixing host, and substituting a different one would be a different measurement."
+  },
+  "third_review_round": {
+   "why": "A THIRD review round at head d27f5675 (#13919) found four defects, all fixed in the tool AFTER this run. None is retro-applied: a measured artifact records what the instrument that produced it computed.",
+   "not_in_this_receipt": {
+    "role_evidence.uri_source": "published '~/.zshrc:48', which was a STRING LITERAL in the tool: nothing in the run read a shell profile, and the URI that was actually measured came from the option's BUILT-IN default (DEFAULT_LIVE_URI) \u2014 not from --live-uri on the command line: instrument.argv is [\"--out\", ...] only, so the measured value is the constant's, asserted by the source and NOT read from any profile or flag. The provenance claim above is therefore UNSUPPORTED for this receipt. The tool now records what SUPPLIED the URI ('--live-uri', or 'built-in DEFAULT_LIVE_URI ... asserted by the constant and NOT measured'), and a re-run will say so.",
+    "skipped_arms_were_exit_0": "this run measured every arm it was asked for, so the defect was not exercised: an arm that SKIPPED (store absent, graph not in the file, no TORTOISE_DB_URI, no capture journal) returned a bare {'skipped': ...}, which main collected as nothing, exited 0 and was allowed to REPLACE the target receipt. Skips are now a top-level `unmeasurable` verdict (exit 2, sibling artifact), and an unknown/empty --arms is refused before anything runs.",
+    "truncated_error_prose": "the census truncates `skipped_on_error` to 25 entries; the unmeasurable sentence derived its count from that list, so with 30 raising graphs it would have said '25 of ... raised' beside a field saying 30. The sentence now reads the authoritative `graphs_skipped_on_error`. This run's census carried no error field at all, so nothing to correct here.",
+    "uri_field_shape": "arms.live.uri and arms.instrument.uri were the --live-uri STRING verbatim, and the writer wrote uri.rsplit('/', 1)[-1] (on a path-less URI that slice returns the whole authority, i.e. the password). Both read arms now publish the URI with its userinfo STRIPPED and the writer publishes the PARSED graph segment. This run's URI was docker://:@localhost:16379/tortoise \u2014 EMPTY userinfo \u2014 so no credential was ever in this artifact; a re-run emits it as docker://localhost:16379/tortoise."
+   },
+   "action": "unchanged: re-running the instrument regenerates this receipt; the population it measured is not present on the fixing host, and substituting a different one would be a different measurement."
+  },
+  "round_7_note_correction": {
+   "why": "A round-7 review found that `arms.instrument.note` -- the artifact's endorsed explanation for its headline zero -- asserted an ATTRIBUTION this same artifact refutes.",
+   "what_was_wrong": "The note named ONE writer (`tools/ask_spotcheck.seed_capture_turn_store`) for the whole 37,605-target population, and the tool's `contains_targets_by_kind` comment said that seeder 'writes a `session-transcript` Point per session'. Both are false for this population: `contains_targets_by_kind` here is event=24999, session-transcript=12606, and `tortoise/retrieval.py` records that `session-transcript` is written ONLY by the eval ingest lane and explicitly NOT by that seeder, which hardcodes `k: event` (tools/ask_spotcheck.py). The 12,606 chunk targets are therefore not the seeder's, and a reader re-deriving this census was sent to the wrong writer.",
+   "fix": "The note is now DERIVED from `contains_targets_by_kind` by the tool's own `_instrument_note()`, so it can only say what the artifact measured; the two source comments were corrected too. The note was updated in place because it is an ASSERTION about the population, not a measured value -- every number in this artifact is untouched.",
+   "what_survives": "The conclusion the note supports is unchanged and is independently reproduced by the `writer` arm: the stores this arm censuses are not the product's capture path, and none of their writers runs the entity-link pass, which is why `aboutObject` reads 0 there."
+  },
+  "round_7_census_and_gate": {
+   "why": "A SECOND round-7 receipt lane (#13919, the fresh-context review at 75216acaaf \u2014 the lane's review round 7) found four defects, all fixed in the tool AFTER this run. None is retro-applied: a measured artifact records what the instrument that produced it computed.",
+   "not_in_this_receipt": {
+    "objects_with_gt1_turn_was_UNFILTERED": "arms.<store,writer,live>.counts.objects_with_gt1_turn was computed as `MATCH (p:Point)-[:aboutObject]->(o:Object) WITH o, count(DISTINCT p)` \u2014 NO turn discriminator, so it counted any attached Point (an extracted claim Point or the fixture seeder's session-transcript Point) as a turn. The sibling `sessions_with_gt1_*` keys were already split into a turn reading and an any-kind reading; this one was not. The key now applies the shared TURN constant, and a new `objects_with_gt1_point` carries the any-kind reading beside it. The values published here (store 0, writer 1, live 0) are the UNFILTERED reading, and the FILTERED value on this population is NOT derivable from this artifact: the writer arm carries 9 Point->Object edges against 8 turns and 3 `statement` Points in contains_targets_by_kind, so at least one attachment is not a turn, and whether an Object holding >1 attachment holds >1 TURN is not recorded here. A re-run emits both keys.",
+    "zero_graph_census_was_exit_0": "arm `instrument` marked itself unmeasurable only when a graph RAISED. An instance with NO graphs has no error to count, so a re-run against an empty/wrong instance published `graphs with a turn store: 0 of 0`, all-zero totals and `every graph turns<=CONTAINS: null` \u2014 and exited 0, REPLACING this receipt. This run inspected 60 of 173 graphs, so the defect was not exercised here; the arm now refuses (top-level unmeasurable, exit 2, `<name>.unmeasurable.json` sibling) when it inspects no graph at all.",
+    "exit_2_contract_named_one_location": "the docstring said exit 2 ALWAYS leaves its reason in this receipt's top-level `unmeasurable` block; the interpreter guard and the `--arms` refusal exit 2 with NO receipt, reason on stderr. Behaviour unchanged (stderr was already attributable, the #5128 invariant); the stated contract now names both paths.",
+    "no_gate_selected_this_artifact": "nothing gated this file: a receipt-only diff selected NO CI surface and no test opened it, so a hand-edit or a re-emit with different numbers shipped green. The pin now lives in tests/test_measure_4211_session_hierarchy.py (registered `core`) and the path is in `tools/ci_selection.py` CORE_ALSO, so this artifact selects `core`. That is a GATE, not a measurement \u2014 nothing above changes.",
+    "sessions_with_gt1_contains_point": "this receipt predates the turn/any-kind SPLIT for the CONTAINS keys, so it carries the turn reading (`sessions_with_gt1_contains_turn`) and not the any-kind reading beside it. On the STORE arm that makes no difference (its 27 CONTAINS targets in contains_targets_by_kind are all pointKind='event'), but on the WRITER arm it does: that arm's contains_targets_by_kind carries `event x 22` beside `statement x 3`, so its any-kind `sessions_with_gt1_contains_point` is absent from this artifact as a published KEY \u2014 but it IS derivable from the numbers it does carry: `arms.writer.per_session[*].contains_points_all_kinds` is 9 / 9 / 7, all greater than 1 over three sessions, so `sessions_with_gt1_contains_point` = 3. (An earlier revision of this ledger said 'NOT recoverable'; that was WRONG \u2014 the ledger exists so a reader can tell a real absence from a derivable one, and OVERSTATING an absence is the same asserted-vs-measured defect it is here to prevent. See `round_9_calibration_correction` in this block.) A re-run emits both keys directly."
+   },
+   "action": "unchanged: re-running the instrument regenerates this receipt; the population it measured is not present on the fixing host, and substituting a different one would be a different measurement.",
+   "round_9_calibration_correction": "Two entries in this ledger stated more, or less, than the artifact can support, found by the round-9 review. (1) `sessions_with_gt1_contains_point` is NOT 'unrecoverable' \u2014 it is derivable as 3 from `arms.writer.per_session[*].contains_points_all_kinds` (9 / 9 / 7); the text now says so. (2) The `instrument.note` / module-docstring claim that 'neither writer runs the entity-link pass' was UNSOUND for one of the two writers it names: the eval ingest lane has a V2 leg (`tools/longmem_eval/ingest_v2.py`) that DOES write `aboutObject` by its own parity route (#2165 / E7-D7, gated on `about_entities`); V1 (`tools/longmem_eval/ingest.py`) writes none. So the census's 0 also measures the ABSENCE OF v2 EXTRACTION OUTPUT in these 60 graphs \u2014 a fact about the population, not a property of 'the eval lane'. No NUMBER is changed by either correction: both are statements about what the numbers MEAN. (3) Two queries this artifact does not carry, because round 9 added them: `sessions_with_gt1_aboutObject_object` (the distinct-target reading beside `sessions_with_gt1_aboutObject_edge`) and `aboutObject_duplicate_pairs` (the double-wire count on the Session->aboutObject side, the `Content`-guard `contains_duplicate_pairs` already provides on CONTAINS). \u26d4 The published 0 for `sessions_with_gt1_aboutObject_edge` is the OBJECT reading, NOT the edge reading, and this artifact's own `queries` block proves it: all three arms record that key's Cypher as `WITH s, count(DISTINCT o) AS c WHERE c > 1` \u2014 `count(DISTINCT o)` collapses a double-wired Session->Object to 1. (An earlier revision of this sentence said the opposite, which read as 'the #12244 double-wire question was measured and answered 0'. It was not: the EDGE reading `count(r)`, and the duplicate-pair count, were never taken on this population. An artifact of record that reports false comfort about a write-bug class is precisely what this ledger exists to prevent \u2014 see `cycle_8_ledger_correction`.) So Session->aboutObject edge multiplicity is UNANSWERED by this artifact, and a re-run emits all three keys.",
+   "cycle_6_calibration_correction": "Two label corrections, applied after this run, with NO number changed. (1) `event_session_ids_distinct` was named for the whole Event population but its Cypher filtered to events carrying an `aboutObject` edge \u2014 which is why it published 1042 beside `events_total` 10526. The value 1042 is the ATTACHED reading and is now carried under `event_attached_session_ids_distinct`, the name that says so; the unfiltered `event_session_ids_distinct` is absent from this artifact (it was never measured here) and a re-run publishes both. (2) `arms.live.role_evidence.note` asserted a hardcoded \u201860 sibling graphs\u2019 \u2014 a measurement claim about a DIFFERENT arm, in an artifact produced by `--arms live`, which does not run that arm. The literal is gone; the block now points at the arm that counts them and says which number it does publish. This is the same asserted-vs-measured class as the `~/.zshrc:48` literal in the field directly above it.",
+   "cycle_8_ledger_correction": "This ledger contains sentences ABOUT the artifact, and a cycle-8 review found one that stated the opposite of the artifact's own `queries` block: the note for `sessions_with_gt1_aboutObject_edge` claimed the published 0 was the EDGE reading, while the recorded Cypher for that key on all three arms is `count(DISTINCT o)` \u2014 the OBJECT reading. The sentence is corrected in place and the edge reading is stated as UNANSWERED. No number changes; this is a claim about what a number means. The general lesson, since nothing pinned it: a ledger sentence that describes a QUERY must agree with the `queries` block beside it, and the test suite now DERIVES that agreement for this key instead of trusting the prose.",
+   "cycle_9_note_correction": "The `instrument.note` was re-derived after a cycle-9 review found it ASSERTING A NUMBER IT HAD NOT READ: the generator took only the kind breakdown and then said `0 aboutObject` unconditionally, while the arm computes `aboutObject_edges` and `turns_with_aboutObject` two lines above and publishes them in the SAME body. On this population both are 0, so no sentence here is now wrong \u2014 but on a population where the edge IS present (the very answer the #4211 gate exists to detect) the artifact would have said 42 in `totals` and 0 in its own note. The generator now takes the totals and branches on the MEASURED count; the two other branches say that the edge is present, or that only `event` targets were measured (rather than citing a `session-transcript` writer with no measured output as proof of a second writer). No number in this artifact changes."
+  },
+  "round_11_key_and_ledger_correction": {
+   "why": "A cycle-11 fresh-context review found that `8f7e1b508b` renamed a COUNT key (`event_session_ids_distinct` -> `event_attached_session_ids_distinct`, when the unfiltered reading became its own query) without renaming the same arm's `queries` entry \u2014 so all three arms published a count with NO recorded query, and kept the ATTACHED Cypher under the name the ledger says is absent. A reader re-deriving from `queries` (the discipline `cycle_8_ledger_correction` installs) concluded the unfiltered read ran here.",
+   "fix": "The `queries` entry is re-keyed to `event_attached_session_ids_distinct` in every arm \u2014 the Cypher it stores IS the attached one, so the value and the query now sit under one name. No measured NUMBER is touched and no Cypher text is edited. Also removed from `round_7_census_and_gate.not_in_this_receipt.sessions_with_gt1_contains_point` a clause pasted TWICE (an edit artefact: the same sentence ran twice before its own continuation), and a pin now requires every published `counts` key to carry a `queries` entry in the same arm, so this cannot recur silently. \u26d4 AND THE SECOND HALF, found by the cycle-12 review of this very correction: `arms.writer.counts_before_any_write` still published the same value under the OLD name, so the writer arm's BEFORE block kept a number with no recorded query and a value under the name the ledger says is absent \u2014 the recurrence the first pass had missed because the pin read only `counts`. Re-keyed there too (value 0, untouched), and the pin now checks `counts_before_any_write` in every arm that publishes it."
+  },
+  "round_10_review": {
+   "why": "A fresh-context review at f367b1b9 found five defects in this artifact and in the pins that hold it (findings 1-5). None is retro-applied: a measured artifact records what the instrument that produced it computed. Two of them are about whether a number in this file can be re-derived at all, and two change the MEANING of a published key.",
+   "not_in_this_receipt": {
+    "arms.instrument.queries": "the census arm published NO Cypher: its eight statements were inline strings in measure_instrument() while store/writer/live each carried `queries`. So the arm this artifact's headline rests on ('0 aboutObject in 60 of 173', 37,605 CONTAINS) was the one arm whose queries existed nowhere in the file, and not one of its numbers could be re-derived from the artifact. The statements are now a module constant (INSTRUMENT_QUERIES) that the arm RUNS from, and it publishes that dict as `arms.instrument.queries`; a re-run carries it.",
+    "arms.instrument.per_graph[*].contains_targets_by_kind (SHAPE)": "this arm's breakdown was `RETURN p.pointKind, count(*)` - TWO columns - published under the SAME key name as QUERIES['contains_targets_by_kind'], which answers THREE (pointKind, episodic, n). One name with two shapes inside one artifact: here `per_graph[0].contains_targets_by_kind` is [['event', 616], ['session-transcript', 311]] while `arms.store.counts.contains_targets_by_kind` is [['event', true, 22], ...]. The census now runs the SAME three-column query, so the shapes agree; the rows in THIS receipt are the two-column reading they were measured with, and a re-run emits three.",
+    "objects_reaching_gt1_event (MEANING)": "the Cypher bound no relationship: `MATCH (:Event)-[:aboutObject]->(o:Object) WITH o, count(*) AS c`. FalkorDB documents that a relationship not referenced elsewhere in the query is 'only verified to exist rather than operating on every matching relation' (docs.falkordb.com/cypher/known-limitations, 'Relationship uniqueness in patterns'), so parallel Event->Object edges collapse before count(*) sees them. This receipt's store-arm 211 is therefore either 'objects reached by >1 Event' or 'objects with >1 Edge', and nothing here distinguishes the two. The query now binds the event and counts it DISTINCT, and `objects_with_gt1_event_edge` (count(r)) publishes the edge reading beside it; a re-run emits both keys, and the store arm's 211 must be re-read as the OBJECT reading only.",
+    "session_turn_count_sum (MEANING)": "the value is a sum of WINDOW LENGTHS, not of turns. tortoise/sdk.py:4143 writes `turn_count = len(turns)` on every session MERGE and sdk.py:4149 says so verbatim - '`turn_count` is a WINDOW LENGTH (`len(turns)`), not a max id index' - and each append at turn_offset > 0 overwrites it. So the store arm's 17,934 describes the windows the LAST write of each of its 1,538 Sessions saw; it is NOT comparable to `turns_total` (27) and must not be read as that population's turn count. The legacy-population verdict rests on `session_signature` (1,537 of 1,538 Sessions carry only {id, created_at, turn_count}), which is what the PR body argues from; the sum is published beside it, not as its evidence. The QUERIES entry now says all of this where a reader of the tool will see it.",
+    "store arm temp-dir leak": "mkdtemp() + copy2() + the copy's identity ran BEFORE the try whose finally removes the directory, so a copy failure (ENOSPC, EACCES, a directory as source) skipped the cleanup and leaked a full copy of the user's embedded store per failed run. Fixed by moving them inside the try; no number moves."
+   },
+   "pins": "each fix carries a pin in tests/test_measure_4211_session_hierarchy.py that reds when it is reverted (each mutant was RUN, not asserted): deleting `arms.instrument.queries` reds two pins; replacing a census statement with a sentinel proves the arm executes what it publishes; no census statement may share a name with a QUERIES key whose text differs; the census breakdown must carry the episodic column and the aggregation must consume three-column rows; `objects_reaching_gt1_event` must bind and count the event DISTINCT with the edge reading beside it; the store arm must clean its temp directory when the copy raises; `counts_before_any_write` and `delta_this_run` must be re-derivable from the arm's own published numbers; and the `session_turn_count_sum` exemption must cite the SDK's own window-length wording.",
+   "action": "unchanged: re-running the instrument regenerates this receipt; the population it measured is not present on the fixing host, and substituting a different one would be a different measurement."
+  },
+  "round_14_review": {
+   "why": "A fresh-context review at a302af1b found eight further defects: two P2 and six P3. None is retro-applied. One of them changes what the tool RUNS, so the recorded Cypher in this file is no longer the Cypher at HEAD for the key named below; the rest are pins, the exit contract, and three receipt-shape disclosures that follow.",
+   "not_in_this_receipt": {
+    "queries text for the keys the turn-filter and multiplicity fixes touched": "`turns_per_session_contains_max_avg`, `contains_distinct_pairs`, `objects_with_gt1_turn`, `objects_reaching_gt1_event`, `sessions_with_gt1_contains_turn`, `sessions_with_gt1_entity_linked_turn` and `sessions_with_gt1_aboutObject_edge` are recorded with the pre-fix text in every arm. Each is already named elsewhere in this ledger (values_a_rerun_on_this_population_would_change, round_10_review), and the pin test_r14_the_recorded_cypher_is_the_query_this_tool_still_runs accepts a mismatch ONLY for a key the ledger names - so a silent drift in one of these is still red.",
+    "instrument.arms_requested / instrument.arms_not_requested": "emitted by the tool at HEAD, absent here: this run predates them. The consequence is the one the PR body warns a reader about, and it is about this file's own argv - see the next row.",
+    "instrument.argv is NOT a reproduction command": "`--out` only, no `--arms`. When this run was taken the writer arm was IN DEFAULT_ARMS; the defaults are now the READ-ONLY set, so a reader who copies instrument.argv verbatim gets the SHRUNKEN measurement (writer arm absent) rather than this one. The reproduction command is the one in the PR body: name `--arms store,writer,live,instrument,corpus` explicitly."
+   },
+   "keyed_query_changes": {
+    "queries.turns_per_session_contains_max_avg": "recorded without the turn filter; the tool at HEAD filters with WHERE {TURN}",
+    "queries.contains_distinct_pairs": "recorded before the multiplicity guard; the tool counts bound edges",
+    "queries.objects_with_gt1_turn": "recorded before the turn discriminator was applied",
+    "queries.objects_reaching_gt1_event": "recorded as an unreferenced count(*); the tool binds e and counts DISTINCT e",
+    "queries.sessions_with_gt1_contains_turn": "recorded before the turn discriminator was applied",
+    "queries.sessions_with_gt1_entity_linked_turn": "recorded before the turn discriminator was applied",
+    "queries.sessions_with_gt1_aboutObject_edge": "recorded as count(DISTINCT o) (the OBJECT reading); the tool binds r and counts r",
+    "per_session_queries.session_aboutObject_edges": "the per-session edge key was `MATCH (:Session {id:$sid})-[:aboutObject]->(:Object) RETURN count(*)` - an UNBOUND relationship, which FalkorDB documents is 'only verified to exist rather than operating on every matching relation', so parallel Session->Object edges COLLAPSE before the count. A Session double-wired to one Object therefore read 1, which is the #12244 class its sibling sessions_with_gt1_aboutObject_edge exists to expose. The key is named `*_edges`, so it now binds the relationship and returns count(r). The published per_session values are unchanged on THIS population (1/0/1 against aboutObject_by_endpoint Session->2 objects over 2 sessions), because no Session here is double-wired; a re-run carries the corrected Cypher and would report it if one were."
+   }
+  },
+  "round_20_review": {
+   "why": "The `writer` arm — the arm whose capture produced this receipt's `writer` numbers — called a RETIRED SDK method. `measure_writer` minted its fixture Object with `sdk.create_object('test/repo#42', objectKind='pm:issue')`, and `create_object` was privatised to `_create_object` by the #12901 sweep that landed on `main` while this branch was open. The SDK's `__getattr__` RAISES with the migration hint instead of forwarding (`TortoiseSDK.create_object was retired (#4282) — use TortoiseSDK.create_entity instead`), so at HEAD that line was an AttributeError BEFORE any arm ran: a reader following this file's own re-run recipe would have got the retirement shim, and `--out` would never be written. Disclosed because the tool at HEAD still differs from the revision that measured this file (instrument.sha256) — this is the artifact's rule, not a formality.",
+   "fix": "Landed at 21ae734ce3: the call site and the ARMS docstring now name the live spelling (`sdk._create_object(`, the same implementation — `tortoise/sdk.py:57766` is `create_object`'s post-sweep name), and the ten `_FakeSDK` doubles in the pin test follow, because a double that answers a different name than the caller uses is not a double — they had spelled `create_object` themselves, which is why 100 tests stayed green over an arm that could not run. NO query text, threshold, denominator or published number moves: the two spellings are one function. This lane added the closing of that hole: `test_r20_the_writer_arm_calls_only_sdk_names_the_real_class_still_defines` reads `class TortoiseSDK`'s own body out of `tortoise/sdk.py` as SOURCE and asserts the arm's `sdk.<name>` call sites against it in BOTH directions, which no fake can satisfy (measured on the pre-fix spelling: `1 failed`).",
+   "not_in_this_receipt": {
+    "the SDK method name the writer arm calls": "this file records the numbers the arm produced, not the call that produced them. The call site is now held by `test_r20_…` above, which reds if the arm names a method the class body does not define — including a freshly retired one, since the SDK's retirement shim lives in `__getattr__` and never enters the class body.",
+    "tools/sdk_privatise.py's typed-reference count": "0 at this head, measured (`--check` exit 0). It was 5 on the merged tree before 21ae734ce3: this arm's one `create_object`, plus four `sdk.ingest_corpus(...)` calls in `tests/test_13826_write_gate.py` that are `main`'s own red (#13899 retired that name too, `origin/main` carried the same four). That file was not this PR's diff when the residue was measured — `21ae734ce3` put it into the diff for these four lines and no others, so the direction of the claim is: they were `main`'s residue (the same commit files them as `main`'s red), and the fix is what absorbs them; both are gone at HEAD, and the residue pin is measured on BOTH trees rather than carried forward: `origin/main` `6fbd96f270` on its own tree = (11804, `e0c67cf6a5e97d20`), the tree this receipt ships on = (11822, `05e0ff542dfb8e62`) — the +18 are this PR's two census files, and the base's rows are `main`'s (see `round_21_review`)."
+   }
+  },
+  "round_21_review": {
+   "why": "The pin this file's OWN text quoted was stale the moment the merge of `origin/main` `6fbd96f270` re-cut it, and nothing could see that: `round_20_review` named (11802, `9e7cfa678c4d1126`), the PRE-MERGE branch head's pin, while the merged tree measures (11822, `05e0ff542dfb8e62`). The pin's value is held by `tools/sdk_privatise.py` and checked by its `--check`; this receipt's pin asserts only the revision's SHAPE and key set, so the suite stayed green over a provenance sentence that contradicted the tree it ships on — the third stale-provenance clause in this PR ('a stale artifact must be distinguishable from a reproduced one'). Disclosed as a round because the correction is post-run prose: an in-place edit is invisible to the shape pin by design, so the record has to say it happened.",
+   "fix": "`round_20_review`'s row now quotes the measured pair for both trees (11804 on `origin/main`, 11822 here) instead of a pin carried forward. No measured number, query, threshold or denominator moves — the residue pin counts UNTYPED receiver spellings on the tree, not anything this receipt's arms measured. `python3 tools/sdk_privatise.py --check` on the merged tree: `typed references still pointing at a public name: 0`, `untyped receivers left alone: 11822`, exit 0.",
+   "not_in_this_receipt": {
+    "arms.writer.per_session[*].shared_points": "a MID-RUN reading, not an end-state. `m4211-ref-2of8`'s row publishes `shared_points: 0`, and the artifact's own counts refute it: `contains_points_all_kinds` 9+9+7 = 25 slots against `points_total` 23, and `contains_edges` 25 = `contains_distinct_pairs` 25, so the 3 `statement` slots are ONE claim Point CONTAINS-wired into all three sessions — every session's END-STATE `shared_points` is 1, as rows `m4211-noref` and `m4211-ref-6of6` already read. `m4211-ref-2of8` was measured inside the capture loop, before the later sessions existed, and this receipt was measured before the R9 fix (`test_r9_per_session_is_END_STATE_not_a_mid_run_snapshot`) moved the per-session reads AFTER all captures. ⛔ So a re-run does NOT reproduce this row: the tool at HEAD emits 1/1/1. Published beside the defect rather than rewritten, because the value is a reading the instrument really took — the same rule `values_a_rerun_on_this_population_would_change` applies to the other known-wrong numbers."
+   }
+  }
+ },
+ "warnings": []
+}

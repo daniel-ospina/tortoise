@@ -743,6 +743,7 @@ _EXPECTED_TOOL_SITES = {
     "apps/graph-viz/server/main.py": 1,          # the viz boot client (bound via its builder)
     "graph-scripts/audit_graph.py": 1,           # the shallow audit's shared client
     "graph-scripts/audit_graph_deep.py": 1,      # the deep audit's shared client
+    "graph-scripts/business_map_13880/file_map.py": 1,  # #13953: the fill-in's read-back `redis.from_url` (#13913 landed it unbounded, and this row was missed with it — the guard found the offender while the inventory stayed green on absence). Bound with `**_bounded_server_socket_kwargs()`, the same resolver the sibling graph-scripts take.
     "graph-scripts/context_removal_audit.py": 1,  # pre-existing 5s/120s literals
     "graph-scripts/merge_endometriosis.py": 1,   # the one-off data merge
     "graph-scripts/parity_sample.py": 1,         # pre-existing 5s/120s literals
@@ -757,6 +758,7 @@ _EXPECTED_TOOL_SITES = {
     "tools/embedding_residual_scan.py": 1,      # #11642's read-only dense-leg scan (bound: `**_bounded_server_socket_kwargs()`)
     "tools/graph_write_repair.py": 2,            # per-DB scan client + the repair client
     "tools/longmem_eval/server_posture.py": 1,   # pre-existing, already resolver-bound
+    "tools/measure_4211_session_hierarchy.py": 2,  # #4211's census instrument: the READ-ONLY embedded copy (`_open_embedded`) and the live handle (`_open_live`). Both were constructed with NO read bound when the tool landed — 0% CPU in `recv()` against a stalled engine, on a tool whose whole contract is "measure and change nothing" — which is the two-site offence this inventory exists to make visible. ⛔ The two sites take DIFFERENT resolvers, and that is deliberate, not an oversight: `_open_live` (host lane) splats `**_bounded_server_socket_kwargs()` INLINE, while `_open_embedded` (unix-socket lane) passes `socket_timeout=` from `_socket_timeouts()` because redis-py DROPS `socket_connect_timeout` on that branch — the server pair there would wire a connect bound that does not exist (see that helper's own "NOT for the embedded (unix-socket) lane" clause, and `projection`'s embedded branch, which uses the same two helpers this site uses).
     "tools/ram_window_census.py": 2,            # #13084's INFO/DUMP handle + the RESTORE probe's client (both `**_bounded_server_socket_kwargs()`)
     "tools/text_gate_13099.py": 2,              # #13107's seed client + the arms' measurement client (both `**_bounded_server_socket_kwargs()`)
     "tools/vector_parity_13906.py": 1,          # #13906's read-only graph leg (`GraphStore`), bound: `**_bounded_server_socket_kwargs()` on the `FalkorDB(...)` construction — without this row the inventory assert reds on the very file the bound was added to (#8118's "a new raw client must be listed here (and carry a bound)")
