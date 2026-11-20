@@ -1587,6 +1587,24 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         r'^os\.environ\["TORTOISE_DB_URI"\] = old$',
         r'^os\.environ\.pop\("TORTOISE_DB_URI", None\)$',
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", f"\{uri\}_\{uuid\.uuid4\(\)\.hex\[:10\]\}"\)$'],
+    # ── test_13557_13558_reachable_reads.py — DELIBERATE_URI, one SET site ───
+    # `1231060fd2` (#13833) landed this module with its one mutation site
+    # untriaged, so this register is RED on `main` for it — the same class as
+    # #12631/#13290 above (each PR green against its review base, the tip
+    # carrying both). The site is the `sdk` fixture:
+    #     monkeypatch.setenv("TORTOISE_DB_URI", _uri())
+    # and it PINS the lane the module's own availability probe already found:
+    # `_uri()` prefers the ambient value, then `_WORKING_URI` (the first seam the
+    # probe got an answer from), then the docker seam. Both reads under test are
+    # live Cypher over a real store, so an embedded fake would certify nothing —
+    # the mutation is the lane PIN, not a silent downgrade. `monkeypatch` is the
+    # fixture param, so pytest auto-restores it and the sibling restoration guard
+    # is satisfied without any save/restore pair.
+    # ⛔ Anchored to the whole stripped line, like every row above: a future
+    # setenv of a DIFFERENT expression in this file is a different site and
+    # must be triaged rather than riding along on this arm (#11083).
+    "test_13557_13558_reachable_reads.py": [
+        r'^monkeypatch\.setenv\("TORTOISE_DB_URI", _uri\(\)\)$'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;
