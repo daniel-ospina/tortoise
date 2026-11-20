@@ -108,9 +108,21 @@ def _journal_rebuild_refusal(*, journal_is_complete: bool = False) -> str | None
         # turn a recovery tool into an error; the pre-#14002 behaviour stands.
         return None
     try:
-        if record_writer.record_dsn() is None:
-            return None
+        configured = record_writer.record_dsn() is not None
     except Exception:  # noqa: BLE001, RUF100 — a malformed DSN: see above
+        return None
+    if not configured:
+        # ⛔ AND THE SHELL IS NOT THE DEPLOYMENT (#14002 review cycle 4, P2).
+        # `record_dsn()` reads `os.environ` only, and `tortoise rebuild` loads no
+        # `.env` (the daemon does, via `mcp_server._load_dotenv`), so a
+        # FalkorDB-only rebuild run from an operator shell — which has no reason
+        # to export a record DSN — saw "no record" and wiped the graph from a
+        # frozen journal. So the DEPLOYMENT's own `.env` is read too, with the
+        # reader this repo already uses for exactly this (`doctor`), and either
+        # source naming a record is enough.
+        configured = _deployment_names_a_record()
+    if not configured:
+        # No record anywhere: the journal IS this deployment's rebuild source.
         return None
     if journal_is_complete:
         return None
@@ -125,6 +137,27 @@ def _journal_rebuild_refusal(*, journal_is_complete: bool = False) -> str | None
         "`--journal-is-complete`; otherwise restore the graph from the record's "
         "own backup, not from the journal"
     )
+
+
+def _deployment_names_a_record() -> bool:
+    """Does this DEPLOYMENT's `.env` name a record, even if the shell does not?
+
+    `record_dsn()` answers for the PROCESS environment; the daemon and the
+    reporting verbs load `.env` through `dotenv_file`, and a FalkorDB-only
+    maintenance command has no reason to. Reads the same file `doctor` reads, with
+    the same parser, and swallows its own failures: an unreadable `.env` answers
+    "not named here", which leaves the pre-#14002 behaviour rather than turning a
+    recovery tool into an exception.
+    """
+    try:
+        from tortoise import dotenv_file
+
+        values = dotenv_file.parse_dotenv(dotenv_file.dotenv_path())
+    except Exception:  # noqa: BLE001, RUF100 — see the docstring
+        return False
+    from tortoise import record_writer
+
+    return bool(values.get(record_writer.RECORD_DSN_ENV))
 
 
 def _cmd_rebuild(args):

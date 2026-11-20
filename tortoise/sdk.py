@@ -16244,9 +16244,17 @@ class TortoiseSDK:
                 # request RESOLVED, so it is passed by value rather than left to
                 # the chokepoint's ambient resolution: a chokepoint that resolved
                 # scope/env while this SDK carried a different pair would skip the
-                # append on one graph and allocate on another. The tenant still
-                # reaches the seam through `_write_record_projection` (same
-                # attribute, same value), so there is one answer on both halves.
+                # append on one graph and allocate on another.
+                # ⚠️ AND "SAME VALUE" IS A PROPERTY OF THIS SDK'S LIFETIME, NOT
+                # OF THE CODE (#14002 review cycle 4, P3):
+                # `_write_record_projection` reads `self._record_tenant` AGAIN,
+                # after the append, so the two reads agree only because a hosted
+                # data path builds a fresh SDK per request —
+                # `_bind_record_tenant`'s own docstring names the cached-SDK
+                # shape that would break it. A shared SDK that re-binds
+                # mid-write could skip the append on one graph and allocate on
+                # another; the fix then is to capture the pair once and hand the
+                # SAME value to both halves, not to lean on the attribute.
                 event, log=log, fold=False,
                 tenant=self._record_tenant,
                 record_sink=record_sink,

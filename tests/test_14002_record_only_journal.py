@@ -364,6 +364,44 @@ def test_a_raise_on_the_record_only_arm_does_not_claim_a_position(
     assert result.appended is False
 
 
+def test_the_real_helper_forwards_the_tenant_and_durable_and_the_DECISION(
+        monkeypatch):
+    """⛔ THE REAL HELPER, NOT A MONKEYPATCH (#14002 review cycle 4, P2).
+
+    Every other chokepoint leg replaces `live_write._record_owns_position`, so
+    nothing measured that the helper (i) reaches the record's own predicate,
+    (ii) forwards THIS write's `tenant`/`durable`, and (iii) passes its ANSWER on
+    instead of a constant. That gap is why a mutant which keeps the call and
+    returns False left the whole DB-free suite green. This leg patches the REAL
+    `record_writer.record_owns_position` — the seam's predicate, one layer in —
+    and drives `live_write.write` through the real helper.
+    """
+    from tortoise import record_writer
+
+    asked: list = []
+
+    def predicate(*, tenant=None, durable=True):
+        asked.append((tenant, durable))
+        return True
+
+    monkeypatch.setattr(record_writer, "record_owns_position", predicate)
+    monkeypatch.delenv(record_writer.RECORD_ALLOCATE_ENV, raising=False)
+    log, seen = _Log(), []
+
+    result = live_write.write({"type": "PointAdded"}, log=log,
+                              tenant=("org-z", "graph-z"), durable=True,
+                              project=_project(seen=seen))
+
+    assert asked == [(("org-z", "graph-z"), True)], (
+        f"the real helper did not ask the record with this write's own "
+        f"tenant/durable: {asked}")
+    assert log.appended == [], (
+        "the helper answered True and the chokepoint appended anyway — the "
+        "helper's ANSWER is not reaching the decision")
+    assert result.appended is False
+    assert seen and seen[0]["journal_skipped"] is True
+
+
 def test_the_import_failure_arm_appends(monkeypatch):
     """`live_write._record_owns_position` never raises — a broken record module
     must not stop a write that has not happened yet."""
@@ -723,14 +761,31 @@ def test_a_rebuild_is_refused_where_the_record_owns_the_ordinal(monkeypatch,
     DSN ⇒ refuse, with an explicit `--journal-is-complete` as the escape. Too
     broad refuses a rebuild that would have been fine; too narrow destroys work.
     """
-    from tortoise.__main__ import _journal_rebuild_refusal
+    from tortoise import __main__ as cli
 
-    # No record configured at all: the journal IS the rebuild source.
+    # No record configured at all — in the ENV *or* the deployment's `.env`:
+    # the journal IS the rebuild source. Both sources are neutralised here
+    # because this checkout's `.env` names a record (the dev box is armed), and
+    # the point of the leg is the "no record anywhere" arm.
     monkeypatch.delenv(rw.RECORD_DSN_ENV, raising=False)
     monkeypatch.delenv(rw.RECORD_ALLOCATE_ENV, raising=False)
-    assert _journal_rebuild_refusal() is None, (
+    monkeypatch.setattr(cli, "_deployment_names_a_record", lambda: False)
+    assert cli._journal_rebuild_refusal() is None, (
         "a deployment with NO record refused a journal rebuild — the journal is "
         "the rebuild source there")
+
+    # ⛔ AND THE DEPLOYMENT'S `.env` COUNTS (#14002 review cycle 4, P2):
+    # `record_dsn()` reads only `os.environ` and `tortoise rebuild` loads no
+    # `.env`, so a FalkorDB-only maintenance command run from an operator shell
+    # saw "no record" and wiped the graph from a frozen journal. Either source
+    # naming a record is enough to refuse.
+    monkeypatch.setattr(cli, "_deployment_names_a_record", lambda: True)
+    assert cli._journal_rebuild_refusal() is not None, (
+        "a deployment whose `.env` names a record allowed a journal rebuild from "
+        "a shell that does not export the DSN — the fail-open an operator's shell "
+        "takes")
+    monkeypatch.setattr(cli, "_deployment_names_a_record", lambda: False)
+    _journal_rebuild_refusal = cli._journal_rebuild_refusal
 
     monkeypatch.setenv(rw.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
 
@@ -808,6 +863,16 @@ _MUTATIONS = {
     "decision-not-forwarded-to-the-seam": (
         "outcome = project(event, seq, journal_skipped=journal_skipped)",
         "outcome = project(event, seq, journal_skipped=False)"),
+    # ⛔ THE CYCLE-4 MUTANT: the call is KEPT and the ANSWER is discarded. This
+    # passed every claim of the gate ("it reaches the record") and every DB-free
+    # leg (they monkeypatch the helper), so the whole fix could be disabled with
+    # `record wiring — WIRED` and a green suite.
+    "helper-calls-the-record-and-ignores-it": (
+        "        return record_writer.record_owns_position(\n"
+        "            tenant=tenant, durable=durable)",
+        "        record_writer.record_owns_position(\n"
+        "            tenant=tenant, durable=durable)\n"
+        "        return False"),
 }
 
 

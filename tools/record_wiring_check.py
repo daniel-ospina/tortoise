@@ -1199,21 +1199,32 @@ def the_chokepoint_skips_the_append(module_path: Path | None = None) -> list[str
             "`position_divergence` wedge returns under concurrent writers "
             "(#14002)")
 
-    # ── fact 2: the helper is not a constant ─────────────────────────────────
+    # ── fact 2: the helper ANSWERS FROM the record, and RETURNS it ──────────
+    # ⛔ CALLING IS NOT RETURNING (#14002 review cycle 4, P2). This fact used to
+    # accept any helper whose body reached a `*record_owns_position` call, so
+    # `record_owns_position(...)` followed by `return False` — the whole fix
+    # disabled — satisfied it, and no DB-free leg drove the real helper either
+    # (every chokepoint leg monkeypatches it), so the suite stayed green. The
+    # returned EXPRESSION must now contain the call, which is the shape a
+    # "plant the call, answer a constant" edit cannot fake.
     helpers = {name for name in functions if name.endswith("record_owns_position")}
     if helpers:
         for helper in helpers:
-            reaches = any(
-                (_call_name(call) or "").endswith("record_owns_position")
-                for scope, call in _calls_by_scope(tree)
-                if scope is functions[helper])
-            if not reaches:
+            node = functions[helper]
+            returns = [child for child in ast.walk(node)
+                       if isinstance(child, ast.Return) and child.value is not None]
+            answers = [ret for ret in returns
+                       if any((_call_name(call) or "").endswith(
+                                  "record_owns_position")
+                              for call in ast.walk(ret.value)
+                              if isinstance(call, ast.Call))]
+            if not answers:
                 problems.append(
-                    f"{rel}: `{helper}` never calls the record's own "
-                    "`record_owns_position` — a helper that answers a constant "
-                    "skips the append for every graph, including one whose "
-                    "allocation then refuses, so the write lands in NEITHER "
-                    "store (#14002)")
+                    f"{rel}: `{helper}` never RETURNS the record's own "
+                    "`record_owns_position(…)` answer — a helper that calls it "
+                    "and answers a constant (or a bare `return False`) skips the "
+                    "append for every graph, or appends on every graph, while "
+                    "this gate and every DB-free leg stay green (#14002)")
 
     # ── fact 3: the append is behind the decision ────────────────────────────
     for call, tests in _calls_with_enclosing_tests(door):
