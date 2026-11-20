@@ -2958,8 +2958,9 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
             "is stale and must say so (#13853 review round 19)")
     # ⛔ AND THE WINDOW IS A CONTROL TOO, not just a number in the pattern: round 20 measured that
     # narrowing `{0,400}` back to `{0,200}` left every other control green, so the 200-char escape
-    # round 19 fixed could have been re-opened silently. This probe puts ~210 chars between the
-    # noun and the copula; it must still be caught.
+    # round 19 fixed could have been re-opened silently. This probe puts ~240 characters after the
+    # noun (the assert bounds the COPULA'S INDEX from the string start, not the gap itself, so it
+    # stays meaningful if the prefix is edited); it must still be caught.
     wide_gap = "… whose first non-space character" + " and more words here" * 12 + " is `#` …"
     assert 200 < wide_gap.index(" is `#`") < 400, (
         f"the wide-gap probe stopped separating the 400-char window from the 200-char one "
@@ -2982,7 +2983,7 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
     # the injection loop green while that description could be re-inserted into the document
     # uncaught — the measured bypass #13807 review finding 5 recorded for the membership
     # ledger, closed here the same way: pin the rows, never the count.
-    assert (
+    assert _FILTER_FALSE_DESCRIPTIONS == (
         "drops only lines whose first non-space character is `#`",
         "drops exactly the lines whose first non-space character is `#`",
         "a CODE line and a DOCSTRING line both survive it and would print",
@@ -2990,7 +2991,7 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
         "rules both out",
         "an empty result therefore means no changed `tortoise/` line is anything but a `#` "
         "comment",
-    ) == _FILTER_FALSE_DESCRIPTIONS, (
+    ), (
         "the `#`-filter description ledger changed. These are the exact spellings that were "
         "recorded as FALSE at a head and survived every arm, so a row that is edited, "
         "however slightly, is a ban the document can be re-inserted past. Retiring a NEW "
@@ -3012,9 +3013,11 @@ def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have
     patterns = _document_filter_patterns(bundle)
     assert len(patterns) == 1, (
         "05-verify.md states the `#`-only filter's two grep stages more than one way, or no "
-        f"longer states them as one `grep -E … | grep -vE …` pipeline: {patterns!r}. One "
-        "pipeline, stated once, is what lets this arm run the document's own patterns; two "
-        "spellings would let one of them rot unseen (#13853 review round 17, P2-1)")
+        f"longer states them as one `grep -E … | grep -vE …` pipeline: {patterns!r}. ONE "
+        "DISTINCT PAIR — the document states this pipeline three times (`:102` twice, `:147` "
+        "once) and they are deduplicated here — is what lets this arm run the document's own "
+        "patterns; two DISTINCT spellings would let one of them rot unseen (#13853 review "
+        "round 17 P2-1; round 21 NIT)")
     include, exclude = patterns[0]
     docstring_line = "+        #11702 — an ABSENT belief contributes NO term.\n"
     code_line = "+        subject_binding = resolve_subject()\n"
@@ -3095,10 +3098,10 @@ def test_the_D5_row_types_no_verdict_about_the_head_being_merged():
 
     # CONTENT, not size: the tuple is pinned WHOLE, so a row that is edited (or deleted) cannot
     # leave the ban inert while the injection loop below still passes.
-    assert (
+    assert _D5_HEAD_BOUND_VERDICTS == (
         "does NOT hold for this head",
         "the FIRST of them prints a path",
-    ) == _D5_HEAD_BOUND_VERDICTS, (
+    ), (
         "the per-head-verdict ledger changed. These are the exact sentences #13853's re-cut "
         "merge restored and the tree refuted; retiring a NEW spelling means adding it, never "
         "re-wording one (#13853 review round 17, P1)")
