@@ -6859,7 +6859,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # true for any end at or beyond `:15385` (both needles are the file's only occurrences —
     # `:15375` and `:15385` — so a later end cannot change the sum). Ends below `:15385` fail
     # for two DIFFERENT reasons, and conflating them is how a mechanism claim goes false: an
-    # end in `:15346`-`:15385` gives a non-empty window that lacks at least the second needle,
+    # end in `:15346`-`:15384` gives a non-empty window that lacks at least the second needle,
     # and an end below `:15346` gives an EMPTY window. The end is therefore pinned by the
     # structural assertion at `_i7_end_ok` — the stated last line must still be the blank
     # line immediately before `return OrgInfoResponse(`.

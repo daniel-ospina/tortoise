@@ -91,11 +91,13 @@ def _isolated(monkeypatch, tmp_path):
     # (`tortoise/config.py:31`), so the `setenv("HOME", …)` above is too late. The
     # constant itself is what must be pinned — the same pattern this file already
     # uses at its two relative-path arms (`monkeypatch.setattr(config,
-    # "DEFAULT_DB_PATH", …)`). The pinned path deliberately does not exist:
-    # #2204's dir guard keeps the open from dying on the missing parent, and
-    # `_probe_embedded_busy` (`tortoise/sdk.py`) returns early because the
-    # `<db_path>.settings` registry is absent — so no store is graded, which is
-    # what makes these tests hermetic rather than "green on a quiet machine".
+    # "DEFAULT_DB_PATH", …)`). The pinned path deliberately does not exist, and
+    # THAT is what makes these tests hermetic: `doctor`'s pre-init arm grades a
+    # MISSING target without opening it (`⚠️ … no Tortoise DB at …` — an expected
+    # first run under the #5815 verdict split), so no store is ever probed and the
+    # result does not depend on the machine being quiet. A separate guarantee, NOT
+    # the mechanism: were an open ever attempted, the absent `<db_path>.settings`
+    # registry means `_probe_embedded_busy` raises no `EmbeddedStoreBusyError`.
     import tortoise.config as _config
     monkeypatch.setattr(_config, "DEFAULT_DB_PATH",
                         str(tmp_path / "canonical" / "tortoise.db"))
