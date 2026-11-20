@@ -14,7 +14,7 @@ aboutObjects: "SEARCH-ARCHITECTURE.md §3, §6.1; #11642; #13220; #13610; #5004;
 # Dense-leg query parity — both stores, one corpus, four readers (#13906)
 
 **Instrument:** `tools/vector_parity_13906.py` · **Comparator pins:**
-`tests/test_vector_parity_13906.py` (79 DB-free tests) · **Artifacts, this
+`tests/test_vector_parity_13906.py` (80 DB-free tests) · **Artifacts, this
 directory:** `parity-run.json`, `poison-{id,order,recall,vector}.json`.
 
 The question this answers, in one sentence: **for the same tenant data and the
@@ -464,7 +464,7 @@ done
 ```
 
 DB-free comparator pins: `uv run python tools/test_lane.py run --
-tests/test_vector_parity_13906.py -q` → **79 passed**.
+tests/test_vector_parity_13906.py -q` → **80 passed**.
 
 ⚠️ The `--json-out` line above is the recipe that PRODUCED the committed
 artifacts, and it no longer re-produces them: at the shipped corpus size the
