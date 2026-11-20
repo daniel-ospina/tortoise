@@ -254,19 +254,105 @@ def test_a_refused_start_is_reported_and_does_not_block(monkeypatch):
                 monitoring._WorkerBacklogFull("starter backlog full"))
             return future
 
-    monkeypatch.setattr(monitoring, "_probe_starter", _RefusingStarter)
-
     probe = monitoring.HealthProbe(
         lambda: {"ok": True, "latency_ms": 1.0}, timeout=0.3)
+    monkeypatch.setattr(monitoring, "_probe_starter", _RefusingStarter)
+    # ⛔ APPLIED AFTER the pool is built and the probe constructed: the only
+    # thing that could pay this cost is the forbidden inline fallback, which is
+    # exactly what the elapsed-time assertion below names. (At 0.05 s the
+    # assertion could never fire for its own named failure — review finding.)
+    _slow_thread_start(monkeypatch, seconds=1.5)
 
     started = time.monotonic()
     result = asyncio.run(probe.run())
     elapsed = time.monotonic() - started
 
-    assert elapsed < 1.0, f"a refused start blocked for {elapsed:.2f}s"
+    assert elapsed < 0.5, (
+        f"a refused start blocked for {elapsed:.2f}s — an inline fallback "
+        "start() was attempted")
     assert result["ok"] is False, "a probe that never ran must not report ok"
+    assert "starter refused" in (result.get("error") or ""), (
+        f"the refusal is not declared: {result.get('error')!r}")
     assert probe.info()["in_flight"] is False, (
         "the coordinator still believes a probe it could not start is running")
+
+
+def test_a_start_that_fails_asynchronously_is_reconciled_and_can_recover(
+        monkeypatch):
+    """An ACCEPTED start that then raises must not wedge the coordinator.
+
+    ``can't start new thread`` (``RLIMIT_NPROC``/``EAGAIN``) is raised on the
+    STARTER thread, not inside ``begin()`` — the exact resource-exhaustion
+    regime this change exists for. Left unreconciled that reports
+    ``in_flight: true`` forever: the probe is never served, readiness fails
+    closed for the life of the process, and only a restart recovers.
+    """
+    _fresh_starter()
+
+    import concurrent.futures
+
+    accepted: list[concurrent.futures.Future] = []
+
+    class _AcceptThenFail:
+        def submit(self, fn):
+            future: concurrent.futures.Future = concurrent.futures.Future()
+            accepted.append(future)
+            return future
+
+    class _Healthy:
+        def submit(self, fn):
+            future: concurrent.futures.Future = concurrent.futures.Future()
+            try:
+                future.set_result(fn())
+            except BaseException as exc:  # pragma: no cover - start cannot raise
+                future.set_exception(exc)
+            return future
+
+    monkeypatch.setattr(monitoring, "_probe_starter", _AcceptThenFail)
+    probe = monitoring.HealthProbe(
+        lambda: {"ok": True, "latency_ms": 58.0}, timeout=2.0)
+
+    async def scenario() -> dict:
+        async def fail_the_start():
+            await asyncio.sleep(0.05)
+            accepted[0].set_exception(RuntimeError("can't start new thread"))
+
+        failing = asyncio.create_task(fail_the_start())
+        result = await probe.run()
+        await failing
+        return result
+
+    result = asyncio.run(scenario())
+    assert result["ok"] is False
+    assert "can't start new thread" in (result.get("error") or ""), (
+        f"the failure is not declared: {result.get('error')!r}")
+    info = probe.info()
+    assert info["in_flight"] is False, (
+        "a start that failed on the starter left the probe 'in flight' forever")
+    assert info["starting"] is False
+
+    # ⛔ And the coordinator RECOVERS: a later read starts a fresh generation.
+    monkeypatch.setattr(monitoring, "_probe_starter", _Healthy)
+    again = asyncio.run(probe.run())
+    assert again["ok"] is True, f"the coordinator never recovered: {again!r}"
+    assert probe.info()["start_error"] is None
+
+
+def test_the_starter_is_its_own_pool():
+    """The start must not queue behind the probe QUERY (#10893 design rule).
+
+    Sharing ``_PROBE_WORKER`` would make ``worker.start`` wait behind a stalled
+    ``probe_db`` socket read: probes would stop starting for the whole DB stall
+    and readiness would 503 by way of the query stall — the exact confusion the
+    design comment forbids. It would also silently no-op
+    ``reset_probe_starter()``.
+    """
+    _fresh_starter()
+    starter = monitoring._probe_starter()
+    assert starter is not monitoring._probe_worker()
+    assert any(t.name == monitoring.PROBE_STARTER_NAME
+               for t in starter._threads), (
+        "the starter pool's threads are not named for it")
 
 
 def test_an_abandoned_generation_does_not_clear_the_successors_start_bit():

@@ -5236,6 +5236,9 @@ PROBE_STARTER_NAME = "tortoise-probe-starter"
 #: is wedged, which the coordinator reports instead of blocking to hide.
 PROBE_STARTER_MAX_BACKLOG = 8
 
+_PROBE_STARTER_LOCK = threading.Lock()
+_PROBE_STARTER_CACHE: _SingleSlotWorker | None = None
+
 
 def _probe_starter() -> _SingleSlotWorker:
     """The process-wide starter that starts probe worker threads (#10893).
@@ -5245,20 +5248,59 @@ def _probe_starter() -> _SingleSlotWorker:
     at import time, so building the starter there costs nothing on a request
     path. See :func:`_start_probe_worker_off_caller` for why the start is
     deferred at all.
+
+    ⛔ THE CACHED FAST PATH IS PART OF THE FIX, not an optimisation.
+    ``daemon_worker`` holds ``_DAEMON_WORKERS_LOCK`` ACROSS its
+    ``_SingleSlotWorker`` construction — i.e. across up to 8 blocking
+    ``Thread.start()`` calls for the pools built with ``workers=8``. Those pools
+    are built from the loop (``run_control_plane_call``), so a ``begin()`` that
+    re-entered ``daemon_worker`` on every call would WAIT ON THAT LOCK and
+    re-acquire the very loop block this change removes (measured: 0.54 s of
+    ``begin()`` while a concurrent 8-worker build held it). So the hot path
+    touches no lock at all — one global read and an ``alive`` check — and the
+    registry is consulted only to (re)build.
+
+    ⚠️ RESIDUAL, stated rather than implied: a build path still pays its thread
+    starts on the caller. That happens at construction (import time for every
+    production coordinator), and again only if the pool must be rebuilt — after
+    :func:`reset_probe_starter`, or if the starter thread itself has died. It is
+    not reachable from a healthy request path.
     """
-    return daemon_worker(PROBE_STARTER_NAME, max_backlog=PROBE_STARTER_MAX_BACKLOG)
+    global _PROBE_STARTER_CACHE
+    starter = _PROBE_STARTER_CACHE
+    if starter is not None and starter.alive:
+        return starter
+    with _PROBE_STARTER_LOCK:
+        starter = _PROBE_STARTER_CACHE
+        if starter is None or not starter.alive:
+            starter = daemon_worker(PROBE_STARTER_NAME,
+                                    max_backlog=PROBE_STARTER_MAX_BACKLOG)
+            _PROBE_STARTER_CACHE = starter
+    return starter
 
 
 def reset_probe_starter() -> None:
     """Drop the starter so the next probe start rebuilds it (tests / ops).
 
     The old pool's threads are daemons and are abandoned, never joined — the
-    same escape-hatch contract as :func:`reset_daemon_worker`.
+    same escape-hatch contract as :func:`reset_daemon_worker`. The REPLACEMENT is
+    built HERE rather than on the next ``begin()``: this hatch exists to be
+    pulled during an incident, and leaving the rebuild to the loop would
+    reinstate the #10893 block at the worst moment. Callers that want a
+    quiesced pool drain it first (``_probe_starter().drain(timeout=…)``).
     """
-    reset_daemon_worker(PROBE_STARTER_NAME)
+    global _PROBE_STARTER_CACHE
+    with _PROBE_STARTER_LOCK:
+        reset_daemon_worker(PROBE_STARTER_NAME)
+        _PROBE_STARTER_CACHE = None
+    try:
+        _probe_starter()
+    except Exception:  # pragma: no cover - pool construction is local
+        logger.warning("#10893: probe starter could not be rebuilt",
+                       exc_info=True)
 
 
-def _start_probe_worker_off_caller(worker: threading.Thread) -> bool:
+def _start_probe_worker_off_caller(worker: threading.Thread):
     """Start ``worker`` WITHOUT making the CALLER wait for the new thread.
 
     ⛔ WHY THIS EXISTS (#10893, measured). CPython's ``Thread.start()`` ends
@@ -5267,7 +5309,9 @@ def _start_probe_worker_off_caller(worker: threading.Thread) -> bool:
     scheduled. On a CPU-saturated box that is hundreds of milliseconds (2x cpus
     spinning, n=30: **0.49 s p50, 1.09 s p95**), and it grows with exactly the
     load that makes a request late. On the production box the EVENT LOOP thread
-    was captured parked inside it for **7.4 s**::
+    was captured parked inside it for **7.4 s** (line numbers are PRE-FIX
+    coordinates, captured 2026-11-20 on the deployed build — the symbol is
+    authoritative, the number is a convenience)::
 
         hosted_api.py:8767 in health_ready
           monitoring.py:5477 in run          (HealthProbe.run)
@@ -5282,35 +5326,44 @@ def _start_probe_worker_off_caller(worker: threading.Thread) -> bool:
     are comfortably inside budget — accrues stage time it did not spend. The
     fix is not a wider budget: **starting a thread is not a request's work.**
 
-    Returns ``True`` when the start was handed off, ``False`` when the starter
-    refused it (its bounded backlog is full, i.e. the starter itself is wedged).
+    Returns the ``Future`` of the handed-off start (the caller keeps it so a
+    LATER failure can be observed — a start that is accepted and then raises in
+    the starter is not a refusal and must not wedge the coordinator), or
+    ``None`` when the starter refused it (its bounded backlog is full, i.e. the
+    starter itself is wedged).
+
     ⛔ A refusal NEVER falls back to an inline ``start()``: that would restore
     the very loop block this removes, in the one situation where the block is
     already unbounded. The caller reports "no probe running" instead, and the
     read fails closed / reports stale, which is the honest answer.
+
+    ⛔ NO LOCK OF THE PROBE'S IS TAKEN HERE, and none may be: a done-callback
+    that acquired ``HealthProbe._cv`` would invert the order the caller holds
+    (``_cv`` -> ``future._condition``, while the completing thread holds
+    ``future._condition`` -> would wait for ``_cv``) and deadlock a request.
+    That is why the failure is LOGGED here and RECONCILED by the coordinator on
+    its own thread (:meth:`HealthProbe._reconcile_start_locked`).
     """
     try:
         starter = _probe_starter()
-    except Exception:  # pragma: no cover - pool construction is local
-        logger.warning("#10893: probe starter unavailable — probe not started",
-                       exc_info=True)
-        return False
-    future = starter.submit(worker.start)
+        future = starter.submit(worker.start)
+    except Exception:
+        logger.warning("#10893: probe start could not be handed off — probe "
+                       "not started", exc_info=True)
+        return None
 
     def _report(f) -> None:
         if f.cancelled() or f.exception() is not None:
-            logger.warning(
-                "#10893: a probe worker could not be started (%r) — the probe "
-                "is reported as not running rather than blocking the caller",
-                f.exception())
+            # INFO, not WARNING: `snapshot()` calls `begin()` on EVERY
+            # unauthenticated `/health` read, so a warning here is a log
+            # amplifier exactly while the box is in trouble. The operator-visible
+            # signal is the coordinator's `start_error`, which is published by
+            # `info()` and by the read that could not be served.
+            logger.info("#10893: a probe worker could not be started: %r",
+                        f.exception())
 
     future.add_done_callback(_report)
-    # A refusal is synchronous (`_SingleSlotWorker.submit` returns an ALREADY
-    # failed future when its backlog is full). Distinguish it from a start that
-    # simply completed very fast: only the failed/cancelled future is a refusal.
-    if future.done() and (future.cancelled() or future.exception() is not None):
-        return False
-    return True
+    return future
 
 
 class HealthProbe:
@@ -5407,6 +5460,14 @@ class HealthProbe:
         #: that window would start a SECOND probe — the accumulation item 2 of
         #: this class's contract exists to prevent.
         self._starting = False
+        #: ``(seq, future)`` of the handed-off start, kept until it resolves so a
+        #: start the starter ACCEPTED and then FAILED (``can't start new
+        #: thread`` under RLIMIT_NPROC — the resource-exhaustion regime this
+        #: whole change is about) is reconciled instead of wedging the probe.
+        self._start_attempt: tuple[int, concurrent.futures.Future] | None = None
+        #: Why the last start failed, published instead of the misleading
+        #: "probe in flight" a wedged generation would otherwise report.
+        self._start_error: str | None = None
         self._seq = 0
         self._worker: threading.Thread | None = None
         self._result: dict | None = None
@@ -5448,11 +5509,64 @@ class HealthProbe:
                 return PROBE_STALE_AFTER
         return budget
 
+    def _reconcile_start_locked(self) -> None:
+        """Settle a handed-off start that will never produce a worker (#10893).
+
+        Called with ``self._cv`` held, from ``begin()`` and ``_view_locked()`` —
+        never from the start's own done-callback, which runs holding the
+        future's condition and would deadlock against this lock (see
+        :func:`_start_probe_worker_off_caller`).
+
+        Three outcomes for the recorded attempt:
+
+        * still in flight — leave the generation alone (it is legitimately
+          ``starting``);
+        * completed OK — drop the record; ``_run`` owns the state from there;
+        * FAILED or cancelled — clear ``_running``/``_starting``/``_worker`` so
+          the next ``begin()`` starts a fresh generation, and record why. Without
+          this a single transient thread-exhaustion left ``in_flight: true``
+          forever: ``/health`` degraded with "probe in flight", `/health/ready`
+          failing closed for the life of the process, and no way back but a
+          restart.
+        """
+        attempt = self._start_attempt
+        if attempt is None:
+            return
+        seq, future = attempt
+        if seq != self._seq:
+            # A superseded generation's attempt no longer speaks for this probe.
+            self._start_attempt = None
+            return
+        if not future.done():
+            return
+        self._start_attempt = None
+        if not future.cancelled() and future.exception() is None:
+            return                      # the start landed; `_run` takes over
+        exc = future.exception()
+        self._starting = False
+        self._running = False
+        self._worker = None
+        if future.cancelled():
+            self._start_error = "probe could not be started: cancelled"
+        elif isinstance(exc, _WorkerBacklogFull):
+            # A refusal and a start failure are different operator actions: the
+            # backlog is full when the STARTER is wedged (recover it), while
+            # "can't start new thread" is the box out of threads (recover the
+            # box). Say which.
+            self._start_error = (
+                "probe could not be started: the starter refused the request "
+                "(its bounded backlog is full — the starter is wedged)")
+        else:
+            self._start_error = (
+                f"probe could not be started: {type(exc).__name__}: {exc}")
+        self._cv.notify_all()
+
     def _start_locked(self) -> None:
         self._seq += 1
         seq = self._seq
         self._running = True
         self._started_at = time.monotonic()
+        self._start_error = None
         worker = threading.Thread(
             target=self._run, args=(seq,),
             name=HEALTH_PROBE_THREAD_NAME, daemon=True,
@@ -5462,22 +5576,32 @@ class HealthProbe:
         # `_start_probe_worker_off_caller`. `_starting` covers the window before
         # the new thread is scheduled, so single-flight stays exact.
         self._starting = True
-        if not _start_probe_worker_off_caller(worker):
+        future = _start_probe_worker_off_caller(worker)
+        if future is None:
             self._starting = False
             self._running = False
             self._worker = None
+            self._start_error = (
+                "probe could not be started: the starter refused the request "
+                "(its bounded backlog is full — the starter is wedged)")
+            return
+        self._start_attempt = (seq, future)
 
     def _run(self, seq: int) -> None:
         with self._cv:
             # #10893: the deferred start has landed; `is_alive()` is authoritative
-            # from here on. ⛔ ONLY for the CURRENT generation: a SUPERSEDED
+            # from here on — but ONLY for the CURRENT generation. A SUPERSEDED
             # worker can begin after its successor was handed off (that is what
-            # superseding is for), and clearing the bit then would make `begin()`
-            # read `_starting=False` + `is_alive()=False` for the successor and
-            # start a THIRD probe — breaking the supersede cap. The successor
-            # owns the bit; this generation only clears its own.
-            if seq == self._seq:
-                self._starting = False
+            # superseding a wedged probe DOES): its result would be discarded
+            # below anyway, so running the probe would issue REAL DB work at the
+            # moment of recovery — up to 1 + max_supersedes of them, on the box
+            # that was already saturated — and clearing `_starting` would drop the
+            # bit the SUCCESSOR owns, letting `begin()` start a THIRD probe. So a
+            # stale generation touches nothing and returns.
+            if seq != self._seq:
+                return
+            self._starting = False
+            self._start_error = None
         try:
             result = self._probe_fn()
         except BaseException as exc:
@@ -5518,6 +5642,9 @@ class HealthProbe:
           it is younger than the READ BUDGET (``timeout``) — a readiness gate
           may not claim a freshness it does not have — else fail closed.
         """
+        # #10893: settle a start that failed before reporting — otherwise a probe
+        # that will never run is described as "in flight" for its whole budget.
+        self._reconcile_start_locked()
         if self._result is not None:
             age = now - self._completed_at
             max_age = self._timeout if self._fresh_only else self._stale_after
@@ -5535,8 +5662,13 @@ class HealthProbe:
         return {
             "ok": False,
             "latency_ms": 0.0,
-            "error": ("probe in flight (%.1fs)" % (now - self._started_at)
-                      if self._running else "probe has not produced a result"),
+            # #10893: when a start FAILED, say so — "probe in flight" for a probe
+            # that will never run is the kind of misleading degraded text #2952
+            # forbids (it sends the operator to look for a stuck worker that does
+            # not exist).
+            "error": (self._start_error if self._start_error else
+                      ("probe in flight (%.1fs)" % (now - self._started_at)
+                       if self._running else "probe has not produced a result")),
         }
 
     # ── public API ───────────────────────────────────────────────────────
@@ -5569,6 +5701,7 @@ class HealthProbe:
         and must start work when asked.
         """
         with self._cv:
+            self._reconcile_start_locked()
             if self._running and self._worker is not None and (
                     self._starting or self._worker.is_alive()):
                 if (time.monotonic() - self._started_at >= self._stale_after
@@ -5613,6 +5746,10 @@ class HealthProbe:
         deadline = loop.time() + self._timeout
         while True:
             with self._cv:
+                # #10893: a start that failed resolves HERE rather than after the
+                # full budget — the caller asked for an answer, not for a wait
+                # whose worker can never appear.
+                self._reconcile_start_locked()
                 if not self._running:
                     return self._view_locked(time.monotonic())
             remaining = deadline - loop.time()
@@ -5666,6 +5803,9 @@ class HealthProbe:
         deadline = time.monotonic() + (self._timeout if timeout is None else timeout)
         while True:
             with self._cv:
+                # #10893: same reconciliation as `run()` — a start that failed on
+                # the starter must answer now, not after the budget.
+                self._reconcile_start_locked()
                 if not self._running:
                     return self._view_locked(time.monotonic())
                 remaining = deadline - time.monotonic()
@@ -5690,6 +5830,9 @@ class HealthProbe:
                 # for it and an operator would otherwise read "not running" for
                 # a probe that IS in flight.
                 "starting": self._starting,
+                # #10893: why a start failed, or None. Published so a degraded
+                # read names its cause instead of implying a stuck worker.
+                "start_error": self._start_error,
                 "result_age_s": (round(now - self._completed_at, 2)
                                  if self._completed_at else None),
                 "supersedes": self._supersedes,
@@ -5706,6 +5849,8 @@ class HealthProbe:
             self._seq += 1  # invalidate any in-flight worker's write
             self._running = False
             self._starting = False
+            self._start_attempt = None
+            self._start_error = None
             self._worker = None
             self._result = None
             self._started_at = 0.0
