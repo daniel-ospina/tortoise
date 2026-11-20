@@ -196,35 +196,30 @@ RETIRED_SDK_METHODS: dict[str, str] = {
     # approved target rows the beta doc's own "Removed" table names for them, and
     # every pair is quoted VERBATIM in `RETIRED_SDK_APPROVALS` below.
     #
-    # ⛔ WHAT IS DELIBERATELY NOT HERE, and why (stated so a later lane does not
-    # "finish" the job by retiring a capability):
-    #   * `update_point` and `supersede_point` — both carry a §17.1 write-lane
-    #     DECLARATION keyed by the door's NAME (`_declares_apply_first_write_lane` /
-    #     `_declares_live_write_lane`), and three gate suites pin that census by name
-    #     (`tests/test_9124_declared_live_doors.py`, `test_9397_...`,
-    #     `test_10047_record_every_lane.py`). Renaming them is a write-lane change with
-    #     its own review, not a rename this batch can carry — so they stay public and
-    #     the container's `def` delegates to them, which is the same behaviour with the
-    #     old name still available.
-    #   * `invalidate_point` — its `valid_to_precision='unknown'` window state
-    #     (#2350: "this ended, but I cannot date it") has NO home on
-    #     `update_knowledge`, so retiring it would DELETE the state rather than
-    #     rename it. `supersede_knowledge(transfer_edges=False)` covers its
-    #     everyday arm; the precision arm keeps the door.
-    #   * `retract_point` — same class: `update_knowledge`'s temporal arm retracts
-    #     WITH an instant, and the door's instant-free retraction is the shape its
-    #     callers use. Retiring it is a signature change to the approved verb, not
-    #     a rename.
-    #   * `promote_point`, `set_point_baseline` — their approving row names TWO
-    #     destinations ("a field on `update_knowledge`" AND a filter on
-    #     `list_knowledge`), so `tests/test_sdk_retirement.py` cannot derive a
-    #     single approved replacement for them. The MCP tools DO retire (into
-    #     `tortoise_refresh_confidence`); the SDK names wait on the owner settling
-    #     §D2c of `docs/product/bridge-table.md`.
-    #   * `annotate_operator`, `mitigate_operator` — same two-destination row
-    #     ("`adjust_relationship` for strength, `update_knowledge` for annotation").
-    #     The MCP tools retire into `tortoise_adjust_relationship`; the SDK names
-    #     wait on the same ruling.
+    # ⛔ THE EIGHT §17.1 / TWO-DESTINATION DOORS **WERE** CARRIED BY #12901 FINAL.
+    # This block used to say they stay public, and that record is now false — it is
+    # rewritten rather than deleted, because a lane that reads the old text would
+    # re-decide a question this batch already settled (#13899 F4). What changed, and
+    # what did not:
+    #   * `update_point`, `supersede_point`, `invalidate_point`, `retract_point` are
+    #     RETIRED here (a RENAME, hinted: `update_knowledge` / `supersede_knowledge`)
+    #     and `promote_point`, `set_point_baseline`, `annotate_operator`,
+    #     `mitigate_operator` are REMOVALS (their approving row names TWO destinations,
+    #     so no single replacement can be derived and no hint could be true — the MCP
+    #     tools retire into `tortoise_refresh_confidence` / `tortoise_adjust_relationship`).
+    #   * ⚠️ THE §17.1 DECLARATIONS STILL NAME THE **PUBLIC** SPELLING, deliberately:
+    #     the decorator argument is the door's name in the write-lane census
+    #     (`@_declares_apply_first_write_lane("update_point")` on `def _update_point`),
+    #     and the batch privatised the `def` without renaming the claim it makes. The
+    #     three gate suites that pin that census by name
+    #     (`tests/test_9124_declared_live_doors.py`, `test_9397_about_edge_properties.py`,
+    #     `test_10047_record_every_lane.py`) were re-keyed to the `def` names in the same
+    #     batch — that re-key is what makes this a rename rather than a write-lane change.
+    #   * The capability is NOT deleted: every body is still there behind its private
+    #     name, so a caller that needs the precision / instant-free arm reaches
+    #     `sdk._invalidate_point(id, corrected_by_id=…)` / `sdk._retract_point(id)`.
+    #     The destination the hint names is the APPROVED verb, and the private door is
+    #     the escape hatch for the state the approved verb cannot express.
     "supersede": "supersede_knowledge",
     "update_entity": "update_knowledge",
     "file_decision": "write_question",

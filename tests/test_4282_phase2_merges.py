@@ -59,6 +59,34 @@ def _sdk() -> TortoiseSDK:
     return TortoiseSDK.__new__(TortoiseSDK)
 
 
+#: ⚠️ #12901 FINAL privatised these doors: the `def` moved to the private spelling while the
+#: SEMANTIC name — the one the merges route to, and the one every assertion in this file
+#: names — is unchanged. So the fixture substitutes the PRIVATE attribute and records the
+#: PUBLIC name: substituting by public spelling is an `AttributeError` at fixture time
+#: (`monkeypatch.setattr` refuses a name the class does not have), and recording the private
+#: one would make a routing assertion about the rename rather than about the route.
+#: `delete_entity` collided with an existing `_delete_entity`, so its carrier is `__svc`.
+_PRIVATE_DOORS = {
+    "create_direct_edge": "_create_direct_edge",
+    "create_derivation": "_create_derivation",
+    "create_operator": "_create_operator",
+    "create_edge": "_create_edge",
+    "link_source_to_entity": "_link_source_to_entity",
+    "update": "_update",
+    "retract_point": "_retract_point",
+    "invalidate_point": "_invalidate_point",
+    "annotate_operator": "_annotate_operator",
+    "delete": "_delete",
+    "delete_point": "_delete_point",
+    "delete_entity": "_delete_entity__svc",
+}
+
+
+def _carrier(door: str) -> str:
+    """The attribute name the class actually holds for a semantic door name."""
+    return _PRIVATE_DOORS.get(door, door)
+
+
 @pytest.fixture
 def sdk(monkeypatch):
     """An SDK whose write doors are recorded instead of executed."""
@@ -76,21 +104,10 @@ def sdk(monkeypatch):
 
     for door in (
         "create_entity",
-        "_create_derivation",
-        "_create_direct_edge",
-        "_create_operator",
-        "_create_edge",
-        "_link_source_to_entity",
-        "_update",
         "_update_entity_any",
-        "_retract_point",
-        "_invalidate_point",
-        "_annotate_operator",
-        "_delete",
-        "_delete_point",
-        "_delete_entity__svc",
+        *_PRIVATE_DOORS,
     ):
-        monkeypatch.setattr(inst, door, record(door))
+        monkeypatch.setattr(inst, _carrier(door), record(door))
     return inst
 
 
@@ -226,29 +243,29 @@ def test_create_entity_relays_the_point_arms_it_absorbed(monkeypatch):
     ("relation", "door", "check"),
     [
         # The operator-less half of the epistemic layer: a bare IMPL/NAND edge.
-        ("IMPL", "_create_direct_edge", lambda a, k: a[0] == "IMPL"),
-        ("nand", "_create_direct_edge", lambda a, k: a[0] == "NAND"),
+        ("IMPL", "create_direct_edge", lambda a, k: a[0] == "IMPL"),
+        ("nand", "create_direct_edge", lambda a, k: a[0] == "NAND"),
         # The derivation writer owns the direction — the caller's is not used,
         # and the arm passes the two ids through POSITIONALLY: `link_entities`
         # documents the ontology's `(dst)-[:wasDerivedFrom]->(src)` orientation
         # rather than silently re-ordering the caller's arguments (#10053 review).
-        ("wasDerivedFrom", "_create_derivation", lambda a, k: a == ("src", "dst")),
+        ("wasDerivedFrom", "create_derivation", lambda a, k: a == ("src", "dst")),
         # A structural relation stays PLAIN (ontology v3.5 §8) even though
         # `ownedBy` is in CORE_OPERATOR_LABELS — that set mixes the two vocabularies.
-        ("ownedBy", "_create_edge", lambda a, k: a[0] == "ownedBy"),
-        ("hasPart", "_create_edge", lambda a, k: a[0] == "hasPart"),
+        ("ownedBy", "create_edge", lambda a, k: a[0] == "ownedBy"),
+        ("hasPart", "create_edge", lambda a, k: a[0] == "hasPart"),
         # Point↔Point support/contradict is the ontology's operator case — and
         # the relation is a MEANING, so `op_type` carries the MECHANISM the
         # registry fixes for it, never the meaning itself (#10053).
-        ("supports", "_create_operator",
+        ("supports", "create_operator",
          lambda a, k: a[0] == "IMPL" and k["semantics"] == "supports"),
-        ("refutes", "_create_operator",
+        ("refutes", "create_operator",
          lambda a, k: a[0] == "NAND" and k["semantics"] == "refutes"),
-        ("mutuallySupportive", "_create_operator",
+        ("mutuallySupportive", "create_operator",
          lambda a, k: a[0] == "IMPL" and k["semantics"] == "mutuallySupportive"),
         # The caller's casing is not the vocabulary's: `mutuallyExclusive` is
         # camelCase and `create_operator` matches it exactly.
-        ("MUTUALLYEXCLUSIVE", "_create_operator",
+        ("MUTUALLYEXCLUSIVE", "create_operator",
          lambda a, k: a[0] == "NAND" and k["semantics"] == "mutuallyExclusive"),
     ],
 )
@@ -263,7 +280,7 @@ def test_link_entities_routes_each_relation_to_the_door_it_absorbed(
 def test_link_entities_builds_an_operator_when_the_caller_asks_for_one(sdk):
     """IMPL is the one relation with two legitimate storages — `operator=True` is the override."""
     sdk.link_entities("IMPL", "src", "dst", operator=True)
-    assert sdk.calls[-1][0] == "_create_operator"
+    assert sdk.calls[-1][0] == "create_operator"
 
 
 def test_link_entities_does_not_mint_an_unanchored_references_edge_when_the_label_is_given(sdk):
@@ -275,7 +292,7 @@ def test_link_entities_does_not_mint_an_unanchored_references_edge_when_the_labe
     """
     sdk.link_entities("references", "https://ex/s", "e1", entity_label="Event")
     door, _args, kwargs = sdk.calls[-1]
-    assert door == "_link_source_to_entity"
+    assert door == "link_source_to_entity"
     assert kwargs["source_url"] == "https://ex/s" and kwargs["entity_id"] == "e1"
 
 
@@ -326,7 +343,7 @@ def test_link_entities_passes_the_meaning_and_the_mechanism_in_their_own_slots(
 
     sdk.link_entities(relation, "src", "dst")
     door, args, kwargs = sdk.calls[-1]
-    assert door == "_create_operator", (
+    assert door == "create_operator", (
         f"{relation} is Point↔Point support/contradict — it must carry an operator, got {door}")
     assert args[0] == mechanism, (
         f"{relation} must resolve to its documented mechanism {mechanism!r}, got {args[0]!r}")
@@ -408,16 +425,16 @@ def test_update_knowledge_is_the_door_update_lives_in(sdk):
 def test_retraction_is_a_temporal_field_not_a_separate_verb(sdk):
     """`retract_point` is reached through `update_knowledge(valid_until=…)`."""
     sdk.update_knowledge("p1", valid_until="2026-01-01")
-    assert sdk.calls[-1][0] == "_retract_point"
+    assert sdk.calls[-1][0] == "retract_point"
     sdk.update_knowledge("p1", invalid_at="2026-01-01")
-    assert sdk.calls[-1][0] == "_retract_point"
+    assert sdk.calls[-1][0] == "retract_point"
 
 
 def test_a_temporal_field_with_a_successor_is_the_invalidate_arm(sdk):
     """A specific successor replaces the claim → `invalidate_point`, not a bare retract."""
     sdk.update_knowledge("p1", invalid_at="2026-01-01", corrected_by_id="p2")
     door, args, _ = sdk.calls[-1]
-    assert door == "_invalidate_point" and args == ("p1", "p2")
+    assert door == "invalidate_point" and args == ("p1", "p2")
 
 
 def test_two_different_window_ends_are_refused_not_resolved_by_precedence(sdk):
@@ -439,7 +456,7 @@ def test_two_equal_window_ends_are_one_field_and_pass_through(sdk):
     """Agreement is not a conflict: the same instant spelled twice is one end."""
     sdk.update_knowledge("p1", valid_until="2026-01-01", invalid_at="2026-01-01")
     door, args, kwargs = sdk.calls[-1]
-    assert door == "_retract_point" and args == ("p1",)
+    assert door == "retract_point" and args == ("p1",)
     assert kwargs["valid_to"] == "2026-01-01", (
         "an agreeing pair must reach the writer as the caller's instant, "
         f"not be dropped: {kwargs!r}")
@@ -449,7 +466,7 @@ def test_annotating_a_link_is_an_update_on_it(sdk):
     sdk.update_knowledge("op1", annotation={
         "bias": 0.1, "precision": 0.2, "consistency": 0.3, "directness": 0.4})
     door, args, kwargs = sdk.calls[-1]
-    assert door == "_annotate_operator" and args[0] == "op1"
+    assert door == "annotate_operator" and args[0] == "op1"
     assert kwargs["precision"] == 0.2
 
 
@@ -467,7 +484,7 @@ def test_delete_knowledge_is_the_door_delete_lives_in(sdk):
     delete_entity), so the merge must DELEGATE rather than re-implement the branch."""
     sdk.delete_knowledge("p1")
     door, args, _ = sdk.calls[-1]
-    assert door == "_delete" and args == ("p1",)
+    assert door == "delete" and args == ("p1",)
 
 
 def test_delete_knowledge_keeps_the_two_arms_the_narrow_doors_had(monkeypatch):
@@ -582,7 +599,7 @@ def test_operator_false_still_means_a_plain_edge_where_no_meaning_decides(sdk):
     for relation in ("IMPL", "NAND"):
         sdk.link_entities(relation, "p1", "p2", operator=False)
         door, _args, _kwargs = sdk.calls[-1]
-        assert door == "_create_direct_edge", (
+        assert door == "create_direct_edge", (
             f"{relation} + operator=False must stay a PLAIN edge, got {door}")
 
 
@@ -590,31 +607,31 @@ def test_operator_false_still_means_a_plain_edge_where_no_meaning_decides(sdk):
 
 
 @pytest.mark.parametrize(("relation", "kwargs", "door"), [
-    ("wasDerivedFrom", {"confidence": 0.8}, "_create_derivation"),
-    ("wasDerivedFrom", {"promote_source": False}, "_create_derivation"),
-    ("hasPart", {"confidence": 0.8}, "_create_edge"),
-    ("hasPart", {"label": "part-of"}, "_create_edge"),
-    ("hasPart", {"direction": "->"}, "_create_edge"),
-    ("supports", {"weight": 0.5}, "_create_operator"),
-    ("supports", {"batch_id": "b1"}, "_create_operator"),
-    ("references", {"entity_label": "Event", "label": "cited"}, "_link_source_to_entity"),
-    ("references", {"entity_label": "Event", "confidence": 0.4}, "_link_source_to_entity"),
+    ("wasDerivedFrom", {"confidence": 0.8}, "create_derivation"),
+    ("wasDerivedFrom", {"promote_source": False}, "create_derivation"),
+    ("hasPart", {"confidence": 0.8}, "create_edge"),
+    ("hasPart", {"label": "part-of"}, "create_edge"),
+    ("hasPart", {"direction": "->"}, "create_edge"),
+    ("supports", {"weight": 0.5}, "create_operator"),
+    ("supports", {"batch_id": "b1"}, "create_operator"),
+    ("references", {"entity_label": "Event", "label": "cited"}, "link_source_to_entity"),
+    ("references", {"entity_label": "Event", "confidence": 0.4}, "link_source_to_entity"),
     # #10053 review (P2): `entity_label` / `source_kind` belong to the PROVENANCE arm
     # alone. They were absent from `requested`, so every other arm accepted and
     # ignored them — `link_entities("hasPart", a, b, entity_label="Event")`
     # returned success for a plain edge with the label dropped.
-    ("hasPart", {"entity_label": "Event"}, "_create_edge"),
-    ("hasPart", {"source_kind": "document"}, "_create_edge"),
-    ("wasDerivedFrom", {"entity_label": "Event"}, "_create_derivation"),
-    ("supports", {"source_kind": "document"}, "_create_operator"),
-    ("IMPL", {"entity_label": "Event"}, "_create_direct_edge"),
+    ("hasPart", {"entity_label": "Event"}, "create_edge"),
+    ("hasPart", {"source_kind": "document"}, "create_edge"),
+    ("wasDerivedFrom", {"entity_label": "Event"}, "create_derivation"),
+    ("supports", {"source_kind": "document"}, "create_operator"),
+    ("IMPL", {"entity_label": "Event"}, "create_direct_edge"),
     # #10053 review (P3): `operator` was OUTSIDE `requested`, so no arm could ever
     # refuse it — and the two arms that return BEFORE it is read anywhere swallowed
     # `operator=True`, the mirror of the `operator=False` refusal tested above, on
     # the two writers that record no carrying operator at all. Asking for one there
     # is not "already true", it is a request the writer has no home for.
-    ("wasDerivedFrom", {"operator": True}, "_create_derivation"),
-    ("references", {"entity_label": "Event", "operator": True}, "_link_source_to_entity"),
+    ("wasDerivedFrom", {"operator": True}, "create_derivation"),
+    ("references", {"entity_label": "Event", "operator": True}, "link_source_to_entity"),
 ])
 def test_link_entities_refuses_a_parameter_the_chosen_arm_cannot_record(
         sdk, relation, kwargs, door):
@@ -643,7 +660,7 @@ def test_the_direct_edge_arm_still_records_every_attribute_it_can(sdk):
     sdk.link_entities("IMPL", "src", "dst", confidence=0.8, weight=0.5,
                       label="bearson", batch_id="b1", direction="->")
     door, _args, kwargs = sdk.calls[-1]
-    assert door == "_create_direct_edge"
+    assert door == "create_direct_edge"
     assert kwargs["confidence"] == 0.8 and kwargs["weight"] == 0.5
     assert kwargs["label"] == "bearson" and kwargs["batch_id"] == "b1"
     assert kwargs["direction"] == "->"
@@ -662,14 +679,14 @@ def test_operator_true_still_reaches_the_arms_that_do_build_the_operator(sdk):
     for relation in ("IMPL", "NAND", "supports", "refutes"):
         sdk.link_entities(relation, "p1", "p2", operator=True)
         door, _args, _kwargs = sdk.calls[-1]
-        assert door == "_create_operator", (
+        assert door == "create_operator", (
             f"{relation} + operator=True must build the carrying operator, got {door}")
 
 
 def test_the_operator_arm_still_records_the_attributes_it_can(sdk):
     sdk.link_entities("supports", "src", "dst", label="backed", direction="->")
     door, _args, kwargs = sdk.calls[-1]
-    assert door == "_create_operator"
+    assert door == "create_operator"
     assert kwargs["label"] == "backed" and kwargs["direction"] == "->"
 
 
@@ -683,7 +700,7 @@ def test_the_provenance_arm_still_records_the_label_and_the_kind(sdk):
     """
     sdk.link_entities("references", "https://x", "e1", entity_label="Event")
     door, _args, kwargs = sdk.calls[-1]
-    assert door == "_link_source_to_entity"
+    assert door == "link_source_to_entity"
     assert kwargs["entity_label"] == "Event"
     assert kwargs["source_kind"] == "document", (
         "the arm must resolve the not-asked sentinel to the writer's own default")
@@ -702,7 +719,7 @@ def test_the_retraction_instant_reaches_the_writer(sdk):
     """#4282: `valid_until=…` used to be tested and thrown away."""
     sdk.update_knowledge("p1", valid_until="2026-01-01")
     door, _args, kwargs = sdk.calls[-1]
-    assert door == "_retract_point" and kwargs["valid_to"] == "2026-01-01"
+    assert door == "retract_point" and kwargs["valid_to"] == "2026-01-01"
 
     sdk.update_knowledge("p1", invalid_at="2026-02-02")
     assert sdk.calls[-1][2]["valid_to"] == "2026-02-02"
@@ -712,16 +729,17 @@ def test_the_supersede_arms_instant_reaches_the_writer(sdk):
     """#4282: the successor arm stamped `now` and dropped the caller's instant."""
     sdk.update_knowledge("p1", invalid_at="2026-01-01", corrected_by_id="p2")
     door, args, kwargs = sdk.calls[-1]
-    assert door == "_invalidate_point" and args == ("p1", "p2")
+    assert door == "invalidate_point" and args == ("p1", "p2")
     assert kwargs["valid_to"] == "2026-01-01"
 
 
-@pytest.mark.parametrize("door", ["_retract_point", "_invalidate_point"])
+@pytest.mark.parametrize("door", ["retract_point", "invalidate_point"])
 def test_the_writers_have_somewhere_to_put_the_callers_instant(door):
     """The merge may only forward `valid_to` if the writers accept it."""
     import inspect
 
-    assert "valid_to" in inspect.signature(getattr(TortoiseSDK, door)).parameters
+    assert "valid_to" in inspect.signature(
+        getattr(TortoiseSDK, _carrier(door))).parameters
 
 
 def test_the_merge_exposes_the_temporal_field_and_forwards_its_value():

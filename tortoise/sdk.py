@@ -22464,18 +22464,18 @@ class TortoiseSDK:
         # `"document"` at its one use site: with the old `"document"` default it
         # would read as ALWAYS requested and refuse every other arm.
         _honours: dict[str, frozenset[str]] = {
-            "_create_direct_edge": frozenset({
+            "create_direct_edge": frozenset({
                 "direction", "confidence", "weight", "label", "batch_id",
                 "promote_source"}),
             # `operator` is honoured HERE and only here (#10053 review, P3): this
             # is the arm whose writer BUILDS the carrying operator, so an
             # explicit `True` is exactly what it does. Every other door records
             # no carrying operator, so `True` there is refused by `_dispatch`.
-            "_create_operator": frozenset({
+            "create_operator": frozenset({
                 "label", "direction", "promote_source", "operator"}),
-            "_create_derivation": frozenset(),
-            "_link_source_to_entity": frozenset({"entity_label", "source_kind"}),
-            "_create_edge": frozenset(),
+            "create_derivation": frozenset(),
+            "link_source_to_entity": frozenset({"entity_label", "source_kind"}),
+            "create_edge": frozenset(),
         }
         requested = {
             name: value for name, value in (
@@ -22520,8 +22520,7 @@ class TortoiseSDK:
                     "which builds it."
                     if "operator" in dropped else
                     f" Call `TortoiseSDK.{door}` directly if you need that "
-                    f"parameter (the standalone public door was retired in "
-                    f"the #12901 batch, so only this spelling resolves)."
+                    f"parameter."
                 )
                 raise ValueError(
                     f"link_entities: the {rel!r} arm writes through `{door}`, which "
@@ -22536,7 +22535,7 @@ class TortoiseSDK:
         # the entity label (the signal that they are linking a SOURCE).
         if rel == "references" and entity_label:
             return _dispatch(
-                "_link_source_to_entity",
+                "link_source_to_entity",
                 lambda: self._link_source_to_entity(
                     source_url=from_id, entity_id=to_id,
                     entity_label=entity_label,
@@ -22545,13 +22544,13 @@ class TortoiseSDK:
         if rel == "wasDerivedFrom":
             # create_derivation(src_id, dst_id) writes (dst)-[:wasDerivedFrom]->(src).
             return _dispatch(
-                "_create_derivation",
+                "create_derivation",
                 lambda: self._create_derivation(from_id, to_id))
 
         upper = rel.upper()
         if upper in ("IMPL", "NAND") and operator is not True:
             return _dispatch(
-                "_create_direct_edge",
+                "create_direct_edge",
                 lambda: self._create_direct_edge(
                     upper, from_id, to_id, direction=direction,
                     confidence=confidence, weight=weight, label=label,
@@ -22597,7 +22596,7 @@ class TortoiseSDK:
                 )
 
             return _dispatch(
-                "_create_operator",
+                "create_operator",
                 lambda: self._create_operator(
                     SEMANTICS_MECHANISMS[meaning], from_id, [to_id], label=label,
                     direction=direction or "bidirectional",
@@ -22618,14 +22617,14 @@ class TortoiseSDK:
 
         if operator is True:
             return _dispatch(
-                "_create_operator",
+                "create_operator",
                 lambda: self._create_operator(
                     upper, from_id, [to_id], label=label,
                     direction=direction or "bidirectional",
                     promote_source=promote_source))
 
         return _dispatch(
-            "_create_edge", lambda: self._create_edge(rel, from_id, to_id))
+            "create_edge", lambda: self._create_edge(rel, from_id, to_id))
 
     def update_knowledge(self, id: str, *, valid_until: str | None = None,
                          invalid_at: str | None = None,
