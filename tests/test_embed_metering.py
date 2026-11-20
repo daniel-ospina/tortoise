@@ -116,8 +116,12 @@ def _assert_door_shaped(installed, door) -> None:
     `(name, kind, default)` triple compared with `==` left TWO drifts GREEN — an
     annotation-only change (`resource: int = "points"` passed), and `False`↔`0`
     because `False == 0`. So name/kind/ANNOTATION are compared by `==` (both modules
-    are PEP-563, so both sides carry the strings `'str'`/`'bool'`) and each default
-    by IDENTITY, where `False is 0` is False.
+    are PEP-563, so both sides carry the strings `'str'`/`'bool'`) and each default by
+    `type` AND `==` — which rejects `False`↔`0` and `True`↔`1` while never rejecting
+    an equal default. ⚠️ NOT by `is`: identity false-REDs a CORRECT stand-in as soon
+    as the door's default stops being interned (`"points.v2"`, `1000`, `0.5` all
+    measure `equal=True, identical=False`), and the failure text would then send the
+    author to "fix the stand-in" for a fix that does not exist.
 
     ⚠️ `door` is captured BEFORE an arm's `setattr` and never re-read afterwards:
     comparing `mcp._enforce_quota` against itself would pass for ANY object, which
@@ -134,12 +138,13 @@ def _assert_door_shaped(installed, door) -> None:
         "(`**kw`) fails OPEN on a shape drift and a narrower one (a missing default) "
         "reads a legal zero-arg door call as a TEST defect. Fix the stand-in, not "
         "this assertion")
-    assert all(a.default is b.default for a, b in
-               zip(installed_params, door_params, strict=True)), (
+    assert all(type(a.default) is type(b.default) and a.default == b.default
+               for a, b in zip(installed_params, door_params, strict=True)), (
         f"the `_enforce_quota` stand-in installed here ({installed!r}) has a DEFAULT "
-        "that differs from the door's in identity — `False == 0` is True, so an "
-        "equality comparison would accept a flipped default. Fix the stand-in, not "
-        "this assertion")
+        "that differs from the door's — `False == 0` is True, so a plain equality "
+        "comparison would accept a flipped default, which is why the TYPE is compared "
+        "too. Identity is deliberately NOT used: it false-REDs an equal but "
+        "non-interned default. Fix the stand-in, not this assertion")
 
 
 def _assert_door_arm(installed, door) -> None:
@@ -186,7 +191,8 @@ def test_the_enforce_quota_double_is_the_door():
     drifts GREEN: an annotation-only change (`resource: int = "points"` passed), and
     `False`↔`0` because `False == 0`. So name/kind/ANNOTATION are compared by `==`
     (both modules are PEP-563, so both sides carry the strings `'str'`/`'bool'`) and
-    each default is compared by IDENTITY, where `False is 0` is False.
+    each default by `type` AND `==` — see `_assert_door_shaped` for why identity is
+    deliberately not the instrument.
 
     This test pins the symbol's definition; each `TestRunnerWiring` arm
     additionally pins what it INSTALLS, via `_assert_door_arm`.
