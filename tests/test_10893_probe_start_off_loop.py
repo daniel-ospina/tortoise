@@ -560,6 +560,94 @@ def test_the_sync_wait_path_reconciles_a_failed_start_too(monkeypatch):
     assert probe.info()["in_flight"] is False
 
 
+def test_a_failed_readiness_start_fails_closed_with_its_cause_not_the_budget(
+        monkeypatch):
+    """``run()``'s reconciliation, on the plane that reads ``fresh_only=True``.
+
+    ``_READY_PROBE`` and ``_CONTROL_PLANE_PROBE`` are both ``fresh_only=True``
+    (``hosted_api``), so readiness is the caller whose WHOLE budget is at stake:
+    unreconciled, every ``/health/ready`` after a failed start holds the full
+    ``DB_PROBE_HARD_TIMEOUT`` and then reports "probe did not complete within
+    5.6s — readiness fails closed" for a probe that never started — the
+    #2952 class (misnamed cause) on the deploy gate's last assertion.
+
+    Measured with the reconcile removed from ``run()``: 2.00 s and the
+    budget message instead of 0.001 s and the start failure. Nothing else in
+    this file sees that: the terminal state is identical, so only the ELAPSED
+    and CAUSE assertions discriminate.
+    """
+    _fresh_starter()
+
+    import concurrent.futures
+
+    class _AcceptThenFail:
+        def submit(self, fn):
+            future: concurrent.futures.Future = concurrent.futures.Future()
+            future.set_exception(RuntimeError("can't start new thread"))
+            return future
+
+    monkeypatch.setattr(monitoring, "_probe_starter", _AcceptThenFail)
+    probe = monitoring.HealthProbe(
+        lambda: {"ok": True, "latency_ms": 1.0}, timeout=2.0, fresh_only=True)
+
+    started = time.monotonic()
+    result = asyncio.run(probe.run())
+    elapsed = time.monotonic() - started
+
+    assert result["ok"] is False
+    assert "can't start new thread" in (result.get("error") or ""), (
+        f"readiness reported {result.get('error')!r} for a start that failed — "
+        "the operator is sent to look for a stuck probe that never existed")
+    assert elapsed < probe._timeout / 2, (
+        f"run() held a readiness caller for {elapsed:.2f}s of a "
+        f"{probe._timeout:g}s budget after a failed start — the failure was "
+        "only reconciled at the deadline")
+    assert probe.info()["in_flight"] is False
+
+
+def test_peek_reports_a_failed_start_without_any_read_reconciling_first(
+        monkeypatch):
+    """``peek()`` is the ONLY path into ``_view_locked`` with no ``begin()``.
+
+    ``/healthz`` must not start work (see ``peek``'s docstring), so it cannot
+    reconcile through ``begin()`` the way ``run()``/``snapshot()``/``read()`` do:
+    the reconcile in ``_view_locked`` itself is the only thing standing between
+    a failed start and a ``served_liveness`` that reports ``in_flight: True``
+    with a growing ``in_flight_s`` for a worker that does not exist.
+
+    Every other row reconciles in ``begin()`` first, so removing that call from
+    ``_view_locked`` left the whole file green — this row drives the failure and
+    then calls ``peek()`` ONLY.
+    """
+    _fresh_starter()
+
+    import concurrent.futures
+
+    accepted: list[concurrent.futures.Future] = []
+
+    class _AcceptThenFail:
+        def submit(self, fn):
+            future: concurrent.futures.Future = concurrent.futures.Future()
+            accepted.append(future)
+            return future
+
+    monkeypatch.setattr(monitoring, "_probe_starter", _AcceptThenFail)
+    probe = monitoring.HealthProbe(
+        lambda: {"ok": True, "latency_ms": 1.0}, timeout=2.0)
+
+    probe.begin()                                  # the hand-off under test
+    assert accepted, "the start was never handed to the starter"
+    accepted[0].set_exception(RuntimeError("can't start new thread"))
+
+    viewed = probe.peek()                          # no begin(), by design
+
+    assert "can't start new thread" in (viewed.get("error") or ""), (
+        f"peek() reported {viewed.get('error')!r} — /healthz is describing a "
+        "probe that will never run as if it were in flight")
+    assert probe.info()["in_flight"] is False, (
+        "a failed start is still counted as an in-flight probe")
+
+
 def test_constructing_a_probe_warms_the_starter_off_the_loop():
     """The ONE remaining blocking start() is paid at CONSTRUCTION, not on a read.
 
