@@ -2284,14 +2284,19 @@ def test_the_document_types_no_numstat_figure_for_the_index_residual():
     times across FOUR clauses (:108, :134 … :114, :134 again, :143)" and NO revision in
     this branch's range produces that census, and ⛔ **the figure the earlier cut typed was HEAD-BOUND, not false**:
     with this same pattern it reproduces SIX matches across FIVE lines at `6238dde72a`
-    (`:102`, `:108`, `:114`, `:134`, `:143`) and at every head before `8bdd34c631`, whose
-    own commit (`fix(13728)`, `#13728`/`#13845`) de-typed those clauses — and it measures
-    ZERO from there and at `origin/main` (`28ca66878d`). So a census is quoted WITH its head
-    or not at all: the cut that stood here typed it "at `origin/main`", a floating ref,
-    which is the rule this paragraph enforces everywhere else (round 10 review, P2 — and the
-    first correction of it blamed `#13807`, which landed on a file already at zero; both
-    halves measured here). Re-run the pattern at the head you are reviewing and read the map
-    from that, rather than trusting a figure written here
+    (`:102`, `:108`, `:114`, `:134`, `:143`) and at every head from there up to
+    `8bdd34c631^` — ⛔ and the WINDOW is stated rather than left to "every head before"
+    (round 12 review, P2: that absolute was false — heads OLDER than `6238dde72a` carry FEWER
+    of the clauses, `aeb4882c18` matching three lines and `f6f202cf5c` four, so a reviewer who
+    tested it on one of those would read the figure as unreproducible and "correct" a true
+    statement, which is how round 10 went wrong) — whose own commit (`fix(13728)`,
+    `#13728`/`#13845`) de-typed those clauses, and it measures ZERO from there and at
+    `origin/main` (`28ca66878d`). So a census is quoted WITH its head or not at all: the cut
+    that stood here typed it "at `origin/main`", a floating ref, which is the rule this
+    paragraph enforces everywhere else (round 10 review, P2 — and the first correction of it
+    blamed `#13807`, which landed on a file already at zero; both halves measured here).
+    Re-run the pattern at the head you are reviewing and read the map from that, rather than
+    trusting a figure written here
     — which is the arm's whole thesis applied to its own docstring.
     """
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
