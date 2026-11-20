@@ -21374,18 +21374,39 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # computed off the loop above, so the linker adds NO scrub pass of its
         # own.
         link_texts = _turn_texts
-        link_result = link_session_entities(
-            proj, session_id, link_texts,
-            turn_ids=[_capture_turn_id(session_id, i)
-                      for i in range(len(link_texts))],
-            sdk=sdk)
-        if link_result["attempted"]:
-            proj.g.query(
-                "MATCH (s:Session {id:$sid}) SET "
-                "s.entity_links_attempted=$a, s.entity_links_created=$c",
-                params={"sid": session_id, "a": link_result["attempted"],
-                        "c": link_result["created"]},
-            )
+
+        def _link_off_loop():
+            """The entity-linking pass — synchronous FalkorDB work, so OFF the loop.
+
+            ⛔ #10893 (second cycle): this ran INLINE on the single uvicorn
+            worker. It is not one query — `link_session_entities` resolves
+            targets and writes an `about*` edge PER TURN that carries a
+            reference (two round trips each) and the `SET` below is one more, so
+            a twenty-turn capture parked the event loop for tens of graph round
+            trips. Every other leg of this handler was already offloaded (see
+            the #4625 legs above and below); this tail was the residue, and it
+            is the class that makes a CONCURRENT `/v1/search` accrue
+            `pre_handler` seconds it did not spend.
+
+            The same callable, the same result, the same non-fatal arm — only
+            WHERE it runs changes. `proj` cross-thread use is the established
+            pattern here (it is handed to workers throughout the capture path).
+            """
+            result = link_session_entities(
+                proj, session_id, link_texts,
+                turn_ids=[_capture_turn_id(session_id, i)
+                          for i in range(len(link_texts))],
+                sdk=sdk)
+            if result["attempted"]:
+                proj.g.query(
+                    "MATCH (s:Session {id:$sid}) SET "
+                    "s.entity_links_attempted=$a, s.entity_links_created=$c",
+                    params={"sid": session_id, "a": result["attempted"],
+                            "c": result["created"]},
+                )
+            return result
+
+        await _run_off_loop(_CAPTURE_EXECUTOR, _link_off_loop)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception(
@@ -21549,13 +21570,27 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             sdk._emit_event("SessionDeleted", id=session_id)
 
     receipt_key = _capture_receipt_key(capture_harness)
-    if _session_alive():
+    # ⛔ #10893 (second cycle): THE RECEIPT BLOCK IS SYNCHRONOUS GRAPH + REGISTRY
+    # WORK, and it used to run INLINE on the single uvicorn worker. Three probes
+    # (`_session_alive`), one full-graph count (`_session_count_by_harness`), and
+    # up to two `_update_onboarding_state` writes — which are a jsonb
+    # compare-and-set against the registry AND keyed graph MERGEs — all park the
+    # event loop. That is the `#2988`/`#3498` class this file offloads at every
+    # other leg of this handler (see the #4625 legs above), and it is the shape
+    # that makes a CONCURRENT `/v1/search` accrue `pre_handler` seconds it never
+    # spent: the read route's task cannot be scheduled while the loop is held.
+    #
+    # Only WHERE these run changes. The order, the fail-open arms, the
+    # bucket-aware compensation and the fail-closed warnings are byte-identical —
+    # each call is awaited in the same sequence, so no window opens or closes
+    # that was not already there.
+    if await _run_off_loop(_CAPTURE_EXECUTOR, _session_alive):
         try:
             # #4625: write-only — the return is discarded here, and this is
             # the per-capture hot path (see ``_update_onboarding_state``).
-            _update_onboarding_state(org["org_id"], _echo=False, **{
-                receipt_key: now,
-            })
+            await _run_off_loop(
+                _CAPTURE_EXECUTOR, _update_onboarding_state,
+                org["org_id"], _echo=False, **{receipt_key: now})
             # #3520: the `session_capture_last_error_<harness>` clear used to sit
             # HERE, before `_capture_ok` was known — which is exactly how an
             # extraction failure cleared its own error. It now rides the outcome,
@@ -21569,7 +21604,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             extraction_warnings.append(
                 "session capture receipt write failed (non-fatal)")
         else:
-            if not _session_alive():
+            if not await _run_off_loop(_CAPTURE_EXECUTOR, _session_alive):
                 # The delete won between the pre-check and the receipt PATCH
                 # — compensate (the response still 200s; the capture itself
                 # was valid). Bucket-aware like the delete-side recompute:
@@ -21580,7 +21615,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # read leaves the receipt (fail-open; the next delete's
                 # reconcile self-heals).
                 try:
-                    bucket_empty = _session_count_by_harness(
+                    bucket_empty = await _run_off_loop(
+                        _CAPTURE_EXECUTOR, _session_count_by_harness,
                         proj, capture_harness) == 0
                 except Exception:
                     bucket_empty = False
@@ -21590,9 +21626,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                         # #4625: write-only — this return is discarded, and
                         # this is the same per-capture hot path as the
                         # receipt write above.
-                        _update_onboarding_state(
-                            org["org_id"], _echo=False,
-                            **{receipt_key: None})
+                        await _run_off_loop(
+                            _CAPTURE_EXECUTOR, _update_onboarding_state,
+                            org["org_id"], _echo=False, **{receipt_key: None})
                         cleared = True
                     if cleared:
                         extraction_warnings.append(
@@ -21606,7 +21642,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                     extraction_warnings.append(
                         "session deleted during capture — capture receipt "
                         "retained (sessions remain in this harness bucket)")
-                _sweep_orphaned_writes()
+                await _run_off_loop(_CAPTURE_EXECUTOR, _sweep_orphaned_writes)
     else:
         # Session deleted mid-capture before the receipt write — never land
         # an orphan receipt (the mutation was already removed). The capture
@@ -21615,7 +21651,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # (exact-ids; best-effort).
         extraction_warnings.append(
             "session deleted during capture — capture receipt not recorded")
-        _sweep_orphaned_writes()
+        await _run_off_loop(_CAPTURE_EXECUTOR, _sweep_orphaned_writes)
         # #3520: the unconditional clear that used to sit HERE is gone as well.
         # The per-harness `last_error` is written ONCE, from the capture
         # outcome, above — clearing it here as well would be a second writer of
@@ -21644,11 +21680,24 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     try:
         legacy_mirror = bool(
             _onboard_state.get("onboarding_complete"))
-        _cd = _os.write_completed_step(
-            proj, org["org_id"], "capture-disclosed",
-            status_from_mirror=legacy_mirror)
-        first_capture = bool(_cd["created"])
-        _maybe_apply_completion(org["org_id"])
+
+        def _first_capture_checkpoint():
+            """The capture-disclosed checkpoint — synchronous graph work, OFF the loop.
+
+            ⛔ #10893 (second cycle): `write_completed_step` takes the per-org
+            lock and runs keyed MERGEs, and `_maybe_apply_completion` reads the
+            registry; both used to run INLINE here, on the single uvicorn
+            worker, at the end of EVERY first capture. Same callable, same
+            order, same non-fatal arm — only WHERE it runs changes.
+            """
+            created = bool(_os.write_completed_step(
+                proj, org["org_id"], "capture-disclosed",
+                status_from_mirror=legacy_mirror)["created"])
+            _maybe_apply_completion(org["org_id"])
+            return created
+
+        first_capture = await _run_off_loop(
+            _CAPTURE_EXECUTOR, _first_capture_checkpoint)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception(
@@ -21782,14 +21831,21 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # sdk.capture_session's twin read for why (a helper-composed clause
             # is unresolvable to the §17.1 census, and the raw columns are what
             # every other surface consumes).
-            rows = proj.g.query(
-                "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
-                "coalesce(n.pointKind, 'statement'), "
-                "coalesce(n.status, 'live'), "
-                "n.confidence, n.posterior_alpha, n.ep_alpha, "
-                "n.posterior_beta, n.ep_beta",
-                params={"ids": [p["id"] for p in extracted]},
-            ).result_set
+            #
+            # ⛔ #10893 (second cycle): a graph round trip on the single uvicorn
+            # worker, INLINE here until now. Off the loop on the capture pool;
+            # the callable, the result and the non-fatal arm are unchanged.
+            def _enrichment_read():
+                return proj.g.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
+                    "coalesce(n.pointKind, 'statement'), "
+                    "coalesce(n.status, 'live'), "
+                    "n.confidence, n.posterior_alpha, n.ep_alpha, "
+                    "n.posterior_beta, n.ep_beta",
+                    params={"ids": [p["id"] for p in extracted]},
+                ).result_set
+
+            rows = await _run_off_loop(_CAPTURE_EXECUTOR, _enrichment_read)
             facts = {
                 r[0]: (r[1] or "statement", r[2] or "live",
                        ep_state(confidence=r[3], posterior_alpha=r[4],
@@ -21925,12 +21981,18 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # legacy-replay instead of re-attempting. Additive warning names the
         # residue.
         try:
-            proj.g.query(
-                "MATCH (s:Session {id:$sid}) "
-                "SET s.capture_ok=$ok, "
-                "    s.capture_extractor=$extractor",
-                params={"sid": session_id, "ok": _capture_ok_record,
-                        "extractor": _capture_extractor_record})
+            # ⛔ #10893 (second cycle): a graph round trip INLINE on the single
+            # uvicorn worker until now — the LAST one on this handler's tail.
+            # Off the loop on the capture pool; same statement, same params,
+            # same non-fatal arm.
+            await _run_off_loop(
+                _CAPTURE_EXECUTOR,
+                lambda: proj.g.query(
+                    "MATCH (s:Session {id:$sid}) "
+                    "SET s.capture_ok=$ok, "
+                    "    s.capture_extractor=$extractor",
+                    params={"sid": session_id, "ok": _capture_ok_record,
+                            "extractor": _capture_extractor_record}))
         except Exception as exc:  # pragma: no cover - graph hiccup
             extraction_warnings.append(
                 f"capture_ok state write failed: {type(exc).__name__}")
