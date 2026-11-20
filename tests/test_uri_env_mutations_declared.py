@@ -319,9 +319,10 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # authorizes sites nobody reviewed). ⛔ It is anchored at BOTH ends over the whole
     # stripped line, so it also cannot silence a commented-out or embedded mutation;
     # reformatting the call is therefore a RE-TRIAGE by design, not a silent pass.
-    # The module's other three `TORTOISE_DB_URI` mentions are READS (its probe's
-    # candidate list and `_uri()`'s fallback), not mutations, and are deliberately not
-    # declared — a row that matched them would silence a future mutation on those lines.
+    # The module's other three `TORTOISE_DB_URI` mentions are READS (its `_probe`'s
+    # `env_uri` capture and candidate list, and `_uri()`'s fallback), not mutations,
+    # and are deliberately not declared — a row that matched them would silence a
+    # future mutation on those lines.
     #
     # ⛔ ONE ROW, ONE FILE — and it is THIS one (#12631, measured 2026-11-20 at `main`
     # `f2e5e3a98f`). THREE rows for this key had landed inside ~4 minutes, because each
@@ -625,14 +626,17 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # meant to clear, so "add the row" is exactly how one missing declaration became
     # three.
     #
-    # ⛔ MERGE NOTE (#13158 vs #13176) — a DIFFERENT module, kept where it was recorded:
-    # `main`'s 5fae3f4f6f landed its OWN declaration for
-    # `test_13034_currency_rule_reads_position.py` (that row is in the #13158 region
-    # below, at `:1539`) while another branch had landed a narrowed one for the same
-    # KEY — an auto-merge that keeps BOTH sides of a row pair is a duplicate dict key,
-    # and the last one wins SILENTLY, so the guard would have graded one row while the
-    # file showed two. The narrowed row was kept and the other dropped rather than left
-    # to shadow it. One file, one row — the same rule #12631 had to re-apply above.
+    # ⛔ MERGE NOTE (#13158 vs #13176) — a DIFFERENT module, kept here because it is
+    # where it was recorded: `main`'s 5fae3f4f6f added the
+    # `test_13034_currency_rule_reads_position.py` key with THREE `^…$`-anchored arms,
+    # and that is the one row this dict carries for it today (the #13158 region below —
+    # no line number, which is what let the original citation rot). The two competing
+    # copies on record were both BROADER and neither landed: #13146's "one broad
+    # unanchored arm" (closed, never merged) and the carrier its own correction names,
+    # #13164's "two loose arms". A second row for one key is a duplicate dict literal
+    # (ruff `F601` + the duplicate-key scan), and at runtime the later key shadows the
+    # earlier, so whichever PR lands second drops its copy — never add a third. One
+    # file, one row — the same rule #12631 had to re-apply above.
     "test_aggregative_facet_coverage.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                             r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],  # #2521: module-level live probe + per-test isolated-graph fixture (DELIBERATE_URI — probe/setenv IS the test input, mirrors #2518's entity-key pattern)
     # #2165 connected-assembly (merged via #2657): the assembly fixture/sdk
