@@ -158,10 +158,20 @@ def _assert_door_arm(installed, door) -> None:
     `setattr` kept the whole file GREEN, because no assertion observed what an
     arm actually installed.
 
-    A shape comparison alone would NOT have closed it: main's pre-fix lambda is
-    shaped exactly like the door, so it passes a shape check and is still a
-    SECOND copy of the door's shape that nothing keeps in sync — the arm must
-    install the pinned symbol by IDENTITY, and that symbol must match `door`.
+    ⚠️ THE MUTANT ONLY THE IDENTITY LEG CATCHES IS A **TYPED** COPY OF THE DOOR
+    (#14037 review, cycle 6, P3 — MEASURED), *not* main's pre-fix lambda: an earlier
+    cut of this docstring named the lambda, and that was FALSE once
+    `_assert_door_shaped` began comparing ANNOTATION as well as name/kind. A lambda
+    carries `inspect.Parameter.empty` for every annotation, so main's lambda is
+    already RED one leg EARLIER (measured: lambda → params leg RED; typed copy →
+    shape GREEN, identity RED). The typed copy is the one that genuinely slips
+    through a shape check —
+    `def _stub(resource: str = "points", *, truth_carried: bool = False) -> None`
+    matches name, kind, annotation AND default, and is still a SECOND copy of the
+    door's shape that nothing keeps in sync. So the arm must install the pinned
+    symbol by IDENTITY, and that symbol must still match `door`. ⛔ Do not read the
+    lambda case as "the shape leg already covers this" and drop the identity
+    assertion — the typed copy goes green again if you do.
     """
     assert installed is _enforce_quota_double, (
         f"this arm installed {installed!r} instead of the pinned "
@@ -1374,9 +1384,13 @@ class TestRunnerWiring:
         # green, `58 passed` then — the file is 59 now).
         # `test_the_enforce_quota_double_is_the_door` compares name, kind,
         # annotation AND default per parameter against the door itself — and
-        # `_assert_door_arm` below pins THAT THIS ARM installs the same pinned symbol,
-        # because main's pre-fix inline lambda had the right shape and still hid the
-        # drift this pin exists to catch (it reddened NOTHING). ⚠️ the two
+        # `_assert_door_arm` below pins THAT THIS ARM installs the same pinned symbol.
+        # What needs that IDENTITY leg is a TYPED copy of the door's signature, which
+        # passes the shape comparison above and is still a second copy nothing keeps in
+        # sync (it reddened NOTHING before the arm assertion existed). ⚠️ NOT main's
+        # pre-fix inline lambda: a lambda carries no annotations, so the annotation leg
+        # already reds it one leg earlier — an earlier cut of this comment named the
+        # lambda and was wrong at that point (#14037 review, cycle 6, P3). ⚠️ the two
         # `mcp_server.py` addresses an earlier cut typed here are GONE on purpose:
         # nothing reads a number in a comment, which is the rule #14025 applied to
         # `tests/test_7949_capstone_measure.py`.
