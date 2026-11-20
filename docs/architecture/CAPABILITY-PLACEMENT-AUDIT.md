@@ -112,10 +112,12 @@ the ratio below counts them rather than pretending it compares them. ⛔ **That 
 re-derive from a symbol.**
 **The drift is 127 of those 223.** ⚠️ **These counts are a parsing decision, and this header states which
 one it took**: the 223 counts unique `(resolved path, start line)` pairs over `path.py:NNNN` spellings
-written as ONE token. The document also writes three pairs as two code spans
+written as ONE token. The document also writes five pairs as two code spans
 (`` `cache_projection.py` `:2485` ``, a `main`-set address listed above, plus
-`` `sdk.py` `:2917` `` and `` `sdk.py` `:61587` ``); they are resolved but not counted by the one-token rule,
-and counting that form gives **227 pairs and 130 drifters**. So the
+`` `sdk.py` `:2917` ``, `` `sdk.py` `:61587` ``, `` `sdk.py` `:61594` `` and
+`` `projection/entities.py` `:5765` ``); four of them are resolved but not counted by the one-token rule —
+`` `sdk.py` `:61594` `` is ALSO written one-token, in the `:Meta` row of §2.7, so it is one of the 223
+already — and counting that form gives **227 pairs and 130 drifters**. So the
 basis must travel with the figure — 127 and 129 are one measurement under two counting decisions, not two
 findings. ⚠️ **An earlier form of
 this paragraph sat in the MIDDLE of the sentence it qualifies**, between `103` and `collisions`, so the
@@ -174,7 +176,28 @@ open at the pin — plus row 13's four writer addresses, which the `#13394` swee
 absent from this list, so the rule above was sending a reader to the pin, where three of them are a comment and the fourth
 (`:22919`) is unrelated code:
 `sdk.py:22081` (the capture writer) with its read-back `:22204`, and `hosted_api.py:23046` (the commit
-door's `MERGE (s:Source {url:$did})`) with `_execute_commit_writes` at `:22858`. ⛔ **A `file:line` in NEITHER list has an UNDECLARED head: the pin
+door's `MERGE (s:Source {url:$did})`) with `_execute_commit_writes` at `:22858`; and §2.5's `:Tag`
+paragraph, whose **five** reader addresses the `#13879` review re-derived from that row's own quoted
+fragments — the group this list carried only as the number it then gave for the `mcp_server.py`
+member — `sdk.py`: `:31365`
+(`MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag})`), `:31347` (the tag list with
+counts — `MATCH (t:Tag)` + `OPTIONAL MATCH (p:Point)-[:TAGGED]->(t)`), `:24327` (the tag-name match —
+its `WHERE t.name IN $names` filter is the line below it) and `:24671` (`MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t`, the
+orphan GC), and `mcp_server.py`: `:11281` (`MATCH (t:Tag) OPTIONAL MATCH (t)<-[:TAGGED]-(q)`). The four
+`sdk.py` ones are spelled as bare `:NNNN` siblings behind one path, as the `mcp_server.py` group above
+does, and NOT as new `path.py:NNNN` pairs (a bare sibling is not counted at all — that is the point):
+a pair spelling would
+add five more **as-written spellings** — 328 → 333 — and so 105 → 110 collisions, since a collision is a
+spelling that shares its `(path, line)` pair with another, while adding **no pair at all**: 223 either
+way, because each of the five already carries its pair from §2.5. A bare sibling adds neither. The pin
+agrees: `_REDEFINED_13854` pins each of these four by content at ONE occurrence of the
+§2.5 token, so a second one-token spelling would red it. Each was
+opened at this head, and ⛔ **none of them
+opens at the pin**: at `ccb49741b2ec` all five of those numbers
+read an unrelated statement (`git show ccb49741b2ec:tortoise/sdk.py | sed -n '31365p;31347p;24327p;24671p'`,
+and `…:tortoise/mcp_server.py | sed -n '11281p'`), so the head these five belong to is this one, and a
+reader sent to the pin would have found a different line at every one of them — which is why they are
+enumerated here rather than left to the paragraph's own say-so. ⛔ **A `file:line` in NEITHER list has an UNDECLARED head: the pin
 `ccb49741b2ec` is where the census USUALLY wrote it, not where it provably IS.** Open it there first, but
 a hit at the pin is a hypothesis about the census's history, not a fact about the line. A review of this
 PR found one address in exactly that position whose head is `main`: `goal_judgement.py:1128` is
@@ -563,8 +586,11 @@ read resolves the node **through the edge** — `sdk.py:31365`
 (`MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag}) RETURN properties(p)`),
 `sdk.py:31347` (`MATCH (t:Tag) OPTIONAL MATCH (p:Point)-[:TAGGED]->(t) …` — the tag list with counts),
 `sdk.py:24327` (`MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) WHERE t.name IN $names`) /
-`mcp_server.py:11281` (`OPTIONAL MATCH (t)<-[:TAGGED]-(q)`), and
-`sdk.py:24671` (`MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t`, the orphan GC). A traversal needs its
+`mcp_server.py:11281` (`MATCH (t:Tag) OPTIONAL MATCH (t)<-[:TAGGED]-(q)`), and
+`sdk.py:24671` (`MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t`, the orphan GC) — all five
+addresses opened at this head and re-checked in this pass (#13879 review, P2): the four `sdk.py`
+addresses stand as they were, and only the `mcp_server.py` one was stale, at `:11280` → `:11281`,
+where the statement itself opens. A traversal needs its
 **endpoint in the graph**, so "the node is only the endpoint label" is not an exemption — it is the
 justification. **Verdict: `graph`.**
 
