@@ -246,6 +246,16 @@ instrument's own gates could be widened with every falsifier still green — the
 | **G3** the two tolerances the REQUIRED arms rest on were themselves ungated: `TIE_TOL` 1e-6 → 1e-3 excuses a genuine cross-distance re-rank as a `tie` (a PASS), and the scan arm's literal `distance_tol` 1e-3 → 10.0 makes its value check inert — both left 30/30 green | mutants, then the same wideners at the CALL SITE | `SCAN_DISTANCE_TOL` is a module constant read through a named `_scan_arm()` seam (`compare` reports the tolerance it was given, so it is assertable with no store); pins: distances 2e-6 apart must report `diverged`, a half-unit scan error must report `ok: False` while a delta inside the tolerance still passes, and `run()`'s body is AST-read so the tolerance cannot leave the constant |
 | **G4** two docstrings overclaimed: `_verdict` said the under-return "IS gateable, through `graph_index_shortfall`" (nothing in it reads that field — the index arm is informational, the count is REPORTED), and the `None`-distance justification claimed a reachable NULL `<=>` (see the corrected **F2** row) | read the source | both corrected in the code and in this artifact; the `None` branch stays as defence with its real justification stated |
 
+### Round 6: the record-DSN guard skipped exactly when it could not decide
+
+Found by a **second dispatch of the same PR** (measurement posted to the PR, not a
+review record); reproduced here before it was touched. No gated comparison changed.
+
+| finding | verified how | fix |
+|---|---|---|
+| **H1** `run()` wrote `host = urlsplit(args.record_dsn).hostname; if host:` — and `hostname` is `None` for **two legal libpq spellings that both reach a remote host** (`postgresql:///db?host=db.example.com`, PostgreSQL §34.1.1's query-string form, and the whitespace conninfo `host=db.example.com dbname=x`). The guard was therefore SKIPPED exactly when it could not decide, on the path that seeds that store and deletes rows by `org_id` — a no-op on the destructive path R1 advertises. It also inverted `tortoise.config.is_loopback_uri`'s fail-closed rule (`tortoise/config.py:375`: an absent hostname is NOT loopback) | measured both spellings: `urlsplit(dsn).hostname is None` | the decision is now `_assert_local_record_dsn()` — a DSN whose host cannot be resolved is REFUSED unless `--allow-remote-writes`, with the unresolvable host named in the refusal; pinned by `test_a_dsn_whose_host_cannot_be_parsed_is_refused_not_skipped`, which also AST-reads `run()` so the call site cannot go back to `if host:` (mutant: restore the old shape → **1 failed, 35 passed**) |
+| **H2** `agent-infra-ci / lint` was red at this head with **18** ruff findings, all in this PR's own two files (8× `RUF100` for a `BLE001`-only `noqa` where this repo spells both codes, 4× `B905`, 2× `SIM105`, plus `SIM103`/`F841`/`RUF015`/`SIM300`) | `ruff 0.16.4` (the `python-ci.yml` pin) over both files | all 18 fixed; `ruff check` → **All checks passed**. Not a required context (so it never blocked the merge), but it is this change's own new code |
+
 ### The two evidence errors this section exists to correct
 
 Both were in the **previous revision of this document**, and both are the
@@ -292,7 +302,7 @@ done
 ```
 
 DB-free comparator pins: `uv run python tools/test_lane.py run --
-tests/test_vector_parity_13906.py -q` → **35 passed**.
+tests/test_vector_parity_13906.py -q` → **36 passed**.
 
 ## 7. What this artifact does NOT establish
 
