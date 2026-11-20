@@ -1721,12 +1721,14 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # stronger declaration, and the two it shadowed authorized nothing while reading
     # as coverage. If you are here to add a row, EDIT THIS ONE.
     # ⚠️ Do NOT restate the licence above as "the same ladder": `_uri()`'s fall-backs
-    # are NOT byte-identical to the module probe's. That caveat, and the 15/16/10
-    # coverage counts that make it checkable, are already recorded ONCE in this file —
-    # `#13886`'s block above (`_uri()`'s own ladder is NOT byte-identical …, and the
-    # "Coverage of the live-store reads is the 15 …" paragraph). Read them there; do
-    # not copy them here. `test_13557_13558_reachable_reads.py` is an actively growing
-    # module, so a second copy of a live count is a count that goes stale in one place.
+    # are NOT byte-identical to the module probe's. That caveat, and the coverage counts
+    # that make it checkable, are already recorded ONCE in this file — `#13886`'s block
+    # above (`_uri()`'s own ladder is NOT byte-identical …, and its "Coverage of the
+    # live-store reads" paragraph). Read them there; do NOT copy the digits here: those
+    # counts are live (`test_13557_13558_reachable_reads.py` is an actively growing
+    # module), so a second copy is a copy that goes stale with nothing reddening. This
+    # paragraph is a POINTER precisely so that no number is restated — if you find one
+    # here, it is a regression, not a record.
     # The row's licence is the narrow, sufficient one: the probe's ANSWER is reused, and
     # the probe is what decides `@_docker_only`.
     "test_13557_13558_reachable_reads.py": [
