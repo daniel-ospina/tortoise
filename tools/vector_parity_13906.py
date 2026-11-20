@@ -1182,10 +1182,20 @@ class RecordStore:
             # ⛔ …AND THE INDEX, not just the column — including its VALIDITY.
             # The decision is `_require_valid_hnsw`'s so it is pinnable without a
             # database (the seam pattern `_require_index_arm` sets out).
+            # ⛔ `c` IS THE INDEXED TABLE — THE INDEX NAME IS `ic.relname`.
+            # Joining `pg_class` on `i.indrelid` and selecting `c.relname` returns
+            # `'point'`, the TABLE, for every row. `assert_index_scan` then compares
+            # that against the plan's `Index Name` (the index RELATION, e.g.
+            # `idx_point_embedding_vec_hnsw`) and can never match — relations share
+            # one namespace, so no index may be named `point` while the table exists.
+            # Fail-closed, but it refused EVERY database: the record arm was
+            # unreachable and the tool could not produce the measurement it exists
+            # for. `test_the_index_name_comes_from_the_index_relation` pins the join.
             cur.execute(
-                "SELECT c.relname, pg_get_indexdef(i.indexrelid), i.indisvalid "
+                "SELECT ic.relname, pg_get_indexdef(i.indexrelid), i.indisvalid "
                 "FROM pg_index i "
                 "JOIN pg_class c ON c.oid = i.indrelid "
+                "JOIN pg_class ic ON ic.oid = i.indexrelid "
                 "JOIN pg_namespace n ON n.oid = c.relnamespace "
                 "WHERE n.nspname='public' AND c.relname='point'")
             name, definition = _require_valid_hnsw(
@@ -1315,7 +1325,11 @@ class RecordStore:
         with self._plan_conn.cursor() as cur:
             # The same session setting the read installs, or the plan measured
             # here is not the plan the read produced (see `HNSW_ITERATIVE_SCAN`).
-            cur.execute("SELECT set_config('hnsw.iterative_scan', %s, true)",
+            # ⛔ `is_local = FALSE`, NOT `TRUE`: `_plan_conn` is AUTOCOMMIT, so a
+            # transaction-local setting is discarded with the statement that set it
+            # — `SHOW hnsw.iterative_scan` then answers the default, and the plan
+            # would be measured under a setting the read never used.
+            cur.execute("SELECT set_config('hnsw.iterative_scan', %s, false)",
                         (record_vector.HNSW_ITERATIVE_SCAN,))
             cur.execute("EXPLAIN (FORMAT JSON) " + sql, params)
             plan = cur.fetchone()[0]
