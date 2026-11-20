@@ -698,7 +698,7 @@ _TWO_SPAN_TOTAL = re.compile(rf"writes (\d+|{_NUMERAL_ALT}) pairs? as two code s
 #: the count, not of the claim. `one of them IS resolved` is how a lane re-measuring to a single uncounted
 #: pair writes that sentence — the singular form for the one count that takes it — and a plural-only pattern
 #: could not read it. That was never the false-ABSENCE verdict the messages above were reworded to avoid (it
-#: reported the count as one \"in a form this guard reads\"), which is worse in one way: the document is
+#: reported the count as one `in a form this guard reads`), which is worse in one way: the document is
 #: RIGHT, the guard says it cannot read it, and the lane re-measuring is sent to reword a correct sentence
 #: instead of to its figure (`#14010` re-review, P2). `zero`/`none`/`two`.. keep `are`.
 _TWO_SPAN_NEW = re.compile(
