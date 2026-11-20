@@ -212,6 +212,28 @@ Six more of the same class, each fixed here and each MEASURED before the fix:
   exposed to it. The transport wait bound is now widened once, in the fixture, for
   every arm; the ``sources_state`` projection stub stays for what it actually is —
   that tool's own control-plane dependency.
+
+A THIRD REVIEW ROUND (r8) — what it changed
+===========================================
+
+Two findings, both *claim vs assertion* rather than product defects, both fixed by
+making the fixture and the assertion measure the same thing:
+
+* ``test_review_link_candidates_answers_both_directions`` asserted that the
+  operator's TARGET was proposed — but the seed CONNECTS that pair, and
+  ``sdk._review_add`` skips connected pairs, so the row's verdict came from an
+  unengineered pair clearing the 0.72 similarity band. Measured consequence: the
+  same test code red on a box without the embeddings extra and green on one with
+  it (the TF-IDF fallback scores a template-sharing pair far below 0.72). The
+  seed now carries an engineered pair — verbatim wording that scores 1.000 under
+  BOTH the embedding cosine and the TF-IDF fallback — and the row asserts both
+  halves: that pair IS proposed, and the above-band pair joined by the seeded
+  IMPL operator is NOT (which is what makes the ``connected`` skip falsifiable).
+* ``_PlainText`` was a guard with no reddening row: ``_text_of`` renders a dict
+  too, so reverting the sentinel to the pre-r6 ``{"_text": …}`` left the file
+  green. Both ``deletion`` token refusals now assert the WIRE SHAPE
+  (``isinstance(out, str) and not isinstance(out, dict)``), which reds on exactly
+  that revert.
 """
 
 from __future__ import annotations
@@ -346,12 +368,25 @@ class _PlainText(str):
     ``{"_text": text}``, and that dict satisfied ``isinstance(out, dict)`` plus
     ``"error" not in out`` — so a *text* refusal could pass a *structured-payload*
     arm (`#13886` r6, F2). A string can satisfy neither.
+
+    ⛔ The guard is only guard-shaped if a revert REDS something. The two
+    ``deletion`` token arms assert ``isinstance(out, str) and not
+    isinstance(out, dict)``, because ``_text_of`` renders both forms and would
+    otherwise pass on the dict this subclass exists to prevent (`#13886` r8, F2).
     """
 
 
 def _text_of(out):
     """The refusal WORDING of a non-JSON answer, or the JSON rendering of a
-    structured one — what the two `deletion` token cases read."""
+    structured one — what the two `deletion` token cases read.
+
+    ⛔ The two renderings are NOT interchangeable, and this helper must never be
+    used to tell them apart: it renders a dict as well as a str, so a text
+    refusal that regressed to ``{"_text": …}`` still "contains" its wording.
+    The two token cases therefore ALSO assert the wire shape
+    (``isinstance(out, str) and not isinstance(out, dict)``) — that is the half
+    that reds on the regression (`#13886` r8, F2).
+    """
     if isinstance(out, str):
         return str(out)
     return json.dumps(out, default=str)
@@ -469,8 +504,18 @@ def seeded(tmp_path, monkeypatch):
     s["calibrated"] = sdk.create_point(
         "statement", "A calibrated seeded claim for the confidence arm.",
         credibility="high")["id"]
+    # ⛔ The operator's TARGET restates the SOURCE verbatim ON PURPOSE.
+    # `review_link_candidates(mode='add')` skips pairs that already share a
+    # connection (`sdk._review_add`: `if frozenset((a, b)) in connected:
+    # continue`), so a connected pair can only make that skip FALSIFIABLE if
+    # its similarity clears the 0.72 band — otherwise "not proposed" is
+    # indistinguishable from "scored too low" and deleting the skip reds
+    # nothing (`#13886` r8, F1). Verbatim wording scores 1.000 under BOTH
+    # scorers (bge-small cosine, and the TF-IDF fallback `_encode` degrades to
+    # when the embeddings extra is absent — #399), so no box can change the
+    # verdict.
     s["claim2"] = sdk.create_point(
-        "statement", "A second seeded claim, the operator's target.")["id"]
+        "statement", "The capstone V2 lane proves payloads, not statuses.")["id"]
     # ── the `check_confidence(topic=…)` seed ───────────────────────────────
     # That arm dispatches to `belief_timeline`, which RESOLVES the topic as an
     # ENTITY and returns the `decision` Points `aboutObject`-linked to it. A Point
@@ -489,6 +534,23 @@ def seeded(tmp_path, monkeypatch):
     s["source"] = sdk.register_source("https://example.test/a", "web")["id"]
     s["event"] = sdk.create_event("Deploy", eventKind="core:action")["id"]
     s["operator"] = sdk.create_operator("IMPL", s["claim"], [s["claim2"]])["id"]
+    # ── the `review_link_candidates` seed ─────────────────────────────────
+    # A related-but-UNCONNECTED pair the add arm must PROPOSE. The pre-r8 row
+    # asserted `claim2` — the operator's target — so the pair it named is
+    # excluded BY CONSTRUCTION and its pass rested on some other pair clearing
+    # 0.72 incidentally, i.e. on the box having the embedding model (measured:
+    # the same test code, `1 failed, 122 passed` on one box and `123 passed` on
+    # another at a docstring-only head — `#13886` r7 ISSUE 2 / r8 F1). This
+    # pair is engineered instead: verbatim wording ⇒ similarity 1.000 under
+    # the embedding cosine AND under the TF-IDF fallback, and no edge between
+    # the two, so "proposed" is the product's answer on every box.
+    s["review_pair"] = [
+        sdk.create_point(
+            "statement",
+            "A related-pair statement seeded for the link-candidate arm.",
+        )["id"]
+        for _ in range(2)
+    ]
     s["session"] = "sess-capstone-1"
     sdk.create_event("capstone session", eventKind="AgentSession",
                      session_id=s["session"], agent_name="capstone")
@@ -1326,6 +1388,14 @@ class TestWritesAreReadableBack:
         status, out = door.call("tortoise_delete",
                                 {"id": s["claim2"], "confirmation": token})
         assert status == 200
+        # ⛔ The WIRE SHAPE, not only the wording (`#13886` r8, F2). This
+        # refusal is a bare-string answer, and `_text_of` renders a dict too —
+        # so before this line, reverting `_tool_payload`'s `_PlainText` to the
+        # pre-r6 `{"_text": text}` left the row GREEN (measured: 2 passed, the
+        # file's red count unchanged). A `str` refusal is precisely what must
+        # not satisfy a structured-payload arm; assert that here.
+        assert isinstance(out, str) and not isinstance(out, dict), (
+            f"a TEXT refusal must not arrive as a structured payload: {out!r}")
         assert "different item" in _text_of(out), out
         status, still = door.call("tortoise_get_entity",
                                   {"id": s["claim2"], "type": "point"})
@@ -1340,6 +1410,8 @@ class TestWritesAreReadableBack:
                                 {"id": s["claim"],
                                  "confirmation": "not-a-token"})
         assert status == 200
+        assert isinstance(out, str) and not isinstance(out, dict), (
+            f"a TEXT refusal must not arrive as a structured payload: {out!r}")
         assert "not a deletion confirmation token" in _text_of(out), out
         status, still = door.call("tortoise_get_entity",
                                   {"id": s["claim"], "type": "point"})
@@ -2030,99 +2102,83 @@ class TestRelationshipsAndRemainingReads:
                                 {"id": mit["id"], "type": "point"})
         assert got.get("id") == mit["id"], got
 
-    def test_review_link_candidates_answers_both_directions(self, seeded,
-                                                            monkeypatch):
+    def test_review_link_candidates_answers_both_directions(self, seeded):
         """`add` is a LIST OF CANDIDATES, so a key-presence check proves only
-        that the envelope exists (`#13886` r6, F3). Both directions are driven:
-        a related-but-UNCONNECTED pair is PROPOSED, and a pair the graph already
-        connects is NOT — even when it scores higher.
+        that the envelope exists (`#13886` r6, F3).
 
-        ⛔ The pre-fix row asserted `claim2`, an endpoint of the fixture's `IMPL`,
-        and its docstring called that pair unconnected. It is not: the seed
-        creates the operator (`create_operator("IMPL", claim, [claim2])` below),
-        and `_review_add` drops every pair `_connected_pairs` reports —
-        operator-mediated pairs included (`sdk.py:38110-38111`; the same fact the
-        `create_operator` case states 900 lines above). The row passed only
-        because two UNRELATED seeded sentences happened to clear the 0.72
-        paraphrase band on a box carrying the embedding weights (MEASURED:
-        `calibrated ↔ claim2` = 0.765 — that was the sole `add` row), so it was
-        measuring the embedder, not this arm. On the TF-IDF fallback
-        (`embeddings._encode` degrades when the model is unavailable, #399) the
-        whole pool ceilings at ~0.22, so `add == []` and the row reds on every
-        lane without the `embeddings` extra — and the file is registered on the
-        `core` surface (`config/ci-surfaces.yml`).
+        ⛔ BOTH halves are ENGINEERED, because an incidental pass is not a
+        measurement (`#13886` r8, F1 — the pre-r8 version of this row named
+        `claim2`, which the seed CONNECTS via the IMPL operator, so
+        `_review_add` excludes that pair by construction and the row's verdict
+        came from an unengineered pair clearing the 0.72 band: measured RED on a
+        box without the embeddings extra and GREEN on one with it, same test
+        code):
 
-        The pair this row proposes is therefore seeded HERE — deliberately
-        unconnected and meant to be proposed — and the pairwise SCORE is INJECTED.
-        The score source is not what this row owns (the embedder has its own
-        suites); the arm's own selection is: the floor it applies, the
-        connected-pair skip, the ordering, and the payload. Injecting the score
-        makes all four measurable on any box, with or without the model, and the
-        0.88 entry makes the SKIP an assertion instead of a coincidence.
-        """
+        * ``review_pair`` — verbatim-identical, NO edge ⇒ the arm must PROPOSE
+          it, naming the relation it suggests. Verbatim wording scores 1.000
+          under the bge-small cosine AND under the TF-IDF fallback, so the
+          assertion holds on a keyword-only box too;
+        * ``{claim, claim2}`` — also verbatim-identical, but joined by the seeded
+          IMPL ⇒ it must NOT be proposed. That is the ``connected`` skip in
+          ``sdk._review_add``; with the pair BELOW the band (as it was before
+          r8) removing the skip reddened nothing.
+
+        The row's PAYLOAD invariants are asserted on the proposed pair as well,
+        because "a row came back" is the key-presence check this row exists to
+        replace: the similarity FLOOR the arm applied is the product's own
+        default, the queue is ordered most-similar-first, and the row names the
+        relation it suggests and the score it measured. (The endpoints' sorted
+        shape is NOT asserted: a mutant that emits `(a, b)` unsorted stays green
+        on this seed, so that assertion would be dead weight — rule 3.)
+
+        `prune` stays empty — nothing superseded is seeded — and is asserted as
+        the list a crash would break."""
         from tortoise.embeddings import DEFAULT_THRESHOLD
 
-        door, s, sdk = seeded
-        # Seeded INSIDE the case, so no other arm's candidate pool changes.
-        src = sdk.create_point(
-            "statement",
-            "The review queue should propose a missing edge between two related "
-            "nodes.")["id"]
-        dst = sdk.create_point(
-            "statement",
-            "A review queue proposes an edge between two related nodes before "
-            "the graph asserts it.")["id"]
-        #: similarity by UNORDERED pair — the arm's business, never the embedder's
-        injected_scores = {
-            frozenset((src, dst)): 0.91,                    # unconnected → proposed
-            frozenset((s["claim"], s["claim2"])): 0.88,     # ALREADY IMPL-linked
-            frozenset((s["claim"], s["calibrated"])): 0.74,  # unconnected, over the floor
-        }
-
-        def _injected_pairwise_similarity(points):
-            ids = [p["id"] for p in points]
-            return {(a, b): injected_scores.get(frozenset((a, b)), 0.05)
-                    for i, a in enumerate(ids) for b in ids[i + 1:]}
-
-        # Same seam shape as the `_TRANSPORT_WAIT_BOUND_S` patch above: the
-        # call site reads it as a CLASS attribute at call time
-        # (`sim_fn = similarity_fn or self._default_pairwise_similarity`,
-        # `sdk.py:38103`), so a scoped attribute patch reaches the door's own
-        # per-request SDK instance.
-        monkeypatch.setattr(TortoiseSDK, "_default_pairwise_similarity",
-                            staticmethod(_injected_pairwise_similarity))
-
+        door, s, _ = seeded
         status, out = door.call("tortoise_review_link_candidates", {})
         assert status == 200
         assert isinstance(out, dict), out
         add = out.get("add")
         assert isinstance(add, list) and add, out
-        proposed = [(row.get("from"), row.get("to")) for row in add
-                    if isinstance(row, dict)]
-        # 1. the pair the seed MEANT to propose, in the arm's ordered (a, b) shape
-        assert (min(src, dst), max(src, dst)) in proposed, (
-            f"the seeded unconnected pair is not proposed: {out}")
-        # 2. the pair the graph ALREADY connects, at a HIGHER score, is not —
-        #    the skip `_connected_pairs` exists for, now measured
-        assert not any({s["claim"], s["claim2"]} == set(pair)
-                       for pair in proposed), (
-            "`add` proposed a pair `_connected_pairs` reports as connected: "
-            f"{out}")
-        # 3. the floor is the PRODUCT's default, not whatever the caller gets
-        assert all(float(row["similarity"]) >= DEFAULT_THRESHOLD
-                   for row in add if isinstance(row, dict)), out
-        # 4. most similar first — a caller reading the head of the queue sees
-        #    the best candidate
-        similarities = [float(row["similarity"]) for row in add
-                        if isinstance(row, dict)]
+
+        def _rows_touching(point_id):
+            return [row for row in add if isinstance(row, dict)
+                    and point_id in (row.get("from"), row.get("to"))]
+
+        left, right = s["review_pair"]
+        proposed = [row for row in _rows_touching(left)
+                    if right in (row.get("from"), row.get("to"))]
+        assert proposed, (
+            "the seeded UNCONNECTED pair is not proposed by the link-candidate "
+            f"read (left={left} right={right}): {out}")
+        assert all(row.get("suggested_relation") for row in proposed), out
+
+        connected_pairs = [row for row in _rows_touching(s["claim"])
+                           if s["claim2"] in (row.get("from"),
+                                              row.get("to"))]
+        assert not connected_pairs, (
+            "a pair that ALREADY shares the seeded IMPL operator was proposed "
+            f"as a missing connection — the `connected` skip is not holding: "
+            f"{connected_pairs}")
+
+        # ── the proposed row's payload, not just its presence ──────────────
+        assert len(proposed) == 1, proposed
+        row = proposed[0]
+        # the floor the arm applied is the PRODUCT's default (`DEFAULT_THRESHOLD`,
+        # 0.72) — asserted over the whole queue, so dropping the filter (every
+        # pair, including the 0.0-0.2 tail, becomes a "candidate") reds here
+        assert all(float(r["similarity"]) >= DEFAULT_THRESHOLD
+                   for r in add if isinstance(r, dict)), out
+        # most similar first — a caller reading the head of the queue sees the
+        # best candidate, which is the arm's documented ordering
+        similarities = [float(r["similarity"]) for r in add
+                        if isinstance(r, dict)]
         assert similarities == sorted(similarities, reverse=True), out
-        # 5. the payload names the relation it suggests AND the score it measured
-        row = next(r for r in add
-                   if {r.get("from"), r.get("to")} == {src, dst})
+        # the row names the relation it suggests, and the score it measured
         assert row["suggested_relation"] == "IMPL", out
         assert f"{float(row['similarity']):.2f}" in row["reason"], out
-        # 6. `prune` stays empty — nothing superseded is seeded — and is asserted
-        #    as the list a crash would break
+
         assert isinstance(out.get("prune"), list), out
         assert out["prune"] == [], out
 
