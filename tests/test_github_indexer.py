@@ -3283,6 +3283,13 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # un-supersede arm) and `56343` (the per-label `SET n += $props`). `update_knowledge`
     # re-measured UNCHANGED at `22779-22954`. The `+194` is the consistency check on a
     # measurement, never its input.
+    #
+    # ⛔ RE-DERIVED AGAIN at the `origin/main` (`bd020ff45b`) forward merge into this
+    # branch: main's own growth above these regions moved every address, and by TWO
+    # different offsets — `+150` for the `update_knowledge` block and `+195` for the
+    # three later ones — so the same by-hand method was used: each address was found by
+    # searching its own pinned FIRST-line text (and, for the arm, its own LAST-line text
+    # `continue`) on the MERGED tree, never by applying an offset to the previous set.
     ("sdk.py", 55742, 55744): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
     ("sdk.py", 55894, 55903): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),
