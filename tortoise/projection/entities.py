@@ -97,10 +97,31 @@ def _derived_mirror_required(entity_type: str) -> bool:
     ⛔ AND THIS GUARDS THE **DERIVED** ENTITY VECTORS, PLUS THE `:Point` MIRROR AT THE TWO
     WRITERS WHERE THAT COPY IS REDUNDANT (#13971). A `:Point`'s vector IS record truth
     (`#5004`), and the test that decides which writers ask is **"is this copy the redundant
-    one?"**: `hosted_backup.restore_graph` and `sdk::_update_entity` place a copy the record
-    already holds, so with coverage measured true they stop — the graph property is unread
-    (`#13330` retired the in-graph `:Point` index) and re-writing it would undo a strip
-    (`#13610` option 2's "write it back on the next call" race).
+    one?"**: `sdk::_update_entity` and `hosted_backup.restore_graph` both stop when
+    coverage measures true, because the graph property is unread (`#13330` retired the
+    in-graph `:Point` index) and re-writing it would undo a strip (`#13610` option 2's
+    "write it back on the next call" race).
+
+    ⚠️ AND WHY THE LABEL AGGREGATE IS STILL THE TEST FOR THESE TWO, WHEN IT IS EXACTLY THE
+    TEST THAT IS WRONG FOR THE TWO THAT DO NOT ASK (#13971 review, P2) — the answer is
+    per-door, not a blanket claim that the record holds the row:
+
+      * `sdk::_update_entity` is a caller-prop write on the ENTITY path (not a capture
+        lane), the record leg answers for that row, and it sets the property with
+        `SET n += $p` — so an EXISTING graph vector survives a pop untouched.
+      * `hosted_backup.restore_graph` targets a graph whose record is the same graph: that
+        is the premise of a DR restore, and it refuses a non-empty target.
+
+    ⛔ WHAT THE AGGREGATE DOES NOT BOUND IS A GRAPH-ONLY `:Point` ID ON THE RESTORE DOOR.
+    That shape is `CREATE (n:{labels}) SET n = $p` into a required-empty graph, so a popped
+    vector has no stored value behind it: once BOTH halves (`point`, and the `operator`
+    conjunct) answer stop, an id the record has no row for loses its only copy, and `#5004`
+    forbids re-encoding it. Today the aggregate answers KEEP (≈37,099 record point vectors
+    against 37,158 in the graph, measured 2026-11-19), and the `operator` half is held back
+    by a numerator/denominator asymmetry — accidental protection, not a bound. The correct
+    fix is a PER-ID ask (does the record hold THIS row), which is `#13971`'s remaining work,
+    recorded there with the measured shape; the gate stays where it is until it lands,
+    because the restore is the one writer whose mistake cannot be repaired afterwards.
 
     ⛔ TWO `:Point` DECLARED WRITERS DELIBERATELY DO NOT ASK (#13971 review, P1), and the
     reason is the same test read honestly: on their lanes the copy is NOT redundant.

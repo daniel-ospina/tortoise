@@ -321,7 +321,9 @@ def test_the_point_journal_fold_deliberately_keeps_the_mirror(proj, monkeypatch)
     NOT ASK (`#13971` review, P1): `sdk::_write_capture_turns` (the graph batch runs exactly
     where the record cannot hold the turn, so the copy there is the SOLE store) and
     `projection::_rebuild_all_replay` (pass-1b restores a snapshot vector only for ids the
-    journal wrote none for). The census therefore REFUSES `:Point` and names both — the
+    journal wrote none for). The census therefore REFUSES `:Point`, naming both once the
+    coverage verdict verifies (today the coverage arm answers first and names the two
+    counts) — the
     strip stays unavailable until the capture path can answer per-turn, which is cheaper
     than a capture that writes a turn's vector to neither store.
     """
