@@ -239,7 +239,7 @@ _MEASUREMENT_RUN_KEYS = (
     "errors",
     "corpus_sha256",
     # #10982: the A-row census is written INTO the run block by the emitter
-    # (`capstone_measure.py:4442`), beside `e3_census`/`e4_receipt`. ⛔ THE NUMBER IS
+    # (`capstone_measure.py:4826`), beside `e3_census`/`e4_receipt`. ⛔ THE NUMBER IS
     # REQUIRED, not decoration: `tests/test_7949_capstone_measure.py`'s
     # `_CROSS_FILE_PROBE_CITES` reads THIS pair out of THIS file and asserts that line of the
     # probe carries `"a_row_census": a_census,` — symbol-only prose matches nothing and reds it.
@@ -252,6 +252,15 @@ _MEASUREMENT_RUN_KEYS = (
     # (`edges_total`, `by_type`, the `pointKind` histogram, the subject-family
     # counts). A key set derived from the emitter may not grow without this one.
     "a_row_census",
+    # #11695: E6's own census block — the population (`packs`/`relations`/
+    # `hierarchies`/`declared`), the defect list, and the census artifact's `written`
+    # cells. It is a MEASUREMENT, not identity: a record emptied of every other
+    # measurement key but this one still holds produced numbers
+    # (`unbound_and_unexplained`, the population), so parking it in
+    # `_NON_MEASUREMENT_RUN_KEYS` would re-open the V12 exemption hole this set exists
+    # to close. ⛔ `written` rides INSIDE it and is NEVER the row's bar (§3.8) — the bar
+    # is `unbound_and_unexplained`, which is in here too.
+    "e6_census",
 )
 
 #: The RUN-block keys that carry NO measureMENT: the run's identity, its graph name,
@@ -270,7 +279,7 @@ _MEASUREMENT_RUN_KEYS = (
 #: one counted cell, ``door.captures`` (``door_witness()``'s ``entered``/``bypassed``),
 #: is a ROUTING witness and NO RECORD CAN VARY IT: ``main`` calls
 #: ``require_door_entered(runs)`` BEFORE it reaches ``render_log``
-#: (``capstone_measure.py:4587`` vs ``:4728``), and that function raises on any bypass,
+#: (``capstone_measure.py:4994`` vs ``:5142``), and that function raises on any bypass,
 #: so ``bypassed`` is always ``[]`` and ``entered`` is always ``sessions`` re-counted.
 #: A constant carries no number of its own — ⛔ and NOT for the reason a witness like
 #: ``steps_observed`` would give: that key is itself a MEASUREMENT member of the set

@@ -955,7 +955,7 @@ def _criteria(prereg: dict) -> dict[str, dict]:
     for entry in crit:
         if isinstance(entry, dict) and isinstance(entry.get("id"), str):
             out[entry["id"]] = entry
-    missing = [c for c in ("E1", "E1b", "E2a", "E2b", "E3", "E4", "E5")
+    missing = [c for c in ("E1", "E1b", "E2a", "E2b", "E3", "E4", "E5", "E6")
                if c not in out]
     if missing:
         raise ValueError(f"preregistration is missing criteria {missing}")
@@ -1027,6 +1027,12 @@ def parse_bars(prereg: dict) -> dict:
                               _threshold(crit, "E2a"), "E2a")
     e4_ok, e4_total = _ints(r"=\s*(\d+)\s*of\s*(\d+)",
                             _threshold(crit, "E4"), "E4")
+    # E6's bar is a COUNT of defects that must reach zero, and its prose writes it as
+    # ``unbound_and_unexplained = 0`` (§3.1). Parsed like every other bar for the same
+    # reason: a bar typed in this file is a bar nobody froze, and E6 is the row a lane
+    # would be most tempted to re-type (a zero looks like it needs no reading).
+    e6_max = int(_float(r"unbound_and_unexplained\s*=\s*(\d+)",
+                        _threshold(crit, "E6"), "E6"))
     e5_bars = [float(x) for x in
                re.findall(r">=\s*([0-9]+(?:\.[0-9]+)?)", _threshold(crit, "E5"))]
     if len(e5_bars) < 2:
@@ -1045,12 +1051,17 @@ def parse_bars(prereg: dict) -> dict:
                                         _threshold(crit, "E3"), "E3")},
         "E4": {"required": e4_ok, "of": e4_total},
         "E5": {"ratio": e5_bars[0], "raw_absolute": e5_bars[1]},
+        "E6": {"unbound_max": e6_max},
         "floors": {
             "e1_objects": floor("e1_objects"),
             "e1_min_before_share": share_floor("e1_min_before_share"),
             "e2b_surviving_units": floor("e2b_surviving_units"),
             "e3_derived_nodes": floor("e3_derived_nodes"),
             "e5_rate_min_sentences": floor("e5_rate_min_sentences"),
+            # #11673's floor for the sixth row: a pack set under it is REFUSED, never
+            # scored, because a registry that failed to load reports zero declared rows
+            # and `unbound = 0` would then read GREEN over an absent subject (§10.21).
+            "e6_declared_rows": floor("e6_declared_rows"),
         },
     }
 
@@ -1469,8 +1480,16 @@ def e2_row_note(e1: dict, e2a_result: dict, e2b_result: dict,
 
 
 def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
-               e3: dict, e4: dict, e5: dict, e1: dict, e2: dict) -> list[dict]:
-    """The five table rows — one per criterion, each with the artifact behind it.
+               e3: dict, e4: dict, e5: dict, e1: dict, e2: dict,
+               e6: dict) -> list[dict]:
+    """The TABLE's rows — one per criterion, each with the artifact behind it.
+
+    ⛔ SIX rows, and the two SETS are deliberately different (#11673/#11695): the RECORD
+    must carry `E1`–`E6` (`REQUIRED_CRITERIA`, `tools/capstone_preregistration_check.py` —
+    which is what this builder emits, or the record is incomplete), while the epic's CLOSE
+    reads `E1`–`E5` only (`tools/capstone_verdict_check.py`'s `CRITERIA`, V2/V9). The
+    closing set is NOT touched here: promoting `E6` into it is a re-registration (V2's row
+    set, V9's `5/5` and §3.1 all change) and therefore the owner's call, not a lane's.
 
     ``evidence`` is the path of the artifact that ACTUALLY CARRIES the number.
     ``capstone_run.py`` hard-coded ``EVIDENCE_DIR/capstone.log`` regardless of
@@ -1494,7 +1513,8 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
             numerator: int | None, denominator: int | None,
             corpus_sha256: str | None, blocked_by: str | None, note: str,
             artifact_corpus_sha256: str | None = None,
-            sibling: str | None = None) -> dict:
+            sibling: str | None = None,
+            written: dict | None = None) -> dict:
         # GREEN and BLOCKED are mutually exclusive in the gate (V5 refuses a green
         # row that carries a blocker; V6 requires one on every non-green row), so
         # the pair is resolved ONCE, here. Without this a row that is correctly
@@ -1517,6 +1537,14 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
             built["sibling"] = sibling
         if artifact_corpus_sha256 is not None:
             built["artifact_corpus_sha256"] = artifact_corpus_sha256
+        # `written_counts` is E6's BESIDE-the-bar column (the census's own key name, so a
+        # consumer reads the artifact and the row with one spelling). It is emitted only
+        # where the criterion really has one — a `None` on five rows would read as "the
+        # column is there, the numbers are missing" rather than "this row has no such
+        # column". ⛔ It is NEVER the bar: the row's numerator/denominator are, and `A1`
+        # owns the written graph (§3.8).
+        if written is not None:
+            built["written_counts"] = written
         return built
 
     # The docstring's rule, applied to E4's operands rather than hard-coded to
@@ -1538,6 +1566,20 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
             "artifact beside this run's numbers, and a missing `corpus_sha256` would "
             "raise a bare KeyError from the comparison below — so the mapping is "
             "refused by name rather than left to either")
+
+    # E6's mapping is guarded on the same rule, for the same class of defect: `note` and
+    # `written` are the two cells the row cannot be honest without — the note states the
+    # bar, and `written` is the column the registration REQUIRES to be reported beside it.
+    # A caller that omits either would emit a row reading as though the beside column had
+    # been measured as zero, which is the silent-zero shape #10995 forbids.
+    e6_missing = [key for key in ("note", "written", "blocked_by") if key not in e6]
+    if e6_missing:
+        raise SystemExit(
+            "capstone-measure: REFUSED — build_rows was handed an e6 mapping with no "
+            + " and no ".join(f"`{key}`" for key in e6_missing)
+            + ". The row's `written` column is reported BESIDE the bar and may never be "
+            "silently omitted (an absent column reads as a measured zero), and a missing "
+            "`blocked_by` would let a non-green row skip the pointer the gate requires")
 
     # ⛔ `_same_corpus` coerces both operands itself, so this line passes them RAW on
     # purpose: a non-string `corpus_sha256` must yield a ROW the gate can report (V7
@@ -1599,6 +1641,17 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
         row("E5", verdict=e5["verdict"], evidence=E5_RESCORE, sha=head,
             numerator=e5["numerator"], denominator=e5["denominator"],
             corpus_sha256=log_corpus_sha, blocked_by="#5087", note=e5["note"]),
+        # E6 (#11695) — the sixth ROW, appended so the five-row order above is untouched.
+        # Its `evidence` is THIS log: the population and the defect list are re-derived by
+        # this run (`measure_e6`) and printed into the E6 section below, while the
+        # census's `written` cells travel beside the bar in `written_counts`.
+        # `corpus_sha256` is the run's corpus for the same reason E3's is: every row is
+        # measured in one pass over that corpus, and E6's own population — the packs at
+        # this head — is a property of the checkout the row's `sha` names.
+        row("E6", verdict=e6["verdict"], evidence=out_path, sha=head,
+            numerator=e6["numerator"], denominator=e6["denominator"],
+            corpus_sha256=log_corpus_sha, blocked_by=e6["blocked_by"],
+            note=e6["note"], written=e6.get("written")),
     ]
 
 
@@ -4037,8 +4090,313 @@ def build_e4_row(receipt: dict, *, bars: dict, corpus_sha: str) -> dict:
     }
 
 
+# ── E6 — the packs' declared connections (#11673 registers the row, #11695 the producer) ──
+#
+# E6 asks: for every declared connection (`relations[]` and `hierarchies[]`) of every
+# installed pack, does the DECLARATION bind a write path and record its sense? The bar is
+# a zero-tolerance COUNT of rows that are **unbound and unexplained** (PRE-REGISTRATION.md
+# §3.1, registered by #11673); the census's `written` column is REPORTED BESIDE it, never
+# the bar, because `A1` already measures what the written graph answers and a bar on
+# `written` would let one defect red two rows (§3.8, §10.21).
+#
+# ⛔ THE INSTRUMENT IS NAMED, NOT REBUILT (§10.21). The per-row cells E6 reads are
+# `tools/pack_relation_census.py`'s, whose `relation_write_verdict`/`effective_direction`
+# come from `tortoise.pack_registry` — the ONE resolver (#2766). A second parser here would
+# be a second answer to "is this declared row writable", and the two would drift.
+#
+# ⛔ THE DECLARATION HALF IS RE-DERIVED AT THIS HEAD; THE `written` HALF IS READ FROM THE
+# COMMITTED ARTIFACT, and the split is not laziness. `build_census(write_probe=False)` is
+# hermetic (it parses the packs), so the BAR measures the registry this run is stamped at
+# instead of a census committed weeks earlier — a row that cited another revision's numbers
+# under this run's head is the E4-off-pin shape the probe already refuses. `written` is a
+# GRAPH fact: re-probing it would mint and delete endpoint nodes inside a scored run's own
+# graph, so it is read from `docs/evidence/11083/pack-relation-census.json` and reported
+# beside the bar, with any cell the artifact does not carry reading `unmeasured` — never 0
+# (#10995's rule: an unmeasured door reads UNMEASURED, never zero).
+
+#: The committed census artifact — the carrier of the `written` family.
+E6_CENSUS = "docs/evidence/11083/pack-relation-census.json"
+#: The packs the registry is loaded from. Repo-relative: the row's `packs_dir` is printed
+#: into a committed log, and an absolute path there is a claim about one operator's machine.
+PACKS_DIR = "packs"
+
+#: The open issue that owns a declared row which binds NO write path — `#11484`
+#: ("a pack-declared object relation must be writable as an edge, not just an IMPL label").
+#: ⛔ NOT `#11237`: that issue owns the runtime WRITER, i.e. `written`, which this row
+#: reports beside and never bars on.
+E6_BINDING_OWNER = "#11484"
+#: The open issue that owns "a row could not be scored at this head" — `#11496` (the
+#: closing walk: every row carries a state and an artifact, or is explicitly BLOCKED).
+E6_POPULATION_OWNER = "#11496"
+
+
+def _pack_census_module():
+    """``tools/pack_relation_census.py``, imported from where it lives.
+
+    Through a function, not a module-level import: this file is RUN as a script from
+    ``probes/``, so only the repo root is on ``sys.path`` at import time and ``tools`` is not
+    a package. The same shape ``_derivation_label_classes`` uses for the writer's constant,
+    and for the same reason — a module-level import here is E402, and ruff runs over this file.
+    """
+    tools_dir = ROOT / "tools"
+    if str(tools_dir) not in sys.path:
+        sys.path.insert(0, str(tools_dir))
+    import pack_relation_census
+    return pack_relation_census
+
+
+def e6_row_reasons(row: dict, *, pnia_verdict: str) -> list[str]:
+    """Why ONE declared row is (or is not) unbound-and-unexplained — the registered metric.
+
+    The metric is written over the ROW, not over the census's `verdicts` aggregate: that
+    aggregate sums `relations[]` only, so reading it would silently drop every
+    `hierarchies[]` cell (§10.21). Three ways a row is a defect, and a row is COUNTED ONCE
+    however many of them it hits:
+
+    * its predicate is not in the write allowlist and it carries no `declarationOnly`
+      reason (the census's `predicate-not-in-allowlist` verdict);
+    * it binds no write path at all and no `declarationOnly` reason explains that — the
+      "unbound" half of the bar, and the one the flipped-on declaration would land in;
+    * it DOES bind a write path but records no `effective_direction` — a row that claims a
+      path while leaving the sense blank, which is the second clause §3.1 registers.
+
+    ⚠️ "Explained" is `declarationOnly: true` WITH a non-blank reason. A row retired with a
+    reason is exactly what the metric excludes (`pm`'s `onBoard`); a row retired with no
+    reason is a defect, because nothing states why the pack declares a connection it will
+    never construct.
+    """
+    verdict = row.get("verdict")
+    binds = bool(row.get("write_path"))
+    explained = bool(row.get("declaration_only")) and bool(
+        str(row.get("declaration_only_reason") or "").strip())
+    reasons: list[str] = []
+    if verdict == pnia_verdict and not explained:
+        reasons.append("predicate not in the write allowlist, with no "
+                       "declarationOnly reason")
+    if not binds and not explained:
+        reasons.append("no write path binds the declared row and no "
+                       "declarationOnly reason explains it")
+    if binds and not str(row.get("effective_direction") or "").strip():
+        reasons.append("the row binds a write path but records no "
+                       "effective_direction")
+    return reasons
+
+
+def _e6_row_ref(row: dict) -> dict:
+    """The identifying cells a defect is reported with — never the whole row."""
+    return {key: row.get(key) for key in
+            ("pack", "surface", "predicate", "from_kind", "to_kind", "verdict",
+             "declaration_only", "effective_direction")}
+
+
+def _e6_write_cells(census_path: str) -> tuple[dict, str]:
+    """The committed census's ``written`` cell per row, keyed by that row's identity.
+
+    Returns ``(cells, source)``. A missing/unreadable artifact is NOT an error for E6's
+    bar (the bar's own population is re-derived at this head); it only means the beside
+    column reads ``unmeasured``, and ``source`` states why rather than leaving a blank.
+    """
+    path = ROOT / census_path
+    if not path.is_file():
+        return {}, f"{census_path} is ABSENT from this checkout"
+    try:
+        artifact = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {}, (f"{census_path} could not be read ({type(exc).__name__}); "
+                    f"its `written` cells are UNMEASURED")
+    cells: dict[tuple, dict] = {}
+    for pack, block in (artifact.get("packs") or {}).items():
+        if not isinstance(block, dict):
+            continue
+        for surface in ("relations", "hierarchies"):
+            for row in block.get(surface) or []:
+                if not isinstance(row, dict):
+                    continue
+                cells[_e6_key(pack, surface, row)] = row
+    generated = artifact.get("generated_by") or "an unstated command"
+    return cells, f"{census_path} (generated_by: {generated})"
+
+
+def _e6_key(pack: str, surface: str, row: dict) -> tuple:
+    """A declared row's IDENTITY across the two derivations.
+
+    (pack, surface, predicate, from_kind, to_kind) — the cells a pack DECLARES, so the same
+    declaration reads the same in a re-derivation and in the committed artifact. `path` is
+    not in the key: it is a hierarchy's provenance, not its declaration.
+    """
+    return (pack, surface, row.get("predicate"), row.get("from_kind"),
+            row.get("to_kind"))
+
+
+def measure_e6(*, packs_dir: Path | str | None = None,
+               census_path: str = E6_CENSUS) -> dict:
+    """E6's numbers at THIS head: the population, and the rows unbound AND unexplained.
+
+    Returns a measurement, never a verdict: ``build_e6_row`` turns it into a row. A pack
+    registry that cannot be loaded is reported as an ``error`` (a NAMED gap, never zeros —
+    the same rule the A-row census follows), so the rest of the table is still scored.
+    """
+    census_tool = _pack_census_module()
+    relative = os.path.relpath(Path(packs_dir or (ROOT / PACKS_DIR)), ROOT)
+    measurement: dict = {
+        "census_tool": "tools/pack_relation_census.py (build_census, write_probe=False)",
+        "packs_dir": relative.replace(os.sep, "/"),
+        "packs": 0, "relations": 0, "hierarchies": 0, "declared": 0,
+        "writable": 0, "declaration_only": 0,
+        "predicate_not_in_allowlist": 0,
+        "defects": [], "unbound_and_unexplained": 0,
+        "written": {"direct": 0, "mediated": 0, "none": 0, "unmeasured": 0},
+        "written_source": "",
+        "error": None,
+    }
+    try:
+        census = census_tool.build_census(Path(packs_dir or (ROOT / PACKS_DIR)))
+    except Exception as exc:  # the other rows must still be scored, and the gap named
+        measurement["error"] = census_reason(exc)
+        measurement["written_source"] = (
+            "not read — the pack registry could not be loaded")
+        return measurement
+
+    packs = census.get("packs") or {}
+    rows: list[tuple[str, str, dict]] = []
+    for pack, block in packs.items():
+        for surface in ("relations", "hierarchies"):
+            for row in (block or {}).get(surface) or []:
+                rows.append((pack, surface, row))
+    population = census.get("population") or {}
+    pnia = census_tool.RELATION_PREDICATE_NOT_IN_ALLOWLIST
+    measurement.update({
+        "packs": population.get("packs", len(packs)),
+        "relations": population.get("relations", 0),
+        "hierarchies": population.get("hierarchies", 0),
+        # ⛔ `population.declared` — the registered denominator, ROWS not connections,
+        # read from the census the packs produce here rather than counted again here.
+        "declared": population.get("declared", len(rows)),
+        "writable": sum(1 for _p, _s, row in rows
+                        if row.get("verdict") == census_tool.RELATION_WRITABLE),
+        "declaration_only": sum(1 for _p, _s, row in rows
+                                if row.get("declaration_only")),
+        "predicate_not_in_allowlist": sum(1 for _p, _s, row in rows
+                                          if row.get("verdict") == pnia),
+    })
+
+    for pack, surface, row in rows:
+        reasons = e6_row_reasons(row, pnia_verdict=pnia)
+        if reasons:
+            measurement["defects"].append(
+                {**_e6_row_ref(row), "pack": pack, "surface": surface,
+                 "reasons": reasons})
+    measurement["unbound_and_unexplained"] = len(measurement["defects"])
+
+    cells, source = _e6_write_cells(census_path)
+    written = {"direct": 0, "mediated": 0, "none": 0, "unmeasured": 0}
+    for pack, surface, row in rows:
+        cell = cells.get(_e6_key(pack, surface, row)) or {}
+        value = cell.get("written")
+        written[value if value in ("direct", "mediated", "none") else "unmeasured"] += 1
+    measurement["written"] = written
+    measurement["written_source"] = source
+    return measurement
+
+
+def e6_outcome(*, declared: int, unbound: int, bars: dict,
+               measured: bool = True) -> dict:
+    """E6: ``unbound_and_unexplained = 0``, over a population floored at 30 rows.
+
+    ⛔ THE FLOOR IS THE POINT, and it refuses the false PASS at the top of the row: a
+    registry that failed to load its packs reports ``declared: 0``, so ``unbound: 0`` too,
+    and the bar would read GREEN over a subject that is not there
+    (``denominator_floors.e6_declared_rows``, §10.21). Below it the row is REFUSED — the
+    record's own word for "neither a pass nor a fail" — which the table spells BLOCKED.
+    """
+    floor = bars["floors"]["e6_declared_rows"]
+    limit = bars["E6"]["unbound_max"]
+    below = measured and declared < floor
+    return outcome(measured=measured, below_floor=below,
+                   passed=(measured and not below and unbound <= limit),
+                   bar=(f"unbound_and_unexplained = {limit} (population floor {floor} "
+                        f"declared rows)"),
+                   value=(f"unbound_and_unexplained={unbound} of declared={declared}"
+                          if measured else "unmeasured"))
+
+
+def build_e6_row(e6: dict, *, bars: dict) -> dict:
+    """E6's row, from ``measure_e6``'s numbers — the census is the artifact, not a fallback.
+
+    The row carries the census's `written` cells BESIDE the bar (``written``, rendered into
+    the log as its own line) so a reader cannot mistake them for it: the bar is a count of
+    declared rows that bind nothing and explain nothing, and `written` is `A1`'s subject.
+    """
+    measured = not e6.get("error")
+    result = e6_outcome(declared=e6.get("declared") or 0,
+                        unbound=e6.get("unbound_and_unexplained") or 0,
+                        bars=bars, measured=measured)
+    verdict = verdict_word(result)
+    # The pointer is chosen by the FINDING, not by the row: a measured defect names the
+    # issue that owns binding a declared row (#11484), while a row that could not be scored
+    # at all names the closing-walk issue that refuses to omit a row (#11496). Both are OPEN;
+    # V12 refuses a row whose blocker is recorded CLOSED, and the pairing is stated here so
+    # a future edit cannot swap one for a closed issue without moving this sentence.
+    blocked_by = None
+    if verdict != "GREEN":
+        blocked_by = (E6_BINDING_OWNER if result["outcome"] == "FAIL"
+                      else E6_POPULATION_OWNER)
+    written = e6.get("written") or {}
+    beside = (f"written (REPORTED BESIDE the bar, never the bar — A1 owns the written "
+              f"graph): direct={written.get('direct')} "
+              f"mediated={written.get('mediated')} none={written.get('none')} "
+              f"unmeasured={written.get('unmeasured')} from "
+              f"{e6.get('written_source') or 'no artifact'}")
+    if not measured:
+        detail = (f"the pack registry at {e6.get('packs_dir')} could not be loaded "
+                  f"({e6.get('error')}), so E6's population is UNMEASURED and the row "
+                  f"is not scored — a registry that reports zero declared rows would "
+                  f"otherwise read GREEN over a subject that is not there. {beside}")
+    else:
+        population = (f"declared={e6.get('declared')} "
+                      f"({e6.get('relations')} relations + {e6.get('hierarchies')} "
+                      f"hierarchy paths) over {e6.get('packs')} packs at "
+                      f"{e6.get('packs_dir')}, of which "
+                      f"{e6.get('writable')} writable, "
+                      f"{e6.get('declaration_only')} declaration-only and "
+                      f"{e6.get('predicate_not_in_allowlist')} "
+                      f"predicate-not-in-allowlist; the registered denominator is "
+                      f"`population.declared` AT THE RUN'S HEAD, so it MOVES with the "
+                      f"packs (#11797 re-measures the inventory after #11001)")
+        if e6["defects"]:
+            named = "; ".join(
+                f"{row['pack']}:{row['surface']}:{row['predicate']}"
+                f"({row['from_kind']}->{row['to_kind']}) — " + " AND ".join(row["reasons"])
+                for row in e6["defects"])
+            detail = (f"{e6['unbound_and_unexplained']} declared row(s) are unbound or "
+                      f"unexplained and are NAMED: {named}. {population}. {beside}")
+        else:
+            detail = (f"no declared row is unbound-and-unexplained: every row either "
+                      f"binds a write path with a recorded effective_direction, or is "
+                      f"retired as declarationOnly WITH its reason (the shape the "
+                      f"metric EXCLUDES rather than the defect it counts). {population}. "
+                      f"{beside}")
+    return {
+        "verdict": verdict,
+        "outcome": result["outcome"],
+        "bar": result["bar"],
+        "value": result["value"],
+        # The table's numerator is the count that PASSED on every other row; E6's bar is a
+        # defect count that must be ZERO, so the complement (rows that are bound or
+        # explained) keeps the table's polarity and leaves V5's "a green row measures at
+        # least ONE success" reachable — the same reason `e1_pass_objects` carries E1's
+        # complement rather than the bare-definite count E1 minimises.
+        "numerator": ((e6.get("declared") - e6.get("unbound_and_unexplained"))
+                      if measured else None),
+        "denominator": (e6.get("declared") if measured else None),
+        "blocked_by": blocked_by,
+        "written": written,
+        "note": (f"{result['value']}; bar {result['bar']}; {detail}"),
+    }
+
+
 def score_e5(sessions: list[str], out_path: Path) -> dict:
-    """Re-score the #7947 arms over the corpus's CURRENT gold; return the numbers.
+    """Re-score the #7947 arms over the corpus's CURRENT gold; return the numbers."
 
     The re-score is what makes E5 a measurement of the CORPUS THIS RUN FROZE (the
     gold is part of ``fixtures_hash``) rather than a citation of a 2026-10-18
@@ -4175,6 +4533,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
                census_data: dict, e1: dict, e1_aux: dict, e1_out: dict,
                e1b_out: dict, e2a_out: dict, e2b_out: dict, e3: dict,
                e3_out: dict, e4: dict, e4_out: dict, e5: dict, e5_out: dict,
+               e6: dict, e6_row: dict,
                rows: list[dict], out_path: str,
                a_census: dict | None = None,
                required: list[str] | None = None,
@@ -4372,6 +4731,31 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         add("e5 incomplete receipts (disclosed, not silently averaged): " +
             " | ".join(e5["partial_receipts"]))
     add("")
+    add("## E6 — the packs' declared connections (declared -> writable -> written)")
+    add(f"e6 source: {e6['census_tool']} over {e6['packs_dir']} at this head — the "
+        "declaration half is re-derived HERE, so the bar measures the registry this "
+        "run is stamped at and not a census committed earlier")
+    add(f"e6 population packs={e6['packs']} relations={e6['relations']} "
+        f"hierarchies={e6['hierarchies']} declared={e6['declared']} "
+        f"writable={e6['writable']} declaration_only={e6['declaration_only']} "
+        f"predicate_not_in_allowlist={e6['predicate_not_in_allowlist']}")
+    add(f"e6 outcome={e6_row['outcome']} {e6_row['value']} bar={e6_row['bar']}")
+    for defect in e6["defects"]:
+        add(f"e6 defect pack={defect['pack']} surface={defect['surface']} "
+            f"predicate={defect['predicate']} "
+            f"from={defect['from_kind']} to={defect['to_kind']} "
+            f"verdict={defect['verdict']} "
+            f"declaration_only={defect['declaration_only']} "
+            f"effective_direction={defect['effective_direction']} — "
+            + " AND ".join(defect["reasons"]))
+    if e6.get("error"):
+        add(f"e6 error: the pack registry could not be loaded — {e6['error']}")
+    written = e6.get("written") or {}
+    add("e6 written (REPORTED BESIDE the bar, NEVER the bar — A1 owns the written "
+        f"graph): source={e6.get('written_source')} "
+        f"direct={written.get('direct')} mediated={written.get('mediated')} "
+        f"none={written.get('none')} unmeasured={written.get('unmeasured')}")
+    add("")
     # #10982: the A-row census, rendered from the SAME pass as the E-row census so a reader cannot
     # be served two different graphs in one log, and emitted at a REAL section boundary — ⛔ it used
     # to be spliced in right after the E3 note, which put the block INSIDE E3's section and left the
@@ -4440,6 +4824,29 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
             # #10982: the A-row census travels in the machine record too, so a consumer
             # reads the same numbers the human log prints.
             "a_row_census": a_census,
+            # #11695: E6's population and its defect list, so the row's numbers are
+            # machine-readable in the same block as every other row's. `written` rides
+            # BESIDE `unbound_and_unexplained` and is never the bar (§3.8).
+            "e6_census": {
+                "source": e6["census_tool"],
+                "packs_dir": e6["packs_dir"],
+                "population": {
+                    "packs": e6["packs"],
+                    "relations": e6["relations"],
+                    "hierarchies": e6["hierarchies"],
+                    "declared": e6["declared"],
+                },
+                "writable": e6["writable"],
+                "declaration_only": e6["declaration_only"],
+                "predicate_not_in_allowlist": e6["predicate_not_in_allowlist"],
+                "unbound_and_unexplained": e6["unbound_and_unexplained"],
+                "unbound": e6["defects"],
+                "written": e6["written"],
+                "written_source": e6["written_source"],
+                "outcome": e6_row["outcome"],
+                "bar": e6_row["bar"],
+                "error": e6.get("error"),
+            },
             "e4_receipt": {
                 "numerator": e4["edge_correct"],
                 "denominator": e4["planted"],
@@ -4722,8 +5129,15 @@ def main(argv: list[str] | None = None) -> int:
                  f"(#5087)"),
     }
 
+    # ── E6 ────────────────────────────────────────────────────────────────
+    # The packs at THIS head (`build_census` is hermetic), with the census artifact's
+    # `written` cells reported beside the bar. An unloadable registry is a NAMED gap in the
+    # row, never zeros — and never a reason to lose the five rows above.
+    e6 = measure_e6()
+    e6_row = build_e6_row(e6, bars=bars)
+
     rows = build_rows(head=head, out_path=out_path, log_corpus_sha=corpus_sha,
-                      e3=e3, e4=e4, e5=e5_row, e1=e1_row, e2=e2_row)
+                      e3=e3, e4=e4, e5=e5_row, e1=e1_row, e2=e2_row, e6=e6_row)
 
     text = render_log(head=head, prereg_sha=prereg_sha, bars=bars,
                       corpus_sha=corpus_sha, graph=graph, runs=runs,
@@ -4732,7 +5146,8 @@ def main(argv: list[str] | None = None) -> int:
                       e1_out=e1_result, e1b_out=e1b_result,
                       e2a_out=e2a_result, e2b_out=e2b_result, e3=e3,
                       e3_out=e3_result, e4=receipt, e4_out=e4_result, e5=e5,
-                      e5_out=e5_result, rows=rows, out_path=out_path,
+                      e5_out=e5_result, e6=e6, e6_row=e6_row,
+                      rows=rows, out_path=out_path,
                       a_census=a_census,
                       required=required, accounts=accounts, steps_gap=steps_gap,
                       arm=arm, door=arm)

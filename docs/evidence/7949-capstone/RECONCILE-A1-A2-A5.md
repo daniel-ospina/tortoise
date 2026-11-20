@@ -207,7 +207,7 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    parenthetical is the statement no `sdk.py:` token and no `sed` covers, so it is the one that rots silently. #10226 removed 26 SDK methods above this writer, and the prose cite and the `sed` were re-derived with it while this bare parenthetical was not. Then `#12825` (`32011c4dad`, fix(sdk): allow `superseded -> live` when the write clears the carriers) inserted 286 lines into `tortoise/sdk.py`, 185 of them above this writer, so ALL THREE moved again — the prose cite, this parenthetical and the `sed` below — and were re-derived together off `grep -n '^ *proj\.link_source_to_event' tortoise/sdk.py`. Then `#12882` (`2dfbb5d455`) inserted 379 lines and deleted 29 in `tortoise/sdk.py` (`git show --numstat 2dfbb5d455 -- tortoise/sdk.py` → `379 29`, net `+350`; an earlier cut of this note said “inserted 408”, which is the CHURN, not the insertions) and `#12904` (`5cc36a42d4`) added 8 and deleted 2 in `tortoise/hosted_api.py` (`8 2`, net `+6`, not “added 10”), and a third re-derivation moved all three together again, by the same +20 net band, off the same grep. Then `#13084` inserted its own RAM-cap seam into `tortoise/sdk.py` above this writer, and a fourth re-derivation moved all three together off the same grep. --> What is missing is the *declared part-whole* edge, not every structural
    edge — and saying otherwise would send a lane off to build a writer the graph already has (the "second
    producer" the epic forbids).
-3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2747-2749`
+3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2800-2802`
    enumerates **every** relationship type (`MATCH ()-[r]->() RETURN type(r) …`), and the registered
    scored census (`capstone-measured-9152448d.log:299-309`) lists 9 types — `CONTAINS` 309, `IMPL` 65,
    `INPUT` 68, `NAND` 14, `aboutObject` 248, `aboutSubject` 21, `extractedFrom` 150, `mitigated_by` 11,
@@ -217,7 +217,7 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    `4e6a3ce612bd^` every one of its hits is this file's own lines — so the operand has to name the
    bundle alone, with this file excluded:
    `git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \
-   ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'` → **all 42 hits are the bundle's own registration**
+   ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'` → **all 51 hits are the bundle's own registration**
    (#10982 landed it after this record was written) — the bundle CITES the predicate, it does not
    produce it; the producer claim is the call-shaped grep above, which is still empty. The **0 hits**
    the `exit 1` in earlier revisions of this record was taken at is that EXCLUDED command in the tree
@@ -789,7 +789,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — �
                                                           # — 3 — and tests/test_7949_capstone_measure.py
                                                           # — 4 — SOURCE-TEXT scans and one prose comment, not
                                                           # consumers: one is the `extractor_v2.py` scan
-                                                          # (`:15447`) that derives the doc's cite, two are the
+                                                          # (`:15704`) that derives the doc's cite, two are the
                                                           # ⛔ NEITHER side of this merge's conflict printed this
                                                           # number: HEAD said `:15100`, `origin/main` said
                                                           # `:15096`, and BOTH were stale on the merged tree
@@ -799,7 +799,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — �
                                                           # whatever the head you merge derives. ⛔ **The two figures this
                                                           # note once typed (`:15228`, then `:15391`) are both refuted by
                                                           # later commits on this branch (#13802 review, P2)**: no line number
-                                                          # is typed HERE for that figure; the `:15447` cite earlier in this block IS the
+                                                          # is typed HERE for that figure; the `:15704` cite earlier in this block IS the
                                                           # derived value the guard reads at this head — named by the value, never by its
                                                           # DISTANCE from this comment, which is the same rotted-positional class this file
                                                           # exists to catch (#13802 review, P2: this said "six lines up", measured 10).
@@ -873,10 +873,10 @@ git grep -in 'rollup' -- '*.py' '*.md'                      # no graph rollup qu
 # not a producer — the bundle CITES the predicate, it does not produce it. The producer
 # claim is the call-shaped grep above, which is still empty:
 git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \
-    ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'    # 42 lines, exit 0 — all in the bundle
+    ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'    # 51 lines, exit 0 — all in the bundle
                                                             # (PRE-REGISTRATION.md 23,
                                                             # preregistration.json 9,
-                                                            # probes/capstone_measure.py 10)
+                                                            # probes/capstone_measure.py 19)
 
 # A2 (§2) — the shipped arm moves the share by exactly zero, on a tree that HAS #10997
 .venv/bin/python3 docs/evidence/7949-capstone/probes/e1_e2_probe.py --json-out /tmp/e1e2.json \
