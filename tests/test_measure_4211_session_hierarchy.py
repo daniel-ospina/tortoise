@@ -734,3 +734,38 @@ def test_f4_the_shrunken_denominator_names_the_true_count_not_the_truncated_list
     assert body["graphs_skipped_on_error"] == 30
     assert len(body["skipped_on_error"]) == 25          # the list really is truncated
     assert body["unmeasurable"].startswith("30 of 30 graphs raised"), body["unmeasurable"]
+
+
+# ── F2, the FOURTH site: the recorded argv is committed too ───────────────
+#
+# Found by live verification, not by reading: the round-4 fix redacted the three arms
+# that serialise a URI, and `instrument.argv` was left verbatim. MEASURED at that head:
+#   .venv/bin/python tools/measure_4211_session_hierarchy.py --arms live \
+#     --live-uri 'docker://:hunter2@127.0.0.1:1/tortoise' --out /tmp/x.json
+#   -> 'hunter2' at instrument.argv[3], inside a receipt that is committed under docs/.
+
+def test_f2_the_recorded_argv_does_not_carry_the_password(monkeypatch, tmp_path):
+    assert mod._redact_argv(["--arms", "live", "--live-uri", "docker://:pw@h:1/g"]) == [
+        "--arms", "live", "--live-uri", "docker://h:1/g"]
+    assert mod._redact_argv(["--live-uri=docker://:pw@h:1/g"]) == [
+        "--live-uri=docker://h:1/g"]
+    assert mod._redact_argv(["--arms", "corpus"]) == ["--arms", "corpus"]
+
+    monkeypatch.setattr(mod, "measure_live", lambda *a, **k: {"measured": True})
+    out = tmp_path / "r.json"
+    assert mod.main(["--arms", "live", "--live-uri", "docker://:hunter2@h:1/g",
+                     "--out", str(out)]) == 0
+    text = out.read_text()
+    assert "hunter2" not in text, "the connection password reached the committed receipt"
+    assert "docker://h:1/g" in text, "the flag's value must stay reproducible"
+
+
+def test_f2_argv_records_this_invocations_arguments_not_the_interpreters(tmp_path):
+    """`sys.argv[1:]` records the PYTEST command line for a programmatic `main([...])`."""
+    out = tmp_path / "r.json"
+    assert mod.main(["--arms", "corpus", "--sessions-dir", str(tmp_path / "none"),
+                     "--out", str(out)]) == 2
+    argv = json.loads(out.read_text())["instrument"]["argv"]
+    assert argv[:3] == ["--arms", "corpus", "--sessions-dir"], argv
+    assert "no:cacheprovider" not in argv, argv
+    assert not any("test_measure_4211" in a for a in argv), argv

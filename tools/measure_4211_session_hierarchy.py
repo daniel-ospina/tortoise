@@ -491,6 +491,43 @@ def _redact_uri(uri: str) -> str:
                        parts.path, "", ""))
 
 
+#: argv flags whose VALUE is a connection string. Their recorded value is redacted: the
+#: receipt (with its ``instrument.argv``) is committed under ``docs/scoping/receipts/``.
+_URI_ARGV_FLAGS = ("--live-uri",)
+
+
+def _redact_argv(argv: list[str]) -> list[str]:
+    """The recorded command line with every connection-string VALUE redacted.
+
+    #4211 review F2 named the three arms that serialised the raw URI and the fix redacted
+    all of them. ``instrument.argv`` is a FOURTH site it did not reach, and live
+    verification found it: every arm body can be redacted while
+    ``--live-uri docker://:pw@host:6379/g`` still commits the password, because argv was
+    recorded verbatim and the receipt is committed. MEASURED before this fix: a run with
+    ``--live-uri docker://:hunter2@127.0.0.1:1/tortoise`` wrote ``hunter2`` at
+    ``instrument.argv[3]``. The flag is kept — it is what makes a receipt reproducible —
+    and only its value is re-emitted without userinfo.
+    """
+    out: list[str] = []
+    redact_next = False
+    for a in argv:
+        if redact_next:
+            out.append(_redact_uri(a))
+            redact_next = False
+            continue
+        matched = next((f for f in _URI_ARGV_FLAGS
+                        if a == f or a.startswith(f + "=")), None)
+        if matched is None:
+            out.append(a)
+        elif a == matched:
+            out.append(a)
+            redact_next = True
+        else:
+            flag, _, value = a.partition("=")
+            out.append(f"{flag}={_redact_uri(value)}")
+    return out
+
+
 def measure_live(uri: str, uri_source: str | None = None) -> dict:
     db, spec = _open_live(uri)
     names = [n for n in db.connection.execute_command("GRAPH.LIST")]
@@ -993,6 +1030,10 @@ def main(argv: list[str] | None = None) -> int:
                          "look ephemeral (default: refuse)")
     ap.add_argument("--out", default=None, help="receipt JSON path")
     args = ap.parse_args(argv)
+    # The argv this run actually saw: `sys.argv[1:]` is the right default, but a
+    # programmatic `main([...])` call (every test) must record ITS argv, not the
+    # interpreter's — and the value is redacted before it reaches the receipt (F2).
+    parsed_argv = list(argv) if argv is not None else sys.argv[1:]
 
     arms = [a.strip() for a in args.arms.split(",") if a.strip()]
     unknown = [a for a in arms if a not in KNOWN_ARMS]
@@ -1011,7 +1052,7 @@ def main(argv: list[str] | None = None) -> int:
             "path": "tools/measure_4211_session_hierarchy.py",
             "sha256": _sha256(_TOOL_PATH),
             "measured_through": _module_digests(),
-            "argv": sys.argv[1:],
+            "argv": _redact_argv(parsed_argv),
             # ⛔ What RAN versus what was never ASKED FOR. The default set is read-only
             # (`writer` is opt-in), so the documented one-line re-run used to produce a
             # receipt with no writer arm and nothing in the artifact saying why — an
