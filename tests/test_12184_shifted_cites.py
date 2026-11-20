@@ -221,8 +221,8 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # --- three re-derived addresses that had NO pin at all, so a `+1` mutation left 441 tests green
     # (review cycle 6, P2-2). `grep -rn '28008\|28372' tests/ tools/` returned nothing before these rows:
     # the guard set is per-token, and an unlisted token is coverage the file only APPEARED to have.
-    (_INDEX, '`sdk.py:28178` at this head', _SDK, 28178, 'WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL'),
-    (_EVIDENCE, '(`sdk.py:28178`), so any non-NULL', _SDK, 28178, 'WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL'),
+    (_INDEX, '`sdk.py:28373` at this head', _SDK, 28373, 'WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL'),
+    (_EVIDENCE, '(`sdk.py:28373`), so any non-NULL', _SDK, 28373, 'WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL'),
     (_EVIDENCE, 'called at `sdk.py:28542`', _SDK, 28542, 'result = apply_entity_merge('),
 )
 
@@ -351,8 +351,8 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7117` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6834` inside the same function'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3062` derives the label'): 1,
-    ('docs/00_index.md', '`sdk.py:28178` at this head'): 1,
-    ('docs/architecture/ENTITY-VERDICT-BANDS.md', '(`sdk.py:28178`), so any non-NULL'): 1,
+    ('docs/00_index.md', '`sdk.py:28373` at this head'): 1,
+    ('docs/architecture/ENTITY-VERDICT-BANDS.md', '(`sdk.py:28373`), so any non-NULL'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'called at `sdk.py:28542`'): 1,
 }
 
