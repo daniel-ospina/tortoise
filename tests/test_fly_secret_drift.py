@@ -3638,8 +3638,12 @@ def test_the_reserved_member_paragraph_names_every_fly_only_member():
 def test_the_reserved_member_paragraph_keeps_the_recorded_ruling_precondition():
     """A `fly-only:` precondition is a CONTRACT; a contract is not amended to fit a member.
 
-    `#13814` declares a third `fly-only:` member whose ruling does not exist yet.
-    The way to declare that is a GAP named against an UNCHANGED rule. The way not
+    `#13814` declared a third `fly-only:` member whose ruling did not exist yet.
+    That member is HISTORY, not shipped state: #13926 took the name to route (b) and
+    this change deleted the member and its `⚠️ ONE DECLARED GAP` paragraph, so the
+    manifest declares TWO `fly-only:` members and this arm now runs with an EMPTY gap
+    set — it still asserts the rule's sentence, which is the point.
+    The way to declare a gap is a GAP named against an UNCHANGED rule. The way not
     to declare it is to re-word the rule into a status report — which is what this
     file said at `d63e5a9e8e`, *"THREE members are declared below, and their
     rulings do NOT all exist yet"*, replacing `origin/main`'s *"each with its own
@@ -3767,7 +3771,7 @@ def _embedder_warmup_runbook_section() -> str:
 
     Sliced by HEADINGS, not by a line range: the runbook is appended to by other
     changes, so a numeric range here would be stale on the next merge — the exact
-    defect class `test_the_embedder_warmup_citations_resolve_to_the_flag_readers`
+    defect class `test_the_embedder_warmup_runbook_citations_resolve_to_the_flag_readers`
     exists to catch.
     """
     lines = REAL_RUNBOOK.read_text().splitlines()
@@ -3898,9 +3902,10 @@ def test_the_warmup_revert_guidance_names_both_red_states():
     quoted = _runbook_quoted_red_states(section)
     missing = [leader for leader in _WARMUP_REVERT_REDS if leader not in quoted]
     assert not missing, (
-        "the runbook's `fly-only:` removal guidance names only some of the red states a "
-        "revert can meet. A two-step revert is red in EITHER order, so naming one leaves "
-        f"the other reading as a regression rather than as the expected interval: missing {missing}"
+        "the runbook's `fly-toml-env` red-state guidance names only some of the red "
+        "states the transition can meet. BOTH are red — while the shadow is set, and "
+        "after an unset that lands before the deploy applies `[env]` — so naming one "
+        f"leaves the other reading as a regression: missing {missing}"
     )
 
     emitted = _warmup_revert_red_states()
