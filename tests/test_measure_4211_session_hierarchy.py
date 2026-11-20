@@ -100,16 +100,26 @@ class _FakeInstrumentGraph:
 
 
 class _FakeLiveGraph:
-    """Answers ONLY the node-label read, so every other query records an ERROR."""
+    """Answers ONLY the node-label read, so every other query records an ERROR.
 
-    def __init__(self, fail_nodes: bool = False):
+    That shape is a PARTIAL read, and since #13919 round 9 a partial read is
+    unmeasurable by design — so a test that needs `main` to exit 0 must ask for
+    `answers_all=True` (a complete read) rather than assuming the raising fake is
+    benign. Keeping the default raising matters: it is what the `queries_failed` and
+    `empty_or_absent` arms are about.
+    """
+
+    def __init__(self, fail_nodes: bool = False, answers_all: bool = False):
         self.fail_nodes = fail_nodes
+        self.answers_all = answers_all
 
     def query(self, cypher: str, params=None) -> _Result:
         if cypher.startswith("MATCH (n) UNWIND labels"):
             if self.fail_nodes:
                 raise TimeoutError("nodes read timed out")
             return _Result([["Point", 5]])
+        if self.answers_all:
+            return _Result([[0]])
         raise RuntimeError("query timeout")
 
 
@@ -748,7 +758,7 @@ def test_f3_the_uri_source_is_what_supplied_the_uri_not_a_hardcoded_profile(
     """`role_evidence.uri_source` was the literal '~/.zshrc:48' while the URI came from
     `--live-uri`, so a re-run published a receipt asserting a provenance nothing read."""
     monkeypatch.setattr(mod, "_open_live", lambda uri: (
-        _FakeDB({"tortoise": _FakeLiveGraph()}), {"graph": "tortoise"}))
+        _FakeDB({"tortoise": _FakeLiveGraph(answers_all=True)}), {"graph": "tortoise"}))
     assert "~/.zshrc:48" not in \
         mod.measure_live("docker://:@localhost:1/tortoise")["role_evidence"]["uri_source"]
     assert mod.measure_live(
@@ -1480,3 +1490,163 @@ def test_r8_redact_argv_catches_a_URI_VALUE_with_no_recognised_flag():
     # The exact flag still takes the paired-value path.
     assert mod._redact_argv(["--live-uri", "docker://:hunter2@h:1/g"]) == [
         "--live-uri", "docker://h:1/g"]
+
+
+# ── #13919 review round 9 ───────────────────────────────────────────────────
+def test_r9_a_PARTIAL_read_is_not_a_measurement(monkeypatch, tmp_path):
+    """R9 (P1): both read arms published `queries_failed` and NOTHING consulted it.
+
+    ``_note_unreadable_emptiness`` set ``unmeasurable`` only when ``nodes_by_label``
+    ITSELF raised, so a read where that one query answered and the other 36 timed out
+    published as MEASURED: exit 0, no ``.unmeasurable.json`` sibling, and
+    ``--out <receipt> || exit 1`` destroyed the artifact of record. The same harm this
+    file already closes for a SKIPPED arm and for a zero-graph census — the two read
+    arms were the gap.
+    """
+    class _OneAnswerGraph(_FakeLiveGraph):
+        """Answers nodes_by_label, raises on everything else (the read-bound shape)."""
+
+        def query(self, cypher: str, params=None) -> _Result:
+            if cypher.startswith("MATCH (n) UNWIND labels"):
+                return _Result([["Point", 5]])
+            raise TimeoutError("Timeout reading from socket")
+
+    monkeypatch.setattr(mod, "_open_live",
+                        lambda uri: (_FakeDB({"tortoise": _OneAnswerGraph()}),
+                                     {"graph": "tortoise"}))
+    body = mod.measure_live("docker://:@localhost:1/tortoise")
+    assert isinstance(body["queries_failed"], list) and body["queries_failed"]
+    assert mod._could_not_measure(body), (
+        "36 of 37 queries raised and the arm reported itself MEASURED — the receipt "
+        "of record would be replaced by a partial read")
+    assert "partial read is not a measurement" in mod._could_not_measure(body)
+
+    # …and the EXIT CODE, with a good receipt on disk that must survive.
+    good = {"issue": 4211, "arms": {"store": {"counts": {"turns_total": 8}}}}
+    out = tmp_path / "receipt.json"
+    out.write_text(json.dumps(good) + "\n")
+    rc = mod.main(["--arms", "live", "--live-uri", "docker://:@localhost:1/tortoise",
+                   "--out", str(out)])
+    assert rc == 2, "a partial read exited 0, so `|| exit 1` accepted it"
+    assert json.loads(out.read_text()) == good, "the good receipt was replaced"
+
+
+def test_r9_the_store_arm_is_bound_by_the_same_partial_read_verdict(monkeypatch, tmp_path):
+    """R9 symmetric half: the store arm was the other site with no verdict."""
+    class _StorePartial(_MutatingEngine):
+        def select_graph(self, _name):
+            class _G:
+                def query(self, _cypher, params=None):
+                    raise TimeoutError("Timeout reading from socket")
+            return _G()
+
+    src = tmp_path / "store.db"
+    src.write_bytes(b"rdb-bytes")
+    monkeypatch.setattr(mod, "_open_embedded", lambda path: _StorePartial(path))
+    body = mod.measure_store(str(src), "tortoise")
+    assert body.get("queries_failed")
+    assert mod._could_not_measure(body), (
+        "a store whose queries all raised reported itself measured")
+
+
+def test_r9_the_corpus_counts_records_that_carry_NO_session_id(tmp_path):
+    """R9 (P2): a record with no session id was silently given a SYNTHETIC one.
+
+    It became its own session bucket and nothing counted it — so the artifact could not
+    say whether `sessions` and `records_per_session` were computed over real ids or
+    invented ones, and `sessions_with_gt1_turn` is inflated by every such split (one
+    session's transcript arriving as N records becomes N sessions). The drain names
+    `no_session_id` as a record class it must classify
+    (`tortoise/session_events_drain.py`), so this is a real shape, not a hypothetical.
+    The two NEIGHBOURING degradations were already counted.
+    """
+    d = tmp_path / "events"
+    d.mkdir()
+    (d / "a.jsonl").write_text("\n".join([
+        json.dumps({"session_id": "real-1",
+                    "conversation": [{"role": "user", "content": "hello"}]}),
+        json.dumps({"conversation": [{"role": "user", "content": "no id here"}]}),
+        json.dumps({"sessionId": "real-2",
+                    "conversation": [{"role": "user", "content": "second"}]}),
+    ]) + "\n")
+    body = mod.measure_corpus(str(d))
+    assert body["stats"]["records_without_session_id"] == 1, body["stats"]
+    assert body["stats"]["records"] == 3
+    # The record is still TALLIED (dropping it would understate the corpus) …
+    assert body["sessions"] == 3, body.get("sessions")
+    # … and the neighbouring degradation counter is untouched by it.
+    assert body["stats"]["records_without_text"] == 0
+
+
+def test_r9_per_session_is_END_STATE_not_a_mid_run_snapshot(monkeypatch):
+    """R9 (P2): `per_session` rows were measured INSIDE the capture loop.
+
+    Each row was a snapshot taken right after that session's capture, so the receipt
+    refuted itself arithmetically: `contains_points_all_kinds` 9/9/7 = 25 slots against
+    `points_total` 23 (the 3 `statement` slots are ONE claim Point wired into three
+    sessions), so `shared_points` reading 0 for the first session cannot be its
+    end-state value — it was read before the later sessions existed. A row describing a
+    moment the graph will never be in again is not a row about the graph.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/m4211_hierarchy")
+    counts = {"points_total": 0, "turns_total": 0, "contains_edges": 0,
+              "sessions_total": 0, "objects_total": 0,
+              "aboutObject_by_endpoint": 0, "turns_with_aboutObject": 0,
+              "sessions_with_aboutObject": 0}
+    seq = iter([dict(counts), dict(counts, points_total=23, turns_total=22)])
+    monkeypatch.setattr(mod, "_run_queries", lambda g: next(seq))
+
+    order: list[str] = []
+
+    class _Graph:
+        def query(self, cypher: str, params=None):
+            sid = (params or {}).get("sid")
+            if sid:
+                # A per-session read must see ALL THREE captures already done.
+                order.append(f"{sid}:{len(captured)}")
+            return _Result([[0]])
+
+    captured: list[str] = []
+
+    class _Proj:
+        g = _Graph()
+
+    class _FakeSDK:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def _get_proj(self):
+            return _Proj()
+
+        def create_object(self, *_a, **_k):
+            return {}
+
+        def _capture_session(self, conv, session_id=None):
+            captured.append(session_id)
+            return {"ok": True, "turns": 1, "extraction_mode": "mocked",
+                    "errors": [], "warnings": []}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("tortoise.sdk.TortoiseSDK", _FakeSDK)
+    body = mod.measure_writer()
+    assert body["per_session"], "no per-session rows were measured"
+    assert all(n == "3" for _sid, n in (o.split(":") for o in order)), order
+
+
+def test_r9_a_turn_named_and_an_any_kind_aboutObject_key_are_both_present():
+    """R9 (P2): `sessions_with_gt1_aboutObject_edge` measured distinct OBJECTS.
+
+    `count(DISTINCT o)` collapses a double-wired Session→Object to c=1, so the key
+    answered "wired to >1 object" while its NAME promised "carries >1 edge" — the
+    `#12244` double-wire class the CONTAINS side already guards
+    (`contains_duplicate_pairs`). The edge-count reading is now its own key, with the
+    object reading and the duplicate-pair count beside it.
+    """
+    queries = dict(mod.QUERIES)
+    assert "count(r)" in queries["sessions_with_gt1_aboutObject_edge"], (
+        "the key is named after EDGES and must count edges, not distinct targets")
+    assert "count(DISTINCT o)" in queries["sessions_with_gt1_aboutObject_object"]
+    assert "aboutObject_duplicate_pairs" in queries
+    assert "count(r)" in queries["aboutObject_duplicate_pairs"]

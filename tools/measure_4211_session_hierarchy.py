@@ -38,10 +38,14 @@ ARMS
                 ``tortoise/retrieval.py`` records that ``session-transcript`` is
                 written ONLY by the eval ingest lane and explicitly NOT by the
                 ask-fixture seeder (``tools/ask_spotcheck.py::
-                seed_capture_turn_store`` hardcodes ``"k": "event"``). Neither of
-                those writers runs the entity-link pass, which is what the arm's
-                attribution note says — derived from the breakdown it measured, never
-                asserted. The product's own capture path is what ``writer`` measures.
+                seed_capture_turn_store`` hardcodes ``"k": "event"``). Neither the
+                seeder nor the eval ingest V1 leg (``ingest.py``, zero ``aboutObject``
+                writes) runs the entity-link pass — but the V2 leg DOES (``#2165`` /
+                E7-D7 in ``ingest_v2.py``), so 0 ``aboutObject`` over this population
+                also measures the ABSENCE OF v2 EXTRACTION OUTPUT in these graphs, not
+                a property of "the eval lane". That attribution is DERIVED from the
+                breakdown the arm measured (never asserted) and is what its `note`
+                publishes. The product's own capture path is what ``writer`` measures.
 ``corpus``      the capture journal ``~/.tortoise/session-events`` (no graph). Turns are
                 counted BOTH ways — per-record occurrences AND distinct per session —
                 because one session writes one record per end-of-session capture, each
@@ -252,8 +256,20 @@ QUERIES: list[tuple[str, str]] = [
      f"MATCH (s:Session)-[:CONTAINS]->(p:Point)-[:aboutObject]->(:Object) WHERE {TURN} "
      "WITH s, count(DISTINCT p) AS c WHERE c > 1 RETURN count(*) AS n"),
     ("sessions_with_gt1_aboutObject_edge",
+     # ⛔ `count(DISTINCT o)` answers "wired to >1 OBJECT", not "carries >1 EDGE" —
+     # a double-wired Session→Object collapsed to c=1 and the key read 0 beside the
+     # write bug it is named after (#12244). The CONTAINS side got exactly this guard
+     # (`contains_distinct_pairs` / `contains_duplicate_pairs`); the `aboutObject` side
+     # had none, and this key is the one whose NAME would be read as providing it.
+     # The matching any-kind reading is reported beside it (#13919 review round 9).
+     "MATCH (s:Session)-[r:aboutObject]->(:Object) "
+     "WITH s, count(r) AS c WHERE c > 1 RETURN count(*) AS n"),
+    ("sessions_with_gt1_aboutObject_object",
      "MATCH (s:Session)-[:aboutObject]->(o:Object) "
      "WITH s, count(DISTINCT o) AS c WHERE c > 1 RETURN count(*) AS n"),
+    ("aboutObject_duplicate_pairs",
+     "MATCH (s:Session)-[r:aboutObject]->(o:Object) "
+     "WITH s, o, count(r) AS c WHERE c > 1 RETURN count(*) AS n"),
     ("turns_per_session_contains_max_avg",
      f"MATCH (s:Session)-[:CONTAINS]->(p:Point) WHERE {TURN} "
      "WITH s, count(DISTINCT p) AS c RETURN max(c) AS max_c, "
@@ -839,10 +855,21 @@ def _instrument_note(kinds: dict[str, int]) -> str:
     seeder" (which hardcodes ``"k": "event"``). So the population is NOT one
     writer's output, and the honest note is the split this arm computed.
 
-    What survives, and is what the note is FOR: neither of those writers runs the
-    entity-link pass, so 0 ``aboutObject`` describes THEM. The writer arm measures the
-    product's own capture path separately, which is why the gate's answer does not
-    depend on this note.
+    What survives, and is what the note is FOR: the ask-fixture seeder and the **v1**
+    ingest leg run no entity-link pass, so 0 ``aboutObject`` over that material describes
+    THEM. The writer arm measures the product's own capture path separately, which is
+    why the gate's answer does not depend on this note.
+
+    ⛔ And the causal claim is NARROWER than it first read (#13919 review round 9).
+    ``tortoise/retrieval.py``'s citation names the eval ingest lane as
+    ``ingest.py`` / ``ingest_v2.py``, and the SUCCESSOR DOES wire the edge: ``#2165``
+    (R8) — ``MERGE (e)-[:aboutObject]->(o)`` and the ``E7 (D7)``
+    ``MERGE (p)-[:aboutObject]->(o)`` parity route, gated on ``about_entities``
+    resolving to an existing ``:Object``. ``ingest.py`` carries zero ``aboutObject``
+    writes. So this census's 0 also measures the ABSENCE OF v2 EXTRACTION OUTPUT in
+    these graphs — a fact about the population, not a property of "the eval ingest
+    lane". Saying otherwise would be the rounds-7/8 defect again, one layer down: the
+    source check that stopped at ``ingest.py`` and missed its successor.
     """
     total = sum(kinds.values())
     if not total:
@@ -857,10 +884,15 @@ def _instrument_note(kinds: dict[str, int]) -> str:
         "writer's output — `tortoise/retrieval.py` records that "
         "`session-transcript` is written only by the eval ingest lane, and "
         "`tools/ask_spotcheck.py::seed_capture_turn_store` hardcodes `\"k\": \"event\"`, "
-        "so it writes none of them. Neither writer runs the entity-link pass, which is "
-        "why 0 `aboutObject` here describes THEM and not the product's capture path — "
-        "that path is what the `writer` arm measures, before and after, on a fresh "
-        "graph.")
+        "so it writes none of them. Neither of those — the seeder, nor the eval "
+        "ingest V1 leg (`tools/longmem_eval/ingest.py`, zero `aboutObject` writes) — "
+        "runs the entity-link pass, so 0 `aboutObject` here describes THEIR output. "
+        "⛔ It does NOT describe the whole eval lane: its V2 leg "
+        "(`tools/longmem_eval/ingest_v2.py`) DOES write the edge by its own parity "
+        "route (#2165/E7-D7, gated on `about_entities`), so a census that reads 0 "
+        "here also measures the ABSENCE OF v2 EXTRACTION OUTPUT in these graphs. "
+        "The product's own capture path is what the `writer` arm measures, before "
+        "and after, on a fresh graph.")
 
 
 def _mark_shrunken_denominator(body: dict) -> dict:
@@ -1058,6 +1090,17 @@ def measure_writer(*, allow_non_ephemeral: bool = False) -> dict:
                 "errors": r.get("errors"),
                 "warnings": r.get("warnings"),
             }
+        # ⛔ `per_session` is measured in a SECOND PASS, after every capture has run
+        # (#13919 review round 9). Measuring it inside the loop made each row a
+        # MID-RUN snapshot: the receipt's own numbers refuted it arithmetically —
+        # `contains_points_all_kinds` 9/9/7 = 25 slots against `points_total` 23 (the
+        # 3 `statement` slots are one claim Point wired into three sessions), so at
+        # most one of those 2 shared slots can be session 1's, yet `shared_points`
+        # read 0 for it because it was read before the later sessions existed. A row
+        # that describes a moment the graph will never be in again is not a row about
+        # the graph; an END-STATE reading is re-derivable against `counts`.
+        per_session: dict[str, dict] = {}
+        for sid in captures:
             per_session[sid] = {
                 k: g.query(q, params={"sid": sid}).result_set[0][0]
                 for k, q in _PER_SESSION.items()
@@ -1177,7 +1220,19 @@ def measure_corpus(sessions_dir: str) -> dict:
         return {"skipped": f"no session events under {d}"}
     stats = {"files": len(files), "records": 0, "parse_errors": 0,
              "records_without_text": 0, "turn_occurrences": 0,
-             "turn_occurrences_with_ref": 0}
+             "turn_occurrences_with_ref": 0,
+             # ⛔ A record with no session id was silently given a SYNTHETIC one
+             # (`<file>:<n>`), i.e. it became its own session bucket — and nothing
+             # counted that (#13919 review round 9). It is a real record class: the
+             # drain names `no_session_id` / `no_conversation` / `unparseable_record`
+             # as the shapes it must classify (`tortoise/session_events_drain.py`).
+             # Uncounted, the artifact cannot say whether `sessions` and
+             # `records_per_session` were computed over real ids or invented ones, and
+             # `sessions_with_gt1_turn` is inflated by every such split, because one
+             # session's transcript arriving as N records becomes N "sessions" each
+             # holding the whole transcript. The two NEIGHBOURING degradations are
+             # already counted; this one now is too.
+             "records_without_session_id": 0}
     per_session: dict[str, dict] = {}
     for f in files:
         with f.open(errors="replace") as fh:
@@ -1203,8 +1258,13 @@ def measure_corpus(sessions_dir: str) -> dict:
                 if not turns:
                     stats["records_without_text"] += 1
                     continue
-                sid = rec.get("session_id") or rec.get("sessionId") \
-                    or f"{f.name}:{stats['records']}"
+                sid = rec.get("session_id") or rec.get("sessionId")
+                if not sid:
+                    # Counted before the fallback makes it invisible: the synthetic id
+                    # keeps the record in the tally (dropping it would understate the
+                    # corpus) but the ARTIFACT now says how many were invented.
+                    stats["records_without_session_id"] += 1
+                    sid = f"{f.name}:{stats['records']}"
                 row = per_session.setdefault(sid, {"turns": set(), "ref_turns": set()})
                 for t in turns:
                     key = (t.get("role"), t["content"])
@@ -1273,6 +1333,37 @@ def _publish(receipt: dict, out: str | None) -> Path | None:
     target.write_text(json.dumps(receipt, indent=1, allow_nan=False) + "\n")
     print(f"receipt: {target}")
     return target
+
+
+def _could_not_measure(body) -> str | None:
+    """The reason this arm measured NOTHING, or ``None`` if it measured something.
+
+    ⛔ A PARTIAL read is not a measurement (#13919 review round 9).
+    ``measure_live`` and ``measure_store`` publish ``queries_failed`` and nothing
+    consulted it: ``_note_unreadable_emptiness`` set ``unmeasurable`` only when
+    ``nodes_by_label`` ITSELF raised, so a read where that one query answered and all
+    the others timed out published as MEASURED — exit 0, no ``.unmeasurable.json``
+    sibling, and ``--out <receipt> || exit 1`` then destroyed the artifact of record.
+    That is the same harm this file already closes for a SKIPPED arm and for a
+    zero-graph census; the two read arms were the gap between them.
+
+    The ``writer`` arm publishes a ``{before, after}`` mapping and reaches its own
+    verdict, so only the LIST shape is handled here. Module-level rather than nested in
+    ``main`` so the arms' verdict is directly pinnable.
+    """
+    if not isinstance(body, dict):
+        return None
+    if body.get("unmeasurable"):
+        return body["unmeasurable"]
+    if body.get("skipped") and "counts" not in body:
+        return body["skipped"]
+    failed = body.get("queries_failed")
+    if isinstance(failed, list) and failed:
+        return (f"{len(failed)} of {len(QUERIES)} queries raised "
+                f"({', '.join(failed[:5])}"
+                f"{', …' if len(failed) > 5 else ''}) — a partial read is not a "
+                "measurement")
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1395,15 +1486,6 @@ def main(argv: list[str] | None = None) -> int:
     # reported itself as a completed capture to a `--out <receipt> || exit 1` caller, and
     # (having no `unmeasurable`) was allowed to REPLACE the committed receipt with the
     # empty artefact (#4211 review F1).
-    def _could_not_measure(body) -> str | None:
-        if not isinstance(body, dict):
-            return None
-        if body.get("unmeasurable"):
-            return body["unmeasurable"]
-        if body.get("skipped") and "counts" not in body:
-            return body["skipped"]
-        return None
-
     unmeasurable_arms = {
         arm: reason
         for arm, body in receipt["arms"].items()
