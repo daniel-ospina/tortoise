@@ -64,7 +64,7 @@ def _apply_replay(sdk, events_dir) -> None:
 
 
 def _point_state(sdk, pid: str) -> dict:
-    p = sdk.get_point(pid) or {}
+    p = sdk._get_point(pid) or {}
     return {k: p.get(k) for k in
             ("status", "outdated", "content", "reviewed")}
 
@@ -81,13 +81,13 @@ def _append_raw_promote(sdk, events_dir, pid: str, *,
     along) with ``content``/``status`` overridden. A snapshot stripped of the
     derived props would red ``check_consistency`` on ``embedding`` for reasons
     that have nothing to do with this issue."""
-    snap = dict(sdk.get_point(pid) or {})
+    snap = dict(sdk._get_point(pid) or {})
     snap["id"] = pid
     snap["content"] = content
     snap["status"] = status
     with open(events_dir / "events.jsonl", "a") as fh:
         fh.write(json.dumps({
-            "event_id": sdk.ulid(),
+            "event_id": sdk._ulid(),
             "ts": datetime.now(UTC).isoformat(),
             "type": "PointPromoted",
             "initiated_by": "raw-producer",
@@ -147,9 +147,9 @@ def test_raw_promote_after_supersede_is_terminal_on_the_apply_arm(sup):
     Point that live's promote could never have touched. ``rebuild_all`` held
     ``superseded`` while ``rebuild(EventLog)`` produced ``live``."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "OLD", status="live")["id"]
-    succ = sdk.create_point("statement", "SUCC", status="live")["id"]
-    sdk.supersede_point(a, succ)
+    a = sdk._create_point("statement", "OLD", status="live")["id"]
+    succ = sdk._create_point("statement", "SUCC", status="live")["id"]
+    sdk._supersede_point(a, succ)
     _append_raw_promote(sdk, events, a)
 
     _apply_replay(sdk, events)
@@ -166,9 +166,9 @@ def test_raw_promote_after_supersede_agrees_across_engines(sup):
     must produce ONE state, and it must be a journal the reference fold accepts
     (``check_consistency`` green on the replayed graph)."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "OLD", status="live")["id"]
-    succ = sdk.create_point("statement", "SUCC", status="live")["id"]
-    sdk.supersede_point(a, succ)
+    a = sdk._create_point("statement", "OLD", status="live")["id"]
+    succ = sdk._create_point("statement", "SUCC", status="live")["id"]
+    sdk._supersede_point(a, succ)
     _append_raw_promote(sdk, events, a)
 
     _rebuild(sdk, events)
@@ -202,11 +202,11 @@ def test_restatus_then_promote_after_supersede_matches_live(sup):
     holds it. ``promote_point`` — the observed call — is still made through the
     public SDK, so live remains the oracle for the fold."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "OLD", status="live")["id"]
-    succ = sdk.create_point("statement", "SUCC", status="live")["id"]
-    sdk.supersede_point(a, succ)
+    a = sdk._create_point("statement", "OLD", status="live")["id"]
+    succ = sdk._create_point("statement", "SUCC", status="live")["id"]
+    sdk._supersede_point(a, succ)
     _restatus_raw(sdk, a, "draft")
-    promoted = sdk.promote_point(a)
+    promoted = sdk._promote_point(a)
     assert promoted["promoted"] is True
 
     live = _point_state(sdk, a)
@@ -231,14 +231,14 @@ def test_later_restatus_after_the_promote_still_wins(sup):
     journal places AFTER the promote is the LAST status writer and must win on
     both engines (the re-fold's whole reason to exist)."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "OLD", status="live")["id"]
-    succ = sdk.create_point("statement", "SUCC", status="live")["id"]
-    sdk.supersede_point(a, succ)
+    a = sdk._create_point("statement", "OLD", status="live")["id"]
+    succ = sdk._create_point("statement", "SUCC", status="live")["id"]
+    sdk._supersede_point(a, succ)
     # #9649: both restatus writes are pre-fix shapes (terminal → draft, then
     # live → archived, which ONTOLOGY §5 does not declare) — journalled the way
     # a pre-#9649 writer left them. ``promote_point`` stays a public SDK call.
     _restatus_raw(sdk, a, "draft")
-    sdk.promote_point(a)
+    sdk._promote_point(a)
     _restatus_raw(sdk, a, "archived")
 
     live = _point_state(sdk, a)
@@ -261,8 +261,8 @@ def test_ordinary_draft_promote_still_reaches_live(sup):
     """A promote over the ``draft`` status live itself requires is untouched —
     the gate must not freeze a legitimate promote."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "DRAFT", status="draft")["id"]
-    sdk.promote_point(a)
+    a = sdk._create_point("statement", "DRAFT", status="draft")["id"]
+    sdk._promote_point(a)
     live = _point_state(sdk, a)
     assert live["status"] == "live"
 
@@ -276,10 +276,10 @@ def test_promote_before_the_supersede_is_still_superseded(sup):
     """The other order: a promote that PRECEDES the supersede is legal, and the
     supersede that follows is the last status writer — both engines keep it."""
     _, events, sdk = sup
-    a = sdk.create_point("statement", "DRAFT", status="draft")["id"]
-    succ = sdk.create_point("statement", "SUCC", status="live")["id"]
-    sdk.promote_point(a)
-    sdk.supersede_point(a, succ)
+    a = sdk._create_point("statement", "DRAFT", status="draft")["id"]
+    succ = sdk._create_point("statement", "SUCC", status="live")["id"]
+    sdk._promote_point(a)
+    sdk._supersede_point(a, succ)
 
     live = _point_state(sdk, a)
     assert live["status"] == "superseded"
@@ -298,8 +298,8 @@ def test_promote_only_journal_still_materializes_live(sup):
     _db, events, sdk = sup
     # A live snapshot to journal, taken from a throwaway Point in the same
     # graph so the payload is a real ``get_point`` shape.
-    src = sdk.create_point("statement", "CAPTURED", status="draft")["id"]
-    snap = dict(sdk.get_point(src) or {})
+    src = sdk._create_point("statement", "CAPTURED", status="draft")["id"]
+    snap = dict(sdk._get_point(src) or {})
     snap["status"] = "live"
     snap["reviewed"] = True
     # The promote-only journal: NO PointAdded for this id.
@@ -307,7 +307,7 @@ def test_promote_only_journal_still_materializes_live(sup):
     snap["id"] = pid
     with open(events / "events.jsonl", "w") as fh:
         fh.write(json.dumps({
-            "event_id": sdk.ulid(),
+            "event_id": sdk._ulid(),
             "ts": datetime.now(UTC).isoformat(),
             "type": "PointPromoted",
             "initiated_by": "capture",

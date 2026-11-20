@@ -3176,7 +3176,7 @@ def _seed_org_anchor(namespace: str, *, name: str = "Team 10180") -> str:
     sdk = ha._make_sdk(graph_name=namespace)
     try:
         proj = sdk._get_proj()
-        subj = sdk.create_subject(name=name, subjectKind=ORG_ANCHOR_KIND,
+        subj = sdk._create_subject(name=name, subjectKind=ORG_ANCHOR_KIND,
                                   org_id=TEAM)
         _os.write_onboards_edge(proj, TEAM, str(subj["id"]))
         return str(subj["id"])
@@ -3511,7 +3511,7 @@ def _registry_with_bound_and_wide_keys(tmp_path, monkeypatch):
 
     reg = TortoiseSDK(db_path=db_path, namespace="registry")
     try:
-        org = reg.org_create("org-10180-bound")
+        org = reg._org_create("org-10180-bound")
         org_id = org["id"]
         # ⛔ `sdk.org_update` was deleted by #4282 (tenancy administration is a
         # console operation in the approved tenancy block, no recorded

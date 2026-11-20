@@ -156,7 +156,7 @@ def test_a_verbatim_embedding_does_not_poison_the_dense_leg(tmp_path):
     with mock.patch(_EMBED_PATCH, embedder):
         sdk = TortoiseSDK(str(tmp_path / "verbatim_read.db"))
         try:
-            typed_id = sdk.create_point("statement", "alpha text")["id"]
+            typed_id = sdk._create_point("statement", "alpha text")["id"]
             assert _typeof(sdk, typed_id) == "Vectorf32", (
                 "premise: create_point stores a typed vector")
 
@@ -165,9 +165,9 @@ def test_a_verbatim_embedding_does_not_poison_the_dense_leg(tmp_path):
             # test does NOT assert the caller's float64 precision — a narrowed
             # store would score 1.0 here exactly as the verbatim one does; that
             # pin is `test_the_caller_value_is_still_stored_verbatim` below.
-            verbatim_id = sdk.create_point("statement", "beta text")["id"]
+            verbatim_id = sdk._create_point("statement", "beta text")["id"]
             caller_vec = [_CALLER_VALUE + 0.01 * i for i in range(DIM)]
-            sdk.update_point(verbatim_id, embedding=caller_vec)  # THE write
+            sdk._update_point(verbatim_id, embedding=caller_vec)  # THE write
             assert _typeof(sdk, verbatim_id) == "List", (
                 "premise: a caller-supplied embedding is stored VERBATIM "
                 "(PR #3018) — this test is about the READ, not the write")
@@ -191,7 +191,7 @@ def test_a_verbatim_embedding_does_not_poison_the_dense_leg(tmp_path):
             # vector (or that stopped distinguishing the rows) would stay
             # green. The discriminating pair below is the value-preservation
             # half for the plain-List shape (#8316).
-            far_id = sdk.create_point(
+            far_id = sdk._create_point(
                 "statement", "gamma text",
                 embedding=[-(_CALLER_VALUE + 0.01 * i) for i in range(DIM)])["id"]
             hits, reason = _dense(sdk, caller_vec)
@@ -226,8 +226,8 @@ def test_the_caller_value_is_still_stored_verbatim(tmp_path):
     with mock.patch(_EMBED_PATCH, embedder):
         sdk = TortoiseSDK(str(tmp_path / "verbatim_value.db"))
         try:
-            pid = sdk.create_point("statement", "alpha text")["id"]
-            sdk.update_point(pid, embedding=[_CALLER_VALUE] * DIM)
+            pid = sdk._create_point("statement", "alpha text")["id"]
+            sdk._update_point(pid, embedding=[_CALLER_VALUE] * DIM)
             assert _typeof(sdk, pid) == "List"
             stored = _stored(sdk, pid)
             assert stored is not None and stored[0] == _CALLER_VALUE, (
@@ -255,7 +255,7 @@ def test_the_typed_shape_is_still_readable(tmp_path):
     with mock.patch(_EMBED_PATCH, embedder):
         sdk = TortoiseSDK(str(tmp_path / "typed_read.db"))
         try:
-            pid = sdk.create_point("statement", "alpha text")["id"]
+            pid = sdk._create_point("statement", "alpha text")["id"]
             assert _typeof(sdk, pid) == "Vectorf32", "premise: typed vector"
             rows = sdk._get_proj().g.query(
                 "MATCH (n:Point {id:$id}) WITH vecf32($q) AS _qv, n "
@@ -276,7 +276,7 @@ def test_create_point_verbatim_embedding_is_dense_readable(tmp_path):
         sdk = TortoiseSDK(str(tmp_path / "create_verbatim.db"))
         try:
             caller_vec = [_CALLER_VALUE] * DIM
-            pid = sdk.create_point(
+            pid = sdk._create_point(
                 "statement", "caller vector wins over the encoder",
                 embedding=caller_vec)["id"]
             assert _typeof(sdk, pid) == "List", (
@@ -296,7 +296,7 @@ def test_update_entity_point_branch_verbatim_embedding_is_dense_readable(tmp_pat
     with mock.patch(_EMBED_PATCH, embedder):
         sdk = TortoiseSDK(str(tmp_path / "entity_verbatim.db"))
         try:
-            pid = sdk.create_point("statement", "alpha text")["id"]
+            pid = sdk._create_point("statement", "alpha text")["id"]
             caller_vec = [_CALLER_VALUE] * DIM
             sdk.update_knowledge(pid, embedding=caller_vec)
             assert _typeof(sdk, pid) == "List", (
@@ -340,7 +340,7 @@ def test_a_non_numeric_embedding_no_longer_aborts_the_match(tmp_path):
     with mock.patch(_EMBED_PATCH, _StubEmbedder()):
         sdk = TortoiseSDK(str(tmp_path / "non_numeric.db"))
         try:
-            healthy = sdk.create_point("statement", "healthy")["id"]
+            healthy = sdk._create_point("statement", "healthy")["id"]
             assert _typeof(sdk, healthy) == "Vectorf32", (
                 "premise: the neighbour is a normal typed row")
             sdk._get_proj().g.query(

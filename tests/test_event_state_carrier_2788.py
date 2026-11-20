@@ -133,7 +133,7 @@ class TestTheLaneIsNotAStateCarrier:
         db = os.path.join(tempfile.mkdtemp(prefix="tortoise_2788_"), "t.db")
         sdk = TortoiseSDK(db)
         try:
-            ev = sdk.create_event("Board review", "meeting")
+            ev = sdk._create_event("Board review", "meeting")
             eid = ev.get("eventId") or ev.get("id")
             props = sdk._get_proj().g.query(
                 "MATCH (e:Event {eventId:$e}) RETURN properties(e)",

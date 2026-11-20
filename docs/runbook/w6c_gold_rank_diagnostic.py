@@ -104,7 +104,7 @@ def measure(q: dict, dense: bool) -> dict:
         _seed_memory(sdk, q, embed=False)
         attach = _attach_dense_vectors(sdk) if dense else None
         leg_trace: list[dict] = []
-        hits = sdk.tortoise_fts_query(
+        hits = sdk._tortoise_fts_query(
             q["question"], limit=LIMIT, pool_size=LEG_DEPTH,
             include_terminal=True, leg_trace=leg_trace,
             keep_numeric=True, search_keys_prf=True,

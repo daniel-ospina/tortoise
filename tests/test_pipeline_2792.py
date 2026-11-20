@@ -239,7 +239,7 @@ class TestEffectivePipeline:
         sdk = _mk_sdk(tmp_path)
         try:
             g = sdk._get_proj().g
-            sdk.create_object("deal-r", objectKind=KEY)
+            sdk._create_object("deal-r", objectKind=KEY)
             P.seed_pipeline(g, KEY, DECL)
             P.advance_stage(sdk, "deal-r", KEY, "stg_discussion", declared=DECL)
             P.rename_stage(g, KEY, "stg_discussion", "Assinado", declared=DECL)
@@ -269,7 +269,7 @@ class TestEffectivePipeline:
         sdk = _mk_sdk(tmp_path)
         try:
             g = sdk._get_proj().g
-            sdk.create_object("deal-ret", objectKind=KEY)
+            sdk._create_object("deal-ret", objectKind=KEY)
             P.seed_pipeline(g, KEY, DECL)
             P.advance_stage(sdk, "deal-ret", KEY, "stg_discussion", declared=DECL)
             retired = P.retire_stage(g, KEY, "stg_discussion", declared=DECL)
@@ -486,7 +486,7 @@ class TestEffectivePipeline:
             assert pipe.resolve("  Diligence  ").stage_id == "stg_x"
             # The consequence the padding used to cause is gone: a real stage is
             # applied, not parked as an unknown candidate.
-            sdk.create_object("deal-pad", objectKind=KEY)
+            sdk._create_object("deal-pad", objectKind=KEY)
             move = P.advance_stage(sdk, "deal-pad", KEY, "Diligence",
                                    at="2026-09-02", declared=padded)
             assert move.applied and move.stage.stage_id == "stg_x", move
@@ -504,7 +504,7 @@ class TestStageAdvance:
         sdk = _mk_sdk(tmp_path)
         try:
             g = sdk._get_proj().g
-            sdk.create_object("deal-2792", objectKind=KEY)
+            sdk._create_object("deal-2792", objectKind=KEY)
             # 1. pack default applies
             assert [s.stage_id for s in
                     P.list_stages(g, KEY, declared=DECL)] == [
@@ -528,7 +528,7 @@ class TestStageAdvance:
         sdk = _mk_sdk(tmp_path)
         try:
             g = sdk._get_proj().g
-            sdk.create_object("deal-hist", objectKind=KEY)
+            sdk._create_object("deal-hist", objectKind=KEY)
             P.advance_stage(sdk, "deal-hist", KEY, "stg_contact",
                             at="2026-09-01", declared=DECL)
             P.advance_stage(sdk, "deal-hist", KEY, "stg_discussion",
@@ -549,7 +549,7 @@ class TestStageAdvance:
         sdk = _mk_sdk(tmp_path)
         try:
             g = sdk._get_proj().g
-            sdk.create_object("deal-stale", objectKind=KEY)
+            sdk._create_object("deal-stale", objectKind=KEY)
             P.advance_stage(sdk, "deal-stale", KEY, "stg_discussion",
                             at="2026-09-10", declared=DECL)
             # An EARLIER-valid transition, processed later.
@@ -570,7 +570,7 @@ class TestStageAdvance:
         sdk = _mk_sdk(tmp_path)
         try:
             g = sdk._get_proj().g
-            sdk.create_object("client-x", objectKind="core:client")
+            sdk._create_object("client-x", objectKind="core:client")
             with pytest.raises(ValueError, match="does not apply"):
                 P.advance_stage(sdk, "client-x", KEY, "stg_won", declared=DECL)
             assert P.current_stage(g, "client-x")["stageId"] is None
@@ -602,7 +602,7 @@ class TestStageAdvance:
         try:
             g = sdk._get_proj().g
             sdk.create_entity("object", "the card", objectKind="dev:issue")
-            sdk.create_event("done", "pm:cardCompleted", object="the card")
+            sdk._create_event("done", "pm:cardCompleted", object="the card")
             cur = P.current_stage(g, "the card")
             assert (cur["stageId"], cur["pipelineKey"], cur["isClosed"]) == (
                 "done", P.CORE_WORK_ITEM_PIPELINE_KEY, True), cur
@@ -628,7 +628,7 @@ class TestStageAdvance:
         sdk = _mk_sdk(tmp_path)
         try:
             g = sdk._get_proj().g
-            sdk.create_object("never-folded", objectKind="dev:thing")
+            sdk._create_object("never-folded", objectKind="dev:thing")
             with pytest.raises(ValueError, match="does not apply"):
                 P.advance_stage(sdk, "never-folded",
                                 P.CORE_WORK_ITEM_PIPELINE_KEY, "todo")
@@ -671,7 +671,7 @@ class TestStageAdvance:
         sdk = _mk_sdk(tmp_path)
         try:
             g = sdk._get_proj().g
-            sdk.create_object("deal-null", objectKind=KEY)
+            sdk._create_object("deal-null", objectKind=KEY)
             for absent in (None, "", "   ", 7):
                 move = P.advance_stage(sdk, "deal-null", KEY, absent,
                                        declared=DECL)
@@ -687,7 +687,7 @@ class TestStageAdvance:
         must not silently park every value as a candidate."""
         sdk = _mk_sdk(tmp_path)
         try:
-            sdk.create_object("deal-nopipe", objectKind=KEY)
+            sdk._create_object("deal-nopipe", objectKind=KEY)
             with pytest.raises(ValueError, match="no pipeline is configured"):
                 P.advance_stage(sdk, "deal-nopipe", KEY, "anything")
         finally:
@@ -698,7 +698,7 @@ class TestStageAdvance:
         sdk = _mk_sdk(tmp_path)
         try:
             g = sdk._get_proj().g
-            sdk.create_object("deal-back", objectKind=KEY)
+            sdk._create_object("deal-back", objectKind=KEY)
             P.advance_stage(sdk, "deal-back", KEY, "stg_discussion",
                             at="2026-09-02", declared=DECL)
             move = P.advance_stage(sdk, "deal-back", KEY, "stg_contact",
@@ -724,7 +724,7 @@ class TestTerminalAndUnknown:
         sdk = _mk_sdk(tmp_path)
         try:
             g = sdk._get_proj().g
-            sdk.create_object("deal-closed", objectKind=KEY)
+            sdk._create_object("deal-closed", objectKind=KEY)
             P.advance_stage(sdk, "deal-closed", KEY, "stg_won",
                             at="2026-09-04", declared=DECL)
             assert P.current_stage(g, "deal-closed")["isClosed"] is True
@@ -740,7 +740,7 @@ class TestTerminalAndUnknown:
         sdk = _mk_sdk(tmp_path)
         try:
             g = sdk._get_proj().g
-            sdk.create_object("deal-reopen", objectKind=KEY)
+            sdk._create_object("deal-reopen", objectKind=KEY)
             P.advance_stage(sdk, "deal-reopen", KEY, "stg_won",
                             at="2026-09-04", declared=DECL)
             move = P.advance_stage(sdk, "deal-reopen", KEY, "stg_discussion",
@@ -756,7 +756,7 @@ class TestTerminalAndUnknown:
         sdk = _mk_sdk(tmp_path)
         try:
             g = sdk._get_proj().g
-            sdk.create_object("deal-unknown", objectKind=KEY)
+            sdk._create_object("deal-unknown", objectKind=KEY)
             move = P.advance_stage(sdk, "deal-unknown", KEY, "vendor diligence",
                                    at="2026-09-06", declared=DECL)
             assert not move.applied and move.reason == "unknown-stage"
@@ -776,7 +776,7 @@ class TestTerminalAndUnknown:
         sdk = _mk_sdk(tmp_path)
         try:
             g = sdk._get_proj().g
-            sdk.create_object("deal-clear", objectKind=KEY)
+            sdk._create_object("deal-clear", objectKind=KEY)
             P.advance_stage(sdk, "deal-clear", KEY, "bogus", declared=DECL)
             assert P.unknown_stage_candidates(g, pipeline_key=KEY)
             P.advance_stage(sdk, "deal-clear", KEY, "stg_contact",
@@ -815,7 +815,7 @@ class TestGuardIntegrity:
         sdk = _mk_sdk(tmp_path)
         try:
             g = sdk._get_proj().g
-            sdk.create_object("deal-drift", objectKind=KEY)
+            sdk._create_object("deal-drift", objectKind=KEY)
             P.advance_stage(sdk, "deal-drift", KEY, "stg_won", at="2026-09-04",
                             declared=DECL)
             assert P.current_stage(g, "deal-drift")["isClosed"] is True
@@ -861,7 +861,7 @@ class TestGuardIntegrity:
         sdk = _mk_sdk(tmp_path)
         try:
             g = sdk._get_proj().g
-            sdk.create_object("deal-slot-drift", objectKind=KEY)
+            sdk._create_object("deal-slot-drift", objectKind=KEY)
             P.advance_stage(sdk, "deal-slot-drift", KEY, "stg_won",
                             at="2026-09-04", declared=DECL)
             assert P.current_stage(g, "deal-slot-drift")["isClosed"] is True
@@ -894,7 +894,7 @@ class TestGuardIntegrity:
         sdk = _mk_sdk(tmp_path)
         try:
             g = sdk._get_proj().g
-            sdk.create_object("deal-live-reopen", objectKind=KEY)
+            sdk._create_object("deal-live-reopen", objectKind=KEY)
             P.advance_stage(sdk, "deal-live-reopen", KEY, "stg_discussion",
                             at="2026-09-02", declared=DECL)
             move = P.advance_stage(sdk, "deal-live-reopen", KEY, "stg_contact",
@@ -922,7 +922,7 @@ class TestGuardIntegrity:
         sdk = _mk_sdk(tmp_path)
         try:
             g = sdk._get_proj().g
-            sdk.create_object("deal-arm", objectKind=KEY)
+            sdk._create_object("deal-arm", objectKind=KEY)
             P.advance_stage(sdk, "deal-arm", KEY, "stg_won",
                             at="2026-09-04", declared=DECL)
             other_key = "venture:invest"
@@ -948,7 +948,7 @@ class TestGuardIntegrity:
         sdk = _mk_sdk(tmp_path)
         try:
             g = sdk._get_proj().g
-            sdk.create_object("deal-park", objectKind=KEY)
+            sdk._create_object("deal-park", objectKind=KEY)
             calls: list[dict] = []
             real = sdk.update_knowledge
 
@@ -1016,7 +1016,7 @@ class TestGuardIntegrity:
         sdk = _mk_sdk(tmp_path)
         try:
             g = sdk._get_proj().g
-            sdk.create_object("deal-props", objectKind=KEY)
+            sdk._create_object("deal-props", objectKind=KEY)
             written: dict = {}
             real = sdk.update_knowledge
 
@@ -1044,7 +1044,7 @@ class TestGuardIntegrity:
         sdk = _mk_sdk(tmp_path)
         try:
             g = sdk._get_proj().g
-            node = sdk.create_object("legacy-closed", objectKind=KEY)
+            node = sdk._create_object("legacy-closed", objectKind=KEY)
             sdk.update_knowledge(node["id"], isClosed=True)
             cur = P.current_stage(g, "legacy-closed")
             assert cur["isClosed"] is True and cur["stageId"] is None, cur
@@ -1074,7 +1074,7 @@ class TestGuardIntegrity:
         sdk = _mk_sdk(tmp_path)
         try:
             g = sdk._get_proj().g
-            sdk.create_object("deal-tie", objectKind=KEY)
+            sdk._create_object("deal-tie", objectKind=KEY)
             P.seed_pipeline(g, KEY, DECL)
             P.advance_stage(sdk, "deal-tie", KEY, "stg_discussion",
                             at="2026-09-02", declared=DECL)

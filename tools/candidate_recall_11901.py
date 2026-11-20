@@ -1463,7 +1463,7 @@ def run(args: argparse.Namespace) -> int:
         # One cache-warming query so the first measured query is not paying the
         # full-scan cold cost — the residual is the #4997 unindexed-label scan
         # (§14.3 V3), constant across every arm, so it cannot bias a comparison.
-        sdk.tortoise_fts_query("warm", entity_type="object", limit=1,
+        sdk._tortoise_fts_query("warm", entity_type="object", limit=1,
                                include_terminal=True, _record_reads=False,
                                _valid_time_rerank=False)
 
@@ -1504,7 +1504,7 @@ def run(args: argparse.Namespace) -> int:
             here would measure a query shape the product never issues.
             """
             trace: list[dict] = []
-            rows = sdk.tortoise_fts_query(
+            rows = sdk._tortoise_fts_query(
                 _sanitise_query_text(query), entity_type="object", limit=k,
                 include_terminal=True, _record_reads=False,
                 _valid_time_rerank=False, leg_trace=trace)

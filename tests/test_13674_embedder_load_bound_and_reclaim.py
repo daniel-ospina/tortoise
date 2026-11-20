@@ -698,9 +698,9 @@ class TestTheDeclarationReachesTheQueryPath:
             classmethod(lambda cls, load_timeout=None: encoder))
         sdk = sdk_factory()
         try:
-            sdk.create_point("statement", "alpha beta gamma waves")
+            sdk._create_point("statement", "alpha beta gamma waves")
             out: dict = {}
-            sdk.tortoise_fts_query("alpha beta gamma", read_status_out=out,
+            sdk._tortoise_fts_query("alpha beta gamma", read_status_out=out,
                                    limit=5)
             assert out.get("retrieval") == RETRIEVAL_HYBRID, (
                 "a query with a loaded embedder must DECLARE the dense leg it "
@@ -716,9 +716,9 @@ class TestTheDeclarationReachesTheQueryPath:
             classmethod(lambda cls, load_timeout=None: None))
         sdk = sdk_factory()
         try:
-            sdk.create_point("statement", "alpha beta gamma waves")
+            sdk._create_point("statement", "alpha beta gamma waves")
             out: dict = {}
-            sdk.tortoise_fts_query("alpha beta gamma", read_status_out=out,
+            sdk._tortoise_fts_query("alpha beta gamma", read_status_out=out,
                                    limit=5)
             assert out.get("retrieval") == RETRIEVAL_KEYWORD_ONLY, (
                 f"a keyword-only read must not leave the leg to be inferred; "

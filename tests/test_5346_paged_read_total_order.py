@@ -97,7 +97,7 @@ def _sweep(sdk: TortoiseSDK, kind: str, page: int) -> tuple[list[str], int]:
     skip = 0
     total = None
     while True:
-        r = sdk.paginated_query(kind=kind, skip=skip, limit=page)
+        r = sdk._paginated_query(kind=kind, skip=skip, limit=page)
         total = r["total"]
         seen.extend(row["id"] for row in r["results"])
         if not r["hasMore"]:
@@ -166,8 +166,8 @@ def test_small_tie_group_pages_without_overlap_or_loss(sdk):
     kind = _kind()
     _seed_tied_points(sdk, kind, 3)
 
-    page1 = sdk.paginated_query(kind=kind, skip=0, limit=2)
-    page2 = sdk.paginated_query(kind=kind, skip=2, limit=2)
+    page1 = sdk._paginated_query(kind=kind, skip=0, limit=2)
+    page2 = sdk._paginated_query(kind=kind, skip=2, limit=2)
 
     assert page1["total"] == 3 and page2["total"] == 3
     first = {row["id"] for row in page1["results"]}
@@ -201,7 +201,7 @@ def test_search_sessions_legacy_fallback_pages_without_loss(sdk, monkeypatch):
         "name:$q + ' ' + toString(i), startedAt:$ts})",
         params={"n": n, "q": "zzprobe5346", "ts": "2026-01-01T00:00:00Z"},
     )
-    monkeypatch.setattr(sdk, "tortoise_fts_query", lambda *a, **k: [])
+    monkeypatch.setattr(sdk, "_tortoise_fts_query", lambda *a, **k: [])
 
     seen: list[str] = []
     offset = 0

@@ -2024,7 +2024,7 @@ def _cmd_init(args):
             # so the child resolves identically (same precedence, conf 60).
             os.environ.setdefault("TORTOISE_DB_PATH", db_path)
             sdk = TortoiseSDK(db_path=db_path)
-        sdk.create_point(
+        sdk._create_point(
             kind="observation",
             content="Tortoise graph initialized — file decisions and observations here so your agents remember across sessions.",
             tags=["system", "welcome"],
@@ -5897,7 +5897,7 @@ def _cmd_context(args) -> int:
                 sdk = TortoiseSDK()
             else:
                 sdk = TortoiseSDK(db_path=_os.environ.get("TORTOISE_DB_PATH"))
-            data = sdk.session_context()
+            data = sdk._session_context()
         except Exception as e:
             print(f"Tortoise unavailable: {e}", file=_sys.stderr)
             return 1
@@ -6099,7 +6099,7 @@ def _cmd_volunteer(args) -> int:
             from tortoise.sdk import TortoiseSDK
             sdk = TortoiseSDK() if _os.environ.get("TORTOISE_DB_URI") else \
                 TortoiseSDK(db_path=_os.environ.get("TORTOISE_DB_PATH"))
-            data = sdk.volunteer_context(
+            data = sdk._volunteer_context(
                 window=window,
                 session_id=session_id,
                 prior_context=prior_context,
@@ -13843,7 +13843,7 @@ def _cmd_audit(args) -> int:
         else:
             sdk = TortoiseSDK(db_path=target)
         sdk._proj = _projection_for(target)
-        report = sdk.audit(point_kinds=args.kinds)
+        report = sdk._audit__svc(point_kinds=args.kinds)
     except Exception as e:
         # conf 75: construction/audit failures (EmbeddedStoreBusyError,
         # unreachable URI host, init errors) — one clean line, exit 1.
@@ -15836,7 +15836,7 @@ def _cmd_doctor(args):
                     # projection is still open — #720's finally-close would kill
                     # the embedded server before the session check could connect.
                     try:
-                        _chk4 = sdk.session_index_health()
+                        _chk4 = sdk._session_index_health()
                         _fc = _chk4["file_count"]
                         if _fc == 0:
                             results.append(("Session indexing", "⚠️",
@@ -16458,7 +16458,7 @@ def _cmd_index_sessions(args) -> int:
     try:
         sdk = TortoiseSDK()
         sdk._proj = _projection_for(target)
-        report = sdk.reconcile_sessions(directory=args.dir,
+        report = sdk._reconcile_sessions(directory=args.dir,
                                         extract_metadata=args.metadata)
     except Exception as e:
         print(f"  ❌ graph unreachable: {e}", file=_sys.stderr)
@@ -16784,7 +16784,7 @@ def _cmd_decide(args) -> int:
                 "evidence"
             )
             try:
-                p = sdk.create_point(kind, content, dedup=True)
+                p = sdk._create_point(kind, content, dedup=True)
                 all_points[pid] = p["id"]
                 print(f"  ✓ {pid} → {p['id']}")
             except Exception as e:
@@ -16945,7 +16945,7 @@ def _cmd_decide(args) -> int:
                     if target_id not in all_operator_ids:
                         all_operator_ids.append(target_id)
                 for target_id in targets:
-                    sdk.mitigate_operator(target_id, reason, strength)
+                    sdk._mitigate_operator(target_id, reason, strength)
                 extra = ("" if len(targets) == 1
                          else f" on {len(targets)} operators")
                 print(f"  ⚖ relevance: {src} --{op_type}--> {tgt} "
@@ -16957,9 +16957,9 @@ def _cmd_decide(args) -> int:
         try:
             if all_operator_ids:
                 print(f"  (operator-factor mode: {len(all_operator_ids)} operator factors)")
-                result = sdk.compute_confidence(factors=all_operator_ids)
+                result = sdk._compute_confidence(factors=all_operator_ids)
             else:
-                result = sdk.compute_confidence()
+                result = sdk._compute_confidence()
             print(f"\n✓ EP computed: {result['iterations']} iterations, converged={result['converged']}")
             confs = result.get("confidences", {})
 
@@ -17332,7 +17332,7 @@ def _cmd_key_create(args) -> int:
             break
     if org_id is None:
         try:
-            result = sdk.org_create(args.name)
+            result = sdk._org_create(args.name)
         except ControlPlaneError as e:
             # conf 85: an invalid --name (spaces/punctuation, >64 chars,
             # blank) must surface as a clean CLI error, never a raw

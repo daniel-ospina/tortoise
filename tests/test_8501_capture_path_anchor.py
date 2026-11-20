@@ -261,7 +261,7 @@ def test_a_failed_mint_reports_one_warning_not_two(prov, monkeypatch):
     def _boom(*_a, **_kw):
         raise RuntimeError("mint down")
 
-    monkeypatch.setattr(sdk, "create_event", _boom)
+    monkeypatch.setattr(sdk, "_create_event", _boom)
     res = sdk._capture_session(CONV)
     assert res["ok"] is True, "a mint failure must never fail the capture"
 

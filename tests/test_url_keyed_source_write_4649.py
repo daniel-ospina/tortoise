@@ -129,7 +129,7 @@ class TestReadPathPremise:
         ``extractedFrom`` mints exactly that node via ``_link_source``."""
         sdk, _ = env
         url = "https://example.com/report"
-        sdk.create_point("statement", "the claim", extractedFrom=url)
+        sdk._create_point("statement", "the claim", extractedFrom=url)
 
         node_id, _status = _stub(sdk._get_proj(), url)
         assert node_id is None, (
@@ -171,7 +171,7 @@ class TestUrlKeyedSourceIsRootable:
 
         sdk, _ = env
         url = "https://example.com/nav-root"
-        point = sdk.create_point("statement", "the claim", extractedFrom=url)
+        point = sdk._create_point("statement", "the claim", extractedFrom=url)
         proj = sdk._get_proj()
         assert _stub(proj, url)[0] is None, (
             "fixture minted an id-carrying Source — it does not exercise the "
@@ -192,7 +192,7 @@ class TestUrlKeyedSourceIsRootable:
 
         sdk, _ = env
         url = "https://example.com/nav-root"
-        point = sdk.create_point("statement", "the claim", extractedFrom=url)
+        point = sdk._create_point("statement", "the claim", extractedFrom=url)
         proj = sdk._get_proj()
         assert _stub(proj, url)[0] is None
 
@@ -234,7 +234,7 @@ class TestUrlKeyedSourceIsVisibleAsNeighbour:
         from tortoise.navigation import entityProfile
 
         sdk, _ = env
-        point = sdk.create_point("statement", "the claim",
+        point = sdk._create_point("statement", "the claim",
                                  extractedFrom=self.URL)
         proj = sdk._get_proj()
         assert _stub(proj, self.URL)[0] is None, (
@@ -256,7 +256,7 @@ class TestUrlKeyedSourceIsVisibleAsNeighbour:
         from tortoise.navigation import tortoise_traverse
 
         sdk, _ = env
-        point = sdk.create_point("statement", "the claim",
+        point = sdk._create_point("statement", "the claim",
                                  extractedFrom=self.URL)
         proj = sdk._get_proj()
 
@@ -280,7 +280,7 @@ class TestUrlKeyedSourceIsVisibleAsNeighbour:
         from tortoise.navigation import tortoise_traverse
 
         sdk, _ = env
-        point = sdk.create_point("statement", "the claim",
+        point = sdk._create_point("statement", "the claim",
                                  extractedFrom=self.URL)
         proj = sdk._get_proj()
 
@@ -310,9 +310,9 @@ class TestUrlKeyedSourceIsVisibleAsNeighbour:
         from tortoise.navigation import entityProfile, tortoise_traverse
 
         sdk, _ = env
-        point = sdk.create_point("statement", "the claim",
+        point = sdk._create_point("statement", "the claim",
                                  extractedFrom=self.URL)
-        far = sdk.create_point("statement", "beyond the source")
+        far = sdk._create_point("statement", "beyond the source")
         proj = sdk._get_proj()
         assert _stub(proj, self.URL)[0] is None
         assert proj.create_edge(self.URL, far["id"], "related") is True
@@ -341,7 +341,7 @@ class TestUrlKeyedSourceIsVisibleAsNeighbour:
         from tortoise.navigation import entityProfile
 
         sdk, _ = env
-        sdk.create_point("statement", "the claim", extractedFrom=self.URL)
+        sdk._create_point("statement", "the claim", extractedFrom=self.URL)
         proj = sdk._get_proj()
         assert _stub(proj, self.URL)[0] is None
 
@@ -366,7 +366,7 @@ class TestUrlKeyedSourceIsWritable:
         ``id`` absent."""
         sdk, events = env
         url = "https://example.com/report"
-        sdk.create_point("statement", "the claim", extractedFrom=url)
+        sdk._create_point("statement", "the claim", extractedFrom=url)
         assert _stub(sdk._get_proj(), url)[1] is None
 
         returned = sdk.update_knowledge(url, status="retired")
@@ -391,9 +391,9 @@ class TestUrlKeyedSourceIsWritable:
         ``extractedFrom`` stub."""
         sdk, _ = env
         url = "https://example.com/report"
-        sdk.create_point("statement", "the claim", extractedFrom=url)
+        sdk._create_point("statement", "the claim", extractedFrom=url)
 
-        returned = sdk.update(url, status="retired")
+        returned = sdk._update(url, status="retired")
 
         assert returned, "update() must resolve a url-keyed Source, not return {}"
         assert _stub(sdk._get_proj(), url)[1] == "retired"
@@ -432,11 +432,11 @@ class TestUrlKeyedSourceIsWritable:
         the ``extractedFrom`` stub."""
         sdk, events = env
         url = "https://example.com/report"
-        sdk.create_point("statement", "the claim", extractedFrom=url)
+        sdk._create_point("statement", "the claim", extractedFrom=url)
         proj = sdk._get_proj()
         assert _rows(proj, "MATCH (s:Source {url:$u}) RETURN s.url", u=url)
 
-        assert sdk.delete(url) is True, (
+        assert sdk._delete(url) is True, (
             "delete() must find a url-keyed Source — pre-fix it resolved "
             "without by_url and returned False (#4649)")
         assert not _rows(proj, "MATCH (s:Source {url:$u}) RETURN s.url", u=url)
@@ -453,9 +453,9 @@ class TestUrlKeyedSourceIsWritable:
         OR-set. Failing value: ``False`` + the surviving node."""
         sdk, _ = env
         url = "https://example.com/report"
-        sdk.create_point("statement", "the claim", extractedFrom=url)
+        sdk._create_point("statement", "the claim", extractedFrom=url)
 
-        assert sdk.delete_entity(url) is True
+        assert sdk._delete_entity__svc(url) is True
         assert not _rows(sdk._get_proj(),
                          "MATCH (s:Source {url:$u}) RETURN s.url", u=url)
 
@@ -474,7 +474,7 @@ class TestDeletePreviewAgreesWithTheWriter:
 
         sdk, _ = env
         url = "https://example.com/report"
-        sdk.create_point("statement", "the claim", extractedFrom=url)
+        sdk._create_point("statement", "the claim", extractedFrom=url)
 
         preview = _preview_delete_entity(sdk, url)
         assert preview["nodes_removed"] == 1, preview
@@ -495,7 +495,7 @@ class TestDeletePreviewAgreesWithTheWriter:
 
         sdk, _ = env
         url = "https://example.com/report"
-        sdk.create_point("statement", "the claim", extractedFrom=url)
+        sdk._create_point("statement", "the claim", extractedFrom=url)
         before = _graph_shape(sdk)
 
         preview = _preview_delete(sdk, url)
@@ -538,7 +538,7 @@ class TestDeletePreviewAgreesWithTheWriter:
         sdk, _ = env
         proj = sdk._get_proj()
         addr = "https://example.com/multilabel"
-        sdk.create_point("statement", "the claim", extractedFrom=addr)
+        sdk._create_point("statement", "the claim", extractedFrom=addr)
         proj.g.query("CREATE (n:Object:Source {id:$v})", params={"v": addr})
 
         nodes_before = _graph_shape(sdk)[0]
@@ -553,7 +553,7 @@ class TestDeletePreviewAgreesWithTheWriter:
             "gated on a raw match, not on the key having CONTRIBUTED a node")
 
         # Ground truth: the preview must equal the writer's own node delta.
-        assert sdk.delete(addr) is True
+        assert sdk._delete(addr) is True
         assert nodes_before - _graph_shape(sdk)[0] == preview["nodes_removed"], (
             "the dry run and the write disagree on the blast radius")
 
@@ -623,7 +623,7 @@ class TestFoldHonoursTheOrSet:
         url = "https://corpus.example.com/paper2"
         _corpus_source(sdk, tmp_path, url, "doc_2")
 
-        assert sdk.delete(url) is True
+        assert sdk._delete(url) is True
         assert not _rows(proj, "MATCH (s:Source {url:$u}) RETURN s.url", u=url)
 
         caplog.clear()
@@ -714,7 +714,7 @@ class TestNoRegressionOnExistingShapes:
         url = "https://example.com/keyed"
         sdk.register_source(url, "document")
 
-        assert sdk.delete(url) is True
+        assert sdk._delete(url) is True
         recs = [r for r in _mutations(events)
                 if r.get("id") == url and r.get("op") == "delete"]
         assert len(recs) == 1, recs
@@ -727,11 +727,11 @@ class TestNoRegressionOnExistingShapes:
         (1) Failing value is a raised exception / a phantom record; (2) the id
         is simply absent from an otherwise populated graph."""
         sdk, events = env
-        sdk.create_point("statement", "an unrelated claim")
+        sdk._create_point("statement", "an unrelated claim")
 
         assert sdk.update_knowledge("no-such-id", status="retired") == {}
-        assert sdk.update("no-such-id", status="retired") == {}
-        assert sdk.delete("no-such-id") is False
+        assert sdk._update("no-such-id", status="retired") == {}
+        assert sdk._delete("no-such-id") is False
         assert _mutations(events) == []
 
     def test_point_update_still_journals_only_the_annotator_dim(self, env):
@@ -740,7 +740,7 @@ class TestNoRegressionOnExistingShapes:
         missing ``PointRevised`` or a stray Source record; (2) a Point with no
         Source linkage."""
         sdk, events = env
-        pt = sdk.create_point("statement", "claim", annotator_bias=0.5)
+        pt = sdk._create_point("statement", "claim", annotator_bias=0.5)
         pid = pt["id"]
 
         sdk.update_knowledge(pid, annotator_bias=0.77)
@@ -822,7 +822,7 @@ class TestPassTwoMintOrderingResidual:
         creation carrier is pass 2."""
         sdk, events = env
         url = "https://example.com/report"
-        sdk.create_point("statement", "the claim", extractedFrom=url)
+        sdk._create_point("statement", "the claim", extractedFrom=url)
         sdk.update_knowledge(url, status="retired")
 
         sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
@@ -838,8 +838,8 @@ class TestPassTwoMintOrderingResidual:
         (2) same ``extractedFrom``-stub fixture."""
         sdk, events = env
         url = "https://example.com/report"
-        sdk.create_point("statement", "the claim", extractedFrom=url)
-        assert sdk.delete(url) is True
+        sdk._create_point("statement", "the claim", extractedFrom=url)
+        assert sdk._delete(url) is True
 
         sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
 
@@ -859,7 +859,7 @@ class TestPassTwoMintOrderingResidual:
         this pin asserts the warning rather than an exception."""
         sdk, events = env
         url = "https://example.com/report"
-        sdk.create_point("statement", "the claim", extractedFrom=url)
+        sdk._create_point("statement", "the claim", extractedFrom=url)
         sdk.update_knowledge(url, status="retired")
 
         caplog.clear()

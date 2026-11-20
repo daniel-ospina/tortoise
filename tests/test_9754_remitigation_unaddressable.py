@@ -46,9 +46,9 @@ def _impl_chain_with_idless_mitigation(sdk, label="op"):
     ever reaches ``mitigate_operator``.
     """
     g = sdk._get_proj().g
-    src = sdk.create_point("statement", f"{label} source", status="live")
-    dst = sdk.create_point("statement", f"{label} claim", status="live")
-    op_id = sdk.create_operator("IMPL", src["id"], [dst["id"]])["id"]
+    src = sdk._create_point("statement", f"{label} source", status="live")
+    dst = sdk._create_point("statement", f"{label} claim", status="live")
+    op_id = sdk._create_operator("IMPL", src["id"], [dst["id"]])["id"]
     g.query(
         "MATCH (op:Point {id:$id}) CREATE (m:Point {pointKind:'statement', "
         "content:'[MITIGATION] legacy', status:'live', is_operator:false})"
@@ -65,7 +65,7 @@ def test_remitigation_onto_idless_mitigation_refuses_and_names_the_mitigation(sd
         params={"id": op_id}).result_set == [[None]]
 
     with pytest.raises(UnaddressableClaimError) as excinfo:
-        sdk.mitigate_operator(op_id, "second reason", strength=0.5)
+        sdk._mitigate_operator(op_id, "second reason", strength=0.5)
 
     msg = str(excinfo.value)
     # The remedy must diagnose the node that is actually unaddressable — the
@@ -98,9 +98,9 @@ def test_commit_ops_skips_an_unaddressable_mitigation_per_item(sdk):
     broken_op, broken_src, broken_dst = _impl_chain_with_idless_mitigation(
         sdk, label="broken")
     # A second, clean IMPL chain for the second MITIGATES record.
-    src = sdk.create_point("statement", "clean source", status="live")
-    claim = sdk.create_point("statement", "clean claim", status="live")
-    clean_op = sdk.create_operator("IMPL", src["id"], [claim["id"]])["id"]
+    src = sdk._create_point("statement", "clean source", status="live")
+    claim = sdk._create_point("statement", "clean claim", status="live")
+    clean_op = sdk._create_operator("IMPL", src["id"], [claim["id"]])["id"]
     g = sdk._get_proj().g
 
     ops = [

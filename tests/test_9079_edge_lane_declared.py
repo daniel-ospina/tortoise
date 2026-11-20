@@ -173,10 +173,10 @@ def _endpoints(sdk) -> dict:
     reusing those ids for `create_owned_by` would close a real ownership cycle
     and raise), and a document-bearing `:Source` (`aboutDocument`'s legal
     target, ONTOLOGY §4.4)."""
-    first = sdk.create_point("statement", "edge-lane source 9195")
-    second = sdk.create_point("statement", "edge-lane target 9195")
-    third = sdk.create_point("statement", "edge-lane wrapper entity 9195")
-    fourth = sdk.create_point("statement", "edge-lane wrapper subject 9195")
+    first = sdk._create_point("statement", "edge-lane source 9195")
+    second = sdk._create_point("statement", "edge-lane target 9195")
+    third = sdk._create_point("statement", "edge-lane wrapper entity 9195")
+    fourth = sdk._create_point("statement", "edge-lane wrapper subject 9195")
     sdk.register_source(DOC_URL, "web", documentKind="page")
 
     def _id(p):
@@ -778,11 +778,11 @@ def test_the_about_name_path_is_still_refused_until_its_lane_lands(
     sdk = sdk_with_journal
     proj = sdk._get_proj()
     assert proj._journal_backed is True, "the fixture did not arm §17.1"
-    sdk.create_object("residual-target-9195", "release")
+    sdk._create_object("residual-target-9195", "release")
 
     probe = _instrument(monkeypatch, refuse=True, owner=proj)
     with pytest.raises(DirectCacheWriteRefused) as refused:
-        sdk.create_event("residual-probe-9195", "meeting",
+        sdk._create_event("residual-probe-9195", "meeting",
                          aboutObject="residual-target-9195")
     assert "#9124" in str(refused.value), (
         "the refusal must name the guard that will fire (#9124), so the failure "

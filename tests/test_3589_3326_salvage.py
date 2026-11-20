@@ -94,7 +94,7 @@ def test_derived_id_reference_does_not_mint_a_second_carrier(tmp_path):
                            "ObjectRegistered")
 
         # 2) the session-indexing path references the DERIVED id of that name
-        ev = sdk.create_event("AgentSession", eventKind="AgentSession",
+        ev = sdk._create_event("AgentSession", eventKind="AgentSession",
                               session_id="s1")
         assert sdk._connect_issue_objects(
             ev["eventId"], {"issues": [{"id": derived, "title": "SHARED"}]}) == 1
@@ -107,7 +107,7 @@ def test_derived_id_reference_does_not_mint_a_second_carrier(tmp_path):
 
         # 3) the public delete of the (never-created) derived id must anchor
         #    nothing and must leave the live carrier untouched
-        assert sdk.delete_entity(derived) is False
+        assert sdk._delete_entity__svc(derived) is False
         live = proj.g.query(
             "MATCH (o:Object {name:'SHARED'}) RETURN o.id, o.status").result_set
         assert live == [["ARBITRARY_ID", "live"]], (

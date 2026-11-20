@@ -79,7 +79,7 @@ def sdk(sdk_factory):
 
 def _goal(sdk, *, tag="g", **props):
     props.setdefault("goalState", "active")
-    return sdk.create_object(f"CI is fast [{tag}]", objectKind="goal", **props)
+    return sdk._create_object(f"CI is fast [{tag}]", objectKind="goal", **props)
 
 
 # ── 1. ended on one field, left running on the other: REFUSED ──────────────
@@ -217,24 +217,24 @@ def test_the_create_door_grades_an_EXPLICIT_id_as_the_update_it_can_be(sdk):
     """
     # a `:Point` goal — the label `_upsert_point_props` MERGEs on, i.e. the node
     # this door's own journal fold can reach
-    goal = sdk.create_point("goal", "GOAL - CI is fast [create-door]",
+    goal = sdk._create_point("goal", "GOAL - CI is fast [create-door]",
                             goalState="met")
     assert goal["status"] == "live" and goal["goalState"] == "met"
     with pytest.raises(ValueError) as exc:
-        sdk.create_point("goal", "GOAL - duplicate [create-door]",
+        sdk._create_point("goal", "GOAL - duplicate [create-door]",
                          id=goal["id"], status="archived")
     msg = str(exc.value)
     assert "REFUSED" in msg and "create_point" in msg, msg
     assert "goalState='abandoned'" in msg       # repair 1: add the ending
     assert "status='live'" in msg               # repair 2: drop the ending
     # nothing landed: the stored pair is untouched
-    node = sdk.get_point(goal["id"])
+    node = sdk._get_point(goal["id"])
     assert node["goalState"] == "met"
     assert not live.is_terminal_status(node.get("status"))
 
     # the stored half is what decided it — on a GENUINELY fresh explicit id the
     # node does not exist, the probe answers `{}`, and the same write lands
-    fresh = sdk.create_point("goal", "GOAL - fresh [create-door]",
+    fresh = sdk._create_point("goal", "GOAL - fresh [create-door]",
                              id=ulid(), status="archived")
     assert fresh["status"] == _CANONICAL_ENDED
 
@@ -265,13 +265,13 @@ def test_the_create_door_grades_an_EXPLICIT_id_as_the_update_it_can_be(sdk):
 
     sdk_mod._stored_goal_ending_view = recording_probe
     try:
-        sdk.create_point("goal", "GOAL - revived [create-door]",
+        sdk._create_point("goal", "GOAL - revived [create-door]",
                          id=goal["id"], goalState="active")
     finally:
         sdk_mod._stored_goal_ending_view = real
     assert calls, ("the explicit-id create leg must read the stored half — an "
                    "ending there is final, so the pair alone cannot decide")
-    revived = sdk.get_point(goal["id"])
+    revived = sdk._get_point(goal["id"])
     # the write was NOT refused (this call is the false-refusal arm): the node is
     # still live on both surfaces. ⚠️ The create door does not overwrite a
     # ``goalState`` on a colliding explicit id (measured here: it stays 'met'),
@@ -298,15 +298,15 @@ def test_the_create_door_grades_the_DEFAULT_status_of_an_EXPLICIT_id(sdk):
     # a `:Point` goal retired on BOTH fields — coherent, so its own create lands
     # (`archived` is the ending a Point's own vocabulary accepts; `deprecated` is
     # an Object word — see the residual recorded on the PR)
-    goal = sdk.create_point("goal", "GOAL - CI is fast [dup]",
+    goal = sdk._create_point("goal", "GOAL - CI is fast [dup]",
                             goalState="abandoned", status="archived")
-    stored = sdk.get_point(goal["id"])
+    stored = sdk._get_point(goal["id"])
     assert stored["goalState"] == "abandoned"
     assert live.is_terminal_status(stored["status"])
 
     # the caller names NO status: the CREATE lands its own default
     with pytest.raises(ValueError) as exc:
-        sdk.create_point("goal", "GOAL - duplicate [no status]", id=goal["id"])
+        sdk._create_point("goal", "GOAL - duplicate [no status]", id=goal["id"])
     msg = str(exc.value)
     assert "REFUSED" in msg and "create_point" in msg, msg
     assert "status='live'" in msg                # the pair it refused, named
@@ -314,7 +314,7 @@ def test_the_create_door_grades_the_DEFAULT_status_of_an_EXPLICIT_id(sdk):
 
     # nothing landed — the retired pair is untouched, and the two surfaces still
     # read it the same way
-    after = sdk.get_point(goal["id"])
+    after = sdk._get_point(goal["id"])
     assert after["goalState"] == "abandoned"
     assert after["status"] == _CANONICAL_ENDED
     assert (after["goalState"] in RETIRED_GOAL_STATES) != (
@@ -322,7 +322,7 @@ def test_the_create_door_grades_the_DEFAULT_status_of_an_EXPLICIT_id(sdk):
                                     bool(after.get("outdated"))))
 
     # a genuinely fresh explicit id under the same default still lands
-    fresh = sdk.create_point("goal", "GOAL - fresh [dup]", id=ulid())
+    fresh = sdk._create_point("goal", "GOAL - fresh [dup]", id=ulid())
     assert not live.is_terminal_status(fresh["status"])
 
 
@@ -373,11 +373,11 @@ def test_a_NON_WORD_status_never_reaches_a_frozenset():
 def _world(sdk, *, tag):
     """A measured thing, its target and a goal — the shape the invalidation
     path was built for (#11926)."""
-    indicator = sdk.create_object(f"CI duration [{tag}]",
+    indicator = sdk._create_object(f"CI duration [{tag}]",
                                   objectKind="workflow")
-    target = sdk.create_object(f"CI <= 10m [{tag}]", objectKind="target",
+    target = sdk._create_object(f"CI <= 10m [{tag}]", objectKind="target",
                                comparator="<=", threshold=10.0, dwell=1)
-    goal = sdk.create_object(f"CI is fast [{tag}]", objectKind="goal",
+    goal = sdk._create_object(f"CI is fast [{tag}]", objectKind="goal",
                              goalState="active")
     return indicator, target, goal
 
@@ -389,7 +389,7 @@ def test_retiring_with_the_ordinary_verb_ends_both_fields_and_the_surfaces_agree
     path consider it retired?" and "does the reading rule serve it as current?" —
     agree, on the node the sweep reads."""
     indicator, target, goal = _world(sdk, tag="agree")
-    sdk.create_event("CI run", "measurement", value=9.0, unit="minutes",
+    sdk._create_event("CI run", "measurement", value=9.0, unit="minutes",
                      startedAt="2026-11-11T10:00:00Z",
                      aboutObject=indicator["id"])
     made = judge_and_record(sdk, goal_id=goal["id"],
@@ -460,7 +460,7 @@ def test_no_WRITABLE_pair_leaves_the_two_surfaces_disagreeing(sdk):
                 # AGREEMENT rather than on the missing successor
                 props["supersededBy"] = "a-successor"
             try:
-                goal = sdk.create_object(
+                goal = sdk._create_object(
                     f"pair [{goal_state}/{status}]", objectKind="goal", **props)
             except ValueError:
                 continue        # refused: the pair cannot exist to disagree
@@ -490,7 +490,7 @@ def test_no_WRITABLE_pair_leaves_the_two_surfaces_disagreeing(sdk):
 
     # and the defect's own pair is REFUSED outright, not merely absent
     with pytest.raises(ValueError):
-        sdk.create_object("the defect pair", objectKind="goal",
+        sdk._create_object("the defect pair", objectKind="goal",
                           goalState="abandoned", status="live")
 
 
@@ -499,12 +499,12 @@ def test_a_bare_CORRECTS_edge_satisfies_the_successor_obligation(sdk):
     property (`ONTOLOGY.md` §4.7). ``supersede_point`` writes that edge and the
     ``superseded`` status; the achievement word can then be aligned in a second
     write without being refused for "no successor" — the edge IS the name."""
-    old = sdk.create_point("goal", "GOAL - CI is fast [old]", goalState="active")
-    new = sdk.create_point("goal", "GOAL - CI is fast [new]")
-    sdk.supersede_point(old["id"], new["id"])
-    assert sdk.get_point(old["id"])["status"] == "superseded"
+    old = sdk._create_point("goal", "GOAL - CI is fast [old]", goalState="active")
+    new = sdk._create_point("goal", "GOAL - CI is fast [new]")
+    sdk._supersede_point(old["id"], new["id"])
+    assert sdk._get_point(old["id"])["status"] == "superseded"
     sdk.update_knowledge(old["id"], goalState="superseded")
-    assert sdk.get_point(old["id"])["goalState"] == "superseded"
+    assert sdk._get_point(old["id"])["goalState"] == "superseded"
 
 
 def test_an_ending_is_FINAL_so_a_live_word_cannot_be_revived_over_it(sdk):
@@ -531,17 +531,17 @@ def test_an_ending_is_FINAL_so_a_live_word_cannot_be_revived_over_it(sdk):
 def test_guideline_is_refused_on_every_door(sdk):
     goal = _goal(sdk)
     for call in (
-        lambda: sdk.create_object("G", objectKind="goal", goalState="guideline"),
-        lambda: sdk.create_point("goal", "GOAL - g", goalState="guideline"),
+        lambda: sdk._create_object("G", objectKind="goal", goalState="guideline"),
+        lambda: sdk._create_point("goal", "GOAL - g", goalState="guideline"),
         lambda: sdk.update_knowledge(goal["id"], goalState="guideline"),
-        lambda: sdk.update_point(
-            sdk.create_point("goal", "GOAL - h")["id"], goalState="guideline"),
+        lambda: sdk._update_point(
+            sdk._create_point("goal", "GOAL - h")["id"], goalState="guideline"),
     ):
         with pytest.raises(ValueError, match="guideline"):
             call()
     # the refusal says what to do instead, not just "no"
     with pytest.raises(ValueError) as exc:
-        sdk.create_object("G", objectKind="goal", goalState="guideline")
+        sdk._create_object("G", objectKind="goal", goalState="guideline")
     assert "REMOVED" in str(exc.value) and "#13035" in str(exc.value)
     assert sdk.get_entity(goal["id"])["goalState"] == "active"
 
@@ -566,22 +566,22 @@ def test_guideline_is_refused_through_a_RENDERED_key_too(sdk):
             return hash("not-the-literal-name")
 
     goal = _goal(sdk, tag="rendered-guideline")
-    point = sdk.create_point("goal", "GOAL - rendered guideline")
+    point = sdk._create_point("goal", "GOAL - rendered guideline")
     for call in (
-        lambda: sdk.create_object("G", objectKind="goal",
+        lambda: sdk._create_object("G", objectKind="goal",
                                   **{Rendered("harmless"): "guideline"}),
-        lambda: sdk.create_point("goal", "GOAL - rg",
+        lambda: sdk._create_point("goal", "GOAL - rg",
                                  **{Rendered("harmless"): "guideline"}),
         lambda: sdk.update_knowledge(goal["id"],
                                      **{Rendered("harmless"): "guideline"}),
-        lambda: sdk.update_point(point["id"],
+        lambda: sdk._update_point(point["id"],
                                  **{Rendered("harmless"): "guideline"}),
     ):
         with pytest.raises(ValueError, match="guideline"):
             call()
     # nothing landed, on either door
     assert sdk.get_entity(goal["id"])["goalState"] == "active"
-    assert sdk.get_point(point["id"]).get("goalState") is None
+    assert sdk._get_point(point["id"]).get("goalState") is None
 
 
 def test_no_code_path_still_EXPECTS_guideline():
@@ -644,7 +644,7 @@ def test_the_stored_half_is_read_ONLY_when_the_write_cannot_answer(sdk):
     goal = _goal(sdk, tag="cost-pair", goalState="met")
     # a goal holding NO achievement word: the store has no claim to
     # contradict, so ending it on `status` alone is legal
-    plain = sdk.create_object("CI is fast [cost-plain]", objectKind="goal")
+    plain = sdk._create_object("CI is fast [cost-plain]", objectKind="goal")
     retiree = _goal(sdk, tag="cost-retired")
     sdk.update_knowledge(retiree["id"], status="deprecated",
                          goalState="abandoned")
@@ -692,7 +692,7 @@ def test_a_superseded_write_that_CLEARS_the_successor_is_refused(sdk):
     one this same write was clearing, so the write satisfied the rule by erasing
     the evidence for it. The guard grades the state the write LEAVES.
     """
-    goal = sdk.create_object("GOAL - replaced [clear]", objectKind="goal",
+    goal = sdk._create_object("GOAL - replaced [clear]", objectKind="goal",
                              goalState="active")
     sdk.update_knowledge(goal["id"], status="superseded",
                          goalState="superseded", supersededBy="succ-1")
@@ -722,7 +722,7 @@ def test_a_RENDERED_goalState_key_cannot_walk_past_the_guard(sdk):
         def __hash__(self):                     # ...and misses `in props`
             return hash("not-the-literal-name")
 
-    goal = sdk.create_object("GOAL - rendered [key]", objectKind="goal",
+    goal = sdk._create_object("GOAL - rendered [key]", objectKind="goal",
                              goalState="active")
     with pytest.raises(ValueError) as exc:
         sdk.update_knowledge(goal["id"], **{Rendered("zzz"): "abandoned"})
@@ -740,13 +740,13 @@ def test_the_create_door_cannot_RESURRECT_an_ended_goal_by_naming_both(sdk):
     landed a coherent LIVE pair over the ending. The identical transition through
     ``update_knowledge`` was already refused.
     """
-    goal = sdk.create_point("goal", "GOAL - retired [resurrect]",
+    goal = sdk._create_point("goal", "GOAL - retired [resurrect]",
                             goalState="abandoned", status="archived")
     with pytest.raises(ValueError) as exc:
-        sdk.create_point("goal", "GOAL - resurrect [named]",
+        sdk._create_point("goal", "GOAL - resurrect [named]",
                          id=goal["id"], goalState="met", status="live")
     assert "ALREADY ENDED" in str(exc.value), str(exc.value)
-    after = sdk.get_point(goal["id"])
+    after = sdk._get_point(goal["id"])
     assert after["goalState"] == "abandoned"          # the ending survived
     assert live.is_terminal_status(after["status"])
 
@@ -764,7 +764,7 @@ def test_DUPLICATE_ids_differing_ONLY_on_the_legacy_flag_are_a_CONFLICT(sdk):
     the row order. Plan-order dependent, which is exactly what this arm exists to
     prevent.
     """
-    goal = sdk.create_point("goal", "GOAL - dup flag [a]",
+    goal = sdk._create_point("goal", "GOAL - dup flag [a]",
                             goalState="active", status="live")
     sdk._get_proj().g.query(
         "CREATE (:Point {id:$id, name:'GOAL - dup flag [b]', "
@@ -788,7 +788,7 @@ def test_DUPLICATE_ids_differing_ONLY_on_the_SUCCESSOR_are_a_CONFLICT(sdk):
     ADMITTED on one row and REFUSED "names no successor" on two, with no
     `conflict` raised. The verdict was literally taken from an unstable row order.
     """
-    goal = sdk.create_point("goal", "GOAL - dup successor [a]",
+    goal = sdk._create_point("goal", "GOAL - dup successor [a]",
                             goalState="active", status="live")
     sdk._get_proj().g.query(
         "CREATE (:Point {id:$id, name:'GOAL - dup successor [b]', "
@@ -809,7 +809,7 @@ def test_DUPLICATE_ids_that_disagree_refuse_rather_than_answer_from_one(sdk):
     plan-order dependent (measured: two identical statements in one process
     returned the rows in different orders).
     """
-    goal = sdk.create_point("goal", "GOAL - dup ids [a]",
+    goal = sdk._create_point("goal", "GOAL - dup ids [a]",
                             goalState="met", status="live")
     sdk._get_proj().g.query(
         "CREATE (:Point {id:$id, name:'GOAL - dup ids [b]', "
@@ -838,7 +838,7 @@ def test_a_RE_MENTION_create_cannot_land_HALF_an_ending(sdk):
     """
     goal = _goal(sdk, tag="re-mention")          # goalState='active', status absent
     with pytest.raises(ValueError) as exc:
-        sdk.create_object("CI is fast [re-mention]", objectKind="goal",
+        sdk._create_object("CI is fast [re-mention]", objectKind="goal",
                           status="archived", goalState="abandoned")
     msg = str(exc.value)
     assert "REFUSED" in msg
@@ -883,7 +883,7 @@ def test_a_RE_MENTION_create_with_a_RENDERED_goalState_key_is_refused(sdk):
 
     goal = _goal(sdk, tag="re-mention-rendered")   # goalState='active', no status
     with pytest.raises(ValueError) as exc:
-        sdk.create_object("CI is fast [re-mention-rendered]", objectKind="goal",
+        sdk._create_object("CI is fast [re-mention-rendered]", objectKind="goal",
                           status="archived", **{Rendered("harmless"): "abandoned"})
     msg = str(exc.value)
     assert "REFUSED" in msg
@@ -993,11 +993,11 @@ def test_the_SWEEP_clears_a_goal_retired_on_its_status(sdk):
     # reach the repair no matter what — the vacuous-arm class review finding 8
     # named (measured: the first version of this test PASSED with the
     # `expected == word` short-circuit restored, i.e. it proved nothing).
-    indicator = sdk.create_object("CI pipeline duration [sweep-retired]",
+    indicator = sdk._create_object("CI pipeline duration [sweep-retired]",
                                  objectKind="workflow")
-    target = sdk.create_object("CI <= 10m [sweep-retired]", objectKind="target",
+    target = sdk._create_object("CI <= 10m [sweep-retired]", objectKind="target",
                               comparator="<=", threshold=10.0, dwell=1)
-    sdk.create_event("CI run 2026-11-11T10:00:00Z", "measurement", value=9.0,
+    sdk._create_event("CI run 2026-11-11T10:00:00Z", "measurement", value=9.0,
                      unit="minutes", startedAt="2026-11-11T10:00:00Z",
                      aboutObject=indicator["id"])
     made = judge_and_record(sdk, goal_id=goal["id"],
@@ -1081,11 +1081,11 @@ def test_the_SWEEP_clears_a_goal_retired_by_the_LEGACY_outdated_flag(sdk):
     from tortoise.derived_invalidation import reconcile_goal_states
 
     goal = _goal(sdk, tag="sweep-outdated")
-    indicator = sdk.create_object("CI pipeline duration [outdated]",
+    indicator = sdk._create_object("CI pipeline duration [outdated]",
                                  objectKind="workflow")
-    target = sdk.create_object("CI <= 10m [outdated]", objectKind="target",
+    target = sdk._create_object("CI <= 10m [outdated]", objectKind="target",
                               comparator="<=", threshold=10.0, dwell=1)
-    sdk.create_event("CI run 2026-11-11T10:00:00Z", "measurement", value=9.0,
+    sdk._create_event("CI run 2026-11-11T10:00:00Z", "measurement", value=9.0,
                      unit="minutes", startedAt="2026-11-11T10:00:00Z",
                      aboutObject=indicator["id"])
     made = judge_and_record(sdk, goal_id=goal["id"],
@@ -1121,18 +1121,18 @@ def test_a_READ_MODIFY_WRITE_echo_of_a_terminal_status_is_admitted(sdk):
     terminal word is still graded, so the exemption is a restatement rule and not
     an open door.
     """
-    goal = sdk.create_point("goal", "GOAL - echo [a]", goalState="active")
-    successor = sdk.create_point("goal", "GOAL - echo [b]", goalState="active")
-    sdk.supersede_point(goal["id"], successor["id"])
+    goal = sdk._create_point("goal", "GOAL - echo [a]", goalState="active")
+    successor = sdk._create_point("goal", "GOAL - echo [b]", goalState="active")
+    sdk._supersede_point(goal["id"], successor["id"])
 
-    before = sdk.get_point(goal["id"])
+    before = sdk._get_point(goal["id"])
     assert before["status"] == "superseded", before          # the ending
     assert before["goalState"] == "active", before           # the benign half
 
     # the tenant PUT: the status it already has, sent back with another field
     sdk.update_knowledge(goal["id"], status="superseded",
                          content="GOAL - echo [a] (edited)")
-    after = sdk.get_point(goal["id"])
+    after = sdk._get_point(goal["id"])
     assert after["status"] == "superseded", after
     assert after["goalState"] == "active", after
     assert "(edited)" in after["content"], after
@@ -1142,7 +1142,7 @@ def test_a_READ_MODIFY_WRITE_echo_of_a_terminal_status_is_admitted(sdk):
     with pytest.raises(ValueError) as exc:
         sdk.update_knowledge(goal["id"], status="retracted")
     assert "still describes a live commitment" in str(exc.value), str(exc.value)
-    assert sdk.get_point(goal["id"])["status"] == "superseded"   # nothing landed
+    assert sdk._get_point(goal["id"])["status"] == "superseded"   # nothing landed
 
 
 def test_judging_a_RETIRED_goal_writes_no_cache_and_keeps_its_ending(sdk):
@@ -1160,7 +1160,7 @@ def test_judging_a_RETIRED_goal_writes_no_cache_and_keeps_its_ending(sdk):
     graph writes in ``test_11926_derived_invalidation.py``.
     """
     indicator, target, goal = _world(sdk, tag="judge-retired")
-    sdk.create_event("CI run", "measurement", value=9.0, unit="minutes",
+    sdk._create_event("CI run", "measurement", value=9.0, unit="minutes",
                      startedAt="2026-11-11T10:00:00Z",
                      aboutObject=indicator["id"])
     first = judge_and_record(sdk, goal_id=goal["id"],
@@ -1226,7 +1226,7 @@ def test_DUPLICATE_ids_differing_ONLY_on_a_FALSY_flag_SPELLING_are_NOT_a_conflic
     "more than one node". The shape is minted raw, the same route the sibling
     duplicate-id tests use.
     """
-    goal = sdk.create_point("goal", "GOAL - dup flag falsy [a]",
+    goal = sdk._create_point("goal", "GOAL - dup flag falsy [a]",
                             goalState="active", status="live")
     sdk._get_proj().g.query(
         "CREATE (:Point {id:$id, name:'GOAL - dup flag falsy [b]', "
@@ -1235,7 +1235,7 @@ def test_DUPLICATE_ids_differing_ONLY_on_a_FALSY_flag_SPELLING_are_NOT_a_conflic
     )
     # no ValueError: the two rows agree about "did this goal end?" (no)
     sdk.update_knowledge(goal["id"], goalState="met")
-    assert sdk.get_point(goal["id"])["goalState"] == "met"
+    assert sdk._get_point(goal["id"])["goalState"] == "met"
 
 
 def test_the_SUCCESSOR_refusal_names_a_repair_the_POINT_doors_ACCEPT(sdk):
@@ -1258,16 +1258,16 @@ def test_the_SUCCESSOR_refusal_names_a_repair_the_POINT_doors_ACCEPT(sdk):
     repair is carrier-aware, and this test performs the Point half rather than
     grepping it.
     """
-    goal = sdk.create_point("goal", "GOAL - successor repair", goalState="active")
+    goal = sdk._create_point("goal", "GOAL - successor repair", goalState="active")
     # ⛔ THE CARRIER CLAIM ABOVE, PERFORMED — a status word ALONE on a LIVE goal
     # Point is refused by the goalState-coherence arm, while the same word on a
     # plain Point is accepted and stored as `deprecated`. Both are closed here so
     # the docstring's "MEASURED here" names an assertion in this test.
-    status_only = sdk.create_point("goal", "GOAL - successor repair [status only]",
+    status_only = sdk._create_point("goal", "GOAL - successor repair [status only]",
                                    goalState="active")
     with pytest.raises(ValueError, match="still describes a live commitment"):
         sdk.update_knowledge(status_only["id"], status="archived")
-    plain = sdk.create_point("statement", "plain - archived synonym")
+    plain = sdk._create_point("statement", "plain - archived synonym")
     assert sdk.update_knowledge(plain["id"], status="archived")["status"] == (
         "deprecated"), "a PLAIN Point must still accept `archived`, as `deprecated`"
     with pytest.raises(ValueError) as exc:
@@ -1286,15 +1286,15 @@ def test_the_SUCCESSOR_refusal_names_a_repair_the_POINT_doors_ACCEPT(sdk):
     assert "'retracted' is the legacy spelling" in msg, msg   # disclosed, not prescribed
     # the prescribed Point write is accepted on both fields at once
     sdk.update_knowledge(goal["id"], goalState="abandoned", status="deprecated")
-    node = sdk.get_point(goal["id"])
+    node = sdk._get_point(goal["id"])
     assert node["goalState"] == "abandoned", node
     assert node["status"] == _CANONICAL_ENDED, node
     # ...and the legacy spelling the message discloses still lands the SAME ending,
     # so the disclosure is true rather than decorative
-    legacy = sdk.create_point("goal", "GOAL - successor repair (legacy word)",
+    legacy = sdk._create_point("goal", "GOAL - successor repair (legacy word)",
                               goalState="active")
     sdk.update_knowledge(legacy["id"], goalState="abandoned", status="retracted")
-    legacy_node = sdk.get_point(legacy["id"])
+    legacy_node = sdk._get_point(legacy["id"])
     assert legacy_node["goalState"] == "abandoned", legacy_node
     assert legacy_node["status"] == _CANONICAL_ENDED, legacy_node
 
@@ -1312,11 +1312,11 @@ def test_the_DRY_RUN_reports_None_for_the_goal_it_is_about_to_CLEAR(sdk):
     from tortoise.derived_invalidation import reconcile_goal_states
 
     goal = _goal(sdk, tag="dry-run-to")
-    indicator = sdk.create_object("CI pipeline duration [dry-run-to]",
+    indicator = sdk._create_object("CI pipeline duration [dry-run-to]",
                                  objectKind="workflow")
-    target = sdk.create_object("CI <= 10m [dry-run-to]", objectKind="target",
+    target = sdk._create_object("CI <= 10m [dry-run-to]", objectKind="target",
                               comparator="<=", threshold=10.0, dwell=1)
-    sdk.create_event("CI run 2026-11-11T10:00:00Z", "measurement", value=9.0,
+    sdk._create_event("CI run 2026-11-11T10:00:00Z", "measurement", value=9.0,
                      unit="minutes", startedAt="2026-11-11T10:00:00Z",
                      aboutObject=indicator["id"])
     made = judge_and_record(sdk, goal_id=goal["id"],
@@ -1409,7 +1409,7 @@ def test_a_NON_NAME_does_not_discharge_the_successor_obligation_on_a_CREATE(sdk,
     axes cannot drift apart in what they demand."*
     """
     with pytest.raises(ValueError) as exc:
-        sdk.create_object(f"GOAL - non-name successor {value!r}",
+        sdk._create_object(f"GOAL - non-name successor {value!r}",
                           objectKind="goal", goalState="superseded",
                           status="superseded", supersededBy=value)
     msg = str(exc.value)
@@ -1425,7 +1425,7 @@ def test_the_SNAKE_successor_spelling_does_not_name_anybody(sdk):
     not accept it either.
     """
     with pytest.raises(ValueError) as exc:
-        sdk.create_object("GOAL - snake successor", objectKind="goal",
+        sdk._create_object("GOAL - snake successor", objectKind="goal",
                           goalState="superseded", status="superseded",
                           superseded_by="v2")
     assert "successor" in str(exc.value), str(exc.value)
@@ -1512,14 +1512,14 @@ def test_an_UNHASHABLE_goalState_reaches_the_documented_ValueError(sdk):
     # it with the documented `ValueError`. Before the fix the raw membership test
     # hashed it and raised `TypeError: unhashable type`.
     with pytest.raises(ValueError) as exc:
-        sdk.create_object("GOAL - unhashable goalState", objectKind="goal",
+        sdk._create_object("GOAL - unhashable goalState", objectKind="goal",
                           goalState=_UnhashableWord("nonsense"))
     assert "Invalid goalState" in str(exc.value), str(exc.value)
 
     # ...and one whose content IS a legal word is graded by that content (the
     # module's type-first rule), never by hashing the object: no `TypeError`
     # escapes and the write lands.
-    goal = sdk.create_object("GOAL - unhashable legal goalState",
+    goal = sdk._create_object("GOAL - unhashable legal goalState",
                              objectKind="goal",
                              goalState=_UnhashableWord("met"))
     assert sdk.get_entity(goal["id"])["goalState"] == "met"
@@ -1623,7 +1623,7 @@ def test_a_goalState_whose_RENDERING_lies_cannot_split_the_pair(sdk):
         f"{node.get('status')!r}/{node.get('goalState')!r}")
 
     # (2) the same lie through the CREATE door
-    created = sdk.create_object("CI is fast [rendering-lie-create]",
+    created = sdk._create_object("CI is fast [rendering-lie-create]",
                                 objectKind="goal", status="live",
                                 goalState=_RenderingLie("active"))
     assert sdk.get_entity(created["id"])["goalState"] == "active"
@@ -1710,7 +1710,7 @@ def test_an_EQUALITY_lie_cannot_forge_a_superseded_ending(sdk):
 
     # ...and the create door
     with pytest.raises(ValueError) as exc:
-        sdk.create_object("CI is fast [equality-lie-create]", objectKind="goal",
+        sdk._create_object("CI is fast [equality-lie-create]", objectKind="goal",
                           status="archived",
                           goalState=_EqualityLie("superseded"))
     assert "successor" in str(exc.value).lower(), str(exc.value)
@@ -1738,9 +1738,9 @@ def test_the_family_Supersede_verb_aligns_a_GOALs_achievement_word(sdk):
     ``superseded`` is the one ending that keeps its spelling on both axes, so the
     verb now aligns the pair in the same journaled write.
     """
-    old = sdk.create_object("GOAL - plan v1 [supersede-verb]", objectKind="plan",
+    old = sdk._create_object("GOAL - plan v1 [supersede-verb]", objectKind="plan",
                             status="live", goalState="active")
-    new = sdk.create_object("GOAL - plan v2 [supersede-verb]", objectKind="plan",
+    new = sdk._create_object("GOAL - plan v2 [supersede-verb]", objectKind="plan",
                             status="live", goalState="active")
 
     out = sdk.supersede_knowledge(old["id"], new["id"])
@@ -1758,9 +1758,9 @@ def test_the_family_Supersede_verb_aligns_a_GOALs_achievement_word(sdk):
 
     # ⛔ a row that makes NO achievement claim is left making none — the verb
     # aligns an existing word, it does not invent one
-    bare_old = sdk.create_object("PLAN - no claim [supersede-verb]",
+    bare_old = sdk._create_object("PLAN - no claim [supersede-verb]",
                                  objectKind="plan", status="live")
-    bare_new = sdk.create_object("PLAN - no claim v2 [supersede-verb]",
+    bare_new = sdk._create_object("PLAN - no claim v2 [supersede-verb]",
                                  objectKind="plan", status="live")
     sdk.supersede_knowledge(bare_old["id"], bare_new["id"])
     bare = sdk.get_entity(bare_old["id"])
@@ -1823,10 +1823,10 @@ def test_the_SUCCESSOR_repairs_prescribe_the_NAME_the_carrier_RESOLVES(sdk):
     assert "supersededBy=<successor id>" not in msg, msg
 
     # (d) the finality arm — a coherent LIVE pair over an ALREADY ENDED node
-    ended = sdk.create_point("goal", "GOAL - ended [f1-finality]",
+    ended = sdk._create_point("goal", "GOAL - ended [f1-finality]",
                              goalState="abandoned", status="archived")
     with pytest.raises(ValueError) as exc:
-        sdk.create_point("goal", "GOAL - revived [f1-finality]",
+        sdk._create_point("goal", "GOAL - revived [f1-finality]",
                          id=ended["id"], goalState="met", status="live")
     msg = str(exc.value)
     assert "ALREADY ENDED" in msg, msg
@@ -1835,7 +1835,7 @@ def test_the_SUCCESSOR_repairs_prescribe_the_NAME_the_carrier_RESOLVES(sdk):
 
     # (e) the prescription is PERFORMABLE and lands the value the reader keys on:
     # a NAME is stored verbatim and is what `_probe_visible_successors` resolves.
-    target = sdk.create_object("GOAL - successor [f1-name]",
+    target = sdk._create_object("GOAL - successor [f1-name]",
                                objectKind="goal", goalState="active")
     goal3 = _goal(sdk, tag="f1-name")
     sdk.update_knowledge(goal3["id"], goalState="superseded",
@@ -1868,7 +1868,7 @@ def test_the_ABANDONED_repair_is_PERFORMABLE_on_a_POINT_goal(sdk):
     the status transition 'live' -> 'archived'``, a message that is unreachable
     for ``archived`` because normalisation runs before the transition map.
     """
-    goal = sdk.create_point("goal", "GOAL - abandoned repair [point]",
+    goal = sdk._create_point("goal", "GOAL - abandoned repair [point]",
                             goalState="active")
     with pytest.raises(ValueError) as exc:
         sdk.update_knowledge(goal["id"], goalState="abandoned")
@@ -1903,18 +1903,18 @@ def test_the_ABANDONED_repair_is_PERFORMABLE_on_a_POINT_goal(sdk):
     # the message NAMES (`deprecated`), not its synonym: pinning the synonym would
     # stay green if `deprecated` were refused from `live` (v3.37 review, round 4).
     sdk.update_knowledge(goal["id"], goalState="abandoned", status="deprecated")
-    node = sdk.get_point(goal["id"])
+    node = sdk._get_point(goal["id"])
     assert node["goalState"] == "abandoned", node
     assert node["status"] == _CANONICAL_ENDED, node
     # ...and BOTH synonyms the message DISCLOSES land the same ending, so the
     # disclosure is true rather than decorative — and `archived`, which the pre-fix
     # text called "REFUSED there as reserved", is not refused at all
     for spelling in ("retracted", "archived"):
-        goal_legacy = sdk.create_point(
+        goal_legacy = sdk._create_point(
             "goal", f"GOAL - abandoned repair [{spelling}]", goalState="active")
         sdk.update_knowledge(goal_legacy["id"], goalState="abandoned",
                              status=spelling)
-        legacy_node = sdk.get_point(goal_legacy["id"])
+        legacy_node = sdk._get_point(goal_legacy["id"])
         assert legacy_node["goalState"] == "abandoned", legacy_node
         assert legacy_node["status"] == _CANONICAL_ENDED, legacy_node
     assert legacy_node["status"] == _CANONICAL_ENDED, legacy_node
@@ -1939,10 +1939,10 @@ def test_the_FINALITY_repair_is_PERFORMABLE_on_a_POINT_goal_too(sdk):
     LANDS on this very door). The ``not in`` / ``status='deprecated'`` assertions
     are RED on that text.
     """
-    ended = sdk.create_point("goal", "GOAL - ended [finality-point]",
+    ended = sdk._create_point("goal", "GOAL - ended [finality-point]",
                              goalState="abandoned", status="retracted")
     with pytest.raises(ValueError) as exc:
-        sdk.create_point("goal", "GOAL - revived [finality-point]",
+        sdk._create_point("goal", "GOAL - revived [finality-point]",
                          id=ended["id"], goalState="met", status="live")
     msg = str(exc.value)
     assert "ALREADY ENDED" in msg, msg
@@ -1952,12 +1952,12 @@ def test_the_FINALITY_repair_is_PERFORMABLE_on_a_POINT_goal_too(sdk):
     assert "REFUSED there as reserved" not in msg, msg
     assert "supersededBy=<successor name>" in msg, msg
     # the ending survived the refused write
-    after = sdk.get_point(ended["id"])
+    after = sdk._get_point(ended["id"])
     assert after["goalState"] == "abandoned", after
     assert after["status"] == _CANONICAL_ENDED, after
     # ⛔ and the pair the message prescribes LANDS — on this same door, for the
     # same node, so the repair is performable rather than merely worded
-    kept = sdk.create_point("goal", "GOAL - revived [finality-point, canonical]",
+    kept = sdk._create_point("goal", "GOAL - revived [finality-point, canonical]",
                             id=ended["id"], goalState="abandoned",
                             status="deprecated")
     assert kept["status"] == _CANONICAL_ENDED, kept

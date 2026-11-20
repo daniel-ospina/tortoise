@@ -71,13 +71,13 @@ def sup(tmp_path):
 
 
 def _operator(sdk: TortoiseSDK) -> str:
-    a = sdk.create_point("statement", "source claim", status="live")["id"]
-    b = sdk.create_point("statement", "target claim", status="live")["id"]
-    return sdk.create_operator("IMPL", a, [b])["id"]
+    a = sdk._create_point("statement", "source claim", status="live")["id"]
+    b = sdk._create_point("statement", "target claim", status="live")["id"]
+    return sdk._create_operator("IMPL", a, [b])["id"]
 
 
 def _dims(sdk: TortoiseSDK, pid: str) -> dict:
-    p = sdk.get_point(pid) or {}
+    p = sdk._get_point(pid) or {}
     return {k: p.get(k) for k in DIMS}
 
 
@@ -108,7 +108,7 @@ def test_annotator_dims_survive_rebuild(sup):
     """
     _, events, sdk = sup
     op = _operator(sdk)
-    sdk.annotate_operator(op, 0.4, 0.0, 0.2, 0.1)
+    sdk._annotate_operator(op, 0.4, 0.0, 0.2, 0.1)
     pre = _dims(sdk, op)
     assert pre == {
         "annotator_bias": 0.4,
@@ -132,7 +132,7 @@ def test_rebuild_does_not_leak_deleted_incarnation_dims(sup, tmp_path):
     path does not exhibit (#3689 review P2)."""
     _, events, sdk = sup
     op = _operator(sdk)
-    sdk.annotate_operator(op, 0.4, 0.3, 0.2, 0.1)
+    sdk._annotate_operator(op, 0.4, 0.3, 0.2, 0.1)
     records = _journal(events)
     snap = next(r["point"] for r in records
                 if r.get("type") == "OperatorAdded"
@@ -140,7 +140,7 @@ def test_rebuild_does_not_leak_deleted_incarnation_dims(sup, tmp_path):
     # Terminate incarnation 1, then recreate the SAME id with no dims (raw
     # producer shape: a PointAdded-carried operator snapshot).
     records.append({
-        "event_id": sdk.ulid(), "ts": "2026-09-18T00:00:00+00:00",
+        "event_id": sdk._ulid(), "ts": "2026-09-18T00:00:00+00:00",
         "type": "EntityMutated", "initiated_by": "raw-producer",
         "projection_version": 2, "op": "delete", "id": op,
         "label": "Point",
@@ -149,7 +149,7 @@ def test_rebuild_does_not_leak_deleted_incarnation_dims(sup, tmp_path):
     recreate.pop("embedding", None)
     recreate.pop("content_hash", None)
     records.append({
-        "event_id": sdk.ulid(), "ts": "2026-09-18T00:00:01+00:00",
+        "event_id": sdk._ulid(), "ts": "2026-09-18T00:00:01+00:00",
         "type": "PointAdded", "initiated_by": "raw-producer",
         "projection_version": 2, "point": recreate,
     })
@@ -161,7 +161,7 @@ def test_rebuild_does_not_leak_deleted_incarnation_dims(sup, tmp_path):
     try:
         for r in records:
             oracle._get_proj().apply(r)
-        applied = {k: (oracle.get_point(op) or {}).get(k) for k in DIMS}
+        applied = {k: (oracle._get_point(op) or {}).get(k) for k in DIMS}
     finally:
         oracle.close()
     _rebuild(sdk, events)
@@ -181,7 +181,7 @@ def test_bare_upsert_does_not_suppress_prior_annotation(sup, tmp_path):
     ``apply()`` oracle."""
     _, events, sdk = sup
     op = _operator(sdk)
-    sdk.annotate_operator(op, 0.4, 0.3, 0.2, 0.1)
+    sdk._annotate_operator(op, 0.4, 0.3, 0.2, 0.1)
     pre = _dims(sdk, op)
     records = _journal(events)
     snap = next(r["point"] for r in records
@@ -191,7 +191,7 @@ def test_bare_upsert_does_not_suppress_prior_annotation(sup, tmp_path):
     duplicate.pop("embedding", None)
     duplicate.pop("content_hash", None)
     records.append({
-        "event_id": sdk.ulid(), "ts": "2026-09-18T00:00:02+00:00",
+        "event_id": sdk._ulid(), "ts": "2026-09-18T00:00:02+00:00",
         "type": "PointAdded", "initiated_by": "raw-producer",
         "projection_version": 2, "point": duplicate,
     })
@@ -200,7 +200,7 @@ def test_bare_upsert_does_not_suppress_prior_annotation(sup, tmp_path):
     try:
         for r in records:
             oracle._get_proj().apply(r)
-        applied = {k: (oracle.get_point(op) or {}).get(k) for k in DIMS}
+        applied = {k: (oracle._get_point(op) or {}).get(k) for k in DIMS}
     finally:
         oracle.close()
     _rebuild(sdk, events)
@@ -214,7 +214,7 @@ def test_bare_upsert_does_not_suppress_prior_annotation(sup, tmp_path):
 def test_annotator_dims_survive_double_rebuild(sup):
     _, events, sdk = sup
     op = _operator(sdk)
-    sdk.annotate_operator(op, 0.4, 0.3, 0.2, 0.1)
+    sdk._annotate_operator(op, 0.4, 0.3, 0.2, 0.1)
     pre = _dims(sdk, op)
     _rebuild(sdk, events)
     _rebuild(sdk, events)
@@ -250,7 +250,7 @@ def test_operator_annotated_is_journaled_with_dims(sup):
     at all (the positional emit took ``_emit_event``'s early return)."""
     _, events, sdk = sup
     op = _operator(sdk)
-    sdk.annotate_operator(op, 0.4, 0.3, 0.2, 0.1)
+    sdk._annotate_operator(op, 0.4, 0.3, 0.2, 0.1)
     recs = [r for r in _journal(events)
             if r.get("type") == "OperatorAnnotated"]
     assert len(recs) == 1, "OperatorAnnotated was not journaled"
@@ -269,7 +269,7 @@ def test_rebuild_restores_dims_from_operator_annotated_only(sup):
     logs an unrecognized-type warning)."""
     _, events, sdk = sup
     op = _operator(sdk)
-    sdk.annotate_operator(op, 0.4, 0.3, 0.2, 0.1)
+    sdk._annotate_operator(op, 0.4, 0.3, 0.2, 0.1)
     pre = _dims(sdk, op)
     kept = [r for r in _journal(events) if r.get("type") != "PointRevised"]
     assert any(r.get("type") == "OperatorAnnotated" for r in kept)
@@ -283,10 +283,10 @@ def test_rebuild_warns_when_operator_annotated_matches_nothing(sup, caplog):
     never created by any journaled event must be audible, not dropped in
     silence (parity with the other #3299 fold-miss warnings)."""
     _, events, sdk = sup
-    sdk.create_point("statement", "unrelated claim", status="live")
+    sdk._create_point("statement", "unrelated claim", status="live")
     records = _journal(events)
     records.append({
-        "event_id": sdk.ulid(),
+        "event_id": sdk._ulid(),
         "ts": "2026-09-18T00:00:00+00:00",
         "type": "OperatorAnnotated",
         "initiated_by": "raw-producer",
@@ -310,7 +310,7 @@ def test_rebuild_restores_dims_from_legacy_point_revised_only(sup):
     extension must still restore them."""
     _, events, sdk = sup
     op = _operator(sdk)
-    sdk.annotate_operator(op, 0.4, 0.3, 0.2, 0.1)
+    sdk._annotate_operator(op, 0.4, 0.3, 0.2, 0.1)
     pre = _dims(sdk, op)
     kept = [r for r in _journal(events) if r.get("type") != "OperatorAnnotated"]
     assert any(r.get("type") == "PointRevised" and "annotator_bias" in r
@@ -329,10 +329,10 @@ def test_point_revised_short_named_props_are_not_aliased(sup):
     """
     _, events, sdk = sup
     op = _operator(sdk)
-    sdk.annotate_operator(op, 0.4, 0.2, 0.3, 0.1)
-    sdk.update_point(op, precision=0.9, bias=0.8)
+    sdk._annotate_operator(op, 0.4, 0.2, 0.3, 0.1)
+    sdk._update_point(op, precision=0.9, bias=0.8)
     _rebuild(sdk, events)
-    post = sdk.get_point(op)
+    post = sdk._get_point(op)
     assert post["annotator_precision"] == 0.2, (
         "unrelated `precision` prop was aliased onto annotator_precision")
     assert post["annotator_bias"] == 0.4, (
@@ -358,8 +358,8 @@ def test_direct_update_point_annotator_dims_survive_rebuild(sup):
     without clobbering the sibling dims (presence-conditional fold)."""
     _, events, sdk = sup
     op = _operator(sdk)
-    sdk.annotate_operator(op, 0.4, 0.3, 0.2, 0.1)
-    sdk.update_point(op, annotator_bias=0.9)
+    sdk._annotate_operator(op, 0.4, 0.3, 0.2, 0.1)
+    sdk._update_point(op, annotator_bias=0.9)
     pre = _dims(sdk, op)
     assert pre == {
         "annotator_bias": 0.9,
@@ -529,7 +529,7 @@ def test_rebuild_drops_non_finite_annotator_dim(sup):
     op = _operator(sdk)
     records = _journal(events)
     records.append({
-        "event_id": sdk.ulid(), "ts": "2026-09-18T00:00:00+00:00",
+        "event_id": sdk._ulid(), "ts": "2026-09-18T00:00:00+00:00",
         "type": "OperatorAnnotated", "initiated_by": "raw-producer",
         "projection_version": 2, "id": op,
         "annotator_bias": float("nan"),
@@ -554,13 +554,13 @@ def test_rebuild_skips_operator_annotated_with_unwritable_id(sup, caplog):
     op = _operator(sdk)
     records = _journal(events)
     records.append({
-        "event_id": sdk.ulid(), "ts": "2026-09-18T00:00:04+00:00",
+        "event_id": sdk._ulid(), "ts": "2026-09-18T00:00:04+00:00",
         "type": "OperatorAnnotated", "initiated_by": "raw-producer",
         "projection_version": 2, "id": "bad\x00id",
         "annotator_bias": 0.5,
     })
     records.append({
-        "event_id": sdk.ulid(), "ts": "2026-09-18T00:00:05+00:00",
+        "event_id": sdk._ulid(), "ts": "2026-09-18T00:00:05+00:00",
         "type": "OperatorAnnotated", "initiated_by": "raw-producer",
         "projection_version": 2, "id": "a\ud800b",
         "annotator_bias": 0.5,
@@ -581,13 +581,13 @@ def test_rebuild_skips_ungated_point_revised_content(sup):
     op = _operator(sdk)
     records = _journal(events)
     records.append({
-        "event_id": sdk.ulid(), "ts": "2026-09-18T00:00:07+00:00",
+        "event_id": sdk._ulid(), "ts": "2026-09-18T00:00:07+00:00",
         "type": "PointRevised", "initiated_by": "raw-producer",
         "projection_version": 2, "id": op, "new_content": "a\x00b",
         "annotator_bias": 0.5,
     })
     records.append({
-        "event_id": sdk.ulid(), "ts": "2026-09-18T00:00:08+00:00",
+        "event_id": sdk._ulid(), "ts": "2026-09-18T00:00:08+00:00",
         "type": "PointRevised", "initiated_by": "raw-producer",
         "projection_version": 2, "id": op,
         "new_content": {"nested": 1},
@@ -603,14 +603,14 @@ def test_corrupt_new_content_fold_matches_rebuild(sup):
     building its query — so a corrupt ``PointRevised`` made the pure fold and
     ``rebuild_all`` silently disagree. Both must drop the same edit."""
     _, events, sdk = sup
-    pid = sdk.create_point("statement", "original content",
+    pid = sdk._create_point("statement", "original content",
                            status="live")["id"]
-    before = sdk.get_point(pid)["content"]
+    before = sdk._get_point(pid)["content"]
     records = _journal(events)
     for seq, corrupt in ((7, "a\x00b"), (8, "a\ud800b"),
                          (9, {"nested": 1}), (10, float("inf"))):
         records.append({
-            "event_id": sdk.ulid(),
+            "event_id": sdk._ulid(),
             "ts": f"2026-09-18T00:00:{seq:02d}+00:00",
             "type": "PointRevised", "initiated_by": "raw-producer",
             "projection_version": 2, "id": pid, "new_content": corrupt,
@@ -618,7 +618,7 @@ def test_corrupt_new_content_fold_matches_rebuild(sup):
     _rewrite_journal(events, records)
     folded = fold(records)[pid]["content"]
     _rebuild(sdk, events)
-    rebuilt = sdk.get_point(pid)["content"]
+    rebuilt = sdk._get_point(pid)["content"]
     assert folded == before, "fold applied an unwritable new_content"
     assert rebuilt == before, "rebuild applied an unwritable new_content"
     assert folded == rebuilt, (
@@ -630,7 +630,7 @@ def test_rebuild_skips_point_revised_with_unwritable_id(sup):
     op = _operator(sdk)
     records = _journal(events)
     records.append({
-        "event_id": sdk.ulid(), "ts": "2026-09-18T00:00:09+00:00",
+        "event_id": sdk._ulid(), "ts": "2026-09-18T00:00:09+00:00",
         "type": "PointRevised", "initiated_by": "raw-producer",
         "projection_version": 2, "id": "bad\x00id",
         "new_content": "irrelevant", "annotator_bias": 0.5,
@@ -647,7 +647,7 @@ def test_rebuild_skips_operator_annotated_with_non_str_id(sup):
     op = _operator(sdk)
     records = _journal(events)
     records.append({
-        "event_id": sdk.ulid(), "ts": "2026-09-18T00:00:06+00:00",
+        "event_id": sdk._ulid(), "ts": "2026-09-18T00:00:06+00:00",
         "type": "OperatorAnnotated", "initiated_by": "raw-producer",
         "projection_version": 2, "id": ["not", "a", "str"],
         "annotator_bias": 0.5,
@@ -673,7 +673,7 @@ def test_rebuild_drops_nul_and_surrogate_annotator_strings(sup):
     op = _operator(sdk)
     records = _journal(events)
     records.append({
-        "event_id": sdk.ulid(), "ts": "2026-09-18T00:00:03+00:00",
+        "event_id": sdk._ulid(), "ts": "2026-09-18T00:00:03+00:00",
         "type": "OperatorAnnotated", "initiated_by": "raw-producer",
         "projection_version": 2, "id": op,
         "annotator_bias": "a\x00b",
@@ -695,7 +695,7 @@ def test_rebuild_drops_non_finite_point_revised_dim(sup):
     op = _operator(sdk)
     records = _journal(events)
     records.append({
-        "event_id": sdk.ulid(), "ts": "2026-09-18T00:00:01+00:00",
+        "event_id": sdk._ulid(), "ts": "2026-09-18T00:00:01+00:00",
         "type": "PointRevised", "initiated_by": "raw-producer",
         "projection_version": 2, "id": op, "new_content": None,
         "annotator_bias": float("-inf"),
@@ -710,10 +710,10 @@ def test_rebuild_replays_none_annotator_dim_as_clear(sup):
     dropping the key would leave the earlier value in place (review P2)."""
     _, events, sdk = sup
     op = _operator(sdk)
-    sdk.annotate_operator(op, 0.4, 0.3, 0.2, 0.1)
+    sdk._annotate_operator(op, 0.4, 0.3, 0.2, 0.1)
     records = _journal(events)
     records.append({
-        "event_id": sdk.ulid(), "ts": "2026-09-18T00:00:02+00:00",
+        "event_id": sdk._ulid(), "ts": "2026-09-18T00:00:02+00:00",
         "type": "OperatorAnnotated", "initiated_by": "raw-producer",
         "projection_version": 2, "id": op, "annotator_bias": None,
     })
@@ -731,7 +731,7 @@ def test_rebuild_drops_non_persistable_annotator_dim(sup):
     op = _operator(sdk)
     records = _journal(events)
     records.append({
-        "event_id": sdk.ulid(), "ts": "2026-09-18T00:00:00+00:00",
+        "event_id": sdk._ulid(), "ts": "2026-09-18T00:00:00+00:00",
         "type": "OperatorAnnotated", "initiated_by": "raw-producer",
         "projection_version": 2, "id": op,
         "annotator_bias": {"nested": 1},
@@ -749,7 +749,7 @@ def test_rebuild_drops_non_persistable_point_revised_dim(sup):
     op = _operator(sdk)
     records = _journal(events)
     records.append({
-        "event_id": sdk.ulid(), "ts": "2026-09-18T00:00:01+00:00",
+        "event_id": sdk._ulid(), "ts": "2026-09-18T00:00:01+00:00",
         "type": "PointRevised", "initiated_by": "raw-producer",
         "projection_version": 2, "id": op, "new_content": None,
         "annotator_bias": [1, {"bad": 2}],
@@ -798,7 +798,7 @@ def test_operator_annotated_graph_event_payload_unchanged(sup):
     """
     _, _, sdk = sup
     op = _operator(sdk)
-    sdk.annotate_operator(op, 0.11, 0.22, 0.33, 0.44)
+    sdk._annotate_operator(op, 0.11, 0.22, 0.33, 0.44)
     evs = sdk.poll_events(types=["OperatorAnnotated"])["events"]
     assert len(evs) == 1
     payload = evs[0]["payload"]

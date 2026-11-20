@@ -35,7 +35,7 @@ Design contract
    should auto-investigate …"), which must survive.
 2. **Dry-run by default.** ``--apply`` is required to delete anything. A
    dry run prints exactly what would go.
-3. **Deletes through ``TortoiseSDK.delete_point``** — the graph-write path
+3. **Deletes through ``TortoiseSDK._delete_point``** — the graph-write path
    the ``how-to-use-tortoise`` skill sanctions (emits ``PointRetracted``,
    garbage-collects orphaned tags, marks neighbours dirty, invalidates EP
    messages). Never a raw ``DETACH DELETE``.
@@ -130,7 +130,10 @@ def purge(store, *, apply: bool) -> dict:
     deleted: list[str] = []
     if apply:
         for entry in found:
-            if store.delete_point(entry["id"]):
+            # #12901 FINAL batch: `delete_point` was PRIVATISED to `_delete_point`
+            # (body unchanged; the public spelling is a tombstone). The sanctioned
+            # graph-write path this tool exists to use is the same method.
+            if store._delete_point(entry["id"]):
                 deleted.append(entry["id"])
     return {
         "found": len(found),

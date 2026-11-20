@@ -153,7 +153,7 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
             # passing it raised TypeError, every point soft-failed, and
             # operator resolution fell back to stub nodes (#334 class).
             # dedup=True keeps the write idempotent by content hash.
-            p = sdk.create_point(kind, content, dedup=True)
+            p = sdk._create_point(kind, content, dedup=True)
             all_points[pid] = p["id"]
             print(f"  ✓ {pid} → {p['id']}")
         except Exception as e:
@@ -257,7 +257,7 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
         })
         try:
             for target_id in targets:
-                sdk.mitigate_operator(target_id, reason, strength)
+                sdk._mitigate_operator(target_id, reason, strength)
             extra = "" if len(targets) == 1 else f" on {len(targets)} operators"
             # ONE line, the shape every other decide writer prints: the
             # mitigation detail belongs to the relevance tick, not to a second
@@ -288,10 +288,10 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
     try:
         if context_free and all_operator_ids:
             print(f"  (context-free mode: {len(all_operator_ids)} operator factors)")
-            ep = sdk.compute_confidence(factors=all_operator_ids)
+            ep = sdk._compute_confidence(factors=all_operator_ids)
         else:
             try:
-                ep = sdk.compute_confidence()
+                ep = sdk._compute_confidence()
             except Exception as wide_err:
                 # The graph-wide pass can refuse on state that is not this
                 # decision's (an uncalibrated foreign claim, a fail-closed
@@ -309,7 +309,7 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
             # is "did OUR options rank", never "was the result non-empty".
             print("  (no posterior for this decision's options — ranking this "
                   "decision's operator factors)")
-            ep = sdk.compute_confidence(factors=all_operator_ids)
+            ep = sdk._compute_confidence(factors=all_operator_ids)
             opt_conf = _option_confidences(ep)
 
         if opt_conf:
@@ -334,7 +334,7 @@ def file_decision(sdk, data: dict, *, context_free: bool = False) -> dict:
 
     # ── Verify structure ──
     try:
-        struct = sdk.check_structure()
+        struct = sdk._check_structure()
         ctx_issues = [i for i in struct
                       if ctx in str(i.get("id", "")) or ctx in str(i.get("message", ""))]
         print(f"\n✓ Structure check: {len(struct)} issues total, "

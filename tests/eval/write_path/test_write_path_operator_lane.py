@@ -521,7 +521,7 @@ def test_fold_lane_commit_leg_keeps_every_operator_after_a_rekey(
     anchors = sorted({str(pt["content"]).strip()[:1000]
                       for pt in payload["points"]})
     for anchor in anchors:
-        sdk.create_point("statement", anchor)
+        sdk._create_point("statement", anchor)
     row = proj.g.query(
         "MATCH (p:Point) WHERE NOT p.is_operator AND NOT p.id CONTAINS '_t' "
         "RETURN count(p)").result_set[0][0]
@@ -661,7 +661,7 @@ def test_fold_lane_commit_leg_rekey_stamps_the_operators_it_created(
     anchors = sorted({str(pt["content"]).strip()[:1000]
                       for pt in payload["points"]})
     for anchor in anchors:
-        sdk.create_point("statement", anchor)
+        sdk._create_point("statement", anchor)
 
     monkeypatch.setattr(ev2, "extract_session_v2",
                         _fold_commit_extractor({sid: payload}))
@@ -740,7 +740,7 @@ def test_fold_lane_commit_leg_stamps_every_node_when_a_triple_repeats(
     anchors = sorted({str(pt["content"]).strip()[:1000]
                       for pt in payload["points"]})
     for anchor in anchors:
-        sdk.create_point("statement", anchor)
+        sdk._create_point("statement", anchor)
 
     monkeypatch.setattr(ev2, "extract_session_v2",
                         _fold_commit_extractor({sid: payload}))

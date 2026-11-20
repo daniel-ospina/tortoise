@@ -321,7 +321,7 @@ async def test_the_real_search_tool_is_repaired_when_its_sdk_raises(quiet,
     reproduction hit (`Query timed out` / the #8316 `List` type mismatch); the
     seam must translate it into an error the client can READ."""
     class _RaisingSDK:
-        def tortoise_fts_query(self, *a, **kw):
+        def _tortoise_fts_query(self, *a, **kw):
             raise RuntimeError(
                 "Type mismatch: expected Null or VectorF32 but was List")
 
@@ -341,7 +341,7 @@ def test_the_raw_tool_function_still_returns_the_safe_error_dict(quiet, stdio):
     an error dict, not an exception — is unchanged (`test_mcp_server.py` relies
     on it), so the MCP fix cannot silently become an SDK-facing one."""
     class _RaisingSDK:
-        def tortoise_fts_query(self, *a, **kw):
+        def _tortoise_fts_query(self, *a, **kw):
             raise RuntimeError("boom")
 
     with mock.patch.object(ms, "_get_org_sdk", _RaisingSDK):
@@ -548,7 +548,7 @@ async def test_a_repaired_failure_is_not_recorded_as_ok(monkeypatch, stdio):
         events.append({"status": status, "error_kind": kind}))
 
     class _RaisingSDK:
-        def tortoise_fts_query(self, *a, **kw):
+        def _tortoise_fts_query(self, *a, **kw):
             raise RuntimeError("boom")
 
     with mock.patch.object(ms, "_get_org_sdk", _RaisingSDK):
@@ -661,7 +661,7 @@ async def test_the_named_read_path_siblings(quiet, stdio):
     caller could not read the failure at all.
     """
     class _RaisingSDK:
-        def tortoise_fts_query(self, *a, **kw):
+        def _tortoise_fts_query(self, *a, **kw):
             raise RuntimeError("boom-search")
 
         # #11609: `expand_relationships` retired into `explore_connections`;
@@ -669,7 +669,7 @@ async def test_the_named_read_path_siblings(quiet, stdio):
         def explore_connections(self, *a, **kw):
             raise RuntimeError("boom-expand")
 
-        def recall_state(self, *a, **kw):
+        def _recall_state(self, *a, **kw):
             raise RuntimeError("boom-recall")
 
     calls = {"tortoise_search": {"query": "q"},
@@ -713,7 +713,7 @@ async def test_real_mcp_round_trip_delivers_the_sdk_message(quiet, stdio):
     from fastmcp.exceptions import ToolError
 
     class _RaisingSDK:
-        def tortoise_fts_query(self, *a, **kw):
+        def _tortoise_fts_query(self, *a, **kw):
             raise RuntimeError(
                 "Type mismatch: expected Null or VectorF32 but was List")
 

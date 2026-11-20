@@ -47,7 +47,7 @@ def reg_org(monkeypatch, tmp_path):
     db = str(tmp_path / "retrieval.db")
     monkeypatch.setenv("TORTOISE_DB_PATH", db)
     sdk = TortoiseSDK(db, namespace="registry")
-    org = sdk.org_create(name="retrieval-test")
+    org = sdk._org_create(name="retrieval-test")
     yield sdk, org["id"]
     sdk.close()
 
@@ -564,7 +564,7 @@ class TestReadFunnel:
         sdk = TortoiseSDK(db, namespace="registry")
         try:
             tally = rm.arm(ORG)
-            sdk.tortoise_fts_query("what is a tortoise", limit=5)
+            sdk._tortoise_fts_query("what is a tortoise", limit=5)
             assert tally.queries == 1
             assert tally.wall_ms > 0.0
             # At least one leg ran: the FTS leg with no index in an embedded

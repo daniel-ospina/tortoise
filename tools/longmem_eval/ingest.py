@@ -234,7 +234,7 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict, *,
             # embedding (gracefully None when no embedder), accepts explicit
             # deterministic id (mirrors capture_session's turn shape).
             if turn_id not in existing:
-                sdk.create_point(
+                sdk._create_point(
                     "event",
                     turn_text,
                     id=turn_id,
@@ -271,7 +271,7 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict, *,
         for ci, text, turn_idxs in session_chunks:
             chunk_id = f"lme:{qid}:s{si}:c{ci}"
             if chunk_id not in existing:
-                sdk.create_point(
+                sdk._create_point(
                     SESSION_TRANSCRIPT_KIND, text, id=chunk_id,
                     session_id=sid, lme_question_id=qid,
                     lme_session_index=si, lme_chunk_index=ci,
@@ -297,7 +297,7 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict, *,
         # v2 leg's payload events carry the real content).
         if session_date:
             try:
-                ev = sdk.create_event(
+                ev = sdk._create_event(
                     f"lme_{qid}_s{si}", TIMELINE_EVENT_KIND,
                     startedAt=session_date, endedAt=session_date,
                     sessionId=sid, lme_question_id=qid, lme_session_index=si,
@@ -316,7 +316,7 @@ def ingest_haystack(sdk: TortoiseSDK, question: dict, *,
 
     # ── Provenance event (best-effort — mirrors capture_session) ──
     try:
-        ev = sdk.create_event(
+        ev = sdk._create_event(
             f"lme_{qid}", "lmeHaystackCaptured",
             startedAt=_now_iso(), endedAt=_now_iso(),
             sessionId=qid, lme_question_id=qid, is_episodic=True,

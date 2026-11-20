@@ -227,7 +227,7 @@ def test_journal_carries_the_embedding_and_its_identity(sup):
     made = {}
     for i in range(3):
         content = f"journaled embedding instance {i}"
-        p = sdk.create_point("statement", content)
+        p = sdk._create_point("statement", content)
         made[p["id"]] = content
 
     adds = [e for e in _events(events) if e.get("type") == "PointAdded"]
@@ -261,7 +261,7 @@ def test_replay_restores_the_journalled_vector_verbatim_under_a_changed_embedder
     FAILS BEFORE: the rebuilt vector equals B's output.
     """
     events, sdk = sup
-    pid = sdk.create_point("statement", "verbatim restore probe").get("id")
+    pid = sdk._create_point("statement", "verbatim restore probe").get("id")
     live_a = _vector(sdk, pid)
     assert live_a == _embed_a("verbatim restore probe")
 
@@ -285,7 +285,7 @@ def test_replay_records_the_embedder_identity_mismatch(sup, caplog, monkeypatch)
     which is the full "the embedder changed" shape.
     """
     events, sdk = sup
-    pid = sdk.create_point("statement", "identity mismatch probe").get("id")
+    pid = sdk._create_point("statement", "identity mismatch probe").get("id")
     live_a = _vector(sdk, pid)
 
     monkeypatch.setattr("tortoise.embeddings.EMBEDDING_MODEL", "other/model-v9")
@@ -415,7 +415,7 @@ def test_identity_keys_are_never_node_properties(sup):
     parity class). This is the assertion the `_POINT_HANDLED` entry exists for.
     """
     events, sdk = sup
-    pid = sdk.create_point("statement", "identity prop probe").get("id")
+    pid = sdk._create_point("statement", "identity prop probe").get("id")
     sdk._get_proj().rebuild_all(str(events), confirm_destructive=True)
     props = sdk._get_proj().g.query(
         "MATCH (n:Point {id:$id}) RETURN properties(n)", params={"id": pid},
@@ -532,7 +532,7 @@ def test_a_refused_width_is_not_resurrected_by_the_prewipe_snapshot(tmp_path):
                           event_log_path=str(events / "events.jsonl"))
         proj = sdk._get_proj()
         try:
-            pid = sdk.create_point("statement", "resurrect probe").get("id")
+            pid = sdk._create_point("statement", "resurrect probe").get("id")
 
             # Rewrite the journaled vector to a width this store cannot hold.
             log = events / "events.jsonl"
@@ -625,7 +625,7 @@ def test_identity_keys_cannot_be_set_through_props(tmp_path):
         for key in ("embedding_model", "embedding_revision",
                     "embedding_text_hash"):
             with pytest.raises(ValueError, match="server-managed"):
-                sdk.create_point("statement", "x", **{key: "tenant-supplied"})
+                sdk._create_point("statement", "x", **{key: "tenant-supplied"})
     finally:
         sdk.close()
 
@@ -653,12 +653,12 @@ def test_revise_path_is_explicitly_out_of_scope_for_5004(sup):
     When #5046 lands, INVERT the second half too, not delete it.
     """
     events, sdk = sup
-    pid = sdk.create_point("statement", "original").get("id")
+    pid = sdk._create_point("statement", "original").get("id")
     v_created = _vector(sdk, pid)
     assert v_created is not None
 
     with mock.patch(_EMBED_PATCH, _embed_a):
-        sdk.update_point(pid, content="a substantially longer replacement")
+        sdk._update_point(pid, content="a substantially longer replacement")
     # #4208: the vector now moves WITH the content — the old pin (
     # `assert _vector(...) == v_created`) recorded the defect.
     v_edited = _vector(sdk, pid)
@@ -681,7 +681,7 @@ def test_revise_path_is_explicitly_out_of_scope_for_5004(sup):
     # (#5046). Pinned so it is a DECLARED gap, not an unnoticed one.
     v_before = _vector(sdk, pid)
     caller_vec = [0.2] * _DIM
-    sdk.update_point(pid, embedding=caller_vec)
+    sdk._update_point(pid, embedding=caller_vec)
     assert _vector(sdk, pid) == caller_vec, (
         "shape-2 premise changed: the live revise no longer takes the caller "
         "vector — #5046 may be fixed; INVERT this pin"
@@ -802,7 +802,7 @@ def test_point_created_with_the_embedder_down_gains_no_vector_on_replay(tmp_path
         sdk = TortoiseSDK(str(tmp_path / "novec.db"),
                           event_log_path=str(events / "events.jsonl"))
         try:
-            pid = sdk.create_point("statement", "created with no embedder").get("id")
+            pid = sdk._create_point("statement", "created with no embedder").get("id")
             assert _vector(sdk, pid) is None, "premise: live node has no vector"
 
             rec = [e["point"] for e in _events(events)
@@ -841,7 +841,7 @@ def test_a_caller_supplied_vector_is_restored_verbatim(tmp_path):
         sdk = TortoiseSDK(str(tmp_path / "verbatim.db"),
                           event_log_path=str(events / "events.jsonl"))
         try:
-            pid = sdk.create_point("statement", "caller-owned vector",
+            pid = sdk._create_point("statement", "caller-owned vector",
                                    embedding=caller_vec).get("id")
             live = _vector(sdk, pid)
             assert live == _caller_expected(caller_vec)
@@ -914,10 +914,10 @@ def test_a_promoted_caller_vectored_point_keeps_its_raw_vector(tmp_path):
         sdk = TortoiseSDK(str(tmp_path / "promote.db"),
                           event_log_path=str(events / "events.jsonl"))
         try:
-            pid = sdk.create_point("statement", "promote a caller vector",
+            pid = sdk._create_point("statement", "promote a caller vector",
                                    embedding=caller_vec, status="draft").get("id")
             assert _vector(sdk, pid) == _caller_expected(caller_vec)
-            sdk.promote_point(pid)
+            sdk._promote_point(pid)
             assert any(e.get("type") == "PointPromoted" for e in _events(events)), (
                 "no PointPromoted was journalled — the point was born live, so "
                 "this guard is inert (#11859)")
@@ -949,7 +949,7 @@ def test_the_verbatim_marker_cannot_be_forged_through_props(tmp_path):
                     "embedding_model", "embedding_revision",
                     "embedding_text_hash"):
             with pytest.raises(ValueError, match="server-managed"):
-                sdk.create_point("statement", "x", **{key: "tenant-supplied"})
+                sdk._create_point("statement", "x", **{key: "tenant-supplied"})
     finally:
         sdk.close()
 
@@ -1046,7 +1046,7 @@ def test_a_recreated_point_does_not_inherit_the_verbatim_marker(tmp_path):
         sdk = TortoiseSDK(str(tmp_path / "recreate.db"),
                           event_log_path=str(events / "events.jsonl"))
         try:
-            pid = sdk.create_point("statement", "first incarnation",
+            pid = sdk._create_point("statement", "first incarnation",
                                    embedding=[0.1] * _DIM).get("id")
             props = sdk._get_proj().g.query(
                 "MATCH (n:Point {id:$id}) RETURN properties(n)",
@@ -1054,9 +1054,9 @@ def test_a_recreated_point_does_not_inherit_the_verbatim_marker(tmp_path):
             assert props.get("embedding_verbatim") is True, (
                 "premise: the caller-vectored point carries the marker")
 
-            sdk.delete_point(pid)
+            sdk._delete_point(pid)
             # Same id, now a SERVER vector — the recreate must be marker-free.
-            sdk.create_point("statement", "second incarnation", id=pid)
+            sdk._create_point("statement", "second incarnation", id=pid)
             live_props = sdk._get_proj().g.query(
                 "MATCH (n:Point {id:$id}) RETURN properties(n)",
                 params={"id": pid}).result_set[0][0]
@@ -1094,12 +1094,12 @@ def test_update_point_with_a_caller_vector_marks_the_node(tmp_path):
         try:
             # Draft is explicit since #1088 (a no-status create is LIVE) —
             # this pin exercises the draft→live promote re-emit.
-            pid = sdk.create_point("statement", "update vector probe",
+            pid = sdk._create_point("statement", "update vector probe",
                                    status="draft").get("id")
-            sdk.update_point(pid, embedding=caller_vec)
+            sdk._update_point(pid, embedding=caller_vec)
             assert _vector(sdk, pid) == caller_vec, (
                 "premise: the live update took the caller vector")
-            sdk.promote_point(pid)
+            sdk._promote_point(pid)
             live = _vector(sdk, pid)
 
             with mock.patch(_EMBED_PATCH, _embed_b):
@@ -1176,7 +1176,7 @@ def test_a_wrong_width_caller_vector_is_not_written_on_either_side(tmp_path):
             with mock.patch.object(type(proj), "required_embedding_dim",
                                    new_callable=mock.PropertyMock,
                                    return_value=_DIM):
-                pid = sdk.create_point("statement", "wrong width probe",
+                pid = sdk._create_point("statement", "wrong width probe",
                                        embedding=[0.1] * 10).get("id")
                 assert _vector(sdk, pid) is None, (
                     "a wrong-width caller vector must not be stored live")
@@ -1202,7 +1202,7 @@ def test_a_graph_only_caller_vectored_point_keeps_its_raw_vector_and_marker(tmp_
         sdk = TortoiseSDK(str(tmp_path / "graphonly.db"),
                           event_log_path=str(events / "events.jsonl"))
         try:
-            pid = sdk.create_point("statement", "graph-only probe",
+            pid = sdk._create_point("statement", "graph-only probe",
                                    embedding=[0.1] * _DIM).get("id")
             assert _vector(sdk, pid) == [0.1] * _DIM, (
                 "premise: the caller vector is stored raw")
@@ -1301,7 +1301,7 @@ def test_update_entity_point_branch_is_a_declared_exemption(tmp_path):
         sdk = TortoiseSDK(str(tmp_path / "entity.db"),
                           event_log_path=str(events / "events.jsonl"))
         try:
-            pid = sdk.create_point("statement", "entity embedding probe").get("id")
+            pid = sdk._create_point("statement", "entity embedding probe").get("id")
             v_created = _vector(sdk, pid)
             assert v_created is not None
 
@@ -1375,10 +1375,10 @@ def test_update_entity_caller_vector_rides_a_re_emit_verbatim(tmp_path):
         try:
             # Draft is explicit since #1088 (a no-status create is LIVE) —
             # this pin exercises the draft→live promote re-emit.
-            pid = sdk.create_point("statement", "entity re-emit probe",
+            pid = sdk._create_point("statement", "entity re-emit probe",
                                    status="draft").get("id")
             sdk.update_knowledge(pid, embedding=caller_vec)
-            sdk.promote_point(pid)
+            sdk._promote_point(pid)
 
             live = _vector(sdk, pid)
             live_props = sdk._get_proj().g.query(
@@ -1425,10 +1425,10 @@ def test_fresh_mitigate_operator_journals_an_owned_none_and_replays_it(tmp_path)
         sdk = TortoiseSDK(str(tmp_path / "mitig.db"),
                           event_log_path=str(events / "events.jsonl"))
         try:
-            a = sdk.create_point("statement", "mitigation probe A").get("id")
-            b = sdk.create_point("statement", "mitigation probe B").get("id")
-            op = sdk.create_operator("NAND", a, [b]).get("id")
-            mid = sdk.mitigate_operator(op, "because reasons", 0.5).get("id")
+            a = sdk._create_point("statement", "mitigation probe A").get("id")
+            b = sdk._create_point("statement", "mitigation probe B").get("id")
+            op = sdk._create_operator("NAND", a, [b]).get("id")
+            mid = sdk._mitigate_operator(op, "because reasons", 0.5).get("id")
             assert mid, "the mitigation Point has no id"
 
             record = [
@@ -1485,14 +1485,14 @@ def test_clearing_the_vector_clears_the_marker_too(tmp_path):
         sdk = TortoiseSDK(str(tmp_path / "clearmark.db"),
                           event_log_path=str(events / "events.jsonl"))
         try:
-            pid = sdk.create_point("statement", "clear the marker",
+            pid = sdk._create_point("statement", "clear the marker",
                                    embedding=[0.2] * _DIM).get("id")
             props = sdk._get_proj().g.query(
                 "MATCH (n:Point {id:$id}) RETURN properties(n)",
                 params={"id": pid}).result_set[0][0]
             assert props.get("embedding_verbatim") is True
 
-            sdk.update_point(pid, embedding=None)
+            sdk._update_point(pid, embedding=None)
             props = sdk._get_proj().g.query(
                 "MATCH (n:Point {id:$id}) RETURN properties(n)",
                 params={"id": pid}).result_set[0][0]
@@ -1538,12 +1538,12 @@ def test_a_stale_promote_after_recreate_is_a_declared_exemption(tmp_path):
         sdk = TortoiseSDK(str(tmp_path / "staleprom.db"),
                           event_log_path=str(events / "events.jsonl"))
         try:
-            pid = sdk.create_point("statement", "first incarnation",
+            pid = sdk._create_point("statement", "first incarnation",
                                    embedding=[0.1] * _DIM,
                                    status="draft").get("id")
-            sdk.promote_point(pid)
-            sdk.delete_point(pid)
-            sdk.create_point("statement", "second incarnation", id=pid)
+            sdk._promote_point(pid)
+            sdk._delete_point(pid)
+            sdk._create_point("statement", "second incarnation", id=pid)
             live = sdk._get_proj().g.query(
                 "MATCH (n:Point {id:$id}) RETURN properties(n)",
                 params={"id": pid}).result_set[0][0]

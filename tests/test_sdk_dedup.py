@@ -35,8 +35,8 @@ class TestDedupAlwaysPersistsHash:
     def test_create_point_dedup_without_first_dedup(self, sdk):
         """Create without dedup, then with dedup=True → same id returned."""
         content = "Claim created without dedup first"
-        p1 = sdk.create_point("statement", content, dedup=False)
-        p2 = sdk.create_point("statement", content, dedup=True)
+        p1 = sdk._create_point("statement", content, dedup=False)
+        p2 = sdk._create_point("statement", content, dedup=True)
         assert p1["id"] == p2["id"]
 
     def test_dedup_with_extra_props(self, sdk):
@@ -52,7 +52,7 @@ class TestDedupAlwaysPersistsHash:
         makes the two words distinguishable.
         """
         content = "Gold baseline claim"
-        p1 = sdk.create_point("hypothesis", content, dedup=True,
+        p1 = sdk._create_point("hypothesis", content, dedup=True,
                               credibility="gold")
         # The authored weak body landed (gold ⇒ one weak body, NOT a 10:1 prior)
         # so the dedup hit below has something to clobber.
@@ -61,7 +61,7 @@ class TestDedupAlwaysPersistsHash:
         assert p1.get("credibility") == "T0"  # the word, kept as a label
         # Later dedup attempt with a DIFFERENT credibility — must not overwrite
         # the authored assertion already carried.
-        p2 = sdk.create_point("hypothesis", content, dedup=True,
+        p2 = sdk._create_point("hypothesis", content, dedup=True,
                               credibility="T1")
         assert p1["id"] == p2["id"]
         assert p2.get("ep_alpha") == p1.get("ep_alpha")
@@ -87,10 +87,10 @@ class TestDedupHitAppliesAuthoredBaseline:
 
     def test_dedup_hit_calibrates_an_uncalibrated_point(self, sdk):
         content = "#7980 dedup hit applies the authored baseline"
-        first = sdk.create_point("statement", content, dedup=True)
+        first = sdk._create_point("statement", content, dedup=True)
         # No credibility on the first write, so the point carries no baseline.
         assert not first.get("baseline_set"), first
-        second = sdk.create_point("statement", content, dedup=True,
+        second = sdk._create_point("statement", content, dedup=True,
                                   credibility="gold")
         assert first["id"] == second["id"], "still a dedup hit — no duplicate"
         assert second.get("baseline_set") is True, second
@@ -111,10 +111,10 @@ class TestDedupHitAppliesAuthoredBaseline:
         """The observable #7980 symptom, not just the prop: the write reported
         success and the fail-closed gate then refused the graph."""
         content = "#7980 the graph stays EP-able after the hit"
-        sdk.create_point("statement", content, dedup=True)
-        sdk.create_point("statement", content, dedup=True, credibility="high")
+        sdk._create_point("statement", content, dedup=True)
+        sdk._create_point("statement", content, dedup=True, credibility="high")
         # Raised CalibrationError before the fix: a live point with no baseline.
-        sdk.compute_confidence()
+        sdk._compute_confidence()
 
     def test_dedup_hit_weak_body_is_displaceable_by_a_real_source(self, sdk):
         """#398/#6151 Defect 1 — the sequence that was BROKEN.
@@ -127,9 +127,9 @@ class TestDedupHitAppliesAuthoredBaseline:
         real T1 source raises the claim (0.5238 -> 0.8361).
         """
         content = "#6151 dedup-hit weak body is displaceable"
-        pid = sdk.create_point("statement", content, dedup=True)["id"]
-        sdk.create_point("statement", content, dedup=True, credibility="gold")
-        before = sdk.get_point(pid)
+        pid = sdk._create_point("statement", content, dedup=True)["id"]
+        sdk._create_point("statement", content, dedup=True, credibility="gold")
+        before = sdk._get_point(pid)
         assert before.get("ep_alpha") == pytest.approx(
             1.0 + AUTHOR_ASSERTION_WEAK_PC)
         assert before.get("credibility") == "T0"
@@ -138,7 +138,7 @@ class TestDedupHitAppliesAuthoredBaseline:
                           sourceDate="2024-01-01T00:00:00+00:00")
         sdk._get_proj()._link_source(pid, "https://t1-dedup.example")
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        after = sdk.get_point(pid)
+        after = sdk._get_point(pid)
         # 1 + word(0.1) + T1(4.0) = 5.1 -> 0.8361
         assert after.get("ep_alpha") == pytest.approx(5.1)
         assert after.get("baseline_source") == "inherited-from-source"
@@ -155,12 +155,12 @@ class TestDedupHitAppliesAuthoredBaseline:
         than the same part unlabelled (frozen at 0.75).
         """
         content = "#6151 born-live decide part dedup word"
-        pid = sdk.create_point("option", content)["id"]
-        born = sdk.get_point(pid)
+        pid = sdk._create_point("option", content)["id"]
+        born = sdk._get_point(pid)
         assert born.get("baseline_source") == "system-default"
         assert born.get("baseline_system_default") is True
-        sdk.create_point("option", content, dedup=True, credibility="gold")
-        hit = sdk.get_point(pid)
+        sdk._create_point("option", content, dedup=True, credibility="gold")
+        hit = sdk._get_point(pid)
         assert hit.get("ep_alpha") == pytest.approx(3.0 + AUTHOR_ASSERTION_WEAK_PC)
         assert hit.get("baseline_source") == "set-by-author"
         assert hit.get("credibility") == "T0"
@@ -169,7 +169,7 @@ class TestDedupHitAppliesAuthoredBaseline:
         # And the #2199 provision survives a recompute (never weaker than the
         # unlabelled part's frozen 0.75).
         sdk._apply_source_inheritance(recency_decay=1.0, recompute_interval=0)
-        rec = sdk.get_point(pid)
+        rec = sdk._get_point(pid)
         assert rec.get("ep_alpha") == pytest.approx(3.1)
 
     def test_dedup_hit_plain_point_rules_out_the_ladder_prior(self, sdk):
@@ -179,9 +179,9 @@ class TestDedupHitAppliesAuthoredBaseline:
         (1.1 -> 0.5238), never the 10:1 T0 prior (10.0 -> 0.9091).
         """
         content = "#6151 plain point dedup word"
-        pid = sdk.create_point("statement", content, dedup=True)["id"]
-        sdk.create_point("statement", content, dedup=True, credibility="gold")
-        pt = sdk.get_point(pid)
+        pid = sdk._create_point("statement", content, dedup=True)["id"]
+        sdk._create_point("statement", content, dedup=True, credibility="gold")
+        pt = sdk._get_point(pid)
         mean = pt["ep_alpha"] / (pt["ep_alpha"] + pt["ep_beta"])
         assert mean == pytest.approx(0.5238, abs=0.0001)
         assert mean != pytest.approx(0.9091, abs=0.0001)
@@ -201,10 +201,10 @@ class TestDedupHitAppliesAuthoredBaseline:
         body on neutral — 1.1 / 0.5238, and NO marker.
         """
         content = "#6151 born draft option dedup default"
-        pid = sdk.create_point("option", content, status="draft")["id"]
-        assert sdk.get_point(pid).get("baseline_set") is None, (
+        pid = sdk._create_point("option", content, status="draft")["id"]
+        assert sdk._get_point(pid).get("baseline_set") is None, (
             "a born-draft decide part never received the #2199 default")
-        hit = sdk.create_point("option", content, dedup=True, credibility="gold")
+        hit = sdk._create_point("option", content, dedup=True, credibility="gold")
         assert hit.get("ep_alpha") == pytest.approx(
             1.0 + AUTHOR_ASSERTION_WEAK_PC), hit
         mean = hit["ep_alpha"] / (hit["ep_alpha"] + hit["ep_beta"])
@@ -219,7 +219,7 @@ class TestDedupHitAppliesAuthoredBaseline:
         import logging
 
         content = "#7980 dedup hit preserves the authored baseline"
-        first = sdk.create_point("statement", content, dedup=True,
+        first = sdk._create_point("statement", content, dedup=True,
                                  credibility="gold")
         # RE-PINNED (#398, owner ruling 2026-10-12): the authored word is ONE
         # weak body, not the ladder prior it names (gold ⇒ 10.0 was superseded).
@@ -230,7 +230,7 @@ class TestDedupHitAppliesAuthoredBaseline:
         # The self-host surface dedups by DEFAULT, which makes this retry the
         # normal path; a WARNING on it is how a warning stops being read.
         with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
-            retry = sdk.create_point("statement", content, dedup=True,
+            retry = sdk._create_point("statement", content, dedup=True,
                                      credibility="gold")
         assert retry.get("ep_alpha") == pytest.approx(
             1.0 + AUTHOR_ASSERTION_WEAK_PC), retry
@@ -239,7 +239,7 @@ class TestDedupHitAppliesAuthoredBaseline:
         # A DIFFERENT belief is the case that must be audible: it is dropped.
         caplog.clear()
         with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
-            second = sdk.create_point("statement", content, dedup=True,
+            second = sdk._create_point("statement", content, dedup=True,
                                       credibility="T1")
         assert second.get("ep_alpha") == pytest.approx(
             1.0 + AUTHOR_ASSERTION_WEAK_PC), second
@@ -263,8 +263,8 @@ class TestCrossContextDedup:
         """Same content dedup returns existing point (hash + kind match)."""
         content = "The sky is blue"
 
-        p1 = sdk.create_point("statement", content, dedup=True)
-        p2 = sdk.create_point("statement", content, dedup=True)
+        p1 = sdk._create_point("statement", content, dedup=True)
+        p2 = sdk._create_point("statement", content, dedup=True)
 
         assert p1["id"] == p2["id"], (
             "Same content should return existing point"
@@ -275,17 +275,17 @@ class TestCrossContextDedup:
         """context= raises TypeError — the #49 deprecation guard is enforced."""
         content = "Context guard claim"
         with pytest.raises(TypeError):
-            sdk.create_point("statement", content, dedup=True, context="legacy-ctx")
+            sdk._create_point("statement", content, dedup=True, context="legacy-ctx")
         # Even an explicit None context is rejected — no silent fallback.
         with pytest.raises(TypeError):
-            sdk.create_point("statement", content, dedup=True, context=None)
+            sdk._create_point("statement", content, dedup=True, context=None)
 
     def test_dedup_plain_points_match_each_other(self, sdk):
         """Points without context dedup against each other (hash + kind match)."""
         content = "Untethered claim"
 
-        p1 = sdk.create_point("statement", content, dedup=True)  # no context
-        p2 = sdk.create_point("statement", content, dedup=True)  # no context
+        p1 = sdk._create_point("statement", content, dedup=True)  # no context
+        p2 = sdk._create_point("statement", content, dedup=True)  # no context
 
         assert p1["id"] == p2["id"], (
             "Same content without context should dedup"
@@ -300,8 +300,8 @@ class TestCrossContextDedup:
         """
         content = "Contextual claim"
 
-        p1 = sdk.create_point("statement", content, dedup=True, wing="alpha")
-        p2 = sdk.create_point("statement", content, dedup=True, wing="beta")
+        p1 = sdk._create_point("statement", content, dedup=True, wing="alpha")
+        p2 = sdk._create_point("statement", content, dedup=True, wing="beta")
 
         assert p1["id"] == p2["id"], (
             "Same content must dedup to one point — context-like props do not isolate"
@@ -311,9 +311,9 @@ class TestCrossContextDedup:
         """Same content across three 'contexts' yields ONE point (no isolation)."""
         content = "Cross-context contamination test"
 
-        p_a = sdk.create_point("statement", content, dedup=True, wing="alpha")
-        p_b = sdk.create_point("statement", content, dedup=True, wing="beta")
-        p_c = sdk.create_point("statement", content, dedup=True, wing="gamma")
+        p_a = sdk._create_point("statement", content, dedup=True, wing="alpha")
+        p_b = sdk._create_point("statement", content, dedup=True, wing="beta")
+        p_c = sdk._create_point("statement", content, dedup=True, wing="gamma")
 
         ids = {p_a["id"], p_b["id"], p_c["id"]}
         assert len(ids) == 1, (
@@ -330,8 +330,8 @@ class TestDedupHitDropsCallerStatus:
     def test_dedup_hit_with_draft_status_no_crash(self, sdk):
         """Second create_point with status='draft' dedups to the same point."""
         content = "#1905 draft status dedup hit"
-        p1 = sdk.create_point("statement", content, dedup=True, status="draft")
-        p2 = sdk.create_point("statement", content, dedup=True, status="draft")
+        p1 = sdk._create_point("statement", content, dedup=True, status="draft")
+        p2 = sdk._create_point("statement", content, dedup=True, status="draft")
         assert p1["id"] == p2["id"]
         assert p2["status"] == "draft"
 
@@ -339,10 +339,10 @@ class TestDedupHitDropsCallerStatus:
         """The existing point's status survives a dedup hit unchanged — the
         hit only applies non-lifecycle props (updatedAt), never status."""
         content = "#1905 lifecycle preservation"
-        p1 = sdk.create_point("statement", content, dedup=True, status="draft")
-        sdk.update_point(p1["id"], status="live")
+        p1 = sdk._create_point("statement", content, dedup=True, status="draft")
+        sdk._update_point(p1["id"], status="live")
         # dedup hit with status='draft' must NOT demote the live point
-        p2 = sdk.create_point("statement", content, dedup=True, status="draft")
+        p2 = sdk._create_point("statement", content, dedup=True, status="draft")
         assert p1["id"] == p2["id"]
         assert p2["status"] == "live"
 
@@ -351,11 +351,11 @@ class TestDedupHitDropsCallerStatus:
         point — lifecycle transitions stay explicit (update_point / ingest
         auto-policy), never implicit on a dedup hit (#1905 contract)."""
         content = "#1905 no implicit promotion"
-        p1 = sdk.create_point("statement", content, dedup=True, status="draft")
+        p1 = sdk._create_point("statement", content, dedup=True, status="draft")
         assert p1["status"] == "draft"
         # pre-#1905 this raised ValueError (update_point rejects non-'live')
         # for the draft→live case it used to promote; both are now a no-op
-        p2 = sdk.create_point("statement", content, dedup=True, status="live")
+        p2 = sdk._create_point("statement", content, dedup=True, status="live")
         assert p1["id"] == p2["id"]
         assert p2["status"] == "draft"
 
@@ -364,9 +364,9 @@ class TestDedupHitDropsCallerStatus:
         raises even when the point already exists (no silent-ignore on dedup
         hits — status is validated before the branch, #1905)."""
         content = "#1905 uniform validation"
-        sdk.create_point("statement", content, dedup=True)
+        sdk._create_point("statement", content, dedup=True)
         with pytest.raises(ValueError) as exc:
-            sdk.create_point("statement", content, dedup=True, status="bogus")
+            sdk._create_point("statement", content, dedup=True, status="bogus")
         # ⛔ The WORD refusal is the ONE lifecycle door's text since `#11824` S0
         # (`status 'bogus' was refused: it is not a lifecycle word for :Point`).
         # The per-door `Invalid status …` line survives only for a value that is

@@ -71,11 +71,11 @@ def _posterior_after(store, n_nand: int, credibility: str) -> tuple[float, float
     c0 = target.confidence
     sdk = arm._sdk(sc)
     for i in range(n_nand):
-        ev = sdk.create_point(
+        ev = sdk._create_point(
             kind="evidence",
             content=f"contradicting source {i} ({credibility}) {n_nand}",
             credibility=credibility, status="live")
-        sdk.create_operator("NAND", ev["id"], [target.id],
+        sdk._create_operator("NAND", ev["id"], [target.id],
                             direction="unidirectional")
     arm.ep_terminal_outcome(sc, variance_threshold=0.04)
     after = store.retrieve("")

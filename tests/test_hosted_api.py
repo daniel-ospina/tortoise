@@ -2366,7 +2366,7 @@ class TestTeamInfo:
         import tortoise.hosted_api as ha
 
         sdk = _warm_data_graph()
-        subj_id = sdk.create_subject("wrong-label-target",
+        subj_id = sdk._create_subject("wrong-label-target",
                                      subjectKind="company")["id"]
         assert subj_id != "", "subject id must be minted"
         body = ha.CreatePointRequest(
@@ -3700,7 +3700,10 @@ class TestSessionCapture:
         def boom(*args, **kwargs):
             raise RuntimeError("falkordb down")
 
-        monkeypatch.setattr("tortoise.sdk.TortoiseSDK.create_event", boom)
+        # #12901 privatised the method, so the STRING target must name the `def`
+        # the class actually holds — a string-keyed patch is the one shape a
+        # receiver-based sweep cannot type.
+        monkeypatch.setattr("tortoise.sdk.TortoiseSDK._create_event", boom)
         r = client.post("/v1/sessions", json={
             "conversation": [{"role": "user", "content": "I think auth is the top issue."}]})
         assert r.status_code == 200, r.text
@@ -3748,7 +3751,10 @@ class TestSessionCapture:
         def boom(*args, **kwargs):
             raise RuntimeError("falkordb down")
 
-        monkeypatch.setattr("tortoise.sdk.TortoiseSDK.create_event", boom)
+        # #12901 privatised the method, so the STRING target must name the `def`
+        # the class actually holds — a string-keyed patch is the one shape a
+        # receiver-based sweep cannot type.
+        monkeypatch.setattr("tortoise.sdk.TortoiseSDK._create_event", boom)
         r = client.post("/v1/sessions", json={
             "conversation": [{"role": "user", "content": "auth is the top issue"}]})
         assert r.status_code == 200, r.text
@@ -3798,8 +3804,8 @@ class TestSessionCapture:
         app.dependency_overrides[get_current_org] = lambda: {
             **TEST_TEAM, "max_points": 1}
         sdk = ha_mod._make_sdk(namespace=TEST_ORG_ID)
-        sdk.create_point(kind="statement", content="pre-existing non-episodic point 1")
-        sdk.create_point(kind="statement", content="pre-existing non-episodic point 2")
+        sdk._create_point(kind="statement", content="pre-existing non-episodic point 1")
+        sdk._create_point(kind="statement", content="pre-existing non-episodic point 2")
         r = client.post("/v1/sessions", json={"conversation": []})
         assert r.status_code == 422, r.text  # blank gate BEFORE quota: 422 wins
         r2 = client.post("/v1/sessions", json={
@@ -4336,7 +4342,7 @@ class TestSessionList:
             if row["id"] == session_id)
         detail = client.get(f"/v1/sessions/{session_id}").json()
 
-        read = _ha_mod._make_sdk(namespace=TEST_ORG_ID).get_session(session_id)
+        read = _ha_mod._make_sdk(namespace=TEST_ORG_ID)._get_session(session_id)
         assert read is not None, (
             "the SDK session read must see a captured :Session — the capture "
             "lane writes no AgentSession Event (#3557)")
@@ -5908,10 +5914,10 @@ class TestCrossTenantIsolation:
         # Create a point in team A's namespace directly
         from tortoise.hosted_api import _make_sdk
         sdk_a = _make_sdk(namespace=f"test_hosted_iso_team_a_{os.urandom(4).hex()}")
-        sdk_a.create_point(content="TEAM_A_SECRET", kind="statement")
+        sdk_a._create_point(content="TEAM_A_SECRET", kind="statement")
         # Create a point in team B
         sdk_b = _make_sdk(namespace=f"test_hosted_iso_team_b_{os.urandom(4).hex()}")
-        sdk_b.create_point(content="TEAM_B_SECRET", kind="statement")
+        sdk_b._create_point(content="TEAM_B_SECRET", kind="statement")
 
         # Verify team A's graph has its own point and NOT team B's
         pts_a = sdk_a._get_proj().g.query(
@@ -5979,7 +5985,7 @@ class TestIssueInsightAPI:
         import tortoise.hosted_api as hosted_api
 
         class _FakeSDK:
-            def issue_insight(self, title, body=None, repo=None, limit=2):
+            def _issue_insight(self, title, body=None, repo=None, limit=2):
                 return {
                     "has_prior": True, "no_prior_knowledge": False,
                     "repo_not_indexed": False,
@@ -6020,7 +6026,7 @@ class TestIssueInsightAPI:
         import tortoise.hosted_api as hosted_api
 
         class _FakeSDK:
-            def issue_insight(self, title, body=None, repo=None, limit=2):
+            def _issue_insight(self, title, body=None, repo=None, limit=2):
                 return {
                     "has_prior": True, "no_prior_knowledge": False,
                     "repo_not_indexed": False,
@@ -6051,7 +6057,7 @@ class TestIssueInsightAPI:
 
         # Team A indexes repo acme/app in ITS namespace.
         sdk_a = _make_sdk(namespace=TEST_ORG_ID)
-        sdk_a.create_point(
+        sdk_a._create_point(
             kind="observation", content="acme/app #1: login bug on iOS",
             source="github", github_repo="acme/app", github_number=1, github_state="open",
         )
@@ -6067,7 +6073,7 @@ class TestIssueInsightAPI:
         app.dependency_overrides[get_current_org] = lambda: dict(
             TEST_TEAM, org_id="team-002")
         sdk_b = _make_sdk(namespace="team-002")
-        sdk_b.create_point(
+        sdk_b._create_point(
             kind="observation", content="b-corp/web #3: unrelated styling tweak",
             source="github", github_repo="b-corp/web", github_number=3, github_state="closed",
         )
@@ -6101,7 +6107,7 @@ class TestIssueInsightAPI:
         def _boom(*args, **kwargs):
             raise RuntimeError("graph down")
 
-        monkeypatch.setattr(ha_mod.TortoiseSDK, "issue_insight", _boom)
+        monkeypatch.setattr(ha_mod.TortoiseSDK, "_issue_insight", _boom)
         r = client.get("/v1/issue-insight", params={"title": "x", "repo": "owner/a"})
         assert r.status_code == 500
         assert r.json()["detail"] == "Insight unavailable"
@@ -10109,7 +10115,7 @@ class TestProvisioningService:
             gid = g["graph_id"]
             # Write a point to the DEFAULT graph (the cross-graph probe: the
             # child must never see it).
-            sdk.create_point("default-only", content="default only")
+            sdk._create_point("default-only", content="default only")
             token = "tk_" + uuid.uuid4().hex
             sdk._get_registry().query(
                 "CREATE (k:APIKey {id:$id, org_id:$tid, key_hash:$kh, "

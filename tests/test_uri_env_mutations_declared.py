@@ -339,6 +339,17 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # ⚠️ The ROW for this file is NOT here: this block is the #13886 merge's record of a
     # dropped duplicate. The single surviving row is at the tail of this dict, fully
     # anchored to the stripped line (`^monkeypatch\.setenv("TORTOISE_DB_URI", _uri\(\)\)$`).
+    # ⛔ #12631 (the root this block records): THREE rows for this key had already landed
+    # inside ~4 minutes BEFORE that merge — #13929's, then #13926's, then #13928's squash
+    # (147 rows / 145 unique keys at `f2e5e3a98f`) — because each red was repaired by
+    # ADDING a row rather than by checking whether one existed. Python keeps the LAST
+    # silently, so the file read as triple coverage while ONE row graded: `ruff` raised
+    # `F601` on the SECOND and THIRD occurrences — `:607` and `:1663` in that tree — and
+    # NEVER on the first, so a `:322:5 F601` is not a diagnostic ruff can emit.
+    # `test_the_declaration_table_carries_no_duplicate_key` reads the table as SOURCE, so
+    # it reds on the same tree. **Adding a row at THIS position re-creates the cascade** —
+    # grep this dict for the key first. One file, one row.
+    #
     # #12275: `test_candidate_recall_11901.py` (#12159) landed with three
     # untriaged URI mutations, which reds this gate on `main` in `test (d)` —
     # the same "module landed without its entry" shape as #9664 above. None of
@@ -617,18 +628,28 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # observe, and `_uri()` resolves the ambient lane URI first so the fixture can
     # never silently drag a docker lane onto an embedded database. `monkeypatch`
     # auto-restores at teardown, so nothing leaks into a later docker-lane test.
-    # The module's other three `TORTOISE_DB_URI` mentions are READS (its probe's
-    # candidate list and `_uri()`'s fallback), which are not mutations and are
-    # deliberately not declared — a row that matched them would silence a future
-    # mutation on those lines.
-    # ⛔ MERGE NOTE (#13158 vs #13176): `main`'s 5fae3f4f6f landed its OWN
-    # unanchored declaration for this file here, and this branch had already
-    # landed a narrowed one at the tail of this dict under the same KEY — an
-    # auto-merge that keeps BOTH is a duplicate dict key, and the last one wins
-    # SILENTLY, so the guard would have graded one row while the file showed two.
-    # The narrowed row is kept (it anchors every arm at both ends, so it cannot
-    # silence a commented-out mutation) and this copy is dropped rather than
-    # left to shadow it. One file, one row.
+    # The module's other three `TORTOISE_DB_URI` mentions are READS — its probe's
+    # `env_uri` capture, the probe's candidate list, and `_uri()`'s fallback — which are
+    # not mutations and are deliberately not declared: a row that matched them would
+    # silence a future mutation on those lines. (Measured: the module has FOUR mentions —
+    # the `sdk`-fixture setenv the surviving row declares, plus the three reads above; an
+    # earlier revision of this note named two of the three and still said "three", which is
+    # the kind of count that cannot be checked and therefore rots.)
+    # ⛔ MERGE NOTE (#13158 vs #13176): an auto-merge that keeps BOTH sides of a row
+    # pair is a duplicate dict key, and the last one wins SILENTLY, so the guard would
+    # have graded one row while the file showed two. The narrowed row is kept (it
+    # anchors every arm at both ends, so it cannot silence a commented-out mutation)
+    # and this copy is dropped rather than left to shadow it.
+    # ⚠️ CORRECTION (measured 2026-11-20 via `git show 5fae3f4f6f --
+    # tests/test_uri_env_mutations_declared.py`): an earlier revision of this note said
+    # 5fae3f4f6f "landed its OWN unanchored declaration for this file". It did not, and
+    # the sentence had inverted who was narrowed. That commit added the
+    # `test_13034_currency_rule_reads_position.py` key with THREE `^`…`$`-anchored arms
+    # — the single row this dict carries for that key today — so the #13158-vs-#13176
+    # conflict is a DIFFERENT module from this one. The two competing copies on record
+    # for THAT key were the BROADER ones and neither landed: #13146 is CLOSED and was
+    # never merged, and #13164 merged as `082213c6a8` with an EMPTY diff for this file,
+    # having dropped its own copy. One file, one row.
     "test_aggregative_facet_coverage.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])',
                                             r'monkeypatch\.setenv\s*\(\s*"TORTOISE_DB_URI"'],  # #2521: module-level live probe + per-test isolated-graph fixture (DELIBERATE_URI — probe/setenv IS the test input, mirrors #2518's entity-key pattern)
     # #2165 connected-assembly (merged via #2657): the assembly fixture/sdk
@@ -1517,11 +1538,18 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #   `monkeypatch.delenv`/`del` still red there, the `del` because that
     #   alternative is nested inside `os\.environ(?:…` and so cannot match
     #   `del os.environ[…`.
-    #   The LIVE duplicate carrier is **#13164** (open, `34f80298a2bf`), which
-    #   must land FIRST — it is the only carrier that clears `test (h)`'s
-    #   `_hydrate_evidence` and `test (i)`'s two raw `FalkorDB(...)` clients,
-    #   neither of which any row here can reach. It carries its OWN row for
-    #   this key at its `:482`, two loose arms
+    #   The LIVE duplicate carrier is **#13164** (merged as `082213c6a8` on
+    #   2026-11-17, AFTER this row landed, and it dropped its own loose copy — so the
+    #   "if this PR lands after #13164 it MUST DROP this row" paragraph below is the
+    #   pre-merge reasoning, kept as the record; the dict carries ONE row for this key
+    #   today). Both roots it cleared were `test (k)` shard failures, and #13164's own
+    #   message names them (`git show 082213c6a8`): the census counting a READ as a
+    #   WRITE for `TortoiseSDK._hydrate_evidence`, pinned in
+    #   `test_9124_declared_live_doors.py`, and the two raw `FalkorDB(...)` clients in
+    #   `tools/text_gate_13099.py`, whose tool-site count
+    #   `test_bounded_raw_clients_3065.py` pins — neither of which any row here can reach.
+    #   On its branch it carried its OWN row for this key (that branch's `:482`) with
+    #   two loose arms
     #   (`os\.environ\["TORTOISE_DB_URI"]\s*=` and
     #   `os\.environ\.pop\(\s*"TORTOISE_DB_URI"`). Measured, not inferred,
     #   at `d8790fd364f8` (the figures shift with any edit here, so they are
@@ -1535,6 +1563,9 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #   the narrowing should instead be moved BEFORE that landing — #13164's
     #   `:482` row takes these three `^`…`$` arms and this row is dropped, so
     #   the tightening survives the merge instead of being lost with it.
+    #   ⛔ RESOLVED (measured 2026-11-20): that order did not happen — #13164 landed
+    #   second with an EMPTY diff for this file (see above), so this row is the one that
+    #   supplied the anchored arms. The outcome is the same either way: one row, one file.
     "test_13034_currency_rule_reads_position.py": [
         r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*DB_URI$',
         r'^os\.environ\["TORTOISE_DB_URI"\]\s*=\s*_(?:OLD_URI|old)$',
@@ -3758,6 +3789,34 @@ def test_declaration_path_rejects_undeclared():
     assert not _is_declared(
         "test_10015_organisation_account.py",
         'monkeypatch.delenv("TORTOISE_DB_URI")')
+    # #12631: the `test_13557_13558_reachable_reads.py` row's arm is anchored at BOTH
+    # ends, and that narrowing is a CLAIM the row's own comment makes — so it is
+    # enforced here, not just written. Scoped to the SAME declared file, per the
+    # `test_unknown.py` lesson above. THREE independent widenings red the negatives, one
+    # per end of the anchor plus the value: dropping the `^` makes the commented-out line
+    # "declared"; loosening the value to a bare variable name makes a different
+    # expression pass; and dropping the `$` alone is the one that is easy to miss and
+    # worst — `_MUTATION_RE` is applied to WHOLE source and `_uri_mutation_sites` yields
+    # ONE STRIPPED LINE PER MATCH, so a single line carrying a second mutation
+    # (`monkeypatch.setenv(...); monkeypatch.delenv(...)`) yields that same line twice
+    # and an unanchored arm would declare BOTH, letting the `delenv` ride along silently
+    # (#11083). With `$` the row declares neither and both red, which is fail-closed.
+    assert _is_declared(
+        "test_13557_13558_reachable_reads.py",
+        'monkeypatch.setenv("TORTOISE_DB_URI", _uri())')
+    assert not _is_declared(
+        "test_13557_13558_reachable_reads.py",
+        '# monkeypatch.setenv("TORTOISE_DB_URI", _uri())')
+    assert not _is_declared(
+        "test_13557_13558_reachable_reads.py",
+        'monkeypatch.setenv("TORTOISE_DB_URI", uri)')
+    assert not _is_declared(
+        "test_13557_13558_reachable_reads.py",
+        'monkeypatch.setenv("TORTOISE_DB_URI", _uri()); '
+        'monkeypatch.delenv("TORTOISE_DB_URI")')
+    assert not _is_declared(
+        "test_13557_13558_reachable_reads.py",
+        'monkeypatch.setenv("TORTOISE_DB_URI", _uri())  # pinned lane')
 
 
 def test_restoration_exemption_boundary():

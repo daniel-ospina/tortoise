@@ -110,9 +110,9 @@ def _edges(proj, rel: str) -> set[tuple[str, str]]:
 def _world(sdk) -> dict[str, str]:
     """Three Points: the claim, a target, and the successor."""
     return {
-        "old": sdk.create_point("claim", "one", pointKind="statement")["id"],
-        "target": sdk.create_point("claim", "two", pointKind="statement")["id"],
-        "new": sdk.create_point("claim", "three", pointKind="statement")["id"],
+        "old": sdk._create_point("claim", "one", pointKind="statement")["id"],
+        "target": sdk._create_point("claim", "two", pointKind="statement")["id"],
+        "new": sdk._create_point("claim", "three", pointKind="statement")["id"],
     }
 
 
@@ -132,8 +132,8 @@ def test_a_supersede_MOVES_the_edge_and_the_journal_rebuild_agrees(
     """
     sdk, journal, tmp_path = edge_sdk
     ids = _world(sdk)
-    assert sdk.create_edge(rel, ids["old"], ids["target"])["created"] is True
-    sdk.supersede_point(ids["old"], ids["new"])
+    assert sdk._create_edge(rel, ids["old"], ids["target"])["created"] is True
+    sdk._supersede_point(ids["old"], ids["new"])
 
     live = _edges(sdk._proj, rel)
     assert live == {(ids["new"], ids["target"])}, live
@@ -185,8 +185,8 @@ def test_a_SOURCE_targeted_edge_MOVES_and_both_routes_agree(edge_sdk, rel):
     url = sdk.register_source("https://9836.test/doc",
                             sourceKind="document").get("url")
     assert url, "the Source must carry the url the edge is keyed by"
-    assert sdk.create_edge(rel, ids["old"], url)["created"] is True
-    sdk.supersede_point(ids["old"], ids["new"])
+    assert sdk._create_edge(rel, ids["old"], url)["created"] is True
+    sdk._supersede_point(ids["old"], ids["new"])
 
     live = _edges(sdk._proj, rel)
     assert live == {(ids["new"], url)}, live
@@ -270,8 +270,8 @@ def test_the_no_self_edge_guard_JOURNALS_a_delete_only_descriptor(edge_sdk, rel,
     """
     sdk, journal, tmp_path = edge_sdk
     ids = _world(sdk)
-    assert sdk.create_edge(rel, ids["old"], ids["new"])["created"]
-    sdk.supersede_point(ids["old"], ids["new"])
+    assert sdk._create_edge(rel, ids["old"], ids["new"])["created"]
+    sdk._supersede_point(ids["old"], ids["new"])
 
     assert _edges(sdk._proj, rel) == set()
     reps = [r for r in _repoints(journal) if r.get("edge_type") == rel]
@@ -315,7 +315,7 @@ def test_the_no_self_edge_guard_is_unchanged_for_the_DERIVABLE_family(edge_sdk):
     sdk, journal, _tmp = edge_sdk
     ids = _world(sdk)
     assert sdk._proj.create_about_edge(ids["old"], ids["new"], "aboutPoint")
-    sdk.supersede_point(ids["old"], ids["new"])
+    sdk._supersede_point(ids["old"], ids["new"])
     reps = [r for r in _repoints(journal)
             if r.get("edge_type") == "aboutPoint"]
     assert len(reps) == 1 and reps[0].get("delete_only") is True, reps
@@ -334,13 +334,13 @@ def test_a_supersede_CHAIN_lands_the_edge_on_the_terminal_point(edge_sdk, rel):
     addressed, so this leg asserts the addressing did not disturb the hop rule.
     """
     sdk, journal, tmp_path = edge_sdk
-    x = sdk.create_point("claim", "x", pointKind="statement")["id"]
-    y = sdk.create_point("claim", "y", pointKind="statement")["id"]
-    z = sdk.create_point("claim", "z", pointKind="statement")["id"]
-    target = sdk.create_point("claim", "t", pointKind="statement")["id"]
-    assert sdk.create_edge(rel, x, target)["created"] is True
-    sdk.supersede_point(x, y)
-    sdk.supersede_point(y, z)
+    x = sdk._create_point("claim", "x", pointKind="statement")["id"]
+    y = sdk._create_point("claim", "y", pointKind="statement")["id"]
+    z = sdk._create_point("claim", "z", pointKind="statement")["id"]
+    target = sdk._create_point("claim", "t", pointKind="statement")["id"]
+    assert sdk._create_edge(rel, x, target)["created"] is True
+    sdk._supersede_point(x, y)
+    sdk._supersede_point(y, z)
 
     live = _edges(sdk._proj, rel)
     assert live == {(z, target)}, live
@@ -376,12 +376,12 @@ def test_the_TARGET_is_not_hopped_to_its_own_successor(edge_sdk, rel):
     """
     sdk, journal, tmp_path = edge_sdk
     ids = _world(sdk)
-    t2 = sdk.create_point("claim", "target successor", pointKind="statement")["id"]
-    assert sdk.create_edge(rel, ids["old"], ids["target"])["created"] is True
+    t2 = sdk._create_point("claim", "target successor", pointKind="statement")["id"]
+    assert sdk._create_edge(rel, ids["old"], ids["target"])["created"] is True
     # The TARGET retires FIRST, so its successor is exactly the node the direct
     # leg's `_final(tgt)` would hop to if this descriptor reached it.
-    sdk.supersede_point(ids["target"], t2)
-    sdk.supersede_point(ids["old"], ids["new"])
+    sdk._supersede_point(ids["target"], t2)
+    sdk._supersede_point(ids["old"], ids["new"])
 
     live = _edges(sdk._proj, rel)
     assert live == {(ids["new"], ids["target"])}, (
@@ -410,8 +410,8 @@ def test_a_rel_the_supersede_does_not_move_is_untouched(edge_sdk):
     """
     sdk, journal, tmp_path = edge_sdk
     ids = _world(sdk)
-    assert sdk.create_edge("dependsOn", ids["old"], ids["target"])["created"]
-    sdk.supersede_point(ids["old"], ids["new"])
+    assert sdk._create_edge("dependsOn", ids["old"], ids["target"])["created"]
+    sdk._supersede_point(ids["old"], ids["new"])
 
     live = _edges(sdk._proj, "dependsOn")
     assert live == {(ids["old"], ids["target"])}, live
@@ -793,7 +793,7 @@ def test_an_event_target_keeps_its_OWN_node_across_the_rebuild(edge_sdk):
         # both Events and the descriptors have something to resolve.
         sdk._emit_event("EventRecorded", id=eid, eventId=eid,
                         eventKind="meeting", name=f"meeting {eid}")
-        assert sdk.create_edge("wasDerivedFrom", ids["old"], eid)["created"]
+        assert sdk._create_edge("wasDerivedFrom", ids["old"], eid)["created"]
 
     def by_event(p):
         return {(row[0], row[1]) for row in p.g.query(
@@ -802,7 +802,7 @@ def test_an_event_target_keeps_its_OWN_node_across_the_rebuild(edge_sdk):
     before = by_event(sdk._proj)
     assert before == {(ids["old"], eid) for eid in resolved}, before
 
-    sdk.supersede_point(ids["old"], ids["new"])
+    sdk._supersede_point(ids["old"], ids["new"])
     live = by_event(sdk._proj)
     assert live == {(ids["new"], eid) for eid in resolved}, (
         f"live = {sorted(live)} — the transfer must move BOTH edges, one per "

@@ -60,14 +60,14 @@ def test_a_content_fold_with_a_generic_prop_does_not_mutate_a_terminal_point(sdk
     never addressed it.
     """
     content = _fresh_content("generic-prop")
-    pid = sdk.create_point("statement", content, dedup=True)["id"]
-    sdk.retract_point(pid)
-    before = sdk.get_point(pid)
+    pid = sdk._create_point("statement", content, dedup=True)["id"]
+    sdk._retract_point(pid)
+    before = sdk._get_point(pid)
     assert before["status"] == "retracted"
 
-    again = sdk.create_point("statement", content, dedup=True,
+    again = sdk._create_point("statement", content, dedup=True,
                              custom_probe="x")
-    after = sdk.get_point(pid)
+    after = sdk._get_point(pid)
 
     assert again["id"] == pid, "a dedup HIT is still reported"
     assert after["status"] == "retracted", "the point must stay terminal"
@@ -92,13 +92,13 @@ def test_an_authored_word_fold_does_not_touch_a_terminal_points_baseline(sdk):
     this one (#7819's own "all-or-nothing" reasoning).
     """
     content = _fresh_content("authored-word")
-    pid = sdk.create_point("statement", content)["id"]
-    sdk.retract_point(pid)
-    before = sdk.get_point(pid)
+    pid = sdk._create_point("statement", content)["id"]
+    sdk._retract_point(pid)
+    before = sdk._get_point(pid)
 
-    again = sdk.create_point("statement", content, dedup=True,
+    again = sdk._create_point("statement", content, dedup=True,
                              credibility="gold")
-    after = sdk.get_point(pid)
+    after = sdk._get_point(pid)
 
     assert again["id"] == pid
     assert after["status"] == "retracted"
@@ -117,9 +117,9 @@ def test_the_same_fold_still_applies_to_a_live_target(sdk):
     re-ingest, #7704's "one claim, N sources").
     """
     content = _fresh_content("live-target")
-    pid = sdk.create_point("statement", content)["id"]
-    sdk.create_point("statement", content, dedup=True, custom_probe="x")
-    stored = sdk.get_point(pid)
+    pid = sdk._create_point("statement", content)["id"]
+    sdk._create_point("statement", content, dedup=True, custom_probe="x")
+    stored = sdk._get_point(pid)
     assert stored.get("custom_probe") == "x"
     assert stored["status"] == "live"
 
@@ -133,12 +133,12 @@ def test_an_addressed_revision_still_applies_to_a_terminal_point(sdk):
     a later change widens #10368's guard into `update_point`, this reds.
     """
     content = _fresh_content("addressed")
-    pid = sdk.create_point("statement", content)["id"]
-    sdk.retract_point(pid)
+    pid = sdk._create_point("statement", content)["id"]
+    sdk._retract_point(pid)
 
-    sdk.update_point(pid, custom_probe="y")
+    sdk._update_point(pid, custom_probe="y")
 
-    after = sdk.get_point(pid)
+    after = sdk._get_point(pid)
     assert after.get("custom_probe") == "y", (
         "an addressed revision of a dead claim is a recorded capability "
         "(#3305) — #10368 scopes the CREATE fold only")
@@ -155,13 +155,13 @@ def test_a_key_resolved_fold_is_refused_on_a_terminal_point_too(sdk):
     """
     content = _fresh_content("key-hit")
     key = f"key-10368-{uuid.uuid4().hex[:10]}"
-    pid = sdk.create_point("statement", content, key=key)["id"]
-    sdk.retract_point(pid)
-    before = sdk.get_point(pid)
+    pid = sdk._create_point("statement", content, key=key)["id"]
+    sdk._retract_point(pid)
+    before = sdk._get_point(pid)
 
-    again = sdk.create_point("statement", content, key=key, dedup=True,
+    again = sdk._create_point("statement", content, key=key, dedup=True,
                              custom_probe="x")
-    after = sdk.get_point(pid)
+    after = sdk._get_point(pid)
 
     assert again["id"] == pid, "a key dedup HIT is still reported"
     assert after["status"] == "retracted"
@@ -182,14 +182,14 @@ def test_the_journaled_provenance_fold_still_applies_to_a_terminal_point(sdk):
     """
     content = _fresh_content("provenance")
     ref = f"https://example.com/10368/{uuid.uuid4().hex[:8]}"
-    pid = sdk.create_point("statement", content)["id"]
-    sdk.retract_point(pid)
-    before = sdk.get_point(pid)
+    pid = sdk._create_point("statement", content)["id"]
+    sdk._retract_point(pid)
+    before = sdk._get_point(pid)
 
-    again = sdk.create_point("statement", content, dedup=True,
+    again = sdk._create_point("statement", content, dedup=True,
                              extractedFrom=ref)
 
-    after = sdk.get_point(pid)
+    after = sdk._get_point(pid)
     urls = {row[0] for row in sdk._get_proj().g.query(
         "MATCH (p:Point {id:$id})-[:extractedFrom]->(s:Source) "
         "RETURN s.url", params={"id": pid}).result_set}
@@ -211,13 +211,13 @@ def test_a_pure_dedup_hit_on_a_terminal_point_stays_silent(sdk):
     P2-1: a pure dedup hit must not re-trigger EP dirty-marking).
     """
     content = _fresh_content("pure-hit")
-    pid = sdk.create_point("statement", content)["id"]
-    sdk.retract_point(pid)
-    before = sdk.get_point(pid)
+    pid = sdk._create_point("statement", content)["id"]
+    sdk._retract_point(pid)
+    before = sdk._get_point(pid)
 
-    again = sdk.create_point("statement", content, dedup=True)
+    again = sdk._create_point("statement", content, dedup=True)
 
-    after = sdk.get_point(pid)
+    after = sdk._get_point(pid)
     assert again["id"] == pid
     assert after["updatedAt"] == before["updatedAt"]
     assert "terminal_fold_refused" not in _advisory_codes(again), again
@@ -258,13 +258,13 @@ def test_a_bare_dedup_hit_costs_no_terminal_read(sdk, monkeypatch):
     read a verdict either.
     """
     content = _fresh_content("read-cost")
-    pid = sdk.create_point("statement", content)["id"]
-    sdk.retract_point(pid)
+    pid = sdk._create_point("statement", content)["id"]
+    sdk._retract_point(pid)
 
     calls = _count_terminal_reads(sdk, monkeypatch)
 
     # (a) a bare hit: no props, no authored word.
-    again = sdk.create_point("statement", content, dedup=True)
+    again = sdk._create_point("statement", content, dedup=True)
     assert again["id"] == pid
     assert calls == [], (
         "a bare dedup hit asked the lifecycle fan-out for a verdict it cannot "
@@ -273,7 +273,7 @@ def test_a_bare_dedup_hit_costs_no_terminal_read(sdk, monkeypatch):
     # (b) an evidence-only hit: `extractedFrom` is the #7704 provenance fold,
     # deliberately NOT refused, so there is still nothing to decide.
     ref = f"https://example.com/10368/{uuid.uuid4().hex[:8]}"
-    sdk.create_point("statement", content, dedup=True, extractedFrom=ref)
+    sdk._create_point("statement", content, dedup=True, extractedFrom=ref)
     assert calls == [], (
         "an evidence-only fold read the terminal verdict although #7704's "
         f"provenance retrofit is never refused — extra reads: {calls}")
@@ -288,12 +288,12 @@ def test_a_prop_bearing_dedup_hit_DOES_read_the_verdict_once(sdk, monkeypatch):
     `…_does_not_mutate_a_terminal_point` cases would then stop refusing.
     """
     content = _fresh_content("read-cost-positive")
-    pid = sdk.create_point("statement", content)["id"]
-    sdk.retract_point(pid)
+    pid = sdk._create_point("statement", content)["id"]
+    sdk._retract_point(pid)
 
     calls = _count_terminal_reads(sdk, monkeypatch)
 
-    again = sdk.create_point("statement", content, dedup=True,
+    again = sdk._create_point("statement", content, dedup=True,
                              custom_probe="x")
     assert calls == [pid], (
         "a caller prop must be adjudicated by the terminal verdict, exactly "
@@ -321,7 +321,7 @@ def test_a_bare_dedup_hit_spends_no_terminal_read(sdk, monkeypatch):
     one read where it asserts zero.
     """
     content = _fresh_content("bare-read")
-    pid = sdk.create_point("statement", content)["id"]
+    pid = sdk._create_point("statement", content)["id"]
 
     reads: list[str] = []
     real = sdk._lifecycle_terminal_marker
@@ -333,7 +333,7 @@ def test_a_bare_dedup_hit_spends_no_terminal_read(sdk, monkeypatch):
     monkeypatch.setattr(sdk, "_lifecycle_terminal_marker", _spy)
 
     # 1. BARE dedup hit: no prop, no authored word -> no terminal read at all.
-    bare = sdk.create_point("statement", content, dedup=True)
+    bare = sdk._create_point("statement", content, dedup=True)
     assert bare["id"] == pid, "a dedup HIT is still reported"
     assert reads == [], (
         "a bare dedup hit spent a LIFECYCLE_FANOUT_QUERY it does not need — "
@@ -342,9 +342,9 @@ def test_a_bare_dedup_hit_spends_no_terminal_read(sdk, monkeypatch):
     # 2. …and a hit that CARRIES a caller prop still reads it, because the
     #    #10368 verdict is what decides the refusal. The fix must not silence
     #    the read when it is load-bearing.
-    sdk.retract_point(pid)
+    sdk._retract_point(pid)
     reads.clear()
-    with_prop = sdk.create_point("statement", content, dedup=True,
+    with_prop = sdk._create_point("statement", content, dedup=True,
                                  custom_probe="x")
     assert with_prop["id"] == pid
     assert reads == [pid], (
@@ -354,7 +354,7 @@ def test_a_bare_dedup_hit_spends_no_terminal_read(sdk, monkeypatch):
 
     # 3. The authored-word leg reads it too (no props, but `cred_prior` set).
     reads.clear()
-    with_word = sdk.create_point("statement", content, dedup=True,
+    with_word = sdk._create_point("statement", content, dedup=True,
                                  credibility="low")
     assert with_word["id"] == pid
     assert reads == [pid], (

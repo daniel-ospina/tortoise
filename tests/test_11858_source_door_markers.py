@@ -201,7 +201,7 @@ def test_the_family_is_not_blanket_refused_at_the_funnel(tmp_path):
     """
     sdk, journal = _journal(tmp_path)
     try:
-        created = sdk.create_point("statement", "a claim",
+        created = sdk._create_point("statement", "a claim",
                                    source_id="s", span="1-2", quote="q")
         point_id = created["id"] if isinstance(created, dict) else created
         # The store refuses a vector whose width it cannot index (`#5004`
@@ -210,7 +210,7 @@ def test_the_family_is_not_blanket_refused_at_the_funnel(tmp_path):
         # the row would pass or fail for a reason that has nothing to do with
         # the marker family.
         dim = sdk._get_proj().required_embedding_dim or 2
-        sdk.update_point(point_id, embedding=[0.5] * dim)
+        sdk._update_point(point_id, embedding=[0.5] * dim)
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -320,7 +320,7 @@ def test_the_other_props_doors_refuse_the_marker(tmp_path, door):
             # `update_entity` refuse at intake BEFORE any id lookup (measured),
             # so creating a target for them would be dead setup that reads as if
             # the constraint applied to all four.
-            created = sdk.create_point("statement", "a census claim",
+            created = sdk._create_point("statement", "a census claim",
                                        source_id="s", span="1-2", quote="q")
             target = created["id"] if isinstance(created, dict) else created
         with pytest.raises(ValueError) as excinfo:
@@ -332,27 +332,27 @@ def test_the_other_props_doors_refuse_the_marker(tmp_path, door):
             # and stayed GREEN under the mutant that removes the key from the
             # constant — a false PASS in the file written to stop exactly that.
             if door == "create_point":
-                sdk.create_point("statement", "a claim",
+                sdk._create_point("statement", "a claim",
                                  source_id="s", span="1-2", quote="q",
                                  embedding_width="f16")
             elif door == "create_entity":
                 sdk.create_entity("object", "e-census", embedding_width="f16")
             elif door == "create_object":
-                sdk.create_object("o-census", None, embedding_width="f16")
+                sdk._create_object("o-census", None, embedding_width="f16")
             elif door == "create_subject":
-                sdk.create_subject("s-census", None, embedding_width="f16")
+                sdk._create_subject("s-census", None, embedding_width="f16")
             elif door == "create_event":
-                sdk.create_event("e-census", "thing", embedding_width="f16")
+                sdk._create_event("e-census", "thing", embedding_width="f16")
             elif door == "update_point":
-                sdk.update_point("p-census", embedding_width="f16")
+                sdk._update_point("p-census", embedding_width="f16")
             elif door == "update_entity":
                 sdk.update_knowledge("e-census", embedding_width="f16")
             elif door == "update":
-                sdk.update(target, embedding_width="f16")
+                sdk._update(target, embedding_width="f16")
             elif door == "update_knowledge":
                 sdk.update_knowledge(target, embedding_width="f16")
             elif door == "create_document":
-                sdk.create_document("a census title", "document",
+                sdk._create_document("a census title", "document",
                                     embedding_width="f16")
             else:
                 # ⛔ No catch-all call. An `else:` that drove some OTHER door

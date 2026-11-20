@@ -683,7 +683,7 @@ def _delete_minted(sdk, minted: list[str]) -> list[str]:
     leftovers: list[str] = []
     for node_id in reversed(list(minted)):
         try:
-            if not sdk.delete_entity(node_id):
+            if not sdk._delete_entity__svc(node_id):
                 leftovers.append(node_id)
         except Exception:  # a cleanup failure is REPORTED below, never a crash
             leftovers.append(node_id)
@@ -729,9 +729,9 @@ def _run_write_probe(rows: list[dict], packs_dir: Path,
                                  slot="dst" if same_kind else "")
             try:
                 if row["write_path"] == "structural":
-                    sdk.create_edge(row["predicate"], src, dst)
+                    sdk._create_edge(row["predicate"], src, dst)
                 else:
-                    written_op = sdk.create_operator(
+                    written_op = sdk._create_operator(
                         row.get("mechanism") or "IMPL",
                         src,
                         [dst],

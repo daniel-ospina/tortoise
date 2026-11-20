@@ -59,6 +59,34 @@ def _sdk() -> TortoiseSDK:
     return TortoiseSDK.__new__(TortoiseSDK)
 
 
+#: ⚠️ #12901 FINAL privatised these doors: the `def` moved to the private spelling while the
+#: SEMANTIC name — the one the merges route to, and the one every assertion in this file
+#: names — is unchanged. So the fixture substitutes the PRIVATE attribute and records the
+#: PUBLIC name: substituting by public spelling is an `AttributeError` at fixture time
+#: (`monkeypatch.setattr` refuses a name the class does not have), and recording the private
+#: one would make a routing assertion about the rename rather than about the route.
+#: `delete_entity` collided with an existing `_delete_entity`, so its carrier is `__svc`.
+_PRIVATE_DOORS = {
+    "create_direct_edge": "_create_direct_edge",
+    "create_derivation": "_create_derivation",
+    "create_operator": "_create_operator",
+    "create_edge": "_create_edge",
+    "link_source_to_entity": "_link_source_to_entity",
+    "update": "_update",
+    "retract_point": "_retract_point",
+    "invalidate_point": "_invalidate_point",
+    "annotate_operator": "_annotate_operator",
+    "delete": "_delete",
+    "delete_point": "_delete_point",
+    "delete_entity": "_delete_entity__svc",
+}
+
+
+def _carrier(door: str) -> str:
+    """The attribute name the class actually holds for a semantic door name."""
+    return _PRIVATE_DOORS.get(door, door)
+
+
 @pytest.fixture
 def sdk(monkeypatch):
     """An SDK whose write doors are recorded instead of executed."""
@@ -76,21 +104,10 @@ def sdk(monkeypatch):
 
     for door in (
         "create_entity",
-        "create_derivation",
-        "create_direct_edge",
-        "create_operator",
-        "create_edge",
-        "link_source_to_entity",
-        "update",
         "_update_entity_any",
-        "retract_point",
-        "invalidate_point",
-        "annotate_operator",
-        "delete",
-        "delete_point",
-        "delete_entity",
+        *_PRIVATE_DOORS,
     ):
-        monkeypatch.setattr(inst, door, record(door))
+        monkeypatch.setattr(inst, _carrier(door), record(door))
     return inst
 
 
@@ -113,9 +130,9 @@ def test_the_four_merges_are_rows_of_the_approved_40_and_the_declaration_is_unch
 @pytest.mark.parametrize(
     ("alias", "type_", "extra"),
     [
-        ("create_subject", "subject", {"name": "Acme"}),
-        ("create_object", "object", {"name": "Widget"}),
-        ("create_event", "event", {"name": "Kickoff", "eventKind": "core:meeting"}),
+        ("_create_subject", "subject", {"name": "Acme"}),
+        ("_create_object", "object", {"name": "Widget"}),
+        ("_create_event", "event", {"name": "Kickoff", "eventKind": "core:meeting"}),
 
     ],
 )
@@ -141,7 +158,7 @@ def test_create_document_is_a_parallel_writer_not_an_alias_FINDING(monkeypatch):
     """
     import inspect
 
-    source = inspect.getsource(TortoiseSDK.create_document)
+    source = inspect.getsource(TortoiseSDK._create_document)
     assert "_create_entity(" in source, (
         "if this no longer holds, create_document became a real alias — delete this "
         "finding test and add it to the parametrised absorption test above")
@@ -477,8 +494,8 @@ def test_delete_knowledge_keeps_the_two_arms_the_narrow_doors_had(monkeypatch):
         inst, "_get_proj", lambda: type("P", (), {
             "_resolve_entity": lambda self, i, **k: [{"label": "Point"}],
         })())
-    monkeypatch.setattr(inst, "delete_point", lambda i: "point-arm")
-    monkeypatch.setattr(inst, "delete_entity", lambda i: "entity-arm")
+    monkeypatch.setattr(inst, "_delete_point", lambda i: "point-arm")
+    monkeypatch.setattr(inst, "_delete_entity__svc", lambda i: "entity-arm")
     assert TortoiseSDK.delete_knowledge(inst, "x") == "point-arm"
 
     monkeypatch.setattr(
@@ -530,7 +547,7 @@ def test_the_operator_door_really_does_refuse_the_uppercased_word():
     passing it could never have written anything.
     """
     with pytest.raises(ValueError, match="op_type must be"):
-        TortoiseSDK.create_operator(_sdk(), "SUPPORTS", "p1", ["p2"])
+        TortoiseSDK._create_operator(_sdk(), "SUPPORTS", "p1", ["p2"])
 
 
 @pytest.mark.parametrize("mechanism", ["IMPL", "NAND", "composedOf",
@@ -539,7 +556,7 @@ def test_every_mechanism_the_merge_can_pick_is_accepted_by_the_door(mechanism):
     """The operator door's mechanism set is closed — every member is accepted."""
     inst = _stops_at_the_graph(_sdk())
     with pytest.raises(_ReachedTheGraph):
-        TortoiseSDK.create_operator(inst, mechanism, "p1", ["p2"])
+        TortoiseSDK._create_operator(inst, mechanism, "p1", ["p2"])
 
 
 def test_operator_true_on_a_relation_with_no_mechanism_is_refused():
@@ -721,7 +738,8 @@ def test_the_writers_have_somewhere_to_put_the_callers_instant(door):
     """The merge may only forward `valid_to` if the writers accept it."""
     import inspect
 
-    assert "valid_to" in inspect.signature(getattr(TortoiseSDK, door)).parameters
+    assert "valid_to" in inspect.signature(
+        getattr(TortoiseSDK, _carrier(door))).parameters
 
 
 def test_the_merge_exposes_the_temporal_field_and_forwards_its_value():

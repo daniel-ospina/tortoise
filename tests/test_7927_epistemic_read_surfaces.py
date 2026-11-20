@@ -86,7 +86,7 @@ def sdk():
 
 
 def _point(sdk: TortoiseSDK, content: str = "a point claim") -> str:
-    return sdk.create_point("statement", content, status="live")["id"]
+    return sdk._create_point("statement", content, status="live")["id"]
 
 
 def _node(sdk: TortoiseSDK, label: str, node_id: str, *,
@@ -217,7 +217,7 @@ def test_bfs_selects_operator_reached_from_non_point_anchor(sdk, label):
     """
     p = _point(sdk)
     n = _node(sdk, label, f"anchor-{label.lower()}")
-    sdk.create_operator("IMPL", p, [n])
+    sdk._create_operator("IMPL", p, [n])
 
     ops, _ = _bfs_select_operators(sdk._get_proj(), [n], max_hops=1)
     assert ops, f"operator over a :{label} input was not selected from a :{label} anchor"
@@ -232,7 +232,7 @@ def test_bfs_walks_direct_edge_touching_non_point_endpoints(sdk, label):
     other = "Object" if label != "Object" else "Subject"
     src = _node(sdk, label, f"de-src-{label.lower()}")
     tgt = _node(sdk, other, f"de-tgt-{label.lower()}")
-    sdk.create_direct_edge("IMPL", src, tgt)
+    sdk._create_direct_edge("IMPL", src, tgt)
 
     proj = sdk._get_proj()
     fwd_ops, fwd_anchors = _bfs_select_operators(proj, [src], max_hops=1)
@@ -274,7 +274,7 @@ def test_bfs_draft_filter_sees_a_draft_non_point_anchor(sdk):
     # Live control: the identical fixture, live, must be selectable.
     p_live = _point(sdk, "live control claim")
     n_live = _node(sdk, "Subject", "live-anchor", status="live")
-    sdk.create_operator("IMPL", p_live, [n_live])
+    sdk._create_operator("IMPL", p_live, [n_live])
     live_ops, _ = _bfs_select_operators(sdk._get_proj(), [n_live], max_hops=1)
     assert live_ops, ("the live control itself is unreachable — the assertion "
                       "below would be vacuous")
@@ -283,7 +283,7 @@ def test_bfs_draft_filter_sees_a_draft_non_point_anchor(sdk):
     # present in the anchor set) and the anchor must be excluded.
     p = _point(sdk)
     n = _node(sdk, "Subject", "draft-anchor", status="draft")
-    sdk.create_operator("IMPL", p, [n])
+    sdk._create_operator("IMPL", p, [n])
 
     counter = _CountingProjection(sdk._get_proj())
     ops, _ = _bfs_select_operators(counter, [n], max_hops=1)
@@ -315,7 +315,7 @@ def test_sdk_select_subgraph_admits_every_non_point_anchor(sdk):
     for label in NON_POINT_LABELS:
         p = _point(sdk, f"claim for {label}")
         n = _node(sdk, label, f"sdk-{label.lower()}")
-        sdk.create_operator("IMPL", p, [n])
+        sdk._create_operator("IMPL", p, [n])
         anchors.append(n)
 
     ops, _ = sdk._select_subgraph(anchors, max_hops=1)
@@ -466,7 +466,7 @@ def test_ranker_load_and_support_reads_return_non_point_belief(sdk, label):
     IMPL edge from a non-Point neighbour counts as support."""
     n = _node(sdk, label, f"gaps-{label.lower()}")
     neighbour = _node(sdk, "Subject", f"neighbour-{label.lower()}")
-    sdk.create_direct_edge("IMPL", neighbour, n)
+    sdk._create_direct_edge("IMPL", neighbour, n)
 
     proj = sdk._get_proj()
     load = GapsRanker(projection=proj)._fetch_load_signals([neighbour])
@@ -645,7 +645,7 @@ def test_contested_relevance_never_boosts_a_point_from_its_own_text(sdk):
     proj = sdk._get_proj()
     pid = _point(sdk, "cache rollback is the safer default")
     # input == target == the contested point: the self-referential NAND shape.
-    op = sdk.create_operator("NAND", pid, [pid])["id"]
+    op = sdk._create_operator("NAND", pid, [pid])["id"]
     proj.g.query(
         "MATCH (op:Point {id:$op})-[r:NAND]->(n) SET r.idx = 1", params={"op": op})
     proj.g.query(
@@ -723,7 +723,7 @@ def test_audit_mitigation_check_sees_a_non_point_endpoint(sdk):
     # A second live Point so the operator is not itself degenerate, and the
     # operator NANDs the :Subject belief with no mitigated_by edge.
     other = _point(sdk, "a supporting claim")
-    op_id = sdk.create_operator("NAND", other, [subject])["id"]
+    op_id = sdk._create_operator("NAND", other, [subject])["id"]
     sdk._get_proj().g.query(
         "MATCH (op:Point {id:$op}) SET op.confidence = 0.2",
         params={"op": op_id})
@@ -750,7 +750,7 @@ def test_svbp_extractor_includes_non_point_operator_input(sdk, label):
     it exists it must agree with the engine about which beliefs feed a factor."""
     p = _point(sdk, "SVBP point input")
     n = _node(sdk, label, f"svbp-{label.lower()}")
-    sdk.create_operator("IMPL", p, [n])
+    sdk._create_operator("IMPL", p, [n])
 
     factors, _evidence = sdk._get_proj().extract_svbp_factors()
     assert factors, "no factor extracted for the operator"

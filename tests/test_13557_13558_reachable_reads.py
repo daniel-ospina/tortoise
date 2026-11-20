@@ -585,18 +585,18 @@ def _commitment_world(sdk):
     from tortoise import pipeline
 
     pipeline.seed_pipeline(sdk._get_proj().g, "core:plan", PLAN_PIPELINE)
-    plan = sdk.create_object("Launch event — 12 December at the beach club",
+    plan = sdk._create_object("Launch event — 12 December at the beach club",
                              objectKind="core:plan")
     pipeline.advance_stage(sdk, plan["id"], "core:plan", "scheduled")
-    goal = sdk.create_object("Q4 uptime", objectKind="core:goal",
+    goal = sdk._create_object("Q4 uptime", objectKind="core:goal",
                              props={"goalState": "unmet"})
-    target = sdk.create_object("Uptime target — 99.9% or better",
+    target = sdk._create_object("Uptime target — 99.9% or better",
                                objectKind="core:target",
                                props={"comparator": ">=", "threshold": 99.9})
-    other = sdk.create_object("Office lease", objectKind="process")
-    retired = sdk.create_object("Old onboarding goal", objectKind="core:goal")
+    other = sdk._create_object("Office lease", objectKind="process")
+    retired = sdk._create_object("Old onboarding goal", objectKind="core:goal")
     sdk.update_knowledge(retired["id"], status="deprecated")
-    cancelled = sdk.create_object("Thursday partner call — 6 November",
+    cancelled = sdk._create_object("Thursday partner call — 6 November",
                                   objectKind="core:plan")
     pipeline.advance_stage(sdk, cancelled["id"], "core:plan", "cancelled")
     return {"plan": plan, "goal": goal, "target": target, "other": other,
@@ -614,7 +614,7 @@ def test_a_commitment_question_returns_every_live_commitment_by_kind(sdk):
     """
     world = _commitment_world(sdk)
 
-    rows = sdk.tortoise_fts_query("current commitments", entity_type="object",
+    rows = sdk._tortoise_fts_query("current commitments", entity_type="object",
                                   limit=50)
     by_id = {r["id"]: r for r in rows}
 
@@ -653,7 +653,7 @@ def test_a_retired_or_ended_commitment_is_not_in_the_commitment_question(sdk):
     """
     world = _commitment_world(sdk)
 
-    rows = sdk.tortoise_fts_query("what are we committed to", entity_type="object",
+    rows = sdk._tortoise_fts_query("what are we committed to", entity_type="object",
                                   limit=50)
     served = _ids(rows)
 
@@ -673,15 +673,15 @@ def test_a_draft_is_current_but_is_not_a_commitment(sdk):
     keep predicate (rightly) KEEPS drafts — they are not dead — so a read that
     simply reused it would report a not-yet-committed thing as committed.
     """
-    draft = sdk.create_object("Draft launch plan", objectKind="core:plan",
+    draft = sdk._create_object("Draft launch plan", objectKind="core:plan",
                               status="draft")
 
-    rows = sdk.tortoise_fts_query("current commitments", entity_type="object",
+    rows = sdk._tortoise_fts_query("current commitments", entity_type="object",
                                   limit=50)
     assert draft["id"] not in _ids(rows)
     # …and it is still CURRENT, so the ended read must not claim it either.
     assert draft["id"] not in _ids(
-        sdk.tortoise_fts_query(None, entity_type="object", ended_scope=True,
+        sdk._tortoise_fts_query(None, entity_type="object", ended_scope=True,
                                limit=50))
 
 
@@ -796,7 +796,7 @@ def test_the_commitment_question_honours_the_callers_kind_filter(sdk):
     """A narrowing the caller asked for is honoured, not overridden."""
     world = _commitment_world(sdk)
 
-    rows = sdk.tortoise_fts_query("current commitments", kind="goal",
+    rows = sdk._tortoise_fts_query("current commitments", kind="goal",
                                   entity_type="object", limit=50)
     served = _ids(rows)
 
@@ -817,7 +817,7 @@ def test_a_point_scoped_commitment_question_is_not_answered_with_objects(sdk):
     """
     world = _commitment_world(sdk)
 
-    rows = sdk.tortoise_fts_query("current commitments", entity_type="point",
+    rows = sdk._tortoise_fts_query("current commitments", entity_type="point",
                                   limit=50)
     assert world["plan"]["id"] not in _ids(rows)
 
@@ -855,7 +855,7 @@ def test_an_ending_question_on_a_family_with_no_lifecycle_keeps_the_text_read(
 
     monkeypatch.setattr(ended_mod, "enumerate_ended", record)
 
-    sdk.tortoise_fts_query("has anything we relied on been withdrawn",
+    sdk._tortoise_fts_query("has anything we relied on been withdrawn",
                            entity_type="event", limit=5)
     assert reached == [], (
         "an Event-scoped ending question was served the ended population, which "
@@ -863,7 +863,7 @@ def test_an_ending_question_on_a_family_with_no_lifecycle_keeps_the_text_read(
         "with no lifecycle is gone")
 
     # POSITIVE CONTROL — the same question, on a family that HAS a lifecycle.
-    sdk.tortoise_fts_query("has anything we relied on been withdrawn",
+    sdk._tortoise_fts_query("has anything we relied on been withdrawn",
                            entity_type="point", limit=5)
     assert reached == ["point"], (
         "the control did not reach the population, so the assertion above proves "
@@ -878,15 +878,15 @@ def test_a_withdrawal_question_returns_the_ended_records_and_how_each_ended(sdk)
     question, at score 0.0, and the withdrawn claim reachable only when terminal
     scope was forced by name.
     """
-    live = sdk.create_point(kind="statement", content="the venue is booked")
-    retracted = sdk.create_point(
+    live = sdk._create_point(kind="statement", content="the venue is booked")
+    retracted = sdk._create_point(
         kind="statement", content="The beach club confirmed our 12 December booking.")
-    sdk.retract_point(retracted["id"])
-    old = sdk.create_point(kind="decision", content="the entry tier is 29")
-    new = sdk.create_point(kind="decision", content="the entry tier is 39")
-    sdk.supersede_point(old["id"], new["id"])
+    sdk._retract_point(retracted["id"])
+    old = sdk._create_point(kind="decision", content="the entry tier is 29")
+    new = sdk._create_point(kind="decision", content="the entry tier is 39")
+    sdk._supersede_point(old["id"], new["id"])
 
-    rows = sdk.tortoise_fts_query("has anything we relied on been withdrawn",
+    rows = sdk._tortoise_fts_query("has anything we relied on been withdrawn",
                                   entity_type="point", limit=50)
     by_id = {r["id"]: r for r in rows}
 
@@ -908,11 +908,11 @@ def test_a_withdrawal_question_returns_the_ended_records_and_how_each_ended(sdk)
 @_docker_only
 def test_a_live_unrelated_record_is_not_served_as_the_answer(sdk):
     """The other half of #13558: the question is not answered with unrelated rows."""
-    live = sdk.create_point(kind="statement", content="the venue is booked")
-    dead = sdk.create_point(kind="statement", content="an old claim we withdrew")
-    sdk.retract_point(dead["id"])
+    live = sdk._create_point(kind="statement", content="the venue is booked")
+    dead = sdk._create_point(kind="statement", content="an old claim we withdrew")
+    sdk._retract_point(dead["id"])
 
-    rows = sdk.tortoise_fts_query("has anything been withdrawn",
+    rows = sdk._tortoise_fts_query("has anything been withdrawn",
                                   entity_type="point", limit=50)
     assert dead["id"] in _ids(rows)
     assert live["id"] not in _ids(rows), (
@@ -929,10 +929,10 @@ def test_a_withdrawal_question_on_a_clean_graph_says_so_plainly(sdk):
     means here). The answer must be empty, and the read status must say the store
     ANSWERED — ``empty`` is a fact about the graph, ``degraded`` is not.
     """
-    live = sdk.create_point(kind="statement", content="the venue is booked")
+    live = sdk._create_point(kind="statement", content="the venue is booked")
 
     status: dict = {}
-    rows = sdk.tortoise_fts_query("has anything we relied on been withdrawn",
+    rows = sdk._tortoise_fts_query("has anything we relied on been withdrawn",
                                   entity_type="point", limit=50,
                                   read_status_out=status)
     assert rows == [], (
@@ -956,13 +956,13 @@ def test_a_policy_question_is_not_answered_with_the_ended_population(sdk):
     Post-fix the route does not fire, so the relevance read answers and no ending
     is asserted to the customer.
     """
-    live = sdk.create_point(kind="statement",
+    live = sdk._create_point(kind="statement",
                             content="we archive customer emails on request")
-    dead = sdk.create_point(kind="statement",
+    dead = sdk._create_point(kind="statement",
                             content="an old claim we withdrew")
-    sdk.retract_point(dead["id"])
+    sdk._retract_point(dead["id"])
 
-    rows = sdk.tortoise_fts_query("do we archive customer emails",
+    rows = sdk._tortoise_fts_query("do we archive customer emails",
                                   entity_type="point", limit=50)
     served = _ids(rows)
     assert dead["id"] not in served, (
@@ -993,16 +993,16 @@ def test_the_two_populations_are_disjoint_in_both_directions(sdk):
     from tortoise import pipeline
 
     pipeline.seed_pipeline(sdk._get_proj().g, "core:plan", PLAN_PIPELINE)
-    live_plan = sdk.create_object("Live plan", objectKind="core:plan")
+    live_plan = sdk._create_object("Live plan", objectKind="core:plan")
     pipeline.advance_stage(sdk, live_plan["id"], "core:plan", "scheduled")
-    cancelled = sdk.create_object("Cancelled plan", objectKind="core:plan")
+    cancelled = sdk._create_object("Cancelled plan", objectKind="core:plan")
     pipeline.advance_stage(sdk, cancelled["id"], "core:plan", "cancelled")
-    retired = sdk.create_object("Retired goal", objectKind="core:goal")
+    retired = sdk._create_object("Retired goal", objectKind="core:goal")
     sdk.update_knowledge(retired["id"], status="deprecated")
 
-    commitments = _ids(sdk.tortoise_fts_query(
+    commitments = _ids(sdk._tortoise_fts_query(
         "current commitments", entity_type="object", limit=50))
-    ended = _ids(sdk.tortoise_fts_query(
+    ended = _ids(sdk._tortoise_fts_query(
         None, entity_type="object", ended_scope=True, limit=50))
 
     assert live_plan["id"] in commitments
@@ -1036,15 +1036,15 @@ def test_a_LEGACY_outdated_row_is_in_the_ended_read_and_not_a_commitment(sdk):
     from tortoise import pipeline
 
     pipeline.seed_pipeline(sdk._get_proj().g, "core:plan", PLAN_PIPELINE)
-    legacy = sdk.create_object("Legacy outdated plan", objectKind="core:plan")
+    legacy = sdk._create_object("Legacy outdated plan", objectKind="core:plan")
     pipeline.advance_stage(sdk, legacy["id"], "core:plan", "scheduled")
     sdk._get_proj().g.query(
         "MATCH (n {id:$id}) SET n.status = 'outdated'",
         params={"id": legacy["id"]})
 
-    commitments = _ids(sdk.tortoise_fts_query(
+    commitments = _ids(sdk._tortoise_fts_query(
         "current commitments", entity_type="object", limit=50))
-    ended = _ids(sdk.tortoise_fts_query(
+    ended = _ids(sdk._tortoise_fts_query(
         None, entity_type="object", ended_scope=True, limit=50))
 
     assert legacy["id"] in ended, (
@@ -1066,7 +1066,7 @@ def test_a_capped_commitment_answer_is_marked_truncated(sdk):
     _commitment_world(sdk)
 
     trunc: dict = {}
-    rows = sdk.tortoise_fts_query("current commitments", entity_type="object",
+    rows = sdk._tortoise_fts_query("current commitments", entity_type="object",
                                   limit=2, _truncation_out=trunc)
     assert len(rows) == 2
     from tortoise.truncation import EXACT_KEY, truncation_field
@@ -1078,7 +1078,7 @@ def test_a_capped_commitment_answer_is_marked_truncated(sdk):
     assert trunc[EXACT_KEY] is False, (
         "a full page must never be certified as the whole population")
     # …and the proof is real: the population is larger than the page served.
-    everything = sdk.tortoise_fts_query("current commitments", entity_type="object",
+    everything = sdk._tortoise_fts_query("current commitments", entity_type="object",
                                         limit=50)
     assert len(everything) > len(rows), (len(everything), len(rows))
 
@@ -1103,7 +1103,7 @@ def test_a_commitments_scan_that_could_not_answer_is_carried_not_swallowed(
     status: dict = {}
     trace: list = []
     trunc: dict = {}
-    rows = sdk.tortoise_fts_query("current commitments", entity_type="object",
+    rows = sdk._tortoise_fts_query("current commitments", entity_type="object",
                                   limit=10, read_status_out=status,
                                   leg_trace=trace, _truncation_out=trunc)
     assert rows == []
@@ -1115,7 +1115,7 @@ def test_a_commitments_scan_that_could_not_answer_is_carried_not_swallowed(
     # …and with no sink there is nowhere for the marking to go, so the store's
     # error rises rather than an unmarked empty being served.
     with pytest.raises(RuntimeError):
-        sdk.tortoise_fts_query("current commitments", entity_type="object",
+        sdk._tortoise_fts_query("current commitments", entity_type="object",
                                limit=10)
 
 
@@ -1145,7 +1145,7 @@ def test_no_retrieval_knob_is_served_beside_a_state_question(sdk, monkeypatch):
 
     # A KNOB → the relevance read (which cannot report a belief above 0.99 here,
     # so the rows are empty either way: the ASSERTION is on `reached`).
-    sdk.tortoise_fts_query("current commitments", entity_type="object",
+    sdk._tortoise_fts_query("current commitments", entity_type="object",
                            min_confidence=0.99, limit=5)
     assert reached == [], (
         "the commitment population was served to a caller who asked for a "
@@ -1153,7 +1153,7 @@ def test_no_retrieval_knob_is_served_beside_a_state_question(sdk, monkeypatch):
         "dropped")
 
     # NO KNOB → the population, with no scope argument from the caller.
-    sdk.tortoise_fts_query("current commitments", entity_type="object", limit=5)
+    sdk._tortoise_fts_query("current commitments", entity_type="object", limit=5)
     assert reached, "the plain commitment question did not reach the population"
 
 
@@ -1165,6 +1165,6 @@ def test_the_ended_scope_still_refuses_an_explicit_query(sdk):
     for two different reads at once.
     """
     with pytest.raises(ValueError) as err:
-        sdk.tortoise_fts_query("anything withdrawn", entity_type="point",
+        sdk._tortoise_fts_query("anything withdrawn", entity_type="point",
                                ended_scope=True)
     assert "ended_scope" in str(err.value)

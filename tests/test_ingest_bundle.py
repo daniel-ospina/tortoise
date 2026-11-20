@@ -102,7 +102,7 @@ def _full_bundle():
 class TestIngestFullBundle:
     def test_creates_all_sections_and_wires_connections(self, sdk):
         bundle = _full_bundle()
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
 
         assert res["created"] == {
             "points": 2, "entities": 1, "sources": 1, "connections": 3,
@@ -151,9 +151,9 @@ class TestIngestFullBundle:
         ) == 1
 
     def test_refs_do_not_leak_as_node_properties(self, sdk):
-        res = sdk.ingest(_full_bundle())
+        res = sdk._ingest(_full_bundle())
         p1 = res["ids"]["points"][0]
-        point = sdk.get_point(p1)
+        point = sdk._get_point(p1)
         assert "ref" not in point
         subject = sdk._get_entity(res["ids"]["entities"][0])
         assert "ref" not in subject
@@ -178,11 +178,11 @@ class TestIngestFullBundle:
             ],
             "connections": [],
         }
-        res = sdk.ingest(bundle, promotion_policy="auto")
+        res = sdk._ingest(bundle, promotion_policy="auto")
         pid_default, pid_live, pid_draft = res["ids"]["points"]
-        assert sdk.get_point(pid_default)["status"] == "live"
-        assert sdk.get_point(pid_live)["status"] == "live"
-        assert sdk.get_point(pid_draft)["status"] == "draft"
+        assert sdk._get_point(pid_default)["status"] == "live"
+        assert sdk._get_point(pid_live)["status"] == "live"
+        assert sdk._get_point(pid_draft)["status"] == "draft"
 
 # ── promotion_policy (epic #902 W4 A0) ─────────────────────────────
 
@@ -195,7 +195,7 @@ class TestPromotionPolicy:
 
     def test_signature_default_is_gated(self):
         import inspect
-        sig = inspect.signature(TortoiseSDK.ingest)
+        sig = inspect.signature(TortoiseSDK._ingest)
         # Q2-lock contract pin: the signature default IS the guarantee (no
         # silent auto-promotion). The KEYWORD_ONLY half is behaviorally
         # covered by test_keyword_only_enforced — not re-asserted here.
@@ -213,13 +213,13 @@ class TestPromotionPolicy:
             "connections": [{"from": "pA", "to": "pB", "operator": "IMPL",
                               "reify": True}],
         }
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         pA, pB = res["ids"]["points"]
-        assert sdk.get_point(pA)["status"] == "draft"  # not auto-promoted
-        assert sdk.get_point(pB)["status"] == "draft"
+        assert sdk._get_point(pA)["status"] == "draft"  # not auto-promoted
+        assert sdk._get_point(pB)["status"] == "draft"
         # operator node itself is written draft (#780 promote_source=False)
         op_id = res["ids"]["connections"][0]
-        assert sdk.get_point(op_id)["status"] == "draft"
+        assert sdk._get_point(op_id)["status"] == "draft"
 
     def test_explicit_gated_keeps_source_draft(self, sdk):
         bundle = {
@@ -230,9 +230,9 @@ class TestPromotionPolicy:
             "connections": [{"from": "pA", "to": "pB", "operator": "IMPL",
                               "reify": True}],
         }
-        res = sdk.ingest(bundle, promotion_policy="gated")
+        res = sdk._ingest(bundle, promotion_policy="gated")
         pA, pB = res["ids"]["points"]
-        assert sdk.get_point(pA)["status"] == "draft"
+        assert sdk._get_point(pA)["status"] == "draft"
 
         # CYCLE-26 REVIEW FIX (P2): assert the OPERATOR node and the TARGET
         # also stay draft under explicit gated (not just the source) — closes
@@ -242,15 +242,15 @@ class TestPromotionPolicy:
             i for i in res["ids"]["connections"]
             if isinstance(i, str)
         )
-        assert sdk.get_point(op_id)["status"] == "draft"
-        assert sdk.get_point(pB)["status"] == "draft"
+        assert sdk._get_point(op_id)["status"] == "draft"
+        assert sdk._get_point(pB)["status"] == "draft"
 
     def test_invalid_promotion_policy_raises_naming_valid_values(self, sdk):
         # every invalid value raises ValueError naming the param AND the valid
         # values (cycle-21 message-content pin)
         for bad in ("atomic", "nope"):
             with pytest.raises(ValueError) as exc:
-                sdk.ingest({"points": []}, promotion_policy=bad)
+                sdk._ingest({"points": []}, promotion_policy=bad)
             msg = str(exc.value)
             assert "promotion_policy" in msg
             assert "gated" in msg and "auto" in msg
@@ -266,14 +266,14 @@ class TestPromotionPolicy:
             "connections": [{"from": "pA", "to": "pB", "operator": "IMPL",
                               "reify": True}],
         }
-        res = sdk.ingest(bundle, granularity="granular", promotion_policy="gated")
+        res = sdk._ingest(bundle, granularity="granular", promotion_policy="gated")
         pA, pB = res["ids"]["points"]
         op_id = res["ids"]["connections"][0]
         # Full status set mirrors the bulk counterpart — E2E-5's "identical
         # final graph" claim checked per-node, not just the source.
-        assert sdk.get_point(pA)["status"] == "draft"
-        assert sdk.get_point(pB)["status"] == "draft"
-        assert sdk.get_point(op_id)["status"] == "draft"
+        assert sdk._get_point(pA)["status"] == "draft"
+        assert sdk._get_point(pB)["status"] == "draft"
+        assert sdk._get_point(op_id)["status"] == "draft"
 
     def test_auto_promotes_source_live(self, sdk):
         # E2E-8 assertion 1 (SDK surface): auto → source promotes live on
@@ -288,11 +288,11 @@ class TestPromotionPolicy:
             ],
             "connections": [{"from": "pA", "to": "pB", "operator": "IMPL"}],
         }
-        res = sdk.ingest(bundle, promotion_policy="auto")
+        res = sdk._ingest(bundle, promotion_policy="auto")
         pA, pB = res["ids"]["points"]
         op_id = res["ids"]["connections"][0]
-        assert sdk.get_point(pA)["status"] == "live"   # source promoted
-        assert sdk.get_point(pB)["status"] == "draft"  # target stays draft
+        assert sdk._get_point(pA)["status"] == "live"   # source promoted
+        assert sdk._get_point(pB)["status"] == "draft"  # target stays draft
         # #8499 endpoint-kind gate (owner ruling 2026-10-13): a plain IMPL
         # between two :Points is REIFIED, so `ids["connections"][0]` is a real
         # operator NODE id and the promotion asymmetry is observable on it.
@@ -302,7 +302,7 @@ class TestPromotionPolicy:
         assert _operator_count(sdk) == 1
         op_id = res["ids"]["connections"][0]
         assert isinstance(op_id, str)
-        assert sdk.get_point(op_id)["status"] == "live"
+        assert sdk._get_point(op_id)["status"] == "live"
 
     def test_auto_nand_promotes_source_live(self, sdk):
         # Promotion is op-type-agnostic: NAND wires the same #131 path
@@ -314,9 +314,9 @@ class TestPromotionPolicy:
             ],
             "connections": [{"from": "pA", "to": "pB", "operator": "NAND"}],
         }
-        res = sdk.ingest(bundle, promotion_policy="auto")
+        res = sdk._ingest(bundle, promotion_policy="auto")
         pA, _ = res["ids"]["points"]
-        assert sdk.get_point(pA)["status"] == "live"
+        assert sdk._get_point(pA)["status"] == "live"
 
     def test_auto_dual_role_point_source_wins(self, sdk):
         """A point that is the `to` of one operator connection AND the
@@ -341,11 +341,11 @@ class TestPromotionPolicy:
                 {"from": "pB", "to": "pC", "operator": "IMPL"},
             ],
         }
-        res = sdk.ingest(bundle, promotion_policy="auto")
+        res = sdk._ingest(bundle, promotion_policy="auto")
         pA, pB, pC = res["ids"]["points"]
-        assert sdk.get_point(pA)["status"] == "live"   # pure source
-        assert sdk.get_point(pB)["status"] == "live"   # dual-role: source wins
-        assert sdk.get_point(pC)["status"] == "draft"  # pure target
+        assert sdk._get_point(pA)["status"] == "live"   # pure source
+        assert sdk._get_point(pB)["status"] == "live"   # dual-role: source wins
+        assert sdk._get_point(pC)["status"] == "draft"  # pure target
 
     def test_auto_goal_target_is_born_live(self, sdk):
         """#7856 on the INGEST surface: a `goal` that is only ever an
@@ -369,16 +369,16 @@ class TestPromotionPolicy:
                 {"from": "mid", "to": "top", "operator": "IMPL"},
             ],
         }
-        res = sdk.ingest(bundle, promotion_policy="auto")
+        res = sdk._ingest(bundle, promotion_policy="auto")
         top, mid = res["ids"]["points"]
-        assert sdk.get_point(top)["status"] == "live"   # pure target, goal
-        assert sdk.get_point(mid)["status"] == "live"   # pure source
+        assert sdk._get_point(top)["status"] == "live"   # pure target, goal
+        assert sdk._get_point(mid)["status"] == "live"   # pure source
 
         # Under gated the same shape is draft for both — the gate is the
         # explicit draft request and it applies to goals too. A SEPARATE
         # bundle: re-ingesting the one above dedups onto those (now live)
         # points, and a dedup hit never rewrites an existing status.
-        gated = sdk.ingest({
+        gated = sdk._ingest({
             "points": [
                 {"ref": "top", "kind": "goal", "content": "ship v4"},
                 {"ref": "mid", "kind": "goal", "content": "measure first"},
@@ -388,8 +388,8 @@ class TestPromotionPolicy:
             ],
         }, promotion_policy="gated")
         g_top, g_mid = gated["ids"]["points"]
-        assert sdk.get_point(g_top)["status"] == "draft"
-        assert sdk.get_point(g_mid)["status"] == "draft"
+        assert sdk._get_point(g_top)["status"] == "draft"
+        assert sdk._get_point(g_mid)["status"] == "draft"
 
     def test_auto_relation_only_source_is_born_live(self, sdk):
         # #1088 owner ruling: a relation-only source is NEITHER an
@@ -420,9 +420,9 @@ class TestPromotionPolicy:
                  "relation": "extractedFrom"},
             ],
         }
-        res = sdk.ingest(bundle, promotion_policy="auto")
+        res = sdk._ingest(bundle, promotion_policy="auto")
         p1 = res["ids"]["points"][0]
-        assert sdk.get_point(p1)["status"] == "live", (
+        assert sdk._get_point(p1)["status"] == "live", (
             "a relation-only source is born live under auto — nothing "
             "asked for draft"
         )
@@ -447,12 +447,12 @@ class TestPromotionPolicy:
                 {"from": "p1", "to": "p2", "relation": "references"},
             ],
         }
-        res = sdk.ingest(bundle, promotion_policy="auto")
+        res = sdk._ingest(bundle, promotion_policy="auto")
         p1, p2 = res["ids"]["points"]
-        assert sdk.get_point(p1)["status"] == "live"
+        assert sdk._get_point(p1)["status"] == "live"
         # A relation connection has no promotion path at all — neither
         # endpoint is status-injected, so the target is born live.
-        assert sdk.get_point(p2)["status"] == "live", (
+        assert sdk._get_point(p2)["status"] == "live", (
             "a relation connection's `to` is not a promotion target (#1088)"
         )
 
@@ -478,11 +478,11 @@ class TestPromotionPolicy:
                  "reify": True},
             ],
         }
-        res = sdk.ingest(bundle, promotion_policy="auto")
+        res = sdk._ingest(bundle, promotion_policy="auto")
         pA, pB, pC = res["ids"]["points"]
-        assert sdk.get_point(pA)["status"] == "live"   # source promoted
-        assert sdk.get_point(pB)["status"] == "draft"  # list-`to` target
-        assert sdk.get_point(pC)["status"] == "draft"  # list-`to` target
+        assert sdk._get_point(pA)["status"] == "live"   # source promoted
+        assert sdk._get_point(pB)["status"] == "draft"  # list-`to` target
+        assert sdk._get_point(pC)["status"] == "draft"  # list-`to` target
 
     def test_auto_granular_parity(self, sdk):
         # E2E-5 discriminating cell: auto holds in granular mode — the
@@ -494,22 +494,22 @@ class TestPromotionPolicy:
             ],
             "connections": [{"from": "pA", "to": "pB", "operator": "IMPL"}],
         }
-        res = sdk.ingest(bundle, granularity="granular", promotion_policy="auto")
+        res = sdk._ingest(bundle, granularity="granular", promotion_policy="auto")
         pA, pB = res["ids"]["points"]
-        assert sdk.get_point(pA)["status"] == "live"
-        assert sdk.get_point(pB)["status"] == "draft"
+        assert sdk._get_point(pA)["status"] == "live"
+        assert sdk._get_point(pB)["status"] == "draft"
         # #8499: reified on the granular path too — the gate lives in the SHARED
         # connection loop, so bulk and granular cannot diverge here.
         assert _operator_count(sdk) == 1
         op_id = res["ids"]["connections"][0]
         assert isinstance(op_id, str)
-        assert sdk.get_point(op_id)["status"] == "live"
+        assert sdk._get_point(op_id)["status"] == "live"
 
     def test_keyword_only_enforced(self, sdk):
         # Q2-lock: positional auto-promotion must NOT silently opt in — a
         # third positional arg raises TypeError (agents opt in explicitly).
         with pytest.raises(TypeError):
-            sdk.ingest({"points": []}, "bulk", "auto")
+            sdk._ingest({"points": []}, "bulk", "auto")
 
     def test_gated_rejects_explicit_live_item(self, sdk):
         # INGEST_CONTRACT row 9: under gated, an explicit status:'live' on a
@@ -523,7 +523,7 @@ class TestPromotionPolicy:
             "connections": [],
         }
         with pytest.raises(ValueError) as exc:
-            sdk.ingest(bundle)
+            sdk._ingest(bundle)
         msg = str(exc.value)
         assert "status:'live' is not allowed under promotion_policy 'gated'" in msg
         assert "promotion_policy='auto'" in msg and "update_point" in msg
@@ -537,9 +537,9 @@ class TestPromotionPolicy:
             ],
             "connections": [],
         }
-        res = sdk.ingest(bundle, promotion_policy="auto")
+        res = sdk._ingest(bundle, promotion_policy="auto")
         pA = res["ids"]["points"][0]
-        assert sdk.get_point(pA)["status"] == "live"
+        assert sdk._get_point(pA)["status"] == "live"
 
     def test_gated_rejects_nested_props_status_live(self, sdk):
         # PR #1073 re-review P0: the props={"status": "live"} convention is
@@ -553,7 +553,7 @@ class TestPromotionPolicy:
             "connections": [],
         }
         with pytest.raises(ValueError) as exc:
-            sdk.ingest(bundle)
+            sdk._ingest(bundle)
         assert "not allowed under promotion_policy 'gated'" in str(exc.value)
 
     def test_gated_rejects_case_variant_status(self, sdk):
@@ -571,7 +571,7 @@ class TestPromotionPolicy:
                 "connections": [],
             }
             with pytest.raises(ValueError) as exc:
-                sdk.ingest(bundle)
+                sdk._ingest(bundle)
             assert "not allowed under promotion_policy 'gated'" in str(exc.value)
 
     def test_gated_rejects_explicit_none_status(self, sdk):
@@ -584,7 +584,7 @@ class TestPromotionPolicy:
              "props": {"status": None}},
         ):
             with pytest.raises(ValueError) as exc:
-                sdk.ingest({"points": [item], "connections": []})
+                sdk._ingest({"points": [item], "connections": []})
             assert "not allowed under promotion_policy 'gated'" in str(exc.value)
 
     def test_gated_accepts_items_without_status_key(self, sdk):
@@ -600,9 +600,9 @@ class TestPromotionPolicy:
             ],
             "connections": [],
         }
-        res = sdk.ingest(bundle)  # gated default
+        res = sdk._ingest(bundle)  # gated default
         for pid in res["ids"]["points"]:
-            assert sdk.get_point(pid)["status"] == "draft"
+            assert sdk._get_point(pid)["status"] == "draft"
 
     def test_gated_rejects_terminal_status(self, sdk):
         # PR #1073 re-review P1: canonical terminal statuses are EP-LIVE under
@@ -617,7 +617,7 @@ class TestPromotionPolicy:
             ):
                 bundle = {"points": [item], "connections": []}
                 with pytest.raises(ValueError) as exc:
-                    sdk.ingest(bundle)
+                    sdk._ingest(bundle)
                 assert "not allowed under promotion_policy 'gated'" in str(
                     exc.value)
 
@@ -649,17 +649,17 @@ class TestPromotionPolicy:
         # what the create door STORES.
         for spelling, canonical in (("Live", "live"), ("draft ", "draft"),
                                     ("live\n", "live")):
-            made = sdk.create_point("claim", "re-spelled status", status=spelling)
+            made = sdk._create_point("claim", "re-spelled status", status=spelling)
             assert made["status"] == canonical, (
                 f"the create door must STORE the canonical word for {spelling!r}, "
                 f"not the caller's spelling — got {made['status']!r}")
-            assert sdk.get_point(made["id"])["status"] == canonical
+            assert sdk._get_point(made["id"])["status"] == canonical
 
         # Non-str values (including unhashable list/dict) raise ValueError, not
         # TypeError.
         for bad in (["live"], {"x": 1}, None):
             with pytest.raises(ValueError) as exc:
-                sdk.create_point("claim", "junk status", status=bad)
+                sdk._create_point("claim", "junk status", status=bad)
             assert "must be a plain string" in str(exc.value), str(exc.value)
 
     def test_auto_not_retroactive_on_dedup(self, sdk):
@@ -673,23 +673,23 @@ class TestPromotionPolicy:
             "connections": [{"from": "pA", "to": "pB", "operator": "IMPL",
                               "reify": True}],
         }
-        first = sdk.ingest(bundle)  # gated default
+        first = sdk._ingest(bundle)  # gated default
         pA, _ = first["ids"]["points"]
-        assert sdk.get_point(pA)["status"] == "draft"
-        second = sdk.ingest(bundle, promotion_policy="auto")  # dedup path
+        assert sdk._get_point(pA)["status"] == "draft"
+        second = sdk._ingest(bundle, promotion_policy="auto")  # dedup path
         pA2, _ = second["ids"]["points"]
         assert pA2 == pA
         # Directly prove the dedup branch ran: operator deduped, not re-created
         assert second["deduped"]["connections"] == 1
         assert second["ids"]["connections"][0] == first["ids"]["connections"][0]
-        assert sdk.get_point(pA)["status"] == "draft"  # not retro-promoted
+        assert sdk._get_point(pA)["status"] == "draft"  # not retro-promoted
 
 
 # ── granularity ─────────────────────────────────────────────────────
 
 class TestGranularity:
     def test_granular_returns_per_item_results(self, sdk):
-        res = sdk.ingest(_full_bundle(), granularity="granular")
+        res = sdk._ingest(_full_bundle(), granularity="granular")
         assert res["granularity"] == "granular"
         results = res["results"]
         # one result per item, sections in write order (sources → points →
@@ -707,13 +707,13 @@ class TestGranularity:
         }
 
     def test_bulk_has_no_per_item_results(self, sdk):
-        res = sdk.ingest(_full_bundle())
+        res = sdk._ingest(_full_bundle())
         assert res["granularity"] == "bulk"
         assert "results" not in res
 
     def test_invalid_granularity_raises(self, sdk):
         with pytest.raises(ValueError, match="granularity") as exc:
-            sdk.ingest({"points": []}, granularity="atomic")
+            sdk._ingest({"points": []}, granularity="atomic")
         # message-content half of the contract: valid values named (mirror of
         # the promotion_policy pin)
         assert "bulk" in str(exc.value) and "granular" in str(exc.value)
@@ -724,8 +724,8 @@ class TestGranularity:
 class TestReingest:
     def test_reingest_same_bundle_no_duplicates(self, sdk):
         bundle = _full_bundle()
-        first = sdk.ingest(bundle)
-        second = sdk.ingest(bundle)
+        first = sdk._ingest(bundle)
+        second = sdk._ingest(bundle)
 
         # Nothing newly created on re-ingest
         assert second["created"] == {
@@ -759,9 +759,9 @@ class TestReingest:
 
     def test_reingest_after_extra_writes_keeps_dedup(self, sdk):
         # Re-ingest must not clobber unrelated graph state
-        sdk.create_point("claim", "unrelated point")
-        res = sdk.ingest(_full_bundle())  # noqa: F841
-        res2 = sdk.ingest(_full_bundle())
+        sdk._create_point("claim", "unrelated point")
+        res = sdk._ingest(_full_bundle())  # noqa: F841
+        res2 = sdk._ingest(_full_bundle())
         assert res2["created"]["points"] == 0
         assert _point_count(sdk) == 3  # 2 bundle + 1 unrelated
 
@@ -778,11 +778,11 @@ class TestReingest:
             {"ref": "p1", "kind": "statement",
              "content": "#1905 gated draft re-ingest.", "status": "draft"},
         ]}
-        first = sdk.ingest(bundle, promotion_policy="gated")
+        first = sdk._ingest(bundle, promotion_policy="gated")
         assert first["created"]["points"] == 1
-        assert sdk.get_point(first["ids"]["points"][0])["status"] == "draft"
+        assert sdk._get_point(first["ids"]["points"][0])["status"] == "draft"
         # second call: dedup hit must NOT crash; returns a clean duplicate
-        second = sdk.ingest(bundle, promotion_policy="gated")
+        second = sdk._ingest(bundle, promotion_policy="gated")
         assert second["created"]["points"] == 0
         assert second["deduped"]["points"] == 1
         assert second["ids"]["points"] == first["ids"]["points"]
@@ -797,8 +797,8 @@ class TestReingest:
              "content": "#1905 nested status re-ingest.",
              "props": {"status": "draft", "note": "x"}},
         ]}
-        first = sdk.ingest(bundle, promotion_policy="gated")
-        second = sdk.ingest(bundle, promotion_policy="gated")
+        first = sdk._ingest(bundle, promotion_policy="gated")
+        second = sdk._ingest(bundle, promotion_policy="gated")
         assert second["created"]["points"] == 0
         assert second["deduped"]["points"] == 1
         assert second["ids"]["points"] == first["ids"]["points"]
@@ -820,7 +820,7 @@ class TestReingest:
             {"ref": "p3", "kind": "statement", "content": "#1905 batch C.",
              "status": "draft"},
         ]}
-        sdk.ingest(seed, promotion_policy="gated")
+        sdk._ingest(seed, promotion_policy="gated")
         bundle = {"points": [
             {"ref": "p1", "kind": "statement", "content": "#1905 batch A."},
             {"ref": "p2", "kind": "statement", "content": "#1905 batch B."},
@@ -828,14 +828,14 @@ class TestReingest:
              "status": "draft"},
             {"ref": "p4", "kind": "statement", "content": "#1905 batch D."},
         ]}
-        res = sdk.ingest(bundle, promotion_policy="gated")
+        res = sdk._ingest(bundle, promotion_policy="gated")
         assert res["created"]["points"] == 1
         assert res["deduped"]["points"] == 3
         assert len(res["ids"]["points"]) == 4
         assert res.get("batch_id") is not None
         # no partial commit: the post-dedup items landed too
         assert _point_count(sdk) == 4
-        p4 = sdk.get_point(res["ids"]["points"][-1])
+        p4 = sdk._get_point(res["ids"]["points"][-1])
         assert p4["content"] == "#1905 batch D."
         assert p4["status"] == "draft"
 
@@ -844,7 +844,7 @@ class TestReingest:
 
 class TestLocalRefs:
     def test_connections_resolve_by_local_ref(self, sdk):
-        res = sdk.ingest(_full_bundle())
+        res = sdk._ingest(_full_bundle())
         p1, p2 = res["ids"]["points"]
         s1 = res["ids"]["entities"][0]
         url = "https://example.com/rust-report"
@@ -874,7 +874,7 @@ class TestLocalRefs:
 
     def test_mixed_ref_and_external_ids(self, sdk):
         # A connection may reference a bundle item AND a pre-existing node
-        existing = sdk.create_point("claim", "pre-existing point", status="live")
+        existing = sdk._create_point("claim", "pre-existing point", status="live")
         bundle = {
             "points": [{"ref": "p1", "kind": "claim", "content": "new point"}],
             "connections": [
@@ -882,7 +882,7 @@ class TestLocalRefs:
                  "reify": True},
             ],
         }
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         p1 = res["ids"]["points"][0]
         assert _count(
             sdk,
@@ -906,7 +906,7 @@ class TestLocalRefs:
             ],
             "connections": [],
         }
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         org = res["ids"]["entities"][0]
         evt = res["ids"]["entities"][1]
         p2 = res["ids"]["points"][1]
@@ -927,7 +927,7 @@ class TestLocalRefs:
             ],
         }
         with pytest.raises(ValueError, match="ref"):
-            sdk.ingest(bundle)
+            sdk._ingest(bundle)
 
     def test_unresolvable_connection_endpoint_raises(self, sdk):
         bundle = {
@@ -937,7 +937,7 @@ class TestLocalRefs:
             ],
         }
         with pytest.raises(ValueError):
-            sdk.ingest(bundle)
+            sdk._ingest(bundle)
 
 
 # ── reification rule ────────────────────────────────────────────────
@@ -965,7 +965,7 @@ class TestReificationRule:
             ],
             "connections": [{"from": "pA", "to": "pB", "operator": "IMPL"}],
         }
-        res = sdk.ingest(bundle, granularity="granular")
+        res = sdk._ingest(bundle, granularity="granular")
         # REIFIED: one operator node, an IMPL edge per input, no bare edge.
         assert _operator_count(sdk, "IMPL") == 1
         assert _edge_count(sdk, "IMPL") == 2
@@ -982,7 +982,7 @@ class TestReificationRule:
         # (plan §5.5 route matrix, cycle-22).
         op_id = res["ids"]["connections"][0]
         assert isinstance(op_id, str)
-        assert sdk.get_point(op_id)["is_operator"] is True
+        assert sdk._get_point(op_id)["is_operator"] is True
         conn_entry = next(e for e in res["results"]
                           if e["section"] == "connections")
         assert set(conn_entry["result"].keys()) == {"operator_id", "deduped"}
@@ -1002,10 +1002,10 @@ class TestReificationRule:
             "connections": [{"from": "pA", "to": "pB", "operator": "IMPL",
                               "reify": True}],
         }
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         assert _operator_count(sdk, "IMPL") == 1
         op_id = res["ids"]["connections"][0]
-        op = sdk.get_point(op_id)
+        op = sdk._get_point(op_id)
         assert op["is_operator"] is True
         assert op["op_type"] == "IMPL"
 
@@ -1015,7 +1015,7 @@ class TestReificationRule:
             "entities": [{"ref": "author", "type": "subject", "name": "Author"}],
             "connections": [{"from": "pA", "to": "author", "relation": "authoredBy"}],
         }
-        res = sdk.ingest(bundle)  # noqa: F841
+        res = sdk._ingest(bundle)  # noqa: F841
         # structural edge exists, NO operator node created for it
         assert _edge_count(sdk, "authoredBy") == 1
         assert _operator_count(sdk, "IMPL") == 0
@@ -1035,10 +1035,10 @@ class TestReificationRule:
             ],
             "connections": [{"from": "pA", "to": "pB", "operator": "NAND"}],
         }
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         assert _operator_count(sdk, "NAND") == 1
         # direction-absent NAND = unidirectional, carried by the operator node
-        op = sdk.get_point(res["ids"]["connections"][0])
+        op = sdk._get_point(res["ids"]["connections"][0])
         assert op["direction"] == "unidirectional"
 
     def test_connection_with_both_relation_and_operator_raises(self, sdk):
@@ -1049,7 +1049,7 @@ class TestReificationRule:
             ],
         }
         with pytest.raises(ValueError, match="exactly one"):
-            sdk.ingest(bundle)
+            sdk._ingest(bundle)
 
     def test_unknown_relation_raises(self, sdk):
         bundle = {
@@ -1057,14 +1057,14 @@ class TestReificationRule:
             "connections": [{"from": "pA", "to": "pA", "relation": "notARelation"}],
         }
         with pytest.raises(ValueError, match="relation"):
-            sdk.ingest(bundle)
+            sdk._ingest(bundle)
 
 
 # ── validation ──────────────────────────────────────────────────────
 
 class TestValidation:
     def test_missing_sections_are_fine(self, sdk):
-        res = sdk.ingest({})
+        res = sdk._ingest({})
         assert res["created"] == {
             "points": 0, "entities": 0, "sources": 0, "connections": 0,
         }
@@ -1075,40 +1075,40 @@ class TestValidation:
 
     def test_point_item_requires_content(self, sdk):
         with pytest.raises(ValueError, match="content"):
-            sdk.ingest({"points": [{"kind": "claim"}]})
+            sdk._ingest({"points": [{"kind": "claim"}]})
 
     def test_point_item_without_kind_defaults_to_statement(self, sdk):
         # CYCLE-25 (ontology v3.8): a point item WITHOUT pointKind DEFAULTS
         # to 'statement' (the extraction write kind) — not a violation.
-        res = sdk.ingest({"points": [{"ref": "p", "content": "no kind"}]})
+        res = sdk._ingest({"points": [{"ref": "p", "content": "no kind"}]})
         pid = res["ids"]["points"][0]
-        assert sdk.get_point(pid)["pointKind"] == "statement"
+        assert sdk._get_point(pid)["pointKind"] == "statement"
 
     def test_event_point_kind_rejected(self, sdk):
         # CYCLE-25: pointKind 'event' is REMOVED (#1013) — episodic records
         # are entity items type:'event' with eventKind.
         with pytest.raises(ValueError, match="event"):
-            sdk.ingest({"points": [{"kind": "event", "content": "x"}]})
+            sdk._ingest({"points": [{"kind": "event", "content": "x"}]})
 
     def test_entity_requires_type_and_name(self, sdk):
         with pytest.raises(ValueError, match="type"):
-            sdk.ingest({"entities": [{"name": "x"}]})
+            sdk._ingest({"entities": [{"name": "x"}]})
         with pytest.raises(ValueError, match="type"):
-            sdk.ingest({"entities": [{"type": "gadget", "name": "x"}]})
+            sdk._ingest({"entities": [{"type": "gadget", "name": "x"}]})
 
     def test_event_entity_requires_eventKind(self, sdk):
         with pytest.raises(ValueError, match="eventKind"):
-            sdk.ingest({"entities": [{"type": "event", "name": "launch"}]})
+            sdk._ingest({"entities": [{"type": "event", "name": "launch"}]})
 
     def test_source_requires_url_and_sourceKind(self, sdk):
         with pytest.raises(ValueError, match="url"):
-            sdk.ingest({"sources": [{"sourceKind": "report"}]})
+            sdk._ingest({"sources": [{"sourceKind": "report"}]})
         with pytest.raises(ValueError, match="sourceKind"):
-            sdk.ingest({"sources": [{"url": "https://x.example"}]})
+            sdk._ingest({"sources": [{"url": "https://x.example"}]})
 
     def test_connection_requires_from_and_to(self, sdk):
         with pytest.raises(ValueError, match="from"):
-            sdk.ingest({"connections": [{"to": "x", "operator": "IMPL"}]})
+            sdk._ingest({"connections": [{"to": "x", "operator": "IMPL"}]})
 
 
 # ── regression ──────────────────────────────────────────────────────
@@ -1116,8 +1116,8 @@ class TestValidation:
 class TestRegression:
 
     def test_create_point_dedup_still_works(self, sdk):
-        p1 = sdk.create_point("claim", "same", dedup=True)
-        p2 = sdk.create_point("claim", "same", dedup=True)
+        p1 = sdk._create_point("claim", "same", dedup=True)
+        p2 = sdk._create_point("claim", "same", dedup=True)
         assert p1["id"] == p2["id"]
 
 # ── batch_id (epic #902 A4, §4.2) ──────────────────────────────────
@@ -1152,7 +1152,7 @@ class TestBatchId:
     def test_response_carries_ulid_shaped_batch_id(self, sdk):
         import re
         ulid_re = re.compile(r"^[0-7][0-9A-HJKMNP-TV-Z]{25}$", re.IGNORECASE)
-        res = sdk.ingest(_full_bundle())
+        res = sdk._ingest(_full_bundle())
         bid = res["batch_id"]
         assert isinstance(bid, str) and len(bid) == 26
         assert ulid_re.match(bid), bid
@@ -1161,7 +1161,7 @@ class TestBatchId:
         # E2E-5.1 assertion 2: batch_id present on EVERY bundle-created Point —
         # plain points AND the operator Point (stamped POST-WRITE keyed on the
         # returned id — create_operator accepts no props).
-        res = sdk.ingest(_full_bundle())
+        res = sdk._ingest(_full_bundle())
         bid = res["batch_id"]
         stamped = _count(
             sdk,
@@ -1174,22 +1174,22 @@ class TestBatchId:
             sdk, "MATCH (n:Point) WHERE n.batch_id IS NULL RETURN count(n)")
         assert unstamped == 0
         op_id = next(i for i in res["ids"]["connections"] if isinstance(i, str))
-        assert sdk.get_point(op_id)["batch_id"] == bid
+        assert sdk._get_point(op_id)["batch_id"] == bid
 
     def test_batch_id_equal_across_fresh_graphs(self, sdk):
         # E2E-5.1: same canonical bundle content ⇒ same content-derived key.
         base = tempfile.mkdtemp(prefix="tortoise_ingest_batch_id_g2_")
         sdk2 = TortoiseSDK(os.path.join(base, "test.db"))
         try:
-            b1 = sdk.ingest(_full_bundle())["batch_id"]
-            b2 = sdk2.ingest(_full_bundle())["batch_id"]
+            b1 = sdk._ingest(_full_bundle())["batch_id"]
+            b2 = sdk2._ingest(_full_bundle())["batch_id"]
             assert b1 == b2
         finally:
             sdk2.close()
 
     def test_reingest_same_bundle_same_batch_id_no_rewrite(self, sdk):
-        first = sdk.ingest(_full_bundle())
-        second = sdk.ingest(_full_bundle())
+        first = sdk._ingest(_full_bundle())
+        second = sdk._ingest(_full_bundle())
         assert second["batch_id"] == first["batch_id"]
         # dedup hits keep their stamp — every point still carries ONE batch_id
         # and no NEW BatchIdStamped record is emitted on a clean re-ingest.
@@ -1200,9 +1200,9 @@ class TestBatchId:
         ) == 3
 
     def test_reingest_does_not_duplicate_records(self, sdk_logged):
-        sdk_logged.ingest(_full_bundle())
+        sdk_logged._ingest(_full_bundle())
         before = len(_batch_id_records(sdk_logged))
-        sdk_logged.ingest(_full_bundle())
+        sdk_logged._ingest(_full_bundle())
         after = len(_batch_id_records(sdk_logged))
         assert after == before  # (h)-repair is a no-op when records exist
 
@@ -1210,7 +1210,7 @@ class TestBatchId:
         # A point already stamped with ANOTHER bundle's batch_id keeps it —
         # dedup never rewrites provenance.
         bundle = _full_bundle()
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         bid = res["batch_id"]
         # simulate a point stamped with a different batch (e.g. a prior import)
         other_bid = "0AAAAAAAAAAAAAAAAAAAAAAAAA"
@@ -1219,35 +1219,35 @@ class TestBatchId:
             "MATCH (n:Point {id:$id}) SET n.batch_id = $bid",
             params={"id": pid, "bid": other_bid},
         )
-        res2 = sdk.ingest(bundle)
+        res2 = sdk._ingest(bundle)
         assert res2["batch_id"] == bid
-        assert sdk.get_point(pid)["batch_id"] == other_bid
+        assert sdk._get_point(pid)["batch_id"] == other_bid
 
     def test_row14_pre_existing_batch_less_point_acquires(self, sdk):
         # E2E-10 row 14: a batch-less pre-existing LIVE point that dedup-hits
         # ACQUIRES the bundle's batch_id on its first dedup-hit.
-        pid = sdk.create_point("claim", "Rust is memory-safe by default.")["id"]
-        sdk.update_point(pid, status="live")  # months-old LIVE graph shape
-        res = sdk.ingest(_full_bundle())
+        pid = sdk._create_point("claim", "Rust is memory-safe by default.")["id"]
+        sdk._update_point(pid, status="live")  # months-old LIVE graph shape
+        res = sdk._ingest(_full_bundle())
         assert res["deduped"]["points"] == 1
         assert res["batch_id"] is not None
-        assert sdk.get_point(pid)["batch_id"] == res["batch_id"]
+        assert sdk._get_point(pid)["batch_id"] == res["batch_id"]
 
     def test_stamp_when_absent_crash_position_f(self, sdk):
         # Crash position (f): create_point succeeded, the stamp never landed —
         # the retry's dedup hit applies stamp-when-absent (completing an
         # interrupted stamp, not rewriting provenance).
-        pid = sdk.create_point("claim", "Rust is memory-safe by default.")["id"]
-        assert "batch_id" not in sdk.get_point(pid)
-        res = sdk.ingest(_full_bundle())
+        pid = sdk._create_point("claim", "Rust is memory-safe by default.")["id"]
+        assert "batch_id" not in sdk._get_point(pid)
+        res = sdk._ingest(_full_bundle())
         assert res["deduped"]["points"] == 1
-        assert sdk.get_point(pid)["batch_id"] == res["batch_id"]
+        assert sdk._get_point(pid)["batch_id"] == res["batch_id"]
 
     def test_h_record_repair_reemits_only_missing_record(self, sdk_logged):
         # Crash sub-position (h): the prop SET landed but the JSONL record did
         # not → the retry re-emits ONLY the missing record (never duplicates
         # existing records, never rewrites the prop).
-        res = sdk_logged.ingest(_full_bundle())
+        res = sdk_logged._ingest(_full_bundle())
         bid = res["batch_id"]
         pid = res["ids"]["points"][0]
         records = _batch_id_records(sdk_logged)
@@ -1262,9 +1262,9 @@ class TestBatchId:
                         and e.get("id") == pid):
                     f.write(json.dumps(e) + "\n")
         # Prop is PRESENT (the SET survived); the record is missing.
-        assert sdk_logged.get_point(pid)["batch_id"] == bid
+        assert sdk_logged._get_point(pid)["batch_id"] == bid
         # Retry → repair: exactly the missing record re-emitted.
-        res2 = sdk_logged.ingest(_full_bundle())
+        res2 = sdk_logged._ingest(_full_bundle())
         assert res2["batch_id"] == bid
         repaired = _batch_id_records(sdk_logged)
         assert len(repaired) == 3
@@ -1272,28 +1272,28 @@ class TestBatchId:
             e.get("type") == "BatchIdStamped" and e.get("id") == pid
             for e in repaired
         )
-        assert sdk_logged.get_point(pid)["batch_id"] == bid  # prop untouched
+        assert sdk_logged._get_point(pid)["batch_id"] == bid  # prop untouched
 
     def test_operator_dedup_hit_stamp_when_absent(self, sdk):
         # Crash position (g): an operator Point created but never stamped is
         # stamped on the retry's _find_operator dedup hit.
-        res = sdk.ingest(_full_bundle())
+        res = sdk._ingest(_full_bundle())
         bid = res["batch_id"]
         op_id = next(i for i in res["ids"]["connections"] if isinstance(i, str))
         sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) REMOVE n.batch_id",
             params={"id": op_id},
         )
-        assert "batch_id" not in sdk.get_point(op_id)
-        res2 = sdk.ingest(_full_bundle())
+        assert "batch_id" not in sdk._get_point(op_id)
+        res2 = sdk._ingest(_full_bundle())
         assert res2["deduped"]["connections"] == 3
-        assert sdk.get_point(op_id)["batch_id"] == bid
+        assert sdk._get_point(op_id)["batch_id"] == bid
 
     def test_jsonl_record_shape_and_content_hash(self, sdk_logged):
         # §4.2 rebuild-durability record: {id, batch_id, content_hash?} via
         # the JSONL branch — plain points carry the dedup-key content_hash;
         # operator Points (not content-hash dedupable) omit it.
-        res = sdk_logged.ingest(_full_bundle())
+        res = sdk_logged._ingest(_full_bundle())
         bid = res["batch_id"]
         records = _batch_id_records(sdk_logged)
         assert len(records) == 3
@@ -1313,7 +1313,7 @@ class TestBatchId:
     def test_no_graph_event_store_write_for_batch_id_record(self, sdk_logged):
         # _stamp_batch_id is a single SET + JSONL-ONLY record — NO GraphEvent
         # store write (BatchIdStamped is not in _GRAPH_EVENT_TYPES).
-        sdk_logged.ingest(_full_bundle())
+        sdk_logged._ingest(_full_bundle())
         assert _count(
             sdk_logged,
             "MATCH (e:GraphEvent {type:'BatchIdStamped'}) RETURN count(e)",
@@ -1332,13 +1332,13 @@ class TestBatchId:
                              "batch_id": "FORGED"}),
         ):
             with pytest.raises(ValueError, match="batch_id"):
-                sdk.ingest({section: [item]})
+                sdk._ingest({section: [item]})
 
     def test_guard_rejects_before_any_mutation(self, sdk):
         # The ingest-scoped guard fires BEFORE any node is written (Phase 1 —
         # zero-mutation discipline, J2).
         with pytest.raises(ValueError, match="batch_id"):
-            sdk.ingest({"points": [{"kind": "claim", "content": "x",
+            sdk._ingest({"points": [{"kind": "claim", "content": "x",
                                     "batch_id": "FORGED"}]})
         assert _point_count(sdk) == 0
 
@@ -1347,7 +1347,7 @@ class TestBatchId:
         # lists + renamed refs) ingest to ONE identical batch_id on fresh
         # graphs — guards cross-graph equality and crash-retry single id.
         canonical = _full_bundle()
-        bid = sdk.ingest(canonical)["batch_id"]
+        bid = sdk._ingest(canonical)["batch_id"]
 
         def _shuffle(value):
             if isinstance(value, dict):
@@ -1374,7 +1374,7 @@ class TestBatchId:
         base = tempfile.mkdtemp(prefix="tortoise_ingest_batch_id_v_")
         sdk2 = TortoiseSDK(os.path.join(base, "test.db"))
         try:
-            assert sdk2.ingest(variant)["batch_id"] == bid
+            assert sdk2._ingest(variant)["batch_id"] == bid
         finally:
             sdk2.close()
 
@@ -1410,10 +1410,10 @@ class TestA3DirectEdgeRouting:
             "connections": [{"from": "pA", "to": "pB", "operator": "IMPL",
                               "label": "supports"}],
         }
-        res = sdk.ingest(bundle, granularity="granular", promotion_policy="auto")
+        res = sdk._ingest(bundle, granularity="granular", promotion_policy="auto")
         assert _operator_count(sdk, "IMPL") == 1
         # label + batch_id on the OPERATOR NODE (not the edge)
-        op = sdk.get_point(res["ids"]["connections"][0])
+        op = sdk._get_point(res["ids"]["connections"][0])
         assert op["label"] == "supports"
         assert op["batch_id"] == res["batch_id"]
         # conn_result shape (plan §5.5 route matrix, cycle-22): the direct-edge
@@ -1423,7 +1423,7 @@ class TestA3DirectEdgeRouting:
         assert conn["result"]["deduped"] is False
         assert any("point_mediated_route" in w for w in res["warnings"])
         # idempotent re-ingest → deduped, still exactly ONE operator
-        r2 = sdk.ingest(bundle, granularity="granular", promotion_policy="auto")
+        r2 = sdk._ingest(bundle, granularity="granular", promotion_policy="auto")
         assert _operator_count(sdk, "IMPL") == 1
         conn2 = next(e for e in r2["results"] if e["section"] == "connections")
         assert conn2["result"]["deduped"] is True
@@ -1438,9 +1438,9 @@ class TestA3DirectEdgeRouting:
             ],
             "connections": [{"from": "pA", "to": "pB", "operator": "NAND"}],
         }
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         assert _operator_count(sdk, "NAND") == 1
-        op = sdk.get_point(res["ids"]["connections"][0])
+        op = sdk._get_point(res["ids"]["connections"][0])
         assert op["direction"] == "unidirectional"
 
 
@@ -1458,8 +1458,8 @@ class TestA3OperatorDedupRicherReturn:
             "connections": [{"from": "pA", "to": "pB", "operator": "IMPL",
                               "reify": True}],
         }
-        first = sdk.ingest(bundle)
-        second = sdk.ingest(bundle)
+        first = sdk._ingest(bundle)
+        second = sdk._ingest(bundle)
         assert _operator_count(sdk, "IMPL") == 1
         assert second["deduped"]["connections"] == 1
         assert second["ids"]["connections"][0] == first["ids"]["connections"][0]
@@ -1475,8 +1475,8 @@ class TestA3OperatorDedupRicherReturn:
             "connections": [{"from": "pA", "to": "pB", "operator": "NAND",
                               "reify": True}],
         }
-        first = sdk.ingest(bundle)  # noqa: F841
-        second = sdk.ingest(bundle)
+        first = sdk._ingest(bundle)  # noqa: F841
+        second = sdk._ingest(bundle)
         assert _operator_count(sdk, "NAND") == 1
         assert second["deduped"]["connections"] == 1
 
@@ -1485,16 +1485,16 @@ class TestA3OperatorDedupRicherReturn:
         SUBSET absorbs the retry — completes the written set on the REAL
         operator (is_operator:true, per-input multiplicity 1), one node per
         id, operator_absorb_completed warning."""
-        pa = sdk.create_point("claim", "A")["id"]
-        pb = sdk.create_point("claim", "B")["id"]
-        pc = sdk.create_point("claim", "C")["id"]
-        partial = sdk.create_operator("IMPL", pa, [pc], promote_source=False)
+        pa = sdk._create_point("claim", "A")["id"]
+        pb = sdk._create_point("claim", "B")["id"]
+        pc = sdk._create_point("claim", "C")["id"]
+        partial = sdk._create_operator("IMPL", pa, [pc], promote_source=False)
         bundle = {
             "points": [], "entities": [], "sources": [],
             "connections": [{"from": pa, "to": [pb, pc], "operator": "IMPL",
                               "reify": True}],
         }
-        res = sdk.ingest(bundle, promotion_policy="auto")
+        res = sdk._ingest(bundle, promotion_policy="auto")
         assert _operator_count(sdk, "IMPL") == 1
         assert res["deduped"]["connections"] == 1
         assert res["ids"]["connections"][0] == partial["id"]
@@ -1516,15 +1516,15 @@ class TestA3OperatorDedupRicherReturn:
         """CYCLE-14/15: a label-ABSENT retry must NOT absorb a LABELED
         operator (the cross-absorption semantic-theft class) — strict miss →
         a fresh operator + partial_operator_residue on the old one."""
-        pa = sdk.create_point("claim", "A")["id"]
-        pb = sdk.create_point("claim", "B")["id"]
-        sdk.create_operator("IMPL", pa, [pb], label="L", promote_source=False)
+        pa = sdk._create_point("claim", "A")["id"]
+        pb = sdk._create_point("claim", "B")["id"]
+        sdk._create_operator("IMPL", pa, [pb], label="L", promote_source=False)
         bundle = {
             "points": [], "entities": [], "sources": [],
             "connections": [{"from": pa, "to": pb, "operator": "IMPL",
                               "reify": True}],
         }
-        res = sdk.ingest(bundle)  # noqa: F841
+        res = sdk._ingest(bundle)  # noqa: F841
         assert _operator_count(sdk, "IMPL") == 2  # strict miss → new operator
         # the labeled partial stays as residue (never absorbed by a no-label
         # retry — the semantic-theft class stays closed)
@@ -1536,17 +1536,17 @@ class TestA3OperatorDedupRicherReturn:
     def test_decline_on_two_candidates(self, sdk):
         """§5.5: TWO+ qualifying partials → decline + partial_operator_residue
         warning; the retry creates a fresh complete operator."""
-        pa = sdk.create_point("claim", "A")["id"]
-        pb = sdk.create_point("claim", "B")["id"]
-        pc = sdk.create_point("claim", "C")["id"]
-        sdk.create_operator("IMPL", pa, [pc], promote_source=False)
-        sdk.create_operator("IMPL", pa, [pb], promote_source=False)
+        pa = sdk._create_point("claim", "A")["id"]
+        pb = sdk._create_point("claim", "B")["id"]
+        pc = sdk._create_point("claim", "C")["id"]
+        sdk._create_operator("IMPL", pa, [pc], promote_source=False)
+        sdk._create_operator("IMPL", pa, [pb], promote_source=False)
         bundle = {
             "points": [], "entities": [], "sources": [],
             "connections": [{"from": pa, "to": [pb, pc], "operator": "IMPL",
                               "reify": True}],
         }
-        res = sdk.ingest(bundle)
+        res = sdk._ingest(bundle)
         assert _operator_count(sdk, "IMPL") == 3  # 2 residue + 1 fresh
         assert res["created"]["connections"] == 1
         assert any("partial_operator_residue" in w for w in res["warnings"])
@@ -1555,16 +1555,16 @@ class TestA3OperatorDedupRicherReturn:
         """§5.5 cycle-13: the absorbed operator survives post-rebuild at the
         FULL input set, per-input multiplicity 1 (the #548 graph-only-point
         snapshot captures it from its edges), count()==1 per id."""
-        pa = sdk.create_point("claim", "A")["id"]
-        pb = sdk.create_point("claim", "B")["id"]
-        pc = sdk.create_point("claim", "C")["id"]
-        partial = sdk.create_operator("IMPL", pa, [pc], promote_source=False)
+        pa = sdk._create_point("claim", "A")["id"]
+        pb = sdk._create_point("claim", "B")["id"]
+        pc = sdk._create_point("claim", "C")["id"]
+        partial = sdk._create_operator("IMPL", pa, [pc], promote_source=False)
         bundle = {
             "points": [], "entities": [], "sources": [],
             "connections": [{"from": pa, "to": [pb, pc], "operator": "IMPL",
                               "reify": True}],
         }
-        sdk.ingest(bundle)
+        sdk._ingest(bundle)
         # pre-rebuild: the real operator at the full set
         n = _count(sdk,
                    "MATCH (o:Point {is_operator:true, id:$p})-[:IMPL]->() "
@@ -1620,7 +1620,7 @@ class TestConnectionMitigation:
     the pre-fix code."""
 
     def test_mitigation_point_and_edge_are_written(self, sdk):
-        res = sdk.ingest(_mitigation_bundle())
+        res = sdk._ingest(_mitigation_bundle())
         op_id = res["ids"]["connections"][0]
         assert isinstance(op_id, str), res["ids"]["connections"]
         assert _edge_count(sdk, "mitigated_by") == 1
@@ -1642,7 +1642,7 @@ class TestConnectionMitigation:
         assert res["created"]["connections"] == 1
 
     def test_mitigation_is_written_on_granular_and_auto_policies(self, sdk):
-        res = sdk.ingest(_mitigation_bundle(), granularity="granular",
+        res = sdk._ingest(_mitigation_bundle(), granularity="granular",
                          promotion_policy="auto")
         op_id = res["ids"]["connections"][0]
         assert len(_mitigation_rows(sdk, op_id)) == 1
@@ -1651,12 +1651,12 @@ class TestConnectionMitigation:
         assert set(conn_result.keys()) == {"operator_id", "deduped"}
 
     def test_resubmission_updates_in_place_and_warns(self, sdk):
-        first = sdk.ingest(_mitigation_bundle(0.3))
+        first = sdk._ingest(_mitigation_bundle(0.3))
         assert first["warnings"] == []
         op_id = first["ids"]["connections"][0]
         mid = _mitigation_rows(sdk, op_id)[0][0]
 
-        second = sdk.ingest(_mitigation_bundle(0.5))
+        second = sdk._ingest(_mitigation_bundle(0.5))
         # the operator dedups — the mitigation is applied to the SAME operator
         assert second["ids"]["connections"] == [op_id]
         assert second["deduped"]["connections"] == 1
@@ -1673,9 +1673,9 @@ class TestConnectionMitigation:
         assert second["warnings"][0].endswith("0.3->0.5")
 
     def test_reason_change_alone_is_reported_too(self, sdk):
-        first = sdk.ingest(_mitigation_bundle(0.3, "first reason"))
+        first = sdk._ingest(_mitigation_bundle(0.3, "first reason"))
         op_id = first["ids"]["connections"][0]
-        second = sdk.ingest(_mitigation_bundle(0.3, "second reason"))
+        second = sdk._ingest(_mitigation_bundle(0.3, "second reason"))
         rows = _mitigation_rows(sdk, op_id)
         assert len(rows) == 1
         assert rows[0][1] == "[MITIGATION] second reason"
@@ -1683,8 +1683,8 @@ class TestConnectionMitigation:
                    for w in second["warnings"]), second["warnings"]
 
     def test_unchanged_resubmission_is_silent_and_idempotent(self, sdk):
-        sdk.ingest(_mitigation_bundle(0.3))
-        res2 = sdk.ingest(_mitigation_bundle(0.3))
+        sdk._ingest(_mitigation_bundle(0.3))
+        res2 = sdk._ingest(_mitigation_bundle(0.3))
         assert res2["warnings"] == []
         assert _count(
             sdk,
@@ -1697,7 +1697,7 @@ class TestConnectionMitigation:
         # INGEST_CONTRACT §16: batch_id is stamped on EVERY new Point the
         # bundle creates — plain points, operator Points, mitigation Points —
         # and the audit surface reaches all of them.
-        res = sdk.ingest(_mitigation_bundle())
+        res = sdk._ingest(_mitigation_bundle())
         bid = res["batch_id"]
         rows = _query(
             sdk,
@@ -1705,11 +1705,11 @@ class TestConnectionMitigation:
             "RETURN m.batch_id",
         )
         assert len(rows) == 1 and rows[0][0] == bid
-        audit = sdk.list_batch(bid)
+        audit = sdk._list_batch(bid)
         assert audit["counts"]["points"] == 4, audit  # 2 points + operator + mitigation
 
     def test_mitigation_batch_record_carries_the_operator_link(self, sdk_logged):
-        res = sdk_logged.ingest(_mitigation_bundle())
+        res = sdk_logged._ingest(_mitigation_bundle())
         op_id = res["ids"]["connections"][0]
         mid = _mitigation_rows(sdk_logged, op_id)[0][0]
         recs = [r for r in _batch_id_records(sdk_logged) if r["id"] == mid]
@@ -1721,7 +1721,7 @@ class TestConnectionMitigation:
         # Multi-input fan-out is the documented reason `mitigation` is also a
         # reification anchor (§2.1) — the dampener must land on the operator the
         # fan-out created.
-        res = sdk.ingest({
+        res = sdk._ingest({
             "points": [{"ref": "a", "content": "A."},
                        {"ref": "b", "content": "B."},
                        {"ref": "c", "content": "C."}],
@@ -1735,10 +1735,10 @@ class TestConnectionMitigation:
         # …and on the partial-ABSORB branch: a pre-existing 2-input operator is
         # completed to the wider input set, and the mitigation applies to it
         # (not to a second operator).
-        pa, pb, pc = [sdk.create_point("statement", t)["id"]
+        pa, pb, pc = [sdk._create_point("statement", t)["id"]
                       for t in ("P.", "Q.", "R.")]
-        op = sdk.create_operator("IMPL", pa, [pb], promote_source=False)
-        res2 = sdk.ingest({"connections": [
+        op = sdk._create_operator("IMPL", pa, [pb], promote_source=False)
+        res2 = sdk._ingest({"connections": [
             {"from": pa, "to": [pb, pc], "operator": "IMPL",
              "mitigation": {"reason": "absorbed", "strength": 0.4}}]})
         assert res2["ids"]["connections"] == [op["id"]]
@@ -1756,12 +1756,12 @@ class TestConnectionMitigation:
         # SAME operator — this is also the recovery path for graphs written
         # before the fix (the bundle's batch_id is content-derived, so an
         # identical re-submission still dedups the operator).
-        pa = sdk.create_point("claim", "A implies B.")["id"]
-        pb = sdk.create_point("claim", "B.")["id"]
-        op = sdk.create_operator("IMPL", pa, [pb], promote_source=False)
+        pa = sdk._create_point("claim", "A implies B.")["id"]
+        pb = sdk._create_point("claim", "B.")["id"]
+        op = sdk._create_operator("IMPL", pa, [pb], promote_source=False)
         assert _mitigation_rows(sdk, op["id"]) == []
 
-        res = sdk.ingest({"connections": [
+        res = sdk._ingest({"connections": [
             {"from": pa, "to": pb, "operator": "IMPL",
              "mitigation": {"reason": "historic loss", "strength": 0.3}}]})
         assert res["ids"]["connections"] == [op["id"]]

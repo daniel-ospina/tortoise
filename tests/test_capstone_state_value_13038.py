@@ -1635,7 +1635,7 @@ def test_search_projects_through_the_served_row_helper():
     }
 
     class _SDK:
-        def tortoise_fts_query(self, **_kwargs):
+        def _tortoise_fts_query(self, **_kwargs):
             return [row]
 
     t = object.__new__(cap.LocalTarget)

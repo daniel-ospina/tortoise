@@ -350,9 +350,9 @@ def test_no_create_channel_can_erase_a_stored_goal_state(tmp_path):
         sdk = ha._make_sdk(namespace=_ORG)
         try:
             # FOLD CHANNEL 1 — the SDK directly (fails without the pop).
-            a = sdk.create_point("goal", "fold goal A", goalState="met",
+            a = sdk._create_point("goal", "fold goal A", goalState="met",
                                  dedup=True)
-            again_a = sdk.create_point("goal", "fold goal A", goalState=None,
+            again_a = sdk._create_point("goal", "fold goal A", goalState=None,
                                        dedup=True)
             assert again_a["id"] == a["id"], "dedup did not fold - test is vacuous"
             assert sdk.get_entity(a["id"]).get("goalState") == "met"
@@ -692,7 +692,7 @@ def test_the_sdk_guard_is_the_only_home_of_the_vocabulary(tmp_path):
     sdk = TortoiseSDK(str(tmp_path / "guard.db"))
     try:
         with pytest.raises(ValueError) as via_write:
-            sdk.create_object("GUARD", objectKind="goal", goalState="green")
+            sdk._create_object("GUARD", objectKind="goal", goalState="green")
     finally:
         sdk.close()
     assert str(via_write.value) == guard_message

@@ -61,7 +61,7 @@ class _FakeSDK(TortoiseSDK):
     def _get_proj(self):
         return self._proj
 
-    def delete(self, id):
+    def _delete(self, id):
         self.delete_calls.append(id)
         return True
 
@@ -134,7 +134,7 @@ class _FakeSDK:
     def __init__(self):
         self.delete_calls = []
 
-    def delete(self, id):
+    def _delete(self, id):
         self.delete_calls.append(id)
         return True
 

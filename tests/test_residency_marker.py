@@ -284,10 +284,10 @@ class TestReadPathEndToEnd:
         _no_embedder(monkeypatch)
         sdk = sdk_factory()
         try:
-            sdk.create_point("statement", "alpha beta gamma waves")
+            sdk._create_point("statement", "alpha beta gamma waves")
             self._declare(sdk, partial=True)
             out: dict = {}
-            rows = sdk.tortoise_fts_query(
+            rows = sdk._tortoise_fts_query(
                 None, kind="no_such_kind", read_status_out=out, limit=5)
             assert rows == []
             assert out[RESIDENCY_FIELD] == RESIDENCY_NOT_HOT
@@ -304,10 +304,10 @@ class TestReadPathEndToEnd:
         _no_embedder(monkeypatch)
         sdk = sdk_factory()
         try:
-            sdk.create_point("statement", "alpha beta gamma waves")
+            sdk._create_point("statement", "alpha beta gamma waves")
             self._declare(sdk, partial=False)
             out: dict = {}
-            rows = sdk.tortoise_fts_query(
+            rows = sdk._tortoise_fts_query(
                 None, kind="no_such_kind", read_status_out=out, limit=5)
             assert rows == []
             assert out[RESIDENCY_FIELD] == RESIDENCY_HOT
@@ -320,10 +320,10 @@ class TestReadPathEndToEnd:
         _no_embedder(monkeypatch)
         sdk = sdk_factory()
         try:
-            sdk.create_point("statement", "alpha beta gamma waves")
+            sdk._create_point("statement", "alpha beta gamma waves")
             self._declare(sdk, partial=True)
             out: dict = {}
-            rows = sdk.tortoise_fts_query(
+            rows = sdk._tortoise_fts_query(
                 None, kind="statement", read_status_out=out, limit=5)
             assert rows
             assert out[RESIDENCY_FIELD] == RESIDENCY_HOT
@@ -336,10 +336,10 @@ class TestReadPathEndToEnd:
         _no_embedder(monkeypatch)
         sdk = sdk_factory()
         try:
-            sdk.create_point("statement", "alpha beta gamma waves")
+            sdk._create_point("statement", "alpha beta gamma waves")
             self._declare(sdk, partial=True)
             out: dict = {}
-            rows = sdk.tortoise_fts_query(
+            rows = sdk._tortoise_fts_query(
                 None, kind="no_such_kind", read_status_out=out, limit=5)
             assert rows == []
             # off means off: the declaration is never even read, and the
@@ -369,7 +369,7 @@ class TestReadPathEndToEnd:
             # tests/test_read_status.py).
             monkeypatch.setattr(sdk, "_get_proj", _health_check_failed)
             out: dict = {}
-            rows = sdk.tortoise_fts_query("alpha", read_status_out=out, limit=5)
+            rows = sdk._tortoise_fts_query("alpha", read_status_out=out, limit=5)
             assert rows == []
             assert out["status"] == "degraded"
             assert RESIDENCY_FIELD not in out
@@ -382,12 +382,12 @@ class TestReadPathEndToEnd:
         _no_embedder(monkeypatch)
         sdk = sdk_factory()
         try:
-            sdk.create_point("statement", "alpha beta gamma waves")
+            sdk._create_point("statement", "alpha beta gamma waves")
             self._declare(sdk, partial=True)
             assert clear_residency(sdk._get_proj().g) is True
             assert clear_residency(sdk._get_proj().g) is False
             out: dict = {}
-            sdk.tortoise_fts_query(
+            sdk._tortoise_fts_query(
                 None, kind="no_such_kind", read_status_out=out, limit=5)
             assert out[RESIDENCY_FIELD] == RESIDENCY_HOT
         finally:
@@ -429,10 +429,10 @@ class TestReadPathEndToEnd:
         _no_embedder(monkeypatch)
         sdk = sdk_factory()
         try:
-            sdk.create_point("statement", "alpha beta gamma waves")
+            sdk._create_point("statement", "alpha beta gamma waves")
             self._declare(sdk, partial=True)
             out: dict = {}
-            rows = sdk.recall_state(
+            rows = sdk._recall_state(
                 None, kind="no_such_kind", read_status_out=out, limit=5)
             assert rows == []
             assert out[RESIDENCY_FIELD] == RESIDENCY_NOT_HOT
@@ -456,7 +456,7 @@ class TestHostedSearchRoute:
                 # fake standing in for `_data_sdk` must model the attach.
                 return object()
 
-            def tortoise_fts_query(self, q, limit=10, read_status_out=None,
+            def _tortoise_fts_query(self, q, limit=10, read_status_out=None,
                                    _truncation_out=None, **_ignored):
                 if read_status_out is not None:
                     read_status_out["status"] = "empty"
@@ -533,7 +533,7 @@ class TestHostedSearchRoute:
                 # opens and then cannot answer.
                 return object()
 
-            def tortoise_fts_query(self, q, limit=10, read_status_out=None,
+            def _tortoise_fts_query(self, q, limit=10, read_status_out=None,
                                    _truncation_out=None, **_ignored):
                 if read_status_out is not None:
                     # the store is down: the SDK sets `degraded` and the
@@ -565,7 +565,7 @@ class TestHostedSearchRoute:
                 # #10602: see the sibling `_DownSDK` above.
                 return object()
 
-            def tortoise_fts_query(self, q, limit=10, read_status_out=None,
+            def _tortoise_fts_query(self, q, limit=10, read_status_out=None,
                                    _truncation_out=None, **_ignored):
                 if read_status_out is not None:
                     read_status_out["status"] = "degraded"

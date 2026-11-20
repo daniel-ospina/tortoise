@@ -50,7 +50,7 @@ class TestListPointkinds:
 
     def test_kinds_shape(self, sdk):
         """list_pointkinds returns a list of {kind, count, pack} dicts."""
-        sdk.create_point("statement", "test")
+        sdk._create_point("statement", "test")
         result = sdk.graph_overview("pointkinds")
         assert isinstance(result, list)
         for entry in result:
@@ -58,7 +58,7 @@ class TestListPointkinds:
 
     def test_single_kind(self, sdk):
         """One kind, one point → returns [{kind, count, pack}]."""
-        sdk.create_point("observation", "test")
+        sdk._create_point("observation", "test")
         result = sdk.graph_overview("pointkinds")
         entry = next((r for r in result if r["kind"] == "observation"), None)
         assert entry is not None
@@ -68,9 +68,9 @@ class TestListPointkinds:
         """Multiple kinds → sorted by count descending."""
         # Create multiple points of different kinds
         for _ in range(3):
-            sdk.create_point("statement", "a point")
+            sdk._create_point("statement", "a point")
         for _ in range(5):
-            sdk.create_point("observation", "b point")
+            sdk._create_point("observation", "b point")
         # observation(5) > statement(3)
         result = sdk.graph_overview("pointkinds")
         counts = [r["count"] for r in result]
@@ -83,7 +83,7 @@ class TestListPointkinds:
     def test_output_fields_match_expected(self, sdk):
         """Each result has exactly 'kind', 'count', 'pack' fields."""
         for i in range(3):
-            sdk.create_point("statement", f"point {i}")
+            sdk._create_point("statement", f"point {i}")
         result = sdk.graph_overview("pointkinds")
         entry = next(r for r in result if r["kind"] == "statement")
         assert set(entry.keys()) == {"kind", "count", "pack"}

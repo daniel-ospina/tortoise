@@ -63,7 +63,7 @@ def _fresh_sdk():
 def _make_claim(sdk: TortoiseSDK, content: str,
                 kind: str = "statement") -> dict:
     """Create a non-operator claim Point."""
-    return sdk.create_point(kind, content, dedup=False, status="live")  # #780 default excludes drafts
+    return sdk._create_point(kind, content, dedup=False, status="live")  # #780 default excludes drafts
 
 
 def _make_finding(sdk: TortoiseSDK, content: str) -> dict:
@@ -127,32 +127,32 @@ def build_synthetic_subgraph(sdk: TortoiseSDK) -> dict:
     findings = [f1, f2, f3, f4, f5]
 
     # ── Set baselines (priors) on findings so EP has signal ──
-    sdk.set_point_baseline(f1["id"], 8.0, 2.0)   # strong support
-    sdk.set_point_baseline(f2["id"], 6.0, 3.0)   # moderate
-    sdk.set_point_baseline(f3["id"], 7.0, 2.5)   # moderate-strong
-    sdk.set_point_baseline(f4["id"], 3.0, 5.0)   # weak (anti-evidence)
-    sdk.set_point_baseline(f5["id"], 7.0, 2.0)   # strong
+    sdk._set_point_baseline(f1["id"], 8.0, 2.0)   # strong support
+    sdk._set_point_baseline(f2["id"], 6.0, 3.0)   # moderate
+    sdk._set_point_baseline(f3["id"], 7.0, 2.5)   # moderate-strong
+    sdk._set_point_baseline(f4["id"], 3.0, 5.0)   # weak (anti-evidence)
+    sdk._set_point_baseline(f5["id"], 7.0, 2.0)   # strong
 
     # ── Operators: IMPL (supports) ──
     # Findings → options (via criteria in some cases)
-    op_impl_1 = sdk.create_operator("IMPL", f1["id"], [opt_a["id"]])
-    op_impl_2 = sdk.create_operator("IMPL", f2["id"], [opt_b["id"]])
-    op_impl_3 = sdk.create_operator("IMPL", f3["id"], [opt_c["id"]])
-    op_impl_4 = sdk.create_operator("IMPL", f5["id"], [opt_a["id"]])
+    op_impl_1 = sdk._create_operator("IMPL", f1["id"], [opt_a["id"]])
+    op_impl_2 = sdk._create_operator("IMPL", f2["id"], [opt_b["id"]])
+    op_impl_3 = sdk._create_operator("IMPL", f3["id"], [opt_c["id"]])
+    op_impl_4 = sdk._create_operator("IMPL", f5["id"], [opt_a["id"]])
     # Criteria → options
-    op_impl_5 = sdk.create_operator("IMPL", crit_sec["id"], [opt_a["id"]])
-    op_impl_6 = sdk.create_operator("IMPL", crit_spd["id"], [opt_b["id"]])
-    op_impl_7 = sdk.create_operator("IMPL", crit_cost["id"], [opt_c["id"]])
+    op_impl_5 = sdk._create_operator("IMPL", crit_sec["id"], [opt_a["id"]])
+    op_impl_6 = sdk._create_operator("IMPL", crit_spd["id"], [opt_b["id"]])
+    op_impl_7 = sdk._create_operator("IMPL", crit_cost["id"], [opt_c["id"]])
     # Criteria → findings (chain)
-    op_impl_8 = sdk.create_operator("IMPL", f4["id"], [crit_sec["id"]])
+    op_impl_8 = sdk._create_operator("IMPL", f4["id"], [crit_sec["id"]])
 
     impl_ops = [op_impl_1, op_impl_2, op_impl_3, op_impl_4,
                 op_impl_5, op_impl_6, op_impl_7, op_impl_8]
 
     # ── Operators: NAND (opposes) ──
     # NAND edges always go operator→point
-    op_nand_1 = sdk.create_operator("NAND", f4["id"], [opt_c["id"]])
-    op_nand_2 = sdk.create_operator("NAND", opt_a["id"], [opt_b["id"]])
+    op_nand_1 = sdk._create_operator("NAND", f4["id"], [opt_c["id"]])
+    op_nand_2 = sdk._create_operator("NAND", opt_a["id"], [opt_b["id"]])
 
     nand_ops = [op_nand_1, op_nand_2]
 
@@ -244,7 +244,7 @@ def test_parity_anchors_equals_context():
         # no longer persisted — so parity is validated against the structural
         # ground truth above instead.)
         _random.seed(42)
-        result_new = sdk.compute_confidence(
+        result_new = sdk._compute_confidence(
             anchors=graph["all_point_ids"], max_hops=1, direction="both",
         )
 
@@ -283,10 +283,10 @@ def test_bfs_direction_incoming():
         ctx = "test-incoming"  # noqa: F841
         opt = _make_option(sdk, "Target option")
         finding = _make_finding(sdk, "Supporting finding")
-        sdk.set_point_baseline(finding["id"], 8.0, 2.0)
+        sdk._set_point_baseline(finding["id"], 8.0, 2.0)
 
         # Operator: finding IMPL→option (operator targets option)
-        op = sdk.create_operator("IMPL", finding["id"], [opt["id"]])
+        op = sdk._create_operator("IMPL", finding["id"], [opt["id"]])
         op_id = op["id"]
 
         proj = sdk._get_proj()
@@ -311,9 +311,9 @@ def test_bfs_direction_outgoing_from_operator():
         ctx = "test-outgoing"  # noqa: F841
         opt = _make_option(sdk, "Target option")
         finding = _make_finding(sdk, "Supporting finding")
-        sdk.set_point_baseline(finding["id"], 8.0, 2.0)
+        sdk._set_point_baseline(finding["id"], 8.0, 2.0)
 
-        op = sdk.create_operator("IMPL", finding["id"], [opt["id"]])
+        op = sdk._create_operator("IMPL", finding["id"], [opt["id"]])
         op_id = op["id"]
 
         proj = sdk._get_proj()
@@ -374,7 +374,7 @@ def test_bfs_nand_bidirectional():
         opt_b = _make_option(sdk, "Option B")
 
         # Operator NAND: opt_a NANDs opt_b (operator persists the NAND)
-        op = sdk.create_operator("NAND", opt_a["id"], [opt_b["id"]])
+        op = sdk._create_operator("NAND", opt_a["id"], [opt_b["id"]])
         op_id = op["id"]
 
         proj = sdk._get_proj()
@@ -459,11 +459,11 @@ def test_rel_filter_excludes_nand():
         f_good = _make_finding(sdk, "Good evidence")
         f_bad = _make_finding(sdk, "Bad evidence against")
 
-        sdk.set_point_baseline(f_good["id"], 8.0, 2.0)
-        sdk.set_point_baseline(f_bad["id"], 3.0, 5.0)
+        sdk._set_point_baseline(f_good["id"], 8.0, 2.0)
+        sdk._set_point_baseline(f_bad["id"], 3.0, 5.0)
 
-        impl_op = sdk.create_operator("IMPL", f_good["id"], [opt["id"]])
-        nand_op = sdk.create_operator("NAND", f_bad["id"], [opt["id"]])
+        impl_op = sdk._create_operator("IMPL", f_good["id"], [opt["id"]])
+        nand_op = sdk._create_operator("NAND", f_bad["id"], [opt["id"]])
 
         proj = sdk._get_proj()
 
@@ -509,7 +509,7 @@ def test_max_nodes_cap_warns_and_truncates(caplog):
         op_ids = []
         for i in range(250):
             finding = _make_finding(sdk, f"Finding {i}")
-            op = sdk.create_operator("IMPL", finding["id"], [opt["id"]])
+            op = sdk._create_operator("IMPL", finding["id"], [opt["id"]])
             op_ids.append(op["id"])
 
         proj = sdk._get_proj()
@@ -545,18 +545,18 @@ def test_anchors_precedence_over_context():
         # Build graph in anchors context
         opt = _make_option(sdk, "Option in anchors ctx")
         finding = _make_finding(sdk, "Finding in anchors ctx")
-        sdk.set_point_baseline(finding["id"], 8.0, 2.0)
-        op_good = sdk.create_operator("IMPL", finding["id"], [opt["id"]])  # noqa: F841
+        sdk._set_point_baseline(finding["id"], 8.0, 2.0)
+        op_good = sdk._create_operator("IMPL", finding["id"], [opt["id"]])  # noqa: F841
 
         # Build separate graph in context ctx (should be excluded when anchors used)
         opt_other = _make_option(sdk, "Option in other ctx")
         finding_other = _make_finding(sdk, "Finding in other ctx")
-        sdk.set_point_baseline(finding_other["id"], 1.0, 9.0)  # very weak
-        op_other = sdk.create_operator("IMPL", finding_other["id"], [opt_other["id"]])  # noqa: F841
+        sdk._set_point_baseline(finding_other["id"], 1.0, 9.0)  # very weak
+        op_other = sdk._create_operator("IMPL", finding_other["id"], [opt_other["id"]])  # noqa: F841
 
         # With anchors pointing to the first graph only
         anchor_ids = [opt["id"], finding["id"]]
-        result = sdk.compute_confidence(
+        result = sdk._compute_confidence(
             anchors=anchor_ids,
             max_hops=1,
             direction="both", # should be IGNORED
@@ -579,7 +579,7 @@ def test_empty_anchors_returns_zero():
     """Empty anchors list → no operators → zero iterations."""
     sdk = _fresh_sdk()
     try:
-        result = sdk.compute_confidence(anchors=[], max_hops=1)
+        result = sdk._compute_confidence(anchors=[], max_hops=1)
         assert result["iterations"] == 0
         assert result["converged"] is True
         assert result["confidences"] == {}
@@ -595,7 +595,7 @@ def test_nonexistent_anchors():
     """Non-existent anchor IDs should not crash — just return no operators."""
     sdk = _fresh_sdk()
     try:
-        result = sdk.compute_confidence(
+        result = sdk._compute_confidence(
             anchors=["nonexistent-point-1", "nonexistent-point-2"],
             max_hops=1,
         )
