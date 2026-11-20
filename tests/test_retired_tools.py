@@ -152,8 +152,11 @@ class TestDeclaration:
         # the SDK pin moves DOWN to 94) -> 105 (#11609 P3: the eleven approved names that
         # had no `def` were implemented — the ONE move in this chain that runs UP, because
         # it delivers approved surface instead of removing surplus, and the reason
-        # `high_water_counts.sdk_public_methods` was raised with it).
-        assert len(public) == 105, f"SDK surface changed: {len(public)} != 105"
+        # `high_water_counts.sdk_public_methods` was raised with it) -> 39 (#12901's FINAL
+        # batch, this PR: the remaining 66 off-surface methods privatised in one pass — an
+        # off-surface departure, so the approved 40 does not move and the growth pin follows
+        # the live count DOWN to 39, which is what `config/surface-manifest.yml` states).
+        assert len(public) == 39, f"SDK surface changed: {len(public)} != 39"
 
     def test_retired_sdk_bindings_that_resolve_are_still_public(self):
         from tortoise.sdk import TortoiseSDK

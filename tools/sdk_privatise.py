@@ -116,11 +116,24 @@ SWEEP_RESIDUE = (11782, "0f00153d4691e3de")
 _SDKISH = re.compile(r"(?i)(?:^|_)sdk\d*(?:_|$)")
 
 
+#: The declaration module, read BY PATH. ⛔ Never import it as `tortoise.__all__`: a dotted
+#: import SETS the `__all__` attribute on the `tortoise` package, and from then on
+#: `from tortoise import *` raises `TypeError: 'module' object is not iterable` for the rest of
+#: the process — in a pytest shard that runs this file BEFORE the declaration's own suite, it is
+#: `test_loading_the_declaration_by_path_does_not_shadow_star_import` that reds, and it is right
+#: to red: the pin exists to catch exactly this import shape.
+DECLARATION = ROOT / "tortoise" / "__all__.py"
+
+
 def approved_methods() -> set[str]:
     """The owner-approved set, read from the declaration — never re-typed here."""
-    from tortoise.__all__ import __all__ as approved
+    import importlib.util
 
-    return set(approved) - {"Tortoise"}
+    spec = importlib.util.spec_from_file_location("_sweep_approved_declaration", DECLARATION)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return set(module.__all__) - {"Tortoise"}
 
 
 def _sdk_source(rev: str | None = None) -> str:

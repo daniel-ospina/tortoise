@@ -20,13 +20,15 @@ What each test is for, and why the naive version of it would prove nothing:
   4. **An approved method that does not exist fails, and is NAMED** — the mirror direction,
      with the same non-vacuity pattern. A gate tested in one direction permits the other.
 
-  5. **Today's state is RED, and pinned with the real numbers** (40 approved, 118 live, 96
-     off the surface, 17 approved-but-absent — the split the composition of two disjoint
-     retirement waves moved it to: #12901's five off-surface names, then #4282 Phase 2's
-     lane B (four retired, three delivered) and lane C (seven retired, six delivered)). This is
-     the honest reading of #4282; it goes green when Phase 2 lands, not before — which is why
-     the three live numbers carry an explicit "update this premise" note instead of being
-     restated from the declaration.
+  5. **Today's state is GREEN, and pinned with the real numbers** (40 approved, 39 live, 0
+     off-surface, 0 approved-but-absent — the split the composition of two disjoint retirement
+     waves and #12901's FINAL batch moved it to: #12901's five off-surface names, then #4282
+     Phase 2's lane B (four retired, three delivered) and lane C (seven retired, six
+     delivered), then the batch that privatised the last 66). This is the honest reading of
+     #4282: it went green when the surplus landed, not before — which is why the three live
+     numbers carry an explicit "update this premise" note instead of being restated from the
+     declaration, and why the same test synthesizes one offender per direction to prove the
+     green is not a gate that stopped looking.
   6. **The CONTRACT half is green and is the required-CI invariant** — the declaration is
      still the owner's 40 — and it reds when the declaration is padded or a binding dropped.
   7. **The baseline document is generated, fresh, and says it is not the target.** The gap is
@@ -205,33 +207,29 @@ def test_the_absence_failure_is_NOT_vacuous():
     assert not any(gone in p for p in _problems(live=live))
 
 
-# ── 5. today's state is RED, with the real numbers ──────────────────────────────
+# ── 5. today's state is GREEN, with the real numbers ──────────────────────────
 
 
-def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
-    """#4282's true state: 40 approved, 118 live. Not green, and not vague.
+def test_the_gate_is_GREEN_on_todays_surface_and_still_names_a_synthesized_gap():
+    """#4282's true state at this head: 40 approved, 39 live, 0 off-surface, 0 absent.
 
-    The approved side has not moved: 23 of the 40 exist (22 live methods the
-    declaration names, plus row 1's `Tortoise(...)`, which resolves to the class
-    itself), 17 do not — 23 + 17 = 40, and the 22 live ones are why
-    `118 live − 22 approved-and-live = 96` off-surface. The LIVE side moved
-    150 → 124 on 2026-10-27, when the owner's ruling that the surplus methods nothing calls
-    may be deleted (PR #10187) removed the 26 with no caller under `tortoise/**` — so the
-    off-surface gap falls 138 → 112 — 124 → 125 on 2026-11-14 (#10015), when approved
-    row 28 `get_organisation_account` was IMPLEMENTED, which moves the resolved rows
-    13 → 14 and `absent` 27 → 26 without touching the off-surface 112 (an approved name is
-    not surplus) — 125 → 120 on 2026-11-15 (#12901 wave 1), which retired the first five
-    off-surface methods with NO production caller, so the gap falls 112 → 107 without
-    moving `absent` (a surplus departure is not an approved name) — 120 → 119 by #4282
-    Phase 2's WRITE/MUTATE lane (lane B: four public names retired into its containers,
-    three approved ones delivered, so resolved 14 → 16 and `absent` 26 → 23, gap
-    107 → 103) — and 119 → 118 by the SAME epic's SOURCES/MINE/SESSION lane (this PR:
-    seven advertised names retired into its containers, six approved ones delivered, so
-    resolved 16 → 22, `absent` 23 → 17, gap 103 → 96). Every one of those five literals is
-    MEASURED off the tree at this head (`tools/sdk_surface.py --check` and
-    `tools/sdk_surface_declaration.py`), which is the only place the two halves can be read
-    together. Nothing approved was removed: the 96 are all off-surface surplus, which is why
+    The approved side has not moved: all 39 METHOD rows exist on the class, plus row 1's
+    `Tortoise(...)`, which resolves to the class itself — 39 + 1 = the approved 40. The LIVE
+    side moved 125 → 120 (#12901 wave 1) → 112 (#11609 READ/QUERY, #12951) → 111 (lane B) →
+    110 (lane C) → 94 (#12901 wave 2, the sixteen control-plane doors) → 105 (#11609 P3
+    IMPLEMENTED the eleven approved names that had no `def` — the one move that runs toward
+    the target) → **39** (this PR, #12901's FINAL batch: the remaining 66 off-surface methods
+    privatised in one pass). Every one of those literals is MEASURED off the tree at this head
+    (`tools/sdk_surface_declaration.py show`: `live on TortoiseSDK 39`, `live off-surface 0`,
+    `approved, absent 0`), which is the only place the two halves can be read together.
+    Nothing approved was removed: the 66 departures were all off-surface surplus, which is why
     this premise and the 40 are separate numbers.
+
+    ⛔ IT ALSO STILL NAMES OFFENDERS, and that half is why the literals alone are not enough: a
+    gate that returned `[]` for everything would satisfy every literal below. So the last
+    block synthesizes ONE offender per direction on top of today's real sets and requires the
+    verdict to carry its name — and requires today's sets, through the same call, to name
+    neither.
     """
     declared = _declaration()["__all__"]
     live = _live()
@@ -242,33 +240,38 @@ def test_the_gate_is_RED_on_todays_gap_and_names_every_offender():
 
     # The numbers are LITERALS, not restatements of the same set algebra: `|live − declared|`
     # equals `|live| − |live ∩ declared|` by definition, so asserting that identity would
-    # verify nothing at all. Each literal carries its own premise note —
+    # verify nothing at all. Each literal carries its own premise note.
     assert len(declared) == APPROVED_COUNT, "the approved list was re-cut; that is an owner decision"
-    # 110 -> 94 by #12901 wave 2 (the control-plane partition `N1`–`N6` left the public
-    # surface); the off-surface set falls 82 -> 66 with it. `absent` is unchanged at 11 —
-    # none of the sixteen was an approved row, so no approved name left the class.
-    # MEASURED on this tree, not carried over: the wave branched before #12951's
-    # READ/QUERY containers landed, so its own "118 -> 102 / 96 -> 80 / absent 17" is
-    # that branch's arithmetic. See `tools/sdk_surface_declaration.py show`.
+    # 110 -> 94 by #12901 wave 2; 94 -> 105 and `absent` 11 -> 0 by #11609 P3 (#12901's SDK
+    # leg), which IMPLEMENTED the eleven approved names that had no `def` — implementations are
+    # not surplus, so the off-surface 66 did not move with it. MEASURED on this tree, not
+    # carried over: see `tools/sdk_surface_declaration.py show`.
     #
-    # 94 -> 105 and `absent` 11 -> 0 by #11609 P3 (#12901's SDK leg): the eleven approved
-    # names that had no `def` were IMPLEMENTED, each as a delegation to the implementation
-    # already in the tree. Implementations are not surplus, so the off-surface 66 does not
-    # move: `105 − 39 approved-and-live = 66`. This is the FIRST time the approved side has
-    # been complete, which is why the `absent` literal is now 0 rather than "small".
-    assert len(live) == 105, "the live surface moved — update this premise (it pins today's gap)"
+    # 105 -> 39 by #12901's FINAL batch (this PR): the last 66 off-surface methods were
+    # privatised in one pass, so the surplus set empties rather than moving. `absent` stays 0
+    # (a surplus departure is not an approved name), and the approved 40 does not move.
+    assert len(live) == 39, "the live surface moved — update this premise (it pins today's state)"
 
-    assert len(off_surface) == 66, "the gap moved — update this premise (it pins today's gap)"
-    # ⛔ 0 is the DELIVERABLE of #11609 P3, not an accident: every declared method now
-    # exists on the class. The gate stays RED on the other half (66 off-surface) until
-    # #4282 Phase 2 finishes removing them — so this literal going up again means an
-    # approved name was dropped, and this test is where that is caught.
+    # ⛔ 0 is the DELIVERABLE of this epic, not an accident: the live class is now exactly the
+    # declaration. These two literals going UP again means surplus came back (or an approved
+    # name lost its implementation), and this test is where that is caught.
+    assert len(off_surface) == 0, f"surplus is back on the surface: {off_surface[:5]}"
     assert len(absent) == 0, "an approved name lost its implementation — that is a regression"
-    assert problems, "the gate must be RED while the gap is open"
-    # EVERY offender is named, and nothing else is: the count is the gap, exactly.
-    assert sum(1 for p in problems if "NOT on the approved surface" in p) == len(off_surface)
-    assert sum(1 for p in problems if "does NOT exist on TortoiseSDK" in p) == len(absent)
-    assert len(problems) == len(off_surface) + len(absent)
+    assert problems == [], f"the gate is RED on a surface that IS the declaration: {problems}"
+
+    # The gate still holds a line: one synthesized offender per direction, on today's sets.
+    surplus = "probe_surplus_method"
+    dropped = next(
+        n for n in declared if n != surface.CONSTRUCTOR and surface.resolves(n, live)
+    )
+    doc_names = surface.approved_from_doc()
+    wider = surface.problems(declared, live | {surplus}, doc_names)
+    thinner = surface.problems(declared, live - {dropped}, doc_names)
+    assert any(surplus in p and "NOT on the approved surface" in p for p in wider), wider
+    assert any(dropped in p and "does NOT exist on TortoiseSDK" in p for p in thinner), thinner
+    # … and today's own verdict names neither, so the synthesized arms are not noise.
+    assert not any(surplus in p for p in problems), problems
+    assert not any(dropped in p for p in problems), problems
 
 
 def test_the_declaration_docstring_states_the_measured_split_not_the_delta():
@@ -360,8 +363,13 @@ def test_the_gate_is_NOT_always_red():
     completed = set(doc_names)
 
     assert surface.problems(doc_names, completed, doc_names) == []
-    # ... and the same call on TODAY's live set is red, so the difference is the surface.
-    assert surface.problems(doc_names, _live(), doc_names) != []
+    # ... and TODAY's live set — which the FINAL batch made identical in size and content to
+    # the declared METHOD rows — is green for the same reason, so the difference this test
+    # used to draw from "today is red" is gone. The discriminating half is now SYNTHETIC: one
+    # extra public name on the same set turns the verdict red, so "green here" still means
+    # "the surface matches", not "the gate is off".
+    assert surface.problems(doc_names, _live(), doc_names) == []
+    assert surface.problems(doc_names, _live() | {"probe_surplus_method"}, doc_names) != []
 
 
 # ── 6. the contract half: the required-CI invariant ─────────────────────────────
@@ -392,10 +400,13 @@ def test_a_dropped_approved_method_breaks_the_contract(tmp_path):
     assert any("close" in p and "MISSING from __all__" in p for p in problems), problems
 
 
-def test_contract_mode_ignores_the_gap_but_still_reports_the_contract():
-    """The required job is green on the contract WHILE the gap is open — and says so."""
+def test_contract_mode_ignores_the_gap_and_the_full_check_agrees_today():
+    """The required job is green on the contract — and, since the FINAL batch closed the gap,
+    so is the full check. The gap half is still LIVE, not deleted: one synthesized surplus name
+    reds it, so a green full check here cannot be a check that stopped looking."""
     assert surface.check(contract_only=True) == []
-    assert surface.check() != []
+    assert surface.check() == []
+    assert surface.check(live=_live() | {"probe_surplus_method"}) != []
 
 
 # ── the CLI, on the real evidence ────────────────────────────────────────────────
@@ -407,12 +418,25 @@ def _run(*args: str) -> subprocess.CompletedProcess:
     )
 
 
-def test_the_cli_full_check_is_RED_today_and_names_the_gap():
+def test_the_cli_full_check_is_GREEN_today_and_still_reds_on_a_padded_declaration(tmp_path):
+    """The CLI's full check is GREEN over today's tree — the first head at which that is true
+    — and it is still a CHECK: the same command over a padded declaration exits 1 and says
+    FAIL, so green here is a verdict about the surface and not a disabled gate."""
     result = _run("check")
 
-    assert result.returncode == 1, result.stdout + result.stderr
-    assert "FAIL" in result.stdout
-    assert "NOT on the approved surface" in result.stdout
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "OK" in result.stdout
+    assert "NOT on the approved surface" not in result.stdout
+
+    text = DECLARATION.read_text(encoding="utf-8")
+    padded = tmp_path / "__all__.py"
+    padded.write_text(
+        text.replace('    "close",\n', '    "close",\n    "probe_surplus_method",\n', 1),
+        encoding="utf-8")
+    red = _run("check", "--declaration", str(padded))
+
+    assert red.returncode == 1, red.stdout + red.stderr
+    assert "FAIL" in red.stdout
 
 
 def test_the_cli_contract_mode_is_green_and_prints_the_gap():

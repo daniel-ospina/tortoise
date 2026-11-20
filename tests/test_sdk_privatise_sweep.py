@@ -105,6 +105,29 @@ def test_the_pinned_base_still_derives_the_whole_batch():
     assert len({e.private for e in entries}) == len(entries), "two names share a private spelling"
 
 
+def test_reading_the_approved_set_does_not_shadow_the_package_star_import():
+    """⛔ THE IMPORT-SHAPE ARM: the declaration is read BY PATH, never as `tortoise.__all__`.
+
+    A dotted import sets the `__all__` ATTRIBUTE on the `tortoise` package, and from then on
+    `from tortoise import *` raises `TypeError: 'module' object is not iterable` for the rest of
+    the process. MEASURED, not asserted from memory: with the dotted import restored, the three
+    files in this family in one pytest process give
+    `test_loading_the_declaration_by_path_does_not_shadow_star_import` RED whenever THIS file is
+    collected first (`1 failed, 48 passed`) and green when it is not — an order-dependent red
+    that lives in the process's module state, so the arm belongs beside the reader that caused
+    it. It is deliberately a SEPARATE arm, not a tail on the pinned-base arm above: that one
+    SKIPS on a shallow checkout, and an assertion parked there would skip with it.
+    """
+    import tortoise
+
+    assert "__all__" not in vars(tortoise), "the package already carries a shadowing attribute"
+    approved = privatise.approved_methods()
+    assert approved, "the reader returned nothing, so this proves nothing"
+    assert "__all__" not in vars(tortoise), (
+        "reading the declaration left `__all__` on the `tortoise` package — a dotted import is "
+        "back, and `from tortoise import *` now raises TypeError for the rest of the process")
+
+
 def test_check_refuses_a_base_whose_map_is_empty(monkeypatch, capsys):
     """⛔ THE F3 REGRESSION ARM: an empty map is a RED (exit 2), never a passing zero.
 
