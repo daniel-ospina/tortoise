@@ -1212,6 +1212,94 @@ def test_the_unconfirmed_intent_is_on_disk_BEFORE_the_call(
     assert any(marker in f for f in failed), failed
 
 
+def test_a_node_is_matched_by_its_LABEL_and_its_declared_property(map_doc):
+    """An Event row cannot stand in for a declared POINT.
+
+    An Event is written with `name` AND `props.content`; harvesting every
+    non-empty column (and ignoring the label) let that row satisfy a declared
+    Point whose content it restates — the Point was certified present without
+    ever being written, and a correct graph produced a phantom duplicate.
+
+    ⛔ This pin entered at `b53f66001e` and was SILENTLY DROPPED by the two-lane
+    merge `32767afd39`, which is why the net PR diff never carried it (#13913
+    review round 9). Restored here.
+
+    Mutant: match on any non-empty column of any row — `verdict` returns 0 here.
+    """
+    point = map_doc["points"][0]
+    # The graph holds the Event (name + content), and NOT the Point, but the
+    # Event's content column carries the Point's content.
+    rows = [["Event", "a different event entirely", "", point["content"]]]
+    assert filer.presence(map_doc, rows, [], [])[0] != []
+    assert filer.verdict(map_doc, rows, [], []) == 1
+    # And the same row does not double-count as a duplicate of anything.
+    full = _node_rows(map_doc)
+    assert filer.duplicates(map_doc, full) == []
+    extra_row = ["Event", "a different event entirely", "", point["content"]]
+    assert filer.duplicates(map_doc, [*full, extra_row]) == []
+
+
+def test_no_save_persists_an_intent_without_its_unconfirmed_flag(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """NO reader may ever see the marker without its `unconfirmed` flag.
+
+    `write_once` used to `mark()` (which saves) and update `unconfirmed` in a
+    SECOND save, so the disk held `written` = +marker / `unconfirmed` = [] for the
+    width of one save — a window a resume reads as a COMPLETED write, skipping a
+    non-idempotent operator forever (#13913 review round 9, measured by killing
+    inside that save). Both fields are persisted together, once.
+
+    Mutant: `mark(marker)` before `pending.add(marker)` + the combined save.
+    """
+    state = tmp_path / "state.json"
+    snapshots: list[tuple[list, list]] = []
+    real_save = filer.save_state
+    first_operator_seen = {"at": None}
+    counter = {"n": 0}
+
+    class _Snapshotted(_StubMcp):
+        def __init__(self, *_a, **_k) -> None:
+            self._n = 0
+            self._inner = _RealMcp("not-a-real-key")
+
+            def _post(body: dict):
+                tool = (body.get("params") or {}).get("name")
+                if tool == "tortoise_create_operator" and first_operator_seen["at"] is None:
+                    first_operator_seen["at"] = len(snapshots)
+                self._n += 1
+                return (200, {"jsonrpc": "2.0", "id": body.get("id"), "result": {
+                    "structuredContent": {"id": f"{tool}:{self._n}"}}}, {})
+
+            self._inner._post = _post
+
+        def call(self, tool: str, args: dict, **kw) -> dict:
+            return self._inner.call(tool, args, **kw)
+
+    def _save(st: dict) -> None:
+        counter["n"] += 1
+        snapshots.append((sorted(st.get("written") or []),
+                          sorted(st.get("unconfirmed") or [])))
+        return real_save(st)
+
+    monkeypatch.setattr(filer, "save_state", _save)
+    monkeypatch.setattr(filer, "STATE_PATH", state)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _Snapshotted)
+    assert filer.write_map(map_doc) == 0
+    capsys.readouterr()
+
+    at = first_operator_seen["at"]
+    assert at is not None and at > 0, "no operator call observed"
+    # Only OPERATOR markers are non-idempotent intents; a structural edge is
+    # idempotent and is marked after its call.
+    op_markers = {filer.edge_marker(e) for e in map_doc["edges"] if "op" in e}
+    for written, unconfirmed in snapshots[:at]:
+        intents = [m for m in written if m in op_markers]
+        assert set(intents) <= set(unconfirmed), (
+            "a snapshot persisted an operator marker with no unconfirmed flag — "
+            "a resume in that window would call it a completed write")
+
+
 def test_the_direction_expectation_is_the_DOOR_s_OWN_resolution(map_doc):
     """`direction_of` is the writer's resolver, not a partial restatement.
 
@@ -1684,3 +1772,82 @@ def test_the_bare_invocation_is_not_success(monkeypatch):
     """A runbook passing the mode through an empty variable must not read 0."""
     monkeypatch.setattr(filer.sys, "argv", ["file_map.py"])
     assert filer.main() == 2
+
+
+def test_a_WIDE_or_REVERSED_operator_over_a_declared_pair_is_a_duplicate(map_doc):
+    """A duplicate is a second operator PRICING a declared pair — whatever shape.
+
+    Measured pre-fix (#13913 review round 9): an extra `A -> [B, C]` operator over
+    a declared `A -> B`, and an extra REVERSED `B -> A`, both read `101/101`,
+    `dup_ops=[]`, exit 0 — while `EP._priced_pairs` charges `(A, B)` twice, the
+    #10849 harm this census exists to catch.
+
+    Mutant: count holders only when the slots are exactly `{0: one, 1: one}` and
+    in declared order — both cases vanish.
+    """
+    by_source: dict[tuple, list[dict]] = {}
+    for e in map_doc["edges"]:
+        if "op" in e:
+            by_source.setdefault((e["from"], e["op"], e.get("direction")), []).append(e)
+    pair = next(edges for edges in by_source.values() if len(edges) >= 2)
+    first, second = pair[0], pair[1]
+    # A declared pair that some OTHER operator also happens to price.
+    declared = next(e for e in map_doc["edges"]
+                    if "op" in e and e["from"] != first["from"])
+    idents = filer.identity_by_ref(map_doc)
+    src, dst = idents[declared["from"]], idents[declared["to"]]
+    edge_rows, op_rows = _edge_rows(map_doc)
+
+    wide = [*op_rows,
+            ["opWIDE", declared["op"], 0, filer.direction_of(declared), *_row_of(src)],
+            ["opWIDE", declared["op"], 1, filer.direction_of(declared), *_row_of(dst)],
+            ["opWIDE", declared["op"], 1, filer.direction_of(declared), *_row_of(idents[second["to"]])]]
+    assert filer.duplicate_operators(map_doc, wide), "a wide operator priced the pair twice"
+    assert filer.verdict(map_doc, _node_rows(map_doc), edge_rows, wide) == 1
+
+    reversed_op = [*op_rows,
+                   ["opREV", declared["op"], 0, filer.direction_of(declared), *_row_of(dst)],
+                   ["opREV", declared["op"], 1, filer.direction_of(declared), *_row_of(src)]]
+    assert filer.duplicate_operators(map_doc, reversed_op), "a reversed operator was invisible"
+
+
+def test_an_UNCLASSIFIED_exception_never_retires_the_intent(tmp_path, monkeypatch, map_doc, capsys):
+    """The default arm is UNKNOWN, not a refusal.
+
+    Only a `Refusal` — a door that answered no — may un-record a non-idempotent
+    intent. An exception nobody classified may have arrived after the server
+    acted, and re-issuing that write is the one unrecoverable error here
+    (#13913 review round 9).
+
+    Mutant: `except Exception:` on the refusal arm — the marker is retired and
+    the resume re-issues the operator.
+    """
+    state = tmp_path / "state.json"
+
+    class _Weird(_StubMcp):
+        def __init__(self, *_a, **_k) -> None:
+            self._n = 0
+            self._inner = _RealMcp("not-a-real-key")
+
+            def _post(body: dict):
+                tool = (body.get("params") or {}).get("name")
+                if tool == "tortoise_create_operator":
+                    raise ZeroDivisionError("an exception nobody classified")
+                self._n += 1
+                return (200, {"jsonrpc": "2.0", "id": body.get("id"), "result": {
+                    "structuredContent": {"id": f"{tool}:{self._n}"}}}, {})
+
+            self._inner._post = _post
+
+        def call(self, tool: str, args: dict, **kw) -> dict:
+            return self._inner.call(tool, args, **kw)
+
+    monkeypatch.setattr(filer, "STATE_PATH", state)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _Weird)
+    assert filer.write_map(map_doc) == 1
+    capsys.readouterr()
+
+    recorded = json.loads(state.read_text())
+    ops = {filer.edge_marker(e) for e in map_doc["edges"] if "op" in e}
+    assert ops & set(recorded["written"]), "the intent was retired by an unknown error"
