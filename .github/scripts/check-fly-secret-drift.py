@@ -1539,7 +1539,7 @@ def main() -> int:
     print(
         f"OK: all {len(fly_names)} Fly secret(s) are declared "
         f"({len(managed)} managed, {len(fly_conditional)} conditionally propagated, "
-        f"{len(fly_only)} decision-backed fly-only, {len(ledger)} deliberately absent)"
+        f"{len(fly_only)} fly-only, {len(ledger)} deliberately absent)"
     )
     return 0
 

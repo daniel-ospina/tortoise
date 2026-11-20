@@ -3147,7 +3147,13 @@ def test_fly_only_declaration_is_accepted_for_a_live_unassigned_secret():
         manifest=_fly_only_manifest("manifest-fly-only.txt", _FLY_ONLY_LINE),
     )
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "1 decision-backed fly-only" in r.stdout, r.stdout
+    # ⛔ NOT "decision-backed": the shipped manifest declares one `fly-only:` member
+    # whose ruling does NOT exist yet (`#13674`, a declared gap), so a summary that
+    # counts every `fly-only:` name as decision-backed prints a false statement on
+    # a GREEN run — the one line an operator reads to learn the gate passed. The
+    # checker is SHAPE ONLY and hermetic by design (it never reads an issue), so it
+    # must not claim the decision half at all (#13814 review round 8, P2).
+    assert "1 fly-only" in r.stdout, r.stdout
 
 
 def test_fly_only_accepts_a_qualified_owner_repo_ref():
@@ -3647,7 +3653,10 @@ def test_the_reserved_member_paragraph_names_every_fly_only_member():
       whose status nobody declared);
     * each paragraph's spelled count equals its own set, so a declared gap that is
       silently promoted, or a member silently dropped, reds on the artifact
-      disagreeing with itself.
+      disagreeing with itself;
+    * no entry BORROWS another member's ref — a fourth entry spelled
+      `NEW_LEVER fly-only:#13209` adds a `fly-only:` declaration whose ruling lives
+      on someone else's issue, which the REF partition above cannot see.
 
     Every ref and both counts are derived FROM the manifest — never a list in the
     test. Measured reds: against the pre-#13674 manifest it reds on the missing
@@ -3706,6 +3715,35 @@ def test_the_reserved_member_paragraph_names_every_fly_only_member():
         "rulings exist — which is the whole content of the token. Declare the "
         f"ruling (a reviewer reads it) or the gap: {undeclared}\n"
         f"--- reserved ---\n{reserved}\n--- gap ---\n{gap}"
+    )
+
+    # (2b) ONE ENTRY PER REF. (2)'s partition is over REFS, so an entry that
+    #      BORROWS another member's ref satisfies it: `NEW_LEVER fly-only:#13209`
+    #      puts a RULED ref in the set without adding a ruling, and every other
+    #      prose guard here stays green — measured (#13814 review round 8) by
+    #      adding exactly that entry with the entry-point count bumped to FOUR and
+    #      the name mentioned in the runbook: 5 tests passed. The promises above
+    #      and in the manifest ("a fourth `fly-only:` entry that is neither ruled
+    #      nor declared a gap REDS") then hold for the REF list while a fourth
+    #      ENTRY is ruled by nobody. The reservation is per ENTRY — "each with its
+    #      OWN recorded ruling" — so a shared ref is a BORROWED ruling, not a
+    #      second one.
+    entries = [
+        (name, source.split(":", 1)[1])
+        for name, source in sources.items()
+        if source.startswith("fly-only:")
+    ]
+    ref_counts: dict[str, int] = {}
+    for _name, ref in entries:
+        ref_counts[ref] = ref_counts.get(ref, 0) + 1
+    borrowed = sorted(f"{name} -> {ref}" for name, ref in entries if ref_counts[ref] > 1)
+    assert not borrowed, (
+        "two or more `fly-only:` ENTRIES share one decision ref, so at most one of "
+        "them can be backed by that ruling and the other is riding on it. The "
+        "partition above counts REFS and cannot see this, so a borrowed ref keeps "
+        "every other guard here green while the artifact still reads as if each "
+        "entry had its own ruling. Give each entry its OWN ref: "
+        f"{borrowed}\n--- reserved ---\n{reserved}\n--- gap ---\n{gap}"
     )
 
     number_words = {"ONE": 1, "TWO": 2, "THREE": 3, "FOUR": 4, "FIVE": 5, "SIX": 6}

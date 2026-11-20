@@ -4449,7 +4449,12 @@ revert broke something", and do not "unset now, file the revert change later" �
 and it reads like a regression. (The other end-state is the version-controlled route, `fly-toml-env`,
 and it is only reachable once the secret is **gone**: a Fly secret SHADOWS a `fly.toml [env]` value of
 the same name, so the versioned value would be dead until the secret is unset — fly.io's `[env]`
-reference states the precedence explicitly.)
+reference states the precedence explicitly. ⚠️ And that route's ORDER is not interchangeable with
+this one: put the `fly.toml [env]` value on the machine **before** the unset, never unset-first —
+the manifest's route (b) works the four steps in that order for a measured reason (#4568: a
+value absent from the MERGED `fly.toml` is removed by the next deploy, and an unset-first window
+leaves the name absent for hours). See `.github/scripts/fly-managed-secrets.txt` "ORDER MATTERS"
+and the "WHY THE MERGED COMMIT" note beneath it.)
 
 That is fail-closed and intended: the exception exists for a REAL out-of-band secret, so its removal
 is a visible revert rather than a silent staleness.
