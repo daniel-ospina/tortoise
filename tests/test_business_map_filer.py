@@ -2045,14 +2045,20 @@ def test_a_resume_does_NOT_erase_a_failure_it_did_not_re_observe(
         "the resume erased a diagnosis it did not re-observe")
 
 
-def test_a_legitimate_IMPL_and_NAND_pair_is_not_a_duplicate(map_doc):
-    """Two declared mechanisms over ONE endpoint pair are not a duplicate.
+def test_two_mechanisms_over_one_pair_are_not_a_duplicate(map_doc):
+    """The census counts DECLARED holders, so a pair's baseline is arithmetic.
 
     The census compares holders against the number of operator edges the map
-    DECLARES over that pair, so a future map that states support AND a refutation
-    over one pair is legitimate — and a naive `> 0` census would false-refuse it
-    (#13913 review round 10: the real map declares no such pair, so that branch
-    was untested against the artifact it protects).
+    DECLARES over that pair, and a naive `> 0` would false-refuse a pair the map
+    declares twice (#13913 review round 10: the real map declares no such pair,
+    so that branch was untested against the artifact it protects).
+
+    ⛔ THIS IS A CENSUS PROPERTY, NOT A FILING A USER MAY MAKE: the door REFUSES a
+    pair that already carries another mechanism (#12067, `sdk.py`
+    `_mechanism_pair_conflicts`), so a two-mechanism pair cannot be written at
+    all. The arithmetic still has to be right — the census must not report a
+    duplicate on a document it is merely asked to count — but nothing here says
+    such a pair is filable (#13913 review round 12).
 
     Mutant: `if len(ids) > 0` — this fixture is refused.
     """
@@ -2174,3 +2180,111 @@ def test_an_AMBIGUOUS_event_is_told_to_supply_the_ID_not_to_re_file(
     assert "no line of its own; its edges do" in err, err
     assert "drop its marker from state.json" not in err, (
         "the remedy still says to drop the marker, which re-files a non-idempotent write")
+
+
+def test_a_MECHANISM_MISMATCH_is_on_disk_the_moment_it_is_observed(
+        tmp_path, monkeypatch, map_doc, capsys):
+    """A diagnosis must not wait for the end of the run.
+
+    `failures` is a local list and `st["failed"]` was assigned once, after the
+    edge loop — so a run KILLED between the mismatch and that final save left
+    `failed: []`. The resume re-observes nothing (its marker is already recorded),
+    prints `all nodes and edges written` and exits 0 over an operator filed with
+    the INVERTED mechanism, and `--verify` cannot see it (this module's own
+    stated limitation: the surface stores no Layer-2 `label`). Measured: kill at
+    the 3rd structural edge → on-disk `failed == []`, resume rc 0.
+
+    Mutant: assign `st["failed"]` only at the end of the run — this reds.
+    """
+    state_path = tmp_path / "state.json"
+
+    class _MismatchThenKill(_StubMcp):
+        seen = 0
+        operators = 0
+
+        def call(self, tool: str, args: dict, **_kw) -> dict:
+            if tool == "tortoise_create_operator":
+                type(self).operators += 1
+                # `_json_of` prefers `structuredContent`, so the warning rides
+                # THERE — the same place the surface puts it.
+                return {"structuredContent": {
+                    "id": f"op{type(self).seen}",
+                    "warnings": [{"code": "mechanism_mismatch",
+                                  "message": "IMPL carrying a refutes meaning"}]}}
+            if tool == "tortoise_create_edge":
+                type(self).seen += 1
+                # ⛔ KILLED AFTER the mismatch was observed — on the FIRST
+                # structural edge that follows an operator write. The edges loop
+                # is doc-ordered, so a fixed count can land before the first
+                # operator and make this test vacuous (measured).
+                if type(self).operators:
+                    raise KeyboardInterrupt("the harness killed the lane here")
+            return super().call(tool, args, **_kw)
+
+    monkeypatch.setattr(filer, "STATE_PATH", state_path)
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _MismatchThenKill)
+
+    with pytest.raises(KeyboardInterrupt):
+        filer.write_map(map_doc)
+    capsys.readouterr()
+
+    on_disk = json.loads(state_path.read_text())
+    assert [f for f in on_disk["failed"] if "mechanism_mismatch" in f], (
+        "the mismatch was lost because the run died before the final save: "
+        f"{on_disk['failed']}")
+
+
+def test_an_operator_over_an_UNDECLARED_extra_endpoint_certifies_nothing(map_doc):
+    """The per-slot ARITY leg is load-bearing only against an undeclared extra.
+
+    An operator over three endpoints certifies a declared pair only if each slot
+    holds exactly one endpoint. The fixture-based rows miss it when the extra
+    endpoint belongs to ANOTHER DECLARED edge: that edge reds on its own, so the
+    arity leg is never the deciding one (#13913 review round 12).
+
+    Mutant: `and all(slot in (0, 1) for slot in slots)` without the `len(...) == 1`
+    legs — a wide operator over one declared and one UNDECLARED endpoint then
+    reads `101/101`, verdict 0.
+    """
+    declared = next(e for e in map_doc["edges"] if "op" in e)
+    idents = filer.identity_by_ref(map_doc)
+
+    # A graph holding A -> [B, C] where only A -> B is declared, and C is an
+    # identity no declared edge names. The shipped map wires every node, so the
+    # stranger is built rather than looked up.
+    stranger = ("Point", "content", "a point no declared edge names")
+    assert stranger not in set(idents.values())
+    # ⛔ THE WIDE OPERATOR MUST BE THE ONLY HOLDER OF THE PAIR: keeping the
+    # declared edge's own operator rows would certify it regardless, and the
+    # arity leg would never be the deciding one (#13913 review round 12).
+    a, b = idents[declared["from"]], idents[declared["to"]]
+    wide_only = [
+        ["opW", declared["op"], 0, filer.direction_of(declared), *_row_of(a)],
+        ["opW", declared["op"], 1, filer.direction_of(declared), *_row_of(b)],
+        ["opW", declared["op"], 1, filer.direction_of(declared), *_row_of(stranger)],
+    ]
+    _missing_nodes, missing_edges = filer.presence(
+        map_doc, _node_rows(map_doc), [], wide_only)
+    assert (declared.get("op"), declared["from"], declared["to"]) in missing_edges, (
+        "an operator with a SECOND, UNDECLARED target certified the declared edge")
+
+
+def test_a_two_mechanism_pair_is_not_a_duplicate_edge(map_doc):
+    """`edge_key` keeps the MECHANISM: IMPL and NAND over one pair are two edges.
+
+    Without the mechanism leg the duplicate-judgement arm refuses the pair as
+    "the same edge … judged twice", turning the map's own contradiction (a NAND
+    against a claim, alongside the IMPL it bears on) into a validation failure
+    (#13913 review round 12).
+
+    Mutant: `edge_key` → `f"{from}->{to}"` — `validate()` then reports
+    "the same edge".
+    """
+    a = next(e for e in map_doc["edges"] if "op" in e)
+    b = {k: v for k, v in a.items() if k not in ("label", "direction")}
+    b["op"] = "NAND" if a["op"] != "NAND" else "IMPL"
+    doc = dict(map_doc, edges=[*map_doc["edges"], b])
+    assert filer.edge_key(a) != filer.edge_key(b)
+    assert not [e for e in filer.validate(doc) if "judged twice" in e], (
+        "a legitimate two-mechanism pair was refused as one edge judged twice")

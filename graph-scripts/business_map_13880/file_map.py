@@ -979,6 +979,19 @@ def write_map(doc: dict) -> int:
                     # stored is not the one the meaning declares, so the
                     # judgement is filed INVERTED and only a re-filing fixes it.
                     failures.append(f"{marker}: {mismatch}")
+                    # ⛔ PERSISTED AS IT IS OBSERVED, not at the end of the run.
+                    # `failures` is a LOCAL list: `mark()`/`write_once()` save
+                    # `st` while `st["failed"]` still holds the value loaded from
+                    # disk, so a run KILLED between this arm and the final save
+                    # left `failed: []` — and the resume, which re-observes
+                    # nothing, then printed `all nodes and edges written` with
+                    # exit 0 over an operator filed with the INVERTED mechanism
+                    # and no other record of it. `--verify` cannot see it (this
+                    # module's own stated limitation: the surface stores no
+                    # Layer-2 `label`) (#13913 review round 12).
+                    st["failed"] = sorted({*(st.get("failed") or []),
+                                           *failures})
+                    save_state(st)
             else:
                 mcp.call("tortoise_create_edge",
                          {"source_id": src, "target_id": dst,
