@@ -6812,7 +6812,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # the four suites GREEN. Measured with it, per statement (cycle 5): the two claims the
     # first cut covered red, and the OTHER TWO — the `grep` output and the mid clause — stayed
     # green at 458 passed, so a half-done move was still reachable. All FOUR are asserted here
-    # because D5 is one markdown LINE carrying 265 cite-shaped `:N` tokens (the `~50` these
+    # because D5 is one markdown LINE carrying 269 cite-shaped `:N` tokens (the `~50` these
     # comments used to say was about five times low, `265/50 ≈ 5.3`, not a tenfold one —
     # #13900 review, finding 5): a row cannot separate two
     # statements on one line, and an arm that covers half of them reports a guarantee it does
@@ -6835,28 +6835,28 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
 
     # ⛔ THE SAME TREATMENT FOR THE CONTENT-REVIEW FILTER (#13589 review, P3). The pin row
     # added for this clause scopes to the phrase `the content-review queue filter that cite
-    # named`, which is DISCRIMINATING (`:28178` is the file's only `dedup_reviewed IS NULL`),
+    # named`, which is DISCRIMINATING (`:28395` is the file's only `dedup_reviewed IS NULL`),
     # but a `_pin_row_failures` row only asks whether the number appears SOMEWHERE on the
-    # scoped line — and D5 IS ONE LINE carrying `:28178` six times, so a row satisfied by any
+    # scoped line — and D5 IS ONE LINE carrying `:28395` seven times, so a row satisfied by any
     # of them cannot tell the clause being re-pointed from another occurrence staying put.
     # ⛔ `:28067` is NOT the live cite here, and an earlier cut of this comment called it the
     # file's only `dedup_reviewed IS NULL` (#13746 review, P2). Measured at this head:
-    # `grep -n 'dedup_reviewed IS NULL' tortoise/sdk.py` -> `28178` (the only hit), while
-    # `sed -n '28067p'` -> `# Tier 1: hash vs existing decisions (pointKind-scoped, N11).`
-    # `:28067` is a MIDDLE waypoint of D5's own re-point chain, and it takes THREE commits, not
+    # `grep -n 'dedup_reviewed IS NULL' tortoise/sdk.py` -> `28395` (the only hit), while
+    # `sed -n '28067p'` -> a docstring line of `entity_identity.resolve_entity_id`.
+    # `:28067` is a MIDDLE waypoint of D5's own re-point chain, and it takes FOUR commits, not
     # two: `:28019` -> `:28067` (main's `#13551`), `:28067` -> `:28142` (`#13755`), `:28142` ->
-    # `:28178` (main's `#13724`) — each hop measured on `docs/00_index.md`'s `#12296` row
+    # `:28178` (main's `#13724`), `:28178` -> `:28395` (`#13854`) — each hop measured on
+    # `docs/00_index.md`'s `#12296` row
     # (`git show <sha> -- docs/00_index.md | grep -E '^[+-][^+-]' | grep -oE 'sdk.py:[0-9]+'`
     # prints exactly those pairs). An earlier cut of this comment collapsed the middle hop and
     # credited `:28067` -> `:28178` to `#13724`, which never touched `:28067` — the same class
     # of defect as the premise it replaced, one layer down (`#13746` re-review, P1). So D5 still
-    # prints `:28067` four times and it is still not what the clause says. The live value — and
-    # the one the pin row above asserts — is `:28178`. (`:28141`/`:28142` are the `def` and signature lines, which is a
+    # prints `:28067` six times and it is still not what the clause says. The live value — and
+    # the one the pin row above asserts — is `:28395`. (`:28141`/`:28142` are the `def` and signature lines, which is a
     # different statement again; this comment used to conflate all three.)
-    # MEASURED (#13589 review): deleting the clause's own "sits at `sdk.py:28178`" left the
-    # row GREEN. The sentence is therefore read WHOLE, with its number DERIVED from the
-    # source, so both halves are graded: a source move the document did not follow reds, and
-    # a document re-point the source did not make reds.
+    # MEASURED (#13589 review, at that head — the clause reads `sdk.py:28395` here): deleting
+    # the clause's own "sits at `sdk.py:28178`" left the row GREEN. The sentence is therefore
+    # read WHOLE, with its number DERIVED from the source, so both halves are graded: a source move the document did not follow reds, and a document re-point the source did not make reds.
     _dedup_filter_lines = [
         _n for _n, _ln in enumerate(sources["sdk"], 1)
         if "dedup_reviewed IS NULL" in _ln]
@@ -16492,7 +16492,7 @@ def test_every_bundle_table_row_carries_its_headers_cell_count():
 
 
 def test_the_D5_row_is_still_one_table_row():
-    """D5 is the row this bundle re-derives 265 cite-shaped tokens on at this head, and it is
+    """D5 is the row this bundle re-derives 269 cite-shaped tokens on at this head, and it is
     ONE line. ⛔ THAT FIGURE IS A READING, NOT A PIN, AND IT IS NOW READ: the arm below derives
     the line's own count and compares it with every `<n> cite-shaped` sentence in this file, so
     any commit moving the line off `265` reds instead of leaving four comments behind (a
@@ -16706,7 +16706,7 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #: D5's PRESENT-TENSE anchors, each bound to the line of the tree it names. ⛔ The clause
 #: below had NO reader before this pin, which is why it rotted while the suite was green
 #: (#13602 review, finding 1): a `_pin_row_failures` row asserts the number appears
-#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 265 cite-shaped tokens at
+#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 269 cite-shaped tokens at
 #: this head, so any
 #: occurrence satisfied every row — including the historical ones — and a number asserted
 #: as CURRENT could name prose, a comment or an unrelated statement indefinitely. These
@@ -16739,7 +16739,7 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     ),
     # ⛔ THE QUOTA GUARD, BOUND TO ITS OWN SENTENCE (#13845 review, finding 1, P1). The
     # `_pin_row_failures` row for this line was satisfied by ANY `:N` on it, and the D5 row
-    # carries 265 cite-shaped `:N` tokens at this head (re-derived from the row this branch
+    # carries 269 cite-shaped `:N` tokens at this head (re-derived from the row this branch
     # ships, at the merge that brought `origin/main` in; measured here with
     # `len(re.findall(r":\d{2,}", <the `| **D5**` line>)` — the `~50` this comment used to
     # say was about five times low (`265/50 ≈ 5.3`), which is the same rot one layer up) — so `:20329`
