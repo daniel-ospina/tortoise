@@ -91,9 +91,25 @@ composition `docs/product/canonical-mcp-tools.md` states at 27.
 | `link_entities` | `tortoise_create_edge` + `tortoise_create_operator` — capability present, SPLIT in two | `#13036` (consolidate) |
 | `delete_knowledge` | `tortoise_delete` — the name difference is the RULING: owner 2026-10-25 (#9660), *"the absorbed names stay retired-forward entries, not new siblings"*, canonical row 18 executed by keeping the single entry | none — **by ruling, not a gap** |
 
-**Extra — 17 live names are off the approved list**, and every one is a *held* door
-whose recorded reason is that its destination is not live yet
-(`tortoise/tool_registry.py` → `NO_CONTAINER_YET`, the held block):
+**Extra — 17 live names are off the approved list**, and every one is a *held* door whose
+recorded reason is a **checked population**, not prose: `tests/test_11609_door_retirement.py`
+holds the two tables and asserts `len(PROTECTED) + len(NO_CONTAINER_YET) == 17`, so a live
+door dropped from either table reds there instead of surviving as a comment.
+(`config/surface-manifest.yml`'s registry block quotes the same composition; it is not the
+definition — the tables are.)
+
+* **`NO_CONTAINER_YET` — 7**, whose destination is not live on `main` yet: `delete`
+  (`delete_knowledge`, executed by *keeping* `tortoise_delete` — the #9660 ruling),
+  `create_edge` / `create_operator` (`link_entities`), `events_poll` (`poll_events`),
+  `ingest` (`write_knowledge_batch`), `list_graphs` (inside `overview`), `org_create`
+  (account tenancy is not on the MCP — settled 2026-09-22).
+* **`PROTECTED` — 10**, retained by a property this file READS BACK out of the code rather
+  than by a missing destination: eight keep their `-> list[dict]` envelope (`search_sessions`,
+  `suggest_entry_points`, `list_batches`, `list_namespaces`, `diary_read`,
+  `expand_relationships`, `check_structure`, `calibrate_summary` — the #8482 repair), `search`
+  is held by that same envelope (`GET /v1/search` is a hand-written route its row does not
+  create, so the row's `rest_spec` cell is a RECORD, not a retention reason), and `query` is
+  the paged destination of two already-retired pointers.
 
 `calibrate_summary` · `check_structure` · `create_edge` · `create_operator` ·
 `delete` · `diary_read` · `events_poll` · `expand_relationships` · `ingest` ·
@@ -101,9 +117,11 @@ whose recorded reason is that its destination is not live yet
 `search` · `search_sessions` · `suggest_entry_points`
 
 23 approved-and-live + 17 off-target = 40. Reaching 27 is therefore
-`40 − 17 + 4 = 27`, and **every one of the 17 is blocked on a destination arm that
-does not exist yet** (e.g. `tortoise_search` is held by its `list[dict]` envelope and
-can only retire once `tortoise_search_knowledge` answers that shape).
+`40 − 17 + 4 = 27`. **Seven of the 17 are blocked on a destination arm that does not exist
+yet** (e.g. `tortoise_ingest` waits for `write_knowledge_batch`); the other **ten** are
+retained by a recorded property — a `-> list[dict]` envelope, or a paged destination — not
+by a missing destination, so a lane that retires one has to remove the property that holds
+it, not wait for a container.
 
 > ⚠️ **The `40` is not the `+13` the tool prints.** `surface-target-check.py` compares
 > counts, so a name MISSING and a name EXTRA offset each other: the true gap is
