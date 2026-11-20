@@ -814,14 +814,24 @@ def _cmd_record_reconcile(args):
     as "your cron line is malformed": it means only *no verdict was produced*.
     ``0`` and ``3`` are the answers this verb promises.
 
-    ⛔ **``--cache-graph`` is REQUIRED, with no derived default.** The cache
-    graph's name is NOT the record's ``graph_id`` scope column: this tree names
-    it ``org_<org_id>`` (the org SDK's isolated graph) or
-    ``org_<org_id>_<graph_id>`` (the registry/ACL namespace). Guessing wrong
-    does not fail — FalkorDB opens an EMPTY graph — and an empty cache reports
-    every record key as ``missing_in_cache``, i.e. a coherent cache exits ``3``.
-    A wrong VERDICT is worse than no verdict, so an absent name is a refusal
-    (``2``) that prints both conventions.
+    ⛔ **``--cache-graph`` is OPTIONAL, and the name is READ rather than
+    derived (#13337).** The cache graph's name is NOT the record's ``graph_id``
+    scope column: this tree names it ``org_<org_id>`` (the org's DEFAULT graph,
+    the legacy namespace) or ``org_<org_id>_<graph_id>`` (the registry/ACL
+    spelling). Guessing wrong does not fail — FalkorDB opens an EMPTY graph —
+    and an empty cache reports every record key as ``missing_in_cache``, i.e. a
+    coherent cache exits ``3``. A wrong VERDICT is worse than no verdict, which
+    is why this verb REFUSED to derive the name at all until a FACT existed.
+    It exists now: ``tortoise.cache_graph.declared_cache_graph`` reads
+    ``public.graphs.namespace`` through the control plane (the same read
+    ``hosted_api._assert_graph_owned`` makes), so an org-wide write that landed
+    in ``org_<org>`` grades ``clean`` on the name the tenant actually has
+    instead of ``divergent`` on a spelling it never used. When nothing can
+    answer (a self-host with no control plane) the registry spelling is used
+    and the run REPORTS ``cache_graph_source="derived"`` — an assumed
+    coordinate is never presented as a read one. A stated ``--cache-graph``
+    always wins, and a readable fact that disagrees with it is printed as a
+    WARNING rather than silently graded.
 
     Both stores are BOUNDED: the cache read by ``--timeout-ms``
     (:data:`tortoise.record_reconcile.CACHE_READ_TIMEOUT_MS` by default) and the
@@ -874,23 +884,47 @@ def _cmd_record_reconcile(args):
               "extra.", file=sys.stderr)
         return EXIT_UNAVAILABLE
 
+    # The cache graph's name is READ, not derived (#13337). `--cache-graph`
+    # still wins outright; without it the name is the FACT the control plane
+    # holds for this tenant (`public.graphs.namespace` — the org's default graph
+    # lives at the legacy `org_<org>`, which no derivation of
+    # `org_<org>_<graph_id>` can produce), and only when nothing can answer is
+    # the registry spelling ASSUMED, labelled so.
+    from tortoise.cache_graph import (
+        SOURCE_DERIVED,
+        declared_cache_graph,
+        namespace_from_control_plane,
+    )
     from tortoise.projection import FalkorProjection
     from tortoise.residency import read_declaration
 
-    # The cache graph's name is NOT the record's `graph_id` scope column (see
-    # this function's docstring): refuse rather than open an empty graph and
-    # report a coherent cache as divergent.
-    if not args.cache_graph:
-        print(
-            "Error: --cache-graph is required — the cache graph's name is not "
-            "the record's --graph scope. This tree names it org_<org_id> (the "
-            "org SDK's isolated graph) or org_<org_id>_<graph_id> (the "
-            "registry/ACL namespace); guessing wrong opens an EMPTY graph, so "
-            "every record key would report missing_in_cache and a coherent "
-            "cache would exit 3. Nothing was compared, so divergence is "
-            "UNKNOWN, not zero.", file=sys.stderr)
-        return EXIT_UNAVAILABLE
-    cache_graph = args.cache_graph
+    # ONE read, so the stated-name warning and the resolution cannot disagree.
+    # `None` when the control plane is disabled or cannot answer — which is why
+    # the derived arm below is still reachable and still labelled.
+    namespace_fact = namespace_from_control_plane(args.org, args.graph)
+    declared = declared_cache_graph(
+        org_id=args.org, graph_id=args.graph,
+        cache_graph=args.cache_graph,
+        read_namespace=lambda _org, _gid: namespace_fact)
+    cache_graph = declared.name
+    if namespace_fact and args.cache_graph and namespace_fact != declared.name:
+        # A stated name is a fact and is never overridden — but grading the
+        # wrong coordinate produces a WRONG VERDICT, which is the thing this
+        # verb exists to refuse. Say it, grade what was asked for.
+        print(f"WARNING: --cache-graph {declared.name!r} disagrees with the "
+              f"control plane's namespace for {args.graph} ({namespace_fact!r}). "
+              f"This run grades the name you stated; if the tenant's writes go "
+              f"to {namespace_fact!r}, every key reports missing_in_cache and a "
+              f"coherent cache exits 3 (#13337).", file=sys.stderr)
+    elif declared.source == SOURCE_DERIVED and not args.cache_graph:
+        # ⛔ NOT SILENT. A derived name is the one this tree has always been
+        # wrong about for graph 0, so a run that used it must say so — the
+        # verdict is real, the COORDINATE is an assumption.
+        print(f"note: --cache-graph not given and no control plane answered, so "
+              f"{declared.name!r} is the DERIVED (registry/ACL) spelling — if "
+              f"this tenant is the org's default graph its cache is "
+              f"org_<org_id>. Pass --cache-graph to state it (#13337).",
+              file=sys.stderr)
     timeout_ms = args.timeout_ms if args.timeout_ms is not None \
         else CACHE_READ_TIMEOUT_MS
     # A non-positive bound is not a bound: the driver reads 0 as "wait forever",
@@ -1028,10 +1062,23 @@ def _cmd_record_reconcile(args):
             conn.close()
 
     line = log_result(result)
+    # ⛔ THE COORDINATE IS PART OF THE VERDICT (#13337). A divergence count is a
+    # statement about ONE cache graph; a reader who cannot see WHICH name was
+    # graded (and whether it was read or assumed) cannot tell a real cache gap
+    # from a wrong coordinate — which is exactly how the org-wide tenant in
+    # #13337 read `divergent` on a graph its writes never used.
+    declaration_fields = {
+        "cache_graph": declared.name,
+        "cache_graph_source": declared.source,
+        "cache_graph_detail": declared.detail,
+    }
     if args.json:
-        print(_json.dumps(result.as_dict(), indent=2, sort_keys=True))
+        payload = result.as_dict()
+        payload.update(declaration_fields)
+        print(_json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(line)
+        print(f"  cache graph   {declared.name} ({declared.source})")
         if result.verdict() == VERDICT_CLEAN:
             # ⛔ `not_hot > 0` means keys were NOT compared: after a `partial`
             # declaration they were removed from the truth side, so this run
@@ -1356,14 +1403,17 @@ def _cmd_record_restore(args):
       inherited verbatim: argparse's own ``error()`` also exits ``2``, so ``2``
       means only *no verdict was produced*.
 
-    ⛔ ``--cache-graph`` is REQUIRED, with no derived default, for the reason
-    ``record-reconcile`` requires it — and the consequence here is worse than a
-    wrong verdict: a wrong guess opens an EMPTY graph, so the run would report
-    a restore into a graph nobody reads while the operator's real graph stayed
-    destroyed. That is why the pre-wipe node count is reported too, and why the
-    counts the verb prints are read back off the cache after the rebuild
+    ⛔ ``--cache-graph`` is OPTIONAL for the same reason and by the same
+    declaration as ``record-reconcile`` (#13337): the name is READ from the
+    control plane's ``public.graphs.namespace`` and only ASSUMED (and labelled)
+    when nothing can answer. The consequence of a wrong coordinate here is worse
+    than a wrong verdict: a wrong guess opens an EMPTY graph, so the run would
+    report a restore into a graph nobody reads while the operator's real graph
+    stayed destroyed. That is why the pre-wipe node count is reported too, and
+    why the counts the verb prints are read back off the cache after the rebuild
     (``record_restore``): a number the code did not measure is a claim, not a
-    restore.
+    restore. A stated ``--cache-graph`` still wins outright, and a readable fact
+    that disagrees with it is printed as a WARNING naming both.
 
     ⛔ Both reads are BOUNDED (connect timeout + session ``statement_timeout``
     on the record, ``CACHE_READ_TIMEOUT_MS`` on the pre-wipe count — the same
@@ -1414,19 +1464,37 @@ def _cmd_record_restore(args):
               "neither. The cache's state is UNCHANGED.", file=sys.stderr)
         return EXIT_UNAVAILABLE
     # Usage-shaped refusals come BEFORE the optional-dependency check: an
-    # operator who forgot `--cache-graph` must not be told to install an extra
-    # first (measured — that ordering answered a missing flag with "psycopg2 is
-    # not installed" on a lane without the `postgres` extra).
-    if not args.cache_graph:
-        print(
-            "Error: --cache-graph is required — the cache graph's name is not "
-            "the record's --graph scope. This tree names it org_<org_id> (the "
-            "org SDK's isolated graph) or org_<org_id>_<graph_id> (the "
-            "registry/ACL namespace); guessing wrong opens an EMPTY graph, so "
-            "this run would report a restore into a graph nobody reads while "
-            "the real graph stayed destroyed. Nothing was restored.",
-            file=sys.stderr)
-        return EXIT_UNAVAILABLE
+    # operator who gave a bad value must not be told to install an extra first
+    # (measured — that ordering answered a missing flag with "psycopg2 is not
+    # installed" on a lane without the `postgres` extra).
+    #
+    # The cache graph's name is READ, not derived — the ONE declaration
+    # ``record-reconcile`` uses (#13337), so the two verbs cannot disagree about
+    # a tenant's coordinate.
+    from tortoise.cache_graph import (
+        SOURCE_DERIVED,
+        declared_cache_graph,
+        namespace_from_control_plane,
+    )
+
+    namespace_fact = namespace_from_control_plane(args.org, args.graph)
+    declared = declared_cache_graph(
+        org_id=args.org, graph_id=args.graph,
+        cache_graph=args.cache_graph,
+        read_namespace=lambda _org, _gid: namespace_fact)
+    if namespace_fact and args.cache_graph and namespace_fact != declared.name:
+        print(f"WARNING: --cache-graph {declared.name!r} disagrees with the "
+              f"control plane's namespace for {args.graph} ({namespace_fact!r}). "
+              f"This run restores into the name you stated; if the tenant's "
+              f"graph is {namespace_fact!r} that is a restore into a graph "
+              f"nobody reads (#13337).", file=sys.stderr)
+    elif declared.source == SOURCE_DERIVED and not args.cache_graph:
+        print(f"note: --cache-graph not given and no control plane answered, so "
+              f"{declared.name!r} is the DERIVED (registry/ACL) spelling — if "
+              f"this tenant is the org's default graph its cache is "
+              f"org_<org_id>. Pass --cache-graph to state it (#13337).",
+              file=sys.stderr)
+    args.cache_graph = declared.name
     if args.limit is not None and args.limit < 1:
         print(f"Error: --limit must be >= 1, got {args.limit} — 0 wipes the "
               f"cache and writes nothing, so it is refused before any write. "
