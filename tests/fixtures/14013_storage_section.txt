@@ -1,11 +1,11 @@
 How your data is stored and searched If you arrived here from a note about your search layer
 filling up, this is the full explanation behind it — no architecture required. Everything you save
 is kept Your data is kept in a Postgres database. Postgres is ordinary, inexpensive storage, so we
-can keep all of it. This copy is your record — every save is written to it first, and everything
-else is built from it. A second copy, for the things you use most On top of the record we run a
-graph database. It mirrors a slice of your data in a shape that makes two things quick: finding
-things by meaning rather than by exact wording, and following the connections between them — so a
-search can bring back what is related to what you asked for, not only what matches it. That graph
+can keep all of it. This copy is your record — saves are written here first, and the fast layer is
+rebuilt from it. A second copy, for the things you use most On top of the record we run a graph
+database. It mirrors a slice of your data in a shape that makes two things quick: finding things
+by meaning rather than by exact wording, and following the connections between them — so a search
+can bring back what is related to what you asked for, not only what matches it. That graph
 database is expensive to run and holds far less than the record does, so it is reserved for what
 matters most: the items you search for and use most often, and the items that other things hang
 off. Everything else stays in the record. What happens when the fast layer fills Nothing is lost,
