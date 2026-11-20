@@ -3883,15 +3883,17 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
     carries a `\` line where the class counts 2. Accepted because it is a spelling a document
     plausibly writes, with the cost (one impossible diff line) stated rather than implied. Two
     backslashes can still pass (`^[\+\-]$` counts `3` — the same superset, not a separate case).
-    The REAL bound, and it is one-sided (#13995 review rounds 17-19, MEASURED): acceptance is the
-    ESCAPE MODEL's verdict, not a member-set test. A `\` before a `-` that is followed by another
-    member reads as a RANGE (so `^[\-+]$` is refused — and grep refuses it too, `Invalid range
-    end`, rc 2); a `\` that TRAILS the content is an INCOMPLETE ESCAPE (so `^[-+\]$` and
-    `^[\\+-]$` are refused even though grep runs them and counts `3`). Those refusals are the safe
-    direction: the ONLY guarantee offered is that an ACCEPTED spelling counts `2` or `3` and never
-    more, which is what makes the superset cost one impossible diff line. It is not a
-    biconditional — the docstring does not claim to accept every bracket whose members happen to
-    be `+`, `-` and `\`, and two spellings with exactly those members are refused. Three spellings are NOT among them, all measured: `^[\-+]$` (the
+    The REAL rule, stated exactly as the code implements it (#13995 review rounds 17-20, MEASURED):
+    a bracket is accepted IFF `_d5_class_members` returns exactly `{"+", "-"}`. That helper answers
+    `None` — a refusal — for a NEGATED class, for a RANGE (an unescaped `-` with members on both
+    sides, so `^[\-+]$` is refused, and grep refuses it too: `Invalid range end`, rc 2), for an
+    escaped `-` in that same between-members position, and for an INCOMPLETE ESCAPE (a `\` that
+    ends the content, which is why `^[-+\]$` is refused although grep runs it and counts `3`). An
+    escaped `\` is a MEMBER, which is why `^[\\+-]$` is refused as well: its set is `{+,-,\}`, not
+    `{+,-}` — the same refusal, from the set rather than from the escape state.
+    Those refusals are the safe direction, and the only guarantee offered is one-sided and
+    measured: an ACCEPTED spelling counts `2` or `3` (3 when the bracket carries a literal `\`),
+    never more — which is what makes the superset cost one impossible diff line. Three spellings are NOT among them, all measured: `^[\-+]$` (the
     DESCENDING range `\`–`+`: `grep: Invalid range end`, rc 2, and this test now refuses it too),
     `^(?:\+|-)$` (POSIX ERE has no non-capturing group: `warning: ? at start of expression`,
     counts `1` under `-E` and `0` under BRE) and `^+$`/`^-$` (one sign, half the class). What it
@@ -4397,6 +4399,17 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
             f"{equivalent_class!r} counts the BLANK lines and must be graded as this class — "
             "a spelling list read it as some OTHER class, which left a second prescription green "
             "and misattributed the ZERO message (#13995 review, P2)")
+    # ⛔ THE TWO REFUSALS THE RULE NAMES ARE PINNED TOO, or the paragraph can go false beside
+    # green code — which is how it survived a round (#13995 review round 20, P3 — MEASURED):
+    # `^[-+\]$` ends in a `\` (incomplete escape) and `^[\\+-]$` carries a literal `\` member;
+    # grep runs both and counts `3`, and this test refuses both.
+    assert not _d5_counts_the_blank_class("^[-+\\]$"), (
+        "a bracket whose content ENDS in a backslash is an incomplete escape: refused, although "
+        "grep runs it and counts 3 (measured)")
+    assert not _d5_counts_the_blank_class("^[\\\\+-]$"), (
+        "an escaped backslash is a MEMBER, so this bracket's set is `{+,-,\\}`, not `{+,-}`: "
+        "refused, although grep runs it and counts 3 (measured)")
+
     # ⛔ THE DECLARED SUPERSET IS PINNED, because the docstring makes a claim about it
     # (#13995 review round 18, P2 — MEASURED). Refusing a bracket that carries TWO backslashes
     # left all eight d5 tests GREEN while the paragraph above became false beside green code: the
@@ -4442,11 +4455,10 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
                        # guard rewritten as `1 < len(alternatives) < 4` every d5 test still passed
                        # and this one was graded as the class on a `grep -cE` count of 6).
                        "^\\+|-|\\+|-$",
-                       # ⛔ AND A RANGE, because the docstring's bound names it: `^[+-+-+]$` is
-                       # grep rc 2 (`Invalid range end`) and only the range branch of
-                       # `_d5_class_members` refuses it — with that branch deleted, 14
-                       # grep-refused spellings were graded as the class and all 8 d5 tests
-                       # stayed GREEN (#13995 review round 18, P3 — MEASURED).
+                       # ⛔ AND A RANGE, because the docstring's rule names it — but the WITNESS
+                       # for the range branch is the row above (`^[\-+]$`): `^[+-+-+]$` is also
+                       # caught by the plain-hyphen rule, so on its own it would not notice that
+                       # branch being deleted (#13995 review round 20, P3 — MEASURED).
                        "^[+-+-+]$"):
         assert not _d5_counts_the_blank_class(half_class), (
             f"{half_class!r} must NOT be graded as the blank class: none of these counts exactly "
