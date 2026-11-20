@@ -378,6 +378,17 @@ def compare(truth_rows: list[tuple[str, float]], candidate_ids: list[str],
     count_equal = len(cand) == len(truth_ids)
 
     distance_of = {key: dist for key, dist in truth_rows}
+    # ⛔ BUCKETING, AND ITS ERROR IS DELIBERATELY FAIL-CLOSED. `round(dist /
+    # TIE_TOL)` is COARSER than "within `TIE_TOL` of each other": two distances
+    # 2e-10 apart that straddle a bucket boundary (4.999e-7 and 5.001e-7 round to
+    # 0 and 1) land in different buckets, so a swap between them reports
+    # `diverged` — measured on this harness, not assumed. The error is
+    # one-directional and that is the point: a bucket is exactly `TIE_TOL` wide,
+    # so anything bucketed TOGETHER is inside the tolerance, which means this
+    # rounding can produce a false RED but never a false `tie`. Tolerating the
+    # straddle instead would move the error into the direction that matters —
+    # a genuine cross-distance re-rank excused as a PASS. Pinned by
+    # `test_a_straddling_pair_fails_CLOSED_never_as_a_tie`.
     tie_groups: dict[float, set[str]] = {}
     for key, dist in truth_rows:
         bucket = round(dist / TIE_TOL) if TIE_TOL else 0.0

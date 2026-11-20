@@ -1244,6 +1244,86 @@ def test_run_routes_the_required_scan_arm_through_the_seam(harness):
         f"via `_scan_arm`")
 
 
+def test_a_straddling_pair_fails_CLOSED_never_as_a_tie(harness):
+    """The tie GROUPS are rounded buckets, and their error is one-directional.
+
+    `compare()` groups truth rows by `round(dist / TIE_TOL)`, which is COARSER
+    than "within `TIE_TOL` of each other": two distances 2e-10 apart that
+    straddle a bucket boundary (`4.999e-7` -> bucket 0, `5.001e-7` -> bucket 1)
+    are placed in DIFFERENT groups, so a swap between them is reported
+    `diverged` even though the two are far inside the tolerance. Measured, not
+    assumed — and pinned because the fix a reader would reach for is the wrong
+    one: comparing the pair against `TIE_TOL` directly instead of bucketing is
+    strictly MORE permissive (a bucket is exactly `TIE_TOL` wide, so anything
+    bucketed together is inside the tolerance), and that moves the error into
+    the direction that matters — a genuine cross-distance re-rank excused as a
+    PASS. This pin holds the fail-closed direction in place, so widening it
+    reds here rather than passing silently.
+    """
+    near_a, near_b = 4.999e-7, 5.001e-7
+    assert abs(near_a - near_b) < harness.TIE_TOL, (
+        "this pin only says anything while the two distances are INSIDE the "
+        f"tolerance; they are {abs(near_a - near_b)!r} apart")
+    assert round(near_a / harness.TIE_TOL) != round(near_b / harness.TIE_TOL), (
+        "the two distances no longer straddle a bucket boundary, so the case "
+        "this pin exists for is not being exercised")
+    cmp_ = harness.compare([("a", near_a), ("b", near_b), ("c", 0.5)],
+                           ["b", "a", "c"])
+    assert cmp_["order"] == "diverged", (
+        "a sub-tolerance pair is now excused as a `tie` — the bucket rounding "
+        "was replaced by a direct tolerance comparison, which is strictly more "
+        "permissive and can turn a real cross-distance re-rank into a PASS")
+
+
+def test_the_vector_poison_is_applied_at_SEED_time(harness):
+    """`run()` must perturb the SEEDED rows, and no DB-free pin could see it.
+
+    The comment at `run()` states why the `--poison vector` mutation is applied
+    before `store.seed(...)` rather than after `scan_answers` is taken: a
+    post-read divergence leaves that arm measuring the UNPOISONED data and the
+    poison goes undetected (measured on this harness's first attempt — `vector`
+    reported POISON NOT DETECTED while the other three were caught).
+
+    That literal is inside `run()`, which no DB-free test executes, so replacing
+    `perturb_for_vector_poison(rows)` with `rows` left **80/80 green** while the
+    runtime consequence is a poison that can never be detected. It is the same
+    defect this module already closed for `_scan_arm` and `require_index` — "a
+    literal inside `run()` no DB-free pin can reach" — so it is closed the same
+    way: the body is READ.
+    """
+    tree = ast.parse(MODULE_PATH.read_text())
+    run = next(node for node in ast.walk(tree)
+               if isinstance(node, ast.FunctionDef) and node.name == "run")
+
+    perturbs = [node for node in ast.walk(run) if isinstance(node, ast.Call)
+                and getattr(node.func, "id", "") == "perturb_for_vector_poison"]
+    assert len(perturbs) == 1, (
+        "`run()` must call `perturb_for_vector_poison` exactly once, found "
+        f"{len(perturbs)} — zero means the poison is never applied")
+
+    # ...and it must be the value the STORE is seeded with, under the
+    # `args.poison == "vector"` condition, not a result computed elsewhere.
+    seed_arg_names: list[str] = []
+    for node in ast.walk(run):
+        if (isinstance(node, ast.Call) and getattr(node.func, "attr", "") == "seed"
+                and node.args and isinstance(node.args[0], ast.Name)):
+            seed_arg_names.append(node.args[0].id)
+    carriers = {
+        target.id
+        for node in ast.walk(run) if isinstance(node, ast.Assign)
+        for target in node.targets if isinstance(target, ast.Name)
+        and any(sub is perturbs[0] for sub in ast.walk(node.value))
+    }
+    assert carriers, (
+        "`perturb_for_vector_poison(...)` is not assigned to a name in `run()` — "
+        "its result has nowhere to go, so the seed cannot receive it")
+    assert carriers & set(seed_arg_names), (
+        "the perturbed rows never reach a `seed(...)` call: `run()` seeds "
+        f"{seed_arg_names!r} but the perturbation lands in {sorted(carriers)!r}. "
+        "Applying the vector poison AFTER the arms are read leaves the arm "
+        "measuring unpoisoned data, so the poison can never be detected")
+
+
 def test_a_none_distance_is_not_a_verified_one(harness):
     """The second branch of the same fail-open the short-list guard closes.
 
