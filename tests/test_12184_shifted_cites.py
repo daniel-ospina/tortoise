@@ -64,6 +64,10 @@ _SDK = "tortoise/sdk.py"
 _MCP = "tortoise/mcp_server.py"
 _RS = "tortoise/record_serve.py"
 _GJ = "tortoise/goal_judgement.py"
+_HB = "tortoise/hosted_backup.py"
+#: `#13854`'s vector-index-parity plan. Its reader table cites `hosted_backup.py:2666` for
+#: `_index_has_is_operator()`, and that row is in this branch's diff.
+_PLAN_4997 = "docs/plans/2026-09-25-4997-vector-index-parity.md"
 
 #: (document, cite token the document must still carry, target file, 1-based line, fragment at that line)
 _PINS: tuple[tuple[str, str, str, int, str], ...] = (
@@ -218,6 +222,15 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_INDEX, '`sdk.py:28200` at this head', _SDK, 28200, 'WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL'),
     (_EVIDENCE, '(`sdk.py:28200`), so any non-NULL', _SDK, 28200, 'WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL'),
     (_EVIDENCE, 'called at `sdk.py:28564`', _SDK, 28564, 'result = apply_entity_merge('),
+    # --- docs/plans/2026-09-25-4997-vector-index-parity.md — the vector-index reader table
+    # ⛔ The branch's `+147` to `hosted_backup.py` moved `def _index_has_is_operator()` from
+    # `origin/main`'s `:2519` to `:2666`, and this branch re-pointed the row to `:1548` — a `+4`
+    # applied to a number that was ALREADY wrong at `main` (`:1544` there, on a `restore_graph`
+    # comment block). `:1548` opens on a comment whose text has nothing to do with the symbol, so the
+    # row shipped naming a symbol at a line that does not carry it. Re-derived by CONTENT:
+    # `grep -n 'def _index_has_is_operator' tortoise/hosted_backup.py` -> `2666`. Pinned here because
+    # an unlisted token is coverage this file only APPEARED to have (the `:6989` shape).
+    (_PLAN_4997, "tortoise/hosted_backup.py:2666", _HB, 2666, "def _index_has_is_operator() -> bool:"),
 )
 
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
@@ -348,6 +361,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/00_index.md', '`sdk.py:28200` at this head'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', '(`sdk.py:28200`), so any non-NULL'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'called at `sdk.py:28564`'): 1,
+    ('docs/plans/2026-09-25-4997-vector-index-parity.md', 'tortoise/hosted_backup.py:2666'): 1,
 }
 
 
@@ -866,7 +880,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     count both move together only when a row is added on purpose.
     """
     docs = {row[0] for row in _PINS}
-    assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE, _INDEX}
+    assert docs == {_AUDIT, _SUBSTRATE, _M3_BRIEF, _CENSUS, _EVIDENCE, _INDEX, _PLAN_4997}
     # 48: `#13489`'s review added the `:6989` row (`("Object", ["name"])`, the §2.5 address that
     # had NO pin at all, which is how `:6869` stayed behind its three siblings — `:6984`/`:6985`/`:6990`
     # sit 115/116/121 lines below `:6869`, while `:6989`, the row that had no pin, is the 120th), and row
@@ -889,7 +903,10 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # lines `:37143`/`:37185`) and `git grep -n '37143\|37144' -- tests docs` reached only the prose
     # sites, so no mutant reddened anything. Same shape as the `:6989` and `sdk.py:28030` rows above.
     # The arm is an anti-SHRINK arm, so it moves with a documented ADDITION, never with a deletion.
-    assert len(_PINS) == 61
+    # 61 -> 62 at the #13854 fix lane: the vector-index-parity plan's reader row was re-pointed to
+    # `hosted_backup.py:1548` (a comment) for `_index_has_is_operator()`, which is `:2666` at this head
+    # — and that document had NO pin at all, so nothing would have reddened the next rotation of it.
+    assert len(_PINS) == 62
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
