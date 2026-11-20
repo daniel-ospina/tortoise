@@ -1478,8 +1478,16 @@ class GraphStore:
     def __init__(self, host: str, port: int, graph: str):
         from falkordb import FalkorDB
 
+        # #3065/#8118: `falkordb` passes `socket_timeout` straight through to
+        # redis-py, whose default is `None` — i.e. UNBOUNDED. Against a stalled
+        # engine the process then parks in `recv()` forever at 0% CPU, printing
+        # nothing (#3065, #2838's MERGE lock, #2969's defrag loop). The bound
+        # comes from the product's ONE resolution point so it is knob-aware
+        # (`TORTOISE_DB_SOCKET_TIMEOUT`) rather than a second pair of literals.
+        from tortoise.projection import _bounded_server_socket_kwargs
+
         self.graph_name = graph
-        self.client = FalkorDB(host=host, port=port)
+        self.client = FalkorDB(host=host, port=port, **_bounded_server_socket_kwargs())
         self.g = self.client.select_graph(graph)
 
     def reset(self) -> None:
