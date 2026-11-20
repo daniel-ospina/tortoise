@@ -2094,6 +2094,21 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     #     the #13209 `workflow_secret_refs` belt above is kept: the gate and this
     #     file are different readers, and a divergence in either should red HERE.
     embedder_warmup = "TORTOISE_EMBEDDER_WARMUP"
+    # Split from the equality below on purpose: without it the missing-declaration
+    # case is a bare `KeyError: 'TORTOISE_EMBEDDER_WARMUP'` with no diagnosis, which
+    # reads as a broken test rather than as the removed declaration it is — the same
+    # defect this file repairs for `_region_marker` (#13814 review round 9). It is
+    # the FIRST red of a `fly-only:` revert, and the manifest's block quotes it, so
+    # its wording is part of that operator procedure.
+    fly_only_declared = sorted(n for n, s in declared.items() if s.startswith("fly-only:"))
+    assert embedder_warmup in declared, (
+        "TORTOISE_EMBEDDER_WARMUP is no longer declared at all, so the emergency "
+        "switch lost its provenance line — restore `TORTOISE_EMBEDDER_WARMUP "
+        "fly-only:#13674` (or, if the lever is being removed, carry the revert in "
+        "ONE change with `fly secrets unset`, its DECLARED GAP paragraph and the "
+        "reviewer entry point's count). The manifest declares "
+        f"{len(fly_only_declared)} `fly-only:` name(s): {fly_only_declared}"
+    )
     assert declared[embedder_warmup] == "fly-only:#13674", declared[embedder_warmup]
     assert embedder_warmup not in workflow_refs, (
         "TORTOISE_EMBEDDER_WARMUP must stay OUT of the deploy payload — it is the "
