@@ -2388,3 +2388,30 @@ def test_an_at_sign_in_a_query_value_does_not_move_the_userinfo_boundary(harness
     harness._assert_local_record_dsn("postgresql://u:p@127.0.0.1:5432/db", False)
     assert harness._split_uri("postgresql://u@127.0.0.1:5432?host=x") == (
         "postgresql://u@127.0.0.1:5432", "host=x")
+
+def test_the_index_name_comes_from_the_index_relation(harness):
+    """⛔ THE TABLE NAME IS NOT THE INDEX NAME, and the guard compares against the PLAN's.
+
+    `require_schema` joins `pg_class` on `i.indrelid` — the INDEXED TABLE — so
+    selecting that alias's `relname` returns `'point'` for every row. The name is
+    then compared with the `Index Name` an `EXPLAIN` reports, which is the INDEX
+    relation (`idx_point_embedding_vec_hnsw`); relations share one namespace, so a
+    table and an index cannot share a name and the comparison **cannot** succeed.
+    Fail-closed, and therefore invisible to every DB-free assertion about the
+    verdict — it refused every database, so the record arm was unreachable and the
+    tool could not produce its measurement at all (measured on a fresh
+    `pgvector/pgvector:pg16`: `record_hnsw_index_name = 'point'`, plan
+    `[('Index Scan','idx_point_embedding_vec_hnsw')]`, exit 2).
+
+    A DB-free pin cannot run the SQL, so it pins the SQL's SHAPE: the name must
+    come from the index relation, and that relation must be joined by
+    `i.indexrelid`. Restoring `c.relname` alone, or dropping the `ic` join, reds
+    this.
+    """
+    source = MODULE_PATH.read_text()
+    start = source.index("SELECT ic.relname")
+    query = source[start:source.index('")', start) + 2] if "\")" not in source[start:start + 400] else source[start:start + 400]
+    assert "ic.relname" in query, query
+    assert "JOIN pg_class ic ON ic.oid = i.indexrelid" in query, query
+    assert "JOIN pg_class c ON c.oid = i.indrelid" in query, query
+    assert "SELECT c.relname" not in source, "the indexed TABLE's name is not the index name"

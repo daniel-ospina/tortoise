@@ -14,7 +14,7 @@ aboutObjects: "SEARCH-ARCHITECTURE.md §3, §6.1; #11642; #13220; #13610; #5004;
 # Dense-leg query parity — both stores, one corpus, four readers (#13906)
 
 **Instrument:** `tools/vector_parity_13906.py` · **Comparator pins:**
-`tests/test_vector_parity_13906.py` (67 DB-free tests) · **Artifacts, this
+`tests/test_vector_parity_13906.py` (71 DB-free tests) · **Artifacts, this
 directory:** `parity-run.json`, `poison-{id,order,recall,vector}.json`.
 
 The question this answers, in one sentence: **for the same tenant data and the
@@ -462,7 +462,7 @@ done
 ```
 
 DB-free comparator pins: `uv run python tools/test_lane.py run --
-tests/test_vector_parity_13906.py -q` → **67 passed**.
+tests/test_vector_parity_13906.py -q` → **71 passed**.
 
 Falsifier exit codes — the recipe above reads them, so they are part of the
 contract, not decoration:
