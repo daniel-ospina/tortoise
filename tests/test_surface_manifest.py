@@ -8073,12 +8073,17 @@ def test_a_waiver_on_the_wrong_surface_is_still_reported(monkeypatch):
     the `else` fallback, so deleting the `cls is not None and (symbol, cls) not in prior`
     branch left this row GREEN over a report that had stopped naming the surface at all.
     Measured on the pre-fix tree: delete that branch -> this test still passes.
+
+    The row is picked as a TOOL row rather than `rows[0]`: the claim under test is `this symbol
+    is live on the 'tool' surface`, and `rows[0]` only happens to be one today — a re-cut that
+    reordered the baseline would turn the new assertion into a false red on a required job.
     """
     sm = _load_manifest_tool()
     with MANIFEST.open() as fh:
         doc = yaml.safe_load(fh)
-    live = doc["rows"][0]
+    live = next(row for row in doc["rows"] if not row.get("method"))
     symbol = str(live.get("name") or live.get("tool") or live.get("key") or "")
+    assert symbol, live
 
     problems = sm.shrink_problems(doc, doc, allowed=[f"sdk:{symbol}"])
 
