@@ -1835,11 +1835,17 @@ def test_shipped_manifest_matches_the_real_workflow_and_recorded_debt(monkeypatc
     workflow can assign but nothing declares) fails HERE — in review — instead
     of hard-blocking the deploy in CI.
 
-    The exit code is derived from the manifest, not pinned: `unmanaged` names NO
-    managing source, so the gate FAILS while any remains and the same test goes
-    green the moment the last one is retired — without an edit here. What IS
-    pinned is that the recorded debt is the ONLY problem: any STALE/UNDECLARED
-    violation on the shipped artifacts is a real defect.
+    ⛔ The exit code IS pinned now, and the policy is NOT "any violation fails":
+    `open_route_b` (:1898) records the route-(b) transitions that are still OPEN,
+    and for a name in it a `STALE DECLARATION` carrying the `which shadows [env]`
+    clause is tolerated and the code pinned to 1 — with a withheld-shadow control
+    that must come back 0, so the two fixtures cannot collapse into one run. Every
+    OTHER `STALE`/`UNDECLARED` on the shipped artifacts still fails here. ⛔ Do NOT
+    restore the older shape (`assert "STALE DECLARATION" not in r.stdout`): that is
+    what made this suite green over a shadowed state the deploy gate refuses
+    (measured: rc=0 with the assertion, rc=1 with the shadow), which is the false
+    PASS this file exists to prevent. `unmanaged` debt is still derived, not pinned:
+    the recorded set is what must stay empty.
     """
     sys.path.insert(0, str(REPO_ROOT / ".github" / "scripts"))
     import importlib.util
@@ -3780,10 +3786,11 @@ def test_the_reserved_member_paragraph_keeps_the_recorded_ruling_precondition():
     # is not met ("…each with its own recorded ruling. Not all of the members'
     # rulings exist yet."). The rule's words are then still there while the
     # paragraph states the rule is already false — the same unfalsifiable state, and
-    # the assertion above passes it. The manifest's own note already promises this
-    # arm ("the sentence must be present UNQUALIFIED (a 'not yet recorded' qualifier
-    # inside it REDS)"); this is the check behind that promise. Measured on this
-    # tree: that wording passes the assertion above and reds only here.
+    # the assertion above passes it. This arm enforces the sentence's QUALIFICATION
+    # directly — no manifest prose promises it since #13926 deleted the note that
+    # used to ("the sentence must be present UNQUALIFIED …"), so do not re-derive the
+    # contract from a citation that is gone: the check IS the contract. Measured on
+    # this tree: that wording passes the assertion above and reds only here.
     #
     # Several spellings, because the defect is the SPEECH ACT (the paragraph
     # conceding that the precondition is not met), not one string — a guard that knew

@@ -4460,7 +4460,9 @@ revert split across two changes looks like — and neither can be cleared by edi
 | the declaration is deleted while the Fly secret is still live | `UNDECLARED — 'TORTOISE_EMBEDDER_WARMUP' is on Fly but declared nowhere in fly-managed-secrets.txt` |
 
 The first is resolved only by unsetting the secret **after** a deploy applied `[env]`; the second by
-restoring the declaration (an unset also clears it, and leaves a clean `fly-toml-env` state).
+restoring the declaration — and note that an unset ALONE clears the violation while leaving the name
+declared NOWHERE, which the shipped-artifacts test reds on (`no longer declared at all`): an unset is
+not a substitute for the declaration.
 ⛔ **The unset itself is not a third red — it is the one step that is GREEN.** Unsetting the secret while
 the `fly-toml-env` declaration stands produces **no violation for this name** (`fly.toml [env]` alone
 satisfies the declaration), so an unset that lands BEFORE `[env]` is on the machine is **not** caught
@@ -4485,12 +4487,16 @@ anyone reading the exit-1 state as done — it is the bypassable class, not the 
 verification:** the three states measure differently and only one is green — `main`'s duplicate pair
 is exit **2** (`manifest unusable`, NOT bypassable), this route-(b) declaration is exit **1**, and
 the REJECTED direction — `fly-only:#13674` with the `[env]` row removed, i.e. reverting #13926, which is
-an owner decision (#13923) and not a lane's — is exit **0** (#13941's direction check, measured
-2026-11-20; the live-value fixture matters — the same run is exit 0 if the secret list is seeded
-WITHOUT this name, which is the false green that check was written for). The exit-1 and exit-0 halves
-are pinned by `tests/test_fly_secret_drift.py::test_shipped_manifest_matches_the_real_workflow_and_recorded_debt`
-(it seeds this name as the live shadow, so this state cannot be reported as clean again, and re-runs the
-same fixture with the shadow withheld for the exit-0 half); the exit-2 half is pinned by
+an owner decision (#13923) and not a lane's — is exit **0**, but only while the secret is LIVE: withhold
+it and `fly-only:` reds (`exists neither on Fly nor in the deploy payload`), because that token requires
+a real out-of-band secret (#13941's direction check, measured 2026-11-20). ⛔ The false green is the
+other way round: THIS route-(b) state reads exit **0** for this name if the secret list is seeded
+WITHOUT it, which is exactly what a fixture that models the transition away does.
+The route-(b) PAIR — exit 1 with the shadow, exit 0 with it withheld — is pinned by
+`tests/test_fly_secret_drift.py::test_shipped_manifest_matches_the_real_workflow_and_recorded_debt`
+(it seeds this name as the live shadow, so this state cannot be reported as clean again). The rejected
+direction's exit 0 is a HAND measurement above and is NOT pinned — that test reds on the route assertion
+(`declared[embedder_warmup] == "fly-toml-env"`) before the gate even runs. The exit-2 half is pinned by
 `::test_duplicate_declaration_is_exit_2`, on a fixture manifest — which is why the duplicate must never
 be re-created.
 
