@@ -50,7 +50,7 @@ Five disclosures that bound any use of it:
 - **The judge was `--judge file`, not a fresh reader.** `run-before.json` →
   `judge: {mode: "file", file: "…/verdicts-baseline.json"}`. The verdict prose
   is a re-used baseline; where it disagrees with this run's payload the payload
-  wins. It disagrees in four places — the three bullets below name them — and the
+  wins. It disagrees in five places — the three bullets below name them — and the
   boards keep the baseline's lines, because they are what that judge emitted.
 - **The read path was degraded in every read that ran a retrieval leg.** Of the
   13 reads carrying a `read_status`, 11 are `degraded`; the other 2 are the
@@ -73,15 +73,19 @@ Five disclosures that bound any use of it:
   but Q1's three calls run `vector` / `fts` / `structural` / `fallback` only —
   `valid_time` appears nowhere in Q1 — and `state_read_incomplete` occurs only
   inside that inherited clause, nowhere in this run's payloads. The run's sole
-  `valid_time` read — Q3's `include_terminal` search, reason
+  `valid_time` **leg** — on Q3's `include_terminal` search, reason
   `no-prefer-latest-intent` — is **not** degraded, exactly as the board's own
-  posture table says. What Q1's payload does support is the rest of that
+  posture table says. (The read carrying it does report `read_status=degraded`;
+  the leg itself ran and did not degrade, which is the distinction that matters
+  here.) What Q1's payload does support is the rest of that
   sentence: the object search returned 0 rows, and the point search reports
   `read_status=degraded` on `fallback` / `fts` / `vector`.
-- **Q6's baseline `cause` claims the withdrawn claim needs `include_terminal`:**
-  *"the withdrawn claim is reachable only via include_terminal"*. This run's
-  `ended_scope` read serves it with `include_terminal: false` — the retracted
-  beach-club claim and the superseded Q3 decision, both terminal statuses.
+- **Q6's baseline `because` and `cause` both claim the withdrawn claim needs
+  `include_terminal`:** *"the retracted beach-club claim only appears when
+  terminal objects are force-included"*, and *"the withdrawn claim is reachable
+  only via include_terminal"*. This run's `ended_scope` read serves it with
+  `include_terminal: false` — the retracted beach-club claim and the superseded
+  Q3 decision, both terminal statuses.
 
 **A fresh-judged 3/6 does exist — at a different product.** `13302/README.md`
 records `bf3a7b8e77bf` (the parent commit of #13302) scored by a fresh reader at
@@ -106,7 +110,9 @@ alongside the counts: `vector` `["ok"]` 9/9; `fts` `["ok", "empty_results"]` 9/9
 on every one of its runs. And 4 of the 13 searches reported no legs at all
 (`retrieval: keyword_only`, `legs: []`): Q1 `current commitments`, Q5 `ended`,
 Q6 `has anything we relied on been withdrawn` and Q6 `ended` — which is why the
-posture reads `searches: 13` while each leg reports 9 runs. Q1's two object
+posture reads `searches: 13` while the `vector` / `fts` / `structural` legs report
+9 runs each and `valid_time` reports 5 — it runs only on the `include_terminal`
+reads. Q1's two object
 searches took different paths inside this one run: `current commitments`
 `keyword_only` with no legs, `onboarding flow` `hybrid` with three.
 
