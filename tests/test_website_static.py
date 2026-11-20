@@ -3719,12 +3719,21 @@ def _css_rule_preludes(css: str, selector: str) -> list[tuple[str, str]]:
 def _max_width_media_blocks(html: str) -> list[tuple[int, str]]:
     """Every `@media (max-width: Npx) { ... }` block as `(N, body)`.
 
-    Reads the COMMENT-BLANKED sheet. A raw scan matches a media query QUOTED in
-    a comment — this page's own notes write `@media (max-width: 760px)` in prose
-    — and emits a phantom block that can false-RED an assertion about what that
-    block declares (measured: a comment quoting
-    `@media (max-width: 360px) { .outcomes { max-width: 660px } }` produced one).
-    Fail-closed, but wrong, and the sheet's other readers are already blanked.
+    Reads the COMMENT-BLANKED sheet: a raw scan matches a media query QUOTED in
+    a CSS comment and emits a phantom block, which can false-RED an assertion
+    about what that block declares (measured at #14020 review cycle 4: a comment
+    quoting `@media (max-width: 360px) { .outcomes { max-width: 660px } }`
+    produced one, and the page's own notes are the kind of prose that quotes
+    these queries — the note that did so here was deleted in `d6b4776350a`, so
+    do not go looking for it in the page today).
+
+    ⛔ The failure mode of a RAW reader here is FAIL-CLOSED (a phantom block
+    makes a row red, not green), which is why this one was only ever noise. Do
+    not read that as "raw readers are safe in this file": the sibling
+    `_max_height_media_blocks` had the same raw scan and its failure mode is the
+    opposite — a COMMENTED-OUT `@media (max-height: …)` block is invisible to a
+    raw reader, so the escape-hatch row could be defeated by a comment. Both
+    read the blanked sheet now (#14020 review cycle 4, measured).
     """
     blanked = _css_blanked(html)
     return [(int(m.group(1)), _brace_block(blanked, m.end() - 1))
@@ -3759,11 +3768,21 @@ def _max_height_media_blocks(html: str) -> list[tuple[int, str]]:
     selector inside the media query is semantically identical to a shared one,
     and a regex that stops at the first `}` would read that refactor as "no
     rule names this selector" — a false red on a correct page.
+
+    ⛔ Reads the COMMENT-BLANKED sheet, and here that is LOAD-BEARING rather than
+    cosmetic: the escape-hatch row asks "does this tall beat declare the
+    hatch?", and a RAW reader cannot see a commented-out `@media (max-height:
+    820px)` block — so `/* … */` around the real block, or a comment QUOTING
+    one, let the row stay green while every beat had lost its hatch. That is a
+    false PASS, not noise (#14020 review cycle 4: measured GREEN with the real
+    block commented out, before this change). Blanking makes the commented
+    block invisible and the row red, which is the direction a guard must fail.
     """
+    blanked = _css_blanked(html)
     blocks: list[tuple[int, str]] = []
-    for match in MEDIA_PRELUDE_RE.finditer(html):
+    for match in MEDIA_PRELUDE_RE.finditer(blanked):
         blocks.append((int(match.group(1)),
-                       _brace_block(html, match.end() - 1)))
+                       _brace_block(blanked, match.end() - 1)))
     return blocks
 
 
