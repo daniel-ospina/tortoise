@@ -79,7 +79,7 @@ class _FakeProj:
 
 
 class _SDK:
-    """The REAL `TortoiseSDK.get_point` body over a fake cache and a tenant.
+    """The REAL `TortoiseSDK._get_point` body over a fake cache and a tenant.
 
     Subclassing is deliberate: the fallback must live in the METHOD under test,
     not in this stub — a stub that implemented the seam would pin the stub.
@@ -94,7 +94,12 @@ class _SDK:
 
 
 def _sdk_class():
-    """The real class, so `get_point` is the one under test."""
+    """The real class, so `_get_point` is the one under test.
+
+    ⛔ The PRIVATE spelling, because #12901's FINAL batch (#13899) privatised the body
+    (`def get_point` → `def _get_point`) and left a tombstone at the public name: calling
+    `get_point` raises `AttributeError` instead of running the method.
+    """
     from tortoise.sdk import TortoiseSDK
 
     Base = TortoiseSDK
@@ -800,7 +805,7 @@ def test_SDK_record_mode_refuses_on_a_bound_miss(monkeypatch):
     stub = _sdk_class()(None)
 
     with pytest.raises(rs.RecordUnavailable) as caught:
-        stub.get_point("p-1", served_out={})
+        stub._get_point("p-1", served_out={})
 
     cause = caught.value.__cause__
     assert isinstance(cause, rs.RecordReadBoundMiss), (
