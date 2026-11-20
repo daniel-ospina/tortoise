@@ -70,10 +70,10 @@ stated rather than implied: this epic CAN close 5-of-5 with `E6` red.** Promotin
 closing set is a re-registration (`V2`'s row set, `V9`'s `5/5` and §3.1's table all change), so it
 is the owner's call and not a lane's (`#11673` review, relayed to `#7949`).
 
-⛔ **`E6` cannot be SCORED yet, and that residual is named rather than claimed away:** the scored-log
-producer (`probes/capstone_measure.py`) still emits the five `E1`–`E5` rows, so no run can populate
-an `E6` row. Growing the probe is `#11695` — registering the row ahead of its producer is
-deliberate, because the alternative leaves the epic's acceptance criterion with no bar at all.
+✅ **`E6` is now SCORED — `#11695` grew the producer, so the residual named here is closed.** The scored-log producer emits SIX rows: the five closing ones in order, then `E6`, which measures the registered bar and nothing else — declared rows that are **unbound and unexplained** over `population.declared` at the run's head (floor 30).
+Its census's `written` column is reported **beside** that bar (`written_counts` on the row, `run.e6_census.written` in the machine record) and NEVER as it, because `A1` owns the written graph: at this head 45 declared rows over 7 packs, 44 `writable`, 1 `declaration-only` with its reason, 0 `predicate-not-in-allowlist` ⇒ **`unbound_and_unexplained = 0`, `E6` GREEN 45/45**, with `written` at **9 `direct` / 35 `mediated` / 1 `none`**.
+The population is 45 rather than the stamped 42 because the denominator is read at the run's head (`#11001` moved the registry; `#11797` re-measures the inventory).
+The shipped log beside this README is FROZEN evidence from before the producer, so its table still carries five rows — a row moves only by re-running the probe — and `CLOSING` is unchanged: still `E1`–`E5`.
 
 > **Verdict: 0/5 rows green. THREE rows are RED with measured numbers, TWO are BLOCKED
 > because the frozen metric cannot be scored on the artifact that exists. The epic is NOT
