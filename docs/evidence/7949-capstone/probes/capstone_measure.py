@@ -4207,6 +4207,15 @@ def _e6_write_cells(census_path: str) -> tuple[dict, str]:
     Returns ``(cells, source)``. A missing/unreadable artifact is NOT an error for E6's
     bar (the bar's own population is re-derived at this head); it only means the beside
     column reads ``unmeasured``, and ``source`` states why rather than leaving a blank.
+
+    ⛔ AND "unreadable" INCLUDES THE WRONG JSON *SHAPE*, not only bytes that fail to parse
+    (#14060 review round 4, P3, reproduced: `[]` -> ``AttributeError: 'list' object has no
+    attribute 'get'``; `{"packs": "x"}`` -> ``AttributeError: 'str' object has no attribute
+    'items'``). Both escaped `measure_e6` — this function is called AFTER the run has paid
+    its cost — and crashed `main`, when the docstring above promises the beside column
+    degrades to `unmeasured`. A truncated or hand-edited artifact is exactly the shape this
+    column exists to SURVIVE, and it is the same crash-after-a-paid-run class the loader
+    fault at F4b closed one function over.
     """
     path = ROOT / census_path
     if not path.is_file():
@@ -4216,8 +4225,15 @@ def _e6_write_cells(census_path: str) -> tuple[dict, str]:
     except (OSError, json.JSONDecodeError) as exc:
         return {}, (f"{census_path} could not be read ({type(exc).__name__}); "
                     f"its `written` cells are UNMEASURED")
+    if not isinstance(artifact, dict):
+        return {}, (f"{census_path} holds a {type(artifact).__name__}, not a JSON object; "
+                    f"its `written` cells are UNMEASURED")
     cells: dict[tuple, dict] = {}
-    for pack, block in (artifact.get("packs") or {}).items():
+    blocks = artifact.get("packs")
+    if blocks is not None and not isinstance(blocks, dict):
+        return {}, (f"{census_path} carries a {type(blocks).__name__} under `packs`, not a "
+                    f"JSON object; its `written` cells are UNMEASURED")
+    for pack, block in (blocks or {}).items():
         if not isinstance(block, dict):
             continue
         for surface in E6_SURFACES:

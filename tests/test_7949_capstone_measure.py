@@ -1458,6 +1458,32 @@ def test_e6_reports_an_unmeasurable_written_cell_as_unmeasured_never_zero(tmp_pa
     assert e6["unbound_and_unexplained"] == 0, e6["unbound_and_unexplained"]
 
 
+def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main(tmp_path):
+    """A census artifact that parses but is not an OBJECT must not crash `main` (#14060 review 4).
+
+    The docstring above promises that an artifact E6 cannot read makes the beside column read
+    `unmeasured`, and `measure_e6` calls the loader AFTER the run has paid its cost. Measured
+    before this arm: `[]` raised `AttributeError: 'list' object has no attribute 'get'` and
+    `{"packs": "x"}` raised `'str' object has no attribute 'items'` — the crash-after-a-paid-run
+    class the loader fault at F4b closed one function over, left open on the ARTIFACT side.
+    A truncated or hand-edited artifact is the shape this column exists to survive, so both
+    directions of the shape fault are armed.
+    """
+    for payload, why in (("[]", "a LIST"), ("{\"packs\": \"x\"}", "non-object packs")):
+        bad = tmp_path / "census.json"
+        bad.write_text(payload)
+        cells, source = measure._e6_write_cells(str(bad))
+        assert cells == {}, (why, cells)
+        assert "UNMEASURED" in source.upper(), (why, source)
+    # …and through the run's own path, where an escape is fatal rather than merely wrong.
+    bad = tmp_path / "census.json"
+    bad.write_text("[]")
+    e6 = measure.measure_e6(census_path=str(bad))
+    assert e6["error"] is None, e6["error"]
+    assert e6["written"]["unmeasured"] == e6["declared"], e6["written"]
+    assert set(e6["written"]) == {"direct", "mediated", "none", "unmeasured"}, e6["written"]
+
+
 def test_a_synthetic_hierarchies_defect_runs_through_the_runs_own_defect_scan():
     """`#11695` review F4d: the scan's `hierarchies[]` breadth, pinned WHERE IT IS USED.
 
