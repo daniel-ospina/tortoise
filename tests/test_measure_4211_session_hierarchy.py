@@ -1079,7 +1079,11 @@ def test_r6_a_writer_run_whose_counts_RAISED_is_unmeasurable_not_a_zero_delta(
     assert body.get("unmeasurable"), (
         "an UNREADABLE delta was reported as a measurement — `delta.get(k) is None` "
         "is not `delta.get(k) == 0`")
-    assert "not readable" in body["unmeasurable"]
+    # A raising count is ALSO a partial read, so the stricter cycle-6 reason fires
+    # first — either wording is a correct verdict, but the reason must NAME the
+    # failing keys, because "could not measure" without them is unactionable.
+    assert ("not readable" in body["unmeasurable"]
+            or "partial read is not a measurement" in body["unmeasurable"])
     assert "turns_total" in body["unmeasurable"]
     assert "queries_failed" in body, (
         "the writer arm must publish which queries it could not run, like "
@@ -1440,11 +1444,17 @@ def test_r8_the_docstring_does_not_name_ONE_writer_for_the_mixed_population():
     that seeder's. This pin makes the correction stick in the one place a prose fix
     forgets.
     """
-    text = _TOOL.read_text()
-    assert "those stores are written\n" not in text, (
+    # ⛔ Pin the DOCSTRING itself, not the whole file: the word "mixed" already occurs
+    # in a source comment (`# Naming one writer for a mixed population`), so a
+    # whole-file scan stayed green when the docstring's own sentence was deleted —
+    # the exact thing the message says it pins, and the text `--help` prints
+    # (#13919 cycle 6). The sibling prose pin already reads `mod.__doc__`.
+    doc = mod.__doc__ or ""
+    assert "those stores are written" not in doc, (
         "the docstring still attributes the whole instrument population to one writer")
-    assert "MIXED" in text or "mixed" in text, (
-        "the docstring must say the population is mixed, not silently drop the claim")
+    assert "MIXED" in doc, (
+        "the docstring must say the population is MIXED — a whole-file scan cannot "
+        "pin this, because 'mixed' also appears in a source comment")
     # …and the module exposes the derivation it should be pointing at.
     assert hasattr(mod, "_instrument_note")
 
@@ -1650,3 +1660,118 @@ def test_r9_a_turn_named_and_an_any_kind_aboutObject_key_are_both_present():
     assert "count(DISTINCT o)" in queries["sessions_with_gt1_aboutObject_object"]
     assert "aboutObject_duplicate_pairs" in queries
     assert "count(r)" in queries["aboutObject_duplicate_pairs"]
+
+
+# ── #13919 review cycle 6 ───────────────────────────────────────────────────
+def test_c6_a_writer_run_with_UNRELATED_queries_failing_is_unmeasurable(monkeypatch,
+                                                                       tmp_path):
+    """C6 (P1): the writer's verdict read 2 of 39 keys, so a PARTIAL read published.
+
+    `turns_total` and `points_total` are cheap counts; `aboutObject_by_endpoint`'s
+    UNWIND and `contains_targets_by_kind` can time out on a 25k-turn store — the exact
+    failure the read bound exists for. When those two answered and 37 others raised,
+    the delta guard passed, `_could_not_measure` skipped the arm (its `queries_failed`
+    is a MAPPING, not a list), and `main` exited 0 — replacing the artifact of record
+    with an object whose own counts are `{"error": …}` dicts. That is verbatim the
+    round-9 harm, closed for live/store with zero tolerance and left open here.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/m4211_hierarchy")
+    err = {"error": "TimeoutError: Timeout reading from socket"}
+    keys = [k for k, _ in mod.QUERIES]
+    # The two gate keys ANSWER on both sides; everything else raises.
+    gate = {"points_total": 0, "turns_total": 0}
+    before = {k: (0 if k in gate else dict(err)) for k in keys}
+    after = {k: (1 if k in gate else dict(err)) for k in keys}
+    seq = iter([dict(before), dict(after)])
+    monkeypatch.setattr(mod, "_run_queries", lambda g: next(seq))
+
+    class _Graph:
+        def query(self, *_a, **_k):
+            return _Result([[0]])
+
+    class _Proj:
+        g = _Graph()
+
+    class _FakeSDK:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def _get_proj(self):
+            return _Proj()
+
+        def create_object(self, *_a, **_k):
+            return {}
+
+        def _capture_session(self, conv, session_id=None):
+            return {"ok": True, "turns": 1, "extraction_mode": "mocked",
+                    "errors": [], "warnings": []}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("tortoise.sdk.TortoiseSDK", _FakeSDK)
+    body = mod.measure_writer()
+    assert body.get("unmeasurable"), (
+        f"{len(keys) - 2} of {len(keys)} queries raised and the writer arm reported "
+        "itself MEASURED — the two cheap gate keys answered, so the delta guard passed")
+    assert "partial read is not a measurement" in body["unmeasurable"]
+    assert mod._could_not_measure(body), (
+        "main would collect this arm as measured, so exit would be 0")
+
+    good = {"issue": 4211, "purpose": "the of-record artifact"}
+    out = tmp_path / "receipt.json"
+    out.write_text(json.dumps(good) + "\n")
+    assert mod.main(["--arms", "writer", "--out", str(out)]) == 2
+    assert json.loads(out.read_text()) == good, "the receipt of record was replaced"
+
+
+def test_c6_live_publishes_no_number_it_did_not_measure():
+    """C6 (P2): ``role_evidence.note`` hardcoded "the 60 sibling graphs".
+
+    That is a measurement claim about a DIFFERENT arm, in an artifact produced by
+    ``--arms live`` — which never runs that arm. Same asserted-vs-measured class as the
+    ``~/.zshrc:48`` literal in the field directly above it, which F3 fixed.
+    """
+    monkeypatch_fake = None  # documented: this pin is textual on purpose
+    assert monkeypatch_fake is None
+    text = _TOOL.read_text()
+    assert "the 60 sibling" not in text, (
+        "a hardcoded count is asserted in an artifact that may never have measured it")
+    assert "graphs_on_instance" in text, (
+        "the block must publish the number it DID measure and say so")
+
+
+def test_c6_the_two_event_session_keys_carry_their_own_scope():
+    """C6 (P2): `event_session_ids_distinct` promised ALL events, measured ATTACHED ones.
+
+    The Cypher filtered to events carrying an `aboutObject` edge, so the receipt
+    published 1042 beside `events_total` 10526 — a 10× smaller, attachment-scoped answer
+    under an unscoped name, with the scoping visible only in a source comment. The
+    file's own discipline (the turn/any-kind pairs) is: carry the filter in the name, or
+    publish both.
+    """
+    queries = dict(mod.QUERIES)
+    unscoped = queries["event_session_ids_distinct"]
+    attached = queries["event_attached_session_ids_distinct"]
+    assert "aboutObject" not in unscoped, (
+        "the UNFILTERED key must not carry the attachment filter")
+    assert "aboutObject" in attached, (
+        "the ATTACHED key must carry the filter its name declares")
+
+
+def test_c6_the_write_refusal_names_the_SEGMENT_predicate_it_implements():
+    """C6 (P2): the message described the substring match that was removed.
+
+    ``_looks_ephemeral`` splits on ``_ - .`` and matches a SEGMENT, so ``tortoise_latest``
+    is refused even though it CONTAINS ``test`` — the old message told such a caller
+    their name satisfied a condition it does not.
+    """
+    _, refusal = mod._writer_target("docker://:@db:6379/tortoise_latest")
+    assert refusal, "the fixture assumption changed: this name should be refused"
+    assert "segment" in refusal.lower(), refusal
+    # ⛔ The whole phrase: `tortoise_latest` CONTAINS `test` and is refused, so any
+    # message that describes a CONTAINMENT test tells the caller their name satisfies a
+    # condition it does not. (Asserting only the longer "must contain one of" was too
+    # weak — a mutant that kept "contain one of" survived it.)
+    assert "contain one of" not in refusal.lower(), (
+        "the message describes a CONTAINMENT test; the predicate is a delimited SEGMENT")

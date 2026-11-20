@@ -324,6 +324,15 @@ QUERIES: list[tuple[str, str]] = [
     ("events_with_aboutObject",
      "MATCH (e:Event)-[:aboutObject]->(:Object) RETURN count(DISTINCT e) AS n"),
     ("event_session_ids_distinct",
+     # ⛔ The NAME promises the whole Event population; the earlier Cypher filtered to
+     # events that CARRY an `aboutObject` edge and published 1042 beside
+     # `events_total: 10526` — a 10x-smaller, attachment-scoped answer under an
+     # unscoped name, with the scoping visible only in a source comment (#13919 cycle
+     # 6, the fourth of this class: a key readable two ways either carries the filter
+     # in its name or publishes both readings, as the turn/any-kind pairs do).
+     "MATCH (e:Event) WHERE e.session_id IS NOT NULL "
+     "RETURN count(DISTINCT e.session_id) AS n"),
+    ("event_attached_session_ids_distinct",
      "MATCH (e:Event)-[:aboutObject]->(:Object) "
      "RETURN count(DISTINCT e.session_id) AS n"),
     ("events_without_session_id",
@@ -717,8 +726,11 @@ def measure_live(uri: str, uri_source: str | None = None) -> dict:
             "note": "uri_source says what SUPPLIED the URI; it does not prove where "
                     "that came from, and this tool never reads a shell profile. The "
                     "receipt records this graph's contents. It does NOT prove this is "
-                    "the product's turn store — see 'instrument' for the 60 sibling "
-                    "graphs on the same instance that hold turns.",
+                    "the product's turn store — see the 'instrument' arm for the "
+                    "sibling graphs on this instance that hold turns (that arm is the "
+                    "one that COUNTS them; this block publishes only "
+                    "`graphs_on_instance`, which is a different number and is "
+                    "measured).",
         },
         "counts": counts,
         "empty_or_absent": _is_empty(counts),
@@ -1046,8 +1058,9 @@ def _writer_target(uri: str) -> tuple[dict | None, str | None]:
             f"refusing to WRITE into graph {spec['graph']!r} on {spec['host']}:{spec['port']}"
             " — the writer arm mints 3 fixture sessions ('m4211-*'), one shared claim "
             "Point and the Object 'test/repo#42' into whatever graph TORTOISE_DB_URI "
-            "names, and every later census would then count them. The graph name must "
-            f"contain one of {EPHEMERAL_GRAPH_MARKERS}; pass "
+            "names, and every later census would then count them. A delimited SEGMENT "
+            f"of the graph name must be one of {EPHEMERAL_GRAPH_MARKERS} (the name is "
+            "split on '_', '-', '.'), e.g. 'm4211_hierarchy'; pass "
             "--allow-non-ephemeral-writes to write anyway (the receipt records the argv).")
     return target, None
 
@@ -1172,16 +1185,32 @@ def measure_writer(*, allow_non_ephemeral: bool = False) -> dict:
         # bound produces on a 25k-turn store. Unreadable must be a verdict, not a
         # skipped branch — the writer arm is the only one with no `queries_failed`
         # accounting, and `measure_live`/`measure_store` both publish it.
+        # ⛔ And a PARTIAL read is not a measurement here EITHER (#13919 cycle 6).
+        # The gate above reads `turns_total` and `points_total` out of 39 queries, so a
+        # run where those two cheap counts answered and `aboutObject_by_endpoint`'s
+        # UNWIND or `contains_targets_by_kind` timed out on a 25k-turn store reached a
+        # verdict on 2 of 39 keys — exit 0, no `.unmeasurable.json` sibling, and
+        # `--out <receipt> || exit 1` replaced the artifact of record with an object
+        # whose own counts are `{"error": …}` dicts. That is verbatim the round-9 harm,
+        # closed for `live`/`store` with zero tolerance and left open on this arm — and
+        # `_could_not_measure` skips the arm because this field is a MAPPING, not a
+        # list, so nothing downstream caught it either. The rule is the other two
+        # arms' rule: ONE failed key makes the run unmeasurable.
+        failed_any = _failed_keys(before) or _failed_keys(after)
         turns_delta = delta.get("turns_total")
         points_delta = delta.get("points_total")
-        if turns_delta is None or points_delta is None:
-            unreadable = _failed_keys(after) or _failed_keys(before)
+        if failed_any:
             body["unmeasurable"] = (
-                "the before/after counts are not readable ("
-                + (", ".join(unreadable) if unreadable else
-                   "turns_total/points_total absent from a three-session fixture run")
-                + ") — a delta that could not be read is not a delta of zero, so this "
-                "run cannot be reported as a measurement")
+                f"{len(failed_any)} of {len(QUERIES)} queries raised before/after the "
+                f"capture ({', '.join(failed_any[:5])}"
+                f"{', …' if len(failed_any) > 5 else ''}) — a partial read is not a "
+                "measurement")
+        elif turns_delta is None or points_delta is None:
+            body["unmeasurable"] = (
+                "the before/after counts are not readable (turns_total/points_total "
+                "absent from a three-session fixture run) — a delta that could not be "
+                "read is not a delta of zero, so this run cannot be reported as a "
+                "measurement")
         elif turns_delta == 0 and points_delta == 0:
             # A replay proves nothing about a writer: nothing was written. The numbers
             # that follow are the PRE-EXISTING content of this graph.
