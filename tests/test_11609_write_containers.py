@@ -556,14 +556,14 @@ NON_SDK_RECEIVERS: dict[tuple[str, str, str], str] = {
 #: census exists to back up, not a substitute for it.
 #:
 #: This branch is ALSO what exempts the FalkorDB graph handle, and that is measured,
-#: not assumed (#13036 review F3a): the 16 ``.g.query(...)`` sites in the package
-#: (`tortoise/__main__.py` ×10, `why.py` ×5, `why_snapshot.py` ×3) call `query`, which
-#: is ambiguous, so they are exempted HERE — a separate `GRAPH_HANDLE_RECEIVERS` table
-#: keyed on `(path, receiver)` changed no outcome (0 offenders with it, 0 without) and
-#: its recorded justification was wrong on both counts (it said FIVE offenders where
-#: there are 16, and named `tortoise/__main__.py`'s `g` as `FalkorProjection.g` when
-#: there `g` is a loop variable over `groups`). Dead weight that misdescribes the
-#: mechanism is worse than absent: the next reader believes the guard is covered.
+#: not assumed (#13036 review F3a): a ``.g.query(...)`` call names `query`, which is
+#: ambiguous, so every one of them is exempted HERE — a separate
+#: `GRAPH_HANDLE_RECEIVERS` table keyed on `(path, receiver)` changed no outcome
+#: (0 offenders with it, 0 without, repo-wide) and its recorded justification was wrong
+#: on both counts: it cited FIVE offenders where the three files it named carry 16
+#: (MEASURED at a3655b739b: `why.py` 5, `why_snapshot.py` 3, `__main__.py` 8 — the
+#: package holds 927 such calls in all), and it described `tortoise/__main__.py`'s `g`
+#: as `FalkorProjection.g` when there `g` is a loop variable over `groups`.
 #: ``test_the_census_still_catches_an_ambiguous_name_on_an_sdk_receiver`` pins BOTH
 #: directions of this branch so removing the receiver test cannot pass silently.
 AMBIGUOUS_RETIRED_NAMES: frozenset[str] = frozenset(
