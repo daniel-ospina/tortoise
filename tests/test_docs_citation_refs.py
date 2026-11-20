@@ -3813,12 +3813,13 @@ def _inverts_the_match_set(flags: str) -> bool:
 #: — `--fixed-regexp`, `--fixed-r` and `--fixed-re` — in
 #: `test_the_d5_count_reader_does_not_grade_a_command_whose_pattern_is_NOT_A_REGEX`'s
 #: `alias_spelling` loop, and `--fixed-regexp` again as a control in
-#: `test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS` — this paragraph used to
-#: call the long-spelling cell a witness, and that cell asserts nothing about an alias (measured:
-#: `--fixed-regexp` occurs there only inside grep's own ambiguity message), which is the
-#: `_D5_RETIRED_OVERCLAIMS` defect this file bans (#13962). It is FAIL-CLOSED: `-F` prints `0` on
-#: the blank-class probe, so declining
-#: the alias can never grade a non-class as this class.
+#: `test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS` — the second witness is
+#: REAL and MEASURED (making every long spelling readable reds both), and this paragraph is where a
+#: previous version said "NOWHERE ELSE" and was wrong (#14027 round 8, P3). What that paragraph got
+#: right, and what stays: the LONG-SPELLING cell is NOT a witness — it asserts nothing about an
+#: alias (measured: `--fixed-regexp` occurs there only inside grep's own ambiguity message), which
+#: is the `_D5_RETIRED_OVERCLAIMS` defect this file bans (#13962). It is FAIL-CLOSED: `-F` prints
+#: `0` on the blank-class probe, so declining the alias can never grade a non-class as this class.
 #: ⛔ THE NEIGHBOURS THAT ARE **NOT** HERE, measured on the same probe: `-i`, `-w`, `-x`, `-E`, `-G`
 #: and `-P` all print `2`, so they leave this class intact; `--null` is `-Z` (a NUL after the FILE
 #: name) and prints `2`, so it is a RIVAL of the `--null-data` prefix rather than a shortening of it.
@@ -3833,6 +3834,18 @@ def _inverts_the_match_set(flags: str) -> bool:
 #: a wrong count look right — and the cost is a false RED on a document that legitimately prescribes
 #: a CAPPED second count. `egrep -c` is blind for the same reason (another tool spelling): measured
 #: `2` on the probe, and this reader only knows `grep`.
+#:
+#: ⛔ AND A CLUSTER WHOSE ARGUMENT-TAKING MEMBER HAS AN INVALID VALUE IS GRADED, NOT DECLINED
+#: (#14027 round 8, P3 — MEASURED, and the same on `origin/main`, so this is a DECLARATION of
+#: pre-existing behaviour rather than a regression here). `_d5_flag_word` does not validate a
+#: short flag's value — grep is the judge of the NAME — so the word is read as a count request and
+#: its tail is never checked: `grep -cmw '^[+-]$'` is `grep: invalid max count` (rc 2) yet is
+#: graded, and so are `grep -cDE` (`unknown devices method`) and `grep -cAc` (`invalid context
+#: length argument`). This is the FALSE-RED direction — a document that merely MENTIONS such a
+#: spelling would red the arm — and it is bounded: the executed row is still `_D5_BLANK_COUNT_RE`,
+#: so nothing here can make a wrong count look right. Closing it means validating `m`/`A`/`B`/`C`
+#: as numeric and `d`/`D` against their allowed sets; until then the classification above matches
+#: the code. It was already true on `origin/main` at `af3e8b0ffa`.
 _D5_RETARGETING_SHORT_FLAGS = frozenset("Fz")
 _D5_RETARGETING_LONG_FLAGS = frozenset({"--fixed-strings", "--null-data"})
 _D5_RETARGETING_LONG_RIVALS = ("--null",)
