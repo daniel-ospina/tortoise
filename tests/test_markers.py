@@ -282,6 +282,19 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_invite_fusion_http.py": {"registry": "prod-coupled"},    # #2003 (W7): registry lane invite-fusion HTTP tests
     "test_invite_fusion_docker.py": {"registry": "prod-coupled"}, # #2003 (W7): docker-lane fusion journeys
     "test_mcp_http.py": {"registry": "prod-coupled"},
+    # #13886: the capstone V2 suite provisions the `:Team` node its tenant-HTTP
+    # fixture authenticates as, and the quota gate resolves that team's limits
+    # through the REGISTRY namespace (`quota.resolve_org_limits` calls
+    # `_make_sdk(namespace="registry")`, never the caller's handle) — so the
+    # literal IS the namespace PROD code reads. MEASURED: renaming it to
+    # `test_registry` (this guard's own suggested remedy, and the first attempt)
+    # left every WRITE case refused `team limits missing max_points for resource
+    # 'points'` and 21 of the file's cases red, because the team was seeded in a
+    # graph the resolver never reads. The `prod-coupled` class exactly, like
+    # test_mcp_http / test_12943 above; the db_path is tmp_path-bound so the
+    # shared-graph hazard is closed by the redirect's per-path derivation, not by
+    # a rename.
+    "test_13036_capstone_v2.py": {"registry": "prod-coupled"},
     "test_mcp_server_auth_modes.py": {"registry": "prod-coupled"},   # C2 #2111 TestTenantModeDefault tk_ resolve mirrors test_mcp_http's registry pattern (the #2657 TestAskConnectedAssemblyExposure selfhost site went with the ask surface, #3849)
     "test_metering.py": {"registry": "prod-coupled"},
     # #3825: the metering-WINDOW tests put a real billing anchor on an org's
