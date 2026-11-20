@@ -2414,16 +2414,25 @@ def test_the_bundles_stated_index_re_point_lands_in_the_file_it_re_points():
     """
     doc = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
            / "05-verify.md").read_text(encoding="utf-8")
+    # ⛔ BOTH SPELLINGS ARE GRADED, because the two sides of the merge state the SAME
+    # re-point in different words and neither may lose its arm (#13802 merge): `main`
+    # writes it as "re-pointing that row's `sdk.py` cite from **`:OLD`** to **`:NEW`**",
+    # this branch writes it as "that row's cite moved **`:OLD`** → **`:NEW`**" — and the
+    # branch's attribution arm REFUSES the first spelling by name, because a gerund
+    # "re-pointing" reads as this repair's own act. Extending the matcher keeps the arm
+    # discriminating on the merged document (both ends named, new side resolvable, old
+    # side absent) instead of forcing one side's prose through the other's list.
     m = re.search(
         r"re-pointing that row's `sdk\.py` cite from \*\*`:(\d+)`\*\*.*?"
-        r"to \*\*`:(\d+)`\*\*",
+        r"to \*\*`:(\d+)`\*\*"
+        r"|that row's cite moved \*\*`:(\d+)`\*\* → \*\*`:(\d+)`\*\*",
         doc, re.S)
     assert m, (
-        "05-verify.md no longer states the index row's re-point as "
-        "`from **`:OLD`** ... to **`:NEW`**`. State it with both ends named, so this "
-        "arm can check the pair against the file the re-point lands in "
-        "(#13489 review, cycle 5)")
-    old, new = m.groups()
+        "05-verify.md no longer states the index row's re-point with both ends named "
+        "as `from **`:OLD`** ... to **`:NEW`**` (or `moved **`:OLD`** → **`:NEW`**`). "
+        "State it with both ends named, so this arm can check the pair against the file "
+        "the re-point lands in (#13489 review, cycle 5)")
+    old, new = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
     index = (DOCS / "00_index.md").read_text(encoding="utf-8")
     assert f"sdk.py:{new}" in index, (
         f"05-verify.md says the row's cite is re-pointed to `sdk.py:{new}`; "
@@ -3582,6 +3591,36 @@ _INDEX_REPOINT_CLAIMS = (
     "for exactly ONE cite",
     "THIS repair re-points it once more, to",
     "this repair re-pointed that cite once more",
+    # ⛔ The two the list above missed while the merged head still carried them
+    # (#13746 review, round 3, finding 4): both say the capstone row's cite move is
+    # THIS repair's, and the tree refutes both — ⛔ and `cmp` does NOT print nothing
+    # (round 8, P1, MEASURED): it differs at line 45175. What carries the refutation is
+    # the RANGE, not a whole-file identity: `:21715` and `:28178` both sit before 45175,
+    # and the live three-dot diff adds no `sdk.py:<n>` token.
+    "and THAT shift is this repair",
+    "this repair re-pointed it once more",
+    # ⛔ The two BARE spellings `_ATTRIBUTION_PHRASES` above carried with no counterpart
+    # here (#13802 review, finding 2, residual): on a head whose cite sets DIFFER and
+    # whose base is readable the attribution arm stands down, and without these entries
+    # the live-diff arm below
+    # did not know the phrasings either — so the attribution was covered by NEITHER arm,
+    # which is the fail-open Finding 2 names in its second form. Both are absent here.
+    "re-points it once more, to",
+    "re-pointed that cite once more",
+    # ⛔ The THIRD spelling with no counterpart (#13802 review, finding 2, residual — one
+    # instance over from the two above): on a head whose cite sets DIFFER and whose base
+    # is readable the `_attributions` arm stands down, and without this entry the
+    # live-diff arm below does not know this phrasing either, so the attribution is
+    # covered by NEITHER arm. Absent here, measured.
+    "re-pointing that row's `sdk.py` cite from",
+    # ⛔ The FOURTH, and the one the previous passes still missed (#13802 review, finding
+    # 2, residual — the same class, one instance over again). The bare phrase in
+    # `_ATTRIBUTION_PHRASES` had only the PREFIXED counterpart `this repair re-pointed it
+    # once more`, and that is not a counterpart for the purpose this list serves: the arm
+    # asks whether the CLAIM occurs in the document, so a document saying only
+    # `re-pointed it once more` contains no claim and escapes both arms on a diff-set
+    # head. Absent here, measured (`grep -cF` -> 0 at this head).
+    "re-pointed it once more",
 )
 
 
