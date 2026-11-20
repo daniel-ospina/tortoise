@@ -612,6 +612,33 @@ class TestDriftAndStaleness:
             cn.read_account(cp, ORG_ID)
         assert len(cp.calls) == 2, "one retry, then fail closed"
 
+    def test_a_fully_drifted_schema_raises_the_ORIGINAL_error(self):
+        """When the retry fails too, the FIRST error is what the operator sees.
+
+        The retry exists to separate "the additive column is missing" from "the
+        ledger is missing". If it also swallowed the case where nothing works, the
+        logged cause would be the RETRY's error — which names the ledger column
+        even when a base column is what the schema is actually missing
+        (#14038 review cycle 2's misdiagnosis class, one direction further out).
+        """
+        cp = _ColumnBlindCP(missing="suspended_at")
+
+        def failing_retry(table, *, select=None, filters=None, **_kw):
+            cp.calls.append(list(select or []))
+            raise RuntimeError("column organizations.deleted_at does not exist")
+
+        original_query = cp.query
+
+        def query(table, *, select=None, filters=None, **kw):
+            if len(cp.calls) == 0:
+                return original_query(table, select=select, filters=filters, **kw)
+            return failing_retry(table, select=select, filters=filters, **kw)
+
+        cp.query = query
+        with pytest.raises(RuntimeError, match="suspended_at"):
+            cn.read_account(cp, ORG_ID)
+        assert len(cp.calls) == 2
+
     def test_a_stale_gauge_is_not_a_reading(self, monkeypatch):
         """The gate treats a stale gauge as UNARMED; the notice must not state a
         figure from one (#14038 review, P3 — a 5-day-old 110 MB reading against a
@@ -1436,16 +1463,19 @@ def _ladder_import_problems(tree: ast.Module,
     mutation-attribution rule 2/3).
     """
     tiers = set(_additive_tiers())
-    module_bound = _scope_bindings(tree.body)
-    scopes: list[tuple[str, list[ast.stmt], set[str]]] = [
-        ("<module>", tree.body, module_bound)]
-    for fn in ast.walk(tree):
-        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            scopes.append((fn.name, fn.body,
-                           module_bound | _scope_bindings(fn.body)))
     problems: list[str] = []
     checked = 0
-    for scope_name, body, bound in scopes:
+
+    def visit(scope_name: str, body: list[ast.stmt], inherited: set[str]) -> None:
+        """Check THIS scope, then recurse with its bindings INHERITED.
+
+        ⛔ A nested `def` resolves a name against its own bindings AND every
+        ENCLOSING function's, so a legal closure read must not red (#14038 review
+        cycle 3 measured the over-block: `outer`'s import did not reach `nested`).
+        That is also why `inherited` accumulates rather than replacing.
+        """
+        nonlocal checked
+        bound = inherited | _scope_bindings(body)
         for node in _iter_own_scope(body):
             if not (isinstance(node, ast.Name) and node.id in tiers
                     and isinstance(node.ctx, ast.Load)):
@@ -1455,7 +1485,33 @@ def _ladder_import_problems(tree: ast.Module,
                 problems.append(
                     f"{label}:{node.lineno} {scope_name} uses {node.id} "
                     "without binding it")
+        for node in _own_child_scopes(body):
+            name = node.name if isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) else "<lambda>"
+            visit(name, node.body, bound)
+
+    visit("<module>", tree.body, set())
     return problems, checked
+
+
+def _own_child_scopes(body: list[ast.stmt]) -> list[ast.AST]:
+    """The def/class nodes that belong DIRECTLY to this scope (not nested deeper)."""
+    found: list[ast.AST] = []
+
+    def walk(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.ClassDef)):
+                found.append(child)          # its body is ITS scope, stop here
+                continue
+            walk(child)
+
+    for node in body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            found.append(node)
+            continue
+        walk(node)
+    return found
 
 
 def test_the_call_site_binding_guard_is_not_vacuous(tmp_path):
@@ -1489,6 +1545,41 @@ def test_the_call_site_binding_guard_is_not_vacuous(tmp_path):
         f"got {problems}")
     assert "outer" in problems[0], problems
     assert "sibling" not in problems[0], problems
+
+
+def test_the_ladder_resolver_credits_an_enclosing_closure(tmp_path):
+    """A legal closure read must NOT red — the mirror of the vacuity defect.
+
+    #14038 review cycle 3 planted it: `outer()` imports the tier and a `def
+    nested()` inside it reads it. Python resolves that read against the enclosing
+    function's bindings, so a resolver that only unions MODULE + own-scope
+    over-blocks correct code, and an over-block on a green PR is its own cost. The
+    same fixture keeps a genuinely unbound load (`loser`→`deep`) so crediting the
+    closure cannot be achieved by crediting everything.
+    """
+    planted = tmp_path / "closure_module.py"
+    planted.write_text(
+        "from somewhere import OTHER\n"
+        "\n"
+        "\n"
+        "def outer():\n"
+        "    from somewhere import _ORG_ADDITIVE_0015_TIER\n"
+        "\n"
+        "    def nested():\n"
+        "        return _ORG_ADDITIVE_0015_TIER\n"
+        "\n"
+        "    return nested\n"
+        "\n"
+        "\n"
+        "def loser():\n"
+        "    def deep():\n"
+        "        return _ORG_ADDITIVE_BILLING_TIER\n"
+        "\n"
+        "    return deep\n")
+    problems, checked = _ladder_import_problems(_parse(planted), str(planted))
+    assert checked == 2, f"expected both loads to be seen, got {checked}"
+    assert len(problems) == 1, problems
+    assert "deep" in problems[0] and "_ORG_ADDITIVE_BILLING_TIER" in problems[0], problems
 
 
 def test_every_ladder_module_imports_the_tiers_it_names():
