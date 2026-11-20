@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-14011-usage-1795212119-p699475-6532584e",
+  "_sha": "27d05665a907b4a1e0c9ecada7fddc6900aba583",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/14011-usage.log"
+    },
+    {
+      "kind": "branch",
+      "value": "fix/14011-usage-signal-hardening"
+    },
+    {
+      "kind": "sha",
+      "value": "f2028c595be5b86d1c77b096b554491508471f44"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/14011-usage"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 3565,
+  "ended_at": 1795215684,
+  "exit_code": 0,
+  "heartbeat_at": 1795215684,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-14011-usage-1795212119-p699475-6532584e",
+  "lease_until": 1795252284,
+  "pid": 699475,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795212119,
+  "state": "DONE",
+  "tag": "14011-usage",
+  "worktree": "/home/cmux/tortoise/.worktrees/14011-usage"
+}
