@@ -10090,12 +10090,16 @@ def test_the_fourth_legs_container_arm_asks_the_whole_family():
             assert upstream is True, (
                 f"`{name}({inner})` is answered by the FOURTH leg and by nothing upstream — the "
                 f"redundancy `_CONTAINER_CALLS_ANSWERED_UPSTREAM` records has stopped holding. "
-                f"TWO causes raise this exact message and it cannot tell them apart: leg 3 lost "
-                f"a wrapper it read, OR the FOURTH leg WIDENED to answer one of the 12 rows "
-                f"nothing upstream answers (measured at this head by mutation — an arm-only "
-                f"widening reddens HERE, on a row whose upstream legs were never touched). Rule "
-                f"leg 1 out: it is a DUPLICATE at this seam — measured 0 rows where leg 1 "
-                f"answers and leg 3 does not — so it cannot be the cause. A real store is still "
+                f"⛔ THIS RED IS NOT DIAGNOSTIC: do not read it as blaming one leg, and do not "
+                f"treat what follows as a closed list. It fires whenever `upstream` came back "
+                f"False while the arm answers, and that has more than one cause — leg 3 can stop "
+                f"answering a wrapper it read; a recogniser BOTH upstream legs consult can stop "
+                f"naming the key (measured at this head: `_names_property_key` forced off "
+                f"reddens HERE, on a PLAIN row, with the arm untouched); or the FOURTH leg can "
+                f"WIDEN to answer a row nothing upstream answers (measured: an arm-only widening "
+                f"reddens HERE with no upstream leg touched). The one thing this red DOES "
+                f"establish is that leg 1 is not the cause — it is a DUPLICATE at this seam, "
+                f"measured 0 rows where leg 1 answers and leg 3 does not. A real store is still "
                 f"REFUSED, so nothing certifies: this is the record's guard, not a fail-open."
             )
 
