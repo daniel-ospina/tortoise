@@ -3877,11 +3877,14 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
 
     Accepted here, each measured — SPELLINGS CHECKED, NOT A GRAMMAR: `^[+-]$`, `^[-+]$`,
     `^[+\-]$`, and the alternation forms `^(\+|-)$` / `^(-|\+)$` (PLAIN groups, each counting `2`
-    on the `x`/`+`/`-`/empty probe). ⛔ ANY BACKSLASH-BEARING BRACKET IS A DECLARED SUPERSET, not
-    an equivalence (#13995 review round 13, P3, MEASURED): a POSIX bracket has no escapes, so the
-    `\` is a MEMBER, and `^[+\-]$` plus its siblings count `3` on a probe that carries a `\` line
-    (the class counts 2). Accepted because it is a spelling a document plausibly writes, with the
-    cost (one impossible diff line) stated rather than implied. Three spellings are NOT among them, all measured: `^[\-+]$` (the
+    on the `x`/`+`/`-`/empty probe). ⛔ A BACKSLASH-BEARING BRACKET BUILT FROM THAT TABLE IS A
+    DECLARED SUPERSET, not an equivalence (#13995 review rounds 13 and 16, P3, MEASURED): a POSIX
+    bracket has no escapes, so the `\` is a MEMBER, and `^[+\-]$` counts `3` on a probe that
+    carries a `\` line where the class counts 2. Accepted because it is a spelling a document
+    plausibly writes, with the cost (one impossible diff line) stated rather than implied. It is
+    NOT a universal: a bracket mixing two backslashes or an inside RANGE (`` `^[-+\]$` ``, which
+    grep runs and counts `3`) is REFUSED here — the safe direction, and a residual this sentence
+    declares rather than a guarantee it makes. Three spellings are NOT among them, all measured: `^[\-+]$` (the
     DESCENDING range `\`–`+`: `grep: Invalid range end`, rc 2, and this test now refuses it too),
     `^(?:\+|-)$` (POSIX ERE has no non-capturing group: `warning: ? at start of expression`,
     counts `1` under `-E` and `0` under BRE) and `^+$`/`^-$` (one sign, half the class). What it
@@ -4415,12 +4418,16 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
                        # without a row going RED (#13995 review round 15, P2 — MEASURED: with the
                        # guard rewritten as `len(alternatives) == 2`, every d5 test still passed and
                        # these two were graded as the class, on a `grep -cE` count of 6).
-                       "^\\+|-|-$", "^-|\\-|\\+$"):
+                       "^\\+|-|-$", "^-|\\-|\\+$",
+                       # ⛔ AND A FOUR-BRANCH BODY (#13995 review round 16, P3 — MEASURED: with the
+                       # guard rewritten as `1 < len(alternatives) < 4` every d5 test still passed
+                       # and this one was graded as the class on a `grep -cE` count of 6).
+                       "^\\+|-|\\+|-$"):
         assert not _d5_counts_the_blank_class(half_class), (
             f"{half_class!r} must NOT be graded as the blank class: none of these counts exactly "
             "the two class lines (`^-$` counts only the removed half, measured 0 on a diff whose "
             "only blank line is added; `^+$` names one shape — the EMPTY line under `-E`; "
-            "`^(?:\\+|-)$` loses its group to POSIX ERE; `^\\\\+|-|-$` and its siblings are UNGROUPED "
+            "`^(?:\\+|-)$` loses its group to POSIX ERE; `^\\+|-$` and its siblings are UNGROUPED "
             "alternations, where ERE binds `^` to one branch and `$` to another and five or more "
             "lines match). "
             "Grading it would let the "
