@@ -14,7 +14,7 @@ aboutObjects: "SEARCH-ARCHITECTURE.md §3, §6.1; #11642; #13220; #13610; #5004;
 # Dense-leg query parity — both stores, one corpus, four readers (#13906)
 
 **Instrument:** `tools/vector_parity_13906.py` · **Comparator pins:**
-`tests/test_vector_parity_13906.py` (53 DB-free tests) · **Artifacts, this
+`tests/test_vector_parity_13906.py` (56 DB-free tests) · **Artifacts, this
 directory:** `parity-run.json`, `poison-{id,order,recall,vector}.json`.
 
 The question this answers, in one sentence: **for the same tenant data and the
@@ -340,6 +340,19 @@ guard kept re-deriving libpq's grammar. The question is **"what would
 `psycopg2.connect(dsn)` dial"**, not **"what does this string say"** — and answering
 it keeps needing libpq's own rules, not Python's.
 
+### Round 12: the authority is a failover LIST, and a socket PATH is not a remote host
+
+| finding | verified how | fix |
+|---|---|---|
+| **O1** the guard read the URI authority as ONE hostname. To libpq the authority is a comma-separated **failover list**: `postgresql://127.0.0.1:1,203.0.113.9/db` has `host='127.0.0.1,203.0.113.9'` and libpq **dials the second entry** when the first refuses (`PQhostaddr` → `203.0.113.9`), while `urlsplit().hostname` returns `127.0.0.1` — and `.port` even raises (`Port could not be cast to integer value as '1,203.0.113.9'`), so urllib itself does not consider that netloc parseable. The realistic trigger is the failover case the list exists for: the local store is down | libpq's resolver + a real connect attempt naming both hosts | `_authority_hosts()` splits the netloc on commas (userinfo stripped, `[::1]:5432` and `host:port` handled, percent-decoded) and every member must be loopback. Pinned by `test_the_uri_authority_is_a_failover_list_not_one_host`, plus the reverse (a single-host authority is still accepted) |
+| **O2** over-block, fail-closed: a unix-socket PATH (`?host=/var/run/postgresql`, `host=/var/run/postgresql`) was refused, so the operator had to pass `--allow-remote-writes` — a flag whose name asserts the opposite of what they are doing | `_assert_local_record_dsn` on both spellings | a host beginning with `/` is a socket PATH and is local by construction; it is skipped in the loop. Pinned by `test_a_unix_socket_path_is_local_not_a_remote_host` |
+| **O3** `app_role_dsn` mangled two legitimate local DSNs, the M2 class two spellings further on: re-joining `shlex.split` tokens dropped a conninfo VALUE's quoting (`password='p w'` → `password=p w`, which libpq rejects: `missing "=" after "w"`), and `parse_qsl` decoded a literal `+` in a URI value to a space (libpq does not) | `PQconninfoParse` on the rebuilt strings, before and after | conninfo values are re-emitted through `_quote_conninfo_value` (quoted only when they must be), and the URI side splits the raw query and percent-decodes only what libpq percent-decodes. Pinned inside `test_the_app_role_dsn_keeps_the_spelling_it_was_given` |
+| **O4** `poison-vector.json` publishes `efRuntime: 200` ANSWERS under `efRuntime: 10` PARAMETERS: that arm's graph answers are re-read after `rebuild_with_ef`, but `index_params` had been captured from the default index. No verdict impact (the poison gates on `graph_scan`), but the artifact misattributes its own numbers | all five artifacts re-derived: only `poison-vector` has `graph_index` identical to `graph_index_ef200` | the arm re-reads `index_params` together with its answers, pinned by an AST read of the branch. ⚠️ The COMMITTED `poison-vector.json` predates this fix and still pairs the default index's parameters with the ef-200 answers — a fresh live run regenerates it; nothing else in that artifact is affected |
+
+Mutants, each reddening exactly its own pin: the authority read as one host → **1 failed**; the
+unix-socket skip removed → **1 failed**; the vector arm keeping stale parameters → **1 failed**.
+Restored tree: **56 passed**.
+
 ## 6. Reproducing
 
 ```bash
@@ -369,7 +382,7 @@ done
 ```
 
 DB-free comparator pins: `uv run python tools/test_lane.py run --
-tests/test_vector_parity_13906.py -q` → **53 passed**.
+tests/test_vector_parity_13906.py -q` → **56 passed**.
 
 Falsifier exit codes — the recipe above reads them, so they are part of the
 contract, not decoration:

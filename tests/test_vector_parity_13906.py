@@ -23,6 +23,7 @@ import ast
 import importlib.util
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -312,7 +313,7 @@ def test_a_dsn_whose_host_cannot_be_parsed_is_refused_not_skipped(harness):
         "host=db.prod.example.com dbname=tortoise_record",
     )
     for dsn in unresolvable:
-        assert harness.urlsplit(dsn).hostname is None, dsn  # ← the SKIP condition
+        assert urlsplit(dsn).hostname is None, dsn  # ← the SKIP condition
         with pytest.raises(harness.CannotRun) as refused:
             harness._assert_local_record_dsn(dsn, False)
         assert "NON-LOCAL" in str(refused.value)
@@ -415,7 +416,7 @@ def test_a_host_in_the_query_string_overrides_the_authority_and_is_refused(harne
     # real connect attempts that address). The two parsers disagree about where
     # the host is, so this is REFUSED rather than resolved one way.
     hash_shape = "postgresql://127.0.0.1/tortoise_record#?hostaddr=203.0.113.9"
-    assert harness.urlsplit(hash_shape).query == ""      # ← what Python sees
+    assert urlsplit(hash_shape).query == ""             # ← what Python sees
     assert harness._record_dsn_hosts(hash_shape) == [harness.RECORD_DSN_AMBIGUOUS]
     with pytest.raises(harness.CannotRun):
         harness._assert_local_record_dsn(hash_shape, False)
@@ -509,6 +510,18 @@ def test_the_app_role_dsn_keeps_the_spelling_it_was_given(harness):
     assert replaced.count("options=") == 1, replaced
     assert "x%3D1" not in replaced, replaced
 
+
+    # ⛔ A conninfo VALUE carrying whitespace must stay QUOTED: re-joining bare
+    # `shlex.split` tokens emitted `password=p w`, which libpq rejects outright
+    # (`missing "=" after "w"`) — a DSN the guard had certified as local.
+    quoted = harness.app_role_dsn(
+        "dbname=tortoise_record host=127.0.0.1 password='p w'")
+    assert "password='p w'" in quoted, quoted
+
+    # ⛔ And a literal `+` in a URI value must NOT be decoded to a space
+    # (`parse_qsl` does; libpq does not).
+    plus = harness.app_role_dsn("postgresql://127.0.0.1/db?password=ab+cd")
+    assert "ab%2Bcd" in plus, plus
 
 def test_an_empty_leg_is_not_a_perfect_cross_recall(harness):
     """`1.0` for an empty leg published "perfect agreement" for a leg that
@@ -1570,3 +1583,61 @@ def test_the_record_arm_refuses_a_database_without_its_hnsw_index(harness):
                for d in record_arm for k in d.keys), (
         "arms.record does not record the index it measured — the driver name is "
         "an unverified claim without it")
+
+def test_the_uri_authority_is_a_failover_list_not_one_host(harness):
+    """`urlsplit().hostname` answers HALF the question libpq asks.
+
+    To libpq the URI authority is a comma-separated FAILOVER LIST: for
+    `postgresql://127.0.0.1:1,203.0.113.9/db` its `host` is
+    `'127.0.0.1,203.0.113.9'` and it dials the SECOND entry when the first
+    refuses (measured: `PQhostaddr` → `203.0.113.9`) — while `urlsplit().hostname`
+    returns `127.0.0.1` and `.port` even RAISES. The realistic trigger is the
+    failover itself: the local store is down, so the run seeds and then deletes in
+    the remote one.
+    """
+    assert harness._record_dsn_hosts(
+        "postgresql://127.0.0.1:1,203.0.113.9/tortoise_record"
+    ) == ["127.0.0.1", "203.0.113.9"]
+    for dsn in ("postgresql://127.0.0.1:1,203.0.113.9/tortoise_record",
+                "postgresql://localhost:5432,db.prod.example.com/tortoise_record"):
+        with pytest.raises(harness.CannotRun) as refused:
+            harness._assert_local_record_dsn(dsn, False)
+        assert "NON-LOCAL" in str(refused.value), dsn
+        harness._assert_local_record_dsn(dsn, True)   # the deliberate act survives
+    # …and a single-host authority is still accepted, so this is about the LIST.
+    harness._assert_local_record_dsn("postgresql://127.0.0.1:5432/db", False)
+
+
+def test_a_unix_socket_path_is_local_not_a_remote_host(harness):
+    """A socket PATH is local by construction — refusing it was an over-block.
+
+    `--allow-remote-writes` is the flag for a deliberate REMOTE run; requiring it
+    for `host=/var/run/postgresql` tells the operator the opposite of what they
+    are doing.
+    """
+    for dsn in ("postgresql:///tortoise_record?host=/var/run/postgresql",
+                "host=/var/run/postgresql dbname=tortoise_record"):
+        harness._assert_local_record_dsn(dsn, False)
+
+
+def test_the_vector_poison_arm_rereads_its_own_index_params(harness):
+    """The arm's answers are re-read after `rebuild_with_ef`; its PARAMETERS must be too.
+
+    Otherwise `poison-vector.json` publishes `efRuntime: 200` answers under
+    `efRuntime: 10` parameters — the "a driver name is a claim, the artifact is
+    the evidence" rule broken from the other side. Caught by an AST read of the
+    branch, because building the real stores is a live action.
+    """
+    tree = ast.parse(MODULE_PATH.read_text())
+    run_node = next(n for n in ast.walk(tree)
+                    if isinstance(n, ast.FunctionDef) and n.name == "run")
+    reread = False
+    for node in ast.walk(run_node):
+        if not isinstance(node, ast.If):
+            continue
+        src = ast.unparse(node.test)
+        if "poison" in src and "vector" in src:
+            reread = reread or "index_params" in ast.unparse(node)
+    assert reread, ("the vector-poison branch must re-read "
+                    "`report[\"arms\"][\"graph_index\"][\"index_params\"]` after "
+                    "the ef-diagnostic rebuild")
