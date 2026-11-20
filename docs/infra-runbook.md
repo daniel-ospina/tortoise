@@ -4634,6 +4634,11 @@ load-bearing:
 
 ⚠️ **`set` and `unset` both RESTART the Machine.** App secrets are injected at boot, so the restart is
 the mechanism by which the change takes effect — schedule it, do not read the brief 502s as a regression.
+⛔ **Do NOT reach for `--stage` to dodge that restart.** A staged secret is *stored but not applied*: it
+takes effect when the Machines are next started or updated, i.e. at the next `fly deploy`
+([Fly docs — Secrets and Fly Apps](https://docs.fly.io/apps/secrets)). That hands the arming moment to
+a deploy, which is the one thing this declaration refuses (see **Provenance** below). The restart is the
+deliberate act: take it in a window instead.
 
 ```bash
 fly secrets set TORTOISE_RECORD_ALLOCATE=1 -a tortoise-y4mjjq     # ONLY after every graph is seeded + armed
