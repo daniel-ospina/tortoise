@@ -3192,13 +3192,17 @@ _D5_BLANK_COUNT_RE = re.compile(
 #: word ends at whitespace or at a character that cannot appear inside a `grep` argument in prose
 #: (`` ` `` closes the code span; `;`/`|`/`&`/`(`/`)`/`<`/`>` are shell operators); a flag TOKEN
 #: is `--`/`-` then alphanumerics (which still expresses `-c`, `-Ec`, `--count`,
-#: `--color=never`, `-C3`, `-m2`); a QUOTED tail is an attached VALUE only on a SHORT cluster
-#: whose LAST character takes an argument (`-e'…'`), and on every other cluster it is MORE FLAG
-#: CHARACTERS, because the shell has already removed the quotes — an alphanumeric residue is read
-#: as one word (`grep -c'x'` is argv `-cx`, so it IS a count and the quoted token after it is its
-#: expression) while a non-alphanumeric one is unreadable (`grep -c'^\+$'` is argv `-c^\+$`, which
-#: grep rejects). An UNQUOTED tail follows the same split: it is a value only on such a cluster
-#: (`-e^[+-]$`), and `grep -c, '…'` is unreadable because `-c,` is not a flag cluster at all. On a
+#: `--color=never`, `-C3`, `-m2`); a QUOTED tail is an attached VALUE on a SHORT cluster that
+#: CONTAINS an argument-taking flag, at ANY position in it (`-e'…'`, `-ce'…'`, `-ec'…'`), and on
+#: every other cluster it is MORE FLAG CHARACTERS, because the shell has already removed the quotes
+#: — an alphanumeric residue is read as one word (`grep -c'x'` is argv `-cx`, so it IS a count and
+#: the quoted token after it is its expression) while a non-alphanumeric one is unreadable
+#: (`grep -c'^\+$'` is argv `-c^\+$`, which grep rejects). ⛔ An UNQUOTED tail is NARROWER than
+#: that and is NOT the same split (#14027 P3 — MEASURED while verifying round 7's F2: the two
+#: tests differ in the code): only a cluster whose LAST character takes the argument owns one
+#: (`-e^[+-]$`, `-ce^[+-]$`), so `-ec^[+-]$` is not a flag word at all — argv `-e c^[+-]$` makes
+#: the whole token `-e`'s pattern. `grep -c, '…'` is unreadable because `-c,` is not a flag
+#: cluster at all. On a
 #: LONG option a quoted tail is MORE NAME with the
 #: quotes removed (`--count'x'` is argv `--countx`), so the acceptance test refuses it, while a
 #: tail that is a `=`-separated value (`--regexp='x'`) is read as that value. A QUOTED section
@@ -4878,6 +4882,16 @@ def test_the_d5_count_reader_reads_an_UNQUOTED_pattern_and_refuses_an_ambiguous_
     restoring `return option, None` in `_d5_flag_word` reds the `--count,` row; restoring
     `return option, rest` for a long option's QUOTED tail reds the `--count'x'` row, and a blanket
     refusal of that tail reds its `--count''` control.
+    ⛔ TWO DIFFERENT TESTS DECIDE WHETHER A SHORT CLUSTER OWNS AN ATTACHED VALUE (#14027 P3 —
+    MEASURED while verifying round 7's F2): the QUOTED branch asks whether the cluster CONTAINS an
+    argument-taking flag (`any(...)`), the UNQUOTED branch whether its LAST character takes the
+    argument. The module
+    comment used to state the last-character rule for both, which the code then contradicted two
+    lines later for `-ec'…'`. The asymmetry is observable ONLY in `_d5_flag_word` — a non-last
+    argument-taking flag always makes the value's role `other`, so no graded prescription
+    changes, which is exactly why it needs a READER pin rather than a graded row: `-ec'^[+-]$'`
+    IS an attached value, while `-ec^[+-]$` is not a flag word at all. Both are green on
+    `origin/main`'s reader, so they are regression pins, not witnesses of a behaviour fix.
     """
     for context in ("grep -c --context 2 '^[+-]$'", "grep -c --context=2 '^[+-]$'",
                     "grep -c -C 2 '^[+-]$'"):
@@ -4983,6 +4997,41 @@ def test_the_d5_count_reader_reads_an_UNQUOTED_pattern_and_refuses_an_ambiguous_
         "grep counts the blank class (measured: 2) — treating `'=^[+-]$'` as an attached "
         "value's LITERAL text would report the expression `=^[+-]$`, which is not this class "
         "(#14027 second review round, P3 — MEASURED)")
+
+    # ⛔ A SHORT CLUSTER OWNS A QUOTED ATTACHED VALUE IF IT **CONTAINS** AN ARGUMENT-TAKING FLAG,
+    # BUT AN UNQUOTED ONE ONLY IF ITS **LAST** CHARACTER TAKES THE ARGUMENT — two different tests
+    # in `_d5_flag_word`, and the module comment stated the last-character rule for both until
+    # this pin (#14027 P3, verified post-review). The behaviour is not what changed: all three
+    # rows are GREEN on `origin/main`'s reader (measured by loading it and calling it), so they are
+    # REGRESSION
+    # pins that hold the asymmetry the comment now claims, not witnesses of a new fix. The first
+    # row is also the assertion behind the module comment's own citation of `grep -ce'^[+-]$'` as
+    # READ — a REAL count (argv `-c -e ^[+-]$`, prints 2) that was named in prose and pinned
+    # nowhere. The other two exist because the asymmetry has NO graded witness — a NON-last
+    # argument-taking flag always makes the value's role `other`, so both spellings grade `[]` —
+    # and a claim nothing varies on is the inert-narration defect this file bans: replace
+    # `any(...)` with `option[-1]` and `-ec'^[+-]$'` turns `None`; loosen the unquoted branch to
+    # `any(...)` and `-ec^[+-]$` turns an attached value. Measured real grep: `-ec'^[+-]$'` is
+    # argv `-ec^[+-]$` = `-e c^[+-]$` (rc 1, nothing counted) and `-ec^[+-]$` is the same argv, so
+    # `-e`'s pattern is `c^[+-]$` and neither token carries a count flag of its own.
+    assert _d5_blank_class_prescriptions("a count: `grep -c -ce'^[+-]$'`\n") == ["^[+-]$"], (
+        "`grep -c -ce'^[+-]$'` is argv `-c -e ^[+-]$` and grep counts the blank class (measured: "
+        "2, rc 0) — the class lives in the quoted tail of a cluster whose first character is the "
+        "count, and the module comment cites this spelling as READ. A reader that treated every "
+        "quoted tail as more flag characters would call it unreadable and leave a REAL count "
+        "invisible behind it, which is the false PASS this arm exists to refuse "
+        "(#14027 P3 — MEASURED)")
+    assert _d5_flag_word("-ec'^[+-]$'") == ("-ec", "'^[+-]$'"), (
+        "`-ec'^[+-]$'` IS an attached value: the QUOTED branch asks whether the cluster CONTAINS "
+        "an argument-taking flag (`any(...)`), not whether its LAST character takes one, and the "
+        "module comment used to say otherwise. No graded row can red this — `-ec`'s value has "
+        "role `other`, so nothing is graded either way — which is why the pin is on the reader "
+        "(#14027 P3 — MEASURED)")
+    assert _d5_flag_word("-ec^[+-]$") is None, (
+        "`-ec^[+-]$` is NOT a flag word: the UNQUOTED branch needs the cluster's LAST character "
+        "to take the argument (`option[-1]`), and `c` does not — the token is argv "
+        "`-e c^[+-]$`, i.e. `-e`'s pattern, so it carries no count flag. Loosening this branch to "
+        "`any(...)` would turn it into an attached value (#14027 round 7, P3 — MEASURED)")
 
     # ⛔ DECLARED RESIDUAL, AND IT IS PINNED AS ONE (#14027 third review round, P3 —
     # MEASURED): this reader checks that an argument-taking SHORT flag HAS an argument, never that
