@@ -6829,20 +6829,25 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # added for this clause scopes to the phrase `the content-review queue filter that cite
     # named`, which is DISCRIMINATING (`:28373` is the file's only `dedup_reviewed IS NULL`),
     # but a `_pin_row_failures` row only asks whether the number appears SOMEWHERE on the
-    # scoped line — and D5 IS ONE LINE carrying `:28373` six times, so a row satisfied by any
+    # scoped line — and D5 IS ONE LINE carrying `:28373` four times, so a row satisfied by any
     # of them cannot tell the clause being re-pointed from another occurrence staying put.
     # ⛔ `:28067` is NOT the live cite here, and an earlier cut of this comment called it the
     # file's only `dedup_reviewed IS NULL` (#13746 review, P2). Measured at this head:
     # `grep -n 'dedup_reviewed IS NULL' tortoise/sdk.py` -> `28373` (the only hit), while
-    # `sed -n '28067p'` -> `# Tier 1: hash vs existing decisions (pointKind-scoped, N11).`
+    # at `e679d22286` `sed -n '28067p'` -> `# Tier 1: hash vs existing decisions (pointKind-scoped, N11).`
+    #
+    # ⛔ AND AT THIS HEAD THAT COMMAND DOES NOT PRINT IT (fresh review at `1021ff6ed7`, P2,
+    # MEASURED): `sed -n '28067p' tortoise/sdk.py` reads `resolver just proved there is only
+    # one.` here and the Tier 1 comment is `:28262`. The reading above is `e679d22286`'s — a
+    # PAST head's — which is the same one-reading-two-heads defect this comment is about.
     # `:28067` is a MIDDLE waypoint of D5's own re-point chain, and it takes THREE commits, not
-    # two: `:28019` -> `:28067` (main's `#13551`), `:28067` -> `:28337` (`#13755`), `:28337` ->
-    # `:28373` (main's `#13724`) — each hop measured on `docs/00_index.md`'s `#12296` row
+    # two: `:28019` -> `:28067` (main's `#13551`), `:28067` -> `:28142` (`#13755`), `:28142` ->
+    # `:28178` (main's `#13724`) — each hop measured on `docs/00_index.md`'s `#12296` row
     # (`git show <sha> -- docs/00_index.md | grep -E '^[+-][^+-]' | grep -oE 'sdk.py:[0-9]+'`
     # prints exactly those pairs). An earlier cut of this comment collapsed the middle hop and
-    # credited `:28067` -> `:28373` to `#13724`, which never touched `:28067` — the same class
+    # credited `:28067` -> `:28178` to `#13724`, which never touched `:28067` — the same class
     # of defect as the premise it replaced, one layer down (`#13746` re-review, P1). So D5 still
-    # prints `:28067` four times and it is still not what the clause says. The live value — and
+    # prints `:28067` six times and it is still not what the clause says. The live value — and
     # the one the pin row above asserts — is `:28373`. (`:28336`/`:28337` are the `def` and signature lines, which is a
     # different statement again; this comment used to conflate all three.)
     # MEASURED (#13589 review): deleting the clause's own "sits at `sdk.py:28373`" left the
@@ -16761,6 +16766,13 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     # `test_the_merge_head_honours_line_is_what_that_head_carries` reads head-labelled
     # figures against that head's own blob, which is the arm a `09f5c99afd` label needs.
     # Deleting these two is therefore a COVERAGE MOVE, not a silence.
+    # ⛔ AND THE LABELLED PAIR IS **UNGUARDED**, stated here because an earlier cut of this
+    # comment claimed the opposite (fresh review at `1021ff6ed7`, P2, MEASURED):
+    # `test_the_merge_head_honours_line_is_what_that_head_carries` hard-codes
+    # `2584a86ec1` (`_honours`) and the quartet head (`bd020ff45b`), both read out of
+    # `tortoise/sdk.py`; NO arm in `tests/` or `tools/` reads
+    # `09f5c99afd:tortoise/hosted_api.py`, so `:15328`/`:15405`/`:15357`/`:15367` are
+    # read by nothing. Guarding them is a follow-up, not a claim this file can make.
     # ⛔ THE `sdk.py` IMPORT'S *OTHER* HIT, bound to the sentence that states it (#13879
     # review, P2). The I7 pair above closed this class for two anchors and left this
     # equally bindable clause unbound: the row states `:45867` as CURRENT
