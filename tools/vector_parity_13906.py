@@ -67,12 +67,26 @@ per poison, and a blind harness that shares `1` with "diverged" reads as
 """
 from __future__ import annotations
 
+import sys
+
+# #5128: refuse a <3.12 interpreter before the imports below — a module-level
+# 3.12-only import would fail first, and the operator would get an unattributed
+# traceback instead of this sentence (the `tools/` entry-point contract;
+# `tests/test_entry_point_python_guard.py` pins it for the corpus). This guard is
+# PROTECTIVE, not documentary: nothing below it may use 3.12-only SYNTAX, or the file
+# would die in the tokenizer and never reach this statement.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/vector_parity_13906.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/vector_parity_13906.py`"
+    )
+
 import argparse
 import contextlib
 import json
 import math
 import os
-import sys
 import time
 import uuid
 from dataclasses import dataclass
