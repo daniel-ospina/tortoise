@@ -57,11 +57,11 @@ _AMBIENT = ("FLY_API_TOKEN", "FLY_MACHINES_FILE", "FLY_TOML", "FLY_APP",
 #: full audited set. ⛔ Do not read it as one: the live set grows with every
 #: `fly-toml-env` DECLARATION — not with every `fly.toml [env]` key (`[env]` holds
 #: 20 keys while only 8 are declared `fly-toml-env`) — so a count written here is
-#: stale by the next declaration (7 on `main` at `e3f894b31b`; 8 once #13926 merged,
-#: which added `TORTOISE_EMBEDDER_WARMUP`). This comment said "three" while the
-#: manifest already declared 7. `LIVE_NAMES` is fixture data for the tests below and
-#: is never compared against the real manifest; the pin that matters is
-#: `deliberate test change`, not coverage.
+#: stale by the next declaration (6 when this comment was written, 7 by
+#: `e3f894b31b`, 8 once #13926 merged, which added `TORTOISE_EMBEDDER_WARMUP`). It
+#: said "three" while the manifest already declared 6 — never 3.
+#: `LIVE_NAMES` is fixture data for the tests below and is never compared against
+#: the real manifest; the pin that matters is `deliberate test change`, not coverage.
 LIVE_NAMES = ("TORTOISE_CONTROL_PLANE", "TORTOISE_REAUTH_WINDOW_SECONDS",
               "TORTOISE_MANUAL_LINKING_ENABLED")
 
