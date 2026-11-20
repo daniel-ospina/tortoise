@@ -396,13 +396,15 @@ def _open_transport(reg, s, db: str):
             yield
 
     parent = Starlette(lifespan=_lifespan, routes=[Mount("/mcp", app=app)])
-    tc = TestClient(parent)
-    tc.headers.update({
+    # The headers go in the CONSTRUCTOR, not a `headers.update(...)` call: `update` is one
+    # of the retired SDK names, so an ordinary dict spread on the client would be counted
+    # as one more untyped-receiver row by `tools/sdk_privatise.py` and move the
+    # `SWEEP_RESIDUE` pin (#12901) — a pin that must move only for a real reference shape.
+    return TestClient(parent, headers={
         "Authorization": f"Bearer {s['api_key']}",
         "Accept": "application/json, text/event-stream",
         "Content-Type": "application/json",
     })
-    return tc
 
 
 # ══════════════════════════════════════════════════════════════════════════
