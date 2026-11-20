@@ -3646,6 +3646,52 @@ def _css_rules_with_scope(css: str, selector: str) -> list[tuple[str, bool]]:
     return out
 
 
+def _effective_decl(body: str, prop: str) -> str | None:
+    """The LAST `prop: …` declaration in a rule body — the one that WINS.
+
+    ⛔ "`prop: value` occurs somewhere in this block" is not "the rule says
+    `value`": inside a block the last declaration wins, so appending
+    `text-align: center` below a `text-align: left` leaves a substring search
+    green with the rule centred — measured at #14020 review cycle 3, P1: the
+    hero subtitle row passed with `text-align: center` appended to the very
+    block it reads, which is the ordinary way an editor changes a rule.
+    Read the winning value, not the presence of a string.
+    """
+    # Split on `;` rather than regexing `(?:\A|;)\s*prop…`: a regex that
+    # CONSUMES the separator cannot match two declarations of the same property
+    # back to back, which is exactly the append shape this guards — the first
+    # draft of this helper reported the FIRST `text-align` and both mutants
+    # stayed green (#14020 review cycle 3, measured).
+    last = None
+    for decl in _css_blanked(body).split(";"):
+        name, sep, value = decl.partition(":")
+        if sep and name.strip().lower() == prop.lower():
+            last = value.strip()
+    return last
+
+
+def _css_all_rules(css: str) -> list[tuple[str, str, bool]]:
+    """Every style rule as `(prelude, body, inside_media)`, comment-blanked.
+
+    The reader of last resort for a question no single selector can answer —
+    "does ANY rule reach this element?" (#14020 review cycle 3, P1: the lead
+    row read only rules whose prelude NAMES `#beat-intro .lead`, so
+    `#beat-intro p:first-of-type { font-size: 2rem }` moved the lead's `ch`
+    with every row green). `@media` preludes are returned as their own entries
+    only when they carry declarations; callers that care pass `inside_media`.
+    """
+    blanked = _css_blanked(css)
+    media = _media_block_spans(css)
+    out: list[tuple[str, str, bool]] = []
+    for m in re.finditer(r"([^{}]+)\{", blanked):
+        prelude = m.group(1).strip()
+        if not prelude or prelude.startswith("@"):
+            continue
+        out.append((prelude, _brace_block(blanked, m.end() - 1),
+                    any(start <= m.start() < end for start, end in media)))
+    return out
+
+
 def _css_rule_preludes(css: str, selector: str) -> list[tuple[str, str]]:
     """Every rule whose selector LIST contains `selector`, as `(prelude, body)`.
 
@@ -10357,6 +10403,28 @@ class TestProductTeamsCopy:
             "serif silently disappears and no CSS row above reds (#14020 "
             "review P1)")
 
+        # ...and nothing may move the lead's font through a selector that does
+        # not NAME it. `.lead` is a <p> inside `#beat-intro`, so any
+        # `#beat-intro`-rooted rule without a child combinator can reach it:
+        # `#beat-intro p:first-of-type { font-size: 2rem }` resolved the lead's
+        # `74ch` past the flat 660px while EVERY row in this class stayed green
+        # (#14020 review cycle 3, P1 — measured, not reasoned).
+        reachable = [
+            (prelude, _effective_decl(body, "font-size"))
+            for prelude, body, inside_media in _css_all_rules(css)
+            if not inside_media
+            and re.search(r"(?:^|;)\s*(?:font-size|font-family|font)\s*:", body)
+            for part in (p.strip() for p in prelude.split(","))
+            if part.startswith("#beat-intro") and ">" not in part
+        ]
+        assert reachable == [], (
+            f"rules set the lead's font without naming `.lead`: {reachable!r}. "
+            "`.lead` is a <p> inside `#beat-intro`, so these reach it — and "
+            "`max-width: min(660px, 74ch)` resolves in ITS font, so changing "
+            "that size moves the lead's measure to ~the flat 660px while every "
+            "row above stays green (#14020 review cycle 3 P1). The serif and "
+            "any size live on `#beat-intro .lead > span`.")
+
         ch_property = re.search(r"--[\w-]+\s*:[^;{}]*\bch\b", _css_blanked(css))
         assert ch_property is None, (
             f"a custom property carries a `ch` measure: {ch_property.group(0)!r}. "
@@ -10383,10 +10451,16 @@ class TestProductTeamsCopy:
         assert shared is not None, (
             "no shared-measure rule for `#beat-intro p, #beat-compute > p, "
             ".outcomes` — the prose and the ↑/↓ grid must stand on one measure")
-        assert "min(660px, 74ch)" in shared, (
-            f"the shared measure reads {shared!r}; it must stay "
-            "`min(660px, 74ch)` — a flat 660px keeps 80 mono characters per "
-            "line at the 13.6px font floor (the band is 45–75ch)")
+        # The WINNING declaration, not the presence of the string: `min(660px,
+        # 74ch)` followed by `max-width: 660px` in the same block leaves a
+        # substring search green while the effective measure is the flat value
+        # the message forbids (#14020 review cycle 3, P2 — measured).
+        assert _effective_decl(shared, "max-width") == "min(660px, 74ch)", (
+            f"the shared measure's winning `max-width` is "
+            f"{_effective_decl(shared, 'max-width')!r} (block: {shared!r}); it "
+            "must BE `min(660px, 74ch)` — a flat 660px keeps 80 mono characters "
+            "per line at the 13.6px font floor (the band is 45–75ch), and a "
+            "later declaration in the block wins whatever the earlier one says")
         for width, body in _max_width_media_blocks(css):
             for m in re.finditer(r"\.outcomes\s*\{([^}]*)\}", body):
                 assert "max-width" not in m.group(1), (
@@ -10414,7 +10488,7 @@ class TestProductTeamsCopy:
             "is wider than the prose above it whenever that rule applies "
             "(#13696, #14020 review P2.3)")
         prelude, body = with_measure[0]
-        assert "min(660px, 74ch)" in body, (
+        assert _effective_decl(body, "max-width") == "min(660px, 74ch)", (
             f"the `.outcomes` measure is declared on `{prelude}` as "
             f"{body.strip()!r}; the grid's ONLY max-width must be the shared "
             "`min(660px, 74ch)` — a flat value is the 54.1px overhang at 760px "
@@ -10431,7 +10505,7 @@ class TestProductTeamsCopy:
             (b, inside) for b, inside in _css_rules_with_scope(css, ".beat p")
             if not inside and "font-size" in b]
         assert prose_rules, "`.beat p` declares no base `font-size` to mirror"
-        want = re.search(r"font-size:\s*([^;]+);", prose_rules[-1][0]).group(1).strip()
+        want = _effective_decl(prose_rules[-1][0], "font-size")
         grid_rules = [
             (b, inside) for b, inside in _css_rules_with_scope(css, ".outcomes")
             if not inside and "font-size" in b]
@@ -10440,7 +10514,7 @@ class TestProductTeamsCopy:
             "14px: its `74ch` is then NOT the prose's `74ch` and the grid measures "
             "623.7px against the prose's 605.9px at 768 — owner item 3, 18px the "
             "other way (#14020 review P2.4). Mirror `.beat p`'s clamp.")
-        got = re.search(r"font-size:\s*([^;]+);", grid_rules[-1][0]).group(1).strip()
+        got = _effective_decl(grid_rules[-1][0], "font-size")
         assert got == want, (
             f"`.outcomes` resolves `ch` at `{got}` while `.beat p` resolves it at "
             f"`{want}` — so the shared `min(660px, 74ch)` is two different "
@@ -10482,17 +10556,21 @@ class TestProductTeamsCopy:
             assert base, (
                 f"{selector} declares no BASE rule — every one of its "
                 f"{len(scoped)} rule(s) sits inside an `@media` block")
-            assert "text-align: left" in base[-1], (
-                f"the last base `{selector}` rule reads {base[-1].strip()!r}; "
-                f"{why}. A later top-level rule wins the cascade even when an "
-                "earlier one says `left` (#14020 review P2.4)")
+            assert _effective_decl(base[-1], "text-align") == "left", (
+                f"the last base `{selector}` rule's winning `text-align` is "
+                f"{_effective_decl(base[-1], 'text-align')!r} (block: "
+                f"{base[-1].strip()!r}); {why}. A later top-level rule wins the "
+                "cascade even when an earlier one says `left`, and a later "
+                "DECLARATION in this same block wins too — read the value that "
+                "wins, not whether the string appears (#14020 review P2.4, "
+                "cycle 3 P1)")
         # Comment-blanked, like the alignment rows above: `_css_rules` scans the
         # raw sheet, so `#beat-hero .hero-links { /* display: flex; */ }` — a
         # commented-out declaration inside its own rule — would satisfy this row
         # while the row stops being a row (#14020 review P2).
         links = " ".join(body for body, _inside_media in
                          _css_rules_with_scope(css, "#beat-hero .hero-links"))
-        assert "display: flex" in links, (
+        assert _effective_decl(links, "display") in {"flex", "inline-flex"}, (
             "`.hero-links` is not a flex row on the copy column's left edge — "
             "the `·` separators are `::after` on non-last links, a layout that "
             "only holds as a row (#13696 item 1)")
