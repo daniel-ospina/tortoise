@@ -2783,8 +2783,10 @@ def test_the_retired_membership_spellings_are_read_in_both_directions(monkeypatc
 #: whose own text opens with `#` (measured: `tortoise/ranking.py`'s `graph_boost` docstring
 #: carries such a line). An empty result therefore proves that every changed line WHICH
 #: REACHED STAGE 2 opens with `#`; it cannot prove those lines are comments, and it says
-#: nothing at all about a blank-line-only change — stage 1 drops an added line that is just
-#: `+`/`-` and any added line whose content itself opens with `+`/`-` (measured:
+#: nothing at all about a blank-line-only change — stage 1 drops a line that is just
+#: `+`/`-` and any line whose first character after the marker is `+`/`-`, ADDED OR REMOVED
+#: alike (`--counter` is a removed line and stage 1 drops it just the same): the marker is one
+#: character and the test is on the NEXT one, so the class is direction-blind (measured:
 #: `printf '%s\n' '+' '++i' '--counter' | grep -E '^[+-][^+-]' | grep -vE '^[+-][[:space:]]*#'`
 #: is silent while the input holds three changed lines). That was the over-claim that TWO
 #: separate sentences of the D5 cell made — and the second one was not among the three the
@@ -2850,35 +2852,39 @@ _D5_BLANK_COUNT_RE = re.compile(
     r"that counts the BLANK ones at YOUR head")
 
 
-#: ANY count prescription of that shape in the bundle, whatever sentence follows it. This is
-#: what makes "exactly one" a property of the ROW rather than of one SPELLING (#13956 review,
-#: P2): the anchored pattern above is keyed to a fixed trailing phrase, so a SECOND
-#: prescription worded differently is invisible to it. Measured: re-inserting the superseded
-#: `^\+$` as its own sentence left the anchored extraction at `['^[+-]$']` and the arm GREEN
-#: while the row carried two BLANK-class count commands — the narrower one among them. A text
-#: ban cannot see that either, which is the same reason arm (5) exists at all.
-_D5_COUNT_COMMAND_RE = re.compile(
-    r"`git diff origin/main\.\.\.HEAD \\\| grep -cE '(?P<expr>[^']+)'`")
+#: ANY `grep -c…` prescription in the bundle, whatever command prefix and whatever sentence
+#: follows it, plus the shape that makes a prescription BLANK-class. Keying "exactly one" on
+#: the COMMAND PREFIX was still a spelling rather than a property (#13956 review, cycle 5):
+#: this row already prescribes `git diff origin/main...HEAD -- tortoise/` five times, so a
+#: second BLANK-class command written that way left the count GREEN while the row carried two
+#: prescriptions — the retired, narrower one among the ungraded ones — and, in the other
+#: direction, it redded a legitimately different command of the same shape
+#: (`grep -cE '^\+import '`), which is an over-block on a correct document. Keying on the
+#: EXPRESSION is prefix-independent and refuses only what the class is: a count of the blank
+#: `+`/`-` lines.
+_D5_ANY_COUNT_EXPR_RE = re.compile(r"grep -c[A-Za-z]* '([^']+)'")
+_D5_BLANK_CLASS_EXPR_RE = re.compile(r"\^(?:\\[+-]|\[[-+]+\])\$")
 
 
 def _d5_blank_count_expression() -> str:
     """The blank-line count expression as `05-verify.md` states it.
 
-    Loud on zero or many — and MANY is checked TWICE, because it has two spellings that fail
-    differently. The ANCHORED pattern pins the sentence arm (5) grades; the SHAPE-ONLY one
-    counts every command of this form in the bundle, so a second prescription worded
-    differently cannot stand beside the graded one and go unread. Zero would make every
-    assertion below vacuous — an inert arm of exactly the kind (3) refuses for the ledger
-    rows — and MANY would silently grade the first of two prescriptions, which is how a cell
-    ends up asserting one command while its reader follows another.
+    Loud on zero or many — and MANY is checked TWICE, because "a second command" has two
+    spellings that fail differently: a second copy of the SENTENCE arm (5) grades (the
+    anchored pattern), and a second BLANK-CLASS PRESCRIPTION worded or prefixed differently
+    (the expression-shaped count). Zero would make every assertion below vacuous — an inert
+    arm of exactly the kind (3) refuses for the ledger rows — and MANY would silently grade
+    the first of two prescriptions, which is how a cell ends up asserting one command while
+    its reader follows another.
     """
     bundle = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
               / "05-verify.md").read_text(encoding="utf-8")
-    prescriptions = _D5_COUNT_COMMAND_RE.findall(bundle)
-    assert len(prescriptions) == 1, (
-        f"05-verify.md states {len(prescriptions)} count commands of this shape "
-        f"({prescriptions!r}), so this arm would grade one of them while a reader follows "
-        "another")
+    prescriptions = _D5_ANY_COUNT_EXPR_RE.findall(bundle)
+    blank_prescriptions = [e for e in prescriptions if _D5_BLANK_CLASS_EXPR_RE.fullmatch(e)]
+    assert len(blank_prescriptions) == 1, (
+        f"05-verify.md prescribes {len(blank_prescriptions)} BLANK-line count commands "
+        f"({blank_prescriptions!r} of {prescriptions!r}), so this arm would execute one of "
+        "them while a reader follows another")
     found = _D5_BLANK_COUNT_RE.findall(bundle)
     assert len(found) == 1, (
         "05-verify.md no longer states exactly one `git diff … | grep -cE '<expr>'` command "
