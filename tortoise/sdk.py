@@ -230,6 +230,13 @@ from .projection.entities import (  # #3998: the declared :Source surface
     _SOURCE_NODE_PROP_NAMES,
     filter_source_props,
 )
+# #13626: the ONE write-gate ask for the DERIVED entity vectors. It is the same helper
+# the folds use, imported rather than re-spelled: `#13610` says there is exactly one
+# predicate (`record_vector.mirror_required`), so an sdk-local spelling would be a second
+# one — and it is the helper rather than the predicate itself because `_derived_mirror_required`
+# is the arm that answers "keep the graph copy" when the gate cannot be read at all, which
+# a WRITE path needs (an unreadable arming module must never take a write down).
+from .projection.entities import _derived_mirror_required
 # #8006: the `search_keys` flatten rule has ONE home — the projection module that
 # owns the Point prop contract (`_POINT_DECLARED_PROPS` / `_POINT_LIST_PROPS` /
 # `_upsert_point_props`). The SDK write doors below call it under their
@@ -16913,6 +16920,21 @@ class TortoiseSDK:
                 "where the vector lands, so the bound reads the aliases the statement WRITES TO, "
                 "not only the labels it mentions (#11641)."
             )
+        # ── #13626: the WRITE-STOP for the vector this door carries ──
+        # The statement is the CALLER's (declared grammar, `#11641`), and it names no
+        # vector of its own: every one of this product's statements spells the vector as
+        # `set_embedding_clause`, whose only vector is the `$embedding` parameter. So the
+        # stop is exactly the parameter — answering "not required" makes the clause write
+        # none (the CASE is null-guarded and `clear_then_set_prefix` only clears when the
+        # incoming vector is non-null), while `$props` — the ROW — is passed through
+        # untouched. The journal follows the same value: a record that carried a vector
+        # the node did not receive would replay it back on the next rebuild.
+        # ⛔ `mirror_required` answering "unknown" (unarmed, no tenant, unmeasured) keeps
+        # the vector, which is the gate's own contract rather than a second judgement here.
+        caller_vector = embedding
+        embedding = None
+        if _derived_mirror_required("event"):
+            embedding = caller_vector
         if self._journal_event_raw_write(
                 event_id, props, graph=getattr(proj, "g", None),
                 event_kind=event_kind, embedding=embedding) is False:
@@ -44326,10 +44348,17 @@ class TortoiseSDK:
     
                         # #244: (re)compute the session embedding from the merged
                         # surface and store as vecf32 — None when model unavailable.
-                        embedding = self._session_embedding(
-                            update_props["name"], metadata.get("summary", ""),
-                            merged_keywords, update_props["topics"],
-                        )
+                        # ⛔ #13626: and NONE when the record has proved it holds this
+                        # label's vectors — the FROZEN legacy branch is a declared writer of
+                        # `:Event` (`embed_tortoise.embed_writer_register`), so leaving it
+                        # ungated would let one legacy ingest put back the vector a strip
+                        # just removed.
+                        embedding = None
+                        if _derived_mirror_required("event"):
+                            embedding = self._session_embedding(
+                                update_props["name"], metadata.get("summary", ""),
+                                merged_keywords, update_props["topics"],
+                            )
                         # #9122 (§17.1): this writer reached the cache with no
                         # journal record. Journal-first, then the handle inside
                         # the sanctioned scope (see `_event_raw_write_door`).
@@ -44435,10 +44464,13 @@ class TortoiseSDK:
                         # #244: compute the session embedding (name + summary +
                         # keywords + topics) and store as vecf32 — None when the
                         # model is unavailable (indexing never depends on it).
-                        embedding = self._session_embedding(
-                            props["name"], metadata.get("summary", ""),
-                            props["keywords"], props["topics"],
-                        )
+                        # ⛔ #13626: the same write-stop as the update arm above.
+                        embedding = None
+                        if _derived_mirror_required("event"):
+                            embedding = self._session_embedding(
+                                props["name"], metadata.get("summary", ""),
+                                props["keywords"], props["topics"],
+                            )
                         # #9122 (§17.1): journal the new session Event before
                         # the handle write (see `_event_raw_write_door`).
                         try:
@@ -56112,7 +56144,52 @@ class TortoiseSDK:
                     _folded_new = normalize_entity_name(props["name"])
                     if _folded_new:
                         props.setdefault("canonical_name", _folded_new)
+            # ⛔ ONE DICT, FIVE LABELS — so the gate's decision is resolved into a
+            # PER-LABEL dict, never a pop on the shared one (#13828 review, P1). `props`
+            # is visited by every label in this loop (`SET n += $props`, and the non-Point
+            # branch journals it as `state`), and the label the write ACTUALLY lands on
+            # is only known later, from whichever `MATCH` returns rows — so a pop taken
+            # for the FIRST label whose gate says stop removed the vector from a write
+            # the gate had called KEEP for its own label (measured: with `object` KEEP and
+            # `subject` STOP, an `:Object` update landed the row and lost the vector, the
+            # "vector in neither store" state the gate's conservatism forbids). Every
+            # iteration therefore STARTS from the caller's dict and rebinds `props` to a
+            # vector-free COPY only when THIS label's gate says not-required; nothing that
+            # is not the vector is ever dropped — the status fold, the `EntityMutated`
+            # journal (its `state` is built from the same per-label dict, so replay cannot
+            # re-add the vector) and the return read all run as before.
+            _props_base = props
             for label, _prop in _CANONICAL_ENTITY_ID_PROPS:
+                # ── #13626: the coverage-gated labels' graph vector is retired ──
+                # `embedding` is a caller-settable property on every one of these labels
+                # (`_sanitize_props` deliberately admits it, PR #3018), and this door
+                # writes it straight through `SET n += $props`. With the record proved to
+                # hold this label's vectors, keeping the graph copy would make a strip
+                # pointless: the very next `update_entity(<id>, embedding=…)` would put
+                # it back — the class `#13610` option 2 forbids.
+                # ⛔ ONE ASK PER LABEL, never one boolean for five: a single top-of-method
+                # answer would drop an Object's vector on `event` coverage (or keep an
+                # Event's on `object` coverage) while the census saw a gate that "covered"
+                # the writer. The `:Source` arm asks BOTH `document` and `source` and
+                # retires only when both answer stop — the same rule
+                # `hosted_backup.restore_graph` applies, and for the same reason: one
+                # `:Source` vector serves both halves of the node (a document's own vector
+                # and the provenance source's), the two counters are over different
+                # populations, and either answer alone is evidence about only half of it.
+                props = _props_base
+                if label == "Subject" and not _derived_mirror_required("subject"):
+                    props = dict(_props_base)
+                    props.pop("embedding", None)
+                if label == "Object" and not _derived_mirror_required("object"):
+                    props = dict(_props_base)
+                    props.pop("embedding", None)
+                if label == "Event" and not _derived_mirror_required("event"):
+                    props = dict(_props_base)
+                    props.pop("embedding", None)
+                if (label == "Source" and not _derived_mirror_required("document")
+                        and not _derived_mirror_required("source")):
+                    props = dict(_props_base)
+                    props.pop("embedding", None)
                 # #4649: a canonical label's identity is an OR-SET, not one key.
                 # NOTE: the primary key is not read here any more — `id_keys` below
                 # is derived THROUGH `_entity_identity_probes()`, so the write and the
@@ -58926,9 +59003,18 @@ class TortoiseSDK:
                 # (every later run reports skipped and the embedding never
                 # heals). Election-suppressed (non-primary) units are
                 # Source-existence-only — no Event exists to hold e.embedding.
+                # ⛔ #13626: AND NOT WHEN THE GRAPH NO LONGER OWNS THE VECTOR. This
+                # clause exists so a session indexed during an embedder outage heals
+                # later; once the record has proved it holds every `event` vector, a
+                # missing graph vector is the TARGET design rather than an outage, and
+                # leaving the clause on would take the repair path on every sweep, spend
+                # a model call to re-derive a vector the graph must not store, and report
+                # the file `healed` for ever. Same predicate as the writers, so the
+                # completeness accounting and the write-stop cannot disagree.
                 embedding_incomplete = bool(
                     classifier == "agent_session" and extract_metadata
-                    and gate["entity"] and gate["embedding"] is None)
+                    and gate["entity"] and gate["embedding"] is None
+                    and _derived_mirror_required("event"))
                 complete = base_complete and not embedding_incomplete
             # single-file duplicate-sessionId rule (W4 row; no election context)
             single_dup = False
@@ -58976,6 +59062,11 @@ class TortoiseSDK:
                         gate["marker"])
                     if attempt == "healed":
                         repair_work = True
+                    elif attempt == "retired":
+                        # the record serves this label's vectors: nothing was
+                        # written and nothing is owed — fall through and let the
+                        # SOURCE MERGE decide the status, never a repair claim.
+                        pass
                     else:
                         # failed OR suppressed → skipped embedding-unavailable
                         # (a failed repair performs NO unit-completion write →
@@ -59298,14 +59389,27 @@ class TortoiseSDK:
         # embedding — short-circuited to None under extract_metadata=False
         # (I15 pin) or NO_NETWORK; CASE-guarded $embedding is the ONLY node-
         # write surface (never rides $props).
-        embedding = None
+        # ⛔ #13626: `computed` is what this write RETURNS to its caller (the sweep
+        # reads None as "embedding unavailable" and records the repair marker on an
+        # existing Event), while `embedding` is what the graph write and the journal
+        # RECEIVE. The two part company on exactly one verdict: `mirror_required("event")`
+        # answering False, i.e. the record has proved it holds this label's vectors — then
+        # the ROW is still MERGEd (every prop in `$props`), the vector clause writes none
+        # and leaves a stored vector alone, and the journal carries no vector for a
+        # rebuild to re-add. Folding the gate into the COMPUTE instead would make a gated
+        # deployment look like an outage to the caller and mark every session unit
+        # retryable for ever, which is the one direction that must not happen.
+        computed = None
         if extract_metadata:
             try:
-                embedding = self._session_embedding(
+                computed = self._session_embedding(
                     props["name"], metadata.get("summary", ""),
-                    props["keywords"], props["topics"])
+                    props["keywords"], metadata.get("topics", []))
             except Exception:  # noqa: BLE001, RUF100
-                embedding = None
+                computed = None
+        embedding = None
+        if _derived_mirror_required("event"):
+            embedding = computed
         # REVIEW-FIX P2 (cycle-26): timestamps preserved on MATCH — the MERGE
         # splits ON CREATE (full props incl. startedAt/capturedAt) vs ON MATCH
         # (additive props WITHOUT the timestamps), so a repair re-run of a
@@ -59329,7 +59433,7 @@ class TortoiseSDK:
         self._emit_event("EventRecorded", id=event_id, **{
             **payload, "embedding": embedding, "eventId": event_id,
             "eventKind": "AgentSession"})
-        return embedding
+        return computed
 
     def _record_embedding_marker(self, event_id: str) -> None:
         """Targeted marker SET (pin (a) cycle-7): e.embeddingRepairFailedAt =
@@ -59489,7 +59593,7 @@ class TortoiseSDK:
     def _embedding_repair_attempt(self, event_id, frontmatter, text, title,
                                   repair_backoff, marker) -> tuple:
         """Embedding repair (sessions; §5.1 pin (a) cycle-6/7/8). Returns
-        (attempt, marker_ts): 'healed' | 'suppressed' | 'failed'.
+        (attempt, marker_ts): 'healed' | 'retired' | 'suppressed' | 'failed'.
 
         Backoff: a FAILED repair attempt records e.embeddingRepairFailedAt
         (targeted SET touching no other key) and reports skipped
@@ -59511,6 +59615,24 @@ class TortoiseSDK:
             except (TypeError, ValueError):
                 pass  # unparseable marker → re-attempt
         proj = self._get_proj()
+        # ⛔ #13626: a repair is a WRITE too, so it asks the gate. The heal exists
+        # because an Event's vector could be missing while the graph was the answering
+        # leg; once the record has proved it holds this label's vectors, re-deriving one
+        # for the graph is rent and the next strip would have to remove it again. The
+        # answer is a WRITE-STOP, not a failure: no repair marker is written and no
+        # model call is spent — where treating it as "failed" would retry this file for
+        # ever. It is ALSO not work: `retired` is its own verdict because a caller that
+        # reads `healed` as "something was written" reports the unit `updated` for a run
+        # that wrote neither the Event nor a vector (#13826 review).
+        # ⚠️ DEFENSIVE, and stated rather than implied (#13854 review cycle 4, P2): today's
+        # ONLY caller is reached from `_embedding_incomplete`, which already requires this
+        # same answer to be TRUE — so this arm cannot fire from that path, and a falsifier
+        # can only drive the function directly. It stays because that reachability is a
+        # property of the completeness clause, not of this function: relaxing the clause
+        # (e.g. so a unit is still repaired when only the graph copy is missing) would put
+        # a gated write straight back on this path, and the arm is one line of rent.
+        if not _derived_mirror_required("event"):
+            return ("retired", None)
         try:
             metadata = _kw_fallback(text)
             embedding = self._session_embedding(
