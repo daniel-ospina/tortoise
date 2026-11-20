@@ -1449,6 +1449,41 @@ def test_the_vector_poison_is_applied_at_SEED_time(harness):
         f"the ORACLE must stay on the unperturbed corpus; `record.seed` receives "
         f"{[arg for arg, _ in oracle]!r} — poisoning the oracle too measures "
         "nothing, because both legs are then read from the same wrong data")
+    # ⛔ ...AND THE ORACLE MUST BE SEEDED BEFORE THE NAME IT RECEIVES IS
+    # REBOUND. That assertion alone is a check on a NAME: hoisting
+    # `rows = perturb_for_vector_poison(rows) if args.poison == "vector" else rows`
+    # ABOVE the seeding block keeps `record.seed(rows)` literal while feeding the
+    # oracle the POISONED corpus, and every other assertion in this pin stays
+    # green (measured on the pre-fix pin: 82 passed with both legs seeded from the
+    # rebound name).
+    #
+    # ⛔ THE CONDITION IS THE REBINDING, NOT THE ORDER OF TWO STATEMENTS. An
+    # unconditional "oracle seed precedes `carrier_line`" reds two programs that
+    # are SEMANTICALLY IDENTICAL to the shipped one — a distinct carrier
+    # (`store_rows`) hoisted above the seeding block, and the oracle merely
+    # re-seeded after it — because `rows` is never rebound in either and
+    # `perturb_for_vector_poison` is a pure function. That is a false block with a
+    # false diagnosis (it would tell the author "a rebound `rows` hands the
+    # poisoned corpus to BOTH legs" about code that rebinds nothing). So what is
+    # asserted is the fact that actually matters: the oracle's seed must precede
+    # any rebinding of `rows` FROM THE PERTURBATION. A rebinding of `rows` from
+    # the corpus (`rows = build_corpus(...)`, which necessarily precedes it) is
+    # not this hazard and must not be caught here.
+    rebound = sorted(
+        node.lineno
+        for node in ast.walk(run) if isinstance(node, ast.Assign)
+        for target in node.targets if isinstance(target, ast.Name)
+        and target.id == "rows"
+        and any(sub is perturbs[0] for sub in ast.walk(node.value)))
+    oracle_lines = [line for _arg, line in oracle]
+    if oracle_lines and rebound:
+        assert min(oracle_lines) < rebound[0], (
+            f"`rows` is rebound at line {rebound[0]} but the oracle is seeded at "
+            f"line {min(oracle_lines)} — the oracle must be seeded from the "
+            "corpus BEFORE anything rebinds `rows`, or it is handed the "
+            "POISONED corpus, both legs then read the same wrong data, and "
+            "`--poison vector` can never diverge. That is the blindness this "
+            "pin exists to prevent")
 
 
 def test_a_none_distance_is_not_a_verified_one(harness):
