@@ -3548,23 +3548,29 @@ MEDIA_PRELUDE_RE = re.compile(r"@media\s*\(\s*max-height:\s*(\d+)\s*px\s*\)\s*\{
 MAX_WIDTH_MEDIA_RE = re.compile(r"@media\s*\(\s*max-width:\s*(\d+)\s*px\s*\)\s*\{")
 
 
-def _css_rules(css: str, selector: str) -> list[str]:
-    """Every `{...}` body for an EXACT selector, in document order.
-
-    A selector can legitimately appear twice (base rule + narrow-viewport
-    override), so callers that ask "is this property declared for the
-    selector" must read ALL bodies — reading only the last would report
-    `display: flex` as missing because a media block re-states the rule to
-    re-flow it.
-    """
-    return [_brace_block(css, m.end() - 1)
-            for m in re.finditer(re.escape(selector) + r"\s*\{", css)]
-
-
 def _css_declarations(css: str, selector: str) -> str | None:
-    """The body of the LAST `selector { ... }` rule, or None."""
-    rules = _css_rules(css, selector)
-    return rules[-1] if rules else None
+    """The body of the LAST **base** `selector { ... }` rule, or None.
+
+    Reads through `_css_rules_with_scope`, so it is COMMENT-BLANKED and it sees
+    a rule that shares its prelude with other selectors. This was the last
+    structural reader still scanning the RAW sheet: `/* max-width: min(660px,
+    74ch); */` inside the shared-measure rule left
+    `test_the_outcomes_grid_is_never_wider_than_the_prose_above_it` GREEN with
+    the prose's measure gone — the same false PASS as #14020's review P2 on the
+    two rows beside this one, so the ROOT is fixed here and `_css_rules` (whose
+    only remaining consumer this was) is deleted rather than left as a trap.
+
+    "Base" is deliberate: a selector legitimately appears twice (base rule +
+    narrow-viewport override), and `[-1]` over ALL rules answers "what does the
+    media block say" when the caller asked "what is the declaration" — the
+    `@media (max-width: 760px) .outcomes` override sits after the shared rule
+    and would win a `[-1]` over the whole sheet (#13696).
+    """
+    rules = _css_rules_with_scope(css, selector)
+    if not rules:
+        return None
+    base = [body for body, inside_media in rules if not inside_media]
+    return (base or [body for body, _inside in rules])[-1]
 
 
 def _css_blanked(css: str) -> str:
@@ -3612,14 +3618,20 @@ def _css_rules_with_scope(css: str, selector: str) -> list[tuple[str, bool]]:
     Bodies come from the COMMENT-BLANKED sheet (see `_css_blanked`), so a
     `text-align`/`max-width` named in a comment cannot satisfy an assertion.
 
-    `_css_rules` cannot say whether a body sits inside an `@media` block, and
-    that is exactly the difference between the desktop rule and a narrow-
-    viewport override. `_css_declarations` takes `[-1]`, which is the LAST rule
-    — on `#beat-hero .doc-copy` that is `@media (max-width: 760px)`'s centred
+    A reader that ignores `@media` scope cannot say whether a body sits inside
+    a media block, and that is exactly the difference between the desktop rule
+    and a narrow-viewport override: a `[-1]` over the whole sheet is the LAST
+    rule — on `#beat-hero .doc-copy` that is `@media (max-width: 760px)`'s centred
     override, so a later BASE `text-align: center` appended after it would leave
     a `[-1]`-based assertion green while the desktop column is centred (#14020
     review P2.4, measured).
     """
+    #: `selector` may itself be a comma-separated LIST, and then a rule matches
+    #: only when its prelude covers ALL of them — the shared-measure caller asks
+    #: for `#beat-intro p, #beat-compute > p, .outcomes` as one request, and a
+    #: rule listing only two of the three is a DIFFERENT (broken) invariant, not
+    #: a match. For a single selector this is the same test as membership.
+    wanted = {part.strip() for part in selector.split(",")}
     blanked = _css_blanked(css)
     media = _media_block_spans(css)
     out: list[tuple[str, bool]] = []
@@ -3627,7 +3639,7 @@ def _css_rules_with_scope(css: str, selector: str) -> list[tuple[str, bool]]:
         prelude = m.group(1).strip()
         if not prelude or prelude.startswith("@"):
             continue
-        if selector not in {p.strip() for p in prelude.split(",")}:
+        if not wanted.issubset({p.strip() for p in prelude.split(",")}):
             continue
         out.append((_brace_block(blanked, m.end() - 1),
                     any(start <= m.start() < end for start, end in media)))
@@ -3637,7 +3649,7 @@ def _css_rules_with_scope(css: str, selector: str) -> list[tuple[str, bool]]:
 def _css_rule_preludes(css: str, selector: str) -> list[tuple[str, str]]:
     """Every rule whose selector LIST contains `selector`, as `(prelude, body)`.
 
-    `_css_rules` matches the exact selector TEXT, so it cannot see a rule that
+    An exact-selector-TEXT reader cannot see a rule that
     shares its prelude with other selectors — which is the shape the shared
     prose measure uses (`#beat-intro p, #beat-compute > p, .outcomes { … }`) and
     therefore the shape any `.outcomes` override can hide in: `.outcomes
