@@ -9928,10 +9928,11 @@ def test_the_fourth_legs_container_arm_asks_the_whole_family():
       that STRENGTHENS leg 1 to answer a sole-decider row reddens its `assert upstream is False`;
       and removing leg 1 is caught by a DIFFERENT test in this same file — measured at this head,
       leg 1 disabled on `tools.strip_graph_entity_vectors` reddens
-      `test_the_stop_arm_must_not_store_the_vector` (`the plain-pair stop arm that leg 1 alone
-      refuses certifies once leg 1 cannot answer`). So leg 1 is a duplicate AT THE FAMILY SEAM,
-      not an unwitnessed leg: scope this paragraph to the family test or it becomes the
-      "protection nothing can redden" claim this whole file exists to remove.
+      `test_the_stop_arm_must_not_store_the_vector` with `a STOP ARM THAT STORES certified the
+      writer`, on the plain-pair stop arm `props |= [("embedding", _encode(ev))]` that leg 1
+      alone refuses. So leg 1 is a duplicate AT THE FAMILY SEAM, not an unwitnessed leg: scope
+      this paragraph to the family test or it becomes the "protection nothing can redden" claim
+      this whole file exists to remove.
       ⛔ Both cites in this paragraph are by CONSTRUCT, not by line number, on purpose: an earlier
       revision pinned `:9990` / `:9994` and both were wrong within one commit (a string fragment
       and a blank line) — see `tests/test_12184_shifted_cites.py`, written for exactly that
