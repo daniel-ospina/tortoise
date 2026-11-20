@@ -174,8 +174,45 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # bare-token row with count 2 (header + §2.5). This row and its count are the site the re-derived
     # §2.5 row left behind.
     (_AUDIT, "`:11281`", _MCP, 11281, "OPTIONAL MATCH (t)<-[:TAGGED]-(q)"),
+    # 1 -> 3 at the #13991 merge of `origin/main` `0656b056d7`: the branch's OWN prose adds two more
+    # BARE sites of this same address, so the bare-token row DIRECTLY ABOVE (`` `:11281` ``, count
+    # 1 -> 3) can no longer see every spelling of it; the `mcp_server.py:11281` row above it (count 1,
+    # unchanged — the row whose token carries the path, not a bare `:NNNN`) covers only the §2.5
+    # one-token spelling. Deliberately no "N lines above": that distance moved twice on this branch
+    # already, and a stated count is the defect class this file exists to catch. Measured on the merged document
+    # (`.venv/bin/python -c 'from pathlib import Path; t=Path("docs/architecture/
+    # CAPABILITY-PLACEMENT-AUDIT.md").read_text(); print(t.count("`:11281`"))'` -> 3), with the site
+    # lines RE-MEASURED on this document rather than carried from the pre-merge edition — `main`'s
+    # merge `0656b056d7` shifted the last two by +2, and the P2 fix above (which sits BETWEEN them)
+    # added another +2 to the last one only — so the pre-merge `:182`/`:585` named lines that no
+    # longer hold:
+    #   :171  the header trio above — main's site, the one this row was created for;
+    #   :184  the §2.5 `:Tag`-family enumeration this branch adds, which lists all five reader
+    #         addresses (the four `sdk.py` ones plus this `mcp_server.py` one) as BARE siblings so the
+    #         `_REDEFINED_13854` one-token counts are not doubled;
+    #   :590  the same branch's §2.5 provenance sentence, `:11280` -> `:11281`.
+    # Re-derive with `grep -n '`:11281`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` before
+    # trusting this list on a later head: a line number in prose is exactly the claim this file pins
+    # for the document, and it drifts the same way.
+    # All three name ONE address with ONE meaning, so this is not the `b9e7822362c6` class (two
+    # addresses for one reader). The count is kept at the measured number rather than deleting a
+    # spelling: re-pointing any one of the three now reds here, which is the discrimination the row
+    # exists for.
     (_AUDIT, "`:5654`", _MCP, 5654, "entity_type=entity_type"),
     (_AUDIT, "`:8206`", _MCP, 8206, "entity_type=entity_type"),
+    # ⛔ The four `sdk.py` members of §2.5's `:Tag` row are enumerated in the header as BARE `:NNNN`
+    # siblings — a spelling none of the rows above reaches (they all require a path or the one-token
+    # form), which is the same one-site-vs-one-string gap the `:11281` header half and `:6989` were:
+    # re-pointing any one of them to a stale number left every arm green. One ROW per SITE, pinned by
+    # the fragment the header paragraph quotes for it.
+    # ⚠️ RE-DERIVED at this branch's head, not carried from `#13991`: that PR measured the four at
+    # `:31365`/`:31347`/`:24327`/`:24671` on ITS tree, and this branch's own `sdk.py` insertions sit above
+    # all four, so those numbers open on unrelated code here (`git show 22bb351bb5:tortoise/sdk.py |
+    # sed -n '31365p'` -> `{"url": row[0], …}`). By CONTENT: `grep -n` on each quoted fragment.
+    (_AUDIT, "`:31396`", _SDK, 31396, 'MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag})'),
+    (_AUDIT, "`:31378`", _SDK, 31378, '"MATCH (t:Tag) "'),
+    (_AUDIT, "`:24358`", _SDK, 24358, "MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) "),
+    (_AUDIT, "`:24702`", _SDK, 24702, 'MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t'),
     (_AUDIT, "`:6974-6990`", _PI, 6974, "_FULLTEXT_INDEX_LABEL_FIELDS"),
     (_AUDIT, "`:6984`", _PI, 6984, '("Event", ["subject", "name"])'),
     (_AUDIT, "`:6985`", _PI, 6985, '("Subject", ["name"])'),
@@ -233,8 +270,8 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # carries its own wording, not a bare number, because a bare `:NNNN` is satisfied by any sibling
     # spelling of the same digits — the defect `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence`
     # exists for, and the reason row 13's parenthetical and §2.1's count marker survived three passes.
-    (_AUDIT, '`:5404` at this head', 'tortoise/projection/entities.py', 5404, 'def _upsert_document(self, ev: dict) -> None:'),
-    (_AUDIT, '`:7210` at this head', 'tortoise/projection/entities.py', 7210, 'def _upsert_source('),
+    (_AUDIT, '`:5408` at this head', 'tortoise/projection/entities.py', 5408, 'def _upsert_document(self, ev: dict) -> None:'),
+    (_AUDIT, '`:7214` at this head', 'tortoise/projection/entities.py', 7214, 'def _upsert_source('),
     # ⚠️ Widened from the bare `` `:6681` `` this pass first wrote (review cycle 6, F5): a bare `:NNNN`
     # is exactly the shape the comment above says is excluded — it is satisfied by any sibling spelling
     # of the same digits — and this row was the one of the four that carried it.
@@ -254,7 +291,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # row shipped naming a symbol at a line that does not carry it. Re-derived by CONTENT:
     # `grep -n 'def _index_has_is_operator' tortoise/hosted_backup.py` -> `2666`. Pinned here because
     # an unlisted token is coverage this file only APPEARED to have (the `:6989` shape).
-    (_PLAN_4997, "tortoise/hosted_backup.py:2684", _HB, 2684, "def _index_has_is_operator() -> bool:"),
+    (_PLAN_4997, "tortoise/hosted_backup.py:2683", _HB, 2683, "def _index_has_is_operator() -> bool:"),
 )
 
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
@@ -276,7 +313,7 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
     (":2724-2726", _CP, 2724, "prose_columns = _EPISODIC_SOURCE_PROSE_COLUMNS"),
     (":2776", _CP, 2776, "tail_denied = forbidden | {"),
     (":3841", _CP, 3841, 'if table == "point"'),
-    (":5794", _ENT, 5794, "s.summary=coalesce($summary, s.summary, '')"),
+    (":5798", _ENT, 5798, "s.summary=coalesce($summary, s.summary, '')"),
     # Round 8: written at `main`, pinned at `main`, but absent from the enumeration — so the header's rule
     # sent readers to the pin. ⛔ NOT "where every one is a comment": at the pin `sdk.py:24004` is a DELETE
     # statement and `hosted_api.py:22919` is `if is_subject_kind(...)`, both executable. The pin is wrong for
@@ -336,11 +373,20 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2463`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:5184`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:11281`'): 1,
-    # 1: the header's BARE spelling of the same address, counted as its own site. Measured at this
-    # head: `grep -o '`:11281`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 1.
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:11281`'): 1,
+    # 4: the header's TWO BARE spellings of this address (the `main`-set enumeration and the
+    # re-derivation clause #13991's merge added to the same paragraph), plus the two BARE sites §2.5
+    # adds (§2.5's five-address enumeration and its `:11280` -> `:11281` provenance sentence) — see
+    # the row's own comment for the sites. Measured on the merged document:
+    # `grep -o '`:11281`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 4.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:11281`'): 4,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5654`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8206`'): 2,
+    # The four bare `sdk.py` `:Tag` siblings the header paragraph enumerates, one occurrence each —
+    # the §2.5 spellings are the one-token keys `sdk.py:31396` etc. and are a different key.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:31396`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:31378`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:24358`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:24702`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6974-6990`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6984`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6985`'): 1,
@@ -382,14 +428,14 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23046'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22858`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:33809`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5404` at this head'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7210` at this head'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5408` at this head'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7214` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6834` inside the same function'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3062` derives the label'): 1,
     ('docs/00_index.md', '`sdk.py:28426` at this head'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', '(`sdk.py:28426`), so any non-NULL'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'called at `sdk.py:28790`'): 1,
-    ('docs/plans/2026-09-25-4997-vector-index-parity.md', 'tortoise/hosted_backup.py:2684'): 1,
+    ('docs/plans/2026-09-25-4997-vector-index-parity.md', 'tortoise/hosted_backup.py:2683'): 1,
 }
 
 
@@ -527,9 +573,10 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
         # A SELF-INFLICTED one: an alternative counting basis was described as "±5 … the numerator does not
         # move — it is 124 under either basis". Both halves are claims about MEASUREMENT, and both were
         # asserted rather than measured: the basis-INVARIANCE is false (counting the two-code-span pairs
-        # adds four addresses, THREE of them drifters (`cache_projection.py:2485` and `sdk.py:2917`;
-        # `sdk.py:61587` is past both heads' EOF, so it is non-comparable and adds nothing), so the
-        # numerator moves 127 -> 130 while the denominator moves 223 -> 227), and "±5"
+        # adds addresses, TWO of them drifters at this edition — `cache_projection.py:2485` and
+        # `sdk.py:2917`; `sdk.py:61587` is past both heads' EOF, so it is non-comparable and adds nothing,
+        # and the two span form of a pair that is ALSO written one-token adds no pair at all), so the
+        # numerator moves 127 -> 129 while the denominator moves 223 -> 226), and "±5"
         # names a fixed offset for a denominator that moves by whatever the counting decision moves it by. A
         # reader told to compare numerators across bases would have "corrected" a correct figure by
         # arithmetic — the offset-not-content failure, one level down.
@@ -754,6 +801,33 @@ def test_the_published_denominator_is_the_count_of_this_file() -> None:
     )
 
 
+def test_the_five_header_siblings_already_carry_their_pair_from_section_2_5() -> None:
+    """The header's bare-sibling clause is only true while each of the five is ALSO written one-token.
+
+    The clause now says a `path.py:NNNN` re-spelling would add "five more **as-written spellings** —
+    328 → 333 — and so 105 → 110 collisions … while adding **no pair at all**: 223 either way, because
+    each of the five already carries its pair from §2.5". That last half is the load-bearing one, and it
+    was FALSE for the sentence it replaced: the previous edition claimed a pair spelling "would add five
+    more pairs to the populations the figures above are measured over" (`#13991` review, P2-1), while
+    measuring the same re-spelling with this file's own `_resolved_pairs` puts the delta at **0 pairs /
+    +5 spellings** — the pairs do not move and the collisions do.
+
+    That 0 is a set-membership fact, not an arithmetic one: a re-spelling adds no pair BECAUSE all five
+    `(resolved path, line)` pairs are already in the population, from the §2.5 one-token sites. Delete
+    ONE of those sites and the corrected clause goes false with no other arm red, so the premise is
+    recovered from the document here rather than trusted to the prose.
+    """
+    _spellings, pairs = _resolved_pairs((REPO / _AUDIT).read_text(encoding="utf-8"))
+    five = [(_SDK, 31396), (_SDK, 31378), (_SDK, 24358), (_SDK, 24702), (_MCP, 11281)]
+    missing = [pair for pair in five if pair not in pairs]
+    assert not missing, (
+        f"the header's §2.5 `:Tag` enumeration says each of these addresses 'already carries its pair "
+        f"from §2.5', but {missing} has no one-token `path.py:NNNN` spelling anywhere in the document — "
+        "so re-spelling the bare header siblings WOULD add pairs and the clause's 'no pair at all' "
+        "would be false. Restore the §2.5 one-token spelling, or correct the clause to the measurement."
+    )
+
+
 def test_a_carried_forward_figure_is_reported() -> None:
     """The comparator's negative case, reachable: a stale triple and a broken arithmetic relation red.
 
@@ -970,7 +1044,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # `:11281`, where no row and no count reached. Reverting just the header half left every arm green,
     # measured above. One ROW per SITE, never one row per STRING: `:8206`/`:5654` on that same header
     # line are the neighbours that already carry their own bare-token row.
-    assert len(_PINS) == 64
+    assert len(_PINS) == 68
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
@@ -1358,17 +1432,17 @@ _REDEFINED_13854: tuple[tuple[str, str, int, str, int], ...] = (
     (":30298", "tortoise/sdk.py", 30298, "f\"MATCH (n:Point) WHERE {where} RETURN properties(n)\"", 3),
     (":30397", "tortoise/sdk.py", 30397, "\"MATCH (n:Point {id:$id}) RETURN properties(n)\",", 3),
     (":44026", "tortoise/sdk.py", 44026, "\"RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $lim\",", 3),
-    ("entities.py:1262", "tortoise/projection/entities.py", 1262, "_POINT_JSON_RECORD_PROPS: frozenset = frozenset({\"mentions\"})", 2),
-    ("entities.py:2038-2046", "tortoise/projection/entities.py", 2038, "# once. MEASURED at #10389's review head, before this entry: one SDK", 1),
-    ("entities.py:2476", "tortoise/projection/entities.py", 2476, "\"operator\", \"provenance\", \"about_entities\", \"aboutEntities\",", 1),
-    ("entities.py:2525", "tortoise/projection/entities.py", 2525, "_POINT_DENY: frozenset = frozenset({", 1),
-    ("entities.py:2385-2386", "tortoise/projection/entities.py", 2386, "# out first, because the wipe destroys the only copy (\u00a717.2, `#11325`)", 1),
-    ("entities.py:2389-2390", "tortoise/projection/entities.py", 2390, "# `update_point(<id>, story_arc=None)` \u2014 #11325, and only on the rows ", 1),
-    ("entities.py:3147", "tortoise/projection/entities.py", 3147, "set_clauses.append(\"n.sourceVersionTransit=$sv\")", 1),
-    ("entities.py:3952", "tortoise/projection/entities.py", 3952, "\"MERGE (s:Session {id:$sid}) SET s.is_episodic=true\",", 1),
-    (":3265-3267", "tortoise/projection/entities.py", 3267, "self._POINT_HANDLED | self._POINT_DENY,", 1),
-    (":3309", "tortoise/projection/entities.py", 3309, "for key in self._POINT_DENY - self._POINT_HANDLED:", 1),
-    (":3359", "tortoise/projection/entities.py", 3359, "or key in self._POINT_DENY or key in self._META_KEYS:", 1),
+    ("entities.py:1266", "tortoise/projection/entities.py", 1266, "_POINT_JSON_RECORD_PROPS: frozenset = frozenset({\"mentions\"})", 2),
+    ("entities.py:2042-2050", "tortoise/projection/entities.py", 2042, "# once. MEASURED at #10389's review head, before this entry: one SDK", 1),
+    ("entities.py:2480", "tortoise/projection/entities.py", 2480, "\"operator\", \"provenance\", \"about_entities\", \"aboutEntities\",", 1),
+    ("entities.py:2529", "tortoise/projection/entities.py", 2529, "_POINT_DENY: frozenset = frozenset({", 1),
+    ("entities.py:2389-2390", "tortoise/projection/entities.py", 2390, "# out first, because the wipe destroys the only copy (\u00a717.2, `#11325`)", 1),
+    ("entities.py:2393-2394", "tortoise/projection/entities.py", 2394, "# `update_point(<id>, story_arc=None)` \u2014 #11325, and only on the rows ", 1),
+    ("entities.py:3151", "tortoise/projection/entities.py", 3151, "set_clauses.append(\"n.sourceVersionTransit=$sv\")", 1),
+    ("entities.py:3956", "tortoise/projection/entities.py", 3956, "\"MERGE (s:Session {id:$sid}) SET s.is_episodic=true\",", 1),
+    (":3269-3271", "tortoise/projection/entities.py", 3271, "self._POINT_HANDLED | self._POINT_DENY,", 1),
+    (":3313", "tortoise/projection/entities.py", 3313, "for key in self._POINT_DENY - self._POINT_HANDLED:", 1),
+    (":3363", "tortoise/projection/entities.py", 3363, "or key in self._POINT_DENY or key in self._META_KEYS:", 1),
 )
 
 
