@@ -8029,6 +8029,92 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ A MAPPING'S VIEW IS A PAIRS SOURCE IN EVERY POSITION, INCLUDING INSIDE A
+        # CONSTRUCTOR (`#13788` review round 10, P1, measured). `.items()` was answered at three
+        # seams and NOT at the pairs resolver, so a constructor fed a view abstained and the whole
+        # family CERTIFIED beside its refused bare twin. Every row below stores `embedding` and
+        # every one of them answered `gated=True` before the view arms landed.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in dict({"embedding": 1}.items())}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict({"embedding": 1}.items()).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict.fromkeys({"embedding": 1}).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in dict.fromkeys({"embedding": 1})}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in {"a": ("embedding", 1)}.values()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in list({"embedding": 1}.items())}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in tuple({"embedding": 1}.items())}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict(OrderedDict({"embedding": 1}).items())}
+        return None
+    _write(props)
+""",
+        # ⛔ THE VIEW ARMS NEED A ROW EACH, OR REVERTING ONE IS UNPUNISHED (`#13788` review
+        #    round 10, measured by the sweep that found BOTH of these legs surviving their own
+        #    mutation). Each row below is the ONLY fixture row that reds when the named arm is
+        #    removed:
+        #
+        #      - the `.values()` arm of `_mapping_items_pairs`, reached from a CONSTRUCTOR
+        #        (the comprehension position is covered by the row above, which pins the OTHER
+        #        resolver's `.values()` arm — same spelling, different seam, so each needs its
+        #        own witness);
+        #      - the view arm of `_sequence_options`, reached only when the view is wrapped by a
+        #        container call, because the wrapper is resolved there BEFORE any caller sees it.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in dict({"a": ("embedding", 1)}.values())}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in dict(list({"embedding": 1}.items()))}
+        return None
+    _write(props)
+""",
     )
     # ⛔ AN EMPTIED TUPLE IS A GREEN TEST ASSERTING NOTHING (`#13788`, measured by the review
     # of this branch). These tuples run to hundreds of lines and a careless trim — or a bad
@@ -9170,10 +9256,72 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
+        # ⛔ THE ARITY PIN IS THE ROW BELOW, NOT THE ROW ABOVE (`#13788` review round 10, P2,
+        #    measured): reverting the arity leg (`pairs.append((element,))`) reds
+        #    `dict([d])` and leaves `dict([d]).items()` CERTIFIED, because the ITEMS seam never
+        #    unpacks the pair list — it hands the pairs back to callers that guard with
+        #    `len(item)` — while the KEYS seam unpacks (`for key, _value in pairs`). The commit
+        #    that added both says "both seams"; that is the claim this comment corrects, because
+        #    a record that overstates its own coverage is how the next lane measures the wrong
+        #    row. `dict([d]).items()` earns its place as an honest-write-stop control, not as an
+        #    arity witness.
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= {k: _encode(ev) for k in dict([d])}
+        return None
+    _write(props)
+""",
+        # ⛔ AND THE TWO `dict([d])` ROWS ARE CERTIFIED BECAUSE `d` IS A NAME, NOT BECAUSE THE
+        #    STORE IS HARMLESS (`#13788` review round 10, P2, measured): bound to a real pair or
+        #    a mapping, BOTH rows place the vector at runtime. They sit in the tuple whose block
+        #    comment calls its members honest write-stops, so they are named here as the STATED
+        #    NAME-BOUND RESIDUAL (`_sequence_options`: "a container bound to a NAME stays the
+        #    stated data-flow residual") — a future fix that closes the NAME residual will red
+        #    them, and that red is correct, not a regression.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in dict({"embedding_model": 1}.items())}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in {"a": ("embedding_model", 1)}.values()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict.fromkeys({"embedding_model": 1}).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in {"a": 1, "b": 2}.values()}
+        return None
+    _write(props)
+""",
+        # ⛔ THE VIEW ARMS MUST NOT SWALLOW THE KEY-SOURCE SPELLING (`#13788` review round 10):
+        #    `for k in m.values()` reads the view as a KEY source, not as pairs, so a blanket
+        #    "a values view is a pairs sequence" rule would refuse an honest writer. Pinned as
+        #    an accepted control because that is the cheaper error to police.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in d.values()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in d.items()}
         return None
     _write(props)
 """,

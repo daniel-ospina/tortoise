@@ -2246,7 +2246,7 @@ def _source_holds_the_store_anywhere(node) -> bool:
             #    `.items()` arm now follows the receiver's wrappers too; the value question is
             #    kept BESIDE it, because a mapping that really does place the vector is still a
             #    store. Both directions only ever REFUSE, so neither can widen acceptance.
-            #    ⚠️ AND REVERTING THIS LEG ALONE MOVES **0** OF THE 504 FIXTURE ROWS — measured,
+            #    ⚠️ AND REVERTING THIS LEG ALONE MOVES **0** OF THE **532** FIXTURE ROWS — measured,
             #    not assumed, and recorded so the next lane does not re-litigate it: for every
             #    spelling in this family the key question is ALSO answered upstream (by the
             #    comprehension terms, or by `_comprehension_key_mentions_the_bound_property` on
@@ -2255,6 +2255,11 @@ def _source_holds_the_store_anywhere(node) -> bool:
             #    narrow fix it was given here is the one the review asked for: ask the KEY
             #    question, not the value question. An arm that is inert is not the same as an
             #    arm that is wrong — it is disclosed here instead of looking load-bearing.
+            #    ⛔ THAT NUMBER HAD ROTTED FOUR TIMES (491 → 504 → 516 → 532, the fourth found by
+            #    `#13788` review round 10), so the count is stated WITH its read recipe instead of
+            #    as a fact: re-derive it from the three tuples of
+            #    `tests/test_13629_entity_vector_retire.py::test_the_stop_arm_must_not_store_the_vector`
+            #    (397 refused / 132 accepted / 3 over_refused at that head), never from this line.
             return (_comprehension_source_pairs_the_property_with_a_value(node)
                     or _mapping_literal_stores_the_vector(node.func.value))
         return False              # `zip(…)`, `map(…)`: the stated residual
@@ -2458,6 +2463,42 @@ def _mapping_items_pairs(mapping, _depth: int = 0):
             return [(ast.Constant(value=EMBEDDING_PROPERTY), mapping.value)]
         return [(mapping.key, mapping.value)]
     if isinstance(mapping, ast.Call):
+        # ⛔ A MAPPING'S *VIEW* IS A PAIRS SEQUENCE, AND THIS RESOLVER HAD NO VIEW ARM
+        #    (`#13788` review round 10, P1, measured through the tool's own
+        #    `_writer_consults_gate`). The `.items()` view was answered at THREE other seams
+        #    — `_pairs_operand_stores_the_vector`'s arm, `_source_holds_the_store_anywhere`'s,
+        #    and `_comprehension_source_yields`' — so a CONSTRUCTOR fed a view abstained here
+        #    and the whole family CERTIFIED beside its refused bare twin:
+        #
+        #        props |= {k: _encode(ev) for k in dict({"embedding": 1})}                  refused
+        #        props |= {k: _encode(ev) for k in dict({"embedding": 1}.items())}          CERTIFIED
+        #        props |= {k: _encode(ev) for k, _v in {"embedding": 1}.items()}            refused
+        #        props |= {k: _encode(ev) for k, _v in dict({"embedding": 1}.items()).items()}  CERTIFIED
+        #        props |= {k: _encode(ev) for k, _v in {"a": ("embedding", 1)}.values()}    CERTIFIED
+        #
+        #    ONE rule, both directions: `.items()` yields the receiver's pairs, and `.values()`
+        #    yields the receiver's values READ AS PAIRS (which is exactly what unpacking them
+        #    does at runtime). Both only ever produce keys/values for the key question, so
+        #    neither can widen acceptance; an unreadable receiver returns `None` (abstain),
+        #    which is the pre-existing answer for a NAME-bound mapping.
+        if not mapping.args and not mapping.keywords and isinstance(mapping.func, ast.Attribute):
+            if mapping.func.attr == "items":
+                return _mapping_items_pairs(mapping.func.value, _depth + 1)
+            if mapping.func.attr == "values":
+                inner = _mapping_items_pairs(mapping.func.value, _depth + 1)
+                if inner is None:
+                    return None
+                values: list = []
+                for _key, value in inner:
+                    rows = _sequence_options(value, _depth + 1)
+                    if rows is None:
+                        return None
+                    for row in rows:
+                        if len(row) >= 2:
+                            values.append((row[0], row[1]))
+                        elif row:
+                            values.append((row[0], ast.Constant(value=None)))
+                return values or None
         name = _callee_name(mapping)
         if _is_mapping_constructor(name):
             # ⛔ EVERY OPERAND FORM CONTRIBUTES, AND THEY COMPOSE (`#13788` review round 8, P1,
@@ -2530,6 +2571,19 @@ def _mapping_items_pairs(mapping, _depth: int = 0):
             return pairs or None
         if name == "fromkeys" and mapping.args and not mapping.keywords:
             keys = _sequence_options(mapping.args[0], _depth + 1)
+            if keys is None:
+                # ⛔ A MAPPING IS A KEYS SOURCE, AND THIS ARM ASKED ONLY THE SEQUENCE ONE
+                #    (`#13788` review round 10, P1, measured): `dict.fromkeys({"embedding":
+                #    1})` was refused (that path goes through
+                #    `_comprehension_source_yields`' own fromkeys arm, which DOES resolve a
+                #    mapping's keys), while `dict.fromkeys({"embedding": 1}).items()` — the
+                #    SAME constructor asked from the pairs resolver — abstained here and
+                #    CERTIFIED. `_comprehension_source_yields` is the resolver that answers
+                #    "what does iterating this source yield", which is exactly what
+                #    `fromkeys` consumes, so it is the fallback rather than a second
+                #    vocabulary. Refusal-only: its options are the source's own keys, which
+                #    can only be asked the property question.
+                keys = _comprehension_source_yields(mapping.args[0], _depth + 1)
             if keys is None:
                 return None
             value = mapping.args[1] if len(mapping.args) > 1 else ast.Constant(value=None)
@@ -2771,6 +2825,28 @@ def _comprehension_source_yields(source, _depth: int = 0):
                 and not source.keywords):
             if source.func.attr == "keys":
                 return _comprehension_source_yields(source.func.value, _depth + 1)
+            if source.func.attr == "values":
+                # ⛔ THE VALUES VIEW IS THE SAME PAIRS SOURCE IN THE UNPACKING POSITION
+                #    (`#13788` review round 10, P1, measured): `for k, _v in {"a": ("embedding",
+                #    1)}.values()` unpacks each value into the two pair slots, so a mapping whose
+                #    VALUES are pairs places the vector — and it CERTIFIED while the `.items()`
+                #    twin one keystroke away was refused. Each value is read as a PAIRS ROW (the
+                #    same `_sequence_options` options the pair question already consumes).
+                #    ⛔ NARROW ON PURPOSE: this is the VIEW arm only. A blanket "a values view is
+                #    a pairs sequence" would also refuse `{k: _encode(ev) for k in m.values()}`,
+                #    where the view is the KEY source and nothing is stored — a NAME receiver
+                #    therefore still abstains (`_mapping_items_pairs` returns None), and an
+                #    unreadable value abstains with it.
+                inner = _mapping_items_pairs(source.func.value, _depth + 1)
+                if inner is None:
+                    return None
+                rows: list = []
+                for _key, value in inner:
+                    options = _sequence_options(value, _depth + 1)
+                    if options is None:
+                        return None
+                    rows.extend(tuple(option) for option in options if option)
+                return rows or None
             if source.func.attr == "items":
                 # ⛔ THE RECEIVER IS A SOURCE TOO, AND IT GOES THROUGH THE SAME WRAPPERS
                 # (`#13788` review round 6, P1 — a measured in-surface false PASS). This arm
@@ -3023,6 +3099,22 @@ def _sequence_options(node, _depth: int = 0):
     if (isinstance(node, ast.Call) and not node.keywords and len(node.args) == 1
             and _callee_name(node) in ("list", "tuple", "set")):
         return _sequence_options(node.args[0], _depth + 1)
+    # ⛔ A MAPPING'S VIEW IS A SEQUENCE, AND IT BELONGS IN THIS RESOLVER (`#13788` review
+    #    round 10, P1, measured). `_mapping_items_pairs` now answers `.items()`/`.values()`,
+    #    but the wrappers this resolver owns are asked BEFORE any caller reaches it, so
+    #    `list({"embedding": 1}.items())` and `(... ).values()` certified while the unwrapped
+    #    twin was refused — the one-wrapper asymmetry this branch has closed at five seams.
+    #    Delegating to the pairs resolver and rendering each pair as a TUPLE element is the
+    #    whole rule: an option is an element list, and a view's element is a pair. Refusal-only
+    #    (the elements are the mapping's own keys/values, asked by the key question), and an
+    #    unreadable receiver stays `None`.
+    if (isinstance(node, ast.Call) and not node.args and not node.keywords
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("items", "values")):
+        pairs = _mapping_items_pairs(node, _depth + 1)
+        if pairs is None:
+            return None
+        return [[ast.Tuple(elts=[key, value], ctx=ast.Load()) for key, value in pairs]]
     if isinstance(node, ast.Subscript) and _is_full_slice(node.slice):
         return _sequence_options(node.value, _depth + 1)
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
