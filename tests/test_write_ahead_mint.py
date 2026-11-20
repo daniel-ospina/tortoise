@@ -34,7 +34,10 @@ REPO = Path(__file__).resolve().parent.parent
 # Every product function that mints a `:TeamMeta` graph — the guard fails
 # loudly if this set changes, so a new site must adopt the seam + register here.
 _MINT_SITES = {
-    ("tortoise/sdk.py", "org_create"),
+    # #12901 FINAL batch: `org_create` was PRIVATISED to `_org_create` (body unchanged,
+    # public spelling a tombstone), so the mint-site inventory names the private one —
+    # the AST walk reads the `def` that exists, and the seam it guards did not move.
+    ("tortoise/sdk.py", "_org_create"),
     ("tortoise/hosted_api.py", "provision_tenant"),
     ("tortoise/hosted_api.py", "register_user"),
     ("tortoise/hosted_api.py", "_eager_provision_org_graph"),

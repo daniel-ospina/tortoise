@@ -532,10 +532,13 @@ _DOORS: frozenset[str] = frozenset({
     "tortoise/sdk.py:TortoiseSDK._doc_write",
     "tortoise/sdk.py:TortoiseSDK._journal_event_raw_write",
     "tortoise/sdk.py:TortoiseSDK._update_entity",
-    "tortoise/sdk.py:TortoiseSDK.create_point",
-    "tortoise/sdk.py:TortoiseSDK.ingest_corpus",
-    "tortoise/sdk.py:TortoiseSDK.link_source_to_entity",
-    "tortoise/sdk.py:TortoiseSDK.update_point",
+    # #12901 FINAL batch: these four were PRIVATISED (body unchanged, public spelling a
+    # tombstone). The DOOR is the same gate call site — only the enclosing `def` moved to
+    # the underscore spelling, which is what this inventory keys on.
+    "tortoise/sdk.py:TortoiseSDK._create_point",
+    "tortoise/sdk.py:TortoiseSDK._ingest_corpus",
+    "tortoise/sdk.py:TortoiseSDK._link_source_to_entity",
+    "tortoise/sdk.py:TortoiseSDK._update_point",
 })
 
 
