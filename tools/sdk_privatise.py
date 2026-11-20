@@ -190,11 +190,17 @@ SWEEP_NAMES = 66
 #: `origin/main` `ef1d6f7561`, which observes 11784 on its OWN tree against the same pin of 11752.
 #: ⛔ So the 32 rows between 11752 and that base's 11784 are the BASE's, not declared here, and this
 #: block does not enumerate them (they are `#13854`/`#13966`-era merges' business); the ten above
-#: are the only rows this PR owns. ⛔ And
+#: are the only rows `#13906`'s harness owned; `#13919`'s own rows are declared below.
 #: ⛔ **`--check` on that tree is RED regardless of this pin** — `typed references still pointing at
-#: a public name: 4`, all four on the typed SDK receiver `._ingest_corpus` in
+#: a public name: 4`, all four on the typed SDK receiver `.ingest_corpus` in
 #: `tests/test_13826_write_gate.py:544,555,580,596` (a `#13854` file). A re-pin cannot make that
-#: check green, and this PR does not FIX it: the four are base-owned and out of this PR's scope.
+#: check green, and `#13906`'s harness did not FIX it: on that tree the four were base-owned and out
+#: of that PR's scope — this branch fixed them at `21ae734ce3`, declared in the `#13919` block below.
+#: ⛔ Spelling matters on that row: the four were `sdk.ingest_corpus(…)`, the PUBLIC name. A private
+#: receiver (`sdk._ingest_corpus(…)`) is not typed residue at all — the rename map is keyed on public
+#: names only (`off_surface_names` skips `_`-prefixed defs) and `edits_for` counts a hit only when
+#: the attribute is IN that map — so a reader who chases a red by re-pointing an already-private
+#: name will find nothing to fix and start distrusting the gate.
 #: Measured here, so the next lane does not have to re-derive it:
 #:   `typed references` on the merge parent = 4; on this tree = 4 (this PR adds NONE).
 #: ⛔ THE PARAGRAPH ABOVE IS MAINTENANCE HISTORY, NOT A LIVE CLAIM — corrected by `#13919` at the
@@ -216,8 +222,9 @@ SWEEP_NAMES = 66
 #:     `tools/measure_4211_session_hierarchy.py`; `super().query` 62 → 67 (+5), `seen.update` 99 →
 #:     101 (+2), `out.update` 41 → 42 (+1) and `graph.query` 267 → 268 (+1) in
 #:     `tests/test_measure_4211_session_hierarchy.py`. 7+2+5+2+1+1 = 18 = 11822 − 11804.
-#: Every one is an ordinary-word receiver on a dict/set or on a FalkorDB `Graph` (or a fake standing in
-#: for one). ⛔ The five `super().query(…)` rows are a test double that OVERRIDES `Graph.query` and
+#: Every one is an ordinary-word receiver on a dict/set, a `hashlib` hash object (the two `h.update`
+#: rows), or a FalkorDB `Graph` (or a fake standing in for one). ⛔ The five `super().query(…)` rows
+#: are a test double that OVERRIDES `Graph.query` and
 #: delegates to the fake's own implementation — re-pointing them at a private spelling would break the
 #: double's fidelity to the API it stands in for, which is exactly the `declared_markers.update`
 #: precedent (a name-scoped rewrite would be sabotage). No new SDK-holding receiver is added.
