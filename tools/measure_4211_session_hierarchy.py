@@ -279,6 +279,17 @@ QUERIES: list[tuple[str, str]] = [
     # session-MERGE three. Reported so a stale population cannot be read as a live defect.
     ("session_signature",
      "MATCH (s:Session) WITH keys(s) AS k, count(*) AS n RETURN k, n ORDER BY n DESC"),
+    # ⛔ WHAT THIS KEY ACTUALLY SUMS (#13919 review round 10, finding 3). `s.turn_count`
+    # is a WINDOW LENGTH, not a turn population: the SDK writes it as
+    # ``turn_count = len(turns)`` on every session MERGE (``tortoise/sdk.py:4143``), and
+    # ``sdk.py:4149`` says so verbatim — "`turn_count` is a WINDOW LENGTH
+    # (`len(turns)`), not a max id index" — overwritten by each append at
+    # ``turn_offset > 0``. So this reading is the sum of the windows the LAST write of
+    # each Session saw: it UNDER-counts a session captured through several append
+    # windows, and it is NOT comparable to a turn count (`turns_total`) on the same
+    # graph. It is published because the receipt's legacy-population reading of the
+    # embedded store rests on the session SIGNATURE beside it, and a reader must be
+    # able to see what the number is before comparing it to one.
     ("session_turn_count_sum",
      "MATCH (s:Session) RETURN sum(coalesce(s.turn_count, 0)) AS n"),
     # #4211 review N1: the two facts the receipt's reader needs to decide whether the
@@ -340,12 +351,60 @@ QUERIES: list[tuple[str, str]] = [
     ("events_with_aboutObject_missing_session_id",
      "MATCH (e:Event)-[:aboutObject]->(:Object) WHERE e.session_id IS NULL "
      "RETURN count(e) AS n"),
+    # ⛔ The relationship was UNREFERENCED, so the edge multiplicity this key's name
+    # implies was never enumerated: FalkorDB documents that "when a relation in a match
+    # pattern is not referenced elsewhere in the query, FalkorDB will only verify that
+    # at least one matching relation exists (rather than operating on every matching
+    # relation)" (docs.falkordb.com/cypher/known-limitations, "Relationship uniqueness
+    # in patterns"), and its own example is `MATCH (a)-[e]->(b) RETURN count(b)`
+    # answering 1 for two parallel edges. `count(*)` counts the collapsed ROW, so the
+    # old reading was either "objects reached by >1 Event" or "objects with >1
+    # Event->Object edge" and the artifact carried no way to tell which
+    # (#13919 review round 10, finding 4). The event is now BOUND and counted
+    # distinct, and the edge reading is published beside it as
+    # `objects_with_gt1_event_edge` — the same turn/any-kind, node/edge discipline the
+    # sibling keys carry.
     ("objects_reaching_gt1_event",
-     "MATCH (:Event)-[:aboutObject]->(o:Object) "
-     "WITH o, count(*) AS c WHERE c > 1 RETURN count(*) AS n"),
+     "MATCH (e:Event)-[:aboutObject]->(o:Object) "
+     "WITH o, count(DISTINCT e) AS c WHERE c > 1 RETURN count(*) AS n"),
+    ("objects_with_gt1_event_edge",
+     "MATCH (:Event)-[r:aboutObject]->(o:Object) "
+     "WITH o, count(r) AS c WHERE c > 1 RETURN count(*) AS n"),
     ("event_objects_total_distinct",
      "MATCH (:Event)-[:aboutObject]->(o:Object) RETURN count(DISTINCT o) AS n"),
 ]
+
+#: The same query set keyed by name, so a census statement that IS a `QUERIES` reading is
+#: the same OBJECT rather than a hand-typed copy that can drift from it.
+_QUERIES_DICT: dict[str, str] = dict(QUERIES)
+
+
+#: The `instrument` census's own statements, keyed by the name the arm publishes them
+#: under. ⛔ THIS DICT **IS** WHAT THE ARM RUNS (#13919 review round 10, finding 1): the
+#: eight statements used to be inline strings in `measure_instrument`, and the arm
+#: published none of them — so the one arm whose headline the receipt argues from
+#: ("0 `aboutObject` in 60 of 173", 37,605 CONTAINS) was the only arm whose Cypher
+#: existed nowhere in the artifact, and a reader could not re-derive a single number.
+#: Running the loop below FROM this dict is what makes the published block the executed
+#: text rather than a copy of it.
+#:
+#: ⛔ AND ONE NAME CARRIES ONE SHAPE. The census's `contains_targets_by_kind` used to be
+#: `RETURN p.pointKind, count(*)` — TWO columns — while `QUERIES` published the THREE
+#: column `(pointKind, episodic, n)` reading under the SAME key name, so the committed
+#: receipt carried `[['event', 616], ...]` in `per_graph` and
+#: `[['event', true, 22], ...]` in `counts`, one name, two shapes, in one artifact. The
+#: cached ones here are therefore taken FROM `QUERIES` (same object, same text) and the
+#: two census-only readings are named for exactly what they read.
+INSTRUMENT_QUERIES: dict[str, str] = {
+    "sessions": "MATCH (s:Session) RETURN count(s) AS n",
+    "turns": f"MATCH (p:Point) WHERE {TURN} RETURN count(p) AS n",
+    "contains_edges": _QUERIES_DICT["contains_edges"],
+    "contains_distinct_pairs": _QUERIES_DICT["contains_distinct_pairs"],
+    "contains_duplicate_pairs": _QUERIES_DICT["contains_duplicate_pairs"],
+    "aboutObject_edges": "MATCH ()-[r:aboutObject]->() RETURN count(r) AS n",
+    "turns_with_aboutObject": _QUERIES_DICT["turns_with_aboutObject"],
+    "contains_targets_by_kind": _QUERIES_DICT["contains_targets_by_kind"],
+}
 
 
 def _clean(value):
@@ -545,13 +604,20 @@ def measure_store(db_path: str, graph_name: str) -> dict:
     # opens anything (N3) — ``source_bytes`` and ``source_sha256`` describe the same
     # file at the same moment.
     source = _file_identity(src)
-    tmpdir = Path(tempfile.mkdtemp(prefix="m4211-store-"))
-    dst = tmpdir / "store.db"
+    # ⛔ EVERYTHING THAT CAN RAISE LIVES INSIDE THE `try` (#13919 review round 10,
+    # finding 5). `mkdtemp` + `copy2` + the copy's identity used to run BEFORE it, so a
+    # copy failure (ENOSPC, EACCES, `src` a directory, `_file_identity(dst)` raising)
+    # skipped the `finally` entirely — leaking one `m4211-store-*` directory holding a
+    # full copy of the user's embedded store per failed run. `tmpdir` therefore starts
+    # as `None` and the `finally` removes it only when it was created.
+    tmpdir: Path | None = None
     t0 = time.time()
-    shutil.copy2(src, dst)  # the ORIGINAL is never opened by the engine
-    copy = _file_identity(dst)  # the bytes the engine is about to get, measured pre-open
     db = None
     try:
+        tmpdir = Path(tempfile.mkdtemp(prefix="m4211-store-"))
+        dst = tmpdir / "store.db"
+        shutil.copy2(src, dst)  # the ORIGINAL is never opened by the engine
+        copy = _file_identity(dst)  # the bytes the engine is about to get, pre-open
         db = _open_embedded(dst)
         names = [n for n in db.connection.execute_command("GRAPH.LIST")]
         if graph_name not in names:
@@ -582,7 +648,8 @@ def measure_store(db_path: str, graph_name: str) -> dict:
         if db is not None:
             with contextlib.suppress(Exception):
                 db.close()
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        if tmpdir is not None:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 # ── ARM `live`: the graph the box is CONFIGURED to serve, read-only ───────
@@ -781,44 +848,35 @@ def measure_instrument(uri: str) -> dict:
     for n in names:
         g = db.select_graph(n)
         try:
-            sess = g.query("MATCH (s:Session) RETURN count(s)").result_set[0][0]
+            sess = g.query(INSTRUMENT_QUERIES["sessions"]).result_set[0][0]
             if not sess:
                 filtered.append({"graph": n, "reason": "no :Session"})
                 continue
-            turns = g.query(f"MATCH (p:Point) WHERE {TURN} RETURN count(p)"
-                            ).result_set[0][0]
+            turns = g.query(INSTRUMENT_QUERIES["turns"]).result_set[0][0]
             if not turns:
                 filtered.append({"graph": n, "reason": "no turn Point"})
                 continue
-            contains = g.query("MATCH (:Session)-[r:CONTAINS]->(:Point) "
-                               "RETURN count(r)").result_set[0][0]
-            # Multiplicity guard on the biggest number this arm publishes: a
-            # double-wired CONTAINS (the #12244 write-bug class the gate cites) would
-            # inflate a raw row count undetected. Pairs are measured, not inferred —
-            # and measured by NODE IDENTITY, because the `s.id + '|' + p.id` spelling
-            # is null-blind (a Point without an `id` makes the whole count 0).
-            pairs = g.query("MATCH (s:Session)-[:CONTAINS]->(p:Point) "
-                            "WITH DISTINCT s, p RETURN count(*)"
-                            ).result_set[0][0]
-            dupes = g.query("MATCH (s:Session)-[r:CONTAINS]->(p:Point) "
-                            "WITH s, p, count(r) AS c WHERE c > 1 RETURN count(*)"
-                            ).result_set[0][0]
-            about = g.query("MATCH ()-[r:aboutObject]->() RETURN count(r)"
-                            ).result_set[0][0]
-            turn_about = g.query("MATCH (p:Point)-[:aboutObject]->(:Object) "
-                                 f"WHERE {TURN} RETURN count(DISTINCT p)"
-                                 ).result_set[0][0]
-            kinds = g.query("MATCH (:Session)-[:CONTAINS]->(p:Point) "
-                            "RETURN p.pointKind, count(*) ORDER BY count(*) DESC"
-                            ).result_set
+            row = {"graph": n, "sessions": sess, "turns": turns}
+            # Multiplicity guards, run from the SAME constants the arm publishes, so a
+            # reader re-deriving these numbers executes the statement that produced
+            # them (see `INSTRUMENT_QUERIES`). A double-wired CONTAINS (the #12244
+            # write-bug class the gate cites) would inflate a raw row count undetected,
+            # so the distinct-pair and duplicate-pair readings are measured beside it —
+            # by NODE IDENTITY, because the `s.id + '|' + p.id` spelling is null-blind
+            # (a Point without an `id` makes the whole count 0; the reasoning lives on
+            # the `contains_distinct_pairs` entry itself).
+            for key in ("contains_edges", "contains_distinct_pairs",
+                        "contains_duplicate_pairs", "aboutObject_edges",
+                        "turns_with_aboutObject"):
+                row[key] = g.query(INSTRUMENT_QUERIES[key]).result_set[0][0]
+            # The breakdown keeps the SAME three-column shape as
+            # `QUERIES["contains_targets_by_kind"]` — one name, one shape, in this
+            # artifact and in the arms beside it.
+            row["contains_targets_by_kind"] = [
+                list(r) for r in
+                g.query(INSTRUMENT_QUERIES["contains_targets_by_kind"]).result_set]
             inspected += 1
-            rows.append({"graph": n, "sessions": sess, "turns": turns,
-                         "contains_edges": contains,
-                         "contains_distinct_pairs": pairs,
-                         "contains_duplicate_pairs": dupes,
-                         "aboutObject_edges": about,
-                         "turns_with_aboutObject": turn_about,
-                         "contains_targets_by_kind": [list(r) for r in kinds]})
+            rows.append(row)
         except Exception as exc:
             # ⛔ NEVER a silent drop: an exception on ANY of the eight queries removes
             # this graph from `rows`, hence from every total AND from the denominator
@@ -830,7 +888,7 @@ def measure_instrument(uri: str) -> dict:
     total = lambda k: sum(r[k] for r in rows)  # noqa: E731
     kinds: dict[str, int] = {}
     for r in rows:
-        for kind, cnt in r["contains_targets_by_kind"]:
+        for kind, _episodic, cnt in r["contains_targets_by_kind"]:
             kinds[str(kind)] = kinds.get(str(kind), 0) + cnt
     return _mark_shrunken_denominator({
         # Redacted: host/port/graph survive, the userinfo does not (F2).
@@ -852,6 +910,11 @@ def measure_instrument(uri: str) -> dict:
         },
         "contains_targets_by_kind": dict(sorted(kinds.items(),
                                                  key=lambda kv: -kv[1])),
+        # ⛔ The census's Cypher, published (#13919 review round 10, finding 1): the
+        # statements above run FROM this dict, so this block is what executed, not a
+        # description of it. Every statement that produced a number in this body is
+        # here — `store`/`writer`/`live` already carried theirs.
+        "queries": dict(INSTRUMENT_QUERIES),
         "graphs_with_any_aboutObject": sum(1 for r in rows if r["aboutObject_edges"]),
         "graphs_with_zero_aboutObject": sum(1 for r in rows if not r["aboutObject_edges"]),
         "every_graph_has_fewer_turns_than_contains":

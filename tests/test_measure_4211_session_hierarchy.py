@@ -24,7 +24,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import tempfile
 from pathlib import Path
+
+import pytest
 
 _REPO = Path(__file__).resolve().parent.parent
 _TOOL = (_REPO / "tools" / "measure_4211_session_hierarchy.py")
@@ -92,8 +95,11 @@ class _FakeInstrumentGraph:
             return _Result([[self.sessions]])
         if cypher.startswith("MATCH (p:Point) WHERE"):
             return _Result([[self.turns]])
-        if "pointKind, count(*)" in cypher:
-            return _Result([["event", self.turns]])
+        if cypher.startswith("MATCH (:Session)-[:CONTAINS]->(p:Point) RETURN p.pointKind"):
+            # Three columns, the SAME shape `QUERIES["contains_targets_by_kind"]`
+            # publishes (#13919 review round 10, finding 1: the census used to answer
+            # two columns under a key name whose sibling answered three).
+            return _Result([["event", True, self.turns]])
         if "aboutObject" in cypher:
             return _Result([[0]])
         return _Result([[1]])
@@ -152,10 +158,21 @@ def _run(graph, keys: tuple[str, ...]) -> dict:
 #: silently passed the fourth, unfiltered `objects_with_gt1_turn` (#13919 round-7 item 3).
 _TURN_KEY_EXEMPT = {
     "session_turn_count_sum": (
-        # The exemption is only valid because the Cypher really is the SDK property sum: a
-        # `*turn*` key that neither carries TURN nor sums `turn_count` reds below.
-        "sums the SDK's own `s.turn_count` PROPERTY — the value IS the product's turn "
-        "counter (a Session property), so the Point discriminator does not apply to it"),
+        # ⛔ THE EXEMPTION'S REASON, RESTATED TO WHAT THE SDK ACTUALLY WRITES (#13919
+        # review round 10, finding 3). The old reason — "the value IS the product's turn
+        # counter" — is refuted by the product: the SDK writes
+        # ``turn_count = len(turns)`` on every session MERGE (``tortoise/sdk.py:4143``)
+        # and says so verbatim, "`turn_count` is a WINDOW LENGTH (`len(turns)`), not a
+        # max id index" (``sdk.py:4149``), overwritten by each append at
+        # ``turn_offset > 0``. So this key sums WINDOW LENGTHS: it is not a turn
+        # population, and the receipt's 17,934 beside its `turns_total` of 27 is not a
+        # like-for-like comparison. The exemption is kept because the property is a
+        # Session's under BOTH readings — the Point discriminator still cannot apply to
+        # a stored scalar — and because retiring the key would silently drop a reading
+        # the artifact of record publishes.
+        "sums the SDK's own `s.turn_count` PROPERTY, which the SDK writes as "
+        "`turn_count = len(turns)` — a WINDOW LENGTH, not a turn population — so no "
+        "Point discriminator can apply to a scalar the Session carries either way"),
 }
 
 
@@ -269,6 +286,11 @@ def test_an_unreadable_emptiness_read_makes_the_arm_unmeasurable(monkeypatch):
     body = mod.measure_live("docker://:@localhost:1/tortoise")
     assert body["empty_or_absent"] is None
     assert "unmeasurable" in body
+
+
+#: The tool's query set at HEAD, snapshotted so a pin can compare a census statement to
+#: the reading it claims to be (`mod.QUERIES` is the same object the pin reads below).
+_QUERIES_AT_HEAD: dict[str, str] = dict(mod.QUERIES)
 
 
 def _instrument(monkeypatch, graphs: dict) -> dict:
@@ -1162,8 +1184,9 @@ def test_r7_the_instrument_note_is_DERIVED_from_the_kinds_it_measured(monkeypatc
         """The population the committed receipt actually censused: turns AND chunks."""
 
         def query(self, cypher: str, params=None) -> _Result:
-            if "pointKind, count(*)" in cypher:
-                return _Result([["event", 7], ["session-transcript", 3]])
+            if cypher.startswith(
+                    "MATCH (:Session)-[:CONTAINS]->(p:Point) RETURN p.pointKind"):
+                return _Result([["event", True, 7], ["session-transcript", False, 3]])
             return super().query(cypher, params)
 
     # ⛔ Drive the ARM, not the helper: a pin that calls `_instrument_note` directly
@@ -2042,8 +2065,9 @@ def test_c10_no_kinds_but_events_is_not_reported_as_only_event(monkeypatch):
     # …and drive the ARM, so the helper cannot be fixed while the arm ignores it.
     class _MixedKinds(_FakeInstrumentGraph):
         def query(self, cypher: str, params=None) -> _Result:
-            if "pointKind, count(*)" in cypher:
-                return _Result([["event", 5], ["statement", 3]])
+            if cypher.startswith(
+                    "MATCH (:Session)-[:CONTAINS]->(p:Point) RETURN p.pointKind"):
+                return _Result([["event", True, 5], ["statement", False, 3]])
             return super().query(cypher, params)
 
     body = _instrument(monkeypatch, {"g": _MixedKinds(sessions=2, turns=5)})
@@ -2228,3 +2252,263 @@ def test_c11_no_ledger_entry_repeats_itself():
             if parts.count(part) > 1:
                 repeated.append((part[:90], parts.count(part)))
     assert not repeated, f"a ledger entry repeats a sentence verbatim: {repeated}"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Review round 10 — the fresh-context review at f367b1b9 (PR #13919)
+#
+# Five findings, all of them about the artifact's own re-derivability rather than
+# about a wrong number: the `instrument` arm published no Cypher at all and carried
+# `contains_targets_by_kind` in a shape the same key name does not have elsewhere;
+# the "hand-edit cannot pass" pin compared against the TOOL at HEAD instead of the
+# receipt's own `queries` (and no pin re-derived `delta_this_run`); the
+# `session_turn_count_sum` exemption stated a reason the SDK refutes; a key measuring
+# Event attachments counted a COLLAPSED relationship; and the store arm created its
+# temp directory before the `try` that removes it.
+# ══════════════════════════════════════════════════════════════════════════
+
+def test_r10_every_arm_publishes_the_queries_it_ran(monkeypatch, tmp_path):
+    """Finding 1, first half: the census published NO Cypher.
+
+    `store`/`writer`/`live` each carried `"queries": dict(QUERIES)`; the `instrument`
+    census carried none of its eight statements, so the one arm the receipt's headline
+    is argued from ("0 aboutObject in 60 of 173") was the arm whose queries existed
+    nowhere in the artifact. Deleting all three `"queries": dict(QUERIES)` lines kept
+    78/78 green.
+    """
+    bodies = {}
+
+    # live
+    monkeypatch.setattr(mod, "_open_live", lambda uri: (
+        _FakeDB({"tortoise": _FakeLiveGraph(answers_all=True)}), {"graph": "tortoise"}))
+    bodies["live"] = mod.measure_live("docker://:@localhost:1/tortoise")
+
+    # instrument
+    bodies["instrument"] = _instrument(monkeypatch, {"g": _FakeInstrumentGraph(1, 3)})
+
+    # store
+    src = tmp_path / "store.db"
+    src.write_bytes(b"rdb-bytes")
+    monkeypatch.setattr(mod, "_open_embedded", lambda path: _MutatingEngine(path))
+    bodies["store"] = mod.measure_store(str(src), "tortoise")
+
+    # writer
+    class _Graph:
+        def query(self, *_a, **_k):
+            return _Result([[0]])
+
+    class _Proj:
+        g = _Graph()
+
+    class _FakeSDK:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def _get_proj(self):
+            return _Proj()
+
+        def create_object(self, *_a, **_k):
+            return {}
+
+        def _capture_session(self, conv, session_id=None):
+            return {"ok": True, "turns": 0, "extraction_mode": "mocked",
+                    "errors": [], "warnings": []}
+
+        def close(self):
+            pass
+
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@localhost:1/m4211_r10_fake")
+    monkeypatch.setattr("tortoise.sdk.TortoiseSDK", _FakeSDK)
+    bodies["writer"] = mod.measure_writer(allow_non_ephemeral=True)
+
+    for arm, body in bodies.items():
+        queries = body.get("queries")
+        assert isinstance(queries, dict) and queries, (
+            f"{arm}: the arm publishes numbers with no `queries` block — nothing in "
+            "this body can be re-derived from the artifact")
+        assert all(isinstance(k, str) and isinstance(v, str) for k, v in queries.items()), (
+            f"{arm}: a `queries` entry is not a name -> Cypher string")
+
+
+def test_r10_the_census_RUNS_from_the_block_it_publishes(monkeypatch):
+    """Finding 1, second half: a published block that is a COPY can drift from the run.
+
+    The census now executes `INSTRUMENT_QUERIES`. Pinned by REPLACING one entry with a
+    sentinel: if the arm goes back to inline literals, the sentinel is never executed
+    and this reds — which is exactly the mutation that was silent before (the arm's
+    statements existed only inline, so nothing could compare them to anything).
+    """
+    seen: list[str] = []
+
+    class _Spy(_FakeInstrumentGraph):
+        def query(self, cypher, params=None):
+            seen.append(cypher)
+            return super().query(cypher, params)
+
+    sentinel = "MATCH (s:Session) RETURN count(s) AS sentinel_r10"
+    queries = dict(mod.INSTRUMENT_QUERIES)
+    queries["sessions"] = sentinel
+    monkeypatch.setattr(mod, "INSTRUMENT_QUERIES", queries)
+    body = _instrument(monkeypatch, {"g": _Spy(sessions=1, turns=3)})
+
+    assert body["queries"] == queries, (
+        "the arm publishes something other than the dict it runs from")
+    assert sentinel in seen, (
+        "the census did not execute the statement it publishes — the arm is back to "
+        "inline literals, so the published block describes a run that never happened")
+
+
+def test_r10_one_key_name_carries_one_cypher_shape():
+    """Finding 1, the collision: `contains_targets_by_kind` had TWO shapes in one file.
+
+    The census answered `RETURN p.pointKind, count(*)` (2 columns) while
+    `QUERIES["contains_targets_by_kind"]` answered `(pointKind, episodic, n)` (3), both
+    published under the same name — `[['event', 616], ...]` in `per_graph` beside
+    `[['event', true, 22], ...]` in `counts`, in the committed receipt.
+    """
+    for key, cypher in mod.INSTRUMENT_QUERIES.items():
+        if key in _QUERIES_AT_HEAD:
+            assert cypher == _QUERIES_AT_HEAD[key], (
+                f"{key!r} is a name BOTH the census and `counts` publish, and the two "
+                "statements differ — one name, two readings")
+    breakdown = mod.INSTRUMENT_QUERIES["contains_targets_by_kind"]
+    assert "coalesce(p.is_episodic, false) AS episodic" in breakdown, (
+        "the census breakdown dropped the episodic column again — the shape the "
+        "same-named key has everywhere else")
+
+
+def test_r10_the_census_reads_THREE_column_breakdown_rows(monkeypatch):
+    """The aggregation must consume the shape the pinned query answers.
+
+    A 2-column reading unpacked as three columns raises `ValueError` on the FIRST graph,
+    which is the crash a half-applied fix leaves behind; and the aggregate must still be
+    per KIND (the note is derived from it), summing across the episodic split.
+    """
+    class _Split(_FakeInstrumentGraph):
+        def query(self, cypher, params=None):
+            if cypher.startswith(
+                    "MATCH (:Session)-[:CONTAINS]->(p:Point) RETURN p.pointKind"):
+                return _Result([["event", True, 4], ["event", False, 1],
+                                ["session-transcript", False, 2]])
+            return super().query(cypher, params)
+
+    body = _instrument(monkeypatch, {"g": _Split(sessions=1, turns=4)})
+    assert body["contains_targets_by_kind"] == {"event": 5, "session-transcript": 2}
+    assert body["per_graph"][0]["contains_targets_by_kind"][0] == ["event", True, 4], (
+        "the per-graph row lost its episodic column — the shape the committed receipt "
+        "carries for the same key name elsewhere is three columns, not two")
+
+
+def test_r10_the_turn_count_sum_exemption_cites_the_SDKs_WINDOW_LENGTH():
+    """Finding 3: the exemption's stated reason was refuted by the product's own source.
+
+    ``session_turn_count_sum`` is exempt from the turn discriminator on the ground that
+    it sums a Session scalar. That is still true — and the scalar is a WINDOW LENGTH:
+    ``turn_count = len(turns)`` (sdk.py:4143), "a WINDOW LENGTH (`len(turns)`), not a max
+    id index" (sdk.py:4149), overwritten by every append at ``turn_offset > 0``. The old
+    reason ("the value IS the product's turn counter") made the sum read as the turn
+    population, which is how ``17,934`` beside ``turns_total: 27`` stayed unexamined in
+    the comparison the legacy-population verdict rests on.
+    """
+    sdk_src = (_REPO / "tortoise" / "sdk.py").read_text()
+    assert "turn_count = len(turns)" in sdk_src, (
+        "sdk.py no longer writes `turn_count = len(turns)` — re-derive this pin")
+    assert "WINDOW LENGTH" in sdk_src, (
+        "the SDK no longer documents `turn_count` as a window length — the exemption "
+        "below must be re-derived, not just reworded")
+
+    reason = _TURN_KEY_EXEMPT["session_turn_count_sum"].lower()
+    assert "window length" in reason, (
+        "the exemption no longer says WHAT the summed property is — the reason that "
+        "made the sum readable as a turn population")
+    assert "not a turn population" in reason, reason
+    # …and the reading itself is untouched: this is a correction of the CLAIM, never of
+    # the number.
+    assert _receipt()["arms"]["store"]["counts"]["session_turn_count_sum"] == 17934.0
+
+
+def test_r10_objects_reaching_gt1_event_counts_DISTINCT_events():
+    """Finding 4: the key measured a relationship it never referenced.
+
+    FalkorDB: "when a relation in a match pattern is not referenced elsewhere in the
+    query, FalkorDB will only verify that at least one matching relation exists (rather
+    than operating on every matching relation)"
+    (docs.falkordb.com/cypher/known-limitations) — its own example is
+    `MATCH (a)-[e]->(b) RETURN count(b)` answering 1 for two parallel edges. So
+    `MATCH (:Event)-[:aboutObject]->(o:Object) WITH o, count(*)` collapsed parallel
+    Event->Object edges before counting, and the store arm's published 211 was
+    "objects reached by >1 Event" OR "objects with >1 Edge", with nothing in the
+    artifact to tell which.
+    """
+    queries = dict(mod.QUERIES)
+    cypher = queries["objects_reaching_gt1_event"]
+    assert "(e:Event)" in cypher, (
+        "the event is not BOUND, so the relationship is unreferenced and FalkorDB "
+        "collapses parallel edges before the count sees them")
+    assert "count(DISTINCT e)" in cypher, (
+        "a bound but uncounted event still collapses: the reading must count the "
+        "DISTINCT event")
+    assert "count(*) AS c" not in cypher, (
+        "the INNER count is the collapsed one: `count(*)` counts the row FalkorDB "
+        "collapsed the parallel edges into")
+
+    edge = queries["objects_with_gt1_event_edge"]
+    assert "count(r)" in edge, (
+        "the edge reading must count the RELATIONSHIP to preserve multiplicity — "
+        "`count(*)` is the collapsed shape this fix is about")
+    assert "objects_with_gt1_turn" in queries, "the Point-side sibling must stay"
+
+
+def test_r10_a_failed_copy_leaves_no_temp_directory(monkeypatch, tmp_path):
+    """Finding 5: `mkdtemp` + `copy2` ran BEFORE the `try` whose `finally` removes them.
+
+    A copy failure (ENOSPC, EACCES, `src` a directory) therefore skipped the cleanup
+    entirely, leaking one `m4211-store-*` directory holding a full copy of the user's
+    embedded store per failed run.
+    """
+    src = tmp_path / "store.db"
+    src.write_bytes(b"rdb-bytes")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+
+    def _enospc(*_a, **_k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(mod.shutil, "copy2", _enospc)
+    with pytest.raises(OSError):
+        mod.measure_store(str(src), "tortoise")
+    assert list(scratch.iterdir()) == [], (
+        "the failed copy leaked its temp directory — the cleanup lives outside the "
+        "`try` that the failure escapes")
+
+
+def test_r10_the_before_block_and_the_delta_are_re_derivable_from_their_own_arm():
+    """Finding 2: `counts_before_any_write` was read by NO pin, and `delta_this_run`
+    was pinned only by KEY SET.
+
+    So a hand-edit to the BEFORE block — the block the delta is derived from — shipped
+    green while the published delta contradicted its own inputs. The delta agrees today
+    (re-derived here from the artifact's own numbers), and an arm's BEFORE block must be
+    re-derivable from the same arm's `queries`, like its `counts` block already is.
+    """
+    receipt = _receipt()
+    checked = 0
+    for arm in ("store", "writer", "live"):
+        block = receipt["arms"][arm]
+        before = block.get("counts_before_any_write")
+        delta = block.get("delta_this_run")
+        if not isinstance(before, dict):
+            continue
+        assert set(before) - set(block["queries"]) == set(), (
+            f"{arm}.counts_before_any_write publishes key(s) with no recorded query: "
+            f"{sorted(set(before) - set(block['queries']))}")
+        if not isinstance(delta, dict):
+            continue
+        for key, published in delta.items():
+            after = block["counts"][key]
+            assert published == after - before[key], (
+                f"{arm}.delta_this_run[{key!r}] = {published} is not "
+                f"counts - counts_before_any_write = {after} - {before[key]}")
+            checked += 1
+    assert checked >= 5, f"only {checked} delta key(s) re-derived — the pin is vacuous"
