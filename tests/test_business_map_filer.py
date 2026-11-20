@@ -1543,7 +1543,7 @@ def test_a_carried_line_is_printed_under_ITS_OWN_header_not_a_class_heading(
         tmp_path, monkeypatch, map_doc, capsys):
     """An earlier run's line must not sit beneath THIS run's class heading.
 
-The class headings say what to DO: `N edge(s) were DECLINED by the door —
+    The class headings say what to DO: `N edge(s) were DECLINED by the door —
     nothing was written for them` is followed by a remedy whose first bullet is
     "delete the line, nothing was written". The carried lines used to be printed
     AFTER those headings, so an earlier run's line landed underneath whichever
@@ -1587,12 +1587,17 @@ The class headings say what to DO: `N edge(s) were DECLINED by the door —
     assert "edge(s) were DECLINED" in err, err
     # ⛔ BOTH HALVES OF THE ORDER, because they fail differently. This assertion
     # pins the line ABOVE the class headings (the mislabel); the next one pins it
-    # BELOW its own header. Hoisting the loop out of `if markers_carried:` — one
-    # indent — satisfies the first and breaks the second: the line then prints
-    # right after this run's own `!!` block, detached from the header that says it
-    # is an EARLIER run's, so it reads as one more line THIS run produced. That
-    # mutant was measured green (136 passed) until the header anchor existed, at
-    # #13985 review round 4.
+    # BELOW its own header. The mutant that breaks only the second is moving the
+    # loop ABOVE the header — e.g. above the `markers_carried` computation — where
+    # the line prints right after this run's own `!!` block, detached from the
+    # sentence that says it is an EARLIER run's, so it reads as one more line THIS
+    # run produced; that mutant was measured green (136 passed) until this anchor
+    # existed (#13985 review round 4).
+    # ⛔ A ONE-INDENT DEDENT IS NOT THAT MUTANT. `markers_carried` is empty exactly
+    # when `repeated` is, so lifting the loop out of `if markers_carried:` prints
+    # the same lines in the same place — measured green, and the output is
+    # byte-identical. Naming it here would send a reader to an edit that cannot
+    # fail, which is the defect this file keeps repairing.
     header = "marker(s) from an earlier run"
     assert header in err, err
     # ⛔ AND ONCE. `err.index` reads only the FIRST occurrence, so a SECOND copy of
