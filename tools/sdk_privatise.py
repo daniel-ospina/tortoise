@@ -337,6 +337,12 @@ SWEEP_NAMES = 66
 #: ordinary-word receivers on an untyped `surface` — the shape this counter exists to report, not
 #: a typed SDK site. `+1` each (11831 → 11833), counted per row on this tree with `--repin`; the
 #: rows are the two new tests' own calls, so the move is attributable line-for-line.
+#: ⛔ A FIRST READING OF THIS DELTA attributed the +2 to the `tests/test_github_indexer.py`
+#: citation rows added for the moved `entities.py` addresses, on the theory that a pin row
+#: QUOTES its statement and so re-counts the `.query(` inside the string. That is wrong on this
+#: tree and is marked here so it is not re-applied: those rows are unchanged across the move, and
+#: the two rows that actually differ are `surface.create_subject` (6 → 7) and
+#: `surface.create_edge` (1 → 2), both in the seed pins below.
 SWEEP_RESIDUE = (11833, "c115acaf5bbb4163")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
