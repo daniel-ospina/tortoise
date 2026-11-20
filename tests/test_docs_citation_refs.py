@@ -519,7 +519,9 @@ def test_the_real_docs_tree_is_not_empty():
 #: quoted invocation's later clause is refused (the F4 fail-open, measured: three true, head-named
 #: history sentences on the live document red under a wide gap and none red under this one).
 #:
-#: Both gaps are built from FOUR UNIT KINDS and nothing else. Listing them is not an enumeration
+#: Both gaps are built from FOUR UNIT KINDS and nothing else — all four in BOTH gaps (the wide
+#: gap's budget is 40 units, the narrow one's is unbounded, and the bracket unit was missing
+#: from the wide gap until a verification round measured it). Listing them is not an enumeration
 #: of SPELLINGS — the earlier attempts died because they enumerated those — it is the closure
 #: itself, stated once, and each kind is defined structurally:
 #:
@@ -550,12 +552,29 @@ def test_the_real_docs_tree_is_not_empty():
 #: 8/16/28/40/80/200 spaces and 40 repeated units of each kind → 0.000-0.002 s; the ambiguous
 #: form `7557a52cf5` replaced took 15.8 s at 24 spaces.
 _AMP = r"(?:&[#\w]{1,10};|&(?![#\w]{1,10};))"
-_TAG = (r'<(?:"[^"\n]*"|\'[^\'\n]*\'|[^>"\'\n]'
-        r'|\n(?![^\S\n]*\n))*>')
-_GAP_FULL = (r"(?:[^;|<&\n]|" + _TAG + r"|" + _AMP
-             + r"|\n(?![^\S\n]*\n)){0,40}?")
-_GAP_ABBREV = (r"(?:[^\w&\n]|_|" + _TAG + r"|\[[^\]\n]*\]|" + _AMP
-               + r"|\n(?![^\S\n]*\n))*")
+#: ⛔ A SOFT BREAK IS CROSSED INSIDE A UNIT, NOT ONLY BETWEEN UNITS (#13900 review,
+#: verification round, MEASURED). Three holes, each reproduced on the LIVE document:
+#:   * a BRACKETED run was `\[[^\]\n]*\]`, newline-excluded — so
+#:     "`-- tortoise/` [the census\nsection above] prints FIVE paths" returned `[]`
+#:     and the suite stayed `592 passed` over a false claim (the label unwrapped reds);
+#:   * a QUOTED attribute value was `"[^"\n]*"`, so a soft break inside a tag's value
+#:     was refused although the tag is a unit and the newline rule is B3's;
+#:   * the tag catch-all excluded `'`, so `<that row's own path>` — live-document
+#:     vocabulary, twice — was refused while `<path>` graded. A LONE apostrophe is
+#:     ordinary text: the quoted alternatives are ordered FIRST, so a real quoted run is
+#:     still one unit, and anything else falls through to the catch-all.
+#: The blank line remains the boundary in every one of them (`(?!...\n)` in each unit).
+_SOFT = r"\n(?![^\S\n]*\n)"
+_TAG = (r'<(?:"(?:[^"\n]|' + _SOFT + r')*"|\'(?:[^\'\n]|' + _SOFT + r')*\''
+        r'|[^>"\n]|' + _SOFT + r')*>')
+#: …and an ESCAPED character inside a label is a unit too (`[a\]b]` is one label), which
+#: is the same ordering rule as the tag's quoted value: the escape is tried first so the
+#: `]` it protects cannot end the run.
+_BRACKET = r"\[(?:\\.|[^\]\n]|" + _SOFT + r")*\]"
+_GAP_FULL = (r"(?:[^;|<&\n]|" + _TAG + r"|" + _BRACKET + r"|" + _AMP
+             + r"|" + _SOFT + r"){0,40}?")
+_GAP_ABBREV = (r"(?:[^\w&\n]|_|" + _TAG + r"|" + _BRACKET + r"|" + _AMP
+               + r"|" + _SOFT + r")*")
 
 def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]:
     """Every typed ANSWER to `cmd` in `doc`, as `(answer, claims_empty)` pairs.
@@ -676,9 +695,10 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             #     (cycle 10);
             #   * a bounded tag/footnote FORM missed `<span class="x">`, `[^1234]` and `&nbsp;`,
             #     all three of which left the LIVE document GREEN (cycle 11).
-            # So the gap is not described. It is ANY run of characters that contains no newline,
-            # no sentence terminator (`.` `;` `|`) and no more than 40 of them — lazy, so the
-            # match still starts at the reported occurrence and stops at the first listed verb.
+            # So the gap is not a grammar of SPELLINGS. It is the four UNIT KINDS stated at the
+            # constants, repeated: 40 of them for the wide gap (`;`, `|` and the blank line stop
+            # it; a `.` does NOT), unbounded for the narrow one, and lazy either way so a match
+            # starts at the reported occurrence and stops at the first listed verb.
             # That admits prose between the command and the verb, which is deliberate and is the
             # correct side to err on: a sentence that names the command and then states an answer
             # IS a claim about the command, and this file's own rule is that a false PASS costs
