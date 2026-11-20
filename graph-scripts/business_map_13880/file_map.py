@@ -191,11 +191,6 @@ def shipped_vocab() -> dict | None:
         relations = set(_VALID_EDGE_PREDICATES)
     except Exception:  # the fallback is the transcription, not a silent pass
         relations = set(STRUCTURAL_RELS)
-    try:
-        from tortoise.projection.edges import _VALID_EDGE_PREDICATES
-        relations = set(_VALID_EDGE_PREDICATES)
-    except Exception:  # the fallback is the transcription, not a silent pass
-        relations = set(STRUCTURAL_RELS)
     # The MECHANISM each Layer-2 meaning declares. The write gate COMPARES the two
     # and only warns (#9963, warn-not-block), so an `IMPL` wire carrying
     # `refutes` is filed as asked and INVERTS the meaning (it raises where the
@@ -803,15 +798,16 @@ def write_map(doc: dict) -> int:
         un-recording it there is what re-issued a second operator on resume
         (#13913 review round 5). `--verify` is the authority on what landed.
         """
-        mark(marker)
+        # ⛔ PERSISTED BEFORE THE CALL, IN ONE SAVE. `pending` is a COPY of the
+        # saved list, so saving `st` without updating it left the intent only in
+        # memory (round 6); and calling `mark()` — which saves — before updating
+        # it left a WINDOW in which the disk held `written` = +marker with
+        # `unconfirmed` = [] (round 9, measured by killing inside that save): a
+        # resume read the intent as a COMPLETED write and skipped the operator
+        # forever. Both fields go down together, once.
         pending.add(marker)
-        # ⛔ PERSISTED BEFORE THE CALL. `pending` is a COPY of the saved list, so
-        # saving `st` without this line left the intent only in memory: a run
-        # killed between the write and its response (the exact window this guard
-        # exists for) resumed with `unconfirmed: []`, and the operator it may
-        # have written was indistinguishable from a completed one — the resume
-        # printed `all nodes and edges written` with a declared edge silently
-        # absent (#13913 review round 6, measured with a BaseException kill).
+        if marker not in st["written"]:
+            st["written"].append(marker)
         st["unconfirmed"] = sorted(pending)
         save_state(st)
         try:
@@ -1385,38 +1381,57 @@ def duplicate_operators(doc: dict, op_rows: list) -> list[tuple[str, str, str]]:
             slot = -1
         slots.setdefault(slot, []).append(_row_identities(row[4:8]))
 
-    # ⛔ COUNTED PER ENDPOINT PAIR, not per (mechanism, direction, pair): a
-    # re-issued `create_operator` is a duplicate even when the second call stored
-    # a DIFFERENT direction or mechanism, and both copies still make EP price
-    # that claim pair twice (#10849) — measured: a duplicate with a flipped
-    # direction or a flipped mechanism read `101/101`, `dup_ops=[]`, exit 0
-    # (#13913 review round 8). A pair carrying TWO DECLARED operators (IMPL and
-    # NAND over one pair is a legitimate contradiction) is not a duplicate, so the
-    # comparison is against the number of edges the map DECLARES over that pair.
-    declared_by_pair: dict[tuple[tuple, tuple], int] = {}
-    where: dict[tuple[tuple, tuple], list[tuple[str, str, str]]] = {}
+    # ⛔ COUNTED PER ENDPOINT PAIR — UNORDERED, and by what the node actually
+    # PRICES. Three blind shapes this closes (#13913 review round 9, each
+    # measured as `101/101`, `dup_ops=[]`, exit 0):
+    #  * a duplicate that stored a different direction or mechanism;
+    #  * a WIDE operator `A -> [B, C]` over a declared `A -> B` (`EP._priced_pairs`
+    #    prices `(A,B)` and `(A,C)`, so the declared pair is priced twice);
+    #  * a REVERSED operator `B -> A` over the declared `A -> B`.
+    # The map's own count of declared operators over the pair is the baseline, so
+    # a legitimate IMPL+NAND pair (two declared edges, two nodes) is not flagged.
+    declared_by_pair: dict[frozenset, int] = {}
+    where: dict[frozenset, list[tuple[str, str, str]]] = {}
     for e in doc["edges"]:
         if "op" not in e:
             continue
-        key = (by_ref[e["from"]], by_ref[e["to"]])
+        key = frozenset((by_ref[e["from"]], by_ref[e["to"]]))
         declared_by_pair[key] = declared_by_pair.get(key, 0) + 1
         where.setdefault(key, []).append((e["op"], e["from"], e["to"]))
 
-    holders: dict[tuple[tuple, tuple], set[object]] = {}
+    holders: dict[frozenset, set[object]] = {}
     for nid, (_kind, _dir, slots) in grouped.items():
-        if not (len(slots.get(0, ())) == 1 and len(slots.get(1, ())) == 1
-                and not (set(slots) - {0, 1})):
-            continue
-        # ⛔ ROWS, not the first identity of a set: an Event endpoint carries two
-        # identities (name AND content), so `next(iter(...))` picked an arbitrary
-        # one and the duplicate census could not match the declared pair
-        # (#13913 review round 9).
-        source_ids, target_ids = slots[0][0], slots[1][0]
+        # ⛔ ROWS, not identity SETS: an Event endpoint carries two identities
+        # (`name` AND `content`), so a set-flattened slot made the arity check
+        # below false for 8 declared operator edges and this census blind on the
+        # same edges (#13913 review round 9). The pair itself stays UNORDERED
+        # (`frozenset`), so a duplicate priced with a flipped direction or a
+        # swapped mechanism is still a duplicate.
+        # ⛔ PRICING, NOT SHAPE. The question here is "does this operator charge
+        # this claim pair a second time?", so EVERY endpoint row counts: a WIDE
+        # operator (`A -> [B, C]`) prices `(A, B)`, and a REVERSED one prices the
+        # same unordered pair. (Presence is the strict arm — it certifies nothing
+        # unless the shape is exactly one source slot and one target slot —
+        # because certifying a declared edge is a different claim from noticing a
+        # second charge on it.)
+        source_ids: set = set()
+        for row_ids in slots.get(0, []):
+            source_ids |= row_ids
+        target_ids: set = set()
+        for slot, rows in slots.items():
+            if slot == 0:
+                continue
+            for row_ids in rows:
+                target_ids |= row_ids
         for key in declared_by_pair:
-            if key[0] in source_ids and key[1] in target_ids:
+            ends = sorted(key, key=repr)
+            if len(ends) != 2:
+                continue
+            if ((ends[0] in source_ids and ends[1] in target_ids)
+                    or (ends[0] in target_ids and ends[1] in source_ids)):
                 holders.setdefault(key, set()).add(nid)
     out: list[tuple[str, str, str]] = []
-    for key, ids in sorted(holders.items()):
+    for key, ids in sorted(holders.items(), key=lambda kv: sorted(map(repr, kv[0]))):
         if len(ids) > declared_by_pair[key]:
             out.extend(where[key])
     return out
