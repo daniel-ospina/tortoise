@@ -645,5 +645,44 @@ def test_an_abandoned_generation_does_not_clear_the_successors_start_bit():
         "next begin() will start a third probe")
 
 
+def test_a_reset_racing_the_build_is_not_undone_by_the_cache(monkeypatch):
+    """A reset landing between the build and the cache must survive (#14032 P3-b).
+
+    ``reset_daemon_worker(PROBE_STARTER_NAME)`` is the documented ops hatch and
+    deliberately does NOT take ``_PROBE_STARTER_LOCK`` (re-entering it from
+    ``reset_probe_starter`` deadlocks on a non-reentrant lock: measured, the
+    whole suite hung). It pops the registry entry and clears the cache under
+    ``_DAEMON_WORKERS_LOCK`` instead. ``_probe_starter`` builds through
+    ``daemon_worker``, which RELEASES that lock before returning — so a reset
+    landing in the window between the build and the cache assignment used to be
+    overwritten, leaving the cache holding a pool the registry no longer had.
+
+    Driven deterministically by doing the reset from inside the build
+    (``daemon_worker`` has returned, so this is exactly the racing interleaving;
+    no thread scheduling involved).
+    """
+    _fresh_starter()
+    with monitoring._PROBE_STARTER_LOCK:
+        monitoring._PROBE_STARTER_CACHE = None
+    monitoring.reset_daemon_worker(monitoring.PROBE_STARTER_NAME)
+
+    real_daemon_worker = monitoring.daemon_worker
+
+    def racing_daemon_worker(name, **kwargs):
+        worker = real_daemon_worker(name, **kwargs)
+        if name == monitoring.PROBE_STARTER_NAME:
+            monitoring.reset_daemon_worker(name)
+        return worker
+
+    monkeypatch.setattr(monitoring, "daemon_worker", racing_daemon_worker)
+
+    monitoring._probe_starter()
+
+    assert monitoring._PROBE_STARTER_CACHE is None, (
+        "the cache kept a pool the concurrent reset had just dropped — the next "
+        "daemon_worker() builds a second starter while the cached one is "
+        "invisible to every registry-reading surface")
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))

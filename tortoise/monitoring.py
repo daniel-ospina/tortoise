@@ -5292,7 +5292,22 @@ def _probe_starter() -> _SingleSlotWorker:
         if starter is None or not starter.alive:
             starter = daemon_worker(PROBE_STARTER_NAME,
                                     max_backlog=PROBE_STARTER_MAX_BACKLOG)
-            _PROBE_STARTER_CACHE = starter
+            # ⛔ CACHE IT ONLY IF THE REGISTRY STILL HOLDS IT (#14032 review
+            # P3-b). ``daemon_worker`` releases ``_DAEMON_WORKERS_LOCK``
+            # before returning, and ``reset_daemon_worker`` — the documented ops
+            # hatch, which must NOT take ``_PROBE_STARTER_LOCK`` or it deadlocks
+            # on this one — pops the registry entry AND clears this cache under
+            # THAT lock. A reset landing between the build and the assignment
+            # used to be silently overwritten: the cache kept a pool the
+            # registry no longer had, so the next ``daemon_worker`` call built a
+            # SECOND starter while every registry-reading surface saw neither
+            # the cached pool nor the reset's effect. Re-reading the registry
+            # under its own lock makes the check-and-assign ATOMIC with the pop:
+            # the reset either lands before (we skip the cache, and the next
+            # caller rebuilds) or after (it clears what we cached).
+            with _DAEMON_WORKERS_LOCK:
+                if _DAEMON_WORKERS.get(PROBE_STARTER_NAME) is starter:
+                    _PROBE_STARTER_CACHE = starter
     return starter
 
 
