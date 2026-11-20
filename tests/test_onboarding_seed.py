@@ -70,7 +70,13 @@ class _FakeSDK:
         digest = hashlib.sha256(f"{label}:{name}".encode()).hexdigest()[:26]
         return f"{label[:3].lower()}-{digest}"
 
-    def _create_subject(self, name, subjectKind="other", **props):
+    # ⛔ PUBLIC NAMES, restored: `#13899`'s privatisation sweep renamed this double's two
+    # doors to `_create_subject`/`_create_edge` because it matched the ATTRIBUTE NAME, but
+    # this class stands in for the SEED SURFACE (`_OrgSeedSurface` / `_SdkSeedSurface`),
+    # whose published API is `create_subject`/`create_edge` — the private spellings are what
+    # the surface calls on the real SDK underneath, never what a surface exposes. The same
+    # sweep mis-renamed the call sites in `tortoise/onboarding/seed.py`.
+    def create_subject(self, name, subjectKind="other", **props):
         node = self.subjects.get(name)
         if node is None:
             node = {"id": self._id_for("Subject", name), "name": name,
@@ -86,7 +92,7 @@ class _FakeSDK:
             node[k] = v
         return dict(node)
 
-    def _create_edge(self, relation, from_id, to_id):
+    def create_edge(self, relation, from_id, to_id):
         edge = (relation, from_id, to_id)
         created = edge not in self.edges
         if created:
