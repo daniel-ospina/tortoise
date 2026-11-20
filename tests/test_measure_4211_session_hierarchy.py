@@ -508,3 +508,46 @@ def test_n8_an_ephemeral_graph_needs_no_override(monkeypatch):
     assert mod._writer_target("docker://:@127.0.0.1:16379/m4211_hierarchy")[1] is None
     target, refusal = mod._writer_target("docker://:@db:6379/tortoise")
     assert refusal and target["graph"] == "tortoise"
+
+
+# ── the multiplicity guard the round-2 fix claimed, pinned end to end ───────
+def test_the_pair_count_is_node_identity_not_a_property_join():
+    """The round-2 "fixed" guard was itself null-blind, and nothing exercised it.
+
+    ``count(DISTINCT s.id + '|' + p.id)`` answers **0** for any graph whose Points
+    carry no ``id`` property — every fixture-shape graph this arm measures — because
+    ``null + '|' + null`` is null and ``count(DISTINCT null)`` is 0. The pairs column
+    then reads 0 beside a non-zero ``contains_edges``, and the duplicate check derived
+    from it reports "0 duplicates" unconditionally. MEASURED on an embedded fixture
+    (one Session, one Point with no id, one duplicate CONTAINS edge): 2 edges →
+    id-concat 0, ``WITH DISTINCT s, p`` 1.
+    """
+    queries = dict(mod.QUERIES)
+    pairs = queries["contains_distinct_pairs"]
+    assert "WITH DISTINCT s, p" in pairs
+    assert "s.id" not in pairs and "p.id" not in pairs, (
+        "the pair count must not depend on a node PROPERTY fixtures do not set")
+
+    # No CODE carries the spelling — a comment that documents the defect is fine, a
+    # statement that executes it is the defect (the census arm has its own copy).
+    offenders = [ln for ln in _TOOL.read_text(encoding="utf-8").splitlines()
+                 if "DISTINCT s.id + '|' + p.id" in ln
+                 and not ln.lstrip().startswith("#")]
+    assert offenders == [], (
+        f"the null-blind pair count still executes at {offenders}")
+
+
+def test_a_refused_writer_run_is_exit_2_not_a_completed_capture(monkeypatch, tmp_path):
+    """N8's refusal must reach the EXIT CODE, not only the arm body.
+
+    A refusal writes nothing, so a ``--out <receipt> || exit 1`` caller that receives
+    exit 0 accepts "I declined to measure" as a finished capture. Same class as R3's
+    replay: the reason is hoisted to the top-level ``unmeasurable`` block.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@db.example:6379/tortoise")
+    out = tmp_path / "r.json"
+    rc = mod.main(["--arms", "writer", "--out", str(out)])
+    assert rc == 2, "a refused write measured nothing and must not read as success"
+    receipt = json.loads(out.read_text())
+    assert "refusing to WRITE" in receipt["unmeasurable"]["arms"]["writer"]
+    assert "counts" not in receipt["arms"]["writer"]

@@ -129,8 +129,15 @@ QUERIES: list[tuple[str, str]] = [
     ("contains_edges",
      "MATCH (:Session)-[r:CONTAINS]->(:Point) RETURN count(r) AS n"),
     ("contains_distinct_pairs",
-     "MATCH (s:Session)-[:CONTAINS]->(p:Point) "
-     "RETURN count(DISTINCT s.id + '|' + p.id) AS n"),
+     # ⛔ Node IDENTITY, never `count(DISTINCT s.id + '|' + p.id)`: a Point with no `id`
+     # property concatenates to null, so `count(DISTINCT null)` answers 0 and the
+     # multiplicity guard below then reports "0 distinct pairs, 0 duplicates" for a
+     # graph that wired every edge — the guard silently disabled on exactly the
+     # fixture-shaped graphs this arm measures. MEASURED on an embedded fixture (one
+     # Session, one `{pointKind:'event'}` Point with no id, one duplicate CONTAINS):
+     # 2 edges → id-concat 0, `WITH DISTINCT s, p` 1.
+     "MATCH (s:Session)-[:CONTAINS]->(p:Point) WITH DISTINCT s, p "
+     "RETURN count(*) AS n"),
     ("contains_duplicate_pairs",
      "MATCH (s:Session)-[r:CONTAINS]->(p:Point) "
      "WITH s, p, count(r) AS c WHERE c > 1 RETURN count(*) AS n"),
@@ -512,9 +519,11 @@ def measure_instrument(uri: str) -> dict:
                                "RETURN count(r)").result_set[0][0]
             # Multiplicity guard on the biggest number this arm publishes: a
             # double-wired CONTAINS (the #12244 write-bug class the gate cites) would
-            # inflate a raw row count undetected. Pairs are measured, not inferred.
+            # inflate a raw row count undetected. Pairs are measured, not inferred —
+            # and measured by NODE IDENTITY, because the `s.id + '|' + p.id` spelling
+            # is null-blind (a Point without an `id` makes the whole count 0).
             pairs = g.query("MATCH (s:Session)-[:CONTAINS]->(p:Point) "
-                            "RETURN count(DISTINCT s.id + '|' + p.id)"
+                            "WITH DISTINCT s, p RETURN count(*)"
                             ).result_set[0][0]
             dupes = g.query("MATCH (s:Session)-[r:CONTAINS]->(p:Point) "
                             "WITH s, p, count(r) AS c WHERE c > 1 RETURN count(*)"
@@ -711,7 +720,11 @@ def measure_writer(*, allow_non_ephemeral: bool = False) -> dict:
                            "(uri=\"$(uv run python tools/test_lane.py uri)\"; eval \"$uri\")"}
     target, refusal = _writer_target(uri)
     if refusal and (target is None or not allow_non_ephemeral):
-        return {"skipped": refusal, "target": target}
+        # `unmeasurable` as well as `skipped`: the reason has to be readable where a
+        # reader looks for it (the top-level block, which `main` hoists), and a run
+        # that REFUSED to write measured NOTHING — exiting 0 would let a
+        # `--arms writer || exit 1` caller accept a refusal as a completed capture.
+        return {"skipped": refusal, "unmeasurable": refusal, "target": target}
     # #4211: the offline extractor seam. It IS load-bearing for the extractor's own
     # Points (a canned claim per session) — so those are counted separately below and
     # never folded into the turn counts. The turn-level link pass runs on the STORED
