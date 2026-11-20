@@ -1518,16 +1518,36 @@ def test_the_record_arm_refuses_a_database_without_its_hnsw_index(harness):
     # 3. ⛔ AN INDEX IS NOT ENOUGH — it must be the HNSW index on the ANN COLUMN.
     #    A btree on the same column, an HNSW on a DIFFERENT column, and a plain
     #    pgvector-compatible index all leave the read as a scan.
+    # ⛔ AND "USING HNSW ON THE COLUMN" IS STILL NOT "AN INDEX THIS READ CAN USE".
+    #    HNSW is built for ONE operator class, and the record arm reads with `<=>`
+    #    (cosine): an `vector_l2_ops` / `vector_ip_ops` index cannot serve that
+    #    ORDER BY, so pgvector does not use it and the read falls back to the EXACT
+    #    SCAN this guard exists to refuse. The repo states the hazard on the same
+    #    index (`20261109000001_record_embedding_vector.sql:88-90`). A PARTIAL index
+    #    (`… WHERE status IS NULL`) covers a subset for the same reason. The first
+    #    cut of this guard matched `using hnsw` + `(embedding_vec` only and
+    #    accepted all three — measured in review.
+    l2 = ("CREATE INDEX i ON public.point USING hnsw (embedding_vec "
+          "public.vector_l2_ops)")
+    ip = ("CREATE INDEX i ON public.point USING hnsw (embedding_vec "
+          "public.vector_ip_ops)")
+    partial = ("CREATE INDEX i ON public.point USING hnsw (embedding_vec "
+               "public.vector_cosine_ops) WHERE (status IS NULL)")
     for decoys in (
         ["CREATE INDEX p_key ON public.point USING btree (embedding_vec)"],
         ["CREATE INDEX x ON public.point USING hnsw (other_vec vector_cosine_ops)"],
         ["CREATE INDEX p_id ON public.point USING btree (id)"],
+        [l2],
+        [ip],
+        [partial],
+        ["CREATE INDEX i ON public.point USING hnsw (embedding_vec)"],
     ):
         with pytest.raises(harness.CannotRun):
             harness._require_hnsw_indexdef(decoys)
     # …and a genuine one alongside decoys still wins (no false block)
     assert harness._require_hnsw_indexdef(
-        [decoys[0], "CREATE INDEX p_id ON public.point USING btree (id)", hnsw]) == hnsw
+        [l2, ip, partial, decoys[0],
+         "CREATE INDEX p_id ON public.point USING btree (id)", hnsw]) == hnsw
 
     # 4. The CALL SITE and the RECORD: `require_schema` must route through the
     #    decision (not re-inline an existence check), and the run must publish the
