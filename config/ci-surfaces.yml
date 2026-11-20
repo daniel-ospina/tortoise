@@ -3999,18 +3999,23 @@ surfaces:
   # file, so it matches no SOURCE_PATTERN) nor tortoise/sdk.py selects anything
   # narrower, and the hook it pins lives in the read funnel every surface uses.
   - test_read_ledger.py
-  # #14011 (`SEARCH-ARCHITECTURE.md` §7's window-local counter): the usage
-  # signal's own suite. `core` is the right arm for exactly the reason the read
-  # ledger's row above names — `tortoise/usage_signal.py` is a NEW file that
-  # matches no `SOURCE_PATTERNS` entry, so the one diff class the module OWNS
-  # (`tortoise/usage_signal.py` alone) selects `core`, and without this row the
-  # only file that guards it runs in NO leg. Measured: `select(["tortoise/usage_signal.py"])`
-  # → surfaces `["core"]`, and `test_usage_signal.py` absent from its test list.
-  # ⚠️ Today `tortoise/sdk.py` travels in the same diff and is a SHARED_MODULES
-  # entry, so the FULL matrix masks the drop — the masking stops the moment a
-  # later PR touches the module alone, which is the silent-drop class
-  # `--integrity` cannot see (it checks the file is in SOME surface, not that a
-  # diff can select it).
+  # #14011: the per-node USAGE signal (`tortoise/usage_signal.py`) and the SDK
+  # hook that feeds it. `core` is the right arm for the same reason the row above
+  # states, MEASURED the same way rather than inferred:
+  #
+  #   select(['tortoise/usage_signal.py'], 'pull_request', m) -> ['core'], full=False
+  #   select(['tests/test_usage_signal.py'], 'pull_request', m) -> ['core'], full=False
+  #
+  # `usage_signal.py` is a NEW file, so it matches no SOURCE_PATTERNS row; the
+  # test file falls through the `tests/` fallback in `select()`. Both resolve to
+  # `core`, and a named-surface match REPLACES the `core` fallback — so with no
+  # row here a module-only diff (`tortoise/usage_signal.py`, the one diff class
+  # this file owns) runs the `core` MEMBER LIST and the guard for that module is
+  # not in it. Today the FULL matrix masks that, because `tortoise/sdk.py` is in
+  # the same diff; the masking stops the moment the next PR touches the module
+  # alone. Without the row `uv run python tools/ci_selection.py --integrity` exits
+  # 1 with `manifest drift: ['test_usage_signal.py']`, which is the required
+  # `manifest-integrity` check (#14011 review finding 1, both halves).
   - test_usage_signal.py
   - test_5509_name_keyed_identity_reads.py
   - test_7925_route_parity.py

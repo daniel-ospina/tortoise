@@ -672,6 +672,13 @@ def _imports_of(source: str) -> set[str]:
                 found.add(
                     node.module if node.level == 0 else f"tortoise.{node.module}"
                 )
+                # ⛔ `from tortoise import sdk` imports the SUBMODULE
+                # `tortoise.sdk`; recording only `tortoise` left that spelling
+                # invisible, which is a third way to reach a store client.
+                if node.level == 0:
+                    found.update(
+                        f"{node.module}.{alias.name}" for alias in node.names
+                    )
             elif node.level:
                 # `from . import x` — resolve each alias under the package.
                 found.update(f"tortoise.{alias.name}" for alias in node.names)
@@ -683,9 +690,14 @@ def test_no_graph_dependency() -> None:
 
     A `last_searched_at` property written on every search is write amplification
     into the very store the window exists to bound (#14011), so this module is
-    required to have no graph in reach at all — an import is the only way it could
-    get one. The import forms checked include the relative spellings this package
-    actually uses; see `_imports_of`.
+    required to have no graph in reach.
+
+    ⚠️ **SCOPE: a STATIC import is the only thing this guard can see.** Every
+    static spelling is resolved (`from . import x`, `from .mod import x`,
+    `import a.b`, and imports inside function bodies — `ast.walk` descends).
+    `importlib.import_module("tortoise.manager")` or `__import__` would pass, and
+    are OUT OF SCOPE rather than covered. Said out loud because this docstring is
+    what a future reader consults to decide the guard is sufficient.
     """
     source = Path(usage_signal.__file__).read_text(encoding="utf-8")
     imported = _imports_of(source)
@@ -699,6 +711,40 @@ def test_no_graph_dependency() -> None:
         f"usage_signal imports a graph client: {sorted(offending)} — a residency "
         f"signal may never write to the store it is bounding"
     )
+    # Cheap transitive check: importing the module must not drag a store client in
+    # through some other path the AST of one file cannot see.
+    #
+    # ⛔ IN A SUBPROCESS, not this one. `sys.modules` here is the WHOLE pytest
+    # session's — the conftest and a hundred other tests import a store client long
+    # before this line runs, so an in-process assertion is green or red depending on
+    # test ORDER, i.e. it pins nothing. A clean interpreter is the only honest read.
+    # ⚠️ The probe's own name list is DERIVED from `_FORBIDDEN_GRAPH_ROOTS`, not
+    # restated: an earlier cut hardcoded two modules that are in NO tree
+    # (`tortoise.manager`, `tortoise.graph_connection`) while omitting
+    # `tortoise.projection` — the module that actually carries
+    # `from falkordb import FalkorDB` — so the probe could not see the one path
+    # that reaches the client. `test_the_no_graph_guard_names_modules_that_EXIST`
+    # and `…_covers_every_module_that_reaches_a_store` hold the set in both
+    # directions; this leg inherits whatever they certify.
+    probe = (
+        "import sys;"
+        "from tortoise import usage_signal;"
+        f"forbidden={_FORBIDDEN_GRAPH_ROOTS!r};"
+        "bad=[n for n in sys.modules if any(n == r or n.startswith(r + '.') "
+        "for r in forbidden)];"
+        "print(','.join(sorted(bad)))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        cwd=str(Path(__file__).resolve().parent.parent),
+        check=True,
+    )
+    assert out.stdout.strip() == "", (
+        f"importing usage_signal pulled a graph client into sys.modules: "
+        f"{out.stdout.strip()}"
+    )
 
 
 def test_the_no_graph_guard_catches_relative_imports() -> None:
@@ -709,6 +755,12 @@ def test_the_no_graph_guard_catches_relative_imports() -> None:
     }
     assert _imports_of("import redis\n") == {"redis"}
     assert _imports_of("from . import read_ledger\n") == {"tortoise.read_ledger"}
+    # ⛔ AND the package-spelling of a SUBMODULE: `from tortoise import sdk`
+    # reaches `tortoise.sdk` without ever naming it as a module path.
+    assert _imports_of("from tortoise import sdk\n") == {
+        "tortoise",
+        "tortoise.sdk",
+    }
 
 
 def test_the_no_graph_guard_names_modules_that_EXIST() -> None:
@@ -889,6 +941,11 @@ def test_an_empty_stream_is_not_a_confident_zero(stream: Path) -> None:
     assert got.error == "empty stream"
     assert got.orderable is False
     assert got.coldest_first() == []
+    # The door covers this cause too — without the assertion the refusal could be
+    # removed here and the test would stay green, because `coldest_first` returns
+    # `[]` over an empty entry map regardless.
+    assert got.refusal_reason() is not None
+    assert got.unserved_keys(["a", "b"]) == []
 
 
 def test_a_forged_checkpoint_cannot_disable_the_prefix_check(stream: Path) -> None:
@@ -1046,3 +1103,316 @@ def test_the_shared_ledger_hook_also_feeds_the_counter(
 
     got = usage_signal.refresh(stream)
     assert [e.key for e in got.entries.values()] == ["p1"]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Cycle-2 findings, pinned
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_alternating_partitions_do_not_replay_the_whole_stream(stream: Path) -> None:
+    """The door's own advice must not defeat the bound.
+
+    ``refusal_reason()`` tells a pooled caller to "order one tenant at a time",
+    and the default is ``ALL_TENANTS`` — so with ONE checkpoint per stream, the
+    recommended usage re-folded the entire stream on every alternating call
+    (bounded only by ``USAGE_MAX_BYTES``). The checkpoint is keyed by partition.
+    """
+    _serve(stream, "Point", ["p1"], at=_at(1))
+    usage_signal.record_serves(
+        "Point", [{"id": "other"}], at=_at(2), path=stream, tenant_id="org-2"
+    )
+
+    pooled = usage_signal.refresh(stream)
+    one = usage_signal.refresh(stream, tenant="org-2")
+    pooled_again = usage_signal.refresh(stream)
+    one_again = usage_signal.refresh(stream, tenant="org-2")
+
+    assert pooled.pooled is True
+    assert one.pooled is False
+    # ⛔ The BOUND, not just the result: only the FIRST call on each partition may
+    # fold the stream.
+    assert one_again.bytes_folded == 0
+    assert pooled_again.bytes_folded == 0
+
+
+def test_replay_matches_the_surviving_set_under_a_window(stream: Path) -> None:
+    """What the replay invariant actually guarantees once pruning is on.
+
+    ⚠️ NARROWER THAN THE UNBOUNDED CASE, deliberately. Pruning drops an entry
+    INCLUDING its count, so a cold replay (which sees the events an incremental
+    fold already pruned) legitimately disagrees on ``pruned`` and on a re-served
+    key's ``serve_count``. The SURVIVING SET is what both paths must agree on, and
+    that is what the ordering is built from.
+    """
+    _serve(stream, "Point", ["ancient"], at=_at(1))
+    _serve(stream, "Point", ["kept"], at="2026-01-03T23:00:00+00:00")
+    now = datetime(2026, 1, 4, 0, 0, tzinfo=UTC)
+
+    incremental = usage_signal.refresh(stream, now=now, window_days=2)
+    for path in (usage_signal.checkpoint_path(stream),):
+        path.unlink()
+    # Every partition-tagged checkpoint is gone, so the next call replays.
+    for extra in stream.parent.glob(f"{stream.name}.*.rollup.json"):
+        extra.unlink()
+    replayed = usage_signal.refresh(stream, now=now, window_days=2)
+
+    assert replayed.replayed is True
+    assert set(incremental.entries) == set(replayed.entries), (
+        "the surviving coordinate SET must be identical; only the cumulative "
+        "counters are history-dependent"
+    )
+    assert incremental.coldest_first() == replayed.coldest_first()
+
+
+def test_the_checkpoint_is_not_world_readable(stream: Path) -> None:
+    """The checkpoint carries the same coordinates the stream's 0600 protects.
+
+    `Source.url` / `Object` / `Subject` keys identify a tenant's content, so a
+    checkpoint written at the umask's 0644 beside a 0600 stream leaves every key
+    readable by any local user on a 0755 store directory.
+    """
+    _serve_row(stream, "Source", "https://a.example/secret", at=_at(1))
+
+    got = usage_signal.refresh(stream)
+    ckpt = usage_signal.checkpoint_path(stream)
+
+    assert got.served_total == 1
+    assert ckpt.exists()
+    assert (ckpt.stat().st_mode & 0o077) == 0, (
+        f"checkpoint mode {oct(ckpt.stat().st_mode & 0o777)} exposes (label, key) "
+        f"coordinates the 0600 stream exists to protect"
+    )
+
+
+def test_a_same_inode_shrink_forces_a_cold_replay(stream: Path) -> None:
+    """`copytruncate` in place: same inode, shorter file.
+
+    ⚠️ The RESIDUAL this cannot cover, named rather than implied: a SAME-SIZE
+    in-place rewrite of bytes already folded is undetectable to any incremental
+    fold — the stream's contract is append-only (``O_APPEND``), and a rotation that
+    rewrites in place must remove the checkpoint. A shrink IS detectable and is.
+    """
+    _serve(stream, "Point", ["p1", "p2", "p3"], at=_at(1))
+    usage_signal.refresh(stream)
+    inode_before = stream.stat().st_ino
+
+    with open(stream, "r+", encoding="utf-8") as fh:  # same inode, truncated
+        fh.seek(0)
+        fh.write('{"at":"2026-02-01T00:00:00+00:00","event":"serve","label":"Point","key":"new"}\n')
+        fh.truncate()
+
+    got = usage_signal.refresh(stream)
+
+    assert stream.stat().st_ino == inode_before, "the test did not exercise the in-place shape"
+    assert got.replayed is True
+    assert [e.key for e in got.entries.values()] == ["new"]
+
+
+def test_a_bad_stream_path_does_not_raise(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`refresh` is documented NEVER to raise — and it is on the armed path.
+
+    `checkpoint_path` calls `Path.with_suffix`, which raises `ValueError` for a
+    path with an empty name; `TORTOISE_USAGE_SIGNAL_PATH=.` reaches that from
+    configuration alone. The unarmed WRITER already degraded correctly, so a raise
+    here landed on the armed consumer and nothing said so.
+    """
+    monkeypatch.setenv(usage_signal.USAGE_PATH_ENV, ".")
+
+    got = usage_signal.refresh()
+
+    assert got.stale is True
+    assert got.orderable is False
+    assert "bad path" in (got.error or "")
+
+
+def test_the_accessors_return_nothing_on_a_refused_reading(stream: Path) -> None:
+    """⛔ THE DOOR IS ON EVERY READ, not just `coldest_first`.
+
+    The residency policy composes ``recency_key`` + its class booster (that is what
+    the docstring tells it to do), so a frozen or pooled counter returning a
+    healthy-looking tuple HERE hands the policy exactly the hazard the refusal
+    exists to prevent — at the door it recommends. "No signal" is the only safe
+    answer, and it is what a refused reading gives.
+    """
+    _serve(stream, "Point", ["hot"], at=_at(5))
+    # An UNDATED serve too, so `undated_entries` has content to withhold — without
+    # it the refusal below is vacuously satisfied and the guard is unpinned.
+    with open(stream, "a", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps(
+                {"at": "not-a-time", "event": "serve", "label": "Point", "key": "undated"}
+            )
+            + "\n"
+        )
+    healthy = usage_signal.refresh(stream)
+    assert healthy.recency_key("Point", "hot") is not None  # the control
+    assert [e.key for e in healthy.undated_entries()] == ["undated"]
+
+    for refusal in ({"capped": True}, {"stale": True}):
+        refused = usage_signal.UsageReading(**{**healthy.__dict__, **refusal})
+        assert refused.orderable is False
+        assert refused.recency_key("Point", "hot") is None
+        assert refused.serve_count("Point", "hot") == 0
+        assert refused.last_served("Point", "hot") is None
+        assert refused.entry("Point", "hot") is None
+        assert refused.undated_entries() == []
+
+
+def test_a_tenant_with_only_an_unresolvable_row_does_not_latch_pooled(
+    stream: Path,
+) -> None:
+    """`pooled` must be derived from the ENTRIES, not from every tenant SEEN.
+
+    A tenant that contributed only an unresolvable row gets no entry, so a bind on
+    ``state.tenants`` latched a PERMANENT pooled refusal over a roll-up whose
+    entries are entirely one tenant's — and it never ages off, because a replay
+    re-derives it from the same events.
+    """
+    _serve(stream, "Point", ["mine"], at=_at(1))
+    # org-2's only row is unaddressable (`Source` keys on `url`, not `sourcePath`).
+    usage_signal.record_serves(
+        "Source", [{"sourcePath": "/not-a-url"}], at=_at(2), path=stream, tenant_id="org-2"
+    )
+
+    got = usage_signal.refresh(stream)
+
+    assert got.unresolved_skips == 1
+    assert got.pooled is False, "one tenant's unresolvable row latched a pooled refusal"
+    assert got.orderable is True
+    assert got.coldest_first() == [("Point", "mine")]
+
+
+def test_a_checkpoint_whose_tenants_disagree_with_its_entries_is_a_cache_miss(
+    stream: Path,
+) -> None:
+    """The `tenants ⊇ entry tenants` invariant, in the shape `head_len` has.
+
+    Without it, a checkpoint claiming NO partitions while its entries span two
+    passes every per-field validator and opens the ordering door on exactly the
+    reading the pool refusal exists for — one tenant's node scored on another's
+    reads.
+    """
+    _serve(stream, "Point", ["mine"], at=_at(1))
+    usage_signal.record_serves(
+        "Point", [{"id": "theirs"}], at=_at(2), path=stream, tenant_id="org-2"
+    )
+    usage_signal.refresh(stream)  # pooled; a valid checkpoint now exists
+
+    ckpt = usage_signal.checkpoint_path(stream)
+    payload = json.loads(ckpt.read_text(encoding="utf-8"))
+    assert payload["tenants"]  # the valid shape
+    payload["tenants"] = []
+    ckpt.write_text(json.dumps(payload), encoding="utf-8")
+
+    got = usage_signal.refresh(stream)
+
+    assert got.replayed is True, "a self-contradicting checkpoint was trusted"
+    assert got.pooled is True
+    assert got.coldest_first() == []
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# The window bound: a refusal must be AUDIBLE, never byte-identical to "unset"
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_a_non_positive_window_is_not_a_silent_unbounded_rollup(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ #14011 review finding 3: `0` / `-1` read as "not configured".
+
+    The `ValueError` arm already warns that a mistyped bound leaves the roll-up
+    UNBOUNDED; the numeric arm returned `None` without a word, so
+    `WINDOW_DAYS=0` produced a reading byte-identical to no window at all
+    (`pruned=0`, `pruned_before=None`) while the roll-up kept every entry — the
+    quiet direction on the one parameter whose job is bounding memory.
+    """
+    import logging
+
+    for raw in ("0", "-1", "0.0"):
+        monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, raw)
+        usage_signal._warned.clear()
+        caplog.clear()
+
+        with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+            assert usage_signal._window_days() is None
+
+        assert any(
+            "UNBOUNDED" in record.getMessage() for record in caplog.records
+        ), (
+            f"{usage_signal.USAGE_WINDOW_DAYS_ENV}={raw} was silently accepted as "
+            f"'no window' — the operator is never told the roll-up is unbounded"
+        )
+
+
+def test_a_positive_window_is_returned_and_warns_about_nothing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The other polarity: the warning belongs to bad values, not to every call."""
+    import logging
+
+    monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, "7")
+    usage_signal._warned.clear()
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+        assert usage_signal._window_days() == 7.0
+
+    assert not caplog.records
+
+    # …and UNSET is the documented default: no window, and no warning either.
+    monkeypatch.delenv(usage_signal.USAGE_WINDOW_DAYS_ENV)
+    with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+        assert usage_signal._window_days() is None
+
+    assert not caplog.records
+
+
+def test_the_funnel_hands_the_pool_guard_its_record_reads_flag() -> None:
+    """The funnel must PASS `_record_reads`, not a literal the helper is tested on.
+
+    `_usage_record_served`'s own parameter is exercised elsewhere, but the call
+    site is what decides whether a candidate pool becomes a serve. A mutant that
+    replaces the argument with a literal `True` at the funnel keeps every
+    behavioural test green — a node the caller never saw is then marked USED,
+    which is the flattering direction for a residency score. Structural because
+    reaching the funnel behaviourally needs a live graph.
+    """
+    import ast
+
+    from tortoise import sdk as sdk_module
+
+    tree = ast.parse(Path(sdk_module.__file__).read_text(encoding="utf-8"))
+    parents: dict[object, object] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    sites: list[tuple[object, list[object]]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == "_usage_record_served":
+            chain: list[object] = []
+            cursor: object = node
+            while cursor in parents:
+                cursor = parents[cursor]
+                chain.append(cursor)
+            sites.append((node, chain))
+
+    assert len(sites) == 1, (
+        f"expected exactly ONE `_usage_record_served` call site (the FTS funnel); "
+        f"found {len(sites)}"
+    )
+    call, _chain = sites[0]
+    assert len(call.args) == 3, (
+        "the funnel's call must pass (label, rows, _record_reads); a shortened "
+        "call drops the pool guard"
+    )
+    third = call.args[2]
+    assert isinstance(third, ast.Name) and third.id == "_record_reads", (
+        "the funnel passes something other than `_record_reads` as the serve "
+        "guard — a candidate POOL would be counted as served"
+    )
