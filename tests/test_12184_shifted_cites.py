@@ -693,8 +693,11 @@ _CLASS_EXAMPLES = "/".join((*_ZERO_NUMERALS, _SPELLED_NUMERALS[len(_ZERO_NUMERAL
 #: (` pairs? as two code spans`, ` of them (?:is|are) resolved`) already makes a trailing prefix match
 #: unable to complete, so the ordering is defence and the literal is the guarantee on that side.
 #: ⛔ `\b` on the LEADING side is not defence — it is the guarantee there, and there was none. The literal
-#: after the group binds the right edge only, so `the recount REWRITES five pairs as two code spans` matched
-#: `writes five pairs…` and `EVERYONE of them are resolved…` matched `one of them…`. Both arms grade the
+#: after the group binds the right edge only, so `the recount rewrites five pairs as two code spans`
+#: matched `writes five pairs…` and `everyone of them are resolved…` matched `one of them…` — both
+#: LOWERCASE, because both patterns are case-SENSITIVE (an uppercase `REWRITES` matched nothing even before
+#: the fix, so quoting it as the evidence made this paragraph unverifiable: `#14010` round-7 review). Both
+#: arms grade the
 #: leftmost match, so an edition whose prose contains an earlier `…rewrites five pairs…` while its real
 #: disclosure says six would be graded on the wrong sentence, red on correct content — and a DISCLOSURE that
 #: is genuinely missing could be masked by such a sentence (`#14010` round-6 review, P2). Measured with the
@@ -959,8 +962,12 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
             "against how the count is published now, do not delete this arm"
         )
     elif two_span is not None and _as_int(total.group(1)) != len(two_span):
+        # ⛔ Number AGREEMENT derived from the count, because the message quotes what "the header says" and
+        # the pattern accepts `pairs?`: a one-pair edition was graded `the header says it writes one PAIRS`
+        # — a statement about the header that the header does not make (`#14010` round-7 review, P2).
+        _pair = "pair" if _as_int(total.group(1)) == 1 else "pairs"
         problems.append(
-            f"the header says it writes {total.group(1)} pairs as two code spans, but this document "
+            f"the header says it writes {total.group(1)} {_pair} as two code spans, but this document "
             f"MEASURES {len(two_span)}"
         )
     uncounted = _TWO_SPAN_NEW.search(body)
@@ -972,9 +979,10 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
             "do not delete this arm"
         )
     elif extra_pairs is not None and _as_int(uncounted.group(1)) != extra_pairs:
+        _verb = "is" if _as_int(uncounted.group(1)) == 1 else "are"
         problems.append(
-            f"the header says `{uncounted.group(1)} of them` are not counted by the one-token rule, but "
-            f"this document MEASURES {extra_pairs} of its {len(two_span)} two-code-span pairs as "
+            f"the header says `{uncounted.group(1)} of them` {_verb} not counted by the one-token rule, "
+            f"but this document MEASURES {extra_pairs} of its {len(two_span)} two-code-span pairs as "
             f"not-already-counted"
         )
     return problems
@@ -1355,6 +1363,56 @@ def test_the_accepted_numeral_class_is_pinned_by_literals_not_by_the_table_it_de
             "grader and the patterns are one vocabulary or they are a defect"
         )
 
+    # ⛔ EVERY value, not the six spellings exercised above: those come from an `enumerate` over a
+    # hand-ordered tuple, so a transposition (`six`/`seven`, `sixteen`/`seventeen`) renumbers every count
+    # after it and each derived row agrees with the table by construction. Measured before this assertion:
+    # swapping two entries left all rows GREEN while a correct `writes seventeen pairs as two code spans`
+    # was graded `16` (`#14010` round-7 review, P2 — the round-5 defect one spelling over). The equality is
+    # deliberately BOTH-WAYS: it reds on a narrowed class, a widened class and a reordered one.
+    assert _NUMERALS == {
+        "zero": 0,
+        "none": 0,
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+        "eleven": 11,
+        "twelve": 12,
+        "thirteen": 13,
+        "fourteen": 14,
+        "fifteen": 15,
+        "sixteen": 16,
+        "seventeen": 17,
+        "eighteen": 18,
+        "nineteen": 19,
+        "twenty": 20,
+    }, f"the graded vocabulary is not the one this file documents: {_NUMERALS!r}"
+
+    # ⛔ The LEFT boundary of both patterns, pinned. The trailing literal binds the right edge only, so
+    # without `\b` the arms read a count out of a sentence that is not the disclosure — `rewrites five
+    # pairs…` matches `writes five pairs…`, `everyone of them …` matches `one of them …`. Both arms grade
+    # the LEFTMOST match, so such a sentence earlier in the document can mask a genuinely missing
+    # disclosure (a false PASS) or grade the wrong one (a false red). Measured: dropping either `\b` reds
+    # exactly this assertion (`#14010` round-6 review, P2 — the fix shipped without a pin).
+    assert _TWO_SPAN_TOTAL.search("the recount rewrites five pairs as two code spans") is None, (
+        "`writes` matched inside `rewrites` — the leading boundary is gone"
+    )
+    assert _TWO_SPAN_NEW.search(
+        "everyone of them are resolved but not counted by the one-token rule"
+    ) is None, "`one` matched inside `everyone` — the leading boundary is gone"
+    assert _TWO_SPAN_TOTAL.search("this header also writes five pairs as two code spans") is not None, (
+        "the boundary must not cost the shipped phrasing (`also writes five pairs`)"
+    )
+    assert _TWO_SPAN_NEW.search(
+        "four of them are resolved but not counted by the one-token rule"
+    ) is not None, "the boundary must not cost the shipped phrasing (`four of them`)"
+
 
 def test_a_reworded_figures_sentence_is_graded_not_crashed_by_path_resolution() -> None:
     r"""A header whose `_TRIPLE`/`_QUADRUPLE` sentence moved gets its problem STRING, not an assertion.
@@ -1411,7 +1469,7 @@ def test_a_two_span_cite_that_does_not_resolve_is_graded_not_raised() -> None:
     # Keep every OTHER sentence intact (so the `_TRIPLE`/`_QUADRUPLE` early returns do not own this state,
     # and the alternative-basis arm is reached), and move the two-code-span cite onto a path that resolves
     # to no file at all.
-    text = document.replace(
+    text = body.replace(
         total.group(0), "writes six pairs as two code spans and cites `no_such_module_zzz.py` `:1`", 1
     )
     problems = _figure_problems(text)
@@ -1448,8 +1506,12 @@ def test_an_unread_two_span_count_is_reported_as_UNREAD_not_as_absent() -> None:
     sentence, leave its own intact, and have its assertions satisfied by the other arm's message: a
     vacuous frame that stayed green when `_TWO_SPAN_NEW`'s wording was reverted (`#14010` round-5 review,
     P2). `assert marker in unread[0]` is what makes each iteration speak about its own arm.
+    ⛔ The search and the substitution both run on the UNBOLDED body — the surface `_figure_problems`
+    grades. Against the raw text, a correct edition that bolds the count (`writes **five** pairs as two code
+    spans`) matched nothing here, so this test redded on CORRECT content with its own false-absence message —
+    the exact class it exists to refuse (`#14010` round-7 review, P1).
     """
-    document = (REPO / _AUDIT).read_text(encoding="utf-8")
+    document = _unbolded((REPO / _AUDIT).read_text(encoding="utf-8"))
     for arm, sentence, frame, marker in (
         (
             _TWO_SPAN_TOTAL,
