@@ -1177,8 +1177,16 @@ _PER_SESSION = {
     "entity_linked_turns":
         "MATCH (:Session {id:$sid})-[:CONTAINS]->(p:Point)-[:aboutObject]->(:Object) "
         f"WHERE {TURN} RETURN count(DISTINCT p)",
+    # ⛔ THE RELATIONSHIP IS BOUND AND COUNTED, not `count(*)` over an unbound pattern
+    # (#13919 review round 14, finding 3). FalkorDB's known limitation — the same one
+    # `QUERIES` cites and `objects_reaching_gt1_event` was fixed under in round 10 — is
+    # that an UNREFERENCED relationship is "only verified to exist rather than operating
+    # on every matching relation", so parallel edges COLLAPSE: `count(*)` answers 1 for a
+    # Session double-wired to ONE Object, which is exactly the #12244 class the sibling
+    # `sessions_with_gt1_aboutObject_edge` key exists to expose. The key is named
+    # `*_edges`, so it must count edges.
     "session_aboutObject_edges":
-        "MATCH (:Session {id:$sid})-[:aboutObject]->(:Object) RETURN count(*)",
+        "MATCH (:Session {id:$sid})-[r:aboutObject]->(:Object) RETURN count(r)",
     # a Point CONTAINS-wired by MORE THAN ONE session is shared structure, and must be
     # visible as such rather than silently inflating per-session counters.
     "shared_points":
@@ -1388,9 +1396,18 @@ def measure_writer(*, allow_non_ephemeral: bool = False) -> dict:
                 "absent from a three-session fixture run) — a delta that could not be "
                 "read is not a delta of zero, so this run cannot be reported as a "
                 "measurement")
-        elif turns_delta == 0 and points_delta == 0:
+        elif replayed or (turns_delta == 0 and points_delta == 0):
             # A replay proves nothing about a writer: nothing was written. The numbers
             # that follow are the PRE-EXISTING content of this graph.
+            # ⛔ `replayed` IS ITS OWN CONDITION, not merely the message's prose
+            # (#13919 review round 14, finding 8). As `delta == 0 AND replayed`, a
+            # PARTIAL replay — one of the three fixture ids already in the graph, the
+            # other two captured — produced `delta > 0`, so the arm published
+            # `counts` (whole-graph after-state: pre-existing replay content PLUS this
+            # run's writes) as a measurement, and `extraction_modes` carried a silent
+            # `"replayed"` beside two `"llm:mock"`. The module promises a run that
+            # replays a known session reports `unmeasurable` instead of numbers; the
+            # delta check is kept alongside so the keyless hole stays closed.
             why = ("sessions replayed, not captured: " + ", ".join(replayed)
                    if replayed else
                    "this run wrote NOTHING (no new turns and no new points) — the "
@@ -1739,8 +1756,36 @@ def main(argv: list[str] | None = None) -> int:
         }
 
     receipt["warnings"] = _collect_warnings(receipt)
-    _publish(receipt, args.out)
+    # ⛔ A FAILED WRITE IS A REFUSAL TO MEASURE, NOT A CRASH (#13919 review round 14,
+    # finding 6). `_publish` sat OUTSIDE every handler, so `target.parent.mkdir(…)`
+    # raising (a `--out /dev/null/x.json`, an EACCES, a parent that is a file)
+    # propagated out of `main` as an unattributed traceback with exit **1** — a code
+    # this module's own docstring argues must never appear, because it "reads to a
+    # caller as a verdict about the measurement". The caller that decides whether the
+    # artifact exists is the one place the 0-or-2 contract has to hold, so a write
+    # failure is reported in the same shape as every other refusal: named on stderr,
+    # exit 2, and it is raised BEFORE the report so no caller reads a printed summary
+    # as "the receipt was written".
+    try:
+        _publish(receipt, args.out)
+    except OSError as exc:
+        print(f"could not write --out {args.out!r}: {exc} — the measurement below is "
+              "printed but NOT published", file=sys.stderr)
+        _print_report(receipt)
+        return 2
 
+    _print_report(receipt)
+    if receipt.get("unmeasurable"):
+        print("\nUNMEASURABLE — at least one arm could not measure:", file=sys.stderr)
+        for arm, reason in (receipt["unmeasurable"].get("arms") or {}).items():
+            print(f"  {arm}: {reason}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def _print_report(receipt: dict) -> None:
+    """The human report. Separate from `main` so a failed `--out` write can still print
+    the measurement it could not publish (#13919 review round 14, finding 6)."""
     for arm in ("store", "writer", "live"):
         body = receipt["arms"].get(arm)
         if not isinstance(body, dict):
@@ -1800,12 +1845,6 @@ def main(argv: list[str] | None = None) -> int:
         print("  turns distinct          :", corp["turns_distinct"])
         print("  turns naming a ref      :", corp["turns_naming_a_ref_distinct"])
         print("  sessions w/ >1 turn     :", corp["sessions_with_gt1_turn"])
-    if receipt.get("unmeasurable"):
-        print("\nUNMEASURABLE — at least one arm could not measure:", file=sys.stderr)
-        for arm, reason in (receipt["unmeasurable"].get("arms") or {}).items():
-            print(f"  {arm}: {reason}", file=sys.stderr)
-        return 2
-    return 0
 
 
 if __name__ == "__main__":

@@ -2512,3 +2512,218 @@ def test_r10_the_before_block_and_the_delta_are_re_derivable_from_their_own_arm(
                 f"counts - counts_before_any_write = {after} - {before[key]}")
             checked += 1
     assert checked >= 5, f"only {checked} delta key(s) re-derived — the pin is vacuous"
+
+
+# ── #13919 review round 14 ──────────────────────────────────────────────────
+def test_r14_the_recorded_cypher_is_the_query_this_tool_still_runs():
+    """R14-2 (P2): the artifact's central promise — "carries the exact Cypher" — was
+    compared to NOTHING.
+
+    `test_c11_every_published_count_has_its_query_in_the_same_arm` compares KEY SETS, and
+    `test_c8` constrains a single key's reading. No pin compared the recorded Cypher
+    TEXT to `QUERIES`, so a reader who re-derives a number from the artifact's own
+    Cypher could get a different number than the artifact publishes, with CI green.
+    Measured by the round-14 reviewer: replacing `queries["turns_total"]` in all three
+    arms with `MATCH (p:Point) RETURN count(p)` kept the whole suite green.
+
+    A mismatch is legitimate ONLY where the ledger NAMES that key as one a re-run would
+    change — this artifact was produced by an instrument that predates the turn-filter
+    fix, and `post_measurement_revision` says so key by key. That is the same
+    "disclosed, not silent" discipline the ledger already holds for the numbers.
+    """
+    receipt = _receipt()
+    ledger = json.dumps(receipt.get("post_measurement_revision") or {})
+    current = dict(mod.QUERIES)
+    compared = 0
+    disclosed: list[str] = []
+    for arm in ("store", "writer", "live"):
+        recorded = receipt["arms"][arm]["queries"]
+        for key, cypher in recorded.items():
+            assert key in current, (
+                f"{arm}.queries publishes a key this tool no longer runs: {key!r} — a "
+                "recorded reading whose query was renamed away")
+            compared += 1
+            if cypher == current[key]:
+                continue
+            assert key in ledger, (
+                f"{arm}.queries[{key!r}] is NOT the Cypher this tool runs, and "
+                "`post_measurement_revision` does not name it — so the artifact "
+                "publishes a number under a query that would not reproduce it, with no "
+                "disclosure. Either re-run, or name the key in the ledger.")
+            disclosed.append(f"{arm}.{key}")
+    assert compared >= 90, (
+        f"only {compared} recorded quer(ies) compared — the pin has gone vacuous")
+    assert disclosed, (
+        "no recorded query differs from the tool's at this head — if the artifact was "
+        "genuinely re-measured, delete this arm's ledger rows rather than the premise")
+
+
+def test_r14_the_per_session_row_set_is_the_capture_set():
+    """R14-1 (P2): `per_session` rows were only ever checked ROW BY ROW.
+
+    The cycle-13 pin iterates `for session_id, row in per_session.items()` — whatever
+    rows the artifact happens to hold — and `test_r9_per_session_is_END_STATE` asserts
+    only that the block is non-empty. So a receipt that lost a session row shipped green,
+    and so did a tool that measured only some of its captures. Wrong outcome: the ledger
+    derives `sessions_with_gt1_contains_point = 3` FROM `per_session[*]`, and the PR body
+    quotes 2/8 (realistic density), 0/8 (the no-reference control) and 6/6 (every turn
+    names it) from the same block — drop `m4211-noref` and two of those three readings
+    become unsupported while every pin stays green. Measured by the round-14 reviewer:
+    popping `per_session["m4211-noref"]` from the receipt kept the suite green.
+
+    Both halves are asserted, because one row per capture is the contract on BOTH sides:
+    the artifact must carry a row per capture, and the tool must measure every capture.
+    """
+    writer = _receipt()["arms"]["writer"]
+    assert set(writer["per_session"]) == set(writer["captures"]), (
+        "the artifact publishes a `per_session` row set that is not one row per "
+        f"capture: rows {sorted(writer['per_session'])}, "
+        f"captures {sorted(writer['captures'])}")
+
+    # …and the tool's own loop must be over `captures`, not over a slice of it.
+    source = _TOOL.read_text(encoding="utf-8")
+    assert "for sid in captures:" in source, (
+        "the per-session loop no longer names `captures` — if it now iterates a subset, "
+        "the receipt's row set is measured from less than the run captured")
+    assert "for sid in list(captures)[:" not in source, (
+        "the per-session loop slices `captures`, so a run measures a PART of what it "
+        "captured and publishes the part as the whole")
+
+
+def test_r14_the_per_session_query_set_is_the_tools_own():
+    """R14-4 (P3): the `_PER_SESSION` key set was never compared to the artifact's.
+
+    The cycle-13 pin reads the artifact's `per_session` and `per_session_queries` and
+    compares them TO EACH OTHER, so a TOOL-side rename or removal was silent: the next
+    re-run would publish rows missing `shared_points` — the key whose round-9 `0 → 1`
+    correction IS the end-state fix — with no pin noticing. That is exactly the defect
+    cycles 11-13 closed one level up for `counts`/`counts_before_any_write`.
+    """
+    writer = _receipt()["arms"]["writer"]
+    assert set(mod._PER_SESSION) == set(writer["per_session_queries"]), (
+        "the tool's per-session query set and the artifact's `per_session_queries` have "
+        f"drifted: tool-only {sorted(set(mod._PER_SESSION) - set(writer['per_session_queries']))}, "
+        f"artifact-only {sorted(set(writer['per_session_queries']) - set(mod._PER_SESSION))}")
+    for key, cypher in writer["per_session_queries"].items():
+        assert key in mod._PER_SESSION, key
+        if cypher == mod._PER_SESSION[key]:
+            continue
+        ledger = json.dumps(_receipt().get("post_measurement_revision") or {})
+        assert key in ledger, (
+            f"per_session_queries[{key!r}] is not the Cypher this tool runs and the "
+            "ledger does not name it")
+
+
+def test_r14_the_per_session_edge_key_COUNTS_EDGES_not_collapsed_pairs():
+    """R14-3 (P3): `session_aboutObject_edges` answered `count(*)` over an UNBOUND
+    relationship, so parallel edges collapsed.
+
+    FalkorDB's documented limitation — the rule this very module quotes and acted on four
+    keys away, in the same commit, for `objects_reaching_gt1_event` — is that an
+    unreferenced relationship is "only verified to exist rather than operating on every
+    matching relation". A Session double-wired to ONE Object therefore read `1`, which is
+    precisely the #12244 class its sibling `sessions_with_gt1_aboutObject_edge` exists to
+    expose. The key is named `*_edges`, so it must count edges. Measured by the round-14
+    reviewer: substituting `count(DISTINCT o)` for `count(*)` kept the suite green, i.e.
+    no pin constrained this key's multiplicity semantics at all.
+    """
+    cypher = mod._PER_SESSION["session_aboutObject_edges"]
+    assert "-[r:aboutObject]->" in cypher, (
+        "the edge key no longer BINDS the relationship, so the engine may collapse "
+        f"parallel edges before counting: {cypher!r}")
+    assert "count(r)" in cypher, (
+        f"the edge key does not count the edge it binds: {cypher!r}")
+    assert "count(*)" not in cypher, (
+        "the edge key counts ROWS of an unbound pattern, not edges — two Session→Object "
+        f"edges to one Object read 1: {cypher!r}")
+
+
+def test_r14_every_arm_pins_its_turns_per_session_reading():
+    """R14-5 (P3): `turns_per_session_contains_max_avg` was hand-editable in the store
+    arm with every pin green.
+
+    The ledger's own `values_a_rerun_on_this_population_would_change` quotes this key to
+    derive what a re-run would publish, and `test_the_receipts_headline_figures_are_pinned`
+    pins six OTHER figures — this one was left out, so `[[27, 27.0]] → [[99, 99.0]]`
+    passed. It is the reading that says the store's 27 CONTAINS targets are 27 turns in
+    ONE session, which is one of the two facts the verdict rests on.
+    """
+    receipt = _receipt()
+    expected = {
+        "store": [[27, 27.0]],
+        "writer": [[9, 8.33333333333333]],
+        "live": [[None, None]],
+    }
+    for arm, want in expected.items():
+        got = receipt["arms"][arm]["counts"]["turns_per_session_contains_max_avg"]
+        assert got == want, (
+            f"{arm}.counts.turns_per_session_contains_max_avg is {got!r}, not {want!r} "
+            "— either a hand-edit, or a genuine re-run that must re-derive the ledger "
+            "sentences that quote it")
+
+
+def test_r14_a_PARTIAL_replay_is_not_published_as_a_measurement(monkeypatch):
+    """R14-8 (P3): `replayed` was consulted only for the message of the `delta == 0`
+    branch, never as a verdict of its own.
+
+    The module promises "a run that replays a known session reports `unmeasurable` instead
+    of numbers". As written the condition was `delta == 0 AND replayed`, so on a graph
+    holding only ONE of the three fixture ids — the other two written by this run — the
+    deltas are non-zero and the arm published `counts` (the WHOLE-GRAPH after-state, i.e.
+    pre-existing replay content PLUS this run's writes) with no `unmeasurable`, while
+    `extraction_modes` silently carried one `"replayed"` beside two `"llm:mock"`. That is
+    the round-1 harm — a replay published as numbers — returning for the partial case.
+
+    The delta check stays alongside it: a keyless replay writes nothing and must remain
+    caught (pinned by `test_f1_a_keyless_replay_is_unmeasurable_and_the_token_is_not_the_invariant`).
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:16379/m4211_hierarchy")
+    before = {"points_total": 0, "turns_total": 0, "contains_edges": 0,
+              "sessions_total": 0, "objects_total": 0,
+              "aboutObject_by_endpoint": 0, "turns_with_aboutObject": 0,
+              "sessions_with_aboutObject": 0}
+    after = dict(before, points_total=9, turns_total=8, contains_edges=8,
+                 sessions_total=3)
+    seq = iter([dict(before), dict(after)])
+    monkeypatch.setattr(mod, "_run_queries", lambda g: next(seq))
+
+    class _Graph:
+        def query(self, *_a, **_k):
+            return _Result([[0]])
+
+    class _Proj:
+        g = _Graph()
+
+    replayed_sid = "m4211-noref"
+
+    class _FakeSDK:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def _get_proj(self):
+            return _Proj()
+
+        def create_object(self, *_a, **_k):
+            return {}
+
+        def _capture_session(self, conv, session_id=None):
+            mode = "replayed" if session_id == replayed_sid else "llm:mock"
+            return {"ok": True, "turns": 3 if mode == "llm:mock" else 0,
+                    "extraction_mode": mode, "errors": [], "warnings": []}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("tortoise.sdk.TortoiseSDK", _FakeSDK)
+
+    body = mod.measure_writer()
+    assert body["extraction_modes"][replayed_sid] == "replayed", body["extraction_modes"]
+    assert body.get("unmeasurable"), (
+        "a PARTIAL replay (one session replayed, two captured, delta > 0) published "
+        "whole-graph after-state counts as a measurement — those counts include the "
+        "replayed session's PRE-EXISTING content")
+    assert replayed_sid in body["unmeasurable"], (
+        "the refusal must NAME the replayed session, or a reader cannot tell which of "
+        f"the three captures contributed no new writes: {body['unmeasurable']!r}")
+    assert "counts" not in body or body.get("unmeasurable"), (
+        "counts were published beside an unmeasurable verdict")
