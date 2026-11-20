@@ -2674,7 +2674,7 @@ def test_a_row_shaped_continuation_cannot_replace_the_row_above_it(
     is also what emptied row 21 out of it: privatising a method re-points its registry
     `sdk_method` to the underscore spelling, the beta doc names no such spelling, so the tool
     stops being CITED, and an uncited tool is not disputed. That is not a fact about the SDK
-    `def` (every one of row 14's members is private too, and still cites) — it is a fact about
+    `def` (all three of row 14's members are private, and two still cite) — it is a fact about
     the RE-POINT, and it cuts both ways: `tortoise_get_source_reliability`'s binding was
     re-pointed in the same batch, and it is no longer cited at all. Measured with the body
     guards off: truncating row 21 changes 0 artifact lines, row 14 changes 15 — and restoring
