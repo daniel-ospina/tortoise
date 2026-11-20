@@ -1720,16 +1720,15 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # Python silently kept the last — a duplicate dict key is a SHADOWED row, not a
     # stronger declaration, and the two it shadowed authorized nothing while reading
     # as coverage. If you are here to add a row, EDIT THIS ONE.
-    # ⚠️ Do NOT restate the licence above as "the same ladder". `_uri()`'s fall-backs
-    # are NOT byte-identical to the module probe's — `_probe` tries env →
-    # `docker_uri` → `legacy_uri`, while `_uri()` tries env → `_WORKING_URI` →
-    # `docker_uri(password=None)` — so what licenses the row is narrower and
-    # sufficient: the probe's ANSWER is reused, and the probe is what decides
-    # `@_docker_only`, so a test admitted on one URI cannot open a handle on another
-    # the probe never proved. Coverage is the 15 `@_docker_only`-marked tests; 16 take
-    # the `sdk` fixture and `test_the_ended_scope_still_refuses_an_explicit_query` is
-    # deliberately unmarked (it asserts a `ValueError` raised before any query, so it
-    # can neither need a store nor pass vacuously embedded), and 10 take no `sdk`.
+    # ⚠️ Do NOT restate the licence above as "the same ladder": `_uri()`'s fall-backs
+    # are NOT byte-identical to the module probe's. That caveat, and the 15/16/10
+    # coverage counts that make it checkable, are already recorded ONCE in this file —
+    # `#13886`'s block above (`_uri()`'s own ladder is NOT byte-identical …, and the
+    # "Coverage of the live-store reads is the 15 …" paragraph). Read them there; do
+    # not copy them here. `test_13557_13558_reachable_reads.py` is an actively growing
+    # module, so a second copy of a live count is a count that goes stale in one place.
+    # The row's licence is the narrow, sufficient one: the probe's ANSWER is reused, and
+    # the probe is what decides `@_docker_only`.
     "test_13557_13558_reachable_reads.py": [
         r'^monkeypatch\.setenv\("TORTOISE_DB_URI", _uri\(\)\)$'],
 }
