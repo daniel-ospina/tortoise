@@ -116,11 +116,17 @@ written as ONE token. The document also writes six pairs as two code spans
 (`` `cache_projection.py` `:2485` ``, a `main`-set address listed above, plus
 `` `sdk.py` `:2917` ``, `` `sdk.py` `:61587` ``, `` `sdk.py` `:61594` ``,
 `` `projection/entities.py` `:5765` `` and the `#13124` enumeration's
-`` `projection/entities.py` `:5824` ``); five of them are resolved but not counted by the one-token rule —
-`` `sdk.py` `:61594` `` is ALSO written one-token, in the `:Meta` row of §2.7, so it is one of the 223
+`` `projection/entities.py` `:5824` ``); four of them are resolved but not counted by the one-token rule —
+`` `sdk.py` `:61594` `` is ALSO written one-token, in the `:Meta` row of §2.7, and
+`` `projection/entities.py` `:5824` `` is ALSO written one-token in row 13, so BOTH are among the 223
 already — and counting that form gives **227 pairs and 130 drifters**. ⛔ **This enumeration is COUNTED, not
 carried**: the `#13971` merge brought `main`'s edition of this paragraph, which listed five forms in a
-document that writes six, so the sentence would have published a denominator one short. So the
+document that writes six, so the sentence would have published a denominator one short; and the `#13971`
+merge of `main` `7efdedf2382` then caught the INVERSE error the same sentence still carried — it named
+ONLY `` `sdk.py` `:61594` `` as already-counted, so `five of them` left six pairs minus one duplicate and
+overstated the uncounted set by one, which `tests/test_12184_shifted_cites.py` measures from this document
+by resolving every pair against the tree (`#14010`'s two-code-span arm). Four is the measured figure and
+`223 + 4` is the `227` printed beside it. So the
 basis must travel with the figure — 127 and 130 are one measurement under two counting decisions, not two
 findings. ⚠️ **An earlier form of
 this paragraph sat in the MIDDLE of the sentence it qualifies**, between `103` and `collisions`, so the
