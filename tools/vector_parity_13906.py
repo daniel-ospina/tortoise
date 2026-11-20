@@ -838,12 +838,70 @@ def _assert_local_record_dsn(dsn: str | None, allow_remote: bool) -> None:
         _assert_loopback(host, "record database", allow_remote)
 
 
-#: libpq's conninfo `options` pair, whitespace-tolerant on BOTH sides of `=` and
-#: with a quoted value. Used to DELETE the keyword the harness owns; nothing else
-#: in a caller's conninfo is rewritten (see `app_role_dsn`).
-_OPTIONS_KV = re.compile(
-    r"""(?<![A-Za-z0-9_])options\s*=\s*(?:'((?:[^'\\]|\\.)*)'|(\S+))""",
-    re.IGNORECASE)
+def _drop_options_pairs(dsn: str) -> str:
+    """Delete every TOP-LEVEL `options` pair from a conninfo, and nothing else.
+
+    ⛔ A REGEX CANNOT DO THIS. libpq's conninfo is a little grammar, and two legal
+    spellings defeat a pattern match — both measured with real `PQconninfoParse`:
+
+        host=127.0.0.1 options=-c\\ search_path=a
+            a backslash-escaped space in an UNQUOTED value: `(\\S+)` stopped at the
+            space, so the value was truncated and its remainder became a bogus
+            keyword (libpq: `invalid connection option "search_path"`);
+        host=127.0.0.1 password='options=zzz'
+            `options=` inside ANOTHER keyword's quoted value was matched and
+            deleted, unbalancing that quote (libpq: `missing "=" after "-c"`) —
+            and worse, `password='a options=b c'` PARSED with the password silently
+            changed to `'a   c'`.
+
+    So the scan tracks single-quote state and backslash escapes, and deletes only
+    a `options` keyword at TOP level together with its value (`'…'` or a run of
+    `\\.` / non-space characters — the two shapes libpq admits).
+    """
+    out: list[str] = []
+    i, n = 0, len(dsn)
+    while i < n:
+        # find a top-level word start
+        if dsn[i].isspace():
+            out.append(dsn[i])
+            i += 1
+            continue
+        word_start = i
+        while i < n and not dsn[i].isspace() and dsn[i] != "=":
+            i += 1
+        word = dsn[word_start:i]
+        # optional whitespace, then `=`?
+        j = i
+        while j < n and dsn[j].isspace():
+            j += 1
+        if not word or j >= n or dsn[j] != "=":
+            out.append(dsn[word_start:i])
+            continue
+        j += 1                                   # consume `=`
+        while j < n and dsn[j].isspace():
+            j += 1
+        # the value: a quoted run that honours escapes, else escaped/non-space run
+        value_start = j
+        if j < n and dsn[j] == "'":
+            j += 1
+            while j < n:
+                if dsn[j] == "\\":
+                    j += 2
+                    continue
+                if dsn[j] == "'":
+                    j += 1
+                    break
+                j += 1
+        else:
+            while j < n and (dsn[j] == "\\" or not dsn[j].isspace()):
+                j += 2 if dsn[j] == "\\" else 1
+        value = dsn[value_start:j]
+        if word.lower() == "options":
+            out.append(" ")                      # drop the pair entirely
+        else:
+            out.append(f"{word}={value}")
+        i = j
+    return "".join(out)
 
 
 def _quote_conninfo_value(value: str | None) -> str:
@@ -911,10 +969,12 @@ def app_role_dsn(dsn: str) -> str:
     #
     # The caller's string is already a DSN libpq accepts — that is what the guard
     # certified. So the only thing this function may change is the `options`
-    # keyword it owns: delete that one pair (whitespace-tolerant, quoted or bare)
-    # and append its own. Everything else stays BYTE-FOR-BYTE, which cannot
-    # corrupt a spelling no test imagined.
-    stripped = _OPTIONS_KV.sub(" ", dsn).strip()
+    # keyword it owns: delete that one pair and append its own. Every OTHER
+    # keyword and value is re-emitted exactly as parsed (quoted values intact, a
+    # backslash-escaped space kept inside its value); only the whitespace BETWEEN
+    # keywords is normalised, which libpq does not read. That is the property the
+    # pin asserts, via `shlex` rather than this scanner's own helpers.
+    stripped = _drop_options_pairs(dsn).strip()
     return f"{stripped} options={_quote_conninfo_value(options)}"
 
 
