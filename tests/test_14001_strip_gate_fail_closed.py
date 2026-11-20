@@ -60,6 +60,22 @@ def _gate(tmp_path, monkeypatch, body: str, name: str,
     return strip._writer_consults_gate(module, "_upsert_object", ("object",))
 
 
+def _record_write(*args, **kwargs) -> None:
+    """The write channel: records what it is HANDED, so a rebuild-then-write is measurable.
+
+    ⛔ A GATE CAN BE FOOLED BY A MAPPING THE ARM BUILDS AND HANDS ON (`#14001`, round-8
+    review): `params = {**props, k: vec}; _write(params)` leaves `props` untouched, so an oracle
+    that only inspects `props` cannot see the store. The handed arguments are part of the
+    measurement.
+    """
+    _HANDED.clear()
+    for argument in args:
+        _HANDED.append(argument)
+
+
+_HANDED: list = []
+
+
 def _oracle(body: str, extra: str = "") -> dict:
     """EXECUTE the writer with the gate answering STOP and report whether the vector lands.
 
@@ -75,7 +91,7 @@ def _oracle(body: str, extra: str = "") -> dict:
         "_derived_mirror_required": lambda label: False,
         "mirror_required": lambda label: False,
         "_encode": lambda ev: VECTOR,
-        "_write": lambda *args, **kwargs: None,
+        "_write": _record_write,
         "_f": lambda: True,
         "_m": lambda: "model",
         "_keys": lambda: ["embedding"],
@@ -88,9 +104,12 @@ def _oracle(body: str, extra: str = "") -> dict:
     }
     exec(compile(source, "<oracle>", "exec"), namespace)
     props: dict = {}
+    _HANDED.clear()
     with contextlib.suppress(Exception):   # a raising writer placed what it placed
         namespace["_upsert_object"](props, {"x": 1})
-    return {"lands": props.get("embedding") is VECTOR, "props": props}
+    handed = any(isinstance(item, dict) and item.get("embedding") is VECTOR
+                 for item in _HANDED)
+    return {"lands": props.get("embedding") is VECTOR or handed, "props": props}
 
 
 def _stage_one_sees_a_store(body: str) -> bool:
@@ -490,6 +509,39 @@ DEFEATED_RESOLVER_ROWS = (
     ("chainmap-via-fromkeys", """
     if not _derived_mirror_required("object"):
         props |= dict.fromkeys(ChainMap({"x": 1}, {"embedding": 2}), _encode(ev))
+        return None
+    _write(props)
+"""),
+    # a mapping REBUILD whose key is unprovable, handed on rather than merged into `props`
+    ("rebuilt-mapping-handed-on", """
+    k = "embed" + "ding"
+    if not _derived_mirror_required("object"):
+        params = {**props, k: _encode(ev)}
+        _write(params)
+        return None
+    _write(props)
+"""),
+    ("rebuilt-mapping-inline", """
+    k = "embed" + "ding"
+    if not _derived_mirror_required("object"):
+        _write({**props, k: _encode(ev)})
+        return None
+    _write(props)
+"""),
+    ("rebuilt-mapping-bitor", """
+    k = "embed" + "ding"
+    if not _derived_mirror_required("object"):
+        _write(props | {k: _encode(ev)})
+        return None
+    _write(props)
+"""),
+    # the MUTATOR spelling of the dynamic-namespace write (residual 3's other half)
+    ("globals-mutator-rebinding", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        globals().update({"gk": "embedding"})
+        props[gk] = _encode(ev)
         return None
     _write(props)
 """),

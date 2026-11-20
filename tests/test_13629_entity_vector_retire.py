@@ -9291,20 +9291,6 @@ def _upsert_object(props, ev):
         # strengthened recursion must not swallow a MENTION or an identity-triple rebuild —
         # `_write({**props, **extra})` merges an unknown and names no key, and
         # `_write({**props, "embedding_model": …})` merges only the identity triple.
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        _write({**props, **extra})
-        return None
-    _write(props)
-""",
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        _write({**props, "embedding_model": _m()})
-        return None
-    _write(props)
-""",
         # ⛔ THE HONEST-STOP CONTROLS FOR THE `**` VALUE WALK (`#13788` F5): a READ whose
         # default is a literal must still CERTIFY, and the identity triple must stay certified
         # behind the same wrapper — otherwise the walk costs an honest writer its gate.
@@ -9849,6 +9835,25 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props.update(_merged[0])
+        return None
+    _write(props)
+""",
+        # ⛔ AND A `{**<name>}` MERGE HANDED TO THE WRITE CHANNEL (`#14001`, round-8
+        # review): the mapping the write receives is BUILT in the arm, so an unreadable
+        # operand's keys are unproven — `extra = {"embedding": vec}` would place the
+        # vector through `{**props, **extra}`. The one-literal-key twin is caught by the
+        # same rule because its `**props` operand is a Name this walk cannot read.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _write({**props, **extra})
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _write({**props, "embedding_model": _m()})
         return None
     _write(props)
 """,
