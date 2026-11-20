@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-13083-capability-1795202366-p736366-d51308e1",
+  "_sha": "23d4be8c385da2e594ecdd4233623b2d881fe390",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/13083-capability.log"
+    },
+    {
+      "kind": "branch",
+      "value": "feat/13083-capability-audit"
+    },
+    {
+      "kind": "sha",
+      "value": "f53846746a5d9d43cbeea3d84626c12e18233b90"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/13083-capability"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 3576,
+  "ended_at": 1795205942,
+  "exit_code": 0,
+  "heartbeat_at": 1795205942,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-13083-capability-1795202366-p736366-d51308e1",
+  "lease_until": 1795242542,
+  "pid": 736366,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795202366,
+  "state": "DONE",
+  "tag": "13083-capability",
+  "worktree": "/home/cmux/tortoise/.worktrees/13083-capability"
+}
