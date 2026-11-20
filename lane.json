@@ -1,0 +1,21 @@
+{
+  "artifacts": [],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "exit_code": null,
+  "heartbeat_at": 1795212325,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-12943-cachew2-1795212325-p3826521-792848d4",
+  "lease_until": 1795248925,
+  "pid": 3826521,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795212325,
+  "state": "RUNNING",
+  "tag": "12943-cachew2",
+  "worktree": "/home/cmux/tortoise/.worktrees/12943-cachew2"
+}
