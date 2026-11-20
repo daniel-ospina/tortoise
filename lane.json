@@ -1,0 +1,21 @@
+{
+  "artifacts": [],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 22200,
+  "exit_code": null,
+  "heartbeat_at": 1795194353,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-P8-1795194353-p3337133-52d2daf7",
+  "lease_until": 1795216553,
+  "pid": 3337133,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795194353,
+  "state": "RUNNING",
+  "tag": "P8",
+  "worktree": "/home/cmux/.worktrees/P8"
+}
