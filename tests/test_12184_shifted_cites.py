@@ -619,6 +619,38 @@ _QUADRUPLE = re.compile(
     r"(\d+) written spellings → (\d+) pairs → (\d+) collisions → (\d+) drifters of the (\d+)(?: comparable)?"
 )
 _ALT_BASIS = re.compile(r"counting that form gives (\d+) pairs and (\d+) drifters")
+#: The two-code-span disclosure's OWN counts — "writes N pairs as two code spans", and "M of them are
+#: resolved but not counted by the one-token rule". Both were PROSE ONLY until the `#13991` review (`ab6f915b8d`, finding
+#: P2-A) measured them: the sentence stated **three** pairs while the document writes **five**, so the one
+#: numeral that sanctions the alternative basis was the one figure in it nothing re-derived. A reader who
+#: took the reconciliation at its word could not reach the `227` published beside it — `223 + 3 != 227` — and
+#: the added-pair count was left to be inferred rather than read. The published `227`/`130` were measured by
+#: `_ALT_BASIS` the whole time; the sentence JUSTIFYING them was not, which is the `#13599` class one level
+#: up (a figure quoted from a document rots while the comparator beside it stays green). The prose was
+#: corrected by the lane that landed `#13991`; nothing GRADED it, so this arm is the durable half: without
+#: it the next re-measurement of this document can state any number here and the comparator stays green.
+_TWO_SPAN_TOTAL = re.compile(
+    r"writes (\d+|one|two|three|four|five|six|seven|eight|nine|ten) pairs? as two code spans"
+)
+_TWO_SPAN_NEW = re.compile(
+    r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten) of them are resolved but not "
+    r"counted by the one-token rule"
+)
+#: Spelled numerals are graded as NUMBERS, not treated as an absent statement. The edition this guard was
+#: written against states `three pairs` IN WORDS, so a digits-only pattern reported "the header no longer
+#: states how many pairs…" — a MISSING-SENTENCE verdict about a sentence that is right there, one digit
+#: wrong, which is the false-negative shape `#13599` finding 1 punished on the other side of this file.
+_NUMERALS: dict[str, int] = {
+    word: value
+    for value, word in enumerate(
+        ("zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten")
+    )
+}
+
+
+def _as_int(token: str) -> int:
+    """*token* as an int, spelling the numerals this header may write as words (`three`) as well as digits."""
+    return int(token) if token.isdigit() else _NUMERALS[token]
 
 
 def _resolved_pairs(text: str, repo: Path = REPO) -> tuple[int, set[tuple[str, int]]]:
@@ -673,6 +705,12 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
     problems: list[str] = []
     spellings, pairs = _resolved_pairs(text, repo)
     collisions = spellings - len(pairs)
+    # ⛔ The two-code-span form is MEASURED from this document, never asserted as an offset: `_SPELLING`
+    # cannot see it, so the count it contributes moves whenever the document does. Computed once here
+    # because TWO arms grade it — the disclosure's own stated counts below, and the alternative basis it
+    # justifies (whose `227`/`130` are these same pairs).
+    two_span = _two_span_pairs(text, repo)
+    extra_pairs = len(pairs | two_span) - len(pairs)
     # Matched on the unbolded body: see `_unbolded` — a bold marker between a word and its figure is not a
     # disagreement about the figure.
     body = _unbolded(text)
@@ -734,7 +772,6 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
         # `_SPELLING`, so the count it adds is a property of THIS document and moves when the document does.
         # A hard-coded `+1` here enforced "one pair" while the document wrote four — the comparator became
         # the thing that was wrong, and it red on correct text the moment the document was measured.
-        extra_pairs = len(pairs | _two_span_pairs(text, repo)) - len(pairs)
         if alt_pairs != published_pairs + extra_pairs:
             problems.append(
                 f"the alternative basis reads {alt_pairs} pairs, but this document writes {extra_pairs} "
@@ -756,6 +793,32 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
                 f"{drifters} — its {extra_pairs} added pair(s) can add at most {extra_pairs} drifter(s) and "
                 f"cannot remove one, so it is {drifters}..{drifters + extra_pairs}"
             )
+    # ⛔ The sentence that REACHES the alternative basis is graded here too. `#13991`'s review
+    # (`ab6f915b8d`, P2-A) measured it publishing `three` pairs where the document writes five, and
+    # `223 + 3 != 227`: the figure it sanctions was measured, the figure that sanctions it was not, so
+    # a reader reconciling the two bases by arithmetic on the STATED three concluded the document was
+    # inconsistent — and was right. Both counts are now measured from the same `two_span` set the
+    # alternative basis is computed from, so they cannot disagree with it or with each other.
+    total = _TWO_SPAN_TOTAL.search(body)
+    if not total:
+        problems.append("the header no longer states how many pairs it writes as two code spans")
+    elif _as_int(total.group(1)) != len(two_span):
+        problems.append(
+            f"the header says it writes {total.group(1)} pairs as two code spans, but this document "
+            f"MEASURES {len(two_span)}"
+        )
+    uncounted = _TWO_SPAN_NEW.search(body)
+    if not uncounted:
+        problems.append(
+            "the header no longer states how many of its two-code-span pairs the one-token rule does "
+            "not count"
+        )
+    elif _as_int(uncounted.group(1)) != extra_pairs:
+        problems.append(
+            f"the header says `{uncounted.group(1)} of them` are not counted by the one-token rule, but "
+            f"this document MEASURES {extra_pairs} of its {len(two_span)} two-code-span pairs as "
+            f"not-already-counted"
+        )
     return problems
 
 
@@ -837,8 +900,10 @@ def test_a_carried_forward_figure_is_reported() -> None:
     What cannot rot is the RELATION each mutant breaks: a pair count one under the measured one, an
     arithmetic figure that stops following its pair count, a ratio naming a denominator it does not carry,
     one of the three mentions of the ratio disagreeing with the others, an alternative basis level with the
-    primary, and an alternative basis whose numerator is inflated past what its added pairs can
-    contribute. Each is applied to the sentence AS SHIPPED, by capture-group position.
+    primary, an alternative basis whose numerator is inflated past what its added pairs can
+    contribute, a two-code-span pair count stated below what the document measures, and one more of those
+    pairs claimed uncounted than the union adds. Each is applied to the sentence AS SHIPPED, by
+    capture-group position.
 
     ⛔ The alternative basis is mutated on BOTH capture groups (`:1` pairs, `:2` drifters) on purpose: the
     drifter half used to be read and thrown away (`_alt_drifters`), so the guard on the only figure in this
@@ -852,11 +917,15 @@ def test_a_carried_forward_figure_is_reported() -> None:
     quadruple = _QUADRUPLE.search(text)
     ratio = re.search(r"(\d+) of this document's (\d+)", text)
     alt = _ALT_BASIS.search(text)
+    two_total = _TWO_SPAN_TOTAL.search(text)
+    two_new = _TWO_SPAN_NEW.search(text)
     for found, what in ((triple, "triple"), (quadruple, "figures sentence"), (ratio, "`N of this document's M`"),
-                        (alt, "alternative basis")):
+                        (alt, "alternative basis"), (two_total, "two-code-span pair count"),
+                        (two_new, "two-code-span uncounted count")):
         assert found is not None, (
             f"the shipped document no longer carries the {what}, so this control has nothing to mutate — "
-            "re-point `_TRIPLE`/`_QUADRUPLE`/`_ALT_BASIS` at how it is published now"
+            "re-point `_TRIPLE`/`_QUADRUPLE`/`_ALT_BASIS`/`_TWO_SPAN_TOTAL`/`_TWO_SPAN_NEW` at how it is "
+            "published now"
         )
 
     def _mutate(match: re.Match[str], overrides: dict[int, int]) -> str:
@@ -874,10 +943,28 @@ def test_a_carried_forward_figure_is_reported() -> None:
                 parts[index] = str(overrides[group])
         return "".join(parts)
 
+    def _mutate_numeral(match: re.Match[str], value: int) -> str:
+        r"""The matched sentence with its OWN numeral rewritten to *value*, spelled or in digits.
+
+        `_mutate` splits on `\d+` and so cannot see a numeral the header SPELLS: both counts in the
+        two-code-span sentence are published as words (`writes five pairs`, `four of them`), which is
+        precisely the edition that shipped the wrong one. The positional guarantee `_mutate` exists for
+        is kept by asserting the token occurs once inside the matched sentence, so the edit cannot land
+        on a different word.
+        """
+        token = match.group(1)
+        assert match.group(0).count(token) == 1, (
+            f"the numeral `{token}` occurs twice in {match.group(0)!r} — the edit would land on one of "
+            "them by position, not by meaning"
+        )
+        return match.group(0).replace(token, str(value), 1)
+
     triple_pairs, triple_collisions = map(int, triple.groups()[1:])
     _written, _pairs, collisions, _drifters, comparable = map(int, quadruple.groups())
     ratio_drifters, _ratio_pairs = map(int, ratio.groups())
     alt_pairs, alt_drifters = map(int, alt.groups())
+    two_span_stated = _as_int(two_total.group(1))
+    two_span_uncounted = _as_int(two_new.group(1))
 
     for match, overrides, why in (
         (
@@ -919,8 +1006,28 @@ def test_a_carried_forward_figure_is_reported() -> None:
             "is anchored to the PRIMARY numerator, not `alt - 2`, because a band wide enough for four added "
             "pairs would swallow `alt - 2` and the control would silently stop proving anything)",
         ),
+        (
+            two_total,
+            {1: two_span_stated - 2},
+            "the two-code-span pair count is stated BELOW what the document measures — the shipped P2-A "
+            "state (`three` stated where five are written), which leaves the published `227` unreachable "
+            "from the `223` beside it and turns the reconciliation into arithmetic a reader cannot close",
+        ),
+        (
+            two_new,
+            {1: two_span_uncounted + 1},
+            "one more two-code-span pair is claimed uncounted than the union actually adds, so the stated "
+            "reconciliation overstates what the alternative basis contributes",
+        ),
     ):
-        stale = _mutate(match, overrides)
+        # ⛔ Both spell their numeral, so they go through the numeral-aware mutator; `_mutate` would
+        # split on digits that are not there and return the sentence unchanged, which its own
+        # `stale != match.group(0)` assertion would then catch as a broken control rather than a pass.
+        stale = (
+            _mutate_numeral(match, next(iter(overrides.values())))
+            if match in (two_total, two_new)
+            else _mutate(match, overrides)
+        )
         assert stale != match.group(0), f"the negative control for {why!r} did not change the figures"
         mutated = text.replace(match.group(0), stale, 1)
         assert mutated != text, f"the negative control for {why!r} did not change the text"
