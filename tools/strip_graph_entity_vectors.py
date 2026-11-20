@@ -1106,10 +1106,11 @@ _STATEMENT_RUNNERS = ("run", "query", "execute", "write")
 #: changes WHICH element the check sees — `list`, `tuple`, `set` (re-columned), `sorted` (re-ordered),
 #: `reversed` (re-ordered) and `iter` (the one-shot view of the same elements). ⛔ ONE INCLUDE LIST, ASKED AT EVERY SEAM THAT UNWRAPS A CONTAINER
 #: (`#13788` round 12, measured) — `_source_holds_the_store_anywhere`'s container arm included: it
-#: asks THIS list through `_container_call_operand` and subtracts only
-#: `_CONTAINER_CALLS_ANSWERED_UPSTREAM`, so a name added here reaches that seam too unless it is
-#: excluded there by name, with its measurement beside it. The family used to be spelled out FOUR
-#: times with four different
+#: asks THIS list through `_container_call_operand` and answers ALL of it, with NO subtraction, so
+#: a name added here reaches that seam by construction. `_CONTAINER_CALLS_ANSWERED_UPSTREAM` is a
+#: RECORD of upstream redundancy, never a disposition: subtracting it is the one direction this
+#: file forbids, and it was measured to CERTIFY (see that constant). The family used to be spelled
+#: out FOUR times with four different
 #: member sets, and the two names missing from all four — `sorted`/`reversed` — CERTIFIED a stop arm
 #: that STORES the vector, 21 of 100 generated rows, each runtime-checked:
 #:
@@ -1166,14 +1167,16 @@ def _container_call_operand(node):
 #: 3-tuple makes the pairs rule abstain, so this arm is the SOLE decider for that class — 12 rows
 #: at this seam (`list`/`tuple` nested rows were refused at BOTH heads: those names were never
 #: subtracted). The 12 rows certified at BOTH heads are the two extras spellings that place no
-#: top-level key at all (`[("embedding", 1, 1)]` — constant value; `[(1, "embedding", …)]` —
+#: top-level VECTOR at all (`[("embedding", 1, 1)]` — constant value; `[(1, "embedding", …)]` —
 #: property bound to key `1`), so certification is correct there and neither row belongs to this
-#: arm's question.
+#: arm's question. ⛔ NOT "no top-level key": `[("embedding", 1, 1)]` produces
+#: `{'embedding': 1}` — the property IS the key, and what makes it not a store is that its VALUE
+#: is a constant rather than the vector.
 #:
 #: ⛔ THE FIRST REPAIR ROUND READ "0 verdicts moved" AND THAT WAS A SAMPLE ARTEFACT: its rows spell
 #: the filter DIRECTLY in the clause (`sorted([(…, 1)]) if v`), and some other term of the `|=`
 #: chain refuses that form with or without this arm. It also claimed the two index-1 extras rows
-#: were a pre-existing hole; measured here through the same gate they place no top-level key, so
+#: were a pre-existing hole; measured here through the same gate they place no top-level vector, so
 #: they are not a store to certify. The rows are kept (they pin the class) and the NESTED spellings
 #: are the ones that pin this arm.
 #:
@@ -1182,14 +1185,36 @@ def _container_call_operand(node):
 #: x ten inner shapes (literal, `.copy()`, `if`-expression, `Starred` splice, set literal, three
 #: pair-with-extras literals, and the two NESTED extras wrappers) = **60 rows at this seam**. Leg 1
 #: (`_pairs_operand_stores_the_vector`) answers 30/60, leg 3
-#: (`_comprehension_source_pairs_the_property_with_a_value`) 36/60, the arm 48/60 — and the 12 rows
-#: nothing upstream answers are exactly the nested extras spellings, where this arm is the SOLE
-#: decider. `set`/`list`/`tuple` are SAMPLED here — never extrapolated from the
-#: `sorted`/`reversed`/`iter` sweep that named only three of the six.
-#: ⛔ AND THE COVER IS GUARDED, NOT HOPED FOR: if leg 1 or leg 3 stops answering a family name, or
-#: if a family name is added to `_CONTAINER_CALLS` without being asked at this seam,
+#: (`_comprehension_source_pairs_the_property_with_a_value`) 36/60, the arm 48/60 — and **24** rows
+#: are answered by NOTHING upstream, in two disjoint classes of 12: the NESTED extras wrappers,
+#: where this arm is the SOLE decider, and the two extras spellings — `[("embedding", 1, 1)]`,
+#: whose key IS the property but whose value is a bare constant, and
+#: `[(1, "embedding", _encode(ev))]`, whose produced key is not the property by any reading these
+#: rules make. ⛔ THE KEY IS NOT WHAT RULES THE FIRST ONE OUT: `[("embedding", _encode(ev), 1)]`
+#: and `[("embedding", 1, 1)]` carry the SAME key and leg 3 answers only the one with a live
+#: value, so the constancy of `v[1]` is the deciding factor there (measured at this head). (The
+#: earlier text said "the 12 rows nothing upstream
+#: answers are exactly the nested extras spellings": re-measured at `f2e5e3a98f`, nothing-upstream
+#: is 24, so that sentence counted one class and named it the whole.) `set`/`list`/`tuple` are
+#: SAMPLED here — never extrapolated from the `sorted`/`reversed`/`iter` sweep that named only
+#: three of the six.
+#: ⛔ AND THE COVER IS GUARDED, NOT HOPED FOR — BUT ONLY BY LEG 3, WHICH IS THE WHOLE REASON THIS
+#: PARAGRAPH NAMES WHICH LEG: if **leg 3** stops answering a family name, or if a family name is
+#: added to `_CONTAINER_CALLS` without being asked at this seam,
 #: `test_the_fourth_legs_container_arm_asks_the_whole_family` reddens — instead of the arm quietly
-#: losing the legs that were doing the work.
+#: losing the legs that were doing the work. **LEG 1 IS SILENT HERE IN ONE DIRECTION ONLY:
+#: removing or weakening it cannot redden the FAMILY test** (measured at `f2e5e3a98f` over this
+#: same 60-row sample: `leg1 AND NOT leg3` is **0** rows, so deleting leg 1 outright moves
+#: `upstream` nowhere and the family test stays green). ⛔⛔ **THAT IS A FACT ABOUT THE FAMILY TEST,
+#: NOT ABOUT THE SUITE — do not widen it.** Leg 1 is a disjunct of `upstream`, so a mutant that
+#: STRENGTHENS it to answer a sole-decider row reddens `assert upstream is False`; and REMOVING
+#: leg 1 is caught by `test_the_stop_arm_must_not_store_the_vector` in the same file — measured at
+#: this head, leg 1 disabled reddens it, because the plain-pair stop arm that leg 1 alone refuses
+#: then certifies. So leg 1 is a duplicate AT THIS SEAM, not an unwitnessed leg, and this record
+#: must not be quoted as "leg 1 removal is invisible". That asymmetry is DISCLOSED rather than repaired: deleting a leg is the one
+#: direction that can widen acceptance, so leg 1 stays and this record says plainly that it is a
+#: duplicate at this seam — naming it as a guard would be the inert-enforcer shape this file's
+#: doctrine removes.
 #: ⛔ AND THE ARM IS KEPT RATHER THAN DELETED, for the reason the `.items()` arm below records:
 #: deleting a leg is the ONE direction that can widen acceptance. An arm with no witness is
 #: DISCLOSED here, never left looking load-bearing — and an arm that IS witnessed stays whole.
