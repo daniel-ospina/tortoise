@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-P8b-1795195213-p3615153-674546a0",
+  "_sha": "fb1a3c219e76756699aa56d728c0d68cbdc3f34f",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/P8b.log"
+    },
+    {
+      "kind": "branch",
+      "value": "feat/gates-shrink-one-pr-b"
+    },
+    {
+      "kind": "sha",
+      "value": "22c1283b43de0209ca3570148220875c05c31fb2"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/.worktrees/P8b"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 22200,
+  "duration_s": 8245,
+  "ended_at": 1795203458,
+  "exit_code": 0,
+  "heartbeat_at": 1795203458,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-P8b-1795195213-p3615153-674546a0",
+  "lease_until": 1795225658,
+  "pid": 3615153,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795195213,
+  "state": "DONE",
+  "tag": "P8b",
+  "worktree": "/home/cmux/.worktrees/P8b"
+}
