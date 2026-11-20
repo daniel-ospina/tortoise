@@ -25,8 +25,8 @@ this document classifies **statements**.
 | what | count |
 |---|---|
 | product surface (`tortoise/**/*.py`, test modules excluded) | **302** files scanned |
-| files carrying at least one statement site | **101** |
-| **statement sites (this census)** | **1324** |
+| files carrying at least one statement site | **102** |
+| **statement sites (this census)** | **1325** |
 | of those, shape **`plain`** — no traversal, no adjacency, no fulltext, no EP | **868** (586 read, 282 write) |
 | **`plain` READS — the migration candidates** | **586** |
 | `adjacency` (edge pattern, fixed length) | 293 |
@@ -34,11 +34,11 @@ this document classifies **statements**.
 | `traversal` (variable length) | 3 |
 | `fulltext` | 2 |
 | `ddl` | 17 |
-| `unresolved` (statement not statically resolvable) | 109 |
-| non-Cypher door calls (excluded from every shape total) | 262 |
+| `unresolved` (statement not statically resolvable) | 110 |
+| non-Cypher door calls (excluded from every shape total) | 261 |
 | **AST door calls** = census + non-Cypher | **1586** |
 
-> **The finding, with its count: 586 of 1324 product statements (44.3 %) need none of the
+> **The finding, with its count: 586 of 1325 product statements (44.2 %) need none of the
 > four graph-only capabilities.** They are lookups, listings, filters, aggregates and ordered reads —
 > and they are served from a store that costs ~584× as much per GB as the record (`#13082`). That is
 > not an adjective; it is 586 statements.
@@ -65,8 +65,8 @@ the box, are:
 
 | mode | statement sites | files | note |
 |---|---|---|---|
-| product surface (this census) | **1324** | **101** | `tortoise/**/*.py`, test modules excluded |
-| every tracked surface (`--all-surface`) | **9,170** | **842** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,077 / 9,082 / 9,097 / 9,110 / 9,132 / 9,150 here, and only `9,170` reproduces at this tree — the 2,439 files it scanned include this lane's three (`#13557`/`#13558`); the number beside this row names the tree it does) |
+| product surface (this census) | **1325** | **102** | `tortoise/**/*.py`, test modules excluded |
+| every tracked surface (`--all-surface`) | **9,179** | **844** | tests, `graph-scripts/`, `archive/`, `eval/`, `docs/`. A dated measurement (at THIS merged head), NOT a pin, and deliberately so: this population includes `tests/`, so it moves on any test edit and a pin on it would red an unrelated PR for a number this document does not rest on (`#13098` review P2 — it has read 8,791 / 8,908 / 8,935 / 8,939 / 8,950 / 8,964 / 8,979 / 9,008 / 8,994 / 9,055 / 9,058 / 9,077 / 9,082 / 9,097 / 9,110 / 9,132 / 9,150 / 9,170 here, and only `9,179` reproduces at this tree — the 2,441 files it scanned include this lane's five (`#13557`/`#13558`'s three, plus `#13906`'s `tools/vector_parity_13906.py` and `tests/test_vector_parity_13906.py`, which is 9 sites and 2 carrying files of the move from 9,170 / 842); the number beside this row names the tree it does) |
 
 3,015 sits between them, so it is not a rounding error on either population — it has no predicate
 here. **This document therefore does not adopt it, and does not reconcile TO it.** It replaces it
@@ -105,7 +105,7 @@ verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 = 1,586  occurrences on a line carrying a door CALL          [measured]
   − 0   of those, the AST did not record (residual)
 = 1,586  AST door calls
-= 1324  classified Cypher statements + 262 non-Cypher door calls
+= 1325  classified Cypher statements + 261 non-Cypher door calls
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
@@ -222,9 +222,9 @@ placement table — or, for a shape §3 names explicitly, a reopen argued on `#4
 | `ddl` | **17** | ddl=17 |
 | `traversal` | **3** | read=3 |
 | `fulltext` | **2** | read=2 |
-| `unresolved` | **109** | unresolved=109 |
+| `unresolved` | **110** | unresolved=110 |
 
-**What the unresolved bucket is.** 109 sites hand a door a statement built where no static reader
+**What the unresolved bucket is.** 110 sites hand a door a statement built where no static reader
 can follow: a **parameter** (`def _count(proj, query: str)` in `tortoise/audit.py:247`), a
 **call-built** string (`proj.g.query(cypher, …)` where `cypher` is an argument), a helper's return
 value, or — since `#13098` review P1 — a `CALL` whose procedure NAME the text cannot prove
@@ -417,6 +417,8 @@ halves:
 2. **Re-run `--check`** and commit the regenerated doc in the same PR that added or removed the
    statement. A product PR that adds a query owns the one-line pin update; the alternative (a census
    that only counts its own diff) is a snapshot wearing a census's name.
+
+**The cut this PR (#13906, `feat/13906-vector-move`) makes — one site, and it is a RE-CLASSIFICATION rather than a new query.** The parity work moved `vector_search`'s kNN `SELECT` out of the function body into `tortoise/record_vector.py::knn_statement`, because the harness that EXPLAINs that read must plan the **same string** the read runs (the reviewed defect: an instrument that re-spells the SELECT can only prove something about its own spelling). The door call did not move and no statement was added — but the census's static resolver no longer follows it: the argument is now a value returned by another function, so the site lands in the documented **over-report** arm (`unresolved`) instead of the `SQL_VETO` arm that used to fold it to `non_cypher_door_calls`. The two operands therefore move by ONE in OPPOSITE directions and the reconciliation cannot lose or gain a call: `sites` 1324→**1325**, `unresolved` 109→**110** (the `shape_unresolved` and `shape_unresolved_unresolved` pins with it), `non_cypher_door_calls` 262→**261**, `files` 101→**102** (`record_vector.py` is the file that starts CARRYING a site); `ast_door_calls` **1586** (= 1325 + 261) and `files_scanned` **302** are unchanged, as are `plain` **868** / `candidates` **586** (which is why the migration metric §0 is about does not move: an `unresolved` site is never a candidate), `adjacency`, `ep`, `ddl`, `traversal`, `fulltext` and `partial` **318**. §1's `rg` reconciliation is unchanged at this tree (door **1,640 / 110** whole-text, verb **2,365 / 147**, bare **1,646 / 111**) because no door CALL line was added or removed — only the text it is handed. ⚠️ The paragraphs below describe earlier cuts against their own bases, so no number in them is the table's any more; §0, §3 and the pins carry THIS one.
 
 **The cut at the `origin/main` integration that carries this PR's merge (`#13557`/`#13558` ×
 `#13610` × `#12244`):** re-derived by RUNNING the tool on the merged tree, never by arithmetic on the
@@ -910,10 +912,10 @@ LAST**, deliberately: a base-drift pin must still red the job (the doc's numbers
 it must not be able to mask whether the harness can fail at all — which is exactly what it did before
 the order was fixed (`#13098` review F8).
 
-<!-- cypher-inventory:sites = 1324 -->
-<!-- cypher-inventory:files = 101 -->
+<!-- cypher-inventory:sites = 1325 -->
+<!-- cypher-inventory:files = 102 -->
 <!-- cypher-inventory:files_scanned = 302 -->
-<!-- cypher-inventory:unresolved = 109 -->
+<!-- cypher-inventory:unresolved = 110 -->
 <!-- cypher-inventory:candidates = 586 -->
 <!-- cypher-inventory:shape_adjacency = 293 -->
 <!-- cypher-inventory:shape_ddl = 17 -->
@@ -921,7 +923,7 @@ the order was fixed (`#13098` review F8).
 <!-- cypher-inventory:shape_fulltext = 2 -->
 <!-- cypher-inventory:shape_plain = 868 -->
 <!-- cypher-inventory:shape_traversal = 3 -->
-<!-- cypher-inventory:shape_unresolved = 109 -->
+<!-- cypher-inventory:shape_unresolved = 110 -->
 <!-- cypher-inventory:shape_plain_read = 586 -->
 <!-- cypher-inventory:shape_plain_write = 282 -->
 <!-- cypher-inventory:shape_adjacency_read = 192 -->
@@ -931,8 +933,8 @@ the order was fixed (`#13098` review F8).
 <!-- cypher-inventory:shape_ddl_ddl = 17 -->
 <!-- cypher-inventory:shape_traversal_read = 3 -->
 <!-- cypher-inventory:shape_fulltext_read = 2 -->
-<!-- cypher-inventory:shape_unresolved_unresolved = 109 -->
-<!-- cypher-inventory:non_cypher_door_calls = 262 -->
+<!-- cypher-inventory:shape_unresolved_unresolved = 110 -->
+<!-- cypher-inventory:non_cypher_door_calls = 261 -->
 <!-- cypher-inventory:ast_door_calls = 1586 -->
 <!-- cypher-inventory:partial = 318 -->
 
@@ -1763,6 +1765,7 @@ the order was fixed (`#13098` review F8).
 | `tortoise/record_projection.py:8150` | `replay` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/record_reconcile.py:581` | `scan_cache_view` | plain | read | candidate:SQL-shaped | `MATCH (n:{}) RETURN properties(n)` |
 | `tortoise/record_restore.py:474` | `_target_nodes_before` | plain | read | candidate:SQL-shaped | `MATCH (n) WHERE any(l IN labels(n) WHERE l IN $labels) RETURN count(…` |
+| `tortoise/record_vector.py:2795` | `vector_search` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/rerank.py:555` | `_fetch_embeddings` | plain | read | candidate:SQL-shaped | `MATCH (n:Point) WHERE n.id IN $ids AND n.embedding IS NOT NULL RETUR…` |
 | `tortoise/residency.py:243` | `read_declaration` | plain | read | candidate:SQL-shaped | `MATCH (n:Meta {key:$key}) RETURN n.coverage, n.hot_keys` |
 | `tortoise/residency.py:283` | `declare_residency` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MERGE (n:Meta {key:$key}) SET n += $props` |
