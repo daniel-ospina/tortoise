@@ -408,11 +408,12 @@ def test_an_UNKNOWN_outcome_keeps_the_intent_marker(tmp_path, monkeypatch, map_d
     monkeypatch.setattr(filer, "STATE_PATH", state_path)
     monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
     monkeypatch.setattr(filer, "Mcp", _DiesOnOperator)
-    first_op = next(i for i, e in enumerate(map_doc["edges"]) if "op" in e)
+    first_op = next(e for e in map_doc["edges"] if "op" in e)
     assert filer.write_map(map_doc) == 1
     capsys.readouterr()
     written = json.loads(state_path.read_text())["written"]
-    assert f"edge:{first_op}" in written, "the UNKNOWN outcome retired the intent marker"
+    assert filer.edge_marker(first_op) in written, (
+        "the UNKNOWN outcome retired the intent marker")
 
 
 def test_a_marker_without_an_id_is_AMBIGUOUS_not_re_created(tmp_path, monkeypatch, map_doc, capsys):
@@ -802,7 +803,7 @@ def test_a_non_idempotent_write_records_its_intent_BEFORE_the_call(
     """
     state_path = tmp_path / "state.json"
     seen: dict[str, bool] = {}
-    first_op = next(i for i, e in enumerate(map_doc["edges"]) if "op" in e)
+    first_op = next(e for e in map_doc["edges"] if "op" in e)
 
     class _Intent(_StubMcp):
         def __init__(self, *_a, **_k) -> None:
@@ -815,7 +816,7 @@ def test_a_non_idempotent_write_records_its_intent_BEFORE_the_call(
                     written = json.loads(state_path.read_text())["written"]
                     # THIS edge's marker — structural edges earlier in the list
                     # have their own markers, so a prefix test would pass either way.
-                    seen["op"] = filer.edge_marker(map_doc["edges"][first_op]) in written
+                    seen["op"] = filer.edge_marker(first_op) in written
                 self._n += 1
                 return (200, {"jsonrpc": "2.0", "id": body.get("id"), "result": {
                     "structuredContent": {"id": f"{tool}:{self._n}"}}}, {})
