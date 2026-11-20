@@ -558,8 +558,17 @@ DEFEATED_RESOLVER_ROWS = (
     # ⛔ THE CANONICAL SHAPE OF THE DYNAMIC-NAMESPACE DEFECT, in the WRITER'S OWN SCOPE (`#14001`,
     # round-5 review — the spelling `_dynamic_namespace_write`'s own docstring names): a subscript
     # write to the module namespace with a CONSTANT key. No key-shape rule can see it (the key is a
-    # constant, so the stop arm's own `props[gk]` reads as a non-property store) and `gk` is not an
-    # assignment target, so ONLY the `global`-declaration arm poisons it. The two rows below pin
+    # constant, so the stop arm's own `props[gk]` reads as a non-property store). What makes the row
+    # CATCH anything is the opposite of what this comment first said: `gk` IS an ordinary assignment
+    # target (`gk = "x"`), so the static value map knows `props[gk]` is the non-property `"x"` and
+    # CERTIFIES the writer, and the own-scope dynamic-namespace arm then poisons the scope's `global`
+    # declarations (`poisoned |= _scope_declarations`). That arm is NOT the `ast.Nonlocal | ast.Global`
+    # arm: measured, stubbing the latter leaves this row green (`2 passed`, with `nonlocal-rebinding`),
+    # while stubbing the own-scope dynamic arm reds it — and only it. ⛔ `gk = "x"` IS LOAD-BEARING, not
+    # scenery: delete just that line and the row goes VACUOUS — measured, it then passes even with the
+    # arm stubbed to `pass`, because with no static value the stop arm is merely UNPROVEN and the gate
+    # refuses on its own. A lane that "tidied" the row to match the old comment would therefore have
+    # deleted the pin's discriminating power while the table stayed green. The two rows below pin
     # the MUTATOR and the ONE-SCOPE-IN spellings; without this row the plain form the defect was
     # MEASURED on had no regression pin, so an ordering change in the own-scope loop could re-open
     # it with every row here still green. Re-measure when a row joins the table: `32 of 33` is the
