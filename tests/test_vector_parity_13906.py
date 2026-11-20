@@ -409,6 +409,17 @@ def test_a_host_in_the_query_string_overrides_the_authority_and_is_refused(harne
         with pytest.raises(harness.CannotRun):
             harness._assert_local_record_dsn(dsn, False)
 
+    # ⛔ libpq has NO FRAGMENT CONCEPT: Python ends the URL at `#` and reports no
+    # query, while libpq reads on and dials the query string's `hostaddr`
+    # (`PQconninfoParse` on this exact string returns hostaddr=203.0.113.9, and a
+    # real connect attempts that address). The two parsers disagree about where
+    # the host is, so this is REFUSED rather than resolved one way.
+    hash_shape = "postgresql://127.0.0.1/tortoise_record#?hostaddr=203.0.113.9"
+    assert harness.urlsplit(hash_shape).query == ""      # ← what Python sees
+    assert harness._record_dsn_hosts(hash_shape) == [harness.RECORD_DSN_AMBIGUOUS]
+    with pytest.raises(harness.CannotRun):
+        harness._assert_local_record_dsn(hash_shape, False)
+
     # The DECISION must remain the helper — an inlined authority read is exactly
     # the shape that shipped the fail-open, so it cannot come back silently.
     tree = ast.parse(MODULE_PATH.read_text())
@@ -470,6 +481,78 @@ def test_a_service_dsn_cannot_prove_it_is_local(harness, monkeypatch):
     for dsn in ("postgresql://127.0.0.1:5432/tortoise_record",
                 "host=127.0.0.1 dbname=tortoise_record"):
         harness._assert_local_record_dsn(dsn, False)
+
+
+def test_the_app_role_dsn_keeps_the_spelling_it_was_given(harness):
+    """TWO spellings, TWO syntaxes — `urlunsplit` produced DSNs libpq rejects.
+
+    The guard now ACCEPTS the authority-less URI and the whitespace conninfo, so
+    `app_role_dsn` must be able to rebuild them. It emitted
+    `postgresql:/tortoise_record?…` for the first (`postgresql` is not in
+    `urllib.parse.uses_netloc`, so an empty netloc loses a slash: libpq answers
+    `invalid connection option "postgresql:/tortoise_record?host"`) and glued
+    `?options=…` onto the LAST keyword's VALUE for the second
+    (`host=127.0.0.1?options=…`, unresolvable). Either way the tool certified a
+    store it then could not read a single row from.
+    """
+    uri = harness.app_role_dsn("postgresql:///tortoise_record?host=localhost")
+    assert uri.startswith("postgresql:///tortoise_record?"), uri
+    assert "options=-c%20role%3D" in uri, uri
+
+    conninfo = harness.app_role_dsn("dbname=tortoise_record host=127.0.0.1")
+    assert conninfo.startswith("dbname=tortoise_record host=127.0.0.1 "), conninfo
+    assert "options='-c role=" in conninfo, conninfo
+    assert "127.0.0.1?" not in conninfo, conninfo  # ← the glued-suffix defect
+
+    # An `options=` already present is REPLACED, never duplicated.
+    replaced = harness.app_role_dsn("postgresql://127.0.0.1/db?options=-c%20x%3D1")
+    assert replaced.count("options=") == 1, replaced
+    assert "x%3D1" not in replaced, replaced
+
+
+def test_an_empty_leg_is_not_a_perfect_cross_recall(harness):
+    """`1.0` for an empty leg published "perfect agreement" for a leg that
+    answered nothing — in the same entry that reports its recall as 0.000.
+
+    `compare()` was already fixed for this class (an empty truth set is an empty
+    MEASUREMENT, not a perfect one); this is the informational arm of the same
+    mistake, and §3 of the artifact quotes this number as evidence.
+    """
+    assert harness._cross_recall([], ["a", "b"])["recall"] is None
+    assert harness._cross_recall([], [])["recall"] is None
+    assert harness._cross_recall(["a"], ["a", "b"])["recall"] == 1.0
+    assert harness._cross_recall(["a"], ["b"])["recall"] == 0.0
+
+
+def test_an_unpoisoned_run_that_could_not_measure_is_not_a_divergence(
+        harness, monkeypatch):
+    """The round-7 conflation, ONE BRANCH OVER: `unmeasured` was only ever set on
+    the POISONED branch, so an ordinary run whose every failure was a
+    cannot-measure one exited **1** — "a required comparison diverged", a claim
+    about a measurement it never made.
+    """
+    entry = _reachable_entry(harness, record_error="VectorShortfall: 8 of 10")
+    report = {"k": 8, "queries": [entry],
+              "verdict": harness._verdict({"k": 8, "queries": [dict(entry)]},
+                                          poisoned=None)}
+    assert report["verdict"]["ok"] is False, report["verdict"]
+    assert report["verdict"].get("unmeasured") is True, report["verdict"]
+
+    argv = ["--record-dsn", "postgresql://u:p@127.0.0.1/db", "--graph-port", "1"]
+    monkeypatch.setattr(harness, "run", lambda _args: report)
+    assert harness.main(argv) == 2, (
+        "an unmeasured UNPOISONED run exited 1 — the code that means 'a required "
+        "comparison diverged'")
+
+    # …and a MEASURED divergence still exits 1: the arm this must not swallow.
+    entry = _reachable_entry(harness, corrupt_record=True)
+    report = {"k": 8, "queries": [entry],
+              "verdict": harness._verdict({"k": 8, "queries": [dict(entry)]},
+                                          poisoned=None)}
+    assert report["verdict"]["ok"] is False, report["verdict"]
+    assert "unmeasured" not in report["verdict"], report["verdict"]
+    monkeypatch.setattr(harness, "run", lambda _args: report)
+    assert harness.main(argv) == 1, "a measured divergence must keep exit 1"
 
 
 def test_a_reordered_poison_moves_the_distance_WITH_the_row(harness):

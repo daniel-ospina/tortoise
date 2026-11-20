@@ -14,7 +14,7 @@ aboutObjects: "SEARCH-ARCHITECTURE.md §3, §6.1; #11642; #13220; #13610; #5004;
 # Dense-leg query parity — both stores, one corpus, four readers (#13906)
 
 **Instrument:** `tools/vector_parity_13906.py` · **Comparator pins:**
-`tests/test_vector_parity_13906.py` (49 DB-free tests) · **Artifacts, this
+`tests/test_vector_parity_13906.py` (52 DB-free tests) · **Artifacts, this
 directory:** `parity-run.json`, `poison-{id,order,recall,vector}.json`.
 
 The question this answers, in one sentence: **for the same tenant data and the
@@ -324,6 +324,20 @@ was wrong while being wrong itself.
    distance)` pairs, and the reorder poison reports `distance_ok=True, delta
    4.7e-09` (`test_a_reordered_poison_moves_the_distance_WITH_the_row`).
 
+### Round 10: the guard read the string libpq parses, but not where each parser STOPS
+
+| finding | verified how | fix |
+|---|---|---|
+| **M1** `_record_dsn_hosts` read the query through `urlsplit(dsn).query`, but **libpq has no FRAGMENT concept**: Python ends the URL at `#` and reports an empty query, while libpq keeps scanning for the first `?` in the RAW string. `postgresql://127.0.0.1/tortoise_record#?hostaddr=203.0.113.9` therefore returned `['127.0.0.1']` from the guard while libpq resolved `hostaddr='203.0.113.9'` and **actually dialled it** — measured as a real connect attempt to that address (`timeout expired`, not a name-resolution error). The guard the previous round had just tightened was still defeatable by one character, on the path that seeds and then deletes a tenant's rows | libpq's own resolver (`PQconninfoParse` via `ctypes`) on the exact string: `{'dbname': 'tortoise_record#', 'host': '127.0.0.1', 'hostaddr': '203.0.113.9'}`, against `urlsplit(...).query == ""` | the query is now read the way libpq reads it (everything after the first `?` of the RAW string), and a `#` anywhere BEFORE that `?` makes the two parsers disagree about where the authority ends — so that shape is REFUSED (`RECORD_DSN_AMBIGUOUS`) rather than resolved one way. Pinned: the `#` shape reds the guard, and the mutant that restores `parse_qs(parts.query)` reds the pin |
+| **M2** `app_role_dsn` destroyed the two spellings the guard had just begun to ACCEPT. `urlunsplit` emits `postgresql:/tortoise_record?…` for an authority-less URI (`postgresql` is not in `urllib.parse.uses_netloc`, so an empty netloc loses a slash — libpq: `invalid connection option "postgresql:/tortoise_record?host"`), and for the whitespace conninfo there is no `?`, so `?options=…` was glued onto the LAST keyword's value (`host=127.0.0.1?options=…`, unresolvable). Either way the tool certified a store it then could not read one row from, and every query carried a `record_error` | rebuilt both DSNs through `app_role_dsn` and parsed the results with `PQconninfoParse` | two syntaxes, two constructions: the URI keeps its `head` VERBATIM (so `postgresql:///db` keeps all three slashes) and gets `options=` in the query; the conninfo gets `options='-c role=…'` as a KEYWORD. An existing `options=` is replaced, never duplicated. Pinned by `test_the_app_role_dsn_keeps_the_spelling_it_was_given` |
+| **M3** the `unmeasured` flag existed only on the POISONED branch, so an ordinary run whose every failure was a cannot-measure one exited **1** — byte-identical to "a required comparison DIVERGED", a claim about a measurement the run never made. The round-7 fix had separated the three readings for the falsifier and left the same conflation in the main path | one report object (a raised record leg on every query) invoked twice: not poisoned → exit 1, `unmeasured` ABSENT; the same run with `--poison id` → exit 2 | the key is now set whenever `not ok` and EVERY failure is a cannot-measure one, and `main` prints a distinct cannot-run message for the unpoisoned case. It stays ABSENT on a measured run so the committed artifacts still replay bit-identically (verified: all five unchanged). Pinned by `test_an_unpoisoned_run_that_could_not_measure_is_not_a_divergence`, whose second half asserts a MEASURED divergence still exits 1 |
+| **M4** *(fixed in `8d4bccf960` by the concurrent lane editing the same function)* `_cross_recall` published `recall: 1.0` for a leg that returned ZERO rows — in the same entry that reports that leg's own recall as `0.000`. `compare()` had been fixed for this class already (an empty truth set is an empty MEASUREMENT, not a perfect one); this was the informational arm of the same mistake, and §3 of this artifact quotes that number | `_cross_recall([], ["a","b"])` → `{'recall': 1.0, …}` | an empty `a` now publishes `None` (unmeasured), not a perfect score. Pinned by `test_an_empty_leg_is_not_a_perfect_cross_recall` |
+
+Mutants, each reddening exactly its own pin and nothing else: the `#` shape read through
+`urlsplit().query` → **1 failed**; `app_role_dsn` rebuilt with `urlunsplit` → **1 failed**;
+`recall 1.0` for an empty leg → **1 failed**; the non-poisoned `unmeasured` block disabled →
+**1 failed**. Restored tree: **48 passed**.
+
 ## 6. Reproducing
 
 ```bash
@@ -353,7 +367,7 @@ done
 ```
 
 DB-free comparator pins: `uv run python tools/test_lane.py run --
-tests/test_vector_parity_13906.py -q` → **49 passed**.
+tests/test_vector_parity_13906.py -q` → **52 passed**.
 
 Falsifier exit codes — the recipe above reads them, so they are part of the
 contract, not decoration:
