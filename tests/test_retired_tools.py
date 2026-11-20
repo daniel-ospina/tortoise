@@ -139,10 +139,10 @@ class TestDeclaration:
             if not n.startswith("_") and callable(getattr(TortoiseSDK, n))
         ]
 
-        # 105 is the number `config/surface-manifest.yml` derives
+        # 39 is the number `config/surface-manifest.yml` derives
         # (`counts.sdk_public_methods`, re-cut at this head) and the one
         # `tools/surface-guard.py` pins as the frozen baseline. Measured, not
-        # typed: `uv run python tools/sdk_surface.py --check` reads 105.
+        # typed: `uv run python tools/sdk_surface.py --check` reads 39.
         # The composition: 125 -> 120 (#12901 wave 1) -> 112 (#11609 READ/QUERY
         # family A, #12951: +6 containers / -14 re-privatised) -> 111 (lane B, -4
         # retired / +3 approved) -> 110 (lane C, -7 retired / +6 approved) -> 94

@@ -3700,7 +3700,10 @@ class TestSessionCapture:
         def boom(*args, **kwargs):
             raise RuntimeError("falkordb down")
 
-        monkeypatch.setattr("tortoise.sdk.TortoiseSDK.create_event", boom)
+        # #12901 privatised the method, so the STRING target must name the `def`
+        # the class actually holds — a string-keyed patch is the one shape a
+        # receiver-based sweep cannot type.
+        monkeypatch.setattr("tortoise.sdk.TortoiseSDK._create_event", boom)
         r = client.post("/v1/sessions", json={
             "conversation": [{"role": "user", "content": "I think auth is the top issue."}]})
         assert r.status_code == 200, r.text
@@ -3748,7 +3751,10 @@ class TestSessionCapture:
         def boom(*args, **kwargs):
             raise RuntimeError("falkordb down")
 
-        monkeypatch.setattr("tortoise.sdk.TortoiseSDK.create_event", boom)
+        # #12901 privatised the method, so the STRING target must name the `def`
+        # the class actually holds — a string-keyed patch is the one shape a
+        # receiver-based sweep cannot type.
+        monkeypatch.setattr("tortoise.sdk.TortoiseSDK._create_event", boom)
         r = client.post("/v1/sessions", json={
             "conversation": [{"role": "user", "content": "auth is the top issue"}]})
         assert r.status_code == 200, r.text

@@ -101,14 +101,22 @@ SWEEP_NAMES = 66
 #: cannot be typed from evidence — reds `--check` instead of being silently absorbed into a fresh
 #: count each review (#13899 F6). Re-pin deliberately with `--repin`, in a commit that says why.
 #:
-#: RE-PINNED (11776, bfbf6195136edc2c) → (11782, 0f00153d4691e3de) by #13899's fix round, and
-#: the move is the intended direction: the 6 `reg.query(` sites in `test_delivery_tenancy.py`,
-#: `test_issue_4010_sessions_unlimited.py` and `test_mcp_http.py` were restored from the vendor
-#: PRIVATE `reg._query(` to the public `query` (P2 — `reg` is a FalkorDB `Graph`, never the SDK), so
-#: the `reg.query` row went 403 → 409 and nothing else moved. A re-pin here is a DECLARATION of a
-#: known shape, not a new allowance: adding an SDK-holding receiver to the residue still requires
-#: the same deliberate re-pin with its own reason.
-SWEEP_RESIDUE = (11782, "0f00153d4691e3de")
+#: RE-PINNED (11776, bfbf6195136edc2c) → (11782, 0f00153d4691e3de) → (11769, 3dc892001700a031)
+#: by #13899's fix rounds, and both moves are the intended direction:
+#:   * +6 — the 6 `reg.query(` sites in `test_delivery_tenancy.py`,
+#:     `test_issue_4010_sessions_unlimited.py` and `test_mcp_http.py` were restored from
+#:     the vendor PRIVATE `reg._query(` to the public `query` (P2 — `reg` is a FalkorDB
+#:     `Graph`, never the SDK), so the `reg.query` row went 403 → 409;
+#:   * −13 net — the SDK test doubles were renamed to the private seams the doors now
+#:     call (`_QuotaSDK().query` → `._query`, `super()._tortoise_fts_query`,
+#:     `ctx["sdk"]._tortoise_fts_query`, `sdk._query`/`_create_point` in
+#:     `integrations/cli-extraction/extract_turns.py`, …), and every one of those was an
+#:     untyped-receiver row of this residue. The pinned row set holds exactly the ordinary
+#:     words that remain, `reg.query` still at 409.
+#: A re-pin here is a DECLARATION of a known shape, not a new allowance: adding an
+#: SDK-holding receiver to the residue still requires the same deliberate re-pin with its
+#: own reason.
+SWEEP_RESIDUE = (11769, "3dc892001700a031")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —

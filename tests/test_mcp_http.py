@@ -11,6 +11,7 @@ fixture pattern. TORTOISE_SECRET_PEPPER MUST be set before tortoise.auth import.
 from __future__ import annotations
 
 import os
+import re
 
 # #67: TORTOISE_SECRET_PEPPER is mandatory for auth module import.
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
@@ -24,6 +25,20 @@ import time
 import pytest
 
 from tortoise.sdk import TortoiseSDK
+
+
+def _scans_as(src: str, patterns) -> bool:
+    """Does `src` call one of `patterns`, in the PUBLIC or the PRIVATISED spelling?
+
+    ⛔ The patterns are `.<name>` substrings, and #12901's FINAL batch renamed the method
+    BODIES to `_name` — so `._create_edge(` no longer contains the substring `.create_edge`
+    and this scan went blind to every writer it exists to meter, while still reporting a
+    clean sweep (measured before the fix: 0 of 3 representative tools matched, and the
+    completeness arm reds at `assert matched >= 3`). Matching with an optional private
+    underscore keeps the guarantee pointed at the CALL, which is the thing that creates
+    nodes, whether or not the surface spelling moved.
+    """
+    return any(re.search(rf"\._?{re.escape(p[1:])}", src) for p in patterns)
 
 
 def _mcp_post(tc, payload):
@@ -2226,7 +2241,7 @@ class TestIntrospectiveQuotaCompleteness:
                 src = inspect.getsource(fn)
             except (OSError, TypeError):
                 continue
-            creates = any(p in src for p in scan_patterns)
+            creates = _scans_as(src, scan_patterns)
             # ingest_corpus/index_sessions/backfill_v25 are HTTP-EXCLUDED and
             # therefore never in HTTP_ALLOWED — the loop cannot reach them;
             # test_bulk_writers_stay_http_excluded is the dedicated guard.
@@ -2242,7 +2257,7 @@ class TestIntrospectiveQuotaCompleteness:
             fn = getattr(ms, tool_name, None)
             if fn is not None:
                 try:
-                    if any(p in inspect.getsource(fn) for p in scan_patterns):
+                    if _scans_as(inspect.getsource(fn), scan_patterns):
                         matched += 1
                 except (OSError, TypeError):
                     pass
