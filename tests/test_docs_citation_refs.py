@@ -609,7 +609,13 @@ def _typed_answers_to_tortoise_cmd(doc: str, cmd: str) -> list[tuple[str, bool]]
             # older, enumerated class used to admit (measured: `2 failed` when it was left
             # out — a closure that drops a form the previous rule already had is a
             # regression wearing a widening's clothes).
-            + r"(?:[^\w\n]|_|<[^>\n]{1,8}>|\[\^?\d{1,3}\]){0,4}"
+            # ⛔ AND A REPETITION BOUND IS AN ENUMERATION TOO (#13900 review, cycle 10, P1,
+            # MEASURED): with `{0,4}` six spaces or five spaces between the command and the
+            # verb returned `[]` — a REGRESSION against `origin/main`, whose class was
+            # unbounded — and a table cell spends the whole budget, so one emphasis mark on
+            # top of it is ungraded. The quantifier is therefore unbounded: prose cannot
+            # cross it, because a word character ends the run, so there is nothing to cap.
+            + r"(?:[^\w\n]|_|<[^>\n]{1,8}>|\[\^?\d{1,3}\])*"
               r"(?:(?:still|now|actually|also)\s+)?"
               r"(prints|returns|yields|reports|gives|outputs|carries|lists|shows|"
               r"names|includes|contains|has|->|→|is|=|:)", doc, flags=re.IGNORECASE):
@@ -754,7 +760,10 @@ _TORTOISE_CENSUS_CMD = "git diff --name-only origin/main...HEAD -- tortoise/"
 #: already reads this subject correctly; only the call was missing — so it is called.
 #: ⛔ THERE IS NO PATHSpec SKIP ANY MORE (#13900 review, finding 3): every occurrence is
 #: graded, and the reason is recorded at the matcher. A claim about another head is written
-#: so it is not an answer to the command (past tense, or the named head first) — that is the
+#: so it is not an answer to the command. PAST TENSE is the only form that does that, and it
+#: is measured (#13900 review, cycle 10, finding 5): naming the head FIRST does not help,
+#: because the matcher reads the VERB — `at `2a7f24e241` `git diff … -- tortoise/` names
+#: exactly …` is still GRADED and still refused. So the convention this arm relies on is the
 #: convention the document keeps, and it is the half this arm relies on now.
 _TORTOISE_CENSUS_CMD_ABBREV = "-- tortoise/"
 
@@ -1480,7 +1489,8 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     # closed the reported spelling and left another open — the last exempted any claim that
     # merely SHARED A LINE with an unbackticked `git diff` — so it is DELETED, and the
     # blocking direction it protected is now carried by the CONVENTION (a claim about another
-    # head is written as one: past tense, or the named head first). Both halves of that are
+    # head is written as one, in PAST TENSE — the named-head-first form was measured NOT to
+    # protect anything, since the matcher reads the verb (#13900 review, cycle 10, finding 5)). Both halves of that are
     # pinned below, because the two ways this rule fails are opposite and both silent: a skip
     # that widens to every occurrence looks green while grading nothing, and a skip no
     # witness reaches is dead code nothing reads.
@@ -1502,7 +1512,7 @@ def test_the_bundles_tortoise_set_answers_are_not_typed_against_the_tree():
     ):
         assert _typed_answers_to_tortoise_cmd(_refuted, "-- tortoise/"), (
             f"the arm SKIPPED {_refuted!r} — it is an answer to the command in a form the arm "
-            "must grade. A pathspec skip was measured fail-open in nine spellings and is "
+            "must grade. A pathspec skip was measured fail-open in SIX spellings and is "
             "DELETED; if this reds, one was reintroduced (#13845 review, cycles 3-7)")
     # ⛔ AND THE SEPARATOR CASE, which is a hole a review of #13900 MEASURED and this
     # witness now holds shut: a table cell and a parenthetical both came back `[]`.
