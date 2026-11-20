@@ -272,8 +272,13 @@ cutover by the same window. The measured cost above is the alternative.
    (`backup.py:638`, "the journal always"), and `journal_segments.seal_active`
    moves the active file aside and creates a fresh empty one. Both are operator
    verbs (seal has no production caller), so the frozen prefix holds absent
-   operator action — and after a restore that put a journal BEHIND the counter,
-   the divergence state `record_writer` names is the one you are in.
+   operator action. ⚠️ And a restore onto a CUT-OVER graph lands in a quieter
+   state than `record_writer`'s journal-behind warning describes: the guard is
+   skipped there (there is no second reading), so the restored journal is an inert
+   stale prefix that nothing reports, while the record — which `restore` does not
+   rewind — still owns the ordinal. The journal-behind case that DOES warn is the
+   still-appending arm, where it does not wedge: it silently loses a row per write
+   for `counter - floor` records.
 5. **A sealed layout (#13050) is still a procedural gate**: `read_cursor` answers
    the file-local/segment-spanning question the same way it did, so *do not arm
    across a seal* continues to hold. Segment-aware numbering is #13050's.
