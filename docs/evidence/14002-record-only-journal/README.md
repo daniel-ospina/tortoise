@@ -296,7 +296,8 @@ out of the guard, the helper answering a constant, the helper CALLING the record
 and ignoring the answer, and the decision not forwarded to the seam), SIX door
 shapes
 (`test_a_door_that_drops_the_flag_is_refused_by_the_gate` — dropped, constant
-`False`, constant `True`, `None`, a locally bound constant forwarded by name, and
+`False`, constant `True`, `None`, a name bound NOWHERE forwarded by name
+(`_local_constant` — it reds on the undefined name, not on provenance), and
 **the parameter REBOUND to a constant and forwarded under its own name**, review
 cycle 8 F1: the parameter arm of the provenance rule was taken on the signature
 alone, so that mutant shipped with the gate printing `WIRED` and the whole

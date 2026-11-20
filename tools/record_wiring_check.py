@@ -1331,10 +1331,11 @@ def journal_skip_forwarding_problems(tree: ast.AST, rel: str) -> list[str]:
             continue
         problems.append(
             f"{rel}:{call.lineno} forwards `{value.id}` as `journal_skipped`, but "
-            f"`{value.id}` is neither a parameter of {_function_name(scope)}() nor "
-            "bound from the chokepoint's `*record_owns_position(…)` decision in "
-            f"this scope — a parameter this scope REBINDS ({value.id} = …) or a "
-            "locally bound constant is the same defect as a "
+            f"`{value.id}` is not an UNREBOUND parameter of "
+            f"{_function_name(scope)}() nor bound from the chokepoint's "
+            "`*record_owns_position(…)` decision in this scope — a parameter "
+            f"this scope REBINDS (`{value.id} = …`), or a locally bound "
+            "constant, is the same defect as a "
             "literal: `False` skips the append and gets every cut-over write "
             "refused, `True` forces allocation on a graph that is not cut over "
             "(#14002)")

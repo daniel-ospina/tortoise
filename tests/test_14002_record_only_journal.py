@@ -1212,23 +1212,16 @@ def test_a_door_that_drops_the_flag_is_refused_by_the_gate(wiring_mod, tmp_path)
             ("as a constant False", "            journal_skipped=False)"),
             ("as a constant True", "            journal_skipped=True)"),
             ("as None", "            journal_skipped=None)"),
-            # ⛔ AND THE ONE-ASSIGNMENT-AWAY FORM (#14002 review cycle 3, P3): a
-            # local binding forwarded BY NAME is the same defect as a literal,
-            # and it passed the gate until the rule also checked provenance.
-            ("via a local constant",
+            # ⛔ AND A NAME WITH NO PROVENANCE AT ALL (#14002 review cycle 3,
+            # P3; relabelled cycle 9, F2): `_local_constant` is bound NOWHERE in
+            # the door, so this case exercises the no-provenance arm — it reds on
+            # the undefined name, identically before and after the provenance fix,
+            # and the `journal_skipped = True` this case used to inject was dead
+            # code (never forwarded). The shape its old label claimed — bind
+            # locally, forward THAT name — is the REBOUND-PARAMETER leg below.
+            ("via a name bound nowhere",
              "            journal_skipped=_local_constant)")):
         mutated = source.replace(old, replacement, 1)
-        if "_local_constant" in replacement:
-            mutated = mutated.replace(
-                "    def _write_record_projection(self, record: dict,",
-                "    def _write_record_projection(self, record: dict,",
-                1)
-            # Bind it INSIDE the door, above the call — the shape a lane writes
-            # when it "knows" the answer.
-            mutated = mutated.replace(
-                "        log = self._event_log",
-                "        journal_skipped = True\n        log = self._event_log",
-                1)
         problems = problems_for(mutated)
         assert problems, (
             f"the gate certified a door that supplies journal_skipped {label} — "
@@ -1238,9 +1231,8 @@ def test_a_door_that_drops_the_flag_is_refused_by_the_gate(wiring_mod, tmp_path)
             "exactly the false PASS this check exists to stop")
 
     # ⛔ AND THE FORM A LANE ACTUALLY WRITES: KEEP THE PARAMETER, REBIND IT
-    # (#14002 review cycle 8, F1). The `via a local constant` case above forwards
-    # `_local_constant`, a name bound NOWHERE, so it exercises the no-provenance
-    # arm. The shape that shipped green was the one-assignment-away form the
+    # (#14002 review cycle 8, F1). The `via a name bound nowhere` case above
+    # forwards a name that does not exist, so it exercises the no-provenance arm. The shape that shipped green was the one-assignment-away form the
     # rule's own docstring forbids: leave `journal_skipped=journal_skipped)` in
     # place, inject `journal_skipped = True` above it, and the name is in the
     # SIGNATURE — so the parameter arm accepted it and the provenance check below
