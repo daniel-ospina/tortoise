@@ -98,9 +98,9 @@ def _isolated(monkeypatch, tmp_path):
     # `test_the_daemons_refusal_is_still_the_one_the_user_sees` builds an SDK, and
     # `TortoiseSDK.__init__` DOES call `_probe_embedded_busy` (`sdk.py:14094`) — so it takes
     # `_isolated` too, and on the pinned path the absent `<db_path>.settings` returns first
-    # (`sdk.py:14194-14195`). ⚠️ It did NOT, and that was not academic: unpinned it reached the
-    # REAL `~/.tortoise/tortoise.db`, where a crash-residue `.settings` exists, so the
-    # settings short-circuit was NOT what saved it — the dead-pidfile arm (`:14211-14212`) was.
+    # (`sdk.py:14194-14195`). ⚠️ Unpinned, that row resolved to the REAL `~/.tortoise/tortoise.db`
+    # (measured), so that registry's CONTENTS chose the arm: a dead pid returned at `:14211-14212`,
+    # a live one raises `EmbeddedStoreBusyError` — #13867 Root 1, the red this PR removes.
     import tortoise.config as _config
     monkeypatch.setattr(_config, "DEFAULT_DB_PATH",
                         str(tmp_path / "canonical" / "tortoise.db"))
