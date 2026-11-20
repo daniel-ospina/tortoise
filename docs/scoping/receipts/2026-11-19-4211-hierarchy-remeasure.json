@@ -1,0 +1,1331 @@
+{
+ "issue": 4211,
+ "measured_at": "2026-11-20T01:40:01Z",
+ "code_head": "447180bbc0cfe27384f8ce544fe87b0418d3094a",
+ "instrument": {
+  "path": "tools/measure_4211_session_hierarchy.py",
+  "sha256": "088b7de91e0ae8b0ebf7aafa81674d9ed55c7bbb8bc8c220ede492007998bb53",
+  "argv": [
+   "--out",
+   "docs/scoping/receipts/2026-11-19-4211-hierarchy-remeasure.json"
+  ],
+  "note": "code_head is the tree this run STARTED from; it may predate the commit that carries this file, so the sha256 is what a re-run keys on"
+ },
+ "purpose": "does a session-hierarchy structure exist for the #4211 candidate-expansion arm to walk?",
+ "definitions": {
+  "turn": "coalesce(p.is_episodic,false)=true AND p.pointKind='event'",
+  "hierarchy_linked_turn": "a turn Point reachable from its Session via (:Session)-[:CONTAINS]->(:Point) \u2014 the edge the scoping doc's arm walks",
+  "entity_linked_turn": "a turn Point carrying (:Point)-[:aboutObject]->(:Object) \u2014 entity attachment, NOT the hierarchy",
+  "event_level_attachment": "an :Event carries a session_id PROPERTY, so (:Event)-[:aboutObject]->(:Object) is a session->entity attachment with NO Session->Object edge; counted separately, never folded into the Session counts"
+ },
+ "edges_the_arm_could_walk": {
+  "contains": "the hierarchy (Session -> turns) the scoping doc's arm uses",
+  "aboutObject": "entity attachment; the edge the #4211 gate names. NOT the hierarchy \u2014 a graph can have one and not the other"
+ },
+ "arms": {
+  "store": {
+   "source": "/Users/danielospina/.tortoise/tortoise.db",
+   "source_sha256": "6bc03049acf5f3261c3bf576f37d4876f144818d788320e71320908362bd2d04",
+   "source_bytes": 48680518,
+   "read_only_copy": "/var/folders/lh/4zv9grjx0958bnrclvkt8dv40000gn/T/m4211-store-w43dwkjv/store.db",
+   "graph": "tortoise",
+   "graphs_in_file": 4708,
+   "copy_s": 38.95,
+   "counts": {
+    "nodes_by_label": [
+     [
+      "Event",
+      10526
+     ],
+     [
+      "Source",
+      9014
+     ],
+     [
+      "GraphEvent",
+      3762
+     ],
+     [
+      "Session",
+      1538
+     ],
+     [
+      "Object",
+      518
+     ],
+     [
+      "Point",
+      204
+     ],
+     [
+      "Subject",
+      26
+     ],
+     [
+      "Tag",
+      4
+     ],
+     [
+      "Meta",
+      3
+     ],
+     [
+      "Batch",
+      1
+     ],
+     [
+      "EpMeta",
+      1
+     ],
+     [
+      "GraphEventMeta",
+      1
+     ]
+    ],
+    "edges_by_type": [
+     [
+      "references",
+      8969
+     ],
+     [
+      "aboutObject",
+      1290
+     ],
+     [
+      "INPUT",
+      66
+     ],
+     [
+      "IMPL",
+      56
+     ],
+     [
+      "CONTAINS",
+      27
+     ],
+     [
+      "NAND",
+      10
+     ],
+     [
+      "performs",
+      8
+     ],
+     [
+      "produces",
+      8
+     ],
+     [
+      "CORRECTS",
+      8
+     ],
+     [
+      "participatesIn",
+      5
+     ],
+     [
+      "related",
+      2
+     ],
+     [
+      "uses",
+      1
+     ]
+    ],
+    "aboutObject_by_endpoint": [
+     [
+      "Event",
+      [
+       "Object"
+      ],
+      1290
+     ]
+    ],
+    "points_total": 204,
+    "turns_total": 27,
+    "episodic_points_any_kind": 27,
+    "turns_with_aboutObject": 0,
+    "nonepisodic_points_with_aboutObject": 0,
+    "sessions_total": 1538,
+    "sessions_with_aboutObject": 0,
+    "contains_edges": 27,
+    "contains_distinct_pairs": 27,
+    "contains_duplicate_pairs": 0,
+    "sessions_with_contains": 1,
+    "contains_targets_by_kind": [
+     [
+      "event",
+      true,
+      27
+     ]
+    ],
+    "sessions_with_gt1_contains_turn": 1,
+    "sessions_with_gt1_entity_linked_turn": 0,
+    "sessions_with_gt1_aboutObject_edge": 0,
+    "turns_per_session_contains_max_avg": [
+     [
+      27,
+      27.0
+     ]
+    ],
+    "session_signature": [
+     [
+      [
+       "id",
+       "created_at",
+       "turn_count"
+      ],
+      1537
+     ],
+     [
+      [
+       "id",
+       "created_at",
+       "turn_count",
+       "is_episodic",
+       "capture_ok",
+       "capture_extractor"
+      ],
+      1
+     ]
+    ],
+    "session_turn_count_sum": 17934.0,
+    "objects_total": 518,
+    "objects_with_gt1_turn": 0,
+    "objects_reaching_gt1_session": 0,
+    "objects_with_point_attachment": 0,
+    "objects_with_any_attachment": 469,
+    "events_total": 10526,
+    "events_with_aboutObject": 1042,
+    "event_session_ids_distinct": 1042,
+    "events_without_session_id": 1557,
+    "events_with_aboutObject_missing_session_id": 0,
+    "objects_reaching_gt1_event": 211,
+    "event_objects_total_distinct": 469
+   },
+   "empty_or_absent": false,
+   "queries": {
+    "nodes_by_label": "MATCH (n) UNWIND labels(n) AS l RETURN l AS label, count(*) AS n ORDER BY n DESC",
+    "edges_by_type": "MATCH ()-[r]->() RETURN type(r) AS edge, count(*) AS n ORDER BY n DESC",
+    "aboutObject_by_endpoint": "MATCH (s)-[r:aboutObject]->(o) UNWIND labels(s) AS sl RETURN sl AS src_label, labels(o) AS dst_labels, count(*) AS n ORDER BY n DESC",
+    "points_total": "MATCH (p:Point) RETURN count(p) AS n",
+    "turns_total": "MATCH (p:Point) WHERE coalesce(p.is_episodic,false)=true AND p.pointKind='event' RETURN count(p) AS n",
+    "episodic_points_any_kind": "MATCH (p:Point) WHERE coalesce(p.is_episodic, false) = true RETURN count(p) AS n",
+    "turns_with_aboutObject": "MATCH (p:Point)-[:aboutObject]->(:Object) WHERE coalesce(p.is_episodic,false)=true AND p.pointKind='event' RETURN count(DISTINCT p) AS n",
+    "nonepisodic_points_with_aboutObject": "MATCH (p:Point)-[:aboutObject]->(:Object) WHERE coalesce(p.is_episodic, false) = false RETURN count(DISTINCT p) AS n",
+    "sessions_total": "MATCH (s:Session) RETURN count(s) AS n",
+    "sessions_with_aboutObject": "MATCH (s:Session)-[:aboutObject]->(:Object) RETURN count(DISTINCT s) AS n",
+    "contains_edges": "MATCH (:Session)-[r:CONTAINS]->(:Point) RETURN count(r) AS n",
+    "contains_distinct_pairs": "MATCH (s:Session)-[:CONTAINS]->(p:Point) RETURN count(DISTINCT s.id + '|' + p.id) AS n",
+    "contains_duplicate_pairs": "MATCH (s:Session)-[r:CONTAINS]->(p:Point) WITH s, p, count(r) AS c WHERE c > 1 RETURN count(*) AS n",
+    "sessions_with_contains": "MATCH (s:Session)-[:CONTAINS]->(:Point) RETURN count(DISTINCT s) AS n",
+    "contains_targets_by_kind": "MATCH (:Session)-[:CONTAINS]->(p:Point) RETURN p.pointKind AS pointKind, coalesce(p.is_episodic, false) AS episodic, count(*) AS n ORDER BY n DESC",
+    "sessions_with_gt1_contains_turn": "MATCH (s:Session)-[:CONTAINS]->(p:Point) WITH s, count(DISTINCT p) AS c WHERE c > 1 RETURN count(*) AS n",
+    "sessions_with_gt1_entity_linked_turn": "MATCH (s:Session)-[:CONTAINS]->(p:Point)-[:aboutObject]->(:Object) WITH s, count(DISTINCT p) AS c WHERE c > 1 RETURN count(*) AS n",
+    "sessions_with_gt1_aboutObject_edge": "MATCH (s:Session)-[:aboutObject]->(o:Object) WITH s, count(DISTINCT o) AS c WHERE c > 1 RETURN count(*) AS n",
+    "turns_per_session_contains_max_avg": "MATCH (s:Session)-[:CONTAINS]->(p:Point) WITH s, count(DISTINCT p) AS c RETURN max(c) AS max_c, toFloat(sum(c)) / count(s) AS avg_c",
+    "session_signature": "MATCH (s:Session) WITH keys(s) AS k, count(*) AS n RETURN k, n ORDER BY n DESC",
+    "session_turn_count_sum": "MATCH (s:Session) RETURN sum(coalesce(s.turn_count, 0)) AS n",
+    "objects_total": "MATCH (o:Object) RETURN count(o) AS n",
+    "objects_with_gt1_turn": "MATCH (t:Point)-[:aboutObject]->(o:Object) WITH o, count(DISTINCT t) AS c WHERE c > 1 RETURN count(*) AS n",
+    "objects_reaching_gt1_session": "MATCH (s:Session)-[:aboutObject]->(o:Object) WITH o, count(DISTINCT s) AS c WHERE c > 1 RETURN count(*) AS n",
+    "objects_with_point_attachment": "MATCH (o:Object) WHERE (:Point)-[:aboutObject]->(o) RETURN count(o) AS n",
+    "objects_with_any_attachment": "MATCH (o:Object) WHERE ()-[:aboutObject]->(o) RETURN count(o) AS n",
+    "events_total": "MATCH (e:Event) RETURN count(e) AS n",
+    "events_with_aboutObject": "MATCH (e:Event)-[:aboutObject]->(:Object) RETURN count(DISTINCT e) AS n",
+    "event_session_ids_distinct": "MATCH (e:Event)-[:aboutObject]->(:Object) RETURN count(DISTINCT e.session_id) AS n",
+    "events_without_session_id": "MATCH (e:Event) WHERE e.session_id IS NULL RETURN count(e) AS n",
+    "events_with_aboutObject_missing_session_id": "MATCH (e:Event)-[:aboutObject]->(:Object) WHERE e.session_id IS NULL RETURN count(e) AS n",
+    "objects_reaching_gt1_event": "MATCH (:Event)-[:aboutObject]->(o:Object) WITH o, count(*) AS c WHERE c > 1 RETURN count(*) AS n",
+    "event_objects_total_distinct": "MATCH (:Event)-[:aboutObject]->(o:Object) RETURN count(DISTINCT o) AS n"
+   }
+  },
+  "writer": {
+   "uri_graph": "m4211_hierarchy_r6",
+   "sdk": "TortoiseSDK() against TORTOISE_DB_URI",
+   "object_mint": {
+    "name": "test/repo#42",
+    "kind": "pm:issue",
+    "advisory": null
+   },
+   "captures": {
+    "m4211-ref-2of8": {
+     "ok": true,
+     "turns": 8,
+     "extraction_mode": "llm:mock",
+     "errors": [],
+     "warnings": [
+      "point 'the new strategy is durable' has no resolvable source turn (no quote match)"
+     ]
+    },
+    "m4211-noref": {
+     "ok": true,
+     "turns": 8,
+     "extraction_mode": "llm:mock",
+     "errors": [],
+     "warnings": []
+    },
+    "m4211-ref-6of6": {
+     "ok": true,
+     "turns": 6,
+     "extraction_mode": "llm:mock",
+     "errors": [],
+     "warnings": []
+    }
+   },
+   "per_session": {
+    "m4211-ref-2of8": {
+     "contains_turns": 8,
+     "contains_points_all_kinds": 9,
+     "entity_linked_turns": 2,
+     "session_aboutObject_edges": 1,
+     "shared_points": 0
+    },
+    "m4211-noref": {
+     "contains_turns": 8,
+     "contains_points_all_kinds": 9,
+     "entity_linked_turns": 0,
+     "session_aboutObject_edges": 0,
+     "shared_points": 1
+    },
+    "m4211-ref-6of6": {
+     "contains_turns": 6,
+     "contains_points_all_kinds": 7,
+     "entity_linked_turns": 6,
+     "session_aboutObject_edges": 1,
+     "shared_points": 1
+    }
+   },
+   "counts": {
+    "nodes_by_label": [
+     [
+      "Point",
+      23
+     ],
+     [
+      "Event",
+      4
+     ],
+     [
+      "Source",
+      3
+     ],
+     [
+      "Session",
+      3
+     ],
+     [
+      "GraphEvent",
+      2
+     ],
+     [
+      "Object",
+      2
+     ],
+     [
+      "Meta",
+      1
+     ],
+     [
+      "GraphEventMeta",
+      1
+     ],
+     [
+      "EpMeta",
+      1
+     ]
+    ],
+    "edges_by_type": [
+     [
+      "CONTAINS",
+      25
+     ],
+     [
+      "aboutObject",
+      11
+     ],
+     [
+      "references",
+      3
+     ],
+     [
+      "extractedFrom",
+      1
+     ]
+    ],
+    "aboutObject_by_endpoint": [
+     [
+      "Point",
+      [
+       "Object"
+      ],
+      9
+     ],
+     [
+      "Session",
+      [
+       "Object"
+      ],
+      2
+     ]
+    ],
+    "points_total": 23,
+    "turns_total": 22,
+    "episodic_points_any_kind": 22,
+    "turns_with_aboutObject": 8,
+    "nonepisodic_points_with_aboutObject": 1,
+    "sessions_total": 3,
+    "sessions_with_aboutObject": 2,
+    "contains_edges": 25,
+    "contains_distinct_pairs": 25,
+    "contains_duplicate_pairs": 0,
+    "sessions_with_contains": 3,
+    "contains_targets_by_kind": [
+     [
+      "event",
+      true,
+      22
+     ],
+     [
+      "statement",
+      false,
+      3
+     ]
+    ],
+    "sessions_with_gt1_contains_turn": 3,
+    "sessions_with_gt1_entity_linked_turn": 2,
+    "sessions_with_gt1_aboutObject_edge": 0,
+    "turns_per_session_contains_max_avg": [
+     [
+      9,
+      8.33333333333333
+     ]
+    ],
+    "session_signature": [
+     [
+      [
+       "id",
+       "created_at",
+       "turn_count",
+       "is_episodic",
+       "turn_max_index",
+       "capture_redactions",
+       "entity_links_attempted",
+       "entity_links_created",
+       "capture_ok",
+       "capture_extractor"
+      ],
+      2
+     ],
+     [
+      [
+       "id",
+       "created_at",
+       "turn_count",
+       "is_episodic",
+       "turn_max_index",
+       "capture_redactions",
+       "capture_ok",
+       "capture_extractor"
+      ],
+      1
+     ]
+    ],
+    "session_turn_count_sum": 22.0,
+    "objects_total": 2,
+    "objects_with_gt1_turn": 1,
+    "objects_reaching_gt1_session": 1,
+    "objects_with_point_attachment": 2,
+    "objects_with_any_attachment": 2,
+    "events_total": 4,
+    "events_with_aboutObject": 0,
+    "event_session_ids_distinct": 0,
+    "events_without_session_id": 4,
+    "events_with_aboutObject_missing_session_id": 0,
+    "objects_reaching_gt1_event": 0,
+    "event_objects_total_distinct": 0
+   },
+   "counts_before_any_write": {
+    "nodes_by_label": [
+     [
+      "Meta",
+      1
+     ]
+    ],
+    "edges_by_type": null,
+    "aboutObject_by_endpoint": null,
+    "points_total": 0,
+    "turns_total": 0,
+    "episodic_points_any_kind": 0,
+    "turns_with_aboutObject": 0,
+    "nonepisodic_points_with_aboutObject": 0,
+    "sessions_total": 0,
+    "sessions_with_aboutObject": 0,
+    "contains_edges": 0,
+    "contains_distinct_pairs": 0,
+    "contains_duplicate_pairs": 0,
+    "sessions_with_contains": 0,
+    "contains_targets_by_kind": null,
+    "sessions_with_gt1_contains_turn": 0,
+    "sessions_with_gt1_entity_linked_turn": 0,
+    "sessions_with_gt1_aboutObject_edge": 0,
+    "turns_per_session_contains_max_avg": [
+     [
+      null,
+      null
+     ]
+    ],
+    "session_signature": null,
+    "session_turn_count_sum": 0.0,
+    "objects_total": 0,
+    "objects_with_gt1_turn": 0,
+    "objects_reaching_gt1_session": 0,
+    "objects_with_point_attachment": 0,
+    "objects_with_any_attachment": 0,
+    "events_total": 0,
+    "events_with_aboutObject": 0,
+    "event_session_ids_distinct": 0,
+    "events_without_session_id": 0,
+    "events_with_aboutObject_missing_session_id": 0,
+    "objects_reaching_gt1_event": 0,
+    "event_objects_total_distinct": 0
+   },
+   "delta_this_run": {
+    "points_total": 23,
+    "turns_total": 22,
+    "contains_edges": 25,
+    "sessions_total": 3,
+    "turns_with_aboutObject": 8,
+    "sessions_with_aboutObject": 2,
+    "objects_total": 2
+   },
+   "queries": {
+    "nodes_by_label": "MATCH (n) UNWIND labels(n) AS l RETURN l AS label, count(*) AS n ORDER BY n DESC",
+    "edges_by_type": "MATCH ()-[r]->() RETURN type(r) AS edge, count(*) AS n ORDER BY n DESC",
+    "aboutObject_by_endpoint": "MATCH (s)-[r:aboutObject]->(o) UNWIND labels(s) AS sl RETURN sl AS src_label, labels(o) AS dst_labels, count(*) AS n ORDER BY n DESC",
+    "points_total": "MATCH (p:Point) RETURN count(p) AS n",
+    "turns_total": "MATCH (p:Point) WHERE coalesce(p.is_episodic,false)=true AND p.pointKind='event' RETURN count(p) AS n",
+    "episodic_points_any_kind": "MATCH (p:Point) WHERE coalesce(p.is_episodic, false) = true RETURN count(p) AS n",
+    "turns_with_aboutObject": "MATCH (p:Point)-[:aboutObject]->(:Object) WHERE coalesce(p.is_episodic,false)=true AND p.pointKind='event' RETURN count(DISTINCT p) AS n",
+    "nonepisodic_points_with_aboutObject": "MATCH (p:Point)-[:aboutObject]->(:Object) WHERE coalesce(p.is_episodic, false) = false RETURN count(DISTINCT p) AS n",
+    "sessions_total": "MATCH (s:Session) RETURN count(s) AS n",
+    "sessions_with_aboutObject": "MATCH (s:Session)-[:aboutObject]->(:Object) RETURN count(DISTINCT s) AS n",
+    "contains_edges": "MATCH (:Session)-[r:CONTAINS]->(:Point) RETURN count(r) AS n",
+    "contains_distinct_pairs": "MATCH (s:Session)-[:CONTAINS]->(p:Point) RETURN count(DISTINCT s.id + '|' + p.id) AS n",
+    "contains_duplicate_pairs": "MATCH (s:Session)-[r:CONTAINS]->(p:Point) WITH s, p, count(r) AS c WHERE c > 1 RETURN count(*) AS n",
+    "sessions_with_contains": "MATCH (s:Session)-[:CONTAINS]->(:Point) RETURN count(DISTINCT s) AS n",
+    "contains_targets_by_kind": "MATCH (:Session)-[:CONTAINS]->(p:Point) RETURN p.pointKind AS pointKind, coalesce(p.is_episodic, false) AS episodic, count(*) AS n ORDER BY n DESC",
+    "sessions_with_gt1_contains_turn": "MATCH (s:Session)-[:CONTAINS]->(p:Point) WITH s, count(DISTINCT p) AS c WHERE c > 1 RETURN count(*) AS n",
+    "sessions_with_gt1_entity_linked_turn": "MATCH (s:Session)-[:CONTAINS]->(p:Point)-[:aboutObject]->(:Object) WITH s, count(DISTINCT p) AS c WHERE c > 1 RETURN count(*) AS n",
+    "sessions_with_gt1_aboutObject_edge": "MATCH (s:Session)-[:aboutObject]->(o:Object) WITH s, count(DISTINCT o) AS c WHERE c > 1 RETURN count(*) AS n",
+    "turns_per_session_contains_max_avg": "MATCH (s:Session)-[:CONTAINS]->(p:Point) WITH s, count(DISTINCT p) AS c RETURN max(c) AS max_c, toFloat(sum(c)) / count(s) AS avg_c",
+    "session_signature": "MATCH (s:Session) WITH keys(s) AS k, count(*) AS n RETURN k, n ORDER BY n DESC",
+    "session_turn_count_sum": "MATCH (s:Session) RETURN sum(coalesce(s.turn_count, 0)) AS n",
+    "objects_total": "MATCH (o:Object) RETURN count(o) AS n",
+    "objects_with_gt1_turn": "MATCH (t:Point)-[:aboutObject]->(o:Object) WITH o, count(DISTINCT t) AS c WHERE c > 1 RETURN count(*) AS n",
+    "objects_reaching_gt1_session": "MATCH (s:Session)-[:aboutObject]->(o:Object) WITH o, count(DISTINCT s) AS c WHERE c > 1 RETURN count(*) AS n",
+    "objects_with_point_attachment": "MATCH (o:Object) WHERE (:Point)-[:aboutObject]->(o) RETURN count(o) AS n",
+    "objects_with_any_attachment": "MATCH (o:Object) WHERE ()-[:aboutObject]->(o) RETURN count(o) AS n",
+    "events_total": "MATCH (e:Event) RETURN count(e) AS n",
+    "events_with_aboutObject": "MATCH (e:Event)-[:aboutObject]->(:Object) RETURN count(DISTINCT e) AS n",
+    "event_session_ids_distinct": "MATCH (e:Event)-[:aboutObject]->(:Object) RETURN count(DISTINCT e.session_id) AS n",
+    "events_without_session_id": "MATCH (e:Event) WHERE e.session_id IS NULL RETURN count(e) AS n",
+    "events_with_aboutObject_missing_session_id": "MATCH (e:Event)-[:aboutObject]->(:Object) WHERE e.session_id IS NULL RETURN count(e) AS n",
+    "objects_reaching_gt1_event": "MATCH (:Event)-[:aboutObject]->(o:Object) WITH o, count(*) AS c WHERE c > 1 RETURN count(*) AS n",
+    "event_objects_total_distinct": "MATCH (:Event)-[:aboutObject]->(o:Object) RETURN count(DISTINCT o) AS n"
+   },
+   "per_session_queries": {
+    "contains_turns": "MATCH (:Session {id:$sid})-[:CONTAINS]->(p:Point) WHERE coalesce(p.is_episodic,false)=true AND p.pointKind='event' RETURN count(DISTINCT p)",
+    "contains_points_all_kinds": "MATCH (:Session {id:$sid})-[:CONTAINS]->(p:Point) RETURN count(DISTINCT p)",
+    "entity_linked_turns": "MATCH (:Session {id:$sid})-[:CONTAINS]->(p:Point)-[:aboutObject]->(:Object) WHERE coalesce(p.is_episodic,false)=true AND p.pointKind='event' RETURN count(DISTINCT p)",
+    "session_aboutObject_edges": "MATCH (:Session {id:$sid})-[:aboutObject]->(:Object) RETURN count(*)",
+    "shared_points": "MATCH (:Session {id:$sid})-[:CONTAINS]->(p:Point) WITH p MATCH (s2:Session)-[:CONTAINS]->(p) WITH p, count(DISTINCT s2) AS c WHERE c > 1 RETURN count(DISTINCT p)"
+   }
+  },
+  "live": {
+   "uri": "docker://:@localhost:16379/tortoise",
+   "graph": "tortoise",
+   "read_only": "ro_query=True",
+   "role_evidence": {
+    "uri_source": "~/.zshrc:48",
+    "graphs_on_instance": 173,
+    "note": "this receipt proves the URI STRING lives in a shell profile and records this graph's contents. It does NOT prove this is the product's turn store \u2014 see 'instrument' for the 60 sibling graphs on the same instance that hold turns."
+   },
+   "counts": {
+    "nodes_by_label": [
+     [
+      "GraphEvent",
+      10742
+     ],
+     [
+      "Point",
+      10518
+     ],
+     [
+      "Source",
+      61
+     ],
+     [
+      "Tag",
+      16
+     ],
+     [
+      "MpProbe",
+      13
+     ],
+     [
+      "PackInstall",
+      5
+     ],
+     [
+      "evidence",
+      5
+     ],
+     [
+      "Document",
+      2
+     ],
+     [
+      "Meta",
+      2
+     ],
+     [
+      "EpMeta",
+      1
+     ],
+     [
+      "Event",
+      1
+     ],
+     [
+      "Evidence",
+      1
+     ],
+     [
+      "GraphEventMeta",
+      1
+     ],
+     [
+      "ProbeQ",
+      1
+     ],
+     [
+      "__w",
+      1
+     ]
+    ],
+    "edges_by_type": [
+     [
+      "IMPL",
+      14305
+     ],
+     [
+      "INPUT",
+      10506
+     ],
+     [
+      "NAND",
+      1345
+     ],
+     [
+      "extractedFrom",
+      73
+     ],
+     [
+      "CORRECTS",
+      54
+     ],
+     [
+      "SUPPORTS",
+      52
+     ],
+     [
+      "hasPart",
+      47
+     ],
+     [
+      "mitigated_by",
+      45
+     ],
+     [
+      "measures",
+      40
+     ],
+     [
+      "TAGGED",
+      20
+     ],
+     [
+      "addresses",
+      19
+     ],
+     [
+      "SOURCE",
+      18
+     ],
+     [
+      "TARGET",
+      18
+     ],
+     [
+      "dependsOn",
+      17
+     ],
+     [
+      "references",
+      17
+     ],
+     [
+      "refutes",
+      17
+     ],
+     [
+      "related",
+      16
+     ],
+     [
+      "supports",
+      15
+     ],
+     [
+      "refutes_in_part",
+      5
+     ],
+     [
+      "MEASURES",
+      4
+     ],
+     [
+      "REFUTES",
+      3
+     ],
+     [
+      "BLOCKS",
+      2
+     ],
+     [
+      "blocks",
+      1
+     ]
+    ],
+    "aboutObject_by_endpoint": null,
+    "points_total": 10518,
+    "turns_total": 0,
+    "episodic_points_any_kind": 0,
+    "turns_with_aboutObject": 0,
+    "nonepisodic_points_with_aboutObject": 0,
+    "sessions_total": 0,
+    "sessions_with_aboutObject": 0,
+    "contains_edges": 0,
+    "contains_distinct_pairs": 0,
+    "contains_duplicate_pairs": 0,
+    "sessions_with_contains": 0,
+    "contains_targets_by_kind": null,
+    "sessions_with_gt1_contains_turn": 0,
+    "sessions_with_gt1_entity_linked_turn": 0,
+    "sessions_with_gt1_aboutObject_edge": 0,
+    "turns_per_session_contains_max_avg": [
+     [
+      null,
+      null
+     ]
+    ],
+    "session_signature": null,
+    "session_turn_count_sum": 0.0,
+    "objects_total": 0,
+    "objects_with_gt1_turn": 0,
+    "objects_reaching_gt1_session": 0,
+    "objects_with_point_attachment": 0,
+    "objects_with_any_attachment": 0,
+    "events_total": 1,
+    "events_with_aboutObject": 0,
+    "event_session_ids_distinct": 0,
+    "events_without_session_id": 1,
+    "events_with_aboutObject_missing_session_id": 0,
+    "objects_reaching_gt1_event": 0,
+    "event_objects_total_distinct": 0
+   },
+   "empty_or_absent": false,
+   "queries": {
+    "nodes_by_label": "MATCH (n) UNWIND labels(n) AS l RETURN l AS label, count(*) AS n ORDER BY n DESC",
+    "edges_by_type": "MATCH ()-[r]->() RETURN type(r) AS edge, count(*) AS n ORDER BY n DESC",
+    "aboutObject_by_endpoint": "MATCH (s)-[r:aboutObject]->(o) UNWIND labels(s) AS sl RETURN sl AS src_label, labels(o) AS dst_labels, count(*) AS n ORDER BY n DESC",
+    "points_total": "MATCH (p:Point) RETURN count(p) AS n",
+    "turns_total": "MATCH (p:Point) WHERE coalesce(p.is_episodic,false)=true AND p.pointKind='event' RETURN count(p) AS n",
+    "episodic_points_any_kind": "MATCH (p:Point) WHERE coalesce(p.is_episodic, false) = true RETURN count(p) AS n",
+    "turns_with_aboutObject": "MATCH (p:Point)-[:aboutObject]->(:Object) WHERE coalesce(p.is_episodic,false)=true AND p.pointKind='event' RETURN count(DISTINCT p) AS n",
+    "nonepisodic_points_with_aboutObject": "MATCH (p:Point)-[:aboutObject]->(:Object) WHERE coalesce(p.is_episodic, false) = false RETURN count(DISTINCT p) AS n",
+    "sessions_total": "MATCH (s:Session) RETURN count(s) AS n",
+    "sessions_with_aboutObject": "MATCH (s:Session)-[:aboutObject]->(:Object) RETURN count(DISTINCT s) AS n",
+    "contains_edges": "MATCH (:Session)-[r:CONTAINS]->(:Point) RETURN count(r) AS n",
+    "contains_distinct_pairs": "MATCH (s:Session)-[:CONTAINS]->(p:Point) RETURN count(DISTINCT s.id + '|' + p.id) AS n",
+    "contains_duplicate_pairs": "MATCH (s:Session)-[r:CONTAINS]->(p:Point) WITH s, p, count(r) AS c WHERE c > 1 RETURN count(*) AS n",
+    "sessions_with_contains": "MATCH (s:Session)-[:CONTAINS]->(:Point) RETURN count(DISTINCT s) AS n",
+    "contains_targets_by_kind": "MATCH (:Session)-[:CONTAINS]->(p:Point) RETURN p.pointKind AS pointKind, coalesce(p.is_episodic, false) AS episodic, count(*) AS n ORDER BY n DESC",
+    "sessions_with_gt1_contains_turn": "MATCH (s:Session)-[:CONTAINS]->(p:Point) WITH s, count(DISTINCT p) AS c WHERE c > 1 RETURN count(*) AS n",
+    "sessions_with_gt1_entity_linked_turn": "MATCH (s:Session)-[:CONTAINS]->(p:Point)-[:aboutObject]->(:Object) WITH s, count(DISTINCT p) AS c WHERE c > 1 RETURN count(*) AS n",
+    "sessions_with_gt1_aboutObject_edge": "MATCH (s:Session)-[:aboutObject]->(o:Object) WITH s, count(DISTINCT o) AS c WHERE c > 1 RETURN count(*) AS n",
+    "turns_per_session_contains_max_avg": "MATCH (s:Session)-[:CONTAINS]->(p:Point) WITH s, count(DISTINCT p) AS c RETURN max(c) AS max_c, toFloat(sum(c)) / count(s) AS avg_c",
+    "session_signature": "MATCH (s:Session) WITH keys(s) AS k, count(*) AS n RETURN k, n ORDER BY n DESC",
+    "session_turn_count_sum": "MATCH (s:Session) RETURN sum(coalesce(s.turn_count, 0)) AS n",
+    "objects_total": "MATCH (o:Object) RETURN count(o) AS n",
+    "objects_with_gt1_turn": "MATCH (t:Point)-[:aboutObject]->(o:Object) WITH o, count(DISTINCT t) AS c WHERE c > 1 RETURN count(*) AS n",
+    "objects_reaching_gt1_session": "MATCH (s:Session)-[:aboutObject]->(o:Object) WITH o, count(DISTINCT s) AS c WHERE c > 1 RETURN count(*) AS n",
+    "objects_with_point_attachment": "MATCH (o:Object) WHERE (:Point)-[:aboutObject]->(o) RETURN count(o) AS n",
+    "objects_with_any_attachment": "MATCH (o:Object) WHERE ()-[:aboutObject]->(o) RETURN count(o) AS n",
+    "events_total": "MATCH (e:Event) RETURN count(e) AS n",
+    "events_with_aboutObject": "MATCH (e:Event)-[:aboutObject]->(:Object) RETURN count(DISTINCT e) AS n",
+    "event_session_ids_distinct": "MATCH (e:Event)-[:aboutObject]->(:Object) RETURN count(DISTINCT e.session_id) AS n",
+    "events_without_session_id": "MATCH (e:Event) WHERE e.session_id IS NULL RETURN count(e) AS n",
+    "events_with_aboutObject_missing_session_id": "MATCH (e:Event)-[:aboutObject]->(:Object) WHERE e.session_id IS NULL RETURN count(e) AS n",
+    "objects_reaching_gt1_event": "MATCH (:Event)-[:aboutObject]->(o:Object) WITH o, count(*) AS c WHERE c > 1 RETURN count(*) AS n",
+    "event_objects_total_distinct": "MATCH (:Event)-[:aboutObject]->(o:Object) RETURN count(DISTINCT o) AS n"
+   }
+  },
+  "instrument": {
+   "uri": "docker://:@localhost:16379/tortoise",
+   "graphs_on_instance": 173,
+   "graphs_with_turn_store": 60,
+   "totals": {
+    "sessions": 2411,
+    "turns": 24999,
+    "contains_edges": 37605,
+    "contains_distinct_pairs": 37605,
+    "contains_duplicate_pairs": 0,
+    "aboutObject_edges": 0,
+    "turns_with_aboutObject": 0
+   },
+   "contains_targets_by_kind": {
+    "event": 24999,
+    "session-transcript": 12606
+   },
+   "graphs_with_any_aboutObject": 0,
+   "graphs_with_zero_aboutObject": 60,
+   "every_graph_has_fewer_turns_than_contains": true,
+   "per_graph": [
+    {
+     "graph": "org_default__default__58bf7951",
+     "sessions": 57,
+     "turns": 616,
+     "contains_edges": 927,
+     "contains_distinct_pairs": 927,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       616
+      ],
+      [
+       "session-transcript",
+       311
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__71017276",
+     "sessions": 49,
+     "turns": 614,
+     "contains_edges": 923,
+     "contains_distinct_pairs": 923,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       614
+      ],
+      [
+       "session-transcript",
+       309
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__7e00a6cb",
+     "sessions": 62,
+     "turns": 564,
+     "contains_edges": 852,
+     "contains_distinct_pairs": 852,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       564
+      ],
+      [
+       "session-transcript",
+       288
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__e47becba",
+     "sessions": 53,
+     "turns": 550,
+     "contains_edges": 827,
+     "contains_distinct_pairs": 827,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       550
+      ],
+      [
+       "session-transcript",
+       277
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__7161e7e2",
+     "sessions": 48,
+     "turns": 550,
+     "contains_edges": 827,
+     "contains_distinct_pairs": 827,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       550
+      ],
+      [
+       "session-transcript",
+       277
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__e9327a54",
+     "sessions": 50,
+     "turns": 533,
+     "contains_edges": 803,
+     "contains_distinct_pairs": 803,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       533
+      ],
+      [
+       "session-transcript",
+       270
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__89941a93",
+     "sessions": 51,
+     "turns": 528,
+     "contains_edges": 793,
+     "contains_distinct_pairs": 793,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       528
+      ],
+      [
+       "session-transcript",
+       265
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__51a45a95",
+     "sessions": 50,
+     "turns": 529,
+     "contains_edges": 795,
+     "contains_distinct_pairs": 795,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       529
+      ],
+      [
+       "session-transcript",
+       266
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__4c36ccef",
+     "sessions": 49,
+     "turns": 521,
+     "contains_edges": 783,
+     "contains_distinct_pairs": 783,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       521
+      ],
+      [
+       "session-transcript",
+       262
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__35a27287",
+     "sessions": 51,
+     "turns": 519,
+     "contains_edges": 780,
+     "contains_distinct_pairs": 780,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       519
+      ],
+      [
+       "session-transcript",
+       261
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__32260d93",
+     "sessions": 46,
+     "turns": 524,
+     "contains_edges": 789,
+     "contains_distinct_pairs": 789,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       524
+      ],
+      [
+       "session-transcript",
+       265
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__d7c942c3",
+     "sessions": 49,
+     "turns": 520,
+     "contains_edges": 782,
+     "contains_distinct_pairs": 782,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       520
+      ],
+      [
+       "session-transcript",
+       262
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__b5ef892d",
+     "sessions": 52,
+     "turns": 516,
+     "contains_edges": 775,
+     "contains_distinct_pairs": 775,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       516
+      ],
+      [
+       "session-transcript",
+       259
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__58ef2f1c",
+     "sessions": 50,
+     "turns": 518,
+     "contains_edges": 780,
+     "contains_distinct_pairs": 780,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       518
+      ],
+      [
+       "session-transcript",
+       262
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__71315a70",
+     "sessions": 53,
+     "turns": 514,
+     "contains_edges": 772,
+     "contains_distinct_pairs": 772,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       514
+      ],
+      [
+       "session-transcript",
+       258
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__6ade9755",
+     "sessions": 51,
+     "turns": 513,
+     "contains_edges": 774,
+     "contains_distinct_pairs": 774,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       513
+      ],
+      [
+       "session-transcript",
+       261
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__195a1a1b",
+     "sessions": 46,
+     "turns": 515,
+     "contains_edges": 773,
+     "contains_distinct_pairs": 773,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       515
+      ],
+      [
+       "session-transcript",
+       258
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__1e043500",
+     "sessions": 50,
+     "turns": 510,
+     "contains_edges": 767,
+     "contains_distinct_pairs": 767,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       510
+      ],
+      [
+       "session-transcript",
+       257
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__8a2466db",
+     "sessions": 50,
+     "turns": 508,
+     "contains_edges": 766,
+     "contains_distinct_pairs": 766,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       508
+      ],
+      [
+       "session-transcript",
+       258
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__830ce83f",
+     "sessions": 47,
+     "turns": 511,
+     "contains_edges": 768,
+     "contains_distinct_pairs": 768,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       511
+      ],
+      [
+       "session-transcript",
+       257
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__gpt4_fa19884c",
+     "sessions": 46,
+     "turns": 507,
+     "contains_edges": 763,
+     "contains_distinct_pairs": 763,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       507
+      ],
+      [
+       "session-transcript",
+       256
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__6d550036",
+     "sessions": 47,
+     "turns": 505,
+     "contains_edges": 761,
+     "contains_distinct_pairs": 761,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       505
+      ],
+      [
+       "session-transcript",
+       256
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__6f9b354f",
+     "sessions": 50,
+     "turns": 500,
+     "contains_edges": 753,
+     "contains_distinct_pairs": 753,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       500
+      ],
+      [
+       "session-transcript",
+       253
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__afdc33df",
+     "sessions": 46,
+     "turns": 502,
+     "contains_edges": 754,
+     "contains_distinct_pairs": 754,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       502
+      ],
+      [
+       "session-transcript",
+       252
+      ]
+     ]
+    },
+    {
+     "graph": "org_default__default__gpt4_f49edff3",
+     "sessions": 47,
+     "turns": 498,
+     "contains_edges": 748,
+     "contains_distinct_pairs": 748,
+     "contains_duplicate_pairs": 0,
+     "aboutObject_edges": 0,
+     "turns_with_aboutObject": 0,
+     "contains_targets_by_kind": [
+      [
+       "event",
+       498
+      ],
+      [
+       "session-transcript",
+       250
+      ]
+     ]
+    }
+   ],
+   "note": "these stores are written by the fixture seeder (tools/ask_spotcheck.seed_capture_turn_store), which writes the Session->turn CONTAINS edges but does NOT run the entity-link pass \u2014 so 0 aboutObject here is the SEEDER's shape, not the writer's"
+  },
+  "corpus": {
+   "source": "/Users/danielospina/.tortoise/session-events",
+   "stats": {
+    "files": 106,
+    "records": 123033,
+    "parse_errors": 0,
+    "records_without_text": 0,
+    "turn_occurrences": 1138974,
+    "turn_occurrences_with_ref": 252417
+   },
+   "sessions": 73792,
+   "turns_distinct": 736509,
+   "turns_naming_a_ref_distinct": 176802,
+   "sessions_with_gt1_turn": 73095,
+   "sessions_with_gt1_ref_turn": 37014,
+   "sessions_with_any_ref_turn": 57474,
+   "max_turns_per_session": 1940,
+   "records_per_session": 1.667,
+   "ref_density_note": "a turn 'names a ref' when the PRODUCTION resolver session_link.extract_refs matches; it can still resolve to nothing if no matching Object exists in the graph"
+  }
+ },
+ "warnings": []
+}
