@@ -227,8 +227,12 @@ make this the case that goes wrong:
    product; archive the OLD path and treat the new one as new code.
 
 The gate that reads this is `check --base-ref` (bare `--base-ref` = the default branch), which
-compares the MERGE BASE's package set with this tree's, adding package ancestors on both sides so
-that deleting an `__init__.py` whose package still imports is not a removal. It is part of the
+compares the MERGE BASE's package set with this tree's. ⚠️ The boundary for an `__init__.py` is
+its CONTENT, not its path: one that carries no statement of its own (empty, whitespace, or a
+docstring alone) is scaffolding, so deleting it while a sibling submodule keeps the package
+alive is not a removal. An `__init__.py` that carried a body at the base is product code: it is
+a `module` removal even though the package name still resolves, and it must carry its record
+(`tortoise/__init__.py` is 406 lines of the public API). It is part of the
 `surface-guard` job on every PR, and an unresolvable base ref is a REFUSAL (exit 2), never a
 quiet pass. If the deletion is already recorded somewhere this gate cannot read, state it:
 `--allow-archive-shrink module:<dotted.path> --allow-archive-shrink-reason <why>` (a local-shell
