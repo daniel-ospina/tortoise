@@ -4393,6 +4393,18 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
             f"{equivalent_class!r} counts the BLANK lines and must be graded as this class — "
             "a spelling list read it as some OTHER class, which left a second prescription green "
             "and misattributed the ZERO message (#13995 review, P2)")
+    # ⛔ THE DECLARED SUPERSET IS PINNED, because the docstring makes a claim about it
+    # (#13995 review round 18, P2 — MEASURED). Refusing a bracket that carries TWO backslashes
+    # left all eight d5 tests GREEN while the paragraph above became false beside green code: the
+    # sentence "two backslashes can still pass" had no witness.
+    assert _d5_counts_the_blank_class("^[+\\-]$"), (
+        "a backslash-bearing bracket is ACCEPTED as a DECLARED SUPERSET — it counts the two class "
+        "lines plus a literal `\\` (3, measured). If this reads False, the superset paragraph in "
+        "`_d5_counts_the_blank_class` is false and must be corrected in the same commit")
+    assert _d5_counts_the_blank_class("^[\\+\\-]$"), (
+        "two backslashes do not change the superset: `^[\\+\\-]$` is still accepted and still "
+        "counts 3 (`grep -cE` rc 0, measured) — the sentence says so, so it must be witnessed")
+
     # …and the residual the class test DECLARES: regexes equivalent to this class but spelled
     # outside the measured forms are not recognised. Pinned so a widening reds HERE and the
     # docstring at `_d5_counts_the_blank_class` is corrected in the same commit.
@@ -4425,7 +4437,13 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
                        # ⛔ AND A FOUR-BRANCH BODY (#13995 review round 16, P3 — MEASURED: with the
                        # guard rewritten as `1 < len(alternatives) < 4` every d5 test still passed
                        # and this one was graded as the class on a `grep -cE` count of 6).
-                       "^\\+|-|\\+|-$"):
+                       "^\\+|-|\\+|-$",
+                       # ⛔ AND A RANGE, because the docstring's bound names it: `^[+-+-+]$` is
+                       # grep rc 2 (`Invalid range end`) and only the range branch of
+                       # `_d5_class_members` refuses it — with that branch deleted, 14
+                       # grep-refused spellings were graded as the class and all 8 d5 tests
+                       # stayed GREEN (#13995 review round 18, P3 — MEASURED).
+                       "^[+-+-+]$"):
         assert not _d5_counts_the_blank_class(half_class), (
             f"{half_class!r} must NOT be graded as the blank class: none of these counts exactly "
             "the two class lines (`^-$` counts only the removed half, measured 0 on a diff whose "
