@@ -3177,10 +3177,10 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # draft said "61 of the 192", the figure did not reproduce under any reading of "that arm",
     # and the `192` was not this head's tuple length either way it is counted — the same
     # typed-figure rot this file polices about itself, caught by #13802 review round 28, P3,
-    # whose own correction re-typed that `192` as the PARENT head's tuple length (HISTORY, and
-    # false there too: `fa248e666f` measures 201 elements / 189 string literals) and was
-    # refuted in round 29, P3. Both numerals here are QUOTED REFUTATIONS, never a reading: no
-    # count for this tuple is typed, which is why none is re-derived.
+    # whose own correction re-typed that `192` as the PARENT head's tuple length — HISTORY,
+    # and false at that head too — and which round 29, P3 refuted a THIRD time. ⛔ NO count of
+    # either tuple is re-derived or typed here: every numeral in this note is a quoted
+    # refutation, never a reading of this head, which is why none is re-derived.
     r"(?:\s+there)?(?:\s*,?\s*(?:\([^)]{0,90}\)|[\w/-]+),?){0,8}\s*[*_`]{0,3}\s*"
     # ⛔ THE VERB CLASS IS THE DETECTOR'S OWN LIST (#13802 review, round 5, P2; merge-round
     # review, P1): `reports exactly two paths` and `yields `tortoise/x.py`` were green
