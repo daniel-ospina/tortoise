@@ -311,7 +311,41 @@ SWEEP_NAMES = 66
 #: on a tree that itself derived 11821, while `main` at `38086c1bc5` derived 11822. A stale pin on
 #: main is a red gate on every PR that touches nothing in this population (#14062).
 #: Measured with `--repin` on THIS tree, never by arithmetic on the last pin.
-SWEEP_RESIDUE = (11829, "f0301da129c0c584")
+#:
+#: RE-CUT DOWN (11829, "f0301da129c0c584") → (11825, "539914480e400722") by the `#14001` lane, on
+#: `origin/main` `f392bb67d5`. The delta is −6 and it is a REMOVAL, not an absorption: SIX of the
+#: eight rows the `#14062` block above declared are the `poisoned.update` shape, and this lane
+#: deleted the shape rather than declaring it. The binding-poison arms in
+#: `tools/strip_graph_entity_vectors.py` called `poisoned.update(…)`, which this sweep cannot type
+#: on an ordinary-word receiver. FIVE of them are now `poisoned |= …` — the same store, no row — and
+#: one of those five keeps a `set(...)` conversion (`poisoned |= set(sub.names)`):
+#: `ast.Global.names` / `ast.Nonlocal.names` are `list[str]` and `set |= list` is a `TypeError`
+#: (`set.__ior__` takes a set, unlike `.update`, which takes any iterable), measured — the
+#: `nonlocal-rebinding` row fails on exactly that. The SIXTH arm was DELETED, not converted: a
+#: nested-scope `Assign` + `_dynamic_namespace_write` branch that could never run, because an
+#: identical predicate `continue`s above it and the generic `Assign`/`AnnAssign` arm consumes the
+#: rest. It only cost a residue row. ⛔ Five conversions and one deletion is SIX rows; the count is
+#: stated here because "each is now `poisoned |= …`" was this block's own first draft and the tree
+#: falsifies it (raised by a fresh review of this branch's pre-rebase head, #14058 — ⛔ cited by
+#: ISSUE NUMBER and not by sha on purpose: a pre-rebase commit is reachable from no ref and
+#: disappears on the next `gc`, so a sha here would be an unreproducible address of exactly the
+#: kind this block forbids elsewhere).
+#: ⛔ The −6 is verified as an ATTRIBUTION and not as a direction: the residue row sets were
+#: MEASURED on both trees and diffed row by row (`py_files()` → `edits_for()` → `residue` on
+#: `origin/main`'s own tree and on this one), and `poisoned.update` 6 → 0 is the ONLY row that
+#: differs. Nothing else moved in either direction.
+#: TWO absorbed rows are `main`'s, not this lane's, and they are named here because a re-pin that
+#: only states the count is what this block forbids. `main` re-cut to 11829 at `d4a8dddc4e`, then
+#: DRIFTED a further +2 before `f392bb67d5` — so `main`'s own tree measures 11831 against its own
+#: 11829 pin, and `--check` is RED on `main` right now (the same recurrence `#14062` documents: the
+#: pin is graded on PULL REQUESTS only, so `main` drifts and every open PR is then graded against a
+#: stale number). The two rows are `found.update` 10 → 12, both in `tests/test_usage_signal.py`,
+#: added by `ac57b2d38a` (`#14065`) — a concurrent merge between this pin and this tree. Both sit on
+#: a plain `set` fed by a generator expression, so neither is a typed reference to a swept name
+#: (`typed references still pointing at a public name: 0` on this tree).
+#: 11831 − 6 = 11825, and that arithmetic is a CROSS-CHECK of the measurement, not the evidence for
+#: it: what was pasted into the pin is the pair `--repin` printed on THIS tree.
+SWEEP_RESIDUE = (11825, "539914480e400722")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —

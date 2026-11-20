@@ -555,6 +555,24 @@ DEFEATED_RESOLVER_ROWS = (
         return None
     _write(props)
 """),
+    # ⛔ THE CANONICAL SHAPE OF THE DYNAMIC-NAMESPACE DEFECT, in the WRITER'S OWN SCOPE (`#14001`,
+    # round-5 review — the spelling `_dynamic_namespace_write`'s own docstring names): a subscript
+    # write to the module namespace with a CONSTANT key. No key-shape rule can see it (the key is a
+    # constant, so the stop arm's own `props[gk]` reads as a non-property store) and `gk` is not an
+    # assignment target, so ONLY the `global`-declaration arm poisons it. The two rows below pin
+    # the MUTATOR and the ONE-SCOPE-IN spellings; without this row the plain form the defect was
+    # MEASURED on had no regression pin, so an ordering change in the own-scope loop could re-open
+    # it with every row here still green (measured: disabling the own-scope dynamic arm reds THIS
+    # row alone, 26 of 27 siblings still pass).
+    ("globals-subscript-rebinding", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        globals()["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
     # the MUTATOR spelling of the dynamic-namespace write (residual 4's other half) …
     ("globals-mutator-rebinding", """
     global gk
