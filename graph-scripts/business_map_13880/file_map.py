@@ -451,12 +451,15 @@ def write_map(doc: dict) -> int:
         print(f"  subject  {s['name']:<34} -> {ids[s['ref']]}")
 
     # 2. Objects — products, competitors, programmes, goals, standards.
+    #    The lifecycle `status` is a tenant PROP, not a parameter of this door
+    #    (`tortoise_create_object(name, objectKind, props, goalState)`);
+    #    `goalState` is the one object field the surface names explicitly.
     for o in doc["objects"]:
         if already(f"object:{o['ref']}") and o["ref"] in ids:
             continue
         args = {"name": o["name"], "objectKind": o["objectKind"]}
         if o.get("status"):
-            args["status"] = o["status"]
+            args["props"] = {"status": o["status"]}
         if o.get("goalState"):
             args["goalState"] = o["goalState"]
         res = mcp.call("tortoise_create_object", args)
@@ -465,37 +468,45 @@ def write_map(doc: dict) -> int:
         print(f"  object   {o['name'][:44]:<44} -> {ids[o['ref']]}")
 
     # 3. Sources — the documents claims were read from.
+    #    `documentKind` is caller-settable but NOT a parameter of
+    #    `tortoise_create_source(url, sourceKind, tier, sourceDate, props)`.
     for s in doc["sources"]:
         if already(f"source:{s['ref']}") and s["ref"] in ids:
             continue
         args = {"url": s["url"], "sourceKind": s["sourceKind"]}
         if s.get("documentKind"):
-            args["documentKind"] = s["documentKind"]
+            args["props"] = {"documentKind": s["documentKind"]}
         res = mcp.call("tortoise_create_source", args)
         ids[s["ref"]] = _resolve(s["ref"], s["url"], res, "source")
         mark(f"source:{s['ref']}")
         print(f"  source   {s['url'][:60]:<60} -> {ids[s['ref']]}")
 
     # 4. Events — decisions belong on the timeline, not in the belief layer.
+    #    `tortoise_create_event(name, eventKind, props)`: the content and the
+    #    start time are PROPS, and `name` is required.
     for e in doc["events"]:
         if already(f"event:{e['ref']}") and e["ref"] in ids:
             continue
-        args = {"eventKind": e["eventKind"], "content": e["content"]}
+        props = {"content": e["content"]}
         if e.get("startedAt"):
-            args["startedAt"] = e["startedAt"]
-        res = mcp.call("tortoise_create_event", args)
+            props["startedAt"] = e["startedAt"]
+        res = mcp.call("tortoise_create_event",
+                       {"name": event_name(e), "eventKind": e["eventKind"], "props": props})
         ids[e["ref"]] = _resolve(e["ref"], e["content"], res, "event")
         mark(f"event:{e['ref']}")
         print(f"  event    {e['ref']:<34} -> {ids[e['ref']]}")
 
     # 5. Points — the claims.
+    #    Provenance to a Source is `props.extractedFrom` (the contract
+    #    `create_point` validates and `_link_source` reads); there is no
+    #    `source_url` parameter on this surface.
     for p in doc["points"]:
         if already(f"point:{p['ref']}") and p["ref"] in ids:
             continue
         args = {"content": p["content"], "kind": p.get("kind", "statement"), "dedup": True}
         src = p.get("source")
         if src:
-            args["source_url"] = doc_by_ref(doc, src)["url"]
+            args["props"] = {"extractedFrom": doc_by_ref(doc, src)["url"]}
         res = mcp.call("tortoise_create_point", args)
         ids[p["ref"]] = _resolve(p["ref"], p["content"], res, "point")
         mark(f"point:{p['ref']}")
@@ -503,6 +514,8 @@ def write_map(doc: dict) -> int:
 
     # 6. Edges — the whole point. Operators carry a mechanism + a meaning;
     #    structural relations are plain typed edges.
+    #    Spellings are the surface's own: `source_id`/`target_ids` on the
+    #    operator door, `source_id`/`target_id`/`predicate` on the edge door.
     for i, e in enumerate(doc["edges"]):
         marker = f"edge:{i}"
         if already(marker):
@@ -513,7 +526,7 @@ def write_map(doc: dict) -> int:
             continue
         try:
             if "op" in e:
-                args = {"op_type": e["op"], "src": src, "targets": [dst]}
+                args = {"op_type": e["op"], "source_id": src, "target_ids": [dst]}
                 if e.get("label"):
                     args["semantics"] = e["label"]
                 if e.get("direction"):
@@ -521,7 +534,8 @@ def write_map(doc: dict) -> int:
                 mcp.call("tortoise_create_operator", args)
             else:
                 mcp.call("tortoise_create_edge",
-                         {"from_id": src, "to_id": dst, "relation": e["relation"]})
+                         {"source_id": src, "target_id": dst,
+                          "predicate": e["relation"]})
             mark(marker)
         except Exception as exc:  # recorded in `failures`, never swallowed
             failures.append(f"{marker}: {e.get('op') or e.get('relation')} "
@@ -542,6 +556,18 @@ def doc_by_ref(doc: dict, ref: str) -> dict:
             if item["ref"] == ref:
                 return item
     raise KeyError(ref)
+
+
+def event_name(event: dict) -> str:
+    """The `name` the event door requires, taken from the map's own handle.
+
+    `tortoise_create_event(name, eventKind, props)` takes a required `name`, and
+    the map identifies an event by its `ref` (`ev:unlimited-graphs`) rather than
+    inventing a title. Deriving the name from the ref keeps the node's identity
+    the judgement's, not this script's: a name the map does not declare would be
+    a fact the door made up.
+    """
+    return event["ref"].split(":", 1)[-1].replace("-", " ")
 
 
 # ── read-back verification (read-only, FalkorDB) ──────────────────────────

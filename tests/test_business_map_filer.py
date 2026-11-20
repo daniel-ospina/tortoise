@@ -18,6 +18,7 @@ reds. The transport is stubbed (`_post`), so nothing here opens a socket.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 from pathlib import Path
@@ -26,6 +27,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 FILER = ROOT / "graph-scripts" / "business_map_13880" / "file_map.py"
+MCP_SERVER = ROOT / "tortoise" / "mcp_server.py"
 
 _spec = importlib.util.spec_from_file_location("business_map_filer", FILER)
 assert _spec and _spec.loader
@@ -151,6 +153,89 @@ def _node_rows(doc: dict) -> list[list[str]]:
     rows = [_row_for(doc, ref) for ref in refs]
     assert len(rows) == len(filer.map_identities(doc))
     return rows
+
+
+def test_every_write_uses_the_surface_spelling(tmp_path, monkeypatch, map_doc, capsys):
+    """Each `tools/call` names only parameters its handler ACCEPTS, and supplies
+    every one the handler requires without a default.
+
+    This is the pin for the class #13913's review found: the door was written
+    against parameter spellings the surface does not have (`src`/`targets`,
+    `from_id`/`to_id`/`relation`, `status`/`documentKind` as top-level keywords,
+    an event with no `name`), and `--dry-run` cannot see any of it — the first
+    symptom is a `TypeError` from the handler, which the pre-fix filer reported
+    as a successful write.
+
+    The signatures are read from `tortoise/mcp_server.py` with `ast`, not copied:
+    a transcription drifts, and a drifted transcription is exactly the false PASS
+    this map's own validator refuses.
+    """
+    sent: dict[str, list[dict]] = {}
+
+    class _Recording(_StubMcp):
+        def call(self, tool: str, args: dict) -> dict:
+            sent.setdefault(tool, []).append(dict(args))
+            return super().call(tool, args)
+
+    monkeypatch.setattr(filer, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setenv("TORTOISE_MCP_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(filer, "Mcp", _Recording)
+    assert filer.write_map(map_doc) == 0
+    capsys.readouterr()
+
+    signatures = _handler_signatures()
+    assert set(sent) == {
+        "tortoise_create_subject", "tortoise_create_object", "tortoise_create_source",
+        "tortoise_create_event", "tortoise_create_point", "tortoise_create_operator",
+        "tortoise_create_edge",
+    }
+    for tool, calls in sent.items():
+        accepted, required = signatures[tool]
+        for args in calls:
+            unknown = sorted(set(args) - accepted)
+            assert not unknown, (
+                f"{tool} does not take {unknown} — it takes {sorted(accepted)}"
+            )
+            missing = sorted(required - set(args))
+            assert not missing, f"{tool} requires {missing} and was not given them"
+
+
+def _handler_signatures() -> dict[str, tuple[set[str], set[str]]]:
+    """tool name -> (every parameter it accepts, the ones with no default).
+
+    Read from the module the MCP adapter registers (`FastMCPAdapter` binds each
+    registry entry to the module-level function of the same name), so the pin
+    is against the surface's own definitions rather than a copy of them.
+    """
+    tree = ast.parse(MCP_SERVER.read_text(encoding="utf-8"))
+    out: dict[str, tuple[set[str], set[str]]] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        positional = [a.arg for a in node.args.posonlyargs + node.args.args]
+        keyword_only = [a.arg for a in node.args.kwonlyargs]
+        with_default = len(node.args.defaults)
+        required = set(positional[: len(positional) - with_default])
+        required |= {
+            name
+            for name, default in zip(node.args.kwonlyargs, node.args.kw_defaults,
+                                     strict=False)
+            if default is None
+        }
+        out[node.name] = (set(positional) | set(keyword_only), required)
+    return out
+
+
+def test_the_signature_pin_reads_the_real_surface():
+    """Non-vacuity: the pin sees the surface, and would catch a wrong spelling."""
+    signatures = _handler_signatures()
+    accepted, required = signatures["tortoise_create_edge"]
+    assert accepted == {"source_id", "target_id", "predicate"}
+    assert required == accepted
+    assert "from_id" not in accepted
+
+    accepted, required = signatures["tortoise_create_event"]
+    assert required == {"name", "eventKind"}
 
 
 def test_the_readback_verdict_is_identity_scoped_not_a_count(map_doc):
