@@ -184,8 +184,10 @@ counts — `MATCH (t:Tag)` + `OPTIONAL MATCH (p:Point)-[:TAGGED]->(t)`), `:24327
 orphan GC), and `mcp_server.py`: `:11281` (`MATCH (t:Tag) OPTIONAL MATCH (t)<-[:TAGGED]-(q)`). The four
 `sdk.py` ones are spelled as bare `:NNNN` siblings behind one path, as the `mcp_server.py` group above
 does, and NOT as new `path.py:NNNN` pairs (in either spelling the header counts): a pair spelling would
-add five more pairs to the populations the figures above are measured over, while a bare sibling adds
-none. The pin agrees: `_REDEFINED_13854` pins each of these four by content at ONE occurrence of the
+add five more **as-written spellings** — 328 → 333 — and so 105 → 110 collisions, since a collision is a
+spelling that shares its `(path, line)` pair with another, while adding **no pair at all**: 223 either
+way, because each of the five already carries its pair from §2.5. A bare sibling adds neither. The pin
+agrees: `_REDEFINED_13854` pins each of these four by content at ONE occurrence of the
 §2.5 token, so a second one-token spelling would red it. Each was
 opened at this head, and ⛔ **none of them
 opens at the pin**: at `ccb49741b2ec` all five of those numbers

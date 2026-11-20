@@ -175,15 +175,22 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # §2.5 row left behind.
     (_AUDIT, "`:11281`", _MCP, 11281, "OPTIONAL MATCH (t)<-[:TAGGED]-(q)"),
     # 1 -> 3 at the #13991 merge of `origin/main` `0656b056d7`: the branch's OWN prose adds two more
-    # BARE sites of this same address, so the row above (`mcp_server.py:11281`, count 1) can no longer
-    # see every spelling of it. Measured on the merged document
+    # BARE sites of this same address, so the bare-token row DIRECTLY ABOVE (`` `:11281` ``, count
+    # 1 -> 3) can no longer see every spelling of it; the `mcp_server.py:11281` row twelve lines up
+    # (count 1) covers only the §2.5 one-token spelling. Measured on the merged document
     # (`.venv/bin/python -c 'from pathlib import Path; t=Path("docs/architecture/
-    # CAPABILITY-PLACEMENT-AUDIT.md").read_text(); print(t.count("`:11281`"))'` -> 3):
+    # CAPABILITY-PLACEMENT-AUDIT.md").read_text(); print(t.count("`:11281`"))'` -> 3), with the site
+    # lines RE-MEASURED on this document rather than carried from the pre-merge edition — `main`'s
+    # merge `0656b056d7` shifted the last two by +2 and the #13991 P2 fix above added another +2, so
+    # the pre-merge `:182`/`:585` named lines that no longer hold:
     #   :171  the header trio above — main's site, the one this row was created for;
-    #   :182  the §2.5 `:Tag`-family enumeration this branch adds, which lists all five reader
+    #   :184  the §2.5 `:Tag`-family enumeration this branch adds, which lists all five reader
     #         addresses (the four `sdk.py` ones plus this `mcp_server.py` one) as BARE siblings so the
     #         `_REDEFINED_13854` one-token counts are not doubled;
-    #   :585  the same branch's §2.5 provenance sentence, `:11280` -> `:11281`.
+    #   :589  the same branch's §2.5 provenance sentence, `:11280` -> `:11281`.
+    # Re-derive with `grep -n '`:11281`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` before
+    # trusting this list on a later head: a line number in prose is exactly the claim this file pins
+    # for the document, and it drifts the same way.
     # All three name ONE address with ONE meaning, so this is not the `b9e7822362c6` class (two
     # addresses for one reader). The count is kept at the measured number rather than deleting a
     # spelling: re-pointing any one of the three now reds here, which is the discrimination the row
@@ -782,6 +789,33 @@ def test_the_published_denominator_is_the_count_of_this_file() -> None:
         + "\nRe-measure by the header's rule (count the one-token `path.py:NNNN` spellings, resolve each, "
         "dedupe to `(path, start line)`, and compare the pin's line against the named `main`'s text for "
         "text) and update all of its sites together — never by applying a delta to the published number."
+    )
+
+
+def test_the_five_header_siblings_already_carry_their_pair_from_section_2_5() -> None:
+    """The header's bare-sibling clause is only true while each of the five is ALSO written one-token.
+
+    The clause now says a `path.py:NNNN` re-spelling would add "five more **as-written spellings** —
+    328 → 333 — and so 105 → 110 collisions … while adding **no pair at all**: 223 either way, because
+    each of the five already carries its pair from §2.5". That last half is the load-bearing one, and it
+    was FALSE for the sentence it replaced: the previous edition claimed a pair spelling "would add five
+    more pairs to the populations the figures above are measured over" (`#13991` review, P2-1), while
+    measuring the same re-spelling with this file's own `_resolved_pairs` puts the delta at **0 pairs /
+    +5 spellings** — the pairs do not move and the collisions do.
+
+    That 0 is a set-membership fact, not an arithmetic one: a re-spelling adds no pair BECAUSE all five
+    `(resolved path, line)` pairs are already in the population, from the §2.5 one-token sites. Delete
+    ONE of those sites and the corrected clause goes false with no other arm red, so the premise is
+    recovered from the document here rather than trusted to the prose.
+    """
+    _spellings, pairs = _resolved_pairs((REPO / _AUDIT).read_text(encoding="utf-8"))
+    five = [(_SDK, 31365), (_SDK, 31347), (_SDK, 24327), (_SDK, 24671), (_MCP, 11281)]
+    missing = [pair for pair in five if pair not in pairs]
+    assert not missing, (
+        f"the header's §2.5 `:Tag` enumeration says each of these addresses 'already carries its pair "
+        f"from §2.5', but {missing} has no one-token `path.py:NNNN` spelling anywhere in the document — "
+        "so re-spelling the bare header siblings WOULD add pairs and the clause's 'no pair at all' "
+        "would be false. Restore the §2.5 one-token spelling, or correct the clause to the measurement."
     )
 
 
