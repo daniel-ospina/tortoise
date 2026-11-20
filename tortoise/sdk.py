@@ -59429,6 +59429,13 @@ class TortoiseSDK:
         # ever. It is ALSO not work: `retired` is its own verdict because a caller that
         # reads `healed` as "something was written" reports the unit `updated` for a run
         # that wrote neither the Event nor a vector (#13826 review).
+        # ⚠️ DEFENSIVE, and stated rather than implied (#13854 review cycle 4, P2): today's
+        # ONLY caller is reached from `_embedding_incomplete`, which already requires this
+        # same answer to be TRUE — so this arm cannot fire from that path, and a falsifier
+        # can only drive the function directly. It stays because that reachability is a
+        # property of the completeness clause, not of this function: relaxing the clause
+        # (e.g. so a unit is still repaired when only the graph copy is missing) would put
+        # a gated write straight back on this path, and the arm is one line of rent.
         if not _derived_mirror_required("event"):
             return ("retired", None)
         try:
