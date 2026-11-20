@@ -642,9 +642,14 @@ _ALT_BASIS = re.compile(r"counting that form gives (\d+) pairs and (\d+) drifter
 #: be completed by a prefix — so the only outcome above the ceiling was that false absence verdict.
 #: `zero`/`none` are entries, not decoration: an honest re-measurement can find NO two-code-span pair
 #: left, and `zero` shipped as a `_NUMERALS` key no pattern could ever feed (dead entry, `#14010` round 4).
+#: ⛔ The ZERO spellings are named once here, and both structures below are derived from this tuple — the
+#: table that used to write them out a second time and number the rest with `_SPELLED_NUMERALS[2:]` was
+#: coupled BY INDEX: inserting one spelling re-numbered every spelled count after it, so a correct
+#: `one of them …` was graded `2` and red on correct text. Extending the vocabulary is the edit the comment
+#: invited, and it silently broke the grader (`#14010` round-5 review, P2).
+_ZERO_NUMERALS: tuple[str, ...] = ("zero", "none")
 _SPELLED_NUMERALS: tuple[str, ...] = (
-    "zero",
-    "none",
+    *_ZERO_NUMERALS,
     "one",
     "two",
     "three",
@@ -671,15 +676,22 @@ _SPELLED_NUMERALS: tuple[str, ...] = (
 #: states how many pairs…" — a MISSING-SENTENCE verdict about a sentence that is right there, one digit
 #: wrong, which is the false-negative shape `#13599` finding 1 punished on the other side of this file.
 #: ⛔ DERIVED from `_SPELLED_NUMERALS`, never written out again: a third hand-kept copy of the vocabulary is
-#: how the pattern's ceiling and the grader's class came apart in the first place.
+#: how the pattern's ceiling and the grader's class came apart in the first place. The positive spellings are
+#: sliced off `_ZERO_NUMERALS`' own length, so adding a zero spelling moves the boundary with it.
 _NUMERALS: dict[str, int] = {
-    **{word: 0 for word in ("zero", "none")},
-    **{word: value for value, word in enumerate(_SPELLED_NUMERALS[2:], start=1)},
+    **dict.fromkeys(_ZERO_NUMERALS, 0),
+    **{
+        word: value
+        for value, word in enumerate(_SPELLED_NUMERALS[len(_ZERO_NUMERALS) :], start=1)
+    },
 }
+#: The examples the two not-found messages render (`zero/none/one`), DERIVED for the same reason: a literal
+#: `_SPELLED_NUMERALS[:3]` mislabels the accepted class the moment a spelling is inserted before `one`.
+_CLASS_EXAMPLES = "/".join((*_ZERO_NUMERALS, _SPELLED_NUMERALS[len(_ZERO_NUMERALS)]))
 #: Longest first, so `sixteen` is tried before `six`. An unanchored alternation over spelled words normally
 #: needs a `\b` to stop `four` matching inside `fourteen`; here the required literal after the group
-#: (` pairs? as two code spans`, ` of them are resolved`) already makes a prefix match unable to complete,
-#: so the ordering is defence and the literal is the guarantee.
+#: (` pairs? as two code spans`, ` of them (?:is|are) resolved`) already makes a prefix match unable to
+#: complete, so the ordering is defence and the literal is the guarantee.
 _NUMERAL_ALT = "|".join(sorted(_NUMERALS, key=len, reverse=True))
 _TWO_SPAN_TOTAL = re.compile(rf"writes (\d+|{_NUMERAL_ALT}) pairs? as two code spans")
 #: ⛔ `(?:is|are)`, for the same reason `_TWO_SPAN_TOTAL` writes `pairs?`: number AGREEMENT is a property of
@@ -918,7 +930,7 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
         # re-measures this header must not be told to "restore" a sentence it is looking at.
         problems.append(
             "the header states no two-code-span pair count in a form this guard reads (digits, or "
-            f"{'/'.join(_SPELLED_NUMERALS[:3])}..{_SPELLED_NUMERALS[-1]}) — the sentence was reworded or "
+            f"{_CLASS_EXAMPLES}..{_SPELLED_NUMERALS[-1]}) — the sentence was reworded or "
             "dropped, and neither this message nor `_TWO_SPAN_TOTAL` can tell which: re-point the pattern "
             "against how the count is published now, do not delete this arm"
         )
@@ -931,7 +943,7 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
     if not uncounted:
         problems.append(
             "the header states no count of two-code-span pairs the one-token rule skips in a form this "
-            f"guard reads (digits, or {'/'.join(_SPELLED_NUMERALS[:3])}..{_SPELLED_NUMERALS[-1]}) — the "
+            f"guard reads (digits, or {_CLASS_EXAMPLES}..{_SPELLED_NUMERALS[-1]}) — the "
             "sentence was reworded or dropped: re-point `_TWO_SPAN_NEW` against how it is published now, "
             "do not delete this arm"
         )
@@ -1264,9 +1276,10 @@ def test_the_two_span_count_mutant_always_lands_on_the_count_arm() -> None:
     `writes `, so no sentence the store can hold carried this mutant onto the count arm.
 
     NON-VACUOUS: with `_two_span_total_mutant` replaced by the `stated - 2` it replaces, this reds on its
-    first uncovered measurement (`stated=1` renders `writes -1 pairs…`, which the pattern does not match) —
+    first uncovered measurement (`stated=0` renders `writes -2 pairs…`, which the pattern does not match) —
     a measurement the shipped document does not have today, which is exactly why the control could not see
-    it and why the property is pinned here rather than sampled.
+    it and why the property is pinned here rather than sampled. The loop starts at `0` and not at `1`, so
+    `-2` is the first value it meets, not `-1` (`#14010` round-5 review, P2: the sentence named the second).
     """
     for stated in range(0, len(_SPELLED_NUMERALS) + 3):
         value = _two_span_total_mutant(stated)
@@ -1316,26 +1329,46 @@ def test_an_unread_two_span_count_is_reported_as_UNREAD_not_as_absent() -> None:
 
     NON-VACUOUS: against the previous wording the `"in a form this guard reads"` assertion reds on both
     frames, and so does `"no longer states" not in message` — the old text contains exactly that clause.
+    ⛔ Each frame substitutes with ITS OWN compiled pattern, not a shared alternation. Under `count=1` a
+    shared alternation replaces the FIRST match in the document — always the `writes … pairs as two code
+    spans` line, which comes first — so the `_TWO_SPAN_NEW` iteration used to rewrite the OTHER arm's
+    sentence, leave its own intact, and have its assertions satisfied by the other arm's message: a
+    vacuous frame that stayed green when `_TWO_SPAN_NEW`'s wording was reverted (`#14010` round-5 review,
+    P2). `assert marker in unread[0]` is what makes each iteration speak about its own arm.
     """
     document = (REPO / _AUDIT).read_text(encoding="utf-8")
-    for arm, sentence, frame in (
-        (_TWO_SPAN_TOTAL, "writes a handful of pairs as two code spans", "writes a handful of pairs as two code spans"),
-        (_TWO_SPAN_NEW, "a handful of them are resolved but not counted by the one-token rule", "a handful of them"),
+    for arm, sentence, frame, marker in (
+        (
+            _TWO_SPAN_TOTAL,
+            "writes a handful of pairs as two code spans",
+            "writes a handful of pairs as two code spans",
+            "two-code-span pair count",
+        ),
+        (
+            _TWO_SPAN_NEW,
+            "a handful of them are resolved but not counted by the one-token rule",
+            "a handful of them",
+            "the one-token rule skips",
+        ),
     ):
         assert arm.search(document) is not None, "the shipped document must carry the sentence mutated here"
-        mutated = re.sub(
-            r"(?:writes [\w-]+ pairs as two code spans)|(?:[\w-]+ of them are resolved but not counted by the one-token rule)",
-            sentence,
-            document,
-            count=1,
-        )
+        mutated = arm.sub(sentence, document, count=1)
         assert mutated != document
+        assert (REPO / _AUDIT) and arm.search(mutated) is None, (
+            f"the {frame!r} frame must be GONE from the mutated document — {arm.pattern!r} still matches, so "
+            "the substitution landed on a different sentence"
+        )
         problems = _figure_problems(mutated)
         assert problems, f"a header carrying {frame!r} was reported clean"
         unread = [p for p in problems if "in a form this guard reads" in p]
         assert unread, (
             f"a header carrying {frame!r} must be reported as a count this guard cannot READ (the accepted "
             f"class named in the message); got {problems!r}"
+        )
+        assert marker in unread[0], (
+            f"the {frame!r} frame must be reported by ITS OWN arm — expected {marker!r} in the message, got "
+            f"{unread[0]!r}; a message from the other arm means the substitution landed on the wrong "
+            "sentence and this frame is vacuous"
         )
         assert "no longer states" not in unread[0], (
             "the message asserts the sentence is GONE, which is false for a sentence that is present in a "
