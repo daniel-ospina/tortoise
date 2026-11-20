@@ -143,8 +143,9 @@ $ uv run python tools/surface_capstone_probe.py
 * **22 answered** with the seeded content readable out of the payload — 19 at the
   exact approved name, 2 through the door named in the missing table above
   (`poll_events`, `link_entities`), 1 through the #9660 kept entry
-  (`delete_knowledge` → `tortoise_delete`, driven preview-then-confirm: `deleted:
-  true` and the row is gone on read-back).
+  (`delete_knowledge` → `tortoise_delete`, driven preview-then-confirm and then
+  **re-read through the same live door**: `deleted: true`, and the re-read returns an
+  empty answer, so the node is gone rather than merely reported deleted).
 * **4 REFUSED — a measured answer, not a skipped one:**
   * `index_sources_from_directory`, `mine_knowledge_from_directory`,
     `refresh_confidence` → `-32004 This tool is not available over HTTP`, which is
@@ -166,7 +167,7 @@ also drives. It is dual-registered in `config/ci-surfaces.yml` (`core` + `api`).
 
 | class | n | detail |
 |---|---|---|
-| answered in-process | **27** | rows 1–27 of `tortoise/__all__.py`; e.g. `check_confidence` (0.32 s), `record_decision` (0.87 s) — latencies in the table |
+| answered in-process | **27** | rows **1–26 plus 40** of `tortoise/__all__.py` — row 27 is `approve_merge`, recorded ARM GAP below, and row 40 is `check_connection`; latencies are in the table, not transcribed here |
 | `UNMEASURED — control plane` | **12** | rows 28–39 (memory graphs and keys, members). They call the Supabase control plane, which needs a hosted credential this box does not carry. Calling them against an embedded store would measure a different code path than a customer meets (`#2952`) |
 | `ARM GAP` | **1** | `approve_merge` — success arm unreachable on any seed the product will accept |
 
@@ -278,11 +279,16 @@ be measured is recorded as itself, not as a pass.
 with 7 rows reported "hand-edited", and GREEN on `origin/main` — because the new
 `tools/surface_capstone_probe.py` CALLS seven approved SDK methods, so the caller
 scan now derives `other-tooling` where it previously derived "none outside tests".
-The fix is the tool's own maintenance path (`surface_manifest.py cut`), and the diff
-is **derived rows only**: 7 rows' `class`/`dependency`/`reason` + `cut_at_commit`.
-`counts`, `high_water_counts` and every per-row `approved` flag are unchanged —
-verified in the diff, so this is not "editing the manifest to make the check pass",
-and no surface decision moves.
+The fix is the tool's own maintenance path (`surface_manifest.py cut`). Of the diff,
+**the 7 rows' `class`/`dependency`/`reason` + `cut_at_commit` are derived**, and one
+further hunk is **hand-authored prose**: the registry header comment's pointer to where
+the 10 `PROTECTED` + 7 `NO_CONTAINER_YET` tables live, changed in
+`config/surface-manifest.yml` *and* in its generator copy (`MANIFEST_HEADER` in
+`tools/surface_manifest.py`) so a re-cut reproduces it — `surface_manifest.py check`
+reds if the two disagree, which is what makes the prose maintainable rather than
+hand-tuned. `counts`, `high_water_counts` and every per-row `approved` flag are
+unchanged — verified in the diff, so this is not "editing the manifest to make the
+check pass", and no surface decision moves.
 
 ---
 

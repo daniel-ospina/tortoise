@@ -75,11 +75,17 @@ from __future__ import annotations
 
 import sys
 
-# #5128: the guard must precede every other import — a module-level 3.11+-only import
-# raises ImportError on an older interpreter before a later guard could run, which reads
-# as "this tool is broken" rather than "your python3 is too old". Found RED by
-# `tests/test_entry_point_python_guard.py` on this file's first push (the guard sat below
-# the import block); same shape as `tools/surface-target-check.py`.
+# #5128: the guard must precede every other import — that is the PREAMBLE CONTRACT
+# `tests/test_entry_point_python_guard.py` pins by reading the AST, so a modern import
+# added at the top later can never land above the guard and fail as an unreadable
+# traceback instead of "your python3 is too old". Same shape as
+# `tools/surface-target-check.py`.
+#
+# ⛔ THE MECHANISM IS THE CONTRACT, NOT A LIVE `ImportError` TODAY (#14045 review F7).
+# An earlier revision of this comment claimed a `<3.12` interpreter dies with
+# `ImportError` before the old, lower placement could refuse — it does not: this preamble
+# imports only 3.7-era modules, so the pre-move placement reached its own guard and
+# refused correctly. The move still stands, for the reason above.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         "tools/surface_capstone_probe.py requires Python >= 3.12 (got "
@@ -90,6 +96,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 import argparse
 import json
 import os
+import subprocess
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -602,6 +609,20 @@ def _door_refusal(payload) -> tuple[bool, str]:
     return False, ""
 
 
+def _is_absent(payload) -> bool:
+    """Did a `tortoise_get_entity` read MISS?
+
+    The door's contract is "the node properties, or empty dict"
+    (`tortoise/mcp_server.py:5444`), and an armed absence still returns `{}` rather than
+    an attribution envelope (`#12941` review P0-1). So a MISS is an EMPTY answer.
+
+    ⛔ An `{"error": …}` is NOT a miss. A read that could not be performed says nothing
+    about whether the node survived, and recording it as "gone" would be exactly the
+    empty-answer defect these rows exist to catch (#14045 review F5).
+    """
+    return isinstance(payload, dict) and not payload
+
+
 def probe_tools(door: _Door, s: dict) -> list[Row]:
     rows: list[Row] = []
     for approved in APPROVED_TOOLS:
@@ -666,13 +687,31 @@ def probe_tools(door: _Door, s: dict) -> list[Row]:
                                           {"id": doomed, "dry_run": True})
             token = preview.get("confirmation") if isinstance(preview, dict) else None
             if token:
+                # the approved-name row has ALREADY reached a verdict; the follow-up may
+                # only corroborate it. An unconditional assignment let a PASS here mask a
+                # FAIL the preview alias had recorded (#14045 review, finding 2b).
+                prior = rows[-1].status
                 _st2, confirmed, ms2 = door.call("tortoise_delete",
                                                 {"id": doomed, "confirmation": token})
-                rows[-1].status = PASS if (confirmed or {}).get("deleted") is True else FAIL
+                deleted = (confirmed or {}).get("deleted") is True
+                # ⛔ THE READ-BACK IS THE CLAIM (#14045 review F5). This note used to say
+                # the row was "gone on read-back" while nothing read it back —
+                # `deleted: true` is the delete call's OWN receipt, and a receipt that
+                # agrees with itself is the empty answer `_tool_request` exists to refuse.
+                # The node is fetched again through the SAME live door, and the row is
+                # PASS only when that read MISSES.
+                _st3, back, _ms3 = door.call("tortoise_get_entity",
+                                             {"id": doomed, "type": "point"})
+                gone = _is_absent(back)
+                rows[-1].status = PASS if (prior == PASS and deleted and gone) else FAIL
                 rows[-1].latency_ms = ms2
                 rows[-1].shape = _shape_of(confirmed)
-                rows[-1].note = ("preview then confirm — `deleted` is True, and the row is "
-                                 "gone on read-back")
+                if gone:
+                    rows[-1].note = ("preview then confirm — `deleted` is True, and the "
+                                     "re-read no longer serves the node")
+                else:
+                    rows[-1].note = ("preview then confirm — `deleted` is True, but the "
+                                     f"node is STILL READABLE afterwards: {str(back)[:180]}")
                 rows[-1].payload = confirmed
             else:
                 rows[-1].note = f"preview issued no token: {str(preview)[:200]}"
@@ -1034,7 +1073,7 @@ def probe_retired(door: _Door, s: dict) -> tuple[list[tuple[str, bool, str, str]
     retired name that still answers without saying it is retired teaches a caller a
     name the product has stopped supporting.
     """
-    samples: list[tuple[str, bool, str, bool]] = []
+    samples: list[tuple[str, bool, str, str]] = []
     for name, args in _retired_sample(s).items():
         # ONE call: the notice and the payload must come from the SAME invocation — a
         # second call re-runs the handler (a delete arm would refuse the second time)
@@ -1074,10 +1113,73 @@ def _retired_notice(door: _Door, name: str, args: dict):
     return (meta.get("tortoise") or {}).get("retired"), result
 
 
+#: The markdown PREAMBLE: title, generator invocation, the run's provenance and the status
+#: legend. It is emitted by `_render_markdown` rather than hand-written into the artifact,
+#: because the documented regeneration command OVERWRITES that artifact — a hand-written
+#: header is deleted by the very command it tells you to run, and the file then keeps a
+#: provenance it no longer has (#14045 review F1).
+#:
+#: The provenance goes on its OWN line so it can be normalised when the committed artifact
+#: is compared with a fresh render (a generated file cannot carry its own commit's sha).
+TABLE_PREAMBLE = """\
+# #13036 — surface probe tables (GENERATED, do not hand-edit)
+
+Produced by `uv run python tools/surface_capstone_probe.py --markdown <this file>`.
+Regenerate rather than edit — a hand-typed count is the defect `#4185` was filed about,
+and a hand-typed status is the same defect one level down.
+
+Generated at `{provenance}` — the `HEAD` the probe was run FROM, derived at run time
+(`git rev-parse --short=10 HEAD`, read before this file is written), never typed. It
+cannot be the commit that carries this line: a file cannot name its own commit, so it is
+always the parent of the regeneration commit. A `-dirty` suffix means the run measured a
+working tree with uncommitted changes, so the tables are not reproducible from that sha.
+
+Every row is ONE REAL INVOCATION: MCP through `create_http_app` (the authenticated
+tenant door `hosted_api` mounts), SDK against a throwaway embedded store. Latency is
+the call itself, not the fixture.
+
+A status is one of: **PASS** (answered, seeded content readable back), **REFUSED**
+(a measured refusal — `-32004` from `http_policy=False`, or a named product
+precondition), **MISSING** (no live door at all), **ARM GAP** (the success arm is
+unreachable from any seed the product accepts), **UNMEASURED** (cannot be driven
+from this box; the mechanism is named)."""
+
+
+def _generated_at() -> str:
+    """`<10-hex>[-dirty]` — the tree THIS run measured, or `unknown`.
+
+    Derived, never typed: the previous header named `917c2a70fa`, a sha that predated the
+    fix cited beside it, and a hand-typed sha goes stale the moment the code moves under
+    it (#14045 review F1). `-dirty` is appended when TRACKED files carry uncommitted
+    changes — the only honest reading of "generated at `<sha>`" over a working tree.
+
+    The `git status` read happens before the artifact is written (`main()` renders, then
+    writes), so regenerating on a clean tree does not report itself as dirty.
+    """
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "--short=10", "HEAD"],
+            cwd=ROOT, capture_output=True, text=True, timeout=15, check=False)
+        stamp = sha.stdout.strip()
+        if sha.returncode != 0 or not stamp:
+            return "unknown"
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=ROOT, capture_output=True, text=True, timeout=120, check=False)
+        if dirty.returncode == 0 and dirty.stdout.strip():
+            stamp += "-dirty"
+        return stamp
+    except (OSError, subprocess.SubprocessError):  # a gitless box still renders tables
+        return "unknown"
+
+
 def _render_markdown(tool_rows: list[Row], sdk_rows: list[Row],
                      retired_rows: list[tuple[str, bool, str, str]] | None = None,
-                     archived_rows: list[tuple[str, str]] | None = None) -> str:
-    lines: list[str] = []
+                     archived_rows: list[tuple[str, str]] | None = None,
+                     provenance: str | None = None) -> str:
+    lines: list[str] = TABLE_PREAMBLE.format(
+        provenance=_generated_at() if provenance is None else provenance).split("\n")
+    lines.append("")
     lines.append("## Approved MCP tools — one real call each, through the authenticated tenant door")
     lines.append("")
     lines.append("| # | approved tool | served door | status | latency | answer shape | note |")
