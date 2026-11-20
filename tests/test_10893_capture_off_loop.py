@@ -32,7 +32,12 @@ also replays the journal):
 
     before:  640 ms of on-loop synchronous SDK work, of which
              `_create_event` was 552 ms — 86 %; next largest leg 26 ms
-    after:    77 ms, and `_create_event` is not on the loop at all
+    after:    81 ms in 4 calls, and `_create_event` is not on the loop at all
+
+The handler's post-write tail (`link_session_entities`, `_session_alive`,
+`_update_onboarding_state`, `_sweep_orphaned_writes`, the capture-disclosed
+checkpoint) was off-loaded in the SAME cycle, by the commit before this one —
+that is why the residual below is a single leg and not six.
 
 WHY THE CENSUS TEST EXISTS AS WELL AS THE INVARIANT ONE
 ------------------------------------------------------
@@ -95,8 +100,13 @@ _ON_LOOP_RESIDUAL: dict[str, str] = {
     # `_record_write_op` -> `metering.record_write_ops` (a blocking MERGE +
     # MATCH in registry mode, a blocking control-plane RPC in Supabase mode).
     # Its docstring records the off-load as tracked by #4451; this census is
-    # where that promise is visible.
-    "_get_registry": "#4451 (metering + onboarding registry reads)",
+    # where that promise is visible. Measured after this cycle's two commits:
+    # 2 calls, 81.5 ms — the whole of what is left on the loop.
+    "_get_registry": "#4451 (metering registry read inside `record_write_ops`)",
+    # NOT observed on the measured path (the checkpoint that reached it is now
+    # off-loaded). Listed because the census drives ONE branch of this handler
+    # and the completion gate is reached from others; an entry here is a
+    # declaration about ownership, not a claim that the leg runs today.
     "_get_proj": "#4451 (onboarding completion gate)",
 }
 
@@ -168,8 +178,8 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
     bar is 1 ms of TOTAL on-loop time for the request, two orders of magnitude
     below the 552 ms the mint cost.
 
-    Measured on the instrumented tree: 10 on-loop calls, 76.8 ms total, no
-    single leg above 20 ms.
+    Measured on the instrumented tree after this cycle's two commits: 4 on-loop
+    calls, 81.5 ms total, of which the metering registry read is 81.47 ms.
     """
     rows: list[dict] = []
     depth = threading.local()
