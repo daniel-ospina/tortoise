@@ -1564,6 +1564,20 @@ def write_map(doc: dict) -> int:
             print(f"\n{len(markers_carried)} marker(s) from an earlier run are "
                   "STILL unresolved (their markers were not re-written this run) "
                   "— see state.json", file=sys.stderr)
+            # ⛔ ITS OWN LINES COME DIRECTLY UNDER ITS OWN HEADER — BEFORE ANY
+            # CLASS HEADING. This loop used to run AFTER the three class headings
+            # below, so in a mixed resume an earlier run's line was printed
+            # underneath `N edge(s) were DECLINED by the door — nothing was
+            # written for them`: the operator then applied the DECLINED remedy
+            # ("delete the line, nothing was written") to a line whose write may
+            # have LANDED — a duplicate non-idempotent write, which is the exact
+            # mislabel the class headings were introduced to end (#13950 review
+            # round 7, measured: `1 marker(s) from an earlier run …` then `1
+            # edge(s) were DECLINED …` then `  ! edge:…: an EARLIER run's
+            # wording`). Nothing pinned the order, so moving the loop back down
+            # left the suite green.
+            for line in repeated[:10]:
+                print(f"  ! {line}", file=sys.stderr)
         # ⛔ ONE HEADER PER NON-EMPTY CLASS, not an `else` chain: a run can record
         # a declined edge AND an unbound one, and an `elif` silently drops the
         # second class's count (#13950 review).
@@ -1580,8 +1594,6 @@ def write_map(doc: dict) -> int:
                   "judgement does not declare — the write DID happen, so its "
                   "marker stays in `written` (see `failed` in state.json)",
                   file=sys.stderr)
-        for line in repeated[:10]:
-            print(f"  ! {line}", file=sys.stderr)
         if not repeated:
             # ⛔ THE DECLINED CLASS HAS NO MARKER, so it must not be told one
             # exists — the sentence directly above says "NO marker exists", and a
