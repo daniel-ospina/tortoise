@@ -179,11 +179,12 @@ paragraph, whose **five** reader addresses the `#13879` review re-derived from t
 fragments — the group this list carried only as the number it then gave for the `mcp_server.py`
 member — `sdk.py`: `:31365`
 (`MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag})`), `:31347` (the tag list with
-counts — `MATCH (t:Tag)` + `OPTIONAL MATCH (p:Point)-[:TAGGED]->(t)`), `:24327` (the
-`WHERE t.name IN $names` filter) and `:24671` (`MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t`, the
+counts — `MATCH (t:Tag)` + `OPTIONAL MATCH (p:Point)-[:TAGGED]->(t)`), `:24327` (the tag-name match —
+its `WHERE t.name IN $names` filter is the line below it) and `:24671` (`MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t`, the
 orphan GC), and `mcp_server.py`: `:11281` (`MATCH (t:Tag) OPTIONAL MATCH (t)<-[:TAGGED]-(q)`). The four
 `sdk.py` ones are spelled as bare `:NNNN` siblings behind one path, as the `mcp_server.py` group above
-does, and NOT as new `path.py:NNNN` pairs (in either spelling the header counts): a pair spelling would
+does, and NOT as new `path.py:NNNN` pairs (a bare sibling is not counted at all — that is the point):
+a pair spelling would
 add five more **as-written spellings** — 328 → 333 — and so 105 → 110 collisions, since a collision is a
 spelling that shares its `(path, line)` pair with another, while adding **no pair at all**: 223 either
 way, because each of the five already carries its pair from §2.5. A bare sibling adds neither. The pin

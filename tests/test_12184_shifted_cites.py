@@ -190,7 +190,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     #   :184  the §2.5 `:Tag`-family enumeration this branch adds, which lists all five reader
     #         addresses (the four `sdk.py` ones plus this `mcp_server.py` one) as BARE siblings so the
     #         `_REDEFINED_13854` one-token counts are not doubled;
-    #   :589  the same branch's §2.5 provenance sentence, `:11280` -> `:11281`.
+    #   :590  the same branch's §2.5 provenance sentence, `:11280` -> `:11281`.
     # Re-derive with `grep -n '`:11281`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` before
     # trusting this list on a later head: a line number in prose is exactly the claim this file pins
     # for the document, and it drifts the same way.
