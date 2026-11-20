@@ -66,8 +66,9 @@ raises MID-RUN cannot be refused — earlier batches are already stripped. That 
     more `sdk`/`session_indexer` writers. Every one of those re-adds the vector on the next
     call, so the requirement this gate enforces is **every declared writer of the label
     asks the gate** — not "the fold does". The gate therefore refused all four entity
-    labels until `#13854` closed them, and it REFUSES `:Point` today — not because the label
-    is out of scope, but because two of its four declared writers must keep the copy:
+    labels until `#13854` closed them, and it REFUSES `:Point` today on TWO INDEPENDENT
+    arms — the coverage verdict, which currently measures a shortfall, and the writer
+    census, which names two of its four declared writers that must keep the copy:
     `tortoise.sdk::_write_capture_turns` (the graph write is the SOLE store on every lane
     where the record cannot hold the turn — no journal, no tenant, an open connect breaker,
     or a record write that REFUSED the turn) and `tortoise.projection::_rebuild_all_replay`
@@ -182,8 +183,9 @@ redundant MIRROR — not a reason to keep it. ⛔ **BUT THE PLAN STILL REFUSES `
 the refusal is the honest half: two declared writers must keep the copy because on their
 lanes it is the SOLE carrier (`sdk::_write_capture_turns` on every lane where the record
 cannot hold the turn; `projection::_rebuild_all_replay`, whose pass-1b restore runs only
-for ids the journal wrote no vector for). The census names them, so the refusal is
-checkable rather than a shrug. The tool's refusals are otherwise unchanged: it will not
+for ids the journal wrote no vector for). The census names them once coverage verifies, so
+that arm of the refusal is checkable rather than a shrug; the coverage arm names both
+counts instead. The tool's refusals are otherwise unchanged: it will not
 strip `:Point` unless the record's coverage for `point`/`operator` MEASURES true in this
 process. The population remains
 `entity_vector_parity_census.RETIRED` and nothing else.
@@ -366,7 +368,8 @@ FOLD_WRITERS: dict[str, tuple[str, ...]] = {
     # operator action that has to be RE-RUN after a rebuild. TWO of the four declared
     # `:Point` writers ask the gate (the SDK update door and `restore_graph`); the live
     # capture and the pass-1b snapshot restore must NOT, because on their lanes the graph
-    # copy is the SOLE store — which is why the census REFUSES `:Point` and names both.
+    # copy is the SOLE store — which is why the census REFUSES `:Point` once coverage
+    # verifies, naming both.
     "Event": ("_upsert_event", "_event_plain_merge"),
     # ⛔ NOT `_event_plain_merge`: it MERGEs `(s:Source {url:$id})` but every `embedding`
     # touch in it is on `e` (`clear_embedding(..., "e", ...)` and
@@ -5028,7 +5031,7 @@ def render_plan(plan: dict) -> str:
             "— re-run this tool afterwards. Only the SDK update door and the DR restore "
             "ask the gate and stop; the capture writer, the pass-1b snapshot restore and "
             "the fold keep the copy on the lanes where it is the ONLY one, which is why "
-            "this plan refuses `:Point` while the writer census names them.",
+            "this plan refuses `:Point` while the census names them once coverage verifies.",
         ]
     measured = plan.get("population") or [r["label"] for r in plan["labels"]]
     declared = plan.get("declared_population") or measured

@@ -108,8 +108,9 @@ def _derived_mirror_required(entity_type: str) -> bool:
     cannot hold the turn (no journal, no tenant, an open connect breaker, or a record write
     that REFUSED it), and `projection::_rebuild_all_replay` restores a snapshot vector only
     for ids the journal wrote none for — gating either on the label aggregate put those
-    vectors in NEITHER store. `tools/strip_graph_entity_vectors.py` names both, so its plan
-    refuses `:Point` rather than stripping into them.
+    vectors in NEITHER store. `tools/strip_graph_entity_vectors.py` names both in its
+    census arm, so its plan refuses `:Point` rather than stripping into them — on the
+    coverage verdict today, on those two writers once coverage verifies.
 
     ⛔ AND THE JOURNAL FOLD IS A THIRD THAT DOES NOT ASK, outside that declared population:
     `_upsert_point_props` is the journal's own record truth — its vector is what makes

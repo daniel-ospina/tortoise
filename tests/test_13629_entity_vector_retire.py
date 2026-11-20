@@ -847,8 +847,10 @@ def test_a_comment_mentioning_the_gate_is_not_a_gate(tmp_path, monkeypatch):
 #:     snapshot is the sole carrier of a graph-only id's vector.
 #:
 #: The set is EXACT and per label, so a THIRD writer losing its gate reds this test; and the
-#: strip's own census names both, which is why its plan refuses `:Point` (see
-#: `test_the_plan_REFUSES_POINT_and_names_the_two_sole_carrier_writers`).
+#: strip's own census names both, so its plan refuses `:Point` on that arm once coverage
+#: verifies (today it refuses on the coverage verdict first — see
+#: `test_the_plan_REFUSES_POINT_and_names_the_two_sole_carrier_writers`, which seeds parity so
+#: the census arm is the one that answers).
 SOLE_CARRIER_WRITERS: dict[str, frozenset[str]] = {
     "Point": frozenset({
         "tortoise.sdk::_write_capture_turns",

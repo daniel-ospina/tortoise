@@ -208,9 +208,10 @@ RETIRED: tuple[tuple[str, str, str], ...] = (
 
 #: The declared labels this tool does NOT cover. ⛔ EMPTY ON PURPOSE SINCE `#13971`, and
 #: kept as a NAME rather than deleted so a future scope reduction has to edit a pinned
-#: constant instead of quietly dropping a label from `RETIRED`: every served label
-#: (`point`, `operator`, `event`, `subject`, `document`, `object`, `source`) is measured
-#: here now, so the honest value is "none".
+#: constant instead of quietly dropping a label from `RETIRED`: every served LABEL
+#: (`Object`, `Subject`, `Event`, `Source`, `Point` — five labels covering all seven
+#: `entity_type`s, `document`/`source` and `point`/`operator` being two types of one label
+#: each) is measured here now, so the honest value is "none".
 NOT_IN_SCOPE: tuple[str, ...] = ()
 
 #: Keyset page size for the graph leg. Must sit well UNDER FalkorDB's

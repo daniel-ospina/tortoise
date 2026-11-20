@@ -483,10 +483,12 @@ class RecordVectorWithoutFallback(RecordVectorError):
     answering after it would return a SMALLER cohort and report it as the answer.
     That is the `#5090` Q2 defect on the branch that carries production traffic.
     ⛔ AND THAT PREMISE IS PER LABEL, not universal: only the labels in
-    :data:`MIRROR_RETIRED_LABELS` have writers that stop storing, so only they
+    :data:`MIRROR_RETIRED_LABELS` have folds that stop writing, so only they
     raise this. `point` and `operator` are still mirrored after their count
-    verifies (a `:Point`'s vector is record TRUTH and no fold derives it), so a
-    graph answer for them is a complete copy and they keep the named fallback.
+    verifies, because the JOURNAL FOLD never stops writing (a `:Point`'s vector is
+    record TRUTH and no fold derives it), so the graph leg stays fed on the primary
+    retrieval label and a graph answer for them is a complete copy — it keeps the
+    named fallback even though the SDK update door and the DR restore DO stop.
 
     So post-contract the leg does not fall back: it reports that it could not look
     (`degraded`, ``reason="query_failed"``), which is the honest answer and the

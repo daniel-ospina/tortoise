@@ -42,10 +42,10 @@ line does not establish). `record_only` is the readable rows this graph holds no
 for. The
 paragraph's refutation does not depend on either reading of `record=` — `fillable=0` and
 `unmatched=16,982` are what refute the "~9,106 graph-only" inference, and neither moved.
-`:Point` is still in this tool's DEFAULT population, because the
-change is harmless and additive (this tool only FILLS, `WHERE … embedding IS NULL`) and
-`#13685`'s scope-addition comment asks for it — not because it holds a copyable gap. See
-:data:`BACKFILLED` for why it lives here and NOT in the census's `RETIRED`.
+`:Point` is in this tool's DEFAULT population because the change is harmless and additive
+(this tool only FILLS, `WHERE … embedding IS NULL`) and `#13685`'s scope-addition comment
+asks for it — not because it holds a copyable gap. Since `#13971` the label is in the
+census's `RETIRED` too, so :data:`BACKFILLED` is exactly that tuple (`*parity.RETIRED`).
 
 WHY THIS IS A COPY AND NOT A RE-EMBED
 =====================================
@@ -110,12 +110,10 @@ is not the backfill that was approved. ⚠️ That definition is the census's as
 `render_collision` term, and this tool still joins on the RAW key; :func:`_measure_label`
 carries the exact boundary and what it costs.
 
-⚠️ WHY IT IS THE CENSUS'S LEGS AND NOT `parity.census()` ITSELF. `:Point` is not in
-that function's population (see :data:`BACKFILLED`), so calling it with the five
-labels this tool copies would raise `CensusError` and refuse EVERY execution; calling
-it with four and measuring Point separately would give one run two definitions of the
-same number. And a second full census read would double a 46k-Point run's graph cost
-for no information. So one function measures every label, from the census's own graph
+⚠️ WHY IT IS THE CENSUS'S LEGS AND NOT `parity.census()` ITSELF. The census can measure
+`:Point` since `#13971`, so this is a cost/single-definition choice rather than a scope
+one: calling it here would double a 46k-Point run's graph cost for no information, and a
+second full census read would give one run two definitions of the same number. So one function measures every label, from the census's own graph
 leg, and `test_the_per_label_numbers_are_the_census_numbers` pins the equality with
 `parity.census()` for the labels the census does measure — the census stays the
 instrument, this tool only runs its legs.
@@ -158,10 +156,10 @@ Both sides are keyed by the node's IDENTITY, and neither spelling is invented he
 * **graph side** — the property the vector leg itself returns as the node's id
   (`tortoise/search_engine.run_vector_query`'s `id_field`: `url` for
   `source`/`document`, `eventId` for `event`, `id` otherwise). Read from
-  :data:`BACKFILLED`, whose first four rows ARE
-  `entity_vector_parity_census.RETIRED` (`*parity.RETIRED` — imported, never restated;
-  `#9553`: a second declaration of a key column silently filed no row for a whole
-  Event arm). `:Point` is the fifth row and its property is `id`.
+  :data:`BACKFILLED`, whose five rows ARE `entity_vector_parity_census.RETIRED`
+  (`*parity.RETIRED` — imported, never restated; `#9553`: a second declaration of a key
+  column silently filed no row for a whole Event arm). `:Point` is the fifth row and its
+  property is `id`.
 * **record side** — `node_key`, the record's one identity column across every table
   (`NodeSnapshot`'s key, `node_identity`'s PK component, and the column the
   `chk_*_node_key_is_contract_key` constraints pin). Since `#9881` it IS the `id` for
@@ -935,9 +933,9 @@ def _measure_label(g: Any, door: RecordDoor, table: str, label: str) -> dict:
     plan and execution cannot measure two different things.
 
     ⚠️ `parity.census()` ITSELF IS DELIBERATELY NOT CALLED — see the module docstring:
-    it cannot be given `:Point` (that label is outside its `RETIRED` population, which
-    gates a destructive tool), and calling it for the other four would both double the
-    graph read on a 46k-Point corpus and give one run two definitions of one number.
+    `:Point` IS in its `RETIRED` population since `#13971`, so this is a cost choice, not a
+    scope one — calling it would double the graph read on a 46k-Point corpus and give one
+    run two definitions of one number.
     `tests/test_13685_entity_vector_backfill.py::test_the_per_label_numbers_are_the_census_numbers`
     pins this function's output equal to `parity.census()`'s for the labels the census
     does measure, and the scratch-Postgres end-to-end leg runs the census tool itself.
