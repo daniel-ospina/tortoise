@@ -1402,6 +1402,52 @@ def test_a_module_that_was_scaffolding_on_both_sides_is_not_a_removal(tree: Path
     )
 
 
+def test_a_module_replaced_by_a_pyi_STUB_is_a_removal(tree: Path) -> None:
+    """A `.pyi` has no runtime statements, so it cannot stand in for a module (round-6 review).
+
+    `module_name` collapses `.py` and `.pyi` onto one dotted name and the content rule only read
+    `/__init__.py`, so `git rm x.py` + a stub `x.pyi` satisfied the name set AND the content test
+    — arm 1 saw the name on both sides and arm 1b read the STUB as a body. Graded green, with the
+    module's runtime code gone (measured in review; `main` carries zero `.pyi` files under
+    `tortoise/`, so nothing had ever exercised the shape).
+    Mutation: drop the `.pyi` preference when building the per-side carrier map -> RED here.
+    """
+    (tree / "tortoise" / "stubby.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/stubby.py")
+    subprocess.run(["git", "rm", "-q", "tortoise/stubby.py"], cwd=tree, check=True)
+    (tree / "tortoise" / "stubby.pyi").write_text("def value() -> int: ...\n", encoding="utf-8")
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    removed = [p for p in problems if "MODULE BODY REMOVED" in p]
+    assert [p.split(":", 1)[0] for p in removed] == ["tortoise.stubby"], (
+        "a stub is not the module's runtime code: the name resolves, the code is gone — "
+        f"{problems}"
+    )
+    assert ".pyi" in removed[0], f"the violation must name the stub it graded: {removed[0]}"
+
+
+def test_a_module_body_replaced_by_UNPARSEABLE_text_is_a_removal(tree: Path) -> None:
+    """A body that no longer parses holds no statements a caller can reach (round-6 review).
+
+    `_init_carries_a_body` returned True on `SyntaxError` while its docstring called that "fail
+    CLOSED toward the violation" — it was the GREEN direction: a 40-function module rewritten to
+    `this is not python {{{` graded green on every arm. The arm now reports the removal.
+    Mutation: `except SyntaxError: return True` -> RED here.
+    """
+    (tree / "tortoise" / "victim.py").write_text(
+        "".join(f"def f{i}():\n    return {i}\n" for i in range(40)), encoding="utf-8"
+    )
+    _commit(tree, "tortoise/victim.py")
+    (tree / "tortoise" / "victim.py").write_text("this is not python {{{\n", encoding="utf-8")
+    _commit(tree, "tortoise/victim.py")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any(
+        p.startswith("tortoise.victim: MODULE BODY REMOVED") for p in problems
+    ), f"unparseable is not content — the code left: {problems}"
+
+
 def test_emptying_a_module_in_place_is_a_removal(tree: Path) -> None:
     """`> tortoise/x.py` kept every gate green while the code left (review P2 of #14039).
 
@@ -1645,6 +1691,41 @@ def test_a_reanchor_to_a_commit_that_does_not_hold_the_body_is_still_reported(
     assert any("REWRITTEN" in p and "archived_at" in p for p in problems), (
         "a commit that exists but does not carry the frozen body is not a re-anchor: "
         f"{problems}"
+    )
+
+
+def test_a_reanchor_cannot_DELETE_a_frozen_block(tree: Path) -> None:
+    """The escape is a RE-ANCHOR, not a licence to shrink the evidence (round-6 review).
+
+    The first version was handed only the NEW entry, so "the new record is internally consistent
+    with the new file" was the whole question — and a rewrite that DELETED a frozen block while
+    deleting its row from the manifest passed EVERY arm: the row stays, its evidence shrinks, and
+    the removed code now exists nowhere, which is the loss #12291 was filed for. A re-anchor
+    RE-HASHES bodies; it does not delete them, so the base entry's block count and block keys
+    are required to match.
+    Mutation: drop the BASE-entry comparisons (block count / block keys / `sources`) -> RED
+    here. Each of the three catches this fixture on its own, so no single one is load-bearing —
+    defence in depth, and the test pins the PROPERTY rather than one comparison.
+    """
+    entry = arch.archive_symbol(arch.MCP_TOOL, "tortoise_search", "batch-a", "r", root=tree)
+    _commit(tree, ".")
+    assert len(entry["blocks"]) >= 2, "the fixture needs a MULTI-block entry to be able to shrink"
+    kept = entry["blocks"][:1]
+    text, frozen = arch.render_archive_file(
+        entry["kind"], entry["symbol"], entry["batch"], entry["reason"],
+        entry["archived_from"], entry["archived_at"],
+        [(row["path"], arch.frozen_blocks((tree / entry["file"]).read_text(encoding="utf-8"))[i][1], row["node"])
+         for i, row in enumerate(kept)],
+    )
+    (tree / entry["file"]).write_text(text, encoding="utf-8")
+    shrunk = dict(entry, blocks=frozen, sources=[row["path"] for row in frozen])
+    arch.save_manifest({"entries": [shrunk]}, tree / "archive" / "MANIFEST.json")
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any("REWRITTEN" in p and "blocks" in p for p in problems), (
+        "dropping a frozen block while keeping the row is exactly the faithless record this arm "
+        f"grades — the code it held now exists nowhere: {problems}"
     )
 
 

@@ -1033,12 +1033,16 @@ def _init_carries_a_body(text: str) -> bool:
     Only an `__init__.py` with no statements of its own — empty, whitespace, or a docstring
     alone — is pure scaffolding, where deleting it while siblings survive removes nothing. Any
     statement (an import, a re-export, `__all__`, an assignment, a function) is content.
-    Unparseable text is treated as content: fail CLOSED toward the violation.
+    Unparseable text is treated as carrying NOTHING: a body that no longer parses holds no
+    statements a caller can reach, so the arm reports the removal rather than reading the
+    garbage as content and cancelling it. (The previous version returned True here and called
+    that "fail CLOSED toward the violation" — it was the GREEN direction: a 40-function module
+    rewritten to `this is not python {{{` graded green, measured in round-5 review.)
     """
     try:
         tree = ast.parse(text)
     except SyntaxError:
-        return True
+        return False
     body = list(tree.body)
     if (
         body
@@ -1172,7 +1176,9 @@ def parse_shrink_waiver(text: str) -> tuple[str, str]:
     return kind, symbol.strip()
 
 
-def _reanchor_is_verified(root: Path, symbol: str, rel: str, entry: dict) -> bool:
+def _reanchor_is_verified(
+    root: Path, symbol: str, rel: str, entry: dict, base_entry: dict
+) -> bool:
     """Is this REWRITE an EVIDENCED re-anchor, rather than a faithless edit? (#12291)
 
     A re-anchor happens when the frozen body is refreshed from the commit that LAST held the
@@ -1195,15 +1201,37 @@ def _reanchor_is_verified(root: Path, symbol: str, rel: str, entry: dict) -> boo
     forged anchor from an un-fetched one), so accepting on an unreadable anchor would turn this
     arm into a rubber stamp. A clone that cannot read the anchor keeps the violation — fail
     closed, and the archive's own step (`fetch-depth: 0`) is what makes it answerable in CI.
+
+    ⛔ AND IT IS NOT A LICENCE TO SHRINK THE EVIDENCE. The first version of this check was
+    handed only the NEW entry, so "the new record is internally consistent with the new file"
+    was the whole question — and a rewrite that DELETED a frozen block while deleting its row
+    from the manifest passed every arm (measured in round-6 review: a 2-block `mcp-tool` entry
+    reduced to 1 block, `_reanchor_is_verified: True`, `shrink_violations: []`,
+    `file_violations: []`, and `verify-anchors` iterates only the blocks that remain). That is
+    the "code that exists nowhere" loss #12291 was filed for, reached one level down: keep the
+    row, shrink its evidence. A re-anchor re-HASHES bodies; it does not delete them. So the
+    BASE entry is required too: the same number of blocks, the same set of block KEYs, and
+    `sources` still the writer's own derivation (`[path for path, … in blocks]`).
     """
     if not rel:
         return False
+    recorded = entry.get("blocks")
+    base_recorded = base_entry.get("blocks")
+    if not isinstance(recorded, list) or not isinstance(base_recorded, list):
+        return False
+    if len(recorded) != len(base_recorded):
+        return False  # a refresh re-hashes bodies; dropping one is the loss this arm exists for
+    if sorted(str(row.get("node")) for row in base_recorded) != sorted(
+        str(row.get("node")) for row in recorded
+    ):
+        return False  # same blocks, same keys — a re-anchor does not swap the evidence
+    if entry.get("sources") != [row.get("path") for row in recorded]:
+        return False  # the writer's own derivation, so a `sources` edit cannot ride along
     text = _file_text(root, rel)
     if text is None:
         return False
     blocks = frozen_blocks(text)
-    recorded = entry.get("blocks")
-    if not blocks or not isinstance(recorded, list) or len(recorded) != len(blocks):
+    if not blocks or len(recorded) != len(blocks):
         return False
     sha = str(entry.get("archived_at") or "")
     if not _SHA_RE.match(sha) or not _git_has_commit(root, sha):
@@ -1295,13 +1323,29 @@ def shrink_violations(
     # locations). Reading is narrowed to the names present on BOTH sides and to the head file
     # first, so the arm costs one working-tree read per shared module and no git call unless the
     # head file is body-less.
-    base_paths_by_module = {module_name(path): path for path in base_paths}
-    head_paths_by_module = {module_name(path): path for path in head_paths}
+    base_paths_by_module: dict[str, str] = {}
+    head_paths_by_module: dict[str, str] = {}
+    for targets, paths in ((base_paths_by_module, base_paths), (head_paths_by_module, head_paths)):
+        for path in paths:
+            name = module_name(path)
+            # ⛔ PREFER the RUNTIME carrier: a `.pyi` stub has no runtime statements, so it must
+            # never stand in for a module's code on the SHRINK side. Replacing `x.py` with
+            # `x.pyi` deletes the module from the product, and the stub used to satisfy both the
+            # name set AND (being non-empty) the content rule — graded green (round-5 review).
+            if name not in targets or targets[name].endswith(".pyi"):
+                targets[name] = path
     for module in sorted(base_modules & head_modules):
-        head_text = _file_text(root, head_paths_by_module[module])
-        if head_text is None or _init_carries_a_body(head_text):
-            continue  # unreadable is content (fail closed), and content is not a removal
-        base_text = _git_blob(root, sha, base_paths_by_module[module])
+        base_carrier = base_paths_by_module[module]
+        head_carrier = head_paths_by_module[module]
+        stubbed = head_carrier.endswith(".pyi") and not base_carrier.endswith(".pyi")
+        if not stubbed:
+            head_text = _file_text(root, head_carrier)
+            # An UNREADABLE file is not evidence of a removal, so it is not reported as one
+            # (the file arm already reds a manifest row whose file is missing); this is the
+            # one residual of the arm, stated rather than implied.
+            if head_text is None or _init_carries_a_body(head_text):
+                continue
+        base_text = _git_blob(root, sha, base_carrier)
         if base_text is None or not _init_carries_a_body(base_text):
             continue  # scaffolding on BOTH sides: a placeholder that stayed a placeholder
         key = (MODULE, module)
@@ -1310,10 +1354,17 @@ def shrink_violations(
         if key in waivers:
             used.add(key)
             continue
+        how = (
+            f"replaced by a `.pyi` STUB (`{head_carrier}`), which holds no runtime statements"
+            if stubbed
+            else (
+                f"`{head_carrier}` carries none (empty, whitespace, comments or a bare "
+                "docstring)"
+            )
+        )
         out.append(
             f"{module}: MODULE BODY REMOVED — {base_label} carries statements in "
-            f"`{base_paths_by_module[module]}` and this tree's `{head_paths_by_module[module]}` "
-            "carries none (empty, whitespace, comments or a bare docstring). The PATH survived, "
+            f"`{base_carrier}` and this tree's module file {how}. The NAME survived, "
             "so a set comparison over module names cannot see this, and the surface baseline "
             "carries no `module` rows: the code left the product and nothing records it "
             "(#12402). "
@@ -1354,7 +1405,7 @@ def shrink_violations(
                 used.add(key)
                 continue
             if _reanchor_is_verified(
-                root, symbol, str(working[key].get("file") or ""), working[key]
+                root, symbol, str(working[key].get("file") or ""), working[key], base_entry
             ):
                 # Not a faithless edit: the frozen file still matches the record and the new
                 # anchor holds the recorded body byte-for-byte (see `_reanchor_is_verified`).
