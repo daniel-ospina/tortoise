@@ -756,6 +756,72 @@ def test_a_refused_edge_is_not_marked_as_written(tmp_path, monkeypatch, map_doc,
     capsys.readouterr()
 
 
+def test_a_verdict_refuses_a_WRONG_mechanism_and_a_WRONG_target(map_doc):
+    """`presence()`'s two remaining legs each decide a certificate on their own.
+
+    `kind == e["op"]` and `b in slots[1][0]` were the only legs of the operator
+    match with NO discriminating assertion: deleting either left the suite green
+    (81 passed) while the shipped code refused. Measured on the real map —
+    every operator rebuilt with the OTHER mechanism (`IMPL` <-> `NAND`, same
+    endpoints, same direction, one endpoint per slot) read `101/101`,
+    `missing_edges=[]`, verdict 0 over a graph whose 51 operators ALL carry the
+    inverted mechanism; and an operator whose slot 1 reaches a node the declared
+    source is not joined to certified the declared edge (#13913 review round 15).
+
+    ⛔ THE SUBSTITUTION IS WHY THIS ROW EXISTS: `_edge_rows()` derives a row's
+    mechanism and its slot-1 target FROM the declaration it is meant to
+    contradict, so no fixture built by that helper can exercise either leg.
+    """
+    idents = filer.identity_by_ref(map_doc)
+    edge_rows, op_rows = _edge_rows(map_doc)
+    declared = next(e for e in map_doc["edges"] if "op" in e)
+    src, dst = idents[declared["from"]], idents[declared["to"]]
+
+    # the operator rows that hold the declared pair, and no other
+    holders = {}
+    for row in op_rows:
+        holders.setdefault(row[0], []).append(row)
+    opid = next(
+        nid for nid, rows in holders.items()
+        if {tuple(r[4:]) for r in rows if r[2] == 0} == {tuple(_row_of(src))}
+        and {tuple(r[4:]) for r in rows if r[2] == 1} == {tuple(_row_of(dst))})
+    triple = (declared["op"], declared["from"], declared["to"])
+
+    def _presence_with(**swaps) -> set:
+        """The declared edge is MISSING under the substitution, certified without it."""
+        rows = []
+        for row in op_rows:
+            if row[0] != opid:
+                rows.append(row)
+                continue
+            new = list(row)
+            if "mechanism" in swaps and new[2] == 0:
+                new[1] = swaps["mechanism"]
+            if "target" in swaps and new[2] == 1:
+                new[4:] = _row_of(swaps["target"])
+            rows.append(new)
+        _missing_nodes, missing_edges = filer.presence(
+            map_doc, _node_rows(map_doc), edge_rows, rows)
+        return missing_edges
+
+    # baseline: the unsubstituted rows certify it, so the row is not vacuous
+    assert triple not in _presence_with(), "the fixture's own rows do not certify it"
+
+    other_op = "NAND" if declared["op"] != "NAND" else "IMPL"
+    assert triple in _presence_with(mechanism=other_op), (
+        "an operator carrying the WRONG mechanism certified the declared edge")
+
+    # a real node the declared source is joined to by nothing
+    joined = {e["to"] for e in map_doc["edges"] if e["from"] == declared["from"]}
+    joined |= {e["from"] for e in map_doc["edges"] if e["to"] == declared["from"]}
+    stranger = next(r for r, ident in idents.items()
+                    if r != declared["to"] and r != declared["from"]
+                    and r not in joined)
+    assert triple in _presence_with(target=idents[stranger]), (
+        "an operator whose slot 1 reaches an UNRELATED node certified the "
+        "declared edge")
+
+
 def test_a_structural_edge_the_door_DECLINED_is_not_marked_written(
         tmp_path, monkeypatch, map_doc, capsys):
     """`create_edge` declines WITHOUT raising, so its result is the only witness.
