@@ -16576,9 +16576,12 @@ _D5_REFUTED_READINGS: tuple[tuple[tuple[str, ...], str], ...] = (
         "call sites are what `grep -n 'subject_binding_available(' tortoise/sdk.py` "
         "prints — ⛔ no line number is typed here, because the number this note "
         "used to carry rotted to a docstring line while the import list itself "
-        "moved (the same grep prints `:45867` at this head and printed `:45728` at "
-        "the head that wrote the note), which is the same correction the D5 cell "
-        "now records (#13794 measurement, P2; #13853 review, P2)",
+        "moved: the same grep prints `:45867` at `1a193d4c39`, and printed "
+        "`:45728` at `09f5c99afd` — the head that wrote that PIN, ⛔ not the head "
+        "that wrote this note (`d6a3c93308`), which already printed `:45867` — "
+        "which is the same correction the D5 cell now records "
+        "(#13794 measurement, P2; #13853 review, P2; #13853 review at "
+        "`1a193d4c39`, P2: the first cut of this parenthesis named the wrong head)",
     ),
     (
         # ⛔ No frame and no case dependence: the READING is what is pinned, so the entry
