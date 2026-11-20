@@ -801,8 +801,24 @@ def _require_hnsw_indexdef(indexdefs: list[str], *, label: str = "point",
     """
     for indexdef in indexdefs:
         normalised = (indexdef or "").replace('"', "").lower()
-        if "using hnsw" in normalised and f"({column}" in normalised:
-            return indexdef
+        if "using hnsw" not in normalised or f"({column}" not in normalised:
+            continue
+        # ⛔ HNSW IS BUILT FOR **ONE** OPERATOR CLASS, AND THE RECORD ARM READS
+        # WITH `<=>` (COSINE). An `hnsw (embedding_vec vector_l2_ops)` or
+        # `vector_ip_ops` index cannot serve a cosine `ORDER BY`, so pgvector does
+        # not use it and the read falls back to an EXACT SCAN — the very state this
+        # guard exists to refuse, one opclass over. The repo says the same thing
+        # about the same index (`20261109000001_record_embedding_vector.sql:88-90`:
+        # "`vector_l2_ops` here would silently change the ranking, which is the one
+        # thing the issue forbids"). An index matched without its opclass is an
+        # index this guard has not verified.
+        if "vector_cosine_ops" not in normalised:
+            continue
+        # ⛔ AND NOT A PARTIAL ONE: `… WHERE (status IS NULL)` indexes a subset, so
+        # the unfiltered read cannot be answered from it either.
+        if " where " in normalised:
+            continue
+        return indexdef
     raise CannotRun(
         f"cannot run: no HNSW index on public.{label}({column}) — the record leg "
         f"would answer by an EXACT SEQUENTIAL SCAN, which returns this harness's "
