@@ -14,7 +14,7 @@ aboutObjects: "SEARCH-ARCHITECTURE.md §3, §6.1; #11642; #13220; #13610; #5004;
 # Dense-leg query parity — both stores, one corpus, four readers (#13906)
 
 **Instrument:** `tools/vector_parity_13906.py` · **Comparator pins:**
-`tests/test_vector_parity_13906.py` (30 DB-free tests) · **Artifacts, this
+`tests/test_vector_parity_13906.py` (41 DB-free tests) · **Artifacts, this
 directory:** `parity-run.json`, `poison-{id,order,recall,vector}.json`.
 
 The question this answers, in one sentence: **for the same tenant data and the
@@ -269,6 +269,18 @@ five committed artifacts still replay **bit-identically** through the verdict
 | **I1** the falsifier's own proof was minted from runs that never looked: `poison_status = "POISON DETECTED" if not ok` counted EVERY failure as a detection, including the cannot-measure ones this verdict already names. Six queries each carrying `record_error` (a `VectorShortfall` — the #13911 shape) printed `poison: POISON DETECTED` and exited **1**, byte-identical to a real detection, while the poison was never exercised on a gated arm. §6's recipe collapses the three readings into one `echo exit=$?` | reproduced DB-free: six `record_error` entries → `POISON DETECTED`, exit 1 | three readings, three answers: **POISON DETECTED** (a failure from a MEASURED arm — a mixed run still counts), **POISON UNMEASURED …** → exit **2** (the same class as every other cannot-run), **POISON NOT DETECTED — HARNESS BLIND** → exit 1. Pinned by `test_a_poisoned_run_that_could_not_measure_is_not_a_detection` and `…_exits_2` (the exit code, not only the word) |
 | **I2** the index-arm refusal had no pin, so the inert form the `_require_index_arm` docstring says was removed could come back silently: reintroducing `if ready and mechanisms != ["index"]` left **35/35 green**. Consequence: a timed-out `wait_index_ready` publishes `run_vector_query HNSW` over `mechanisms: ["scan_fallback"]` — the SCAN's numbers under the index's name, the arm #13911 is diagnosed from — while the gated arms are unaffected, so nothing reds | mutant: 35/35 green | the decision is a named seam (`_require_index_arm`, the `_scan_arm` treatment), pinned DB-free across five `(mechanisms, ready)` cases — a timed-out readiness REFUSES, since it is the case the guard exists for — plus an AST read of `run()` so the call site cannot inline the `if` again (mutant: restore the inert form → **1 failed**) |
 
+### Round 8: the round-7 fix was inert on the state `run()` actually emits
+
+The attestation review at `9b7b4362` confirmed every pin still discriminates and the
+diff is pure additions — and then drove the REAL `run()` with fake stores, which is
+what round 7's own pin had failed to do. Two findings, both reproduced here first.
+
+| finding | verified how | fix |
+|---|---|---|
+| **J1** round 7's three-way `poison_status` was **INERT on the reachable state**. When the record leg raises, `run()` substitutes `rec_answers[qid] = []` (`:931`), so `compare(t_cos, [])` yields `ids_equal False / recall 0.0`, and `_verdict` appended a "record diverged" failure to `failures` but NOT to `unmeasured` — the `detected = any(f … not in unmeasured)` test read it as a MEASURED divergence. Driving the real `run()` with a record leg raising `VectorShortfall` on all six queries: `--poison id`/`order`/`recall` each printed `POISON DETECTED` and exited **1**, byte-identical to a genuine detection. Round 7's pin could not see it because its fixture paired `record_error` with a GREEN record arm — a state `run()` never emits. Same root, second instance: an all-NaN distance list (pgvector's NaN on a zero-norm vector) also reaches DETECTED | drove `run()` with fake stores; also replayed the reachable entry through `_verdict` | the per-arm decision is now ONE function (`_arm_failure`) that says whether a failure is EVIDENCE or an ABSENCE of it: a raised leg, an empty oracle, zero compared rows, or every distance unmeasurable are cannot-measure — so `POISON UNMEASURED` / exit **2**, and a mixed run with any measured divergence still reports DETECTED. Pinned with fixtures the comparator GENERATES, and the fixture-generation helper says why |
+| **J2** `compare` published `distance.ok: True, max_delta: 0.0` over **ZERO** compared rows — `zip([], [])` runs no iterations — which is what made a raised leg's empty answer look like a passed value check | read the branch | `ok` is `None` (UNMEASURED) with a reason when no candidate row was compared, so every consumer that requires a positive measurement fails on it; pinned by `test_an_empty_answer_is_not_a_passed_distance_check` |
+| **J3** the header above still carried the round-1 count (**30** DB-free tests) while §6 at that revision said **39** and the tree collected 39 (37 `def test_` + 2 from the one parametrized case) — the D1 stale-count pattern, re-staled by round 7's nine added pins. ⚠️ The first draft of THIS ROW said "36", which was neither the header nor §6; it quoted the round-6/7 *mutation* figures by mistake. Corrected here because the same section two paragraphs down records exactly that failure mode — a correction that asserts a previous text was wrong while being wrong itself | `git show <parent>:README.md` lines 17 and 318, plus the parent revision's own test-count (`def test_` occurrences, counted with grep -c) | corrected to **41**, and §6's count now matches the tree |
+
 ### The two evidence errors this section exists to correct
 
 Both were in the **previous revision of this document**, and both are the
@@ -315,7 +327,7 @@ done
 ```
 
 DB-free comparator pins: `uv run python tools/test_lane.py run --
-tests/test_vector_parity_13906.py -q` → **39 passed**.
+tests/test_vector_parity_13906.py -q` → **41 passed**.
 
 ## 7. What this artifact does NOT establish
 

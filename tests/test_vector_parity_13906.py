@@ -678,56 +678,153 @@ def test_a_nan_distance_is_not_a_verified_one(harness):
     assert verdict["ok"] is False
 
 
+def _reachable_entry(harness, *, record_error=None, corrupt_record=False,
+                    nan_distances=False, query="q0"):
+    """An entry in the shape `run()` ACTUALLY produces — built by `compare` itself.
+
+    ⛔ GENERATED, NOT HAND-WRITTEN, and that is the whole lesson of this pin. The
+    first version of it paired `record_error` with a GREEN record arm (`ids_equal
+    True, recall 1.0`) — a state `run()` never emits while that key is set, so it
+    proved nothing about the reachable path. `run()` answers a raised record leg
+    with `rec_answers[qid] = []` (then `compare(t_cos, [])`), and THIS fixture was
+    green while that real state still printed POISON DETECTED (measured in review,
+    round 8). The fixture must be produced by the comparator, not imagined.
+    """
+    rows = harness.build_corpus(13906, 4)
+    qvec = harness._queries(rows, 2)[0][1]
+    t_cos = harness.truth(rows, qvec, 8, metric="cosine")
+    t_euc = harness.truth(rows, qvec, 8, metric="euclidean")
+    cos_ids = [key for key, _ in t_cos]
+    cos_dists = [d for _, d in t_cos]
+    if record_error is not None:
+        # exactly what `run()` does when `record.read` raises
+        rec = harness.compare(t_cos, [], candidate_distances=[])
+    elif nan_distances:
+        rec = harness.compare(t_cos, cos_ids,
+                              candidate_distances=[float("nan")] * len(cos_ids))
+    elif corrupt_record:
+        swapped = [cos_ids[1], cos_ids[0], *cos_ids[2:]]
+        rec = harness.compare(t_cos, swapped, candidate_distances=cos_dists)
+    else:
+        rec = harness.compare(t_cos, cos_ids, candidate_distances=cos_dists)
+    entry = {"query": query, "record": rec, "graph_index": rec,
+             "graph_scan_vs_euclidean": harness.compare(
+                 t_euc, [key for key, _ in t_euc],
+                 candidate_distances=[d for _, d in t_euc]),
+             "graph_scan_vs_cosine": harness.compare(t_cos, cos_ids),
+             "metric_divergence_ids": []}
+    if record_error is not None:
+        entry["record_error"] = record_error
+    return entry
+
+
+def test_each_cannot_measure_signal_makes_an_arm_unmeasured(harness):
+    """The three signals `_arm_failure` decides on, one case each.
+
+    ⛔ EACH IS PINNED SEPARATELY because they BACK EACH OTHER UP: a raised leg is
+    also an empty answer (no rows compared), so removing one guard alone still
+    leaves the reported property intact — and a pin on the property alone would
+    stay green, i.e. the guard it just lost would be untested. Here each signal is
+    observed in the state where it alone decides.
+    """
+    rows = harness.build_corpus(13906, 4)
+    qvec = harness._queries(rows, 2)[0][1]
+    t_cos = harness.truth(rows, qvec, 8, metric="cosine")
+    cos_ids = [key for key, _ in t_cos]
+    cos_dists = [d for _, d in t_cos]
+
+    # (1) A RAISED LEG OUTRANKS A MEASURED-LOOKING COMPARISON. `run()` answers a
+    # raise with `[]` today, so the two coincide — but a leg that returned partial
+    # answers and THEN raised produces exactly this, and the divergence is a
+    # consequence of the failure, not evidence the poison was seen.
+    lookalike = harness.compare(t_cos, [cos_ids[1], cos_ids[0], *cos_ids[2:]],
+                                candidate_distances=cos_dists)
+    msg, measured = harness._arm_failure(
+        "q0", "record", lookalike, oracle="truth_cosine", error="VectorShortfall:")
+    assert msg and "FAILED" in msg
+    assert measured is False, "a raised leg was scored as a MEASURED divergence"
+
+    # (2) EVERY DISTANCE UNMEASURABLE (pgvector's NaN on a zero-norm vector).
+    nan = harness.compare(t_cos, cos_ids,
+                          candidate_distances=[float("nan")] * len(cos_ids))
+    msg, measured = harness._arm_failure("q0", "record", nan, oracle="truth_cosine")
+    assert msg and measured is False, nan["distance"]
+
+    # (3) ZERO ROWS COMPARED.
+    empty = harness.compare(t_cos, [], candidate_distances=[])
+    msg, measured = harness._arm_failure("q0", "record", empty, oracle="truth_cosine")
+    assert msg and measured is False, empty["distance"]
+
+    # (4) An EMPTY ORACLE is an absence of an answer to compare against.
+    _, measured = harness._arm_failure("q0", "record",
+                                      harness.compare([], []), oracle="truth_cosine")
+    assert measured is False
+
+    # (5) …and a genuine divergence IS measured, so (1)-(4) cannot be satisfied
+    # by a function that answers False to everything.
+    real = harness.compare(t_cos, [cos_ids[1], cos_ids[0], *cos_ids[2:]],
+                           candidate_distances=cos_dists)
+    msg, measured = harness._arm_failure("q0", "record", real, oracle="truth_cosine")
+    assert msg and measured is True, real
+
+
 def test_a_poisoned_run_that_could_not_measure_is_not_a_detection(harness):
     """⛔ THE FALSIFIER'S PROOF may only be minted by a MEASURED arm.
 
     `poison_status` used to be `"POISON DETECTED" if not ok`, so EVERY failure
     counted as a detection — including the cannot-measure failures the verdict
-    already names. Measured in review: six entries each carrying `record_error`
-    (a `VectorShortfall` on every query — the #13911 shape) printed
-    `poison: POISON DETECTED` and exited **1**, byte-identical to a real
-    detection, from a run in which the poison was never exercised on a gated
-    arm. Three readings, three answers.
+    already names. Three readings, three answers, and the entries below are the
+    states `run()` really emits (a raised record leg, an all-NaN distance list),
+    not a hand-built approximation of them.
     """
-    def entry(**over):
-        base = {"query": "q0",
-                "record": {"ids_equal": True, "order": "exact", "recall": 1.0,
-                           "distance": {"ok": True, "max_delta": 0.0}},
-                "graph_scan_vs_euclidean": {"ids_equal": True, "order": "exact",
-                                            "recall": 1.0,
-                                            "distance": {"ok": True,
-                                                         "max_delta": 0.0}},
-                "metric_divergence_ids": []}
-        base.update(over)
-        return base
-
-    could_not_measure = {"queries": [entry(record_error="VectorShortfall: 8 of 10")
-                                     for _ in range(6)]}
-    v = harness._verdict(could_not_measure, poisoned="id")
+    raised = {"k": 8, "queries": [
+        _reachable_entry(harness, record_error="VectorShortfall: 8 of 10")] * 6}
+    v = harness._verdict(raised, poisoned="id")
     assert v["ok"] is False
-    assert v["poison_status"].startswith("POISON UNMEASURED"), v["poison_status"]
-    assert "DETECTED" not in v["poison_status"].replace("UNMEASURED", ""), (
-        "a run that never measured a gated arm reported the poison as DETECTED "
-        "— the falsifier certified itself from a run that could not look")
+    assert v["poison_status"].startswith("POISON UNMEASURED"), (
+        f"the state a RAISED record leg actually produces was reported as "
+        f"{v['poison_status']!r} with failures {v['failures']}")
     assert v["unmeasured"] is True
 
-    measured = {"queries": [entry(record={"ids_equal": False, "order": "diverged",
-                                         "recall": 0.5,
-                                         "distance": {"ok": True,
-                                                       "max_delta": 0.0}})]}
+    # The other reachable unmeasured input: every distance NaN (pgvector answers
+    # NaN for a zero-norm vector), with the ids coincidentally intact.
+    nan = {"k": 8, "queries": [_reachable_entry(harness, nan_distances=True)]}
+    nv = harness._verdict(nan, poisoned="order")
+    assert nv["poison_status"].startswith("POISON UNMEASURED"), nv["poison_status"]
+    assert nv["unmeasured"] is True
+
+    measured = {"k": 8, "queries": [_reachable_entry(harness, corrupt_record=True)]}
     hit = harness._verdict(measured, poisoned="id")
-    assert hit["poison_status"] == "POISON DETECTED"
+    assert hit["poison_status"] == "POISON DETECTED", hit["failures"]
     # …and the flag is ABSENT, not False, so the five committed artifacts keep
     # replaying bit-identically through this verdict (checked: all five do).
     assert "unmeasured" not in hit, hit
 
     # A MIXED run still counts as a detection: a real divergence on a measured
     # arm is a detection however many other queries could not be measured.
-    mixed = {"queries": [measured["queries"][0],
-                         entry(record_error="VectorShortfall: 8 of 10")]}
+    mixed = {"k": 8, "queries": [
+        _reachable_entry(harness, corrupt_record=True),
+        _reachable_entry(harness, record_error="VectorShortfall: 8 of 10",
+                         query="q1")]}
     both = harness._verdict(mixed, poisoned="order")
     assert both["poison_status"] == "POISON DETECTED", both["poison_status"]
     assert "unmeasured" not in both, both
+
+
+def test_an_empty_answer_is_not_a_passed_distance_check(harness):
+    """ZERO rows compared is not a value check that passed (#13914 round 8).
+
+    `zip([], [])` runs zero times, so `worst_delta` stayed `0.0` and an empty
+    candidate list published `distance.ok: True, max_delta: 0.0`. That is what
+    made a raised record leg look like a MEASURED divergence: `ids_equal False`
+    with a GREEN distance check.
+    """
+    rows = harness.build_corpus(13906, 4)
+    qvec = harness._queries(rows, 2)[0][1]
+    t_cos = harness.truth(rows, qvec, 8, metric="cosine")
+    empty = harness.compare(t_cos, [], candidate_distances=[])
+    assert empty["distance"]["ok"] is not True, empty["distance"]
+    assert "no candidate row" in empty["distance"]["reason"]
 
 
 def test_a_poisoned_run_that_could_not_measure_exits_2(harness, monkeypatch):
@@ -738,34 +835,22 @@ def test_a_poisoned_run_that_could_not_measure_exits_2(harness, monkeypatch):
     comparison diverged"), that one bit reads as "the poison was confirmed" for a
     run that never looked, which is exactly how a falsifier certifies itself.
     """
-    def report_with(record=None, **entry_over):
-        rec = {"ids_equal": True, "order": "exact", "recall": 1.0,
-               "distance": {"ok": True, "max_delta": 0.0}}
-        rec.update(record or {})
-        entry = {"query": "q0", "record": rec,
-                 "graph_index": {"ids_equal": True, "order": "exact",
-                                  "recall": 1.0},
-                 "graph_scan_vs_euclidean": {
-                     "ids_equal": True, "order": "exact", "recall": 1.0,
-                     "distance": {"ok": True, "max_delta": 0.0}},
-                 "graph_scan_vs_cosine": {"recall": 1.0, "order": "exact"},
-                 "metric_divergence_ids": []}
-        entry.update(entry_over)
-        return {"k": 1, "queries": [entry],
-                "verdict": harness._verdict(
-                    {"k": 1, "queries": [dict(entry)]}, poisoned="id")}
+    def report(**entry_over):
+        entry = _reachable_entry(harness, **entry_over)
+        return {"k": 8, "queries": [entry],
+                "verdict": harness._verdict({"k": 8, "queries": [dict(entry)]},
+                                            poisoned="id")}
 
     argv = ["--record-dsn", "postgresql://u:p@127.0.0.1/db",
             "--graph-port", "1", "--poison", "id"]
 
-    could_not_measure = report_with(record_error="VectorShortfall: 8 of 10")
+    could_not_measure = report(record_error="VectorShortfall: 8 of 10")
     monkeypatch.setattr(harness, "run", lambda _args: could_not_measure)
     assert harness.main(argv) == 2, (
         "a poisoned run that could not measure exited 1 — the falsifier's recipe "
         "reads that as 'poison confirmed'")
 
-    detected = report_with(record={"ids_equal": False, "order": "diverged",
-                                   "recall": 0.5})
+    detected = report(corrupt_record=True)
     monkeypatch.setattr(harness, "run", lambda _args: detected)
     assert harness.main(argv) == 1, "a MEASURED detection must keep exit 1"
 
