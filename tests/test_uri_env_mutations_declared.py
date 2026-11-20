@@ -280,6 +280,48 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
         # third: clearing only the `test_10015…` one leaves the duplicate
         # `test_published_artifact_canary.py` key this PR exists to clear.
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI",\s*raising=False'],
+    # #13833 (the #13557/#13558 read-path rewrite, commit `1231060fd2`) landed
+    # `test_13557_13558_reachable_reads.py` with one URI mutation and no row here,
+    # which reds THIS gate on `main` — the same "module landed without its entry"
+    # shape as #9664 / #12275 / #12521 above (measured: at `main` `e3f894b31b` the
+    # only undeclared site in the tree is the one named below, and it reproduces in
+    # a pristine detached worktree, so this is the tree, not a box).
+    #
+    # The site is the module's `sdk` fixture: `monkeypatch.setenv("TORTOISE_DB_URI",
+    # _uri())`. It is DELIBERATE_URI, NOT an embedded-lane escape, and the reason is
+    # the VALUE: `_uri()` RESOLVES a URI the module's own import-time probe already
+    # PROVED — ambient `TORTOISE_DB_URI`, else `_WORKING_URI` (the candidate the
+    # `_probe` ladder accepted), else `_live_utils.docker_uri("tortoise_test_13557",
+    # password=None)`. So the setenv RE-PINS a reachable store; it cannot fold a
+    # docker-half test onto embedded, which is the #942 vacuity vector this census
+    # exists for. (Precisely: `_uri()`'s own ladder is NOT byte-identical to the
+    # probe's — the probe tries env → `docker_uri` → `legacy_uri`, while `_uri()`
+    # tries env → `_WORKING_URI` → `docker_uri(password=None)` — so the claim is not
+    # "the same ladder", it is "the probe's answer is reused".) That reuse is the
+    # point: the probe decides `@_docker_only`, and if a test were admitted on one URI
+    # and opened a handle on another, every live-store assertion here would run
+    # against a store the probe never proved.
+    # Coverage of the live-store reads is the 15 `@_docker_only`-marked tests. The one
+    # other test that takes the `sdk` fixture,
+    # `test_the_ended_scope_still_refuses_an_explicit_query`, is NOT marked — it asserts
+    # a `ValueError` raised BEFORE any query, so it needs no store and cannot pass
+    # vacuously embedded (do not restate that as "every `sdk` test skips"; 16 take the
+    # fixture, 15 are marked). The remaining 10 tests take no `sdk` at all.
+    #
+    # No leak: the mutation lives in a function-scoped `monkeypatch` FIXTURE, so it is
+    # auto-undone at teardown. ⛔ Do not read the restoration guard as covering it —
+    # that guard reds on RAW module-scope/fixture-body mutations only, so this row's
+    # safety is the `monkeypatch` param, exactly as the other fixture rows here.
+    #
+    # The arm pins the VALUE (`_uri()`), not just the variable name, so a FUTURE site
+    # in this file with a different expression is NOT authorized and must be triaged
+    # by hand (the #11083 hazard: an arm wider than the site it was written for
+    # authorizes sites nobody reviewed). Reformatting the call is likewise a re-triage,
+    # not a silent pass — `\s*` tolerates a wrapped line, but the `_uri()` literal must
+    # still be the argument.
+    "test_13557_13558_reachable_reads.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*_uri\(\)\)',
+    ],
     # #12275: `test_candidate_recall_11901.py` (#12159) landed with three
     # untriaged URI mutations, which reds this gate on `main` in `test (d)` —
     # the same "module landed without its entry" shape as #9664 above. None of
