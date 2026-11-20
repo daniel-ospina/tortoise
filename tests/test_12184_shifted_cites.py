@@ -331,6 +331,12 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, '`:274-281`', _SSM, 274, '_REPAIR_PAIR = ('),
     (_AUDIT, 'session_source_prose_migration.py:277-279', _SSM, 277, "AND coalesce(s.summary,'')=$old_sum "),
     (_AUDIT, '`:1292-1300`', _SSM, 1292, '_CONTROL_LEXICON_ROWS = ('),
+    # --- #14043 review (finding 1, this cycle): §6.3's own two addresses were in neither list and
+    # unpinned, and the header's default resolves them to the PIN — where `sdk.py:15958` is unrelated
+    # prose and `sdk.py:3777` is an EMPTY LINE. Both are one-token spellings already, so no figure
+    # moves (345 as-written stays 345); NON-VACUOUS: `+1` reds the content arm at both.
+    (_AUDIT, 'sdk.py:15958-15962', _SDK, 15958, '**JSONL event log (#548):** written when *point* is provided'),
+    (_AUDIT, 'sdk.py:3777', _SDK, 3777, 'sdk._emit_event("PointRetracted", _deleted_point_payload(tid))'),
 )
 
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
@@ -505,6 +511,10 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:274-281`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'session_source_prose_migration.py:277-279'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:1292-1300`'): 2,
+    # #14043 review (finding 1): one site each in §6.3. Measured on this document:
+    # `grep -o -F 'sdk.py:15958-15962' <doc> | wc -l` -> 1, `... 'sdk.py:3777' ...` -> 1.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:15958-15962'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:3777'): 1,
 }
 
 
@@ -873,7 +883,7 @@ def test_the_five_header_siblings_already_carry_their_pair_from_section_2_5() ->
     """The header's bare-sibling clause is only true while each of the five is ALSO written one-token.
 
     The clause now says a `path.py:NNNN` re-spelling would add "five more **as-written spellings** —
-    342 → 347 — and so 113 → 118 collisions … while adding **no pair at all**: 229 either way, because
+    345 → 350 — and so 114 → 119 collisions … while adding **no pair at all**: 231 either way, because
     each of the five already carries its pair from §2.5". That last half is the load-bearing one, and it
     was FALSE for the sentence it replaced: the previous edition claimed a pair spelling "would add five
     more pairs to the populations the figures above are measured over" (`#13991` review, P2-1), while
@@ -1127,7 +1137,15 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # moved them with nothing red. That is the failure mode the four rows above exist to stop, and
     # §2.7's own note (file-scoped drift is "either fixed everywhere or trusted nowhere") is why the
     # file's remaining unpinned sites are closed in the same commit.
-    assert len(_PINS) == 80
+    # 77 -> 80 by the rc lane's §2.6 re-cut (`0a53ad23d8`): the three statements it re-pointed at this
+    # head — `hosted_backup.py:892`, `:1316`, `:1517` — needed rows of their own, because a re-point
+    # whose new address is unpinned "moves the defect rather than closing it" (that re-cut's own
+    # re-review). MEASURED, not inferred: the count of `_PINS` rows at each of these heads is
+    # 72 (ecb137107e) -> 77 (298d3328db, the five above) -> 80 (0a53ad23d8).
+    # 80 -> 82 at the #14043 review (finding 1, this cycle): §6.3's `sdk.py:15958-15962` and
+    # `sdk.py:3777` were in neither list and unpinned, and the pin default opens on prose and on an
+    # empty line respectively.
+    assert len(_PINS) == 82
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
