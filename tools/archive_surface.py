@@ -1194,6 +1194,42 @@ def parse_shrink_waiver(text: str) -> tuple[str, str]:
     return kind, symbol.strip()
 
 
+def _live_body_is_the_recorded_one(root: Path, entry: dict, carrier: str) -> bool | None:
+    """Does the LIVE carrier still hold the body this row recorded? None = cannot tell.
+
+    ⛔ A live NAME is not a restore. The restore credit is granted because "the code came back
+    to the product", so the question is about the CODE, not the path: a three-line stub dropped
+    at the dotted path used to earn the credit, which destroyed the record of what was removed
+    while nothing came back (round-7 review, measured on a 30-function module: frozen file
+    deleted, row dropped, `X = 1  # nothing of the module` written at the path → every arm
+    green). This asks the writer's own extractor what the symbol WOULD freeze from the live
+    file and compares its sha256 to the row — a verbatim restore is green, and a
+    restore-and-modify leaves the row as the record and takes the `--allow-archive-shrink`
+    route, which is what that route is for.
+
+    `None` (cannot tell) stays on the permissive side ON PURPOSE: an unreadable live file, or a
+    block the extractor cannot key, is not evidence of a loss, and this arm's job is to report
+    losses.
+    """
+    text = _file_text(root, carrier)
+    rows = entry.get("blocks")
+    if text is None or not isinstance(rows, list) or not rows:
+        return None
+    row = rows[0]
+    if not isinstance(row, dict):
+        return None
+    expected = expected_block(
+        str(entry.get("kind") or ""),
+        str(entry.get("symbol") or ""),
+        str(row.get("path") or ""),
+        text,
+        row.get("node"),
+    )
+    if expected is None:
+        return None
+    return _sha256(expected.strip("\n")) == row.get("sha256")
+
+
 def _reanchor_is_verified(
     root: Path, symbol: str, rel: str, entry: dict, base_entry: dict
 ) -> bool:
@@ -1245,6 +1281,19 @@ def _reanchor_is_verified(
         return False  # same blocks, same keys — a re-anchor does not swap the evidence
     if entry.get("sources") != [row.get("path") for row in recorded]:
         return False  # the writer's own derivation, so a `sources` edit cannot ride along
+    # ⛔ EVERY OTHER CLAIM FIELD IS FIXED. A re-anchor moves the anchor and re-hashes bodies;
+    # `archived_from` is a CLAIM_FIELD bound to nothing else on this path (`_anchor_violations`
+    # reads the block rows' `path`, and `file_violations` only makes the FILE's metadata agree
+    # with the manifest), so a consistent lie passed both (round-7 review: `archived_from`
+    # rewritten to a file that never held it, every block byte-identical → `file_violations: []`,
+    # `shrink_violations: []`).
+    for field in CLAIM_FIELDS:
+        if field in ("archived_at", "blocks", "sources"):
+            continue
+        if json.dumps(entry.get(field), sort_keys=True, default=str) != json.dumps(
+            base_entry.get(field), sort_keys=True, default=str
+        ):
+            return False
     text = _file_text(root, rel)
     if text is None:
         return False
@@ -1254,6 +1303,24 @@ def _reanchor_is_verified(
     sha = str(entry.get("archived_at") or "")
     if not _SHA_RE.match(sha) or not _git_has_commit(root, sha):
         return False
+    # ⛔ THE ANCHOR MUST MOVE FORWARD, ON THE DEFAULT BRANCH. A readable anchor is not enough:
+    # re-rendering the frozen body from an OLDER revision of the same symbol and re-pointing
+    # `archived_at` at it satisfies every byte check above and silently ROLLS THE EVIDENCE BACK
+    # (round-7 review — the TUF rollback shape this module cites at the top of this file: "a
+    # client that accepts a lower version than the one it already trusts has been rolled
+    # back"). A side-branch anchor is refused for the same reason `anchor_sha` refuses to WRITE
+    # one: a squash merge orphans it.
+    previous = str(base_entry.get("archived_at") or "")
+    if _SHA_RE.match(previous) and _git_has_commit(root, previous):
+        code, _out = _git(root, "merge-base", "--is-ancestor", previous, sha)
+        if code != 0:
+            return False  # the anchor went BACKWARDS: a rollback, not a refresh
+    ref = default_branch_ref(root)
+    if ref is None:
+        return False  # durability unprovable here: keep the violation (fail closed)
+    code, _out = _git(root, "merge-base", "--is-ancestor", sha, ref)
+    if code != 0:
+        return False  # not on the default branch — this anchor is not a citation
     for (path, body), row in zip(blocks, recorded, strict=True):
         if not isinstance(row, dict):
             return False
@@ -1344,7 +1411,10 @@ def shrink_violations(
     base_paths_by_module: dict[str, str] = {}
     head_paths_by_module: dict[str, str] = {}
     for targets, paths in ((base_paths_by_module, base_paths), (head_paths_by_module, head_paths)):
-        for path in paths:
+        # SORTED so the carrier choice is a property of the paths, not of a set's hash order:
+        # the preference below is what makes "add a stub beside the module" deterministic, and a
+        # hash-ordered map made that guarantee untestable (measured in round-7 review).
+        for path in sorted(paths):
             name = module_name(path)
             # ⛔ PREFER the RUNTIME carrier: a `.pyi` stub has no runtime statements, so it must
             # never stand in for a module's code on the SHRINK side. Replacing `x.py` with
@@ -1358,10 +1428,14 @@ def shrink_violations(
         stubbed = head_carrier.endswith(".pyi") and not base_carrier.endswith(".pyi")
         if not stubbed:
             head_text = _file_text(root, head_carrier)
-            # An UNREADABLE file is not evidence of a removal, so it is not reported as one
-            # (the file arm already reds a manifest row whose file is missing); this is the
-            # one residual of the arm, stated rather than implied.
-            if head_text is None or _init_carries_a_body(head_text):
+            # ⛔ A head carrier that EXISTS but cannot be read is the removed body, not a reason
+            # to stay silent: a dangling symlink, or a DIRECTORY named `x.py`, passes `exists()`
+            # while holding no code (round-7 review). This is the OPPOSITE polarity from
+            # `_modules_with_a_body`, and deliberately so: there a `None` answer means the BASE
+            # side could not read the commit (a shallow clone), where "counts as content" is the
+            # only safe reading — here the file is on disk in the working tree, so an unreadable
+            # one is evidence about THIS tree.
+            if head_text is not None and _init_carries_a_body(head_text):
                 continue
         base_text = _git_blob(root, sha, base_carrier)
         if base_text is None or not _init_carries_a_body(base_text):
@@ -1396,13 +1470,17 @@ def shrink_violations(
             if key in waivers:
                 used.add(key)
                 continue
-            if surface is not None and live_return(base_entry, surface) is not None:
+            if surface is not None and (carrier := live_return(base_entry, surface)) is not None:
                 # A RESTORE, not a loss: the row left because the code came BACK (direction
                 # one reds the row if it stays — archived ⇔ absent), so there is nothing the
                 # archive promised that the product no longer carries. Recognising it here is
                 # what keeps `archive/README.md`'s own restore procedure green in CI, which
                 # runs this arm with `--base-ref` on every PR.
-                continue
+                #
+                # ⛔ The BODY decides, not the name: a stub dropped at the dotted path is not
+                # the code returning (see `_live_body_is_the_recorded_one`).
+                if _live_body_is_the_recorded_one(root, base_entry, carrier) is not False:
+                    continue
             out.append(
                 f"{symbol} ({kind}): REMOVED from archive/MANIFEST.json — {base_label} records "
                 "it and this tree does not, so the only index of what was removed from the "
@@ -1863,7 +1941,18 @@ def _module_source(root: Path, symbol: str) -> list[tuple[str, str, str | None]]
         if (root / package_rel).exists():
             rel, path = package_rel, root / package_rel
         else:
-            raise ArchiveRefused(f"module {symbol} has no file at {rel} and no package at {package_rel} — nothing to archive")
+            # …and a `.pyi`-only module is graded by every other arm (`_package_modules` reads
+            # `*.py*`, `module_name` strips `.pyi`, arm 1b's stub rule), so the remedy must be
+            # able to freeze one — otherwise the red the gate prints has no route, one suffix
+            # over from the package fallback above (round-7 review).
+            stub_rel = symbol.replace(".", "/") + ".pyi"
+            if (root / stub_rel).exists():
+                rel, path = stub_rel, root / stub_rel
+            else:
+                raise ArchiveRefused(
+                    f"module {symbol} has no file at {rel}, no package at {package_rel} and no "
+                    f"stub at {stub_rel} — nothing to archive"
+                )
     try:
         source = path.read_text(encoding="utf-8")
         ast.parse(source, filename=str(path))

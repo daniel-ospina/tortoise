@@ -1410,7 +1410,9 @@ def test_a_module_replaced_by_a_pyi_STUB_is_a_removal(tree: Path) -> None:
     — arm 1 saw the name on both sides and arm 1b read the STUB as a body. Graded green, with the
     module's runtime code gone (measured in review; `main` carries zero `.pyi` files under
     `tortoise/`, so nothing had ever exercised the shape).
-    Mutation: drop the `.pyi` preference when building the per-side carrier map -> RED here.
+    Mutation: `stubbed = False` -> RED here (the arm falls back to the content read, and a
+    non-empty stub reads as a body). The carrier-map determinism is `test_a_pyi_stub_beside_a_
+    live_module_is_NOT_a_removal`'s question, not this one.
     """
     (tree / "tortoise" / "stubby.py").write_text("def value():\n    return 1\n", encoding="utf-8")
     _commit(tree, "tortoise/stubby.py")
@@ -1726,6 +1728,214 @@ def test_a_reanchor_cannot_DELETE_a_frozen_block(tree: Path) -> None:
     assert any("REWRITTEN" in p and "blocks" in p for p in problems), (
         "dropping a frozen block while keeping the row is exactly the faithless record this arm "
         f"grades — the code it held now exists nowhere: {problems}"
+    )
+
+
+def test_a_reanchor_to_an_ANCESTOR_commit_is_a_ROLLBACK(tree: Path) -> None:
+    """A readable anchor is not enough: the evidence must not roll BACKWARDS (round-7 review).
+
+    Re-rendering the frozen body from an OLDER revision of the same symbol and re-pointing
+    `archived_at` at it satisfies every byte check — the file matches the record, and the commit
+    really holds that body — so the escape accepted it and the record silently named an earlier,
+    weaker revision. That is the TUF rollback shape this module cites at its top. A side-branch
+    anchor is refused for the same reason `anchor_sha` refuses to WRITE one.
+    Mutation: drop the `merge-base --is-ancestor previous sha` check -> RED here.
+    """
+    (tree / "tortoise" / "gone.py").write_text("def secret():\n    return 1\n", encoding="utf-8")
+    older = None
+    _commit(tree, "tortoise/gone.py")
+    older = arch._git(tree, "rev-parse", "HEAD")[1].strip()
+    (tree / "tortoise" / "gone.py").write_text(
+        "def secret():\n    return 2\n\ndef more():\n    return 3\n", encoding="utf-8"
+    )
+    _commit(tree, "tortoise/gone.py")
+    entry = arch.archive_symbol(arch.MODULE, "tortoise.gone", "batch-a", "r", root=tree)
+    _commit(tree, ".")
+    assert entry["archived_at"] != older
+    # ROLL BACK: the frozen body from the OLDER revision, anchored at the OLDER commit.
+    old_body = arch._git_blob(tree, older, "tortoise/gone.py")
+    assert old_body is not None
+    text, frozen = arch.render_archive_file(
+        entry["kind"], entry["symbol"], entry["batch"], entry["reason"],
+        entry["archived_from"], older, [("tortoise/gone.py", old_body, None)],
+    )
+    (tree / entry["file"]).write_text(text, encoding="utf-8")
+    arch.save_manifest(
+        {"entries": [dict(entry, archived_at=older, blocks=frozen, sources=["tortoise/gone.py"])]},
+        tree / "archive" / "MANIFEST.json",
+    )
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any("REWRITTEN" in p for p in problems), (
+        "a re-anchor to an ANCESTOR of the recorded anchor is a ROLLBACK, not a refresh — the "
+        f"record would name an earlier revision than the one it already trusted: {problems}"
+    )
+
+
+def test_a_reanchor_off_the_default_branch_is_a_violation(tree: Path) -> None:
+    """The new anchor must be a CITATION, i.e. on the default branch (round-7 review).
+
+    `anchor_unverified` already refuses to read such an entry; accepting it here made the two
+    arms disagree about the same record, and a squash merge orphans a side-branch anchor.
+    Mutation: drop the `--is-ancestor sha <default ref>` check -> RED here.
+    """
+    (tree / "tortoise" / "gone.py").write_text("def secret():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    entry = arch.archive_symbol(arch.MODULE, "tortoise.gone", "batch-a", "r", root=tree)
+    _commit(tree, ".")
+    # A real commit that holds the same body, but on a branch that is not `main`.
+    arch._git(tree, "checkout", "-q", "-b", "side")
+    (tree / "tortoise" / "side_note.py").write_text("Z = 9\n", encoding="utf-8")
+    _commit(tree, "tortoise/side_note.py")
+    side = arch._git(tree, "rev-parse", "HEAD")[1].strip()
+    arch._git(tree, "checkout", "-q", "main")
+    body = "def secret():\n    return 1"
+    text, frozen = arch.render_archive_file(
+        entry["kind"], entry["symbol"], entry["batch"], entry["reason"],
+        entry["archived_from"], side, [("tortoise/gone.py", body, None)],
+    )
+    (tree / entry["file"]).write_text(text, encoding="utf-8")
+    arch.save_manifest(
+        {"entries": [dict(entry, archived_at=side, blocks=frozen, sources=["tortoise/gone.py"])]},
+        tree / "archive" / "MANIFEST.json",
+    )
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any("REWRITTEN" in p for p in problems), (
+        "an anchor that is not an ancestor of the default branch is not a citation: "
+        f"{problems}"
+    )
+
+
+def test_a_reanchor_cannot_REWRITE_archived_from(tree: Path) -> None:
+    """`archived_from` is a CLAIM_FIELD bound to nothing else on the rewrite path (round-7).
+
+    `_anchor_violations` reads the block rows' `path`, and `file_violations` only makes the
+    FILE's metadata agree with the manifest — so a consistent lie passed both (measured: the
+    field rewritten to a file that never held the body, every block byte-identical).
+    Mutation: drop the `CLAIM_FIELDS` equality loop -> RED here.
+    """
+    (tree / "tortoise" / "gone.py").write_text("def secret():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    entry = arch.archive_symbol(arch.MODULE, "tortoise.gone", "batch-a", "r", root=tree)
+    _commit(tree, ".")
+    bogus = "tortoise/a/file/that/never/held/it.py"
+    text, frozen = arch.render_archive_file(
+        entry["kind"], entry["symbol"], entry["batch"], entry["reason"],
+        bogus, entry["archived_at"],
+        [(row["path"],
+          arch.frozen_blocks((tree / entry["file"]).read_text(encoding="utf-8"))[i][1],
+          row["node"]) for i, row in enumerate(entry["blocks"])],
+    )
+    (tree / entry["file"]).write_text(text, encoding="utf-8")
+    arch.save_manifest(
+        {"entries": [dict(entry, archived_from=bogus, blocks=frozen)]},
+        tree / "archive" / "MANIFEST.json",
+    )
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any("REWRITTEN" in p for p in problems), (
+        "a re-anchor moves the anchor and re-hashes bodies — it does not restate where the "
+        f"body came from: {problems}"
+    )
+
+
+def test_a_dropped_row_reattached_to_a_STUB_is_not_a_restore(tree: Path) -> None:
+    """A live NAME is not a restore: the BODY has to come back (round-7 review).
+
+    Dropping the row and the frozen file earned the restore credit whenever the name was live
+    again, so writing a three-line stub at the dotted path destroyed the record of what was
+    removed while nothing came back (measured on a 30-function module: every arm green, the
+    frozen bytes gone).
+    Mutation: drop the `_live_body_is_the_recorded_one` call -> RED here.
+    """
+    body = "".join(f"def f{i}():\n    return {i}\n" for i in range(30))
+    (tree / "tortoise" / "gone.py").write_text(body, encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    entry = arch.archive_symbol(arch.MODULE, "tortoise.gone", "batch-a", "r", root=tree)
+    _commit(tree, ".")
+    arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+    subprocess.run(["git", "rm", "-q", entry["file"]], cwd=tree, check=True)
+    (tree / "tortoise" / "gone.py").write_text("X = 1  # nothing of the module\n", encoding="utf-8")
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD~1", surface=_surface(modules={"tortoise/gone.py"})
+    )
+    assert any("REMOVED from archive/MANIFEST.json" in p for p in problems), (
+        "the row's frozen body is gone and a stub stands at the path — that is a loss, not a "
+        f"restore: {problems}"
+    )
+
+
+def test_a_pyi_only_module_is_archivable_by_its_dotted_path(tree: Path) -> None:
+    """The remedy must reach a shape the gate grades (round-7 review).
+
+    `.pyi` carriers are graded everywhere (`_package_modules`, `module_name`, arm 1b's stub
+    rule), so deleting a stub-only module reported `MODULE REMOVED` and printed a route that
+    resolved neither `<dotted>.py` nor `<dotted>/__init__.py` — a correct red with no route,
+    one suffix over from the package fallback.
+    Mutation: drop the `.pyi` fallback in `_module_source` -> RED (ArchiveRefused).
+    """
+    (tree / "tortoise" / "stubonly.pyi").write_text("def f() -> int: ...\n", encoding="utf-8")
+    _commit(tree, "tortoise/stubonly.pyi")
+
+    entry = arch.archive_symbol(arch.MODULE, "tortoise.stubonly", "batch-a", "r", root=tree)
+    assert entry["archived_from"] == "tortoise/stubonly.pyi"
+    assert entry["file"] == "archive/modules/batch-a/tortoise/stubonly.py"
+    _commit(tree, ".")
+    _commit_drop(tree, "tortoise/stubonly.pyi")
+    assert arch.shrink_violations(tree, base_ref="HEAD~1") == [], (
+        "the row the remedy wrote must clear the removal it was printed for"
+    )
+
+
+def test_an_UNREADABLE_head_carrier_counts_as_the_body_gone(tree: Path) -> None:
+    """A carrier that exists but cannot be read holds no code (round-7 review).
+
+    A dangling symlink (or a DIRECTORY named `x.py`) passes `exists()` while holding nothing; the
+    arm used to skip it as "not evidence", which is the green direction. The opposite polarity
+    to `_modules_with_a_body` is deliberate — there a `None` means the BASE commit could not be
+    read (a shallow clone), where "counts as content" is the only safe reading.
+    """
+    (tree / "tortoise" / "sym.py").write_text("def secret():\n    return 1\n", encoding="utf-8")
+    (tree / "tortoise" / "dir.py").write_text("def other():\n    return 2\n", encoding="utf-8")
+    _commit(tree, "tortoise/sym.py", "tortoise/dir.py")
+    subprocess.run(["git", "rm", "-q", "tortoise/sym.py"], cwd=tree, check=True)
+    (tree / "tortoise" / "sym.py").symlink_to("/nonexistent/target.py")
+    subprocess.run(["git", "rm", "-q", "tortoise/dir.py"], cwd=tree, check=True)
+    (tree / "tortoise" / "dir.py").mkdir()
+    (tree / "tortoise" / "dir.py" / "inner.txt").write_text("x\n", encoding="utf-8")
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    removed = sorted(p.split(":", 1)[0] for p in problems if "MODULE BODY REMOVED" in p)
+    assert removed == ["tortoise.dir", "tortoise.sym"], (
+        "an unreadable carrier holds no code: a dangling symlink and a directory named `.py` "
+        f"are both the body gone — {problems}"
+    )
+
+
+def test_a_pyi_stub_beside_a_live_module_is_NOT_a_removal(tree: Path) -> None:
+    """The `.pyi` preference's real load: a stub ADDED beside the module must stay green.
+
+    A name that carries BOTH `x.py` and `x.pyi` must resolve to the RUNTIME file, or a `.pyi`
+    winning the carrier map would turn "add a stub beside the module" into a false
+    `MODULE BODY REMOVED`. The map is built from a SORTED path list, so the choice is a property
+    of the paths and not of a set's hash order — the determinism is the guard, and this test is
+    its non-vacuity (the replacement case is `test_a_module_replaced_by_a_pyi_STUB_is_a_removal`,
+    whose guard is the `stubbed` flag).
+    """
+    (tree / "tortoise" / "both.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/both.py")
+    (tree / "tortoise" / "both.pyi").write_text("def value() -> int: ...\n", encoding="utf-8")
+    _commit(tree, "tortoise/both.pyi")
+
+    assert arch.shrink_violations(tree, base_ref="HEAD~1") == [], (
+        "adding a stub beside a live module removes nothing"
     )
 
 
