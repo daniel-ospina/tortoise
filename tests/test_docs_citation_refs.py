@@ -2269,7 +2269,33 @@ _TORTOISE_SET_DIRECTION_CLAIM = _HeadBoundBan(re.compile(
     # boundary that is true after a word AND after punctuation, so both spellings are read.
     r"(?![A-Za-z0-9_])[^.\n]{0,60}?tortoise/`?\s*(?:set|side|part|diff|files?|paths?|directory|tree|"
     r"subtree|delta|changes?|holds|holds?|returns?|prints?|reports?|lists?|"
-    r"carries|contains?|includes?|shows?|names?|gives|outputs?|yields|answers?)\b"
+    r"carries|contains?|includes?|shows?|names?|gives|outputs?|yields|answers?|"
+    # ⛔ AND THE LINK VERB THIS FAMILY WAS MISSING (#13802 review, P2 — MEASURED, and
+    # disclosed at `480c675313` as PRE-EXISTING and left: *"the same `[]`-unreachability
+    # survives in a SIBLING alternative … arm E's trailing verb list has no `has`"*).
+    # The answer-first order names the action with the LINKING verb, and this list carried
+    # no `has` while BOTH other families did (the general verb class above: `has|holds?`;
+    # the verb-before-path family: `carries|touches|has|holds|…`). Measured over a 13-verb ×
+    # 7-answer grid at `9024f2e5d0`: **42 of 210** answer-first cells were read by NEITHER
+    # this ban NOR the sibling detector (`_typed_answers_to_tortoise_cmd` → `[]` for every
+    # one of them, so on the `set`/deictic anchor there was no second layer either) —
+    # `` `[]` is what `-- tortoise/` has at this head. `` and its whole count-side family
+    # walked through green while the SAME claim in the verb-then-answer order red. A verb
+    # the other two families carry and this one does not is the same hole round 17 closed in
+    # the verb-before-path direction, so the list is now aligned with theirs.
+    # ⚠️ THE COPULAS STAY OUT, AND THAT IS A MEASURED DECISION, NOT AN OVERSIGHT (#13802
+    # review, P2 — the general class carries `is|are|was|were|remains?|stays?` because there
+    # a copula is BOUNDED by the answer that follows it; at the END of this alternative there
+    # is nothing after the verb to bind it, so `is` would refuse `One path in `tortoise/` is
+    # deprecated.` and `Two paths in `tortoise/` are read by the resolver.` — ordinary prose
+    # about the tree, not a direction claim. That is the file's own trade, stated here rather
+    # than matched: an over-block costs more than a false PASS. What the added verbs do NOT
+    # buy is a NEW over-block class — `One path in `tortoise/` holds a typo.` is refused at
+    # `9024f2e5d0` already, so the prose cost of `has` is one the class had paid for `holds`.
+    # Measured over 855 `docs/**/*.md`: **0 new hits** (6 before, 6 after, set difference
+    # zero) and 0 over the 13 guarded bundle documents; every must-not-refuse form in the
+    # witness test stays GREEN.
+    r"has|have|had|comes? back|resolves?|reveals?|reads?|touches?)\b"
     # C) ⛔ AND THE VERB-BEFORE-THE-PATH FAMILY (#13802 review, P1 — 15 freshly-invented
     # spellings measured GREEN): `this diff carries no `tortoise/` path at all`, `this diff
     # touches no `tortoise/` file`, `the `tortoise/` set holds no path here`. Shape A cannot
@@ -2550,6 +2576,17 @@ def test_the_tortoise_direction_claim_detector_covers_both_directions_and_the_ve
         # sibling DETECTOR reads — was refused by no arm; (b) underlines and (c) emphasis on
         # the NOUN after the anchor were outside the class entirely. (a) is the dangerous
         # direction: detector-read and ban-blind is a refuted claim walking green.
+        # ⛔ AND THE ANSWER-FIRST LINK VERBS (#13802 review, P2 — every one GREEN at
+        # `9024f2e5d0` and RED here; the `[]`/`has` cell is the one the `480c675313` review
+        # disclosed as pre-existing and left, the rest are the same grid)
+        "`[]` is what `-- tortoise/` has at this head.",
+        "Two paths are what the `tortoise/` set has at this head.",
+        "`[]` is what the `tortoise/` set had at this head.",
+        "Nothing is what `-- tortoise/` reads at this head.",
+        "Six entries are what the `tortoise/` diff reveals at this head.",
+        "Both files are what the `-- tortoise/` set touches at this head.",
+        "One path is what `-- tortoise/` resolves at this head.",
+        "`[]` is what the `tortoise/` set comes back with at this head.",
         f"**`{_cmd}`** prints NOTHING at this head.",
         f"***`{_cmd}`*** prints NOTHING at this head.",
         "The _`tortoise/`_ set prints NOTHING at this head.",
