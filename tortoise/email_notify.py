@@ -628,6 +628,71 @@ async def send_onboarding_offer_email(email: str,
     return await _send_onboarding_attempt(email, greeting, org_id)
 
 
+# ── Shared sender for a caller that owns its own copy (#13998) ─────────────
+# The capacity notices (`tortoise.capacity_notice`) render their own approved
+# copy and own their own ledger; they must NOT open a second Resend path. This
+# is the one send primitive they use, and it carries the same posture as the
+# onboarding profile above: the shared budget slot is reserved before the POST
+# and refunded on a failed one, one 0.5s transient retry, an Idempotency-Key so
+# a replay collapses at the provider, and secrets are redacted in every log.
+async def send_notice_email(to: str, subject: str, html_body: str,
+                            text_body: str, *, idempotency_key: str,
+                            label: str = "notice",
+                            timeout: float = 15.0) -> dict:
+    """Send (AWAITED) one rendered transactional email. NEVER raises.
+
+    Returns ``{"status": "sent", "message_id": …}`` on provider accept,
+    ``{"status": "skipped", "reason": …}`` (channel unconfigured, or the shared
+    send budget is spent) or ``{"status": "failed"}`` (provider rejected after
+    one 0.5s transient retry).
+
+    AWAITED, not backgrounded: the caller stamps its own durable marker on
+    ``sent`` (send-then-stamp), so an unawaited send would stamp a marker for a
+    delivery that may never have happened.
+    """
+    api_key = _env("RESEND_API_KEY")
+    if _skip_channel("resend", api_key):
+        return {"status": "skipped", "reason": "channel-unconfigured"}
+    reason = reserve_send_slot()
+    if reason is not None:
+        logger.warning(
+            "email notify: %s email for %s SKIPPED — send budget exhausted (%s)",
+            label, to, reason)
+        return {"status": "skipped", "reason": reason}
+    last_err: Exception | None = None
+    for attempt in (0, 1):
+        try:
+            result = await _send_resend(
+                to, subject, html_body, text_body,
+                idempotency_key=idempotency_key, timeout=timeout)
+            message_id = (result or {}).get("id")
+            logger.info("email notify: %s email accepted by provider (%s, msg %s)",
+                        label, to, message_id)
+            return {"status": "sent", "message_id": message_id}
+        except Exception as e:  # noqa: BLE001, RUF100
+            last_err = e
+            if attempt == 0 and _is_transient(e):
+                await asyncio.sleep(0.5)
+                continue
+            break
+    logger.warning("email notify: %s email failed for %s (%s)",
+                   label, to, redact_safe(last_err))
+    refund_send_slot()  # #1138: provider rejected/failed the POST — free the slot
+    return {"status": "failed"}
+
+
+def recipient_first_name(display_name: str | None, email: str | None,
+                         org_name: str | None) -> str:
+    """Public name for the #2406 greeting heuristic (cosmetic-only).
+
+    Exposed because a second caller now needs the SAME heuristic: the capacity
+    notices greet an account's billing email, which is a mailbox — "Hi Info"
+    reads worse than "Hi there", and a second implementation of the fallback is
+    how two emails from one product start greeting the same person differently.
+    """
+    return _onboarding_greeting_name(display_name, email, org_name)
+
+
 async def drain_pending_sends(timeout: float = 2.0) -> None:
     """Await in-flight best-effort sends (shutdown). Never raises."""
     if not _pending_email_tasks:

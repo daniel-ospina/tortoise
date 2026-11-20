@@ -135,6 +135,8 @@ _ORG_ADDITIVE_SELECT = [
     "subscription_status", "customer_email",
     # #2406: onboarding-call offer email marker (20260907000001).
     "onboarding_email_sent_at",
+    # #13998: the capacity-notice high-water mark (20261120000001).
+    "storage_notice_pct",
 ]
 # Retry tiers for the fail-soft ladder (#1096): the NEWEST migration is
 # dropped FIRST, so a schema missing only the newest additive (e.g.
@@ -167,6 +169,13 @@ _ORG_ADDITIVE_BILLING_TIER = ["subscription_status", "customer_email"]
 # it as unset → one best-effort send attempt) while all older additive state
 # stays readable. Written by the service-role seam only — no RLS change.
 _ORG_ADDITIVE_ONBOARDING_TIER = ["onboarding_email_sent_at"]
+
+# #13998 capacity-notice high-water mark (20261120000001 — the NEWEST additive
+# migration): its OWN tier, dropped FIRST, so a schema one migration behind
+# degrades just the mark (read as unset → at most one best-effort notice per
+# pass, collapsed by the provider Idempotency-Key) while every older additive
+# stays readable. Written by the service-role seam only — no RLS change.
+_ORG_ADDITIVE_STORAGE_NOTICE_TIER = ["storage_notice_pct"]
 
 # Combined quota read (primary query) — the healthy path stays ONE round-trip.
 _QUOTA_SELECT = _ORG_BASE_SELECT + _ORG_ADDITIVE_SELECT
@@ -1071,7 +1080,9 @@ def resolve_api_key(cp, token: str) -> dict | None:
 
     org_row = _orgs_row_fail_soft(
         cp, org_id, select=_QUOTA_SELECT,
-        additive_tiers=[_ORG_ADDITIVE_2040_TIER,
+        additive_tiers=[_ORG_ADDITIVE_STORAGE_NOTICE_TIER,
+                         _ORG_ADDITIVE_ONBOARDING_TIER,
+                         _ORG_ADDITIVE_2040_TIER,
                          _ORG_ADDITIVE_IMPORT_TIER,
                          _ORG_ADDITIVE_DKL_TIER, _ORG_ADDITIVE_0015_TIER,
                          _ORG_ADDITIVE_BILLING_TIER])
@@ -1516,7 +1527,8 @@ def org_by_id(cp, org_id: str) -> dict | None:
                 "backup_enabled", "backup_latest_at", "backup_restored_at",
                 "created_at", "deleted_at", "grace_hours"]
             + _ORG_ADDITIVE_SELECT,
-        additive_tiers=[_ORG_ADDITIVE_ONBOARDING_TIER,  # newest migration first
+        additive_tiers=[_ORG_ADDITIVE_STORAGE_NOTICE_TIER,  # newest first
+                         _ORG_ADDITIVE_ONBOARDING_TIER,
                          _ORG_ADDITIVE_2040_TIER,
                          _ORG_ADDITIVE_IMPORT_TIER,
                          _ORG_ADDITIVE_DKL_TIER, _ORG_ADDITIVE_0015_TIER,
@@ -2500,6 +2512,77 @@ def set_org_onboarding_email_sent(cp, org_id: str) -> bool:
         method="PATCH",
         json_body={"onboarding_email_sent_at":
                    datetime.now(timezone.utc).isoformat()},  # noqa: UP017
+    )
+    return bool(rows)
+
+
+# ── #13998 capacity-notice high-water mark (migration 20261120000001) ──────
+#
+# The durable "exactly one send per threshold per account, ever" ledger for the
+# 80 %/100 % capacity notices (`tortoise/capacity_notice.py`). ONE integer
+# column holding the HIGHEST threshold ever notified, not one column per
+# threshold: two independent markers let a lagging 80 % pass email "at 80 %"
+# AFTER a 100 % notice went out. A high-water mark makes the legal send
+# `threshold > mark` and the sequence monotone by construction.
+
+def org_storage_notice_pct(cp, org_id: str) -> int | None:
+    """The highest capacity-notice threshold already sent for this account.
+
+    ``None`` means NO NOTICE HAS BEEN SENT — and also covers an org row that
+    does not exist. The two are not distinguished on purpose: every caller
+    enumerates orgs from the table itself, so a missing row is not a state a
+    caller can be in, and returning a sentinel for it would invite a caller to
+    branch on a case that cannot occur. A row whose column is missing (one
+    migration behind) reads the same way, which is the fail-soft behaviour the
+    #1096 ladder exists for.
+    """
+    rows = cp.query(
+        "organizations", select=["storage_notice_pct"],
+        filters=[("id", "eq", org_id)],
+    )
+    if not rows:
+        return None
+    value = rows[0].get("storage_notice_pct")
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        # An unreadable figure is NO MARK, and a re-send is the direction that is
+        # safe: the provider Idempotency-Key collapses the duplicate within its
+        # window, and a customer receiving one extra capacity notice is a far
+        # smaller harm than a mark that silently suppresses every future notice.
+        return None
+
+
+def set_org_storage_notice_pct(cp, org_id: str, pct: int,
+                               *, previous: int | None) -> bool:
+    """Rowcount-gated compare-and-swap of the capacity-notice mark (#13998).
+
+    TRUE only when THIS call moved the mark: the PATCH carries the value the
+    caller READ (``previous``) as its guard, so a concurrent pass holding a
+    stale view cannot stamp over a newer one, and two passes that both saw
+    ``None`` cannot both claim the same first send.
+
+    ⛔ SEND-THEN-STAMP (the #2406 posture, mirrored): the caller stamps only
+    after the provider ACCEPTS, so a failed send stays retryable. The crash
+    window between accept and stamp is covered by the provider Idempotency-Key
+    ``capacity-notice:{org_id}:{pct}``.
+
+    ⛔ MONOTONE: a stamp may never LOWER the mark. The guard already makes that
+    unreachable (a lower threshold only reaches here when it is above the value
+    it read), and the explicit comparison below keeps it true if a future caller
+    arrives with a different read order.
+    """
+    if previous is not None and int(pct) <= int(previous):
+        return False
+    guard: tuple[str, str, object] = (
+        ("storage_notice_pct", "is", None) if previous is None
+        else ("storage_notice_pct", "eq", int(previous)))
+    rows = cp.query(
+        "organizations",
+        select=["id"],
+        filters=[("id", "eq", org_id), guard],
+        method="PATCH",
+        json_body={"storage_notice_pct": int(pct)},
     )
     return bool(rows)
 

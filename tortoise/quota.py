@@ -778,6 +778,11 @@ def resolve_org_limits(org_id: str) -> dict:
         _ORG_ADDITIVE_BILLING_TIER,
         _ORG_ADDITIVE_DKL_TIER,
         _ORG_ADDITIVE_IMPORT_TIER,
+        # #13998: the capacity-notice mark rides the same select, so its own tier
+        # must be in the ladder — otherwise a schema missing only this column
+        # fails the whole read and the ladder drops REAL data tiers to recover
+        # from a column nothing on this path consumes.
+        _ORG_ADDITIVE_STORAGE_NOTICE_TIER,
         _orgs_row_fail_soft,
         get_control_plane, is_supabase_enabled,
     )
@@ -794,7 +799,8 @@ def resolve_org_limits(org_id: str) -> dict:
         # #1832 class).
         row = _orgs_row_fail_soft(
             get_control_plane(), org_id, select=_QUOTA_SELECT,
-            additive_tiers=[_ORG_ADDITIVE_2040_TIER,
+            additive_tiers=[_ORG_ADDITIVE_STORAGE_NOTICE_TIER,
+                            _ORG_ADDITIVE_2040_TIER,
                             _ORG_ADDITIVE_IMPORT_TIER,
                             _ORG_ADDITIVE_DKL_TIER,
                             _ORG_ADDITIVE_0015_TIER,

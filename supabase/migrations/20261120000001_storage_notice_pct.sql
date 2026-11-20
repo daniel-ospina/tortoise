@@ -1,0 +1,51 @@
+-- ============================================================================
+-- Migration 20261120000001: capacity-notice high-water mark (#13998)
+-- ----------------------------------------------------------------------------
+-- The 80 % / 100 % working-set capacity notices
+-- (`tortoise/capacity_notice.py`) may be sent AT MOST ONCE PER THRESHOLD PER
+-- ACCOUNT, EVER. This column is that ledger.
+--
+--   teams.storage_notice_pct  (integer, nullable) — the HIGHEST threshold ever
+--     notified for this account (80 or 100), stamped only after the provider
+--     ACCEPTS the send.
+--
+-- ⛔ ONE mark, not two columns. Two independent markers (one per threshold) let
+-- a lagging pass email "at 80 %" AFTER the 100 % notice has gone out — the
+-- out-of-order case the copy makes unacceptable — because each marker is
+-- checked on its own. With a high-water mark the only legal send is
+-- `threshold > mark`, so the sequence is monotone by construction, and an
+-- account that jumps from 60 % to 105 % between passes gets the 100 % notice
+-- alone (no second email in the same pass).
+--
+-- The stamp is a compare-and-swap on the value the caller READ
+-- (`set_org_storage_notice_pct`, rowcount-gated: `WHERE id AND
+-- storage_notice_pct IS NULL` for a first stamp, `= previous` afterwards), so
+-- two processes cannot interleave into a lower mark and two passes that both
+-- saw NULL cannot both claim the first send. The provider Idempotency-Key
+-- `capacity-notice:{org_id}:{pct}` collapses the one duplicate a crash between
+-- the provider accept and the stamp can produce.
+--
+-- A SKIPPED OR FAILED SEND NEVER STAMPS — so the mark never swallows a notice
+-- the customer has not received. That is also what makes the send-budget guard
+-- (#1138) a graceful ramp on the first fleet-wide pass: past the daily cap the
+-- remaining accounts are skipped, unstamped, and retried on a later pass.
+--
+-- Additive + idempotent (IF NOT EXISTS), same pattern as 20260907000001.
+-- Nullable, no default, no NOT NULL — a schema missing it (drift, one migration
+-- behind) fails soft: the #1096 ladder drops the mark's OWN tier
+-- (_ORG_ADDITIVE_STORAGE_NOTICE_TIER, newest dropped first) so only the mark
+-- degrades to unset. The control plane reads/writes via service_role, so no new
+-- grants are needed (precedent: 20260817000001 / 20260907000001).
+--
+-- An INTEGER, deliberately: the derived-column registry that
+-- `tests/test_...`-level pins assert against the migrations covers timestamptz
+-- columns, and a nullable int carries no instant at all (this mark is a policy
+-- watermark, not a clock reading).
+--
+-- ⚠️ Deploy ORDER: this migration must apply BEFORE the capacity-notice sweep
+-- ships. A PGRST204 missing-column error degrades fail-soft (the mark reads as
+-- unset, one retryable notice per pass, provider key deduped), never a 500.
+-- ============================================================================
+
+ALTER TABLE public.teams
+    ADD COLUMN IF NOT EXISTS storage_notice_pct integer;
