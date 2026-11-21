@@ -124,17 +124,43 @@ def _unaliased_sdk_class(tree: ast.Module) -> ast.Module:
     """
     aliases = {
         alias.asname
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
+        for node in tree.body  # module level only: a FUNCTION-LOCAL alias can
+        if isinstance(node, ast.ImportFrom)  # shadow an unrelated name elsewhere
         and (node.module or "").split(".")[0] == "tortoise"
         for alias in node.names
         if alias.name == "TortoiseSDK" and alias.asname
     }
+    # A module-scope alias can still be SHADOWED by a local binding of the same
+    # name (`tests/test_dod_5090_probe.py` has an alias `module` and unrelated
+    # `for module in …` loop targets). Rewriting those Loads would type a loop
+    # variable as the SDK and manufacture a false red, so an id that is RE-BOUND
+    # inside any function/comprehension is left alone.
+    rebound: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        # Every STORE context in that scope — an `=` target, a `for`/`with …
+        # as` target, a comprehension target — rebinds the name locally.
+        rebound |= {
+            sub.id
+            for sub in ast.walk(node)
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store)
+        }
+    aliases -= rebound
     if not aliases:
         return tree
     tree = copy.deepcopy(tree)
     for node in ast.walk(tree):
-        if isinstance(node, ast.Name) and node.id in aliases:
+        # LOAD sites only. A `Store` context is a BINDING of that name, not a use
+        # of the SDK: rewriting `for module in …` would type a loop variable as
+        # the SDK and manufacture a false red (`tests/test_dod_5090_probe.py`
+        # holds exactly that pair — an alias `module` at a function scope and
+        # unrelated `for module in …` targets elsewhere).
+        if (
+            isinstance(node, ast.Name)
+            and node.id in aliases
+            and isinstance(node.ctx, ast.Load)
+        ):
             node.id = "TortoiseSDK"
     return tree
 
@@ -294,6 +320,51 @@ def test_the_sweep_is_not_vacuous():
     )
     assert len(REMOVED_SDK_METHODS) >= 77
 
+    # ⛔ THE ALIAS CASE (`review of 03fc244, P1`). `sdk_typing` types a receiver
+    # from the LITERAL class name, so `from tortoise.sdk import TortoiseSDK as _P`
+    # was a hole in both this gate and `tools/sdk_privatise.py`: the aliased body
+    # yielded `[]` where the plain one yielded the call. Replacing
+    # `_unaliased_sdk_class` with the identity reddens exactly these two.
+    def _script(*lines: str) -> ast.Module:
+        """Parse a synthetic module WITHOUT writing a script-shaped literal.
+
+        A single string holding both a newline and an `import` is exactly what
+        this gate's class-1 sweep parses as a `python -c` seed, so a witness
+        written that way flags ITSELF. Line lists keep the sweep's own file clean.
+        """
+        return ast.parse("".join(line + chr(10) for line in lines))
+
+    aliased = _script(
+        "from tortoise.sdk import TortoiseSDK as _P",
+        "_p = _P()",
+        "_p.create_point(content='x')",
+    )
+    assert _references(aliased, False) == [(3, "_p.create_point")], (
+        "an ALIASED `TortoiseSDK` import must type as the SDK — otherwise a "
+        "retired door is reachable through it and this gate reads green"
+    )
+    direct = _script(
+        "from tortoise.sdk import TortoiseSDK",
+        "TortoiseSDK().create_point(content='x')",
+    )
+    assert _references(direct, False) == [(2, "TortoiseSDK().create_point")], (
+        "a bare construction must be typed as the SDK"
+    )
+    # …and a STORE-context binding of the alias name is not a use of the SDK: a
+    # function-scope alias can shadow an unrelated loop variable, and rewriting
+    # `for module in …` would manufacture a false red
+    # (`tests/test_dod_5090_probe.py` holds that pair).
+    shadowed = _script(
+        "from tortoise.sdk import TortoiseSDK as module",
+        "def f(items):",
+        "    for module in items:",
+        "        module.query('MATCH (n) RETURN n')",
+    )
+    assert _references(shadowed, False) == [], (
+        "a loop variable that shadows a module-scope alias is NOT the SDK — "
+        "rewriting store contexts manufactures a false red"
+    )
+
 
 # ── class 2: a probe cannot read a programming error as "no storage" ──────
 
@@ -306,6 +377,12 @@ def test_the_sweep_is_not_vacuous():
 # fell through to `FALKORDB_AVAILABLE = False`, and the family SKIPPED green
 # over a broken tree.
 _RAISED = frozenset({"AttributeError", "NameError", "TypeError", "ImportError"})
+
+#: What counts as a BROAD arm. `BaseException` belongs here: it swallows the
+#: same programming errors `Exception` does (and more), so a census that asked
+#: only for the word `Exception` read `except BaseException: AVAILABLE = False`
+#: as non-swallowing and passed the exact defect green (review of 03fc244, P2).
+_BROAD = frozenset({"Exception", "BaseException"})
 
 # The import-seam rule is scoped to imports that are IMPORT-TIME-SAFE WITHOUT
 # EXTRAS — in practice the repo's own code, `tortoise.*` / `tests.*` / `tools.*`.
@@ -343,7 +420,7 @@ def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
     `tests/e2e/hosted/conftest.py` is exactly that shape.
     """
     return any(
-        (names == {"<bare>"} or "Exception" in names) and not _reraises_its_own(h)
+        (names == {"<bare>"} or names & _BROAD) and not _reraises_its_own(h)
         for h, names in ((h, _handler_names(h)) for h in handlers)
     )
 
@@ -355,13 +432,17 @@ def _reraises_its_own(handler: ast.ExceptHandler) -> bool:
     only shape that counts as COVERAGE): for swallowing, `raise` and
     `raise exc` are the same outcome — nothing is dropped.
     """
-    caught = _handler_names(handler)
+    caught = _handler_names(handler) | ({handler.name} if handler.name else set())
     for node in ast.walk(handler):
         if not isinstance(node, ast.Raise):
             continue
         if node.exc is None:
             return True
         if isinstance(node.exc, ast.Name) and node.exc.id in caught:
+            return True
+        # `raise ProbeError(…) from e` chains the caught exception; the caller
+        # still sees a raise, which is the property.
+        if isinstance(node.cause, ast.Name) and node.cause.id in caught:
             return True
     return False
 
@@ -390,7 +471,7 @@ def _covered(handlers: list[ast.ExceptHandler]) -> set[str]:
     out: set[str] = set()
     for handler in handlers:
         names = _handler_names(handler)
-        if names == {"<bare>"} or "Exception" in names:
+        if names == {"<bare>"} or names & _BROAD:
             break  # nothing below a broad arm can ever run
         if not _reraises(handler):
             continue
@@ -703,8 +784,18 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     resolvers = _resolver_functions(tree)
     skip_gated = _skip_gating_functions(tree)
     skip_referenced = _skip_condition_names(tree)
+    module_own = _own_imported_names(tree.body)
     for stmt in tree.body:
-        if isinstance(stmt, ast.Try) and _assigns_availability(stmt):
+        if (
+            isinstance(stmt, ast.Try)
+            and _assigns_availability(stmt)
+            and (_imports_own_code(stmt) or _touches_own_code(stmt, module_own))
+        ):
+            # The own-code gate applies to THIS branch too. Without it the rule
+            # redded `TORCH_AVAILABLE = False / try: import torch …`, i.e. a probe
+            # whose only seam is an OPTIONAL third-party extra — precisely the
+            # false red the import-seam rule and the self-test refuse (review of
+            # 03fc244, P2).
             roots.append(stmt)
         elif isinstance(stmt, ast.Try) and (
             _bound_names(stmt) & skip_referenced
@@ -1100,10 +1191,11 @@ def test_the_import_seam_census_sees_the_shapes_it_grades():
             FALKORDB_AVAILABLE = False
         """
     )
-    assert optional == ((3, (), True, False, True),), (
-        f"a third-party import must not be charged to the seam rule: {optional}"
+    assert optional == (), (
+        "a probe whose ONLY import is an optional third-party extra is not graded "
+        "at all — for an optional capability a SKIP is the correct outcome, and "
+        f"demanding an arm there would turn a skip into a collection error: {optional}"
     )
-    assert "ImportError" not in optional[0][1], "no arm is claimed where there is none"
 
     # A probe guard that is NOT a direct child of its helper — inside a `for`
     # over candidate URIs — and resolved through the `_AVAILABLE` spelling. Two
@@ -1220,6 +1312,7 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #    `tests/test_falkordb_compat.py` was graded by nothing under a fixed set.
     respelled = roots(
         """
+        from tortoise.projection import FalkorProjection as _FP
         _LIVE_AVAILABLE = False
         try:
             _probe = _FP.from_uri("redis://x")
@@ -1229,7 +1322,7 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             _LIVE_AVAILABLE = False
         """
     )
-    assert respelled == ((3, (), True, False, True),), (
+    assert respelled == ((4, (), True, False, True),), (
         "a `*_AVAILABLE` flag spelling must be graded like `FALKORDB_AVAILABLE`: "
         f"{respelled}"
     )
@@ -1426,6 +1519,63 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         f"the `try` is the optional extra: {hoisted}"
     )
 
+    # 4c. SHAPE (b): a MODULE-BODY flag read by a skip condition, whatever it is
+    #     called. The skipif widening was consulted only for `def` statements, so
+    #     `LIVE` (not `*AVAILABLE`) was rejected by the spelling rule and never
+    #     considered here — four live probes were graded by nothing (review of
+    #     76abdca, P1). Deleting this branch reddens exactly this assertion.
+    skip_read = roots(
+        """
+        import pytest
+
+        LIVE = False
+        try:
+            from tortoise.sdk import TortoiseSDK
+            TortoiseSDK()
+            LIVE = True
+        except Exception:
+            LIVE = False
+
+        @pytest.mark.skipif(not LIVE, reason="live")
+        def test_live():
+            pass
+        """
+    )
+    assert skip_read == ((5, (), True, True, True),), (
+        "a module-body flag READ BY A SKIP CONDITION is the availability decision "
+        f"whatever it is named — grading it only under `*AVAILABLE` misses it: {skip_read}"
+    )
+
+    # 4d. SHAPE (e): a SENTINEL helper — `URI = _live_target()` … `if URI is None:
+    #     pytest.skip(…)`. Neither a flag nor a `skipif` condition reaches it, and
+    #     the file need not mention either word (that is why
+    #     `tests/test_9226_dump_paging_v6.py` was never parsed). Deleting
+    #     `_skip_guard_call_names` reddens exactly this assertion.
+    sentinel = roots(
+        """
+        import pytest
+
+        def _live_target():
+            try:
+                from tortoise.sdk import TortoiseSDK
+                TortoiseSDK()
+                return "redis://x"
+            except Exception:
+                return None
+
+        URI = _live_target()
+        if URI is None:
+            pytest.skip("no live")
+
+        def test_live():
+            pass
+        """
+    )
+    assert sentinel == ((5, (), True, True, True),), (
+        "a helper whose SENTINEL decides a skip is the availability decision — "
+        f"neither a flag nor a `skipif` reaches it: {sentinel}"
+    )
+
     # 5. The real tree must carry all four shapes, or every assertion above is a
     #    statement about a sample rather than about the code it is meant to guard.
     graded = {row[0] for row in _probe_report()}
@@ -1434,6 +1584,13 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "tests/test_evidence_assembly_wiring_2683.py",
         "tests/test_paired_expansion_ab_2518.py",
         "tests/test_time_aware_run_2520.py",
+        # the skip-read spellings (shape b) …
+        "tests/test_12360_underscore_or_terms.py",
+        "tests/test_search_engine.py",
+        "tests/test_identifier_tokens_8933.py",
+        "tests/test_6151_annotation_band.py",
+        # … and the sentinel helper (shape e)
+        "tests/test_9226_dump_paging_v6.py",
     ):
         assert rel in graded, (
             f"{rel} is absent from the probe census — a shape it grades has "
