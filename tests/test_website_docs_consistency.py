@@ -3387,6 +3387,42 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
     )
     assert " ".join(_visible_text(body_only).split()) == reviewed
 
+    # ⛔ AND THE SAME CLAIM ONE ELEMENT DEEPER — the ordinary spelling, and the one a
+    #    carve-out keyed on DIRECT text under the `<summary>` still dropped (measured
+    #    against the first version of this fix: `<summary><strong>…</strong></summary>`
+    #    returned `''`, i.e. the same P1, reached through inline markup). A claim is
+    #    written bolded or emphasised, so this is not a corner: the walk must find the
+    #    `<summary>` anywhere below the top, not only at `stack[-2:]`.
+    nested = section.replace(
+        "</h2>",
+        "</h2><details><summary><strong>FalkorDB permanently deletes your "
+        "least-used items</strong> <em>after thirty days</em></summary>Tap to read "
+        "more.</details>",
+        1,
+    )
+    assert nested != section, "the nested-summary control could not inject"
+    assert "falkor" in _banned_vocabulary(nested), (
+        "inline markup inside a painted `<summary>` is painted too, so the scan must "
+        "see the claim written in `<strong>`/`<em>`"
+    )
+    with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
+        _assert_storage_section_reviewed(nested)
+    # …and the two refusals that must SURVIVE the wider walk, or "painted" would be
+    # "everything under a `<summary>`": a `hidden` element inside the summary, and a
+    # `hidden` ancestor ABOVE the `<details>`, both hide the text.
+    assert " ".join(_visible_text(
+        "<details><summary><span hidden>GHOST claim</span>shown</summary></details>"
+    ).split()) == "shown", (
+        "a `hidden` element INSIDE the summary is not painted; admitting the whole "
+        "summary subtree unshaded would count it"
+    )
+    assert "GHOST" not in _visible_text(
+        "<div hidden><details><summary>GHOST claim</summary></details></div>"
+    ), (
+        "a `hidden` ANCESTOR above the `<details>` hides the summary too, so the walk "
+        "must read the elements above the summary/`<details>` pair as well"
+    )
+
     # 4. …and the OTHER over-drop, which the loud rows above cannot see: a raw-text
     #    element whose content a reader DOES meet must be counted. `_RAW` is
     #    suppressed for the TOKENIZER's sake, so "suppressed" is not "unreadable" —
@@ -3411,6 +3447,38 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
     ), (
         "a `<textarea>` inside an inert `<template>` is template content: admitting "
         "the raw-text family must not reach into a subtree no reader meets"
+    )
+
+    # 5. …and the FALLBACK slot is the same over-drop for exactly ONE element,
+    #    measured rather than assumed (Chromium 1255, opaque-pixel delta of the same
+    #    text with and without the children): `<object>` paints its children when no
+    #    resource loads (delta 1677), while `<video>`/`<canvas>`/`<audio>`/`<datalist>`/
+    #    `<meter>`/`<progress>` paint none of it (delta 0). `_UNRENDERED` therefore
+    #    refuses all of them for the BOUNDARY question (by tag) but only the
+    #    non-object ones for the TEXT question — otherwise a claim parked in an
+    #    `<object>` fallback is painted by the browser and invisible to this pin.
+    for name, element, visible in (
+        ("object", "<object>{claim}</object>", True),
+        ("video", "<video>{claim}</video>", False),
+        ("datalist", "<datalist><option>{claim}</option></datalist>", False),
+    ):
+        mutant = section.replace(
+            "</h2>",
+            "</h2>" + element.replace("{claim}", "ghost claim about allowance"),
+            1,
+        )
+        assert mutant != section, f"the {name} fallback control could not inject"
+        got = "ghost claim about allowance" in " ".join(_visible_text(mutant).split())
+        assert got is visible, (
+            f"`{name}` fallback text measured '''{'painted' if visible else 'not painted'}"
+            f"''' in Chromium; the wording pin must agree with the measurement, and "
+            f"dropping painted text is the fail-open direction"
+        )
+    # PREMISE: an `<object>` ancestor still does NOT bound the slice, so admitting
+    # its text did not leak into the boundary question (that check is by TAG).
+    assert extract_heading_positions("<object><h2 id='qs'>Q</h2></object>") == [], (
+        "a heading in an `<object>` fallback must not bound the slice: the boundary "
+        "question refuses fallback slots, and that refusal is by tag"
     )
 
 

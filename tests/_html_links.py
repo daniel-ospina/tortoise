@@ -304,19 +304,30 @@ class _AnchorHrefParser(HTMLParser):
     #: reason above argues only the first (#14073 review round 6, P2):
     #:
     #: * the BOUNDARY question (`_unmet_by_reader`) wants a LONG slice, so refusing a
-    #:   heading inside a fallback slot is the loud side — that is the paragraph above;
-    #: * the TEXT question (`extract_visible_text`) wants the LONGEST text, so DROPPING
-    #:   fallback content is the loud side there, and it is what the recording does.
-    #:   Chromium agrees in the cases measured (`<video>`, `<canvas>`, `<audio>`,
-    #:   `<object>`, `<meter>`, `<progress>`, `<datalist>` children are not painted in a
-    #:   supporting browser), and the deliberate cost is stated at `handle_data`: a
-    #:   reader whose browser falls back DOES meet that copy, and the wording pin would
-    #:   not see it. One flag, two loud directions, named rather than assumed.
+    #:   heading inside a fallback slot is the loud side — that is the paragraph above,
+    #:   and it is a TAG test there, so it is unaffected by anything below;
+    #: * the TEXT question (`extract_visible_text`) must not DROP copy a reader meets,
+    #:   because a shorter text reads as a clean one. That is not a direction call —
+    #:   it is measurable, and it was MEASURED (Chromium 1255, opaque-pixel delta of
+    #:   the same fallback text rendered with and without, `_FALLBACK_RENDERS`):
+    #:   `<video>`, `<canvas>`, `<audio>`, `<datalist>`, `<meter>` and `<progress>`
+    #:   paint NOTHING of it (delta 0; `<meter>`/`<progress>` paint their widget
+    #:   chrome, which is identical with and without the text), so dropping theirs is
+    #:   correct. `<object>` paints ALL of it (delta 1677): an unloaded `<object>`
+    #:   shows its children, so dropping it would hide a claim — which is why it is
+    #:   admitted for the text question only (see `_FALLBACK_RENDERS`).
     #: Elements whose content renders only WITH an attribute: `<dialog>` without
     #: `open` is not in the rendering at all, and `<details>` without `open` shows
     #: its `<summary>` and hides the rest. Presence is what counts — an empty `open`
     #: is the rendered spelling.
     #:
+    #: ⛔ `_UNRENDERED` members whose FALLBACK text a browser DOES paint, measured
+    #: rather than argued: an `<object>` with no usable resource renders its children,
+    #: so the TEXT question must count them. The BOUNDARY question still refuses an
+    #: `<object>` ancestor — that check is by TAG in `_unmet_by_reader`, not by this
+    #: flag — which is the loud direction there (a heading in a fallback slot does not
+    #: bound the slice), so admitting the text costs nothing on that side.
+    _FALLBACK_RENDERS = frozenset({"object"})
     # ⛔ THE WHOLE CLOSED SUBTREE IS REFUSED FOR THE BOUNDARY QUESTION, `<summary>`
     # INCLUDED — and that is a DELIBERATE over-refusal in the LOUD direction, not an
     # oversight: a `<summary>` IS rendered by a closed `<details>` (this line used to
@@ -330,9 +341,12 @@ class _AnchorHrefParser(HTMLParser):
     # (round-6 review, P1, measured). `<summary>`'s text IS painted, so refusing it in
     # the TEXT recording DROPS rendered copy — a claim inside a closed
     # `<details><summary>` left every `#storage` pin green. `_open_extent` therefore
-    # admits a `<summary>` whose immediate parent is the closed `<details>` when it
-    # records for the TEXT question only; the inheritance this frozenset drives stays
-    # total for `_unmet_by_reader`.
+    # marks a `<summary>` whose immediate parent is the closed `<details>` as rendered,
+    # and `_text_is_painted` reads that. The BOUNDARY inheritance this frozenset drives
+    # stays total for `_unmet_by_reader` even so, because the closed `<details>`'s own
+    # `False` never leaves the stack — `any(not renders …)` still refuses a heading
+    # anywhere under it, so `("summary of a closed details", '<details><summary><h2
+    # id="qs">Q</h2></summary></details>')` keeps bounding nothing.
     _RENDERS_WITH_ATTR = frozenset({"details", "dialog"})
     #: Every recording of a DOCUMENT TREE, by attribute name. `_clear_recordings`
     #: iterates this tuple, and
@@ -848,10 +862,15 @@ class _AnchorHrefParser(HTMLParser):
         ⛔ AND THE RATCHET IS A TEST, not this comment: a recording added later is
         invisible to a tuple nobody updated, so
         `test_the_parsers_recordings_forget_a_document_a_frameset_replaced` asserts
-        `_RECORDINGS` + `_DIAGNOSTICS` is EVERY public list on the parser — a sixth
-        recording reds there until it is declared, and declaring it here is what
-        makes the clear apply. The diagnostics are deliberately not cleared: they
-        record what the PARSE met, not what the tree holds.
+        `_RECORDINGS` + `_DIAGNOSTICS` is EVERY public list on the parser — a
+        recording added later reds there until it is declared, and declaring it here
+        is what makes the clear apply. `text` was declared here but had NO ROW in that
+        test (#14073 review round 6, P2): the declaration makes the clear HAPPEN
+        without making it OBSERVED. The row this fix adds is the observer — patching
+        this loop to skip `text` now reds that test (measured: `1 failed, 102 passed,
+        1 skipped`, and the failure is the `text` row). The diagnostics are
+        deliberately not cleared: they record what the PARSE met, not what the tree
+        holds.
         """
         for name in self._RECORDINGS:
             getattr(self, name).clear()
@@ -920,7 +939,7 @@ class _AnchorHrefParser(HTMLParser):
         names = {name for name, _value in attrs}
         renders = not (
             "hidden" in names
-            or tag in self._UNRENDERED
+            or (tag in self._UNRENDERED and tag not in self._FALLBACK_RENDERS)
             or (tag in self._RENDERS_WITH_ATTR and "open" not in names)
         )
         # Inherited, so `<div hidden><section><h2>` hides the heading without
@@ -1112,23 +1131,36 @@ class _AnchorHrefParser(HTMLParser):
         dropped a claim written in a summary and left every `#storage` pin green while
         Chromium painted it.
 
-        The flag on `<details>` describes its BODY. So one case is carved out: the
-        current element is a `<summary>` whose immediate parent is the `<details>`, and
-        the answer is whatever the ancestors ABOVE that pair say (a `hidden` div around
-        the `<details>` still hides both). A second `<summary>` is treated the same —
-        the over-count is the loud direction, and the "first only" distinction needs a
-        per-`<details>` counter this stack does not carry.
+        The flag on `<details>` describes its BODY. So one case is carved out: while
+        the stack is inside a `<summary>` whose immediate parent is a `<details>`, the
+        answer is whatever the ancestors ABOVE that pair say (a `hidden` div around
+        the `<details>` still hides both, and a `hidden` element between the summary
+        and here still hides its own text). A second `<summary>` is treated the same —
+        the over-count is the loud direction, and the "first only" distinction needs
+        a per-`<details>` counter this stack does not carry.
+
+        ⛔ THE PAIR IS FOUND ANYWHERE BELOW THE TOP, not only at `stack[-2:]`
+        (measured, #14073 review round 6, the same P1 this method closes): a claim is
+        written in INLINE MARKUP — `<summary><strong>tier limits…</strong></summary>`
+        is the ordinary spelling — so a carve-out that only recognised direct text
+        under a `<summary>` still dropped every painted claim one element down. The
+        walk therefore looks for the NEAREST `<summary>` in the stack and requires
+        only that its parent is the `<details>`; the elements between it and here are
+        inline children of the summary and inherit its flag.
         """
         stack = self._open_elements
         if all(renders for _tag, _container, renders in stack):
             return True
-        if (
-            len(stack) >= 2
-            and stack[-1][0] == "summary"
-            and stack[-1][2]
-            and stack[-2][0] == "details"
-        ):
-            return all(renders for _tag, _container, renders in stack[:-2])
+        for index in range(len(stack) - 1, 0, -1):
+            if stack[index][0] != "summary" or stack[index - 1][0] != "details":
+                continue
+            # Above the pair: a `hidden` ancestor still hides the summary. From the
+            # summary inward: its own flag is inherited from the closed `<details>`
+            # (the exception in `_open_extent` sets it True), so what this half
+            # actually catches is a `hidden` element INSIDE the summary.
+            return all(
+                renders for _tag, _container, renders in stack[: index - 1]
+            ) and all(renders for _tag, _container, renders in stack[index:])
         return False
 
     def parse_comment(self, i: int, report: bool = True) -> int:
@@ -1514,11 +1546,13 @@ def extract_visible_text(html: str) -> str:
     * a `<summary>` whose parent is a CLOSED `<details>` IS recorded here — it is
       painted, and dropping it hid a rendered claim from the wording golden (P1,
       measured); the closed BODY stays dropped, as the browser drops it;
-    * `<datalist>`/`<canvas>`/`<video>`/`<audio>`/`<object>`/`<meter>`/`<progress>`
-      FALLBACK content is dropped here (`_UNRENDERED`) even though a browser without
-      support paints it — for the text question that is the loud side, since the
-      alternative is a wording pin that reads copy from a slot no supporting browser
-      shows. The cost is named: a fallback-only claim is invisible to the golden;
+    * `<datalist>`/`<canvas>`/`<video>`/`<audio>`/`<meter>`/`<progress>` FALLBACK
+      content is dropped here (`_UNRENDERED`), which is MEASURED rather than a
+      direction call: a supporting browser paints none of it (Chromium 1255, delta 0).
+      An `<object>`'s fallback IS painted (delta 1677) and is therefore counted — see
+      `_FALLBACK_RENDERS`. The residual is the OTHER branch: a READER whose browser
+      falls back on a `<video>`/`<canvas>`/… meets copy this pin does not read, named
+      at `handle_data` rather than left implied;
     * FOREIGN text is recorded whatever it is (see the declared residual at
       `handle_data`): a foreign `<title>`/`<desc>`/`<style>`/`<script>` therefore
       contributes text a browser never paints. That is the false-red direction, not a
