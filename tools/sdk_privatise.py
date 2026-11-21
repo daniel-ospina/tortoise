@@ -1115,7 +1115,9 @@ SWEEP_NAMES = 66
 #: alone, neither an SDK handle nor a FalkorDB `Graph`, and `typed references still pointing at a
 #: public name` stays **0**. Measured on the MERGED tree: this head has `origin/main` `9f83a63bfa`
 #: merged in, and `--repin` printed the same pair before and after that merge, so the merge
-#: contributes no row here either.
+#: contributes no row here either — nor do the two sibling commits merged after it (`728f5f65e0`,
+#: `3ec9aa4d4f`, both on this branch's census file): `--check` exits 0 at this head on the SAME
+#: pair, so 11858 is re-measured on the tree that carries them, not carried forward.
 SWEEP_RESIDUE = (11858, "a1552662bf07a10b")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
