@@ -944,18 +944,20 @@ def _package_root_attributes(source: str) -> set[str]:
     deleting this leg reddens the export pin rather than nothing.
 
     ⛔ AND `from tortoise import __init__ as i` IS A SPELLING OF THE PACKAGE ROOT,
-    and the leg reports it — but it is a FAIL-CLOSED OVER-REPORT, not a live reach.
-    At runtime the ordinary binding is `tortoise.__init__` the MODULE's own
-    `__init__` — `<method-wrapper '__init__' of module object …>` — and `i.FalkorDB`
-    raises `AttributeError`; the module object only appears after an explicit
-    `import tortoise.__init__`, and even then it is a DISTINCT module from the
-    package (`sys.modules['tortoise.__init__'] is tortoise` → `False`). Measured on
-    this tree at `e022fc935b`. The leg exists anyway because the name was the one
+    and the leg reports it — but in the ORDINARY case that report is a FAIL-CLOSED
+    OVER-REPORT, not a demonstrated reach. At runtime the unqualified binding is
+    `tortoise.__init__` the MODULE's own `__init__` — `<method-wrapper '__init__' of
+    module object …>` — and `i.FalkorDB` raises `AttributeError`. After an explicit
+    `import tortoise.__init__` the parent's attribute IS a module and the read DOES
+    return the guarded client, but that module is DISTINCT from the package
+    (`sys.modules['tortoise.__init__'] is tortoise` → `False`). Both states measured
+    on this tree at `e022fc935b`. The leg exists anyway because the name was the one
     package-root spelling `_imports_of` FOLDS onto the unbanned `tortoise` and no
     other loop read `ast.ImportFrom` at all, so a caller writing this form would
-    have reached the guarded client with every leg green. Reporting a name that
-    cannot be the client is recoverable; staying silent on a spelling of the root
-    is not — the same asymmetry this function's first paragraph sanctions.
+    have reached the guarded client with every leg green. Reporting a name that is
+    not the client unless the submodule was imported first is recoverable; staying
+    silent on a spelling of the root is not — the same asymmetry this function's
+    first paragraph sanctions.
 
     ⛔ AND THE RELATIVE SPELLING IS THE SAME BINDING IN THE AST, and the more
     natural one to write inside this package. `ast` records `from . import
@@ -1260,9 +1262,9 @@ def test_no_graph_dependency() -> None:
         "ban set minus the probe exemptions, or the transitive leg certifies "
         "coverage it does not deliver")
 
-    def _probe(import_stmt: str) -> str:
-        """Run the sys.modules walk in a CLEAN interpreter over one import."""
-        src = (
+    def _probe_source(import_stmt: str) -> str:
+        """The program the probe runs, with the derived name list interpolated."""
+        return (
             "import sys;"
             f"{import_stmt};"
             f"forbidden={list(_probe_forbidden())!r};"
@@ -1270,6 +1272,24 @@ def test_no_graph_dependency() -> None:
             "for r in forbidden)];"
             "print(','.join(sorted(bad)))"
         )
+
+    # ⛔ AND THE CALL SITE IS PINNED TOO, not just the helper. Pinning the derivation
+    # alone still let the line that CONSUMES it be hardened back to a literal:
+    # replacing the interpolation with `['falkordb', 'redis']` (or with
+    # `list(_STORE_CLIENT_ROOTS)`), helper and assert untouched, left the file at
+    # **102 passed** — the same narrowing, one line over. That is the third
+    # appearance of one class here (predicate, then loop, now the call site), which
+    # is why this asserts on the EMITTED SOURCE: the name list must appear in the
+    # program verbatim, so a literal anywhere in `_probe_source` reds.
+    for _probe_call_site_stmt in ("import tortoise.ep", "from tortoise import usage_signal"):
+        assert repr(list(_probe_forbidden())) in _probe_source(_probe_call_site_stmt), (
+            f"the probe's program does not carry the derived list "
+            f"{list(_probe_forbidden())!r} for {_probe_call_site_stmt!r} — a literal "
+            f"narrowing at the call site certifies coverage it does not deliver")
+
+    def _probe(import_stmt: str) -> str:
+        """Run the sys.modules walk in a CLEAN interpreter over one import."""
+        src = _probe_source(import_stmt)
         return subprocess.run(
             [sys.executable, "-c", src],
             capture_output=True,
