@@ -925,8 +925,11 @@ SWEEP_NAMES = 66
 #: pin exists to catch is a NEW shape, and there is none. `--check` exits 0 on this tree after the
 #: re-pin, with `typed references still pointing at a public name: 0`.
 #:
-#: ⛔ RE-PINNED FROM `main`'s DRIFT AGAIN — the THIRD re-pin from OTHER lanes' commits in one day
-#: (`2c0d66e2ec07` #14086, `f9f480a55ab3` #14164, and now these two), which is the shape of the
+#: ⛔ RE-PINNED FROM `main`'s DRIFT AGAIN. The pin has now moved THREE times in one day, and twice it
+#: moved because ANOTHER lane's commit moved the census and re-pinned nothing: `2c0d66e2ec07`
+#: (#14086) moved the set and re-pinned inside its OWN commit; `f9f480a55ab3` (#14164) moved it again
+#: and the re-pin was only recovered later, by `427c418ebb` (#14188); and now `67dc298ec3` (#14194)
+#: with `1b0db04894` (#14162) moved it and re-pinned nothing at all. That is the shape of the
 #: problem rather than a coincidence: `SWEEP_RESIDUE` is a WHOLE-TREE census, so any commit that
 #: adds or retires an untyped receiver anywhere moves it, while the commits that do so have no
 #: reason to touch this file. The pair below is `--repin`'s output on THIS tree at `1b0db04894`
@@ -942,7 +945,8 @@ SWEEP_NAMES = 66
 #:   `inst.get_point` 1 → 0, `inst.paginated_query` 1 → 0, `inst.query_points_by_tag` 1 → 0, i.e.
 #:   the six removed `inst.*` source lines = −6;
 #:   `1b0db04894` (#14162) is the only commit in the range that touches `tools/miss_rate_m5.py` or
-#:   its test, and it GROWS `cur["proj"].g.query` 2 → 4 there (+2) and adds one NEW row,
+#:   its test, and it GROWS the `cur["proj"].g.query` ROW 2 → 4 tree-wide (+2; that file adds two
+#:   of the four, `tools/window_quality_m2.py` holds the other two) and adds one NEW row,
 #:   `terms.update` 0 → 1 in `tests/test_miss_rate_m5.py` (+1), i.e. +3; net −3 → `11843 − 3`.
 #: The ONE new shape is DECLARED rather than waved through: `terms` at that site
 #: (`_pp_terms`, `tests/test_miss_rate_m5.py`) is a plain `set[str]` built by `re.findall`, so
