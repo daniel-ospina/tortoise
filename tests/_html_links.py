@@ -332,14 +332,14 @@ class _AnchorHrefParser(HTMLParser):
     #:   `_FALLBACK_RENDERS`;
     #: * the TEXT question (`extract_visible_text`) must not DROP copy a reader meets,
     #:   because a shorter text reads as a clean one. That is not a direction call —
-    #:   it is measurable, and it was MEASURED (Chromium 1255, opaque-pixel delta of
-    #:   the same fallback text rendered with and without, `_FALLBACK_RENDERS`):
-    #:   `<video>`, `<canvas>`, `<audio>`, `<datalist>`, `<meter>` and `<progress>`
-    #:   paint NOTHING of it (delta 0; `<meter>`/`<progress>` paint their widget
-    #:   chrome, which is identical with and without the text), so dropping theirs is
-    #:   correct. `<object>` paints ALL of it (delta 1677): an unloaded `<object>`
-    #:   shows its children, so dropping it would hide a claim — which is why it is
-    #:   admitted for the text question only (see `_FALLBACK_RENDERS`).
+    #:   it is a MEASUREMENT (reproduced under `_FALLBACK_RENDERS`): a supporting
+    #:   browser paints NOTHING of the fallback text of `<video>`, `<canvas>`,
+    #:   `<audio>`, `<datalist>`, `<meter>` and `<progress>`, so dropping THEIRS is
+    #:   correct, while `<object>` paints ALL of it, so dropping that one hid a claim —
+    #:   which is why it is admitted for the text question only (see
+    #:   `_FALLBACK_RENDERS`). An earlier revision cited a browser build number here;
+    #:   the reproduction below is what can be re-run, so it is what the paragraph
+    #:   points at.
     #:
     #: ⛔ THE `<object>` MEASUREMENT HAS A NORMATIVE REASON, so the member is not a
     #: browser quirk to re-measure at the next Chromium: the resource branch is entered
@@ -359,6 +359,17 @@ class _AnchorHrefParser(HTMLParser):
     #: `<object>` ancestor — that check is by TAG in `_unmet_by_reader`, not by this
     #: flag — which is the loud direction there (a heading in a fallback slot does not
     #: bound the slice), so admitting the text costs nothing on that side.
+    #:
+    #: ⛔ ADMITTED BY TAG, UNCONDITIONALLY — the `data`-conditional in the sentence above
+    #: is the NORMATIVE REASON the member is here, not a test this code applies
+    #: (#14073 review round 2, P3). `<object data="x.svg">` whose resource LOADS paints
+    #: none of its children (measured: 8000 painted px for a bare `<object>`, 0 for a
+    #: loadable one, 8000 again for a 404), so counting it unconditionally is an
+    #: over-count in the FALSE-RED direction, inside a pin that refuses `<object data>`
+    #: outright via the attribute allowlist (measured: `['<object data>']`). Named rather
+    #: than implemented because a `data`-aware rule would be a second rendering model for
+    #: a spelling the reviewed section cannot carry — and if that allowlist is ever
+    #: widened, this is the residual the widening inherits.
     #:
     #: ⛔ REPRODUCED INDEPENDENTLY at this head, with the box's own `/usr/bin/google-chrome`
     #: driven by Playwright — a 200x40 red block as the child, red pixels counted in the
@@ -1602,8 +1613,9 @@ def extract_visible_text(html: str) -> str:
       measured); the closed BODY stays dropped, as the browser drops it;
     * `<datalist>`/`<canvas>`/`<video>`/`<audio>`/`<meter>`/`<progress>` FALLBACK
       content is dropped here (`_UNRENDERED`), which is MEASURED rather than a
-      direction call: a supporting browser paints none of it (Chromium 1255, delta 0).
-      An `<object>`'s fallback IS painted (delta 1677) and is therefore counted — see
+      direction call: a supporting browser paints none of it (0 painted px with the
+      children vs 0 without, `_FALLBACK_RENDERS`' reproduction). An `<object>`'s
+      fallback IS painted (8 000 painted px) and is therefore counted — see
       `_FALLBACK_RENDERS`. The residual is the OTHER branch: a READER whose browser
       falls back on a `<video>`/`<canvas>`/… meets copy this pin does not read, named
       at `handle_data` rather than left implied;

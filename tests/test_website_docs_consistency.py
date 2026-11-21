@@ -1940,13 +1940,17 @@ def test_the_storage_section_says_exactly_what_was_reviewed() -> None:
     a `<style>` block inside the section whose `content:` property paints a claim (or a
     `<script>` that writes one) is neither text nor an attribute, and measured on this
     tree such a block leaves the allowlist, the destination pin, the vocabulary scan
-    and this golden ALL green. Not closed here on purpose: doing it properly means
-    either modelling the CSS cascade or refusing every `<style>`/`<script>` in the
-    section, and the second one is a false red on the `application/ld+json` block a docs
-    page legitimately carries — and a directive is not how page copy is written, so this
-    is the tail of the class rather than a route a copy edit takes. Named so the next
-    reader does not have to discover it; a page that adds one makes the review manual
-    again, which is the honest cost.
+    and this golden ALL green. A `<script type="application/ld+json">` block is NOT part
+    of this residual — it is already refused by the allowlist's `type` — so the gap is
+    exactly the attribute-free `<style>`/`<script>`.
+
+    Not closed here, and the reason is a cost decision rather than an impossibility:
+    refusing every `<style>`/`<script>` in the section WOULD close the static case, at
+    the price of a new pin, its own mutant, and a red on any directive the section ever
+    carries (a red that says "this section is no longer statically reviewable", which is
+    the honest outcome but not this change's). Modelling the CSS cascade is the general
+    fix and is out of a static guard's reach. Named so a directive added later is a
+    manual review rather than a silent pass.
     """
     markup = _docs_section()
     _assert_storage_section_reviewed(markup)
@@ -3589,10 +3593,11 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
     )
 
     # 5. …and the FALLBACK slot is the same over-drop for exactly ONE element,
-    #    measured rather than assumed (Chromium 1255, opaque-pixel delta of the same
-    #    text with and without the children): `<object>` paints its children when no
-    #    resource loads (delta 1677), while `<video>`/`<canvas>`/`<audio>`/`<datalist>`/
-    #    `<meter>`/`<progress>` paint none of it (delta 0). `_UNRENDERED` therefore
+    #    measured rather than assumed (the reproduction under `_FALLBACK_RENDERS`: a
+    #    red-block child, painted-pixel count, the box's own Chrome): `<object>` paints
+    #    its children when no resource loads (8 000 painted px), while
+    #    `<video>`/`<canvas>`/`<audio>`/`<datalist>`/`<meter>`/`<progress>` paint none of
+    #    it (0). `_UNRENDERED` therefore
     #    refuses all of them for the BOUNDARY question (by tag) but only the
     #    non-object ones for the TEXT question — otherwise a claim parked in an
     #    `<object>` fallback is painted by the browser and invisible to this pin.
