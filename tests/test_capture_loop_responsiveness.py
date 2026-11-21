@@ -2431,10 +2431,17 @@ def _measure_on_loop_graph_work(monkeypatch, turns: int, sid: str):
             [c for _, c, _ in records])
 
 
-def _measure_capture_graph_work(monkeypatch, turns: int, sid: str):
+def _measure_capture_graph_work(monkeypatch, turns: int, sid: str,
+                                conversation: list[dict] | None = None):
     """Like ``_measure_on_loop_graph_work``, but returns the per-thread
     ``(thread_name, cypher, duration)`` records so a caller can assert on
-    WHICH statements the loop ran, not just how many (#4465)."""
+    WHICH statements the loop ran, not just how many (#4465).
+
+    ``conversation`` overrides the default turn bodies (#10893 second cycle):
+    a test of the entity-linking tail needs turns that actually CARRY a
+    reference, and a test that silently ran a reference-free conversation would
+    assert a property of code it never reached.
+    """
     import tortoise.hosted_api as ha_mod
     from tortoise import sdk as sdk_mod
     from tortoise.hosted_api import app
@@ -2470,9 +2477,11 @@ def _measure_capture_graph_work(monkeypatch, turns: int, sid: str):
 
     async def _run():
         async with _verdict_async_client(app, base_url="http://test") as ac:
-            return await ac.post("/v1/sessions",
-                                 json={"conversation": _capture_conv(turns),
-                                       "session_id": sid})
+            return await ac.post(
+                "/v1/sessions",
+                json={"conversation": (conversation if conversation is not None
+                                       else _capture_conv(turns)),
+                      "session_id": sid})
 
     resp = asyncio.run(_run())
     monkeypatch.setattr(graph_cls, "query", orig_query)
@@ -2741,3 +2750,131 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     message = str(excinfo.value)
     assert "INCONCLUSIVE [#5049]" in message
     assert "POST /v1/sessions answered" in message
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# #10893 (SECOND CYCLE) — the capture's POST-WRITE TAIL must not run on the loop
+# ═══════════════════════════════════════════════════════════════════════════════
+# The first cycle removed probe-start work from the request's accounting; after
+# the deploy `/v1/search` still reported `pre_handler 5996.5` — six seconds
+# BEFORE its handler ran, on a box with a single uvicorn worker. The reopened
+# issue's own evidence named the mechanism from outside the process:
+# `hosted_api.py in capture_session` -> `graph_ops.py in wrapper` on the loop
+# thread, one 5.38 s episode.
+#
+# Every graph leg of `_capture_session_impl` was already offloaded (#4625 legs 62
+# and 72); the POST-WRITE TAIL was the residue, and it ran wholly inline: the
+# entity-linking pass (two round trips per turn that carries a reference), the
+# receipt probes and the bucket count, the delete-race sweep, the onboarding
+# state writes, the write-verb enrichment read, and the `capture_ok` stamp.
+#
+# Measured on the embedded lane at the fixing commit's parent (40 turns, every
+# third carrying a `repo#N` reference): 57 graph round trips ON the event loop,
+# 105.0 ms of loop occupancy. After the tail moved to the capture pool: 10 on the
+# loop, 35-42 ms — and every remaining on-loop statement is the schema/bootstrap
+# class `test_capture_does_not_repeat_the_schema_bootstrap_on_the_loop` pins, not
+# this tail.
+#
+# ⛔ NO WALL-CLOCK BUDGET HERE, for the reason stated at
+# `test_capture_write_does_not_scale_loop_blocking_with_turns`: on a shared
+# runner a time bound passes and fails identically pre- and post-fix. The
+# assertion is WHICH THREAD the tail's statements ran on, which is deterministic.
+
+#: Statements that belong to the capture's post-write tail. Each is matched as a
+#: substring of the whitespace-normalised cypher, so a reformat cannot hide one.
+_CAPTURE_TAIL_STATEMENTS = {
+    # the entity-linking pass — target resolution, per-turn, and its SET
+    "ENDS WITH $suffix": "entity-link target resolution",
+    "s.entity_links_attempted": "entity-link counters",
+    # the receipt probes and the bucket-aware compensation count
+    "count(s) AS n, s.capture_ok AS ok": "the capture probe",
+    # …and the delete-race re-check / bucket count
+    "s.capture_extractor AS extractor": "the capture probe",
+    # the onboarding state writes (#2002 first-capture checkpoint + receipt)
+    "MERGE (n:OnboardingState {org_id: $org_id})": "the onboarding state write",
+    "MERGE (s:OnboardingStep {org_id: $org_id, step_id: $step_id})":
+        "the first-capture checkpoint",
+    # the write-verb enrichment read (raw belief columns)
+    "n.posterior_alpha, n.ep_alpha": "the write-verb enrichment read",
+    # the recorded outcome
+    "SET s.capture_ok=$ok": "the capture_ok stamp",
+}
+
+#: A session-alive probe is `MATCH (s:Session …) RETURN count(s)`; the exact
+#: spelling varies with the optional-return shape, so it is matched separately.
+_SESSION_ALIVE = "MATCH (s:Session {id:$sid}) RETURN count(s)"
+
+
+def _ref_conversation(turns: int) -> list[dict]:
+    """Turns where every third carries a `repo#N` reference.
+
+    The reference matters: without one `extract_refs` returns nothing and the
+    linking pass does no graph work at all, so the test would pass over an
+    on-loop linker that had never been exercised.
+    """
+    out = []
+    for i in range(turns):
+        if i % 3 == 0:
+            body = (f"turn {i} the database schema needs work on "
+                    f"daniel-ospina/tortoise#{100 + i} before the storage "
+                    f"migration lands")
+        else:
+            body = f"turn {i} the database schema needs work " * 3
+        out.append({"role": "user" if i % 2 == 0 else "assistant",
+                    "content": body})
+    return out
+
+
+def test_the_capture_post_write_tail_never_runs_on_the_event_loop(
+        client, monkeypatch):
+    """#10893 (second cycle): the tail is capture-pool work, not loop work.
+
+    Mutation check (must stay true): restoring any ONE of these calls inline
+    puts matching statements back on ``MainThread`` and fails the first
+    assertion. Deleting the work instead fails the second — every tail statement
+    must still be ISSUED, on some thread.
+    """
+    resp, records, _writer = _measure_capture_graph_work(
+        monkeypatch, 40, "tail-off-loop-10893",
+        conversation=_ref_conversation(40))
+
+    require_answered(resp, what="POST /v1/sessions answered (40-turn tail run)")
+    assert resp.status_code == 200, resp.text[:300]
+
+    on_loop = [c for name, c, _d in records if name == "MainThread"]
+    all_cyphers = [c for _n, c, _d in records]
+
+    offenders = [
+        f"{label}: {c[:110]}"
+        for c in on_loop
+        for needle, label in _CAPTURE_TAIL_STATEMENTS.items()
+        if needle in c
+    ]
+    if any(_SESSION_ALIVE in c for c in on_loop):
+        offenders.append(f"session-alive probe: {_SESSION_ALIVE}")
+    assert not offenders, (
+        "the capture's post-write tail is back on the event loop — every "
+        "request behind it on the single uvicorn worker pays that time as "
+        "`pre_handler` (#10893):\n  " + "\n  ".join(offenders))
+
+    for needle, label in _TAIL_MUST_BE_ISSUED.items():
+        assert any(needle in c for c in all_cyphers), (
+            f"{label} was never issued — the tail was deleted, not offloaded "
+            f"(expected a statement containing {needle!r})")
+
+
+#: The tail statements THIS fixture is guaranteed to reach, so their ABSENCE is
+#: a real failure ("the work was deleted, not offloaded").
+#:
+#: The two `_CAPTURE_TAIL_STATEMENTS` members left out are named here rather than
+#: silently dropped from the prohibition set above — an on-loop copy of either
+#: still fails, they are simply not PRESENT under this fixture:
+#:   * `s.entity_links_attempted` — its SET fires only when the linking pass
+#:     ATTEMPTED a link, and `_resolve_targets` never creates an Object, so with
+#:     an empty graph nothing resolves;
+#:   * the write-verb enrichment read — `_measure_capture_graph_work` mocks the
+#:     extractor to emit nothing, so there are no extracted ids to enrich.
+_TAIL_MUST_BE_ISSUED = {
+    k: v for k, v in _CAPTURE_TAIL_STATEMENTS.items()
+    if k not in ("s.entity_links_attempted", "n.posterior_alpha, n.ep_alpha")
+}
