@@ -78,8 +78,10 @@ def step_accounting() -> dict:
         "reader": "renders from onboarding state; never mutates it",
         "writer": (
             "tortoise/hosted_api.py::_capture_session_impl — "
-            "write_completed_step(proj, org_id, 'capture-disclosed', ...), "
-            "first-write-wins, on the first 2xx capture of an org"
+            "write_completed_step(default_proj, org_id, 'capture-disclosed', ...), "
+            "first-write-wins, on the first 2xx capture of an org whose "
+            "credential's OWN graph IS the org default (a CUSTOM-bound "
+            "credential writes nothing)"
         ),
     }
 
