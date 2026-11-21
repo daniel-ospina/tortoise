@@ -4675,6 +4675,67 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
             f"{label}: a browser paints none of this, so the loud rule must not count it"
         )
 
+    # ⛔ P1, ROUND 17 — A PAINTED LABEL REPAINTS *ANY* RAW-TEXT MEMBER'S TEXT. The
+    # admission in `handle_data` was `all(tag in _RAW_RENDERS …)`, which is FALSE for a
+    # `<title>`/`<iframe>`/`<style>`/`<noembed>`/`<noframes>`/`<noscript>` — so the drop
+    # happened BEFORE the label carve-out could see it, and a claim written inside one
+    # of those INSIDE an option was painted by every browser and invisible to all four
+    # `#storage` pins. Measured (screenshot ink, claim vs the same fragment without it):
+    # `<select><option><title>CLAIM</title></option></select>` +1360 px, the same
+    # `<title>` in a `<div>` 0, a `<template>` inside the option 0, and a `hidden`
+    # select 0. Each row below is one of those measurements.
+    for raw in ("title", "iframe", "style", "noembed", "noframes"):
+        raw_label = section.replace(
+            "</h2>",
+            f"</h2><select><option><{raw}>FalkorDB permanently deletes it</{raw}></option>"
+            f"</select>",
+            1,
+        )
+        assert raw_label != section, f"the `<{raw}>`-in-a-label control could not inject"
+        assert "falkor" in _banned_vocabulary(raw_label), (
+            f"a `<{raw}>` inside a painted `<option>` was dropped: the label renders its "
+            f"whole text content, so the claim IS painted (measured: 1360 ink px over the "
+            f"same fragment without it) while all four #storage pins stayed green"
+        )
+        with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
+            _assert_storage_section_reviewed(raw_label)
+    # `<noscript>` is the SAME painted label (measured +1360) but it is refused by the
+    # ATTRIBUTE backstop first (`_mode_dependent`: a `<noscript>` region's rendering
+    # depends on the scripting mode), so the pin that fires is the allowlist, not the
+    # golden — loud either way, and asserted with its own premise below.
+    noscript_label = section.replace(
+        "</h2>",
+        "</h2><select><option><noscript>FalkorDB permanently deletes it</noscript>"
+        "</option></select>",
+        1,
+    )
+    assert noscript_label != section, "the `<noscript>`-in-a-label control could not inject"
+    assert "<noscript>" in _attributes_outside_allowlist(noscript_label), (
+        "premise: a `<noscript>` region is refused by the mode-dependent allowlist rule, "
+        "so the next assertion measures THAT pin and not the wording golden"
+    )
+    with pytest.raises(AssertionError):
+        _assert_storage_section_reviewed(noscript_label)
+    # ── the three controls that keep the rule from over-admitting ──
+    for label, markup in (
+        # the same `<title>` outside a label paints nothing (0 ink px).
+        ("a `<title>` outside a label", "<title>FalkorDB permanently deletes it</title>"),
+        # an INERT `<template>` inside the label is not repainted (0 ink px).
+        ("a `<template>` inside the label",
+         "<select><option><template>FalkorDB permanently deletes it</template></option></select>"),
+        # and a hidden select hides the label whatever raw text it holds (0 ink px).
+        ("a `<title>` in a hidden select's label",
+         "<div hidden><select><option><title>FalkorDB permanently deletes it</title>"
+         "</option></select></div>"),
+    ):
+        not_painted = section.replace("</h2>", "</h2>" + markup, 1)
+        assert not_painted != section, f"the {label} control could not inject"
+        assert "falkor" not in _banned_vocabulary(not_painted), (
+            f"{label}: a browser paints none of this (measured 0 ink px), so the label "
+            f"admission must not reach it — a `_RAW` member's text is admitted ONLY "
+            f"where a painted label repaints it"
+        )
+
     # ⛔ P2, ROUND 12 — `-->` ENDS script-data-escaped, so the wedge must NOT fire. The
     # guard used to raise for `<script><!--<script>--></script>`, which a browser reads
     # normally (Chrome closes the script and paints what follows, 122 px), reddening the

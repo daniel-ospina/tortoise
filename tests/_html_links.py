@@ -2151,9 +2151,33 @@ class _AnchorHrefParser(HTMLParser):
         # ⛔ `_RAW_RENDERS` IS THE OTHER HALF, and it is a fail-open if dropped: the
         # raw-text family is suppressed for the TOKENIZER's sake, and three of its
         # members (`<textarea>`, `<xmp>`, `<plaintext>`) render their text anyway —
-        # so "suppressed" is not "unreadable" for this question, and the recording
-        # admits those and only those. A `<textarea>` inside an inert `<template>` is
-        # still dropped, because `template` is in the stack too.
+        # so "suppressed" is not "unreadable" for this question. A `<textarea>` inside
+        # an inert `<template>` is still dropped, because `template` is in the stack
+        # too.
+        #
+        # ⛔ AND A PAINTED LABEL REPAINTS *ANY* `_RAW` MEMBER'S TEXT (#14073 review
+        # round 17, P1, measured). The admission above is not the only way raw text
+        # reaches a reader: an `<option>`/`<optgroup>` in a painted `<select>` renders
+        # its whole text content as the label, so a claim written inside a `<title>`,
+        # `<iframe>`, `<style>`, `<noembed>`, `<noframes>` or `<noscript>` THERE is
+        # painted while the same element outside a label paints nothing. Measured
+        # (screenshot ink, claim vs the same fragment without it):
+        #
+        #   <select><option><title>CLAIM</title></option></select>      +1360 ink px
+        #   <select><option><iframe>CLAIM</iframe></option></select>    +1360
+        #   <select><option><noscript>CLAIM</noscript></option></select> +1360
+        #   <div><title>CLAIM</title></div>                                 0   (control)
+        #   <select><option><template>CLAIM</template></option></select>    0   (control)
+        #   <div hidden><select><option><title>CLAIM</title>…                0   (control)
+        #
+        # The gate was `all(tag in self._RAW_RENDERS …)` and that is FALSE for a
+        # `<title>`, so the drop happened BEFORE `_text_is_painted`'s label carve-out
+        # could see it: the carve-out was unreachable for every non-`_RAW_RENDERS` raw
+        # text inside a label, and all four `#storage` pins stayed green over a painted
+        # contradicting sentence. So the label question is asked as its own admission —
+        # and only for the `_RAW` family: a `<template>` inside the label is NOT
+        # repainted (measured 0), which is why the outer `all(tag in self._RAW …)`
+        # remains.
         #
         # ⛔ NOT `self._foreign`-gated, unlike the anchor and heading recordings: text
         # inside `<svg>`/`<math>` IS rendered (only markup inside it is read by
@@ -2174,12 +2198,46 @@ class _AnchorHrefParser(HTMLParser):
         # fails any covered page that reaches foreign constructs at all (see
         # `foreign_tags` and #3970). Closing it properly means a foreign element stack
         # in `_open`/`_close_extent`; until then this is named rather than implied.
-        if (
-            not self.wedged_reason
-            and all(tag in self._RAW_RENDERS for tag in self._suppress)
-            and self._text_is_painted()
+        if not self.wedged_reason and all(tag in self._RAW for tag in self._suppress) and (
+            self._in_painted_label()
+            or (
+                all(tag in self._RAW_RENDERS for tag in self._suppress)
+                and self._text_is_painted()
+            )
         ):
             self.text.append(data)
+
+    def _in_painted_label(self) -> bool:
+        """Is this text repainted by a painted `<option>`/`<optgroup>` LABEL?
+
+        A painted label renders its whole text content, so text a `<title>`/`<iframe>`/
+        `<style>` would never show anywhere else IS shown here (#14073 review round 17,
+        P1, measured — see `handle_data` for the ink counts). Both callers ask the same
+        question: `_text_is_painted` uses it to skip the unrendered-ancestor loop, and
+        `handle_data` uses it to admit a `_RAW` member whose text is not in
+        `_RAW_RENDERS`.
+
+        ⛔ THE GATE IS THE ENCLOSING `<select>`'s FLAG, NOT THE OPTION'S (#14073 review
+        round 12, P0, measured): an option's own flag inherits from what is directly
+        above it, so gating on it let a wrapper BETWEEN the select and the option kill
+        the exception — `<select><audio><option>CLAIM</option></audio></select>` paints
+        the label (67 px, same as without the wrapper) while the scan returned `''`.
+        What decides is whether the SELECT is rendered: with the wrapper the select is
+        still rendered, and with `<div hidden><select>` it is not (0 px).
+        """
+        frames = self._foster_truncated_ancestry()
+        label_at = next(
+            (i for i, (tag, _c, _r) in enumerate(frames) if tag in self._LABEL_RENDERS),
+            None,
+        )
+        if label_at is None:
+            return False
+        select_at = next(
+            (i for i in range(label_at - 1, -1, -1) if frames[i][0] == "select"),
+            None,
+        )
+        decided_by = select_at if select_at is not None else label_at
+        return all(renders for _t, _c, renders in frames[:decided_by + 1])
 
     def _text_is_painted(self) -> bool:
         """Is the text just read inside a subtree the wording pin should READ?
@@ -2219,27 +2277,10 @@ class _AnchorHrefParser(HTMLParser):
         """
         frames = self._foster_truncated_ancestry()
         # A painted LABEL repaints its whole text content, so nothing BETWEEN the select
-        # and the option can be the thing that decides — see `_LABEL_RENDERS`.
-        #
-        # ⛔ THE GATE IS THE ENCLOSING `<select>`'s FLAG, NOT THE OPTION'S (#14073 review
-        # round 12, P0, measured). An option's own flag inherits from what is directly
-        # above it, so gating on it let a wrapper BETWEEN the select and the option kill
-        # the exception: `<select><audio><option>CLAIM</option></audio></select>` paints
-        # the label (67 px, same as without the wrapper) while this scan returned `''`.
-        # What actually decides is whether the SELECT is rendered: with the wrapper the
-        # select is still rendered, and with `<div hidden><select>` it is not (0 px).
-        label_at = next(
-            (i for i, (tag, _c, _r) in enumerate(frames) if tag in self._LABEL_RENDERS),
-            None,
-        )
-        if label_at is not None:
-            select_at = next(
-                (i for i in range(label_at - 1, -1, -1) if frames[i][0] == "select"),
-                None,
-            )
-            decided_by = select_at if select_at is not None else label_at
-            if all(renders for _t, _c, renders in frames[:decided_by + 1]):
-                return True
+        # and the option can be the thing that decides — see `_LABEL_RENDERS` and
+        # `_in_painted_label`, which both this method and `handle_data` ask.
+        if self._in_painted_label():
+            return True
         for tag, _container, renders in frames:
             if renders:
                 continue
