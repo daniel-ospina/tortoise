@@ -2542,6 +2542,28 @@ def test_the_select_scope_closes_on_input_and_a_nested_select_and_nothing_else()
         "`{'input', 'div', 'span'}` was still 103 passed, 1 skipped, and a decoy "
         "`<select><div><a href=\"#storage-limits\">` in the TOC block left every "
         "storage pin green")
+    # ── AND THE SAME FOR THE IMPLIED-`</p>` SET, for the same reason ──
+    #
+    # `_P_CLOSERS` decides which start tags close an open `<p>` (and with it
+    # everything opened inside that `<p>`). It was an unpinned set too, and it was
+    # measured wrong the first time: `li`, `dd` and `dt` carry their own "close a `p`
+    # element" step and were missing, so `<p>one<li>two` left a `<p>` open here that
+    # every browser closes (Chrome: 0 element children in the `<p>`,
+    # `nextElementSibling` `LI`; `DD`/`DT` likewise — and `<td>`, the control, inserts
+    # nothing outside a table and leaves the `<p>` open). The omission was the safe
+    # direction, but a set this stack's ancestry depends on must red when it MOVES.
+    assert set(_AnchorHrefParser._P_CLOSERS) == {
+        "address", "article", "aside", "blockquote", "center", "dd", "details",
+        "dialog", "dir", "div", "dl", "dt", "fieldset", "figcaption", "figure",
+        "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header",
+        "hgroup", "hr", "li", "listing", "main", "menu", "nav", "ol", "p",
+        "pre", "section", "summary", "table", "ul", "xmp",
+    }, (
+        "`_P_CLOSERS` changed: each member's start tag CLOSES an open `<p>` in a "
+        "browser, and closing it decides which ancestors the summary and any painted "
+        "text inherit from. `li`/`dd`/`dt` belong (their own spec step closes a `<p>`); "
+        "`td` does not (outside a table it inserts nothing). Do not widen or narrow "
+        "this by guess — drive the shape in Chrome first")
     # ── PRESENT: `<input>` pops the scope, so what follows is outside the select ──
     assert extract_anchor_hrefs(
         '<select><input><a href="/blog">Blog</a></select>'
