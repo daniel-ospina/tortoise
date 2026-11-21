@@ -1588,6 +1588,20 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
         strip, "_module_source", lambda name: "" if name == blanked else env_source(name))
     assert outsider in _writer_register_population()["missing"]
 
+    # ⛔ …AND THE PIN MUST RED FOR *THAT* BUCKET TOO (`#14099` F3, review of `00a5804`). The arm
+    # above proves the WALK files a renamed writer under `missing`; it says nothing about the PIN
+    # reporting one. Measured at `00a5804`: deleting the pin's `assert missing == []` left this
+    # whole file GREEN (94 passed) — the `stray` bucket had the red below, `missing` had nothing,
+    # so a renamed writer could silently leave the population the declaration exists to bound.
+    monkeypatch.setattr(
+        strip, "_module_source", lambda name: "" if name == blanked else env_source(name))
+    with pytest.raises(AssertionError) as red_missing:
+        test_no_declared_entity_writer_mentions_a_dynamic_namespace()
+    assert outsider in str(red_missing.value) and "register names a writer" in str(
+        red_missing.value), (
+        f"the pin does not red — or reds without naming the key — for a register writer whose "
+        f"`def` the module no longer contains: {red_missing.value}")
+
     # ⛔ THE PIN ITSELF MUST RED (`#14099` F2). The arms above prove the WALK classifies; they do
     # NOT prove the PIN reports. Measured: deleting the pin's `assert stray == []` left this whole
     # file green, because every other row reads the helper rather than the assertion — so the guard
