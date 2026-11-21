@@ -2888,10 +2888,21 @@ def test_the_capture_post_write_tail_never_runs_on_the_event_loop(
         client, monkeypatch):
     """#10893 (second cycle): the tail is capture-pool work, not loop work.
 
-    Mutation check (must stay true): restoring any ONE of these calls inline
-    puts matching statements back on ``MainThread`` and fails the first
-    assertion. Deleting the work instead fails the second — every tail statement
-    must still be ISSUED, on some thread.
+    Mutation check (must stay true) FOR THE LEGS THIS FIXTURE REACHES: restoring
+    any one of them inline puts its statements back on ``MainThread`` and fails
+    the first assertion. Deleting the work instead fails the second, for the
+    rows in ``_TAIL_MUST_BE_ISSUED`` — the ones this fixture actually ISSUES.
+
+    ⛔ THE CLAIM IS SCOPED, NOT UNIVERSAL (#14086 review, P2). Two declared tail
+    legs are INERT in THIS fixture: `s.entity_links_attempted` (its SET fires
+    only when a link was ATTEMPTED, and `_resolve_targets` never creates an
+    Object on an empty graph) and the write-verb enrichment read
+    (`n.posterior_alpha, n.ep_alpha` — `_measure_capture_graph_work` stubs the
+    extractor to emit nothing, so `if extracted:` is never entered). An inline
+    copy of either would NOT red here. The link PASS is still caught by its
+    sibling needle (`ENDS WITH $suffix`); the enrichment read is UNCOVERED — see
+    the residual note on `_TAIL_MUST_BE_ISSUED` below, so nobody reads this
+    test's green as evidence about that leg.
     """
     resp, records, _writer = _measure_capture_graph_work(
         monkeypatch, 40, "tail-off-loop-10893",
@@ -2965,13 +2976,22 @@ def test_the_capture_post_write_tail_never_runs_on_the_event_loop(
 #: a real failure ("the work was deleted, not offloaded").
 #:
 #: The two `_CAPTURE_TAIL_STATEMENTS` members left out are named here rather than
-#: silently dropped from the prohibition set above — an on-loop copy of either
-#: still fails, they are simply not PRESENT under this fixture:
+#: silently dropped. Both stay in the PROHIBITION set (an on-loop copy is still a
+#: bug), but neither is PRESENT under this fixture, so in this test they are
+#: INERT in both directions — and the honest consequence is stated rather than
+#: implied (#14086 review, P2):
 #:   * `s.entity_links_attempted` — its SET fires only when the linking pass
 #:     ATTEMPTED a link, and `_resolve_targets` never creates an Object, so with
-#:     an empty graph nothing resolves;
-#:   * the write-verb enrichment read — `_measure_capture_graph_work` mocks the
-#:     extractor to emit nothing, so there are no extracted ids to enrich.
+#:     an empty graph nothing resolves. The link PASS itself IS covered, by its
+#:     sibling needle `ENDS WITH $suffix`.
+#:   * the write-verb enrichment read (`n.posterior_alpha, n.ep_alpha`) —
+#:     `_measure_capture_graph_work` stubs the extractor to emit nothing, so
+#:     `if extracted:` (hosted_api.py:21861) is never entered and `_enrichment_read`
+#:     never runs. ⛔ UNCOVERED RESIDUAL: no test in this tree asserts WHICH THREAD
+#:     that leg runs on (`grep -rn 'posterior_alpha, n.ep_alpha' tests/`), so
+#:     returning it inline would be silent here. Making the fixture reach it needs
+#:     the extractor stub replaced with a realistic extraction, which is a fixture
+#:     redesign this change does not carry.
 _TAIL_MUST_BE_ISSUED = {
     k: v for k, v in _CAPTURE_TAIL_STATEMENTS.items()
     if k not in ("s.entity_links_attempted", "n.posterior_alpha, n.ep_alpha")
