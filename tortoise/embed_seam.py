@@ -78,6 +78,20 @@ DEFAULT POSTURE AND ROLLBACK. Both are stated per backing in
   next encode: same encode call, same thread pin, same decline semantics. The
   seam is on the path either way; nothing has to be reverted in code, and no
   state is left behind that a restart would need.
+
+⛔ **KNOWN RESIDUAL — ONE ENCODE RUNS AT A TIME.** The collector is a single
+thread and calls the backing from it, so concurrent queries are SERIALISED behind
+the queue instead of running on N read-lane workers in parallel. For the shipped
+configuration that is the intended change and not a compromise: the encoder is
+pinned to ONE intra-op thread (#10296), so N concurrent encodes on a shared box
+do not buy N× throughput — they buy N× contention, and the 2-4 s ``embed_encode``
+this issue measures *is* that contention, on the same cores the event loop needs.
+Serialising them behind a batch is the scheduling change; the 0.36 s/item figure
+was measured on a single batched encode and is only reachable in this shape. It
+IS a real ceiling, though, and it is stated rather than assumed away: a
+multi-collector variant (N parallel encodes, batching per collector) is a
+FOLLOW-UP TO BE GATED ON A MEASUREMENT, because on a wide, otherwise-idle box it
+could win on wall time — and "could" is not a reason to ship it.
 """
 from __future__ import annotations
 

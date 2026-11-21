@@ -1377,6 +1377,20 @@ curl -sS https://api.premiselabs.co/health \
 ⛔ **`injected: true` means a TEST installed a backing.** It never appears in production; if it does,
 the process is not running the configured encoder and nothing above can be trusted.
 
+#### One encode at a time — a stated ceiling, not a hidden one
+
+The collector is a single thread, so concurrent queries are **serialised** behind the queue rather than
+running on N read-lane workers in parallel. That is the intended change: the encoder is pinned to ONE
+intra-op thread (`#10296`), so N concurrent encodes on a shared box buy N× contention rather than N×
+throughput — and the 2-4 s `embed_encode` this seam exists for *is* that contention, on the same cores
+the event loop needs. The 0.36 s/item figure was measured on a single batched encode and is only
+reachable in this shape.
+
+It is still a real ceiling. If a future measurement shows a wide, otherwise-idle box losing wall time
+to the serialisation, the change is N collectors batching per collector — **gated on that
+measurement**, not made speculatively. Until then, read `latency.batches` growing while
+`latency.encode_ms.p50` stays flat as "the queue is the limit, not the encoder".
+
 ### 4.2 Billing mirror drift — verify and repair an under-delivered plan (#8878)
 
 **Symptom.** A customer pays for a higher tier and is enforced at a lower one.
