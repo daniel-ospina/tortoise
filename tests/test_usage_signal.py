@@ -1720,20 +1720,50 @@ def test_no_graph_dependency() -> None:
     ), (
         "the production import did not even report itself — an emptied stream makes the "
         "table below vacuous")
-    assert _observed_cases == _cases, (
-        f"the probe disagrees with its own expectations: {_observed_cases}. "
-        f"`import tortoise.hosted_backup` MUST come back as {{'tortoise.hosted_backup'}} "
-        f"and `from tortoise import usage_signal` must come back empty. ⛔ READ WHICH "
-        f"WAY IT DISAGREES BEFORE BLAMING ONE SIDE, because an equality red here has "
-        f"two opposite meanings: a MISSING name means the detector is broken (the "
-        f"derivation or the matcher dropped a root), while an EXTRA banned root is "
-        f"either a REAL transitive reach the tree gained — the exact leak this leg "
-        f"exists to catch, and a legitimate red — or the probe over-reporting. "
-        f"Measured: a module-scope `import tortoise.cypher_guard` added to "
-        f"`tortoise/hosted_backup.py` reports the EXTRA "
-        f"`tortoise.cypher_guard`/`tortoise.retry` alongside the expected root. "
-        f"A filter or slice on this expression reds the leaking half instead of "
-        f"silencing the clean one (#14118 item 1)")
+    # ⛔ THE TWO HALVES ARE GRADED DIFFERENTLY ON PURPOSE, because they witness different
+    # things and only ONE of them is this test's subject. This split replaces a single
+    # `_observed_cases == _cases` equality, which graded a THIRD module's exact
+    # banned-root footprint and so red on edits this test does not audit (a fresh-context
+    # review of `0cb373e43f` found it, P2; `fcd90e9e43` corrected that row's MESSAGE but
+    # kept the equality, and the false red is still live there — measured below).
+    #
+    # THE CLEAN HALF IS AN EQUALITY AND MUST STAY ONE. `usage_signal`'s own import is the
+    # SUBJECT: exact-empty IS the leak detector, so a root appearing here is a real reach
+    # the module gained — the class this leg exists to catch. Relaxing it to
+    # `not _observed_cases[...]`-style leniency would silence exactly that.
+    assert _observed_cases["from tortoise import usage_signal"] == set(), (
+        "the subject's own import must reach NO banned root: got "
+        f"{sorted(_observed_cases['from tortoise import usage_signal'])}. A name here is "
+        "a REAL transitive reach of a graph client from `usage_signal` itself — the leak "
+        "this leg exists to catch, and a legitimate red. A filter or slice on the "
+        "expression hung off `_probe` cannot satisfy this half and the next one "
+        "together, so silencing the leak still reds here (#14118 item 1)")
+    #
+    # ⛔ AND THE WITNESS HALF IS A CONTAINMENT, NOT AN EQUALITY. `hosted_backup` is a
+    # CONTROL — a module this test does not audit and the AST ban above never reads — so
+    # its exact footprint is a property of a THIRD file: grading it by equality reds on a
+    # change to THAT file while the message blames this one, and the shortest-looking fix
+    # is to relax the only positive control the transitive class has. Measured at
+    # `fcd90e9e43`: adding one module-scope `import tortoise.cypher_guard` to
+    # `tortoise/hosted_backup.py` (a leaf module, so the import succeeds) red the equality
+    # with `{'tortoise.cypher_guard', 'tortoise.hosted_backup', 'tortoise.retry'}` against
+    # `{'tortoise.hosted_backup'}` — a false red on an unrelated edit. What this row must
+    # WITNESS is that the probe SEES a real banned root and does not answer empty for a
+    # run that has one; a containment states exactly that and nothing wider.
+    assert {"tortoise.hosted_backup"} <= _observed_cases["import tortoise.hosted_backup"], (
+        "the known-leaking control must come back carrying its own banned root: got "
+        f"{sorted(_observed_cases['import tortoise.hosted_backup'])}. A MISSING root "
+        "means the DETECTOR dropped it (the derivation, the child's print, or the "
+        "parent's matcher) — never the tree. An EXTRA root is not this row's business: "
+        "`hosted_backup` is a WITNESS, not the subject, so extra reach there is either a "
+        "real property of that third module or the probe over-reporting, and neither is "
+        "a `usage_signal` defect this test may fail on (#14118 item 1)")
+    # AND the probe's verdict is still pinned in BOTH directions across the table: the
+    # clean half reds on over-reporting (a probe that answers every banned root fails
+    # `== set()` above), and the witness half reds on under-reporting. Neither half alone
+    # can be satisfied by a filter: measured on this head, a `_probe` whose answer drops
+    # `tortoise.hosted_backup` is **1 failed / 101**, and so is one that adds a banned
+    # root to the subject's answer.
 
 
 def test_the_no_graph_guard_catches_relative_imports() -> None:
