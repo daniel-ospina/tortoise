@@ -5011,7 +5011,14 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
             f"effective_direction={defect['effective_direction']} — "
             + " AND ".join(defect["reasons"]))
     if e6.get("error"):
-        add(f"e6 error: the pack registry could not be loaded — {e6['error']}")
+        # ⛔ THE LINE NAMES THE FAULT IT WAS GIVEN, not a cause it assumed (#14060 review round
+        # 12, P3): it said "the pack registry could not be loaded" for EVERY `e6["error"]`, and
+        # the population guard writes CENSUS faults (`… no usable population block …`, `…
+        # does not add up …`, `… N row(s) … could be enumerated`) that no registry had anything
+        # to do with — rendered into a COMMITTED, scored log. `build_e6_row`'s note was fixed
+        # for this in round 9 and its sibling here was left asserting the same false cause; this
+        # is the line the log actually reads, so this is the one an arm below drives.
+        add(f"e6 error: {e6['error']}")
     written = e6.get("written") or {}
     add("e6 written (REPORTED BESIDE the bar, NEVER the bar — A1 owns the written "
         f"graph): source={e6.get('written_source')} "

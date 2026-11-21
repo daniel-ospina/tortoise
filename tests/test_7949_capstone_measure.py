@@ -1637,6 +1637,13 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
         # round 7 fixed for an empty `packs`, left in its twin.
         assert "UNMEASURED" in e6["written_source"].upper(), (why, e6["written_source"])
         assert measure.E6_CENSUS not in e6["written_source"], (why, e6["written_source"])
+        # ⛔ AND THE SENTENCE IS ONE THE NOTE CAN SPLICE (#14060 review round 12, P3: the prefix
+        # this PR added had NO arm — deleting it left the whole file exactly as green as the
+        # baseline, measured). `build_e6_row` renders `… unmeasured=N from {written_source}`, so
+        # a source without `not read — ` reads as `from the census's rows could not be keyed …`.
+        assert e6["written_source"].startswith("not read — "), (why, e6["written_source"])
+        assert f"from {e6['written_source']}" in measure.build_e6_row(
+            e6, bars=BARS)["note"], (why, measure.build_e6_row(e6, bars=BARS)["note"])
     # …and an EMPTY `packs` object, the one shape the fault did not cover: it read as a normal
     # read, so the beside column claimed to have read an artifact it covered none of.
     empty = tmp_path / "empty.json"
@@ -1655,7 +1662,11 @@ def test_a_synthetic_hierarchies_defect_runs_through_the_runs_own_defect_scan():
     defect assertion in this file compares zero with zero — which is why the breadth needed
     an arm here rather than a real-tree one.
 
-    Non-vacuity, both mutants the review built, and neither reddens any other case here:
+    Non-vacuity, both mutants the review built, and each of them ALSO reds this case's
+    companion `test_a_hierarchies_defect_reaches_the_bar_not_just_the_scan` — measured, `2
+    failed` for either mutant, which is what that companion's docstring claims. ⛔ An earlier cut
+    of this sentence read "neither reddens any other case here", which its own sibling
+    contradicted (round 12, P3):
 
     * `e6_defects`' body replaced by `return []` → the returned list is empty;
     * `if surface != "relations": continue` at its loop head → the hierarchy row drops out
@@ -1761,11 +1772,15 @@ def test_the_e6_surface_breadth_is_stated_once_and_every_loop_reads_it():
     # ⚠️ STATED RESIDUAL, because the round-11 review measured the gap between this pin and the
     # comment it guards: a breadth spelled as TWO separate arguments (`loop("relations",
     # "hierarchies")` on two lines, or a set built by name) evades both counts. What catches a
-    # NARROWED tuple is not this case but the population guards in `measure_e6`: the census
-    # declares the rows of both surfaces, so dropping one leaves `declared != len(rows)` and the
-    # row refuses — measured on the mutant (`E6_SURFACES = ("relations",)` reds
-    # `test_a_synthetic_hierarchies_defect_runs_through_the_runs_own_defect_scan` and the
-    # population arm). This case holds the LITERAL to one, which is the edit the comment invites.
+    # NARROWED tuple is not this case but the population guards in `measure_e6` plus the arms
+    # that read the enumeration — MEASURED on the mutant (`E6_SURFACES = ("relations",)` reds
+    # this case, `test_a_hierarchies_defect_reaches_the_bar_not_just_the_scan`,
+    # `test_e6_reads_the_population_from_the_packs_and_written_from_the_artifact`, and five
+    # other E6 cases; ⛔ NOT `test_a_synthetic_hierarchies_defect_runs_through_the_runs_own_
+    # defect_scan`, which hands `e6_defects` a literal tuple and never reads the constant — the
+    # first cut of this sentence named it, and a round-12 review measured that it stays green
+    # under the mutant). This case holds the LITERAL to one, which is the edit the comment
+    # invites.
 
 
 def test_build_rows_refuses_an_e6_mapping_missing_a_required_key():
@@ -2874,6 +2889,22 @@ def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch, tmp_p
     assert list(isolated_block["load_errors"]) == ["dev"], isolated_block["load_errors"]
     assert isolated_block["outcome"] == "REFUSED", isolated_block["outcome"]
     assert isolated_block["population"]["declared"] == 31, isolated_block["population"]
+    # ⛔ AND A NAMED GAP THAT IS NOT A REGISTRY FAULT IS NOT *RENDERED* AS ONE (#14060 review
+    # round 12, P3): `render_log` said "the pack registry could not be loaded" for EVERY
+    # `e6["error"]` — and this diff is what made that line able to lie, because `measure_e6`'s
+    # population guard writes three CENSUS faults that no registry had anything to do with. No
+    # arm drove the line at all. The row is rebuilt through `build_e6_row` so the two halves of
+    # the rendered record agree, and the assertion reads the rendered LINE, not the source.
+    gap_measured, _gap_row = _e6_fixture()
+    gap_measured = {**gap_measured, "error": ("the census's population does not add up: "
+                                              "relations 1 + hierarchies 0 != declared 2"),
+                    "written_source": "not read — the census could not be enumerated"}
+    gap_row = measure.build_e6_row(gap_measured, bars=measure.parse_bars(_prereg()))
+    gap_lines = [line for line in render(_prereg(), (gap_measured, gap_row)).splitlines()
+                 if "e6 error" in line]
+    assert gap_lines, "the rendered log must state the gap it could not score"
+    assert "does not add up" in "\n".join(gap_lines), gap_lines
+    assert "could not be loaded" not in "\n".join(gap_lines), gap_lines
     assert "e1 note: both before realizations clear E1's own floors" in text
     # #9736: the empty-leg line is read from the CENSUS, not from the `e3_out` built by hand above
     # it. This fixture's canned census carries `Document` = 0 nodes while `e3_out` was constructed
