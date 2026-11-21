@@ -545,12 +545,16 @@ SWEEP_NAMES = 66
 #: dead text that still read as the pin. ONE assignment, at the end of the records, cannot be
 #: shadowed by a second re-cut.
 #: ── #13998's own cut, on the tree that carries ALL of the records above ───────────────────
-#: This PR adds SEVEN rows of its own on top of the above — SIX `cp.query` plus ONE `row.update`,
+#: This PR adds EIGHT rows of its own on top of the above — SEVEN `cp.query` plus ONE `row.update`,
 #: which is why it cannot be summarised as "seven `cp.query` rows":
 #:
 #:   * `cp.query` — `capacity_notice.read_account`'s orgs read and its drift-soft retry (2),
 #:     `supabase_control.org_storage_notice_pct` and `set_org_storage_notice_pct` (2), and
-#:     `tests/test_13998_capacity_notice.py`'s save/restore pair on the `_ColumnBlindCP` fake (2);
+#:     `tests/test_13998_capacity_notice.py` — the save/restore pair on the `_ColumnBlindCP` fake
+#:     (2) AND the seam test's own `cp.query("organizations", …)` call (1) = 3, which an earlier cut
+#:     of this record counted as 2. ⛔ The count is not the argument: the THIRD site is the reason
+#:     this record now enumerates it, because the row diff against `origin/main`'s tree shows
+#:     `cp.query` 263 → **270**, seven and not six;
 #:   * `row.update` — `tests/test_13998_capacity_notice.py`'s `_org_row` helper (1).
 #:
 #: None is an SDK accessor (`cp` is the PostgREST client or a fake for it; `row` is a plain DICT),
@@ -584,7 +588,8 @@ SWEEP_NAMES = 66
 #: verified is now on the tree" — is NOT triggered; only a count on an already-pinned shape moved.
 #: The SDK population did not move either (`typed references still pointing at a public name: 0`),
 #: so no typed call site is legitimised by this re-cut. `#13998`'s own +7 above survives intact:
-#: `cp.query` **270** and `row.update` **60** carry the seven rows that record enumerates.
+#: `cp.query` **270** (263 on `origin/main`'s own tree + this PR's seven) and `row.update` **60**
+#: carry the eight rows that record enumerates.
 #:
 #: ⛔ REVERTED BY THE #14038 MERGE: an earlier cut of this file RECORDED a rename of the two
 #: duck-typed onboarding seed surfaces (`_OrgSeedSurface` in `hosted_api.py`, `_SdkSeedSurface` in
@@ -1272,17 +1277,21 @@ SWEEP_NAMES = 66
 #: re-pins NOTHING, deliberately: the pin is not "refreshed" to show that a merge happened, and no
 #: numeral above is re-cut to match a tree that did not move it.
 #:
-#: ⛔ FOLDED `origin/main` `10e51693f1` (the PR's own conflicted head, re-resolved on `main`'s tip) —
-#: an EIGHTH tree, so the pair is `--repin`'s output on THIS tree and neither side's figure is
-#: carried: the conflicting 11866 above marked the PRE-FOLD branch tree, and `main`'s 11858 marked
-#: `main`'s OWN tree, which is not this one either. `--repin` on the resolved tree prints
-#: **(11870, '6da40999bb5162fa')**, and `--check` exits 0 with
+#: ⛔ FOLDED `origin/main` `10e51693f1` INTO THIS PR — an EIGHTH tree, so the pair is `--repin`'s
+#: output on THIS tree and neither side's figure is carried: the conflicting 11866 above marked the
+#: PRE-FOLD branch tree and `main`'s 11858 marked `main`'s OWN tree, which is not this one either.
+#: `--repin` on the resolved tree prints **(11870, '6da40999bb5162fa')**, and `--check` exits 0 with
 #: `typed references still pointing at a public name: 0`.
-#: The +4 over the 11866 line is the FOLD's, not this branch's: it arrives with `main`'s `#14212`/
-#: `#14215`/`#14216` test churn, whose new fakes call `super().query` on a parent no typing can
-#: decide — the same ordinary-word-receiver shape the blocks above attribute per file — and this
-#: branch's own contribution is unchanged, because every line it adds to those paths is `#:`
-#: prose or a docstring figure and `edits_for` walks the AST.
+#: ⛔ ATTRIBUTED BY THE TOOL'S OWN ROW DIFF, not by arithmetic: `--report --base 28ca66878d7c
+#: --top 5000` was run on this tree AND on a clean checkout of `origin/main` `10e51693f1`, and the
+#: two sorted row sets differ in EXACTLY THREE shapes, +9 rows — `cp.query` 263 → 270 (+7),
+#: `row.update` 59 → 60 (+1) and one NEW `self.plane.query` (+1, this branch's capacity-notice seam
+#: and its fake, which is why it cannot be read as a `cp.query` row). No shape was absorbed in the
+#: other direction, so nothing left by the fold went uncounted.
+#: ⛔ AND THE +12 OVER `main`'s PIN IS NOT ALL THIS TREE'S: `main`'s OWN tree at `10e51693f1`
+#: measures **11861** against the **11858** it pins (`--check` exits 1 THERE, on `main`, for that
+#: reason and not for anything this PR does), so 11858 + 9 (this branch, measured) + 3 (`main`'s own
+#: stale pin) = 11870. Neither side's numeral was carried into this line; it is `--repin`'s print.
 SWEEP_RESIDUE = (11870, "6da40999bb5162fa")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
