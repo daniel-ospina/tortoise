@@ -49531,18 +49531,25 @@ class TortoiseSDK:
             return None
         from .embeddings import EmbeddingModel
         from .exceptions import EmbedderUnavailableError
-        try:
-            model = EmbeddingModel.get()
-        except EmbedderUnavailableError:
-            raise  # #5275: REQUIRED — fail loud, never a silent fallback
-        except Exception:  # noqa: BLE001, RUF100
-            model = None
-        # ⛔ #14186: with a worker or external backing there is no local encoder
-        # to acquire, so `model is None` is not a stand-down — the seam carries
-        # its own. Only the in-process backing reads this as "no dense leg".
-        if model is None and \
-                _embed_seam.resolve_backing() == _embed_seam.BACKING_INPROCESS:
-            return None
+        # ⛔ #14186 review F5: with a worker or external backing there is no
+        # LOCAL encoder to acquire, so ``get()`` must not decide this pass at
+        # all. An ARMED ``get()`` with no local model RAISES (#5275), which made
+        # an armed process with a remote backing refuse a read the remote encoder
+        # can serve — #5275 inverted, because the refusal guards an absence that
+        # does not apply to this deployment. The flag's contract is honoured where
+        # the local model is actually the encoder; on the remote path the seam's
+        # own decline ladder carries it.
+        if _embed_seam.resolve_backing() == _embed_seam.BACKING_INPROCESS:
+            try:
+                model = EmbeddingModel.get()
+            except EmbedderUnavailableError:
+                raise  # #5275: REQUIRED — fail loud, never a silent fallback
+            except Exception:  # noqa: BLE001, RUF100
+                model = None
+            # Only the in-process backing reads ``model is None`` as "no dense
+            # leg": the seam carries its own encoder on the other backings.
+            if model is None:
+                return None
         try:
             # THE bounded extra embed: one composed string, one vector. Routed
             # through the seam's coalescer so it can ride the SAME batch as the

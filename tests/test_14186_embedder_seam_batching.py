@@ -64,8 +64,12 @@ class _RecordingBacking:
         self.dim = dim
         self.delay_s = delay_s
         self._lock = threading.Lock()
+        #: Set once an encode is IN PROGRESS — the only state in which a later
+        #: arrival can queue behind it, which is the state review F1 is about.
+        self.entered = threading.Event()
 
     def encode(self, texts, *, timeout_s=None):
+        self.entered.set()
         if self.delay_s:
             time.sleep(self.delay_s)
         with self._lock:
@@ -379,6 +383,59 @@ class TestTheCollectionWindowIsHard:
             embed_seam.install_backing(None)
         assert elapsed_s < 2.0, (
             f"the safety valve did not fire: the ticket parked for {elapsed_s:.2f}s")
+
+    def test_a_sustained_load_keeps_coalescing_behind_a_busy_collector(
+            self, backing, monkeypatch):
+        """The window still coalesces when the collector was BUSY (review F1).
+
+        ⛔ THE STATE THAT MATTERS IS A TICKET QUEUED BEHIND AN ENCODE, and every
+        other coalescing row (and the first cut of this one) never reaches it:
+        a burst fired on a barrier at an IDLE collector agrees with both anchors,
+        and joining each round before starting the next keeps the collector idle
+        too. So the later rounds here are submitted WHILE round 0 is inside the
+        encoder (`entered`), which is ordinary sustained traffic.
+
+        The shipped anchor was the ticket's SUBMISSION, which by then is up to a
+        whole encode in the past, so ``remaining`` was already <= 0 and every
+        queued ticket fired as a one-ticket batch — 29 encodes for 32 tickets,
+        the exact opposite of this module's headline claim, on precisely the two
+        backings whose window is non-zero. Anchored at the dequeue, the 28 queued
+        tickets drain into one batch.
+        """
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_INPROCESS)
+        monkeypatch.setenv(embed_seam.ENV_MAX_WAIT_MS, "20")
+        recorder = backing(delay_s=0.15)
+
+        rounds = 8
+        per_round = 4
+        results: list = []
+        errors: list = []
+
+        def _round(round_index: int) -> list[threading.Thread]:
+            return _pump(
+                per_round, threading.Barrier(per_round), results, errors,
+                text_prefix=f"r{round_index}q")
+
+        threads = _round(0)
+        assert recorder.entered.wait(10), (
+            "the collector never started the first encode, so no later ticket "
+            "could queue behind it")
+        # ⛔ Submitted WHILE round 0 is encoding — not after it returns.
+        for round_index in range(1, rounds):
+            threads.extend(_round(round_index))
+        _join(threads)
+
+        assert not errors, f"an encode_query raised: {errors}"
+        assert len(results) == rounds * per_round, "a caller got no answer"
+        # One encode per queued DRAIN is the target; the allowance covers a ticket
+        # descheduled past the window. The broken anchor produces ~29 of 32.
+        assert len(recorder.batches) <= 6, (
+            f"{rounds * per_round} queries, {rounds} of them concurrent per "
+            f"round, produced {len(recorder.batches)} encodes — the window is "
+            "not coalescing behind a busy collector")
+        assert sorted(t for b in recorder.batches for t in b) == sorted(
+            f"r{r}q{i}" for r in range(rounds) for i in range(per_round)), (
+            "a query was encoded twice or dropped")
 
     def test_max_batch_fires_the_batch_early(self, backing, monkeypatch):
         """Reaching ``max_batch`` must fire at once, not wait out the window."""
@@ -1249,31 +1306,104 @@ class _FakeProc:
 class TestTheCallersRouteThroughTheSeam:
     def test_compute_embeddings_uses_the_seam_and_keeps_its_contract(
             self, monkeypatch):
-        """The store funnel still returns one row per text, through the seam.
+        """The store funnel still returns one row per text, THROUGH the seam.
 
         ``compute_embeddings`` is a widely-REPLACED seam (the longmem eval
         doubles swap the function itself), so its own signature and return shape
         are pinned by other rows; this one pins that the ENCODE inside it is the
         seam's, which is what makes ``TORTOISE_EMBED_BACKING`` reach the write
         path at all.
+
+        ⛔ THE ROUTING IS ASSERTED, NOT INFERRED FROM THE VECTORS (review F9).
+        This row used to double ``EmbeddingModel.get`` and check the rows came
+        back — but the PRE-fix function does exactly ``get()`` →
+        ``ensure_embed_threads()`` → ``model.encode(...)`` →
+        ``[vec.tolist() ...]`` and returns the same values, so both assertions
+        passed verbatim on the code this change replaces. A backing injected
+        through ``install_backing`` is only ever called BY the seam, so its call
+        log is the routing evidence — and the local model is forced absent, so a
+        funnel that still reached for it would have to fail rather than answer.
         """
         from tortoise import embeddings
 
-        seen: list[list[str]] = []
+        class _RecordingModel:
+            name = "recording"
 
-        class _Model:
-            def encode(self, texts):
-                seen.append(list(texts))
-                return np.array([[float(len(t)), 1.0] for t in texts],
-                                dtype=np.float32)
+            def __init__(self) -> None:
+                self.calls: list[list[str]] = []
 
+            def encode(self, texts, *, timeout_s=None):
+                self.calls.append(list(texts))
+                return [[float(len(t)), 1.0] for t in texts]
+
+            def close(self) -> None:
+                return None
+
+            def describe(self) -> dict:
+                return {"backing": self.name}
+
+        recorder = _RecordingModel()
+        embed_seam.install_backing(recorder)
+        # A REMOTE backing is where the routing matters (the in-process path is
+        # deliberately unchanged): it is also the only way past
+        # ``compute_embeddings``' local-model pre-check, so a funnel that still
+        # asked the local model would answer ``[None, None]`` here instead of
+        # quietly encoding.
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_EXTERNAL)
         monkeypatch.setattr(embeddings.EmbeddingModel, "get", classmethod(
-            lambda cls, load_timeout=None: _Model()))
-        monkeypatch.setattr(embeddings, "ensure_embed_threads", lambda: None)
+            lambda cls, load_timeout=None: None))
+        try:
+            rows = embeddings.compute_embeddings(["ab", "cdef"])
+        finally:
+            embed_seam.install_backing(None)
 
-        rows = embeddings.compute_embeddings(["ab", "cdef"])
-        assert rows == [[2.0, 1.0], [4.0, 1.0]]
-        assert seen == [["ab", "cdef"]]
+        assert rows == [[2.0, 1.0], [4.0, 1.0]], rows
+        # ⛔ The routing evidence. A batch funnel calls ``encode_texts``, the
+        # DIRECT entry point (no coalescing — the batch is already whole), so the
+        # proof is the injected backing's own call log, not a collector counter.
+        assert recorder.calls == [["ab", "cdef"]], (
+            "the store funnel did not encode through the seam — its batch never "
+            f"reached an injected backing ({recorder.calls})")
+
+    def test_an_armed_process_refuses_on_the_write_path_when_the_seam_declines(
+            self, monkeypatch):
+        """#5275 binds on the WRITE path too (review F2).
+
+        ⛔ Before the seam, ``EmbeddingModel.get()`` was this path's only exit
+        and it RAISES in an armed process (via ``_unavailable``). A worker or
+        external backing never calls ``get()``, so an armed process whose worker
+        is dead stored NO vector and named NO refusal — the silent #2985 shape
+        this PR closes on the read path, left open here.
+        """
+        from tortoise import embeddings
+        from tortoise.exceptions import EmbedderUnavailableError
+
+        monkeypatch.setenv("TORTOISE_EMBEDDING_MODEL_REQUIRED", "1")
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_EXTERNAL)
+        embed_seam.install_backing(_ExplodingBacking())
+        try:
+            with pytest.raises(EmbedderUnavailableError):
+                embeddings.compute_embeddings(["a", "b"])
+        finally:
+            embed_seam.install_backing(None)
+
+    def test_an_unarmed_process_still_degrades_the_write_path_silently(
+            self, monkeypatch):
+        """The same dead backing is a SILENT ``[None] * n`` unless the flag is armed.
+
+        This is the control for the row above: it is what stops that row from
+        passing on a tree that raises unconditionally, which would turn every
+        embedder blip into a write failure.
+        """
+        from tortoise import embeddings
+
+        monkeypatch.delenv("TORTOISE_EMBEDDING_MODEL_REQUIRED", raising=False)
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_EXTERNAL)
+        embed_seam.install_backing(_ExplodingBacking())
+        try:
+            assert embeddings.compute_embeddings(["a", "b"]) == [None, None]
+        finally:
+            embed_seam.install_backing(None)
 
     def test_compute_embeddings_does_not_require_a_local_model_when_remote(
             self, monkeypatch, http_endpoint):

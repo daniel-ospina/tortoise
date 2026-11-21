@@ -2118,13 +2118,30 @@ def compute_embeddings(
         # or external backing answers from its own encoder and ``model`` is
         # never consulted.
         vecs = embed_seam.encode_texts(truncated)
-    except Exception:
+    except Exception as exc:
         # An encode that RAISED produced no model work, so it is counted as
         # ``skipped`` rather than silently counted as neither — otherwise the
         # figure (0 calls, 0 skipped) is indistinguishable from "no encode was
         # ever attempted", which is exactly the ambiguity ``skipped`` exists to
         # remove (#4488 failure-mode table).
         _note_embed_skip(len(texts))
+        # ⛔ #5275 STILL BINDS ON THE WRITE PATH (#14186 review F2). Before the
+        # seam, ``EmbeddingModel.get()`` was this path's only exit and it returns
+        # through ``_unavailable``, which RAISES in an armed process. A worker or
+        # external backing never calls ``get()`` at all, so an armed process whose
+        # worker or endpoint is dead fell through to a silent ``[None] * n``: no
+        # vectors stored and NO refusal named — the #2985 shape this PR closes on
+        # the READ path, left open here. Name it in the same terms.
+        # The in-process backing is deliberately unchanged: its absence exit
+        # already reaches ``_unavailable`` through ``get()`` above, so routing a
+        # plain encode failure through it would move behaviour no finding covers.
+        if embed_seam.resolve_backing() != embed_seam.BACKING_INPROCESS:
+            EmbeddingModel._unavailable(
+                context=(
+                    f"write: the embed seam declined on the "
+                    f"{embed_seam.resolve_backing()} backing "
+                    f"({type(exc).__name__}: {exc})")[:400],
+                kind=EmbeddingModel.absent_reason())
         return [None] * len(texts)
     # ⛔ The measurement call sits OUTSIDE every value-guarding ``try``: a
     # measurement fault must never discard a batch of successfully computed

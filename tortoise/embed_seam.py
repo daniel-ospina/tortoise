@@ -24,12 +24,21 @@ THREE PROPERTIES THIS MODULE GUARANTEES, and the constraint each one serves.
 
 2. **Micro-batching with a HARD maximum wait.** Concurrent query embeds are
    coalesced into one encode, and the collection window is bounded from the
-   FIRST arrival — it is never extended by a later arrival. That is the
-   whole point: *"batching improves efficiency but can worsen tail latency"*,
+   moment the batch's first ticket is DEQUEUED — it is never extended by a
+   later arrival. That is the whole point: *"batching improves efficiency but can worsen tail latency"*,
    and the bound is what stops a busy collector from turning a 40 ms wait into
    an unbounded one. A batch also fires early when it reaches
    :data:`DEFAULT_MAX_BATCH`. Both bounds are observable
    (:func:`seam_status`) and neither is a suggestion.
+
+   ⛔ DEQUEUE, NOT SUBMISSION. Anchoring at the ticket's submission timestamp
+   looks equivalent and is not: a ticket that waited in the queue while the
+   PREVIOUS batch was encoding carries a submission time up to one encode in
+   the past, so its deadline is already expired and the batch fires with ONE
+   ticket — every time, under exactly the sustained load batching exists for.
+   That made the window do nothing on the two backings whose window is non-zero
+   (`worker`/`external`), while the 0 ms default coalesced correctly and hid it
+   (#14186 review F1).
 
 3. **p50/p95 per backing, exported.** An operator who moved the backing has no
    way to tell whether it helped without a distribution, and a mean over a
@@ -530,6 +539,11 @@ class WorkerBacking:
                     # failure mode that matters most: a worker that will not
                     # start. Name the command instead, so an operator can run
                     # the exact thing that failed.
+                    # ⛔ REAP before raising: an exited child that is never waited
+                    # for stays a zombie until this process exits, and a start-up
+                    # that fails repeatedly would accumulate one per attempt.
+                    with _swallow_base_exception():
+                        proc.wait(timeout=5)
                     raise RuntimeError(
                         f"embed worker exited during start-up (code "
                         f"{proc.returncode}) — reproduce with: "
@@ -543,7 +557,12 @@ class WorkerBacking:
                         proc.pid, address)
                     return address
                 time.sleep(0.02)
+            # ⛔ Kill AND reap: ``kill()` alone leaves the SIGKILLed child a
+            # zombie, so a bounded start-up that repeats leaks one process per
+            # attempt.
             proc.kill()
+            with _swallow_base_exception():
+                proc.wait(timeout=5)
             raise TimeoutError(
                 f"embed worker did not create {address} within {timeout_s}s")
 
@@ -571,12 +590,24 @@ class WorkerBacking:
         with self._lock:
             proc, address = self._proc, self._address
             self._proc = self._address = None
-            if proc is not None and proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+            if proc is not None:
+                # ⛔ CLOSE STDIN FIRST: the child's stdin watcher is the mechanism
+                # that makes it die with this process, so a graceful close should
+                # exercise the same path an OOM-kill does, instead of leaving the
+                # pipe open until the child is terminated out from under it.
+                if proc.stdin is not None:
+                    with _swallow_base_exception():
+                        proc.stdin.close()
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        # ⛔ KILL THEN REAP — a SIGKILL that is not waited for
+                        # leaves a zombie for the life of the process.
+                        proc.kill()
+                        with _swallow_base_exception():
+                            proc.wait(timeout=5)
             if address:
                 with _swallow_oserror():
                     os.unlink(address)
@@ -929,10 +960,17 @@ class _Collector:
         window_s = resolve_max_wait_ms() / 1000.0
         limit = resolve_max_batch()
         if window_s > 0.0:
-            # The deadline is anchored to the batch's FIRST ticket, not to the
-            # last arrival — that is the hard bound. `time.monotonic` is the
-            # clock the budgets in this tree already use (#10893's rule).
-            deadline = batch[0].submitted_at + window_s
+            # ⛔ ANCHOR AT THE DEQUEUE (recorded just above), NOT at the ticket's
+            # submission. `batch[0].submitted_at` is up to one whole encode in
+            # the past whenever this collector was busy, so anchoring there made
+            # `remaining` already <= 0 on the first iteration and fired a
+            # ONE-ticket batch — every batch, under exactly the sustained load
+            # batching exists for. `max()` makes the intent explicit: the window
+            # can never open earlier than the moment we took the batch.
+            opened_at = self._window_opened_at
+            if opened_at is None:  # pragma: no cover — defensive, always set above
+                opened_at = time.monotonic()
+            deadline = max(batch[0].submitted_at, opened_at) + window_s
             while len(batch) < limit:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0.0:
