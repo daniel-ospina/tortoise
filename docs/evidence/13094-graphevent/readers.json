@@ -57,7 +57,7 @@
       ],
       "needs": "DDL: a uniqueness constraint on event_id",
       "class": "maintenance",
-      "why": "the belt behind the dedupe pre-check (the app-side probe is the suspenders). \u26a0\ufe0f Issued through `g.query()` inside a `try/except` that only logs, so on a server without the verb it is REFUSED and production runs without it."
+      "why": "the belt behind the dedupe pre-check (the app-side probe is the suspenders). \u26a0\ufe0f Issued through `g.query()` inside a `try/except` that only logs, so it does not raise the reader \u2014 and on the server this was measured against it was REFUSED while the `event_id` exact-match index was present and installed: `ResponseError: missing supporting exact-match index` (`measurement-payload88.json`). FalkorDB builds the index asynchronously, so a constraint issued immediately after its index can fail for that reason; that `installed` flag in the measurement records \"the command did not raise\", NOT \"the index is usable\". Production runs on the app-side probe either way."
     },
     {
       "file": "tortoise/event_store.py",

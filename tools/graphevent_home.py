@@ -209,8 +209,16 @@ READERS: tuple[dict[str, Any], ...] = (
         "class": "maintenance",
         "why": "the belt behind the dedupe pre-check (the app-side probe is the "
                "suspenders). ⚠️ Issued through `g.query()` inside a `try/except` "
-               "that only logs, so on a server without the verb it is REFUSED and "
-               "production runs without it.",
+               "that only logs, so it does not raise the reader — and on the "
+               "server this was measured against it was REFUSED while the "
+               "`event_id` exact-match index was present and installed: "
+               "`ResponseError: missing supporting exact-match index` "
+               "(`measurement-payload88.json`). FalkorDB builds the index "
+               "asynchronously, so a constraint issued immediately after its "
+               "index can fail for that reason; that `installed` flag in the "
+               "measurement records \"the command did not raise\", NOT \"the "
+               "index is usable\". Production runs on the app-side probe "
+               "either way.",
     },
     {
         "file": "tortoise/event_store.py",
@@ -699,10 +707,24 @@ def superset(graph_rows: list[dict[str, Any]],
 
 #: Cypher shapes that only a graph engine can answer. A row carrying one of
 #: these is NOT a `record_only` candidate, whichever class it was filed under.
+#:
+#: ⛔ The ADJACENCY arm is the one that matters most and is the easiest to miss.
+#: `#13083` §2 / `CAPABILITY-PLACEMENT-AUDIT.md` define "adjacency" and the EP walk
+#: by **fixed-length** patterns — `(new:Point {id:$n})-[r]->(t)`, `NOT (n)--()`,
+#: `MATCH (a)-[r:IMPL|NAND]-(b)` — so a variable-length-only detector (`-[*`) sees
+#: neither, and a one-hop reader filed as `maintenance` would pass. Measured at
+#: #14164 review round 2: six capability-bearing shapes returned `None` under a
+#: `-[*`-only arm, including the audit's own EP walk verbatim.
 GRAPH_CAPABILITY_CYPHER = (
     "-[*",                # a variable-length traversal
+    "*]",                 # a TYPED variable-length pattern, `-[r:NEXT*]->`
     "*1..", "*..",        # a bounded / open hop count
+    "-[",                  # a fixed-length relationship pattern (adjacency)
+    "]->", "<-", "--",    # a directed / undirected hop, including `(n)--()`
+    "exists {",           # a pattern-existence predicate over an edge
+    "size((",             # an adjacency aggregate
     "shortestpath",       # path search
+    "call algo", "apoc.",  # a graph algorithm / path procedure
     "call db.idx.fulltext", "db.idx.fulltext",
     "call db.idx.vector", "db.idx.vector",
 )
@@ -744,17 +766,29 @@ def readers_report() -> dict[str, Any]:
     # Every row, at every class — not only the `serving` ones. A capability
     # reader misfiled as `maintenance` is exactly the case this must surface,
     # and a filter on `class` cannot see it by construction.
+    capability_readers = [
+        {"file": r["file"], "line": r["line"], "reader": r["reader"],
+         "capability": capability}
+        for r in READERS if (capability := graph_capability(r))
+    ]
     return {
         "readers": list(READERS),
         "counts": dict(counts),
-        "graph_capability_readers": [
-            {"file": r["file"], "line": r["line"], "reader": r["reader"],
-             "capability": capability}
-            for r in READERS if (capability := graph_capability(r))
-        ],
-        "verdict": ("no reader needs a graph capability — every reader is a "
-                    "key lookup, an ordered range scan, an aggregate, a predicate "
-                    "delete, or the schema those three depend on"),
+        "graph_capability_readers": capability_readers,
+        # ⛔ DERIVED, never a literal. A fixed sentence here would print a
+        # reassuring "no reader needs a graph capability" in the same JSON as a
+        # non-empty `graph_capability_readers` — and the evidence doc sources its
+        # table from this verb, so the artifact would contradict itself.
+        "verdict": (
+            "no reader needs a graph capability — every reader is a "
+            "key lookup, an ordered range scan, an aggregate, a predicate "
+            "delete, or the schema those three depend on"
+            if not capability_readers else
+            f"{len(capability_readers)} reader(s) NEED a graph capability, so "
+            "the shape is NOT a record_only candidate — re-open #13094's "
+            "verdict: " + ", ".join(
+                f"{r['reader']} ({r['capability']})" for r in capability_readers)
+        ),
     }
 
 
