@@ -909,3 +909,27 @@ def test_every_pin_refusal_carries_the_same_pins_shape_as_the_success_body(
     body = json.loads(capsys.readouterr().out)
     assert body["pins"]["applied"] is False
     assert "cannot be resolved" in body["pins"]["not_applied_reason"]
+
+
+def test_show_with_no_declaration_and_no_window_still_says_cap_checked_is_false(
+        wired, capsys, monkeypatch):
+    """F3 — the `cap_checked` OK-arm could be replaced by the constant `True` undetected.
+
+    ⛔ The positive row asserts `is True`, which a constant satisfies, and the `is False` row is
+    served by the separate hardcoded literal on the no-budget-with-keys path. The ONE state
+    where the OK arm's own expression yields `False` — no declaration AND no resolvable
+    window, so `show` falls through with `keys` empty — was reached by no test. Reporting
+    only (the verdict is `OK` over a declaration that claims nothing), but the whole point of
+    the field is that a monitor can trust it.
+    """
+    monkeypatch.delenv("TORTOISE_CACHE_MAX_NODES", raising=False)
+    monkeypatch.delenv("TORTOISE_PIN_MAX_NODES", raising=False)
+    assert PINS_META_KEY not in wired.meta, "sanity: nothing is declared"
+
+    assert resident.main(["show", *BASE]) == resident.EXIT_OK
+    out = json.loads(capsys.readouterr().out)
+    assert out["cap_checked"] is False, (
+        "the OK arm reported a cap check on a tree with no window and no declaration — the "
+        "`budget is not None` expression is not what this field is measuring"
+    )
+    assert "not checked" in out["reason"].lower()
