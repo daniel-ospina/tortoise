@@ -973,8 +973,22 @@ class _NoDuplicateKeyLoader(yaml.SafeLoader):  # type: ignore[misc]
     """
 
     def construct_mapping(self, node, deep=False):
+        # ⛔ SKIP THE MERGE TAG, DO NOT FLATTEN BEFORE THE SCAN (round-25 review, P3).
+        # `<<:` is not a constructor: handing this pre-scan the raw merge tag makes
+        # `construct_object` die with "could not determine a constructor for the tag
+        # 'tag:yaml.org,2002:merge'" — a diagnosis that names PyYAML instead of the
+        # problem, on a file with no duplicate at all, and merge keys are the natural
+        # way to de-duplicate 39 near-identical rows.
+        # ⛔ AND FLATTENING FIRST WOULD BE A FALSE BLOCK TOO, measured: `flatten_mapping`
+        # REPLACES `<<: *base` with the merged pairs, so the standard `<<: *base` plus an
+        # explicit OVERRIDE of one key reads as a duplicate and is refused. YAML says an
+        # explicit key beats a merged one, so the scan runs over the pairs the file
+        # actually WROTE (merge tags excluded) and the parent constructor then flattens
+        # for itself, which is what supplies the merged values.
         seen: set = set()
         for key_node, _value_node in node.value:
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                continue
             try:
                 key = self.construct_object(key_node, deep=deep)
                 hash(key)
