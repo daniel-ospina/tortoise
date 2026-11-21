@@ -246,6 +246,10 @@ SELECTED = [
     # `is the archived pricing document live`).
     ("is the onboarding flow retired?", "ended", "is_copula"),
     ("is the onboarding flow retired", "ended", "is_copula"),
+    # …and a subject word that carries DIGITS. The first subject class was `[a-z]…`,
+    # so `v3` / `SOC2` / `2024` were unrepresentable and this question was both
+    # unrouted and unreported (the module's own example of a version-qualified name).
+    ("is the v3 export deprecated?", "ended", "is_copula"),
     ("is our onboarding flow already retired", "ended", "is_copula"),
     ("has the partner call been cancelled", "ended", "is_copula"),
     # An IMPERATIVE over a FREE RELATIVE CLAUSE — a request for a SET. ⛔ The
@@ -315,6 +319,16 @@ NOT_SELECTED = [
     "which archived report has the Q3 numbers",
     "what is the archived pricing document",
     "what did we learn from the cancelled launch",
+    # ── the ACTIVE-VOICE class on the perfect branch (#14033 round-7 review, P1)
+    # `already` / `ever` in place of `been` is an ACTIVE third-party action, not a
+    # state of the record: each of these routed to the whole ended population,
+    # measured on the read (the ended row served, the live row not). The `existence`
+    # shape had the same hole one quantifier away — pinned too, because it is the
+    # same active-versus-passive discriminator.
+    "has the partner already cancelled",
+    "has legal already retracted",
+    "has the customer ever cancelled",
+    "have any customers ever cancelled",
     # ── the YES/NO CO-PREDICATE class (#14033 round-6 review, P0) ──────────
     # The `is_copula` shape's first cut reused `existence`'s free 60-character
     # window for its SUBJECT, so an ending participle belonging to a SUBORDINATE
@@ -334,6 +348,18 @@ NOT_SELECTED = [
     # a modifier clause INSIDE the subject keeps the relevance read (the module
     # docstring names this one as its example).
     "is the onboarding flow, as agreed in March, retired",
+    # …a subject LONGER than the four-word bound: unrouted (the bound is where a
+    # clause can hide) and REPORTED — silence here was round-7's P1-B.
+    "is the onboarding flow for enterprise partners retired",
+    # …a `which` head noun carrying a MODIFIER: the stated recall loss, now reported.
+    "which customer claims were archived",
+    # …and boundary-free adverbs outside the admitted recency list: reported, never
+    # silent (`_RECENCY_TAIL` admits four spellings; `_BLOCKED_TAIL` reports the
+    # rest).
+    "what ended previously",
+    "which claims were retracted earlier",
+    "list what we retired previously",
+    "is the onboarding flow retired anymore",
     # ── the COPULA-IN-A-SUBORDINATE-CLAUSE class (round-3 review, measured) ─
     # A passive in a clause the caller tacked on is not the question. Each of
     # these was answered with the whole ended population by the cut that accepted
@@ -489,6 +515,15 @@ NOTICE_ONLY = [
     # table is exactly this class, so the notice is the row's whole remedy
     "which archived report has the Q3 numbers",
     "which archived reports were retracted",
+    # a stated RECALL LOSS the shapes refuse, reported rather than silent: a modified
+    # `which` head noun, an over-long copula subject, and boundary-free adverbs the
+    # recency list does not route.
+    "which customer claims were archived",
+    "is the onboarding flow for enterprise partners retired",
+    "what ended previously",
+    "which claims were retracted earlier",
+    "list what we retired previously",
+    "is the onboarding flow retired anymore",
 ]
 
 
@@ -748,7 +783,8 @@ def test_every_signal_is_its_shape_without_the_end_anchor():
     # silently: `do_support` has no end anchor to swap (it routes with a trailing
     # constraint, a pre-existing deliberate trade), and `which_names_an_ending` is
     # the attributive row.
-    assert set(signals) - set(tail_anchored) == {"which_names_an_ending"}
+    assert set(signals) - set(tail_anchored) == {
+        "which_names_an_ending", "which_modified_noun", "is_copula_long_subject"}
 
     # The BEHAVIOUR the identity buys, driven through the detector: each shape's own
     # routed example, given a qualifier, declines and REPORTS — including the
@@ -1320,7 +1356,15 @@ def test_an_ending_question_on_a_family_with_no_lifecycle_keeps_the_text_read(
         f"the family refusal was not reported ({notice!r}) — the caller is told "
         f"nothing, which is #14033's silence in the one place a shape DID fire")
     assert notice["routed"] is False and notice["cue"]
-    assert "event" not in (notice.get("hint") or "").lower()
+    # ⛔ the family arm gets its OWN hint: a shape DID apply, so "no state-question
+    # shape applied to it" would be false, and its remedy ("ask it as a whole
+    # question") is the string the caller already asked. The assertions are on those
+    # two claims, not on whether the word "event" appears.
+    from tortoise.state_intent import MISSED_ROUTE_FAMILY_HINT, MISSED_ROUTE_HINT
+
+    assert notice["hint"] == MISSED_ROUTE_FAMILY_HINT != MISSED_ROUTE_HINT
+    assert "no state-question shape applied" not in notice["hint"].lower()
+    assert "lifecycle" in notice["hint"].lower()
 
     # POSITIVE CONTROL — the same question, on a family that HAS a lifecycle: the
     # population IS reached, and there is no notice to report.

@@ -154,6 +154,11 @@ _ENDING_BASE = (
 #: `this week` are NOT members on purpose — they name a window the read cannot
 #: apply, and admitting one would be the silently-dropped-constraint defect this
 #: table's history is mostly about.
+#: ⛔ THE RULE ADMITS MORE SPELLINGS THAN THE LIST DOES, and that is deliberate: this
+#: is the set of recency adverbs the shape ROUTES on, because a route serves the whole
+#: population and every admission is a decision. The boundary-free adverbs it does not
+#: route (`previously`, `earlier`, `before`) are REPORTED through `_BLOCKED_TAIL`
+#: instead — unrouted and reported, never unrouted and silent.
 _RECENCY_TAIL = r"(?:\s+(?:recently|lately|so far|to date))?"
 
 #: ENDING-question shapes. ⛔ EVERY SHAPE IS ANCHORED, and that is the lesson of
@@ -299,6 +304,17 @@ _RECENCY_TAIL = r"(?:\s+(?:recently|lately|so far|to date))?"
 #: sentence". The read path answers those queries with the relevance read it
 #: gave them and carries :func:`missed_route_payload` on its sink, so the caller
 #: can tell the two apart and ask again in a form that routes.
+#:
+#: ⛔ WHAT THE NOTICE COVERS, STATED SO IT IS NOT OVERREAD. It is the expression-level
+#: complement of the shapes — a cue whose shape matched but whose GUARD refused it
+#: (an appended qualifier from :data:`_BLOCKED_TAIL`) — plus three named rows for the
+#: recall the shapes give up on purpose: an attributive `which` phrase
+#: (``which_names_an_ending``), a MODIFIED `which` head noun
+#: (``which_modified_noun``) and an over-long copula subject
+#: (``is_copula_long_subject``). It is NOT "every question that mentions an ending":
+#: an over-long `has … been <participle>` subject and a qualifier outside the closed
+#: tail list are still silent, and widening the notice to cover them means widening
+#: this paragraph's claim first.
 
 _TAIL_END = r"\s*[?.!]*$"
 
@@ -306,28 +322,40 @@ _TAIL_END = r"\s*[?.!]*$"
 #: a FUNCTION WORD the caller appended (`by legal`, `in Q3`, `when challenged`).
 #: ⛔ This is what keeps the notice off an ATTRIBUTIVE use — `is the archived
 #: pricing document live` continues with a content noun, so it is not a refused
-#: constraint and gets no notice — while still reporting every refused qualifier,
-#: which is the whole point (#14033: the caller must be able to tell a state
-#: question that did not fire from a genuine empty answer).
+#: constraint and gets no notice — while reporting a qualifier drawn from the CLOSED
+#: list below, which is the whole point (#14033: the caller must be able to tell a
+#: state question that did not fire from a genuine empty answer).
+#: ⛔ IT IS A LIST, NOT A PREDICATE ("every word that is not a noun" needs a POS
+#: tagger), and the limit is stated rather than discovered: a qualifier outside it
+#: (`as yet`, `most recently`) stays silent. The members are the ones a customer
+#: actually appends to an ending question — prepositions that introduce a narrowing,
+#: conjunctions, determiners, and the boundary-free time adverbs.
 _BLOCKED_TAIL = (
     r"(?=\s*(?:[,;:—–]|[?.!]|$|\b(?:in|on|at|by|for|from|with|to|of|about|over|"
     r"against|regarding|concerning|toward|towards|and|or|but|so|yet|that|which|"
     r"when|where|who|if|as|than|because|while|after|before|during|since|until|"
     r"per|last|next|this|these|those|yesterday|today|tomorrow|recently|lately|"
-    r"already|ever|now|still)\b))"
+    r"already|ever|now|still|previously|earlier|afterwards|once|then|anymore|"
+    r"ago)\b))"
 )
 
 #: "has anything we relied on been withdrawn?" — auxiliary + existential
 #: quantifier as the question's subject, the relative clause between them as the
 #: thing asked about, and the participle as the predicate.
-#: ⛔ THE AUXILIARY FORM IS MANDATORY (`been|already|ever` immediately before the
-#: participle). That is the ATTRIBUTIVE discriminator (round-4 review, P1): an
-#: ending word that MODIFIES the noun after the quantifier is not a predicate, so
-#: `have any archived reports been published` and `do we have any archived
-#: reports` are content lookups and are refused.
+#: ⛔ THE AUXILIARY FORM IS MANDATORY (`been` immediately before the participle).
+#: That is the ATTRIBUTIVE discriminator (round-4 review, P1): an ending word that
+#: MODIFIES the noun after the quantifier is not a predicate, so `have any archived
+#: reports been published` and `do we have any archived reports` are content
+#: lookups and are refused.
+#: ⛔ AND IT IS `been`, NOT `been|already|ever` (round-7 review, P1). `already` and
+#: `ever` admit the ACTIVE reading — `have any customers ever cancelled` asks what
+#: customers DID, not which records ended — and both routed to the whole ended
+#: population. The leak PREDATES this change; it is the same active-versus-passive
+#: discriminator as the `is_copula` perfect branch, so it is closed here rather than
+#: left as a known hole in the table this change is repairing.
 _EXISTENCE_PREFIX = (
     rf"\b(?:has|have|had)\s+(?:any|anything|someone|something|everything|anyone)"
-    rf"\b[^?]{{0,60}}?\b(?:been|already|ever)\s+(?:{_ENDING_WORDS})\b"
+    rf"\b[^?]{{0,60}}?\bbeen\s+(?:{_ENDING_WORDS})\b"
 )
 
 #: "what ended" / "what has been withdrawn" / "what was retracted" — the WHOLE
@@ -354,7 +382,13 @@ _WH_PREFIX = (
 _WHICH_PREFIX = (
     rf"^which\s+(?:of\s+)?"
     rf"(?:(?:our|the|all|your|their|its|my|these|those)\s+)?"
-    rf"[a-z]+\s+"                      # the wh-phrase's HEAD noun
+    # the wh-phrase's HEAD noun. ⛔ IT MAY CARRY DIGITS, for the same measured reason
+    # the `is_copula` subject class had to: `[a-z]+` cannot spell `2024` or `v3`, so a
+    # head noun like that was unrepresentable. In practice such a word is a MODIFIER
+    # (`which 2024 reports were archived`, `which v3 features are deprecated`), which
+    # this shape still refuses — and `which_modified_noun` below reports — so the
+    # widening buys the one-word case and changes no measured string.
+    rf"[a-z0-9][a-z0-9'’._/-]*\s+"
     rf"(?:is|are|was|were|has|have|had)\s+"
     rf"(?:been\s+)?(?:{_ENDING_WORDS})\b"
 )
@@ -401,16 +435,29 @@ _WHICH_PREFIX = (
 #: participle is the question's own predicate again, which is the whole claim. The
 #: recall given up is stated rather than discovered: a subject with a modifier
 #: clause inside it (`is the onboarding flow, as agreed in March, retired`) keeps the
-#: relevance read, and so does a subject longer than four words.
+#: relevance read, and so does a subject longer than four words — the latter REPORTS
+#: itself through `_COPULA_LONG_SUBJECT` below rather than going silent.
+#: ⛔ A SUBJECT WORD MAY CARRY DIGITS (`v3`, `SOC2`, `2024`, `Q4`), and that is a
+#: measured fix rather than a detail: the first subject class was `[a-z]…`, which
+#: cannot spell `v3`, so `is the v3 export deprecated?` was BOTH unrouted and
+#: unreported. The input is already lower-cased, so the old class bought
+#: case-insensitivity and nothing else.
 _COPULA_SUBJECT = (
     r"(?:(?:the|our|my|its|their|these|those|this|that|all|your)\s+)?"
-    r"[a-z][a-z'’-]*(?:\s+[a-z][a-z'’-]*){0,3}"
+    r"[a-z0-9][a-z0-9'’._/-]*(?:\s+[a-z0-9][a-z0-9'’._/-]*){0,3}"
 )
+#: ⛔ THE PERFECT BRANCH REQUIRES `been`, AND THAT IS A HIJACK FIX (round-7 review,
+#: P1). `already`/`ever` in place of `been` reads as an ACTIVE third-party action —
+#: `has the partner already cancelled` asks what the partner did, not whether the
+#: record ended — and the earlier cut routed it (and `has legal already retracted`),
+#: serving the whole ended population with no notice. Only `is|are|was|were` can be
+#: followed by a bare participle, because there the passive/adjectival reading is
+#: forced.
 _COPULA_PREFIX = (
     rf"^(?:(?:is|are|was|were)\s+{_COPULA_SUBJECT}"
     rf"\s+(?:already\s+|ever\s+)?(?:{_ENDING_WORDS})\b"
     rf"|(?:has|have|had)\s+{_COPULA_SUBJECT}"
-    rf"\s+(?:been\s+|already\s+|ever\s+)(?:{_ENDING_WORDS})\b)"
+    rf"\s+been\s+(?:{_ENDING_WORDS})\b)"
 )
 
 #: "list what we retired" / "show me what we archived" — an IMPERATIVE over a FREE
@@ -467,6 +514,43 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
 #: qualifier") would have served them the whole ended population. Requiring the
 #: participle to be immediately followed by a noun keeps the attributive row and
 #: refuses the subordinate-clause class, which the shapes already report.
+#: A ``which`` question whose head noun is MODIFIED (`which customer claims were
+#: archived`) is the recall `_WHICH_PREFIX` gives up on purpose — one head noun, so a
+#: modifier cannot stand where a subordinate clause's verb would. It is still a state
+#: question, so it is REPORTED here rather than silent: two head words, then the
+#: wh-word's own auxiliary and predicate.
+#: ⛔ The two-word window is what keeps the SUBORDINATE-CLAUSE class out —
+#: `which vendor said our commitments were archived` has `said` where the auxiliary
+#: must be, so it matches neither this row nor the shape.
+_WHICH_MODIFIED_NOUN = re.compile(
+    rf"^which\s+(?:of\s+)?"
+    rf"(?:(?:our|the|all|your|their|its|my|these|those)\s+)?"
+    rf"[a-z0-9][a-z0-9'’._/-]*\s+[a-z0-9][a-z0-9'’._/-]*\s+"
+    rf"(?:is|are|was|were|has|have|had)\s+(?:been\s+)?(?:{_ENDING_WORDS})\b"
+)
+
+#: A copula question whose SUBJECT is longer than the shape's four-word bound
+#: (`is the onboarding flow for enterprise partners retired`). The shape refuses it —
+#: a longer subject is where a clause can hide — but the question is still about a
+#: state, so it is reported instead of silent.
+#: ⛔ THE NEGATIVE LOOKAHEAD IS THE DISCRIMINATOR, and it is the same rule the bound
+#: enforces structurally: if the subject carries a SUBORDINATOR (`because`, `that`,
+#: `given`, `since`, `when`, `if`, …) OR A SECOND FINITE VERB (`is`, `was`, `has`,
+#: `did`, `will`, …) then the ending participle is that clause's predicate, not the
+#: question's, so nothing is reported. The second-verb half is measured, not
+#: defensive: `is there any chance the release was cancelled` contains no
+#: subordinator and was reported without it.
+_COPULA_LONG_SUBJECT = re.compile(
+    rf"^(?:is|are|was|were)\s+"
+    rf"(?:(?:the|our|my|its|their|these|those|this|that|all|your)\s+)?"
+    rf"(?!(?:[a-z0-9'’._/-]+\s+){{0,12}}"
+    rf"(?:because|that|given|since|when|while|if|unless|after|before|now|and|or|"
+    rf"which|who|whom|whose|where|is|are|was|were|has|have|had|do|does|did|will|"
+    rf"would|can|could|may|might|must|should)\b)"
+    rf"(?:[a-z0-9][a-z0-9'’._/-]*\s+){{5,}}"
+    rf"(?:already\s+|ever\s+)?(?:{_ENDING_WORDS})\b{_BLOCKED_TAIL}"
+)
+
 _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
     *(
         (name, re.compile(shape.pattern.replace(_TAIL_END, _BLOCKED_TAIL)))
@@ -484,6 +568,8 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
         rf"^which\s+(?:of\s+)?"
         rf"(?:(?:our|the|all|your|their|its|my|these|those)\s+)?"
         rf"(?:{_ENDING_WORDS})(?=\s+[a-z])")),
+    ("which_modified_noun", _WHICH_MODIFIED_NOUN),
+    ("is_copula_long_subject", _COPULA_LONG_SUBJECT),
 )
 
 #: What a caller is told when a state cue was seen and no shape applied. ONE
@@ -554,6 +640,18 @@ directly must name that private method deliberately. The difference it makes
 there is that "the route declined my state question" stops looking like "the
 graph says nothing has ended".
 """
+
+#: ⛔ AND THE FAMILY ARM NEEDS ITS OWN SENTENCE (round-7 review, P2): there a shape
+#: DID apply, and the remedy is NOT "ask the whole question" — the caller already did,
+#: and it will be refused again for the same family. Telling them so is the difference
+#: between a notice and a runaround.
+MISSED_ROUTE_FAMILY_HINT = (
+    "this IS a state question, but the ended population has no arm for this "
+    "entity_type: that family has no lifecycle (an Event does not — design §8), so "
+    "the relevance read answered instead. Re-read it with a family that has one "
+    "(entity_type='point', 'object' or 'subject'); every row of the ended population "
+    "states how it ended (status, successorId/successorName, stage+outcome, endedAt)."
+)
 
 #: The reasons a strong cue can be seen without the population being served.
 #: CLOSED, because a caller branches on the value: ``shape`` is the guard refusing
@@ -749,13 +847,15 @@ def missed_route_payload(state_question: StateQuestion, *,
         "population": population,
         "reason": reason,
         "cue": cue,
-        "hint": MISSED_ROUTE_HINT,
+        "hint": (MISSED_ROUTE_FAMILY_HINT if reason == "family"
+                 else MISSED_ROUTE_HINT),
     }
 
 
 __all__ = [
     "COMMITMENTS",
     "ENDED",
+    "MISSED_ROUTE_FAMILY_HINT",
     "MISSED_ROUTE_HINT",
     "MISSED_ROUTE_REASONS",
     "POPULATIONS",
