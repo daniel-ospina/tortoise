@@ -514,7 +514,7 @@ def test_a_recycled_internal_id_cannot_delete_the_wrong_node(lane):
         "the engine did not recycle the id; this test cannot discriminate"
     )
 
-    removed, _survivors = _delete_nodes(graph, [stale], "id")
+    removed, _survivors, _invalidated = _delete_nodes(graph, [stale], "id")
 
     assert removed == 0, "a recycled id was deleted on identity alone"
     assert "NEW" in _ids(graph), (

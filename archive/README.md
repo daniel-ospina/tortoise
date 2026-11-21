@@ -258,14 +258,26 @@ restore path legitimately ends there; pass `--require-entries` when zero must be
 with the merge base's and reports a row that **left**, or one whose CLAIM was **rewritten** in
 place (`kind`, `symbol`, `file`, `archived_from`, `archived_at`, `sources`, `blocks` — appending a
 tombstone field is what an append-only record does, so it is not a rewrite). Passing `--base-ref`
-needs no special handling for a restore, because the two legitimate shapes are both green:
+needs no special handling for a restore, because all three legitimate shapes are green:
 
-- **a restore** — the row and its frozen file go (steps 3-4 below) and the SYMBOL is live again:
-  in `TOOL_REGISTRY`, on `TortoiseSDK`, or importable from `tortoise/`. The code is back in the
-  product, so nothing the archive promised is missing — and the row CANNOT stay, because the
-  other direction reds an archived symbol that is live again. The frozen bytes remain readable in
-  git history at the deletion commit (`git log -- archive/<kind>s/…`). This is why the arm is
-  safe in CI: the CI job runs it with `--base-ref` on every PR, and a restore is green there.
+- **a restore** — the row and its frozen file go (steps 3-4 below) and the SYMBOL is live again
+  **with the recorded body**: in `TOOL_REGISTRY`, on `TortoiseSDK`, or importable from `tortoise/`,
+  and re-extracting it yields the block the row recorded. A live NAME alone is not enough — a stub
+  dropped at the dotted path is not the code coming back. ⚠ A restore that also CHANGES the code
+  has no green state in the PR that lands it: the row cannot stay (the direction above reds a live
+  symbol) and the drop cannot be credited (the body is not the recorded one), so the route is to
+  restore the block VERBATIM here and change the code afterwards, when the row is gone from the
+  merge base. The code is back in the product, so nothing the archive
+  promised is missing — and the row CANNOT stay, because the other direction reds an archived
+  symbol that is live again. The frozen bytes remain readable in git history at the deletion
+  commit (`git log -- archive/<kind>s/…`). This is why the arm is safe in CI: the CI job runs it
+  with `--base-ref` on every PR, and a restore is green there.
+- **a verified re-anchor** — `archived_at` moves FORWARD (the new commit is a descendant of the
+  one it replaces) and onto the default branch, every block key and count is unchanged, every
+  other claim field is unchanged, `sources` still derives from the blocks, and the new commit
+  holds each recorded body byte-for-byte. That is the correction `verify-anchors` asks for when
+  the frozen body is refreshed from the commit that last held the code; it is not a way to edit
+  the record, and anything short of all of it stays the violation #12291 is about.
 - **a stated waiver** — `--allow-archive-shrink <kind>:<symbol>
   --allow-archive-shrink-reason <why>`, for a drop that is neither a restore nor a mistake, and
   it goes in the PR body. It needs `--base-ref` (the arm it waives) and it is a LOCAL-SHELL
