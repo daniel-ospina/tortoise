@@ -367,7 +367,24 @@ SWEEP_NAMES = 66
 #: (`typed references still pointing at a public name: 0` on this tree).
 #: 11831 − 6 = 11825, and that arithmetic is a CROSS-CHECK of the measurement, not the evidence for
 #: it: what was pasted into the pin is the pair `--repin` printed on THIS tree.
-SWEEP_RESIDUE = (11825, "539914480e400722")
+#: RE-CUT UP → (11833, "addee5ad564bd9bc") by the #14039 lane, on the tree that merges
+#: `origin/main` `ad79129cb5` into `feat/gates-shrink-one-pr-b`. ⛔ NOT this PR's rows, and the whole
+#: +8 is attributable to ONE commit: `ad79129cb5` (#14067), measured row-by-row by walking the
+#: residue `Counter` per FILE on the 11825 pin's own tree (`1956b3431f`) and on this one:
+#:
+#:   * `tests/test_cache_eviction_evictor_pins.py` — +1 `super().query` (a `Graph` double)
+#:   * `tests/test_evictor_invalidates_fallback_snapshot_13123.py` — +6 `graph.query`, +1
+#:     `client.delete`
+#:
+#: Every one is an ordinary-name receiver on a graph handle or a test double, not on a
+#: `TortoiseSDK`; `typed references still pointing at a public name: 0` on BOTH trees, so no typed
+#: call site is legitimised by this re-cut. Nothing in this PR's own diff adds a row (it touches no
+#: `tortoise/**` and none of these files). `main` is off-pin against it on its OWN tree — the pin is
+#: graded on PULL REQUESTS only and main's tip carries no `surface-guard` run — and because the
+#: REQUIRED `python-ci-gate` `needs:` includes `surface-guard`, a stale pin reds every PR that touches
+#: nothing in this population (#14062). Re-derive the pair with `--repin` on the merged tree; never by
+#: arithmetic on the last one.
+SWEEP_RESIDUE = (11833, "addee5ad564bd9bc")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
