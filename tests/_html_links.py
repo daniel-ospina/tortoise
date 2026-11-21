@@ -759,20 +759,38 @@ class _AnchorHrefParser(HTMLParser):
     #: later fails THAT test until it is declared here, instead of silently keeping
     #: entries from a tree a browser has thrown away.
     _RECORDINGS = (
-        "hrefs", "ids", "attrs", "headings", "containers", "mode_dependent",
-        "raw_text", "text",
+        "hrefs", "ids", "attrs", "headings", "heading_facts", "containers",
+        "mode_dependent", "raw_text", "text",
     )
     #: Diagnostic ratchets, NOT document recordings: they describe what the PARSE met
     #: (`foreign_tags` is the declared-limits watchdog), so an honored `<frameset>`
     #: does not clear them — they are evidence about the read, not about the tree.
     _DIAGNOSTICS = ("foreign_tags", "foreign_unmatched_endtags", "foreign_root_mismatch")
 
-    def __init__(self, *, container: tuple[str, str] | None = None) -> None:
+    #: The heading elements a browser closes with a HEADING START tag (HTML 13.2.6.4.7
+    #: "in body": *"If the current node is an HTML element whose tag name is one of
+    #: h1, h2, h3, h4, h5, or h6, then this is a parse error; act as if an end tag with
+    #: the tag name of the current node had been seen"*). Kept named because the
+    #: heading-subtree recording below asks exactly that question.
+    _HEADING_TAGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
+
+    def __init__(
+        self,
+        *,
+        container: tuple[str, str] | None = None,
+        heading_hiding_attributes: frozenset[str] = frozenset(),
+    ) -> None:
         """`container` = `(tag, class token)` to collect each one's anchors for.
 
         Off by default because the question is only asked by the docs page's
         section bound (`extract_anchors_within`, #14073 review); the blog and id
         guards ask questions an ancestry does not answer.
+
+        `heading_hiding_attributes` = the attribute names a caller considers
+        statically boundary-removing, recorded per heading subtree into
+        `heading_facts` (`extract_heading_boundary_facts` is the accessor). Empty by
+        default for the same reason: it is a POLICY set, so it belongs with the
+        guard that refuses the bound, not in this parser.
         """
         super().__init__(convert_charrefs=True)
         # `<noscript>` is raw text only with scripting ENABLED — the browser
@@ -825,6 +843,24 @@ class _AnchorHrefParser(HTMLParser):
         # the raw SOURCE at a heading; `extract_heading_positions` turns the line
         # and column into an offset.
         self.headings: list[tuple[str | None, int, int]] = []
+        # One `[has_visible_text, carries_a_hiding_attribute]` entry per entry in
+        # `headings` (same index, appended and mutated together), describing the
+        # heading's own SUBTREE rather than its start tag — the docs page's bound's
+        # input since #14229's review. A heading whose subtree paints no text, or
+        # which hides itself with `heading_hiding_attributes` on the `<h2>` or any
+        # DESCENDANT, is not a boundary a reader meets: the copy under it reads as
+        # part of the section above, so the slice must run LONG (the loud direction)
+        # rather than cut at a line no reader sees. `hiding_attributes` is a caller
+        # question (the policy lives with the guard), defaulting to empty so the
+        # recording is inert for every caller that does not ask it.
+        # `extract_heading_boundary_facts` is the accessor.
+        self.heading_facts: list[list[bool]] = []
+        # Index into `heading_facts` of the innermost OPEN rendered `<h2>`, or None.
+        # INTERNAL: the facts are accumulated here while the heading is open, so a
+        # text node or a descendant's attribute is attributed to the heading the
+        # browser actually has above it.
+        self._open_heading: int | None = None
+        self._heading_hiding_attributes = heading_hiding_attributes
         # The container whose anchors the caller asked for, and the two recordings
         # that answer it: `containers` holds one href list per MATCHING CONTAINER
         # the tree has, in document order, and `_open_containers` holds the ones
@@ -1063,6 +1099,17 @@ class _AnchorHrefParser(HTMLParser):
         if self._suppress or self.wedged_reason:
             return
         line = self.getpos()[0]
+        # ⛔ AND THE HEADING-SUBTREE RECORDING READS THE SAME ADMISSION, which is why it
+        # sits HERE rather than in a walk of the heading's source: an attribute on a
+        # DESCENDANT of an open `<h2>` is part of that heading's subtree, and an
+        # attribute inside an inert `<template>`/raw-text body is not (a browser
+        # applies none of it). `_open_heading` is None for content OUTSIDE a heading,
+        # so section copy never reaches this — the bound's own line-keyed version could
+        # not tell two headings apart on one source line (#14229 review).
+        if self._open_heading is not None and any(
+            name in self._heading_hiding_attributes for name, _value in attrs
+        ):
+            self.heading_facts[self._open_heading][1] = True
         for name, _value in attrs:
             self.attrs.append((tag, name, line))
 
@@ -1151,9 +1198,19 @@ class _AnchorHrefParser(HTMLParser):
         failure mode this docstring's first paragraph describes, reached without
         touching the TOC. What is declared and NOT modelled is CSS: a heading
         hidden by `style`, or by a stylesheet rule its `class` matches, is still
-        recorded and still bounds, because this parser reads markup and a cascade
-        is not markup. That residual is in the fail-open direction, and it is named
-        here instead of being left for the slide after next.
+        RECORDED here, because this parser reads markup and a cascade is not markup.
+        The two questions that follow from it are answered in different places, and
+        neither is left implied (#14229 review):
+
+        * the TEXT and ATTRIBUTE halves are recorded per heading into
+          `heading_facts` — a `style`/`hidden`/`aria-hidden` on the `<h2>` or any
+          descendant, or a subtree that paints no text (see
+          `extract_heading_boundary_facts`), so a consumer asked "may this heading
+          bound a reader-facing slice?" is told NO;
+        * the `class`-via-STYLESHEET case is not modelled ANYWHERE — it cannot be,
+          without a cascade — so such a heading still bounds, and that residual is in
+          the fail-open direction, named here rather than left for the slide after
+          next.
 
         The id is kept rather than the whole tag because the caller asking this
         question is "which heading does the section end at", which is a question
@@ -1166,6 +1223,18 @@ class _AnchorHrefParser(HTMLParser):
             return
         heading_id = next((value for name, value in attrs if name == "id"), None)
         self.headings.append((heading_id, *self.getpos()))
+        # The heading's subtree facts start here and are accumulated by
+        # `_record_attributes` (the `<h2>`'s OWN attributes, from `attrs` here, and
+        # every descendant's) and `handle_data` (its painted text), and stop being
+        # attributed at its end tag or at the heading start that closes it. See
+        # `heading_facts`.
+        self.heading_facts.append([
+            False,
+            any(
+                name in self._heading_hiding_attributes for name, _value in attrs
+            ),
+        ])
+        self._open_heading = len(self.heading_facts) - 1
 
     def _unmet_by_reader(self, attrs: list[tuple[str, str | None]]) -> bool:
         """True when no reader meets this start tag, so it must not bound or advertise.
@@ -2134,6 +2203,9 @@ class _AnchorHrefParser(HTMLParser):
             getattr(self, name).clear()
         self._open_containers.clear()
         self._open_elements.clear()
+        # The heading whose subtree was open is gone with the tree, and so is its
+        # index into `heading_facts`.
+        self._open_heading = None
         # A replaced document has a FRESH root, so the root's flag is reset with the
         # recordings. ⛔ THIS IS BELT-AND-BRACES, NOT AN OBSERVED CASE (#14073 review round
         # 24, P3, measured): the frameset arm in `_open` is gated on `not _body_seen`, and any
@@ -2305,6 +2377,11 @@ class _AnchorHrefParser(HTMLParser):
                 # was dropped, i.e. the boundary question answered a heading no reader meets.
                 self.text.clear()
                 self.headings.clear()
+                # The heading-subtree facts describe the same replaced tree: a `<h2>`
+                # read before the token cannot bound either, and its facts would
+                # otherwise outlive the heading they describe (#14229 review).
+                self.heading_facts.clear()
+                self._open_heading = None
             return
         opened_container = False
         if self._container is not None:
@@ -2531,6 +2608,26 @@ class _AnchorHrefParser(HTMLParser):
         # `_SELECT_POP_IGNORED`).
         if self._close_select_scope(tag):
             return
+        # ⛔ A HEADING START TAG CLOSES THE OPEN HEADING, AND THE SPEC'S RULE IS
+        # "THE CURRENT NODE IS A HEADING" — not "a heading is open somewhere". In
+        # `_record_heading`'s terms, the subtree facts of the heading above stop being
+        # this heading's: HTML 13.2.6.4.7 ("in body") acts as if an end tag for the
+        # current node had been seen when the CURRENT node is h1–h6. `<h2 id="a">A<h2
+        # id="b" aria-hidden="true">B` therefore gives `b` its own hidden fact instead
+        # of blaming `a`, while `<h2 id="a">A<span><h3>c` keeps `c`'s attributes and
+        # text inside `a`'s subtree, which is where the browser puts them (the `<h3>`
+        # is a CHILD of the open `<h2>`, not a sibling). Placed here, after the
+        # implied/select/table closes and BEFORE `_record_id`/`_record_attributes`, so
+        # the arriving heading's own attributes are attributed to itself.
+        if (
+            tag in self._HEADING_TAGS
+            and not self._suppress
+            and not self.wedged_reason
+            and not self._foreign
+            and self._open_elements
+            and self._open_elements[-1][0] in self._HEADING_TAGS
+        ):
+            self._open_heading = None
         # Before `_open`, because this tag's own id/attributes count even where
         # its CONTENT does not (see `_record_id`, `_record_attributes`).
         self._record_id(attrs)
@@ -2732,6 +2829,18 @@ class _AnchorHrefParser(HTMLParser):
             )
         ):
             self.text.append(data)
+            # ⛔ THE SAME ADMISSION, not a second visibility rule: a heading may bound
+            # only if a reader meets its OWN text, so `has_visible_text` is asked at
+            # the point that already decides what the wording golden reads. Measured
+            # shapes this closes that the start-tag check could not:
+            # `<h2 id="x"></h2>`, `<h2 id="x"><!-- c --></h2>` and
+            # `<h2 id="x"><span style="display:none">T</span></h2>` all bound the
+            # slice while a reader landing above met the copy under it as part of the
+            # section, with every pin green (#14229 review). `hidden` on a DESCENDANT
+            # needs no entry in the caller's attribute set either — its text is not
+            # admitted here, so the heading has no visible text either.
+            if self._open_heading is not None and data.strip():
+                self.heading_facts[self._open_heading][0] = True
 
     def _in_painted_label(self) -> bool:
         """Is this text repainted by a painted `<option>`/`<optgroup>` LABEL?
@@ -2973,6 +3082,13 @@ class _AnchorHrefParser(HTMLParser):
             # template-local and closes nothing here, so it must not clear it.
             if tag == "table" and self._table_open_unmatched > 0:
                 self._table_open_unmatched -= 1
+            # ⛔ `</h1>`–`</h6>` CLOSE AN OPEN HEADING WHATEVER THE SPELLING — the spec's
+            # heading end-tag rule pops "until a heading element has been popped", so
+            # `</h3>` closes an open `<h2>` (and `</h2>` closes an open `<h3>`). From
+            # here on, text and descendant attributes belong to something outside the
+            # heading, so the subtree facts stop accumulating (`heading_facts`).
+            if tag in self._HEADING_TAGS and not self._foreign:
+                self._open_heading = None
             self._close_extent(tag)
         if tag in ("br", "p") and self._foreign:
             # Spec 13.2.6.5: `</br>`/`</p>` in foreign content pop it and are
@@ -3168,6 +3284,57 @@ def extract_mode_dependent_regions(html: str) -> list[tuple[str, int]]:
     parser.feed(html)
     parser.close()
     return parser.mode_dependent
+
+
+def extract_heading_boundary_facts(
+    html: str, *, hiding_attributes: frozenset[str],
+) -> list[tuple[int, bool, bool]]:
+    """``(offset, has_visible_text, carries_a_hiding_attribute)`` per rendered `<h2>`.
+
+    The docs page's slice bound's input since #14229's second review, and the answer
+    to a question the START TAG cannot give: whether a reader landing above this
+    heading MEETS it as a boundary. Both fields describe the heading's own SUBTREE
+    (the `<h2>` and everything inside it), which is what a reader sees or does not:
+
+    * ``has_visible_text`` — False when the subtree paints no text at all. The empty
+      heading, the comment-only heading and the heading whose only content is a
+      `style="display:none"` or `hidden` descendant all render a 0-height line, so
+      the copy under them reads as part of the section above; refusing the bound is
+      the LOUD direction (the slice runs long and the copy is pinned).
+    * ``carries_a_hiding_attribute`` — True when the `<h2>` or any DESCENDANT in its
+      subtree carries a name from ``hiding_attributes``. The caller owns that set: it
+      is a policy question (a `style` can paint, via `::after`, or hide; a `class`
+      hides only through a stylesheet this parser cannot compute), so the mechanism
+      stays here and the choice stays with the guard.
+
+    Both are read at the rules the rest of this module already applies — attributes
+    through `_record_attributes`' suppression (an attribute in an inert `<template>`
+    or a raw-text body is not one a browser applies) and text through `handle_data`'s
+    painted-text admission (the same rule the wording golden reads). A heading's
+    subtree stops at its own `</h1>`–`</h6>` or at the heading start tag that closes
+    it, whichever comes first, so content AFTER a correct heading never counts
+    against it.
+
+    `offset` is where the parsed tag STARTS in ``html`` — the same coordinate
+    `extract_heading_positions` returns, so a caller can key the two together without
+    counting headings.
+    """
+    parser = _AnchorHrefParser(heading_hiding_attributes=hiding_attributes)
+    parser.feed(html)
+    parser.close()
+    line_starts = [0]
+    for index, char in enumerate(html):
+        if char == "\n":
+            line_starts.append(index + 1)
+    # `strict=True`: the heading recording and its subtree facts are appended together,
+    # so a length difference means one of them is written from a second place — a
+    # `ValueError` here is the honest answer, not a silently truncated zip.
+    return [
+        (line_starts[line - 1] + column, has_text, hides)
+        for (_heading_id, line, column), (has_text, hides) in zip(
+            parser.headings, parser.heading_facts, strict=True,
+        )
+    ]
 
 
 def extract_heading_positions(html: str) -> list[tuple[str | None, int]]:

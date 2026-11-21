@@ -58,6 +58,7 @@ from tests._html_links import (  # noqa: E402
     extract_element_attributes,
     extract_element_ids,
     extract_first_base_href,
+    extract_heading_boundary_facts,
     extract_heading_positions,
     extract_mode_dependent_regions,
     extract_raw_text_elements,
@@ -1186,85 +1187,75 @@ def test_docs_toc_anchors_all_resolve() -> None:
 #: meets the heading meets the copy under it as part of the section, and the boundary
 #: does not exist for them either. Both are decided by the MARKUP's own attribute, which
 #: is what a static guard can read.
+#: ⛔ AND THEY ARE READ ON THE WHOLE HEADING SUBTREE, not the heading's start tag
+#: (#14229 review, measured): `<h2 id="storage-limits"><span style="display:none">
+#: Limits</span></h2>` is advertised, invisible, and cut the slice while every pin
+#: stayed green — the attribute that removes the boundary was ONE LEVEL DOWN. A
+#: descendant `style` can also PAINT (a `::after` claim inside the heading), which is
+#: the same escape from the other side: refusing the bound brings it into the slice,
+#: where `_attributes_outside_allowlist` reds it loudly.
 #: ⛔ `hidden` IS NOT HERE, and its absence is measured rather than a relaxation:
 #: `_unmet_by_reader` already returns True for it, so `_record_heading` never records
 #: such a heading and it can never be a bound candidate at all —
 #: `extract_heading_positions('<h2 id="x" hidden>T</h2>') == []`. A member no document
 #: can reach decides nothing, and it told the next reader `hidden` needed this pin when
-#: the parser had already refused it a layer up (#14229 review).
-#: `class` is excluded for the measured reason stated at
-#: `_heading_lines_carrying_extra_attributes`.
+#: the parser had already refused it a layer up (#14229 review). On a DESCENDANT it
+#: needs no member either: its text is not admitted by the painted-text rule, so the
+#: heading reports no visible text and is refused by the other half of the same test.
+#: `class` is excluded for the measured reason stated at `_heading_may_bound_the_slice`.
 _STATIC_HIDING_ATTRIBUTES = frozenset({"style", "aria-hidden"})
 
 
-def _heading_lines_carrying_extra_attributes(html: str) -> set[int]:
-    """Lines on which an `<h2>` carries a STATICALLY BOUNDARY-REMOVING attribute.
-
-    The slice bound's second premise (#14073 review round 7). The bound was justified
-    by "a heading a reader can REACH through the TOC had to be added deliberately",
-    and that premise reads visibility as implied by the index. It is not: a TOC entry
-    plus `<h2 id="storage-limits" style="display:none">` is advertised AND invisible,
-    so it cut the slice while a reader landing at `#storage` saw the copy after the
-    cut as part of the section — measured, a `FalkorDB`/`allowance`/`tier`
-    "permanently deletes" paragraph painted 770x27 px inside the `#storage` band with
-    the golden, the vocabulary scan, the destination pin and the allowlist ALL green.
-
-    ⛔ `class` IS DELIBERATELY NOT IN THIS SET, and that is a measured limit rather
-    than an oversight. A `class` only hides through a STYLESHEET RULE, which this
-    parser cannot compute — so a heading carrying `class` must keep BOUNDING, or the
-    round-5 control that moves `class` in front of `id` on the next heading reds the
-    golden on an edit that never touched the storage copy (that is the false-red
-    direction, and `test_the_storage_slice_bound_catches_the_heading_it_exists_for`
-    pins it). `style` and `aria-hidden` are hiding decided by the MARKUP ITSELF, which
-    is exactly the part a static guard can read.
-
-    ⛔ `hidden` IS NOT A MEMBER, because it is UNREACHABLE here: `_unmet_by_reader`
-    refuses such a heading one layer up, so `_record_heading` never records it and it
-    can never be a bound candidate — measured,
-    `extract_heading_positions('<h2 id="x" hidden>T</h2>') == []`. The pre-existing
-    rows `("hidden heading", ...)` and `("heading itself hidden", ...)` pin THAT
-    refusal; keeping a duplicate member here claimed coverage nothing observed
-    (#14229 review).
-
-    The remaining residual — a `class` a stylesheet rule hides — is unchanged and is
-    declared on `_unmet_by_reader` in `tests/_html_links.py`. Read out of the parsed
-    tree (`extract_element_attributes`), never the source, so an attribute inside a
-    comment or an inert `<template>` is not counted.
-    """
-    return {
-        line
-        for tag, name, line in extract_element_attributes(html)
-        if tag == "h2" and name in _STATIC_HIDING_ATTRIBUTES
-    }
-
-
 def _heading_may_bound_the_slice(
-    html: str, offset: int, extra_attribute_lines: set[int],
+    offset: int, boundary_facts: dict[int, tuple[bool, bool]],
 ) -> bool:
-    """Whether the `<h2>` at `offset` is plain enough to end a reader-facing slice.
+    """Whether the `<h2>` at `offset` is one a reader MEETS as a slice boundary.
 
-    The heading's OWN source line is the whole test, and that is exact rather than a
-    narrowing of the ±1 neighbourhood this carried until #14229's review. The
-    neighbourhood was justified by "a legal start tag may wrap: `<h2\n  id="x"\n
-    style="display:none">` puts the offending attribute on a different line from the
-    `id`" — ⛔ WHICH THE PARSER FALSIFIES. `_record_attributes` stamps every attribute
-    of a tag with `self.getpos()[0]`, the position of the TAG's `<`, so
-    `extract_element_attributes('<h2\n  id="x"\n  style="display:none">')` returns
-    BOTH attributes on the tag's line, for any wrapping depth (measured). `line - 1`
-    and `line + 1` could therefore only ever match a DIFFERENT, ADJACENT heading —
-    which made an unrelated heading decide this one's right to bound: measured, with
+    ⛔ THE TEST IS THE HEADING'S OWN SUBTREE, AND IT IS KEYED BY THE HEADING — not
+    by a source LINE, which is what this carried until #14229's second review and
+    what made two headings on one line each other's evidence. Measured: with
+    `<h2 id="storage-limits">Limits</h2><h2 id="storage-draft" aria-hidden="true">
+    Draft</h2>` on ONE line, the line-keyed version refused the VISIBLE, advertised
+    heading (whose copy is byte-identical to the fixture), the slice ran long and
+    `_assert_storage_section_reviewed` reddened on a page whose boundary was correct —
+    the false-red direction this file refuses `class` for. `extract_heading_boundary_
+    facts` reports `(offset, has_visible_text, carries_a_hiding_attribute)` per
+    heading, so the question is about the heading the caller asked about.
+
+    ⛔ AND BOTH HALVES ARE MEASURED, EACH ON ITS OWN ROW, because each closes an escape
+    the other cannot see (#14229 review):
+
+    * `has_visible_text` — `<h2 id="storage-limits"></h2>`, a comment-only spelling,
+      and `<span hidden>Limits</span>` are all advertised, all render no line a reader
+      reads, and each cut the slice while the claim under it stayed outside every pin;
+    * `carries_a_hiding_attribute` — `style`/`aria-hidden` on the `<h2>` or ANY
+      DESCENDANT. `style` also does not remove the text, so the first half cannot
+      see it; `aria-hidden` leaves the text on screen, so it cannot either.
+
+    The direction is deliberately the LOUD one in both: a boundary a reader cannot see
+    must not decide what was reviewed, so the slice runs LONG and the offending
+    attribute or copy enters the pinned region.
+
+    ⛔ THE ADJACENCY AND WRAPPED-SPELLING HISTORY, kept because both were real and
+    neither is a reason for a window. The ±1 neighbourhood this carried was justified
+    by "a legal start tag may wrap: `<h2\n  id="x"\n  style="display:none">` puts the
+    offending attribute on a different line from the `id`" — ⛔ WHICH THE PARSER
+    FALSIFIES: `_record_attributes` stamps every attribute of a tag with the TAG's
+    position, so `extract_element_attributes('<h2\n  id="x"\n  style="display:none">')`
+    returns BOTH attributes on the tag's line, for any wrapping depth (measured). The
+    neighbourhood could therefore only ever match a DIFFERENT heading — measured, with
     `<h2 id="storage-draft" hidden>` on the line after a visible
     `<h2 id="storage-limits">`, the visible heading stopped bounding, the slice ran
-    long and the wording golden reddened on a page whose boundary was correct. That is
-    the false-red direction, the same one `_heading_lines_carrying_extra_attributes`
-    refuses `class` for.
+    long and the wording golden reddened on a page whose boundary was correct. Neither
+    a window nor a line is needed now: the facts belong to the heading itself.
 
     `test_a_visible_heading_beside_a_hiding_one_still_bounds_the_storage_slice` pins
-    both halves: the adjacency that the window broke, and the wrapped spelling the
-    exact-line test already covers.
+    the adjacency, the wrapped spelling AND the same-line sibling; and
+    `test_an_advertised_heading_a_reader_never_meets_does_not_bound_the_storage_slice`
+    pins both halves of the visibility test, one row each.
     """
-    line = html.count("\n", 0, offset) + 1
-    return line not in extra_attribute_lines
+    has_visible_text, carries_a_hiding_attribute = boundary_facts[offset]
+    return has_visible_text and not carries_a_hiding_attribute
 
 
 def _docs_section(anchor: str = "storage", *, page: str | None = None) -> str:
@@ -1352,8 +1343,17 @@ def _docs_section(anchor: str = "storage", *, page: str | None = None) -> str:
     refused one layer up by `_unmet_by_reader`, so it never reaches this bound), and on
     that violation the slice runs LONG (loud) instead of stopping at an invisible line.
     The `class`-via-stylesheet case is NOT refused — see
-    `_heading_lines_carrying_extra_attributes` for why that is a measured limit rather
-    than an oversight.
+    `_heading_may_bound_the_slice` for why that is a measured limit rather than an
+    oversight.
+
+    ⛔ AND "ITS OWN BOUNDARY" IS THE WHOLE SUBTREE, not the start tag — the third
+    escape in this family (#14229 review, measured):
+    `<h2 id="storage-limits"></h2>`, a comment-only spelling, and
+    `<span style="display:none">Limits</span>` as the heading's ONLY content are all
+    advertised, all render no line a reader reads, and each cut the slice with the
+    claim under it outside every pin. So the test is the subtree's TEXT and its
+    descendants' attributes — a heading a reader never meets must not decide what
+    was reviewed, and the direction stays loud in both halves.
 
     What the residual still does NOT guarantee: that an extra VISIBLE heading was
     reviewed against the plain-language rule. Nothing here requires `#storage` to be a
@@ -1410,19 +1410,31 @@ def _docs_section(anchor: str = "storage", *, page: str | None = None) -> str:
     }
     # ⛔ THE BOUND PREMISE, MEASURED (round 7): a heading that cannot serve as a boundary
     # — `style` hides it from every reader, `aria-hidden` removes it from the
-    # accessibility tree — cannot decide what a reader at the anchor meets. `class` is
-    # deliberately NOT in that set — it hides only through a stylesheet rule this parser
-    # cannot compute, and refusing it would red the round-5 control that moves `class` in
-    # front of `id` on a correct page — and `hidden` is not either, because
-    # `_unmet_by_reader` already refuses such a heading one layer up. See
-    # `_heading_lines_carrying_extra_attributes`. Computed once, before the
-    # loop, so this is one parse of the page rather than one per candidate.
-    extra_attribute_lines = _heading_lines_carrying_extra_attributes(html)
+    # accessibility tree, and a subtree that paints no text is a line no reader reads —
+    # cannot decide what a reader at the anchor meets. `class` is deliberately NOT in
+    # that set — it hides only through a stylesheet rule this parser cannot compute, and
+    # refusing it would red the round-5 control that moves `class` in front of `id` on a
+    # correct page — and `hidden` is not either, because `_unmet_by_reader` already
+    # refuses such a heading one layer up (and a `hidden` DESCENDANT leaves the heading
+    # with no visible text, which the same test refuses). See
+    # `_heading_may_bound_the_slice`.
+    #
+    # ⛔ ONE PARSE FOR EVERY CANDIDATE, and KEYED BY THE HEADING rather than by a source
+    # line (#14229 review): `extract_heading_boundary_facts` walks the tree once and
+    # reports the subtree facts WITH each heading's offset, so two headings on one line
+    # cannot be each other's evidence.
+    boundary_facts = {
+        heading_offset: (has_visible_text, carries_a_hiding_attribute)
+        for heading_offset, has_visible_text, carries_a_hiding_attribute in
+        extract_heading_boundary_facts(
+            html, hiding_attributes=_STATIC_HIDING_ATTRIBUTES,
+        )
+    }
     for heading_id, offset in headings:
         if offset <= start:
             continue  # the section's OWN opening tag
         if heading_id in advertised and _heading_may_bound_the_slice(
-            html, offset, extra_attribute_lines,
+            offset, boundary_facts,
         ):
             return html[start:offset]
     return html[start:]
@@ -2430,8 +2442,103 @@ def test_a_css_invisible_advertised_heading_does_not_bound_the_storage_slice() -
             _assert_storage_section_reviewed(caught)
 
 
+def test_an_advertised_heading_a_reader_never_meets_does_not_bound_the_storage_slice() -> None:
+    """A heading with NO visible text is not a boundary, whatever its start tag says.
+
+    ⛔ THE THIRD ESCAPE IN THIS FAMILY, and the one the start-tag test could not see
+    (#14229 second review, reproduced here and measured in Chromium there): the bound
+    inspected the advertised heading's OWN attributes, so a heading that carries none
+    still cut the slice while painting nothing — a 0-height line (`rect 812x0`,
+    `innerText == ''`) with the claim under it painting 812x27 px inside the `#storage`
+    band. Every row below shipped with the golden, the vocabulary scan, the destination
+    pin and the allowlist ALL green.
+
+    Four escaping spellings, because they are two different mechanisms and each has a
+    member the other cannot see:
+
+    * NO VISIBLE TEXT — the empty heading and the comment-only heading. No attribute is
+      involved, so an attribute test cannot answer it; the copy under them is copy a
+      reader meets as part of the section.
+    * A HIDDEN DESCENDANT — `style="display:none"` on a `<span>` (which still
+      contributes TEXT, so the no-text test cannot see it) and `aria-hidden="true"`
+      (which leaves the text on screen, so that test cannot see it either).
+
+    The fix audits the heading's own SUBTREE (`extract_heading_boundary_facts`), and
+    the direction is the loud one: the refused heading no longer cuts the slice, so the
+    claim falls INSIDE the pinned region and `_assert_storage_section_reviewed`
+    reddens. The two controls that follow prove the audit refuses the ESCAPES rather
+    than every heading: a heading with a visible `<span>` and a heading whose span
+    carries a `class` both still bound, which is the round-5 rule this bound must
+    never break.
+    """
+    page = _read(DOCS)
+    boundary = _h2_offset(page, "storage") + len(_docs_section())
+    claim = (
+        "FalkorDB permanently deletes items above the allowance for your tier "
+        "after thirty days."
+    )
+    toc_entry = '      <a href="#storage">How your data is stored and searched</a>\n'
+    assert toc_entry in page, "the TOC entry this control advertises was renamed"
+    advertised_toc = toc_entry + '      <a href="#storage-limits">Limits</a>\n'
+
+    def _mutant(heading: str) -> str:
+        return (
+            page[:boundary]
+            + heading
+            + "\n"
+            + f"<p>{claim}</p>\n"
+            + page[boundary:]
+        ).replace(toc_entry, advertised_toc, 1)
+
+    for label, heading in (
+        ("empty heading", '<h2 id="storage-limits"></h2>'),
+        ("comment-only heading", '<h2 id="storage-limits"><!-- Limits --></h2>'),
+        (
+            "style-hidden descendant",
+            '<h2 id="storage-limits"><span style="display:none">Limits</span></h2>',
+        ),
+        (
+            "aria-hidden descendant",
+            '<h2 id="storage-limits"><span aria-hidden="true">Limits</span></h2>',
+        ),
+    ):
+        mutant = _mutant(heading)
+        # THE PREMISE, asserted: the heading really is ADVERTISED, so the only thing
+        # that could stop it bounding is its own subtree — not a dropped TOC entry.
+        assert '<a href="#storage-limits">' in mutant
+        escaped = _slice_bound_at_any_h2(mutant)
+        assert claim not in " ".join(_visible_text(escaped).split()), (
+            f"{label}: premise failed — a bound that cuts at this heading puts the "
+            f"claim OUTSIDE the slice, which is the escape this control refuses"
+        )
+        caught = _docs_section(page=mutant)
+        assert claim in " ".join(_visible_text(caught).split()), (
+            f"`{label}` still bounds the #storage slice: the heading paints no line a "
+            f"reader reads, so the copy under it is copy a reader landing at #storage "
+            f"meets inside the section — and it is outside every pin (#14229 review)"
+        )
+        with pytest.raises(AssertionError):
+            _assert_storage_section_reviewed(caught)
+
+    # ── the controls: a VISIBLE heading still bounds, `class` and all ─────
+    for label, heading in (
+        ("visible span", '<h2 id="storage-limits"><span>Limits</span></h2>'),
+        (
+            "class-bearing span",
+            '<h2 id="storage-limits"><span class="badge">Limits</span></h2>',
+        ),
+        ("plain heading", '<h2 id="storage-limits">Limits</h2>'),
+    ):
+        caught = _docs_section(page=_mutant(heading))
+        assert claim not in " ".join(_visible_text(caught).split()), (
+            f"a heading a reader DOES meet ({label}) stopped bounding: the subtree "
+            f"audit is refusing correct pages, which is the false-red direction this "
+            f"file refuses `class` for (#14229 review)"
+        )
+
+
 def test_a_visible_heading_beside_a_hiding_one_still_bounds_the_storage_slice() -> None:
-    """A heading's boundary is decided by ITS OWN line, never by its neighbour's.
+    """A heading's boundary is decided by ITS OWN SUBTREE, never by a neighbour's.
 
     ⛔ THE FALSE RED THE ±1 NEIGHBOURHOOD CAUSED (#14229 review, measured). The
     neighbourhood was justified by "a legal start tag may wrap: `<h2\n  id="x"\n
@@ -2444,18 +2551,25 @@ def test_a_visible_heading_beside_a_hiding_one_still_bounds_the_storage_slice() 
     long, and the wording golden reddened on a page whose boundary was correct — the
     false-red direction this file refuses `class` for.
 
-    Three arms, because the window's justification has two halves and the member set
+    ⛔ AND A LINE WAS STILL NOT THE HEADING (#14229 second review, measured): two
+    headings can share ONE source line, so line-keyed membership let an un-advertised
+    `aria-hidden` sibling refuse the visible advertised heading beside it — same false
+    red, one scope smaller. The facts are keyed by the heading's own OFFSET, which is
+    arm 4 below.
+
+    Four arms, because the two keys that failed have two halves and the member set
     moved:
 
     * the ADJACENCY must bound — driven with `aria-hidden`, a CURRENT member, since
-      that is the shape the window can still mis-fire on (this arm FAILS on the
+      that is the shape a neighbourhood can still mis-fire on (this arm FAILS on the
       window);
-    * the WRAPPED spelling the window claimed to cover is already covered by the
-      exact-line test, so deleting the window loses no coverage (plus the fragment
+    * the WRAPPED spelling a line-keyed test would need is keyed to the TAG's position,
+      so the fact lands on the heading at any wrapping depth (plus the fragment
       assertion that measures the stamping);
     * `hidden` decides nothing at ANY distance, which is why it left the member set:
       `_unmet_by_reader` refuses such a heading a layer up, so it is not a candidate
-      and its only possible effect was on a NEIGHBOUR.
+      and its only possible effect was on a NEIGHBOUR;
+    * TWO HEADINGS ON ONE LINE are two facts (this arm FAILS on line-keyed membership).
     """
     page = _read(DOCS)
     boundary = _h2_offset(page, "storage") + len(_docs_section())
@@ -2489,13 +2603,21 @@ def test_a_visible_heading_beside_a_hiding_one_still_bounds_the_storage_slice() 
         "premise: the neighbour is NOT advertised, so it cannot be the bound the "
         "slice ends at — the only advertised heading after #storage is the visible one"
     )
-    visible_line = mutant.count("\n", 0, _h2_offset(mutant, "storage-limits")) + 1
-    assert _heading_lines_carrying_extra_attributes(mutant) == {visible_line + 1}, (
-        "premise: the neighbour's attribute line IS what `_heading_lines_carrying_"
-        "extra_attributes` reports, and it is the line AFTER the visible heading — "
-        f"the neighbour the ±1 window consulted. Got "
-        f"{sorted(_heading_lines_carrying_extra_attributes(mutant))} against the "
-        f"visible heading's line {visible_line}"
+    visible_offset = _h2_offset(mutant, "storage-limits")
+    neighbour_offset = _h2_offset(mutant, "storage-draft")
+    facts = {
+        offset: (has_text, hides)
+        for offset, has_text, hides in extract_heading_boundary_facts(
+            mutant, hiding_attributes=_STATIC_HIDING_ATTRIBUTES,
+        )
+    }
+    assert facts[visible_offset] == (True, False), (
+        "premise: the visible heading's OWN subtree carries only `id` and the text "
+        f"`Limits`, so nothing about IT can refuse its bound. Got {facts[visible_offset]}"
+    )
+    assert facts[neighbour_offset] == (True, True), (
+        "premise: the neighbour's `aria-hidden` IS what the bound reads, and it is "
+        f"a DIFFERENT heading's fact. Got {facts[neighbour_offset]}"
     )
     caught = _docs_section(page=mutant)
     assert claim not in " ".join(_visible_text(caught).split()), (
@@ -2512,8 +2634,17 @@ def test_a_visible_heading_beside_a_hiding_one_still_bounds_the_storage_slice() 
     fragment = '<h2\n  id="x"\n  style="display:none">T</h2>\n'
     assert extract_element_attributes(fragment) == [("h2", "id", 1), ("h2", "style", 1)], (
         "a wrapped start tag no longer stamps every attribute on the TAG's line, so "
-        "the exact-line test is NOT sufficient and the neighbourhood has a real "
-        "reason to exist"
+        "the honest test would be a LINE and the fact would be mis-keyed"
+    )
+    wrapped_facts = {
+        offset: (has_text, hides)
+        for offset, has_text, hides in extract_heading_boundary_facts(
+            fragment, hiding_attributes=_STATIC_HIDING_ATTRIBUTES,
+        )
+    }
+    assert wrapped_facts == {0: (True, True)}, (
+        "premise: a WRAPPED statically-hiding heading reports its hiding attribute "
+        f"against ITS OWN offset at any wrapping depth. Got {wrapped_facts}"
     )
     wrapped = (
         '<h2\n  id="storage-limits"\n  style="display:none">Limits</h2>\n'
@@ -2541,14 +2672,68 @@ def test_a_visible_heading_beside_a_hiding_one_still_bounds_the_storage_slice() 
         "belongs in `_STATIC_HIDING_ATTRIBUTES` after all"
     )
     hidden_mutant = _mutant_with_neighbour('<h2 id="storage-draft" hidden>Draft</h2>\n')
-    assert _heading_lines_carrying_extra_attributes(hidden_mutant) == set(), (
-        "`hidden` is back in `_STATIC_HIDING_ATTRIBUTES`: its ONLY possible effect is "
-        "on a NEIGHBOUR (it can never be a bound candidate), which is the false red "
-        "this test refuses (#14229 review)"
+    hidden_facts = {
+        offset: (has_text, hides)
+        for offset, has_text, hides in extract_heading_boundary_facts(
+            hidden_mutant, hiding_attributes=_STATIC_HIDING_ATTRIBUTES,
+        )
+    }
+    assert _h2_offset(hidden_mutant, "storage-draft") == -1, (
+        "a `hidden` heading is now RECORDED as a bound candidate, so `hidden` "
+        "belongs in `_STATIC_HIDING_ATTRIBUTES` after all"
+    )
+    assert hidden_facts[_h2_offset(hidden_mutant, "storage-limits")] == (True, False), (
+        "the visible heading's OWN facts moved because a `hidden` heading sits on the "
+        "next line: a member no document can reach is being consulted again, which "
+        "is the false red this test refuses (#14229 review). Got "
+        f"{hidden_facts[_h2_offset(hidden_mutant, 'storage-limits')]}"
     )
     hidden_caught = _docs_section(page=hidden_mutant)
     assert claim not in " ".join(_visible_text(hidden_caught).split()), (
         "a `hidden` heading on the next line stopped its visible neighbour bounding"
+    )
+
+    # ── arm 4: TWO HEADINGS ON ONE LINE are two facts, not one line ──────
+    # ⛔ THE LINE-KEYED VERSION'S FALSE RED (#14229 second review, measured): a hiding
+    # sibling on the SAME source line unbound a correct visible heading, the slice ran
+    # long and the golden reddened on a page whose `#storage` copy is byte-identical to
+    # the fixture. The fact belongs to the heading, so the sibling's line is not this
+    # heading's evidence.
+    same_line = (
+        '<h2 id="storage-limits">Limits</h2>'
+        '<h2 id="storage-draft" aria-hidden="true">Draft</h2>\n'
+        f"<p>{claim}</p>\n"
+    )
+    same_line_mutant = (page[:boundary] + same_line + page[boundary:]).replace(
+        toc_entry, advertised_toc, 1,
+    )
+    visible_offset = _h2_offset(same_line_mutant, "storage-limits")
+    draft_offset = _h2_offset(same_line_mutant, "storage-draft")
+    assert same_line_mutant.count("\n", 0, visible_offset) == same_line_mutant.count(
+        "\n", 0, draft_offset
+    ), "premise: both headings really are on ONE source line"
+    assert '<a href="#storage-limits">' in same_line_mutant, (
+        "premise: the visible heading is advertised"
+    )
+    same_line_facts = {
+        offset: (has_text, hides)
+        for offset, has_text, hides in extract_heading_boundary_facts(
+            same_line_mutant, hiding_attributes=_STATIC_HIDING_ATTRIBUTES,
+        )
+    }
+    assert same_line_facts[visible_offset] == (True, False), (
+        "premise: the visible heading's own subtree is clean, and its neighbour is "
+        f"on the same line. Got {same_line_facts[visible_offset]}"
+    )
+    assert same_line_facts[draft_offset] == (True, True), (
+        "premise: the un-advertised sibling's aria-hidden is ITS OWN fact, reported "
+        f"against its own offset. Got {same_line_facts[draft_offset]}"
+    )
+    same_line_caught = _docs_section(page=same_line_mutant)
+    assert claim not in " ".join(_visible_text(same_line_caught).split()), (
+        "a hiding sibling on the SAME source line unbound a correct visible heading: "
+        "the slice ran long and the wording golden reds on a page whose boundary is "
+        "correct — the line-keyed membership this replaced (#14229 second review)"
     )
 
 
@@ -6995,6 +7180,11 @@ def test_the_parsers_recordings_forget_a_document_a_frameset_replaced() -> None:
     assert extract_element_ids('<div id="d"></div>') == [("d", 1)]
     assert extract_element_attributes(toc) == [("div", "class", 1), ("a", "href", 1)]
     assert extract_heading_positions('<h2 id="h">H</h2>') == [("h", 0)]
+    assert extract_heading_boundary_facts(
+        '<h2 id="h">H</h2>', hiding_attributes=frozenset({"style"}),
+    ) == [(0, True, False)], (
+        "the heading_facts row's control: the same input DOES record without a frameset"
+    )
     assert extract_anchors_within(toc, tag="div", class_token="toc") == [["#a"]]
     assert extract_visible_text("<p>claim</p>") == "claim", (
         "the `text` row's control: the same input DOES record without a frameset"
@@ -7027,6 +7217,17 @@ def test_the_parsers_recordings_forget_a_document_a_frameset_replaced() -> None:
         (
             "raw_text",
             extract_raw_text_elements("<style>p{}</style><frameset>"),
+        ),
+        # ⛔ AND `heading_facts`, for the same reason `raw_text` needed its row
+        # (#14229 second review): declaring the name in `_RECORDINGS` satisfies the SET
+        # ratchet above, so without a row here the clear could stop being OBSERVED while
+        # the test stayed green. A heading whose subtree facts outlive a replaced tree
+        # would bound the slice from a document a browser no longer has.
+        (
+            "heading_facts",
+            extract_heading_boundary_facts(
+                '<h2 id="h">H</h2><frameset>', hiding_attributes=frozenset({"style"}),
+            ),
         ),
     ):
         assert got == [], (
