@@ -219,7 +219,7 @@ Explicitly segmented into three audiences on the homepage:
 
 **Their own cost guidance (verbatim, docs):** "Casual coding users (a few hours per day): Typically ~$100/mo+ usage"; "Power users (long sessions, many parallel agents): Often approach or exceed $200+/mo in total usage."
 
-**Open source:** Apache-2.0. Self-hosting supported: "Run Letta fully locally or on your own infrastructure — no Letta account required." MemFS **shared-memory repositories are a cloud feature**; self-hosted deployments must point agents at their own git remote.
+**Open source:** Apache-2.0. Self-hosting supported: run Letta locally or on your own infrastructure with no Letta account required. MemFS **shared-memory repositories are a cloud feature**; self-hosted deployments must point agents at their own git remote.
 
 ✅ Verified against the live pricing page (`letta.com/pricing` redirects to `docs.letta.com/pricing`). [Source](https://docs.letta.com/pricing) — retrieved 2026-09-11
 
@@ -582,7 +582,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 - No vendor lock on memory format — memory is plain Markdown files
 
 **What users complain about:**
-- **Complexity / steep learning curve.** GitHub issue #490: MemGPT is "one of the hardest pieces of AI software to get to grips with." A third-party comparison: Letta "has a steeper learning curve, with concepts like core/recall/archival memory and Python-only setup taking more time to internalize"
+- **Complexity / steep learning curve.** GitHub issue #490: MemGPT is "one of the hardest pieces of AI software to get to grips with." A third-party comparison rates Letta as steeper to learn than Mem0, with core/recall/archival memory concepts and Python-only setup taking more time to internalize (our summary of that comparison's tradeoff section)
 - **Integration friction.** Issue #689: MemGPT did not update the expected memory layer (our summary of the report — the thread states the symptom, not this wording)
 - **Concept churn.** MemGPT → Letta server → Letta Code pivot; heartbeats deprecated; memory blocks now "legacy." Docs explicitly tell users to migrate off the shared-blocks pattern
 - **Self-hosting/ops effort** and **unpredictable usage cost** — their own docs warn casual coding users to expect ~$100/mo+ and power users $200+/mo
