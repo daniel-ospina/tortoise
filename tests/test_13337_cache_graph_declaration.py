@@ -223,19 +223,21 @@ def test_the_control_plane_read_uses_the_SAME_filters_the_ownership_check_does()
     equality rows stay GREEN while the tenant filter this read exists for is
     gone. The old literal-only row went RED on that joint mutant, and dropping it
     outright traded away the dimension the read is for. So the anchor stays, as
-    the independently-stated expectation the comparison is checked against —
-    the pattern the review's research pass found in comparable suites (a
-    known-answer literal pinned beside equivalence assertions across input
-    paths).
+    the independently-stated expectation the comparison is checked against.
+    ⛔ The justification is the measurement above, not an appeal to convention: an
+    earlier draft cited "the pattern the review's research pass found in
+    comparable suites" and named no suite, file or line — unverifiable in exactly
+    the way this PR's doctrine rejects (raised by review). What is checkable is
+    the two mutants: each half reds on a mutant the other half survives.
     """
     from tortoise import supabase_control
 
-    def _capture(call):
-        seen = {}
+    def _capture(reader):
+        calls = []
 
         class _CP:
             def query(self, table, select=None, filters=None):
-                seen.update(table=table, select=select, filters=filters)
+                calls.append({"table": table, "select": select, "filters": filters})
                 return [{"id": "g_1", "namespace": "org_orgA"}]
 
         original = supabase_control.is_supabase_enabled
@@ -243,12 +245,20 @@ def test_the_control_plane_read_uses_the_SAME_filters_the_ownership_check_does()
         try:
             supabase_control.is_supabase_enabled = lambda: True
             supabase_control.get_control_plane = _CP
-            call()
+            reader()
         finally:
             supabase_control.is_supabase_enabled = original
             supabase_control.get_control_plane = original_cp
-        assert seen, "the reader made NO control-plane call — this row would be vacuous"
-        return seen
+        # ⛔ EVERY call is recorded, not just the last. A `dict.update` accumulator kept only the
+        # final query, so a reader that grew a SECOND, looser control-plane read would have been
+        # compared on its tail and the extra read would have been invisible — the truncation
+        # channel this row is otherwise exposed to (raised by review). Exactly one call per reader
+        # is now asserted, so a second read is a deliberate, visible change rather than a silent one.
+        assert calls, "the reader made NO control-plane call — this row would be vacuous"
+        assert len(calls) == 1, (
+            f"the reader made {len(calls)} control-plane calls, expected 1: {calls}"
+        )
+        return calls[0]
 
     import tortoise.cache_graph as cg
     from tortoise.hosted_api import _assert_graph_owned
