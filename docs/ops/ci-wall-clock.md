@@ -293,8 +293,9 @@ RE-CUT THEN MERGED THE TWO SIDES, WHICH IS A THIRD TREE, SO THE TERM IS READ OFF
 INHERITED FROM EITHER PARENT:** `--emit-push-matrix` on THIS manifest emits **25 m on all eleven
 shards**, the worst at `est_seconds` **720.7** (`ceil(720.7/60 x 2)` = 25, re-read after the
 `origin/main` `b4da1f5c` merge — it emitted 720.6 on the previous tree), and the pool it packs now
-holds BOTH parents' added suites — `#14012`'s three (shards `a`, `d`, `i`) and `#14015`'s M5
-`test_miss_rate_m5.py` (shard `i`) — so no arithmetic on the two parents' figures would have
+holds BOTH parents' added suites — `#14012`'s three (shards `d`, `e`, `i` — `test_14012_resident_cli`,
+`test_14012_resident_pin`, `test_14012_outside_view`) and `#14015`'s M5 `test_miss_rate_m5.py` (shard
+`d`, beside `resident_cli`) — so no arithmetic on the two parents' figures would have
 predicted the merged reading. The three
 hand-added figures are re-added from the
 emitted 25 m: 56.6 m / 85.0 m / 5.0 m (the row above, and the same three figures as the row's own
@@ -305,11 +306,9 @@ terms' own total, 56.64 m, that
 `test_demo_session_read_exclusion_8290.py` `durations:` row repeats 85.0 m against the 90 m cap — ⛔ and the × 1.5 is taken on the UNROUNDED
 total, 56.64 → 84.96 → **85.0 m**, headroom 90 − 84.96 = 5.04 → **5.0 m**: multiplying the
 ROUNDED 56.6 instead reads 84.9 m / 5.1 m and overstates the headroom by a tenth of a metre, which
-is how this one sentence came to disagree with the row above it. ⛔ **AND THIS PARAGRAPH RESTATED
+is how this one sentence came to disagree with the row above it. ⛔ **THIS PARAGRAPH ITSELF RESTATED
 84.9 m / 5.1 m UNTIL THE `#14183` RE-CUT** — that is the ROUNDED-SUM path its own next clause
-forbids: 56.6 x 1.5 is 84.9, while the terms' total is 56.64 m and 56.64 x 1.5 = 84.96, i.e. 85.0,
-leaving 90 - 84.96 = 5.04, i.e. 5.0, so the restatement was wrong twice over (both the sum and the
-headroom it implied) and `origin/main` and this branch corrected it independently to the same pair —
+forbids — and `origin/main` and this branch corrected it independently, to the same pair —
 ⛔ NOT the sum of the four ROUNDED
 terms, which reads 56.7 m: the startup term is 7.27 m (182 s + 254 s, where 254 s is ALREADY the 266 s window net of the
 embedder's 12 s — subtracting that 12 s a second time gives 7.07 m, which is how this figure was
