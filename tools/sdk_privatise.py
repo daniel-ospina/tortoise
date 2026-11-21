@@ -367,12 +367,20 @@ SWEEP_NAMES = 66
 #: (`typed references still pointing at a public name: 0` on this tree).
 #: 11831 − 6 = 11825, and that arithmetic is a CROSS-CHECK of the measurement, not the evidence for
 #: it: what was pasted into the pin is the pair `--repin` printed on THIS tree.
-#:
-#: made it URGENT is that the pin is graded only on PULL REQUESTS — `main`'s `d4a8dddc4e` carries 12
-#: check-runs and none of them is `surface-guard` — so main drifted 1 row off the pin and every open
-#: PR then graded main's row as its own: #14045 measured `observed: (11822, …)` against the 11821 pin
-#: on a tree that itself derived 11821, while `main` at `38086c1bc5` derived 11822. A stale pin on
-#: main is a red gate on every PR that touches nothing in this population (#14062).
+#: Which is what makes this safe to take: no typed call site is being legitimised by the re-cut.
+#: What made it URGENT is that the pin is graded only on PULL REQUESTS, so `main` sat one row off the
+#: pin with nothing grading it and every open PR then graded main's row as its own: #14045 measured
+#: `observed: (11822, …)` against the 11821 pin on a tree that itself derived 11821, while `main` at
+#: `38086c1bc5` derived 11822. A stale pin on main is a red gate on every PR that touches nothing in
+#: this population (#14062). ⛔ NO CHECK-RUN COUNT IS QUOTED FOR THAT COMMIT ANY MORE: this block
+#: used to cite `d4a8dddc4e` as carrying 12 check-runs, none of them `surface-guard`, and re-running
+#: the job since has made that FALSE — the commit now reports 72 check-runs and `surface-guard` is
+#: one of them (`completed`, `failure`). Check-run counts accumulate and never reset, so a count in
+#: this block re-stales against a re-run; the durable fact is the RULE (the pin is graded on pull
+#: requests only), not the measurement of one commit on one day. ⛔ The squash-rebase onto
+#: `ad79129cb59` DROPPED this retraction and re-asserted the 12-count with no conflict reported,
+#: which is the same shape #14062 documents one paragraph up: a merge takes a rewritten side and
+#: nothing flags the prose it silently left behind.
 #: ⛔ THIS RECORD CARRIES NO ASSIGNMENT, deliberately: merging two re-cuts left BOTH
 #: `SWEEP_RESIDUE` lines in this file, and Python binds the LAST one, so the earlier value was
 #: dead text that still read as the pin. ONE assignment, at the end of the records, cannot be

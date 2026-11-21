@@ -43,7 +43,15 @@ dependencies = [
     # FLOOR only: dependency hygiene, NOT the fix for #3459. Durable owner
     # decision (2026-09-13). Full rationale: PR #3476.
     "redis>=7.1,<8",
-    "pyyaml>=6.0",
+    # ⛔ UPPER BOUND IS LOAD-BEARING, not hygiene (#14092): `tools/ci_selection.py`'s
+    # `parse_manifest_text` resolves `<<:` merge keys through PyYAML's own
+    # `flatten_mapping` (_NoDuplicateKeyLoader, tools/ci_selection.py:4373/4451), so a
+    # patch release can change WHAT A MANIFEST MEANS. 6.0.4 (uploaded
+    # 2026-11-20T23:34:39Z) makes a re-anchored mapping resolve to the anchor's
+    # pre-override value ({'x': 1, 'y': 3}) where 6.0.3 gives {'x': 2, 'y': 3}, which
+    # reds four `tests/test_ci_selection.py` arms under `test-slow` on a fresh install.
+    # LIFT when #14092 makes the parser independent of `flatten_mapping` ordering.
+    "pyyaml>=6.0,<6.0.4",
     "fastmcp==3.4.6",
     "prometheus-client>=0.16",
     "posthog>=3.0",
