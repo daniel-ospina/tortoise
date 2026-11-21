@@ -2029,10 +2029,11 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     three could be blanked with the population unchanged.
     #
     #     The FIRST-CONTACT arms below are `_touches_own_code`, so the IMPORT half of
-    #     the same two module-body filters needs its own row (4i-bis), and the shape the
+    #     BOTH module-body filters needs its own rows (4i-bis, 4i-ter) — one row cannot
+    #     witness two conditions, because each guard reaches only one of them — and the shape the
     #     removed capability OR used to admit is RESTORED by rule rather than pinned as a
     #     gap (4m states the closure; 4k+ is its positive witness) — all three from the
-    #     review of 90a0e9e8b20c (P2).
+    #     review of 90a0e9e8b20c (P2), the second row from the review of 994fb1d52f (P2).
     #
     # 4i — the module-body `*AVAILABLE` branch's OWN-CODE contact: a module-scope
     #      own import is the only seam, and the flag is an availability flag, so
@@ -2161,6 +2162,35 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "a module-body guard that IMPORTS own code inside the `try` must be graded by "
         "the import arm even when it never binds a name from it, or `_imports_own_code` "
         f"can be deleted with every other row green: {module_body_own_import_unused}"
+    )
+    # 4i-ter. The SAME import arm on the SKIP-READ filter. 4i-bis cannot stand in for
+    #     it: a guard that assigns `*AVAILABLE` never reaches the SKIP-READ condition,
+    #     so `:914`'s `_imports_own_code` term was deletable with the entire file green
+    #     (measured by blanking each call site in turn — `:895` blanked reds 4i-bis,
+    #     `:914` blanked reds this row, and before it existed that deletion was silent;
+    #     review of 994fb1d52f, P2). Measured `((5, (), True, True, True),)`; the import
+    #     INSIDE the `try` binds no `Name`, and there is no capability call, so no other
+    #     arm admits it.
+    module_body_own_import_unused_skip_read = roots(
+        """
+        import pytest
+
+        LIVE = False
+        try:
+            from tortoise.projection import FalkorProjection  # noqa: F401
+            LIVE = True
+        except Exception:
+            LIVE = False
+
+        @pytest.mark.skipif(not LIVE, reason="live")
+        def test_live():
+            pass
+        """
+    )
+    assert module_body_own_import_unused_skip_read == ((5, (), True, True, True),), (
+        "the SKIP-READ filter's import arm needs its OWN witness — the `*AVAILABLE` "
+        "row above cannot reach that condition, so its `_imports_own_code` term stayed "
+        f"deletable with every row green: {module_body_own_import_unused_skip_read}"
     )
 
     # 4m. THE GAP THIS SLOT PINNED AS ACCEPTED IS CLOSED BY RULE (review of
