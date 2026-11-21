@@ -1291,6 +1291,14 @@ def test_no_declared_entity_writer_mentions_a_dynamic_namespace():
 
     from tortoise import embed_writer_register as register
 
+    #: ⛔ THE ONLY MODULE WHOSE IMPORT MAY LEGITIMATELY FAIL HERE (`#14001`, measured by the review
+    #: of `79673ca8`). Its `import` pulls third-party packages a DEV venv may not carry (measured:
+    #: `ModuleNotFoundError: prometheus_client`), so its keys are the one population this pin may
+    #: skip. EVERY other skip is silent shrinkage of the population the over-refusal claim rests
+    #: on — and a shrunk population still satisfied a bare `examined > 0` (measured: 14 of 24),
+    #: which is the whole reason this set is declared rather than inferred.
+    ENV_OPTIONAL_MODULES = ("tortoise.sdk",)
+
     offenders: list[str] = []
     examined: list[str] = []
     unreadable: list[str] = []
@@ -1300,15 +1308,15 @@ def test_no_declared_entity_writer_mentions_a_dynamic_namespace():
         try:
             source = strip._module_source(module_name)
         except strip._UnreadableFold as exc:
-            # ⛔ A MISSING DEPENDENCY IS NOT A LOADER SHAPE CHANGE. `examined` alone could shrink
-            # to one and still satisfy a bare `> 0` (measured: 14 of 24 keys here, the other 10
-            # being `tortoise.sdk::*` with `prometheus_client` absent), so the CAUSE is graded: an
-            # absent third party is the environment, anything else is the loader, and the loader
-            # refusing is exactly what must not silently shrink the population this pin covers.
+            # ⛔ A MISSING DEPENDENCY IS NOT A LOADER SHAPE CHANGE. The CAUSE is graded: an absent
+            # third party is the environment, anything else is the loader, and the loader refusing
+            # is exactly what must not silently shrink the population this pin covers. `ImportError`
+            # (not the `ModuleNotFoundError` subclass alone) is the honest test: a partially
+            # installed optional package raises the parent, and it is the same environmental fact.
             cause = exc.__cause__
-            assert isinstance(cause, ModuleNotFoundError), (
-                f"`{key}`: the source loader refused for a reason that is NOT a missing "
-                f"dependency ({type(cause).__name__ if cause is not None else 'no cause'}: {exc}) "
+            assert isinstance(cause, ImportError), (
+                f"`{key}`: the source loader refused for a reason that is NOT an import failure "
+                f"({type(cause).__name__ if cause is not None else 'no cause'}: {exc}) "
                 "— a loader shape change must red here, not shrink this pin's population")
             unreadable.append(key)
             continue
@@ -1319,6 +1327,11 @@ def test_no_declared_entity_writer_mentions_a_dynamic_namespace():
         examined.append(key)
         if any(strip._is_dynamic_namespace_reference(node) for node in ast.walk(bodies[symbol][0])):
             offenders.append(key)
+    stray = [k for k in unreadable if not k.startswith(ENV_OPTIONAL_MODULES)]
+    assert stray == [], (
+        "a writer outside the declared environment-optional modules could not be read, so it "
+        f"left this pin's population for a reason that is not the environment: {stray} "
+        f"(examined {len(examined)} of {len(register.EMBED_WRITER_CLASSES)})")
     assert missing == [], (
         "the register names a writer whose `def` the module does not contain — the writer was "
         f"renamed or the key is stale, so it left this pin's population: {missing}")
