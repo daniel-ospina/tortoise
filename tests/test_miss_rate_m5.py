@@ -679,7 +679,7 @@ def test_the_run_head_is_a_commit_that_could_have_produced_this_artifact():
     the run commit's instrument bytes must hash to `run_tool_sha256`, and its commit
     time must not be AFTER `generated_at`.
 
-    ⛔ **The never-later half is checked WITHOUT git, on purpose** (#2148 review):
+    ⛔ **The never-later half is checked WITHOUT git, on purpose** (#14162 review round 4):
     CI checks out at depth 1 (`python-ci.yml:968`), so no historical commit is in
     the clone, and a pin whose only home is a git probe SKIPS on the one surface
     that runs it — measured: with the record's run head replaced by `0`*40 the
@@ -711,10 +711,16 @@ def test_the_run_head_is_a_commit_that_could_have_produced_this_artifact():
 
     # The record must SAY this, not only encode it: the README distinguishes the two
     # heads, so a reader quoting the figures is not told the anchor is the run.
+    # ⛔ PROXIMITY, not membership (#14162 review round 4): the README prints the
+    # ANCHOR in the identical backtick form (`**git head:** \`3343599d9847\``), so a
+    # bare substring test is satisfied by setting `run_git_head := git_head` while
+    # the record still never mentions the run — measured GREEN in the CI shape. The
+    # run head must appear ALONGSIDE the field name that makes it the run side.
     text = README.read_text()
-    assert f"`{run_head[:12]}`" in text, (
-        f"the record never prints the run head `{run_head[:12]}` — it prints only the "
-        f"anchor, which is the substitution this pin exists to forbid")
+    assert re.search(rf"`{run_head[:12]}`[^\n]{{0,80}}provenance\.run_git_head", text), (
+        f"the record does not present `{run_head[:12]}` AS `provenance.run_git_head` — "
+        f"naming it anywhere (the anchor is printed in the same form) is not enough, "
+        f"and that substitution is what this pin exists to forbid")
 
     # ---- CORROBORATING HALF: only where the history is actually present --------
     exists = subprocess.run(

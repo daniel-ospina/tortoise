@@ -283,7 +283,7 @@
     }
   },
   "generated_at": "2026-11-21T16:12:03Z",
-  "git_head": "3343599d984720466c5e9217822986c39d392ed1",
+  "git_head": "75970a958753062ff7c430aa87f64a1671ace3cf",
   "issue": 14015,
   "labels": {
     "object": {
@@ -2616,7 +2616,7 @@
     "run_committed_at": 1795277296,
     "run_git_head": "5cc6bad05cf21ca47edb57f15e8c0cdfd7b4ce71",
     "run_tool_sha256": "87fe907fa849f7ab05fe2b363d3bd619587af81f39bf9abe075b2f8eaf685769",
-    "tool_sha256": "8b41762c227948ed6bca99969ff77d929a3fc08fa30a6ae5063cef11d6ab890b"
+    "tool_sha256": "4744678a69f0d57c33621823b0517eb25bcac6f0d93f3fd3623fa5e312604ad1"
   },
   "retrieval": {
     "has_embedder": false,

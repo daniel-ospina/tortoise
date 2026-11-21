@@ -43,7 +43,7 @@ actually use (`F ≈ 0.5`), ordering residency by usage instead of at random rem
 criterion 1 is worth three times the tariff.
 
 - **Artifact:** [`measurement.json`](./measurement.json)
-- **Instrument:** `tools/miss_rate_m5.py` · **git head:** `3343599d9847` — the head these
+- **Instrument:** `tools/miss_rate_m5.py` · **git head:** `75970a958753` — the head these
   figures are ANCHORED to: the artifact's `git_head`, pinned against this line and against
   the instrument's bytes at that commit. ⛔ **It is not the head the run ran at.** The run
   was performed at `5cc6bad05cf2` (the artifact's `provenance.run_git_head`, with the bytes
