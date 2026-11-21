@@ -1777,9 +1777,17 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
     monkeypatch.setattr(strip, "_module_source", folding(module, ModuleNotFoundError("absent")))
     with pytest.raises(AssertionError) as red:
         test_no_declared_entity_writer_mentions_a_dynamic_namespace()
-    assert outsider in str(red.value), (
+    # …AND THIS ARM TOO, OR THE FIX ABOVE IS ONE-THIRD APPLIED (`#14099`, review of `0c4e706e`).
+    # The same no-op conjunct survived here 13 lines below the `missing`/`offenders` fix, where the
+    # commit's own rationale applies verbatim: measured, dropping `{stray}` from the pin's message
+    # left this arm GREEN because pytest's render still carried `assert ['tortoise.api::_emit'] ==
+    # []`. A previous review's mutation table recorded this row as RED — measurably false at this
+    # head — so fixing two of three would have made the survivor newly misleading rather than
+    # uniformly sloppy.
+    stray_msg = str(red.value).split("\nassert ")[0]
+    assert outsider in stray_msg, (
         f"the pin reds without naming the key that left its population: {red.value}")
-    assert f"of {len(keys)}" in str(red.value), (
+    assert f"of {len(keys)}" in stray_msg, (
         f"the pin reds without naming the population it measured: {red.value}")
 
     monkeypatch.setattr(strip, "_module_source", folding(module, ValueError("loader changed")))
