@@ -271,6 +271,19 @@ SELECTED = [
     # unrouted and unreported (the module's own example of a version-qualified name).
     ("is the v3 export deprecated?", "ended", "is_copula"),
     ("is our onboarding flow already retired", "ended", "is_copula"),
+    # ── the BARE-PRONOUN subject, and the recall the round-18 P1 guard KEEPS ──
+    # (round-18 review, P1.) Making a pronoun legal only as the WHOLE subject is the
+    # fix that closes the reduced-relative and extraposed classes; these three rows are
+    # what that rule must NOT cost. `is it archived` is the pronoun branch itself,
+    # `is it really retired` proves the prefix's ADVERB SLOT still carries the time /
+    # degree adverbs a caller actually writes, and `is the export still archived` proves
+    # the same slot applies to a noun-phrase subject. Measured at the pre-fix head: all
+    # three routed, and all three still route — a guard that bought the P1 class by
+    # refusing these would be a recall loss with no finding behind it.
+    ("is it archived", "ended", "is_copula"),
+    ("is it really retired", "ended", "is_copula"),
+    ("is the export still archived", "ended", "is_copula"),
+    ("has it been archived", "ended", "is_copula"),
     ("has the partner call been cancelled", "ended", "is_copula"),
     # An IMPERATIVE over a FREE RELATIVE CLAUSE — a request for a SET. ⛔ The
     # discriminator against `show me the retired onboarding flow` (which stays a
@@ -563,6 +576,37 @@ NOT_SELECTED = [
     "is it what we archived",
     "is that the endpoint we deprecated",
     "is the report the board archived",
+    # ── the PRONOUN-SUBJECT class on `is_copula` (round-18 review, P1) ─────────
+    # Round 17's two guards (a subordinator inside the subject; a second determiner
+    # after a word) miss two shapes: a REDUCED RELATIVE whose subject is a pronoun
+    # needs no second determiner, and an EXTRAPOSED frame (`is it <adj> <subject>
+    # <participle>`) has no determiner at all. Measured at the pre-fix head: every row
+    # below returned `population='ended', shape='is_copula', signal=None` — the whole
+    # ended population served with the caller's own predicate dropped and no notice.
+    # `is_copula` is NEW in this PR (`git grep -c is_copula <merge-base> --
+    # tortoise/state_intent.py` → 0), so on `main` these are ordinary relevance reads:
+    # the class is this PR's own regression.
+    # ⛔ THE GUARD IS A ROLE, NOT A WORD LIST: a subject pronoun may only BE the
+    # subject (a bare-pronoun branch), never sit inside a longer noun phrase — which is
+    # why the SELECTED rows above (`is it archived`, `is it really retired`) survive.
+    # Pinned here and NOT in NOTICE_ONLY on purpose, measured: `signal is None` for
+    # every one, so the remedy is the unchanged relevance read.
+    "is the plan we archived",
+    "is the flow we retired",
+    "is the report she archived",
+    "is the export we deprecated",
+    "is the report they archived",
+    "is the plan you archived",
+    "is it clear legal retracted",
+    "is it true legal retracted",
+    "is it obvious legal retracted",
+    "is it likely legal retracted",
+    "is it certain legal retracted",
+    "is it accurate legal retracted",
+    "is it possible legal retracted",
+    "is it fact legal retracted",
+    "is it news legal retracted",
+    "is there evidence legal retracted",
     # …the same class on the `which` shape, which is the row the pre-fix detector
     # also served (round-3 review, P1: *"`which claims were retracted by legal`
     # → `by legal` dropped"*). It is pinned HERE because the user-facing MCP
@@ -1249,12 +1293,14 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
     # notice, while the served block listed the routes with no clause saying so. A
     # caller reading only this description therefore could not predict the outcome of
     # a filtered call, which is #14033's third acceptance criterion. The five names
-    # below are the retrieval arguments that SILENCE the report, which is NOT the
-    # same as "this tool's retrieval arguments beyond `query`" — the round-16
-    # review's third residual measured that over-claim, and this file now pins the
-    # other side of it below (`kind`/`entity_type`/`limit` narrow the read and leave
-    # the report intact). The signature assertion is what keeps the named five
-    # true: an argument that is renamed or dropped leaves the served clause
+    # below are the retrieval arguments that SILENCE the report — ⛔ EXAMPLES of the
+    # closed list, never the set (round-18 review, P2: the served sentence called them
+    # the set and named "the other three" as the remainder, while `_retrieval_knobs()`
+    # classifies **23** parameters — so a caller who passed `pool_size` or `time_aware`
+    # was told the report survived when it was silenced). The `_knob_names` set below
+    # is DECLARED FROM `sdk.py` rather than re-typed, so the examples cannot drift off
+    # the list they are examples of. The signature assertion is what keeps the named
+    # five true: an argument that is renamed or dropped leaves the served clause
     # describing an argument nobody can pass.
     _filter_args = {"threshold", "min_confidence", "order_by",
                     "relationship_filter", "traversal_path"}
@@ -1267,6 +1313,26 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
             f"the SERVED description does not name `{_name}`, so a caller who passes it "
             "is not told that the cue report is suppressed — the filter/population "
             "boundary is over-promised again (#14033 review round-12, P2)")
+
+    # ⛔ THE EXAMPLES MUST BE MEMBERS OF A BIGGER LIST, DERIVED FROM `sdk.py`
+    # (#14033 round-18 review, P2 — the review's own measurement, made mechanical). The
+    # condition this pins is not "the five are named" (they were, and the sentence was
+    # still wrong): it is that the guard classifies MORE than the examples, so a served
+    # sentence presenting them as the set is describing a different guard from the one
+    # that runs. `_retrieval_knobs()` is a nested function of the SDK read, and each of
+    # its rows is `("<name>", <condition>)`, so the names are read off the source and
+    # never re-typed here — the same rule the module applies to its own tables.
+    _knob_src = inspect.getsource(_sdk_mod.TortoiseSDK._tortoise_fts_query)
+    _knob_names = set(_re.findall(r'\(\s*"([a-z_]+)",', _knob_src))
+    assert _filter_args <= _knob_names, (
+        "the served filter examples are no longer members of `_retrieval_knobs()` — "
+        f"the description names a knob the guard does not classify (knobs: "
+        f"{sorted(_knob_names)})")
+    assert len(_knob_names) > len(_filter_args), (
+        "`_retrieval_knobs()` now classifies no more names than the served description "
+        "shows as examples — the round-18 P2 defect was that the text presented five "
+        "of twenty-three as the set; if the list really is down to five, re-cut the "
+        "text to say so instead of deleting this arm")
 
     # ⛔ AND THE CLAUSE ITSELF MUST BE TRUE, NOT MERELY NAME THE ARGUMENTS (#14033
     # round-13 review, P3). It first read "ANY RETRIEVAL ARGUMENT SILENCES THE
@@ -1306,19 +1372,37 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
         "passed `threshold=0` explicitly is then told they silenced a report that in "
         "fact still fires (#14033 round-13 review, P3)")
 
-    # ⛔ AND THE GENERAL SENTENCE MUST NOT BE READ AS COVERING THE OTHER THREE
-    # (#14033 round-16 review, third residual — the one that is a SERVED-TEXT
-    # defect rather than a note). "A RETRIEVAL ARGUMENT THAT CHANGES THE READ
-    # SILENCES THE REPORT" is read against `_retrieval_knobs()` in `sdk.py`, which
-    # does NOT classify `kind`, `entity_type` or `limit`: the population applies
-    # them, so they change WHICH rows a read returns and never whether the report
-    # fires (measured — `test_a_retrieval_knob_suppresses_the_notice_too` drives
-    # `kind=` and reads the sink). Without a carve-out the sentence tells a caller
-    # who narrowed by `kind` that they silenced a report that in fact still fires,
-    # i.e. the served block mispredicts the boundary it exists to make predictable.
+    # ⛔ AND THE SENTENCE MUST POINT AT THE CLOSED LIST RATHER THAN CLAIM TO BE IT
+    # (#14033 round-18 review, P2 — the served text said the five were the set and
+    # `kind`/`entity_type`/`limit` were "the other three", while `_retrieval_knobs()`
+    # classifies 23: eighteen beyond the five also silence the notice and were named
+    # nowhere, so `pool_size=` or `time_aware=` produced exactly the silence #14033
+    # exists to remove while the description said the report survived). ⛔ THE PIN IS
+    # THE AUTHORITY CLAIM, not a new subset: naming a different five would reproduce
+    # the defect with a different spelling, and the arm above already requires the
+    # examples to be members of a BIGGER list.
     assert _re.search(
-        r"AND THE TOOL'S OTHER THREE RETRIEVAL ARGUMENTS ARE NOT IN THAT SET",
+        r"THE CLOSED LIST IS THE AUTHORITY, NOT THIS SENTENCE",
         _doc_flat), (
+        "the SERVED description no longer says the closed list is the authority — that "
+        "sentence is what stops a reader from treating the examples it names as the set "
+        "(#14033 round-18 review, P2)")
+    assert _re.search(r"`_retrieval_knobs` in `tortoise/sdk\.py`", _doc_flat), (
+        "the SERVED description stopped naming `_retrieval_knobs` as the list — a reader "
+        "is then back to a subset with no pointer to the guard that actually runs")
+    assert _re.search(r"is an EXAMPLE of it, never the set", _doc_flat), (
+        "the SERVED description lost the EXAMPLE-not-the-SET clause: the five names are "
+        "then readable as the whole list again, which is the round-18 P2 defect")
+
+    # ⛔ AND THE OTHER SIDE OF THE BOUNDARY — the three the POPULATION applies
+    # (#14033 round-16 review, third residual; re-worded in round 18). "A RETRIEVAL
+    # ARGUMENT THAT CHANGES THE READ SILENCES THE REPORT" is not true of `kind`,
+    # `entity_type` or `limit`: the population applies them, so they change WHICH rows
+    # a read returns and never whether the report fires (measured —
+    # `test_a_retrieval_knob_suppresses_the_notice_too` drives `kind=` and reads the
+    # sink). Without this carve-out the sentence tells a caller who narrowed by `kind`
+    # that they silenced a report that in fact still fires.
+    assert _re.search(r"Only THREE parameters sit OUTSIDE it", _doc_flat), (
         "the SERVED description dropped the `kind`/`entity_type`/`limit` carve-out, so "
         "the general \"A RETRIEVAL ARGUMENT THAT CHANGES THE READ SILENCES THE "
         "REPORT\" reads as covering arguments that do NOT silence it (#14033 "
@@ -1328,7 +1412,7 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
             f"the carve-out no longer names `{_name}`, so a caller who narrowed by it "
             "cannot tell whether the cue report still fires")
     assert _re.search(
-        r"do NOT ask for a filtered relevance read and leave the report intact",
+        r"they change WHICH rows a read returns rather than asking for a filtered read",
         _doc_flat,
     ), (
         "the carve-out lost its AFFIRMATIVE claim — the names alone do not say what "

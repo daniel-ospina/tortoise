@@ -640,8 +640,40 @@ _COPULA_SUBJECT = (
     r"where|whereas|after|before|now|what|how|why)\b)"
     r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){1,5}"
     r"(?:the|a|an|our|my|its|their|these|those|this|that|all|your)\b)"
+    # ⛔ AND A SUBJECT PRONOUN MAY ONLY **BE** THE SUBJECT (round-18 review, P1,
+    # measured — the SAME #14033 defect still open after round 17's two guards, in the
+    # same worst direction). Both guards above miss it: a REDUCED RELATIVE whose
+    # subject is a pronoun needs no second determiner, and an EXTRAPOSED frame
+    # (`is it <adjective> <subject> <participle>`) has no determiner at all:
+    #
+    #   `is the plan we archived`      <- reduced relative, pronoun subject (`we`)
+    #   `is the report she archived`   <- …or `she`/`they`/`you`
+    #   `is it clear legal retracted`  <- extraposed `it`, the REAL subject follows it
+    #   `is there evidence legal retracted`
+    #
+    # All fourteen probes were answered with the WHOLE ended population with the
+    # caller's own predicate dropped, and `signal` stayed None — so it was not even
+    # reported. `is_copula` is NEW in this PR, so on `main` every one of them is an
+    # ordinary relevance read: this class is the PR's own regression.
+    # ⛔ THE FIX IS A ROLE, NOT A WORD LIST: a personal pronoun can only BE a subject,
+    # never sit INSIDE a longer noun phrase — the pronoun is what a second clause opens
+    # with (`the plan we …`) or, when it leads, the SUBJECT IS the pronoun and every
+    # word after it belongs to another slot (an adverb, which the prefix owns, or the
+    # participle). So the subject is now TWO disjoint branches — a noun phrase, which
+    # may not contain a pronoun at all, or a BARE PRONOUN — and nothing else:
+    #   `is it archived` / `is it really retired` still ROUTE (the bare-pronoun branch,
+    #   with the adverb in the prefix's own adverb slot);
+    #   `is the plan we archived` / `is it clear legal retracted` are REFUSED.
+    # The recall given up is stated rather than discovered: a pronoun subject followed by
+    # a word that is NOT one of the prefix's adverbs (`is it probably retired`) keeps the
+    # relevance read, and so does a subject whose noun phrase contains a pronoun.
+    r"(?:"
+    r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){0,5}"
+    r"(?:i|you|he|she|it|we|they|there)\b)"
     r"(?:(?:the|our|my|its|their|these|those|this|that|all|your)\s+)?"
     r"[a-z0-9][a-z0-9'’._/-]*(?:\s+[a-z0-9][a-z0-9'’._/-]*){0,3}"
+    r"|(?:i|you|he|she|it|we|they|there)"
+    r")"
 )
 #: ⛔ THE PERFECT BRANCH REQUIRES `been`, AND THAT IS A HIJACK FIX (round-7 review,
 #: P1). `already`/`ever` in place of `been` reads as an ACTIVE third-party action —
@@ -650,9 +682,26 @@ _COPULA_SUBJECT = (
 #: serving the whole ended population with no notice. Only `is|are|was|were` can be
 #: followed by a bare participle, because there the passive/adjectival reading is
 #: forced.
+#: ⛔ THE ADVERB SLOT CARRIES THE TIME/DEGREE ADVERBS A CALLER MAY PUT BETWEEN THE
+#: SUBJECT AND ITS PARTICIPLE, and it is a CLOSED list for the same reason every other
+#: guard here is: an open `[a-z]+` there would swallow a NOUN, which is exactly the
+#: extraposed shape the pronoun branch above refuses (`is it clear legal retracted` —
+#: `clear` must not read as an adverb). `really|still|actually|just` are the round-18
+#: additions, and each one exists so the pronoun branch can stay STRICT (a pronoun is
+#: the whole subject) without losing a legitimate question: `is it really retired` and
+#: `is the export still archived` route, measured. `probably`/`likely` are NOT here —
+#: they are the extraposed frame's own adverbs (`is it likely legal retracted`), and
+#: admitting them would re-open the class this slot is closed against.
+#: ⛔ AND `now` IS DELIBERATELY ABSENT even though it is the commonest adverb here: it
+#: is ALREADY a member of the SUBORDINATOR lookahead above (`now the contract is
+#: archived` is exactly the subordinate-clause shape that guard exists to refuse, and
+#: that guard requires a PRECEDING WORD, so a bare-pronoun subject is refused too).
+#: Adding it here would be dead code that reads as coverage — measured:
+#: `is the export now archived` is REFUSED by the subordinator guard, not routed, and
+#: `is it now retired` likewise. Recorded rather than duplicated.
 _COPULA_PREFIX = (
     rf"^(?:(?:is|are|was|were)\s+{_COPULA_SUBJECT}"
-    rf"\s+(?:already\s+|ever\s+)?(?:{_ENDING_WORDS})\b"
+    rf"\s+(?:(?:already|ever|really|still|actually|just)\s+)?(?:{_ENDING_WORDS})\b"
     rf"|(?:has|have|had)\s+{_COPULA_SUBJECT}"
     rf"\s+been\s+(?:{_ENDING_WORDS})\b)"
 )
@@ -866,20 +915,22 @@ evidence that nothing has ended. This tool takes NO argument that forces the
 ended read — the SHAPE is the only way in, so the way to be explicit is to ask
 a form from the ROUTES list above. ⛔ AND A RETRIEVAL ARGUMENT THAT CHANGES THE
 READ SILENCES THE REPORT, which is the other half of that boundary: a
-NON-DEFAULT `threshold`, `min_confidence`, `order_by`, `relationship_filter`
-or `traversal_path` asks for a FILTERED relevance read, and the cue report is
-raised inside the same guard that decides routing — so with any of those
-supplied you get that filtered read and NO report, and a state question you
-filtered looks exactly like an honest empty again. (A value equal to the
-default — `threshold=0`, `min_confidence=0`, `order_by="relevance"` — is not a
-filter and does not silence it.) ⛔ AND THE TOOL'S OTHER THREE RETRIEVAL
-ARGUMENTS ARE NOT IN THAT SET, which is why this sentence names its members
-rather than saying "any argument": `kind`, `entity_type` and `limit` change
-WHICH rows a read returns and are applied by the population itself, so they do
-NOT ask for a filtered relevance read and leave the report intact — `kind=`
-alone never silences the notice, and neither does `limit=`. The filter and the
-population are different answers: send the question ALONE to get the population
-or the report. (The
+NON-DEFAULT retrieval argument asks for a FILTERED relevance read, and the cue
+report is raised inside the same guard that decides routing — so with any of
+them supplied you get that filtered read and NO report, and a state question
+you filtered looks exactly like an honest empty again. ⛔ THE CLOSED LIST IS
+THE AUTHORITY, NOT THIS SENTENCE: it is `_retrieval_knobs` in `tortoise/sdk.py`
+(ONE list, two readers — this guard and the ended-scope arm), and a parameter
+named here is an EXAMPLE of it, never the set: a non-default `threshold`,
+`min_confidence`, `order_by`, `relationship_filter`, `traversal_path`,
+`pool_size`, `time_aware`, … all count, so read that list before assuming a
+parameter is neutral. (A value equal to the default is not a filter and does
+not silence it — `threshold=0`, `min_confidence=0`, `order_by="relevance"`,
+`fusion_k=60`, `w4_enrich=True`.) Only THREE parameters sit OUTSIDE it, because
+the POPULATION applies them and they change WHICH rows a read returns rather
+than asking for a filtered read: `kind`, `entity_type` and `limit` never
+silence the notice. The filter and the population are different answers: send
+the question ALONE to get the population or the report. (The
 hosted `GET /v1/search` route below takes only the question and `limit`,
 neither of which is a routing argument, so it is not silenced.)
 ⛔ THIS TOOL CANNOT REPORT the cue it saw
