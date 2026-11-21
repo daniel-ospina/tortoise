@@ -331,6 +331,50 @@ _RECENCY_TAIL = r"(?:\s+(?:recently|lately|so far|to date))?"
 
 _TAIL_END = r"\s*[?.!]*$"
 
+#: ⛔ THE PREPOSITION CLASS THIS MODULE'S CLOSED LISTS ARE BUILT FROM — ONE HOME.
+#: Prepositions are a CLOSED class (the `ADP` tag in the universal tag set; roughly
+#: fifty single-word English members, and the multi-word forms are excluded on purpose
+#: because both consumers here match a qualifier's FIRST word only), so a curated list
+#: is the right mechanism in a module that deliberately carries no POS tagger. But the
+#: class was typed out TWICE — once in :data:`_BLOCKED_TAIL` (the tail every tail-anchored
+#: shape swaps its end anchor for) and once in the `is_copula` subject guard — and the
+#: two copies drifted twice, each time caught by review only AFTER the fact:
+#:
+#: * round-1 P1 — `is the export archived by the vendor` was SILENT (neither routed
+#:   nor reported) while the bare-noun spelling `… retired by legal` WAS reported,
+#:   because the guard knew `of` and nothing else;
+#: * round-2 P2 — `during`, `until`, `as` and `than` were still silent after that
+#:   fix, while the prose above the guard claimed the class was closed.
+#:
+#: A third hand-typed copy drifts a third time, so BOTH sites now interpolate this
+#: tuple (:data:`_PREPOSITION_RE`), and the membership is pinned by driving every
+#: member through the detector — see
+#: `tests/test_13557_13558_reachable_reads.py::test_every_preposition_the_module_declares_reports_the_qualifier_it_introduces`.
+#: ⛔ THE DELIBERATE OMISSIONS ARE NAMED, so the departure reads as a decision rather
+#: than an oversight: `after`, `before` and `since` are prepositions AND subordinators;
+#: guard A refuses a subordinator inside the subject and cannot tell a tail from a
+#: subject without bounding itself at the participle (measured to re-route the
+#: round-16 hijack), so those three still SILENCE the `is_copula` shape and the notice
+#: for them is genuinely still owed — stated on the guard-B note. `up`/`down`/`off`
+#: are particles in the positions this module matches (`what ended up happening` is a
+#: content query and must stay quiet), and `like`/`following` are ambiguous enough to
+#: stay out of a list whose false positives land on content searches.
+_PREPOSITIONS = (
+    "about", "above", "across", "against", "along", "alongside", "amid",
+    "amidst", "among", "amongst", "around", "as", "at", "behind", "below",
+    "beneath", "beside", "besides", "between", "beyond", "by", "concerning",
+    "despite", "during", "except", "for", "from", "in", "inside", "into",
+    "near", "notwithstanding", "of", "on", "onto", "outside", "over", "past",
+    "per", "regarding", "than", "through", "throughout", "till", "to", "toward",
+    "towards", "under", "underneath", "unlike", "until", "upon", "via", "with",
+    "within", "without",
+)
+
+#: :data:`_PREPOSITIONS` as a regex alternation, LONGEST FIRST so a member that is a
+#: prefix of another (`toward`/`towards`) cannot win the alternation and then fail the
+#: `\b` that follows it.
+_PREPOSITION_RE = "|".join(sorted(_PREPOSITIONS, key=lambda w: (-len(w), w)))
+
 #: …and the tail a BLOCKED state question has INSTEAD of the end: punctuation, or
 #: a FUNCTION WORD the caller appended (`by legal`, `in Q3`, `when challenged`).
 #: ⛔ This is what keeps the notice off an ATTRIBUTIVE use — `is the archived
@@ -345,11 +389,16 @@ _TAIL_END = r"\s*[?.!]*$"
 #: is one, so it is REPORTED). The members are the ones a customer
 #: actually appends to an ending question — prepositions that introduce a narrowing,
 #: conjunctions, determiners, and the boundary-free time adverbs.
+#: ⛔ THE PREPOSITION SEGMENT IS INTERPOLATED FROM :data:`_PREPOSITIONS`, not typed
+#: again: it and the `is_copula` subject guard each carried their own copy of the class
+#: and drifted twice (round-1 P1, round-2 P2). One home, two consumers, and a pin that
+#: drives every member through the detector.
 _BLOCKED_TAIL = (
-    r"(?=\s*(?:[,;:—–]|[?.!]|$|\b(?:in|on|at|by|for|from|with|to|of|about|over|"
-    r"against|regarding|concerning|toward|towards|and|or|but|so|yet|that|which|"
-    r"when|where|who|if|as|than|because|while|after|before|during|since|until|"
-    r"per|last|next|this|these|those|yesterday|today|tomorrow|recently|lately|"
+    r"(?=\s*(?:[,;:—–]|[?.!]|$|\b(?:"
+    + _PREPOSITION_RE
+    + r"|and|or|but|so|yet|that|which|"
+    r"when|where|who|if|because|while|after|before|since|"
+    r"last|next|this|these|those|yesterday|today|tomorrow|recently|lately|"
     r"already|ever|now|still|previously|earlier|afterwards|once|then|anymore|"
     r"ago)\b))"
 )
@@ -774,6 +823,19 @@ _COPULA_SUBJECT = (
     # `other`, `another`, `much`, `enough` — `is the export several teams use deprecated`)
     # still ROUTE, because telling a bare noun from a bare verb needs a lexicon this
     # detector does not have.
+    # ⛔ …AND ONE MORE, ADDED WHEN THE PREPOSITION FIX BELOW WAS MEASURED: a qualifier
+    # introduced by a SUBORDINATOR is still SILENT on this shape — `is the export archived
+    # because of the migration`, `is the onboarding flow retired since the merger`. That is
+    # not the same defect as the preposition case this round fixed: a `because`/`since`
+    # clause turns the question into a CAUSAL or TEMPORAL one, which this module refuses
+    # deliberately (`is the export broken because the schema was deprecated` is the pinned
+    # content class), and a boundary-naming `since` is the class `wh_whole_question` refuses
+    # by design. What is honestly still owed is the NOTICE — `_BLOCKED_TAIL` lists both
+    # words, so the closed-list contract promises a report the shape does not deliver. The
+    # guard cannot see WHERE its subordinator sits without bounding every lookahead at the
+    # participle, and that bound was measured to re-ROUTE the round-16 hijack
+    # (`has anyone complained billing has been deprecated`), so it is recorded here as a
+    # KNOWN silence rather than traded for a routing regression.
     r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){1,5}"
     r"(?:that|which|who|whom|whose|whether|because|since|when|while|if|unless|given|"
     # ⛔ AND A SECOND AUXILIARY IS A NESTED CLAUSE (round-16 review, measured):
@@ -788,7 +850,54 @@ _COPULA_SUBJECT = (
     r"where|whereas|after|before|now|what|how|why|has|have|had|is|are|was|were|will|"
     r"would|can|could|may|might|must|should|do|does|did)(?![-/])\b)"
     r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){0,4}"
-    r"(?!(?:all|both|half|such|many|most|some|any|no|each|every|of|"
+    # ⛔ A PREPOSITION IS NOT A SECOND NOUN PHRASE (review P1, measured). `of` was
+    # already excluded here — a genitive (`the export of the vendor`) is ONE noun
+    # phrase — but no OTHER preposition was, so a `<prep> the <noun>` QUALIFIER
+    # sitting after the participle was read as a second NP inside the subject and
+    # REFUSED the shape. The result was neither a route nor a notice: `is the export
+    # archived by the vendor`, `is the Q3 export archived in the old sharepoint` and
+    # `is the billing service deprecated for the new plans` all came back
+    # `signal=None` — SILENT — which is #14033's own defect (an unrouted state
+    # question that is indistinguishable from "nothing has ended") reproduced on the
+    # shape this PR ADDS. The pinned row that should have caught it pins only
+    # `… retired by legal`, the `<prep> <bare noun>` spelling — the one shape the
+    # guard happened to let through. So the PREPOSITION CLASS is excluded here, and
+    # it is not typed here: it is interpolated from :data:`_PREPOSITIONS`, which is
+    # what makes a reported qualifier of that form reportable instead of swallowed by
+    # a guard looking past the participle.
+    # ⛔ ONE HOME, TWO CONSUMERS (round-25, measured — the third round on this class).
+    # This list and `_BLOCKED_TAIL` each carried their OWN hand-typed copy of the class,
+    # so each round fixed the copy the reviewer happened to probe and left the other
+    # short: round-1 P1 (`by the vendor`) and round-2 P2 (`during`/`until`/`as`/`than`)
+    # were both drift between the two, and the prose here claimed the class closed
+    # while `despite`, `without`, `within`, `under`, `through`, `across`, `between`,
+    # `via`, `near`, `beyond`, `upon`, `around`, `above`, `below` … all still came back
+    # `signal=None` — measured, on the unchanged head. Both sites now interpolate
+    # `_PREPOSITIONS`, and the membership is pinned by driving every member through the
+    # detector, so a fourth drift reddens instead of shipping.
+    # ⛔ WHAT IS STILL NOT COVERED IS STATED, NOT IMPLIED — AND IT HAS TWO CAUSES, NOT
+    # ONE (review at `5b82bcdf03`, P2, measured: the previous draft of this sentence
+    # gave BOTH groups the subordinator reason, which is false for the second):
+    #   (a) SUBORDINATOR members (`because`, `when`, `if`, and the three that are both
+    #       preposition and subordinator — `after`, `before`, `since`) are refused by the
+    #       SUBORDINATOR lookahead above, which refuses inside the subject and cannot
+    #       tell a tail from a subject without bounding itself at the participle —
+    #       measured to re-route the round-16 hijack. Those three are the notice
+    #       genuinely still owed, which is why they stand OUTSIDE `_PREPOSITIONS` rather
+    #       than being quietly counted as covered by it. Excluding them HERE is a
+    #       NO-OP: measured, adding all three flips 0 of 277 probe outcomes.
+    #   (b) CONJUNCTIONS (`and|or|but|so|yet`) are NOT in that lookahead at all. What
+    #       refuses them is the "second noun phrase" test BELOW reading a coordination
+    #       as one — a LIST decision, not that guard's participle bound: excluding them
+    #       here DOES report them (measured: 5 probes flip, 0 pinned rows change). That
+    #       is a recall widening with its own review, so it is stated rather than made,
+    #       and `test_the_conjunction_silence_is_a_LIST_decision_not_a_participle_bound`
+    #       pins it.
+    # ⛔ AND A WORD LIST CANNOT SETTLE (a) EITHER: `after`/`before`/`since` are `ADP`
+    # before a nominal (`since the merger`) and `SCONJ` before a clause (`since the
+    # merger closed`), so the tags separate them only after the fact.
+    r"(?!(?:all|both|half|such|many|most|some|any|no|each|every|"
+    rf"{_PREPOSITION_RE}|"
     r"the|a|an|our|my|its|their|these|those|this|that|your|his|her)\b)"
     r"[a-z0-9][a-z0-9'’._/-]*\s+"
     r"(?:the|a|an|our|my|its|their|these|those|this|that|your|his|her|"
@@ -1133,6 +1242,17 @@ MISSED_ROUTE_FAMILY_HINT = (
 #: Event has no lifecycle — ``ended.py``'s own refusal).
 MISSED_ROUTE_REASONS = ("shape", "family")
 
+#: The keys :func:`missed_route_payload` writes — the CLOSED list a caller-owned sink
+#: must be cleared of before a new decision is written to it. It is a constant because
+#: the clearing side (`sdk._tortoise_fts_query`) is in another module and a sink is
+#: CALLER-OWNED and reusable: it may carry the caller's own bookkeeping beside these
+#: keys, so the sink is cleared BY KEY and never with `dict.clear()` (the same hygiene
+#: `truncation.mark_truncation` performs on its sibling sink). A key added to the
+#: payload without being added here would leave a stale one behind on a reused sink —
+#: which is the whole reason the clear exists — so :func:`missed_route_payload` asserts
+#: the two agree and a test pins it.
+STATE_NOTICE_KEYS = ("routed", "population", "reason", "cue", "hint")
+
 
 #: THE COMMITMENT-question shapes. The issue's own wording — *a commitment is a KIND,
 #: not a phrase* — so the cue is a shape that ASKS FOR THE SET, and the population
@@ -1334,7 +1454,7 @@ def missed_route_payload(state_question: StateQuestion, *,
             return None
         population = ENDED
         cue = state_question.signal_cue
-    return {
+    payload = {
         "routed": False,
         "population": population,
         "reason": reason,
@@ -1342,6 +1462,12 @@ def missed_route_payload(state_question: StateQuestion, *,
         "hint": (MISSED_ROUTE_FAMILY_HINT if reason == "family"
                  else MISSED_ROUTE_HINT),
     }
+    if tuple(payload) != STATE_NOTICE_KEYS:  # pragma: no cover - drift guard
+        raise AssertionError(
+            f"missed-route payload keys {tuple(payload)} do not match "
+            f"STATE_NOTICE_KEYS {STATE_NOTICE_KEYS}; a sink cleared by KEY would "
+            f"carry the difference as a STALE notice on a reused dict")
+    return payload
 
 
 __all__ = [
@@ -1352,6 +1478,7 @@ __all__ = [
     "MISSED_ROUTE_REASONS",
     "POPULATIONS",
     "ROUTING_NOTE",
+    "STATE_NOTICE_KEYS",
     "StateQuestion",
     "detect_state_question",
     "missed_route_payload",

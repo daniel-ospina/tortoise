@@ -240,7 +240,6 @@
 # it down here, not "fix" a row by cutting.
 manifest_version: 1
 issue: 3863
-cut_at_commit: 2c0d66e2ec07d673b17e31b76dc24fbdd57f8e14
 cut_at_commit: 1b0db0489408e1e817688f83cef0d7c1ee33be5d
 allowed_transforms:
 - _HTTPToolFilter

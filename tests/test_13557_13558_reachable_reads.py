@@ -904,6 +904,30 @@ NOTICE_ONLY = [
     "is the contract every employee signed archived",
     "is the report each manager reviewed archived",
     "is the dashboard all customers use deprecated",
+    # ── the `<function word> the <noun>` TAIL class — reported, or silent for a REASON
+    # that is now stated and machine-checked (review at `5b82bcdf03`, P2, measured) ──
+    # The PREPOSITIONS `_BLOCKED_TAIL` names are REPORTED on this shape (see the
+    # reported list in `test_a_strong_cue_that_does_not_fire_reports_itself_and_never_routes`)
+    # UNLESS the subordinator lookahead already refuses the shape. These three are
+    # prepositions AND subordinators, so the exclusion list cannot rescue them: measured,
+    # adding `after|before|since` there flips 0 of 277 probe outcomes. The UD tags split
+    # the two readings only after the fact (`ADP` before a nominal, `SCONJ` before a
+    # clause), which is why this is a stated class rather than a longer word list.
+    # (`test_every_preposition_the_module_declares_reports_the_qualifier_it_introduces`
+    # pins the same three as a deliberate omission from `_PREPOSITIONS`.)
+    "is the export archived after the migration",
+    "is the export archived before the merger",
+    "is the export archived since the merger",
+    # …and the CONJUNCTIONS are silent for a DIFFERENT reason: the second-NP test reads a
+    # coordination as one, and none of these five is in the subordinator lookahead, so
+    # this is a LIST decision rather than that guard's participle bound. Excluding them
+    # WOULD report them (measured: 5 probes flip, 0 pinned rows move) — a recall widening
+    # with its own review, deliberately not made inside a claim correction.
+    "is the export archived and the migration closed",
+    "is the export archived or the backup",
+    "is the export archived but the backup is live",
+    "is the export archived so the team moved on",
+    "is the export archived yet the team still uses it",
 ]
 
 
@@ -1002,6 +1026,7 @@ def test_a_strong_cue_that_does_not_fire_reports_itself_and_never_routes():
     """
     from tortoise.state_intent import (
         MISSED_ROUTE_HINT,
+        STATE_NOTICE_KEYS,
         detect_state_question,
         missed_route_payload,
     )
@@ -1012,6 +1037,34 @@ def test_a_strong_cue_that_does_not_fire_reports_itself_and_never_routes():
         ("has anything we promised been withdrawn by legal", "existence"),
         ("which claims were retracted by legal", "which_predicate"),
         ("is the onboarding flow retired by legal", "is_copula"),
+        # ⛔ …AND THE `<prep> the <noun>` SPELLING OF THE SAME QUALIFIER, which the row
+        # above did NOT cover and which review P1 measured as SILENT (not routed and not
+        # reported): the subject guard read the qualifier's own noun phrase as a second NP
+        # inside the subject, so `is the export archived by the vendor` came back
+        # `signal=None` while `… by legal` (a BARE noun) was reported. A closed-list
+        # qualifier that produces no notice is #14033's own defect on the shape this PR
+        # adds, so the PREPOSITION CLASS is excluded here — it is not typed here any
+        # more, it is interpolated from `_PREPOSITIONS` — one noun phrase, not two, and
+        # the cue is REPORTED. ⛔ `during|until|as|than` were missing from the first
+        # draft's hand-typed run (round-2 review, P2, measured), which is why the four
+        # rows below exist. ⛔ AND THE CLASS HAS TWO REASONS FOR WHAT IT STILL MISSES
+        # (review at `5b82bcdf03`, P2, measured); the guard's note states both:
+        # `after|before|since` are PREPOSITIONS AND SUBORDINATORS, so the subordinator
+        # lookahead refuses the shape first and excluding them from this list is a
+        # NO-OP (measured: 0 of 277 probes move), while the conjunctions
+        # `and|or|but|so|yet` are silent because the second-NP test reads a coordination
+        # as one — a LIST decision (excluding them DOES report them: 5 probes flip, 0
+        # pinned rows move). Both groups are pinned in `NOT_SELECTED`, the first by the
+        # module-level preposition test and the second by
+        # `test_the_conjunction_silence_is_a_LIST_decision_not_a_participle_bound`.
+        ("is the export archived by the vendor", "is_copula"),
+        ("is the billing service deprecated for the new plans", "is_copula"),
+        ("is the Q3 export archived in the old sharepoint", "is_copula"),
+        ("is the data archived on the old server", "is_copula"),
+        ("is the export archived during the migration", "is_copula"),
+        ("is the export archived until the merger", "is_copula"),
+        ("is the export archived as the old policy", "is_copula"),
+        ("is the export archived than the old sharepoint", "is_copula"),
         ("list what we retired in Q3", "imperative_what"),
         # …and the compound question the table has always refused
         ("what ended, and what replaced it", "wh_whole_question"),
@@ -1047,6 +1100,16 @@ def test_a_strong_cue_that_does_not_fire_reports_itself_and_never_routes():
         assert payload["reason"] == "shape"
         assert payload["cue"], "the notice must name the words it saw"
         assert payload["hint"] == MISSED_ROUTE_HINT
+        # ⛔ THE CLEARED KEY SET IS DERIVED FROM THIS PAYLOAD, so it is pinned HERE:
+        # `sdk._tortoise_fts_query` clears a reused caller sink by KEY (never with
+        # `dict.clear()` — the sink may carry the caller's own bookkeeping), using
+        # `STATE_NOTICE_KEYS`. A key added to the payload without being added to that
+        # constant would leave a STALE notice on a reused sink, which is the one thing
+        # the clear exists to stop.
+        assert tuple(payload) == STATE_NOTICE_KEYS, (
+            f"payload keys {tuple(payload)} != STATE_NOTICE_KEYS {STATE_NOTICE_KEYS} — "
+            f"the sink clear in `sdk._tortoise_fts_query` is key-scoped and would leak "
+            f"the difference as a stale notice")
 
     # …and the notice is NOT emitted where there is nothing to report: an
     # ordinary content query (the four that must not route, and a record lookup)
@@ -1073,6 +1136,133 @@ def test_a_strong_cue_that_does_not_fire_reports_itself_and_never_routes():
         assert missed_route_payload(got) is None, (
             f"{quiet!r} carries no state cue, so a notice on it would be noise on "
             f"a content search")
+
+
+#: `_BLOCKED_TAIL`'s CONJUNCTION members — the SECOND of the two silent groups the
+#: guard's note names, and the one whose cause is that guard itself rather than the
+#: subordinator lookahead. Named here so the class is a class, not a set difference.
+_CONJUNCTION_TAIL_MEMBERS = frozenset(("and", "or", "but", "so", "yet"))
+
+#: `_BLOCKED_TAIL`'s TIME ADVERBS and DETERMINERS — the members whose `<member> the
+#: <noun>` spelling is not an appended qualifier at all (`recently`, `this`). Named so
+#: the partition asserted below can be read instead of inferred.
+_NON_NOMINAL_TAIL_MEMBERS = frozenset((
+    "last", "next", "this", "these", "those", "yesterday", "today", "tomorrow",
+    "recently", "lately", "already", "ever", "now", "still", "previously",
+    "earlier", "afterwards", "once", "then", "anymore", "ago",
+))
+
+
+def _the_two_guards():
+    """`is_copula`'s subject guard, split into the two alternations it is built from.
+
+    Read OUT of :data:`state_intent._COPULA_SUBJECT` rather than re-typed: the claim in
+    the guard's note is a statement ABOUT those two lists, so a copy of them would only
+    test the copy. It raises loudly when the pattern's shape changes, because that is the
+    moment the note and this test must be re-derived together.
+    """
+    import re
+
+    from tortoise import state_intent
+
+    pattern = state_intent._COPULA_SUBJECT
+    subordinators = re.search(
+        r"\(\?!\(\?:\[a-z0-9\]\[a-z0-9[^)]*\)\{1,5\}\("
+        r"(?:\?:)?([a-z|]+)\)", pattern)
+    second_np = re.search(r"\{0,4\}\(\?!\(\?:([a-z|]+)\)", pattern)
+    assert subordinators and second_np, (
+        "`_COPULA_SUBJECT` no longer parses into its two alternations — re-derive this "
+        "test AND the note it checks against the new pattern, rather than deleting the "
+        "check: the note is a claim about exactly these two lists")
+    return (frozenset(subordinators.group(1).split("|")),
+            frozenset(second_np.group(1).split("|")))
+
+
+def _blocked_tail_members():
+    """`_BLOCKED_TAIL`'s wording, out of the regex fragment that defines it."""
+    import re
+
+    from tortoise import state_intent
+
+    inner = re.search(r"\\b\(\?:([a-z|]+)\)\\b", state_intent._BLOCKED_TAIL)
+    assert inner, (
+        "`_BLOCKED_TAIL` no longer exposes its closed word list as one alternation — "
+        "re-derive this test rather than skipping it")
+    return frozenset(inner.group(1).split("|"))
+
+
+def test_the_conjunction_silence_is_a_LIST_decision_not_a_participle_bound():
+    """The OTHER silent tail group — refused HERE, not by the subordinator lookahead.
+
+    ⛔ THIS PIN EXISTS BECAUSE THE GUARD'S NOTE GAVE BOTH SILENT GROUPS ONE REASON, AND
+    FOR THIS GROUP THE REASON IS FALSE (review at `5b82bcdf03`, P2, measured). The note
+    said a CONJUNCTION or SUBORDINATOR member still silences this shape "because guard A
+    refuses inside the subject". For `and|or|but|so|yet` that is not what happens:
+
+    * not one of the five is in the subordinator lookahead (asserted below, read out of
+      the pattern, not restated);
+    * what refuses them is the second-NP test reading `and the migration` as the start
+      of a coordinated noun phrase;
+    * so their silence is a LIST DECISION, not the participle bound that the three
+      preposition/subordinator overlaps (`after|before|since`) are stuck behind —
+      excluding the five from that one word list DOES report them.
+
+    That distinction is not pedantry, it is the note's whole content and it decides what
+    a later round can fix cheaply: routing these five is one list entry, whereas routing
+    `after|before|since` needs the lookahead bounded at the participle, which is measured
+    to re-route the round-16 hijack. Measured when the change was tried and reverted:
+    **5 probes flip, 0 pinned rows move**, so the widening is safe — it is simply a
+    recall decision with its own review, not a repair of a false claim.
+
+    The partition assert is the other half: `_BLOCKED_TAIL` must be fully classified by
+    the four sets named here, so a member added later cannot skip this question.
+    """
+    from tortoise import state_intent
+    from tortoise.state_intent import detect_state_question, missed_route_payload
+
+    subordinators, second_np = _the_two_guards()
+    members = _blocked_tail_members()
+
+    # ── the PARTITION: every table member belongs to exactly one of the declared groups.
+    declared = (set(state_intent._PREPOSITIONS)
+                | _CONJUNCTION_TAIL_MEMBERS
+                | (subordinators & members)
+                | _NON_NOMINAL_TAIL_MEMBERS)
+    assert declared == members, (
+        f"`_BLOCKED_TAIL` has unclassified {sorted(members - declared)} and stale "
+        f"{sorted(declared - members)} — classify the new member here (is it a "
+        f"preposition, a conjunction, a subordinator, or a time adverb?) so the guard's "
+        f"note keeps describing the table that exists")
+
+    # ── the CAUSE, read out of the guard rather than restated: this group is NOT
+    # refused by the subordinator lookahead...
+    assert not (_CONJUNCTION_TAIL_MEMBERS & subordinators), (
+        f"{sorted(_CONJUNCTION_TAIL_MEMBERS & subordinators)} reached the subordinator "
+        f"lookahead — the note's two-group split has to be re-derived: it states these "
+        f"five are refused by the SECOND-NP test, not by that lookahead")
+    # …and none of them is excluded from the second-NP test either, which is what makes
+    # the silence a list decision rather than a property of English.
+    assert not (_CONJUNCTION_TAIL_MEMBERS & second_np), (
+        f"{sorted(_CONJUNCTION_TAIL_MEMBERS & second_np)} is now excluded from the "
+        f"second-NP test, so the shape should REPORT it — if a round made that widening "
+        f"deliberately, correct the guard's note (it states all five are still silent "
+        f"and why) and these pins together")
+
+    for member in sorted(_CONJUNCTION_TAIL_MEMBERS):
+        # A FIXED FRAME, so the probe is mechanical rather than a claim about which
+        # sentences people say; the natural spellings are pinned in `NOT_SELECTED`.
+        query = f"is the export archived {member} the migration"
+        got = detect_state_question(query)
+        assert got.population is None, (
+            f"{query!r} was ROUTED to {got.population!r} (shape {got.shape!r}) — this "
+            f"shape REPORTS a tail, it never routes one: the population cannot apply "
+            f"the caller's coordination (#14033's hijack direction)")
+        assert got.signal is None and missed_route_payload(got) is None, (
+            f"{query!r} now REPORTS {got.signal!r}: if a round deliberately routed the "
+            f"conjunction class, update the guard's note (it states these five are still "
+            f"silent) and `NOT_SELECTED` in the same commit — the point is that the note "
+            f"and the behaviour never disagree")
+
 
     # …and a routed question reports nothing, because it WAS applied.
     for routed in ("what ended", "has anything been withdrawn"):
@@ -1136,6 +1326,99 @@ def test_the_two_silences_the_comments_name_are_measured_not_hoped():
             f"{reported!r} is a refused constraint and must be REPORTED (its first "
             "word `as` is a `_BLOCKED_TAIL` member) — if the list lost it, the "
             "comment's '`as yet` is outside the list' example becomes true again")
+
+
+def test_every_preposition_the_module_declares_reports_the_qualifier_it_introduces():
+    r"""The PREPOSITION class has ONE home, and BOTH consumers are measured (round-25).
+
+    #14033's defect is a state cue that does not fire and says nothing, and the
+    ``is_copula`` subject guard and the notice's :data:`_BLOCKED_TAIL` each decide
+    whether ``<participle> <prep> the <noun>`` is a refused constraint. Each carried
+    its OWN hand-typed preposition run, and the two copies drifted twice — both
+    caught by review, both after the fact:
+
+    * round-1 P1 — ``is the export archived by the vendor`` was SILENT while
+      ``… retired by legal`` (a bare-noun qualifier) was reported;
+    * round-2 P2 — ``during``/``until``/``as``/``than`` were still silent after
+      that fix, and the prose above the guard claimed the class was closed.
+
+    A third hand-typed copy drifts a third time, so both sites now interpolate
+    :data:`state_intent._PREPOSITIONS` and this test drives EVERY member through the
+    detector. Drop one member from EITHER site and its row goes back to
+    ``signal=None`` — which is why the pin is a loop over the declared class rather
+    than a handful of examples (the earlier pins were examples, and that is how the
+    first two omissions got through).
+
+    ⛔ The DELIBERATE omissions are pinned too, so a later reader sees a decision
+    rather than an oversight: ``after``/``before``/``since`` are prepositions AND
+    subordinators, and their silence is the guard-A trade the module records.
+    """
+    from tortoise import state_intent
+    from tortoise.state_intent import detect_state_question
+
+    declared = state_intent._PREPOSITIONS
+    assert len(declared) >= 40, (
+        f"the declared preposition class collapsed to {len(declared)} members "
+        f"({declared!r}) — a list that short cannot be the class its prose names")
+    assert len(set(declared)) == len(declared), (
+        "a duplicated member is a copy-paste artefact, not a class")
+
+    for prep in declared:
+        # …the shape this PR adds, whose guard read a prepositional qualifier as a
+        # second noun phrase and swallowed the cue.
+        got = detect_state_question(f"is the export archived {prep} the migration")
+        assert got.population is None, (
+            f"{prep!r}: the qualifier was ROUTED to {got.population!r} — a narrowing "
+            f"the read cannot apply is a silently-dropped constraint. If the class is "
+            f"deliberately wider than the notice, it must not be: the notice is the "
+            f"only channel that tells the caller the cue did not fire")
+        assert got.signal == "is_copula", (
+            f"{prep!r}: `is the export archived {prep} the migration` reports "
+            f"{got.signal!r}, not 'is_copula' — that is #14033's own defect (a state "
+            f"cue that does not fire and says nothing) on the shape this PR adds. "
+            f"Both the `is_copula` subject guard and `_BLOCKED_TAIL` interpolate "
+            f"`_PREPOSITIONS`, so this word was dropped from one of them")
+
+        # …and the notice is not `is_copula`-only: `_BLOCKED_TAIL` is the tail every
+        # tail-anchored shape swaps its end anchor for, so the SAME word must reach the
+        # notice on a different shape — the second consumer, measured separately. (The
+        # `has <subject> been <participle>` spelling reports `is_copula`, whose perfect
+        # branch claims it first; the relative-clause window is what makes it `existence`.)
+        other = detect_state_question(
+            f"has anything we promised been withdrawn {prep} legal")
+        assert other.population is None, (prep, other)
+        # WHICH existence row reports is the window guard's business (`as` trips the
+        # guarded shape and its unguarded twin reports) — the property this pin owns is
+        # the one the class fixes: the word reaches the notice instead of going silent.
+        assert other.signal in ("existence", "existence_unguarded"), (
+            f"{prep!r}: `has anything we promised been withdrawn {prep} legal` "
+            f"reports {other.signal!r} — the shape's own notice lost this preposition, "
+            f"which `_BLOCKED_TAIL` inherits from `_PREPOSITIONS`")
+
+    # ⛔ THE DEPARTURE, PINNED SO IT READS AS A DECISION: these three are prepositions
+    # in this position and still SILENCE the shape, because guard A refuses a
+    # subordinator inside the subject and cannot tell a tail from a subject without
+    # bounding itself at the participle (measured to re-route the round-16 hijack).
+    # The notice is genuinely still owed for them — the module says so — and the day
+    # that is closed, this block is what has to change.
+    for overlap in ("after", "before", "since"):
+        assert overlap not in declared, (
+            f"{overlap!r} is a subordinator overlap — admitting it to the class is a "
+            f"behaviour decision (it changes what `is the export archived "
+            f"{overlap} the merger` reports), not a list completion")
+        got = detect_state_question(f"is the export archived {overlap} the merger")
+        assert got.population is None and got.signal is None, (
+            f"{overlap!r} now reports {got.signal!r}: if the subordinator silence was "
+            f"deliberately closed, say so in the guard-B note and in `_BLOCKED_TAIL`'s "
+            f"limit paragraph, which both state it as still owed")
+
+    # …and the particles must NOT be in it: `what ended up happening` is a content
+    # query and `up` is a particle, not a preposition in that position.
+    for particle in ("up", "down", "off"):
+        assert particle not in declared, (
+            f"{particle!r} is a particle (`what ended up happening`), not a "
+            f"preposition introducing a narrowing — its admission reports a content "
+            f"query as a state cue")
 
 
 def test_a_relative_clause_in_the_perfect_still_routes():
@@ -2455,11 +2738,19 @@ def test_a_missed_state_cue_is_distinguishable_from_an_honest_empty(sdk):
         "state cue was seen")
     reused_status = dict(status)          # carries this test's earlier notice
     reused: dict = dict(notice)
+    # ⛔ …and the CLEAR IS KEY-SCOPED (review P2, measured). The sink belongs to the
+    # CALLER, so a reused dict may also carry that caller's own bookkeeping; the
+    # hygiene this block performs must not destroy it. `dict.clear()` did, which is
+    # what the code shipped before this row: the sibling `truncation.mark_truncation`
+    # (the pattern the comment cites) writes its own keys and `pop`s its own stale one,
+    # and never wipes the mapping.
+    reused["caller_own_key"] = "kept"
     sdk._tortoise_fts_query("launch event", entity_type="point", limit=5,
                             _state_route_out=reused,
                             read_status_out=reused_status)
-    assert reused == {}, (
-        f"a REUSED sink kept a stale notice {sorted(reused)} on a content read")
+    assert reused == {"caller_own_key": "kept"}, (
+        f"the clear took something it does not own: {sorted(reused)} (a stale notice "
+        f"must go, a caller's own key must not)")
     assert "state_question" not in reused_status, (
         "a REUSED read-status sink kept a stale `state_question` on a content "
         "read — the cleared-then-decided rule is what stops that")

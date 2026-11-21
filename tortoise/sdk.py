@@ -46337,7 +46337,7 @@ class TortoiseSDK:
         # a non-Point family raises at the top — replies with an exception, never
         # with a clean read.)
         if _state_route_out is not None:
-            _state_route_out.clear()
+            _clear_state_notice_keys(_state_route_out)   # BY KEY: a caller's own keys survive
         if read_status_out is not None:
             read_status_out.pop("state_question", None)
         if _state_notice is not None:
@@ -62861,3 +62861,30 @@ def _wire_vocabulary_gap_run_reader_10626() -> None:
 
 
 _wire_vocabulary_gap_run_reader_10626()
+
+
+def _clear_state_notice_keys(sink: dict) -> None:
+    """Clear the state-notice keys a REUSED caller sink may still carry (#14033).
+
+    The sink is CALLER-OWNED and may be REUSED, so the notice a previous call wrote
+    has to go before the next decision is written — that is the anti-stale property.
+
+    ⛔ BY KEY, NEVER `dict.clear()` (review P2, measured). Wiping the mapping also
+    destroys whatever bookkeeping the caller keeps beside these keys, which the
+    contract never claims to own. The sibling `truncation.mark_truncation` — the
+    pattern this hygiene is modelled on — writes its own keys, `pop`s its own stale
+    one, and never clears the mapping; the comment at the call site used to claim
+    the opposite. `state_intent.STATE_NOTICE_KEYS` is the closed list, asserted
+    against the payload `missed_route_payload` builds, so a key added there without
+    being added here cannot silently leave a stale notice behind.
+
+    ⛔ DEFINED AT THE FOOT OF THE MODULE ON PURPOSE: `docs/architecture/
+    CAPABILITY-PLACEMENT-AUDIT.md` pins `sdk.py:<line>` addresses by CONTENT, so an
+    insertion anywhere above them rots every one of them. The call site above is
+    therefore the same TWO lines it was, and this helper lives below the last pinned
+    address — a fix that shifts a 62k-line document's cites is its own regression.
+    """
+    from .state_intent import STATE_NOTICE_KEYS
+
+    for key in STATE_NOTICE_KEYS:
+        sink.pop(key, None)
