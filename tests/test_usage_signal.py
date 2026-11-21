@@ -921,32 +921,58 @@ def _getattr_reaching_a_store(
     (`getattr(t, name)`) stays genuinely out of scope, and is named as such beside
     `importlib.import_module`/`__import__`.
 
-    ⛔ AND THE POSITIONAL READ IS EXHAUSTIVE, not a partial leg: `getattr` is a
-    builtin that accepts NO keyword arguments (`getattr(o, name="x")` raises
-    `TypeError: getattr() takes no keyword arguments`, measured on 3.12), so the
-    keyword spelling is not a reach this leg misses — it cannot execute at all.
-    Recorded here because a reviewer counted it as a hole (it is statically
-    literal, so it looked like the same class) and the next reader will too.
+    ⛔ THE BUILTIN `getattr` HAS NO EXHAUSTIVE KEYWORD FORM, BUT THE HOOK DOES.
+    `getattr` accepts NO keyword arguments (`getattr(o, name="x")` raises
+    `TypeError`, measured on 3.12), so for the BUILTIN the keyword spelling is not a
+    reach this leg misses — it cannot execute at all. That reasoning does NOT carry
+    to `tortoise.__getattr__`, which is `def __getattr__(name: str)` and therefore
+    DOES accept `name=`, so the hook's keyword form is a real live reach and is
+    read below alongside the positional one.
+
+    ⚠️ **AND COVERAGE IS SYNTACTIC — stated, because it cannot be completed.** A
+    `getattr`/hook reached through a local ALIAS (`f = getattr; f(tortoise, "X")`,
+    `g = tortoise.__getattr__; g("X")`), through `operator.attrgetter("X")`, or via
+    a direct `tortoise.__getattribute__("X")` call is NOT resolved here, and neither
+    is any name assembled at runtime. Each of those is a literal string one
+    indirection away and this walker does not follow indirections of that kind; the
+    set of such spellings has no natural end, so the boundary is declared rather
+    than chased. What IS guaranteed is the direct form, in every placement.
     """
     found: set[str] = set()
     for node in nodes:
-        # ⛔ `tortoise.__getattr__("FalkorDB")` — the PEP-562 hook itself, called
-        # directly with a literal name. Same reasoning as `getattr` above: the name
-        # is a string constant in the source, and `tortoise.__getattr__` really is a
-        # module attribute that returns the guarded client (`__init__.py:373`).
+        # ⛔ `tortoise.__getattr__("FalkorDB")` AND `tortoise.__getattr__(name=
+        # "FalkorDB")` — the PEP-562 hook itself, called with a literal name. Same
+        # reasoning as `getattr` above: the name is a string constant in the source,
+        # and `tortoise.__getattr__` really is a module attribute that returns the
+        # guarded client (`__init__.py:373`). The KEYWORD form is accepted because
+        # the hook is `def __getattr__(name: str)` — unlike the builtin, it does not
+        # reject it.
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "__getattr__"
             and isinstance(node.func.value, ast.Name)
             and node.func.value.id in bound
-            and len(node.args) >= 1
-            and isinstance(node.args[0], ast.Constant)
-            and isinstance(node.args[0].value, str)
         ):
-            name = f"tortoise.{node.args[0].value}"
-            if name in _REACHABLE_FROM_ROOT:
-                found.add(name)
+            argument = None
+            if len(node.args) >= 1:
+                argument = node.args[0]
+            else:
+                argument = next(
+                    (
+                        keyword.value
+                        for keyword in node.keywords
+                        if keyword.arg == "name"
+                    ),
+                    None,
+                )
+            if (
+                isinstance(argument, ast.Constant)
+                and isinstance(argument.value, str)
+            ):
+                name = f"tortoise.{argument.value}"
+                if name in _REACHABLE_FROM_ROOT:
+                    found.add(name)
         if not (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
@@ -1242,6 +1268,18 @@ def test_no_graph_dependency_pins_the_package_root_EXPORT_form() -> None:
     assert _offending('import tortoise\nc = tortoise.__getattr__("sdk")\n') == {
         "tortoise.sdk"
     }
+    # …and the KEYWORD form, which the hook accepts (`def __getattr__(name: str)`)
+    # even though the builtin `getattr` rejects it.
+    assert _offending(
+        'import tortoise\nc = tortoise.__getattr__(name="FalkorDB")\n'
+    ) == {"tortoise.FalkorDB"}
+    # ⚠️ The remaining literal-name indirections are DECLARED out of scope in the
+    # scope note rather than resolved; pinned here so the boundary is visible and a
+    # future reader cannot mistake silence for coverage.
+    assert _offending('import tortoise\nf = getattr\nf(tortoise, "FalkorDB")\n') == set()
+    assert _offending(
+        'import tortoise\nc = tortoise.__getattribute__("FalkorDB")\n'
+    ) == set()
     # …and the harmless spellings stay clean, so the ban is not a blanket. Bare
     # `import tortoise` and an unrelated attribute must not redden, and neither
     # must an attribute read on a name that was never bound to the package root
