@@ -1709,4 +1709,12 @@ def test_a_DRY_RUN_pass_that_plans_clears_an_earlier_pin_hold():
         f"report offers `unpin` for a hold that is not what ended the sweep. "
         f"reason={report.reason!r}"
     )
-    assert g.node_keys(), "a dry run deleted nodes"
+    # ⛔ `g.node_keys()` only reddens when a dry run empties the graph — measured: deleting
+    # the `continue` in the `if dry_run:` arm made the run fall through to `_delete_nodes`
+    # (18 of 20 nodes left, `deleted=2`, `planned=2`, `verdict=DRY_RUN`) and THIS row still
+    # passed. `report.deleted` is the field that says it, and the sibling row in
+    # `test_cache_eviction_evictor_pins.py` (which does redden under that mutant) covers the
+    # class; this row states the same claim in the terms a reader expects.
+    assert report.deleted == (), (
+        f"a dry run deleted {len(report.deleted)} node(s) — a plan may not execute"
+    )
