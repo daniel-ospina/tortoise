@@ -2529,10 +2529,7 @@ def set_org_onboarding_email_sent(cp, org_id: str) -> bool:
     NULL (return=representation). True only when THIS call performed the
     stamp (one row updated) — a marker already set (concurrent provision /
     replay raced us) returns False and the provider Idempotency-Key
-    ``onboarding:{org_id}`` collapsed the duplicate send — within that key's
-    24 h retention window (Resend dedupes against "the last 24 hours"); a replay
-    that arrives after the window sends again, so the key bounds the duplicate
-    rather than removing it."""
+    ``onboarding:{org_id}`` collapsed the duplicate send, bounded by that key's 24 h window."""
     rows = cp.query(
         "organizations",
         select=["id"],

@@ -17454,8 +17454,8 @@ async def send_onboarding_offer_email_endpoint(request: Request):
                 # the provider Idempotency-Key collapsed the duplicate send
                 # inside its 24 h window; after that window a replay sends again.
                 _logger.warning(
-                    "onboarding email: sent for team %s but the concurrent "
-                    "sender's marker was provider-deduped (24 h window)", org_id)
+                    "onboarding email: sent for team %s; a concurrent sender "
+                    "stamped the marker (the SEND was deduped, 24 h window)", org_id)
             return {"status": "sent",
                     "message_id": result.get("message_id")}
         # Sender-side skip/failure: marker UNSET — the edge-fn retry (or a

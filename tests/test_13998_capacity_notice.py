@@ -1616,8 +1616,12 @@ _NOT_PROVIDER_SEND = re.compile(
 #: happens to mention a session row — a review showed three such sentences
 #: ("prevents the duplicate notice, so a replayed 402 report never sends twice",
 #: "collapses the duplicate email even when one click is retried", "removes the
-#: duplicate send on the non-episodic session path"). So it only applies when no
-#: delivery word is present: the sentence must be about ROWS, not about an email.
+#: duplicate send on the non-episodic session path"). So it only applies when none of
+#: `_DELIVERY_WORD`'s seven words appears — an ABSENCE test, not a reading of what the
+#: sentence is about. ⛔ Measured, that test can still swallow a real claim: "the
+#: provider Idempotency-Key collapses the duplicate a one click retry produces to the
+#: customer" names no delivery word and grades nothing. The veto is therefore one more
+#: enumeration limit, listed with the others below — not a scope that makes it safe.
 _DELIVERY_WORD = re.compile(
     r"\bemail|\bnotice|\bsend|\bsent|\bdeliver|\bstamp|\baccept",
     re.IGNORECASE)
@@ -1722,11 +1726,12 @@ def test_every_idempotency_key_claim_names_the_providers_retention_window():
         safe") — outside the subject match;
       * a claim that names the key but no delivery object (email/notice/send/
         sent/deliver/stamp/accept/duplicate/replay) — outside `_SEND_OBJECT`;
-      * a claim phrased entirely in session-row vocabulary (`session_id`, `one
-        click`, `non-episodic`, `402`) with no delivery word — the
-        session-create veto, which is scoped exactly that way so it cannot
-        swallow a real notice claim (three such sentences are graded as cases
-        below);
+      * a claim phrased in session-row vocabulary (`session_id`, `one click`,
+        `non-episodic`, `402`) with no delivery word — the session-create veto.
+        Its test is the ABSENCE of six words and nothing else, so it CAN swallow a
+        real claim: measured, "the provider Idempotency-Key collapses the duplicate
+        a one click retry produces to the customer" grades nothing. The three
+        sentences it used to hide on this branch ARE graded, and remain cases below;
       * a real but UNRELATED `24 h` in the claim's own sentence — the bound is
         matched by shape, not by referent;
       * ⛔ THE DOMINANT LIMIT, and the one that hid for three cycles: the VERB SET
