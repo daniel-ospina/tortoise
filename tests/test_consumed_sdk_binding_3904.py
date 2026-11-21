@@ -46,9 +46,13 @@ DRIVING THE REAL HANDLER
 
     Two argument vectors are tried per handler — ``minimal`` (required params
     filled, defaults elsewhere) and ``typed`` (every param filled) — and the
-    reads are UNIONED. ``_DRIVE_OVERRIDES`` adds a targeted vector for the three
+    reads are UNIONED. ``_DRIVE_OVERRIDES`` adds a targeted vector for the
     handlers whose declared read sits behind an early-return branch a generic
-    vector cannot reach (a real directory, an entity id, a valid action). A
+    vector cannot reach (a real directory, an entity id, a valid action). ⛔ Its
+    SIZE is deliberately never stated here, and was wrong ("three") until #14248:
+    the map holds one entry per such handler, so a count in this docstring drifts
+    silently with the suite still green — the same reason the map's own comment,
+    below, refuses a typed number. A
     handler that reaches NO SDK read at all is an explicit, CLOSED ledger
     (``_HANDLER_SERVED_NO_SDK_READ``) checked in BOTH directions — never a silent
     pass.
