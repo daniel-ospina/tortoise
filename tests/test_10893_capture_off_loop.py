@@ -170,16 +170,16 @@ _ON_LOOP_RESIDUAL: dict[str, str] = {
     # exemption is the number that sizes the residual. An earlier cut of this
     # comment said "~9 other call sites", understating it ~4× (#14086 review,
     # P2).
-    # ⛔ ITS OWNER IS AN OPEN ISSUE: #14112 off-loads the four stamp sites
-    # (`hosted_api.py` :21182 / :21209 / :21248 / :21283, still inline on this
-    # head) as ONE closure and then DELETES this entry — deleting it is what
+    # ⛔ ITS OWNER IS AN OPEN ISSUE: #14112 off-loads the four stamp sites as ONE
+    # closure and then DELETES this entry — deleting it is what
     # closes the generic-wrapper hole above. ⛔ An earlier cut pointed at #14104,
     # which is CLOSED (NOT_PLANNED); an entry whose owner cannot act is a
     # permanent unowned exemption, the one thing this table exists to prevent, and
     # this file's contract says every entry NAMES the issue that owns removing it
     # (#14086 round-2 review, R2-1).
-    "_graph_write_with_retry": "#14112 (the capture's four provenance stamp sites, currently "
-    "inline at `hosted_api.py` :21182 / :21209 / :21248 / :21283)",
+    "_graph_write_with_retry": "#14112 (the capture's four provenance stamp sites, still "
+    "inline — the issue lists them; no line number here, because this table's "
+    "figures are the ones that rot)",
     # NOT observed on the measured path (the checkpoint that reached it is now
     # off-loaded). Listed because the census drives ONE branch of this handler
     # and the completion gate is reached from others; an entry here is a
