@@ -252,13 +252,13 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (1090 lines at this head, measured through THIS function's own
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (1094 lines at this head, measured through THIS function's own
     walk — re-derive it after a prose edit instead of trusting the figure: `#14086` left one blank
     line inside the run and it silently shrank to 22 until the #14188 repair; PR #14258's own two
     prose commits grew it to 1066 at `main` `70fbd1a27dd5` while this sentence still said 985, which
-    was true at `04afeb811d` — review of #14258, P3; and this branch's appended attribution
-    paragraph adds to that run, so the figure here is RE-DERIVED on this tree, not carried from
-    either lineage), AND THE ARMS GRADE ALL OF IT
+    was true at `04afeb811d` — review of #14258, P3; and this branch's own cuts moved it on top of
+    that, so the figure here is RE-DERIVED on this tree, not carried from either lineage), AND THE
+    ARMS GRADE ALL OF IT
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
     and the residue section's prose is contiguous all the way up to its opening sentence — so
