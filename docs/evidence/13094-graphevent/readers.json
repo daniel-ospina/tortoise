@@ -171,7 +171,7 @@
       "min_occurrences": 2,
       "needs": "a full label-agnostic dump",
       "class": "maintenance",
-      "why": "the export carries `:GraphEvent` rows because it carries everything; it names no label and needs no capability. \u26a0\ufe0f It is censused because a re-home must decide what the export does with the shape, not because it reads one."
+      "why": "the export carries `:GraphEvent` rows because it carries everything; it names no label and needs no capability. \u26a0\ufe0f It is censused because a re-home must decide what the export does with the shape, not because it reads one. \u26a0\ufe0f This statement occurs FOUR times in the file and the two censused sites are byte-identical, so `min_occurrences` proves only that the file still carries at least two of them \u2014 it cannot prove BOTH censused sites survive (a named residual; the `line` is the address)."
     },
     {
       "file": "tortoise/hosted_backup.py",
@@ -183,7 +183,7 @@
       "min_occurrences": 2,
       "needs": "a full label-agnostic dump",
       "class": "maintenance",
-      "why": "the second whole-graph scan: the same statement shape as the line above, in the restore path, so both rows require TWO occurrences."
+      "why": "the second whole-graph scan (the restore's node-count verification): the same statement shape as the line above, so both rows require two occurrences \u2014 see the residual noted on that row."
     }
   ],
   "counts": {
