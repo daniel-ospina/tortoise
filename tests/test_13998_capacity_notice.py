@@ -1819,17 +1819,39 @@ def test_the_idempotency_bound_guard_grades_a_bound_and_an_unbounded_claim():
         "window.",
         "the duplicate send a crash between accept and stamp can produce is "
         "covered by the provider Idempotency-Key, inside its 24 h window.",
-        "the provider Idempotency-Key onboarding:{org_id} collapses the "
-        "duplicate notice from cross-process replays <=24h.",
+        # the artifact's own wording, `≤24h` included. A previous cut of this fix
+        # reworded it to "the duplicate notice from cross-process replays", which
+        # appears in NO artifact, and in doing so dropped the only bounded sample
+        # that pinned the replay-only shape. DELIBERATELY a fragment, against the
+        # rule stated above: measured with `|\breplay` removed from
+        # `_SEND_OBJECT`, the artifact's FULL sentence still grades a claim
+        # ("send"/"stamp" in its surrounding clause) while this fragment does not
+        # — so quoting the whole sentence would mask a `replay` regression.
+        "the provider Idempotency-Key onboarding:{org_id} collapses "
+        "cross-process replays \u226424h.",
+        # SYNTHESISED. Measured: the artifact's own sentence
+        # (`capacity_notice.py`: "Resend keeps a key for \"the last 24 hours\" …")
+        # IS graded a claim — but only by accident of its URL slug
+        # (``idempotency-keys`` satisfies `_SUBJECT`) and its leading "THAT
+        # COLLAPSE" clause (`_COLLAPSE`); the bare "Resend keeps a key for …"
+        # fragment grades nothing, failing BOTH. So the artifact's wording is
+        # graded, but by a path this guard would not credit, which is no help in
+        # pinning that a plain sentence naming the key and the bound is read as
+        # bounded. This sample states that plainly and independently. The
+        # artifact's real prose is graded by the artifact row above, not copied
+        # here, so the two cannot drift apart.
         "Resend keeps the Idempotency-Key for the last 24 hours, so it "
         "collapses a replayed notice inside that window.",
     ):
         claims, unbounded = _idempotency_claims(sample)
         # ⛔ #14038 review (P3, tree): the previous cut asserted only
         # `not unbounded`, so a sample the detector did not read as a CLAIM
-        # satisfied it vacuously — three of these four did exactly that
-        # (measured: claims=0, unbounded=0). A bounded sample that is not a
-        # claim grades nothing, so both halves are asserted now.
+        # satisfied it vacuously — TWO of these four did exactly that (`claims=0,
+        # unbounded=0` for the "crash window … covered" and "Resend keeps that
+        # key" lines; measured at `ca03e79c4eb`, the parent of the commit that
+        # added this assertion — NOT at HEAD~1, where all four already graded).
+        # A bounded sample that is
+        # not a claim grades nothing, so both halves are asserted now.
         assert claims, (
             f"this sample is not read as a claim at all, so it grades no bound: "
             f"{sample!r}")
