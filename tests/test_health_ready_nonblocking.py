@@ -871,6 +871,35 @@ def test_detector_descends_into_an_on_loop_nested_def():
     )
 
 
+def test_the_fail_open_offload_boundary_is_classified_as_an_offload():
+    """``_run_off_loop_fail_open`` runs its callable in the capture pool, so the
+    #4625 census must classify it as an offload boundary.
+
+    It is ``_run_off_loop``'s fail-open twin — same dedicated executor, same
+    positional-only callable at index 0 — and the capture route hands it
+    worker-side callables (``_session_alive``, ``_sweep_orphaned_writes``,
+    ``_capture_ep_pass``) at five sites. Without the name in
+    ``_ONBOARDING_OFFLOAD_BOUNDARIES`` the census records a module-level helper
+    passed to it as ON-LOOP work, so the next
+    ``_run_off_loop_fail_open(_update_onboarding_state, …)`` is reported as an
+    inline blocking call and the guard reds on a correctly offloaded site.
+
+    No current callable separates the two classifications (all are nested
+    ``def``s, which the census never credits by name; measured on the tree at
+    ``2a6a7bed36``: 39 inline hits either way), so this row is the only
+    falsifier. It asserts on the DETECTOR, not on the frozenset literal: drop
+    the name, or break the callable-position rule, and it reds.
+    """
+    src = (
+        "async def handler():\n"
+        "    return await _run_off_loop_fail_open(_update_onboarding_state, proj, org)\n"
+    )
+    assert "_update_onboarding_state" in _offloaded_callable_names(ast.parse(src)), (
+        "a callable handed to _run_off_loop_fail_open runs in the capture pool — "
+        "the census must not treat it (or the calls inside it) as on-loop work"
+    )
+
+
 def test_detector_flags_direct_control_plane_method_io():
     """FIX E self-test: the receiver-sensitive method-form detector.
 
@@ -999,8 +1028,25 @@ _ONBOARDING_OFFLOAD_WRAPPERS = frozenset({
 #: Offload boundaries this scan must honour — a superset of
 #: ``OFFLOAD_BOUNDARY_CALLEES`` adding the data-plane / pool wrappers (#3773)
 #: that the #3498 scan did not need.
+#:
+#: ``_run_off_loop_fail_open`` (#14086) is the fail-open TWIN of
+#: ``_run_off_loop``: same seam, same dedicated ``_CAPTURE_EXECUTOR``, same
+#: callable-at-index-0 shape (``fn`` is positional-only), differing only in that
+#: a broken pool yields ``_DISPATCH_FAILED`` instead of raising. The capture
+#: route hands it worker-side callables at five sites (``_session_alive``,
+#: ``_sweep_orphaned_writes``, ``_capture_ep_pass``). Leaving the name out is not
+#: a false negative today — every one of those is a nested ``def``, so the census
+#: never credits offloaded work BY NAME for them (measured at ``2a6a7bed36``: 39
+#: inline hits with and without the name, identical) — but it makes the NEXT
+#: ``_run_off_loop_fail_open(_update_onboarding_state, …)`` read as an INLINE
+#: blocking call, i.e. a red on a site that is correctly offloaded. The pin below
+#: (``test_the_fail_open_offload_boundary_is_classified_as_an_offload``) is what
+#: keeps the classification, and it asserts on the DETECTOR rather than on this
+#: literal so a broken callable-position rule reds it too.
 _ONBOARDING_OFFLOAD_BOUNDARIES = OFFLOAD_BOUNDARY_CALLEES | frozenset({
     "_run_off_loop", "_submit_off_loop", "_run_with_close", "_run_dream_on_pool",
+    # fail-open twin of ``_run_off_loop`` — same pool, same callable position.
+    "_run_off_loop_fail_open",
 })
 
 #: Functions reachable ON the loop that STILL call an
