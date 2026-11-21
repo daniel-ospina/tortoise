@@ -5467,8 +5467,9 @@ def test_a_fifo_at_the_journal_path_cannot_park_the_absent_write(tmp_path):
             # ⛔ `_update_point` — the INTERNAL door `update_point` retired into
             # (#13899/#4282). Not `update_knowledge`: that container routes to
             # `_update_entity`, which never reaches `_report_absent_revision`,
-            # so using it here would green this test without exercising the
-            # ABSENT-write scan it exists to prove.
+            # so under it the `unreadable == 1` assertion below REDS — measured,
+            # `update_knowledge` leaves `journal_unreadable` at 0 — because the
+            # ABSENT-write scan this test exists to prove never runs.
             reply = sdk._update_point(pid, confidence=0.9)
             after = monitoring.silent_revision_loss_counts()
             print(json.dumps({
