@@ -1784,16 +1784,19 @@ def test_no_graph_dependency() -> None:
         "`hosted_backup` is a WITNESS, not the subject, so extra reach there is either a "
         "real property of that third module or the probe over-reporting, and neither is "
         "a `usage_signal` defect this test may fail on (#14118 item 1)")
-    # AND the probe's verdict is still pinned in BOTH directions across the table: the
-    # clean half reds on over-reporting (a probe that answers every banned root fails
-    # `== set()` above), and the witness half reds on under-reporting. ⛔ BUT NEITHER
-    # HALF IS WHAT CATCHES A FILTER, and saying it is would be the #14118 item-2 class
+    # AND the probe's verdict is still graded in BOTH directions across the table: the
+    # clean half is the EQUALITY an over-reporting probe violates, and the witness half
+    # is the CONTAINMENT an under-reporting probe violates — each states the DIRECTION it
+    # grades, not the row that fires first. ⛔ AND NEITHER HALF IS WHAT CATCHES A
+    # FILTER, and saying it is would be the #14118 item-2 class
     # — naming the row that does the work wrong. Measured on this head: a returned-set
     # filter keeping only exact derivation members (`… & set(_probe_forbidden())`)
     # satisfies BOTH halves (**102 passed** with the `<root>.<sub>` row removed) and is
     # caught by that row, not here (**1 failed / 101**); dropping
-    # `tortoise.hosted_backup` reds the `_all_roots` row ABOVE; and adding a banned root
-    # to the subject's answer reds the `leaked == {"falkordb"}` row ABOVE. A row that
+    # `tortoise.hosted_backup` reds the `_all_roots` row ABOVE; adding a banned root
+    # to the subject's answer reds the `leaked == {"falkordb"}` row ABOVE; and a probe
+    # that answers EVERY banned root reds that same `<root>.<sub>` row, not the
+    # `== set()` equality below. A row that
     # names the wrong one is what lets a load-bearing row be deleted on a false premise.
 
 
