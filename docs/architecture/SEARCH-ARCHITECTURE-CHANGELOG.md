@@ -398,3 +398,33 @@ structural pins are `tests/test_13422_object_subject_dense_leg.py`.
 design fact and carries no issue state. **In `SEARCH-ARCHITECTURE.md`:** the finding-6 parenthetical only — no
 measurement was re-read and no figure moved. Structural pin: `tests/test_14001_strip_gate_fail_closed.py` does
 not cover it; the shape is graded by `tests/test_extractor_v4_citation_rot.py::test_the_design_documents_carry_no_issue_state_or_change_narration`.
+
+## `#14015` — M5 measured: the miss rate a window produces, and where it stops paying
+
+§9's M5 row said the miss rate per tenant *"sizes the compute/IOPS/egress tier"* and had no result. It has one
+now, so §9.2 states it beside §9.1 rather than leaving a reader to find the bundle.
+
+**The measurement, not a re-reading of an old one.** The instrument is `tools/miss_rate_m5.py` and the record is
+`docs/evidence/14015-m5-miss-rate/`; nothing in the document was retro-fitted to it. Two quantities are
+published separately because `#13103` arms the window with fault-in: `fault_in_rate` (a demoted canonical is a
+record read — the cost, and the M5 number) and `miss_resident` (the lexical leg's own unreachability — a floor
+no window buys under). M2's quality figures are cited, never restated: M5 measures how often a read misses, not
+what it returns.
+
+**What §9 gained.** One subsection (§9.2) and the M5 row's pointer to it. The windows, the prices and §11's
+scope line are untouched — M5 measures the input to the tier and does not choose it, and the windows are read
+from `product/pricing.json` and asserted equal to it in `tests/test_miss_rate_m5.py`.
+
+**Neither label's curve has a knee.** `:Object` is near-log-linear — a constant 10.4–12.0 pp removed per
+DOUBLING of the window at every size — and `:Point` decays faster (from its peak **24.6 pp** at
+`0.15→0.30`, 24.2 pp at `0.20→0.40`, down to 5.6 pp at `0.50→1.00`) without reaching a 2 pp-per-doubling
+bar. So "good enough" has to be a DECLARED miss bar rather
+than a discovered knee, which is why the record publishes the covered-tenant size at five bars (1/2/5/10/20 %).
+The two labels still do not share a shape, so an aggregate across them averages two different laws — which
+`#13989` forbids. And the residency POLICY is worth 34.8–36.0 pp at `F ≈ 0.5` against 10.4–10.6 pp from
+doubling the window, which is why `#13989` criterion 1 is load-bearing rather than a refinement.
+
+**What the document does not claim.** The query mass is a recurrence proxy, not an observed read ledger, and the
+sensitivity sweep brackets that assumption rather than removing it; `retrieval.mode` is `keyword_only`, so no
+sentence here is about the fused read; and the `:Point` floor is a lower bound on the production ceiling, because
+`found@deep` is a rate at depth 50 and far more documents compete for those ranks at production scale.

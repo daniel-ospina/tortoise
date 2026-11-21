@@ -1,0 +1,2743 @@
+{
+  "cleanup": {
+    "graphs_created": 18,
+    "graphs_dropped": 0,
+    "note": "each arm is measured on its own graph and NO graph is dropped. `reset()` runs once per population and acts on the graph the last arm left current, so one graph per population is emptied and the rest are left POPULATED. On a lane container `test_lane.py down` disposes of them, which is the intended path; a shared server accumulates one full set per run."
+  },
+  "consumed_by": "#13989 (the working-set allowance)",
+  "corpus": {
+    "corpus": {
+      "files": 27,
+      "files_contributed": 27,
+      "lines": 738,
+      "parse_errors": 3,
+      "records_without_text": 0
+    },
+    "names_harvested": {
+      "definite": 156510,
+      "ident": 14494,
+      "path": 6031
+    },
+    "point_build": {
+      "built": 711,
+      "duplicate_span": 114,
+      "kept": 900,
+      "no_span": 74,
+      "requested": 900,
+      "sanitised_out": 1,
+      "texts_considered": 1381,
+      "too_short": 481
+    }
+  },
+  "coverage_map": {
+    "formula": "F = min(1, W/S)",
+    "why_no_bytes_per_node": "F is dimensionless, so the coverage<->MB map is independent of the per-node byte figure (\u00a717.4.2: the declared 1,024 B matches no measured regime; measured 1,672 B/resident node). The byte dispute moves NODE COUNTS, not this curve."
+  },
+  "document": "docs/architecture/SEARCH-ARCHITECTURE.md \u00a79",
+  "full_corpus_curves": {
+    "definite": {
+      "curve": [
+        {
+          "coverage": 0.02,
+          "covered_mass": 0.57182,
+          "fault_in_rate": 0.42818
+        },
+        {
+          "coverage": 0.05,
+          "covered_mass": 0.620889,
+          "fault_in_rate": 0.379111
+        },
+        {
+          "coverage": 0.1,
+          "covered_mass": 0.663701,
+          "fault_in_rate": 0.336299
+        },
+        {
+          "coverage": 0.15,
+          "covered_mass": 0.696942,
+          "fault_in_rate": 0.303058
+        },
+        {
+          "coverage": 0.2,
+          "covered_mass": 0.71477,
+          "fault_in_rate": 0.28523
+        },
+        {
+          "coverage": 0.25,
+          "covered_mass": 0.732598,
+          "fault_in_rate": 0.267402
+        },
+        {
+          "coverage": 0.3,
+          "covered_mass": 0.750424,
+          "fault_in_rate": 0.249576
+        },
+        {
+          "coverage": 0.4,
+          "covered_mass": 0.786077,
+          "fault_in_rate": 0.213923
+        },
+        {
+          "coverage": 0.5,
+          "covered_mass": 0.821731,
+          "fault_in_rate": 0.178269
+        },
+        {
+          "coverage": 0.6,
+          "covered_mass": 0.857385,
+          "fault_in_rate": 0.142615
+        },
+        {
+          "coverage": 0.7,
+          "covered_mass": 0.893039,
+          "fault_in_rate": 0.106961
+        },
+        {
+          "coverage": 0.8,
+          "covered_mass": 0.928692,
+          "fault_in_rate": 0.071308
+        },
+        {
+          "coverage": 0.9,
+          "covered_mass": 0.964346,
+          "fault_in_rate": 0.035654
+        },
+        {
+          "coverage": 0.95,
+          "covered_mass": 0.982172,
+          "fault_in_rate": 0.017828
+        },
+        {
+          "coverage": 1.0,
+          "covered_mass": 1.0,
+          "fault_in_rate": 0.0
+        }
+      ],
+      "fitted_zipf_exponent": 0.85,
+      "nodes": 156510,
+      "total_mass": 438972
+    },
+    "ident": {
+      "curve": [
+        {
+          "coverage": 0.02,
+          "covered_mass": 0.474802,
+          "fault_in_rate": 0.525198
+        },
+        {
+          "coverage": 0.05,
+          "covered_mass": 0.589737,
+          "fault_in_rate": 0.410263
+        },
+        {
+          "coverage": 0.1,
+          "covered_mass": 0.694256,
+          "fault_in_rate": 0.305744
+        },
+        {
+          "coverage": 0.15,
+          "covered_mass": 0.761872,
+          "fault_in_rate": 0.238128
+        },
+        {
+          "coverage": 0.2,
+          "covered_mass": 0.809582,
+          "fault_in_rate": 0.190418
+        },
+        {
+          "coverage": 0.25,
+          "covered_mass": 0.845268,
+          "fault_in_rate": 0.154732
+        },
+        {
+          "coverage": 0.3,
+          "covered_mass": 0.872919,
+          "fault_in_rate": 0.127081
+        },
+        {
+          "coverage": 0.4,
+          "covered_mass": 0.91179,
+          "fault_in_rate": 0.08821
+        },
+        {
+          "coverage": 0.5,
+          "covered_mass": 0.93729,
+          "fault_in_rate": 0.06271
+        },
+        {
+          "coverage": 0.6,
+          "covered_mass": 0.955627,
+          "fault_in_rate": 0.044373
+        },
+        {
+          "coverage": 0.7,
+          "covered_mass": 0.966724,
+          "fault_in_rate": 0.033276
+        },
+        {
+          "coverage": 0.8,
+          "covered_mass": 0.977813,
+          "fault_in_rate": 0.022187
+        },
+        {
+          "coverage": 0.9,
+          "covered_mass": 0.988911,
+          "fault_in_rate": 0.011089
+        },
+        {
+          "coverage": 0.95,
+          "covered_mass": 0.994451,
+          "fault_in_rate": 0.005549
+        },
+        {
+          "coverage": 1.0,
+          "covered_mass": 1.0,
+          "fault_in_rate": 0.0
+        }
+      ],
+      "fitted_zipf_exponent": 0.9,
+      "nodes": 14494,
+      "total_mass": 130665
+    },
+    "path": {
+      "curve": [
+        {
+          "coverage": 0.02,
+          "covered_mass": 0.460752,
+          "fault_in_rate": 0.539248
+        },
+        {
+          "coverage": 0.05,
+          "covered_mass": 0.618578,
+          "fault_in_rate": 0.381422
+        },
+        {
+          "coverage": 0.1,
+          "covered_mass": 0.740082,
+          "fault_in_rate": 0.259918
+        },
+        {
+          "coverage": 0.15,
+          "covered_mass": 0.806716,
+          "fault_in_rate": 0.193284
+        },
+        {
+          "coverage": 0.2,
+          "covered_mass": 0.848905,
+          "fault_in_rate": 0.151095
+        },
+        {
+          "coverage": 0.25,
+          "covered_mass": 0.878431,
+          "fault_in_rate": 0.121569
+        },
+        {
+          "coverage": 0.3,
+          "covered_mass": 0.901144,
+          "fault_in_rate": 0.098856
+        },
+        {
+          "coverage": 0.4,
+          "covered_mass": 0.931127,
+          "fault_in_rate": 0.068873
+        },
+        {
+          "coverage": 0.5,
+          "covered_mass": 0.950735,
+          "fault_in_rate": 0.049265
+        },
+        {
+          "coverage": 0.6,
+          "covered_mass": 0.960588,
+          "fault_in_rate": 0.039412
+        },
+        {
+          "coverage": 0.7,
+          "covered_mass": 0.970441,
+          "fault_in_rate": 0.029559
+        },
+        {
+          "coverage": 0.8,
+          "covered_mass": 0.980294,
+          "fault_in_rate": 0.019706
+        },
+        {
+          "coverage": 0.9,
+          "covered_mass": 0.990147,
+          "fault_in_rate": 0.009853
+        },
+        {
+          "coverage": 0.95,
+          "covered_mass": 0.995065,
+          "fault_in_rate": 0.004935
+        },
+        {
+          "coverage": 1.0,
+          "covered_mass": 1.0,
+          "fault_in_rate": 0.0
+        }
+      ],
+      "fitted_zipf_exponent": 1.0,
+      "nodes": 6031,
+      "total_mass": 61200
+    }
+  },
+  "generated_at": "2026-11-21T16:12:03Z",
+  "git_head": "5cc6bad05cf21ca47edb57f15e8c0cdfd7b4ce71",
+  "issue": 14015,
+  "labels": {
+    "object": {
+      "arms": {
+        "complete|mass": {
+          "empty_rate": 0.0,
+          "fault_in_rate": 0.0,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.0,
+          "miss_resident": 0.0,
+          "queries": 250,
+          "resident_queries": 250,
+          "resident_query_share": 1.0
+        },
+        "complete|uniform": {
+          "empty_rate": 0.0,
+          "fault_in_rate": 0.0,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.0,
+          "miss_resident": 0.0,
+          "queries": 250,
+          "resident_queries": 250,
+          "resident_query_share": 1.0
+        },
+        "mass@0.1|mass": {
+          "coverage_delivered": 0.1,
+          "coverage_requested": 0.1,
+          "empty_rate": 0.312,
+          "fault_in_rate": 0.64,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.64,
+          "miss_resident": 0.0,
+          "queries": 250,
+          "resident_queries": 90,
+          "resident_query_share": 0.36
+        },
+        "mass@0.1|uniform": {
+          "coverage_delivered": 0.1,
+          "coverage_requested": 0.1,
+          "empty_rate": 0.492,
+          "fault_in_rate": 0.936,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.936,
+          "miss_resident": 0.0,
+          "queries": 250,
+          "resident_queries": 16,
+          "resident_query_share": 0.064
+        },
+        "mass@0.25|mass": {
+          "coverage_delivered": 0.25,
+          "coverage_requested": 0.25,
+          "empty_rate": 0.16,
+          "fault_in_rate": 0.416,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.416,
+          "miss_resident": 0.0,
+          "queries": 250,
+          "resident_queries": 146,
+          "resident_query_share": 0.584
+        },
+        "mass@0.25|uniform": {
+          "coverage_delivered": 0.25,
+          "coverage_requested": 0.25,
+          "empty_rate": 0.368,
+          "fault_in_rate": 0.764,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.764,
+          "miss_resident": 0.0,
+          "queries": 250,
+          "resident_queries": 59,
+          "resident_query_share": 0.236
+        },
+        "mass@0.5|mass": {
+          "coverage_delivered": 0.5,
+          "coverage_requested": 0.5,
+          "empty_rate": 0.08,
+          "fault_in_rate": 0.204,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.204,
+          "miss_resident": 0.0,
+          "queries": 250,
+          "resident_queries": 199,
+          "resident_query_share": 0.796
+        },
+        "mass@0.5|uniform": {
+          "coverage_delivered": 0.5,
+          "coverage_requested": 0.5,
+          "empty_rate": 0.26,
+          "fault_in_rate": 0.496,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.496,
+          "miss_resident": 0.0,
+          "queries": 250,
+          "resident_queries": 126,
+          "resident_query_share": 0.504
+        },
+        "mass@0.75|mass": {
+          "coverage_delivered": 0.75,
+          "coverage_requested": 0.75,
+          "empty_rate": 0.028,
+          "fault_in_rate": 0.084,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.084,
+          "miss_resident": 0.0,
+          "queries": 250,
+          "resident_queries": 229,
+          "resident_query_share": 0.916
+        },
+        "mass@0.75|uniform": {
+          "coverage_delivered": 0.75,
+          "coverage_requested": 0.75,
+          "empty_rate": 0.156,
+          "fault_in_rate": 0.28,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.28,
+          "miss_resident": 0.0,
+          "queries": 250,
+          "resident_queries": 180,
+          "resident_query_share": 0.72
+        },
+        "uniform@0.1|mass": {
+          "coverage_delivered": 0.1,
+          "coverage_requested": 0.1,
+          "empty_rate": 0.436,
+          "fault_in_rate": 0.9,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.9,
+          "miss_resident": 0.0,
+          "queries": 250,
+          "resident_queries": 25,
+          "resident_query_share": 0.1
+        },
+        "uniform@0.1|uniform": {
+          "coverage_delivered": 0.1,
+          "coverage_requested": 0.1,
+          "empty_rate": 0.524,
+          "fault_in_rate": 0.912,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.912,
+          "miss_resident": 0.0,
+          "queries": 250,
+          "resident_queries": 22,
+          "resident_query_share": 0.088
+        },
+        "uniform@0.25|mass": {
+          "coverage_delivered": 0.25,
+          "coverage_requested": 0.25,
+          "empty_rate": 0.264,
+          "fault_in_rate": 0.764,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.764,
+          "miss_resident": 0.0,
+          "queries": 250,
+          "resident_queries": 59,
+          "resident_query_share": 0.236
+        },
+        "uniform@0.25|uniform": {
+          "coverage_delivered": 0.25,
+          "coverage_requested": 0.25,
+          "empty_rate": 0.352,
+          "fault_in_rate": 0.764,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.764,
+          "miss_resident": 0.0,
+          "queries": 250,
+          "resident_queries": 59,
+          "resident_query_share": 0.236
+        },
+        "uniform@0.5|mass": {
+          "coverage_delivered": 0.5,
+          "coverage_requested": 0.5,
+          "empty_rate": 0.14,
+          "fault_in_rate": 0.552,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.552,
+          "miss_resident": 0.0,
+          "queries": 250,
+          "resident_queries": 112,
+          "resident_query_share": 0.448
+        },
+        "uniform@0.5|uniform": {
+          "coverage_delivered": 0.5,
+          "coverage_requested": 0.5,
+          "empty_rate": 0.168,
+          "fault_in_rate": 0.492,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.492,
+          "miss_resident": 0.0,
+          "queries": 250,
+          "resident_queries": 127,
+          "resident_query_share": 0.508
+        },
+        "uniform@0.75|mass": {
+          "coverage_delivered": 0.75,
+          "coverage_requested": 0.75,
+          "empty_rate": 0.064,
+          "fault_in_rate": 0.288,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.288,
+          "miss_resident": 0.0,
+          "queries": 250,
+          "resident_queries": 178,
+          "resident_query_share": 0.712
+        },
+        "uniform@0.75|uniform": {
+          "coverage_delivered": 0.75,
+          "coverage_requested": 0.75,
+          "empty_rate": 0.084,
+          "fault_in_rate": 0.264,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.264,
+          "miss_resident": 0.0,
+          "queries": 250,
+          "resident_queries": 184,
+          "resident_query_share": 0.736
+        }
+      },
+      "curve": [
+        {
+          "coverage": 0.02,
+          "covered_mass": 0.2918,
+          "fault_in_rate": 0.7082
+        },
+        {
+          "coverage": 0.05,
+          "covered_mass": 0.477706,
+          "fault_in_rate": 0.522294
+        },
+        {
+          "coverage": 0.1,
+          "covered_mass": 0.632757,
+          "fault_in_rate": 0.367243
+        },
+        {
+          "coverage": 0.15,
+          "covered_mass": 0.707629,
+          "fault_in_rate": 0.292371
+        },
+        {
+          "coverage": 0.2,
+          "covered_mass": 0.753161,
+          "fault_in_rate": 0.246839
+        },
+        {
+          "coverage": 0.25,
+          "covered_mass": 0.787589,
+          "fault_in_rate": 0.212411
+        },
+        {
+          "coverage": 0.3,
+          "covered_mass": 0.816469,
+          "fault_in_rate": 0.183531
+        },
+        {
+          "coverage": 0.4,
+          "covered_mass": 0.860971,
+          "fault_in_rate": 0.139029
+        },
+        {
+          "coverage": 0.5,
+          "covered_mass": 0.895647,
+          "fault_in_rate": 0.104353
+        },
+        {
+          "coverage": 0.6,
+          "covered_mass": 0.923724,
+          "fault_in_rate": 0.076276
+        },
+        {
+          "coverage": 0.7,
+          "covered_mass": 0.94731,
+          "fault_in_rate": 0.05269
+        },
+        {
+          "coverage": 0.8,
+          "covered_mass": 0.967409,
+          "fault_in_rate": 0.032591
+        },
+        {
+          "coverage": 0.9,
+          "covered_mass": 0.984795,
+          "fault_in_rate": 0.015205
+        },
+        {
+          "coverage": 0.95,
+          "covered_mass": 0.992733,
+          "fault_in_rate": 0.007267
+        },
+        {
+          "coverage": 1.0,
+          "covered_mass": 1.0,
+          "fault_in_rate": 0.0
+        }
+      ],
+      "flattening": {
+        "per_tenant_size": {
+          "rows": {
+            "1200": {
+              "coverage": 0.2,
+              "criterion": "the first point past which every remaining step removes < 0.1 pp of fault-in rate per MB",
+              "pp_per_mb_at_interval": 0.075887,
+              "threshold_pp_per_mb": 0.1,
+              "w_mb": 240.0
+            },
+            "150": {
+              "coverage": 1.0,
+              "criterion": "the first point past which every remaining step removes < 0.1 pp of fault-in rate per MB",
+              "pp_per_mb_at_interval": 0.096893,
+              "threshold_pp_per_mb": 0.1,
+              "w_mb": 150.0
+            },
+            "300": {
+              "coverage": 0.6,
+              "criterion": "the first point past which every remaining step removes < 0.1 pp of fault-in rate per MB",
+              "pp_per_mb_at_interval": 0.09359,
+              "threshold_pp_per_mb": 0.1,
+              "w_mb": 180.0
+            },
+            "600": {
+              "coverage": 0.3,
+              "criterion": "the first point past which every remaining step removes < 0.1 pp of fault-in rate per MB",
+              "pp_per_mb_at_interval": 0.096267,
+              "threshold_pp_per_mb": 0.1,
+              "w_mb": 180.0
+            },
+            "75": null
+          },
+          "threshold_pp_per_mb": 0.1,
+          "why": "pp/MB is S-dependent by construction (W = F x S), so this answers 'for a tenant this size, by which MB has the window flattened' \u2014 never a property of the curve"
+        },
+        "scale_free": {
+          "gains": [
+            {
+              "from_coverage": 0.05,
+              "pp_removed": 15.5051,
+              "to_coverage": 0.1
+            },
+            {
+              "from_coverage": 0.1,
+              "pp_removed": 12.0404,
+              "to_coverage": 0.2
+            },
+            {
+              "from_coverage": 0.15,
+              "pp_removed": 10.884,
+              "to_coverage": 0.3
+            },
+            {
+              "from_coverage": 0.2,
+              "pp_removed": 10.781,
+              "to_coverage": 0.4
+            },
+            {
+              "from_coverage": 0.3,
+              "pp_removed": 10.7255,
+              "to_coverage": 0.6
+            },
+            {
+              "from_coverage": 0.4,
+              "pp_removed": 10.6438,
+              "to_coverage": 0.8
+            },
+            {
+              "from_coverage": 0.5,
+              "pp_removed": 10.4353,
+              "to_coverage": 1.0
+            }
+          ],
+          "point": null,
+          "threshold_pp_per_doubling": 2.0,
+          "why": "a DOUBLING of the window is dimensionless, so this is the knee in the SHAPE of the curve, independent of tenant size \u2014 quote this one about the shape"
+        }
+      },
+      "floor": {
+        "depth_limit": 50,
+        "miss_resident": 0.0,
+        "note": "no window can buy a miss rate below this on this label, AT THIS POPULATION SIZE",
+        "population_scale_caveat": "measured on 1000 nodes at depth 50. At production scale (tens of thousands of nodes) MORE documents compete for the same 50 ranks, so this is a LOWER bound on the production ceiling, not an estimate of it. Read the DIRECTION and the ORDER of magnitude, never the decimal.",
+        "source": "the complete-graph arm's miss (nothing is demoted, so it is the leg's own unreachability)"
+      },
+      "largest_tenant_mb": {
+        "per_window": {
+          "0.01": {
+            "pro": 109.3,
+            "solo": 82.5,
+            "team": 659.3
+          },
+          "0.02": {
+            "pro": 116.9,
+            "solo": 88.3,
+            "team": 704.9
+          },
+          "0.05": {
+            "pro": 143.0,
+            "solo": 107.9,
+            "team": 862.1
+          },
+          "0.10": {
+            "pro": 197.9,
+            "solo": 149.4,
+            "team": 1193.0
+          },
+          "0.20": {
+            "pro": 375.7,
+            "solo": 283.6,
+            "team": 2265.3
+          }
+        },
+        "why": "inverts mb_for_miss: the LARGEST tenant graph a tier's window still keeps at or below a miss bar. This is the '#13989 not nudged in week two' number \u2014 a tenant SIZE, not a rate. None = the bar is unreachable at any window."
+      },
+      "marginal": {
+        "1200": [
+          {
+            "from_coverage": 0.02,
+            "pp_per_mb": 0.516406,
+            "pp_removed": 18.5906,
+            "to_coverage": 0.05,
+            "w_mb": 42.0
+          },
+          {
+            "from_coverage": 0.05,
+            "pp_per_mb": 0.258418,
+            "pp_removed": 15.5051,
+            "to_coverage": 0.1,
+            "w_mb": 90.0
+          },
+          {
+            "from_coverage": 0.1,
+            "pp_per_mb": 0.124787,
+            "pp_removed": 7.4872,
+            "to_coverage": 0.15,
+            "w_mb": 150.0
+          },
+          {
+            "from_coverage": 0.15,
+            "pp_per_mb": 0.075887,
+            "pp_removed": 4.5532,
+            "to_coverage": 0.2,
+            "w_mb": 210.0
+          },
+          {
+            "from_coverage": 0.2,
+            "pp_per_mb": 0.05738,
+            "pp_removed": 3.4428,
+            "to_coverage": 0.25,
+            "w_mb": 270.0
+          },
+          {
+            "from_coverage": 0.25,
+            "pp_per_mb": 0.048133,
+            "pp_removed": 2.888,
+            "to_coverage": 0.3,
+            "w_mb": 330.0
+          },
+          {
+            "from_coverage": 0.3,
+            "pp_per_mb": 0.037085,
+            "pp_removed": 4.4502,
+            "to_coverage": 0.4,
+            "w_mb": 420.0
+          },
+          {
+            "from_coverage": 0.4,
+            "pp_per_mb": 0.028897,
+            "pp_removed": 3.4676,
+            "to_coverage": 0.5,
+            "w_mb": 540.0
+          },
+          {
+            "from_coverage": 0.5,
+            "pp_per_mb": 0.023398,
+            "pp_removed": 2.8077,
+            "to_coverage": 0.6,
+            "w_mb": 660.0
+          },
+          {
+            "from_coverage": 0.6,
+            "pp_per_mb": 0.019655,
+            "pp_removed": 2.3586,
+            "to_coverage": 0.7,
+            "w_mb": 780.0
+          },
+          {
+            "from_coverage": 0.7,
+            "pp_per_mb": 0.016749,
+            "pp_removed": 2.0099,
+            "to_coverage": 0.8,
+            "w_mb": 900.0
+          },
+          {
+            "from_coverage": 0.8,
+            "pp_per_mb": 0.014488,
+            "pp_removed": 1.7386,
+            "to_coverage": 0.9,
+            "w_mb": 1020.0
+          },
+          {
+            "from_coverage": 0.9,
+            "pp_per_mb": 0.01323,
+            "pp_removed": 0.7938,
+            "to_coverage": 0.95,
+            "w_mb": 1110.0
+          },
+          {
+            "from_coverage": 0.95,
+            "pp_per_mb": 0.012112,
+            "pp_removed": 0.7267,
+            "to_coverage": 1.0,
+            "w_mb": 1170.0
+          }
+        ],
+        "150": [
+          {
+            "from_coverage": 0.02,
+            "pp_per_mb": 4.131244,
+            "pp_removed": 18.5906,
+            "to_coverage": 0.05,
+            "w_mb": 5.25
+          },
+          {
+            "from_coverage": 0.05,
+            "pp_per_mb": 2.067347,
+            "pp_removed": 15.5051,
+            "to_coverage": 0.1,
+            "w_mb": 11.25
+          },
+          {
+            "from_coverage": 0.1,
+            "pp_per_mb": 0.998293,
+            "pp_removed": 7.4872,
+            "to_coverage": 0.15,
+            "w_mb": 18.75
+          },
+          {
+            "from_coverage": 0.15,
+            "pp_per_mb": 0.607093,
+            "pp_removed": 4.5532,
+            "to_coverage": 0.2,
+            "w_mb": 26.25
+          },
+          {
+            "from_coverage": 0.2,
+            "pp_per_mb": 0.45904,
+            "pp_removed": 3.4428,
+            "to_coverage": 0.25,
+            "w_mb": 33.75
+          },
+          {
+            "from_coverage": 0.25,
+            "pp_per_mb": 0.385067,
+            "pp_removed": 2.888,
+            "to_coverage": 0.3,
+            "w_mb": 41.25
+          },
+          {
+            "from_coverage": 0.3,
+            "pp_per_mb": 0.29668,
+            "pp_removed": 4.4502,
+            "to_coverage": 0.4,
+            "w_mb": 52.5
+          },
+          {
+            "from_coverage": 0.4,
+            "pp_per_mb": 0.231173,
+            "pp_removed": 3.4676,
+            "to_coverage": 0.5,
+            "w_mb": 67.5
+          },
+          {
+            "from_coverage": 0.5,
+            "pp_per_mb": 0.18718,
+            "pp_removed": 2.8077,
+            "to_coverage": 0.6,
+            "w_mb": 82.5
+          },
+          {
+            "from_coverage": 0.6,
+            "pp_per_mb": 0.15724,
+            "pp_removed": 2.3586,
+            "to_coverage": 0.7,
+            "w_mb": 97.5
+          },
+          {
+            "from_coverage": 0.7,
+            "pp_per_mb": 0.133993,
+            "pp_removed": 2.0099,
+            "to_coverage": 0.8,
+            "w_mb": 112.5
+          },
+          {
+            "from_coverage": 0.8,
+            "pp_per_mb": 0.115907,
+            "pp_removed": 1.7386,
+            "to_coverage": 0.9,
+            "w_mb": 127.5
+          },
+          {
+            "from_coverage": 0.9,
+            "pp_per_mb": 0.10584,
+            "pp_removed": 0.7938,
+            "to_coverage": 0.95,
+            "w_mb": 138.75
+          },
+          {
+            "from_coverage": 0.95,
+            "pp_per_mb": 0.096893,
+            "pp_removed": 0.7267,
+            "to_coverage": 1.0,
+            "w_mb": 146.25
+          }
+        ],
+        "300": [
+          {
+            "from_coverage": 0.02,
+            "pp_per_mb": 2.065622,
+            "pp_removed": 18.5906,
+            "to_coverage": 0.05,
+            "w_mb": 10.5
+          },
+          {
+            "from_coverage": 0.05,
+            "pp_per_mb": 1.033673,
+            "pp_removed": 15.5051,
+            "to_coverage": 0.1,
+            "w_mb": 22.5
+          },
+          {
+            "from_coverage": 0.1,
+            "pp_per_mb": 0.499147,
+            "pp_removed": 7.4872,
+            "to_coverage": 0.15,
+            "w_mb": 37.5
+          },
+          {
+            "from_coverage": 0.15,
+            "pp_per_mb": 0.303547,
+            "pp_removed": 4.5532,
+            "to_coverage": 0.2,
+            "w_mb": 52.5
+          },
+          {
+            "from_coverage": 0.2,
+            "pp_per_mb": 0.22952,
+            "pp_removed": 3.4428,
+            "to_coverage": 0.25,
+            "w_mb": 67.5
+          },
+          {
+            "from_coverage": 0.25,
+            "pp_per_mb": 0.192533,
+            "pp_removed": 2.888,
+            "to_coverage": 0.3,
+            "w_mb": 82.5
+          },
+          {
+            "from_coverage": 0.3,
+            "pp_per_mb": 0.14834,
+            "pp_removed": 4.4502,
+            "to_coverage": 0.4,
+            "w_mb": 105.0
+          },
+          {
+            "from_coverage": 0.4,
+            "pp_per_mb": 0.115587,
+            "pp_removed": 3.4676,
+            "to_coverage": 0.5,
+            "w_mb": 135.0
+          },
+          {
+            "from_coverage": 0.5,
+            "pp_per_mb": 0.09359,
+            "pp_removed": 2.8077,
+            "to_coverage": 0.6,
+            "w_mb": 165.0
+          },
+          {
+            "from_coverage": 0.6,
+            "pp_per_mb": 0.07862,
+            "pp_removed": 2.3586,
+            "to_coverage": 0.7,
+            "w_mb": 195.0
+          },
+          {
+            "from_coverage": 0.7,
+            "pp_per_mb": 0.066997,
+            "pp_removed": 2.0099,
+            "to_coverage": 0.8,
+            "w_mb": 225.0
+          },
+          {
+            "from_coverage": 0.8,
+            "pp_per_mb": 0.057953,
+            "pp_removed": 1.7386,
+            "to_coverage": 0.9,
+            "w_mb": 255.0
+          },
+          {
+            "from_coverage": 0.9,
+            "pp_per_mb": 0.05292,
+            "pp_removed": 0.7938,
+            "to_coverage": 0.95,
+            "w_mb": 277.5
+          },
+          {
+            "from_coverage": 0.95,
+            "pp_per_mb": 0.048447,
+            "pp_removed": 0.7267,
+            "to_coverage": 1.0,
+            "w_mb": 292.5
+          }
+        ],
+        "600": [
+          {
+            "from_coverage": 0.02,
+            "pp_per_mb": 1.032811,
+            "pp_removed": 18.5906,
+            "to_coverage": 0.05,
+            "w_mb": 21.0
+          },
+          {
+            "from_coverage": 0.05,
+            "pp_per_mb": 0.516837,
+            "pp_removed": 15.5051,
+            "to_coverage": 0.1,
+            "w_mb": 45.0
+          },
+          {
+            "from_coverage": 0.1,
+            "pp_per_mb": 0.249573,
+            "pp_removed": 7.4872,
+            "to_coverage": 0.15,
+            "w_mb": 75.0
+          },
+          {
+            "from_coverage": 0.15,
+            "pp_per_mb": 0.151773,
+            "pp_removed": 4.5532,
+            "to_coverage": 0.2,
+            "w_mb": 105.0
+          },
+          {
+            "from_coverage": 0.2,
+            "pp_per_mb": 0.11476,
+            "pp_removed": 3.4428,
+            "to_coverage": 0.25,
+            "w_mb": 135.0
+          },
+          {
+            "from_coverage": 0.25,
+            "pp_per_mb": 0.096267,
+            "pp_removed": 2.888,
+            "to_coverage": 0.3,
+            "w_mb": 165.0
+          },
+          {
+            "from_coverage": 0.3,
+            "pp_per_mb": 0.07417,
+            "pp_removed": 4.4502,
+            "to_coverage": 0.4,
+            "w_mb": 210.0
+          },
+          {
+            "from_coverage": 0.4,
+            "pp_per_mb": 0.057793,
+            "pp_removed": 3.4676,
+            "to_coverage": 0.5,
+            "w_mb": 270.0
+          },
+          {
+            "from_coverage": 0.5,
+            "pp_per_mb": 0.046795,
+            "pp_removed": 2.8077,
+            "to_coverage": 0.6,
+            "w_mb": 330.0
+          },
+          {
+            "from_coverage": 0.6,
+            "pp_per_mb": 0.03931,
+            "pp_removed": 2.3586,
+            "to_coverage": 0.7,
+            "w_mb": 390.0
+          },
+          {
+            "from_coverage": 0.7,
+            "pp_per_mb": 0.033498,
+            "pp_removed": 2.0099,
+            "to_coverage": 0.8,
+            "w_mb": 450.0
+          },
+          {
+            "from_coverage": 0.8,
+            "pp_per_mb": 0.028977,
+            "pp_removed": 1.7386,
+            "to_coverage": 0.9,
+            "w_mb": 510.0
+          },
+          {
+            "from_coverage": 0.9,
+            "pp_per_mb": 0.02646,
+            "pp_removed": 0.7938,
+            "to_coverage": 0.95,
+            "w_mb": 555.0
+          },
+          {
+            "from_coverage": 0.95,
+            "pp_per_mb": 0.024223,
+            "pp_removed": 0.7267,
+            "to_coverage": 1.0,
+            "w_mb": 585.0
+          }
+        ],
+        "75": [
+          {
+            "from_coverage": 0.02,
+            "pp_per_mb": 8.262489,
+            "pp_removed": 18.5906,
+            "to_coverage": 0.05,
+            "w_mb": 2.625
+          },
+          {
+            "from_coverage": 0.05,
+            "pp_per_mb": 4.134693,
+            "pp_removed": 15.5051,
+            "to_coverage": 0.1,
+            "w_mb": 5.625
+          },
+          {
+            "from_coverage": 0.1,
+            "pp_per_mb": 1.996587,
+            "pp_removed": 7.4872,
+            "to_coverage": 0.15,
+            "w_mb": 9.375
+          },
+          {
+            "from_coverage": 0.15,
+            "pp_per_mb": 1.214187,
+            "pp_removed": 4.5532,
+            "to_coverage": 0.2,
+            "w_mb": 13.125
+          },
+          {
+            "from_coverage": 0.2,
+            "pp_per_mb": 0.91808,
+            "pp_removed": 3.4428,
+            "to_coverage": 0.25,
+            "w_mb": 16.875
+          },
+          {
+            "from_coverage": 0.25,
+            "pp_per_mb": 0.770133,
+            "pp_removed": 2.888,
+            "to_coverage": 0.3,
+            "w_mb": 20.625
+          },
+          {
+            "from_coverage": 0.3,
+            "pp_per_mb": 0.59336,
+            "pp_removed": 4.4502,
+            "to_coverage": 0.4,
+            "w_mb": 26.25
+          },
+          {
+            "from_coverage": 0.4,
+            "pp_per_mb": 0.462347,
+            "pp_removed": 3.4676,
+            "to_coverage": 0.5,
+            "w_mb": 33.75
+          },
+          {
+            "from_coverage": 0.5,
+            "pp_per_mb": 0.37436,
+            "pp_removed": 2.8077,
+            "to_coverage": 0.6,
+            "w_mb": 41.25
+          },
+          {
+            "from_coverage": 0.6,
+            "pp_per_mb": 0.31448,
+            "pp_removed": 2.3586,
+            "to_coverage": 0.7,
+            "w_mb": 48.75
+          },
+          {
+            "from_coverage": 0.7,
+            "pp_per_mb": 0.267987,
+            "pp_removed": 2.0099,
+            "to_coverage": 0.8,
+            "w_mb": 56.25
+          },
+          {
+            "from_coverage": 0.8,
+            "pp_per_mb": 0.231813,
+            "pp_removed": 1.7386,
+            "to_coverage": 0.9,
+            "w_mb": 63.75
+          },
+          {
+            "from_coverage": 0.9,
+            "pp_per_mb": 0.21168,
+            "pp_removed": 0.7938,
+            "to_coverage": 0.95,
+            "w_mb": 69.375
+          },
+          {
+            "from_coverage": 0.95,
+            "pp_per_mb": 0.193787,
+            "pp_removed": 0.7267,
+            "to_coverage": 1.0,
+            "w_mb": 73.125
+          }
+        ]
+      },
+      "mass": {
+        "fitted_zipf_exponent": 0.95,
+        "max": 6078,
+        "min": 42,
+        "top_10pct_share": 0.632757,
+        "top_1pct_share": 0.166627,
+        "total": 302598
+      },
+      "mb_for_miss": {
+        "1200": {
+          "0.01": 1140.0,
+          "0.02": 1080.0,
+          "0.05": 960.0,
+          "0.10": 720.0,
+          "0.20": 360.0
+        },
+        "150": {
+          "0.01": 142.5,
+          "0.02": 135.0,
+          "0.05": 120.0,
+          "0.10": 90.0,
+          "0.20": 45.0
+        },
+        "300": {
+          "0.01": 285.0,
+          "0.02": 270.0,
+          "0.05": 240.0,
+          "0.10": 180.0,
+          "0.20": 90.0
+        },
+        "600": {
+          "0.01": 570.0,
+          "0.02": 540.0,
+          "0.05": 480.0,
+          "0.10": 360.0,
+          "0.20": 180.0
+        },
+        "75": {
+          "0.01": 71.25,
+          "0.02": 67.5,
+          "0.05": 60.0,
+          "0.10": 45.0,
+          "0.20": 22.5
+        }
+      },
+      "nodes": 1000,
+      "policy_delta": {
+        "0.1": {
+          "fault_in_mass_ordered": 0.64,
+          "fault_in_random_ordered": 0.9,
+          "pp_removed_by_usage_ordering": 26.0
+        },
+        "0.25": {
+          "fault_in_mass_ordered": 0.416,
+          "fault_in_random_ordered": 0.764,
+          "pp_removed_by_usage_ordering": 34.8
+        },
+        "0.5": {
+          "fault_in_mass_ordered": 0.204,
+          "fault_in_random_ordered": 0.552,
+          "pp_removed_by_usage_ordering": 34.8
+        },
+        "0.75": {
+          "fault_in_mass_ordered": 0.084,
+          "fault_in_random_ordered": 0.288,
+          "pp_removed_by_usage_ordering": 20.4
+        }
+      },
+      "query_sets": {
+        "mass": 250,
+        "uniform": 250
+      },
+      "sensitivity": {
+        "fitted_exponent": 0.95,
+        "rows": {
+          "0.6": {
+            "fitted_curve_covered_mass": {
+              "0.1": 0.367666,
+              "0.25": 0.552651,
+              "0.5": 0.745466
+            },
+            "flattening_at_150mb": null
+          },
+          "0.8": {
+            "fitted_curve_covered_mass": {
+              "0.1": 0.525826,
+              "0.25": 0.688691,
+              "0.5": 0.833529
+            },
+            "flattening_at_150mb": null
+          },
+          "1.0": {
+            "fitted_curve_covered_mass": {
+              "0.1": 0.692994,
+              "0.25": 0.815003,
+              "0.5": 0.907468
+            },
+            "flattening_at_150mb": {
+              "coverage": 0.95,
+              "criterion": "the first point past which every remaining step removes < 0.1 pp of fault-in rate per MB",
+              "pp_per_mb_at_interval": 0.096253,
+              "threshold_pp_per_mb": 0.1,
+              "w_mb": 142.5
+            }
+          },
+          "1.2": {
+            "fitted_curve_covered_mass": {
+              "0.1": 0.831003,
+              "0.25": 0.907571,
+              "0.5": 0.956964
+            },
+            "flattening_at_150mb": {
+              "coverage": 0.6,
+              "criterion": "the first point past which every remaining step removes < 0.1 pp of fault-in rate per MB",
+              "pp_per_mb_at_interval": 0.079347,
+              "threshold_pp_per_mb": 0.1,
+              "w_mb": 90.0
+            }
+          }
+        },
+        "why": "the mass is a RECURRENCE proxy, not an observed read ledger; this re-runs the curve over a Zipf family bracketing the fitted concentration so the flattening point is a RANGE"
+      },
+      "windows": {
+        "1200": {
+          "pro": {
+            "coverage": 0.085,
+            "fault_in_rate": 0.413758,
+            "window_mb": 102
+          },
+          "solo": {
+            "coverage": 0.064167,
+            "fault_in_rate": 0.478363,
+            "window_mb": 77
+          },
+          "team": {
+            "coverage": 0.5125,
+            "fault_in_rate": 0.100843,
+            "window_mb": 615
+          }
+        },
+        "150": {
+          "pro": {
+            "coverage": 0.68,
+            "fault_in_rate": 0.057407,
+            "window_mb": 102
+          },
+          "solo": {
+            "coverage": 0.513333,
+            "fault_in_rate": 0.100609,
+            "window_mb": 77
+          },
+          "team": {
+            "coverage": 1.0,
+            "fault_in_rate": 0.0,
+            "window_mb": 615
+          }
+        },
+        "300": {
+          "pro": {
+            "coverage": 0.34,
+            "fault_in_rate": 0.16573,
+            "window_mb": 102
+          },
+          "solo": {
+            "coverage": 0.256667,
+            "fault_in_rate": 0.20856,
+            "window_mb": 77
+          },
+          "team": {
+            "coverage": 1.0,
+            "fault_in_rate": 0.0,
+            "window_mb": 615
+          }
+        },
+        "600": {
+          "pro": {
+            "coverage": 0.17,
+            "fault_in_rate": 0.274158,
+            "window_mb": 102
+          },
+          "solo": {
+            "coverage": 0.128333,
+            "fault_in_rate": 0.324816,
+            "window_mb": 77
+          },
+          "team": {
+            "coverage": 1.0,
+            "fault_in_rate": 0.0,
+            "window_mb": 615
+          }
+        },
+        "75": {
+          "pro": {
+            "coverage": 1.0,
+            "fault_in_rate": 0.0,
+            "window_mb": 102
+          },
+          "solo": {
+            "coverage": 1.0,
+            "fault_in_rate": 0.0,
+            "window_mb": 77
+          },
+          "team": {
+            "coverage": 1.0,
+            "fault_in_rate": 0.0,
+            "window_mb": 615
+          }
+        }
+      }
+    },
+    "point": {
+      "arms": {
+        "complete|mass": {
+          "empty_rate": 0.0,
+          "fault_in_rate": 0.0,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.24,
+          "miss_resident": 0.24,
+          "queries": 250,
+          "resident_queries": 250,
+          "resident_query_share": 1.0
+        },
+        "complete|uniform": {
+          "empty_rate": 0.0,
+          "fault_in_rate": 0.0,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.244,
+          "miss_resident": 0.244,
+          "queries": 250,
+          "resident_queries": 250,
+          "resident_query_share": 1.0
+        },
+        "mass@0.1|mass": {
+          "coverage_delivered": 0.099859,
+          "coverage_requested": 0.1,
+          "empty_rate": 0.0,
+          "fault_in_rate": 0.74,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.74,
+          "miss_resident": 0.0,
+          "queries": 250,
+          "resident_queries": 65,
+          "resident_query_share": 0.26
+        },
+        "mass@0.1|uniform": {
+          "coverage_delivered": 0.099859,
+          "coverage_requested": 0.1,
+          "empty_rate": 0.0,
+          "fault_in_rate": 0.908,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.908,
+          "miss_resident": 0.0,
+          "queries": 250,
+          "resident_queries": 23,
+          "resident_query_share": 0.092
+        },
+        "mass@0.25|mass": {
+          "coverage_delivered": 0.250352,
+          "coverage_requested": 0.25,
+          "empty_rate": 0.0,
+          "fault_in_rate": 0.432,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.436,
+          "miss_resident": 0.007042,
+          "queries": 250,
+          "resident_queries": 142,
+          "resident_query_share": 0.568
+        },
+        "mass@0.25|uniform": {
+          "coverage_delivered": 0.250352,
+          "coverage_requested": 0.25,
+          "empty_rate": 0.0,
+          "fault_in_rate": 0.736,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.744,
+          "miss_resident": 0.030303,
+          "queries": 250,
+          "resident_queries": 66,
+          "resident_query_share": 0.264
+        },
+        "mass@0.5|mass": {
+          "coverage_delivered": 0.500703,
+          "coverage_requested": 0.5,
+          "empty_rate": 0.0,
+          "fault_in_rate": 0.104,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.18,
+          "miss_resident": 0.084821,
+          "queries": 250,
+          "resident_queries": 224,
+          "resident_query_share": 0.896
+        },
+        "mass@0.5|uniform": {
+          "coverage_delivered": 0.500703,
+          "coverage_requested": 0.5,
+          "empty_rate": 0.0,
+          "fault_in_rate": 0.512,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.576,
+          "miss_resident": 0.131148,
+          "queries": 250,
+          "resident_queries": 122,
+          "resident_query_share": 0.488
+        },
+        "mass@0.75|mass": {
+          "coverage_delivered": 0.749648,
+          "coverage_requested": 0.75,
+          "empty_rate": 0.0,
+          "fault_in_rate": 0.024,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.164,
+          "miss_resident": 0.143443,
+          "queries": 250,
+          "resident_queries": 244,
+          "resident_query_share": 0.976
+        },
+        "mass@0.75|uniform": {
+          "coverage_delivered": 0.749648,
+          "coverage_requested": 0.75,
+          "empty_rate": 0.0,
+          "fault_in_rate": 0.276,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.4,
+          "miss_resident": 0.171271,
+          "queries": 250,
+          "resident_queries": 181,
+          "resident_query_share": 0.724
+        },
+        "uniform@0.1|mass": {
+          "coverage_delivered": 0.099859,
+          "coverage_requested": 0.1,
+          "empty_rate": 0.0,
+          "fault_in_rate": 0.888,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.888,
+          "miss_resident": 0.0,
+          "queries": 250,
+          "resident_queries": 28,
+          "resident_query_share": 0.112
+        },
+        "uniform@0.1|uniform": {
+          "coverage_delivered": 0.099859,
+          "coverage_requested": 0.1,
+          "empty_rate": 0.0,
+          "fault_in_rate": 0.888,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.888,
+          "miss_resident": 0.0,
+          "queries": 250,
+          "resident_queries": 28,
+          "resident_query_share": 0.112
+        },
+        "uniform@0.25|mass": {
+          "coverage_delivered": 0.250352,
+          "coverage_requested": 0.25,
+          "empty_rate": 0.0,
+          "fault_in_rate": 0.744,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.748,
+          "miss_resident": 0.015625,
+          "queries": 250,
+          "resident_queries": 64,
+          "resident_query_share": 0.256
+        },
+        "uniform@0.25|uniform": {
+          "coverage_delivered": 0.250352,
+          "coverage_requested": 0.25,
+          "empty_rate": 0.0,
+          "fault_in_rate": 0.72,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.728,
+          "miss_resident": 0.028571,
+          "queries": 250,
+          "resident_queries": 70,
+          "resident_query_share": 0.28
+        },
+        "uniform@0.5|mass": {
+          "coverage_delivered": 0.500703,
+          "coverage_requested": 0.5,
+          "empty_rate": 0.0,
+          "fault_in_rate": 0.464,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.524,
+          "miss_resident": 0.11194,
+          "queries": 250,
+          "resident_queries": 134,
+          "resident_query_share": 0.536
+        },
+        "uniform@0.5|uniform": {
+          "coverage_delivered": 0.500703,
+          "coverage_requested": 0.5,
+          "empty_rate": 0.0,
+          "fault_in_rate": 0.492,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.564,
+          "miss_resident": 0.141732,
+          "queries": 250,
+          "resident_queries": 127,
+          "resident_query_share": 0.508
+        },
+        "uniform@0.75|mass": {
+          "coverage_delivered": 0.749648,
+          "coverage_requested": 0.75,
+          "empty_rate": 0.0,
+          "fault_in_rate": 0.216,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.336,
+          "miss_resident": 0.153061,
+          "queries": 250,
+          "resident_queries": 196,
+          "resident_query_share": 0.784
+        },
+        "uniform@0.75|uniform": {
+          "coverage_delivered": 0.749648,
+          "coverage_requested": 0.75,
+          "empty_rate": 0.0,
+          "fault_in_rate": 0.248,
+          "found_deep_of_demoted": 0.0,
+          "miss": 0.376,
+          "miss_resident": 0.170213,
+          "queries": 250,
+          "resident_queries": 188,
+          "resident_query_share": 0.752
+        }
+      },
+      "curve": [
+        {
+          "coverage": 0.02,
+          "covered_mass": 0.144837,
+          "fault_in_rate": 0.855163
+        },
+        {
+          "coverage": 0.05,
+          "covered_mass": 0.27349,
+          "fault_in_rate": 0.72651
+        },
+        {
+          "coverage": 0.1,
+          "covered_mass": 0.430816,
+          "fault_in_rate": 0.569184
+        },
+        {
+          "coverage": 0.15,
+          "covered_mass": 0.552231,
+          "fault_in_rate": 0.447769
+        },
+        {
+          "coverage": 0.2,
+          "covered_mass": 0.648434,
+          "fault_in_rate": 0.351566
+        },
+        {
+          "coverage": 0.25,
+          "covered_mass": 0.731742,
+          "fault_in_rate": 0.268258
+        },
+        {
+          "coverage": 0.3,
+          "covered_mass": 0.798169,
+          "fault_in_rate": 0.201831
+        },
+        {
+          "coverage": 0.4,
+          "covered_mass": 0.89017,
+          "fault_in_rate": 0.10983
+        },
+        {
+          "coverage": 0.5,
+          "covered_mass": 0.944489,
+          "fault_in_rate": 0.055511
+        },
+        {
+          "coverage": 0.6,
+          "covered_mass": 0.974363,
+          "fault_in_rate": 0.025637
+        },
+        {
+          "coverage": 0.7,
+          "covered_mass": 0.988903,
+          "fault_in_rate": 0.011097
+        },
+        {
+          "coverage": 0.8,
+          "covered_mass": 0.996051,
+          "fault_in_rate": 0.003949
+        },
+        {
+          "coverage": 0.9,
+          "covered_mass": 0.99906,
+          "fault_in_rate": 0.00094
+        },
+        {
+          "coverage": 0.95,
+          "covered_mass": 0.999675,
+          "fault_in_rate": 0.000325
+        },
+        {
+          "coverage": 1.0,
+          "covered_mass": 1.0,
+          "fault_in_rate": 0.0
+        }
+      ],
+      "flattening": {
+        "per_tenant_size": {
+          "rows": {
+            "1200": {
+              "coverage": 0.4,
+              "criterion": "the first point past which every remaining step removes < 0.1 pp of fault-in rate per MB",
+              "pp_per_mb_at_interval": 0.076667,
+              "threshold_pp_per_mb": 0.1,
+              "w_mb": 480.0
+            },
+            "150": {
+              "coverage": 0.7,
+              "criterion": "the first point past which every remaining step removes < 0.1 pp of fault-in rate per MB",
+              "pp_per_mb_at_interval": 0.096933,
+              "threshold_pp_per_mb": 0.1,
+              "w_mb": 105.0
+            },
+            "300": {
+              "coverage": 0.6,
+              "criterion": "the first point past which every remaining step removes < 0.1 pp of fault-in rate per MB",
+              "pp_per_mb_at_interval": 0.09958,
+              "threshold_pp_per_mb": 0.1,
+              "w_mb": 180.0
+            },
+            "600": {
+              "coverage": 0.5,
+              "criterion": "the first point past which every remaining step removes < 0.1 pp of fault-in rate per MB",
+              "pp_per_mb_at_interval": 0.090532,
+              "threshold_pp_per_mb": 0.1,
+              "w_mb": 300.0
+            },
+            "75": {
+              "coverage": 0.8,
+              "criterion": "the first point past which every remaining step removes < 0.1 pp of fault-in rate per MB",
+              "pp_per_mb_at_interval": 0.095307,
+              "threshold_pp_per_mb": 0.1,
+              "w_mb": 60.0
+            }
+          },
+          "threshold_pp_per_mb": 0.1,
+          "why": "pp/MB is S-dependent by construction (W = F x S), so this answers 'for a tenant this size, by which MB has the window flattened' \u2014 never a property of the curve"
+        },
+        "scale_free": {
+          "gains": [
+            {
+              "from_coverage": 0.05,
+              "pp_removed": 15.7326,
+              "to_coverage": 0.1
+            },
+            {
+              "from_coverage": 0.1,
+              "pp_removed": 21.7618,
+              "to_coverage": 0.2
+            },
+            {
+              "from_coverage": 0.15,
+              "pp_removed": 24.5938,
+              "to_coverage": 0.3
+            },
+            {
+              "from_coverage": 0.2,
+              "pp_removed": 24.1736,
+              "to_coverage": 0.4
+            },
+            {
+              "from_coverage": 0.3,
+              "pp_removed": 17.6194,
+              "to_coverage": 0.6
+            },
+            {
+              "from_coverage": 0.4,
+              "pp_removed": 10.5881,
+              "to_coverage": 0.8
+            },
+            {
+              "from_coverage": 0.5,
+              "pp_removed": 5.5511,
+              "to_coverage": 1.0
+            }
+          ],
+          "point": null,
+          "threshold_pp_per_doubling": 2.0,
+          "why": "a DOUBLING of the window is dimensionless, so this is the knee in the SHAPE of the curve, independent of tenant size \u2014 quote this one about the shape"
+        }
+      },
+      "floor": {
+        "depth_limit": 50,
+        "miss_resident": 0.24,
+        "note": "no window can buy a miss rate below this on this label, AT THIS POPULATION SIZE",
+        "population_scale_caveat": "measured on 711 nodes at depth 50. At production scale (tens of thousands of nodes) MORE documents compete for the same 50 ranks, so this is a LOWER bound on the production ceiling, not an estimate of it. Read the DIRECTION and the ORDER of magnitude, never the decimal.",
+        "source": "the complete-graph arm's miss (nothing is demoted, so it is the leg's own unreachability)"
+      },
+      "largest_tenant_mb": {
+        "per_window": {
+          "0.01": {
+            "pro": 142.6,
+            "solo": 107.6,
+            "team": 859.7
+          },
+          "0.02": {
+            "pro": 159.7,
+            "solo": 120.5,
+            "team": 962.8
+          },
+          "0.05": {
+            "pro": 196.7,
+            "solo": 148.5,
+            "team": 1186.2
+          },
+          "0.10": {
+            "pro": 244.0,
+            "solo": 184.2,
+            "team": 1471.0
+          },
+          "0.20": {
+            "pro": 337.8,
+            "solo": 255.0,
+            "team": 2036.5
+          }
+        },
+        "why": "inverts mb_for_miss: the LARGEST tenant graph a tier's window still keeps at or below a miss bar. This is the '#13989 not nudged in week two' number \u2014 a tenant SIZE, not a rate. None = the bar is unreachable at any window."
+      },
+      "marginal": {
+        "1200": [
+          {
+            "from_coverage": 0.02,
+            "pp_per_mb": 0.357369,
+            "pp_removed": 12.8653,
+            "to_coverage": 0.05,
+            "w_mb": 42.0
+          },
+          {
+            "from_coverage": 0.05,
+            "pp_per_mb": 0.26221,
+            "pp_removed": 15.7326,
+            "to_coverage": 0.1,
+            "w_mb": 90.0
+          },
+          {
+            "from_coverage": 0.1,
+            "pp_per_mb": 0.202358,
+            "pp_removed": 12.1415,
+            "to_coverage": 0.15,
+            "w_mb": 150.0
+          },
+          {
+            "from_coverage": 0.15,
+            "pp_per_mb": 0.160338,
+            "pp_removed": 9.6203,
+            "to_coverage": 0.2,
+            "w_mb": 210.0
+          },
+          {
+            "from_coverage": 0.2,
+            "pp_per_mb": 0.138847,
+            "pp_removed": 8.3308,
+            "to_coverage": 0.25,
+            "w_mb": 270.0
+          },
+          {
+            "from_coverage": 0.25,
+            "pp_per_mb": 0.110712,
+            "pp_removed": 6.6427,
+            "to_coverage": 0.3,
+            "w_mb": 330.0
+          },
+          {
+            "from_coverage": 0.3,
+            "pp_per_mb": 0.076667,
+            "pp_removed": 9.2001,
+            "to_coverage": 0.4,
+            "w_mb": 420.0
+          },
+          {
+            "from_coverage": 0.4,
+            "pp_per_mb": 0.045266,
+            "pp_removed": 5.4319,
+            "to_coverage": 0.5,
+            "w_mb": 540.0
+          },
+          {
+            "from_coverage": 0.5,
+            "pp_per_mb": 0.024895,
+            "pp_removed": 2.9874,
+            "to_coverage": 0.6,
+            "w_mb": 660.0
+          },
+          {
+            "from_coverage": 0.6,
+            "pp_per_mb": 0.012117,
+            "pp_removed": 1.454,
+            "to_coverage": 0.7,
+            "w_mb": 780.0
+          },
+          {
+            "from_coverage": 0.7,
+            "pp_per_mb": 0.005957,
+            "pp_removed": 0.7148,
+            "to_coverage": 0.8,
+            "w_mb": 900.0
+          },
+          {
+            "from_coverage": 0.8,
+            "pp_per_mb": 0.002508,
+            "pp_removed": 0.3009,
+            "to_coverage": 0.9,
+            "w_mb": 1020.0
+          },
+          {
+            "from_coverage": 0.9,
+            "pp_per_mb": 0.001025,
+            "pp_removed": 0.0615,
+            "to_coverage": 0.95,
+            "w_mb": 1110.0
+          },
+          {
+            "from_coverage": 0.95,
+            "pp_per_mb": 0.000542,
+            "pp_removed": 0.0325,
+            "to_coverage": 1.0,
+            "w_mb": 1170.0
+          }
+        ],
+        "150": [
+          {
+            "from_coverage": 0.02,
+            "pp_per_mb": 2.858956,
+            "pp_removed": 12.8653,
+            "to_coverage": 0.05,
+            "w_mb": 5.25
+          },
+          {
+            "from_coverage": 0.05,
+            "pp_per_mb": 2.09768,
+            "pp_removed": 15.7326,
+            "to_coverage": 0.1,
+            "w_mb": 11.25
+          },
+          {
+            "from_coverage": 0.1,
+            "pp_per_mb": 1.618867,
+            "pp_removed": 12.1415,
+            "to_coverage": 0.15,
+            "w_mb": 18.75
+          },
+          {
+            "from_coverage": 0.15,
+            "pp_per_mb": 1.282707,
+            "pp_removed": 9.6203,
+            "to_coverage": 0.2,
+            "w_mb": 26.25
+          },
+          {
+            "from_coverage": 0.2,
+            "pp_per_mb": 1.110773,
+            "pp_removed": 8.3308,
+            "to_coverage": 0.25,
+            "w_mb": 33.75
+          },
+          {
+            "from_coverage": 0.25,
+            "pp_per_mb": 0.885693,
+            "pp_removed": 6.6427,
+            "to_coverage": 0.3,
+            "w_mb": 41.25
+          },
+          {
+            "from_coverage": 0.3,
+            "pp_per_mb": 0.61334,
+            "pp_removed": 9.2001,
+            "to_coverage": 0.4,
+            "w_mb": 52.5
+          },
+          {
+            "from_coverage": 0.4,
+            "pp_per_mb": 0.362127,
+            "pp_removed": 5.4319,
+            "to_coverage": 0.5,
+            "w_mb": 67.5
+          },
+          {
+            "from_coverage": 0.5,
+            "pp_per_mb": 0.19916,
+            "pp_removed": 2.9874,
+            "to_coverage": 0.6,
+            "w_mb": 82.5
+          },
+          {
+            "from_coverage": 0.6,
+            "pp_per_mb": 0.096933,
+            "pp_removed": 1.454,
+            "to_coverage": 0.7,
+            "w_mb": 97.5
+          },
+          {
+            "from_coverage": 0.7,
+            "pp_per_mb": 0.047653,
+            "pp_removed": 0.7148,
+            "to_coverage": 0.8,
+            "w_mb": 112.5
+          },
+          {
+            "from_coverage": 0.8,
+            "pp_per_mb": 0.02006,
+            "pp_removed": 0.3009,
+            "to_coverage": 0.9,
+            "w_mb": 127.5
+          },
+          {
+            "from_coverage": 0.9,
+            "pp_per_mb": 0.0082,
+            "pp_removed": 0.0615,
+            "to_coverage": 0.95,
+            "w_mb": 138.75
+          },
+          {
+            "from_coverage": 0.95,
+            "pp_per_mb": 0.004333,
+            "pp_removed": 0.0325,
+            "to_coverage": 1.0,
+            "w_mb": 146.25
+          }
+        ],
+        "300": [
+          {
+            "from_coverage": 0.02,
+            "pp_per_mb": 1.429478,
+            "pp_removed": 12.8653,
+            "to_coverage": 0.05,
+            "w_mb": 10.5
+          },
+          {
+            "from_coverage": 0.05,
+            "pp_per_mb": 1.04884,
+            "pp_removed": 15.7326,
+            "to_coverage": 0.1,
+            "w_mb": 22.5
+          },
+          {
+            "from_coverage": 0.1,
+            "pp_per_mb": 0.809433,
+            "pp_removed": 12.1415,
+            "to_coverage": 0.15,
+            "w_mb": 37.5
+          },
+          {
+            "from_coverage": 0.15,
+            "pp_per_mb": 0.641353,
+            "pp_removed": 9.6203,
+            "to_coverage": 0.2,
+            "w_mb": 52.5
+          },
+          {
+            "from_coverage": 0.2,
+            "pp_per_mb": 0.555387,
+            "pp_removed": 8.3308,
+            "to_coverage": 0.25,
+            "w_mb": 67.5
+          },
+          {
+            "from_coverage": 0.25,
+            "pp_per_mb": 0.442847,
+            "pp_removed": 6.6427,
+            "to_coverage": 0.3,
+            "w_mb": 82.5
+          },
+          {
+            "from_coverage": 0.3,
+            "pp_per_mb": 0.30667,
+            "pp_removed": 9.2001,
+            "to_coverage": 0.4,
+            "w_mb": 105.0
+          },
+          {
+            "from_coverage": 0.4,
+            "pp_per_mb": 0.181063,
+            "pp_removed": 5.4319,
+            "to_coverage": 0.5,
+            "w_mb": 135.0
+          },
+          {
+            "from_coverage": 0.5,
+            "pp_per_mb": 0.09958,
+            "pp_removed": 2.9874,
+            "to_coverage": 0.6,
+            "w_mb": 165.0
+          },
+          {
+            "from_coverage": 0.6,
+            "pp_per_mb": 0.048467,
+            "pp_removed": 1.454,
+            "to_coverage": 0.7,
+            "w_mb": 195.0
+          },
+          {
+            "from_coverage": 0.7,
+            "pp_per_mb": 0.023827,
+            "pp_removed": 0.7148,
+            "to_coverage": 0.8,
+            "w_mb": 225.0
+          },
+          {
+            "from_coverage": 0.8,
+            "pp_per_mb": 0.01003,
+            "pp_removed": 0.3009,
+            "to_coverage": 0.9,
+            "w_mb": 255.0
+          },
+          {
+            "from_coverage": 0.9,
+            "pp_per_mb": 0.0041,
+            "pp_removed": 0.0615,
+            "to_coverage": 0.95,
+            "w_mb": 277.5
+          },
+          {
+            "from_coverage": 0.95,
+            "pp_per_mb": 0.002167,
+            "pp_removed": 0.0325,
+            "to_coverage": 1.0,
+            "w_mb": 292.5
+          }
+        ],
+        "600": [
+          {
+            "from_coverage": 0.02,
+            "pp_per_mb": 0.714739,
+            "pp_removed": 12.8653,
+            "to_coverage": 0.05,
+            "w_mb": 21.0
+          },
+          {
+            "from_coverage": 0.05,
+            "pp_per_mb": 0.52442,
+            "pp_removed": 15.7326,
+            "to_coverage": 0.1,
+            "w_mb": 45.0
+          },
+          {
+            "from_coverage": 0.1,
+            "pp_per_mb": 0.404717,
+            "pp_removed": 12.1415,
+            "to_coverage": 0.15,
+            "w_mb": 75.0
+          },
+          {
+            "from_coverage": 0.15,
+            "pp_per_mb": 0.320677,
+            "pp_removed": 9.6203,
+            "to_coverage": 0.2,
+            "w_mb": 105.0
+          },
+          {
+            "from_coverage": 0.2,
+            "pp_per_mb": 0.277693,
+            "pp_removed": 8.3308,
+            "to_coverage": 0.25,
+            "w_mb": 135.0
+          },
+          {
+            "from_coverage": 0.25,
+            "pp_per_mb": 0.221423,
+            "pp_removed": 6.6427,
+            "to_coverage": 0.3,
+            "w_mb": 165.0
+          },
+          {
+            "from_coverage": 0.3,
+            "pp_per_mb": 0.153335,
+            "pp_removed": 9.2001,
+            "to_coverage": 0.4,
+            "w_mb": 210.0
+          },
+          {
+            "from_coverage": 0.4,
+            "pp_per_mb": 0.090532,
+            "pp_removed": 5.4319,
+            "to_coverage": 0.5,
+            "w_mb": 270.0
+          },
+          {
+            "from_coverage": 0.5,
+            "pp_per_mb": 0.04979,
+            "pp_removed": 2.9874,
+            "to_coverage": 0.6,
+            "w_mb": 330.0
+          },
+          {
+            "from_coverage": 0.6,
+            "pp_per_mb": 0.024233,
+            "pp_removed": 1.454,
+            "to_coverage": 0.7,
+            "w_mb": 390.0
+          },
+          {
+            "from_coverage": 0.7,
+            "pp_per_mb": 0.011913,
+            "pp_removed": 0.7148,
+            "to_coverage": 0.8,
+            "w_mb": 450.0
+          },
+          {
+            "from_coverage": 0.8,
+            "pp_per_mb": 0.005015,
+            "pp_removed": 0.3009,
+            "to_coverage": 0.9,
+            "w_mb": 510.0
+          },
+          {
+            "from_coverage": 0.9,
+            "pp_per_mb": 0.00205,
+            "pp_removed": 0.0615,
+            "to_coverage": 0.95,
+            "w_mb": 555.0
+          },
+          {
+            "from_coverage": 0.95,
+            "pp_per_mb": 0.001083,
+            "pp_removed": 0.0325,
+            "to_coverage": 1.0,
+            "w_mb": 585.0
+          }
+        ],
+        "75": [
+          {
+            "from_coverage": 0.02,
+            "pp_per_mb": 5.717911,
+            "pp_removed": 12.8653,
+            "to_coverage": 0.05,
+            "w_mb": 2.625
+          },
+          {
+            "from_coverage": 0.05,
+            "pp_per_mb": 4.19536,
+            "pp_removed": 15.7326,
+            "to_coverage": 0.1,
+            "w_mb": 5.625
+          },
+          {
+            "from_coverage": 0.1,
+            "pp_per_mb": 3.237733,
+            "pp_removed": 12.1415,
+            "to_coverage": 0.15,
+            "w_mb": 9.375
+          },
+          {
+            "from_coverage": 0.15,
+            "pp_per_mb": 2.565413,
+            "pp_removed": 9.6203,
+            "to_coverage": 0.2,
+            "w_mb": 13.125
+          },
+          {
+            "from_coverage": 0.2,
+            "pp_per_mb": 2.221547,
+            "pp_removed": 8.3308,
+            "to_coverage": 0.25,
+            "w_mb": 16.875
+          },
+          {
+            "from_coverage": 0.25,
+            "pp_per_mb": 1.771387,
+            "pp_removed": 6.6427,
+            "to_coverage": 0.3,
+            "w_mb": 20.625
+          },
+          {
+            "from_coverage": 0.3,
+            "pp_per_mb": 1.22668,
+            "pp_removed": 9.2001,
+            "to_coverage": 0.4,
+            "w_mb": 26.25
+          },
+          {
+            "from_coverage": 0.4,
+            "pp_per_mb": 0.724253,
+            "pp_removed": 5.4319,
+            "to_coverage": 0.5,
+            "w_mb": 33.75
+          },
+          {
+            "from_coverage": 0.5,
+            "pp_per_mb": 0.39832,
+            "pp_removed": 2.9874,
+            "to_coverage": 0.6,
+            "w_mb": 41.25
+          },
+          {
+            "from_coverage": 0.6,
+            "pp_per_mb": 0.193867,
+            "pp_removed": 1.454,
+            "to_coverage": 0.7,
+            "w_mb": 48.75
+          },
+          {
+            "from_coverage": 0.7,
+            "pp_per_mb": 0.095307,
+            "pp_removed": 0.7148,
+            "to_coverage": 0.8,
+            "w_mb": 56.25
+          },
+          {
+            "from_coverage": 0.8,
+            "pp_per_mb": 0.04012,
+            "pp_removed": 0.3009,
+            "to_coverage": 0.9,
+            "w_mb": 63.75
+          },
+          {
+            "from_coverage": 0.9,
+            "pp_per_mb": 0.0164,
+            "pp_removed": 0.0615,
+            "to_coverage": 0.95,
+            "w_mb": 69.375
+          },
+          {
+            "from_coverage": 0.95,
+            "pp_per_mb": 0.008667,
+            "pp_removed": 0.0325,
+            "to_coverage": 1.0,
+            "w_mb": 73.125
+          }
+        ]
+      },
+      "mass": {
+        "fitted_zipf_exponent": 0.7,
+        "max": 1596,
+        "min": 1,
+        "top_10pct_share": 0.430816,
+        "top_1pct_share": 0.087121,
+        "total": 110662
+      },
+      "mb_for_miss": {
+        "1200": {
+          "0.01": 960.0,
+          "0.02": 840.0,
+          "0.05": 720.0,
+          "0.10": 600.0,
+          "0.20": 480.0
+        },
+        "150": {
+          "0.01": 120.0,
+          "0.02": 105.0,
+          "0.05": 90.0,
+          "0.10": 75.0,
+          "0.20": 60.0
+        },
+        "300": {
+          "0.01": 240.0,
+          "0.02": 210.0,
+          "0.05": 180.0,
+          "0.10": 150.0,
+          "0.20": 120.0
+        },
+        "600": {
+          "0.01": 480.0,
+          "0.02": 420.0,
+          "0.05": 360.0,
+          "0.10": 300.0,
+          "0.20": 240.0
+        },
+        "75": {
+          "0.01": 60.0,
+          "0.02": 52.5,
+          "0.05": 45.0,
+          "0.10": 37.5,
+          "0.20": 30.0
+        }
+      },
+      "nodes": 711,
+      "policy_delta": {
+        "0.1": {
+          "fault_in_mass_ordered": 0.74,
+          "fault_in_random_ordered": 0.888,
+          "pp_removed_by_usage_ordering": 14.8
+        },
+        "0.25": {
+          "fault_in_mass_ordered": 0.432,
+          "fault_in_random_ordered": 0.744,
+          "pp_removed_by_usage_ordering": 31.2
+        },
+        "0.5": {
+          "fault_in_mass_ordered": 0.104,
+          "fault_in_random_ordered": 0.464,
+          "pp_removed_by_usage_ordering": 36.0
+        },
+        "0.75": {
+          "fault_in_mass_ordered": 0.024,
+          "fault_in_random_ordered": 0.216,
+          "pp_removed_by_usage_ordering": 19.2
+        }
+      },
+      "query_sets": {
+        "mass": 250,
+        "uniform": 250
+      },
+      "sensitivity": {
+        "fitted_exponent": 0.7,
+        "rows": {
+          "0.6": {
+            "fitted_curve_covered_mass": {
+              "0.1": 0.362916,
+              "0.25": 0.549731,
+              "0.5": 0.74404
+            },
+            "flattening_at_150mb": null
+          },
+          "0.8": {
+            "fitted_curve_covered_mass": {
+              "0.1": 0.516105,
+              "0.25": 0.682664,
+              "0.5": 0.830461
+            },
+            "flattening_at_150mb": null
+          },
+          "1.0": {
+            "fitted_curve_covered_mass": {
+              "0.1": 0.678406,
+              "0.25": 0.80646,
+              "0.5": 0.903279
+            },
+            "flattening_at_150mb": {
+              "coverage": 0.95,
+              "criterion": "the first point past which every remaining step removes < 0.1 pp of fault-in rate per MB",
+              "pp_per_mb_at_interval": 0.099293,
+              "threshold_pp_per_mb": 0.1,
+              "w_mb": 142.5
+            }
+          },
+          "1.2": {
+            "fitted_curve_covered_mass": {
+              "0.1": 0.815349,
+              "0.25": 0.899155,
+              "0.5": 0.953084
+            },
+            "flattening_at_150mb": {
+              "coverage": 0.6,
+              "criterion": "the first point past which every remaining step removes < 0.1 pp of fault-in rate per MB",
+              "pp_per_mb_at_interval": 0.086433,
+              "threshold_pp_per_mb": 0.1,
+              "w_mb": 90.0
+            }
+          }
+        },
+        "why": "the mass is a RECURRENCE proxy, not an observed read ledger; this re-runs the curve over a Zipf family bracketing the fitted concentration so the flattening point is a RANGE"
+      },
+      "windows": {
+        "1200": {
+          "pro": {
+            "coverage": 0.085,
+            "fault_in_rate": 0.616382,
+            "window_mb": 102
+          },
+          "solo": {
+            "coverage": 0.064167,
+            "fault_in_rate": 0.681934,
+            "window_mb": 77
+          },
+          "team": {
+            "coverage": 0.5125,
+            "fault_in_rate": 0.051777,
+            "window_mb": 615
+          }
+        },
+        "150": {
+          "pro": {
+            "coverage": 0.68,
+            "fault_in_rate": 0.014005,
+            "window_mb": 102
+          },
+          "solo": {
+            "coverage": 0.513333,
+            "fault_in_rate": 0.051528,
+            "window_mb": 77
+          },
+          "team": {
+            "coverage": 1.0,
+            "fault_in_rate": 0.0,
+            "window_mb": 615
+          }
+        },
+        "300": {
+          "pro": {
+            "coverage": 0.34,
+            "fault_in_rate": 0.165031,
+            "window_mb": 102
+          },
+          "solo": {
+            "coverage": 0.256667,
+            "fault_in_rate": 0.259401,
+            "window_mb": 77
+          },
+          "team": {
+            "coverage": 1.0,
+            "fault_in_rate": 0.0,
+            "window_mb": 615
+          }
+        },
+        "600": {
+          "pro": {
+            "coverage": 0.17,
+            "fault_in_rate": 0.409288,
+            "window_mb": 102
+          },
+          "solo": {
+            "coverage": 0.128333,
+            "fault_in_rate": 0.500382,
+            "window_mb": 77
+          },
+          "team": {
+            "coverage": 1.0,
+            "fault_in_rate": 0.0,
+            "window_mb": 615
+          }
+        },
+        "75": {
+          "pro": {
+            "coverage": 1.0,
+            "fault_in_rate": 0.0,
+            "window_mb": 102
+          },
+          "solo": {
+            "coverage": 1.0,
+            "fault_in_rate": 0.0,
+            "window_mb": 77
+          },
+          "team": {
+            "coverage": 1.0,
+            "fault_in_rate": 0.0,
+            "window_mb": 615
+          }
+        }
+      }
+    }
+  },
+  "labels_measured": {
+    "object": ":Object \u2014 the entity dictionary; the label the residency booster exists for",
+    "point": ":Point \u2014 the claim population; the label the window demotes",
+    "\u26d4not_measured": ":Subject shares :Object's harvest class and leg and is not separately populated; :Source and :Event are anchored/key reads and a window does not move them the same way. No aggregate across labels is published."
+  },
+  "measurement": "M5",
+  "params": {
+    "curve_coverages": [
+      0.02,
+      0.05,
+      0.1,
+      0.15,
+      0.2,
+      0.25,
+      0.3,
+      0.4,
+      0.5,
+      0.6,
+      0.7,
+      0.8,
+      0.9,
+      0.95,
+      1.0
+    ],
+    "deep_limit": 50,
+    "doubling_grid": [
+      0.05,
+      0.1,
+      0.15,
+      0.2,
+      0.3,
+      0.4,
+      0.5
+    ],
+    "evict_seed_offset": 1000003,
+    "flat_pp_per_doubling": 2.0,
+    "flat_pp_per_mb": 0.1,
+    "graph_coverages": [
+      1.0,
+      0.75,
+      0.5,
+      0.25,
+      0.1
+    ],
+    "graph_prefix": "m5miss_1795277316_3085714",
+    "miss_bars": [
+      0.2,
+      0.1,
+      0.05,
+      0.02,
+      0.01
+    ],
+    "objects": 1000,
+    "point_text_limit": 1200,
+    "points": 900,
+    "policies": [
+      "mass",
+      "uniform"
+    ],
+    "query_weights": [
+      "mass",
+      "uniform"
+    ],
+    "sample": 250,
+    "seed": 14015,
+    "sensitivity_exponents": [
+      0.6,
+      0.8,
+      1.0,
+      1.2
+    ],
+    "sizes_mb": [
+      75,
+      150,
+      300,
+      600,
+      1200
+    ]
+  },
+  "provenance": {
+    "tool_sha256": "87fe907fa849f7ab05fe2b363d3bd619587af81f39bf9abe075b2f8eaf685769"
+  },
+  "retrieval": {
+    "has_embedder": false,
+    "legs_seen": {
+      "fallback": true,
+      "fts": true,
+      "structural": true,
+      "vector": false
+    },
+    "mode": "keyword_only"
+  },
+  "uniform_query_control": {
+    "curve": [
+      {
+        "coverage": 0.02,
+        "fault_in_rate": 0.98
+      },
+      {
+        "coverage": 0.05,
+        "fault_in_rate": 0.95
+      },
+      {
+        "coverage": 0.1,
+        "fault_in_rate": 0.9
+      },
+      {
+        "coverage": 0.15,
+        "fault_in_rate": 0.85
+      },
+      {
+        "coverage": 0.2,
+        "fault_in_rate": 0.8
+      },
+      {
+        "coverage": 0.25,
+        "fault_in_rate": 0.75
+      },
+      {
+        "coverage": 0.3,
+        "fault_in_rate": 0.7
+      },
+      {
+        "coverage": 0.4,
+        "fault_in_rate": 0.6
+      },
+      {
+        "coverage": 0.5,
+        "fault_in_rate": 0.5
+      },
+      {
+        "coverage": 0.6,
+        "fault_in_rate": 0.4
+      },
+      {
+        "coverage": 0.7,
+        "fault_in_rate": 0.3
+      },
+      {
+        "coverage": 0.8,
+        "fault_in_rate": 0.2
+      },
+      {
+        "coverage": 0.9,
+        "fault_in_rate": 0.1
+      },
+      {
+        "coverage": 0.95,
+        "fault_in_rate": 0.05
+      },
+      {
+        "coverage": 1.0,
+        "fault_in_rate": 0.0
+      }
+    ],
+    "doubling_gain": [
+      {
+        "from_coverage": 0.05,
+        "pp_removed": 5.0,
+        "to_coverage": 0.1
+      },
+      {
+        "from_coverage": 0.1,
+        "pp_removed": 10.0,
+        "to_coverage": 0.2
+      },
+      {
+        "from_coverage": 0.15,
+        "pp_removed": 15.0,
+        "to_coverage": 0.3
+      },
+      {
+        "from_coverage": 0.2,
+        "pp_removed": 20.0,
+        "to_coverage": 0.4
+      },
+      {
+        "from_coverage": 0.3,
+        "pp_removed": 30.0,
+        "to_coverage": 0.6
+      },
+      {
+        "from_coverage": 0.4,
+        "pp_removed": 40.0,
+        "to_coverage": 0.8
+      },
+      {
+        "from_coverage": 0.5,
+        "pp_removed": 50.0,
+        "to_coverage": 1.0
+      }
+    ],
+    "flattening_coverage": null,
+    "flattening_point_at_150mb": null,
+    "why": "uniform query weighting makes fault_in_rate == 1 - F exactly; the curve is a straight line and nothing flattens. M2 drew its queries uniformly at random, so this \u2014 not the window \u2014 is what its policy comparison measured."
+  },
+  "windows": {
+    "derivation": "the 30 %-of-price rule, SEARCH-ARCHITECTURE.md \u00a78",
+    "mb": {
+      "pro": 102,
+      "solo": 77,
+      "team": 615
+    },
+    "note": "solo 77 / pro 102 / team 615 are the SHIPPED values; this artifact measures what they buy and never changes them",
+    "source": "product/pricing.json tiers.<t>.max_graph_storage_mb"
+  },
+  "\u26d4not_this": "STORAGE-ARCHITECTURE.md \u00a715's M5 (where the vector index lives, answered 2026-11-07) \u2014 a different question"
+}
