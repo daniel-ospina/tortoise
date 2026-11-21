@@ -142,6 +142,15 @@ _DOOR_DELETION_SCRIPT = textwrap.dedent(
 
     out = {}
     gone = set()
+    # Measured BEFORE anything is deleted, across every module: "absent after
+    # the replay" is satisfied TRIVIALLY by a name that never existed, so the
+    # replay alone cannot tell a deletion from a typo (review P2). The parent
+    # pins this set, and that is the arm which reddens on a `_PROBE_DOORS`
+    # mistake instead of proving a deletion that never happened.
+    pristine_missing = {
+        rel: [d for d in doors if not hasattr(TortoiseSDK, d)]
+        for rel, doors in targets
+    }
     for rel, doors in targets:
         for door in doors:
             if hasattr(TortoiseSDK, door):
@@ -151,6 +160,7 @@ _DOOR_DELETION_SCRIPT = textwrap.dedent(
         # module its doors are already gone. What must hold for EVERY module is
         # that the doors IT asserts are absent when IT imports.
         absent = sorted(d for d in gone if not hasattr(TortoiseSDK, d))
+        missing_before = pristine_missing[rel]
         spec = importlib.util.spec_from_file_location(
             "_probe_renamed_" + rel.replace("/", "_").replace(".py", ""),
             os.path.join(root, rel))
@@ -159,11 +169,11 @@ _DOOR_DELETION_SCRIPT = textwrap.dedent(
             spec.loader.exec_module(module)
         except BaseException:
             out[rel] = {"raised": traceback.format_exc(), "available": None,
-                        "absent": absent}
+                        "absent": absent, "missing_before": missing_before}
         else:
             out[rel] = {"raised": None,
                         "available": bool(module.FALKORDB_AVAILABLE),
-                        "absent": absent}
+                        "absent": absent, "missing_before": missing_before}
     print(json.dumps(out))
     '''
 )
@@ -385,6 +395,15 @@ def test_a_renamed_probe_door_names_itself_instead_of_skipping():
       live lane, and is swallowed into `FALKORDB_AVAILABLE = False` on a
       no-storage lane; the guard's message is absent in BOTH;
     * revert the narrowed catch to `except Exception` → nothing raises at all.
+
+    ⛔ The replay is split into TWO arms, because "absent afterwards" alone is
+    inert (review P2): a door NAME that never existed on the SDK is trivially
+    absent after a deletion loop that skipped it, so the row would stay green
+    while the deletion it exists to prove never happened. The child therefore
+    reports `missing_before` — the declared doors it could not find on a
+    PRISTINE `TortoiseSDK`, measured before any deletion — and the parent pins
+    that it is empty. Third mutant, which only this arm catches: add a
+    never-existent door (e.g. `create_entty`) to a probe's `_PROBE_DOORS`.
     """
     targets = [[rel, list(_declared_probe_doors(rel))] for rel in PROBE_MODULES]
     proc = subprocess.run(
@@ -400,6 +419,12 @@ def test_a_renamed_probe_door_names_itself_instead_of_skipping():
     report = json.loads(proc.stdout.strip().splitlines()[-1])
     for rel, doors in targets:
         entry = report[rel]
+        assert not entry["missing_before"], (
+            f"{rel}: {entry['missing_before']} is declared as a probe door but "
+            "does not exist on a pristine TortoiseSDK — the mask cannot remove a "
+            "door that is not there, so every assertion below would pass without "
+            "proving the replay (#14114 review P2). Fix `_PROBE_DOORS` in that "
+            "module, or the SDK-surface name it should be.")
         assert set(doors) <= set(entry["absent"]), (
             f"{rel}: {sorted(set(doors) - set(entry['absent']))} still present "
             "on TortoiseSDK when the module imported, so the replay proves "
