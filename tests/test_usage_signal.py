@@ -95,6 +95,20 @@ named test goes RED):
   is no module STRING to compare and an absolute-only branch cannot see it;
   ``_imports_of`` folds ``tortoise.__init__`` onto the unbanned package root, so
   the ban AND the direction scan were both green on a live reach.
+* **Read the relative arm as ``level == 1`` only** (narrow ``relative_root``, so
+  ``from .. import __init__`` falls out) →
+  ``test_no_graph_dependency_pins_the_package_root_EXPORT_form`` RED on the
+  one-dot-further spelling — measured, 101 passed with the pin absent, so the
+  ``level >= 1`` reading was a claim no row held.
+* **Let the scan stop calling the pinned loop** (restore the pre-fix two-leg body
+  inside ``_modules_reaching_a_store``, leaving ``_scan_modules`` intact and
+  exercised) → ``test_the_scan_actually_calls_the_pinned_loop`` RED — measured at
+  head ``1f37c999``: **101 passed** without the pin, i.e. the wiring was invisible
+  to the row that fed the loop.
+* **Quote a stale count beside the ban's provenance claim** (``208 of the 305``
+  modules clean) → no row can redden a prose figure, which is why the count is
+  gone instead: measured at ``1f37c999`` the tree has 305 modules and ``_offending``
+  finds **228** clean (77 offending), so the quoted figure was already false.
 * **Exempt a banned module from the probe into a BAN exemption** (add a non-banned
   name to ``_PROBE_EXEMPT``, or a real importer to ``_COVERAGE_EXEMPT``) →
   ``test_the_no_graph_guard_covers_every_module_that_reaches_a_store`` RED —
@@ -1163,9 +1177,15 @@ def test_no_graph_dependency() -> None:
         "and an empty or misdirected read makes every assertion below vacuous")
     # ⛔ AND ITS PROVENANCE, not just its non-emptiness. The assert above closes the
     # EMPTY read only: `source = "# clean\n"` or a read of another tree module's
-    # file left every row green (measured: 101 passed each), because 208 of the
-    # 305 modules `_offending` finds clean. So the ban compares the string it
-    # audits against a fresh read of the file it claims to audit.
+    # file left every row green (measured: 101 passed each), because MOST of the
+    # tree's 305 modules `_offending` finds clean — the ban's own subject is the
+    # exception, so an empty, cached or misdirected read certifies a file nobody
+    # audited while the rows it feeds read green. No count is quoted here: this
+    # figure has already gone stale twice in this file's own history (it read `208`
+    # while 228 modules were clean at head `1f37c999`, measured), and a figure
+    # beside the property it is used to argue is a fossil waiting to happen. So the
+    # ban compares the string it audits against a fresh read of the file it claims
+    # to audit.
     assert source == Path(usage_signal.__file__).read_text(encoding="utf-8"), (
         "the ban must examine THIS module's CURRENT source: a cached constant or a "
         "misdirected read certifies a file the ban never looked at")
@@ -1483,6 +1503,21 @@ def test_no_graph_dependency_pins_the_package_root_EXPORT_form() -> None:
         "the direction scan must see the RELATIVE bound form too, or it certifies "
         "a ban it cannot see"
     )
+    # ⛔ AND ONE DOT FURTHER: `from .. import __init__`, written in a module ONE
+    # package deep, names the ROOT (`tortoise.__init__`), so the arm must read
+    # `level >= 1` rather than `level == 1`. Narrowing it to `== 1` kept every row
+    # green (measured: 101 passed) while this spelling stopped being seen — the
+    # same unpinned-leg class as the rest of this file. It over-reports for a
+    # module at the top level, where `from .. import __init__` is past the root and
+    # raises instead: fail-closed, per this function's first paragraph.
+    assert _offending(
+        "from .. import __init__ as i\nc = i.FalkorDB\n"
+    ) == {"tortoise.FalkorDB"}, (
+        "`from .. import __init__` in a module one package deep names the ROOT, so "
+        "a `level == 1` arm lets `i.FalkorDB` through every leg")
+    assert _module_reaches_a_store("from .. import __init__ as i\nc = i.sdk\n"), (
+        "the direction scan runs the same leg, so the one-dot-further spelling "
+        "must be visible there too")
     # ⚠️ The remaining literal-name indirections are DECLARED out of scope in the
     # scope note rather than resolved; pinned here so the boundary is visible and a
     # future reader cannot mistake silence for coverage.
@@ -1741,6 +1776,31 @@ def test_the_store_reach_scan_sees_the_REDIS_spelling_too() -> None:
     }, (
         "the scan's loop does not route through `_module_reaches_a_store`, so the "
         "attribute leg can be dropped from the scan with every other row green")
+
+
+def test_the_scan_actually_calls_the_pinned_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⛔ THE EDGE BETWEEN THE SCAN AND ITS LOOP, pinned directly.
+
+    Feeding `_scan_modules` a synthetic pair pins the LOOP and nothing above it: a
+    scan that computed its own inline body left `_scan_modules` correct AND
+    exercised while the attribute leg was gone from the scan — measured at head
+    `1f37c999` by replacing the call site with the pre-fix two-leg loop, which gave
+    **101 passed**, every row green. That is the third appearance of one class in
+    this file (predicate, then loop, now the call site), so the edge is pinned by
+    substitution: a scan that does not route through `_scan_modules` cannot return
+    this sentinel.
+    """
+    sentinel = frozenset({"sentinel.from.a.patched.loop"})
+    monkeypatch.setattr(sys.modules[__name__], "_scan_modules", lambda sources: sentinel)
+    _modules_reaching_a_store.cache_clear()
+    try:
+        assert _modules_reaching_a_store() == sentinel, (
+            "`_modules_reaching_a_store` does not route through `_scan_modules`, "
+            "so the pinned loop can be bypassed and the scan silently narrowed")
+    finally:
+        _modules_reaching_a_store.cache_clear()
 
 
 def test_the_direction_scan_agrees_with_the_ban_on_the_FOLDED_spelling() -> None:
