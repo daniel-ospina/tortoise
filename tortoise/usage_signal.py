@@ -405,9 +405,33 @@ def _window_days(explicit: object = ENV_WINDOW) -> float | None:
             explicit,
         )
         return None
+    value = _as_float(explicit)
+    if value is None:  # already warned: the value cannot be a float at all
+        return None
     return _checked_window(
-        float(explicit), repr(explicit), "the `window_days` argument", "arg"
+        value, repr(explicit), "the `window_days` argument", "arg"
     )
+
+
+def _as_float(explicit: int | float) -> float | None:
+    """The argument door's value as a float, refusing what cannot BE one.
+
+    ⛔ An `int` too large for a float (`10**400`) raises `OverflowError` out of
+    `float()` — before every refusal arm below, so it escaped `refresh` as a
+    traceback rather than a warning. Same class as the non-finite arm: a stated
+    bound nobody can apply is not a bound, and it is refused in the same voice.
+    """
+    try:
+        return float(explicit)
+    except OverflowError:
+        _warn_once(
+            "window-overflow-arg",
+            "usage signal: window_days=%r is too large to be a day count — the "
+            "roll-up is running UNBOUNDED (every entry kept); fix the value to "
+            "bound it",
+            explicit,
+        )
+        return None
 
 
 def _checked_window(days: float, raw: str, origin: str, door: str) -> float | None:
@@ -1193,8 +1217,16 @@ class UsageReading:
         answer is that this signal declines to certify any of them; the caller
         keeps its own tie-break, which is the safe direction (an unfilled
         candidate is not ordered cold).
+
+        ⛔ AND :attr:`pruned_undated` COUNTS AS PRUNING TOO (#14097). The window has
+        TWO prune arms, and the second one deliberately leaves ``pruned == 0`` /
+        ``pruned_before is None`` because nothing places an undated entry against
+        the watermark. Reading only ``pruned`` therefore let the undated arm delete
+        served entries while this guard stayed open, and their keys came back
+        certified as never served — two nodes that WERE in answers, handed to the
+        scorer's tie-break as "no signal".
         """
-        if not self.orderable or self.pruned:
+        if not self.orderable or self.pruned or self.pruned_undated:
             return []
         if label is None:
             seen = {key for (_t, _lbl, key) in self.entries}
@@ -1769,7 +1801,29 @@ def refresh(
     window = _window_days(window_days)
     window_started: str | None = None
     if window is not None:
-        window_started = (ref - timedelta(days=window)).isoformat(timespec="seconds")
+        # ⛔ A BOUND THE DATETIME ARITHMETIC CANNOT CARRY IS NOT A BOUND, and it used
+        # to escape as a raise. `_checked_window` refuses what a `timedelta` cannot
+        # REPRESENT and what is not finite/positive, but `ref - timedelta(days=w)`
+        # underflows a whole band BELOW the timedelta limit: measured from a 2026
+        # `now`, 739620 days already raises `OverflowError: date value out of range`
+        # while 739619 is fine — and `1000000` (a plausible spelling of "never
+        # prune") sits inside that band. This guard is the only place that knows
+        # `ref`, and it is the SAME expression the prune below uses, so one guard
+        # covers both. One key, not a per-door one: the two doors have already been
+        # resolved into `window` by the time this runs.
+        try:
+            window_started = (ref - timedelta(days=window)).isoformat(
+                timespec="seconds"
+            )
+        except OverflowError:
+            _warn_once(
+                "window-underflow",
+                "usage signal: a window of %r days reaches past the earliest "
+                "representable timestamp — the roll-up is running UNBOUNDED "
+                "(every entry kept); fix the value to bound it",
+                window,
+            )
+            window = None
 
     if not _stream_exists(target):
         # ⛔ A MISSING STREAM IS NOT "NOTHING IS HOT". The reading carries

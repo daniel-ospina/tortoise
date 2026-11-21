@@ -1420,7 +1420,8 @@ def test_one_cause_reached_through_BOTH_doors_warns_on_each(
     the same either: each door reports its own `origin` and `raw`.
 
     A single-door test cannot see this; the collision needs a SEQUENCE across
-    both doors inside one process, which is why `_warned` is not cleared here.
+    both doors inside one process, which is why `_warned` is cleared ONCE here
+    and never BETWEEN the three cause pairs.
     """
     import logging
 
@@ -1508,6 +1509,46 @@ def test_a_window_a_timedelta_cannot_carry_is_refused_not_raised(
             "an unappliable bound pruned an entry — it was read as a real bound"
         )
         assert got.pruned == 0
+
+
+@pytest.mark.parametrize("band", [1e6, 739620.0])
+def test_a_window_past_the_earliest_timestamp_is_refused_not_raised(
+    stream: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    band: float,
+) -> None:
+    """⛔ The band BELOW `timedelta`'s limit, which raised out of `refresh`.
+
+    `timedelta` can represent 999999999 days, so `_checked_window`'s overflow arm
+    lets `1e6` through — and then `ref - timedelta(days=…)` raises
+    `OverflowError: date value out of range` (a `datetime`, not a `timedelta`, has
+    to carry the result). From a 2026 `now` the raise starts at 739620 days, so
+    `1e6` — a plausible spelling of "never prune" — is inside it. Both doors are
+    driven: the env door reaches the same subtraction.
+    """
+    import logging
+
+    usage_signal._warned.clear()
+    caplog.clear()
+    _serve(stream, "Point", ["ancient"], at=_at(1))
+    now = datetime(2026, 1, 4, 0, 0, tzinfo=UTC)
+
+    with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+        from_arg = usage_signal.refresh(stream, now=now, window_days=band)
+        monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, repr(band))
+        from_env = usage_signal.refresh(stream, now=now)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 1, (
+        "the underflow guard is ONE code path (the doors are already resolved "
+        f"into `window`), so its key is not per-door — got: {messages}"
+    )
+    assert "earliest" in messages[0] and "UNBOUNDED" in messages[0]
+    for got in (from_arg, from_env):
+        assert got.entry("Point", "ancient") is not None
+        assert got.pruned == 0
+        assert got.window_started is None
 
 
 def test_a_positive_window_is_returned_and_warns_about_nothing(
@@ -1879,6 +1920,64 @@ def test_a_pruned_rollup_refuses_to_certify_any_key_as_unserved(stream: Path) ->
     unbounded = usage_signal.refresh(stream, window_days=None)
     assert unbounded.pruned == 0
     assert unbounded.unserved_keys(["brand-new"], label="Point") == ["brand-new"]
+
+
+def test_an_int_too_large_to_be_a_float_is_refused_not_raised(
+    stream: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ `10**400` is an `int`, so every type arm accepts it — and `float()` raises.
+
+    The conversion sat between the type check and the refusal arms, so a stated
+    bound nobody can represent escaped `refresh` as `OverflowError: int too large
+    to convert to float` instead of being refused in the same voice as the typo,
+    non-positive, non-finite and too-wide arms. Pinned at BOTH levels: the
+    resolver warns once, and `refresh` returns a reading instead of raising.
+    """
+    import logging
+
+    usage_signal._warned.clear()
+    caplog.clear()
+    _serve(stream, "Point", ["ancient"], at=_at(1))
+
+    with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+        assert usage_signal._window_days(10**400) is None
+        got = usage_signal.refresh(
+            stream, now=datetime(2026, 1, 4, tzinfo=UTC), window_days=10**400
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 1, messages
+    assert "too large" in messages[0] and "UNBOUNDED" in messages[0]
+    assert got.entry("Point", "ancient") is not None
+    assert got.pruned == 0
+
+
+def test_the_UNDATED_prune_arm_also_refuses_to_certify_unserved(stream: Path) -> None:
+    """⛔ #14097: the second prune arm leaves `pruned == 0`, so the guard missed it.
+
+    An entry whose serves all carried an unparseable `at` is dropped by the window
+    too, but nothing places it against the watermark — so the reading reports
+    `pruned == 0` / `pruned_before is None` and only `pruned_undated` moves. A guard
+    that read `pruned` alone therefore stayed open while SERVED keys were deleted,
+    and returned them certified as never served: the flattering direction for a
+    residency score, and a claim the stream cannot support.
+    """
+    undated = "2026-01-02T00:00:00+00:00"
+    for key in ("undated-a", "undated-b"):
+        _serve_row(stream, "Point", key, at="not-a-timestamp")
+    _serve(stream, "Point", ["recent"], at=undated)
+
+    got = usage_signal.refresh(
+        stream, now=datetime(2026, 1, 4, tzinfo=UTC), window_days=2
+    )
+
+    assert got.pruned == 0, "the dated watermark must not claim the undated arm"
+    assert got.pruned_undated == 2
+    assert got.orderable is True
+    assert got.unserved_keys(["undated-a", "undated-b", "never"], label="Point") == [], (
+        "the undated prune arm deleted SERVED keys and the reading certified them "
+        "as never served — the caller reads that as 'no signal' (cold-ordered)"
+    )
 
 
 def test_an_incomplete_counter_refuses(stream: Path) -> None:
