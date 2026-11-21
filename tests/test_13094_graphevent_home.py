@@ -1181,6 +1181,75 @@ def test_the_measure_scripts_constraint_names_the_graph_key_not_a_constraint():
         "a graph key containing whitespace must remain a single argv token")
 
 
+def test_a_refused_schema_statement_refuses_the_run(monkeypatch, capsys):
+    """A run whose schema did not install is NOT a measurement — and the ARGV is graded.
+
+    ⛔ TWO ARMS ON ONE FIXTURE (#14183 review round 11). (a) THE GUARD: a refused schema
+    statement marks the run `schema_complete: False` and `main()` exits 2, so a
+    population measured without the schema it claims cannot be quoted as one —
+    deleting the guard left this suite green. (b) THE ISSUANCE PATH, not the helper:
+    `test_the_measure_scripts_constraint_names_the_graph_key_not_a_constraint` grades
+    `command_tokens` in isolation, so reverting `measure()` to
+    `execute_command(*issued.split())` also left the suite green — the "pinned in
+    isolation" shape this branch already fixed for `_require_graph` (round 2). The
+    argv captured AT THE CALL SITE is asserted here, with a key carrying whitespace,
+    which is the one input on which the two spellings differ.
+    """
+    module = _measure()
+    argv: list[tuple] = []
+
+    class _Conn:
+        @staticmethod
+        def execute_command(*args):
+            argv.append(args)
+            if args and args[0] == "GRAPH.CONSTRAINT":
+                raise RuntimeError("missing supporting exact-match index")
+            if args[:2] == ("INFO", "memory"):
+                return {"used_memory": 1000}
+            if args and args[0] == "GRAPH.MEMORY":
+                return ["total_graph_sz_mb", 1]
+            return "OK"
+
+    class _Graph:
+        @staticmethod
+        def query(statement, params=None):
+            return type("_R", (), {"result_set": [[1]]})()
+
+    class _DB:
+        connection = _Conn()
+
+        @staticmethod
+        def select_graph(name):
+            return _Graph()
+
+    monkeypatch.setattr(module, "_connection", lambda uri: _DB())
+    result = module.measure("docker://x", "probe_13094 a", [10], False)
+
+    assert result["schema_complete"] is False, (
+        "a refused schema statement must mark the run incomplete, or the slope it "
+        "publishes claims a schema the population does not carry")
+    constraint = [call for call in argv if call and call[0] == "GRAPH.CONSTRAINT"]
+    assert constraint, argv
+    assert constraint[-1] == (
+        "GRAPH.CONSTRAINT", "CREATE", "probe_13094 a", "UNIQUE", "NODE",
+        "GraphEvent", "PROPERTIES", "1", "event_id"), (
+        "the argv must carry the graph key as ONE token — re-splitting the formatted "
+        f"statement shifts every following argument; got {constraint[-1]!r}")
+
+    # (b2) THE EXIT CONTRACT: a refused schema is exit 2, never a published slope.
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://x")
+    monkeypatch.setattr(
+        module, "measure",
+        lambda *a, **k: {"schema_complete": False,
+                         "schema": [{"installed": False,
+                                     "statement": "GRAPH.CONSTRAINT CREATE …"}]})
+    assert module.main([]) == 2, (
+        "a run with a refused schema statement is \"could not run\" (2), not a "
+        "measurement")
+    err = capsys.readouterr().err
+    assert "REFUSED" in err and "must NOT be quoted" in err, err
+
+
 def test_the_declared_event_types_are_the_sdks_own():
     """The census names the store's type vocabulary; it must BE the store's.
 
