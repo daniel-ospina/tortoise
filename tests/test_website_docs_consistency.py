@@ -2887,8 +2887,35 @@ def test_the_select_scope_closes_on_input_and_a_nested_select_and_nothing_else()
         "real second select and the anchor is inside it (Chrome: 2 selects, "
         "`innerText ''`, width 0) — reporting it advertises a link no reader meets"
     )
-    assert extract_anchor_hrefs(
-        '<select><table><td><input><h2 id="qs">Q</h2>'
+    # ⛔ TWO MORE SHAPES WHERE A VIRTUAL "CLOSE" WAS A LINK A BROWSER NEVER EXPOSES
+    # (#14073 review round 19, P1 + P2, measured). Both are the SAME class as the rows
+    # above — an element the model removed while the browser kept it — reached through
+    # the sibling close and the table start-tag path rather than through select scope.
+    #
+    # (a) THE ADOPTION AGENCY KEEPS ITS `furthestBlock`. AAA removes only the nodes
+    # BETWEEN the formatting element and that block, and `<select>` is SPECIAL, so:
+    #   `<a><select><a href="/blog">L</a>`  -> Chrome `a > select > a`, anchor 0×0, unclickable
+    # (a `<li>`/`<nobr>` in place of the outer `<a>` behaves identically.)
+    #
+    # (b) `<table><select><table><a href="/blog">` -> Chrome CLOSES the select at the
+    # inner `<table>` (`<select></select><table></table><a href…`), anchor 10×17 and NOT
+    # inside a select — so this model used to DROP a link a reader can click (the loud
+    # direction: the golden would cut the slice short on a correct page). Its control is
+    # the row above: a `<table>` with no select already open does NOT close it.
+    for label, markup, expected in (
+        ("the AAA furthest block", '<a><select><a href="/blog">L</a>', []),
+        ("the li sibling close", '<ul><li><select><li><a href="/blog">L</a></ul>', []),
+        ("the nobr sibling close", '<nobr><select><nobr><a href="/blog">L</a>', []),
+        ("a table in a foster-parented select",
+         '<table><select><table><a href="/blog">C</a>', ["/blog"]),
+    ):
+        assert extract_anchor_hrefs(markup) == expected, (
+            f"{label}: an element a browser KEEPS was removed, or one it CLOSES was "
+            f"kept — measured in Chrome, the anchor is 0×0 inside the select in the "
+            f"three AAA/sibling shapes and is a rendered sibling link after the table "
+            f"closes the select in the fourth"
+        )
+    assert extract_anchor_hrefs('<select><table><td><input><h2 id="qs">Q</h2>'
     ) == [], (
         "a `<h2>` after an `<input>` that never popped the select was BOUNDED: the "
         "cell is a scope boundary so the select survives, and a heading inside it is "
@@ -8394,6 +8421,16 @@ def test_the_script_data_wedge_states_its_own_rule() -> None:
         "a literal CR after `<script` did not enter double-escaped: the tokenizer never "
         "sees a CR (§13.2.3 preprocesses it to an LF), so a parse that has one must "
         "treat it as the LF delimiter"
+    )
+    # …and the SAME test on the OTHER arm: leaving double-escaped is the mirror rule, and
+    # dropping `\r` there was invisible to the whole suite (#14073 review round 19, P2 —
+    # the mutation `data[nxt] in " \t\n\f/>"` left `110 passed`). A `</script\r>` reached
+    # from double-escaped only drops back to ESCAPED; the element closes at the NEXT
+    # `</script`, so the wedge must not fire.
+    assert _script_data_state("<!--<script></script\r>") == "escaped", (
+        "a CR after `</script` did not return the tokenizer to escaped: the two arms "
+        "share one delimiter set, and the CR-to-LF preprocessing applies to both — with "
+        "this arm missing the `\r` the state stays double and a legal chunk wedges"
     )
     with pytest.raises(ValueError, match="wedged"):
         extract_visible_text("<script><!--<script></script</script><p>SWALLOWED</p>")

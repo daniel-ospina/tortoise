@@ -1319,6 +1319,8 @@ class _AnchorHrefParser(HTMLParser):
         if targets:
             if tag in self._REMOVE_NOT_POP:
                 self._remove_nearest(targets)
+            elif tag in self._SPECIAL_STOPS_SIBLING_CLOSE:
+                self._close_nearest_stopping_at_special(targets)
             else:
                 self._close_nearest(targets)
             return
@@ -1403,6 +1405,36 @@ class _AnchorHrefParser(HTMLParser):
             del self._open_elements[index + 1:]
             return
 
+    def _table_start_ends_an_open_select(self, tag: str) -> None:
+        """A `<table>` start tag while the current node is a `<select>` CLOSES it.
+
+        ⛔ MEASURED, AND IT IS THE LOUD DIRECTION (#14073 review round 19, P2).
+        "In select" answers a `<table>` start tag with *parse error, act as an
+        `</select>`*, so the browser ends the select there:
+
+            <table><select><table><a href="/blog">L</a>
+              -> Chrome: <select></select><table></table><a href="/blog">L</a>
+                         (anchor 10×17, `inSelect` false)
+
+        while this model kept the select open and reported `[]` — a rendered link
+        DROPPED, i.e. a correct page reddened (the golden would cut the slice short).
+
+        ⛔ THE PRECONDITION IS "FOSTER-PARENTED OUT OF AN OPEN TABLE", NOT "current node
+        is a select" (#14073 review round 19, re-measured). `<select><table>` keeps the
+        table INSIDE the select (Chrome: `<select><table><tbody><tr><td>…`, one select,
+        the anchor inside it) — the close above happens only when a `<table>` is
+        already open and the select was moved out of it, which is the shape that
+        reddened this: `<table><select><table>` gives `<select></select><table></table>`.
+        So the rule fires only when an open `<table>` frame exists too; otherwise the
+        select survives, which is the `#storage` slice pin's own row.
+        """
+        if tag != "table" or self._suppress or self.wedged_reason or self._foreign:
+            return
+        if not self._open_elements or self._open_elements[-1][0] != "select":
+            return
+        if any(open_tag == "table" for open_tag, _c, _r in self._open_elements):
+            self._close_extent("select")
+
     #: The sibling closes whose spec step REMOVES the matched element from the stack
     #: rather than popping through it: the adoption agency's `existingA`
     #: (§13.2.6.4.7, "remove element from the stack of open elements" — the NODE, not
@@ -1455,6 +1487,50 @@ class _AnchorHrefParser(HTMLParser):
             return not any(open_tag == "table" for open_tag, _, _ in self._open_elements)
         return False
 
+    def _close_nearest_stopping_at_special(self, targets: tuple[str, ...]) -> None:
+        """Pop through the nearest target, STOPPING where a browser stops the walk.
+
+        ⛔ THE `li`/`dd`/`dt` RULES WALK FROM THE CURRENT NODE AND BREAK AT A SPECIAL
+        ELEMENT (#14073 review round 19, B3, measured). The spec's loop is "let `node`
+        be the current node; if `node` is an `li`, generate implied end tags except
+        `li` and pop until `li` is popped; otherwise, if `node` is in the SPECIAL
+        category AND is not `address`/`div`/`p`, then break". Popping through whatever
+        is above the match (what `_close_nearest` does) therefore closed elements a
+        browser keeps:
+
+            <ul><li><select><li><a href="/blog">L</a></ul>
+              -> Chrome: <ul><li><select><li><a href="/blog">L</a></li></select></li></ul>
+
+        the second `<li>` and the anchor BOTH inside the still-open select, the anchor
+        0×0 and unclickable — while this model had closed the select and advertised
+        `/blog` as a way in (fail-open). `<ul><li><audio><li>CLAIM` still pops, because
+        `audio` is not special: that measurement is why the rule cannot simply be
+        "current node only".
+        """
+        for index in range(len(self._open_elements) - 1, -1, -1):
+            open_tag = self._open_elements[index][0]
+            if open_tag in targets:
+                for _open_tag, opened_container, _renders in self._open_elements[index:]:
+                    if opened_container and self._open_containers:
+                        self._open_containers.pop()
+                del self._open_elements[index:]
+                return
+            if open_tag in self._SPECIAL and open_tag not in self._SIBLING_CLOSE_PASSES_THROUGH:
+                return
+
+    #: The three SPECIAL elements the `li`/`dd`/`dt` walk is allowed to pass (#14073
+    #: review round 19). The spec names exactly these in the break condition; every
+    #: other special element stops the walk, which is why a `<select>` above the
+    #: target keeps it open.
+    _SIBLING_CLOSE_PASSES_THROUGH = frozenset({"address", "div", "p"})
+
+    #: Tags whose sibling close is the SPECIAL-STOPPING walk rather than a plain
+    #: pop-through (#14073 review round 19, measured — see
+    #: `_close_nearest_stopping_at_special`). `option`/`optgroup` keep the plain walk:
+    #: their rule is the CURRENT NODE only, and widening it without a measurement is
+    #: how the `<button>` entry in `_REMOVE_NOT_POP` was wrong.
+    _SPECIAL_STOPS_SIBLING_CLOSE = frozenset({"li", "dd", "dt"})
+
     def _close_nearest(self, targets: tuple[str, ...]) -> None:
         """Pop THROUGH the nearest open element named in `targets`, if there is one.
 
@@ -1497,6 +1573,29 @@ class _AnchorHrefParser(HTMLParser):
         containers, `_IMPLICITLY_CLOSED`), so `opened_container` is False for every
         target; the branch below falls back to the truncating close rather than leave
         an extent dangling if that refusal is ever widened.
+
+        The container survives through the FURTHEST-BLOCK rule below rather than
+        through a relocation list of its own: containers are special, so the topmost
+        one above the match IS the furthest block, and it stays where it is. A
+        separate "re-append the containers I removed" list was dead once this rule
+        landed (#14073 review round 19: mutating it away changed no behaviour and no
+        pin reddened, which is how it was found).
+
+        ⛔ AND "NOT LEFT IN THE ANCESTRY" IS FALSE FOR THE FURTHEST BLOCK (#14073
+        review round 19, P1, measured). AAA removes from the stack only the nodes
+        BETWEEN the formatting element and its `furthestBlock` — the furthest block
+        and everything above it STAY. The furthest block is the topmost SPECIAL
+        element above the match, and `<select>` is special, so:
+
+            <a><select><a href="/blog">L</a>
+              -> Chrome: <a><select><a href="/blog">L</a></select></a>; the second
+                 anchor is `closest('select')`, 0×0, unclickable
+
+        which this method used to advertise as a link (it removed the `select` frame).
+        Same for `<li><select><li><a href>` and `<nobr><select><nobr><a href>` — the
+        anchor stays inside the select in every one. End-to-end a `<a><select><a
+        href="#storage-limits">` decoy in the real TOC moved the `_docs_section` cut
+        with all four pins green while Chrome painted nothing.
         """
         for index in range(len(self._open_elements) - 1, -1, -1):
             if self._open_elements[index][0] not in targets:
@@ -1505,9 +1604,21 @@ class _AnchorHrefParser(HTMLParser):
             if opened_container:
                 self._close_nearest(targets)
                 return
-            relocated = [entry for entry in self._open_elements[index + 1:] if entry[1]]
+            furthest = next(
+                (
+                    above
+                    for above in range(len(self._open_elements) - 1, index, -1)
+                    if self._open_elements[above][0] in self._SPECIAL
+                ),
+                None,
+            )
+            # The furthest block and everything above it STAY; everything from the
+            # match up to (not including) it goes. A CONTAINER among the removed ones
+            # survives as a relocated ancestor — and only a removed one, or the
+            # furthest block would be appended to itself (#14073 review round 19).
+            kept = self._open_elements[furthest:] if furthest is not None else []
             del self._open_elements[index:]
-            self._open_elements.extend(relocated)
+            self._open_elements.extend(kept)
             return
 
     def _formatting_in_scope(self, tag: str) -> bool:
@@ -2088,6 +2199,7 @@ class _AnchorHrefParser(HTMLParser):
         self._close_implied(tag, attrs)
         # And the table contexts: a table-structure tag discards what the "in table"
         # mode had foster parented out — see `_clear_table_context`.
+        self._table_start_ends_an_open_select(tag)
         self._clear_table_context(tag)
         # A nested `<select>` is IGNORED whole: no element, no id, no extent (see
         # `_SELECT_POP_IGNORED`).
