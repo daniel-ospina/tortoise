@@ -184,7 +184,7 @@ door's `MERGE (s:Source {url:$did})` is the integration head's line) but
 absent from this list, so the rule above was sending a reader to the pin, where **all four** of these
 addresses are a comment or a docstring line at their current spellings (`sdk.py`'s two included) and none is
 the commit door — the `params={"eid": _eid, "oid": _oid},` statement an earlier form of this sentence
-named is the pin's `:23046`, which is not one of them (`main`'s `:22919` is a different line of the same door):
+named is the pin's `:23046`, which is not one of them:
 `sdk.py:22267` (the capture writer) with its read-back `:22390`, and `hosted_api.py:23501` (the commit
 door's `MERGE (s:Source {url:$did})`) with `_execute_commit_writes` at `:23313`. ⚠️ **The `hosted_api.py`
 pair is head-bound and has FIVE readings on record** — `:22301`/`:22113` at the pin, `:22919`/`:22731` at
