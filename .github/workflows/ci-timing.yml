@@ -86,7 +86,16 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install the project env — the probe collects a real conftest (#11607)
-        run: pip install -e '.[test]' pyyaml==6.0.2
+        # PyYAML's number MATCHES the `test` extra's pin on purpose: pip applies
+        # both constraints, so a divergent one here is `ResolutionImpossible` —
+        # the job would go red for a reason nothing in the diff explains. The
+        # number must agree with `pyproject.toml`'s `.[test]` pin, `requirements.txt`
+        # and `uv.lock` — ⛔ NOT with every pyyaml pin in the repo: the `changes`
+        # job's `Install pyyaml` step and `manifest-integrity` (both in
+        # `python-ci.yml`) and `mergify-guard-recut.yml` keep their own
+        # `pyyaml==6.0.2` deliberately, so "one number repo-wide" would be false
+        # (#14099 review, P3).
+        run: pip install -e '.[test]' pyyaml==6.0.3
 
       # ⛔ THE PROBE'S RUNNABILITY IS PINNED AS AN OUTCOME, NOT AS A TOKEN.
       # `tests/test_ci_timing.py` can only read this file, so its install-line
