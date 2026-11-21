@@ -708,7 +708,8 @@ def test_the_census_still_catches_an_ambiguous_name_on_an_sdk_receiver(name):
     holds — the Cypher client's `query`/`list_graphs`/`link_source_to_entity` and the
     two seed surfaces' `create_subject` — are exempted on every non-SDK receiver. That
     branch carries **1561 of 1561** live hits in `tortoise/` (MEASURED at `e0accb8fe` by
-    walking `tortoise/**.py` and counting calls whose attribute is in the set and whose
+    counting, over every `*.py` under `tortoise/` — `Path("tortoise").rglob("*.py")` —
+    each `ast.Call` whose `func` is an `ast.Attribute` with an attr in the set and whose
     receiver's terminal name is not `sdk`/`_sdk`: 1543 `query`, 11 `list_graphs`,
     5 `link_source_to_entity`, 2 `create_subject`; an earlier cut of this sentence said
     "repo-wide" over 1558, which was this same `tortoise/`-only count at an older head —
@@ -750,6 +751,165 @@ def test_the_census_still_catches_an_ambiguous_name_on_an_sdk_receiver(name):
             "changed no outcome and was removed (#13036 review F3a)")
 
 
+def _effective_class_binding(cls: ast.ClassDef, name: str) -> ast.AST | None:
+    """The node that binds `name` in `cls` AT CLASS-CREATION TIME — the LAST one.
+
+    A class body executes top to bottom, so a later binding SHADOWS an earlier one:
+    ``if FLAG:\n    def door(...)`` wins over a plain `def door` above it, and so does
+    the same door inside a `match` case, a `try`/`except` handler, a `for` body or an
+    ``except*`` (``TryStar``) handler — the BODY of a compound statement does not create
+    a new scope. Reading `cls.body` for the FIRST `def` with the name (the shape this
+    pin shipped with) is therefore not a check of the EFFECTIVE door at all —
+    MEASURED at `9badc44b8b98`: adding a shadowing non-delegating door to
+    `_SdkSeedSurface` left the first-def pin GREEN while the runtime binding was the
+    shadowing one. That gap is the residual the recorded CLEAN review at that head
+    left open, verbatim: "tightening it is a follow-up at most".
+
+    ⛔ NO STATEMENT-TYPE WHITELIST. The first cut of this helper recursed only into
+    `if`/`try`/`for`/`while`/`with`, so a door shadowed inside ``match`` or ``except*``
+    was INVISIBLE and the helper answered the earlier `def` — the same fail-open shape
+    as the first-def scan, one node type further out (measured for both: the whitelist
+    answered the earlier `def`). This walks EVERY child node
+    instead and stops only where Python really does create a scope: the bodies of
+    `def`/`async def`/`class`. Those three statements still BIND their own NAME in this
+    scope, so they are candidates too — a class named `create_subject` shadows the door
+    exactly like an assignment would.
+
+    Every binding form is a candidate, not just `def`: a `Name` in store context
+    (`door = …`, `door += …`, `for door in …`, `with … as door`, `except E as door`), an
+    import alias, and the def/class names above. The caller REFUSES any candidate that
+    is not a `def` — a door bound by something other than a function cannot be checked
+    for delegation, so it must fail loudly rather than pass as the `def` it replaced.
+    ``ast.AsyncFunctionDef`` is collected too, so an ``async def`` door is measured
+    rather than read as "no door at all".
+    """
+    candidates: list[ast.AST] = []
+
+    def walk_children(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.ClassDef)):
+                # A SCOPE BOUNDARY: its body binds elsewhere, but the statement
+                # itself binds `child.name` HERE.
+                if child.name == name:
+                    candidates.append(child)
+                continue
+            if isinstance(child, ast.alias):
+                if (child.asname or child.name.split(".")[0]) == name:
+                    candidates.append(child)
+                continue
+            if isinstance(child, ast.Name) and child.id == name \
+                    and isinstance(child.ctx, ast.Store):
+                candidates.append(child)
+                continue
+            walk_children(child)
+
+    for stmt in cls.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if stmt.name == name:
+                candidates.append(stmt)
+            continue
+        walk_children(stmt)
+
+    if not candidates:
+        return None
+    return max(candidates, key=lambda n: (getattr(n, "lineno", 0),
+                                          getattr(n, "col_offset", 0)))
+
+
+def test_the_effective_class_binding_reads_the_shadowing_door():
+    """The pin below rests on `_effective_class_binding` — so pin ITS semantics.
+
+    Every case here is a binding shape that SHADOWS an earlier `def` at class-creation
+    time, and every one of them leaves a binder-order-blind scan green (MEASURED for
+    the first-def shape at `9badc44b8b98`; the rest follow from the same shadowing
+    rule): a door under `if True:`, a door in a `match` case, a door
+    in an ``except*`` handler, an assignment door, and a class named like the door. Plus
+    the isolation case: a door in a NESTED class does not bind in the outer scope.
+
+    The assertion is on the LAST binder in every case, because that is what Python
+    binds — `inspect` agrees: `_SdkSeedSurface.__dict__['create_subject']` is the
+    shadowing function when one of these is present.
+    """
+    def binding_of(source: str) -> ast.AST | None:
+        return _effective_class_binding(ast.parse(source).body[0], "door")
+
+    shadow_if = ast.parse(
+        "class C:\n"
+        "    def door(self):\n"
+        "        return 1\n"
+        "    if True:\n"
+        "        def door(self):\n"
+        "            return 2\n")
+    binding = _effective_class_binding(shadow_if.body[0], "door")
+    assert isinstance(binding, ast.FunctionDef) and binding.lineno == 5, (
+        "a later binding under `if True:` shadows the earlier `def` at class-creation "
+        "time, so it is the EFFECTIVE door and must be the one returned", ast.dump(binding))
+
+    # ⛔ `match` was INVISIBLE to the statement-type whitelist this helper first had.
+    shadow_match = (
+        "class C:\n"
+        "    def door(self):\n"
+        "        return 1\n"
+        "    match 1:\n"
+        "        case 1:\n"
+        "            def door(self):\n"
+        "                return 2\n")
+    binding = binding_of(shadow_match)
+    assert isinstance(binding, ast.FunctionDef) and binding.lineno == 6, (
+        "a door inside a `match` case binds in the CLASS scope and shadows the def "
+        "above it — a whitelist that skips `ast.Match` reports the earlier def and "
+        "leaves the pin green over a non-delegating runtime door", ast.dump(binding))
+
+    # ⛔ ... and so was `except*` (`ast.TryStar`, a distinct class from `ast.Try`).
+    shadow_trystar = (
+        "class C:\n"
+        "    def door(self):\n"
+        "        return 1\n"
+        "    try:\n"
+        "        raise ExceptionGroup('g', [ValueError()])\n"
+        "    except* ValueError:\n"
+        "        def door(self):\n"
+        "            return 2\n")
+    binding = binding_of(shadow_trystar)
+    assert isinstance(binding, ast.FunctionDef) and binding.lineno == 7, (
+        "a door inside an `except*` handler binds in the CLASS scope and shadows the "
+        "def above it — `ast.TryStar` is not `ast.Try`, so a whitelist misses it",
+        ast.dump(binding))
+
+    nested = ("class C:\n"
+              "    class Inner:\n"
+              "        def door(self):\n"
+              "            return 2\n"
+              "    def other(self):\n"
+              "        return 1\n")
+    assert binding_of(nested) is None, (
+        "a door in a NESTED class does not bind in the outer class's scope — the "
+        "outer class has no `door` at all, so the walker must answer None rather than "
+        "reach into `Inner`")
+
+    assigned = (
+        "class C:\n"
+        "    def door(self):\n"
+        "        return 1\n"
+        "    door = staticmethod(other)\n")
+    binding = binding_of(assigned)
+    assert isinstance(binding, ast.Name), (
+        "an assignment door must be RETURNED (last-wins), not skipped — the caller "
+        "refuses it, so a rebound name cannot read as the def above it", ast.dump(binding))
+
+    class_named = (
+        "class C:\n"
+        "    def door(self):\n"
+        "        return 1\n"
+        "    class door:\n"
+        "        pass\n")
+    binding = binding_of(class_named)
+    assert isinstance(binding, ast.ClassDef), (
+        "a CLASS named like the door binds the name too — it must be returned so the "
+        "caller refuses it instead of reading the def it replaced", ast.dump(binding))
+
+
 def test_the_two_seed_surfaces_publish_a_create_subject_door_that_delegates_privately():
     """The FACT behind `create_subject`'s presence in the ambiguous set, MEASURED.
 
@@ -762,9 +922,15 @@ def test_the_two_seed_surfaces_publish_a_create_subject_door_that_delegates_priv
 
     Read off the AST, for the same reason the census above is: a docstring that NAMES
     `create_subject` is not a door. FAILS IF a surface loses the door (the seed's call
-    would raise `AttributeError`) or stops delegating to the private SDK spelling (the
-    door would be a second, unretired write path) — either way the exemption would
-    have outlived its reason.
+    would raise `AttributeError`), REBINDS it to something that is not a `def`, or
+    stops delegating to the private SDK spelling (the door would be a second,
+    unretired write path) — in each case the exemption would have outlived its reason.
+
+    ⛔ The EFFECTIVE binding is what is checked, not the first `def` in `cls.body`:
+    a class body executes top to bottom, so `if FLAG:\n    def create_subject(...)`
+    shadows an earlier door while a first-def scan stays green (MEASURED at
+    `9badc44b8b98`: the first-def pin PASSED on exactly that mutation, and this
+    walker reds it; the walker's own semantics are pinned by the test above).
     """
     doors = {
         ("tortoise/hosted_api.py", "_OrgSeedSurface"): "_create_subject",
@@ -777,12 +943,15 @@ def test_the_two_seed_surfaces_publish_a_create_subject_door_that_delegates_priv
         assert cls is not None, (
             f"{rel} no longer defines `{cls_name}` — the `create_subject` exemption "
             "names a class this file cannot find, so the row's reason is gone")
-        doors_found = [n for n in cls.body
-                       if isinstance(n, ast.FunctionDef) and n.name == "create_subject"]
-        assert len(doors_found) == 1, (
-            f"{rel}::{cls_name} must define exactly ONE `create_subject` door, "
-            f"found {len(doors_found)}")
-        calls = [n for n in ast.walk(doors_found[0])
+        binding = _effective_class_binding(cls, "create_subject")
+        assert binding is not None, (
+            f"{rel}::{cls_name} has no `create_subject` binding — the seed's own call "
+            "would raise `AttributeError`, so the exemption has outlived its reason")
+        assert isinstance(binding, (ast.FunctionDef, ast.AsyncFunctionDef)), (
+            f"{rel}::{cls_name}.create_subject is bound by an "
+            f"{type(binding).__name__} at line {binding.lineno}, not a `def` — a door "
+            "this pin cannot read for delegation is a door the exemption cannot rest on")
+        calls = [n for n in ast.walk(binding)
                  if isinstance(n, ast.Call)
                  and isinstance(n.func, ast.Attribute)
                  and n.func.attr == delegated
