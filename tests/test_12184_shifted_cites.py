@@ -1169,6 +1169,11 @@ _QUADRUPLE = re.compile(
     r"(\d+) written spellings → (\d+) pairs → (\d+) collisions → (\d+) drifters of the (\d+)(?: comparable)?"
 )
 _ALT_BASIS = re.compile(r"counting that form gives (\d+) pairs and (\d+) drifters")
+#: The SECOND publication of the alternative numerator: "155 and 158 are one measurement under two counting
+#: decisions". Graded against `_ALT_BASIS` in the history-free arm, because the two are ONE figure published
+#: twice and a document contradicting itself about it is precisely `#14038`. It needs no pin and no history:
+#: both mentions are IN the document, so the agreement holds in the shape CI actually runs.
+_ONE_MEASUREMENT = re.compile(r"(\d+) and (\d+) are one measurement")
 #: The two-code-span disclosure's OWN counts — "writes N pairs as two code spans", and "M of them are
 #: resolved but not counted by the one-token rule". Both were PROSE ONLY until the `#13991` review (`ab6f915b8d`, finding
 #: P2-A) measured them: the sentence stated **three** pairs while the document writes **five**, so the one
@@ -1488,15 +1493,40 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
                 f"pair(s) in the two-code-span form the one-token basis resolves but does not count, so "
                 f"over {published_pairs} it is {published_pairs + extra_pairs}"
             )
+        # ⛔ HISTORY-FREE, and it closes the hole the comment below admitted: the alternative numerator is
+        # published TWICE, and the two mentions must agree. Graded HERE, not in the pin arm, so it holds in a
+        # `fetch-depth: 1` checkout — where the pin is unreadable and the only other grader of that sentence
+        # cannot run. MEASURED before this leg existed, in a tree with no `.git`: `155 and 158` → `155 and
+        # 156` — a document contradicting itself about a figure it publishes twice — passed every arm there
+        # and red only where history was readable.
+        one = _ONE_MEASUREMENT.search(body)
+        if not one:
+            problems.append(
+                "the `N and M are one measurement` sentence is gone — it is the second publication of the "
+                "alternative numerator, and the only history-free cross-check on it"
+            )
+        else:
+            one_drifters, one_alt_drifters = map(int, one.groups())
+            if (one_drifters, one_alt_drifters) != (drifters, alt_drifters):
+                problems.append(
+                    f"the `{one_drifters} and {one_alt_drifters} are one measurement` sentence disagrees with "
+                    f"the figures it claims to restate: the one-token basis reads {drifters} drifters and the "
+                    f"alternative basis reads {alt_drifters} (`counting that form gives {alt_pairs} pairs and "
+                    f"{alt_drifters} drifters`). One figure, two mentions, and they must be the same figure"
+                )
         # ⛔ A BAND, not a lower bound. The two bases are one measurement under two counting decisions
-        # (`122 and 123 are one measurement under two counting decisions, not two findings`), and each added
+        # (`155 and 158 are one measurement under two counting decisions, not two findings`), and each added
         # pair adds AT MOST one drifter — so the only legal numerators are `drifters` .. `drifters +
         # extra_pairs`. `alt_drifters < drifters` saw the downward violation and was blind to every
         # overstatement: a numerator inflated by +8 or +67 over the primary's read `problems == []`, which
         # is the exact direction a stale figure takes when a denominator moves under it (`#13599` review,
         # finding 1 — measured on this head before the fix). It is the ONLY guard on this figure: the
-        # three-mention agreement arm cannot reach the alternative basis, because the document publishes
-        # `123` in that sentence alone, so there is no second mention to agree with. ⛔ It is NOT the ONLY
+        # three-mention agreement arm cannot reach the alternative basis. ⛔ This comment used to say the
+        # document publishes that figure "alone, so there is no second mention to agree with", and BOTH halves
+        # were false: the alt numerator is published TWICE (the alt-basis sentence and the `N and M are one
+        # measurement` sentence), and the `123` it quoted is the POST-re-spelling COLLISION count, not the alt
+        # numerator. So the two mentions are now graded against each other in the HISTORY-FREE arm ABOVE.
+        # ⛔ It is NOT the ONLY
         # guard on the figure, though, and this comment claimed it was until the re-derivation landed:
         # `test_the_drift_numerator_is_re_derived_from_the_pin_blob_not_carried` grades the alternative
         # basis from the pin's union set, so an alt numerator this BAND still contains is caught there —
