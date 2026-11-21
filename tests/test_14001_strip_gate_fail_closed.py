@@ -1405,8 +1405,6 @@ def _writer_register_population() -> dict[str, list[str]]:
     names NO origin at all (a bare `raise ImportError("…")` inside the declared module's chain)
     is `stray` too: unrecognised is not the environment.
     """
-    import ast
-
     from tortoise import embed_writer_register as register
 
     population: dict[str, list[str]] = {
