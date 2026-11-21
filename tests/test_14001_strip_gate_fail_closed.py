@@ -68,15 +68,23 @@ def _record_write(*args, **kwargs) -> None:
     that only inspects `props` cannot see the store. The handed arguments are part of the
     measurement.
     """
-    _HANDED.clear()
-    for argument in args:
-        _HANDED.append(argument)
+    # ⛔ DO NOT CLEAR HERE (`#14001`, measured by the cycle-4 review): `_oracle` resets per run, and
+    # clearing on entry meant a handoff-then-`_write(props)` arm recorded only the LAST call — the
+    # false "documents nothing" that would get a real row deleted on a false premise. PINNED by
+    # `REBUILD_RESIDUAL_ROWS["rebuilt-mapping-handoff-then-rehandoff"]`, whose stop arm calls this
+    # channel twice; restoring `_HANDED.clear()` here reds that row and nothing else (the rebase
+    # review measured that nothing else reached it, so the row is what makes the change non-inert).
+    _HANDED.extend(args)
+    # ⛔ A KEYWORD HANDOFF IS THE SAME HANDOFF (`#14001`, measured by the review of this branch):
+    # `_write(props={**props, k: vec})` certifies and lands, and an oracle that recorded only
+    # `args` reported `lands=False` — the direction that turns a pin vacuous.
+    _HANDED.extend(kwargs.values())
 
 
 _HANDED: list = []
 
 
-def _oracle(body: str, extra: str = "") -> dict:
+def _oracle(body: str, extra: str = "", call_kwargs: dict | None = None) -> dict:
     """EXECUTE the writer with the gate answering STOP and report whether the vector lands.
 
     ⛔ THIS IS THE MEASUREMENT, NOT A SECOND OPINION. Every fail-open in this series was proved
@@ -84,6 +92,11 @@ def _oracle(body: str, extra: str = "") -> dict:
     `_derived_mirror_required` answering `False` (the arm a strip can actually race) and
     `_encode` returning the sentinel. `props` is a plain dict, so `props["embedding"] is
     VECTOR` answers "did this writer store the property on the stop arm" exactly.
+
+    ⛔ `call_kwargs` IS PART OF THE WRITER'S CONTRACT, not a harness convenience: a stop arm that
+    forwards a CALLER-SUPPLIED mapping to the write channel (`_write({**props, **extra})`) places
+    the vector exactly when that mapping carries it, so an oracle that only ever passes `None`
+    cannot see the store — the caller argument is the measurement.
     """
     source = "def _upsert_object(props, ev" + extra + "):\n" + body
     namespace: dict = {
@@ -106,7 +119,7 @@ def _oracle(body: str, extra: str = "") -> dict:
     props: dict = {}
     _HANDED.clear()
     with contextlib.suppress(Exception):   # a raising writer placed what it placed
-        namespace["_upsert_object"](props, {"x": 1})
+        namespace["_upsert_object"](props, {"x": 1}, **(call_kwargs or {}))
     handed = any(isinstance(item, dict) and item.get("embedding") is VECTOR
                  for item in _HANDED)
     return {"lands": props.get("embedding") is VECTOR or handed, "props": props}
@@ -562,33 +575,30 @@ DEFEATED_RESOLVER_ROWS = (
     # CATCH anything is the opposite of what this comment first said: `gk` IS an ordinary assignment
     # target (`gk = "x"`), so the static value map knows `props[gk]` is the non-property `"x"` and
     # CERTIFIES the writer, and the own-scope dynamic-namespace arm then poisons the scope's `global`
-    # declarations (`poisoned |= _scope_declarations`). That arm is NOT the `ast.Nonlocal | ast.Global`
-    # arm: measured, stubbing the latter leaves this row green (`2 passed`, with `nonlocal-rebinding`),
-    # while stubbing the own-scope dynamic arm reds it — and only it. ⛔ `gk = "x"` IS LOAD-BEARING, not
-    # scenery: delete just that line and the row goes VACUOUS — measured, it then passes even with the
-    # arm stubbed to `pass`, because with no static value the stop arm is merely UNPROVEN and the gate
-    # refuses on its own. A lane that "tidied" the row to match the old comment would therefore have
-    # deleted the pin's discriminating power while the table stayed green. The two rows below pin
-    # the MUTATOR and the ONE-SCOPE-IN spellings; without this row the plain form the defect was
-    # MEASURED on had no regression pin, so an ordering change in the own-scope loop could re-open
-    # it with every row here still green. Re-measure when a row joins the table: `32 of 33` is the
-    # count at the row set below, and it is `32 of 33 ROWS`, not "32 of 33 siblings" — the table
-    # holds 33 rows INCLUDING this one, so it has 32 siblings and every one of them passes.
-    # ⛔ THE COUNT MOVED ONCE ALREADY: it read "30 of 31" until `#14057` added the two
-    # `masked-ask-*` rows and no sibling re-measure followed, which is exactly the rot this line
-    # warns about. Re-measured here at 33 rows: 1 failed, 58 passed of the file's 59 tests.
-    # ⛔ NAME THE MUTANT BY ITS TEXT, AND COUNT THE CANDIDATES FIRST — this comment has already
-    # sent one reviewer at the wrong arm. `poisoned |= _scope_declarations` appears FOUR times and
-    # TWO of them are in the own-scope loop: the subscript-write arm (line ~4666) and the
-    # `_dynamic_namespace_mutation` arm right below it (~4671). Disarming the SECOND also prints
-    # exactly "1 failed, 58 passed" — it reds `globals-mutator-rebinding` instead — so the bare
-    # count does not distinguish the right mutation from the wrong one. The mutant is the FIRST of
-    # the two: the `poisoned |= _scope_declarations` whose very next non-comment line is
-    # `elif isinstance(sub, ast.Call) and _dynamic_namespace_mutation(sub):`, in the branch that
-    # poisons on `_dynamic_namespace_write(target)`. Disarm THAT to `pass` and the file must print
-    # `1 failed, 58 passed` with the single failing id
-    # `test_the_resolver_bypasses_are_closed[globals-subscript-rebinding]`. Any other failing id is
-    # the wrong arm. Disarm-then-RESTORE, and never transcribe the number from a review.
+    # declarations (`poisoned |= _scope_declarations`). ⛔ AT THIS HEAD THE MENTION RULE IS WHAT
+    # REFUSES THIS ROW, not that arm (`#14001`, measured by the review of this branch and
+    # re-measured here): `globals` is named, so `_namespace_mentioned` short-circuits the scope to
+    # `{name: None …}` and the own-scope arms are never read. Disarming the arm alone therefore
+    # reds NOTHING — measured, 93 passed — which is why the blanket `poisoned |=
+    # _scope_declarations` beside the mention was deleted as inert (a mutant removing it reds no
+    # row either). The arm is a FALLBACK, and its own discriminating power is only measurable with
+    # the mention RETURN disabled (`return {name: None for name in assigned}` → `pass`). THE
+    # MEASURED RECIPE, at 56 rows in the table below and 93 tests in this file:
+    #   mention return → `pass`:                       19 failed, 74 passed
+    #   … plus this arm → `pass`:                      22 failed, 71 passed
+    #   ⇒ this arm's OWN contribution is exactly THREE rows — `globals-subscript-rebinding`,
+    #     `globals-annassign-own-scope`, `globals-annassign-inside-tuple-target`.
+    #   … plus the `_dynamic_namespace_mutation` arm → `pass` instead: 21 failed ⇒ that arm's own
+    #     are `globals-mutator-rebinding` and `namespace-unbound-setitem`. Disjoint sets, so the
+    #     two arms are not interchangeable and no bare failure COUNT identifies either.
+    # ⛔ THE PREVIOUS RECIPE HERE WAS FALSE and this comment had already sent one reviewer at the
+    # wrong arm: it claimed disarming the own-scope arm reds `globals-subscript-rebinding` "and
+    # only it" ("1 failed, 58 passed of the file's 59 tests"). Measured at this head: 0 failed, and
+    # the mention rule is why. Re-measure when a row joins; never transcribe a count from a review.
+    # ⛔ `gk = "x"` IS STILL LOAD-BEARING for the ARM's own measurement: with the mention return
+    # disabled, deleting it leaves the stop arm merely UNPROVEN (not certifying), so the arm's
+    # three rows stop reding. The two rows below pin the MUTATOR and the ONE-SCOPE-IN spellings;
+    # without this row the plain form the defect was MEASURED on would have no regression pin.
     ("globals-subscript-rebinding", """
     global gk
     gk = "x"
@@ -629,6 +639,251 @@ DEFEATED_RESOLVER_ROWS = (
     ("immediately-invoked-lambda", """
     if not _derived_mirror_required("object"):
         (lambda k: props.__setitem__(k, _encode(ev)))("embedding")
+        return None
+    _write(props)
+"""),
+    # ⛔ THE ANNOTATED SPELLING OF THE DYNAMIC-NAMESPACE WRITE (`#14001`, measured by the
+    # review of `#14050` at its merged head): `AnnAssign` fell to the generic assignment arm
+    # and its `Subscript` target poisoned nothing. All three are ONE write.
+    ("globals-annassign-own-scope", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        globals()["gk"]: str = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("globals-annassign-in-class-body", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        class _C:
+            globals()["gk"]: str = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("globals-annassign-inside-tuple-target", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        globals()["gk"], _z = "embedding", 1
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    # ⛔ AND EVERY OTHER BINDING FORM (`#14001`, measured by the review of the `AnnAssign`
+    # repair): `AugAssign`, a `for` target and a comprehension target all reach `_poison` with a
+    # `Subscript` that poisoned nothing, so each CERTIFIED while storing.
+    ("globals-augassign-own-scope", """
+    global gk
+    gk = ""
+    if not _derived_mirror_required("object"):
+        globals()["gk"] += "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("globals-for-target-own-scope", """
+    global gk
+    gk = ""
+    if not _derived_mirror_required("object"):
+        for globals()["gk"] in ("embedding",):
+            pass
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("globals-for-target-in-class-body", """
+    global gk
+    gk = ""
+    if not _derived_mirror_required("object"):
+        class _C:
+            for globals()["gk"] in ("embedding",):
+                pass
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("globals-comprehension-target", """
+    global gk
+    gk = ""
+    if not _derived_mirror_required("object"):
+        [None for globals()["gk"] in ("embedding",)]
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    # ⛔ THE RECEIVER IS AN AXIS LIKE THE BINDING FORM (`#14001`, measured by the review of this
+    # branch): every arm above required a CALL named `globals`/`locals`/`vars`, so a NAME bound
+    # to the namespace carried the same write past all of them. Measured CERTIFIED at the head
+    # that closed the binding-form axis; these rows are the receivers axis.
+    ("namespace-alias-subscript", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        ns = globals()
+        ns["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-alias-chain", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        ns = globals()
+        nn = ns
+        nn["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-alias-mutator", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        ns = globals()
+        ns.update({"gk": "embedding"})
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-alias-ior", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        ns = globals()
+        ns |= {"gk": "embedding"}
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-alias-tuple-target", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        ns, _z = globals(), 1
+        ns["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-alias-in-class-body", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        class _C:
+            ns = globals()
+            ns["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    # ⛔ AND THE SPELLINGS THAT DEFEATED THE FIRST RECEIVER MODEL (`#14001`, measured by the
+    # cycle-3 review): the tool now refuses on the MENTION of a dynamic namespace, so none of
+    # these can evade it by holding the namespace in a shape nobody modelled.
+    ("namespace-starred-tuple-target", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        ns, *_r = globals(), 1, 2
+        ns["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-conditional-value", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        ns = globals() if _f() else {}
+        ns["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-box-indirection", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        ns = globals()
+        box = (ns,)
+        box[0]["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-for-target", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        for ns in (globals(),):
+            ns["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-match-capture", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        match globals():
+            case ns:
+                ns["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    # ⛔ THE IMPORT AND STRING-KEY SPELLINGS (`#14001`, measured by the cycle-4 review): they name
+    # a dynamic namespace without producing a `Name` node, so `ast.alias` and a string-keyed
+    # `__dict__`/`__builtins__` subscript had to be inspected too.
+    ("namespace-from-import-alias", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        from builtins import globals as _g
+        _g()["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-builtins-dict-key", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        import builtins
+        builtins.__dict__["globals"]()["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-dunder-builtins", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        __builtins__["globals"]()["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-function-alias", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        g = globals
+        g()["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("namespace-unbound-setitem", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        dict.__setitem__(globals(), "gk", "embedding")
+        props[gk] = _encode(ev)
         return None
     _write(props)
 """),
@@ -684,6 +939,39 @@ def test_the_fallthrough_residual_is_PINNED_as_a_known_fail_open(tmp_path, monke
 #: SITE was written and WITHDRAWN (round-9 review): the positional version certified every WRAPPED
 #: spelling while refusing two honest fixtures, so the boundary is disclosed rather than half-held.
 REBUILD_RESIDUAL_ROWS = (
+    # ⛔ THE TWO SPELLINGS THE WITHDRAWN RULE WAS WRITTEN FOR (`#14001`, measured by the
+    # review of `#14050` at its merged head): withdrawing the rule deleted these rows, so
+    # nothing pinned the central spelling residual 3's own prose describes — a future rule
+    # could pass every remaining pin while these stayed open.
+    ("rebuilt-mapping-inline", """
+    k = "embed" + "ding"
+    if not _derived_mirror_required("object"):
+        _write({**props, k: _encode(ev)})
+        return None
+    _write(props)
+"""),
+    ("rebuilt-mapping-bitor", """
+    k = "embed" + "ding"
+    if not _derived_mirror_required("object"):
+        _write(props | {k: _encode(ev)})
+        return None
+    _write(props)
+"""),
+    # ⛔ THE ROW THAT PINS `_record_write`'s NO-CLEAR (`#14001`, measured by the rebase review
+    # of this branch, F5): the STOP arm calls the write channel TWICE — first with the mapping
+    # that carries the vector, then with bare `props`. Clearing `_HANDED` on entry to
+    # `_record_write` would leave only the LAST call recorded, `handed` would be `False`, and
+    # this row would read `lands is False` — a real handoff deleted on a false premise. With the
+    # no-clear the first call survives and the row measures the store. Mutant: restore
+    # `_HANDED.clear()` at `_record_write`'s entry → this row is the ONLY one that reds.
+    ("rebuilt-mapping-handoff-then-rehandoff", """
+    k = "embed" + "ding"
+    if not _derived_mirror_required("object"):
+        _write({**props, k: _encode(ev)})
+        _write(props)
+        return None
+    _write(props)
+"""),
     ("handed-on", """
     k = "embed" + "ding"
     if not _derived_mirror_required("object"):
@@ -707,7 +995,36 @@ REBUILD_RESIDUAL_ROWS = (
         return None
     _write(props)
 """),
+    # ⛔ THE CALLER-SUPPLIED MAPPING IS PART OF THE SAME FAMILY (`#14001`, measured by the
+    # review of this branch): `_write({**props, **extra})` hands the write channel whatever the
+    # caller passed, so it stores whenever `extra` carries the property. `_oracle` takes the
+    # caller argument so the row can be measured rather than assumed. ⛔ The 13629 fixture that
+    # used to call this an "honest control" was DELETED from that file's `accepted` tuple and is
+    # in NEITHER of its tuples — it is not an `over_refused` row either, because the gate
+    # CERTIFIES this shape rather than refusing it. It is pinned HERE, as a known fail-open;
+    # `tests/test_13629_entity_vector_retire.py` carries the pointer in its `over_refused`
+    # preamble ("neither an honest control nor an over-refusal").
+    ("rebuilt-mapping-extra-unpack", """
+    if not _derived_mirror_required("object"):
+        _write({**props, **extra})
+        return None
+    _write(props)
+"""),
+    ("rebuilt-mapping-extra-bitor", """
+    if not _derived_mirror_required("object"):
+        _write(props | extra)
+        return None
+    _write(props)
+"""),
 )
+
+#: The caller argument each row's writer needs — `**extra` is a LANDER only when the caller's
+#: mapping carries the property, so the pin has to supply one (a `None`/absent caller argument
+#: would make the row's oracle clean and the pin vacuous).
+REBUILD_CALLER_KWARGS = {
+    "rebuilt-mapping-extra-unpack": {"extra": {"embedding": VECTOR}},
+    "rebuilt-mapping-extra-bitor": {"extra": {"embedding": VECTOR}},
+}
 
 
 @pytest.mark.parametrize("case,arm", REBUILD_RESIDUAL_ROWS,
@@ -720,9 +1037,12 @@ def test_the_rebuild_residual_is_PINNED_as_a_known_fail_open(tmp_path, monkeypat
     expression that can evaluate to a mapping, in every position); the positional attempt is
     recorded in the withdrawn-rule note in `_stop_arm_places_the_property`.
     """
-    assert _oracle(arm)["lands"] is True, (
+    extra = ", extra=None" if case in REBUILD_CALLER_KWARGS else ""
+    caller = REBUILD_CALLER_KWARGS.get(case)
+    assert _oracle(arm, extra, caller)["lands"] is True, (
         f"`{case}` no longer stores the vector, so it documents nothing")
-    gated, _why = _gate(tmp_path, monkeypatch, arm, f"rebuild_residual_{case.replace('-', '_')}")
+    gated, _why = _gate(tmp_path, monkeypatch, arm,
+                        f"rebuild_residual_{case.replace('-', '_')}", extra)
     assert gated is True, (
         f"`{case}` is CLOSED — good news, but it must not change silently: delete this pin and "
         "move the row into DEFEATED_RESOLVER_ROWS")
@@ -747,6 +1067,52 @@ def test_the_helper_call_residual_is_PINNED_as_a_known_fail_open(tmp_path, monke
     gated, _why = _gate(tmp_path, monkeypatch, body, "helper_residual_14001")
     assert gated is True, (
         "the helper-call residual is CLOSED — good news, but it must not change silently: "
+        "delete this pin and move the row into DEFEATED_RESOLVER_ROWS")
+
+
+#: ⛔ RESIDUAL 1's REAL WITNESS — an `exec` STRING the gate cannot read, storing through the
+#: MAPPING OBJECT (`#14001`, measured by the review of this branch and re-measured here for the
+#: pre-fix tool: `gated=True` on BOTH `origin/main` and this head, so it is a pre-existing pin and
+#: not a diff regression). ⛔ NOT the bare `exec('k = …')` spelling: a NAME write from `exec`
+#: reaches no fast local on any supported version — 3.12 keeps it in the un-flushed `locals()`
+#: cache and discards it on the next refresh (measured: `lands=False`), and 3.13's PEP 667 gives
+#: each `exec` an independent snapshot so writes are "consistently ignored" (§Impact on exec() and
+#: eval()). ⛔ And NOT the `global`-statement variant (`exec('global k; k = "embedding"')`): it
+#: lands, but the gate REFUSES it (`gated=False`, measured on `origin/main` and here) because the
+#: rebound name resolves to no proven binding — so it is a refusal, not a fail-open.
+EXEC_STRING_RESIDUAL_ROWS = (
+    ("exec-string-subscript", """
+    if not _derived_mirror_required("object"):
+        exec('props["embedding"] = _encode(ev)')
+        return None
+    _write(props)
+"""),
+    ("exec-string-update", """
+    if not _derived_mirror_required("object"):
+        exec('props.update({"embedding": _encode(ev)})')
+        return None
+    _write(props)
+"""),
+)
+
+
+@pytest.mark.parametrize("case,arm", EXEC_STRING_RESIDUAL_ROWS,
+                         ids=[row[0] for row in EXEC_STRING_RESIDUAL_ROWS])
+def test_the_exec_string_residual_is_PINNED_as_a_known_fail_open(tmp_path, monkeypatch, case, arm):
+    """Residual 1's surviving witness: an exec'd string mutates `props`, and the gate certifies.
+
+    ⛔ PINNED, not celebrated — and PINNED AS A RESIDUAL, so the state cannot change silently: a
+    later fix that reads exec'd source, or refuses the `exec` callee, reds here and must move the
+    row into `DEFEATED_RESOLVER_ROWS`. The `gated is True` half is the pin that varies when the
+    boundary moves; the `lands is True` half is the measurement that makes the pin meaningful (a
+    row that certifies something that stores nothing documents nothing — the direction that turns
+    a pin vacuous).
+    """
+    assert _oracle(arm)["lands"] is True, (
+        "the exec-string residual no longer stores the vector, so it documents nothing")
+    gated, _why = _gate(tmp_path, monkeypatch, arm, f"exec_string_residual_14001_{case}")
+    assert gated is True, (
+        "the exec-string residual is CLOSED — good news, but it must not change silently: "
         "delete this pin and move the row into DEFEATED_RESOLVER_ROWS")
 
 
@@ -891,3 +1257,122 @@ def test_a_recognised_store_is_still_refused_by_the_recogniser():
 """):
         assert _stage_one_sees_a_store(body) is True, (
             "stage 1 no longer recognises a literal store — the composition has changed")
+
+
+def test_the_oracle_records_a_KEYWORD_handoff_to_the_write_channel():
+    """⛔ THE MEASUREMENT MUST SEE BOTH CALL SPELLINGS (`#14001`, measured by the cycle-3 review).
+
+    `_write(props={**props, k: vec})` certifies at HEAD and lands — the store is in the mapping the
+    channel RECEIVES — but an oracle that recorded only `args` reported `lands=False`, which is the
+    direction that turns a pin vacuous: a future row written on the keyword spelling would claim
+    "this no longer stores the vector, so it documents nothing".
+    """
+    body = """
+    k = "embed" + "ding"
+    if not _derived_mirror_required("object"):
+        _write(props={**props, k: _encode(ev)})
+        return None
+    _write(props)
+"""
+    assert _oracle(body)["lands"] is True, (
+        "the oracle cannot see a keyword handoff, so every `_write(...)` pin is half-measured")
+
+
+def test_no_declared_entity_writer_mentions_a_dynamic_namespace():
+    """The blanket dynamic-namespace rule costs ZERO refusals on the real population — PINNED.
+
+    ⛔ `_string_bindings` refuses every declared name of a writer that mentions `globals`/
+    `locals`/`vars` at all (`_is_dynamic_namespace_reference`). That over-refusal is only
+    acceptable while no real writer does it: the day one does, this pin reds, and the fix has to
+    argue the trade instead of silently losing a writer's gate. This is the same non-vacuity
+    discipline the residual pins use, pointed at the over-refusal side.
+    """
+    import ast
+
+    from tortoise import embed_writer_register as register
+
+    offenders: list[str] = []
+    examined: list[str] = []
+    unreadable: list[str] = []
+    missing: list[str] = []
+    for key in sorted(register.EMBED_WRITER_CLASSES):
+        module_name, _, symbol = key.partition("::")
+        try:
+            source = strip._module_source(module_name)
+        except strip._UnreadableFold as exc:
+            # ⛔ A MISSING DEPENDENCY IS NOT A LOADER SHAPE CHANGE. `examined` alone could shrink
+            # to one and still satisfy a bare `> 0` (measured: 14 of 24 keys here, the other 10
+            # being `tortoise.sdk::*` with `prometheus_client` absent), so the CAUSE is graded: an
+            # absent third party is the environment, anything else is the loader, and the loader
+            # refusing is exactly what must not silently shrink the population this pin covers.
+            cause = exc.__cause__
+            assert isinstance(cause, ModuleNotFoundError), (
+                f"`{key}`: the source loader refused for a reason that is NOT a missing "
+                f"dependency ({type(cause).__name__ if cause is not None else 'no cause'}: {exc}) "
+                "— a loader shape change must red here, not shrink this pin's population")
+            unreadable.append(key)
+            continue
+        bodies = strip._function_bodies(source)
+        if symbol not in bodies:
+            missing.append(key)         # a renamed writer, not an environment fact
+            continue
+        examined.append(key)
+        if any(strip._is_dynamic_namespace_reference(node) for node in ast.walk(bodies[symbol][0])):
+            offenders.append(key)
+    assert missing == [], (
+        "the register names a writer whose `def` the module does not contain — the writer was "
+        f"renamed or the key is stale, so it left this pin's population: {missing}")
+    assert examined, (
+        "NO writer could be read, so this pin asserts nothing — the register or the source "
+        "loader changed shape and the over-refusal cost it guards is unmeasured")
+    assert offenders == [], (
+        "a declared entity writer now mentions a dynamic namespace, so the blanket rule refuses "
+        "it: argue the trade (is the writer's stop arm provable another way?) before either "
+        f"narrowing the rule or accepting the refusal: {offenders}")
+
+
+#: ⛔ RESIDUAL — A NAME the mention rule cannot READ (`#14001`, measured by the cycle-4 review).
+#: The rule matches a `globals`/`locals`/`vars` NAME, attribute, import alias or string key. A name
+#: COMPOSED at runtime (`builtins.__dict__["glob"+"als"]`) or reached by FRAME INTROSPECTION
+#: (`sys._getframe(0).f_globals`) names nothing the scanner can see. Pinned, not fixed: chasing
+#: string composition is the unbounded recogniser this issue exists to stop.
+DYNAMIC_NAMESPACE_NAME_COMPOSITION = (
+    ("composed-string-key", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        import builtins
+        _g = builtins.__dict__["glob" + "als"]
+        _g()["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+    ("frame-introspection", """
+    global gk
+    gk = "x"
+    if not _derived_mirror_required("object"):
+        import sys
+        sys._getframe(0).f_globals["gk"] = "embedding"
+        props[gk] = _encode(ev)
+        return None
+    _write(props)
+"""),
+)
+
+
+@pytest.mark.parametrize("case,arm", DYNAMIC_NAMESPACE_NAME_COMPOSITION,
+                         ids=[row[0] for row in DYNAMIC_NAMESPACE_NAME_COMPOSITION])
+def test_the_composed_name_residual_is_PINNED_as_a_known_fail_open(tmp_path, monkeypatch, case, arm):
+    """Residual 5, measured: a COMPOSED namespace name certifies while storing.
+
+    ⛔ GREEN ON A KNOWN FAIL-OPEN IS THE POINT. The tool's docstring states the boundary, and this
+    pin is what stops it changing silently: closing it reds here and the row moves into
+    `DEFEATED_RESOLVER_ROWS`.
+    """
+    assert _oracle(arm)["lands"] is True, (
+        f"`{case}` no longer stores the vector, so it documents nothing")
+    gated, _why = _gate(tmp_path, monkeypatch, arm, f"composed_residual_{case.replace('-', '_')}")
+    assert gated is True, (
+        f"`{case}` is CLOSED — good news, but it must not change silently: delete this pin and "
+        "move the row into DEFEATED_RESOLVER_ROWS")

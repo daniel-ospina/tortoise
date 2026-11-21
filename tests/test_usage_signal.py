@@ -39,6 +39,20 @@ named test goes RED):
   every node is "unserved" and the caller silently reverts to creation recency.
 * **Accept a checkpoint that disables its own prefix check** (``head_len = 0``) →
   ``test_a_forged_checkpoint_cannot_disable_the_prefix_check`` RED.
+* **Prune only the entries that carry a time** (the second cut) →
+  ``test_pruning_ages_an_entry_with_no_time_too`` RED — that class aged by no
+  path at all, so the roll-up grew unbounded at every window while the reading
+  still advertised a bound.
+* **Read a window of ``0`` as "no window"** →
+  ``test_a_window_that_cannot_bound_is_refused_loudly`` RED — one parameter whose
+  whole job is bounding memory may not be silently ignored.
+* **Let a non-UTF-8 checkpoint escape ``refresh``** →
+  ``test_a_corrupt_checkpoint_is_a_cache_miss`` RED — ``refresh`` promises it
+  never raises, and a corrupt cache is a MISS.
+* **Name a module that does not exist in the forbidden set** (so the guard reads
+  as protecting something) → ``test_the_no_graph_guard_names_modules_that_EXIST``
+  RED; and **miss the module that owns the graph client** (``.projection``) →
+  ``test_the_no_graph_guard_covers_every_module_that_reaches_a_store`` RED.
 * **Open the door on a roll-up the window emptied** (drop ``not self.entries`` from
   :attr:`UsageReading.orderable`) →
   ``test_a_window_that_prunes_everything_refuses`` RED. ``served_total`` is
@@ -201,7 +215,7 @@ def test_incremental_equals_cold_replay(stream: Path) -> None:
     _serve(stream, "Point", ["p1", "p2"], at=_at(1))
     _serve(stream, "Object", ["o1"], at=_at(2))
     _serve(stream, "Point", ["p1"], at=_at(3))
-    _serve(stream, "Event", ["e1"], at=_at(4))
+    _serve_row(stream, "Event", "e1", at=_at(4))
 
     incremental = usage_signal.refresh(stream)
     snapshot = {
@@ -335,15 +349,25 @@ def test_a_torn_tail_is_folded_exactly_once(stream: Path) -> None:
 
 
 def test_a_corrupt_checkpoint_is_a_cache_miss(stream: Path) -> None:
-    """An unreadable checkpoint replays from cold — never a partial state."""
+    """An unreadable checkpoint replays from cold — never a partial state.
+
+    ⛔ TWO corruptions, not one. `{not json` is valid UTF-8, so it only reaches
+    the `json.loads` handler — and that left the OTHER shape untested:
+    `Path.read_text` raises **`UnicodeDecodeError`** on non-UTF-8 bytes, which is
+    a `ValueError` raised BEFORE any parse, so an `except OSError` on the read let
+    it escape `refresh`, the one function here that promises it never raises.
+    """
     _serve(stream, "Point", ["p1"], at=_at(1))
     before = usage_signal.refresh(stream)
-    usage_signal.checkpoint_path(stream).write_text("{not json", encoding="utf-8")
+    ckpt = usage_signal.checkpoint_path(stream)
 
-    after = usage_signal.refresh(stream)
+    for corruption in (b"{not json", b"\xff\xfe not utf8"):
+        ckpt.write_bytes(corruption)
 
-    assert after.replayed is True
-    assert after.serve_count("Point", "p1") == before.serve_count("Point", "p1")
+        after = usage_signal.refresh(stream)  # must not raise
+
+        assert after.replayed is True
+        assert after.serve_count("Point", "p1") == before.serve_count("Point", "p1")
 
 
 def test_a_capped_stream_is_reported(stream: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -461,6 +485,72 @@ def test_pruning_bounds_the_rollup_and_names_the_watermark(stream: Path) -> None
     assert got.pruned_before == _at(1)
 
 
+def test_pruning_ages_an_entry_with_no_time_too(stream: Path) -> None:
+    """⛔ THE BOUND MUST REACH EVERY ENTRY CLASS, or it is not a bound.
+
+    An entry whose serves all carried an unparseable `at` is stored as
+    `[None, None, n]`, and the first cut's `last_dt is not None and …` skipped it
+    at EVERY window — so the roll-up grew without bound while the reading still
+    printed `pruned`/`undated_serves` as counters. The bound failed OPEN and
+    SILENTLY, on the one property it advertises.
+    """
+    _serve(stream, "Point", ["recent"], at="2026-01-03T23:00:00+00:00")
+    with open(stream, "a", encoding="utf-8") as fh:
+        for key in ("undated-a", "undated-b"):
+            fh.write(
+                json.dumps({"event": "serve", "label": "Point", "key": key}) + "\n"
+            )
+
+    now = datetime(2026, 1, 4, 0, 0, tzinfo=UTC)
+    got = usage_signal.refresh(stream, now=now, window_days=2)
+
+    assert got.entry("Point", "undated-a") is None
+    assert got.entry("Point", "undated-b") is None
+    assert got.pruned_undated == 2
+    # …and it is NOT reported as the dated watermark's doing: nothing places an
+    # undated entry before `pruned_before`, so saying so would be a fabrication.
+    assert got.pruned == 0
+    assert got.pruned_before is None
+    assert got.entry("Point", "recent") is not None
+
+
+def test_a_window_that_cannot_bound_is_refused_loudly(
+    stream: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ `=0` IS NOT "NO WINDOW" — the same refusal the typo arm makes.
+
+    The parse-failure arm warns "A MISTYPED WINDOW IS NOT 'NO WINDOW'", and then
+    the numeric arm returned `None` for `0` and every negative with no warning at
+    all: the reading was byte-identical to *unconfigured* (`pruned=0`,
+    `pruned_before=None`, `window_started=None`) while the roll-up ran unbounded.
+    A non-finite value is worse still — `timedelta(days=nan)` RAISES, out of a
+    function whose docstring says NEVER raises.
+    """
+    _serve(stream, "Point", ["ancient"], at=_at(1))
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+
+    for raw in ("0", "-1", "nan", "inf"):
+        usage_signal._warned.clear()
+        caplog.clear()
+        monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, raw)
+
+        with caplog.at_level("WARNING", logger=usage_signal.logger.name):
+            got = usage_signal.refresh(stream, now=now)
+
+        assert got.window_started is None, f"{raw!r} silently became a window"
+        assert got.pruned == 0
+        assert any("UNBOUNDED" in r.getMessage() for r in caplog.records), (
+            f"{raw!r} was ignored without a warning — the operator believes the "
+            f"roll-up is bounded"
+        )
+
+    # …and the explicit argument is refused the same way, never raised out of.
+    usage_signal._warned.clear()
+    got = usage_signal.refresh(stream, now=now, window_days=float("nan"))
+    assert got.window_started is None
+    assert got.entry("Point", "ancient") is not None
+
+
 def test_the_rollup_is_exact_by_default(stream: Path) -> None:
     """No window ⇒ no pruning ⇒ `serve_count` is the stream's own count."""
     _serve(stream, "Point", ["ancient"], at=_at(1))
@@ -550,12 +640,27 @@ def _stamp(value: str | None) -> float:
 #: Package roots a serve counter may never import. A residency signal that can
 #: reach one of these can write to the store it is bounding — the write
 #: amplification `#14011` exists to avoid — so the reachability itself is banned.
+#:
+#: ⛔ THE LIST IS CHECKED IN BOTH DIRECTIONS, because it rotted in both:
+#: `tortoise.manager` and `tortoise.graph_connection` DO NOT EXIST (the first cut
+#: forbade two modules that are in no tree), while `tortoise.projection` — the
+#: module that actually carries `from falkordb import FalkorDB` and what
+#: `tortoise/sdk.py` itself reaches the client through — was absent, so
+#: `from .projection import FalkorProjection` stayed GREEN. Two tests below hold
+#: the two directions: every name resolves to a real module, and every module in
+#: the tree that imports a store client is named here. Scope, stated rather than
+#: implied: it covers DIRECT importers (the closure is not walked — this module
+#: legitimately imports `read_ledger` for `_stamp`/`row_key`, and a closure would
+#: have to forbid that too).
 _FORBIDDEN_GRAPH_ROOTS = (
     "falkordb",
     "redis",
-    "tortoise.manager",
-    "tortoise.graph_connection",
+    "tortoise.__main__",
+    "tortoise.backup",
+    "tortoise.cypher_guard",
+    "tortoise.projection",
     "tortoise.sdk",
+    "tortoise.session_indexer",
 )
 
 
@@ -576,15 +681,30 @@ def _imports_of(source: str) -> set[str]:
     found: set[str] = set()
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
-            found.update(alias.name for alias in node.names)
+            # ⛔ `|=` and NOT `set.update(...)`: `update` is a RETIRED SDK name, and
+            # `tools/sdk_privatise.py --check` counts every `<untyped>.update(...)`
+            # as residue — the three calls in this helper moved its pinned residue
+            # set off `SWEEP_RESIDUE` by +3 and reddened the `surface-guard` job
+            # (non-required, so it blocks nothing and still costs every lane a red)
+            # over a set in a TEST, i.e. a shape that has nothing to do with the
+            # sweep this pin guards. The union is the same operation, so the pin
+            # keeps meaning "a reference shape appeared" for real SDK spellings.
+            found |= {alias.name for alias in node.names}
         elif isinstance(node, ast.ImportFrom):
             if node.module is not None:
                 found.add(
                     node.module if node.level == 0 else f"tortoise.{node.module}"
                 )
+                # ⛔ `from tortoise import sdk` imports the SUBMODULE
+                # `tortoise.sdk`; recording only `tortoise` left that spelling
+                # invisible, which is a third way to reach a store client.
+                if node.level == 0:
+                    found |= {
+                        f"{node.module}.{alias.name}" for alias in node.names
+                    }
             elif node.level:
                 # `from . import x` — resolve each alias under the package.
-                found.update(f"tortoise.{alias.name}" for alias in node.names)
+                found |= {f"tortoise.{alias.name}" for alias in node.names}
     return found
 
 
@@ -621,11 +741,20 @@ def test_no_graph_dependency() -> None:
     # session's — the conftest and a hundred other tests import a store client long
     # before this line runs, so an in-process assertion is green or red depending on
     # test ORDER, i.e. it pins nothing. A clean interpreter is the only honest read.
+    # ⚠️ The probe's own name list is DERIVED from `_FORBIDDEN_GRAPH_ROOTS`, not
+    # restated: an earlier cut hardcoded two modules that are in NO tree
+    # (`tortoise.manager`, `tortoise.graph_connection`) while omitting
+    # `tortoise.projection` — the module that actually carries
+    # `from falkordb import FalkorDB` — so the probe could not see the one path
+    # that reaches the client. `test_the_no_graph_guard_names_modules_that_EXIST`
+    # and `…_covers_every_module_that_reaches_a_store` hold the set in both
+    # directions; this leg inherits whatever they certify.
     probe = (
         "import sys;"
         "from tortoise import usage_signal;"
-        "bad=[n for n in sys.modules if n in "
-        "{'falkordb','redis','tortoise.manager','tortoise.graph_connection'}];"
+        f"forbidden={_FORBIDDEN_GRAPH_ROOTS!r};"
+        "bad=[n for n in sys.modules if any(n == r or n.startswith(r + '.') "
+        "for r in forbidden)];"
         "print(','.join(sorted(bad)))"
     )
     out = subprocess.run(
@@ -643,12 +772,71 @@ def test_no_graph_dependency() -> None:
 
 def test_the_no_graph_guard_catches_relative_imports() -> None:
     """The guard itself is pinned — it was defeated once by import spelling."""
-    assert _imports_of("from . import manager\n") == {"tortoise.manager"}
-    assert _imports_of("from .graph_connection import get\n") == {
-        "tortoise.graph_connection"
+    assert _imports_of("from . import projection\n") == {"tortoise.projection"}
+    assert _imports_of("from .projection import FalkorProjection\n") == {
+        "tortoise.projection"
     }
     assert _imports_of("import redis\n") == {"redis"}
     assert _imports_of("from . import read_ledger\n") == {"tortoise.read_ledger"}
+    # ⛔ AND the package-spelling of a SUBMODULE: `from tortoise import sdk`
+    # reaches `tortoise.sdk` without ever naming it as a module path.
+    assert _imports_of("from tortoise import sdk\n") == {
+        "tortoise",
+        "tortoise.sdk",
+    }
+
+
+def test_the_no_graph_guard_names_modules_that_EXIST() -> None:
+    """⛔ A FORBIDDEN NAME THAT IS IN NO TREE PROTECTS NOTHING.
+
+    The first cut forbade `tortoise.manager` and `tortoise.graph_connection`,
+    neither of which exists, while omitting `tortoise.projection` — so the guard's
+    summary ("no graph in reach at all") was carried by a list half of which could
+    never match and none of which was the real client's home.
+    """
+    package = Path(usage_signal.__file__).parent
+    missing: list[str] = []
+    for root in _FORBIDDEN_GRAPH_ROOTS:
+        if "." not in root:
+            continue  # third-party (`falkordb`, `redis`) — not this tree's to resolve
+        parts = root.split(".")[1:]
+        candidate = package.joinpath(*parts)
+        if not (candidate.with_suffix(".py").is_file() or candidate.is_dir()):
+            missing.append(root)
+    assert missing == [], (
+        f"the forbidden set names module(s) that do not exist: {missing} — a dead "
+        f"entry makes the guard read as protection it cannot provide"
+    )
+
+
+def test_the_no_graph_guard_covers_every_module_that_reaches_a_store() -> None:
+    """⛔ THE OTHER DIRECTION: a real graph-owning module may not be left out.
+
+    Derived from the TREE rather than listed, so a future module that starts
+    holding the client cannot slip past the guard the way `.projection` did.
+    """
+    package = Path(usage_signal.__file__).parent
+    covered = [
+        p.relative_to(package).with_suffix("") for p in package.rglob("*.py")
+    ]
+    uncovered: list[str] = []
+    for rel in covered:
+        parts = [part for part in rel.parts if part != "__init__"]
+        module = "tortoise" + ("." + ".".join(parts) if parts else "")
+        source = package.joinpath(*rel.parts).with_suffix(".py").read_text(
+            encoding="utf-8"
+        )
+        if not ("from falkordb import" in source or "import falkordb" in source):
+            continue
+        if not any(
+            module == root or module.startswith(root + ".")
+            for root in _FORBIDDEN_GRAPH_ROOTS
+        ):
+            uncovered.append(module)
+    assert uncovered == [], (
+        f"module(s) reach a graph client but are not in the forbidden set, so a "
+        f"serve counter could import them unnoticed: {uncovered}"
+    )
 
 
 def test_recording_never_raises_on_a_broken_path(tmp_path: Path) -> None:
@@ -1148,6 +1336,424 @@ def test_a_checkpoint_whose_tenants_disagree_with_its_entries_is_a_cache_miss(
 
 
 # ══════════════════════════════════════════════════════════════════════════
+# The window bound: a refusal must be AUDIBLE, never byte-identical to "unset"
+# ══════════════════════════════════════════════════════════════════════════
+
+
+def test_a_non_positive_window_is_not_a_silent_unbounded_rollup(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ #14011 review finding 3: `0` / `-1` read as "not configured".
+
+    The `ValueError` arm already warns that a mistyped bound leaves the roll-up
+    UNBOUNDED; the numeric arm returned `None` without a word, so
+    `WINDOW_DAYS=0` produced a reading byte-identical to no window at all
+    (`pruned=0`, `pruned_before=None`) while the roll-up kept every entry — the
+    quiet direction on the one parameter whose job is bounding memory.
+    """
+    import logging
+
+    for raw in ("0", "-1", "0.0"):
+        monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, raw)
+        usage_signal._warned.clear()
+        caplog.clear()
+
+        with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+            assert usage_signal._window_days() is None
+
+        assert any(
+            "UNBOUNDED" in record.getMessage() for record in caplog.records
+        ), (
+            f"{usage_signal.USAGE_WINDOW_DAYS_ENV}={raw} was silently accepted as "
+            f"'no window' — the operator is never told the roll-up is unbounded"
+        )
+
+
+def test_a_typo_and_a_non_positive_window_are_warned_about_SEPARATELY(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ The typo arm and the non-positive arm must not share one `_warn_once` key.
+
+    `_warn_once` is once-per-process, and both arms used the key `"window"` — so
+    an operator who mistyped the value (warned once), then fixed it to `0`,
+    never saw the second refusal: the suppressed message is the one carrying the
+    NEWER `raw`. The non-finite arm is already a separate key for this reason;
+    the non-positive arm now is too.
+
+    A single-value test cannot see this — the collision only shows up in a
+    SEQUENCE inside one process, which is why the two values are exercised
+    against an uncleared `_warned` here.
+    """
+    import logging
+
+    monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, "seven")
+    usage_signal._warned.clear()
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+        assert usage_signal._window_days() is None
+        assert len(caplog.records) == 1, [r.getMessage() for r in caplog.records]
+
+        # The operator fixes the typo to a number that is still no bound.
+        monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, "0")
+        assert usage_signal._window_days() is None
+        messages = [record.getMessage() for record in caplog.records]
+
+    assert len(messages) == 2, (
+        "the second refusal was swallowed — both arms share a `_warn_once` key: "
+        f"{messages}"
+    )
+    assert "not a day count" in messages[0]
+    assert "not a positive day count" in messages[1]
+
+
+def test_one_cause_reached_through_BOTH_doors_warns_on_each(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ A cause-keyed `_warn_once` is still one key for two DOORS.
+
+    `_window_days` resolves the same question twice: once from the environment
+    and once from the call argument. Keying by cause alone
+    (`"window"`, `"window-nonpositive"`) leaves the env door able to consume
+    the key, so the ARG door's refusal — the one naming the CALLER's value — is
+    swallowed by `_warn_once`'s once-per-process contract. The message is not
+    the same either: each door reports its own `origin` and `raw`.
+
+    A single-door test cannot see this; the collision needs a SEQUENCE across
+    both doors inside one process, which is why `_warned` is cleared ONCE here
+    and never BETWEEN the three cause pairs.
+    """
+    import logging
+
+    usage_signal._warned.clear()
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+        # Cause 1 (a typo), env door then arg door.
+        monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, "seven")
+        assert usage_signal._window_days() is None
+        assert usage_signal._window_days("2") is None
+
+        # Cause 2 (non-positive), same two doors.
+        monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, "0")
+        assert usage_signal._window_days() is None
+        assert usage_signal._window_days(0) is None
+
+        # Cause 3 (non-finite), same two doors — the third door-qualified key.
+        monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, "nan")
+        assert usage_signal._window_days() is None
+        assert usage_signal._window_days(float("nan")) is None
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 6, (
+        "a door's refusal was swallowed — the two doors still share a key: "
+        f"{messages}"
+    )
+    assert "not a day count" in messages[0]
+    assert usage_signal.USAGE_WINDOW_DAYS_ENV in messages[0]
+    assert "not a day count" in messages[1]
+    assert "window_days='2'" in messages[1], (
+        "the argument door's warning must name the CALLER's value: "
+        f"{messages[1]}"
+    )
+    assert "not a positive day count" in messages[2]
+    assert usage_signal.USAGE_WINDOW_DAYS_ENV in messages[2]
+    assert "not a positive day count" in messages[3]
+    assert "window_days" in messages[3] and "argument" in messages[3], (
+        "the argument door's warning must name ITS origin, not the env's: "
+        f"{messages[3]}"
+    )
+    assert "not a FINITE day count" in messages[4]
+    assert usage_signal.USAGE_WINDOW_DAYS_ENV in messages[4]
+    assert "not a FINITE day count" in messages[5]
+    assert "argument" in messages[5], (
+        "the argument door's non-finite warning must name ITS origin: "
+        f"{messages[5]}"
+    )
+
+
+def test_the_float_overflow_and_the_timedelta_one_warn_on_EACH(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """⛔ Two REFUSAL CAUSES on the argument door must not share one `_warn_once` key.
+
+    `_as_float` keyed its refusal `"window-overflow-arg"`, and `_checked_window`
+    builds its timedelta-width key as `f"window-overflow-{door}"` — the SAME
+    string on the argument door. `_warn_once` is once-per-process, so the first
+    refusal ate the second: a caller who passed `10**400` (unrepresentable as a
+    float) and then `1e10` (finite, wider than `timedelta.max`) saw only the
+    first warning, about the value they had already replaced.
+
+    A single-value test cannot see this — the collision only appears in a
+    SEQUENCE inside one process, so `_warned` is never cleared between the two
+    calls here. This is the same class the sibling arms above were split to fix;
+    that split keyed on the DOOR, which re-created it per CAUSE.
+    """
+    import logging
+
+    usage_signal._warned.clear()
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+        # Cause A: no float can represent this value at all.
+        assert usage_signal._window_days(10**400) is None
+        assert len(caplog.records) == 1, [
+            record.getMessage() for record in caplog.records
+        ]
+
+        # Cause B: finite, but wider than a `timedelta` can carry — a DIFFERENT
+        # refusal with a different remedy, and it must still be said.
+        assert usage_signal._window_days(1e10) is None
+        messages = [record.getMessage() for record in caplog.records]
+
+    assert len(messages) == 2, (
+        "the second refusal was swallowed — the float arm and the timedelta arm "
+        f"share a `_warn_once` key on the argument door: {messages}"
+    )
+    assert "too large to be a day count" in messages[0]
+    assert "a `timedelta` cannot carry" in messages[1], (
+        "the surviving message must be the NEWER cause's, not the one already "
+        f"replaced by the caller: {messages[1]}"
+    )
+
+
+def test_a_window_a_timedelta_cannot_carry_is_refused_not_raised(
+    stream: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ A FINITE bound wider than `timedelta` can hold must not escape as a raise.
+
+    `1e10` passes every arm above — it is positive, finite and parses — and then
+    `timedelta(days=…)` raises `OverflowError` out of `refresh`, which promises
+    it never raises and is called from the ops door. Both doors are exercised:
+    the env value and the call argument must be refused in the same voice as the
+    typo / non-positive / non-finite arms, and the roll-up must stay bounded by
+    "keep everything" rather than by a traceback.
+    """
+    import logging
+
+    usage_signal._warned.clear()
+    caplog.clear()
+    _serve(stream, "Point", ["ancient"], at=_at(1))
+    now = datetime(2026, 1, 4, 0, 0, tzinfo=UTC)
+
+    with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+        from_arg = usage_signal.refresh(stream, now=now, window_days=1e10)
+        monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, "10000000000")
+        from_env = usage_signal.refresh(stream, now=now)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 2, (
+        "a window too wide for a `timedelta` was not refused on both doors: "
+        f"{messages}"
+    )
+    assert all("cannot carry" in m and "UNBOUNDED" in m for m in messages)
+    assert "argument" in messages[0]
+    assert usage_signal.USAGE_WINDOW_DAYS_ENV in messages[1]
+    for got in (from_arg, from_env):
+        assert got.entry("Point", "ancient") is not None, (
+            "an unappliable bound pruned an entry — it was read as a real bound"
+        )
+        assert got.pruned == 0
+
+
+@pytest.mark.parametrize("band", [1e6, 739620.0])
+def test_a_window_past_the_earliest_timestamp_is_refused_not_raised(
+    stream: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    band: float,
+) -> None:
+    """⛔ The band BELOW `timedelta`'s limit, which raised out of `refresh`.
+
+    `timedelta` can represent 999999999 days, so `_checked_window`'s overflow arm
+    lets `1e6` through — and then `ref - timedelta(days=…)` raises
+    `OverflowError: date value out of range` (a `datetime`, not a `timedelta`, has
+    to carry the result). From a 2026 `now` the raise starts at 739620 days, so
+    `1e6` — a plausible spelling of "never prune" — is inside it. Both doors are
+    driven: the env door reaches the same subtraction.
+    """
+    import logging
+
+    usage_signal._warned.clear()
+    caplog.clear()
+    _serve(stream, "Point", ["ancient"], at=_at(1))
+    now = datetime(2026, 1, 4, 0, 0, tzinfo=UTC)
+
+    with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+        from_arg = usage_signal.refresh(stream, now=now, window_days=band)
+        monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, repr(band))
+        from_env = usage_signal.refresh(stream, now=now)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 1, (
+        "the underflow guard is ONE code path (the doors are already resolved "
+        f"into `window`), so its key is not per-door — got: {messages}"
+    )
+    assert "earliest" in messages[0] and "UNBOUNDED" in messages[0]
+    for got in (from_arg, from_env):
+        assert got.entry("Point", "ancient") is not None
+        assert got.pruned == 0
+        assert got.window_started is None
+
+
+def test_a_positive_window_is_returned_and_warns_about_nothing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The other polarity: the warning belongs to bad values, not to every call."""
+    import logging
+
+    monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, "7")
+    usage_signal._warned.clear()
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+        assert usage_signal._window_days() == 7.0
+
+    assert not caplog.records
+
+    # …and UNSET is the documented default: no window, and no warning either.
+    monkeypatch.delenv(usage_signal.USAGE_WINDOW_DAYS_ENV)
+    with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+        assert usage_signal._window_days() is None
+
+    assert not caplog.records
+
+
+def test_an_explicit_none_turns_an_env_window_off(
+    stream: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`ENV_WINDOW` and `None` are DIFFERENT requests: default vs "no window".
+
+    ⛔ Collapsing them — `refresh(window_days=None)` falling through to the
+    environment, which is what the pre-`ENV_WINDOW` resolver did — makes the
+    documented tuning knob one-directional: an operator who sets the env var
+    cannot turn it off for one call. The same stream is refreshed twice so the
+    two requests cannot both be reported by one reading.
+    """
+    monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, "2")
+    _serve(stream, "Point", ["ancient"], at=_at(1))
+    _serve(stream, "Point", ["recent"], at="2026-01-03T23:00:00+00:00")
+    now = datetime(2026, 1, 4, 0, 0, tzinfo=UTC)
+
+    # The DEFAULT (`ENV_WINDOW`) reads the env: the 3-day-old serve is pruned.
+    from_env = usage_signal.refresh(stream, now=now)
+    assert from_env.entry("Point", "ancient") is None
+    assert from_env.pruned == 1
+
+    # …and an EXPLICIT `None` turns that same env window off, per call.
+    off = usage_signal.refresh(stream, now=now, window_days=None)
+    assert off.entry("Point", "ancient") is not None, (
+        "`window_days=None` fell back to the env window — the knob is one-directional"
+    )
+    assert off.pruned == 0
+
+
+@pytest.mark.parametrize("given", [0, -1, 0.0])
+def test_an_explicit_non_positive_window_is_refused_loudly(
+    stream: Path,
+    caplog: pytest.LogCaptureFixture,
+    given: float,
+) -> None:
+    """The EXPLICIT door refuses in the same voice as the env door.
+
+    ⛔ Two doors, one refusal: `_window_days` resolves both the env value and the
+    call argument, so a `0` given here cannot be silently unbounded while the
+    same `0` in the env is refused. The message is the one `_checked_window`
+    writes ("not a positive day count"), NOT a second spelling that could drift
+    from it.
+    """
+    import logging
+
+    usage_signal._warned.clear()
+    caplog.clear()
+    now = datetime(2026, 1, 4, 0, 0, tzinfo=UTC)
+    _serve(stream, "Point", ["ancient"], at=_at(1))
+
+    with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+        got = usage_signal.refresh(stream, now=now, window_days=given)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("not a positive day count" in m for m in messages), messages
+    assert got.entry("Point", "ancient") is not None, (
+        f"window_days={given!r} pruned — one parameter whose job is bounding "
+        "memory was read as a real bound"
+    )
+    assert got.pruned == 0
+
+
+def test_a_non_numeric_window_argument_is_refused_not_silently_dropped(
+    stream: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stated bound the call cannot read warns — it does not vanish.
+
+    The type allows `str` only for the `"env"` sentinel, so anything else is a
+    caller bug. Dropping it silently is the quiet direction this module refuses
+    everywhere else.
+    """
+    import logging
+
+    monkeypatch.delenv(usage_signal.USAGE_WINDOW_DAYS_ENV, raising=False)
+    usage_signal._warned.clear()
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+        assert usage_signal._window_days("7") is None
+        assert usage_signal._window_days("env") is None  # the sentinel, unset env
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 1, messages
+    assert "not a day count" in messages[0]
+
+
+def test_the_funnel_hands_the_pool_guard_its_record_reads_flag() -> None:
+    """The funnel must PASS `_record_reads`, not a literal the helper is tested on.
+
+    `_usage_record_served`'s own parameter is exercised elsewhere, but the call
+    site is what decides whether a candidate pool becomes a serve. A mutant that
+    replaces the argument with a literal `True` at the funnel keeps every
+    behavioural test green — a node the caller never saw is then marked USED,
+    which is the flattering direction for a residency score. Structural because
+    reaching the funnel behaviourally needs a live graph.
+    """
+    import ast
+
+    from tortoise import sdk as sdk_module
+
+    tree = ast.parse(Path(sdk_module.__file__).read_text(encoding="utf-8"))
+    parents: dict[object, object] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+
+    sites: list[tuple[object, list[object]]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id == "_usage_record_served":
+            chain: list[object] = []
+            cursor: object = node
+            while cursor in parents:
+                cursor = parents[cursor]
+                chain.append(cursor)
+            sites.append((node, chain))
+
+    assert len(sites) == 1, (
+        f"expected exactly ONE `_usage_record_served` call site (the FTS funnel); "
+        f"found {len(sites)}"
+    )
+    call, _chain = sites[0]
+    assert len(call.args) == 3, (
+        "the funnel's call must pass (label, rows, _record_reads); a shortened "
+        "call drops the pool guard"
+    )
+    third = call.args[2]
+    assert isinstance(third, ast.Name) and third.id == "_record_reads", (
+        "the funnel passes something other than `_record_reads` as the serve "
+        "guard — a candidate POOL would be counted as served"
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════════
 # Cycle-3 findings, pinned
 # ══════════════════════════════════════════════════════════════════════════
 
@@ -1361,6 +1967,100 @@ def test_a_pruned_rollup_refuses_to_certify_any_key_as_unserved(stream: Path) ->
     assert unbounded.unserved_keys(["brand-new"], label="Point") == ["brand-new"]
 
 
+def test_an_int_too_large_to_be_a_float_is_refused_not_raised(
+    stream: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ `10**400` is an `int`, so every type arm accepts it — and `float()` raises.
+
+    The conversion sat between the type check and the refusal arms, so a stated
+    bound nobody can represent escaped `refresh` as `OverflowError: int too large
+    to convert to float` instead of being refused in the same voice as the typo,
+    non-positive, non-finite and too-wide arms. Pinned at BOTH levels: the
+    resolver warns once, and `refresh` returns a reading instead of raising.
+    """
+    import logging
+
+    usage_signal._warned.clear()
+    caplog.clear()
+    _serve(stream, "Point", ["ancient"], at=_at(1))
+
+    with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+        assert usage_signal._window_days(10**400) is None
+        got = usage_signal.refresh(
+            stream, now=datetime(2026, 1, 4, tzinfo=UTC), window_days=10**400
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 1, messages
+    assert "too large" in messages[0] and "UNBOUNDED" in messages[0]
+    assert got.entry("Point", "ancient") is not None
+    assert got.pruned == 0
+
+
+def test_the_UNDATED_prune_arm_also_refuses_to_certify_unserved(stream: Path) -> None:
+    """⛔ #14097: the second prune arm leaves `pruned == 0`, so the guard missed it.
+
+    An entry whose serves all carried an unparseable `at` is dropped by the window
+    too, but nothing places it against the watermark — so the reading reports
+    `pruned == 0` / `pruned_before is None` and only `pruned_undated` moves. A guard
+    that read `pruned` alone therefore stayed open while SERVED keys were deleted,
+    and returned them certified as never served: the flattering direction for a
+    residency score, and a claim the stream cannot support.
+    """
+    undated = "2026-01-02T00:00:00+00:00"
+    for key in ("undated-a", "undated-b"):
+        _serve_row(stream, "Point", key, at="not-a-timestamp")
+    _serve(stream, "Point", ["recent"], at=undated)
+
+    got = usage_signal.refresh(
+        stream, now=datetime(2026, 1, 4, tzinfo=UTC), window_days=2
+    )
+
+    assert got.pruned == 0, "the dated watermark must not claim the undated arm"
+    assert got.pruned_undated == 2
+    assert got.orderable is True
+    assert got.unserved_keys(["undated-a", "undated-b", "never"], label="Point") == [], (
+        "the undated prune arm deleted SERVED keys and the reading certified them "
+        "as never served — the caller reads that as 'no signal' (cold-ordered)"
+    )
+
+
+def test_an_undated_only_prune_states_what_it_removed(stream: Path) -> None:
+    """⛔ The empty-roll-up caveat must name the arm that emptied it (#14011 review 2).
+
+    When the UNDATED arm clears the window, `pruned == 0` and
+    `pruned_before is None` by design — so the refusal message, which hardcoded
+    both, read "0 entr(ies) last served at or before None were pruned" while
+    three served entries HAD been dropped. That is the one place a caller is told
+    why nothing survived, and it denied the deletion it was explaining.
+
+    The existing pin for this branch asserted only the fixed substrings
+    ("surviving roll-up entries" / "creation-recency"), so the numbers could be
+    false without any test noticing.
+    """
+    for key in ("undated-a", "undated-b", "undated-c"):
+        _serve_row(stream, "Point", key, at="not-a-timestamp")
+
+    got = usage_signal.refresh(
+        stream, now=datetime(2026, 1, 4, tzinfo=UTC), window_days=7
+    )
+
+    assert got.entries == {}
+    assert got.pruned == 0, "the dated watermark must not claim the undated arm"
+    assert got.pruned_before is None
+    assert got.pruned_undated == 3
+
+    reason = got.refusal_reason() or ""
+    assert "no surviving roll-up entries" in reason
+    assert "3 entr(ies) with no parseable `at` were pruned" in reason, reason
+    assert "before None" not in reason, (
+        "the dated watermark cannot describe entries that have no time: " f"{reason}"
+    )
+    assert "0 entr(ies)" not in reason, (
+        "the caveat denies the deletion it exists to explain: " f"{reason}"
+    )
+
+
 def test_an_incomplete_counter_refuses(stream: Path) -> None:
     """A skipped line is the only trace of a lost `capped` marker.
 
@@ -1517,3 +2217,4 @@ def test_the_ops_door_can_name_the_unpartitioned_namespace(
     assert rc == 0
     assert "mine" in out
     assert "theirs" not in out
+

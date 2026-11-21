@@ -7812,11 +7812,22 @@ class JournalCoverage:
     #: coverage `#5090` Q2 forbids. APPENDED LAST for the positional-rebind
     #: reason `RecordReconcileResult.journal` is.
     gap_measured: bool = True
-    #: Does the RECORD own the ordinal on this graph — i.e. is the journal an
-    #: EXPORT rather than an input (#14002)? ``True`` means the write path does
-    #: not append (:func:`record_writer.record_owns_position` answered yes: the
-    #: deployment is armed and the graph's `record_cursor` row is `active`), so
-    #: the file stops growing while `public.journal_event` keeps gaining rows.
+    #: Does the RECORD own the ordinal on this graph — so the journal is no longer
+    #: an INPUT (#14002)? ⚠️ **THE NAME IS HISTORICAL AND THE FILE IS NOT AN
+    #: EXPORT**: no DRAINER writes or renders it (§A7.8 item 6 / §A7.5.6 unbuilt),
+    #: so it is a FROZEN PREFIX of the journal, not a rendered copy — see
+    #: :func:`_journal_is_export`. ⚠️ "Frozen" is a claim about the DRAINER, not
+    #: about every `active` row: the write path's own append stops when the box
+    #: flag is rolled, not at `arm` (see below). The name and the ``as_dict()`` key
+    #: are kept because that key is a payload surface a rename would break.
+    #: ``True`` means the graph's `record_cursor` row is in mode `active` — the ROW
+    #: ALONE decides (:func:`_journal_is_export`), never the reading process's
+    #: ``TORTOISE_RECORD_ALLOCATE``. :func:`record_writer.record_owns_position`
+    #: ADDITIONALLY requires the deployment to be armed, so on a row-`active` graph
+    #: whose flag is not rolled yet the door STILL APPENDS and the file keeps
+    #: growing (the documented cutover order arms rows first, then the flag). What
+    #: this field buys is the reading's: on a row-`active` graph ``present >
+    #: enumerated`` is the healthy state, not a contradiction.
     #: ⛔ THAT MAKES ``present > enumerated`` THE HEALTHY STATE, not the
     #: contradiction :attr:`unprojected_unknown_reason` was written to refuse —
     #: see its docstring. Default ``False`` keeps every pre-cutover reading (and
@@ -8056,8 +8067,15 @@ def _export_statement(cursor: Any, statement: str, *, why: str) -> None:
 
 def _journal_is_export(cursor: Any, org_id: str, graph_id: str, *,
                        conn: Any | None = None) -> bool:
-    """Does the RECORD own this graph's ordinal — so the file is an EXPORT (#14002)?
+    """Does the RECORD own this graph's ordinal — so the file is NOT an input (#14002)?
 
+    ⚠️ NOT "an export" — no DRAINER writes or renders the file (§A7.8 item 6 /
+    §A7.5.6 unbuilt), so it is a FROZEN PREFIX of the journal, not a rendered one.
+    "Frozen" is a claim about the drainer: the write path's append stops when the
+    box flag is rolled, not at `arm`, so on a row-`active` graph whose flag is not
+    rolled yet this reading is `True` and the door STILL APPENDS. The question this
+    answers is the READING's: may `present > enumerated` be treated as the healthy
+    shape rather than as an impossible journal?
     ⛔ ASKED OF THE RECORD, NEVER OF THE CALLER'S ENVIRONMENT (#14002 review
     cycle 3, P2). The first cut of this function also required
     ``record_writer.record_live_allocate()`` — a WRITER switch, read from the

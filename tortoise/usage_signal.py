@@ -151,6 +151,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import math
 import os
 import stat
 import threading
@@ -336,25 +337,177 @@ def _max_bytes() -> int:
         return DEFAULT_MAX_BYTES
 
 
-def _window_days() -> float | None:
-    raw = os.environ.get(USAGE_WINDOW_DAYS_ENV)
-    if raw is None or not raw.strip():
+#: ``refresh(window_days=…)``'s "resolve it from the environment" sentinel. A
+#: plain ``None`` default could not distinguish "not given" from "no window", so
+#: an env-set window could not be turned OFF per call — the documented tuning knob
+#: in one direction only. It is also :func:`_window_days`'s default, so it must be
+#: defined before that function (the default is evaluated at import time).
+ENV_WINDOW = "env"
+
+
+def _window_days(explicit: object = ENV_WINDOW) -> float | None:
+    """The pruning window in days, or ``None`` for "keep every entry".
+
+    ``explicit`` is either :data:`ENV_WINDOW` (the default — resolve it from
+    ``TORTOISE_USAGE_SIGNAL_WINDOW_DAYS``), a number, or ``None``. ``None`` means
+    NO window for this call, which is a different request from "read the env" —
+    that distinction is why :data:`ENV_WINDOW` exists, and it is why ``None`` may
+    not fall back to the environment here.
+
+    ⛔ A VALUE THE OPERATOR MEANT AS A BOUND IS NEVER SILENTLY "NO BOUND". Every
+    arm that cannot honour the stated bound WARNS and then degrades to "keep
+    everything" in the open — the typo arm, the ``0`` arm and the negative arm
+    alike. The numeric arm used to fall through silently, so
+    ``TORTOISE_USAGE_SIGNAL_WINDOW_DAYS=0`` was byte-identical to *unconfigured*
+    (``pruned=0``, ``pruned_before=None``, ``window_started=None``) while the
+    roll-up ran unbounded — the same quiet direction the comment below refuses,
+    on the one parameter whose whole job is bounding memory.
+
+    A NON-FINITE value is refused for a second reason: ``timedelta(days=nan)``
+    raises, and ``refresh`` promises it never does.
+    """
+    if explicit == ENV_WINDOW:
+        raw = os.environ.get(USAGE_WINDOW_DAYS_ENV)
+        if raw is None or not raw.strip():
+            return None
+        try:
+            days = float(raw)
+        except ValueError:
+            # ⛔ A MISTYPED WINDOW IS NOT "NO WINDOW". A typo'd pruning bound that
+            # degrades to "keep everything" silently un-bounds the roll-up, which
+            # is the quiet direction; the warning names the refusal.
+            _warn_once(
+                "window-env",
+                "usage signal: %s=%r is not a day count — the roll-up is running "
+                "UNBOUNDED (every entry kept); fix the value to bound it",
+                USAGE_WINDOW_DAYS_ENV,
+                raw,
+            )
+            return None
+        return _checked_window(days, raw, USAGE_WINDOW_DAYS_ENV, "env")
+    if explicit is None:
+        # ⛔ NOT A FALLBACK TO THE ENVIRONMENT. `None` is the caller TURNING THE
+        # WINDOW OFF for this call; the env default is `ENV_WINDOW`, so falling
+        # back here would make the knob one-directional again.
         return None
-    try:
-        days = float(raw)
-    except ValueError:
-        # ⛔ A MISTYPED WINDOW IS NOT "NO WINDOW". A typo'd pruning bound that
-        # degrades to "keep everything" silently un-bounds the roll-up, which is
-        # the quiet direction; the warning names the refusal.
+    if not isinstance(explicit, int | float):
+        # ⛔ A STATED BOUND THIS CALL CANNOT READ IS NOT "NO BOUND" EITHER — the
+        # same quiet direction as the env typo arm above, which says why this is
+        # refused. It is NOT the same key: the arms answer different DOORS, and
+        # `_warn_once` is once-per-process, so one key across both makes the
+        # second door's refusal — the one carrying the CALLER's value — vanish
+        # whenever the env already warned. Cause alone cannot key these: the
+        # collision `_warn_once` eats is per DOOR, not per cause.
         _warn_once(
-            "window",
-            "usage signal: %s=%r is not a day count — the roll-up is running "
-            "UNBOUNDED (every entry kept); fix the value to bound it",
-            USAGE_WINDOW_DAYS_ENV,
+            "window-arg",
+            "usage signal: window_days=%r is not a day count — the roll-up is "
+            "running UNBOUNDED (every entry kept); fix the value to bound it",
+            explicit,
+        )
+        return None
+    value = _as_float(explicit)
+    if value is None:  # already warned: the value cannot be a float at all
+        return None
+    return _checked_window(
+        value, repr(explicit), "the `window_days` argument", "arg"
+    )
+
+
+def _as_float(explicit: int | float) -> float | None:
+    """The argument door's value as a float, refusing what cannot BE one.
+
+    ⛔ An `int` too large for a float (`10**400`) raises `OverflowError` out of
+    `float()` — before every refusal arm below, so it escaped `refresh` as a
+    traceback rather than a warning. Same class as the non-finite arm: a stated
+    bound nobody can apply is not a bound, and it is refused in the same voice.
+    """
+    try:
+        return float(explicit)
+    except OverflowError:
+        _warn_once(
+            # ⛔ NOT `window-overflow-arg` (#14011 review finding 1).
+            # `_checked_window` builds its timedelta-width key as
+            # `f"window-overflow-{door}"`, which IS `window-overflow-arg` on the
+            # argument door — so the two arms shared one key and the SECOND cause
+            # vanished: `_window_days(10**400)` (unrepresentable as a float) warned
+            # once, and a later `_window_days(1e10)` (finite, but wider than
+            # `timedelta.max`) was swallowed by the once-per-process contract —
+            # exactly the collision the sibling arms above were split to fix, one
+            # denominator short. Keying on the DOOR alone reintroduced it per CAUSE.
+            "window-unrepresentable-arg",
+            "usage signal: window_days=%r is too large to be a day count — the "
+            "roll-up is running UNBOUNDED (every entry kept); fix the value to "
+            "bound it",
+            explicit,
+        )
+        return None
+
+
+def _checked_window(days: float, raw: str, origin: str, door: str) -> float | None:
+    """A stated window that cannot bound anything is refused LOUDLY.
+
+    ``0`` and the negatives prune nothing (an entry is never older than
+    everything), so they are the "unbounded while the operator believes
+    otherwise" shape the typo arm above already refuses.
+    """
+    if days <= 0:
+        # ⛔ AND NEITHER IS A NON-POSITIVE ONE (#14011 review finding 3). This arm
+        # used to `return None` without a word, so `WINDOW_DAYS=0` (or `-1`) was
+        # byte-identical to NOT CONFIGURED — `pruned=0`, `pruned_before=None` —
+        # while the roll-up ran unbounded. That is the same quiet direction the
+        # typo arm above exists to refuse, on the one parameter whose job is
+        # bounding memory. Prune-everything at `0` would be a different reading
+        # (`pruned_before` would have to be "now"), so this refuses instead.
+        _warn_once(
+            # ⛔ A SEPARATE KEY FROM THE TYPO ARM ABOVE (#14011 review, non-blocking
+            # observation 2). Both used `"window"`, so `_warn_once`'s
+            # once-per-process contract ate the second cause: an operator who
+            # mistyped the value, fixed it to `0`, never saw the newer warning —
+            # and the suppressed message carried the newer `raw`. The non-finite
+            # arm below is separate for the same reason, and EVERY key here is
+            # qualified by `door` (`env` or `arg`) for the same reason one step
+            # out: a cause-keyed name still collides when the SAME cause is
+            # reached through the other door, and the message names that door's
+            # own `origin`/`raw` (the caller's, for `arg`).
+            f"window-nonpositive-{door}",
+            "usage signal: %s=%r is not a positive day count — the roll-up is "
+            "running UNBOUNDED (every entry kept); fix the value to bound it",
+            origin,
             raw,
         )
         return None
-    return days if days > 0 else None
+    if not math.isfinite(days):
+        # ⛔ AND NEITHER IS A NON-FINITE ONE. `nan`/`inf` do not prune anything
+        # either, and `timedelta(days=nan)` RAISES — out of `refresh`, whose own
+        # docstring promises it never raises. A separate key from the arm above so
+        # an operator who fixes `0` still sees the `nan`.
+        _warn_once(
+            f"window-nonfinite-{door}",
+            "usage signal: %s=%r is not a FINITE day count — the roll-up is "
+            "running UNBOUNDED (every entry kept); fix the value to bound it",
+            origin,
+            raw,
+        )
+        return None
+    if abs(days) > timedelta.max.days:
+        # ⛔ AND NEITHER IS ONE A `timedelta` CANNOT CARRY. `1e10` is finite, so the
+        # arm above lets it through, and then `timedelta(days=…)` raises
+        # `OverflowError: Python int too large to convert to C int` straight out of
+        # `refresh` — whose docstring promises it never raises, and whose callers
+        # include the ops door. A bound nobody can apply is not a bound; it is
+        # refused in the same voice as the two arms above. The limit is read from
+        # `timedelta.max.days`, not restated as a literal, so it cannot drift from
+        # the value that actually raises.
+        _warn_once(
+            f"window-overflow-{door}",
+            "usage signal: %s=%r is a day count a `timedelta` cannot carry — the "
+            "roll-up is running UNBOUNDED (every entry kept); fix the value to "
+            "bound it",
+            origin,
+            raw,
+        )
+        return None
+    return days
 
 
 def _warn_once(key: str, msg: str, *args: object) -> None:
@@ -730,6 +883,10 @@ class _State:
     capped: bool = False
     pruned: int = 0
     pruned_before: str | None = None
+    #: Entries dropped by the window for having NO parseable time at all. They
+    #: carry no watermark (nothing places them), so they are counted apart from
+    #: `pruned` rather than letting `pruned_before` claim to describe them.
+    pruned_undated: int = 0
     #: Every partition the stream has been seen to carry, bounded (all we need
     #: is "more than one"). Serialised as a sorted list.
     tenants: set[str | None] = field(default_factory=set)
@@ -760,18 +917,39 @@ class _State:
         RECENCY score (which is what consumes this) and it is honest about what
         was dropped — silently keeping a decayed count would be a number the
         stream no longer supports.
+
+        ⛔ **EVERY entry class ages, or "bounded" is a claim about one of them.**
+        The first cut skipped an entry whose stored ``last`` is not a parseable
+        stamp (``apply(..., None)`` stores ``None``; a torn-then-repaired line can
+        store junk), so a roll-up of undated serves grew without bound at EVERY
+        window while still printing ``pruned``/``undated_serves`` as counters —
+        the bound failing OPEN and SILENTLY, on the one property it advertises.
+        Those entries are now dropped too, counted separately in
+        ``pruned_undated`` because they have no watermark to name: nothing says
+        WHEN they were served, only that nothing places them inside the window.
+
+        ⚠️ This is NOT a reversal of "an undated serve sorts WARMEST". That rule
+        governs the ORDERING door, where evicting a node on unknown recency is the
+        dangerous direction. Prune governs MEMORY, an entry with no time at all
+        cannot be shown to belong to the window, and the survivors are still
+        ordered warmest-first.
         """
         dropped: list[Any] = []
+        undated: list[Any] = []
         watermark: str | None = None
         for coord, slot in self.entries.items():
             last = slot[0]
             last_dt = _stamp(last) if isinstance(last, str) else None
-            if last_dt is not None and last_dt < before:
+            if last_dt is None:
+                undated.append(coord)
+            elif last_dt < before:
                 dropped.append(coord)
                 if watermark is None or _stamp_cmp(last, watermark) > 0:
                     watermark = last
-        for coord in dropped:
+        for coord in dropped + undated:
             del self.entries[coord]
+        if undated:
+            self.pruned_undated += len(undated)
         if dropped:
             self.pruned += len(dropped)
             if watermark is not None and (
@@ -779,7 +957,7 @@ class _State:
                 or _stamp_cmp(watermark, self.pruned_before) > 0
             ):
                 self.pruned_before = watermark
-        return bool(dropped)
+        return bool(dropped or undated)
 
 
 @dataclass(frozen=True)
@@ -814,6 +992,11 @@ class UsageReading:
     serves_folded: int = 0
     observed_from: str | None = None
     window_started: str | None = None
+    #: Entries the window dropped because nothing places them in time at all — the
+    #: class that used to age by NO path (`prune` skipped it, so the roll-up grew
+    #: unbounded at every window). Counted apart from :attr:`pruned`, whose
+    #: `pruned_before` watermark cannot describe an entry that carries no time.
+    pruned_undated: int = 0
     tenants: int = 0
     pooled: bool = False
     error: str | None = None
@@ -894,13 +1077,37 @@ class UsageReading:
             )
         if not self.entries:
             return (
-                f"no surviving roll-up entries — {self.pruned:,} entr(ies) last "
-                f"served at or before {self.pruned_before} were pruned by the "
+                f"no surviving roll-up entries — {self._pruned_phrase()} by the "
                 f"{USAGE_WINDOW_DAYS_ENV} window, so this reading cannot speak for "
                 f"any coordinate, and treating every candidate as unserved is the "
                 f"creation-recency fallback this signal exists to remove"
             )
         return None
+
+    def _pruned_phrase(self) -> str:
+        """WHAT the window removed, named by ARM — because the two arms count apart.
+
+        ⛔ #14011 review finding 2. This message stated `{pruned} … at or before
+        {pruned_before}` unconditionally, so the case the undated arm creates —
+        `pruned == 0`, `pruned_before is None` while ``pruned_undated`` moves —
+        logged "0 entr(ies) last served at or before None were pruned" about a
+        deletion that DID happen, on the one branch whose job is to explain why
+        nothing survived. A caller reading that caveat is told the opposite of
+        what the window did, and the arm that did it is never named.
+        """
+        dated, undated = self.pruned, self.pruned_undated
+        if dated and undated:
+            return (
+                f"{dated:,} entr(ies) last served at or before "
+                f"{self.pruned_before} AND {undated:,} entr(ies) with no "
+                f"parseable `at` were pruned"
+            )
+        if undated:
+            return f"{undated:,} entr(ies) with no parseable `at` were pruned"
+        return (
+            f"{dated:,} entr(ies) last served at or before "
+            f"{self.pruned_before} were pruned"
+        )
 
     def staleness_seconds(self, now: datetime | None = None) -> float | None:
         """How far behind the stream this reading is, or ``None`` if unknown."""
@@ -1043,8 +1250,16 @@ class UsageReading:
         answer is that this signal declines to certify any of them; the caller
         keeps its own tie-break, which is the safe direction (an unfilled
         candidate is not ordered cold).
+
+        ⛔ AND :attr:`pruned_undated` COUNTS AS PRUNING TOO (#14097). The window has
+        TWO prune arms, and the second one deliberately leaves ``pruned == 0`` /
+        ``pruned_before is None`` because nothing places an undated entry against
+        the watermark. Reading only ``pruned`` therefore let the undated arm delete
+        served entries while this guard stayed open, and their keys came back
+        certified as never served — two nodes that WERE in answers, handed to the
+        scorer's tie-break as "no signal".
         """
-        if not self.orderable or self.pruned:
+        if not self.orderable or self.pruned or self.pruned_undated:
             return []
         if label is None:
             seen = {key for (_t, _lbl, key) in self.entries}
@@ -1066,6 +1281,7 @@ class UsageReading:
             "served_total": self.served_total,
             "pruned": self.pruned,
             "pruned_before": self.pruned_before,
+            "pruned_undated": self.pruned_undated,
             "capped": self.capped,
             "lines_read": self.lines_read,
             "lines_skipped": self.lines_skipped,
@@ -1112,6 +1328,7 @@ def _serialise(state: _State) -> dict[str, Any]:
         "capped": state.capped,
         "pruned": state.pruned,
         "pruned_before": state.pruned_before,
+        "pruned_undated": state.pruned_undated,
         "tenants": sorted(t for t in state.tenants if t is not None)
         + ([None] if None in state.tenants else []),
         "observed_from": state.observed_from,
@@ -1180,6 +1397,7 @@ def _deserialise(payload: Any) -> _State | None:
             unresolved_skips=int(payload.get("unresolved_skips") or 0),
             capped=bool(payload.get("capped")),
             pruned=int(payload.get("pruned") or 0),
+            pruned_undated=int(payload.get("pruned_undated") or 0),
             pruned_before=(
                 str(payload["pruned_before"])
                 if payload.get("pruned_before") is not None
@@ -1233,15 +1451,28 @@ def _deserialise(payload: Any) -> _State | None:
 
 
 def _load_checkpoint(target: Path) -> _State | None:
+    """Read a checkpoint, or ``None`` (a CACHE MISS) for every way it can fail.
+
+    ⛔ ``read_text`` raises **``UnicodeDecodeError``** on bytes that are not
+    UTF-8, and that is a ``ValueError`` — so an ``except OSError`` alone let it
+    escape, even though ``refresh`` promises twice in its own docstring that it
+    NEVER raises and that a checkpoint it cannot read is a cache miss. It is
+    raised BEFORE the ``json.loads`` try below, so that handler could not catch
+    it either; a corrupt or foreign-written checkpoint took `refresh` out at the
+    one function that promises it cannot. ``RecursionError`` (deeply nested JSON)
+    is the same class one step further in.
+    """
     try:
         raw = target.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    except OSError:
+    except (OSError, ValueError):
+        # OSError: unreadable. ValueError: NOT UTF-8 — decode fails before any
+        # parse, which is why this arm has to be here and not at `json.loads`.
         return None
     try:
         return _deserialise(json.loads(raw))
-    except ValueError:
+    except (ValueError, RecursionError):
         return None
 
 
@@ -1332,6 +1563,7 @@ def _empty_reading(
         served_total=0,
         pruned=0,
         pruned_before=None,
+        pruned_undated=0,
         capped=False,
         lines_read=0,
         lines_skipped=0,
@@ -1380,6 +1612,7 @@ def _to_reading(
         served_total=state.served_total,
         pruned=state.pruned,
         pruned_before=state.pruned_before,
+        pruned_undated=state.pruned_undated,
         capped=state.capped,
         lines_read=state.lines_read,
         lines_skipped=state.lines_skipped,
@@ -1533,13 +1766,6 @@ def _checkpoint_matches(
     return hashlib.sha256(head_bytes[: state.head_len]).hexdigest() == state.head_sha
 
 
-#: ``refresh(window_days=…)``'s "resolve it from the environment" sentinel. A
-#: plain ``None`` default could not distinguish "not given" from "no window", so
-#: an env-set window could not be turned OFF per call — the documented tuning knob
-#: in one direction only.
-ENV_WINDOW = "env"
-
-
 def refresh(
     path: Path | None = None,
     *,
@@ -1585,33 +1811,52 @@ def refresh(
     ``window_days`` prunes entries whose last serve is older than the window,
     bounding the roll-up's memory. The default ``"env"`` reads
     ``TORTOISE_USAGE_SIGNAL_WINDOW_DAYS``; ``None`` means NO window (and, unlike
-    the env var's absence, can turn an env-set window off per call). Pruning is a
-    separate, opt-in bound and it is reported (:attr:`UsageReading.pruned`,
-    :attr:`UsageReading.pruned_before`). A non-positive value is refused as
-    unbounded, never treated as "prune everything".
+    the env var's absence, can turn an env-set window off per call), so
+    ``serve_count`` is exact. Pruning is a separate, opt-in bound and it is
+    reported (:attr:`UsageReading.pruned`, :attr:`UsageReading.pruned_before`).
+    A non-positive or non-finite value is refused as unbounded — LOUDLY, never
+    byte-identical to "unset" — and never treated as "prune everything".
+    ⛔ It bounds EVERY entry class, not only the dated one: an entry whose serves
+    all carried an unparseable ``at`` is dropped too and counted in
+    :attr:`UsageReading.pruned_undated`, because nothing places it inside or
+    outside the window — before that arm existed, that class grew without bound at
+    any window while the reading still advertised a bound.
     """
     target = Path(path) if path is not None else usage_path()
     ref = now or datetime.now(UTC)
     if ref.tzinfo is None:
         ref = ref.replace(tzinfo=UTC)
-    if window_days == ENV_WINDOW:
-        window = _window_days()
-    else:
-        window = window_days if isinstance(window_days, int | float) else None
-        if window is not None and not window > 0:
-            # ⛔ ZERO IS NOT "PRUNE EVERYTHING". A bound of zero would empty the
-            # roll-up, which is never the intended reading of a tuning knob, and
-            # `_window_days()` already refuses it from the env.
-            _warn_once(
-                "window-zero",
-                "usage signal: window_days=%r is not positive — the roll-up is "
-                "running UNBOUNDED for this call",
-                window_days,
-            )
-            window = None
+    # ⛔ ONE RESOLVER FOR BOTH DOORS. `ENV_WINDOW` (the default) is read from the
+    # environment; `None` is the caller's per-call OFF; a number — inside the env
+    # or given here — goes through `_checked_window`, so the two doors cannot
+    # disagree about what a stated-but-unusable bound sounds like (#14011 review
+    # finding 3, merged with main's `ENV_WINDOW` sentinel).
+    window = _window_days(window_days)
     window_started: str | None = None
     if window is not None:
-        window_started = (ref - timedelta(days=window)).isoformat(timespec="seconds")
+        # ⛔ A BOUND THE DATETIME ARITHMETIC CANNOT CARRY IS NOT A BOUND, and it used
+        # to escape as a raise. `_checked_window` refuses what a `timedelta` cannot
+        # REPRESENT and what is not finite/positive, but `ref - timedelta(days=w)`
+        # underflows a whole band BELOW the timedelta limit: measured from a 2026
+        # `now`, 739620 days already raises `OverflowError: date value out of range`
+        # while 739619 is fine — and `1000000` (a plausible spelling of "never
+        # prune") sits inside that band. This guard is the only place that knows
+        # `ref`, and it is the SAME expression the prune below uses, so one guard
+        # covers both. One key, not a per-door one: the two doors have already been
+        # resolved into `window` by the time this runs.
+        try:
+            window_started = (ref - timedelta(days=window)).isoformat(
+                timespec="seconds"
+            )
+        except OverflowError:
+            _warn_once(
+                "window-underflow",
+                "usage signal: a window of %r days reaches past the earliest "
+                "representable timestamp — the roll-up is running UNBOUNDED "
+                "(every entry kept); fix the value to bound it",
+                window,
+            )
+            window = None
 
     if not _stream_exists(target):
         # ⛔ A MISSING STREAM IS NOT "NOTHING IS HOT". The reading carries
@@ -1843,6 +2088,12 @@ def _main(argv: list[str] | None = None) -> int:
             f"pruned           : {got.pruned:,} entr(ies) last served at or before "
             f"{got.pruned_before} (dropped by {USAGE_WINDOW_DAYS_ENV}) — their exact "
             f"counts are gone, their recency is bounded"
+        )
+    if got.pruned_undated:
+        print(
+            f"pruned (undated) : {got.pruned_undated:,} entr(ies) had NO parseable "
+            f"`at` at all, so nothing places them inside the window — dropped for "
+            f"the same bound (they are the class that used to age by no path)"
         )
     if got.undated_serves:
         print(
