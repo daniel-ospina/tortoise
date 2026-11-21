@@ -703,8 +703,17 @@ _FORBIDDEN_GRAPH_ROOTS = (
 #: guarded redislite `FalkorDB` and `Tortoise` (→ `tortoise.sdk`), and its own
 #: docstring names "code importing `tortoise.FalkorDB`" as the bypass surface.
 #: A SEPARATE set, not entries in `_FORBIDDEN_GRAPH_ROOTS`:
-# `test_the_no_graph_guard_names_modules_that_EXIST` resolves every dotted entry
+#: `test_the_no_graph_guard_names_modules_that_EXIST` resolves every dotted entry
 #: as a module path and would report these as missing.
+#:
+#: ⛔ AND THE `from … import` FORM IS NOT THE ONLY ONE. `_imports_of` resolves
+#: `from tortoise import FalkorDB` to `tortoise.FalkorDB`, but `import tortoise`
+#: followed by `tortoise.FalkorDB` yields only `tortoise` — the package root, which
+#: is deliberately NOT banned (it is in `sys.modules` by construction). So the
+#: ATTRIBUTE form was still invisible to every leg — the AST ban matched no name,
+#: the probe sees it only when the read executes at module scope, and the direction
+#: scan creates no new module — which is the same reach this set exists to close,
+#: one spelling over. `_package_root_attributes` is the leg that closes it.
 _FORBIDDEN_CLIENT_EXPORTS = frozenset({"tortoise.FalkorDB", "tortoise.Tortoise"})
 
 #: The package roots that ARE a store client, DERIVED from the set above — the
@@ -774,17 +783,55 @@ def _imports_of(source: str) -> set[str]:
     return found
 
 
+def _package_root_attributes(source: str) -> set[str]:
+    """`tortoise.FalkorDB`-style reads, resolved through the local names bound to
+    the package root.
+
+    ⛔ THE ATTRIBUTE FORM IS A SEPARATE SPELLING, NOT A VARIANT. `_imports_of`
+    resolves `from tortoise import FalkorDB` to `tortoise.FalkorDB` and the set
+    intersection catches it; `import tortoise` + `tortoise.FalkorDB` resolves to
+    just `tortoise`, which is deliberately unbanned, so nothing caught it. Aliases
+    are followed (`import tortoise as t` -> `t.FalkorDB`), because the alias is
+    what a caller writes.
+
+    Deliberately over-reports rather than under-reports: a local that shadows the
+    package name can only produce a FALSE POSITIVE here, and a guard that reddens
+    spuriously is recoverable while one that stays green is not.
+    """
+    import ast
+
+    tree = ast.parse(source)
+    bound: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "tortoise" or alias.name.startswith("tortoise."):
+                    bound.add(alias.asname or "tortoise")
+    return {
+        f"tortoise.{node.attr}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id in bound
+        and f"tortoise.{node.attr}" in _FORBIDDEN_CLIENT_EXPORTS
+    }
+
+
 def _offending(source: str) -> set[str]:
     """Every name in `source` that reaches a store client — modules AND exports."""
     imported = _imports_of(source)
-    return {
-        name
-        for name in imported
-        if any(
-            name == root or name.startswith(root + ".")
-            for root in _FORBIDDEN_GRAPH_ROOTS
-        )
-    } | (imported & _FORBIDDEN_CLIENT_EXPORTS)
+    return (
+        {
+            name
+            for name in imported
+            if any(
+                name == root or name.startswith(root + ".")
+                for root in _FORBIDDEN_GRAPH_ROOTS
+            )
+        }
+        | (imported & _FORBIDDEN_CLIENT_EXPORTS)
+        | _package_root_attributes(source)
+    )
 
 
 def test_no_graph_dependency() -> None:
@@ -796,10 +843,23 @@ def test_no_graph_dependency() -> None:
 
     ⚠️ **SCOPE: a STATIC import is the only thing this guard can see.** Every
     static spelling is resolved (`from . import x`, `from .mod import x`,
-    `import a.b`, and imports inside function bodies — `ast.walk` descends).
-    `importlib.import_module("tortoise.manager")` or `__import__` would pass, and
-    are OUT OF SCOPE rather than covered. Said out loud because this docstring is
-    what a future reader consults to decide the guard is sufficient.
+    `import a.b`, `from tortoise import FalkorDB`, `tortoise.FalkorDB` on the
+    bound package name, and any of these inside function bodies — `ast.walk`
+    descends). `importlib.import_module("tortoise.manager")` or `__import__`
+    would pass, and are OUT OF SCOPE rather than covered.
+
+    ⚠️ **ALSO OUT OF SCOPE, and easier to get wrong: the TRANSITIVE hop.** The ban
+    is one-hop by design (the closure is not walked — walking it would forbid the
+    legitimate `read_ledger` import too). So a module that reaches a store client
+    only through a LAZY import inside a function body is not banned by name, and
+    the subprocess probe cannot see it either, because the import never executes
+    at module scope (`from . import analyze` is the measured shape:
+    `tortoise/analyze.py` imports `tortoise.sdk` inside a function, and the probe's
+    bad-list stays EMPTY). That residual is stated rather than closed, because
+    closing it is a closure walk — a different design — not a spelling fix.
+
+    Said out loud because this docstring is what a future reader consults to
+    decide the guard is sufficient.
     """
     source = Path(usage_signal.__file__).read_text(encoding="utf-8")
     offending = _offending(source)
@@ -809,6 +869,11 @@ def test_no_graph_dependency() -> None:
     )
     # Cheap transitive check: importing the module must not drag a store client in
     # through some other path the AST of one file cannot see.
+    # ⚠️ What this can and cannot see: it observes what EXECUTES at import time. A
+    # module reached only through a lazy import inside a function body loads
+    # nothing here, so it is invisible to this leg — see the scope note in
+    # `test_no_graph_dependency`, which states that residual rather than implying
+    # the probe closes it.
     #
     # ⛔ IN A SUBPROCESS, not this one. `sys.modules` here is the WHOLE pytest
     # session's — the conftest and a hundred other tests import a store client long
@@ -924,8 +989,23 @@ def test_no_graph_dependency_pins_the_package_root_EXPORT_form() -> None:
     assert _offending("def f():\n    import tortoise\n    return tortoise.Tortoise\n") == {
         "tortoise.Tortoise"
     }
-    # …and the harmless spellings stay clean, so the ban is not a blanket.
+    # ⛔ AND THE ALIASED ATTRIBUTE, which is the form a caller actually writes:
+    # `import tortoise as t` binds `t`, not `tortoise`, so a reader that only knows
+    # the canonical name records nothing. (`_package_root_attributes` follows the
+    # alias; the bare-name branch inside `_imports_of` cannot.)
+    assert _offending("import tortoise as t\nc = t.FalkorDB\n") == {
+        "tortoise.FalkorDB"
+    }
+    # …and `import tortoise.sdk` binds `tortoise` too, so it is both a banned
+    # module AND the handle the attribute form is read through.
+    assert _offending("import tortoise.sdk\nc = tortoise.FalkorDB\n") == {
+        "tortoise.sdk",
+        "tortoise.FalkorDB",
+    }
+    # …and the harmless spellings stay clean, so the ban is not a blanket. Bare
+    # `import tortoise` and an unrelated attribute must not redden.
     assert _offending("from tortoise import usage_signal\n") == set()
+    assert _offending("import tortoise\nx = tortoise.__version__\n") == set()
 
 
 def test_the_no_graph_guard_names_modules_that_EXIST() -> None:
@@ -992,11 +1072,17 @@ def _modules_reaching_a_store() -> frozenset[str]:
 
 
 def test_the_store_reach_scan_sees_the_REDIS_spelling_too() -> None:
-    """⛔ The scan must read ALL THREE declared roots, or its verdict is vacuous.
+    """⛔ The scan must read EVERY declared root, or its verdict is vacuous.
 
     Pinned POSITIVELY on purpose: `uncovered == []` alone cannot see a predicate
-    that narrowed back to `falkordb` (it would simply scan fewer modules and stay
-    green). Naming modules that reach the store through `redis` is what reddens.
+    that narrowed (it would simply scan fewer modules and stay green). The pin is
+    therefore SYMMETRIC: it names modules that reach the store through `redis`
+    and through `redislite` — the roots whose loss is invisible, because those
+    modules are not in the ban set yet — AND one that reaches it through
+    `falkordb` alone, whose loss WOULD have been invisible too: every
+    `falkordb`-only importer is already banned, so narrowing the scan to drop that
+    root leaves `uncovered == []` untouched. `tortoise.cypher_guard` is that
+    witness.
     """
     found = _modules_reaching_a_store()
     for module in (
@@ -1004,10 +1090,11 @@ def test_the_store_reach_scan_sees_the_REDIS_spelling_too() -> None:
         "tortoise.acl_graph_users",
         "tortoise.tortoise_client",
         "tortoise",  # the package root, via `redislite.falkordb_client`
+        "tortoise.cypher_guard",  # `falkordb` ONLY — the root the pin was missing
     ):
         assert module in found, (
-            f"{module} imports a store client through `redis` and the scan did not "
-            f"see it — the reachability guard is narrower than the set it checks: "
+            f"{module} imports a store client and the scan did not see it — the "
+            f"reachability guard is narrower than the roots it declares: "
             f"found={sorted(found)!r}"
         )
 
