@@ -67,6 +67,9 @@ class _RecordingBacking:
         #: Set once an encode is IN PROGRESS — the only state in which a later
         #: arrival can queue behind it, which is the state review F1 is about.
         self.entered = threading.Event()
+        #: Set by :meth:`close`, so a row can prove a retired backing was closed
+        #: (and, in the F5 rows, that it was NOT closed under an in-flight encode).
+        self.closed = False
 
     def encode(self, texts, *, timeout_s=None):
         self.entered.set()
@@ -80,7 +83,7 @@ class _RecordingBacking:
                 for t in texts]
 
     def close(self) -> None:
-        return None
+        self.closed = True
 
     def describe(self) -> dict:
         return {"backing": self.name, "batches": len(self.batches)}
@@ -383,6 +386,46 @@ class TestTheCollectionWindowIsHard:
             embed_seam.install_backing(None)
         assert elapsed_s < 2.0, (
             f"the safety valve did not fire: the ticket parked for {elapsed_s:.2f}s")
+
+    def test_a_ticket_waits_out_a_worker_boot_instead_of_declining(
+            self, monkeypatch):
+        """The valve is sized per PHASE, not by one request budget (review F1).
+
+        ⛔ THE SHIPPED DEFECT, DRIVEN THROUGH THE PUBLIC ENTRY POINT. The startup
+        lever was split off so a boot would not be bounded by the 30 s request
+        budget — and ``_Collector.submit`` still used ``window + request + 1``, so
+        the FIRST query after every worker boot declined at ~31 s while the worker
+        was legally loading (up to 600 s). The read then went keyword-only, and the
+        runbook told the operator to read the ABSENCE of ``last_decline`` as
+        "it was only the boot" — the one reading the defect inverts.
+
+        So the backing here is a ``WorkerBacking`` whose start-up pays
+        ``window + request + 1.5 s``: longer than the old valve, shorter than the
+        boot budget. Pre-fix this RAISES ``TimeoutError``; it must return the
+        vector.
+        """
+        monkeypatch.setenv(embed_seam.ENV_MAX_WAIT_MS, "20")
+        monkeypatch.setenv(embed_seam.ENV_TIMEOUT_S, "0.4")
+        boot_s = 0.02 + 0.4 + 1.5
+
+        class _BootingWorkerBacking(embed_seam.WorkerBacking):
+            """Pays a boot inside ``encode``, then answers like a worker would."""
+
+            def encode(self, texts, *, timeout_s=None):
+                time.sleep(boot_s)
+                return [[float(len(t))] for t in texts]
+
+        booting = _BootingWorkerBacking()
+        embed_seam.install_backing(booting)
+        try:
+            vector = embed_seam.encode_query("why did the window change")
+            assert vector == [float(len("why did the window change"))], vector
+            assert embed_seam.last_decline() is None, (
+                "a healthy boot recorded a decline — the operator diagnostic the "
+                f"runbook tells them to trust is inverted again "
+                f"({embed_seam.last_decline()!r})")
+        finally:
+            embed_seam.install_backing(None)
 
     def test_a_sustained_load_keeps_coalescing_behind_a_busy_collector(
             self, backing, monkeypatch):
@@ -719,7 +762,16 @@ class TestTheDistributionsAreExported:
         import tortoise.hosted_api as hosted_api
 
         block = hosted_api._embed_seam_health()
-        assert set(block) == set(hosted_api._EMBED_SEAM_HEALTH_KEYS)
+        # ⛔ THE LITERAL TUPLE, not ``set(KEYS)`` (review F6 at this head). The
+        # block is PRODUCED as ``{key: status.get(key) for key in KEYS}``, so
+        # comparing it with ``KEYS`` compares the tuple with itself and cannot
+        # fail under any mutation — a tautology that reads as coverage. This is
+        # the operator's ``jq .embed_seam.<key>`` contract, so it is spelled.
+        assert set(block) == {
+            "backing", "max_wait_ms", "max_batch", "timeout_s",
+            "last_decline", "last_decline_age_s", "injected", "backing_state",
+            "latency", "backings",
+        }, sorted(block)
         assert set(embed_seam.seam_status()) >= set(
             hosted_api._EMBED_SEAM_HEALTH_KEYS), (
             "`seam_status()` no longer produces a key `/health` publishes — the "
@@ -877,12 +929,20 @@ class TestTheInProcessBackingIsUnchangedWork:
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
-    """Answers whatever the enclosing test put in ``server.answer``."""
+    """Answers whatever the enclosing test put in ``server.answer``.
+
+    Records the HEADERS as well as the body (review F3): the documented request
+    contract includes ``Authorization: Bearer <token>``, and a handler that keeps
+    only ``json.loads(raw)`` cannot see the one field of that contract whose loss
+    is a real deployment failure against any provider that requires it.
+    """
 
     def do_POST(self) -> None:
         length = int(self.headers.get("content-length") or 0)
         raw = self.rfile.read(length)
         self.server.requests.append(json.loads(raw.decode("utf-8")))
+        self.server.headers.append(
+            {name.lower(): value for name, value in self.headers.items()})
         body, code = self.server.answer
         payload = json.dumps(body).encode("utf-8") if not isinstance(body, bytes) \
             else body
@@ -904,6 +964,7 @@ def http_endpoint():
     def _start(answer, code: int = 200):
         server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
         server.requests = []
+        server.headers = []
         server.answer = (answer, code)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -945,13 +1006,39 @@ class TestTheExternalBacking:
 
     def test_the_request_carries_the_texts_model_and_optional_bearer(
             self, monkeypatch, http_endpoint):
-        """The documented request contract, pinned byte for byte."""
+        """The documented request contract, pinned field for field — headers too.
+
+        ⛔ THE BEARER IS ASSERTED, NOT MERELY SENT (review F3). This row used to
+        set a token and assert the BODY only, so deleting
+        ``headers["authorization"]`` left it green while the prose above it
+        claimed the contract was pinned "byte for byte". An unauthenticated POST
+        is a real failure against any provider that requires the header, and it
+        was the one field of the contract with no coverage.
+        """
         server = http_endpoint({"vectors": [[0.5]]})
         monkeypatch.setenv(embed_seam.ENV_EXTERNAL_MODEL, "some-embed-v2")
         backing = self._backing(monkeypatch, server, token="tok-123")
         backing.encode(["hello"])
         sent = server.requests[0]
         assert sent == {"model": "some-embed-v2", "texts": ["hello"]}
+        assert server.headers[0].get("authorization") == "Bearer tok-123", (
+            "the request went out without its bearer — the documented contract's "
+            f"one authenticated field is missing ({server.headers[0]})")
+
+    def test_the_bearer_is_OMITTED_when_no_token_is_configured(
+            self, monkeypatch, http_endpoint):
+        """The control for the row above: an unset token must not send an empty one.
+
+        ``Authorization: Bearer `` (empty) is a different request from no header
+        at all, and several providers reject it. Without this row a fix that
+        always sets the header would pass the bearer assertion.
+        """
+        server = http_endpoint({"vectors": [[0.5]]})
+        monkeypatch.delenv(embed_seam.ENV_EXTERNAL_TOKEN, raising=False)
+        backing = self._backing(monkeypatch, server)
+        backing.encode(["hello"])
+        assert "authorization" not in server.headers[0], (
+            f"an unset token still sent an authorization header: {server.headers[0]}")
 
     def test_a_missing_url_is_a_named_decline_not_a_local_encode(
             self, monkeypatch):
@@ -1109,6 +1196,16 @@ class TestTheWorkerBacking:
         bind), a request gets a JSON answer (the wire is real, not a mock), and
         closing our stdin terminates the process — a worker that outlives its
         parent holds 432 MB with nothing to serve.
+
+        ⛔ THE STDIN PATH IS DRIVEN DIRECTLY, NOT THROUGH ``close()`` (review F4).
+        This row used to end with ``client.close()``, which closes stdin AND THEN
+        calls ``proc.terminate()`` if the child is still alive — so deleting the
+        ``_watch_stdin`` thread entirely left it GREEN, because SIGTERM kills the
+        worker whether or not anything is watching the pipe. The pipe is the only
+        mechanism that survives a SIGKILLed or OOM-killed parent (no signal can be
+        delivered from a dead process), which is exactly the 432 MB leak the
+        watcher exists to prevent. So the close here is the PIPE only, and the
+        child must exit on its own.
         """
         path = str(tmp_path / "spawned.sock")
         client = embed_seam.WorkerBacking()
@@ -1128,12 +1225,19 @@ class TestTheWorkerBacking:
             answer = embed_seam._LineJSONClient(address).request(
                 {"texts": ["probe"]}, timeout_s=120.0)
             assert "vectors" in answer or "error" in answer, answer
-        finally:
             proc = client._proc
+            assert proc is not None and proc.stdin is not None, (
+                "the worker was spawned without the stdin pipe its life-cycle "
+                "depends on")
+            # ⛔ ONLY the pipe. No terminate, no kill — the child must notice the
+            # EOF itself, which is what ``_watch_stdin`` is for.
+            proc.stdin.close()
+            proc.wait(timeout=30.0)
+            assert proc.poll() is not None, (
+                "the worker survived its parent's stdin closing — nothing in it "
+                "is watching the pipe, so a SIGKILLed parent would orphan 432 MB")
+        finally:
             client.close()
-        assert proc is not None
-        proc.wait(timeout=30.0)
-        assert proc.poll() is not None, "the worker survived its parent's close"
         assert not os.path.exists(path), "the worker left its socket path behind"
 
 
@@ -1300,6 +1404,108 @@ class _FakeProc:
         return None
 
 
+class TestTheWorkerSocketCannotBeClaimedByAnotherUser:
+    """Review F2: readiness is a PATH, so the path must be ours alone.
+
+    The client treats the socket's first EXISTENCE as READY, and the worker
+    creates that path only after its preload — so for the whole boot the expected
+    path is ABSENT and the client is polling for anyone to create it. In a shared
+    temp directory any local user could bind it first, be accepted as the encoder,
+    and have its vectors written as record-truth embeddings (#5004's class: the
+    damage is undetectable downstream, unlike a refused read).
+
+    Two controls, and each row pins the one it names: a ``0700`` directory the
+    backing mints for its socket (nobody else can traverse it, so nobody else can
+    create the path), and a kernel peer-credential check on accept (the belt for
+    an operator who points the lever at a shared path).
+    """
+
+    def test_the_socket_lives_in_a_private_directory_this_uid_owns(self):
+        backing = embed_seam.WorkerBacking()
+        try:
+            path = backing.socket_path()
+            directory = os.path.dirname(path)
+            assert directory != os.environ.get("TMPDIR", "/tmp"), (
+                f"the worker socket is in the SHARED temp dir ({directory}) — any "
+                "local user can create it during the boot and become the embedder")
+            mode = os.stat(directory).st_mode
+            assert mode & 0o077 == 0, (
+                f"the socket directory is mode {oct(mode & 0o777)} — anyone who can "
+                "traverse it can bind the path the client is waiting for")
+            assert os.stat(directory).st_uid == os.getuid()
+            # Stable: the pre-load poll, the spawn argument and ``describe()`` must
+            # all name the SAME path, or the client would watch a path the worker
+            # never creates.
+            assert backing.socket_path() == path
+        finally:
+            backing.close()
+        assert not os.path.exists(directory), (
+            "the private socket directory outlived the backing")
+
+    def test_an_explicit_lever_path_is_honoured_verbatim(self, monkeypatch):
+        """An operator pointing at a shared path still gets that path (the belt)."""
+        monkeypatch.setenv(
+            embed_seam.ENV_WORKER_SOCKET, "/var/run/tortoise/embed.sock")
+        assert embed_seam.WorkerBacking().socket_path() == \
+            "/var/run/tortoise/embed.sock"
+
+    def test_a_peer_on_our_own_uid_is_served_and_a_foreign_uid_is_refused(
+            self):
+        """The kernel's own credential decides, and a refusal is NAMED.
+
+        Directed through a real ``AF_UNIX`` socket pair, so the accepted
+        connection has a genuine peer uid — the assertion is about
+        ``_peer_allowed``'s decision, not a stub of it. ``SO_PEERCRED`` is what a
+        foreign process cannot spoof; filesystem permissions are the primary
+        control and this is what holds when the lever points somewhere shared.
+        """
+        from tortoise import embed_worker
+
+        ours, peer = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            if embed_worker._peer_uid(ours) is None:  # pragma: no cover
+                pytest.skip("this kernel offers no SO_PEERCRED")
+            assert embed_worker._peer_allowed(ours) is True
+
+            import tortoise.embed_worker as worker_module
+            real = worker_module._peer_uid
+            worker_module._peer_uid = lambda _conn: os.getuid() + 1
+            try:
+                assert embed_worker._peer_allowed(ours) is False, (
+                    "a foreign uid was accepted as the embedder — its vectors "
+                    "would be written as record-truth")
+            finally:
+                worker_module._peer_uid = real
+        finally:
+            ours.close()
+            peer.close()
+
+    def test_an_unreadable_peer_credential_is_reported_not_silent(
+            self, caplog, monkeypatch):
+        """A kernel without a peer credential says so instead of pretending.
+
+        Fail-safe in the honest direction: the private directory is still in force
+        on such a platform, and refusing every request would turn a hardening
+        detail into an outage — but the operator is told the check is not running.
+        """
+        from tortoise import embed_worker
+
+        ours, peer = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        monkeypatch.setattr(embed_worker, "_peer_uid", lambda _conn: None)
+        # The note is emitted ONCE per process, so reset it or this row would
+        # pass on the first test to reach the branch and silently skip for every
+        # later one.
+        monkeypatch.setattr(embed_worker, "_peer_credential_note_emitted", False)
+        try:
+            with caplog.at_level("WARNING"):
+                assert embed_worker._peer_allowed(ours) is True
+        finally:
+            ours.close()
+            peer.close()
+        assert any("SO_PEERCRED" in record.message for record in caplog.records), (
+            "the unchecked peer identity was silently allowed")
+
+
 # ── the wiring ──────────────────────────────────────────────────────────────
 
 
@@ -1380,10 +1586,19 @@ class TestTheCallersRouteThroughTheSeam:
 
         monkeypatch.setenv("TORTOISE_EMBEDDING_MODEL_REQUIRED", "1")
         monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_EXTERNAL)
-        embed_seam.install_backing(_ExplodingBacking())
+        exploding = _ExplodingBacking()
+        embed_seam.install_backing(exploding)
         try:
             with pytest.raises(EmbedderUnavailableError):
                 embeddings.compute_embeddings(["a", "b"])
+            # ⛔ ROUTING EVIDENCE (review F4 at this head): the refusal must come
+            # from the SEAM's decline, not from ``EmbeddingModel.get()`` returning
+            # None. On a model-less box (``uv sync`` without the embeddings extra —
+            # a normal state, per AGENTS.md) the pre-fix body refuses by itself, so
+            # without this count the row passes on the code it claims to replace.
+            assert exploding.calls == 1, (
+                "the write path never asked the seam before refusing — it is "
+                f"routing around it ({exploding.calls} call(s))")
         finally:
             embed_seam.install_backing(None)
 
@@ -1399,9 +1614,15 @@ class TestTheCallersRouteThroughTheSeam:
 
         monkeypatch.delenv("TORTOISE_EMBEDDING_MODEL_REQUIRED", raising=False)
         monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_EXTERNAL)
-        embed_seam.install_backing(_ExplodingBacking())
+        exploding = _ExplodingBacking()
+        embed_seam.install_backing(exploding)
         try:
             assert embeddings.compute_embeddings(["a", "b"]) == [None, None]
+            # Control for the SAME reason as the armed row: the degrade must be the
+            # seam's decline, not a local model that was simply absent (review F4).
+            assert exploding.calls == 1, (
+                "the silent degrade did not come through the seam — it came from "
+                f"the local model being absent ({exploding.calls} call(s))")
         finally:
             embed_seam.install_backing(None)
 
@@ -1488,15 +1709,19 @@ class TestTheCallersRouteThroughTheSeam:
 # ── the swap path must not deadlock ─────────────────────────────────────────
 
 
-class TestReplacingTheBackingCannotDeadlock:
+class TestReplacingTheBackingNeverStallsUnderTheModuleLock:
     """The module lock is never held across a collector JOIN.
 
-    ⛔ WHY THIS ROW EXISTS, as a deadlock rather than a slow path. Stopping the
-    collector joins its thread, and that thread calls ``active_backing()`` — which
-    takes the module lock — on every batch. A caller that held the lock across the
-    join would wait for a thread waiting for the lock it holds. Reached by nothing
-    more exotic than a concurrent submit while the lever (or a test) swaps the
-    backing.
+    ⛔ WHY THIS ROW EXISTS, and what the failure actually was (review F6).
+    Stopping the collector joins its thread, and that thread calls
+    ``active_backing()`` — which takes the module lock — on every batch. A caller
+    that held the lock across the join would wait for a thread waiting for the
+    lock it holds. That is a BOUNDED stalemate of every ``encode_query`` for the
+    join's duration (``_Collector.stop`` joins with an explicit 5 s bound), not a
+    deadlock — commit ``0eb23c2f``'s subject called it one and overstated it. The
+    fix is unchanged and still necessary; only the consequence is stated as what
+    it was. Reached by nothing more exotic than a concurrent submit while the
+    lever (or a test) swaps the backing.
 
     A hang is a terrible thing to assert on directly, so this pins the INVARIANT
     the fix is made of — observable, deterministic, and false on the pre-fix
@@ -1527,7 +1752,8 @@ class TestReplacingTheBackingCannotDeadlock:
         assert not any(observed), (
             "the collector was stopped while the module lock was HELD. Its thread "
             "takes that lock on every batch, so a concurrent submit would have "
-            "deadlocked the process (not merely slowed it)."
+            "stalled every encode_query for the whole join (a bounded stall, not "
+            "a deadlock — but still a stall the seam must not have)."
         )
         assert recorder.batches, "the recording backing never ran"
 
@@ -1598,6 +1824,151 @@ class TestTheRequiredEmbedderFlagBindsOnARemoteBacking:
         assert entry.get("reason") == "encode_failed", (
             f"the remote decline did not use the local encode arm's vocabulary: "
             f"{entry!r}")
+
+
+class TestStopIsAStop:
+    """Review F5: a stopped collector fires nothing and closes nothing early.
+
+    ``stop()`` set a flag and joined for a bounded time, but ``_collect`` only
+    exited on that flag when the queue was EMPTY — and a ticket had already been
+    popped into the batch. So after ``stop()`` returned, ``_run`` still fired an
+    encode: it recorded a decline that teardown itself caused, and after
+    ``reset_seam`` had cleared the globals it constructed a FRESH backing through
+    ``active_backing`` (for ``worker``, a 432 MB process nothing would close).
+    The rows below drive exactly that state — an encode IN FLIGHT, more tickets
+    queued behind it, then teardown.
+    """
+
+    @staticmethod
+    def _start_in_flight(recorder) -> tuple[list, list]:
+        """One encode running, plus two tickets queued behind it.
+
+        Returns ``(threads, outcome)``, where ``outcome`` is filled with
+        ``(text, value_or_exception)`` as each caller returns.
+        """
+        outcome: list = []
+
+        def _one(text: str) -> None:
+            try:
+                outcome.append((text, embed_seam.encode_query(text)))
+            except BaseException as exc:  # recorded, asserted by the caller
+                outcome.append((text, exc))
+
+        first = threading.Thread(target=_one, args=("first",), daemon=True)
+        first.start()
+        assert recorder.entered.wait(10), "the collector never started an encode"
+        queued = [threading.Thread(target=_one, args=(f"q{i}",), daemon=True)
+                  for i in range(2)]
+        for thread in queued:
+            thread.start()
+        # ⛔ Wait for them to be IN the queue, not merely started: `_collect`
+        # drains under the lock, so a ticket that has not been appended yet would
+        # make this row prove nothing.
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if len(embed_seam._collector._queue) == 2:
+                break
+            time.sleep(0.01)
+        assert len(embed_seam._collector._queue) == 2, (
+            "the two later tickets never reached the queue")
+        return [*queued, first], outcome
+
+    def test_a_stopped_collector_fires_no_further_batch(self, backing):
+        recorder = backing(delay_s=1.0)
+        try:
+            threads, outcome = self._start_in_flight(recorder)
+            collector = embed_seam._collector
+            assert collector is not None
+            # A join budget far below the encode's own duration: this is the
+            # state a real teardown meets (an encode is 2-4 s; worker boots are
+            # longer), and it is the state the pre-fix path fired from.
+            collector.stop(timeout_s=0.05)
+            for thread in threads:
+                thread.join(timeout=5)
+            still_waiting = [t for t in threads if t.is_alive()]
+            assert not still_waiting, (
+                f"{len(still_waiting)} caller(s) were still parked after stop() "
+                "returned — a stop must DECLINE what it will not encode, not "
+                "leave the caller waiting out its whole bound")
+            answers = dict(outcome)
+            assert set(answers) == {"first", "q0", "q1"}, answers
+            # ⛔ The in-flight ticket (fired BEFORE stop) is answered normally.
+            assert not isinstance(answers["first"], BaseException), answers["first"]
+            # ⛔ The queued tickets were DECLINED, not encoded: they name the stop.
+            for text in ("q0", "q1"):
+                value = answers[text]
+                assert isinstance(value, RuntimeError), (
+                    f"a ticket queued when stop() was called was answered "
+                    f"({value!r}) — the stop was not a stop")
+                assert "stopped" in str(value)
+            # ⛔ And NOTHING fired after stop() returned: one encode, not three.
+            time.sleep(1.2)
+            assert len(recorder.batches) == 1, (
+                f"{len(recorder.batches)} encodes fired after the collector was "
+                "stopped — teardown is doing work the deployment already tore "
+                f"down ({recorder.batches})")
+        finally:
+            embed_seam.reset_seam()
+
+    def test_a_backing_in_use_is_not_closed_until_its_encode_finishes(
+            self, backing, monkeypatch):
+        """The retired backing is closed AFTER the in-flight encode, not under it.
+
+        ⛔ The pre-fix teardown closed the backing as soon as ``stop()`` returned
+        — while the collector could still be inside ``encode``. That turns a
+        normal retirement into an encoder failure, recorded as a decline the
+        DEPLOYMENT did not have, and it can kill a forward pass mid-flight.
+
+        Driven through :func:`_retire` rather than a lever change: that function
+        IS the retirement path (``active_backing`` and ``reset_seam`` both hand it
+        a ``_Retired(backing, collector)``), and an INJECTED backing is never
+        closed by either, so going through them would test the fixture instead of
+        the sequence under review.
+        """
+        recorder = backing(delay_s=1.0)
+        # Shrink the join so an in-flight encode is guaranteed to outlast it.
+        monkeypatch.setattr(embed_seam, "_STOP_JOIN_S", 0.05)
+        try:
+            threads, _outcome = self._start_in_flight(recorder)
+            collector = embed_seam._collector
+            assert collector is not None
+            embed_seam._retire(embed_seam._Retired(recorder, collector))
+            assert recorder.closed is False, (
+                "the backing was CLOSED while an encode was still running on it "
+                "— that encode fails and the teardown's own decline is recorded "
+                "as a deployment fault")
+            for thread in threads:
+                thread.join(timeout=10)
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline and not recorder.closed:
+                time.sleep(0.02)
+            assert recorder.closed, (
+                "the backing was never closed after its encode finished — a "
+                "retired worker would leak its 432 MB process")
+        finally:
+            embed_seam.reset_seam()
+
+
+def test_every_seam_lever_is_cleared_between_tests():
+    """Review F8: the fixture's lever census cannot miss one again.
+
+    ``_isolated_embed_seam`` clears ``SEAM_ENV_LEVERS``, and that list used to be
+    spelled by hand — it had missed ``ENV_WORKER_STARTUP_S``, so a shell exporting
+    it made the real-worker row depend on the ambient environment (a false pass in
+    one direction, a spurious red in the other). This pins the census against the
+    module's own ``ENV_*`` constants, so a new lever is either listed or this row
+    reddens.
+    """
+    declared = {
+        name: value for name, value in vars(embed_seam).items()
+        if name.startswith("ENV_") and isinstance(value, str)
+    }
+    assert declared, "no ENV_* constants found — this row would pass vacuously"
+    missing = set(declared.values()) - set(embed_seam.SEAM_ENV_LEVERS)
+    assert not missing, (
+        f"{sorted(missing)} are read by the seam but not cleared between tests — "
+        "a value exported in a developer or CI shell leaks into unrelated rows")
+    assert embed_seam.ENV_WORKER_STARTUP_S in embed_seam.SEAM_ENV_LEVERS
 
 
 # ── teardown ────────────────────────────────────────────────────────────────

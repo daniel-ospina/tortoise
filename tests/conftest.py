@@ -995,7 +995,7 @@ def _isolated_embed_seam(monkeypatch):
     """#14186: every test starts on the in-process embedder seam.
 
     The seam is PROCESS state (a resolved backing, its collector thread, an
-    optional worker subprocess) plus seven env levers, so without a reset a test
+    optional worker subprocess) plus TEN env levers, so without a reset a test
     that installs a fake backing or points at a worker would leave the next test
     — and the whole read/write path it exercises — encoding somewhere else. Same
     rationale as ``_fresh_commit_ingest_budget`` above: reset the state, do not
@@ -1005,14 +1005,18 @@ def _isolated_embed_seam(monkeypatch):
     ``TORTOISE_EMBED_BACKING=worker`` makes every later test's ``compute_embeddings``
     skip the local-model availability check and try to spawn a process, which
     would present as a scatter of unrelated failures rather than one.
+
+    ⛔ THE LIST IS NOT SPELLED HERE (review F8). It is
+    :data:`tortoise.embed_seam.SEAM_ENV_LEVERS`, the module's own census, so a
+    lever added there is cleared here automatically — the hand-written tuple this
+    replaced had missed ``ENV_WORKER_STARTUP_S``, and a shell that exported it
+    made ``test_a_real_worker_starts_answers_and_dies_with_its_stdin`` depend on
+    the ambient environment. One row in the seam's suite pins that census against
+    the module's ``ENV_*`` constants, so the tuple cannot drift either.
     """
     from tortoise import embed_seam
 
-    for name in (embed_seam.ENV_BACKING, embed_seam.ENV_MAX_WAIT_MS,
-                 embed_seam.ENV_MAX_BATCH, embed_seam.ENV_TIMEOUT_S,
-                 embed_seam.ENV_WORKER_SOCKET, embed_seam.ENV_WORKER_PYTHON,
-                 embed_seam.ENV_EXTERNAL_URL, embed_seam.ENV_EXTERNAL_TOKEN,
-                 embed_seam.ENV_EXTERNAL_MODEL):
+    for name in embed_seam.SEAM_ENV_LEVERS:
         monkeypatch.delenv(name, raising=False)
     embed_seam.reset_seam()
     yield

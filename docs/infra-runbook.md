@@ -1322,12 +1322,13 @@ the block arrives with the SAME key set, every value `null`, plus `error`, and `
 | `TORTOISE_EMBED_MAX_WAIT_MS` | per backing (below) | The query-batching collection window, in ms. |
 | `TORTOISE_EMBED_MAX_BATCH` | `32` | A batch fires early when it reaches this. |
 | `TORTOISE_EMBED_QUERY_TIMEOUT_S` | `30` | The bound on ONE fired request (worker / external round trip). |
-| `TORTOISE_EMBED_WORKER_SOCKET` | `$TMPDIR/tortoise-embed-worker-<pid>.sock` | Where the worker listens. |
+| `TORTOISE_EMBED_WORKER_SOCKET` | a `0700` directory this process mints (`$TMPDIR/tortoise-embed-worker-<pid>-*/embed.sock`) | Where the worker listens. The private directory is not decoration: readiness is the path's EXISTENCE, and a shared directory would let any local user create it first. An explicit path here is honoured verbatim. |
 | `TORTOISE_EMBED_WORKER_PYTHON` | the parent's `sys.executable` | The worker must import the SAME tortoise and extras — a different interpreter is a different encoder. |
 | `TORTOISE_EMBED_EXTERNAL_URL` / `_TOKEN` / `_MODEL` | unset | The remote endpoint, an optional `Bearer`, and the model id to ask for. |
 
-All of them are re-read **per call**, so a `fly ssh` shell or a lane's bulk job can retarget the seam
-without a restart.
+All of them are re-read **per call**, so a test or an in-process bulk job can retarget the seam
+without a restart. ⛔ A SERVER cannot: it cannot acquire a new environment, so changing a lever on a
+deployed machine means rolling it (see "Rollback is one variable" below).
 
 #### Default posture, stated
 
@@ -1347,9 +1348,16 @@ fly secrets set TORTOISE_EMBED_BACKING=inprocess    # or `fly secrets unset` it 
 
 The next encode returns to the pre-#14186 path: the same `EmbeddingModel.get()` +
 `ensure_embed_threads()` + `model.encode(list)` call, the same thread pin, the same decline
-semantics. Nothing has to be reverted in code, no restart is required, and **no state is left behind
-that a restart would need**. A `worker` backing is terminated cleanly when the lever moves (its
-socket is removed and its process is waited on), so rollback does not leave a 432 MB orphan.
+semantics. Nothing has to be reverted in code and **no state is left behind that a restart would
+need**. A `worker` backing is terminated cleanly when the lever moves (its socket is removed and its
+process is waited on), so rollback does not leave a 432 MB orphan.
+
+⛔ **A secret change RESTARTS the machines — that is how the new value reaches the process.** The
+per-call read below is real, and it is what lets a test or an in-process bulk job retarget the seam,
+but a running server cannot acquire a new environment: `fly secrets set/unset` rolls the machines,
+and an export in a `fly ssh console` shell never reaches the server process. So the rollback IS one
+variable and does NOT need a code revert — but it does reboot, and the boot has to be waited out.
+Verify with `jq .embed_seam.backing` before declaring the rollback done, not from the shell's own env.
 
 #### Reading it
 
@@ -1371,8 +1379,9 @@ curl -sS https://api.premiselabs.co/health \
   caller felt, and `collect_ms` as the part the window is responsible for. (Measured on the 0 ms
   default: `coalesced` rises while `collect_ms` stays ~0 — the coalescing is queue-behind-encode,
   which adds no admission wait — review F5.)
-  rode a batch they did not open. A large `submissions` with `coalesced: 0` is a process with no
-  concurrency — expected on a single interactive user, and *not* evidence the seam is broken.
+- **`coalesced` counts the tickets that rode a batch they did not open.** A large `submissions`
+  with `coalesced: 0` is a process with no concurrency — expected on a single interactive user,
+  and *not* evidence the seam is broken.
 - **`last_decline` + `last_decline_age_s` is why a backing failed**, without a log search. It is the
   difference between "the worker will not start" and "the endpoint answered 503", which need opposite
   repairs. ⛔ **There is no silent fallback**: a declining backing leaves the dense leg off and the
@@ -1398,10 +1407,16 @@ cover a boot, and using it for both was exactly what made the first query declin
 
 So:
 
-- **A slow first query on a freshly-started worker is expected, and is not a decline.** Confirm it is
-  the boot by the absence of `last_decline` and by `backing_state` naming a live worker pid; if boot
-  cost grows past the start-up budget the read DECLINES (bounded, never parked) and the remedy is to
-  raise the lever, not to repair the worker.
+- **A slow first query on a freshly-started worker is expected, and is not a decline.** The
+  ticket's own delivery bound (how long `submit` waits for a batch to FIRE) is sized the same way:
+  `window + start-up budget + 1 s` while a boot is in flight, `window + request budget + 1 s`
+  otherwise. Sizing it from the request budget alone is what made the first query decline at ~31 s
+  of a boot that may legitimately take 600 s — the lever was split in one layer and re-conflated in
+  the layer the caller actually blocks in. Confirm a slow query is the boot by the absence of
+  `last_decline` and by `backing_state` naming a live worker pid; if boot cost grows past the
+  start-up budget the read DECLINES (bounded, never parked) and the remedy is to raise the lever,
+  not to repair the worker. A ticket that waits out its whole bound DOES record `last_decline`
+  ("no batch fired for this query within …"), so a wedged collector can no longer read as a boot.
 - **A `last_decline` on a worker that has been up for minutes is a real fault** — the preload
   finished or it never started, so a decline now is the encoder refusing, not loading. That is when
   the "roll back or repair" instruction below applies.

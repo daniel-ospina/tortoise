@@ -50,6 +50,7 @@ import json
 import logging
 import os
 import socket
+import struct
 import sys
 import threading
 import time
@@ -61,6 +62,76 @@ _logger = logging.getLogger(__name__)
 #: closes); this is the belt for a parent that was killed in a way that left the
 #: write end open in a reparented grandchild, which the pipe alone cannot see.
 _HEARTBEAT_S = 1.0
+
+
+def _peer_uid(conn: socket.socket) -> int | None:
+    """The uid on the other end of ``conn``, or ``None`` if this kernel cannot say.
+
+    ``SO_PEERCRED`` is the kernel's own answer — it cannot be spoofed by the
+    connecting process, which is what makes it useful (filesystem permissions can
+    be by design, and a path that exists is not proof of who is on the other end).
+    Absent on platforms that do not offer it (macOS names its own
+    ``LOCAL_PEERCRED``); ``None`` says "this kernel did not tell us", never "uid 0".
+    """
+    so_peercred = getattr(socket, "SO_PEERCRED", None)
+    if so_peercred is None:
+        return None
+    try:
+        raw = conn.getsockopt(
+            socket.SOL_SOCKET, so_peercred, struct.calcsize("3i"))
+    except OSError:
+        return None
+    _pid, uid, _gid = struct.unpack("3i", raw)
+    return int(uid)
+
+
+#: Set once, so an unsupported platform says so ONCE rather than per connection.
+_peer_credential_note_emitted = False
+
+
+def _peer_allowed(conn: socket.socket) -> bool:
+    """Whether the peer on ``conn`` may use this worker — refuse on a foreign uid.
+
+    ⛔ THE ATTACK THIS CLOSES (review F2). The client treats the socket path's
+    first EXISTENCE as READY, and this process creates that path only after its
+    preload — so for the whole boot the expected path is absent. In a shared
+    temp directory any local user could bind it first, be accepted as the
+    encoder, and have its vectors written as record-truth embeddings (#5004's
+    class of damage: undetectable downstream).
+
+    The PRIMARY control is the private ``0700`` directory the client mints for
+    the socket (:meth:`tortoise.embed_seam.WorkerBacking.socket_path`), which no
+    other user can traverse. This is the belt: it keeps the property when an
+    operator points ``TORTOISE_EMBED_WORKER_SOCKET`` at a shared path, which the
+    directory cannot protect.
+
+    Direction of the read is the convergent one (vLLM, and the ``myunix.org``
+    guidance it follows): reject a uid that is not ours. Where the kernel offers
+    no peer credential at all, the failure is REPORTED and the connection is
+    allowed — the private directory is still in force, and refusing every request
+    on such a platform would turn a hardening detail into an outage.
+    """
+    global _peer_credential_note_emitted
+    uid = _peer_uid(conn)
+    if uid is None:
+        if not _peer_credential_note_emitted:
+            _peer_credential_note_emitted = True
+            _logger.warning(
+                "embed worker: this platform offers no SO_PEERCRED — peer "
+                "identity is unchecked; reliance is on the private socket "
+                "directory (0700) (#14186)")
+        return True
+    if uid == os.getuid():
+        return True
+    _logger.warning(
+        "embed worker: REFUSED a connection from uid %s (this worker serves uid "
+        "%s) — a foreign process tried to become the embedder (#14186)",
+        uid, os.getuid())
+    with contextlib.suppress(OSError):
+        conn.sendall(
+            (json.dumps({"error": f"peer rejected: uid {uid} is not the worker's "
+                                  f"own uid {os.getuid()}"}) + "\n").encode("utf-8"))
+    return False
 
 
 def _parent_alive(parent_pid: int) -> bool:
@@ -263,6 +334,8 @@ def serve(socket_path: str, *, parent_pid: int) -> None:
             except OSError:
                 break
             try:
+                if not _peer_allowed(conn):
+                    continue
                 _serve_connection(conn)
             except Exception:
                 _logger.warning("embed worker: connection failed", exc_info=True)

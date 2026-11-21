@@ -112,6 +112,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -166,6 +167,27 @@ ENV_WORKER_STARTUP_S = "TORTOISE_EMBED_WORKER_STARTUP_S"
 ENV_EXTERNAL_URL = "TORTOISE_EMBED_EXTERNAL_URL"
 ENV_EXTERNAL_TOKEN = "TORTOISE_EMBED_EXTERNAL_TOKEN"
 ENV_EXTERNAL_MODEL = "TORTOISE_EMBED_EXTERNAL_MODEL"
+
+#: EVERY lever this module reads, in one place. ``tests/conftest.py`` clears this
+#: tuple between tests, so a lever that is added without being listed here leaks
+#: into the next test — and a leaked ``TORTOISE_EMBED_BACKING=worker`` makes every
+#: later ``compute_embeddings`` skip its local-model check and try to spawn a
+#: process, which presents as a scatter of unrelated failures rather than one
+#: (review F8: ``ENV_WORKER_STARTUP_S`` was missing from a hand-written list).
+#: A row pins this tuple against the module's own ``ENV_*`` constants, so the list
+#: cannot drift silently.
+SEAM_ENV_LEVERS: tuple[str, ...] = (
+    ENV_BACKING,
+    ENV_MAX_WAIT_MS,
+    ENV_MAX_BATCH,
+    ENV_TIMEOUT_S,
+    ENV_WORKER_SOCKET,
+    ENV_WORKER_PYTHON,
+    ENV_WORKER_STARTUP_S,
+    ENV_EXTERNAL_URL,
+    ENV_EXTERNAL_TOKEN,
+    ENV_EXTERNAL_MODEL,
+)
 
 #: The interactive-traffic collection window (ms) for the backings where a round
 #: trip dominates. SCALING-ROADMAP §1 quotes "small micro-batches for interactive
@@ -312,6 +334,51 @@ def resolve_worker_startup_s() -> float:
     """
     return _env_float(
         ENV_WORKER_STARTUP_S, DEFAULT_WORKER_STARTUP_S, minimum=1.0)
+
+
+#: Slack added to a ticket's delivery bound, on top of the phase budget it guards:
+#: it covers the fire itself and ordinary scheduling jitter, not a second wait.
+_TICKET_WAIT_SLACK_S = 1.0
+
+
+def resolve_ticket_wait_s(timeout_s: float,
+                          backing: EmbeddingBacking | None = None) -> float:
+    """How long ONE ticket may wait for its batch to FIRE — sized per PHASE.
+
+    ⛔ SAME LESSON AS :data:`ENV_WORKER_STARTUP_S`, ONE LAYER OUT. ``submit``
+    waits for a batch to fire, and while a ``worker`` backing is still BOOTING
+    the encode that will fire it is inside :meth:`WorkerBacking._ensure_started`
+    — legally paying the cold import plus the model load (#13674). Bounding that
+    wait by the REQUEST budget abandoned the ticket after ~31 s of a boot that
+    may take 600 s, so the first query after every worker boot declined on a
+    healthy worker: the very failure the startup lever was split off to remove,
+    left in the layer the caller actually blocks in.
+
+    So the bound is ``window + (start-up budget while a boot is in flight, else
+    the request budget) + slack``. It stays BOUNDED in both phases — the issue's
+    contradiction test (a) is untouched — and the tight backstop is kept for the
+    steady state, where a wedged collector must not be able to park a read lane
+    worker for a boot's worth of seconds (#13528).
+
+    This is a helper rather than arithmetic inside ``submit`` so that no caller
+    can re-introduce a single ceiling by passing the wrong budget: the backing in
+    use is ASKED what phase it is in (:meth:`WorkerBacking.startup_pending`), and
+    a backing that does not implement it is answered with the request budget.
+
+    ⛔ THE BACKING IS PEEKED, NEVER RESOLVED. :func:`active_backing` CONSTRUCTS a
+    backing on first use and retires the collector it replaces — calling it from
+    ``submit`` retired the very collector holding the ticket, which then declined
+    a perfectly healthy query. Sizing a bound is a READ, so it reads.
+    """
+    window_s = max(resolve_max_wait_ms(), 0.0) / 1000.0
+    candidate = backing if backing is not None else _peek_backing()
+    pending = getattr(candidate, "startup_pending", None)
+    booting = pending() if pending is not None else (
+        # Nothing constructed yet: the configured name is the only evidence about
+        # which phase the FIRST encode will pay.
+        candidate is None and resolve_backing() == BACKING_WORKER)
+    budget_s = resolve_worker_startup_s() if booting else timeout_s
+    return window_s + budget_s + _TICKET_WAIT_SLACK_S
 
 
 # ── vector normalisation ─────────────────────────────────────────────────────
@@ -488,15 +555,61 @@ class WorkerBacking:
     def __init__(self) -> None:
         self._proc: subprocess.Popen | None = None
         self._address: str | None = None
+        #: The private directory this backing minted for its socket, if any.
+        #: Created lazily by :meth:`socket_path` and removed by :meth:`close`.
+        self._socket_dir: str | None = None
+        self._path_lock = threading.Lock()
         self._lock = threading.Lock()
 
     def socket_path(self) -> str:
+        """Where this backing listens — inside a PRIVATE directory (review F2).
+
+        ⛔ NOT in ``$TMPDIR`` DIRECTLY. The old default was
+        ``$TMPDIR/tortoise-embed-worker-<pid>.sock``, a world-writable directory,
+        and :meth:`_ensure_started` treats the path's first EXISTENCE as READY
+        while the worker creates it only after its preload. So for the whole boot
+        the expected path was absent and the client was polling for anyone to
+        create it — any local user who bound it first became the embedder, and
+        the vectors it answered were written as record-truth (#5004's class of
+        damage, undetectable downstream).
+
+        A ``0700`` directory owned by this uid closes that: another user cannot
+        traverse it, so it cannot create the socket inside it either. The
+        worker's peer-credential check (:func:`tortoise.embed_worker._peer_allowed`)
+        is the belt for the one case the directory cannot cover — an operator who
+        points ``TORTOISE_EMBED_WORKER_SOCKET`` at a shared path.
+        """
         path = os.environ.get(ENV_WORKER_SOCKET)
         if path and path.strip():
             return path.strip()
-        return os.path.join(
-            os.environ.get("TMPDIR", "/tmp") or "/tmp",
-            f"tortoise-embed-worker-{os.getpid()}.sock")
+        return os.path.join(self._private_dir(), "embed.sock")
+
+    def _private_dir(self) -> str:
+        """The ``0700`` directory this backing owns, minted once.
+
+        Memoised so the path is STABLE across the many ``socket_path()`` calls a
+        start-up makes (the poll loop, ``describe()``, the spawn argument);
+        ``mkdtemp`` creates the directory ``0700`` (no ``mode`` argument exists on
+        it — the mode is not negotiable) and guarantees a name no other process can
+        predict, which is what makes the directory private in both senses.
+        """
+        with self._path_lock:
+            if self._socket_dir is None:
+                self._socket_dir = tempfile.mkdtemp(
+                    prefix=f"tortoise-embed-worker-{os.getpid()}-")
+            return self._socket_dir
+
+    def startup_pending(self) -> bool:
+        """Whether the next encode will pay a boot (review F1).
+
+        Read WITHOUT the state lock on purpose: the boot holds that lock for its
+        whole duration, and a ticket's bound must not block on it. ``_proc`` is
+        set only once the worker is READY (``embed_worker.serve`` binds after
+        ``_preload_encoder``), so ``None`` is exactly "a boot is in flight" —
+        including the race where it has just finished, which errs on the
+        generous side and costs a slower backstop, never a wrong decline.
+        """
+        return self._proc is None
 
     def _ensure_started(self, timeout_s: float) -> str:
         """Spawn the worker if needed and wait until it is READY.
@@ -611,6 +724,13 @@ class WorkerBacking:
             if address:
                 with _swallow_oserror():
                     os.unlink(address)
+        # The private directory is ours: remove it with the socket, so a backing
+        # that is retired leaves nothing behind in the temp dir (review F2).
+        with self._path_lock:
+            directory, self._socket_dir = self._socket_dir, None
+        if directory is not None:
+            with _swallow_oserror():
+                os.rmdir(directory)
 
     def describe(self) -> dict:
         alive = self._proc is not None and self._proc.poll() is None
@@ -830,6 +950,22 @@ def _percentile(sorted_samples: list[float], quantile: float) -> float:
     return sorted_samples[min(max(index, 0), len(sorted_samples) - 1)]
 
 
+#: How long ``_Collector.stop`` waits for an in-flight encode before returning.
+#: A run-time bound on the JOIN, never a licence to close the backing early —
+#: see :func:`_retire`.
+_STOP_JOIN_S = 5.0
+
+#: The decline a ticket gets when the collector is STOPPED before its batch was
+#: encoded. Named so a caller can tell teardown from an encoder failure.
+_STOPPED_BEFORE_ENCODE = (
+    "embed seam: the collector was stopped before this query's batch was encoded")
+
+#: The decline a ticket gets when the collector's own bookkeeping (not the
+#: backing call, which carries its own exception) failed for its batch.
+_BATCH_FAULTED = (
+    "embed seam: batch failed before this query's answer was produced")
+
+
 class _Collector:
     """The bounded collection window: one queue, one thread, one hard deadline.
 
@@ -888,20 +1024,29 @@ class _Collector:
             self.submissions += 1
             self._ensure_thread_unlocked()
             self._wakeup.notify()
-        # ⛔ The wait is bounded by the collection window PLUS one encode's own
-        # bound. A ticket whose batch has not fired by then is a DECLINE, not an
+        # ⛔ The wait is bounded by the collection window PLUS the budget of the
+        # PHASE it is guarding — the start-up budget while a worker boot is in
+        # flight, the request budget otherwise (see :func:`resolve_ticket_wait_s`).
+        # A ticket whose batch has not fired by then is a DECLINE, not an
         # indefinite park: a wedged collector must not be able to hang a read
         # lane worker, which is the #13528 shape this seam sits under.
-        fired_by = resolve_max_wait_ms() / 1000.0 + timeout_s + 1.0
+        fired_by = resolve_ticket_wait_s(timeout_s)
         if not ticket.done.wait(fired_by):
             # Drop it so the collector does not encode a text nobody is waiting
             # for (the caller has already declined).
             with self._lock, _swallow_value_error():
                 self._queue.remove(ticket)
-            raise TimeoutError(
+            # ⛔ RECORD it. This raise happens OUTSIDE ``_fire``, so without this
+            # the decline left no trace at all: ``last_decline`` stayed null and
+            # the runbook told an operator to read that absence as "it was only
+            # the boot" — the one reading that is inverted whenever the valve
+            # fires. A ticket that waited out its whole bound is a WEDGE.
+            timed_out = TimeoutError(
                 f"embed seam: no batch fired for this query within "
-                f"{fired_by:.2f}s"
-                + (f" (last decline: {last_decline()})" if last_decline() else ""))
+                f"{fired_by:.2f}s — the collector is wedged or the backing never "
+                f"answered")
+            _note_decline(timed_out)
+            raise timed_out
         if ticket.error is not None:
             raise ticket.error
         return ticket.vectors
@@ -921,6 +1066,16 @@ class _Collector:
             batch = self._collect()
             if batch is None:
                 return
+            if self._stop:
+                # ⛔ ``stop()`` landed between the DEQUEUE and the fire. Encoding
+                # this batch would (a) make a stopped collector do work the
+                # deployment has already torn down, and (b) re-resolve a backing
+                # through :func:`active_backing` — constructing a fresh worker
+                # (432 MB) that nothing will close, which is the opposite of what
+                # ``reset_seam`` promises. Decline instead (review F5).
+                for ticket in batch:
+                    self._decline(ticket, _STOPPED_BEFORE_ENCODE)
+                return
             # ⛔ THE COLLECTOR MUST NOT DIE. If it did, every later submission
             # would sit until its own bound expired and then raise, which
             # presents as "the embedder got slow" rather than "the scheduler
@@ -935,18 +1090,25 @@ class _Collector:
                     "embed seam: a batch faulted outside the backing call — the "
                     "collector continues (#14186)", exc_info=True)
                 for ticket in batch:
-                    if not ticket.done.is_set():
-                        ticket.error = RuntimeError(
-                            "embed seam: batch failed before this query's "
-                            "answer was produced")
-                        ticket.done.set()
+                    self._decline(ticket, _BATCH_FAULTED)
+
+    @staticmethod
+    def _decline(ticket: _Ticket, message: str) -> None:
+        """Hand ``ticket`` a named error instead of an answer. Idempotent."""
+        if ticket.done.is_set():
+            return
+        ticket.error = RuntimeError(message)
+        ticket.done.set()
 
     def _collect(self) -> list[_Ticket] | None:
         """Take the next batch, honouring the hard window. ``None`` ⇒ stop."""
         with self._wakeup:
             while not self._queue and not self._stop:
                 self._wakeup.wait()
-            if self._stop and not self._queue:
+            if self._stop:
+                # ⛔ ``stop()`` is a STOP, not a drained queue: nothing is
+                # dequeued (and therefore nothing can fire) once it is set. The
+                # tickets still in the queue were already declined by ``stop()``.
                 return None
             batch = [self._queue.popleft()]
             # ⛔ THE WINDOW OPENS HERE, not at the first ticket's submission: a
@@ -1037,14 +1199,50 @@ class _Collector:
                 ticket.error = error
             ticket.done.set()
 
-    def stop(self) -> None:
+    def stop(self, timeout_s: float | None = None) -> None:
+        """Stop the collector: decline what is queued, fire nothing new.
+
+        ⛔ WHAT THIS USED TO DO, AND WHY IT WAS NOT A STOP (review F5). It set the
+        flag and joined for a bounded time, then returned. But ``_collect`` only
+        exited on the flag when the queue was EMPTY, and a ticket had already
+        been popped into ``batch`` — so after ``stop()`` returned, ``_run`` still
+        called ``_fire(batch)``. That fired an encode after teardown, recorded a
+        decline teardown itself caused, and — after ``reset_seam`` cleared the
+        module globals — constructed a FRESH backing through
+        :func:`active_backing` that nothing would ever close (a 432 MB worker for
+        a ``worker`` backing). Two collectors could then encode concurrently,
+        breaking the one-forward-pass-at-a-time ceiling this module states.
+
+        Now: queued tickets are declined with a named reason (their callers do
+        not wait out their whole bound), a batch dequeued but not yet fired is
+        declined by :meth:`_run`, and nothing fires afterwards. ``timeout_s``
+        bounds only the JOIN — a caller that still sees a live collector knows an
+        encode was in flight and must not close its backing yet (see
+        :func:`_retire`).
+        """
+        bound_s = _STOP_JOIN_S if timeout_s is None else timeout_s
         with self._wakeup:
             self._stop = True
+            queued = list(self._queue)
+            self._queue.clear()
             self._wakeup.notify_all()
+        for ticket in queued:
+            self._decline(ticket, _STOPPED_BEFORE_ENCODE)
         thread = self._thread
         if thread is not None and thread.is_alive() and \
                 thread is not threading.current_thread():
-            thread.join(timeout=5.0)
+            thread.join(timeout=bound_s)
+
+    def alive(self) -> bool:
+        """Whether the collector thread is still running (an encode is in flight)."""
+        thread = self._thread
+        return thread is not None and thread.is_alive()
+
+    def join(self, timeout_s: float | None = None) -> None:
+        """Wait for the collector thread to finish — unbounded unless told otherwise."""
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=timeout_s)
 
     def close(self) -> None:
         self.stop()
@@ -1125,19 +1323,50 @@ def _retire(retired: _Retired) -> None:
     the collector JOINS its thread, and that thread calls :func:`active_backing`
     — which takes the module ``_lock`` — on every batch. So a caller that held
     ``_lock`` across the join would wait for a thread that is waiting for the
-    lock it is holding: a DEADLOCK, not a slow path, reached by nothing more
-    exotic than a concurrent submit while the lever (or a test) swaps the
-    backing. Both callers therefore mutate state under the lock, collect what
-    was retired, and do the waiting after it is released.
+    lock it is holding: a BOUNDED stalemate of every ``encode_query`` for the
+    join's whole duration (``_Collector.stop`` joins with an explicit
+    :data:`_STOP_JOIN_S`), not an unbounded hang. The fix is the same, and the
+    record says what it was: commit ``0eb23c2f``'s subject called it a "deadlock";
+    it was not one (review F6). Both callers therefore mutate state under the
+    lock, collect what was retired, and do the waiting after it is released.
+
+    ⛔ AND THE CLOSE WAITS FOR THE ENCODE (review F5). ``stop()``'s join is
+    bounded, so a collector can still be INSIDE an encode on the backing we are
+    retiring. Closing it there makes that encode fail and records a decline the
+    TEARDOWN caused — a phantom fault in the one number an operator reads. When
+    the collector is still alive the backing is therefore handed to a short-lived
+    daemon thread that closes it once the encode finishes: nothing is leaked, and
+    nothing is closed out from under a forward pass.
 
     Every step is best-effort: a configuration change must not fail because the
     thing it is replacing is already broken.
     """
     if retired.collector is not None:
         retired.collector.stop()
-    if retired.backing is not None:
+    if retired.backing is None:
+        return
+    if retired.collector is not None and retired.collector.alive():
+        _close_when_idle(retired.collector, retired.backing)
+        return
+    with _swallow_base_exception():
+        retired.backing.close()
+
+
+def _close_when_idle(collector: _Collector, backing: EmbeddingBacking) -> None:
+    """Close ``backing`` once ``collector`` has finished its in-flight encode.
+
+    Daemon on purpose: the remaining work is at most one encode (bounded by the
+    request budget for ``worker``/``external``, and by the forward pass itself for
+    the in-process backing, which is not interruptible), and a retire thread must
+    never be able to keep the process alive.
+    """
+    def _wait_then_close() -> None:
+        collector.join()
         with _swallow_base_exception():
-            retired.backing.close()
+            backing.close()
+
+    threading.Thread(
+        target=_wait_then_close, name="embed-seam-retire", daemon=True).start()
 
 
 class _Retired:
@@ -1148,6 +1377,22 @@ class _Retired:
     def __init__(self, backing=None, collector=None) -> None:
         self.backing = backing
         self.collector = collector
+
+
+def _peek_backing() -> EmbeddingBacking | None:
+    """The backing currently in use — READ-ONLY, constructing nothing.
+
+    ⛔ Why this exists next to :func:`active_backing`. That function is a MUTATION
+    on first use: it constructs the backing and retires the collector it replaces.
+    A caller that only wants to ASK the backing a question ("is a boot in
+    flight?", :func:`resolve_ticket_wait_s`) must not do that — calling it from
+    ``_Collector.submit`` retired the collector that was holding the ticket, and
+    the ticket then declined with "the collector was stopped", on a healthy query.
+    """
+    with _lock:
+        if _injected is not None:
+            return _injected
+        return _backing
 
 
 def active_backing() -> EmbeddingBacking:
@@ -1374,8 +1619,9 @@ def reset_seam() -> None:
         _injected = None
         _last_decline = None
         _last_decline_at = None
-    if collector is not None:
-        collector.stop()
-    if backing is not None:
-        with _swallow_base_exception():
-            backing.close()
+    # ⛔ ONE teardown path, shared with a backing change: stop before close, and
+    # defer the close while an encode is still running on this backing
+    # (:func:`_retire`). Two hand-rolled copies is how the reset grew a close
+    # that could land under an in-flight forward pass while the swap path did not
+    # (review F5).
+    _retire(_Retired(backing, collector))
