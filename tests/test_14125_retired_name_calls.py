@@ -789,8 +789,15 @@ def _skip_call_read_names(fn: ast.AST) -> set[str]:
     call an `ast.Name`, so a `try` whose skip uses the bare form reads `set()` here
     and is not admitted. `_skip_guard_call_names` carries the SAME `.attr`-only
     limit, and it is the helper this one now mirrors. Declared rather than widened
-    here: admitting the bare form changes the admission population and owes its own
-    witness row and population measurement.
+    here, and MEASURED before it was claimed: admitting the bare form on both halves
+    of this helper AND on both skip detections of `_skip_guard_call_names` moves the
+    census by ZERO on `72c104bcbb` — 70 rows / 62 roots / 58 files unchanged, no new
+    rows, `UNARMED == ()`, import-seam reds `()`, `_UNGRADABLE == []`. So the
+    widening owes a WITNESS ROW (a separate spelling needs its own assertion —
+    nothing here grades `from pytest import skip`) and NO population re-pin. The
+    zero is the point: a widening that moves no row cannot be witnessed by the
+    census, so a later lane must not read the unchanged pin as evidence the bare
+    form is already covered.
     """
     out: set[str] = set()
     for node in _own_scope_nodes(fn):
