@@ -910,6 +910,113 @@ def test_the_effective_class_binding_reads_the_shadowing_door():
         "caller refuses it instead of reading the def it replaced", ast.dump(binding))
 
 
+#: Statements that OPEN A NEW SCOPE. A node inside one of these does not execute
+#: as the enclosing function's own body, so `ast.walk(door)` — which answers "does
+#: this text MENTION the call" — is not the question the door's delegation pin asks.
+_NESTED_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+
+
+def _own_scope_nodes(root: ast.AST) -> list[ast.AST]:
+    """Every node EXECUTED IN `root`'s own scope — nested scopes are not entered.
+
+    `ast.walk` descends into a `def`/`class`/`lambda` body, which is a different
+    question from "does this scope run it": a helper defined inside the door, or the
+    same call inside a lambda, never executes as the door's delegation. MEASURED at
+    `386e8e3524`: a door rewritten to
+
+        def _never_runs():
+            return self._sdk._create_subject(name, **props)
+        raise RuntimeError('door broken')
+
+    left the pin GREEN (`2 passed`), because the only delegation it found was inside a
+    function nobody calls. That is a FALSE PASS on a gate whose whole justification is
+    that the fact behind the exemption is measured rather than asserted.
+    """
+    out: list[ast.AST] = []
+    stack = list(ast.iter_child_nodes(root))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, _NESTED_SCOPE_NODES):
+            continue
+        out.append(node)
+        stack.extend(ast.iter_child_nodes(node))
+    return out
+
+
+def _contains_own_scope(root: ast.AST, wanted: list[ast.AST]) -> bool:
+    """Identity test: is one of `wanted` a node in `root`'s OWN scope?
+
+    `root` ITSELF counts — the delegated call is normally `root` (`return
+    self._sdk._create_subject(...)`), and `_own_scope_nodes` starts at its children.
+    """
+    wanted_ids = {id(node) for node in wanted}
+    if id(root) in wanted_ids:
+        return True
+    return any(id(node) in wanted_ids for node in _own_scope_nodes(root))
+
+
+def _seed_door_problems(source: str, cls_name: str, delegated: str) -> list[str]:
+    """Every reason `cls_name`'s `create_subject` door fails to satisfy the pin.
+
+    Pure over SOURCE TEXT — the pin below feeds it the two real files, and the
+    non-vacuity test feeds it mutants derived from a real door — so the predicate is
+    the same code in both directions and cannot drift from what ships.
+    """
+    tree = ast.parse(source)
+    cls = next((node for node in ast.walk(tree)
+                if isinstance(node, ast.ClassDef) and node.name == cls_name), None)
+    if cls is None:
+        return [f"no class `{cls_name}` — the exemption names a class that is gone"]
+    binding = _effective_class_binding(cls, "create_subject")
+    if binding is None:
+        return ["no `create_subject` binding — the seed's own call would raise "
+                "`AttributeError`, so the exemption has outlived its reason"]
+    if not isinstance(binding, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return [f"`create_subject` is bound by an {type(binding).__name__} at line "
+                f"{getattr(binding, 'lineno', '?')}, not a `def` — a door this pin "
+                "cannot read for delegation is a door the exemption cannot rest on"]
+
+    own = _own_scope_nodes(binding)
+    delegations = [
+        node for node in own
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == delegated
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr == "_sdk"]
+    if not delegations:
+        return [f"does not call `self._sdk.{delegated}()` in its OWN scope — a call "
+                "nested inside a function/lambda the door never runs is not the "
+                "surface's passthrough, so the exemption that rests on it is "
+                "unjustified"]
+
+    # ⛔ ... and the delegation has to be what the CALLER receives. MEASURED at
+    # `386e8e3524`: `self._sdk._create_subject(...)` followed by `return None` — the
+    # call is in the door's own scope but its result is thrown away — stayed GREEN.
+    carried: set[str] = set()
+    for node in own:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        if node.value is not None and _contains_own_scope(node.value, delegations):
+            carried |= {t.id for t in targets if isinstance(t, ast.Name)}
+
+    for node in own:
+        if not isinstance(node, ast.Return) or node.value is None:
+            continue
+        if _contains_own_scope(node.value, delegations):
+            return []
+        if any(isinstance(inner, ast.Name) and isinstance(inner.ctx, ast.Load)
+               and inner.id in carried for inner in _own_scope_nodes(node)):
+            return []
+    return [f"calls `self._sdk.{delegated}()` but never RETURNS it — the door's "
+            "caller does not receive the subject, so the door is not the "
+            "passthrough the exemption claims"]
+
+
 def test_the_two_seed_surfaces_publish_a_create_subject_door_that_delegates_privately():
     """The FACT behind `create_subject`'s presence in the ambiguous set, MEASURED.
 
@@ -931,36 +1038,78 @@ def test_the_two_seed_surfaces_publish_a_create_subject_door_that_delegates_priv
     shadows an earlier door while a first-def scan stays green (MEASURED at
     `9badc44b8b98`: the first-def pin PASSED on exactly that mutation, and this
     walker reds it; the walker's own semantics are pinned by the test above).
+
+    ⛔ The delegation is measured in the DOOR'S OWN SCOPE and must be RETURNED, not
+    merely mentioned somewhere in its text — both shapes were measured GREEN at
+    `386e8e3524` and are pinned red by the test below.
     """
     doors = {
         ("tortoise/hosted_api.py", "_OrgSeedSurface"): "_create_subject",
         ("tortoise/onboarding/selfhost.py", "_SdkSeedSurface"): "_create_subject",
     }
     for (rel, cls_name), delegated in doors.items():
-        tree = ast.parse((REPO / rel).read_text())
-        cls = next((n for n in ast.walk(tree)
-                    if isinstance(n, ast.ClassDef) and n.name == cls_name), None)
-        assert cls is not None, (
-            f"{rel} no longer defines `{cls_name}` — the `create_subject` exemption "
-            "names a class this file cannot find, so the row's reason is gone")
-        binding = _effective_class_binding(cls, "create_subject")
-        assert binding is not None, (
-            f"{rel}::{cls_name} has no `create_subject` binding — the seed's own call "
-            "would raise `AttributeError`, so the exemption has outlived its reason")
-        assert isinstance(binding, (ast.FunctionDef, ast.AsyncFunctionDef)), (
-            f"{rel}::{cls_name}.create_subject is bound by an "
-            f"{type(binding).__name__} at line {binding.lineno}, not a `def` — a door "
-            "this pin cannot read for delegation is a door the exemption cannot rest on")
-        calls = [n for n in ast.walk(binding)
-                 if isinstance(n, ast.Call)
-                 and isinstance(n.func, ast.Attribute)
-                 and n.func.attr == delegated
-                 and isinstance(n.func.value, ast.Attribute)
-                 and n.func.value.attr == "_sdk"]
-        assert calls, (
-            f"{rel}::{cls_name}.create_subject no longer delegates to "
-            f"`self._sdk.{delegated}()` — then it is a write door of its own, not the "
-            "surface's passthrough, and the exemption that rests on it is unjustified")
+        problems = _seed_door_problems((REPO / rel).read_text(), cls_name, delegated)
+        assert not problems, (
+            f"{rel}::{cls_name}.create_subject no longer satisfies the pin the "
+            f"`create_subject` exemption rests on: " + "; ".join(problems))
+
+
+def test_the_delegation_pin_refuses_a_DISCARDED_or_NESTED_delegation():
+    """Non-vacuity of the pin above, measured on mutants of a REAL door.
+
+    Both arms were GREEN at `386e8e3524` — the predicate matched the call anywhere in
+    the door's text — so both are false PASSes a mutant PR could exploit to keep the
+    exemption while breaking the door:
+
+    1. **nested** — the call lives in a helper the door never runs, or a lambda.
+    2. **discarded** — the door calls the private method and returns something else.
+
+    The mutants are cut out of the real source by the door's own AST line span (not a
+    text anchor), so they track the door if it is ever reformatted, and the control arm
+    proves the unmutated source is what the predicate accepts.
+    """
+    rel, cls_name, delegated = (
+        "tortoise/onboarding/selfhost.py", "_SdkSeedSurface", "_create_subject")
+    assert _seed_door_problems((REPO / rel).read_text(), cls_name, delegated) == [], (
+        "the control arm: the door as it stands must satisfy the pin, or the two "
+        "mutants below prove nothing")
+
+    source = (REPO / rel).read_text()
+    cls = next(node for node in ast.walk(ast.parse(source))
+               if isinstance(node, ast.ClassDef) and node.name == cls_name)
+    door = _effective_class_binding(cls, "create_subject")
+    assert isinstance(door, ast.FunctionDef), door
+    body_first, body_end = door.body[0].lineno - 1, door.end_lineno
+    indent = " " * door.body[0].col_offset
+    head, tail = source.splitlines(keepends=True)[:body_first], source.splitlines(keepends=True)[body_end:]
+
+    def mutant(body: str) -> str:
+        return "".join(head) + body + "".join(tail)
+
+    nested = mutant(
+        f"{indent}def _never_runs():\n"
+        f"{indent}    return self._sdk.{delegated}(name, **props)\n"
+        f"{indent}raise RuntimeError('door broken')\n")
+    problems = _seed_door_problems(nested, cls_name, delegated)
+    assert problems and "OWN scope" in problems[0], (
+        "a delegation that lives only inside a helper the door never runs is not the "
+        "door's delegation — MEASURED green at 386e8e3524, so this arm is the pin on "
+        "the fix", problems)
+
+    discarded = mutant(
+        f"{indent}self._sdk.{delegated}(name, **props)\n"
+        f"{indent}return None\n")
+    problems = _seed_door_problems(discarded, cls_name, delegated)
+    assert problems and "never RETURNS" in problems[0], (
+        "a door that calls the private method and throws the result away gives its "
+        "caller no subject — MEASURED green at 386e8e3524", problems)
+
+    carried = mutant(
+        f"{indent}created = self._sdk.{delegated}(name, **props)\n"
+        f"{indent}return created\n")
+    assert _seed_door_problems(carried, cls_name, delegated) == [], (
+        "the assign-then-return shape IS a passthrough and must not be over-blocked "
+        "by the tightened pin")
 
 
 def test_no_production_module_reaches_a_retired_sdk_name():
