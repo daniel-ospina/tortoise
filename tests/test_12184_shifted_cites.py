@@ -1886,7 +1886,7 @@ def test_a_carried_forward_figure_is_reported() -> None:
             # ⛔ RULE 2 FOR THE BAND, and it was needed the moment the mention leg landed: the two rows
             # that mutate the alternative numerator (`+extra_pairs+1`, and `_drifters - 1`) red TWICE, and
             # the only observation the table makes is `!= []`. MEASURED at the PRE-FIX head
-            # `9decb729185f` — before the assertion below existed — with the band arm deleted (`:1542`
+            # `9decb729185f` — before the assertion below existed — with the band arm deleted (its `if`
             # -> `if False:`) the control stayed GREEN, while the same edit at the pre-leg
             # `d37d356e2ffd` reds it: the mention leg had taken over the entire red those two rows
             # produced, so the band was proven by nothing, and reverting it to the one-sided lower bound
