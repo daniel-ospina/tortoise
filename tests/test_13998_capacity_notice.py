@@ -1311,6 +1311,48 @@ class TestSweepPass:
                 "frontier, not a stuck prefix")
         assert len(sent) == 4
 
+    def test_a_send_whose_mark_write_fails_still_counts_against_the_cap(self):
+        """An ACCEPTED notice counts against the burst guard even when the stamp
+        raises (#14038 review, P2).
+
+        The stamp is send-THEN-stamp, so the provider has already spent the
+        shared Resend budget by the time `claim_notice` runs. `sweep_pass`
+        decrements the cap on `status == "sent"`, so a marker write that raises
+        must not be reported as `error`: a pass whose ledger WRITES fail while
+        its READS still work would then send past `max_sends` — the overrun the
+        cap exists to prevent.
+
+        Asserted by the CAP, not by the label: with `max_sends=1` and two
+        accounts whose every write fails, ONE email may go out, not two.
+        """
+        rows = [_org_row(id=f"team-{i:02d}") for i in range(2)]
+        for row in rows:
+            row["email"] = f"{row['id']}@acme.example"
+        cp = FakeControlPlane({"organizations": rows})
+        cp.fail_query(table="organizations", method="PATCH", times=10)
+        sent: list[str] = []
+
+        async def send(copy):
+            sent.append(copy.text[:0])
+            return {"status": "sent", "message_id": f"m{len(sent)}"}
+
+        from unittest.mock import patch
+        with patch("tortoise.quota.resolve_org_limits",
+                   lambda org_id: {**_limits(102), "org_id": org_id}), \
+             patch("tortoise.allowance_gate.read_dimension",
+                   lambda dimension, org_id: _Reading(103.0)):
+            out = asyncio.run(cn.sweep_pass(
+                cp=cp, send=send, max_sends=1,
+                enumerate_orgs=lambda: [dict(r) for r in rows]))
+        assert out["sent"] == 1, (
+            f"an accepted send must count against the cap: {out}")
+        assert out["statuses"].get("sent") == 1, (
+            f"a DELIVERED notice must not be reported as an error: {out}")
+        assert out["statuses"].get("deferred") == 1
+        assert len(sent) == 1, (
+            f"max_sends=1 was exceeded because a failed mark write hid the "
+            f"send: {len(sent)} emails went out")
+
     def test_a_gauge_that_was_never_written_is_named_in_the_summary(self):
         """`no-reading` for the whole fleet is the shape of a stopped gauge
         (BACKUP_SWEEP_ENABLED off), and it must not read as "nobody is near

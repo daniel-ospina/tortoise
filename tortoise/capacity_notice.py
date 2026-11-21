@@ -1164,8 +1164,33 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
             notice.allowance_mb)
         return {"status": status or "failed", "org_id": org_id,
                 "threshold": notice.threshold}
-    stamped = await asyncio.to_thread(
-        claim_notice, cp, org_id, notice.threshold, fresh)
+    try:
+        stamped = await asyncio.to_thread(
+            claim_notice, cp, org_id, notice.threshold, fresh)
+    except Exception as e:
+        # ⛔ THE SEND HAPPENED, SO THIS PASS MUST COUNT IT (#14038 review, P2).
+        # The provider ACCEPTED this notice, so it has already spent its share
+        # of the shared Resend budget — and `sweep_pass` decrements the
+        # per-pass cap on `status == "sent"`. Letting the marker failure
+        # escape as `error` would do two wrong things at once: report a
+        # DELIVERED notice as a failure, and leave the burst guard believing
+        # nothing was spent — so a pass whose ledger WRITES fail while its
+        # READS still work would send past `max_sends`, which is the exact
+        # overrun the cap exists to prevent (budget-exhausted invites/OTPs are
+        # dropped with no retry). The mark stays unset, so the next pass
+        # re-reads it and re-sends this threshold once the provider
+        # Idempotency-Key's 24 h window has passed — a duplicate bounded by
+        # the provider, not by us.
+        logger.warning(
+            "capacity notice: sent to team %s at %s%% but the mark could not "
+            "be written (%s) — reporting it as SENT so it counts against "
+            "this pass's cap; the mark stays unset and a later pass may send "
+            "this threshold again after the provider key's 24 h window",
+            org_id, notice.threshold, type(e).__name__)
+        return {"status": "sent", "org_id": org_id,
+                "threshold": notice.threshold,
+                "message_id": (result or {}).get("message_id"),
+                "stamped": False}
     if not stamped:
         # Another pass moved the mark between our read and our stamp. The email
         # went out; the provider key collapses only a replay of the SAME
