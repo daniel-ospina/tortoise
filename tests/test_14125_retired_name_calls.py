@@ -115,22 +115,36 @@ def _tracked_python_files() -> list[Path]:
     return privatise.py_files()
 
 
+#: Text-level gate applied BEFORE `ast.parse`. SOUND for both arms that consume the
+#: parse: `receiver_is_sdk` can only answer True for a module that NAMES the SDK
+#: somewhere (`_SDKISH` -> `^sdk|_sdk`, `TortoiseSDK`, a binding from
+#: `TortoiseSDK(...)` / `_get_sdk()` / `_is_sdk_value`, or a stand-in class), and every
+#: one of those spellings contains "sdk"; the probe census is confined to modules that
+#: declare `FALKORDB_AVAILABLE`. Gating on the retired NAME alone is useless here —
+#: `query`/`update`/`status`/`delete` are ordinary words, so 2,189 of 2,417 files matched
+#: and parsing them all was ~50 s of this file's budget.
+_PARSE_HINTS = ("sdk", "falkordb_available")
+
+
 @functools.lru_cache(maxsize=1)
 def _parsed_sources() -> tuple[tuple[str, str, ast.Module | None], ...]:
     """`(repo-relative path, source, AST)` for the tree, parsed ONCE.
 
-    The gate has four arms that each need a walk, and parsing ~2,400 files four
-    times was ~40 s of its ~100 s budget. `None` means the file did not parse —
-    it is kept so the census still counts a file it could not read, rather than
-    silently shrinking the population it grades (`#14125` review: a censusing
-    arm that skips what it cannot parse is the fail-open shape it exists to
-    catch).
+    `tree is None` means the file was **prefiltered out** (`_PARSE_HINTS`) or did not
+    parse. Both are kept in the tuple so a censusing arm still counts a file it did not
+    read, instead of silently shrinking the population it grades — the fail-open shape
+    this file exists to catch.
     """
     out: list[tuple[str, str, ast.Module | None]] = []
     for path in _tracked_python_files():
         try:
             src = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
+            continue
+        rel = str(path.relative_to(ROOT))
+        lowered = src.lower()
+        if not any(hint in lowered for hint in _PARSE_HINTS):
+            out.append((rel, src, None))
             continue
         tree: ast.Module | None
         try:
@@ -139,7 +153,7 @@ def _parsed_sources() -> tuple[tuple[str, str, ast.Module | None], ...]:
                 tree = ast.parse(src)
         except SyntaxError:
             tree = None
-        out.append((str(path.relative_to(ROOT)), src, tree))
+        out.append((rel, src, tree))
     return tuple(out)
 
 
@@ -216,6 +230,16 @@ def _sweep() -> tuple[tuple[str, int, str], ...]:
     for rel, src, tree in _parsed_sources():
         if tree is None:  # pragma: no cover — a broken file reds its own suite
             continue
+        # ⚠️ A SOUND prefilter, not an optimisation guess: `receiver_is_sdk` can only
+        # answer True for a module that NAMES the SDK somewhere — `_SDKISH` (^sdk|_sdk),
+        # `TortoiseSDK`, a binding from `TortoiseSDK(...)` / `_get_sdk()` /
+        # `_is_sdk_value`, or a stand-in class. Every one of those spellings contains
+        # "sdk". Prefiling on the retired name alone is useless here precisely because
+        # `query`/`update`/`status`/`delete` are ordinary words: 2,189 of 2,417 files
+        # matched, and parsing them all was 50 s of this file's budget.
+        # VALIDATED against the unfiltered walk on this tree: identical rows (2).
+        if "sdk" not in src.lower():
+            continue
         if not any(name in src for name in RETIRED_NAMES):
             continue
         in_sdk_file = Path(rel).resolve() == privatise.SDK_SRC.resolve()
@@ -291,7 +315,23 @@ def test_the_sweep_is_not_vacuous():
 
 # ── class 2: a probe cannot read a programming error as "no storage" ──────
 
-_RAISED = frozenset({"AttributeError", "NameError", "TypeError"})
+#: The names a probe's re-raise arm must carry. `ImportError` is the IMPORT seam and
+#: is not optional here: the import sits INSIDE the availability `try` in 19 of these
+#: blocks, so a renamed or moved first-party module (`ModuleNotFoundError`, a
+#: subclass) is the SAME silent SKIP through a different vector as a renamed SDK
+#: method — measured on this tree, `git mv tortoise/projection.py tortoise/proj.py`
+#: left all 19 skipping green while this guard stayed green with them (#14125
+#: re-review). All four are programming errors. The broad arm stays, and narrowing is
+#: not the fix: a genuinely absent server raises `redis.exceptions.ConnectionError`
+#: (a `RedisError`, NOT an `OSError`), so `except OSError` would turn a real skip into
+#: an error.
+_RAISED = frozenset({"AttributeError", "NameError", "TypeError", "ImportError"})
+
+#: Module-level names whose binding makes a module a PROBE module. `_AVAILABLE` is
+#: here because two probes (`test_13302_ended_read`, `test_13557_13558_reachable_reads`)
+#: publish the flag under that name, so a census keyed only on `FALKORDB_AVAILABLE`
+#: skips two files it claims to grade.
+_AVAILABILITY = frozenset({"FALKORDB_AVAILABLE", "_AVAILABLE"})
 
 
 def _handler_names(handler: ast.ExceptHandler) -> set[str]:
@@ -304,6 +344,25 @@ def _handler_names(handler: ast.ExceptHandler) -> set[str]:
     } - {None}
 
 
+def _bound_names(targets: list[ast.expr]) -> set[str]:
+    """Every name an assignment target binds, destructuring `A, B = …`.
+
+    `FALKORDB_AVAILABLE, _WORKING_URI = _probe_falkordb([...])` binds the flag through
+    an `ast.Tuple` target. A check that reads only `ast.Name` targets cannot see that
+    binding — which is precisely how four files this branch repaired stayed invisible
+    to the census (`#14125` review F3b).
+    """
+    out: set[str] = set()
+    for target in targets:
+        if isinstance(target, ast.Name):
+            out.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            out |= _bound_names(target.elts)
+        elif isinstance(target, ast.Starred):
+            out |= _bound_names([target.value])
+    return out
+
+
 def _assigns_availability(node: ast.AST) -> bool:
     for sub in ast.walk(node):
         targets = (
@@ -313,40 +372,119 @@ def _assigns_availability(node: ast.AST) -> bool:
             if isinstance(sub, ast.AnnAssign)
             else []
         )
-        if any(
-            isinstance(t, ast.Name) and t.id == "FALKORDB_AVAILABLE" for t in targets
-        ):
+        if _bound_names(targets) & _AVAILABILITY:
             return True
     return False
 
 
+def _cleanup_tries(root: ast.AST) -> set[int]:
+    """`id()` of every `ast.Try` inside a `finally:` clause — cleanup, not a verdict."""
+    out: set[int] = set()
+    for sub in ast.walk(root):
+        if isinstance(sub, ast.Try):
+            for stmt in sub.finalbody:
+                out |= {
+                    id(inner) for inner in ast.walk(stmt) if isinstance(inner, ast.Try)
+                }
+    return out
+
+
+def _broad_tries(node: ast.AST) -> list[ast.Try]:
+    """Broad `except Exception` blocks under `node`, minus cleanup swallows.
+
+    `try: proj.close() / except Exception: pass` lives in a `finally:` and is
+    deliberately tolerant — a failed close cannot mean "storage unavailable", so
+    demanding a re-raise there would be a false block. The PROBE is the block whose
+    arm decides the module's result.
+    """
+    cleanup = _cleanup_tries(node)
+    return [
+        sub
+        for sub in ast.walk(node)
+        if isinstance(sub, ast.Try)
+        and id(sub) not in cleanup
+        and any("Exception" in _handler_names(h) for h in sub.handlers)
+    ]
+
+
+def _probe_tries(
+    expr: ast.AST,
+    helpers: dict[str, ast.AST],
+    seen: set[str],
+    depth: int = 0,
+) -> list[ast.Try]:
+    """Broad tries reachable from `expr`, following SAME-MODULE helper calls.
+
+    One hop is enough for every probe in this tree; `depth` and `seen` are
+    cycle/runaway guards, not a scope decision. Following the call is what makes the
+    repair of `tests/test_indexes.py`, `test_graphcopy_boolean_index_3154.py`,
+    `test_restore_seq_3902.py` and `test_search_engine_gaps.py` observable at all: in
+    those the `try` lives in the helper, not in the module-level statement.
+    """
+    out = _broad_tries(expr)
+    if depth >= 3:
+        return out
+    for sub in ast.walk(expr):
+        if not (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name)):
+            continue
+        name = sub.func.id
+        if name not in helpers or name in seen:
+            continue
+        seen.add(name)
+        out += _probe_tries(helpers[name], helpers, seen, depth + 1)
+    return out
+
+
+def _probe_blocks_in(
+    rel: str, src: str, tree: ast.Module | None
+) -> list[tuple[str, int, bool]]:
+    """The availability-probe `try` blocks of ONE module: `(path, line, armed?)`.
+
+    A probe resolves its flag at IMPORT (a fixture runs too late), so the population
+    is every module-level binding of an availability name, read in the TWO shapes the
+    flag actually arrives in:
+
+      * a module-level `try:` that binds it — the arms set `FALKORDB_AVAILABLE = False`;
+      * a module-level binding whose VALUE is a same-module helper call —
+        `_AVAILABLE, _WORKING_URI = _probe([...])` — with the `try` inside the helper.
+
+    Grading only the first shape is what left 11 `_falkordb_available()` /
+    `_probe(candidates)` modules ungraded while this gate reported the class closed
+    (`#14125` review F3a), and `armed` is checked against the whole of `_RAISED` so a
+    handler that carries three of the four names is not a re-raise arm.
+    """
+    if tree is None or not (rel.startswith("tests/") or rel.startswith("tools/")):
+        return []
+    if not any(name in src for name in ("FALKORDB_AVAILABLE", "_AVAILABLE")):
+        return []
+    helpers = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    blocks: list[ast.Try] = []
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Try) and _assigns_availability(stmt):
+            blocks += _broad_tries(stmt)
+            continue
+        if not isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+            continue
+        targets = stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
+        if stmt.value is not None and _bound_names(targets) & _AVAILABILITY:
+            blocks += _probe_tries(stmt.value, helpers, set())
+    rows: dict[tuple[str, int], bool] = {}
+    for block in blocks:
+        kinds = [_handler_names(h) for h in block.handlers]
+        rows[(rel, block.handlers[0].lineno)] = any(_RAISED <= k for k in kinds)
+    return [(path, line, armed) for (path, line), armed in sorted(rows.items())]
+
+
 @functools.lru_cache(maxsize=1)
 def _probe_blocks() -> tuple[tuple[str, int, bool], ...]:
-    """Every module-scope availability-probe `try` block: `(path, line, armed?)`.
-
-    The scope is deliberately module level: a probe resolves `FALKORDB_AVAILABLE`
-    at IMPORT (a fixture runs too late), so the block that sets it is the one that
-    decides whether a rename becomes a skip. `armed` means a
-    `(AttributeError, NameError, TypeError)` re-raise arm precedes the broad one.
-    """
-    out: list[tuple[str, int, bool]] = []
+    rows: list[tuple[str, int, bool]] = []
     for rel, src, tree in _parsed_sources():
-        if tree is None or not (rel.startswith("tests/") or rel.startswith("tools/")):
-            continue
-        if "FALKORDB_AVAILABLE" not in src:
-            continue
-        for top in tree.body:
-            if not isinstance(top, ast.Try) or not _assigns_availability(top):
-                continue
-            for block in ast.walk(top):
-                if not isinstance(block, ast.Try):
-                    continue
-                kinds = [_handler_names(h) for h in block.handlers]
-                if not any("Exception" in k for k in kinds):
-                    continue
-                armed = any(k & _RAISED for k in kinds)
-                out.append((rel, block.handlers[0].lineno, armed))
-    return tuple(out)
+        rows += _probe_blocks_in(rel, src, tree)
+    return tuple(rows)
 
 
 def test_every_availability_probe_re_raises_a_programming_error():
@@ -357,15 +495,18 @@ def test_every_availability_probe_re_raises_a_programming_error():
     False`, the family skipped locally, and CI — which refuses a skip — redded a
     shard with a message about live storage that named no door. Measured before
     this gate: ten modules in the same shape, plus 13 more in the assembly and
-    `_probe` families.
+    `_probe` families; eleven more — the `_falkordb_available()` and
+    `_probe(candidates)` helpers — arrived through the helper-assigned shape the
+    census could not see until it followed the call (`#14125` review F3a/F3b).
     """
     unarmed = [(rel, lineno) for rel, lineno, armed in _probe_blocks() if not armed]
     if unarmed:
         rendered = "\n".join(f"  {rel}:{lineno}" for rel, lineno in unarmed)
         pytest.fail(
-            "these module-level availability probes catch `Exception` without "
-            "re-raising `(AttributeError, NameError, TypeError)` first, so a "
-            "renamed or mistyped seam reads as 'storage unavailable' — a SKIP "
+            "these availability probes catch `Exception` without re-raising "
+            "`(AttributeError, NameError, TypeError, ImportError)` first, so a "
+            "renamed or mistyped seam — or a renamed/moved module, whose import is "
+            "inside the same `try` — reads as 'storage unavailable': a SKIP "
             "locally and a hard refusal in CI that names no door (#14114 class 2, "
             f"#14125):\n{rendered}\n\n"
             "Insert the re-raise arm immediately before the broad handler. Keep "
@@ -375,11 +516,138 @@ def test_every_availability_probe_re_raises_a_programming_error():
         )
 
 
+def test_the_census_follows_a_probe_helper():
+    """The census must grade a probe whose `try` sits in a helper, and skip cleanup.
+
+    Four files this branch armed bind the flag through a DESTRUCTURED target whose
+    value is a same-module `_probe_falkordb(...)`, so their `try` is inside the
+    helper. Measured at `b2ffb4fe9f`: deleting the arm in `tests/test_indexes.py`
+    reddened NOTHING (`#14125` review F3b) — the repair was unobservable. This pins
+    both halves of the widening on a synthetic module, so a later narrowing has to
+    red a row instead of quietly dropping the population again.
+    """
+
+    def blocks(body: str) -> list[tuple[str, int, bool]]:
+        src = textwrap.dedent(body)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(src)
+        return _probe_blocks_in("tests/test_synthetic.py", src, tree)
+
+    unarmed = blocks(
+        """
+        FALKORDB_AVAILABLE = False
+
+        def _probe(candidates):
+            for uri in candidates:
+                if not uri:
+                    continue
+                proj = None
+                try:
+                    proj = build(uri)
+                    proj.g.query("RETURN 1")
+                    return True, uri
+                except Exception:
+                    continue
+            return False, None
+
+        FALKORDB_AVAILABLE, _WORKING_URI = _probe([])
+        """
+    )
+    assert [armed for _, _, armed in unarmed] == [False], (
+        "the census stopped following a destructured module-level binding into the "
+        f"helper that holds the probe `try` — it now sees {unarmed}"
+    )
+
+    armed_rows = blocks(
+        """
+        FALKORDB_AVAILABLE = False
+
+        def _probe(candidates):
+            for uri in candidates:
+                if not uri:
+                    continue
+                proj = None
+                try:
+                    proj = build(uri)
+                    proj.g.query("RETURN 1")
+                    return True, uri
+                except (AttributeError, NameError, TypeError, ImportError):
+                    raise
+                except Exception:
+                    continue
+            return False, None
+
+        FALKORDB_AVAILABLE, _WORKING_URI = _probe([])
+        """
+    )
+    assert [armed for _, _, armed in armed_rows] == [True], (
+        f"a fully armed helper probe is not read as armed — the census says {armed_rows}"
+    )
+
+    partial = blocks(
+        """
+        FALKORDB_AVAILABLE = False
+
+        def _probe(candidates):
+            for uri in candidates:
+                proj = None
+                try:
+                    proj = build(uri)
+                    proj.g.query("RETURN 1")
+                    return True, uri
+                except (AttributeError, NameError, TypeError):
+                    raise
+                except Exception:
+                    continue
+            return False, None
+
+        FALKORDB_AVAILABLE, _WORKING_URI = _probe([])
+        """
+    )
+    assert [armed for _, _, armed in partial] == [False], (
+        "an arm that omits `ImportError` lets a renamed/moved module read as "
+        f"'storage unavailable' — the census called it armed: {partial}"
+    )
+
+    with_cleanup = blocks(
+        """
+        FALKORDB_AVAILABLE = False
+
+        def _probe(candidates):
+            for uri in candidates:
+                proj = None
+                try:
+                    proj = build(uri)
+                    proj.g.query("RETURN 1")
+                    return True, uri
+                except (AttributeError, NameError, TypeError, ImportError):
+                    raise
+                except Exception:
+                    continue
+                finally:
+                    if proj is not None:
+                        try:
+                            proj.close()
+                        except Exception:
+                            pass
+            return False, None
+
+        FALKORDB_AVAILABLE, _WORKING_URI = _probe([])
+        """
+    )
+    assert [armed for _, _, armed in with_cleanup] == [True], (
+        "a cleanup swallow inside a `finally:` is not a probe verdict and must not be "
+        f"graded as one — the census reported {with_cleanup}"
+    )
+
+
 def test_the_probe_census_is_not_vacuous():
     """The census must find the probe blocks it claims to grade."""
-    total = len(_probe_blocks())
-    assert total >= 20, (
-        f"the probe census found only {total} module-level availability `try` "
-        "blocks — it has stopped seeing the population it grades (this box "
-        "measured 26+ when the gate landed)"
+    rows = _probe_blocks()
+    total = len(rows)
+    assert total >= 40, (
+        f"the probe census found only {total} availability `try` blocks — it has "
+        "stopped seeing the population it grades (43 across 42 files when the "
+        "helper-assigned shape was added to the walk)"
     )

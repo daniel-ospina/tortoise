@@ -53,9 +53,11 @@ def _probe_falkordb(candidates: list[str | None]) -> tuple[bool, str | None]:
             #   "storage unavailable": that is exactly how #13899's retirement hid for
             #   a whole wave — the probe's own `except Exception` turned an AttributeError
             #   into a SKIP locally and a hard refusal in CI (#14114 class 2, #14125).
-            #   `AttributeError`/`NameError`/`TypeError` are PROGRAMMING errors and are
-            #   re-raised; only genuine transport/driver failures fall through.
-        except (AttributeError, NameError, TypeError):
+            #   `AttributeError`/`NameError`/`TypeError`/`ImportError` are PROGRAMMING
+            #   errors and are re-raised — including an import of a module that was
+            #   renamed or moved, because the import sits inside this same `try`. Only
+            #   genuine transport/driver failures fall through.
+        except (AttributeError, NameError, TypeError, ImportError):
             raise
         except Exception:
             if _uri == _env_uri and _uri:
