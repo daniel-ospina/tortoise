@@ -1483,9 +1483,13 @@ def test_the_residuals_reachability_is_pinned_to_what_fly_toml_documents():
     Cycles 2 and 3 shipped the opposite claim into the module docstring AND into
     the migration header, which is append-only once applied — so the artifact that
     can never be corrected carried the least-verified sentence in the PR. This row
-    is what stops the third copy, and it grades the PREMISE rather than prose
-    style: if this app ever gets a second machine, or a topology without the
-    single-attach volume, both comments must be re-derived and this row says so.
+    is what stops the third copy — and it grades the CLAIM, not a literal phrase.
+    Cycle 4 shipped a PARAPHRASE ("the old/new process overlap of a rolling
+    replacement") that the previous exact-string check could not see, so a
+    surviving copy passed it green. The rule is now semantic: any line mentioning
+    an OVERLAP must be NEGATING it ("does not", "cannot", "never"), because on
+    this topology every true statement about overlap is a negative one. An
+    affirmative claim fails this row whatever its wording.
     """
     fly = (ROOT / "fly.toml").read_text(encoding="utf-8")
     mounts = fly.split("[[mounts]]")[1:]
@@ -1495,18 +1499,25 @@ def test_the_residuals_reachability_is_pinned_to_what_fly_toml_documents():
         "`capacity_notice`'s residual paragraph and in the "
         "20261120000001_storage_notice_pct.sql header rests on exactly ONE "
         "single-attach volume — re-derive both before changing the topology")
-    claimed = [
-        path.relative_to(ROOT).as_posix()
-        for path in (
-            ROOT / "tortoise" / "capacity_notice.py",
-            MIGRATIONS / "20261120000001_storage_notice_pct.sql",
-        )
-        if "overlaps an old and a new process" in path.read_text(encoding="utf-8")
-    ]
+    claimed = []
+    for path in (
+        ROOT / "tortoise" / "capacity_notice.py",
+        MIGRATIONS / "20261120000001_storage_notice_pct.sql",
+    ):
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if not re.search(r"overlap", line, re.IGNORECASE):
+                continue
+            # Every TRUE statement about overlap on this topology is negative; an
+            # affirmative one is the refuted claim, whatever its wording.
+            if re.search(r"\b(cannot|can ?not|does not|do not|nor|never)\b",
+                         line, re.IGNORECASE):
+                continue
+            claimed.append(
+                f"{path.relative_to(ROOT).as_posix()}:{lineno}: {line.strip()}")
     assert not claimed, (
-        "these artifacts still claim a rolling replacement OVERLAPS an old and a "
-        f"new process, which fly.toml's single-attach volume makes impossible: {claimed}"
-    )
+        "these artifacts claim an OVERLAP without negating it, which fly.toml's "
+        "single-attach volume makes impossible (a replacement cannot mount the "
+        f"volume the old process still holds, so the old process exits first): {claimed}")
 
 
 def test_the_mark_migration_targets_the_post_rename_table():

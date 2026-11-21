@@ -838,8 +838,10 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
     # trip; it does not close it — closing it needs a pre-send reservation (a
     # stamp-first protocol with a compensating unset), which is a design decision
     # rather than a tidy-up, and it is NOT improvised here: it is a stated
-    # residual, and the module docstring carries its reachability — which includes
-    # the old/new process overlap of a rolling replacement, not only N>1 replicas.
+    # residual, and the module docstring carries its reachability — two live
+    # processes ADMITTED (`TORTOISE_MULTI_WORKER=1`) or the 2-machine topology,
+    # NOT an ordinary deploy: the app runs one machine on a single-attach volume,
+    # so a replacement exits before the new process starts (`fly.toml`).
     try:
         from .supabase_control import org_storage_notice_pct
 
@@ -915,8 +917,10 @@ async def sweep_pass(*, cp=None, send=None, enumerate_orgs=None,
     production writer, the backup sweep (``BACKUP_SWEEP_ENABLED``, off unless the
     deploy's secret conjunction is present). With it off, every account reads
     ``ABSENT`` → ``no-reading`` and NOTHING is ever sent, silently. The summary
-    therefore always carries a ``no-reading`` count and is logged at INFO when the
-    whole pass agrees on it.
+    therefore carries a ``no-reading`` count WHENEVER ANY account answers
+    ``no-reading`` (``statuses`` gains a key only for a status the pass actually
+    saw, so an all-``below-threshold`` pass has no such key), and an all-
+    ``no-reading`` pass is logged at INFO when the whole pass agrees on it.
     """
     if max_sends is None:
         max_sends = max_sends_per_pass()
