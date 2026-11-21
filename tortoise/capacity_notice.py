@@ -302,9 +302,15 @@ NOTICE_INTERVAL_DEFAULT_S = 6 * 60 * 60
 #: runs on. The sweep is armed with a BOOT RUNG
 #: (``_capacity_notice_sweep_loop``, whose docstring carries the measurement), and
 #: `deploy-hosted.yml` replaces the machine on every `tortoise/**` push to `main`
-#: (over the 30 days to 2026-11-20 the MEDIAN gap was **0.19 h**, with a longest
-#: run of 90 consecutive gaps under 6 h), so a day holds roughly one boot pass PER
-#: DEPLOY rather than one. The send budget is per-process in the same way
+#: (over the 30 days to 2026-11-20, `gh run list --workflow deploy-hosted.yml`,
+#: n=619 runs = **20.6/day**, the MEDIAN gap was **0.48 h**, with a longest run of
+#: **83** consecutive gaps under 6 h), so a day holds roughly one boot pass PER
+#: DEPLOY rather than one. ⛔ An earlier cut of this parenthesis said "0.19 h … 90"
+#: and NO population reproduces that pair — 0.19 h is nearer `main`'s ALL-COMMIT
+#: median (0.08 h at n=1,594), which is the wrong population because most commits
+#: touch nothing `deploy-hosted.yml` ships; the deploy-run and `tortoise/**`-commit
+#: populations agree with each other (20.6/day, 0.47-0.48 h, run 82-83).
+#: The send budget is per-process in the same way
 #: (``email_notify``: "The counter is per-process (N replicas × cap) … Counters
 #: reset on process restart"), so no daily quotient across passes is a number
 #: this tree can compute — and stating one was the defect: it claimed a daily

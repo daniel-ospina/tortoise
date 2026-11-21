@@ -4614,10 +4614,17 @@ async def _capacity_notice_sweep_loop(interval: float,
     ⛔ THE BOOT RUNG IS THE REAL TRIGGER, NOT A NICETY (#14038 review, P1). An
     earlier form slept FIRST, which reads as harmless until the deploy cadence is
     measured: `deploy-hosted.yml` replaces the machine on every `tortoise/**`
-    push to `main`, and over the 30 days to 2026-11-20 the MEDIAN gap between
-    those merges was **0.19 h** with a longest run of **90** consecutive gaps
-    under 6 h — so a sleep-first 6 h timer is reset long before it expires and
-    the notice is delivered days late or never, while the boot log said "armed".
+    push to `main`, and over the 30 days to 2026-11-20 there were **619 runs =
+    20.6/day** with a MEDIAN gap of **0.48 h** and a longest run of **83**
+    consecutive gaps under 6 h (`gh run list --workflow deploy-hosted.yml`;
+    `main`'s `tortoise/**` commits over the same window, n=615, agree at
+    20.6/day, 0.47 h, run 82) — so a sleep-first 6 h timer is reset long before
+    it expires and the notice is delivered days late or never, while the boot log
+    said "armed". ⛔ An earlier cut of this paragraph said "0.19 h … 90" and no
+    population reproduces it; 0.19 h is nearer `main`'s ALL-COMMIT median
+    (0.08 h, n=1,594), which is not the trigger, because most commits touch
+    nothing `deploy-hosted.yml` deploys.
+
     The repo's own convention for a sweep that must cover a window regardless of
     uptime is this one (`#2953`'s boot sweeps run at boot AND on the periodic
     interval).
