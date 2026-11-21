@@ -374,13 +374,20 @@ SWEEP_NAMES = 66
 #: re-cut that pinned 11825 — as its DIRECT PARENT (`git rev-parse ad79129cb5^`), so the whole change
 #: is that one commit's and needs no range scoping. Diffing the residue row sets, measured on each
 #: tree through this module (`rename_map(rev=SWEEP_BASE)` → `edits_for(...)` → `residue` over
-#: `py_files()`), the complete set of changed rows is THREE, and every one of them is in a file that
-#: commit ADDS:
+#: `py_files()`), the complete set of changed rows is THREE — TWO inside the test file that commit
+#: CREATES, and ONE appended to a test file it does NOT create:
 #:
-#:   * `tests/test_evictor_invalidates_fallback_snapshot_13123.py` — `graph.query` +6 (268 → 274)
-#:   * `tests/test_evictor_invalidates_fallback_snapshot_13123.py` — `client.delete` +1 (42 → 43)
-#:   * `tests/test_cache_eviction_evictor_pins.py` — `super().query` +1 (67 → 68), a stub overriding
-#:     the client's own method, so its receiver is `super()` and this sweep cannot type it
+#:   * `tests/test_evictor_invalidates_fallback_snapshot_13123.py` (NEW in `#14067`) — `graph.query`
+#:     +6; tree-wide row total for this spelling 268 → 274
+#:   * `tests/test_evictor_invalidates_fallback_snapshot_13123.py` (NEW in `#14067`) — `client.delete`
+#:     +1; tree-wide 42 → 43
+#:   * `tests/test_cache_eviction_evictor_pins.py` (APPENDED TO, not created — 1,336 lines at the
+#:     parent, `git diff --numstat` `204 0`) — `super().query` +1 at `:1506`; tree-wide 67 → 68. It is
+#:     a stub overriding the client's own method, so its receiver is `super()` and this sweep cannot
+#:     type it
+#: ⚠️ THE `→` PAIRS ARE TREE-WIDE ROW TOTALS FOR THAT SPELLING, never that file's own count. Read as
+#: per-file they are impossible — a file the commit CREATES cannot already carry 268 `graph.query`
+#: rows — and that misreading is part of how the first edition of this block went wrong.
 #:
 #: Six and one and one is eight, which is the net delta (11833 − 11825) — so no row was silently
 #: absorbed in the other direction.
@@ -393,10 +400,12 @@ SWEEP_NAMES = 66
 #: either way, which is exactly why an arithmetic cross-check cannot catch this — the attribution has
 #: to be measured with the same measure the pin uses. Corrected here by the row-set diff above, run on
 #: both trees, with each row's file and count named.
-#: ⛔ NO NEW SHAPE APPEARED — the one thing a re-cut must never absorb silently. Both spellings are
-#: already pinned shapes on this tree: `graph.query` is a pinned row (274 here), and `client.delete`
-#: occurs 46 times across the tracked tree
-#: (`git grep -hoE '\bclient\.(query|update|delete)\b' -- '*.py' | sort | uniq -c`). So the
+#: ⛔ NO NEW SHAPE APPEARED — the one thing a re-cut must never absorb silently. All three spellings
+#: are already pinned shapes on this tree: `graph.query` is a pinned row (274 here), and `client.delete`
+#: occurs 50 times across the tracked tree at this head
+#: (`git grep -hoE '\bclient\.(query|update|delete)\b' HEAD -- '*.py' | sort | uniq -c` → 50
+#: `client.delete`, 45-50 on the heads either side; the residue ROW this pin counts is 43, a different
+#: number again). So the
 #: condition this gate exists to catch — "a reference shape that was not there when this sweep was
 #: verified is now on the tree" — is NOT triggered; only counts on shapes already declared moved.
 #: All three rows are ordinary-word receivers (`query` and `delete` are retired SDK names) on a plain
