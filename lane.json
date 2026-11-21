@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kprfix-prd-daniel-ospina-tortoise-14039-1795250735-p1921715-0fa207c8",
+  "_sha": "e9aa8777a6dc8125b22b25c286c5c82b8459284c",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/prd-daniel-ospina-tortoise-14039.log"
+    },
+    {
+      "kind": "branch",
+      "value": "feat/gates-shrink-one-pr-b"
+    },
+    {
+      "kind": "sha",
+      "value": "146e2d1726c80be8030782f1466475410eb9ee73"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/fix-14039"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 8247,
+  "ended_at": 1795258982,
+  "exit_code": 0,
+  "heartbeat_at": 1795258982,
+  "host": "cmux",
+  "issue": null,
+  "kind": "prfix",
+  "lane_id": "cmux.kprfix-prd-daniel-ospina-tortoise-14039-1795250735-p1921715-0fa207c8",
+  "lease_until": 1795295582,
+  "pid": 1921715,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795250735,
+  "state": "DONE",
+  "tag": "prd-daniel-ospina-tortoise-14039",
+  "worktree": "/home/cmux/tortoise/.worktrees/fix-14039"
+}
