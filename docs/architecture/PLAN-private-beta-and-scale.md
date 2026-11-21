@@ -99,10 +99,10 @@ and exported; a 200 s loopback `/health` soak inside the machine shows **no stal
 acceptance bar).
 
 > **`#4625` status, checked 2026-11-21 and NOT assumed:** its two dominant signatures are already off-loop —
-> `_session_recording_allowed` now runs via `_session_recording_allowed_off_loop` (`hosted_api.py:20177`, whose comment
-> records that it used to run inline), and the capture write goes through `_CAPTURE_EXECUTOR` (`:21725`, `:21773`).
+> `_session_recording_allowed` now runs via `_session_recording_allowed_off_loop`, whose own comment
+> records that it used to run inline, and the capture write goes through `_CAPTURE_EXECUTOR`.
 > What remains is *declared* rather than silent: the receipt's **registry CAS still constructs an SDK handle inside a
-> pooled worker** (`:21707` carries the `#14086` review's P2 residual), and the `#3498` offload-inventory guard **cannot
+> pooled worker** (the `#14086` review's P2 residual, recorded where the CAS is constructed), and the `#3498` offload-inventory guard **cannot
 > see `mcp_server.py`** or sync-helper indirection. So it is **not** a duplicate of `#14185` and must not be closed as one;
 > it is the capture-path instance of the same class, re-scoped to those two residuals.
 
