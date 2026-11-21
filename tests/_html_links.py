@@ -1864,6 +1864,32 @@ class _AnchorHrefParser(HTMLParser):
         # rule (implied `</p>`) runs before the per-token select rules, and they do
         # not overlap: see `_close_p_scope` and `_close_select_scope`.
         self._close_p_scope(tag, attrs)
+        # ⛔ AAA IS NOT ONLY AN END-TAG RULE (#14073 review round 15, P0, measured).
+        # Two START tags run the adoption agency algorithm too — spec 13.2.6.4.7
+        # "in body": an `<a>` while an `a` is in the active formatting list ("Parse
+        # error. Let existingA be that `a` element. Run the adoption agency algorithm
+        # for the token"), and a `<nobr>` while a `nobr` is in scope ("run the
+        # adoption agency algorithm for the token, then once again reconstruct the
+        # active formatting elements"). Both relocate a block OUT of an unrendered
+        # ancestor exactly as an end tag does, and BOTH arrive before `_close_implied`
+        # pops the stack the pattern reads — so the check must run FIRST, here.
+        #
+        # Measured in this box's Chrome (text-node Range, same-origin iframe):
+        #   `<a><canvas><div>CLAIM<a>`       -> 52x17, chain a>div>body   (painted)
+        #   `<a><canvas><div>CLAIM</div><a>` -> 0x0, inside the canvas    (control)
+        #   `<nobr><canvas><div>CLAIM<nobr>` -> 52x17, chain nobr>div>body (painted)
+        #   `<b><canvas><div>CLAIM<b>`       -> 0x0  (a `b` start tag runs no AAA)
+        # `extract_visible_text` returned `''` for all four, `wedged_reason` None.
+        # Instrumenting this point for `<a><canvas><div>CLAIM<a>` showed
+        # `stack=['a','canvas','div'] pattern_would_fire=True`: the RULE already
+        # answered correctly here, and the gap was the missing call site.
+        # ONLY `a` and `nobr`: the other formatting start tags merely reconstruct the
+        # active formatting list and push — no AAA — so a check over all of
+        # `_FORMATTING` here OVER-fires. Measured: `<b><canvas><div>CLAIM<b>` is 0x0
+        # inside the canvas, i.e. the text really is unrendered and dropping it is
+        # correct; a `_FORMATTING`-wide check refused that page.
+        if tag in ("a", "nobr") and self._aaa_would_relocate_a_painted_block(tag):
+            self.wedged_reason = "adoption-agency-relocation"
         # The sibling/implicit closes the spec's "in body" rules also perform
         # (an `<li>`/`<dd>`/`<dt>`/`<option>` closes its own kind, and an
         # `<rt>`/`<rp>`/`<rb>`/`<rtc>` generates implied end tags) — see

@@ -4234,6 +4234,56 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
             f"is reported as painted: AAA has no furthestBlock to relocate, so a "
             f"browser keeps the text inside the unrendered element"
         )
+    # ⛔ AND AAA IS NOT AN END-TAG RULE (#14073 review round 15, P0, measured).
+    # Spec 13.2.6.4.7 "in body" runs the adoption agency algorithm on two START
+    # tags: an `<a>` while an `a` is in the active formatting list, and a `<nobr>`
+    # while a `nobr` is in scope. Both relocate a block out of an unrendered
+    # ancestor, and both arrive BEFORE `_close_implied` pops the stack the pattern
+    # reads — so a check that lives only in `handle_endtag` is defeated by never
+    # emitting the end tag at all. Measured in Chrome: `<a><canvas><div>CLAIM<a>`
+    # paints the claim at 52x17 px (`chain a>div>body`), `<nobr>...<nobr>` likewise,
+    # while the closed control `<a><canvas><div>CLAIM</div><a>` stays 0x0 inside the
+    # canvas. `extract_visible_text` returned '' for all of them.
+    for start_tag in ("a", "nobr"):
+        for unrendered in ("canvas", "video"):
+            escaped = section.replace(
+                "</h2>",
+                f"</h2><{start_tag}><{unrendered}><div>FalkorDB permanently "
+                f"deletes it<{start_tag}>",
+                1,
+            )
+            assert escaped != section
+            with pytest.raises(ValueError, match="adoption-agency-relocation"):
+                _visible_text(escaped)
+            # control: the block CLOSED before the second formatting start tag — no
+            # furthestBlock to lift, so the text stays unrendered and is dropped.
+            closed = section.replace(
+                "</h2>",
+                f"</h2><{start_tag}><{unrendered}><div>FalkorDB permanently "
+                f"deletes it</div><{start_tag}>",
+                1,
+            )
+            assert "falkor" not in _banned_vocabulary(closed)
+    # ⛔ …AND ONLY THOSE TWO START TAGS. Every other formatting start tag just
+    # reconstructs the active formatting list and pushes; it runs no AAA, so a
+    # `_FORMATTING`-wide check here OVER-fires. Measured: `<b><canvas><div>CLAIM<b>`
+    # is 0x0 inside the canvas — the text really is unrendered, and dropping it is
+    # the correct answer, not a reason to refuse the page.
+    for no_aaa in ("b", "i", "em", "strong", "u", "code", "font", "s"):
+        # A SELF-CONTAINED document, not `section` with this injected: leaving a
+        # `<canvas><div>` open would feed the whole remainder of the page into the
+        # unrendered subtree, which is a different (genuinely ambiguous) document.
+        # This isolates exactly the claim — does the START tag alone trigger AAA?
+        quiet = (
+            f"<p>x</p><{no_aaa}><canvas><div>FalkorDB permanently deletes it"
+            f"<{no_aaa}>"
+        )
+        assert "falkor" not in _banned_vocabulary(quiet), (
+            f"`<{no_aaa}>` runs no adoption agency algorithm on its START tag, so "
+            f"a block misnested inside a `<canvas>` stays unrendered and must be "
+            f"dropped quietly — refusing the page here is a false block"
+        )
+
         # control 2: well-formed unrendered content must not refuse the page.
         wellformed = section.replace(
             "</h2>",
