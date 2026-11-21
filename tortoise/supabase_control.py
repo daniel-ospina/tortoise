@@ -2562,13 +2562,18 @@ def org_storage_notice_pct(cp, org_id: str) -> int | None:
 
     ⛔ A row whose COLUMN is missing (one migration behind) does NOT read as
     ``None`` — it RAISES. ``cp.query`` raises ``RuntimeError`` on any status
-    ≥ 300, and PostgREST answers an unknown column with 400/PGRST204. That is
+    ≥ 300, and PostgREST answers an unknown column in ``select`` with HTTP 400:
+    Postgres' ``42703`` when the column reaches SQL, or ``PGRST204`` when it came
+    through a ``columns=`` parameter — THIS reader sends ``select=`` with no
+    ``columns=``, so ``42703`` is the shape it would see. That is
     deliberate, not an oversight: the mark is the LEDGER, and an unreadable
     ledger must FAIL CLOSED (the caller reports ``notice-mark-unavailable``)
     rather than read as “never notified”, which would re-send the one-shot
     notice every interval forever — ``capacity_notice`` states the same rule at
-    its ``_DEGRADE_COLUMNS`` block. This reader therefore carries NO ladder (it
-    is not an additive tier): the fail-soft half is the CALLER's
+    its ``_ACCOUNT_DRIFT_SOFT`` block, which lists the columns whose absence may
+    DEGRADE and DELIBERATELY excludes this one. This reader therefore carries NO
+    ladder (it is
+    not an additive tier): the fail-soft half is the CALLER's
     ``try``/``except`` around the pre-send re-read, not this function's.
     """
     rows = cp.query(
