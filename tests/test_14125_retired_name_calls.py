@@ -1981,6 +1981,11 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     exists to forbid — the review of 4478e90782d measured that each of these
     #     three could be blanked with the population unchanged.
     #
+    #     The FIRST-CONTACT arms below are `_touches_own_code`, so the IMPORT half of
+    #     the same two module-body filters needs its own row (4i-bis), and the shape
+    #     the removed capability OR used to admit needs a stated residual (4m) — both
+    #     added by the review of 90a0e9e8b20c (P2).
+    #
     # 4i — the module-body `*AVAILABLE` branch's OWN-CODE contact: a module-scope
     #      own import is the only seam, and the flag is an availability flag, so
     #      only this arm can admit it.
@@ -2085,6 +2090,66 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     assert module_body_third_party_skip_read == (), (
         "the same filter must apply to the SKIP-READ branch — a third-party-only "
         f"guard is not the own-code seam: {module_body_third_party_skip_read}"
+    )
+
+    # 4i-bis. The IMPORT half of the same two module-body filters. Rows 4i/4j are
+    #     admitted by `_touches_own_code` — they CALL a name imported at module scope —
+    #     so neither of them exercises `_imports_own_code`, and blanking it from either
+    #     condition was a silent drop with every row above green (review of
+    #     90a0e9e8b20c, P2). This guard imports own code INSIDE the `try` and binds no
+    #     name from it, so no other arm can admit it: measured `((3, (), True, True,
+    #     True),)`, which is exactly the import arm.
+    module_body_own_import_unused = roots(
+        """
+        FALKORDB_AVAILABLE = False
+        try:
+            from tortoise.projection import FalkorProjection  # noqa: F401
+            FALKORDB_AVAILABLE = True
+        except Exception:
+            FALKORDB_AVAILABLE = False
+        """
+    )
+    assert module_body_own_import_unused == ((3, (), True, True, True),), (
+        "a module-body guard that IMPORTS own code inside the `try` must be graded by "
+        "the import arm even when it never binds a name from it, or `_imports_own_code` "
+        f"can be deleted with every other row green: {module_body_own_import_unused}"
+    )
+
+    # 4m. DECLARED RESIDUAL (review of 90a0e9e8b20c, P2) — the module-body branches no
+    #     longer OR `_reaches_capability_seam`, and that removal costs one shape that IS
+    #     the own-code seam: a guard whose client is built at MODULE scope
+    #     (`PROJ = _make_proj()`) and then queried. `PROJ` is not an import, so
+    #     `_touches_own_code` cannot see it and no arm admits the block. Measured on
+    #     this tree: `_assigns_availability` True, `_imports_own_code` False,
+    #     `_touches_own_code` False, `_reaches_capability_seam` TRUE — so it WAS a root
+    #     before 90a0e9e8b20c, and `_probe_blocks_from_source` now returns `()`. The
+    #     tree carries NO such block today (the census's own population is what makes
+    #     this survivable), and that is the whole reason this is a pin rather than a
+    #     silent narrowing.
+    #
+    #     The precise repair — keep the arm and restrict its ATTRIBUTE form to a
+    #     receiver the repo's own typing accepts (`privatise.receiver_is_sdk`,
+    #     tools/sdk_privatise.py) — is not attempted here: gating the HELPER branches
+    #     that way breaks the pinned passed-in-client rule
+    #     (`tests/test_8870_version_anchor_write_order.py:138`), and a test-only file
+    #     is the wrong place to change the receiver typing's contract.
+    module_scope_client_is_ungraded = roots(
+        """
+        PROJ = _make_proj()
+
+        FALKORDB_AVAILABLE = False
+        try:
+            PROJ.g.query("RETURN 1")
+            FALKORDB_AVAILABLE = True
+        except Exception:
+            FALKORDB_AVAILABLE = False
+        """
+    )
+    assert module_scope_client_is_ungraded == (), (
+        "PIN OF A KNOWN GAP, not a rule: a module-body guard whose client is built at "
+        "module scope is no longer graded (review of 90a0e9e8b20c, P2). If this reds "
+        "because the coverage was RESTORED, delete this pin and update the census — do "
+        f"not narrow the arm: {module_scope_client_is_ungraded}"
     )
 
     # 4k-/4l-. `_reaches_capability_seam` matches the GENERIC attribute `query`, so it
