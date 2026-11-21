@@ -28,6 +28,14 @@ the parent-died heartbeat), so an OOM-kill or a SIGKILL of the lane cannot leave
 an orphaned worker holding 432 MB. It also removes its socket on exit, so a
 stale path cannot make a later start-up look healthy when it is not.
 
+READINESS — the socket's EXISTENCE means READY, and nothing weaker. The encoder
+is imported and loaded (``_preload_encoder``) BEFORE the socket is bound, so a
+client that polls for the path never talks to a process that would have to pay
+the 156.5 s cold import inside its first request (#13674). That is the convergent
+arrangement (vLLM's preload binds its UNIX socket only once the weights are
+ready), and it is what lets the client's start-up wait be a BOOT budget rather
+than a request budget.
+
 THE PIN IS ASSERTED IN THIS PROCESS, ON THE ENCODING THREAD. ``EmbeddingModel``'s
 ``ensure_embed_threads()`` runs before every forward pass, exactly as it does
 in-process (#10296): ``torch.set_num_threads`` follows the CALLING thread's own
@@ -163,6 +171,53 @@ def _serve_connection(conn: socket.socket) -> None:
         conn.sendall((json.dumps(answer) + "\n").encode("utf-8"))
 
 
+def _preload_encoder() -> bool:
+    """Pay the cold import AND the model load BEFORE the socket exists.
+
+    ⛔ WHY THIS IS A READINESS CONTRACT, NOT AN OPTIMISATION. The client treats
+    the socket's EXISTENCE as "ready" (:meth:`tortoise.embed_seam.WorkerBacking._ensure_started`),
+    which is the convergent practice — vLLM's preload daemon binds its UNIX socket
+    only after the weights are ready, and a socket/port that answers before the
+    model is initialised is documented there as the failure mode, not the design.
+    Before this, ``serve`` bound first and the encoder was imported lazily inside
+    ``_encode``, so the FIRST request after every boot paid the 156.5 s cold
+    import (#13674) inside a 30 s request budget: it raised ``TimeoutError``, was
+    recorded as ``last_decline``, and the runbook told the operator to REPAIR a
+    worker whose only problem was that it had just been born.
+
+    Returns ``True`` when an encoder is resident. ``False`` is NOT a failure to
+    start: this process's contract is to DECLINE with a name (``_encode``
+    re-derives ``EmbeddingModel.absent_reason()``), never to refuse to serve — a
+    worker that exited here would make an absent encoder look like a broken
+    deployment, and the client would have to guess which one it was.
+
+    Total: any failure is logged and answered ``False``, so nothing about the
+    encoder can prevent the socket from appearing.
+    """
+    started = time.monotonic()
+    try:
+        from tortoise.embeddings import EmbeddingModel
+
+        model = EmbeddingModel.get()
+        took = time.monotonic() - started
+        if model is None:
+            _logger.warning(
+                "embed worker: no encoder at start-up (%s) after %.1fs — "
+                "requests will DECLINE with this reason rather than encode",
+                EmbeddingModel.absent_reason(), took)
+            return False
+        _logger.info(
+            "embed worker: encoder preloaded in %.1fs — the socket now means "
+            "READY (#14186)", took)
+        return True
+    except Exception as exc:  # a preload must never block bind
+        _logger.warning(
+            "embed worker: encoder preload failed after %.1fs (%s: %s) — "
+            "requests will DECLINE rather than start late",
+            time.monotonic() - started, type(exc).__name__, exc)
+        return False
+
+
 def serve(socket_path: str, *, parent_pid: int) -> None:
     """Run the worker until the parent dies. Blocks."""
     stop = threading.Event()
@@ -172,6 +227,14 @@ def serve(socket_path: str, *, parent_pid: int) -> None:
     threading.Thread(
         target=_watch_parent, args=(parent_pid,), name="embed-worker-parent",
         daemon=True).start()
+
+    # ⛔ BEFORE the bind, so the socket's existence means READY — see
+    # `_preload_encoder`. The two watcher threads above start FIRST on purpose:
+    # the preload is the longest quiet window in this process's life (156.5 s cold
+    # import + the model load), and the parent-death belt has to be armed for it,
+    # or a killed parent would leave a worker holding 432 MB through the whole
+    # warm-up.
+    _preload_encoder()
 
     if os.path.exists(socket_path):
         # A stale path from a killed predecessor: bind would refuse, and a

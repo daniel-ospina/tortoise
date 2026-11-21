@@ -149,6 +149,11 @@ ENV_WORKER_SOCKET = "TORTOISE_EMBED_WORKER_SOCKET"
 #: that divergence would present as "the vectors changed after we moved the
 #: embedder" with no reason in it.
 ENV_WORKER_PYTHON = "TORTOISE_EMBED_WORKER_PYTHON"
+#: How long the CLIENT waits for a worker to become READY at start-up. It is a
+#: separate budget from `ENV_TIMEOUT_S` on purpose — see
+#: :data:`DEFAULT_WORKER_STARTUP_S` — because the two measure different things
+#: and one number cannot honestly serve both.
+ENV_WORKER_STARTUP_S = "TORTOISE_EMBED_WORKER_STARTUP_S"
 ENV_EXTERNAL_URL = "TORTOISE_EMBED_EXTERNAL_URL"
 ENV_EXTERNAL_TOKEN = "TORTOISE_EMBED_EXTERNAL_TOKEN"
 ENV_EXTERNAL_MODEL = "TORTOISE_EMBED_EXTERNAL_MODEL"
@@ -183,7 +188,24 @@ DEFAULT_MAX_BATCH = 32
 #: provider; the in-process backing keeps today's unbounded behaviour because a
 #: forward pass it cannot interrupt anyway would only turn into "we abandoned a
 #: vector that was about to arrive" (#5004's class).
+#: ⛔ This is a REQUEST budget. It does NOT bound start-up: a worker pays the
+#: cold import and the model load before it is ready (#13674), which no 30 s
+#: request budget can cover, so start-up has its own lever
+#: (:data:`ENV_WORKER_STARTUP_S`). Conflating the two is what made the FIRST
+#: query after every worker boot decline — see
+#: :meth:`WorkerBacking._ensure_started`.
 DEFAULT_TIMEOUT_S = 30.0
+
+#: How long the client waits for a worker to become READY. The worker publishes
+#: readiness by CREATING its socket only after its encoder is loaded
+#: (``embed_worker._preload_encoder``), so the client's wait is the boot cost.
+#: That cost is the cold import the worker exists to move out of the serving
+#: process — 156.5 s, measured in #13674 — plus ``EmbeddingModel``'s own load
+#: bound (``embeddings._LOAD_TIMEOUT_S``, 300 s), because a socket that exists
+#: means the encoder finished loading, not merely that the module imported. 600 s
+#: covers both terms with headroom; a budget below their sum would convert a slow
+#: but HEALTHY boot into the exact decline this lever exists to remove.
+DEFAULT_WORKER_STARTUP_S = 600.0
 
 #: How many observations each latency reservoir keeps. Enough for a useful p95
 #: (a p95 over fewer than ~100 samples is an interpolation, not a measurement)
@@ -268,6 +290,19 @@ def resolve_max_batch() -> int:
 def resolve_timeout_s() -> float:
     """The bound on one fired request's round trip (worker / external)."""
     return _env_float(ENV_TIMEOUT_S, DEFAULT_TIMEOUT_S, minimum=0.1)
+
+
+def resolve_worker_startup_s() -> float:
+    """The bound on a worker BECOMING READY — not on a request answering it.
+
+    Kept distinct from :func:`resolve_timeout_s` because the quantities differ by
+    an order of magnitude: a warm request is milliseconds, a boot is the cold
+    import plus the model load (#13674). A single lever cannot bound both without
+    either parking a read for the boot cost or declining a healthy worker on a
+    request-sized budget.
+    """
+    return _env_float(
+        ENV_WORKER_STARTUP_S, DEFAULT_WORKER_STARTUP_S, minimum=1.0)
 
 
 # ── vector normalisation ─────────────────────────────────────────────────────
@@ -455,6 +490,19 @@ class WorkerBacking:
             f"tortoise-embed-worker-{os.getpid()}.sock")
 
     def _ensure_started(self, timeout_s: float) -> str:
+        """Spawn the worker if needed and wait until it is READY.
+
+        READY means the socket EXISTS, and ``embed_worker.serve`` creates it only
+        after ``_preload_encoder`` has paid the cold import and the model load.
+        That ordering is the contract this wait depends on: an existence check
+        that preceded readiness is how the first query after every boot used to
+        block for the REQUEST budget and then decline on a healthy worker
+        (``docs/infra-runbook.md`` §4.1.1e told an operator to "repair" it).
+
+        ``timeout_s`` is therefore the START-UP budget
+        (:func:`resolve_worker_startup_s`), never the per-request one — the two
+        are passed by different callers and mean different things.
+        """
         with self._lock:
             if self._proc is not None and self._proc.poll() is None:
                 assert self._address is not None
@@ -476,9 +524,17 @@ class WorkerBacking:
             deadline = time.monotonic() + max(timeout_s, 1.0)
             while time.monotonic() < deadline:
                 if proc.poll() is not None:
+                    # ⛔ The child's stderr goes to DEVNULL (it must never write
+                    # into the serving process's own stream), so "see its
+                    # stderr" would be an unactionable instruction for the
+                    # failure mode that matters most: a worker that will not
+                    # start. Name the command instead, so an operator can run
+                    # the exact thing that failed.
                     raise RuntimeError(
                         f"embed worker exited during start-up (code "
-                        f"{proc.returncode}) — see its stderr")
+                        f"{proc.returncode}) — reproduce with: "
+                        f"{python} -m tortoise.embed_worker --socket "
+                        f"{address}")
                 if os.path.exists(address):
                     self._proc, self._address = proc, address
                     _logger.info(
@@ -494,7 +550,11 @@ class WorkerBacking:
     def encode(self, texts: Sequence[str], *,
                timeout_s: float | None = None) -> list[list[float]]:
         budget = resolve_timeout_s() if timeout_s is None else timeout_s
-        address = self._ensure_started(budget)
+        # ⛔ The START-UP budget, not the request budget: this call is what pays
+        # the worker's boot (cold import + model load, #13674), and bounding it by
+        # the 30 s request timeout declined the first query after every boot while
+        # the worker was still legitimately loading.
+        address = self._ensure_started(resolve_worker_startup_s())
         answer = _LineJSONClient(address).request(
             {"texts": list(texts)}, timeout_s=budget)
         error = answer.get("error")
@@ -779,8 +839,13 @@ class _Collector:
         self.coalesced = 0
         self.declines = 0
         self.wait_ms = _Latency()
+        self.collect_ms = _Latency()
         self.encode_ms = _Latency()
         self.batch_size = _Latency()
+        #: When the batch currently being collected was DEQUEUED — the instant
+        #: its window opened. Set by :meth:`_collect`, read by :meth:`_fire`.
+        #: Collector-thread-only, so it needs no lock.
+        self._window_opened_at: float | None = None
 
     # ── submission (any thread) ─────────────────────────────────────────
 
@@ -853,6 +918,14 @@ class _Collector:
             if self._stop and not self._queue:
                 return None
             batch = [self._queue.popleft()]
+            # ⛔ THE WINDOW OPENS HERE, not at the first ticket's submission: a
+            # ticket that arrived while the previous batch was being encoded sat
+            # in the QUEUE, and that wait is not the window's doing. Anchoring
+            # here is what makes ``collect_ms`` a quantity ``max_wait_ms``
+            # actually bounds — anchoring at submission made the two incomparable
+            # and had an operator reading a broken bound on a healthy process
+            # (review F5).
+            self._window_opened_at = time.monotonic()
         window_s = resolve_max_wait_ms() / 1000.0
         limit = resolve_max_batch()
         if window_s > 0.0:
@@ -886,6 +959,17 @@ class _Collector:
     def _fire(self, batch: list[_Ticket]) -> None:
         """Encode ``batch`` in ONE call and hand each ticket its row."""
         fired_at = time.monotonic()
+        # ⛔ TWO DIFFERENT QUANTITIES, published separately because conflating
+        # them is a claim that cannot be true on the DEFAULT backing:
+        #  * ``collect_ms`` — how long the window stayed OPEN (dequeue -> fire).
+        #    THIS is what ``max_wait_ms`` bounds, so this is the bound's proof.
+        #  * ``wait_ms`` — submission -> fire, i.e. END-TO-END latency. It also
+        #    carries however long the ticket queued behind an in-flight encode,
+        #    so on ``inprocess`` (a 0 ms window) every non-zero observation
+        #    "exceeds" the published bound while the bound is fine.
+        if self._window_opened_at is not None:
+            self.collect_ms.note((fired_at - self._window_opened_at) * 1000.0)
+            self._window_opened_at = None
         for ticket in batch:
             ticket.future = (fired_at - ticket.submitted_at) * 1000.0
             self.wait_ms.note(ticket.future)
@@ -939,6 +1023,10 @@ class _Collector:
             "median_batch": (
                 self.batch_size.snapshot().get("p50") if self.batches else None),
             "wait_ms": self.wait_ms.snapshot(),
+            #: The window-attributable wait (dequeue -> fire). ``max_wait_ms``
+            #: bounds THIS; ``wait_ms`` above is end-to-end and is not bounded by
+            #: it (see :meth:`_fire`).
+            "collect_ms": self.collect_ms.snapshot(),
             "encode_ms": self.encode_ms.snapshot(),
             "batch_size": self.batch_size.snapshot(),
         }
@@ -1121,6 +1209,7 @@ def seam_status() -> dict:
          "backing_state": {...},        # the backing's own describe()
          "latency": {"submissions":…, "batches":…, "coalesced":…,
                      "declines":…, "median_batch":…,
+                     "collect_ms": {"n","window","p50","p95","max"},
                      "wait_ms": {"n","window","p50","p95","max"},
                      "encode_ms": {...}, "batch_size": {...}},
          "backings": {                  # EVERY backing, selected or not
@@ -1132,6 +1221,13 @@ def seam_status() -> dict:
     is "p50/p95 exported **per backing**", and a table that only appears once you
     have already switched cannot answer "would the other one be better".
     A backing that has never run reports ``null`` percentiles, never 0.
+
+    ⛔ TWO WAITS, and which one is the bound's proof: ``latency.collect_ms`` is
+    dequeue->fire, the window-attributable wait that ``max_wait_ms`` bounds;
+    ``latency.wait_ms`` is submission->fire, i.e. END-TO-END latency, which also
+    includes queueing behind an in-flight encode and is therefore NOT bounded by
+    the window (review F5 — on the 0 ms default a healthy process publishes
+    non-zero ``wait_ms``, which is not a broken bound).
 
     Never raises: it is read from a health handler, and a diagnostics surface
     that can 5xx is worse than a missing key.
@@ -1169,6 +1265,7 @@ def seam_status() -> dict:
                 _collector.snapshot() if _collector is not None else {
                     "submissions": 0, "batches": 0, "coalesced": 0,
                     "declines": 0, "median_batch": None,
+                    "collect_ms": _Latency().snapshot(),
                     "wait_ms": _Latency().snapshot(),
                     "encode_ms": _Latency().snapshot(),
                     "batch_size": _Latency().snapshot(),

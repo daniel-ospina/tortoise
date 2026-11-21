@@ -1291,6 +1291,7 @@ The body carries
                                  "encoder": "EmbeddingModel (in-process)"},
                "latency": {"submissions": 0, "batches": 0, "coalesced": 0, "declines": 0,
                            "median_batch": null,
+                           "collect_ms":{"n": 0, "window": 0, "p50": null, "p95": null, "max": null},
                            "wait_ms":   {"n": 0, "window": 0, "p50": null, "p95": null, "max": null},
                            "encode_ms": {"n": 0, "window": 0, "p50": null, "p95": null, "max": null},
                            "batch_size":{"n": 0, "window": 0, "p50": null, "p95": null, "max": null}},
@@ -1355,14 +1356,21 @@ socket is removed and its process is waited on), so rollback does not leave a 43
 ```bash
 curl -sS https://api.premiselabs.co/health \
   | jq '.embed_seam | {backing, max_wait_ms, last_decline,
+                       collect_p95: .latency.collect_ms.p95,
                        wait_p95: .latency.wait_ms.p95, encode_p95: .latency.encode_ms.p95,
                        batches: .latency.batches, coalesced: .latency.coalesced}'
 ```
 
-- **`wait_ms.p95` against `max_wait_ms` is the bound's own proof.** A p95 at or under the window says
-  the hard maximum wait is being honoured; a *max* well above it means the collector is being
+- **`collect_ms.p95` against `max_wait_ms` is the bound's own proof.** A p95 at or under the window
+  says the hard maximum wait is being honoured; a *max* well above it means the collector is being
   starved, which is the one way the bound can slip without the number changing.
-- **`coalesced` / `batches` says whether batching is doing anything**: `coalesced` counts tickets that
+- **`wait_ms` is NOT that number — it is end-to-end latency.** `wait_ms` runs from the ticket's
+  SUBMISSION to its batch firing, so it also carries however long the ticket queued behind an
+  in-flight encode. On the `inprocess` default the published bound is `0.0`, so every non-zero
+  `wait_ms` would "exceed" it while the bound is perfectly healthy: read `wait_ms` as the latency a
+  caller felt, and `collect_ms` as the part the window is responsible for. (Measured on the 0 ms
+  default: `coalesced` rises while `collect_ms` stays ~0 — the coalescing is queue-behind-encode,
+  which adds no admission wait — review F5.)
   rode a batch they did not open. A large `submissions` with `coalesced: 0` is a process with no
   concurrency — expected on a single interactive user, and *not* evidence the seam is broken.
 - **`last_decline` + `last_decline_age_s` is why a backing failed**, without a log search. It is the
@@ -1376,6 +1384,29 @@ curl -sS https://api.premiselabs.co/health \
 
 ⛔ **`injected: true` means a TEST installed a backing.** It never appears in production; if it does,
 the process is not running the configured encoder and nothing above can be trusted.
+
+#### The cold window — the first query after a worker boot waits, it does not decline
+
+A `worker` backing publishes readiness by CREATING its socket only once its encoder is loaded
+(`embed_worker._preload_encoder`), which is why `last_decline` no longer fires on the first request
+after a boot. The cost is moved, not removed: a worker's first boot pays the cold import **plus** the
+model load before any request is served, and the client waits for it under its own budget —
+`TORTOISE_EMBED_WORKER_STARTUP_S` (default **600 s**: the 156.5 s cold import measured in `#13674`
+plus `EmbeddingModel`'s own 300 s load bound). That is deliberately NOT
+`TORTOISE_EMBED_QUERY_TIMEOUT_S`: the request budget (30 s) bounds a warm round trip and can never
+cover a boot, and using it for both was exactly what made the first query decline on a healthy worker.
+
+So:
+
+- **A slow first query on a freshly-started worker is expected, and is not a decline.** Confirm it is
+  the boot by the absence of `last_decline` and by `backing_state` naming a live worker pid; if boot
+  cost grows past the start-up budget the read DECLINES (bounded, never parked) and the remedy is to
+  raise the lever, not to repair the worker.
+- **A `last_decline` on a worker that has been up for minutes is a real fault** — the preload
+  finished or it never started, so a decline now is the encoder refusing, not loading. That is when
+  the "roll back or repair" instruction below applies.
+- **`backing: "worker"` beside a decline STILL means keyword-only reads** — the no-silent-fallback
+  rule is unchanged; the difference is only WHEN a healthy boot can produce one (never, now).
 
 #### One encode at a time — a stated ceiling, not a hidden one
 

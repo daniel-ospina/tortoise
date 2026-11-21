@@ -8532,12 +8532,16 @@ def _embed_seam_health() -> dict:
       pid and liveness, or the external endpoint's URL) so "worker" is not
       merely a claim about a string.
     * **Did batching help, and at what tail cost?** ``latency`` carries the
-      submission/batch/coalesced counts and the **p50/p95** of both the
-      collection WAIT and the ENCODE. ⛔ The wait percentiles are the bound's
-      own proof: they cannot exceed ``max_wait_ms`` without the bound being
-      broken (bar one scheduling quantum), so ``wait_ms.p95`` next to
-      ``max_wait_ms`` is the reading that answers "is the hard max-wait
-      actually hard".
+      submission/batch/coalesced counts and the **p50/p95** of the collection
+      WAIT and the ENCODE. ⛔ TWO different waits are published and only ONE of
+      them is the bound's proof: ``latency.collect_ms`` is dequeue→fire, the
+      window-attributable wait that ``max_wait_ms`` bounds (bar one scheduling
+      quantum), so ``collect_ms.p95`` next to ``max_wait_ms`` is the reading that
+      answers "is the hard max-wait actually hard". ``latency.wait_ms`` is
+      submission→fire — END-TO-END latency — and it also carries however long a
+      ticket queued behind an in-flight encode, so it is NOT bounded by the
+      window: on the 0 ms ``inprocess`` default every non-zero ``wait_ms``
+      "exceeds" the published bound on a perfectly healthy process (review F5).
     * ``backings`` lists **all three** with their windows, selected or not. The
       issue's indicator is p50/p95 **per backing**, and a table that only shows
       the one already chosen cannot answer "would the other be better" — the

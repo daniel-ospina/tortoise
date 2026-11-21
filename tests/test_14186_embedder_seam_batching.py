@@ -85,7 +85,14 @@ class _RecordingBacking:
 class _ExplodingBacking:
     name = "exploding"
 
+    def __init__(self) -> None:
+        #: How many times the seam actually ASKED this backing. The read-path row
+        #: uses it to prove the seam was consulted at all: a tree that routes
+        #: around the seam (``_seam_remote = False``) never increments it.
+        self.calls = 0
+
     def encode(self, texts, *, timeout_s=None):
+        self.calls += 1
         raise RuntimeError("encoder went away")
 
     def close(self) -> None:
@@ -182,15 +189,18 @@ class TestTheCollectionWindowIsHard:
                 f"ticket q{index} received another ticket's row: {vector}")
 
     def test_the_wait_never_exceeds_the_window(self, backing, monkeypatch):
-        """The measured collection wait is bounded by ``max_wait_ms``.
+        """The measured COLLECTION wait is bounded by ``max_wait_ms``.
 
-        The hard-max-wait property, measured on the number the seam itself
-        publishes: ``latency.wait_ms.max`` is the longest a ticket actually
-        waited for its batch to be COLLECTED. It is checked against the
-        configured window with a scheduling allowance, because a 0 ms window
-        cannot be beaten by a real thread on a loaded box — what must not happen
-        is an order-of-magnitude overshoot, which is exactly what an unbounded
-        collector produces.
+        The hard-max-wait property, measured on the number the window is actually
+        answerable for: ``latency.collect_ms`` is dequeued→fired, so it cannot
+        include time a ticket spent queued behind the PREVIOUS encode.
+
+        ⛔ THIS ROW USED TO ASSERT ON ``wait_ms``, and had to allow 120 ms against
+        a 40 ms window to do it (3x the bound it claimed to enforce) — because
+        ``wait_ms`` is submission→fire and it legitimately carries that queueing
+        (review F5). Retargeted here: the mutant that widens the window or drops
+        the deadline check moves ``collect_ms.max`` to ~140 ms against a 40 ms
+        bound, which the half-window allowance below catches.
         """
         window_ms = 40.0
         monkeypatch.setenv(embed_seam.ENV_MAX_WAIT_MS, str(window_ms))
@@ -202,48 +212,173 @@ class TestTheCollectionWindowIsHard:
         _join(threads)
 
         assert not errors
-        wait = embed_seam.seam_status()["latency"]["wait_ms"]
-        assert wait["n"] == 12
-        assert wait["p95"] is not None and wait["max"] is not None
+        latency = embed_seam.seam_status()["latency"]
+        collect = latency["collect_ms"]
+        assert collect["n"] >= 1
+        assert collect["p95"] is not None and collect["max"] is not None
         # A ticket that joins just as the window closes sees the FULL window; the
         # slack is for the collector being descheduled between reading the clock
-        # and firing, not for the window itself.
-        slack_ms = 120.0
-        assert wait["max"] <= window_ms + slack_ms, (
-            f"a ticket waited {wait['max']} ms against a {window_ms} ms window — "
-            "the collection bound is not hard")
+        # and firing, not for the window itself — so it is UNDER half a window, and
+        # a deadline that is not enforced cannot hide inside it.
+        slack_ms = window_ms / 2.0
+        assert collect["max"] <= window_ms + slack_ms, (
+            f"the window stayed open {collect['max']} ms against a {window_ms} ms "
+            "bound — the collection bound is not hard")
+        # End-to-end latency is published BESIDE it and is larger by construction.
+        # Asserting only that it was measured keeps the two quantities distinct.
+        assert latency["wait_ms"]["n"] == 12, (
+            "the end-to-end wait was not published alongside the bounded one")
 
     def test_a_late_arrival_does_not_extend_the_open_window(
             self, backing, monkeypatch):
         """The window is anchored to the FIRST arrival, never re-armed.
 
-        ⛔ THIS IS THE PROPERTY AN "wait until the queue is quiet" DESIGN LOSES.
-        With a 120 ms window, a ticket submitted 100 ms after the first must ride
-        the batch the first one opened — not start a second window. Two batches
-        here would mean the deadline moved, and a busy process would then never
-        fire at all.
+        ⛔ THIS IS THE PROPERTY A "wait until the queue is quiet" DESIGN LOSES, and
+        seeing it requires an arrival that is GENUINELY late. The previous cut
+        submitted a lone ticket, joined it, then fired a simultaneous burst — a
+        shape in which one window and a window re-armed on every arrival both
+        produce ONE batch, so the row could not redden for the behaviour its name
+        claims (review F4a).
+
+        Here the second ticket arrives at 0.8 x the window, and two independent
+        assertions separate the designs:
+          * ONE batch ⇒ the two shared a window (coalescing held), and
+          * the batch fired ~1.0 x the window after the FIRST arrival, not ~1.8 x
+            ⇒ the deadline the later arrival would have set was never used.
+        The slack is half a window; a re-arm overshoots by 0.8 of one.
         """
-        window_ms = 120.0
+        window_ms = 300.0
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_INPROCESS)
         monkeypatch.setenv(embed_seam.ENV_MAX_WAIT_MS, str(window_ms))
         recorder = backing(delay_s=0.0)
 
         results: list = []
         errors: list = []
-        first = _pump(1, threading.Barrier(1), results, errors, text_prefix="early")
-        _join(first)
-        # The FIRST batch already fired (the window closed with one ticket), so
-        # assert the single-ticket shape, then prove the NEXT window behaves the
-        # same way for a burst that spans it.
-        assert len(recorder.batches) == 1
-
         started = time.monotonic()
-        threads = _pump(4, threading.Barrier(4), results, errors, text_prefix="late")
-        _join(threads)
+        early = _pump(1, threading.Barrier(1), results, errors, text_prefix="early")
+        time.sleep(window_ms / 1000.0 * 0.8)
+        late = _pump(1, threading.Barrier(1), results, errors, text_prefix="late")
+        _join(late)
+        _join(early)
         elapsed_s = time.monotonic() - started
-        assert not errors
-        assert elapsed_s < (window_ms / 1000.0) + 1.0, (
-            f"a burst took {elapsed_s:.2f}s against a {window_ms} ms window — "
-            "something re-armed the deadline")
+
+        assert not errors, f"an encode_query raised: {errors}"
+        assert len(results) == 2, "a caller got no answer"
+        assert len(recorder.batches) == 1, (
+            "a late arrival opened a SECOND window instead of riding the open "
+            f"one: {recorder.batches}")
+        assert sorted(recorder.batches[0]) == ["early0", "late0"], (
+            f"the late ticket did not join the open batch: {recorder.batches[0]}")
+        slack_s = (window_ms / 1000.0) / 2.0
+        assert elapsed_s < (window_ms / 1000.0) + slack_s, (
+            f"the batch fired {elapsed_s:.2f}s after the FIRST arrival against a "
+            f"{window_ms} ms window — a later arrival extended the deadline")
+        # The same fact on the seam's own published number: the window was open
+        # for about one window, not for 1.8 of them.
+        collect = embed_seam.seam_status()["latency"]["collect_ms"]
+        assert collect["max"] <= window_ms + slack_s * 1000.0, (
+            f"collect_ms recorded a {collect['max']} ms window against a "
+            f"{window_ms} ms bound")
+
+    def test_wait_ms_is_end_to_end_while_collect_ms_is_the_window(
+            self, monkeypatch):
+        """The two published waits are DIFFERENT quantities (review F5).
+
+        ⛔ With a 0 ms window — the ``inprocess`` DEFAULT — a ticket can still
+        wait a quarter of a second, because it arrived while the previous batch
+        was encoding. That wait is real caller latency and it is what ``wait_ms``
+        publishes, but it is NOT the window's doing, so the bound ``max_wait_ms``
+        publishes (0.0) does not cover it. Publishing only ``wait_ms`` made the
+        runbook read "a non-zero observation means the bound is broken" about a
+        perfectly healthy process; ``collect_ms`` is the window-attributable
+        number, and here it stays ~0 while ``wait_ms`` carries the queueing.
+        """
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_INPROCESS)
+        monkeypatch.setenv(embed_seam.ENV_MAX_WAIT_MS, "0")
+        encode_s = 0.25
+        entered = threading.Event()
+        batches: list = []
+
+        class _SlowBacking:
+            name = "slow"
+
+            def encode(self, texts, *, timeout_s=None):
+                entered.set()
+                time.sleep(encode_s)
+                batches.append(list(texts))
+                return [[float(len(t))] for t in texts]
+
+            def close(self) -> None:
+                return None
+
+            def describe(self) -> dict:
+                return {"backing": self.name}
+
+        embed_seam.install_backing(_SlowBacking())
+        results: list = []
+        errors: list = []
+        try:
+            first = _pump(1, threading.Barrier(1), results, errors, text_prefix="a")
+            # ⛔ Wait until the encoder is INSIDE the first encode, so the second
+            # ticket provably queues behind it rather than racing the dequeue.
+            assert entered.wait(10), "the collector never started the first encode"
+            second = _pump(1, threading.Barrier(1), results, errors, text_prefix="b")
+            _join(second)
+            _join(first)
+            latency = embed_seam.seam_status()["latency"]
+        finally:
+            embed_seam.install_backing(None)
+
+        assert not errors, f"an encode_query raised: {errors}"
+        assert len(results) == 2, "a caller got no answer"
+        assert len(batches) == 2, (
+            f"a 0 ms window must not coalesce across an encode it could not see: "
+            f"{batches}")
+        collect = latency["collect_ms"]
+        wait = latency["wait_ms"]
+        assert collect["max"] <= 60.0, (
+            f"a 0 ms window published a {collect['max']} ms collection wait — the "
+            "window-attributable number is carrying queueing it does not own")
+        assert wait["max"] >= 150.0, (
+            f"wait_ms did not record the queueing it exists to report: {wait}")
+
+    def test_a_ticket_whose_batch_never_fires_is_declined_not_parked(
+            self, monkeypatch):
+        """``submit``'s safety valve: a wedged backing must not hang a read.
+
+        ``fired_by = window + request timeout + 1 s``, so when no batch fires the
+        ticket RAISES inside that bound instead of blocking forever — the #13528
+        shape (a read must not park indefinitely on the embedder). No row covered
+        it, which made it an unproven bound on the one path where a wedged backing
+        is otherwise silent.
+        """
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_INPROCESS)
+        monkeypatch.setenv(embed_seam.ENV_MAX_WAIT_MS, "10")
+        monkeypatch.setenv(embed_seam.ENV_TIMEOUT_S, "0.1")
+
+        class _WedgedBacking:
+            name = "wedged"
+
+            def encode(self, texts, *, timeout_s=None):
+                time.sleep(2.5)  # longer than the valve, shorter than the test
+                return [[0.0] for _ in texts]
+
+            def close(self) -> None:
+                return None
+
+            def describe(self) -> dict:
+                return {"backing": self.name}
+
+        embed_seam.install_backing(_WedgedBacking())
+        started = time.monotonic()
+        try:
+            with pytest.raises(TimeoutError, match="no batch fired"):
+                embed_seam.encode_query("x")
+            elapsed_s = time.monotonic() - started
+        finally:
+            embed_seam.install_backing(None)
+        assert elapsed_s < 2.0, (
+            f"the safety valve did not fire: the ticket parked for {elapsed_s:.2f}s")
 
     def test_max_batch_fires_the_batch_early(self, backing, monkeypatch):
         """Reaching ``max_batch`` must fire at once, not wait out the window."""
@@ -476,6 +611,10 @@ class TestTheDistributionsAreExported:
         assert latency["encode_ms"]["p95"] is not None
         assert latency["encode_ms"]["p50"] <= latency["encode_ms"]["p95"]
         assert latency["wait_ms"]["p95"] is not None
+        assert latency["collect_ms"]["n"] == 4, (
+            "the window-attributable wait was not published beside the "
+            "end-to-end one")
+        assert latency["collect_ms"]["p95"] is not None
 
         for other in (embed_seam.BACKING_WORKER, embed_seam.BACKING_EXTERNAL):
             assert status["backings"][other]["latency"] is None, (
@@ -632,6 +771,49 @@ class TestTheInProcessBackingIsUnchangedWork:
 
         with pytest.raises(ValueError, match="row"):
             embed_seam.encode_texts(["a", "b"])
+
+    def test_the_collector_refuses_a_short_row_set_from_the_backing(
+            self, monkeypatch):
+        """The COLLECTOR's own short-answer guard, driven through ``encode_query``.
+
+        ⛔ The row above drives ``encode_texts`` — the DIRECT path, which never
+        reaches ``_Collector._fire`` — so deleting the collector's own
+        ``len(rows) != len(batch)`` raise reddened nothing (review F4c). Two
+        coalesced tickets and ONE row back is the shape that would otherwise hand
+        a caller its neighbour's vector, or raise ``IndexError`` inside the ticket
+        loop; each ticket must be DECLINED with the named refusal instead.
+        """
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_INPROCESS)
+        monkeypatch.setenv(embed_seam.ENV_MAX_WAIT_MS, "60")
+
+        class _ShortBacking:
+            name = "short"
+
+            def encode(self, texts, *, timeout_s=None):
+                # ONE row for however many texts were asked for.
+                return [[0.5, 0.25]]
+
+            def close(self) -> None:
+                return None
+
+            def describe(self) -> dict:
+                return {"backing": self.name}
+
+        embed_seam.install_backing(_ShortBacking())
+        try:
+            results: list = []
+            errors: list = []
+            threads = _pump(2, threading.Barrier(2), results, errors)
+            _join(threads)
+        finally:
+            embed_seam.install_backing(None)
+
+        assert not results, f"a short batch produced vectors: {results}"
+        assert len(errors) == 2, (
+            f"both coalesced tickets must be refused, got {errors}")
+        for _index, exc in errors:
+            assert isinstance(exc, ValueError), exc
+            assert "row" in str(exc), exc
 
 
 # ── the external backing ────────────────────────────────────────────────────
@@ -875,7 +1057,13 @@ class TestTheWorkerBacking:
         client = embed_seam.WorkerBacking()
         client.socket_path = lambda: path  # type: ignore[method-assign]
         try:
-            address = client._ensure_started(timeout_s=30.0)
+            # ⛔ The START-UP budget, not a 30 s literal: readiness now includes
+            # the worker's preload (the cold import plus the model load — 156.5 s
+            # measured in #13674, and a real SentenceTransformer on a box that has
+            # one), so a request-sized wait here would fail on exactly the
+            # deployment the worker exists for.
+            address = client._ensure_started(
+                timeout_s=embed_seam.resolve_worker_startup_s())
             assert os.path.exists(address)
             # ⛔ Either answer is a PASS: on a box with the embeddings extra the
             # worker returns vectors, and on one without it returns a NAMED
@@ -890,6 +1078,131 @@ class TestTheWorkerBacking:
         proc.wait(timeout=30.0)
         assert proc.poll() is not None, "the worker survived its parent's close"
         assert not os.path.exists(path), "the worker left its socket path behind"
+
+
+class TestWorkerReadinessIsTheSocketExisting:
+    """#14186 review F3: the socket must not exist before the encoder is loaded.
+
+    The client treats the path's existence as "ready". With the encoder imported
+    lazily inside ``_encode`` and ``bind`` first, that check reported ready for a
+    process that would pay the 156.5 s cold import (#13674) inside a 30 s request
+    budget — so the FIRST query after every boot declined, and the runbook told
+    the operator to repair a worker that had merely just started.
+    """
+
+    def test_the_encoder_is_preloaded_before_the_socket_is_bound(
+            self, tmp_path, monkeypatch):
+        """``serve`` preloads the encoder BEFORE it binds — order, not intent.
+
+        Structural on purpose: the ordering IS the contract, and it cannot be
+        observed from a healthy socket (the whole point is that both states look
+        identical from outside). ``bind`` records its own event, so a tree that
+        binds first — or never preloads — derives a different order here.
+        """
+        from tortoise import embed_worker
+
+        events: list = []
+
+        class _StopServe(Exception):
+            """Unwind ``serve`` at the first bind."""
+
+        # The real watchers take the session down (``_watch_stdin`` calls
+        # ``os._exit`` on EOF), which is why this replaces them instead.
+        monkeypatch.setattr(embed_worker, "_watch_stdin", lambda *a, **k: None)
+        monkeypatch.setattr(embed_worker, "_watch_parent", lambda *a, **k: None)
+
+        def _preload() -> bool:
+            events.append("preload")
+            return False  # an absent encoder must still let the worker serve
+
+        monkeypatch.setattr(embed_worker, "_preload_encoder", _preload)
+
+        class _FakeSocket:
+            def bind(self, _path: str) -> None:
+                events.append("bind")
+                raise _StopServe()
+
+            def listen(self, _backlog: int) -> None:
+                return None
+
+            def settimeout(self, _timeout: float) -> None:
+                return None
+
+            def accept(self):  # pragma: no cover — unreachable via _StopServe
+                raise AssertionError("accept must not be reached")
+
+            def close(self) -> None:
+                return None
+
+        class _SocketShim:
+            AF_UNIX = socket.AF_UNIX
+            SOCK_STREAM = socket.SOCK_STREAM
+
+            @staticmethod
+            def socket(*_a, **_k):
+                return _FakeSocket()
+
+        # ⛔ The module's REFERENCE, not the stdlib module: patching
+        # ``embed_worker.socket.socket`` would swap the global ``socket`` module's
+        # constructor for every thread during this test.
+        monkeypatch.setattr(embed_worker, "socket", _SocketShim())
+
+        with pytest.raises(_StopServe):
+            embed_worker.serve(str(tmp_path / "ready.sock"), parent_pid=os.getpid())
+
+        assert events == ["preload", "bind"], (
+            f"the worker did not publish readiness before accepting: {events}")
+
+    def test_the_client_waits_for_readiness_with_the_startup_budget(
+            self, tmp_path, monkeypatch):
+        """``encode`` passes the START-UP budget to ``_ensure_started``.
+
+        The request budget bounds a WARM round trip; a boot is the cold import
+        plus the load bound. Passing the request budget there is the defect F3
+        names, and this drives it through the client rather than reading the call
+        site, so a revert reddens instead of being described.
+        """
+        class _Model:
+            def encode(self, texts):
+                return np.array([[float(len(t))] for t in texts], dtype=np.float32)
+
+        from tortoise.embeddings import EmbeddingModel
+
+        monkeypatch.setattr(EmbeddingModel, "get", classmethod(
+            lambda cls, load_timeout=None: _Model()))
+        monkeypatch.setattr(
+            "tortoise.embeddings.ensure_embed_threads", lambda: None)
+        monkeypatch.setenv(embed_seam.ENV_TIMEOUT_S, "7")
+        monkeypatch.setenv(embed_seam.ENV_WORKER_STARTUP_S, "123")
+
+        path = str(tmp_path / "budget.sock")
+        seen: dict = {}
+        with _ServingThread(path):
+            client = embed_seam.WorkerBacking()
+            monkeypatch.setattr(
+                client, "_ensure_started",
+                lambda timeout_s: (seen.__setitem__("t", timeout_s), path)[1])
+            client.encode(["a"])
+
+        assert seen.get("t") == 123.0, (
+            f"encode waited for readiness with {seen.get('t')!r}s — the request "
+            "budget, not the start-up one")
+
+    def test_the_default_startup_budget_covers_the_whole_boot(self):
+        """The default start-up budget covers cold import AND the load bound.
+
+        A budget below their sum converts a slow but HEALTHY boot into the very
+        decline the lever exists to remove, so the two measured terms are pinned
+        rather than left to a reviewer's memory: 156.5 s is the cold import the
+        worker moves off the serving process (#13674, quoted in both module
+        docstrings), and ``_LOAD_TIMEOUT_S`` is the encoder's own bound.
+        """
+        from tortoise.embeddings import EmbeddingModel
+
+        assert embed_seam.DEFAULT_WORKER_STARTUP_S >= 156.5 + EmbeddingModel._LOAD_TIMEOUT_S
+        assert embed_seam.DEFAULT_WORKER_STARTUP_S > embed_seam.DEFAULT_TIMEOUT_S, (
+            "the start-up lever is not larger than the request lever — one number "
+            "cannot bound both a boot and a warm round trip")
 
     def test_the_worker_seam_declines_rather_than_encoding_locally(
             self, monkeypatch, backing):
@@ -984,23 +1297,62 @@ class TestTheCallersRouteThroughTheSeam:
         assert embeddings.compute_embeddings(["a", "b"]) == [[1.0, 2.0], [3.0, 4.0]]
 
     def test_the_read_path_falls_back_to_encode_failed_on_a_backing_raise(
-            self, monkeypatch):
-        """A raising backing reaches the read as ``encode_failed``, not an error.
+            self, monkeypatch, tmp_path):
+        """A RAISING backing reaches the read as ``encode_failed``, not an error.
 
         The read path already owns this vocabulary, and a keystroke-level change
         to it would turn a degraded read into a 500 — the ``#2952`` contract is
         that a read that cannot run its dense leg DECLARES itself.
+
+        ⛔ THE ROW DRIVES THE RAISE, and it pins TWO things, because one was not
+        enough. It used to assert on ``inspect.getsource(...)`` text, which stayed
+        GREEN on the mutant that disables the whole remote branch
+        (``_seam_remote = False``) — the literals it looked for were still in the
+        source (review F4b). Now:
+
+        * the backing genuinely RAISES, and ``last_decline`` proves it did; and
+        * the backing was actually CALLED (``calls == 1``), which is the routing
+          the old text assertion was trying to describe. Under that same mutant
+          the seam is never asked, so ``calls`` stays 0 and this reddens.
+
+        ``EmbeddingModel.get`` is forced absent so the LOCAL fallback branch is
+        resolved the same way on every box: otherwise a developer machine with a
+        real encoder would run that branch to success and the row would mean
+        different things in different environments (measured: it passed under the
+        mutant on a box where the model loads).
         """
-        import inspect
+        monkeypatch.delenv("TORTOISE_EMBEDDING_MODEL_REQUIRED", raising=False)
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_EXTERNAL)
 
-        from tortoise import sdk
+        from tortoise.embeddings import EmbeddingModel
 
-        source = inspect.getsource(sdk.TortoiseSDK._tortoise_fts_query)
-        assert "_embed_seam.encode_query(_dense_query)" in source, (
-            "the read path no longer routes its query embed through the seam")
-        assert "model.encode([_dense_query])" not in source, (
-            "the read path still calls the model directly — the seam cannot "
-            "move that encode out of the request")
+        monkeypatch.setattr(EmbeddingModel, "get", classmethod(
+            lambda cls, load_timeout=None: None))
+        exploding = _ExplodingBacking()
+        embed_seam.install_backing(exploding)
+
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = TortoiseSDK(db_path=str(tmp_path / "read14186_raise.db"))
+        trace: list = []
+        try:
+            sdk._tortoise_fts_query("retention window", limit=3, leg_trace=trace)
+        finally:
+            sdk.close()
+            embed_seam.install_backing(None)
+
+        assert exploding.calls == 1, (
+            "the read path never asked the seam to encode its query — it is "
+            f"routing around it ({exploding.calls} call(s))")
+        assert "encoder went away" in (embed_seam.last_decline() or ""), (
+            "the backing never raised, so this row says nothing about a raise "
+            f"(last_decline={embed_seam.last_decline()!r})")
+        vector_entries = [e for e in trace if e.get("leg") == "vector"]
+        assert vector_entries, f"the read recorded no vector entry: {trace!r}"
+        entry = vector_entries[0]
+        assert entry.get("ran") is False, entry
+        assert entry.get("reason") == "encode_failed", (
+            f"a raising backing did not reach the read as encode_failed: {entry!r}")
 
 
 # ── the #5275 contract survives the move off the local model ────────────────
