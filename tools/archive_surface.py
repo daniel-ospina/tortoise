@@ -1768,8 +1768,8 @@ def shrink_violations(
                         why = (
                             f"{base_label} already records `{symbol}` ({kind}) and this tree does "
                             "not carry it — but that `module` entry FROZE ONLY A STUB, so it is "
-                            "not a record of the source: restore the source from the base, "
-                            "archive it, and delete it again"
+                            "not a record of the source: restore the source from a commit that "
+                            "still holds it, archive it, and delete it again"
                         )
                     else:
                         why = (
