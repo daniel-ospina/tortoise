@@ -1969,9 +1969,16 @@ def test_the_control_binds_the_shared_helpers(monkeypatch):
     was caught. So every call is attributed to its IMMEDIATE CALLER and the control's own binding
     must appear: `_folding` by the control's name (**15** calls, all of them), `_env_source` by a
     caller that is NOT the fake's transitive fallback.
-    ⛔ BOTH FIGURES ARE RE-MEASURED, NEVER TRANSCRIBED: they scale with the arm count (each fold
-    walks `24 − len(declared ∩ register)` keys), so an arm added later falsifies them silently —
-    exactly how the previous `13 / 212` and its `192` went stale.
+    ⛔ BOTH FIGURES ARE RE-MEASURED, NEVER TRANSCRIBED: they scale with the arm count, so an arm
+    added later falsifies them silently — exactly how the previous `13 / 212` and its `192` went
+    stale. ⛔ AND A FOLD'S WALK IS NOT ONE FORMULA (`#14099`, measured at `0b21879f`): a fake that
+    refuses a NON-declared module walks `24 − <that module's keys>` = **20** (`tortoise.api`
+    carries 4), while the declared-exemption fold walks `24 − len(declared ∩ register)` = **14**
+    (`tortoise.sdk` carries 10 of the register's 24 keys). Measured here: 8 driven fakes × 14 +
+    5 × 20 = the **212** that reach `_env_source` through `fake`, and 13 of the 15 built fakes are
+    actually driven (2 are built and never called) — so `15 / 232` is a count of CALLS, not of
+    full walks. Quote the figure you MEASURED; deriving either one from a formula reproduces the
+    very staleness this paragraph warns about.
     """
     callers: dict[str, set[object]] = {"_folding": set(), "_env_source": set()}
     real_folding, real_env_source = _folding, _env_source
