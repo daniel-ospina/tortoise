@@ -566,8 +566,25 @@ NON_SDK_RECEIVERS: dict[tuple[str, str, str], str] = {
 #: as `FalkorProjection.g` when there `g` is a loop variable over `groups`.
 #: ``test_the_census_still_catches_an_ambiguous_name_on_an_sdk_receiver`` pins BOTH
 #: directions of this branch so removing the receiver test cannot pass silently.
+#:
+#: `create_subject` is the second kind of collision, and it is a SURFACE DOOR rather
+#: than a Cypher one: `TortoiseSDK.create_subject` is retired (#11609, in favour of
+#: `create_entity`), and the SAME name is the published write door on the two seed
+#: surfaces — `_OrgSeedSurface.create_subject` (tortoise/hosted_api.py) and
+#: `_SdkSeedSurface.create_subject` (tortoise/onboarding/selfhost.py) — each of which
+#: delegates to `self._sdk._create_subject`. `tortoise/onboarding/seed.py` reaches it
+#: through a `surface` PARAMETER, which is why the path-and-receiver table above
+#: cannot carry the row: its pin (`_receiver_binding_violations`) refuses a
+#: parameter binding, and rightly so — a parameter can hold anything. The exemption
+#: is therefore expressed as the receiver test this branch already is, and the fact
+#: that justifies it is MEASURED by
+#: `test_the_two_seed_surfaces_publish_a_create_subject_door_that_delegates_privately`,
+#: so a surface that stops delegating (or loses the door) reds instead of silently
+#: widening the exemption. Residual, recorded not hidden: a `TortoiseSDK` bound to a
+#: name other than `sdk`/`_sdk` calling `.create_subject()` is missed here — exactly
+#: as `query` is — and `TortoiseSDK.__getattr__` still RAISES for it at runtime.
 AMBIGUOUS_RETIRED_NAMES: frozenset[str] = frozenset(
-    {"query", "list_graphs", "link_source_to_entity"})
+    {"query", "list_graphs", "link_source_to_entity", "create_subject"})
 SDK_RECEIVER_NAMES: frozenset[str] = frozenset({"sdk", "_sdk"})
 
 
@@ -607,8 +624,10 @@ def _attribute_names(tree: ast.AST,
     1. ``NON_SDK_RECEIVERS`` — a non-SDK class that shares a retired name as a method. Its
        rows are skipped only for that module, only for that receiver NAME, and passing no
        path exempts nothing, so the synthetic-tree pins below keep their full strength.
-    2. ``AMBIGUOUS_RETIRED_NAMES`` — the retired names that are ALSO the Cypher client's own
-       methods. This skip is PATH-INDEPENDENT on purpose (it keys on the RECEIVER alone: an
+    2. ``AMBIGUOUS_RETIRED_NAMES`` — the retired names that also name an ordinary method on
+       another class this code base holds (the Cypher client's `query`/`list_graphs`/
+       `link_source_to_entity`, and the two seed surfaces' `create_subject`). This skip is
+       PATH-INDEPENDENT on purpose (it keys on the RECEIVER alone: an
        ambiguous name counts only on an ``sdk``/``_sdk`` receiver), so it DOES apply when
        ``rel_path`` is None. An earlier version of this paragraph claimed "passing no path
        exempts nothing", which was false from the moment this branch existed:
@@ -685,10 +704,16 @@ def test_the_census_still_catches_an_sdk_call_site():
 def test_the_census_still_catches_an_ambiguous_name_on_an_sdk_receiver(name):
     """The ambiguous branch's CATCH direction is a pin, not a claim (#13036 review F3b).
 
-    `query`/`list_graphs`/`link_source_to_entity` are the retired names that also name
-    the Cypher client's own methods, so the branch exempts every non-SDK receiver. That
-    branch carries **1558 of 1558** live hits repo-wide (1542 `query`, 11 `list_graphs`,
-    5 `link_source_to_entity`) — so a mutant that forgot the receiver test
+    The retired names that also name an ordinary method on another class this code base
+    holds — the Cypher client's `query`/`list_graphs`/`link_source_to_entity` and the
+    two seed surfaces' `create_subject` — are exempted on every non-SDK receiver. That
+    branch carries **1561 of 1561** live hits in `tortoise/` (MEASURED at `e0accb8fe` by
+    walking `tortoise/**.py` and counting calls whose attribute is in the set and whose
+    receiver's terminal name is not `sdk`/`_sdk`: 1543 `query`, 11 `list_graphs`,
+    5 `link_source_to_entity`, 2 `create_subject`; an earlier cut of this sentence said
+    "repo-wide" over 1558, which was this same `tortoise/`-only count at an older head —
+    the figures ROT, so re-run that walk rather than quoting them) — so a mutant that
+    forgot the receiver test
     (`if node.func.attr in AMBIGUOUS_RETIRED_NAMES: continue`) would forgive EVERY ONE
     of them and leave the whole file green: the only catch-direction pin that existed
     seeded `sorted(RETIRED_SDK_METHODS)[0]` = a NON-ambiguous name, so nothing measured
@@ -723,6 +748,50 @@ def test_the_census_still_catches_an_ambiguous_name_on_an_sdk_receiver(name):
             "a graph-handle receiver must stay exempt THROUGH THE AMBIGUOUS BRANCH — "
             "the path-scoped `GRAPH_HANDLE_RECEIVERS` table that exempted it separately "
             "changed no outcome and was removed (#13036 review F3a)")
+
+
+def test_the_two_seed_surfaces_publish_a_create_subject_door_that_delegates_privately():
+    """The FACT behind `create_subject`'s presence in the ambiguous set, MEASURED.
+
+    `create_subject` is a retired `TortoiseSDK` name (#11609), AND the published write
+    door on the two seed surfaces. That second half is the whole justification for
+    exempting a `surface` receiver — so it must be checkable here, not asserted in
+    prose: `tortoise/hosted_api.py::_OrgSeedSurface.create_subject` and
+    `tortoise/onboarding/selfhost.py::_SdkSeedSurface.create_subject` each have to
+    exist and each has to delegate to `self._sdk._create_subject`.
+
+    Read off the AST, for the same reason the census above is: a docstring that NAMES
+    `create_subject` is not a door. FAILS IF a surface loses the door (the seed's call
+    would raise `AttributeError`) or stops delegating to the private SDK spelling (the
+    door would be a second, unretired write path) — either way the exemption would
+    have outlived its reason.
+    """
+    doors = {
+        ("tortoise/hosted_api.py", "_OrgSeedSurface"): "_create_subject",
+        ("tortoise/onboarding/selfhost.py", "_SdkSeedSurface"): "_create_subject",
+    }
+    for (rel, cls_name), delegated in doors.items():
+        tree = ast.parse((REPO / rel).read_text())
+        cls = next((n for n in ast.walk(tree)
+                    if isinstance(n, ast.ClassDef) and n.name == cls_name), None)
+        assert cls is not None, (
+            f"{rel} no longer defines `{cls_name}` — the `create_subject` exemption "
+            "names a class this file cannot find, so the row's reason is gone")
+        doors_found = [n for n in cls.body
+                       if isinstance(n, ast.FunctionDef) and n.name == "create_subject"]
+        assert len(doors_found) == 1, (
+            f"{rel}::{cls_name} must define exactly ONE `create_subject` door, "
+            f"found {len(doors_found)}")
+        calls = [n for n in ast.walk(doors_found[0])
+                 if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Attribute)
+                 and n.func.attr == delegated
+                 and isinstance(n.func.value, ast.Attribute)
+                 and n.func.value.attr == "_sdk"]
+        assert calls, (
+            f"{rel}::{cls_name}.create_subject no longer delegates to "
+            f"`self._sdk.{delegated}()` — then it is a write door of its own, not the "
+            "surface's passthrough, and the exemption that rests on it is unjustified")
 
 
 def test_no_production_module_reaches_a_retired_sdk_name():

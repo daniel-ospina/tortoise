@@ -16431,7 +16431,7 @@ class TortoiseSDK:
             write_sink.append(write)
         # ⛔ THE PER-CALL COMMIT SIGNAL, FOR THE ARM THIS CALL ACTUALLY TOOK
         # (#14002 review cycle 7, blocking). The append arm is untouched: a line
-        # was committed to the journal, which is the truth store, so every
+        # was committed to the journal, so every
         # pre-existing gate (`_create_point`'s `WriteNotLandedError`,
         # `_update_point`'s, the evidence fold's, and
         # `hosted_api._report_narrative_home`'s `journalled`) keeps meaning what
