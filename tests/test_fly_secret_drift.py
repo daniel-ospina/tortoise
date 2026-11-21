@@ -6508,12 +6508,20 @@ def _services_region(text: str) -> str:
     keeps the label only by paragraph ordering (re-ordering the note would
     false-RED a correct file). Shared by the pin and its non-vacuity probe.
 
-    KNOWN SCOPE LIMIT: if the `[[vm]]` line ever gains trailing content
-    (`[[vm]]  # shape`), this matches nothing and returns the WHOLE file — the
-    pin then reads later regions too. It fails toward red, not toward a silent
-    green, so it is left un-guarded; re-derive it rather than widening it.
+    SELF-CHECKING, because a failed split is not "fails toward red": if the
+    `[[vm]]` line ever gains trailing content (`[[vm]]  # shape`) the pattern
+    matches nothing, `re.split` returns ONE part, and this would hand back the
+    WHOLE file — from which a later priced row (most plausibly the `[[vm]]`
+    cost derivation) could satisfy the pin and green it while the note still
+    prices a shape the block does not declare. So a missing split raises.
     """
-    return re.split(r"(?m)^\[\[vm\]\]\s*$", text)[0]
+    parts = re.split(r"(?m)^\[\[vm\]\]\s*$", text)
+    assert len(parts) > 1, (
+        "fly.toml has no bare `[[vm]]` line to split on: the `[[services]]` region "
+        "would widen to the whole file and this pin could read a price row from "
+        "below the table — re-derive the split rather than letting it widen"
+    )
+    return parts[0]
 
 
 def _priced_shapes(services_region: str) -> set[int]:
