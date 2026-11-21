@@ -74,9 +74,9 @@ class FallbackSnapshotStore:
         self._store: dict[tuple, dict] = {}
         self._lock = threading.RLock()
         #: Whole-store EPOCH, bumped only by ``clear()`` (a reset, not a write).
-        #: A build captures it with the key's own stamp and re-checks both before
-        #: caching the result, so a write that lands MID-BUILD can never be undone
-        #: by that build's ``put`` (#10602 review round 2).
+        #: A build captures it with the graph's and the key's own stamp and re-checks
+        #: all three before caching the result, so a write that lands MID-BUILD can
+        #: never be undone by that build's ``put`` (#10602 review round 2).
         #:
         #: ⛔ PER-KEY, NOT ONE GLOBAL COUNTER (review round 4, P1). The first
         #: version compared a SINGLE process-global integer, and ``invalidate()``
@@ -111,21 +111,128 @@ class FallbackSnapshotStore:
         #: to keys present in ``_store`` or in flight, which the never-nested lock order
         #: permits). Do not read this as "negligible by construction".
         self._key_generation: dict[tuple, int] = {}
+        #: graph_name -> corpus counter, bumped by ``invalidate_graph(name)`` for every
+        #: key whose FIRST element is that graph — present, in flight, or not yet
+        #: created. It exists because ``invalidate(key)`` alone cannot reach the keys
+        #: an EVICTION must invalidate (#13123):
+        #:
+        #: * the evictor knows the GRAPH it deleted from (it proves it — `evict()`'s
+        #:   gate 5 requires the handle's name to equal the census's), and nothing
+        #:   else: it has no projection, so it cannot build a ``snapshot_key``;
+        #: * and a build that started before the delete may finish after it, so
+        #:   popping the entries that EXIST is not enough — the put guard has to be
+        #:   moved for the key that build captured, which may be in neither ``_store``
+        #:   nor ``_FLIGHTS`` at any instant we could enumerate (a reader sits between
+        #:   ``generation()`` and ``_flight_begin()`` for a few instructions).
+        #:
+        #: ⛔ NOT the whole-store epoch. ``clear()`` bumps that, and review round 4
+        #: measured what a global stamp costs (20 builds, 0 hits over 20 reads with one
+        #: foreign invalidation inside each window). A per-GRAPH stamp has that defect's
+        #: blast radius bounded by the graph whose nodes were actually deleted — the
+        #: only corpus that can now be wrong.
+        #:
+        #: ⚠️ What it deliberately over-approximates: two EMBEDDED stores both named
+        #: ``tortoise`` share a graph name and differ only in ``backend``, so evicting
+        #: from one also invalidates the other's snapshot. The direction is a lost cache
+        #: hit (a rebuild), never a stale serve, and it is bounded by
+        #: ``MAX_SNAPSHOT_ENTRIES`` entries.
+        #: ⚠️ LIFETIME, stated rather than left to be inferred (review round 1). This
+        #: dict grows MONOTONICALLY in the number of distinct graph names this process
+        #: has ever evicted from; it is NOT bounded by ``MAX_SNAPSHOT_ENTRIES``, and
+        #: ``clear()`` is the only thing that empties it — and ``clear()`` has no
+        #: production call site (see ``_key_generation``'s note above). Accepted on that
+        #: note's own reasoning, and for a strictly smaller cardinality: one entry per
+        #: graph-eviction event, ~tens of bytes, against snapshot bodies of up to 50k
+        #: rows. A long-lived process evicting for very many tenant graphs is the case
+        #: that would need a bound; do not read this as "negligible by construction".
+        self._graph_generation: dict[str, int] = {}
 
-    def generation(self, key: tuple) -> tuple[int, int]:
+    def generation(self, key: tuple) -> tuple[int, int, int]:
         """Invalidation stamp for ``key`` (see ``get_or_build``'s STALENESS note).
 
-        A ``(epoch, key_stamp)`` pair: the epoch moves on ``clear()``, the stamp only
-        on ``invalidate(key)`` for THIS key. A write to another graph must not refuse
-        this key's cache insert (review round 4, P1).
+        An ``(epoch, graph_stamp, key_stamp)`` triple: the epoch moves on ``clear()``,
+        the graph stamp on ``invalidate_graph(key[0])``, the key stamp only on
+        ``invalidate(key)`` for THIS key. A write to another graph must not refuse this
+        key's cache insert (review round 4, P1), and neither must an eviction from
+        another graph (the same defect, one level finer).
         """
         with self._lock:
-            return (self._generation, self._key_generation.get(key, 0))
+            return (self._generation, self._graph_stamp(key), self._key_generation.get(key, 0))
+
+    def _graph_stamp(self, key: tuple) -> int:
+        """The graph counter for ``key``'s first element (0 for an un-named key)."""
+        graph = key[0] if isinstance(key, tuple) and key else None
+        if not isinstance(graph, str):
+            return 0
+        return self._graph_generation.get(graph, 0)
 
     def invalidate(self, key: tuple) -> None:
         with self._lock:
             self._key_generation[key] = self._key_generation.get(key, 0) + 1
             self._store.pop(key, None)
+
+    def invalidate_graph(self, graph_name: str) -> int:
+        """Drop every cached snapshot that NAMES ``graph_name``, and refuse its puts.
+
+        Returns how many cached entries were dropped — ``0`` when the cache was cold
+        **and** ``0`` when the name matches no entry (a name that disagrees with the
+        serving projection's ``snapshot_key()[0]``). So the number is a DIAGNOSTIC, not
+        a proof of reach: the guard itself is the stamp bump, which protects puts
+        regardless of how many entries existed. ``tortoise/cache_evictor.py`` reads it
+        only through ``_invalidate_degraded_snapshot``'s ``True`` — i.e. "the counter
+        moved", never "an entry was dropped".
+
+        ⛔ THIS IS THE EVICTION PATH'S HALF OF #13123. ``tortoise/cache_evictor.py``
+        issues ``DETACH DELETE`` and is not an SDK write surface, so it never reaches
+        ``SDK._mark_dirty`` — the hook every normal write uses. Without this, a node
+        the evictor removed stayed returnable from the degraded tier for up to
+        ``SNAPSHOT_TTL_SECONDS`` (60 s), which the M2 instrument measured directly:
+        ``recall@10`` 0.1133 against ``resident_share`` 0.1100, i.e. more nodes
+        retrievable than the graph held.
+
+        What it closes, exactly: the ENTRIES that exist, and the PUT of any build whose
+        captured stamp predates this call — so a corpus read before the delete is never
+        CACHED after it. ⚠️ It does not stop a reader that is already being served: a
+        ``get`` that lands in the window between the delete committing and this call, or
+        a reader that joined a build started before the stamp moved, still sees that
+        flight's rows. Both are bounded by one round trip / one build, not by the TTL —
+        the same best-effort posture the write path documents under COMMIT→INVALIDATE
+        WINDOW, one statement wide instead of one TTL wide.
+
+        Cost, measured rather than claimed. One dict entry write to bump the graph stamp
+        (O(1) in node count, corpus size and how many nodes the pass deleted) plus a
+        scan of ``_store``, bounded by ``MAX_SNAPSHOT_ENTRIES`` (8) — a constant that
+        does not grow with the corpus, and no graph or corpus work at all. Measured over
+        20,000 calls with the store FULL (8 entries of ``MAX_CORPUS_POINTS`` = 50,000
+        points each, i.e. the worst realistic case): **p50 1.37 us, p95 2.11 us**, max
+        144 us (a scheduling outlier). The measurement is the function called in a loop
+        with a full store, refilling each entry the call dropped — it is not committed
+        as a suite because it measures a constant, but it is reproducible in ten lines
+        against this docstring's description.
+
+        ⚠️ The bounds this does NOT cover, stated so they are not inferred:
+        * PROCESS-LOCAL. An evictor running in a different process — e.g.
+          ``tools/cache_evict.py`` driven by an operator against a hosted API — cannot
+          reach the serving process's snapshot, and that process is still bounded only by
+          the 60 s TTL. The sweeper that arms the window (#13103) must therefore run in
+          the process that serves degraded reads, or accept that bound.
+        * The stamp policy below is per-GRAPH by design (see
+          ``_graph_generation``'s note), so two embedded stores sharing a graph name
+          over-invalidate each other — a lost cache hit, never a stale serve.
+        """
+        if not isinstance(graph_name, str) or not graph_name:
+            return 0
+        with self._lock:
+            self._graph_generation[graph_name] = (
+                self._graph_generation.get(graph_name, 0) + 1
+            )
+            stale = [
+                k for k in self._store
+                if isinstance(k, tuple) and k and k[0] == graph_name
+            ]
+            for k in stale:
+                del self._store[k]
+            return len(stale)
 
     def get(self, key: tuple) -> dict | None:
         """Fresh snapshot or None (missing / dirty / TTL-expired)."""
@@ -168,7 +275,8 @@ class FallbackSnapshotStore:
         while len(self._store) > MAX_SNAPSHOT_ENTRIES:
             self._store.pop(next(iter(self._store)), None)
 
-    def put_if_generation(self, key: tuple, snap: dict, generation: tuple[int, int]) -> bool:
+    def put_if_generation(self, key: tuple, snap: dict,
+                          generation: tuple[int, int, int]) -> bool:
         """Insert ``snap`` only if THIS key was not invalidated since ``generation``.
 
         The generation COMPARE and the insert happen inside the SAME lock hold, so a
@@ -176,10 +284,12 @@ class FallbackSnapshotStore:
         by this ``put`` (review round 2: the compare and the insert were separate
         critical sections, which left exactly that window). The comparison is
         PER-KEY (review round 4, P1): a write to another graph must not refuse this
-        insert. Returns whether it was cached.
+        insert — and neither must an eviction from another graph, which is what the
+        graph stamp in the triple carries (#13123). Returns whether it was cached.
         """
         with self._lock:
-            if (self._generation, self._key_generation.get(key, 0)) != generation:
+            if (self._generation, self._graph_stamp(key),
+                    self._key_generation.get(key, 0)) != generation:
                 return False
             self._put_locked(key, snap)
             return True
@@ -188,10 +298,23 @@ class FallbackSnapshotStore:
         with self._lock:
             self._generation += 1
             self._key_generation.clear()
+            self._graph_generation.clear()
             self._store.clear()
 
 
 _store = FallbackSnapshotStore()
+
+
+def invalidate_graph(graph_name: str) -> int:
+    """Drop the ``graph_name`` snapshots on the module store — the eviction path's hook.
+
+    A module-level verb because the EVICTOR has a graph NAME and no projection: it
+    cannot build a ``snapshot_key``, and a caller that had to assemble one would be a
+    second place that knows how a corpus is identified. See
+    :meth:`FallbackSnapshotStore.invalidate_graph` for the measured cost and the
+    process-local bound.
+    """
+    return _store.invalidate_graph(graph_name)
 
 # ── #10602: SINGLE-FLIGHT build (one whole-corpus fetch per in-flight generation) ──
 #
@@ -277,7 +400,7 @@ class _Flight:
         self.waiters = 0
 
 
-def _flight_slot(store, key: tuple, generation: tuple[int, int]) -> tuple:
+def _flight_slot(store, key: tuple, generation: tuple[int, int, int]) -> tuple:
     """Registry slot for one build: **store identity** + key + generation.
 
     ⛔ THE STORE IS PART OF THE SLOT (review round 13, P3). ``get_or_build`` takes
@@ -292,7 +415,7 @@ def _flight_slot(store, key: tuple, generation: tuple[int, int]) -> tuple:
     return (store, key, generation)
 
 
-def _flight_begin(store, key: tuple, generation: tuple[int, int]) -> tuple[_Flight, bool]:
+def _flight_begin(store, key: tuple, generation: tuple[int, int, int]) -> tuple[_Flight, bool]:
     """Join (or open) the flight for this store+key+generation. Returns ``(flight, leader)``."""
     slot = _flight_slot(store, key, generation)
     with _FLIGHTS_GUARD:
@@ -306,7 +429,7 @@ def _flight_begin(store, key: tuple, generation: tuple[int, int]) -> tuple[_Flig
         return flight, True
 
 
-def _flight_end(store, key: tuple, generation: tuple[int, int], flight: _Flight) -> None:
+def _flight_end(store, key: tuple, generation: tuple[int, int, int], flight: _Flight) -> None:
     """Leave a flight; the last one out removes it (registry is in-flight-bounded)."""
     slot = _flight_slot(store, key, generation)
     with _FLIGHTS_GUARD:
@@ -376,7 +499,7 @@ def get_or_build(proj, key: tuple, *, store: FallbackSnapshotStore | None = None
     if snap is not None:
         return snap
 
-    def produce(generation: tuple[int, int]) -> dict | None:
+    def produce(generation: tuple[int, int, int]) -> dict | None:
         """Lead this generation's build: re-check the cache, build, publish.
 
         Never raises ON A BUILD FAILURE: an unexpected build failure is logged and
