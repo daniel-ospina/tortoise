@@ -779,8 +779,11 @@ def _path_in_tree(rev: str, path: str) -> bool | None:
     BOTH for a genuine absence AND for a missing TREE object, so a treeless partial clone
     (`filter=tree:0`) whose lazy fetch fails would be counted "absent at the pin" — inflating the
     drifter figure and inviting a false correction of a published number (#14038 review, P3).
-    `ls-tree` separates them: rc 1 = the tree could not be read (cannot-run), rc 0 with EMPTY output
-    = genuine absence, rc 0 with an entry = present.
+    `ls-tree` separates them on the EXIT CODE: anything non-zero (`rc != 0` — measured 1 for a missing
+    SUBTREE and 128 for a missing ROOT tree, `fatal: not a tree object`) means the tree could not be
+    read and is the cannot-run class; rc 0 with EMPTY output is genuine absence; rc 0 with an entry is
+    present. ⛔ Test `rc != 0`, never `rc == 1`: naming one code sends the commonest treeless shape —
+    the root tree absent — down the absence path and recreates the false count this exists to stop.
     """
     out = subprocess.run(
         ["git", "ls-tree", rev, "--", path],
@@ -806,8 +809,9 @@ def _rev_is_readable(rev: str = _DRIFT_PIN) -> bool:
 
     ⛔ HOW EACH CAUSE IS DECIDED, because a commit probe cannot answer a blob question: the commit
     probe below only establishes that `<rev>` is a commit this checkout holds. The PATH question is
-    asked separately, of the TREE (`<rev>:<path>` resolves or it does not). A path that resolves
-    but still fails to render is neither cause, so it stays in the SKIP class — a BLOBLESS partial
+    asked separately, by `_path_in_tree` — `git ls-tree`, never `<rev>:<path>`, which cannot tell an
+    absent path from a missing tree. A path that IS in the tree but whose blob still fails to render
+    is neither cause, so it stays in the SKIP class — a BLOBLESS partial
     clone's failed lazy fetch would otherwise be counted as "absent at the pin", inflating the
     drifter figure and inviting a false correction of a published number, which is this file's own
     worst case (#14038 review, P3). See `_path_in_tree` for how the tree itself is asked, which is
@@ -864,7 +868,9 @@ def _re_derived_drift(text: str, repo: Path = REPO) -> tuple[int, int, int, int]
     for path, line in pairs:
         pin = _pin_blob_lines(path)
         if pin is None:
-            # the PIN REVISION itself is unreadable — a shallow clone is the only legitimate cause.
+            # cannot produce the pin's copy — the rev is unresolvable, or the path IS in its tree but
+        # the blob will not render (a failed lazy fetch, a corrupt object). Both are facts about
+        # THIS CHECKOUT, which is why they skip rather than count a pair that was never read.
             return None
         head_file = repo / path
         if not head_file.is_file():
