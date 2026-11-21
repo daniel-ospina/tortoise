@@ -969,7 +969,19 @@ SWEEP_NAMES = 66
 #: two MEASURED deltas, and `11843 + 1 + 4 = 11848` is a CROSS-CHECK of the `--repin` run, never its
 #: evidence. `--check` exits 0 on this tree with
 #: `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11848, "de4253d9d4b589a1")
+#:
+#: ⛔ MERGED `origin/main` `69908d006b` ON TOP OF THAT, and THIS is the pin: `--repin` prints
+#: `(11856, "e9249c5490bc38d7")` on the merged tree. The +8 is `main`'s own and it is ATTRIBUTED PER
+#: FILE rather than inferred from the delta: `main` changed 13 `.py` files between `2c0d66e2ec` and
+#: `69908d006b` (`#13094`'s GraphEvent home), both sides of each were walked with the tool's own
+#: `edits_for`, and exactly three of them carry residue — `tools/graphevent_home.py` +3,
+#: `docs/evidence/13094-graphevent/measure_graphevent_residency.py` +4 and
+#: `tests/test_13094_graphevent_home.py` +1; every other changed file contributes 0 in both
+#: directions. This branch's own files are untouched by that merge, so `11848 + 8 = 11856` is a
+#: CROSS-CHECK of the measurement, never its evidence. ⛔ The COUNT alone cannot carry this pin: the
+#: concurrent-lane merge above matched the incoming COUNT (11848) while its DIGEST differed, which is
+#: precisely the two-rows-moved-in-opposite-directions case the digest exists to catch.
+SWEEP_RESIDUE = (11856, "e9249c5490bc38d7")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

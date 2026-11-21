@@ -270,6 +270,16 @@ def test_e2e6_server_mode_fts_text_disambiguation(tmp_path):
                 g.query(probe)
                 unsupported = None
                 break
+            # #14125 class 2: a PROGRAMMING error here is not "this engine cannot
+            # hold a fulltext index" — it is a moved door or a changed call shape,
+            # and swallowing it turns it into a SKIP whose reason names an engine
+            # limitation that does not exist. That is the class-2 false PASS, and
+            # this block was ungraded until the census learned to look inside a test
+            # body (review P1). A real refusal arrives as
+            # `redis.exceptions.ResponseError` — a RedisError, NOT a TypeError — so
+            # the broad arm below stays and the legitimate skip is untouched.
+            except (AttributeError, NameError, TypeError):
+                raise
             except Exception as e:
                 if "already" in str(e).lower():
                     unsupported = None
