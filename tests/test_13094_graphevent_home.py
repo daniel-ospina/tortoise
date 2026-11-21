@@ -612,10 +612,12 @@ def test_a_duplicate_seq_at_a_page_boundary_is_not_dropped():
     with distinct payloads the OLD key — the one without `event_id` — also keeps
     all three rows, so reverting `event_id` out of the key reddened NOTHING. Two
     rows sharing `(seq, type, payload)` with distinct `event_id`s are the
-    multiset members a payload-keyed dedupe merges, and merging them undercounts
-    the graph side: the read then yields 2 rows against a total of 3, which the
-    completeness count turns into a refusal. The assertion below is on all three
-    surviving, so the revert reds here.
+    multiset members a payload-keyed dedupe merges. Under the old key that merge
+    happens at the PAGE BOUNDARY: the second page's only row is already `seen`,
+    so `added` stays 0 and the `added == 0` arm of `_graph_rows` refuses
+    (`this page added no new row`) rather than returning 2 rows against a total
+    of 3 — a short read is refused, never reported. The assertion below is on all
+    three surviving, so the revert reds here.
     """
     module = _tool()
     rows = [
