@@ -280,8 +280,12 @@ def test_the_control_plane_read_uses_the_SAME_filters_the_ownership_check_does()
     # anchor for the same reason: `"graphs"` → `"graph"` in BOTH readers leaves
     # the equality above green, so only a literal catches that joint edit.
     assert ownership["table"] == "graphs"
-    # `select` is deliberately NOT pinned equal: the ownership read also fetches
-    # `id` (it needs the row's identity), the declaration needs only the name.
+    # `select` is deliberately NOT pinned equal — but NOT for the reason an earlier draft gave
+    # ("the declaration needs only the name"): measured, BOTH readers select exactly
+    # `["id", "namespace"]` (`tortoise/cache_graph.py` and `tortoise/hosted_api.py`), so asserting a
+    # difference would be asserting something false. It is left out of the claim because the
+    # PROJECTION is not what this row is about: the FILTERS decide which row is read, and `namespace`
+    # is the column the declaration actually consumes — which is what is pinned here.
     assert "namespace" in declaration["select"]
 
 

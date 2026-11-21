@@ -292,15 +292,78 @@ def test_the_source_fold_asks_the_gate(proj, monkeypatch):
         assert _prop(proj.g, f"(n:Source {{url:'{url}'}})", "title") == tag
 
 
+# ── 3b. `:Point` — the fold the writer REGISTER cannot see (#13971) ─────
+
+
+def test_the_point_journal_fold_deliberately_keeps_the_mirror(proj, monkeypatch):
+    """`:Point`'s four declared writers: two ask the gate, two deliberately must not — and
+    the journal fold does not ask either, on purpose.
+
+    ⛔ THIS TEST PINS AN EXCEPTION, and the exception is a RECORDED DECISION rather than a
+    gap. `_upsert_point_props` is the journal fold: its vector is the JOURNAL's own record
+    truth (`#5004`), so it must restore what the journal holds or `derived == replay(journal)`
+    goes false the moment the record is the only copy. Two shipped pins state the product
+    decision, and BOTH fail if this fold starts asking:
+
+      * `record_vector.MIRROR_RETIRED_LABELS` must NOT contain `point`
+        (`test_13610_graph_vector_copy.py::
+        test_a_verified_label_whose_fold_still_writes_the_graph_keeps_the_fallback`), so the
+        dense leg keeps a named fallback on `point`, the primary retrieval label; and
+      * that set must equal the labels the folds stop writing — a fold that asked would
+        break the equality from the other side.
+
+    So the graph copy of `:Point` is retired by the STRIP plus the two writers that place a
+    redundant copy (the SDK update door and `hosted_backup.restore_graph`), and the
+    consequence is stated rather than hidden: a `rebuild_all` re-materialises the journal's
+    vectors, so the strip is an operator action to re-run after a rebuild.
+    `tools/strip_graph_entity_vectors.py` names that consequence in its own output and
+    leaves `:Point` out of `FOLD_WRITERS`. ⛔ AND TWO MORE `:Point` WRITERS DELIBERATELY DO
+    NOT ASK (`#13971` review, P1): `sdk::_write_capture_turns` (the graph batch runs exactly
+    where the record cannot hold the turn, so the copy there is the SOLE store) and
+    `projection::_rebuild_all_replay` (pass-1b restores a snapshot vector only for ids the
+    journal wrote none for). The census therefore REFUSES `:Point`, naming both once the
+    coverage verdict verifies (today the coverage arm answers first and names the two
+    counts) — the
+    strip stays unavailable until the capture path can answer per-turn, which is cheaper
+    than a capture that writes a turn's vector to neither store.
+    """
+    from tortoise import embeddings
+
+    encoded: list[str] = []
+    monkeypatch.setattr(embeddings, "encode_for_row",
+                        lambda text, dim, **kw: (encoded.append(text), VEC)[1],
+                        raising=True)
+
+    # (a) the JOURNAL RESTORE arm — reached by a live create and by a replay. The vector
+    # survives on BOTH gate answers: this fold does not consult it.
+    for flag, pid in ((True, "pt-13826-keep"), (False, "pt-13826-journalled")):
+        _gate(monkeypatch, flag)
+        proj._upsert_point_props({"id": pid, "content": "a claim",
+                                  "embedding": list(VEC)})
+        assert _prop(proj.g, f"(n:Point {{id:'{pid}'}})", "embedding") is not None, (
+            f"the journal fold dropped the journal's own vector (gate={flag}) — "
+            "`derived == replay(journal)` is now false")
+
+    # (b) the RECOMPUTE arm — a pre-`#5004` journal record carries no vector, so the fold
+    # encodes one. It also runs regardless of the gate, for the same reason.
+    encoded.clear()
+    _gate(monkeypatch, False)
+    proj._upsert_point_props({"id": "pt-13826-recompute",
+                              "content": "no journalled vector"})
+    assert _prop(proj.g, "(n:Point {id:'pt-13826-recompute'})",
+                 "embedding") is not None
+    assert encoded, "the recompute arm did not encode at all"
+
+
 # ── 4. `sdk::_update_entity` — the caller-prop door, per label ──────────
 
 
 def test_update_entity_asks_the_gate_per_label(sdk, monkeypatch):
     """The door reaches FIVE labels, so `embedding` is gated against the label it is on.
 
-    ⛔ The `:Point` arm is NOT gated (a Point's vector is record TRUTH, `#5004`), which is
-    the reason this is a per-label ask rather than one answer for the whole method.
-    ⛔ EVERY ARM BELOW IS PER-LABEL (#13828 review, P2): one answer for all five is
+    ⛔ THE `:Point` ARM IS GATED SINCE `#13971`, ON BOTH OF ITS TYPES, and this is the
+    reason the ask is per-label rather than one answer for the whole method. ⛔ EVERY ARM
+    BELOW IS PER-LABEL (#13828 review, P2): one answer for all five is
     satisfied by a single hoisted boolean, by any permutation of the asks, and by a pop
     taken on the dict the five labels share — all three measured green before this arm
     used `_gate_map`. The `object`-KEEP arm is the one that catches the shared-dict pop:
@@ -371,12 +434,36 @@ def test_update_entity_asks_the_gate_per_label(sdk, monkeypatch):
         "an `:Event` write lost its vector on its OWN label's KEEP answer — the ask is "
         "per label, not per method")
 
-    # …and a `:Point` is untouched in either direction (record truth, never derived).
+    # …and a `:Point` asks BOTH of its types (#13971) — the `:Source` rule, one label over.
+    # ⛔ THIS ARM ASSERTED THE OPPOSITE BEFORE `#13971`, and the reversal is deliberate: the
+    # graph copy was left ungated while coverage for `point`/`operator` was unproven and
+    # every writer mirrored it unconditionally. `#13330` retired the in-graph `:Point`
+    # index (so nothing READS the property) and `#13971` gated the writers on the same
+    # measured predicate, so `#5004`'s "a Point vector is RECORD TRUTH" is now the reason
+    # the RECORD holds it — never a reason to re-write the mirror after a strip.
     g.query("CREATE (p:Point {id: 'pt-13826', content: 'a claim'})")
-    _gate(monkeypatch, False)
+    _gate_map(monkeypatch, {"point"})
     sdk.update_knowledge("pt-13826", embedding=list(VEC))
     assert _prop(g, "(n:Point {id:'pt-13826'})", "embedding") is not None, (
-        "the gate was applied to a `:Point`, whose vector is record truth (#5004)")
+        "a `:Point` write was retired on ONE half's answer (`point` verified) while "
+        "`operator` was unverified — one label, two populations, the `:Source` rule")
+    # ⛔ THE DISCRIMINATING ARM (#13971 review, P3 on the first cut): the SAME question from
+    # the OTHER half. `keep={"point"}` above proves the code asks `point`; on its own it is
+    # also satisfied by a mutant that asks ONLY `point` and dropped the `operator` conjunct
+    # (`point` True -> keep), so the pair of arms is what pins the CONJUNCTION.
+    g.query("MATCH (n:Point {id:'pt-13826'}) REMOVE n.embedding")
+    _gate_map(monkeypatch, {"operator"})
+    sdk.update_knowledge("pt-13826", embedding=list(VEC))
+    assert _prop(g, "(n:Point {id:'pt-13826'})", "embedding") is not None, (
+        "a `:Point` write was retired with `operator` KEEPING — the ask is not `point` "
+        "alone, exactly as for `:Source`'s two halves")
+    g.query("MATCH (n:Point {id:'pt-13826'}) REMOVE n.embedding")
+    _gate_map(monkeypatch, set())
+    sdk.update_knowledge("pt-13826", embedding=list(VEC))
+    assert _prop(g, "(n:Point {id:'pt-13826'})", "embedding") is None, (
+        "a `:Point` write kept the graph vector with BOTH halves answering stop")
+    assert _prop(g, "(n:Point {id:'pt-13826'})", "content") == "a claim", (
+        "the ROW write did not land on the stop arm")
 
 
 def test_update_entity_journals_the_gated_state(sdk, monkeypatch):
@@ -528,7 +615,14 @@ def test_the_embedding_repair_asks_the_gate(sdk, monkeypatch):
 
 
 def test_ingest_corpus_asks_the_gate(sdk, monkeypatch, tmp_path):
-    """The frozen legacy branch is a declared `:Event` writer, so it asks too."""
+    """The frozen legacy branch is a declared `:Event` writer, so it asks too.
+
+    The public spelling `TortoiseSDK.ingest_corpus` was retired by `#4282` (owner ruling
+    `#3836` (c)), and this branch's base already carries the private spelling; the pin is
+    stated here because the writer that asks is `_ingest_corpus`, which is also the key
+    `tortoise.embed_writer_register` declares. A test that cannot reach its subject is a
+    red gate, not a passing one.
+    """
     _stub_session_metadata(monkeypatch)
     calls = _count_session_embedding(monkeypatch)
     corpus = tmp_path / "corpus-13826"
@@ -827,21 +921,55 @@ def test_restore_graph_retires_only_when_every_gated_label_stops(proj, monkeypat
         f"the reported labels must be the gated ones the node carries: {result}")
 
     # ── arm 3: a NON-gated label is never retired, and never reported ────────
-    # ⛔ ARM 3 USED TO ASSERT THE DROP HERE and was wrong (#13854 review, P1): `:Point`'s
-    # vector is RECORD TRUTH (#5004) and no gate answers for it, so a `:Point:Object` node's
-    # `embedding` is the Point's — dropping it because the `object` counter stopped left the
-    # node with a vector in NEITHER store, which is the state restore exists to avoid. The
-    # shipped shape is real: `tests/test_capture_session.py` mints `:Point:Object`.
+    # ⛔ `:Point` USED TO STAND IN FOR THIS ARM and no longer can (#13971): it IS gated
+    # now, so a `:Point:Object` node's vector is decided by BOTH counters (arm 4). What
+    # this arm still needs is a label NO gate answers for — `:Session` is one — because a
+    # restored node carrying it may carry a vector that is not a mirror at all, and
+    # retiring on the gated labels' answer would drop a copy the record need not hold.
     proj.g.query("MATCH (n) DETACH DELETE n")
-    mixed = _dump({"dump_id": 1, "labels": ["Object", "Point"],
-                   "props": {"id": "obj-13826-mixed", "content": "x",
+    mixed = _dump({"dump_id": 1, "labels": ["Object", "Session"],
+                   "props": {"id": "obj-13826-mixed", "name": "mixed-13826",
                              "embedding": list(VEC)}})
     result = restore_graph(proj.g, mixed)
     assert _prop(proj.g, "(n:Object {id:'obj-13826-mixed'})", "embedding") is not None, (
-        "the restore retired the RECORD-TRUTH vector of a co-labelled `:Point` node")
+        "the restore retired the vector of a node carrying a label no gate covers")
     assert "retired_vectors" not in result, (
         "a node carrying a label no gate covers was reported as a retirement: "
         f"{result}")
+
+    # ── arm 4: `:Point` IS gated now, on BOTH its types (#13971) ────────────
+    # The shape is real (`tests/test_capture_session.py` mints `:Point:Object`), so the
+    # question `#13854` raised is not moot — it CHANGED: a Point's vector may be retired
+    # only when the `point`/`operator` counters stop as well as the Object one, and a
+    # half-verified `:Point` keeps it. The record is where a stripped vector still lives.
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    both = _dump({"dump_id": 1, "labels": ["Object", "Point"],
+                  "props": {"id": "pt-13826-co", "content": "x",
+                            "embedding": list(VEC)}})
+    _gate_map(monkeypatch, keep={"point"})
+    result = restore_graph(proj.g, both)
+    assert _prop(proj.g, "(n:Point {id:'pt-13826-co'})", "embedding") is not None, (
+        "the restore retired a `:Point` vector while `operator` was unverified")
+    assert "retired_vectors" not in result, result
+    # ⛔ THE DISCRIMINATING ARM (#13971 review, P3 on the first cut): the same question from
+    # the OTHER half, and it is what makes the pair an arm pair rather than one arm. With
+    # only `keep={"point"}`, a mutant that asks `point` ALONE and dropped the `operator`
+    # conjunct still passes (`point` True -> keep); `keep={"operator"}` is satisfied by no
+    # such mutant, because `point` answers stop.
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    _gate_map(monkeypatch, keep={"operator"})
+    result = restore_graph(proj.g, both)
+    assert _prop(proj.g, "(n:Point {id:'pt-13826-co'})", "embedding") is not None, (
+        "the restore retired a `:Point` vector while `point` answered STOP but `operator` "
+        "said keep — one label, two populations (`#13854`'s rule)")
+    assert "retired_vectors" not in result, result
+    proj.g.query("MATCH (n) DETACH DELETE n")
+    _gate_map(monkeypatch, keep={""})
+    result = restore_graph(proj.g, both)
+    assert _prop(proj.g, "(n:Point {id:'pt-13826-co'})", "embedding") is None, (
+        "both `:Point` halves said stop and the restore kept the graph vector")
+    assert result["retired_vectors"] == 1, result
+    assert result["retired_vector_labels"] == ["Object", "Point"], result
 
 
 def test_the_completeness_clause_asks_the_gate(sdk, monkeypatch, tmp_path):
