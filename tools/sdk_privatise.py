@@ -925,27 +925,35 @@ SWEEP_NAMES = 66
 #: pin exists to catch is a NEW shape, and there is none. `--check` exits 0 on this tree after the
 #: re-pin, with `typed references still pointing at a public name: 0`.
 #:
-#: RE-CUT on the #13094 round-2 branch, and THIS is the pin: `--repin` printed
-#: `(11846, "af4be7eb196a5773")` on this merged tree. ⛔ ATTRIBUTED BY A ROW-BY-ROW DIFF, not by
-#: arithmetic: `--report --base 28ca66878d… --top 5000` was run in a detached worktree at
-#: `origin/main` (`72c104bcbb`, which `--check` exits 0 on at `(11843, "6aed5368ffa10513")`) AND on
-#: this tree, both row sets sorted and diffed, and EXACTLY TWO rows differ — `g.query`
-#: 1499 → 1501 (+2) and `super().query` 68 → 69 (+1). All three are the change-feed walk's
-#: END-PROOF, which is the point of the change: the two `g.query(…)` in
+#: RE-CUT on the #13094 round-2 branch (the SECOND cut: the first was taken against
+#: `origin/main` `72c104bcbb` and printed `(11846, "af4be7eb196a5773")`), and THIS is the pin:
+#: `--repin` prints `(11843, "4f84aaf8cf662bc5")` on this merged tree. ⛔ ATTRIBUTED BY A
+#: ROW-BY-ROW DIFF, not by arithmetic: `--report --base 28ca66878d… --top 5000` was run in a
+#: detached worktree at `origin/main` (`1b0db0489408`) AND on this tree, both row sets sorted and
+#: diffed, and the row SHAPE set is identical (855 rows) with EXACTLY TWO rows differing —
+#: `g.query` 1499 → 1501 (+2) and `super().query` 68 → 69 (+1). The SAME two rows differ in both
+#: cuts, so the attribution is stable while main moves under it. All three are the change-feed
+#: walk's END-PROOF, which is the point of the change: the two `g.query(…)` in
 #: `tools/graphevent_home.py` (the NULL-`seq` count and the total count that make "reached the
 #: end" distinguishable from "the read stopped early") and the one `super().query(…)` in the
 #: `tests/test_13094_graphevent_home.py` stub that stands in for a FalkorDB connection. They are
 #: the ordinary-word receiver this counter exists to REPORT, not typed SDK call sites.
-#: `11843 + 3 = 11846` is a CROSS-CHECK of that measurement, never its evidence. `--check` exits
+#: `11840 + 3 = 11843` is a CROSS-CHECK of that measurement, never its evidence. `--check` exits
 #: 0 on this tree: `typed references still pointing at a public name: 0`.
 #:
 #: ⛔ THE BASE FIGURE IS THE BASE **TREE's** MEASUREMENT, never the `SWEEP_RESIDUE` line committed
-#: on it. Read the committed line instead of measuring and a stale pin looks like proof the pin
-#: below is off by 8 — which is exactly how #14183's round-5 review reported this pair as false
-#: while `--check` was green (#14183 review round 5, finding 2 — falsified by measurement). When
-#: main's own pin drifts, the drift belongs to main (#14180 re-pinned it there); the branch's
-#: figure stays its own `--repin` output, taken on the merged tree.
-SWEEP_RESIDUE = (11846, "af4be7eb196a5773")
+#: on it — AND AT THIS CUT THE TWO DISAGREE ON MAIN. `origin/main` `1b0db0489408` COMMITS
+#: `(11843, "6aed5368ffa10513")` while its tree MEASURES `(11840, "b7eb08ff3acdcce4")`, so
+#: `--check` exits 1 there: main's own drift (the `inst.*` rows `#14162` removed and the
+#: `terms.update` / `cur['proj'].g.query` rows it added), which belongs to main and is re-pinned
+#: there (#14180/#14170 are the same repair, twice). ⛔ NOTE THE COLLISION a reader must not fall
+#: into: main's committed COUNT is 11843 — the same count this pin carries — while its DIGEST is
+#: a different tree's. Read that committed line as the base and this pin looks off by 3, or worse,
+#: looks confirmed. ⛔ AND THE SAME TRAP IS WHY #14183'S ROUND-5 REVIEW CALLED THIS PAIR FALSE
+#: while `--check` was green: the base before it committed 11835 and measured 11843 — off by 8
+#: (#14183 review round 5, finding 2, falsified by measurement). The branch's figure stays its
+#: own `--repin` output, taken on the merged tree.
+SWEEP_RESIDUE = (11843, "4f84aaf8cf662bc5")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
