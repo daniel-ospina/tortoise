@@ -2272,6 +2272,13 @@ def test_the_green_line_echoes_the_waiver_reason(
     assert rc == 0, out
     assert "waived: module:tortoise.gone" in out, out
     assert "reason: deliberate: measured no callers" in out, out
+    # ⛔ THE POSITIVE SIDE OF THE GREEN LINE (review note of PR #14039, "no red"): every row
+    # over this string asserted its ABSENCE (`test_the_shrink_arm_is_OFF_unless_a_base_ref_is
+    # _given` checks `check()`, not `main()`'s print), so deleting the `shrink = f" Shrink
+    # checked against {label}"` assignment kept the suite green and made a green shrink pass
+    # read identically to a run where the arm silently did nothing. Assert the RESOLVED label,
+    # not just the prefix — `resolve_base` is the one definition of what was compared.
+    assert "Shrink checked against HEAD~1 (merge base " in out, out
 
 
 def test_a_waiver_must_name_a_real_kind_and_symbol(tree: Path) -> None:
