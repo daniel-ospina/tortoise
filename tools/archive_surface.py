@@ -1819,11 +1819,17 @@ def shrink_violations(
                         # ONE RUN after printing "THE RECORD FROZE A STUB" — two contradicting
                         # statements about the same entry, the false one pointing away from the
                         # only route that clears it.
+                        # ⛔ AND NAME A SOURCE THAT EXISTS (review F1 of round 19). This branch is
+                        # reached on a base carrying ONLY `tortoise/<x>.pyi` — `_modules_with_a_body`
+                        # admits a `.pyi` module (it filters only `__init__.py`), so membership here
+                        # does NOT mean the base holds the `.py`. An earlier round cleared this site
+                        # on the opposite assumption; it was wrong, so both copies now say "a commit
+                        # that still holds it".
                         why = (
                             f"{base_label} carries `{symbol}` ({kind}) and this tree does not "
                             "— but the `module` entry you also passed FROZE ONLY A STUB, so it "
-                            "is not a record: restore the source from the base, archive it, and "
-                            "delete it again"
+                            "is not a record: restore the source from a commit that still holds "
+                            "it, archive it, and delete it again"
                         )
                     else:
                         why = (
