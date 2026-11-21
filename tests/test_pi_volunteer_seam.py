@@ -62,11 +62,23 @@ VOLUNTEER_TEST = HOOKS / "tortoise-volunteer.test.ts"
 
 _PY = sys.executable
 
-#: The same seeded graph `tests/test_platform_seams.py` uses: the reflex only
+#: SAME SEEDED GRAPH as `tests/test_platform_seams.py` — the reflex only
 #: surfaces EP-MEASURED points (a neutral Beta(1,1) prior sits below the 0.7
 #: gate), so the evidence→claim IMPL edge and the posteriors are wired
 #: directly. Copied deliberately rather than imported — a shared fixture would
 #: make one file's seeding change silently re-baseline the other's assertions.
+#: ⛔ SAME GRAPH, NOT THE SAME DOORS (measured; they have diverged):
+#: `test_platform_seams.py` still seeds through the PRIVATE `sdk._create_point`
+#: / `sdk._create_operator`, because #12901's final batch privatised those and
+#: its seed is written against the surviving internal defs. THIS file seeds
+#: through the CONSOLIDATED public doors `create_entity(type="point",
+#: props=…)` / `link_entities(…, operator=True)` — the approved replacement
+#: `tortoise/sdk_retired.py` records for the names #13899 retired. The two are
+#: therefore not interchangeable: `create_entity` forces
+#: `props.setdefault("dedup", True)` (`sdk.py` `_absorbed_point_write`),
+#: whereas `_create_point` leaves dedup unset, i.e. False. Harmless TODAY
+#: because the two points here have distinct contents, but a reader must not
+#: assume a later edit can be copied across the two seeds unchanged.
 _SEED = """
 import os
 from tortoise.sdk import TortoiseSDK
