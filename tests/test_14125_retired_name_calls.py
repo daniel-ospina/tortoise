@@ -976,34 +976,83 @@ def _module_scope_bindings(tree: ast.Module) -> set[str]:
             continue
         if isinstance(node, ast.Lambda):
             continue
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            # A comprehension has its OWN scope in Python 3, so its targets do NOT
+            # bind in the enclosing one: `_ = [torch for torch in range(3)]` leaves an
+            # outer `torch` intact (verified). Descending it here made that line cancel
+            # the exemption for a module-level `torch.query` probe — a false red
+            # (review of #14160, P1).
+            continue
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
             out.add(node.id)
         stack.extend(ast.iter_child_nodes(node))
     return out
 
 
-def _probe_scope_bindings(tree: ast.Module) -> set[str]:
-    """Bindings that can actually REACH a probe: module scope, plus the parameters of a
-    function that CONTAINS a handler-bearing `try`.
+def _is_probe_container(try_node: ast.Try) -> bool:
+    """Whether a handler-bearing `try` is a CANDIDATE probe (the shapes the census grades).
 
-    ⛔ THE SCOPE IS THE POINT (two fresh reviewers, P2). Subtracting every binding
-    construct ANYWHERE made an unrelated `def _helper(torch)` parameter or a `for torch
-    in …` in some other function cancel the exemption for a legitimate module-level
-    third-party probe, turning it into a graded ROOT — a false red of exactly the class
-    the `4k-`/`4l-` guards exist to prevent. Measured on the scope-blind version:
-    `((6, (), True, False, True),)`; scoped: `()`. A parameter only shadows the import
-    inside ITS function, so only a function that holds a probe try contributes one —
-    and a rebinding inside the probe block itself is caught by `_rebinds_within`.
+    Used to decide which functions' bindings can reach a probe. This must NOT be
+    "contains a call": an unrelated `try: int('x') / except ValueError: pass` in a helper
+    then made that helper's import-named PARAMETER cancel the exemption for a legitimate
+    module-level probe — the same false red from the other side (review of #14160, P1).
+    The test is the census's own subject matter: the block decides availability, imports
+    own code, or calls a capability door by name/attribute.
+    """
+    if not try_node.handlers:
+        return False
+    if _assigns_availability(try_node) or _imports_own_code(try_node):
+        return True
+    for node in ast.walk(try_node):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr in _CAPABILITY_CALLS:
+            return True
+        if isinstance(func, ast.Name) and func.id in _CAPABILITY_NAMES:
+            return True
+    return False
+
+
+def _probe_scope_bindings(tree: ast.Module) -> set[str]:
+    """Bindings that can actually REACH a probe: module scope, plus — for a function that
+    HOLDS a probe — its parameters and its locals.
+
+    ⛔ THE SCOPE IS THE POINT (three findings of the #14160 reviews, two of them mine).
+    Subtracting every binding construct ANYWHERE made an unrelated `def _helper(torch)`
+    parameter (or a `for torch in …` in some other function) cancel the exemption for a
+    legitimate module-level third-party probe, turning it into a graded ROOT — a false
+    red of exactly the class the `4k-`/`4l-` guards exist to prevent. Measured on the
+    scope-blind version `((6, (), True, False, True),)`; here `()`.
+    But scoping it to PARAMETERS ALONE under-corrected: a probe-holding function's LOCAL
+    bound before the block (`torch = _make_client()`) was subtracted by neither this nor
+    `_rebinds_within`, so the exemption survived over OUR client. A local of the function
+    that holds the probe can always reach the block, so this now subtracts the whole
+    function's locals — and ONLY for a function that actually holds a probe, because
+    gating on "any handler-bearing try" over-corrected in the other direction (an
+    unrelated `try: int('x')` made an import-named parameter cancel the exemption).
     """
     out = _module_scope_bindings(tree)
+    resolvers = _resolver_functions(tree)
+    skip_gated = _skip_gating_functions(tree)
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        if not any(isinstance(sub, ast.Try) and sub.handlers for sub in ast.walk(node)):
+        holds_probe = node.name in resolvers or node.name in skip_gated
+        if not holds_probe:
+            holds_probe = any(
+                isinstance(sub, ast.Try) and _is_probe_container(sub) for sub in ast.walk(node)
+            )
+        if not holds_probe:
             continue
         args = node.args
         out |= {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
         out |= {a.arg for a in (args.vararg, args.kwarg) if a is not None}
+        out |= {
+            sub.id
+            for sub in ast.walk(node)
+            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store)
+        }
     return out
 
 
@@ -2650,6 +2699,62 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             "where the probe calls `.query` on OUR client, so leaving it exempt is the "
             f"silent drop 4j-ter pins, one construct family over: {_rebound_row}"
         )
+
+    # 4j-quinquies. THE SCOPING IS ITSELF WITNESSED. `_probe_scope_bindings` exists so a
+    #     binding that cannot REACH the probe does not cancel the exemption — and a
+    #     REVERTED (scope-blind) implementation left all eight tests green, i.e. the fix
+    #     for an unwitnessed rule was itself unwitnessed (review of #14160, P1). These are
+    #     the negative controls: the same probe, with the shadowing binding somewhere that
+    #     cannot reach it, must stay EXEMPT (`()`), or a legitimate optional-extra guard is
+    #     graded as a ROOT (the false red 4k-/4l- forbid).
+    _scope_control_prelude = "import torch\n\n"
+    _scope_control_guard = textwrap.dedent(
+        """
+        TORCH_AVAILABLE = False
+        try:
+            torch.query("SELECT 1")
+            TORCH_AVAILABLE = True
+        except Exception:
+            TORCH_AVAILABLE = False
+        """
+    )
+    for _label, _unrelated in {
+        "a parameter of an unrelated helper": "def _helper(torch):\n    return torch",
+        "an unrelated loop target": "def _helper():\n    for torch in range(3):\n        pass",
+        # a comprehension has its OWN scope in Python 3, so its target does not bind here
+        "a module-level comprehension target": "_ = [torch for torch in range(3)]",
+    }.items():
+        _scope_row = roots(_scope_control_prelude + _unrelated + "\n\n" + _scope_control_guard)
+        assert _scope_row == (), (
+            f"{_label} cannot reach this probe, so it must NOT cancel the third-party "
+            "exemption — a scope-blind subtraction grades a legitimate optional-extra "
+            f"guard as a ROOT, which is the false red 4k-/4l- forbid: {_scope_row}"
+        )
+
+    # 4j-sexies. The OTHER direction: a LOCAL of the function that HOLDS the probe CAN
+    #     reach it, so it must be graded. `_probe_scope_bindings` under-corrected here —
+    #     the local was subtracted by neither the scope set nor `_rebinds_within`, so the
+    #     exemption survived over OUR client (review of #14160, P1-2).
+    _local_shadowing_the_import = textwrap.dedent(
+        """
+        import torch
+
+        def _probe():
+            torch = _make_client()
+            try:
+                torch.query("SELECT 1")
+                return True
+            except Exception:
+                return False
+
+        TORCH_AVAILABLE = _probe()
+        """
+    )
+    assert roots(_local_shadowing_the_import) != (), (
+        "a LOCAL of the probe-holding function can reach the block, so it rebinds the "
+        "non-own import and the guard must be graded — exempting it leaves a swallowed "
+        f"rename reading as 'capability unavailable': {roots(_local_shadowing_the_import)}"
+    )
 
     # 4m. THE GAP THIS SLOT PINNED AS ACCEPTED IS CLOSED BY RULE (review of
     #     90a0e9e8b20c, P2), so the `()` pin that stood here is DELETED — its own text
