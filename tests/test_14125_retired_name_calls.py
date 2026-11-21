@@ -274,12 +274,18 @@ def test_the_sweep_is_not_vacuous():
 # over a broken tree.
 _RAISED = frozenset({"AttributeError", "NameError", "TypeError", "ImportError"})
 
-# The import-seam rule is scoped to the repo's OWN code. An own-code module that
-# is moved is a defect and must fail loudly; a third-party module inside a probe
-# may be an OPTIONAL extra (this repo ships `embeddings` / `parity` extras and a
-# documented keyword-only install), and for those a SKIP is the correct outcome —
-# demanding a re-raise there would turn a legitimate skip into a collection error
-# and contradict the recorded rule that an absent capability skips.
+# The import-seam rule is scoped to imports that are IMPORT-TIME-SAFE WITHOUT
+# EXTRAS — in practice the repo's own code, `tortoise.*` / `tests.*` / `tools.*`.
+# An own-code module that is moved is a defect and must fail loudly; a module
+# behind an OPTIONAL extra must keep its skip, and "own code" does NOT imply that:
+# `tortoise/embeddings.py` does `import numpy as np` at module scope and numpy ships
+# only in the `embeddings` extra, which is why
+# `tests/test_rebuild_graph_only_derived_parity.py` wraps `from tortoise.embeddings`
+# in a broad `try` with a deliberate fallback. Demanding a re-raise there would turn
+# a legitimate skip into a collection error and contradict the recorded rule that
+# an absent capability skips. (That block binds no skip gate and imports no own code
+# inside its `try`, so it is not graded today — but it is the shape a future
+# widening must not charge.)
 _OWN_CODE_ROOTS = frozenset({"tortoise", "tests", "tools"})
 
 
