@@ -258,6 +258,26 @@ def test_greeting_falls_back_rather_than_reading_hi_comma():
         assert cn.render(80, empty).text.startswith("Hi there,\n")
 
 
+def test_the_greeting_constant_is_what_both_renderings_emit():
+    """`GREETING` is a fix only while something RENDERS it.
+
+    MEASURED at `5a8c7edda0c` (#14038 review round 4): putting both render
+    sites back to the literal `Hi {name},` — the exact "a greeting constant
+    nothing rendered" state the P2 named — left the whole file green
+    (103 passed). The constant's value equals the old literal, so the goldens
+    cannot see the difference, and the fallback row uses `Hi there`. Rebinding
+    the constant is therefore the only mutation that reaches it.
+    """
+    original = cn.GREETING
+    try:
+        cn.GREETING = "Howdy {name},"
+        copy = cn.render(80, "Dana")
+    finally:
+        cn.GREETING = original
+    assert copy.text.startswith("Howdy Dana,\n"), copy.text[:40]
+    assert "Howdy Dana," in copy.html, copy.html[:200]
+
+
 # ── 2. The vocabulary guard ─────────────────────────────────────────────────
 
 @pytest.mark.parametrize("threshold", cn.THRESHOLDS)
