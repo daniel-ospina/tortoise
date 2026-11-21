@@ -53,7 +53,7 @@ two whole-graph export scans, which carry the label without naming it.
 | 12 | `_refresh_first_seq` | `event_store.py:1104` | aggregate `min` inside an RMW on the **sibling** label | maintenance |
 | 13 | `webhook_delivery._head_seq` fallback | `webhook_delivery.py:1049` | aggregate `max` | maintenance |
 | 14 | backup footprint | `hosted_backup.py:892` | aggregate `max, min` | maintenance |
-| 15 | whole-graph export (dump side) | `hosted_backup.py:1333` | a label-agnostic dump | maintenance |
+| 15 | whole-graph scan (restore's dirty-target pre-check) | `hosted_backup.py:1333` | a label-agnostic read of the target graph | maintenance |
 | 16 | whole-graph export (restore-side scan) | `hosted_backup.py:1534` | a label-agnostic dump | maintenance |
 
 ⚠️ **The line addresses in `#13083` §2.6 for rows 15–16 are stale at this head**: the census cites
@@ -73,10 +73,12 @@ The **serving** row is exactly one statement, so a re-home re-points one read an
   a re-indent is not a false red while a reword is a real one), and `min_occurrences` is asserted where
   one file holds the same statement twice. ⛔ **Where that is a proof and where it is not**: the
   `event_store.py` dedupe pair is the ONLY two occurrences of its text in that file, so deleting one reds
-  the census; the two export scans are byte-identical to two OTHER occurrences in `hosted_backup.py`
-  (four in total), so there `min_occurrences: 2` proves the file still carries the statement twice and
-  **not** that both censused sites survive — the `line` is the address for those two, and the residual is
-  named on the rows.
+  the census; the two `hosted_backup.py` restore-side scans are byte-identical to two OTHER occurrences
+  in that file (four in total), so there `min_occurrences: 2` proves the file still carries the statement
+  twice and **not** that both censused sites survive — the `line` is the address for those two, and the
+  residual is named on the rows. ⚠️ Both of those rows are in `restore_graph`; **the dump side is not
+  censused at all** — the export's node reader is `_DUMP_NODE_PAGE_QUERY` (`hosted_backup.py:454`), and
+  no row carries it (`#14204`).
 * `…::test_the_census_covers_the_labels_schema_as_well_as_its_readers` — the three DDL rows exist and are
   `maintenance`; an earlier cut of this census omitted them, which is how a re-home ships a store with no
   indexes.
