@@ -991,10 +991,14 @@ def test_a_short_read_is_refused_even_when_the_pages_look_exhausted():
     """The count is what proves completeness: pages alone cannot.
 
     A `seq` stored as a STRING is the shape that breaks it — the engine orders
-    strings before numbers, so a numeric cursor matches no row and the walk ends
-    early with a page that looks like the end of the feed. The stub's `>`
-    comparison would retrieve it, so this arm drives the count guard directly by
-    making the walk's own pages stop short.
+    strings before numbers, so the page that ends the string block puts a STRING on
+    the cursor, and `seq > $after` then matches no NUMERIC row: the walk ends early
+    with a page that looks like the end of the feed (measured on the lane,
+    `v > '10'` returns nothing while `v > 5` returns the numeric rows, so it is the
+    STRING cursor that strands, never a numeric one). The stub cannot stand in for
+    that shape: `_StubGraph`'s sort key raises `TypeError` comparing `str` with
+    `int`, so a mixed-type `seq` is unrepresentable here and this arm drives the
+    count guard directly by making the walk's own pages stop short.
     """
     module = _tool()
 
