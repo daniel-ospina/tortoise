@@ -44,11 +44,19 @@ def _new_sdk():
 
 
 def _has_embedded():
+    # Own code is imported OUTSIDE the guard: a moved or renamed tortoise module
+    # must fail LOUDLY (#14114 class 2, #14125). Inside the guard, a moved seam
+    # (`TortoiseSDK` / `.close`) is re-raised as the programming error it is,
+    # while an absent embedded driver stays a genuine skip — `ImportError` is
+    # deliberately NOT re-raised, because the driver is an optional extra.
+    from tortoise.sdk import TortoiseSDK
+
     try:
-        from tortoise.sdk import TortoiseSDK
         s = TortoiseSDK(os.path.join(tempfile.mkdtemp(prefix="probe_"), "t.db"))
         s.close()
         return True
+    except (AttributeError, NameError, TypeError):
+        raise
     except Exception:
         return False
 

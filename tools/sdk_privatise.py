@@ -893,6 +893,20 @@ SWEEP_NAMES = 66
 #: accumulating by APPEND rather than `update` (#14108), a file this branch's DIFF does not touch. That the
 #: figure lands at 11845 − 1 = 11844 is a CROSS-CHECK of the measurement, not the evidence for it.
 #:
+#: RE-PINNED DOWN by #14125 → (11842, "e1caacfa6167aa7f") — the #13899-fallout sweep. The −2 is
+#: THIS LANE's own and it is the harmless direction (a residue count that FALLS cannot hide a new
+#: untyped reference), but it is named rather than absorbed:
+#:   * `create_point (unexpected span)` 2 → 0. Both rows were
+#:     `tools/measure_13436_write_costs.py`'s two arm-2 "control" shapes, which still called the
+#:     RETIRED public `sdk.create_point(…)` — the arm could not run at all, because `__getattr__`
+#:     refuses the name. Re-pointed to the private seam `sdk._create_point(…)`, matching the
+#:     `point_ns` rows beside them, which is also what removed the two rows: the attribute is no
+#:     longer in the rename map, so it is no longer counted as residue.
+#: ⛔ ATTRIBUTED BY MEASUREMENT, not arithmetic: the row multisets were derived on `origin/main`
+#: (`e0accb8fe6`, a detached worktree) and on this tree with the SAME walk, then diffed — that one
+#: row, 2 → 0, is the ONLY difference, and 11844 − 2 = 11842 is a cross-check of the measurement,
+#: never its evidence. Both moves are downward, and `typed references still pointing at a public
+#: name: 0` on this tree, so no SDK-typed reference was legitimised by the re-cut.
 #: RE-CUT DOWN (11844, "70d6cfdcd8b769e4") → (11833, "4358280454f50b14") by the SEED-SURFACE DOOR
 #: RENAME (`tortoise/onboarding/selfhost.py`, `tortoise/hosted_api.py`, `tortoise/onboarding/seed.py`,
 #: #13971): the two duck-typed seed surfaces published `create_subject`, which is a RETIRED SDK name
@@ -907,6 +921,15 @@ SWEEP_NAMES = 66
 #: (`typed references still pointing at a public name: 0`). `create_subject_anchor` is NOT a swept
 #: name, so the renamed call sites stop being residue at all — they are not "guessed at", they are
 #: simply not references to a privatised method. Re-measured with `--repin` on THIS tree.
+#: because BOTH facts are true of THIS tree: this branch's −2 (the two arm-2 `create_point` controls
+#: re-pointed at `sdk._create_point`) AND `main`'s −11 (the seed-surface door rename). ⛔ Neither
+#: block's pin is this tree's pin — each was measured on ITS OWN tree, and a merged tree is a THIRD
+#: tree — so the pair below was RE-DERIVED with `--repin` on the MERGE tree, which is the rule both
+#: blocks cite. (11842 − 11 = 11831 would be the arithmetic guess; the merged tree's `--repin`
+#: printed exactly that count — the two row sets are DISJOINT, which the arithmetic cannot know and
+#: is a cross-check of the measurement, never its evidence. The digest is the field that proves the
+#: tree: it differs from BOTH sides' digests, as a third tree's must.)
+#: `--check` exits 0 on the merged tree with `typed references still pointing at a public name: 0`.
 #: ── RE-CUT AT THE SIXTH MERGE TREE (`#13998` × `main` `e0accb8fe6`) ─────────────────────────
 #: ⛔ BOTH SIDES' RECORDS ARE KEPT VERBATIM ABOVE — every block is true of the tree it names, and a
 #: reader re-deriving this pin needs the whole chain. There is exactly ONE assignment after them, and
@@ -922,7 +945,17 @@ SWEEP_NAMES = 66
 #: at a public name: 0`. ⛔ NO ROW IS ATTRIBUTED BY THE DIRECTION OF THE DELTA: a re-pin absorbs
 #: whatever shape the tree holds in EITHER direction (#14003 review, round 3, P3 / #14030), so the
 #: count is read from `--report` against `SWEEP_BASE`, not inferred from the difference.
-SWEEP_RESIDUE = (11842, '8978dc5cca557200')
+#: ── RE-CUT AT THE SEVENTH MERGE TREE (`#13998` × `main` `05d218fcaf`) ──────────────
+#: ⛔ BOTH SIDES' RECORDS ARE KEPT VERBATIM ABOVE — each is true of the tree it names, and a merged
+#: tree is a THIRD tree, so this pair is RE-DERIVED with `--repin` on the merge tree, never combined
+#: from either parent's: it prints **(11840, '49b8ac930529bbf6')** — neither 11842 (this branch's
+#: sixth tree) nor 11831 (`main`'s own merge tree), and its digest equals neither side's, which is
+#: the field that proves a third tree. ⛔ NO ROW-BY-ROW ATTRIBUTION IS TYPED HERE: the difference
+#: against `main` was not diffed row for row for THIS merge, so the two numbers above are stated as
+#: what they are — two other trees' pins — and not as a decomposition of this one.
+#: `--check` on this tree: exit 0, `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11840, '49b8ac930529bbf6')
+
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
