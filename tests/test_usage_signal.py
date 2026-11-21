@@ -160,7 +160,7 @@ import functools
 import json
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -1294,6 +1294,22 @@ def test_no_graph_dependency() -> None:
         "ban set minus the probe exemptions, or the transitive leg certifies "
         "coverage it does not deliver")
 
+    def _matching(modules: Iterable[str]) -> set[str]:
+        """The ONE matcher: every module name that IS a banned root or is under one.
+
+        ⛔ IT LIVES HERE, IN THE AUDITED FILE, and `_probe` calls it on what the
+        child printed. That is what makes the predicate assertable at all (below):
+        a matcher inside the child could only be graded through a RECORD of what it
+        did, and every record-based cut on this PR was a round away from a green
+        narrowing.
+        """
+        forbidden = _probe_forbidden()
+        return {
+            name
+            for name in modules
+            if any(name == root or name.startswith(root + ".") for root in forbidden)
+        }
+
     def _probe(import_stmt: str) -> set[str]:
         """The banned roots present in `sys.modules` after `import_stmt`, in a CLEAN
         interpreter.
@@ -1350,18 +1366,19 @@ def test_no_graph_dependency() -> None:
         roots as leaked. `rstrip("\n")` is kept because it is exactly what the
         output format needs, without claiming a failure this code no longer has.
 
-        ⚠️ WHAT THIS STILL CANNOT WITNESS, stated instead of implied: **k controls
-        pin k roots, never the predicate.** A narrowing of the matcher below that
-        keeps the roots the assertions name is not detectable by any assert in this
-        file — measured, a matcher restricted to `('redis', 'tortoise.ep',
-        'tortoise.session_indexer')` is **102 passed**. What changed is that the
-        narrowing is now a one-place edit to the audited matcher instead of a
-        two-hop arrangement where a narrowed child and a fabricated record could
-        BOTH be green by construction. Three distinct roots (`redis` dotless,
-        `tortoise.ep` dotted, `tortoise.session_indexer` dotted) are asserted
-        behaviourally below, which is the strongest evidence a test of a predicate
-        can offer: not that the predicate is whole, but that three different roots
-        it should reach are still found.
+        ⚠️ WHAT THIS STILL CANNOT WITNESS, stated instead of implied. The matcher is
+        now IN THIS FILE, so it is asserted DIRECTLY: `_matching` is run over a
+        one-name input for EVERY root in `_probe_forbidden()` — once as the exact
+        name, once as `<root>.probe_child` — so a matcher restricted to any subset of
+        the derivation (including `('redis','tortoise.ep',
+        'tortoise.session_indexer')`, which measured **102 passed** at
+        `9bc39f9dd4` and is **1 failed / 101** here) reds on every root it dropped.
+        What remains outside any assert is a matcher that SPECIAL-CASES its input
+        shape — behaving differently for the single names the assertions pass than
+        for a real `sys.modules` listing — or one that predicts this test's own
+        expectations. That is a rewrite of the SUBJECT, not a narrowing of it, and it
+        is the structural reason this arrangement is worth preferring to a two-hop
+        one where a narrowed child and a fabricated record could BOTH be green.
         """
         # ⚠️ THE PREFIX CLAUSE `or n.startswith(r + '.')` IS DEFENSIVE ONLY, AND
         # DELIBERATELY UNPINNED — stated so it does not read as a live lever.
@@ -1387,12 +1404,7 @@ def test_no_graph_dependency() -> None:
             check=True,
         ).stdout.rstrip("\n")
         modules = [name for name in out.split(chr(31)) if name]
-        forbidden = _probe_forbidden()
-        return {
-            name
-            for name in modules
-            if any(name == root or name.startswith(root + ".") for root in forbidden)
-        }
+        return _matching(modules)
 
     # ⛔ AND THIS LEG NEEDS POSITIVE CONTROLS, not only the negative assertion.
     # Everything above asserts the probe finds NOTHING, so every way of breaking the
@@ -1447,6 +1459,34 @@ def test_no_graph_dependency() -> None:
         "`_probe_forbidden()` before hunting the matcher — "
         f"'tortoise.session_indexer' in _probe_forbidden() = "
         f"{'tortoise.session_indexer' in _probe_forbidden()}")
+    # ⛔ AND EVERY ROOT IS WITNESSED AGAINST BOTH CLAUSES, so what the matcher must
+    # keep is the DERIVATION, not a list of names a narrowing can satisfy. The
+    # matcher is in this file now, so it can be run over a one-name input directly:
+    # the exact clause per root, then the submodule clause per root. A narrowing to
+    # any subset — by iterable, by predicate, by a `continue` after a recording
+    # append, or by "keep the named controls" — reds on the roots it drops. Measured
+    # at `9bc39f9dd4`: that last shape was **102 passed**; here it is **1 failed /
+    # 101**, and so is every other subset.
+    for _root in _probe_forbidden():
+        assert _matching([_root]) == {_root}, (
+            f"the matcher does not report {_root!r}, which IS a banned root in "
+            "`_probe_forbidden()` and is present in the input — a matcher narrowed to "
+            "some subset of the derivation reds here, on each root it dropped "
+            "(#14118 item 1)")
+        assert _matching([_root + ".probe_child"]) == {_root + ".probe_child"}, (
+            f"the matcher does not report {_root + '.probe_child'!r}, a submodule of "
+            f"the banned root {_root!r} — the submodule clause "
+            "(`n.startswith(r + '.')`) is load-bearing for a name injected behind "
+            "the importer's back, and this row pins it for EVERY root, not for the "
+            "one or two a named control happens to use")
+    # AND the clause's BOUNDARY, both directions: a name that merely CONTAINS a root
+    # is not under it, and an empty input finds nothing. Without this, `startswith`
+    # could be widened to a substring test and every row above would stay green.
+    assert _matching(["redis_probe", "tortoise_ep", "notfalkordb"]) == set(), (
+        "the matcher must not treat a name that merely CONTAINS a banned root as "
+        "being under it — `redis_probe` is not `redis.*`, and matching it would make "
+        "the leg fail closed on unrelated modules")
+    assert _matching([]) == set(), "the matcher must find nothing in an empty input"
     leaked = _probe("from tortoise import usage_signal")
     assert leaked == set(), (
         f"importing usage_signal pulled a graph client into sys.modules: "
