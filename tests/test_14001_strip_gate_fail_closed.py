@@ -578,14 +578,13 @@ DEFEATED_RESOLVER_ROWS = (
     # CATCH anything is the opposite of what this comment first said: `gk` IS an ordinary assignment
     # target (`gk = "x"`), so the static value map knows `props[gk]` is the non-property `"x"` and
     # CERTIFIES the writer, and the own-scope dynamic-namespace arm then poisons the scope's `global`
-    # declarations (`poisoned |= _scope_declarations`). ⛔ AT THIS HEAD THE MENTION RULE IS WHAT
-    # REFUSES THIS ROW, not that arm (`#14001`, measured by the review of this branch and
-    # WITH DISARMING IT IS THE MENTION RULE THAT REFUSES THIS ROW (`#14001`, measured by the review
-    # of this branch and RE-MEASURED at this head). `globals` is named, so `_namespace_mentioned`
+    # declarations (`poisoned |= _scope_declarations`). ⛔ WITH THE ARM DISARMED IT IS THE MENTION
+    # RULE THAT REFUSES THIS ROW (`#14001`, measured by the review of this branch and RE-MEASURED
+    # at this head). `globals` is named, so `_namespace_mentioned`
     # short-circuits the scope to `{name: None …}` and the own-scope arms are never read. Disarming
     # the arm alone therefore reds NOTHING — measured, 96 passed (the file collected 93 when this
     # recipe was first written; the three tests this branch added all pass under either mutation,
-    # so the FAILED counts are unchanged and only the denominators move). Disabling the arm is therefore inert, and the
+    # so the FAILED counts are unchanged and only the denominators move). The
     # blanket `poisoned |= _scope_declarations` beside the mention was deleted as inert (a mutant
     # removing it reds no row either). The arm is a FALLBACK, and its own discriminating power is
     # only measurable with the mention RETURN disabled (`return {name: None for name in assigned}`
@@ -1485,11 +1484,10 @@ def _folding(
 
     ⛔ THE CONTROL'S *USE* OF THESE HELPERS IS PINNED TOO (`#14099`, review of `5de131e6`). The
     helpers above are measured by `test_the_environment_refusal_is_carried_not_re_synthesised`;
-    whether the CONTROL still BINDS them is measured by `test_the_control_binds_the_shared_helpers`
-    — a spy on both names, which this control reaches **15 / 232** times (measured at `89528b12`).
-    ⛔ RE-MEASURE when an arm is added: BOTH counts move with the number of folds the control makes,
-    not with the environment, so a later arm silently falsifies this sentence (it said 13 / 212
-    when the arm that closed the last P2 landed). Without that spy,
+    whether the CONTROL still BINDS them is measured by `test_the_control_binds_the_shared_helpers`,
+    which asserts the IDENTITY of the two `partial`s the control builds — ⛔ NOT a call count.
+    Counts were the previous design and they went stale TWICE (`13 / 212`, then `15 / 232`, each
+    true when measured), because every arm added to the control moves them. Without that arm,
     giving the control its own local pre-F1 fake left the whole file GREEN (95 passed, measured).
     ⛔ The paragraph here previously said a test COULD NOT catch that revert, calling it a
     reviewer's catch. That was false — a spy catches it — and the false version discouraged
@@ -1960,61 +1958,62 @@ def test_the_control_binds_the_shared_helpers(monkeypatch):
     `partial` is built, which is exactly why the patch has to be installed BEFORE the control is
     called (and why a `partial` argument can never be a late-binding global).
 
-    ⛔ AND A BARE COUNTER IS NOT ENOUGH FOR `_env_source` (`#14099`, re-measured at `89528b12`).
-    `_folding`'s inner `fake` ALSO calls the module-level `_env_source` — measured: of **232**
-    calls, **212 come from `fake`** and only 20 from the control's own `served(...)` (the `missing`
-    arm's `lambda`). Replacing the control's `served` with a BEHAVIOURALLY IDENTICAL local copy
-    therefore leaves the counter at 212 and a bare `> 0` assertion GREEN — measured at that head:
-    **96 passed, nothing red**, while the docstring this paragraph replaces claimed that revert
-    was caught. So every call is attributed to its IMMEDIATE CALLER and the control's own binding
-    must appear: `_folding` by the control's name (**15** calls, all of them), `_env_source` by a
-    caller that is NOT the fake's transitive fallback.
-    ⛔ BOTH FIGURES ARE RE-MEASURED, NEVER TRANSCRIBED: they scale with the arm count, so an arm
-    added later falsifies them silently — exactly how the previous `13 / 212` and its `192` went
-    stale. ⛔ AND A FOLD'S WALK IS NOT ONE FORMULA (`#14099`, measured at `0b21879f`): a fake that
-    refuses a NON-declared module walks `24 − <that module's keys>` = **20** (`tortoise.api`
-    carries 4), while the declared-exemption fold walks `24 − len(declared ∩ register)` = **14**
-    (`tortoise.sdk` carries 10 of the register's 24 keys). Measured here: 8 driven fakes × 14 +
-    5 × 20 = the **212** that reach `_env_source` through `fake`, and 13 of the 15 built fakes are
-    actually driven (2 are built and never called) — so `15 / 232` is a count of CALLS, not of
-    full walks. Quote the figure you MEASURED; deriving either one from a formula reproduces the
-    very staleness this paragraph warns about.
+    ⛔ A COUNT IS NOT A PIN — IDENTITY IS (`#14099`, reviews of `57e8daf`, `89528b12`, `1f82e189`).
+    Three counting predicates were each satisfiable WITHOUT the property they claimed: a bare
+    `> 0` (most `_env_source` calls arrive transitively through `_folding`'s inner fake); an
+    exclusion by that fake's NAME (one no-op rename of a nested function restored the vacuity);
+    and an exclusion by its CODE OBJECT — rename-proof, but satisfied by ANY unrelated call of a
+    spied name inside the control (measured: a local `served` copy plus one
+    `_env_source(outsider_module, …)` line, the very assertion arm (3) above carries, left the arm
+    GREEN). The counts themselves also went stale TWICE (`13 / 212`, then `15 / 232`, each true
+    when measured), because every arm added to the control moves them — and a fold's walk has TWO
+    denominators (`24 - len(declared ∩ register)` = 14 for the declared module, `24 - <that
+    module's keys>` = 20 for an outsider), so neither figure can be derived from a formula.
+    So this arm reads the CONTROL'S OWN FRAME and asserts that the two `partial`s it built there
+    have the SPY as their `.func`. ⛔ NOT a `return`: returning the wiring from a test function
+    makes pytest warn (`PytestReturnNotNoneWarning`), and a module-level side channel would
+    outlive the test. An identity cannot be supplied by an extra call, a rename, or a local copy.
     """
-    callers: dict[str, set[object]] = {"_folding": set(), "_env_source": set()}
     real_folding, real_env_source = _folding, _env_source
 
     def spy_folding(*args, **kwargs):
-        callers["_folding"].add(sys._getframe(1).f_code)
         return real_folding(*args, **kwargs)
 
     def spy_env_source(*args, **kwargs):
-        callers["_env_source"].add(sys._getframe(1).f_code)
         return real_env_source(*args, **kwargs)
 
     monkeypatch.setattr(sys.modules[__name__], "_folding", spy_folding)
     monkeypatch.setattr(sys.modules[__name__], "_env_source", spy_env_source)
 
-    test_the_over_refusal_population_is_itself_pinned(monkeypatch)
-
     control_code = test_the_over_refusal_population_is_itself_pinned.__code__
-    assert control_code in callers["_folding"], (
+    bound: dict[str, object] = {}
+
+    def tracer(frame, event, arg):
+        if frame.f_code is control_code:
+            bound["folding"] = frame.f_locals.get("folding")
+            bound["served"] = frame.f_locals.get("served")
+        return tracer
+
+    previous_trace = sys.gettrace()
+    sys.settrace(tracer)
+    try:
+        test_the_over_refusal_population_is_itself_pinned(monkeypatch)
+    finally:
+        sys.settrace(previous_trace)
+
+    # ⛔ `.func` IS THE WHOLE PIN. The control builds `partial(_folding, …)` / `partial(_env_source,
+    # …)` in its own body, so if it still delegates, the object it bound has the SPY as target.
+    # A local re-implementation has whatever function it re-implemented — never these spies — and a
+    # transitive call through `_folding`'s inner fake never becomes `folding`/`served` in the frame.
+    bound_folding = getattr(bound.get("folding"), "func", None)
+    bound_served = getattr(bound.get("served"), "func", None)
+    assert bound_folding is spy_folding, (
         "the control stopped binding the module-level `_folding`, so a pre-F1 fake can be rebuilt "
         f"locally with every helper still correct — that revert is otherwise invisible: "
-        f"{sorted(c.co_name for c in callers['_folding'])}")
-    # ⛔ THE TRANSITIVE CALL IS EXCLUDED BY CODE OBJECT, NEVER BY NAME (`#14099` review, P2).
-    # `_folding`'s inner fallback calls `_env_source` whether or not the CONTROL binds it, so its
-    # calls have to be subtracted. Subtracting the NAME (`- {"fake"}`) left the arm one no-op
-    # rename from vacuous again: renaming that nested `fake` made the SAME local-copy revert read
-    # green (measured — `2 passed`), because nothing pins a nested function's name. The code
-    # object cannot be renamed, and a same-named LOCAL function has a different one, so this both
-    # survives a refactor and still catches the revert. `__probe__` is never folded for real; the
-    # builder's shape takes (module_name, cause, sources, refusals).
-    transitive_code = _folding("__probe__", RuntimeError(), {}, {}).__code__
-    assert callers["_env_source"] - {transitive_code}, (
-        "the control stopped binding the module-level `_env_source`: every call came from "
-        "`_folding`'s own fallback, so a behaviourally identical LOCAL copy of `served` would "
-        "leave this arm green — measured: 96 passed: "
-        f"{sorted(c.co_name for c in callers['_env_source'])}")
+        f"folding={bound.get('folding')!r}")
+    assert bound_served is spy_env_source, (
+        "the control stopped binding the module-level `_env_source`, so a behaviourally identical "
+        f"LOCAL copy of `served` would go unnoticed: served={bound.get('served')!r}")
 
 
 #: ⛔ RESIDUAL — A NAME the mention rule cannot READ (`#14001`, measured by the cycle-4 review).
