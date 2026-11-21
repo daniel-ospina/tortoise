@@ -340,6 +340,13 @@ class ProjectionWorker:
         self._publish_lock = threading.Lock()
         self._publish_seq = 0
         self._published_seq = 0
+        #: ⛔ THE SNAPSHOT NUMBERS ARE PROCESS-LOCAL, SO THEY CARRY AN EPOCH
+        #: (#14222 review cycle 5, P2-1). The reset zeroes the sequence and stamps
+        #: its own snapshot, which makes the reset's number the SMALLEST — so a
+        #: snapshot captured before the reset compared as NEWER and undid the reset
+        #: by restoring the other process's gauges. Bumping the epoch on a reset
+        #: makes every pre-reset number unmatchable instead.
+        self._publish_epoch = 0
         self._pending: collections.deque[PendingProjection] = collections.deque()
         #: The item the loop is folding RIGHT NOW. It is counted as pending lag on
         #: purpose: a position being folded is still a position the record has not
@@ -562,7 +569,7 @@ class ProjectionWorker:
         """
         return self._cond_pid != os.getpid()
 
-    def _reset_for_fork_locked(self) -> tuple[int, int, int, float]:
+    def _reset_for_fork_locked(self) -> tuple[int, int, int, int, float]:
         """Replace the state another process left behind, holding the lock being replaced.
 
         Everything is per-process and everything goes:
@@ -598,6 +605,7 @@ class ProjectionWorker:
         self._failures = 0
         self._publish_seq = 0
         self._published_seq = 0
+        self._publish_epoch += 1
         return self._stamp_locked()
 
     # ── the loop ───────────────────────────────────────────────────────────
@@ -650,7 +658,7 @@ class ProjectionWorker:
             if failure is not None:
                 _publish_failure(failure)
 
-    def _stamp_locked(self) -> tuple[int, int, int, float]:
+    def _stamp_locked(self) -> tuple[int, int, int, int, float]:
         """Number this snapshot, in the critical section that READ it.
 
         The number — not the lock — is what orders the publishes: a snapshot that
@@ -659,13 +667,15 @@ class ProjectionWorker:
         queued, which is exactly the inversion that was measured.
         """
         self._publish_seq += 1
-        return (self._publish_seq, self._depth_locked(),
+        return (self._publish_epoch, self._publish_seq, self._depth_locked(),
                 self._pending_positions_locked(), self._oldest_age_locked())
 
-    def _publish(self, snapshot: tuple[int, int, int, float]) -> None:
+    def _publish(self, snapshot: tuple[int, int, int, int, float]) -> None:
         """Apply ONE gauge snapshot, unless a NEWER one is already applied."""
-        seq, depth, positions, oldest = snapshot
+        epoch, seq, depth, positions, oldest = snapshot
         with self._publish_lock:
+            if epoch != self._publish_epoch:
+                return          # another process's reading: not ours to apply
             if seq <= self._published_seq:
                 return          # superseded: applying it would go backwards
             self._published_seq = seq
@@ -864,39 +874,46 @@ def _meter():
             # lag gauges at their last values while `stats()` kept moving, which is
             # the gauges-disagree-with-stats class this whole module is about, with
             # the observability channel itself dead and nothing recording it.
-            LOGGER.warning(
-                "projection_worker: the metrics module could not be imported "
-                "(%s: %s) — the projection lag gauges and counters are DISABLED "
-                "for this process. The worker still folds and still declines "
-                "correctly; `projection_worker.stats()` remains the reading "
-                "(#14185)", type(exc).__name__, exc)
+            with contextlib.suppress(Exception):
+                LOGGER.warning(
+                    "projection_worker: the metrics module could not be "
+                    "imported (%s: %s) — the projection lag gauges and counters "
+                    "are DISABLED for this process. The worker still folds and "
+                    "still declines correctly; `projection_worker.stats()` "
+                    "remains the reading (#14185)", type(exc).__name__, exc)
         else:
             _METRICS = monitoring
     return _METRICS or None
 
 
+def _emit(writer: str, *args, **kwargs) -> None:
+    """Call one metrics writer, swallowing EVERY failure including the lookup.
+
+    ⛔ THE RESOLUTION IS INSIDE THE GUARD (#14222 review cycle 5, P2-2).
+    ``_meter()`` used to sit outside it, and it now WARNs on an unimportable
+    metrics module — so a logging filter (or anything else in that path) could
+    raise out of a publisher and kill the consumer thread, on the one path this
+    section promises is safe: *a metrics failure must never be able to break the
+    fold or the write that queued it*. `_run` calls `_publish` outside its own
+    `try`, so an escape here is a dead loop, not a lost counter.
+    """
+    with contextlib.suppress(Exception):
+        metrics = _meter()
+        if metrics is None:
+            return
+        getattr(metrics, writer)(*args, **kwargs)
+
+
 def _publish_queue_state(depth: int, pending_positions: int,
                          oldest_age_seconds: float | None = None) -> None:
-    metrics = _meter()
-    if metrics is None:
-        return
-    with contextlib.suppress(Exception):
-        metrics.record_projection_queue_state(
-            depth=depth, pending_positions=pending_positions,
-            oldest_age_seconds=oldest_age_seconds)
+    _emit("record_projection_queue_state", depth=depth,
+          pending_positions=pending_positions,
+          oldest_age_seconds=oldest_age_seconds)
 
 
 def _publish_failure(reason: str) -> None:
-    metrics = _meter()
-    if metrics is None:
-        return
-    with contextlib.suppress(Exception):
-        metrics.record_projection_worker_failure(reason)
+    _emit("record_projection_worker_failure", reason)
 
 
 def _publish_inline_fallback(reason: str) -> None:
-    metrics = _meter()
-    if metrics is None:
-        return
-    with contextlib.suppress(Exception):
-        metrics.record_projection_inline_fallback(reason)
+    _emit("record_projection_inline_fallback", reason)

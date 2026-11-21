@@ -283,6 +283,60 @@ def test_an_OLDER_snapshot_never_overwrites_a_newer_one(armed):
             == worker.stats().queue_depth)
 
 
+def test_a_snapshot_from_BEFORE_a_fork_reset_cannot_undo_it(armed):
+    """⛔ #14222 review cycle 5, P2-1: the snapshot numbers are PROCESS-LOCAL.
+
+    The reset zeroes the sequence and stamps its own snapshot, which makes the
+    reset's number the SMALLEST — so a snapshot captured before the reset compared
+    as NEWER and undid the reset, restoring the other process's gauges and freezing
+    them until the sequence climbed past the stale number. The epoch makes every
+    pre-reset number unmatchable.
+    """
+    slow = _SlowProjector()
+    live_write.write({"type": "A"}, log=_Log(), project=slow, tenant=_TENANT)
+    assert slow.in_flight.wait(5)
+
+    worker = projection_worker.worker()
+    with worker._cond:
+        stale = worker._stamp_locked()          # captured BEFORE the reset
+    worker._cond_pid = os.getpid() + 1_000_000  # a fork is observed…
+    worker.stats()                              # …and the reset runs
+    assert monitoring.projection_worker_gauges()["queue_depth"] == 0
+
+    worker._publish(stale)                      # arrives late, from the old epoch
+    assert monitoring.projection_worker_gauges()["queue_depth"] == 0, (
+        "a pre-reset snapshot undid the reset and restored the other "
+        "process's backlog")
+
+    slow.gate.set()
+    assert projection_worker.wait_for_drain(10) is True
+    projection_worker.shutdown(drain=True, timeout=5)
+
+
+def test_a_metrics_failure_never_escapes_into_the_loop(armed):
+    """⛔ #14222 review cycle 5, P2-2: the observability channel cannot kill the fold.
+
+    `_run` calls `_publish` outside its own `try`, and `_meter()` sits on that
+    path — with a WARNING that can now raise. An escape there is a DEAD consumer,
+    not a lost counter: the loop would stop folding and nothing would say so.
+    """
+    def exploding(*args, **kwargs):
+        raise RuntimeError("the metrics backend went away")
+
+    before = projection_worker.stats().projected
+    monkey = monitoring.record_projection_queue_state
+    monitoring.record_projection_queue_state = exploding
+    try:
+        live_write.write({"type": "A"}, log=_Log(), project=_fast_projector(),
+                         tenant=_TENANT)
+        assert projection_worker.wait_for_drain(10) is True
+        assert projection_worker.stats().projected == before + 1, (
+            "the fold died behind a metrics failure")
+        assert projection_worker.stats().running is True
+    finally:
+        monitoring.record_projection_queue_state = monkey
+
+
 def test_the_metrics_surface_carries_the_lag(armed):
     """`metrics()` names the lag — an operator reads it without the module."""
     metrics = monitoring.metrics()
