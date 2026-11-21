@@ -1232,24 +1232,19 @@ def _function_local_bindings(func: ast.AST) -> set[str]:
         if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
             out |= _walrus_targets(node)
             continue
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            #: §4.2.1 ("import statements" bind) — collected in the FUNCTION scope walk,
-            #: and NOT in `_collect_binding`: at MODULE scope the import is the very thing
-            #: the third-party exemption exists for, so counting it as a shadowing binding
-            #: of ITSELF empties `third_party` for every file (measured: every `4k-`/`4l-`
-            #: negative red).
-            #:
-            #: ⛔ AND ONLY AN IMPORT THAT BINDS THE NAME TO SOMETHING ELSE COUNTS. A local
-            #: `import some_optional_dep` re-binds the name to the SAME module, so it is
-            #: still that package's verb at the call — `tests/` has that shape inside a
-            #: skip-gated helper, and counting it graded the probe (`4k-`-class false red,
-            #: measured `((5, (), True, False, True),)`). `import somedep as torch` and any
-            #: `from … import` bind the name to a DIFFERENT thing, so those do count.
-            out |= {
-                a.asname or a.name.split(".")[0]
-                for a in node.names
-                if a.asname is not None or isinstance(node, ast.ImportFrom)
-            }
+        #: ⛔ AN IMPORT STATEMENT IS NEVER A SHADOWING BINDING — not `import x`, not
+        #: `import somedep as x`, not `from m import n as x`. The RIGHT-HAND SIDE OF AN
+        #: IMPORT IS ALWAYS AN IMPORT, so after it the name still denotes an imported
+        #: module/object, which is the exemption's premise — and `_non_own_imported_names`
+        #: is NAME-keyed, so it holds the alias itself and the receiver is still that
+        #: optional extra. The tempting test ("the alias binds a DIFFERENT name, so the
+        #: name left the import set") is a FALSE RED of the `4k-`/`4l-` class: measured,
+        #: `import falkordb as fdb` … `fdb.query(…)` in a helper went `()` at
+        #: `3b7f3e57d426` to `((6, (), True, False, True),)` under it (a fresh reviewer
+        #: measured the same direction on an earlier attempt and refused it). The OWN-CODE
+        #: half needs no import rule at all: `import tortoise.sdk as torch` is graded by the
+        #: own-import arm (`_touches_own_code`), measured graded before any of this. Rows
+        #: `4j-quattuordecies` pin every direction.
         _collect_binding(node, out)
         stack.extend(ast.iter_child_nodes(node))
     return out
@@ -3398,6 +3393,98 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "outer function's probe reads, so it must not cancel the third-party exemption "
         "— descending into the nested body grades a legitimate optional-extra guard as "
         f"a ROOT: {roots(_nested_scope_control)}"
+    )
+
+    # 4j-quattuordecies. AN IMPORT STATEMENT NEVER CANCELS THE EXEMPTION — NOT EVEN AN
+    #     ALIASED ONE, and not a `from … import … as`. The RIGHT-HAND SIDE OF AN IMPORT
+    #     IS ALWAYS AN IMPORT, so the name still denotes an imported object after it,
+    #     which is this exemption's premise; `_non_own_imported_names` is NAME-keyed, so
+    #     it holds the alias itself. The tempting rule ("the alias binds a DIFFERENT
+    #     name, so the name left the import set") is a FALSE RED of the `4k-`/`4l-`
+    #     class — measured on the parent head: `import falkordb as fdb` … `fdb.query(…)`
+    #     is `()` without it and `((6, (), True, False, True),)` with it. TWO fresh
+    #     reviewers reached the same conclusion from opposite directions, so the rule
+    #     needs a NEGATIVE row, not a default. The OWN-CODE half is the line it must not
+    #     cross, and it needs no import rule at all: the own-import arm grades it.
+    _aliased_third_party_import_in_function = textwrap.dedent(
+        """
+        import torch
+
+        def _probe():
+            import json as torch
+            try:
+                torch.query("SELECT 1")
+                return True
+            except Exception:
+                return False
+
+        TORCH_AVAILABLE = _probe()
+        """
+    )
+    assert roots(_aliased_third_party_import_in_function) == (), (
+        "a local ALIASED import of a non-own module still binds the name to an "
+        "IMPORTED object, so the receiver is that optional extra and keeps the "
+        "exemption — collecting the alias grades a legitimate skip as a ROOT (the "
+        f"false red 4k-/4l- forbid): {roots(_aliased_third_party_import_in_function)}"
+    )
+    _aliased_third_party_import_in_block = textwrap.dedent(
+        """
+        import torch
+
+        TORCH_AVAILABLE = False
+        try:
+            import json as torch
+            torch.query("SELECT 1")
+            TORCH_AVAILABLE = True
+        except Exception:
+            TORCH_AVAILABLE = False
+        """
+    )
+    assert roots(_aliased_third_party_import_in_block) == (), (
+        "the same alias INSIDE the probe block — a row per scope, because the block "
+        "and the enclosing function are resolved by different walks and a fix that "
+        f"only exempts one leaves the other red: {roots(_aliased_third_party_import_in_block)}"
+    )
+    _from_import_alias = textwrap.dedent(
+        """
+        from falkordb import FalkorDB as F
+
+        def _probe():
+            from falkordb import FalkorDB as Client
+            try:
+                Client.query("RETURN 1")
+                return True
+            except Exception:
+                return False
+
+        FALKORDB_AVAILABLE = _probe()
+        """
+    )
+    assert roots(_from_import_alias) == (), (
+        "`from pkg import Class as Name` is the SAME family — the alias binds a name "
+        "to a non-own package's object, so it keeps the exemption in a local scope "
+        f"exactly as `import pkg as name` does: {roots(_from_import_alias)}"
+    )
+    _aliased_own_import = textwrap.dedent(
+        """
+        import torch
+
+        def _probe():
+            import tortoise.sdk as torch
+            try:
+                torch.query("SELECT 1")
+                return True
+            except Exception:
+                return False
+
+        TORCH_AVAILABLE = _probe()
+        """
+    )
+    _aliased_own_row = roots(_aliased_own_import)
+    assert len(_aliased_own_row) == 1 and _aliased_own_row[0][1:] == ((), True, False, True), (
+        "the OTHER direction, and it needs no import rule: an OWN-code alias is graded "
+        "by the own-import arm, so the rows above cannot be satisfied by widening the "
+        f"exemption — it was also graded at the parent head: {_aliased_own_row}"
     )
 
     # 4m. THE GAP THIS SLOT PINNED AS ACCEPTED IS CLOSED BY RULE (review of
