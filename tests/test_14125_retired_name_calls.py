@@ -1091,6 +1091,17 @@ def _module_scope_bindings(tree: ast.Module) -> set[str]:
             stack.extend(node.args.defaults)
             stack.extend(d for d in node.args.kw_defaults if d is not None)
             continue
+        if isinstance(node, ast.AnnAssign) and node.value is None:
+            # ⛔ A BARE ANNOTATION AT MODULE SCOPE BINDS NOTHING. `torch: object` only
+            # records an annotation — reading the name afterwards is a NameError (measured)
+            # — but its TARGET is an `ast.Name` with `Store` context, so the generic walk
+            # counted it and a legitimate third-party probe was graded: a 4k-/4l- false red
+            # (review of #14160, cycle 5). The annotation is still walked, because a walrus
+            # in it IS evaluated here. In a FUNCTION the same line DOES make the name local
+            # (`UnboundLocalError`, measured), so `_function_local_bindings` keeps counting
+            # it — the rule is scope-dependent, not spelling-dependent.
+            stack.append(node.annotation)
+            continue
         if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
             # A comprehension has its OWN scope in Python 3, so its ITERATION TARGETS do
             # not bind in the enclosing one: `_ = [torch for torch in range(3)]` leaves
@@ -1229,8 +1240,14 @@ def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]
     out: set[str] = set()
     crossed_callable = False
     crossed_comprehension = False
+    #: Every node between the call and the current ancestor, the call itself included. A
+    #: generator's ITERABLE is evaluated one scope out, so its own target is not in scope
+    #: there — and that is decided by WHERE the call sits inside the comprehension, which
+    #: only this path knows.
+    seen: set[int] = {id(block)}
     node = parents.get(id(block))
     while node is not None:
+        seen.add(id(node))
         #: A `lambda` is a function scope too: its parameters are invisible to every
         #: other walk (they are `ast.arg`, and the module walk skips a lambda body by
         #: construction), so a call inside one must see them here or the exemption
@@ -1247,6 +1264,17 @@ def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]
             # while main's scope-blind sweep graded it: a fail-open regression against
             # `origin/main` (review of #14160, cycle 4).
             for generator in node.generators:
+                # ⛔ BUT NOT ITS OWN ITERABLE, which is evaluated one scope OUT: the first in
+                # the ENCLOSING scope, a later one in the comprehension scope where the
+                # earlier targets are bound — never with its own target bound. Measured:
+                # `[None for clients in clients.query()]` resolves `clients` from the
+                # enclosing scope, and the same shape with the target meant to be local is
+                # a TypeError. So a call inside `gen.iter` must NOT see `gen.target`; `elt`,
+                # the `ifs` and a LATER generator's iterable do see the earlier targets.
+                # Subtracting all of them graded a call in the outermost iterable — a
+                # 4k-/4l- false red (review of #14160, cycle 5).
+                if id(generator.iter) in seen:
+                    break
                 out |= {
                     sub.id for sub in ast.walk(generator.target) if isinstance(sub, ast.Name)
                 }
@@ -3939,6 +3967,137 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "inside it runs on the target rather than on the import — exempting it leaves a "
         "swallowed rename reading as 'capability unavailable': "
         f"{_comp_target_row}"
+    )
+
+    # 4j-vicesimus-bis. THE OTHER DIRECTION OF THE SAME TARGET, and it is where the
+    #     subtraction was too WIDE: a generator's ITERABLE is evaluated one scope out, so a
+    #     call there reads the import, not the target — measured,
+    #     `[None for clients in clients.query()]` resolves `clients` from the enclosing
+    #     scope (and `[None for c in cs]` is a TypeError when `c` is meant to be local).
+    #     Subtracting every target unconditionally graded this shape: a 4k-/4l- false red
+    #     that would refuse a legitimate optional-extra probe (review of #14160, cycle 5).
+    for _label, _body in (
+        ("outermost iterable", "len([None for torch in torch.query('SELECT 1')])"),
+        ("later generator iterable", "len([None for _x in [1] for torch in (torch,)])"),
+    ):
+        _outermost_row = roots(
+            textwrap.dedent(
+                f"""
+                import torch
+
+                TORCH_AVAILABLE = False
+                try:
+                    _r = {_body}
+                    TORCH_AVAILABLE = True
+                except Exception:
+                    TORCH_AVAILABLE = False
+                """
+            )
+        )
+        assert _outermost_row == (), (
+            "a comprehension's own target is NOT bound in its iterable, so the call there "
+            f"still runs on the import and must stay EXEMPT ({_label}): {_outermost_row}"
+        )
+    # …and the paired positive, so the row above cannot be satisfied by deleting the
+    # comprehension branch: `elt` and the `ifs` DO see the target.
+    for _label, _body in (
+        ("elt", "[torch.query('SELECT 1') for torch in _clients()]"),
+        ("ifs", "[None for torch in _clients() if torch.query('SELECT 1')]"),
+    ):
+        _inside_row = roots(
+            textwrap.dedent(
+                f"""
+                import torch
+
+                TORCH_AVAILABLE = False
+                try:
+                    _r = {_body}
+                    TORCH_AVAILABLE = True
+                except Exception:
+                    TORCH_AVAILABLE = False
+                """
+            )
+        )
+        assert len(_inside_row) == 1, (
+            f"a call in the comprehension's {_label} DOES run on the bound target, so it "
+            f"must be graded — the control for the outermost-iterable row: {_inside_row}"
+        )
+
+    # 4j-duovicesimus. A MODULE-LEVEL BARE ANNOTATION BINDS NOTHING. `torch: object` only
+    #     records an annotation — reading the name afterwards is a `NameError` (measured) —
+    #     but its TARGET is an `ast.Name` with `Store` context, so the generic module walk
+    #     counted it and a legitimate third-party probe read GRADED: a 4k-/4l- false red
+    #     (review of #14160, cycle 5). The annotation is still walked, because a walrus in
+    #     it IS evaluated at module scope; the control below pins that half, so a fix that
+    #     simply skipped the whole node would leave that walrus drop green.
+    _bare_annotation = textwrap.dedent(
+        """
+        import torch
+
+        torch: object
+
+        TORCH_AVAILABLE = False
+        try:
+            torch.query("SELECT 1")
+            TORCH_AVAILABLE = True
+        except Exception:
+            TORCH_AVAILABLE = False
+        """
+    )
+    _bare_row = roots(_bare_annotation)
+    assert _bare_row == (), (
+        "a module-level bare annotation binds no value, so the import still reaches the "
+        f"probe and it must stay EXEMPT: {_bare_row}"
+    )
+    _annotation_walrus = roots(
+        textwrap.dedent(
+            """
+            import torch
+
+            _annotation: (torch := _make_client())
+
+            TORCH_AVAILABLE = False
+            try:
+                torch.query("SELECT 1")
+                TORCH_AVAILABLE = True
+            except Exception:
+                TORCH_AVAILABLE = False
+            """
+        )
+    )
+    assert len(_annotation_walrus) == 1, (
+        "the control: the ANNOTATION expression is evaluated at module scope, so a walrus "
+        "in it binds `torch` and the probe must be graded — skipping the whole `AnnAssign` "
+        f"node instead of its target is a silent drop: {_annotation_walrus}"
+    )
+    #: …and in a FUNCTION the same bare annotation DOES make the name local
+    #: (`UnboundLocalError`, measured), which is why the rule lives in the MODULE walk and
+    #: not in `_collect_binding`.
+    _function_bare_annotation = roots(
+        textwrap.dedent(
+            """
+            import pytest
+            import torch
+
+            def _probe():
+                torch: object
+                TORCH_AVAILABLE = False
+                try:
+                    _e = torch.query("SELECT 1")
+                    TORCH_AVAILABLE = True
+                except Exception:
+                    TORCH_AVAILABLE = False
+                return TORCH_AVAILABLE
+
+            pytestmark = pytest.mark.skipif(not _probe(), reason="engine")
+            """
+        )
+    )
+    assert len(_function_bare_annotation) == 1, (
+        "a bare annotation in a FUNCTION makes the name local (`UnboundLocalError`), so a "
+        "call there cannot run on the module import — the scope-dependent half of the "
+        f"rule, and the reason a single-token fix cannot serve both: "
+        f"{_function_bare_annotation}"
     )
 
     # 4j-unvicesimus. A `global` DECLARED IN A CLASS BODY is the same module-scope
