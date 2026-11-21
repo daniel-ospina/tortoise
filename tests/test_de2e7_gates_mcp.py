@@ -117,13 +117,16 @@ class TestDe2e7:
         # P2). It would stay green if the shim were re-pointed at ANY existing
         # callable (`list_knowledge`, say) — a retired door silently driving a
         # DIFFERENT capability, which is exactly what "the same answer" forbids.
-        # Nothing else pins these two bindings: `tests/test_surface_manifest.py`
-        # compares `use_instead` only, `tests/test_retired_tools.py` only checks
-        # `hasattr`, and `tests/test_surface_resolution.py` covers `TOOL_REGISTRY`,
-        # not the retired one. So the door FAMILY is pinned here — the private
-        # spelling and its public twin both accepted, which is the rename tolerance
-        # #13899 needed — and the resolve check makes a door that stops existing
-        # red instead of passing.
+        # The weak assertion would stay green here, and `tests/test_tool_registry.py`
+        # (`assert binding_resolution_violations(served_registry()) == []`) does red
+        # on a re-point — but with a sentence that names no expected door ("declares
+        # sdk_method 'list_knowledge' that its handler never reaches", #4337), so a
+        # reader cannot tell from it WHICH door the shim was supposed to drive.
+        # This pin states the door, so a re-point reds at the DECLARATION with the
+        # expected value in the message. (Neighbouring arms checked rather than
+        # asserted from memory: `sdk_method` IS read by
+        # `tests/test_surface_manifest.py` for existence, and the #4337 arm above is
+        # the one that catches a re-point.)
         retired_by_name = {t.name: t for t in RETIRED_TOOL_REGISTRY}
         for door, expected in (("tortoise_promote_point", "_promote_point"),
                               ("tortoise_belief_timeline", "_belief_timeline")):

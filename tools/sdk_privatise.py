@@ -688,13 +688,18 @@ SWEEP_NAMES = 66
 #: therefore leave no row. ⛔ ATTRIBUTED BY BISECTION ON THE REAL GATE, not by arithmetic. Measured in
 #: THIS head tree's frame (the frame `--check` reads): reverting `tests/test_read_ledger.py` alone to
 #: its parent head restores the pinned (11844, "70d6cfdcd8b769e4") and exit 0, while reverting
-#: `tests/test_7405_update_point_writes.py` alone leaves it at **11838** — that file contributes no row
-#: — so the whole delta is that one file's six sites. The same measurement in the PARENT tree's frame
+#: `tests/test_7405_update_point_writes.py` alone leaves it at **11838** — that file's row multiset is
+#: identical on both sides, so it contributes no **DELTA** row — so the whole delta is that one
+#: file's six sites. The same measurement in the PARENT tree's frame
 #: (apply each file's change alone): 11844 everywhere except `tests/test_read_ledger.py`, which lands
 #: at 11838. ⛔ Name the frame or the numbers contradict each other: 11844 is the parent's residue and
 #: 11838 this head's, so "reverting X alone leaves 11844" is only true when X is the file that CARRIES
-#: the delta. The three module-level probes likewise contribute no row, so this re-cut shares none with
-#: the `#13994` probe shrink above.
+#: the delta. The three module-level probes likewise contribute no DELTA row (they carry 12 untyped rows
+#: in all — 5 in `test_assembly_sdk.py`, 4 in `test_assembly_fixtures.py`, 3 in
+#: `longmem_eval/test_assembly_arm.py` — identical at both heads), so this re-cut shares none with the
+#: `#13994` probe shrink above. ⛔ "contributes no row" was the earlier wording and it is FALSE for every
+#: file named here: a row is what the census COUNTS, so "no row" would mean the file has no swept-name
+#: receiver at all, and `tests/test_7405_update_point_writes.py` alone carries 80 of them.
 #: The 6 are plain untyped receivers in a test (`inst` is built via `TortoiseSDK.__new__`), not typed
 #: references to a swept name, so the SDK population is untouched — `--check` still reports
 #: `typed references still pointing at a public name: 0`.

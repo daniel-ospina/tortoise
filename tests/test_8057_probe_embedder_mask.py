@@ -286,10 +286,12 @@ def _module_level_write_probe_lines(path: Path) -> list[int]:
     only the handful of files that mention a probe door at all can answer
     yes to. It can only skip files that CANNOT match.
 
-    The doors are BOTH spellings of the point write, because the SDK surface
-    is not fixed: #13899 retired the public `create_point` in favour of
-    `create_entity("point", …)`, which RELAYS to the same write and therefore
-    pays the same `encode_for_store` -> `EmbeddingModel.get` cost at import.
+    The doors are every spelling of the point write, because the SDK surface
+    is not fixed: the public `create_point`, the consolidated
+    `create_entity("point", …)` it was retired in favour of (#13899, which
+    RELAYS to the same write), and the internal `_create_point` (#13899 KEPT
+    it). All three pay the same `encode_for_store` -> `EmbeddingModel.get` cost
+    at import.
     A census that knew only one spelling would report the three probes as gone
     (a silent green) the moment they migrated — which is exactly what happened
     on #13971's `test (a)`: the probes were still unmasked-in-spirit while the
@@ -314,6 +316,42 @@ def _module_level_write_probe_lines(path: Path) -> list[int]:
         and n.func.attr in _PROBE_WRITE_DOORS
         and not any(lo <= n.lineno <= hi for lo, hi in spans)
     ]
+
+
+def test_the_census_sees_every_declared_door_and_is_blind_to_an_alias(tmp_path):
+    """The three doors are EXERCISED, and the documented blind spot is measured.
+
+    ⛔ `_PROBE_WRITE_DOORS` is a claim about what the census can SEE, and a door
+    nothing ever writes is a claim no test measures: before this arm,
+    `_create_point` could be dropped from the tuple and this whole file still
+    passed, because no `tests/**/test_*.py` carries a module-level call of it.
+    Same standard this guard applies to the probes themselves — the claim is a
+    row, not prose.
+
+    The blind-spot arm is the OTHER half: `PROBE_MODULES`' note states that a
+    call through a local alias or through `getattr` is OUTSIDE the census, and a
+    documented blind spot that nothing measures is how a note comes to say the
+    opposite of the code — which is exactly what an earlier draft of it did.
+    """
+    for door in _PROBE_WRITE_DOORS:
+        probe = tmp_path / f"probe_{door}.py"
+        probe.write_text(
+            f"sdk = make_an_sdk()\n"
+            f'sdk.{door}("point", "a")\n')
+        assert _module_level_write_probe_lines(probe) == [2], (
+            f"a module-level `sdk.{door}(…)` is still a POINT-WRITE PROBE and "
+            "the census must see it — otherwise a module that migrates to this "
+            "spelling leaves the census silently")
+
+    for label, body in (
+            ("local_alias", "f = sdk.create_entity\nf(\"point\", \"a\")\n"),
+            ("getattr", "getattr(sdk, 'create_entity')(\"point\", \"a\")\n")):
+        probe = tmp_path / f"blind_{label}.py"
+        probe.write_text("sdk = make_an_sdk()\n" + body)
+        assert _module_level_write_probe_lines(probe) == [], (
+            f"the census DOES see a probe written through a {label} — then the "
+            "bound `PROBE_MODULES` states for it (OUTSIDE the census) is wrong "
+            "and the note must be corrected, not this assertion")
 
 
 def test_probe_census_matches_the_declared_set():
