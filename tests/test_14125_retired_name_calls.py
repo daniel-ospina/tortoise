@@ -406,7 +406,11 @@ _RAISED = frozenset({"AttributeError", "NameError", "TypeError", "ImportError"})
 _BROAD = frozenset({"Exception", "BaseException"})
 
 # The import-seam rule is scoped to imports that are IMPORT-TIME-SAFE WITHOUT
-# EXTRAS — in practice the repo's own code, `tortoise.*` / `tests.*` / `tools.*`.
+# EXTRAS — in practice the repo's own code, `tortoise.*` / `tests.*` / `tools.*` /
+# `battery.*` / `benchmarks.*` (`_OWN_CODE_ROOTS`, and the last two are first-party
+# too: both carry `__init__.py`, both import with no extras, and
+# `battery/runner/setup.py` defines our own `query` wrapper — leaving them out made
+# `import battery.runner.setup as torch; torch.query(…)` read EXEMPT over our seam).
 # An own-code module that is moved is a defect and must fail loudly; a module
 # behind an OPTIONAL extra must keep its skip, and "own code" does NOT imply that:
 # `tortoise/embeddings.py` does `import numpy as np` at module scope and numpy ships
@@ -1023,12 +1027,18 @@ def _global_scope_bindings(tree: ast.Module) -> set[str]:
     nested function's `global` is its own declaration and gets its own turn.
     """
     out: set[str] = set()
-    for func in ast.walk(tree):
-        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+    for scope in ast.walk(tree):
+        #: A CLASS BODY CAN DECLARE `global` TOO, and CPython honours it:
+        #: `class C: global torch; torch = _make_client()` rebinds the MODULE name
+        #: (measured). It was invisible
+        #: here because only FUNCTION nodes were visited, so a module-level probe stayed
+        #: EXEMPT over OUR client — the same fail-open family as the function case, one
+        #: node kind over (final review of #14160, P2; 0 live instances in the tree).
+        if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             continue
-        declared = _global_declarations(func)
+        declared = _global_declarations(scope)
         if declared:
-            out |= declared & _function_local_bindings(func)
+            out |= declared & _function_local_bindings(scope)
     return out
 
 
@@ -3898,6 +3908,87 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "enclosing FUNCTION's locals (measured), so a `torch` bound by `_outer` still "
         "reaches the call and the guard must be graded — a barrier that suppressed "
         f"function scopes too would re-open the silent drop: {_through_row}"
+    )
+
+    # 4j-vicesimus. THE COMPREHENSION TARGET IS ITSELF A WALK, and the
+    #     row for it was missing: the comprehension branch adds the iteration targets (a
+    #     call INSIDE `[torch.query(…) for torch in clients]` runs on the target, not the
+    #     import), and deleting those five lines left the whole file green while restoring
+    #     a silent drop that `origin/main` graded (final review of #14160, P2). The class
+    #     half of the same branch is the opposite direction and is pinned just above.
+    _comprehension_target_rebind = textwrap.dedent(
+        """
+        import torch
+
+        def _probe():
+            clients = _clients()
+            try:
+                rows = [torch.query("SELECT 1") for torch in clients]
+                return bool(rows)
+            except Exception:
+                return False
+
+        TORCH_AVAILABLE = _probe()
+        """
+    )
+    _comp_target_row = roots(_comprehension_target_rebind)
+    assert len(_comp_target_row) == 1 and _comp_target_row[0][1:] == ((), True, False, True), (
+        "the comprehension's ITERATION TARGET binds inside the comprehension, so a call "
+        "inside it runs on the target rather than on the import — exempting it leaves a "
+        "swallowed rename reading as 'capability unavailable': "
+        f"{_comp_target_row}"
+    )
+
+    # 4j-unvicesimus. A `global` DECLARED IN A CLASS BODY is the same module-scope
+    #     rebinding the function case pins (`4j-undecies`), and CPython honours it
+    #     (measured: the module name becomes the assigned object). `_global_scope_bindings`
+    #     visited only FunctionDef/AsyncFunctionDef, so this shape stayed EXEMPT over OUR
+    #     client — the same fail-open family, one node kind over (final review of #14160,
+    #     P2; 0 live instances in the tree, so it is LATENT and needs the row, not a
+    #     population change).
+    _class_body_global = textwrap.dedent(
+        """
+        import torch
+
+        class C:
+            global torch
+            torch = _make_client()
+
+        TORCH_AVAILABLE = False
+        try:
+            torch.query("SELECT 1")
+            TORCH_AVAILABLE = True
+        except Exception:
+            TORCH_AVAILABLE = False
+        """
+    )
+    _class_global_row = roots(_class_body_global)
+    assert len(_class_global_row) == 1 and _class_global_row[0][1:] == ((), True, False, True), (
+        "a `global` declaration in a CLASS BODY binds the MODULE name, so a module-level "
+        "probe after it runs on OUR client and must be graded — missing it is the same "
+        f"silent drop the function case pins: {_class_global_row}"
+    )
+    _class_body_global_control = roots(
+        textwrap.dedent(
+            """
+            import torch
+
+            class C:
+                torch = object()
+
+            TORCH_AVAILABLE = False
+            try:
+                torch.query("SELECT 1")
+                TORCH_AVAILABLE = True
+            except Exception:
+                TORCH_AVAILABLE = False
+            """
+        )
+    )
+    assert _class_body_global_control == (), (
+        "the CONTROL: WITHOUT `global`, a class-body assignment is the class body's own "
+        "name and does NOT touch the module's, so the module-level probe stays exempt "
+        f"(grading it is the `4k-`/`4l-` false red): {_class_body_global_control}"
     )
 
     # 4m. THE GAP THIS SLOT PINNED AS ACCEPTED IS CLOSED BY RULE (review of
