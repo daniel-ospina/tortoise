@@ -305,9 +305,12 @@ _RECENCY_TAIL = r"(?:\s+(?:recently|lately|so far|to date))?"
 #: rules above are what keep a content question out of the population, and the
 #: cost they charge is a real state question that keeps the relevance read —
 #: whose empty (or unrelated) answer is indistinguishable from the factual claim
-#: "nothing has ended". So every shape below is ALSO emitted as a PREFIX — the
-#: shape without its tail anchor — and a query that matches a prefix while
-#: matching no shape is reported as ``StateQuestion.signal``. That is the whole
+#: "nothing has ended". So every TAIL-ANCHORED shape below is ALSO emitted as a
+#: PREFIX — the shape without its tail anchor — and a query that matches a prefix
+#: while matching no shape is reported as ``StateQuestion.signal``. ⛔ NOT EVERY SHAPE
+#: HAS ONE: `do_support`'s pattern carries no end anchor to swap, so it is excluded
+#: by construction and has no signal row (see `_ENDING_SIGNALS`; the identity test
+#: pins the same asymmetry). That is the whole
 #: definition of "strong": a cue the recogniser WOULD have applied but for a
 #: guard the population cannot honour, never "an ending word somewhere in the
 #: sentence". The read path answers those queries with the relevance read it
@@ -399,7 +402,7 @@ _BLOCKED_TAIL = (
 #: it protected was exactly `<det> <noun> has|have|had been`, the asyndetic hijack
 #: `have any users reported the vendor has been deprecated`. ⛔ THE CLASS IS WIDER
 #: NOW, by the follow-up note below: the guard protects any FINITE VERB from a closed
-#: list followed by an optional `not`/`have` and then `been` (19 spellings, incl. the
+#: list followed by an optional `not`/`have` and then `been` (18 spellings, incl. the
 #: modal passive `will have been`), because bounding it to `has|have|had been` left
 #: that class open. Both classes are pinned, and each in the direction it belongs.
 #:
@@ -454,6 +457,24 @@ _EXISTENCE_GUARD = (
     r"that)\s+[a-z0-9][a-z0-9'’._/-]*\s+"
     r"(?:has|have|had|is|are|was|were|will|would|can|could|did|does|do|may|might|"
     r"must|should)\s+(?:not\s+)?(?:have\s+)?been\b)"
+    # ⛔ AND A PRONOUN SUBJECT IS ITS OWN ALTERNATIVE (round-14 review, P2, measured):
+    # the slot above requires `<determiner> <noun>`, which a pronoun has NEITHER of, so
+    # `have any users reported it has been deprecated` was ROUTED to the whole ended
+    # population and the caller's own predicate (`reported`) was dropped — the exact
+    # hijack this guard exists to refuse, one subject class wide.
+    # ⛔ BUT THE PRONOUN IS THE SECOND CLAUSE'S SUBJECT, NOT THE QUESTION'S (#14033
+    # round-15 review, P2, measured — the first cut of THIS lookahead caused it): a
+    # RELATIVE clause's subject can be a pronoun too, and there the participle that
+    # follows `been` belongs to the RELATIVE clause, which is the one place inside the
+    # window the module allows (`has anything we have been tracking been withdrawn` is
+    # the capstone question in the present perfect, and it ROUTES). So the lookahead
+    # fires only when the pronoun clause's own `been` introduces an ENDING participle —
+    # that is what separates `it has been deprecated` (asyndetic: the ending is the
+    # relative clause's) from `we have been tracking` (relative: the ending is still the
+    # question's).
+    rf"(?![^?]{{0,60}}?\b(?:it|they|he|she|we|you)\s+"
+    r"(?:has|have|had|is|are|was|were|will|would|can|could|did|does|do|may|might|"
+    rf"must|should)\s+(?:not\s+)?(?:have\s+)?been\s+(?:{_ENDING_WORDS})\b)"
 )
 _EXISTENCE_WINDOW = rf"[^?]{{0,60}}?\bbeen\s+(?:{_ENDING_WORDS})\b"
 _EXISTENCE_PREFIX = _EXISTENCE_HEAD + _EXISTENCE_GUARD + _EXISTENCE_WINDOW
@@ -714,8 +735,16 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
         rf"^which\s+(?:of\s+)?"
         rf"(?:(?:our|the|all|your|their|its|my|these|those)\s+)?"
         rf"(?:{_ENDING_WORDS})"
+        # ⛔ THE DETERMINER CLASS IS CLOSED, AND IT USED TO BE TOO SHORT (round-14
+        # review, P3, measured): `all|both|each|either|neither|another|other|such|one|
+        # two|three|first|last|next` were missing, so the verb-with-object class this
+        # lookahead exists to refuse still carried the notice on
+        # `which retired all the processes` / `which cancelled both deals`. The
+        # direction was the safe one (a notice, never a route), but the comment above
+        # said "never by a determiner" and the row did not hold it.
         rf"(?=\s+(?!(?:the|a|an|this|that|these|those|its|their|our|my|your|his|her|"
-        rf"any|some|every|no)\b)[a-z])")),
+        rf"any|some|every|no|all|both|each|either|neither|another|other|such|one|two|"
+        rf"three|first|last|next)\b)[a-z])")),
     # …and the unguarded `existence` expression: a state question that fails ONLY on
     # the clause guard above is reported, never silenced (silence is the defect).
     ("existence_unguarded", re.compile(_EXISTENCE_HEAD + _EXISTENCE_WINDOW)),
@@ -789,13 +818,15 @@ SEARCH. There is no second attempt and no fallback: you get the rows the words
 match, which may be empty or unrelated, and an EMPTY answer here is NOT
 evidence that nothing has ended. This tool takes NO argument that forces the
 ended read — the SHAPE is the only way in, so the way to be explicit is to ask
-a form from the ROUTES list above. ⛔ AND ANY RETRIEVAL ARGUMENT SILENCES THE
-REPORT, which is the other half of that boundary: `threshold`,
-`min_confidence`, `order_by`, `relationship_filter` and `traversal_path` each
-ask for a FILTERED relevance read, and the cue report is raised inside the
-same guard that decides routing — so with any of them supplied you get that
-filtered read and NO report, and a state question you filtered looks exactly
-like an honest empty again. The filter and the population are different
+a form from the ROUTES list above. ⛔ AND A RETRIEVAL ARGUMENT THAT CHANGES THE
+READ SILENCES THE REPORT, which is the other half of that boundary: a
+NON-DEFAULT `threshold`, `min_confidence`, `order_by`, `relationship_filter`
+or `traversal_path` asks for a FILTERED relevance read, and the cue report is
+raised inside the same guard that decides routing — so with any of those
+supplied you get that filtered read and NO report, and a state question you
+filtered looks exactly like an honest empty again. (A value equal to the
+default — `threshold=0`, `min_confidence=0`, `order_by="relevance"` — is not a
+filter and does not silence it.) The filter and the population are different
 answers: send the question ALONE to get the population or the report. (The
 hosted `GET /v1/search` route below takes only the question and `limit`,
 neither of which is a routing argument, so it is not silenced.)
@@ -982,13 +1013,18 @@ def detect_state_question(text: str | None) -> StateQuestion:
         if m:
             return StateQuestion(ENDED, shape, m.group(0))
     # ⛔ THE SIGNAL IS CHECKED BEFORE THE COMMITMENT SHAPES, and a commitment
-    # shape still WINS THE POPULATION: a question that is both an ending and a
-    # commitment question is answered by the ending (the precedence note in the
-    # docstring — `what are we committed to and has anything been withdrawn` is
-    # `committed_to` AND `existence`). A commitment question that merely CONTAINS
-    # an ending word in somebody else's clause (`what did the vendor say about our
-    # commitments`) matches no signal either — every signal is a shape's own
-    # expression, plus the attributive `which` row.
+    # shape still WINS THE POPULATION — and, when it does, the cue is DROPPED. That is
+    # a STATED LIMIT rather than a silent loss (#14033 round-14 review, P3, measured):
+    # `what are we committed to and which claims were retracted by legal` comes back as
+    # `committed_to` with ``signal=None`` and no payload, because a notice means "no
+    # population was served" and a commitment population WAS served — so the ending ask
+    # in the same sentence is not reported, and the caller who also wanted the ended set
+    # has to ask it as its own question. The alternative (carrying `signal` on the
+    # COMMITMENTS StateQuestion so the sink can say both) is a read-path change, not a
+    # wording one, and it is recorded here as the boundary of the absolute above. A
+    # commitment question that merely CONTAINS an ending word in somebody else's clause
+    # (`what did the vendor say about our commitments`) matches no signal either — every
+    # signal is a shape's own expression, plus the attributive `which` row.
     for signal, pattern in _ENDING_SIGNALS:
         m = pattern.search(t)
         if m:

@@ -383,6 +383,21 @@ NOT_SELECTED = [
     "has legal already retracted",
     "has the customer ever cancelled",
     "have any customers ever cancelled",
+    # ── the PRONOUN SUBJECT on the asyndetic class (#14033 round-14 review, P2) ──
+    # The guard's subject slot was `<determiner> <noun>`, which a pronoun has neither
+    # of, so each of these ROUTED to the whole ended population and dropped the
+    # caller's own predicate (`reported`, `noticed`, `said`) — measured at
+    # `248713d6f4` on the default surfaces. The guard now has a pronoun alternative,
+    # so they are refused (and reported — see NOTICE_ONLY).
+    "have any users reported it has been deprecated",
+    "have any customers noticed they have been cancelled",
+    "have any users said it will have been deprecated",
+    # ── and the VERB-WITH-OBJECT class on the attributive `which` row ───────────
+    # The determiner lookahead is a CLOSED list that stopped at `the|a|an|this|…`, so
+    # `all|both|each|one|two|first|last` … still carried the notice this row exists to
+    # refuse. Measured at `248713d6f4`; the class is extended, so these are silent.
+    "which retired all the processes",
+    "which cancelled both deals",
     # ── the YES/NO CO-PREDICATE class (#14033 round-6 review, P0) ──────────
     # The `is_copula` shape's first cut reused `existence`'s free 60-character
     # window for its SUBJECT, so an ending participle belonging to a SUBORDINATE
@@ -610,6 +625,12 @@ NOTICE_ONLY = [
     "have any users reported the vendor has been deprecated",
     "have any customers said the feature has been deprecated",
     "have any users noticed the vendor will have been deprecated",
+    # …and the PRONOUN-SUBJECT twin of that class (#14033 round-14 review, P2): there the
+    # subject slot needs no noun, so the guard needs its own alternative — refused by the
+    # guard, reported through `existence_unguarded`, never routed.
+    "have any users reported it has been deprecated",
+    "have any customers noticed they have been cancelled",
+    "have any users said it will have been deprecated",
     "is the SOC2 audit and its evidence package archived",
     "is the onboarding flow and its partner variants retired",
     # …and the COMPLEMENTIZER spellings of the class above (round-14 review, P1).
@@ -854,6 +875,49 @@ def test_the_two_silences_the_comments_name_are_measured_not_hoped():
             "comment's '`as yet` is outside the list' example becomes true again")
 
 
+def test_a_relative_clause_in_the_perfect_still_routes():
+    r"""The pronoun lookahead must not swallow the RELATIVE clause (#14033 round-15).
+
+    The guard's pronoun alternative was added to refuse the ASYNDETIC hijack
+    (`have any users reported it has been deprecated`, where the ending belongs to
+    the relative clause and the caller's own predicate is dropped). Its first cut
+    matched `we have been` in the RELATIVE form too — where the ending still belongs
+    to the question — so the capstone question in the present perfect became a
+    relevance read AND a notice whose remedy ("ask it as a whole question") is a
+    runaround, because re-asking in the same legitimate form is refused again.
+
+    The discriminator is what the pronoun clause's own `been` introduces: an ENDING
+    participle means asyndetic (refuse), anything else means the relative clause is
+    just describing the subject (route). Both directions are pinned here, because a
+    one-sided pin is what let the regression in.
+    """
+    from tortoise.state_intent import detect_state_question, missed_route_payload
+
+    for routed in (
+        "has anything we have been tracking been withdrawn",
+        "have any features we have been using been deprecated",
+        "has anything they have been told about been withdrawn",
+    ):
+        got = detect_state_question(routed)
+        assert got.population == "ended" and got.signal is None, (
+            f"{routed!r} no longer routes ({got.population!r}/{got.signal!r}) — the "
+            "pronoun lookahead is refusing a RELATIVE clause, whose participle is "
+            "still the question's own predicate")
+        assert missed_route_payload(got) is None, (
+            f"{routed!r} now carries a notice on top of a relevance read — the "
+            "remedy it names is a runaround, since the question is already in the "
+            "form the ROUTES list asks for")
+    for refused in (
+        "have any users reported it has been deprecated",
+        "have any customers noticed they have been cancelled",
+    ):
+        got = detect_state_question(refused)
+        assert got.population is None and got.signal is not None, (
+            f"{refused!r} ROUTES to the ended population again ({got!r}) — its "
+            "ending belongs to the relative clause, and the caller's own predicate "
+            "is dropped (#14033 round-14 review, P2)")
+
+
 def test_a_missed_cue_names_words_it_saw_whole():
     r"""The notice's `cue` ends on a WORD boundary (#14033 review, P3).
 
@@ -1011,13 +1075,21 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
 
     # …and the docstring must NOT carry a second copy: prose there reaches no caller,
     # so a re-added copy reads like the contract while the served text drifts from it.
-    # ⛔ THE ABSENCE PIN COVERS THE WHOLE PHRASE TABLE, not one head string (#14033
-    # review round-9, P2, measured): the docstring used to restate the qualifier rule
-    # WITH both of its examples, on the lines immediately above the paragraph claiming
-    # the contract "is not written here" — and the single-head check stayed green
-    # through it, so a second copy could drift with no test seeing it. Every string
-    # here is a row or phrase only the SERVED text may carry; each reds if a copy
-    # comes back (`have any claims been retracted in Q3` was the measured miss).
+    # ⛔ THE ABSENCE PIN COVERS THE SECTION HEADS, THE RESTATED ROWS AND THE QUALIFIER
+    # RULE — not one head string (#14033 review round 9, P2, measured; scope corrected
+    # round 13, P2): the docstring used to restate the qualifier rule WITH both of its
+    # examples, on the lines immediately above the paragraph claiming the contract "is
+    # not written here", and the single-head check stayed green through it. ⛔ IT IS NOT
+    # THE WHOLE TABLE, and the claim is now scoped because the docstring legitimately
+    # NAMES two phrasings as illustrations of the ending question ("has anything been
+    # withdrawn", "what ended"). ⛔ AND THE TWO ARE NOT THE SAME KIND OF ROW (round-13
+    # delta review, P3 — this comment first said a whole-table pin "would red on those",
+    # which is true of ONE of them): `what ended` IS a quoted row of `ROUTING_NOTE`
+    # (measured: `re.findall(r"`([^`]+)`", ROUTING_NOTE)` contains it), while `has
+    # anything been withdrawn` is NOT — the note's row is `has anything we relied on
+    # been withdrawn` — so such a pin would red on the first and miss the second.
+    # What is pinned is what must not come back: the two headings,
+    # the specific rows that were restated here, and the qualifier rule.
     _docstring = tortoise_search.__doc__ or ""
     for _copied in (
         "ROUTES — answered from the ended population",
@@ -1165,6 +1237,44 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
             "is not told that the cue report is suppressed — the filter/population "
             "boundary is over-promised again (#14033 review round-12, P2)")
 
+    # ⛔ AND THE CLAUSE ITSELF MUST BE TRUE, NOT MERELY NAME THE ARGUMENTS (#14033
+    # round-13 review, P3). It first read "ANY RETRIEVAL ARGUMENT SILENCES THE
+    # REPORT", which is FALSE at a value equal to the default — `_retrieval_knobs()`
+    # classifies `threshold not in (0.0, 0)`, `min_confidence not in (0.0, 0)` and
+    # `order_by != "relevance"`, so `threshold=0.0` passed EXPLICITLY is not a knob
+    # and the report still fires (measured in
+    # `test_a_retrieval_knob_suppresses_the_notice_too`). And a names-only pin could
+    # not see an INVERSION of the sentence: flipping "AND ANY … SILENCES" to "AND NO
+    # … SILENCES" left every assertion above green (reviewer-measured mutant).
+    # So the qualifier and its carve-out are pinned as the CLAIMS they are, and the
+    # behaviour behind them is pinned in the SDK test that drives the guard.
+    # ⛔ NORMALISED FIRST: the served string is line-wrapped, and the phrase this pins
+    # spans a wrap (`... THAT CHANGES THE\nREAD SILENCES ...`), so a raw `in doc` would
+    # report a false failure on the very wording it is checking (measured).
+    # ⛔ AND THE PIN IS THE WHOLE CLAIM, INCLUDING ITS POLARITY (#14033 round-13 DELTA
+    # review, P2). A presence pin on the qualifier alone ("THAT CHANGES THE READ" +
+    # "NON-DEFAULT") was measured BLIND to a negation: `AND NO RETRIEVAL ARGUMENT THAT
+    # CHANGES THE …` left the whole file green (164 passed), i.e. a served sentence
+    # saying the guard does NOT silence the report shipped. The regex below requires
+    # the affirmative claim end to end — the qualifier, its verb and its object — so a
+    # negation, a dropped "SILENCES THE REPORT", or a swap to "ANY" all red.
+    _doc_flat = " ".join(doc.split())
+    assert _re.search(
+        r"AND A RETRIEVAL ARGUMENT THAT CHANGES THE READ SILENCES THE REPORT",
+        _doc_flat), (
+        "the SERVED description no longer states the affirmative claim \"a retrieval "
+        "argument that CHANGES THE READ SILENCES THE REPORT\" — a negation, an \"ANY "
+        "ARGUMENT\" wording or a dropped consequence all describe the guard "
+        "differently from how it behaves (default-equal values do NOT silence it; "
+        "non-default ones do) — #14033 round-13 review P3, delta review P2")
+    assert "NON-DEFAULT" in _doc_flat, (
+        "the SERVED description dropped the NON-DEFAULT qualifier, so it reads as if "
+        "an explicit default value is a filter (#14033 round-13 review, P3)")
+    assert "is not a filter and does not silence it" in _doc_flat, (
+        "the SERVED description dropped the NEUTRAL-VALUE carve-out: a caller who "
+        "passed `threshold=0` explicitly is then told they silenced a report that in "
+        "fact still fires (#14033 round-13 review, P3)")
+
 
 def test_the_bounded_cost_claims_name_every_scan():
     """The cost claims this module makes are PINNED to the tables they describe.
@@ -1210,16 +1320,31 @@ def test_the_bounded_cost_claims_name_every_scan():
         "order and its count, so the reader has no home to check the claim against")
 
     # ⛔ AND THE DERIVATION SENTENCE IS PINNED TO THE SPLIT IT DESCRIBES (#14033
-    # round-13 review, P3). The function said the 9 missed-cue signals were
-    # "derived from those shapes" while 4 of them are HAND-WRITTEN recall rows with
-    # no shape at all — the count was right and the derivation claim was not, and a
-    # count-only pin cannot see that. The split is derived here from the tables, so
-    # promoting a hand-written row (or demoting a derived one) reds this instead of
-    # silently leaving the sentence describing a different construction.
-    shape_names = {name for name, _ in si._ENDING_SHAPES}
-    derived = [name for name, _ in si._ENDING_SIGNALS if name in shape_names]
-    hand_written = [name for name, _ in si._ENDING_SIGNALS if name not in shape_names]
-    assert len(derived) + len(hand_written) == signals
+    # round-13 review, P3; the derivation hardened by the round-13 DELTA review, P3).
+    # The function said the 9 missed-cue signals were "derived from those shapes"
+    # while 4 of them are HAND-WRITTEN recall rows with no shape at all — the count
+    # was right and the derivation claim was not, and a count-only pin cannot see
+    # that.
+    #
+    # ⛔ THE SPLIT IS READ OFF THE CODE'S OWN PREDICATE, never off the NAMES. It was
+    # first written as `name in shape_names`, which certified a false sentence while
+    # green: `do_support` IS an ending-shape name but is NOT tail-anchored, so a
+    # hand-written recall row reusing that name was counted as DERIVED, and a
+    # docstring claiming "6 derived" passed (measured: the tables hold 5 derived /
+    # 4 hand-written). The construction in `_ENDING_SIGNALS` filters on
+    # `_TAIL_END in shape.pattern` — the same test this pin now uses — so a name
+    # collision cannot move the count, and the per-shape membership check below
+    # reds if the derivation ever drops or duplicates a row.
+    tail_anchored = [name for name, shape in si._ENDING_SHAPES
+                     if si._TAIL_END in shape.pattern]
+    signal_names = [name for name, _ in si._ENDING_SIGNALS]
+    derived = [name for name in signal_names if name in set(tail_anchored)]
+    hand_written = [name for name in signal_names if name not in set(tail_anchored)]
+    for name in tail_anchored:
+        assert signal_names.count(name) == 1, (
+            f"the tail-anchored shape `{name}` produced {signal_names.count(name)} "
+            f"missed-cue signals — the mechanical derivation is not one-to-one "
+            f"(signals: {signal_names})")
     assert f"{len(derived)} derived" in doc and f"{signals} missed-cue signals" in doc, (
         f"`detect_state_question` no longer states that {len(derived)} of the "
         f"{signals} missed-cue signals are DERIVED from the ending shapes (derived: "
@@ -2031,6 +2156,31 @@ def test_a_retrieval_knob_suppresses_the_notice_too(sdk):
     sdk._tortoise_fts_query("which claims were retracted by legal",
                             entity_type="point", limit=5, _state_route_out=plain)
     assert plain.get("reason") == "shape", plain
+
+    # ⛔ AND THE SERVED CLAUSE'S CARVE-OUT IS THE MEASURED BEHAVIOUR, not a hope
+    # (#14033 round-13 review, P3). The served text now says a retrieval argument
+    # "THAT CHANGES THE READ" silences the report and that a default-equal value is
+    # "not a filter and does not silence it" — this is the arm that makes that true.
+    # `_retrieval_knobs()` classifies by VALUE (`threshold not in (0.0, 0)`), so a
+    # caller who passes the default explicitly is still served the report.
+    # ⛔ WHAT REDS IT, MEASURED RATHER THAN ASSUMED (#14033 round-13 delta review, P3):
+    # `("threshold", threshold is not None)` reds this TEST, but at the PLAIN arm above
+    # (`assert plain.get("reason") == "shape"`), not here — that arm passes the default
+    # `0.0` too, so a value-based variant that treats an explicit `0.0` as a knob also
+    # treats the default as one, and the plain arm fails first. Isolating THIS arm
+    # needs a sentinel default in the signature (`threshold: float | None = None`, knob
+    # `is not None`) — a signature change this PR does not make. The assertion is still
+    # the one that would catch a "default-equal values are filters" reading in the
+    # served text; it is simply not the first arm to red under that mutant.
+    neutral: dict = {}
+    sdk._tortoise_fts_query("which claims were retracted by legal",
+                            entity_type="point", limit=5, threshold=0.0,
+                            min_confidence=0.0, order_by="relevance",
+                            _state_route_out=neutral)
+    assert neutral.get("reason") == "shape", (
+        f"a DEFAULT-equal value silenced the cue report ({neutral!r}) — the served "
+        f"description says such a value \"is not a filter and does not silence it\", "
+        f"so the text and the guard now disagree (#14033 round-13 review, P3)")
 
 
 def test_the_missed_route_hint_states_only_what_the_read_did():

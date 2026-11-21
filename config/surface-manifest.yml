@@ -240,7 +240,7 @@
 # it down here, not "fix" a row by cutting.
 manifest_version: 1
 issue: 3863
-cut_at_commit: ba0eab1d866c369c078a099cdf74b275f300211b
+cut_at_commit: 2c0d66e2ec07d673b17e31b76dc24fbdd57f8e14
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1551,7 +1551,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_search
-  served_from: tortoise/mcp_server.py:c669ff26174fa581
+  served_from: tortoise/mcp_server.py:6bcf8b42aada92a1
   served_attributes: a54ebe88150f0091
   family: memory
   family_rank: 1
@@ -1577,23 +1577,25 @@ rows:
     There is no second attempt and no fallback: you get the rows the words match, which may be empty or unrelated,
     and an EMPTY answer here is NOT evidence that nothing has ended. This tool takes NO argument that forces the
     ended read — the SHAPE is the only way in, so the way to be explicit is to ask a form from the ROUTES list above.
-    ⛔ AND ANY RETRIEVAL ARGUMENT SILENCES THE REPORT, which is the other half of that boundary: `threshold`, `min_confidence`,
-    `order_by`, `relationship_filter` and `traversal_path` each ask for a FILTERED relevance read, and the cue report
-    is raised inside the same guard that decides routing — so with any of them supplied you get that filtered read
-    and NO report, and a state question you filtered looks exactly like an honest empty again. The filter and the
-    population are different answers: send the question ALONE to get the population or the report. (The hosted `GET
-    /v1/search` route below takes only the question and `limit`, neither of which is a routing argument, so it is
-    not silenced.) ⛔ THIS TOOL CANNOT REPORT the cue it saw and could not apply — its reply is the row list and
-    it takes no sink — so an MCP caller who needs that report must use the HOSTED deployment''s `GET /v1/search`
-    route, whose response body carries `state_question` (`{routed: false, population, reason, cue, hint}`), which
-    is the only CUSTOMER-facing channel: no PUBLIC SDK method exposes it either — the same payload rides the PRIVATE
-    `TortoiseSDK._tortoise_fts_query(..., read_status_out=...)` sink (under `read_status_out["state_question"]`),
-    so an integration that calls the SDK directly must name that private method deliberately. ⛔ AND THE HOSTING
-    MATTERS rather than being a detail of the path: the SELF-HOSTED `GET /v1/search` (the same path, `selfhost_api.py`)
-    recognises the cue too — routing happens inside the SDK call — but it passes NO sink and answers with the bare
-    row list, so on a self-hosted deployment a declined state question is still indistinguishable from "nothing
-    has ended"; the private SDK sink above is the only way to read it there. The difference it makes there is that
-    "the route declined my state question" stops looking like "the graph says nothing has ended".'
+    ⛔ AND A RETRIEVAL ARGUMENT THAT CHANGES THE READ SILENCES THE REPORT, which is the other half of that boundary:
+    a NON-DEFAULT `threshold`, `min_confidence`, `order_by`, `relationship_filter` or `traversal_path` asks for
+    a FILTERED relevance read, and the cue report is raised inside the same guard that decides routing — so with
+    any of those supplied you get that filtered read and NO report, and a state question you filtered looks exactly
+    like an honest empty again. (A value equal to the default — `threshold=0`, `min_confidence=0`, `order_by="relevance"`
+    — is not a filter and does not silence it.) The filter and the population are different answers: send the question
+    ALONE to get the population or the report. (The hosted `GET /v1/search` route below takes only the question
+    and `limit`, neither of which is a routing argument, so it is not silenced.) ⛔ THIS TOOL CANNOT REPORT the cue
+    it saw and could not apply — its reply is the row list and it takes no sink — so an MCP caller who needs that
+    report must use the HOSTED deployment''s `GET /v1/search` route, whose response body carries `state_question`
+    (`{routed: false, population, reason, cue, hint}`), which is the only CUSTOMER-facing channel: no PUBLIC SDK
+    method exposes it either — the same payload rides the PRIVATE `TortoiseSDK._tortoise_fts_query(..., read_status_out=...)`
+    sink (under `read_status_out["state_question"]`), so an integration that calls the SDK directly must name that
+    private method deliberately. ⛔ AND THE HOSTING MATTERS rather than being a detail of the path: the SELF-HOSTED
+    `GET /v1/search` (the same path, `selfhost_api.py`) recognises the cue too — routing happens inside the SDK
+    call — but it passes NO sink and answers with the bare row list, so on a self-hosted deployment a declined state
+    question is still indistinguishable from "nothing has ended"; the private SDK sink above is the only way to
+    read it there. The difference it makes there is that "the route declined my state question" stops looking like
+    "the graph says nothing has ended".'
   dependency: declares TortoiseSDK._tortoise_fts_query (resolves)
   lifecycle: active
   used_by: never called, eval-harness, tooling, docs
