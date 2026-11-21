@@ -1120,7 +1120,8 @@ SWEEP_NAMES = 66
 #:
 #: ⛔ MERGED `origin/main` (`e74cf1d13d`, the `#14012` lane's "keep this resident" + "see what's
 #: outside") INTO THIS BRANCH. ⛔ ITS "ZERO ROWS" PREMISE IS `main`'s OWN and NOT THIS BRANCH'S, and
-#: leaving it unscoped would make the log contradict itself nineteen lines below: on `main`'s tree the
+#: leaving it unscoped would make the log contradict itself against the +3 block below (whose target
+#: sentence this branch has since DELETED, so a line-distance here would not reproduce): on `main`'s tree the
 #: diff against this branch adds no executable line, but THIS branch's end-proof adds THREE untyped
 #: receivers (`g.query` ×2 in `tools/graphevent_home.py`, `super().query` ×1 in the test stub), which
 #: is why `--repin` on the tree this branch resolved prints `(11860, "267dce26b4191743")` and not the
@@ -1256,9 +1257,12 @@ SWEEP_NAMES = 66
 #: FALSE, and it sits a dozen lines above the +3 this branch DOES contribute, so a lane
 #: trusting it would attribute a future delta to `main` instead of re-measuring: this branch's
 #: own contribution is its +3 end-proof receivers (`main`'s measured 11857 + 3 = the 11860
-#: this pin carries, both measured), and `git diff --stat origin/main` on THIS resolved tree
-#: spans TENS of files — one added line is executable, `import re` in
-#: `tools/graphevent_home.py`.
+#: this pin carries, both measured), and `git diff --numstat origin/main HEAD` on THIS resolved
+#: tree spans FIFTEEN files: `tools/graphevent_home.py` alone is 215/47 and its added lines are
+#: code, not prose (the change-feed walk and its counts). ⛔ AN EARLIER CUT OF THIS SENTENCE SAID
+#: "one added line is executable, `import re`" — it under-scoped the delta to almost nothing and
+#: was refuted by the same file's own 215/47 eighteen lines up, which is the reader trap this run
+#: exists to police.
 #:
 #: ⛔ MERGED `origin/main` (`9f83a63bfab7`) INTO THIS BRANCH — a further tree, so the pair below is
 #: `--repin`'s output ON IT and neither side's line is inherited. Measured on `origin/main`
