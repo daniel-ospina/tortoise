@@ -19,7 +19,7 @@ infrastructure that can handle load. We can have things ready for scaling withou
 3 returned. Sources are vendor papers, engineering blogs and architecture references; they are **third-party claims, not
 reproduced here**.
 
-⚠️ **Provenance, stated per claim, because it is uneven.** ONE page is linked:
+⚠️ **Provenance, stated per claim, because it is uneven.** ONE source is named by its URL:
 `docs.mem0.ai/core-concepts/memory-evaluation`, and it backs only Mem0's **three storage layers, six-stage pipeline and four
 parallel retrieval signals**. Everything else is a summary of vendor papers/blogs with **no URL recorded here**: Mem0's **< 50 ms
 ack, queue-depth autoscaling, partitioning and search percentiles**, and every Zep, Hindsight, Supermemory and turbopuffer figure
@@ -89,13 +89,14 @@ purpose-built index, or an external API.
 | **stage metrics** | present on **error** paths only (`stages_ms` in a 504 body) | per-stage p50/p95 **always** ✗ |
 | scaling unit | one process, one machine | queue depth → replicas ✗ |
 
-Two structural gaps explain most of the ✗ rows above — the synchronous read path (query embedding, batching) and the inline
-write path. The remaining two ✗ rows, success-path stage metrics and the scaling unit, are Phase A's **A4** and **A5**:
+Two structural gaps explain most of the ✗ rows above:
 
 1. **The read path does the expensive, batchable work synchronously.** A single query embed costs ~2–4 s here; batched it is
    ~0.36 s per item — a ~5–10× difference that is pure scheduling, not hardware.
 2. **The write path is inline.** We already *have* the queue in embryo: `journal_event` is an append-only log and the
    projection is a fold over it. What is missing is a **worker that consumes it on its own schedule**.
+
+The remaining two ✗ rows — success-path stage metrics and the scaling unit — are neither gap: they are Phase A's **A4** and **A5**.
 
 ---
 
