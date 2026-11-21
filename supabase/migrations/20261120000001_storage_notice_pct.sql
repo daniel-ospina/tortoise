@@ -46,7 +46,7 @@
 -- the customer has not received. That is also what makes the send-budget guard
 -- (#1138) a graceful ramp on the first fleet-wide pass: past the daily cap the
 -- remaining accounts are skipped, unstamped, and retried on a later pass, and the
--- per-pass send cap (TORTOISE_CAPACITY_NOTICE_MAX_SENDS, default 25) keeps the
+-- per-pass send cap (TORTOISE_CAPACITY_NOTICE_MAX_SENDS, default 5) keeps the
 -- sweep from spending the whole shared budget in one burst ahead of
 -- customer-blocking mail.
 --

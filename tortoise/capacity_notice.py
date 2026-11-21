@@ -124,7 +124,7 @@ STORAGE_DOCS_URL = "https://premiselabs.co/tortoise/docs#storage"
 # the owner's reds both.
 SUBJECT = "Your search layer is at {n}% — nothing is lost"
 
-GREETING = "Hi {first name},"
+GREETING = "Hi {name},"
 STATUS_LINE = ("Your workspace is using {n}% of the fast-search capacity "
                "included in your plan.")
 SHORT_VERSION = ("Short version: **nothing is lost or deleted.** Everything "
@@ -427,7 +427,7 @@ def _text(name: str, pct: str, changes: str, fetched: str) -> str:
     # emails in `email_notify` do the same: `_invite_text` renders
     # `Accept: {link}` and `_onboarding_text` renders `book a call {link}`.
     return (
-        f"Hi {name},\n\n"
+        f"{GREETING.format(name=name)}\n\n"
         f"{STATUS_LINE.format(n=pct)}\n\n"
         f"{SHORT_VERSION.format(changes=changes).replace('**', '')}\n\n"
         f"[ {ADD_CAPACITY_CTA} ]\n"
@@ -463,7 +463,7 @@ def _html(name: str, pct: str, changes: str, fetched: str) -> str:
     return f"""\
 <div style="background:#060b14;padding:32px 16px;font-family:Helvetica,Arial,sans-serif;">
   <div style="max-width:520px;margin:0 auto;background:#0d1a2d;border:1px solid #1e293b;border-radius:12px;padding:28px;">
-    <p style="color:#e2e8f0;font-size:16px;margin:0 0 16px;">Hi {nm},</p>
+    <p style="color:#e2e8f0;font-size:16px;margin:0 0 16px;">{GREETING.format(name=nm)}</p>
     <p style="color:#e2e8f0;font-size:16px;font-weight:600;margin:0 0 16px;">{STATUS_LINE.format(n=pct)}</p>
     <p style="color:#94a3b8;font-size:14px;margin:0 0 20px;">{short}</p>
     <a href="{capacity}" style="display:inline-block;background:#06b6d4;color:#04121a;text-decoration:none;font-weight:600;padding:12px 24px;border-radius:8px;">{ADD_CAPACITY_CTA}</a>
@@ -856,7 +856,8 @@ async def sweep_pass(*, cp=None, send=None, enumerate_orgs=None,
     silent-partial-pass this docstring forbids (#14038 review, P2).
 
     There IS a per-pass SEND cap (``max_sends`` / ``TORTOISE_CAPACITY_NOTICE_MAX_SENDS``,
-    default 25) and it cannot have that defect: it walks the WHOLE enumeration and
+    default 5 — the 100/day budget's quarter divided by the day's five passes,
+    derived at ``NOTICE_MAX_SENDS_PER_PASS_DEFAULT``) and it cannot have that defect: it walks the WHOLE enumeration and
     stops SENDING, and a send that did not happen leaves its account's mark unset,
     so the next pass starts with a SMALLER unstamped population and the fleet
     ramps. The difference is per-pass PROCESSING (a stuck prefix) against
