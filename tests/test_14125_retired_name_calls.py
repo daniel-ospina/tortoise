@@ -445,7 +445,13 @@ def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
     `tests/e2e/hosted/conftest.py` is exactly that shape.
     """
     return any(
-        (names == {"<bare>"} or names & _BROAD) and not _reraises_its_own(h)
+        #: `_RAISED` is part of THIS question, not only of the coverage one: narrowing
+        #: `except Exception:` to the four names and KEEPING the drop — the substitution a
+        #: lane is most likely to make when this gate reds — read as neither covered nor
+        #: swallowing, i.e. invisible to BOTH gates while the rename stayed swallowed
+        #: (review of #14160, cycle 7, P2-3; pre-existing at `origin/main`, LATENT: the tree
+        #: holds 0 instances, so the census row set is unchanged).
+        (names == {"<bare>"} or names & (_BROAD | _RAISED)) and not _reraises_its_own(h)
         for h, names in ((h, _handler_names(h)) for h in handlers)
     )
 
@@ -526,7 +532,14 @@ def _reraises(handler: ast.ExceptHandler) -> bool:
         # this gate's own repair instruction ("insert the re-raise arm") in that idiomatic
         # spelling was redded for having fixed it (review of #14160, cycle 6, P2-6).
         _caught = _handler_names(handler) | ({handler.name} if handler.name else set())
-        return isinstance(_last.exc, ast.Name) and _last.exc.id in _caught
+        if isinstance(_last.exc, ast.Name) and _last.exc.id in _caught:
+            return True
+        # PEP 3134's CHAINED form is the same propagation with a nicer message, and
+        # `_reraises_its_own` has always counted it — reading the two halves differently
+        # made ONE handler simultaneously "no coverage" and "re-raises, drops nothing", so a
+        # block written per this gate's own repair instruction read UNARMED (review of
+        # #14160, cycle 7, P2-2). `raise X from None` discards the cause and is not coverage.
+        return isinstance(_last.cause, ast.Name) and _last.cause.id in _caught
     return bool(handler.body) and (
         isinstance(handler.body[-1], ast.Raise) and handler.body[-1].exc is None
     )
@@ -1280,7 +1293,7 @@ def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]
     while node is not None:
         seen.add(id(node))
         if isinstance(
-            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
         ) and _is_header_child(node, previous):
             # ⛔ A CALL IN THE HEADER IS NOT IN THE DEFINITION'S SCOPE. Decorators, bases,
             # keywords, defaults and annotations all evaluate in the ENCLOSING scope — the
@@ -1459,6 +1472,17 @@ def _is_header_child(node: ast.AST, child: ast.AST) -> bool:
     if isinstance(child, (ast.arguments, ast.keyword, ast.arg)):
         return True
     if any(expression is child for expression in getattr(node, "decorator_list", ()) or ()):
+        return True
+    #: A TYPE PARAMETER's `bound` / `default_value` evaluates in the ENCLOSING scope too
+    #: (PEP 695): `class C[T: torch.query(…)]: torch = …` defines fine, so that call
+    #: resolved the MODULE import, not the class body — yet it was charged with the
+    #: generic's own bindings. `_header_expressions` excludes these fields for a different
+    #: reason (a `:=` in a bound is a COMPILE-TIME SyntaxError, so it can bind nothing),
+    #: and inheriting that exclusion into the REACH direction graded a legitimate probe:
+    #: measured `()` → `((3, (), True, False, True),)` (review of this PR, P3).
+    #: The ascent reaches the definition with the TYPE-PARAMETER node as the child, not
+    #: the bound expression itself, so the test is on that node's identity.
+    if any(parameter is child for parameter in getattr(node, "type_params", ()) or ()):
         return True
     return any(expression is child for expression in _header_expressions(node))
 
@@ -2667,7 +2691,7 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         f"the `try` is the optional extra: {hoisted}"
     )
 
-    # 3c. A helper that takes the CLIENT as a PARAMETER reaches the seam through
+    # 3e. A helper that takes the CLIENT as a PARAMETER reaches the seam through
     #     `proj.g.query(…)`, and neither own-code test can see it: nothing is
     #     imported in the block and no own-code name is reachable from it. Its
     #     sentinel becomes a SKIP, so the swallow skips the proof green over a
@@ -2752,7 +2776,7 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         f"neither a flag nor a `skipif` reaches it: {sentinel}"
     )
 
-    # 4c. A module-body guard NESTED in module-level control flow. The helper
+    # 4c-bis. A module-body guard NESTED in module-level control flow. The helper
     #     branches always descended control flow, the module level did not — so
     #     `tests/test_assembly_pure.py:2615`'s probe inside `if _DOCKER_URI:` got
     #     NO row at all and the census read GREEN over an unarmed probe with 19
@@ -4260,10 +4284,20 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "a class keyword": (
             'class _Inner(metaclass=torch.query("SELECT 1")):\n        torch = _make()'
         ),
+        #: A `lambda`'s DEFAULT evaluates in the enclosing scope like any other, and its
+        #: PARAMETER named after the import is what made the miss visible: the lambda's own
+        #: scope was charged to a call that cannot be in it (measured `()` → graded before
+        #: the fix). `ast.Lambda` was simply absent from the header test's caller tuple.
+        "a lambda default": '(lambda torch=torch.query("SELECT 1"): torch)',
+        #: …and a PEP 695 type parameter BOUND, the second family `_header_expressions`'
+        #: deliberate exclusion was inherited into.
+        "a type-parameter bound": (
+            'def _inner[T: torch.query("SELECT 1")]():\n        torch = _make()'
+        ),
     }.items():
         _header_row = roots(_header_reach_probe.format(header=_header))
         assert _header_row == (), (
-            f"a {_label} evaluates in the ENCLOSING scope, so the call there still runs on "
+            f"{_label.capitalize()} evaluates in the ENCLOSING scope, so the call there runs on "
             f"the import and the probe must stay EXEMPT: {_header_row}"
         )
     _body_after_header = roots(
@@ -4318,7 +4352,9 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         ("raise an unrelated name", "raise _other", False),
         ("swallow", "_probe = None", False),
         ("bare raise", "raise", True),
-        ("raise from exc", "raise RuntimeError() from exc", False),
+        #: the CHAINED form is coverage — `4j-octovicesimus`; a suppressed cause is not,
+        #: because it discards the caught error it names.
+        ("raise X from None", "raise RuntimeError() from None", False),
     ):
         _handler = next(
             node
@@ -4396,6 +4432,69 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "an inert `global torch` in a NESTED class must not borrow the enclosing function's "
         f"local of that name — the module import still reaches the probe: {_nested_scope_global}"
     )
+
+    # 4j-nonvicesimus. A NARROW arm THAT DROPS the programming errors swallows them exactly
+    #     as a broad arm does. `_swallows_everything` asked only for a bare / `Exception` /
+    #     `BaseException` arm, so the substitution a lane is most likely to make when this
+    #     gate reds — narrow `except Exception:` to the four names and KEEP the drop — read
+    #     as neither covered nor swallowing, i.e. invisible to BOTH gates while the rename
+    #     stayed swallowed (review of #14160, cycle 7, P2-3; pre-existing at `origin/main`,
+    #     LATENT: the tree holds 0 instances, so no population change). The handler list is
+    #     parsed directly because the predicate is over handlers; a fixture block would test
+    #     the admission machinery instead.
+    for _label, _handlers_source, _want in (
+        (
+            "a narrow arm that DROPS the error",
+            "except (AttributeError, NameError, TypeError, ImportError):\n    FLAG = False\n",
+            True,
+        ),
+        (
+            "a narrow arm that RE-RAISES",
+            "except (AttributeError, NameError, TypeError, ImportError):\n    raise\n",
+            False,
+        ),
+        ("a bare arm", "except:\n    FLAG = False\n", True),
+        ("a broad arm", "except Exception:\n    FLAG = False\n", True),
+        ("a broad arm that re-raises", "except Exception:\n    raise\n", False),
+        ("an unrelated narrow arm", "except KeyError:\n    FLAG = False\n", False),
+    ):
+        _handlers = [
+            node
+            for node in ast.walk(ast.parse("try:\n    _probe = _make()\n" + _handlers_source))
+            if isinstance(node, ast.ExceptHandler)
+        ]
+        assert _swallows_everything(_handlers) is _want, (
+            f"{_label} must read as swallowing={_want} — a NARROW arm that catches a "
+            "programming error and drops it swallows it exactly as a broad arm does, and an "
+            "arm that re-raises drops nothing"
+        )
+
+    # 4j-octovicesimus. A CHAINED re-raise — `raise RuntimeError(…) from exc` — propagates the
+    #     caught error just as `raise exc` does (PEP 3134), and `_reraises_its_own` has always
+    #     counted it. `_reraises` read only a bare `raise` or `raise exc`, so ONE handler was
+    #     simultaneously "no coverage" and "re-raises, drops nothing", and a block written per
+    #     this gate's own repair instruction read UNARMED (review of #14160, cycle 7, P2-2).
+    #     `raise X from None` is the control: it discards the cause, so it is not coverage.
+    for _label, _statement, _want in (
+        ("raise X from exc", "raise RuntimeError('boom') from exc", True),
+        ("raise X from None", "raise RuntimeError('boom') from None", False),
+        ("raise the caught name", "raise exc", True),
+    ):
+        _chained = next(
+            node
+            for node in ast.walk(
+                ast.parse(
+                    "try:\n    _probe = _make()\n"
+                    f"except (AttributeError, NameError) as exc:\n    {_statement}\n"
+                    "except Exception:\n    _probe = None\n"
+                )
+            )
+            if isinstance(node, ast.ExceptHandler)
+        )
+        assert _reraises(_chained) is _want, (
+            f"`{_statement}` must be coverage={_want} ({_label}) — a chained re-raise "
+            "propagates the caught error, a suppressed cause does not"
+        )
 
     # 4j-duovicesimus. A MODULE-LEVEL BARE ANNOTATION BINDS NOTHING. `torch: object` only
     #     records an annotation — it is not a binding operation, so an earlier
