@@ -635,6 +635,19 @@ def live_return(entry: dict, surface: dict, root: Path | None = None) -> str | N
         # where the old path-set answer is the only one available.
         base = symbol.replace(".", "/")
         carriers = surface.get("modules_with_a_body")
+        # ⛔ A `.pyi` IS SURFACE, AND THIS IS THE RECORDED RULE (round-15 review, P2 — DECLINED).
+        # A round-15 reviewer proposed skipping the `.pyi` candidate unless the row itself froze a
+        # stub, on the ground that arm 1b's `_head_carries_runtime_body` calls a `.pyi` "not
+        # runtime statements". The two questions are DIFFERENT and both answers are recorded:
+        #   * "does the module's RUNTIME BODY still exist?" -> no, a stub is not a body (arm 1b);
+        #   * "is the symbol still declared in the shipped package?" -> YES, and that is what this
+        #     function answers: `_package_modules` scans `*.py*` on purpose, and
+        #     `test_a_tortoise_archive_stub_module_is_reported` plus
+        #     `test_the_package_module_scan_sees_pyi_stubs` pin it ("a `.pyi` stub under the shipped
+        #     package is importable surface, so the scan must see it"). Adopting the finding would
+        #     reverse that rule and un-red a shape the operator is meant to fix by deleting the
+        #     stub — which IS the green route `archive/README.md` gives, so the finding's "no green
+        #     route" does not hold either.
         for candidate in (f"{base}.py", f"{base}/__init__.py", f"{base}.pyi"):
             if candidate not in surface.get("modules", set()):
                 continue
@@ -2108,7 +2121,6 @@ def _module_source(root: Path, symbol: str) -> list[tuple[str, str, str | None]]
     """
     rel = symbol.replace(".", "/") + ".py"
     path = root / rel
-    package_fallback = False
     if not path.exists():
         # ⛔ A PACKAGE is archived by its DOTTED path and its source is `<dotted>/__init__.py`.
         # Without this fallback the rule arm 1 grades was UNRUNNABLE for the very shape it was
@@ -2122,7 +2134,6 @@ def _module_source(root: Path, symbol: str) -> list[tuple[str, str, str | None]]
         package_rel = symbol.replace(".", "/") + "/__init__.py"
         if (root / package_rel).exists():
             rel, path = package_rel, root / package_rel
-            package_fallback = True
         else:
             # …and a `.pyi`-only module is graded by every other arm (`_package_modules` reads
             # `*.py*`, `module_name` strips `.pyi`, arm 1b's stub rule), so the remedy must be
@@ -2158,15 +2169,26 @@ def _module_source(root: Path, symbol: str) -> list[tuple[str, str, str | None]]
     # module's only code IS the stub). The route this refusal names is the one
     # `archive/README.md` already gives: restore the source from the base, archive it, then
     # delete it again in the same batch.
-    if package_fallback and not _init_carries_a_body(source):
+    #
+    # ⛔ AND THE SAME HOLE EXISTS ON THE ORDINARY `<dotted>.py` PATH (round-15 review, P2 — the
+    # gate was scoped to `package_fallback` and therefore exempted the commonest shape). Arm 1b
+    # grades a module whose file is still there but whose BODY is gone as `MODULE BODY REMOVED`,
+    # and the remedy it prints is `archive module <dotted>` — so emptying `tortoise/x.py` in
+    # place and archiving it froze `"""Scaffolding."""` as the source of record, after which
+    # `shrink_violations` credited the row on its EXISTENCE and the whole run went green with the
+    # module's code in no file under `archive/`. Measured: `archived_from = tortoise/x.py`, the
+    # frozen block was the docstring, `shrink_violations` -> `[]`, `check --base-ref` -> OK.
+    # The rule is therefore about the RESOLVED SOURCE, not about which fallback found it: the only
+    # file shape exempt is a `.pyi`, because a stub's annotations ARE its statements.
+    if not rel.endswith(".pyi") and not _init_carries_a_body(source):
         plain = symbol.replace(".", "/") + ".py"
         raise ArchiveRefused(
-            f"module {symbol} has no file at {plain}, and the only file left at {rel} is "
-            "SCAFFOLDING — no statements of its own. Freezing it would record a docstring as the "
-            "source of record for code that is gone, and `check --base-ref` would then read the "
-            "removal as recorded. Restore the deleted source from the base first "
-            f"(`git checkout <base-sha> -- {plain}`), archive it, and delete it again in the "
-            "same batch."
+            f"module {symbol} resolves to {rel}, which carries no body of its own — a docstring "
+            "alone, or nothing. Freezing it would record SCAFFOLDING as the source of record for "
+            "code that is gone, and `check --base-ref` credits a row on its EXISTENCE, so the "
+            "removal would read as recorded while no file under `archive/` held it. Restore the "
+            f"source from the base revision first (`git checkout <base-sha> -- {plain}`), archive "
+            "it, and delete it again in the same batch."
         )
     return [(rel, source, None)]
 

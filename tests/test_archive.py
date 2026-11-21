@@ -1728,6 +1728,42 @@ def test_archiving_a_module_must_not_freeze_a_LEFTOVER_scaffold(tree: Path) -> N
     )
 
 
+def test_archiving_a_PLAIN_py_whose_body_is_now_a_DOCSTRING_is_refused(tree: Path) -> None:
+    """The scaffold refusal was gated on the PACKAGE fallback, so the plain `.py` shape was open.
+
+    Round-15 review (P2), measured by the reviewer and re-measured here: arm 1b grades a module
+    whose file is still there but whose BODY is gone as `MODULE BODY REMOVED`, and the remedy it
+    prints is `archive module <dotted>` — but the writer refused a scaffold only on the
+    `<dotted>/__init__.py` fallback. So emptying `tortoise/gone.py` IN PLACE and archiving it
+    froze `\"\"\"Scaffolding.\"\"\"` with `archived_from = tortoise/gone.py`, `shrink_violations`
+    then credited the row on its EXISTENCE, and the whole run went green with the module's body
+    in no file under `archive/` — the false PASS the package-shaped row above closed one branch
+    over. The rule is about the RESOLVED SOURCE, not about which fallback found it.
+
+    Mutation: drop the `not rel.endswith(".pyi")` body test -> RED (the writer accepts the
+    docstring and writes a record holding no code).
+    """
+    (tree / "tortoise" / "gone.py").write_text(
+        "def f1():\n    return 1\n\ndef f2():\n    return 2\n", encoding="utf-8"
+    )
+    _commit(tree, "tortoise/gone.py")
+    # The body is removed IN PLACE: the file survives, which is how this shape slips past any
+    # reader that asks whether a path exists.
+    (tree / "tortoise" / "gone.py").write_text('"""Scaffolding."""\n', encoding="utf-8")
+    _commit(tree, ".")
+
+    with pytest.raises(arch.ArchiveRefused, match=r"no body of its own"):
+        arch.archive_symbol(arch.MODULE, "tortoise.gone", "batch-a", "r", root=tree)
+    assert not list((tree / "archive").rglob("*.py")), (
+        "the refusal must not leave a record behind: a row frozen from a docstring is the false "
+        "record this guard exists to prevent"
+    )
+    assert any(
+        p.startswith("tortoise.gone: MODULE") and "REMOVED" in p
+        for p in arch.shrink_violations(tree, base_ref="HEAD~1")
+    ), "and the removal stays a red — declining to write the record must not read as written"
+
+
 def test_the_CLI_refuses_to_freeze_a_leftover_scaffold(
     tree: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
