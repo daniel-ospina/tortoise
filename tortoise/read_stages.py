@@ -129,6 +129,32 @@ STAGE_ORDERING = "ordering"
 #: stage as the cause of a breach that happened after it finished.
 STAGE_RESPONSE = "response"
 
+#: #14232 — the CAPTURE path's stages (`POST /v1/sessions`), declared beside the
+#: read path's because they share ONE timeline and ONE refusal line.
+#:
+#: They exist because that refusal said `stage=unmarked spent_ms={}` in
+#: production: the capture ran the whole model call inside the request and
+#: nothing on the path marked a boundary, so a breach could not name its cause.
+#: The split those marks serve (ack + completion) is #14232's; the marks are what
+#: makes the NEXT breach legible.
+#:
+#: ``capture_gates`` — admission, consent, quota/estimate, rate window, spend cap
+#: (before any write). ``capture_write`` — the record: the `:Session` MERGE + turn
+#: `:Point`s, the sessionCaptured Event mint and the `:Source` materialization.
+#: ``capture_extract`` — the model call on a capture-pool worker.
+#: ``capture_tail`` — what the extraction makes reportable: the provenance stamp,
+#: the entity-link pass, the receipt write and the `capture_ok` record.
+#:
+#: ⛔ The first two are the ones a 504 can still blame: after #14232 the response
+#: is bounded by the ack deadline, so a breach can only land in the record phase.
+#: The last two are marked anyway — they are where the budget goes, they publish
+#: in `spent_ms` on any breach that overlaps them, and an instrument with holes in
+#: it is how `unmarked` happened in the first place.
+STAGE_CAPTURE_GATES = "capture_gates"
+STAGE_CAPTURE_WRITE = "capture_write"
+STAGE_CAPTURE_EXTRACT = "capture_extract"
+STAGE_CAPTURE_TAIL = "capture_tail"
+
 STAGES: tuple[str, ...] = (
     STAGE_UNMARKED,
     STAGE_PRE_HANDLER,
@@ -139,6 +165,22 @@ STAGES: tuple[str, ...] = (
     STAGE_EP_ANNOTATION,
     STAGE_ORDERING,
     STAGE_RESPONSE,
+    # ── #14232: the CAPTURE path's stages ────────────────────────────────
+    # Appended AFTER the read path's terminal stage on purpose: `response` ends
+    # the read timeline and the vocabulary test pins the read ORDER
+    # (`ep_annotation < ordering < response`), so a capture stage inserted above
+    # would silently re-order a timeline it does not belong to. ONE vocabulary,
+    # two surfaces — the refusal's log suffix and its analytics prop are both
+    # gated on `STAGE_SET`, so a second timeline could not publish at all. That
+    # is why the capture path marks HERE.
+    #
+    # `unmarked` keeps its narrow meaning for this path too: a capture breach
+    # that named no stage is an absence of measurement, never a claim that the
+    # bound was spent before the handler ran.
+    STAGE_CAPTURE_GATES,
+    STAGE_CAPTURE_WRITE,
+    STAGE_CAPTURE_EXTRACT,
+    STAGE_CAPTURE_TAIL,
 )
 
 #: ``frozenset`` companion for membership tests at a call site that validates an
