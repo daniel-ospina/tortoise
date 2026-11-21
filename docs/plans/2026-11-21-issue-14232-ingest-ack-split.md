@@ -1,5 +1,5 @@
 <!-- research-path: issue daniel-ospina/tortoise#14232 comment carrying `<!-- research: v1 -->` -->
-<!-- plan-review: cycles=2, status=issues-fixed-awaiting-recheck, version=2.4.0 -->
+<!-- plan-review: cycles=3, status=as-built, version=3.0.0 -->
 ---
 title: "#14232 — POST /v1/sessions acknowledges inside the budget; extraction completes behind it"
 type: plan
@@ -116,46 +116,80 @@ research comment, and the missing-doc gap is reported rather than worked around.
    `phase: "extracting"` + `outcome_known: false`; a session with `capture_ok=true` and a stale phase
    reads `stored-and-processed` with no phase.
 4. **The split (bounded join).** Inside `_capture_session_impl`, after the record write and before
-   the extraction branches: mark `state["attempted"]/["proj"]/["lane"]` (so a pre-ack cancellation
-   still writes the abandoned marker), then define `async def _complete_capture()` holding the tail
-   verbatim, then:
+   the extraction branches, arm `state["attempted"]/["proj"]/["lane"]` — **at the defer point, never
+   above the branch chain** (see 4b) — then:
    - non-extracting lanes (replay / store-only / no-provider / extraction-off) →
-     `return await _complete_capture()` — **byte-identical response to today**;
-   - the MCP lane (`request is None`) → `return await _complete_capture()` — unchanged contract;
-   - the extracting REST lane → `slot.hand_off()` (capacity now belongs to the worker/task, so the
-     request's teardown cannot double-decrement), write `capture_extraction_phase='queued'`, `asyncio.create_task`
-     the completion, then `await asyncio.wait_for(asyncio.shield(task), remaining_to_ack_deadline)`:
-     finished in time → return the task's own full receipt (today's body); else return
-     `build_write_verb(status=STATUS_ACCEPTED, extra=ack)`.
-   **The ack deadline** is `arrival + _CAPTURE_ACK_DEADLINE_S` (1.0 s, the issue's p95 target), read from
-   `request.state["_wait_bound_t0"]` (the same arrival clock the bound uses), clamped to ≥ 0 and kept
-   strictly inside the 10 s bound. ⛔ The record write happens BEFORE this point, so no ack can precede
-   durability (R1) even when phase 1 has already spent the whole window.
+     `return await _report_capture(await _extract_capture())` — **byte-identical response to today**;
+   - the MCP lane (`request is None`) → the same inline call — unchanged contract;
+   - the extracting REST lane → `slot.hand_off()`, `slot.tail_pending()`, write
+     `capture_extraction_phase='queued'`, `asyncio.create_task(_extract_capture())` (registered in
+     `_CAPTURE_TAIL_TASKS`), then `await asyncio.wait_for(asyncio.shield(task), grace)`:
+     finished in time → `return await _report_capture(result)` (today's body); else
+     `_schedule_capture_completion(...)` and return `build_write_verb(status=STATUS_ACCEPTED, extra=ack)`.
+   ⛔ **The tail is TWO coroutines, and the join covers only the first.** `_extract_capture` is the
+   model call; `_report_capture(result)` is everything the extraction makes reportable (provenance
+   stamp, entity links, receipt, the `capture_ok` record). Joining the whole tail made the
+   compatibility half unreachable for a reason that has nothing to do with the extractor's speed: the
+   post-extraction bookkeeping alone exceeded the window, so a fast extraction still answered with
+   the ack. Splitting at that boundary is what makes "completion arrived in time" mean "the model
+   was fast".
+   **The ack deadline** is `arrival + _CAPTURE_ACK_DEADLINE_S`, read from
+   `request.state["_wait_bound_t0"]` (the same arrival clock the bound uses), clamped by
+   `min(_CAPTURE_ACK_DEADLINE_S, _TRANSPORT_WAIT_BOUND_S / 2)` and floored at 0, so the response can
+   never approach `#3834`'s bound. **`_CAPTURE_ACK_DEADLINE_S = 0.5`**, and the number is a
+   measurement rather than a round figure: the window is paid IN FULL on every capture whose
+   extraction outlives it (a real extraction is a network model call and always does), so the ack's
+   latency is `record phase + window`. Measured on the in-process drain at a 1 s window: **p95 ack
+   1.14 s** against this issue's 1 s target — the window bought nothing at 1 s, because a 1 s
+   extraction is not what the compatibility half is for. At 0.5 s the fast path (replayed / cached /
+   small capture) still gets the receipt and the ack clears the target. ⛔ The record write happens
+   BEFORE this point, so no ack can precede durability (R1) even when the record phase has already
+   spent the whole window.
    *Test:* with a parked extractor, the POST answers inside the deadline with
    `protocol_version=memory_write_v1`, `status="accepted"`, `extracted=0`, `points=[]`,
    `extraction.status="stored"`, `outcome_known=false`, `phase` in the declared set,
-   `extraction_outcome="unknown"`, `complete=false`, `status_url`, and HTTP 200; with the mock (fast)
-   extractor the POST still answers today's full body (`extracted >= 1`,
-   `extraction_mode="llm:mock"`). The `extraction_outcome` key is not an invention: it is
-   `capture_spool.UNRECORDED_OUTCOME_KEY/VALUE`, the marker `tortoise/__main__.py` already renders as
-   *"outcome not recorded yet — it may still be running"* and the spool drain already reads, so the
-   ack needs **no client change** to be read honestly.
-4b. **Task ownership.** A module-level registry holds the live completion tasks (a bare
-   `create_task` can be garbage-collected mid-flight), and one done-callback retrieves the
-   exception, writes `_capture_abandoned_marker` when the tail did not reach its terminal record,
-   and calls `slot.complete_tail()` — so a shutdown-cancelled tail neither leaks the session key nor
-   leaves the NULL→replay shape open.
+   `extraction_outcome="unknown"`, `status_url`, `graph`, and HTTP 200 — and **no `complete` key**
+   (it was proposed in v2.1 and dropped: `memory_write_v1` has no such member, and a boolean invented
+   for the ack would be a second way to ask what `status` already answers);
+   with the mock (fast) extractor the POST still answers today's full body (`extracted >= 1`,
+   `extraction_mode="llm:mock"`, `first_capture` present, **no `extraction` block**). The
+   `extraction_outcome` key is not an invention: it is `capture_spool.UNRECORDED_OUTCOME_KEY/VALUE`,
+   the marker `tortoise/__main__.py` already renders as *"outcome not recorded yet — it may still be
+   running"* and the spool drain already reads, so the ack needs **no client change** to be read
+   honestly.
+4b. **Task ownership, and who releases what.** Two module symbols carry it: `_CAPTURE_TAIL_TASKS`
+   (the live completion coroutines — a bare `create_task` can be garbage-collected mid-flight) and
+   `_schedule_capture_completion(task, report, slot, proj, session_id, state)`, ONE place that
+   attaches the continuation's callbacks (`_capture_tail_failed`, `slot.worker_done`,
+   `slot.complete_tail`).
    ⛔ **The marker arm is gated on a GENUINE ATTEMPT, exactly as the existing arming guard is.**
-   `state["attempted"] = True` is set AT THE DEFER POINT (which by construction is
-   `not store_only and (not session_existed or retry_failed_capture)`), never unconditionally before
+   `state["attempted"] = True` is set AT THE DEFER POINT, which by construction is
+   `not store_only and (not session_existed or retry_failed_capture)` — never unconditionally above
    the branch chain: the replay/store-only branches deliberately arm nothing
    (`hosted_api.py:20949-20951` — *"arm the abandoned-capture marker for a genuine FRESH attempt
    only … must not arm a write that could downgrade a succeeded prior to capture_ok=False"*), and
-   `state["finalized"]` is only ever set inside `if _record_session_state:`. So a callback keyed on
+   `state["finalized"]` is only ever set inside `if _record_session_state:`. A callback keyed on
    `not finalized` alone would write `capture_ok=false` over an ALREADY-PROCESSED session on a
-   replay, and the next re-POST would take the #2335 TRUE-retry and re-extract over it. The
-   done-callback therefore writes the marker only when the defer point armed it
-   (`state.get("attempted") and not state.get("finalized")`).
+   replay, and the next re-POST would take the #2335 TRUE-retry and re-extract over it.
+   ⛔ **The marker is scoped to CANCELLATION, not to failure** — `_capture_abandoned_marker`'s own
+   docstring, and `test_hosted_api.py::TestSessionActorStamp2600`'s raise-shape (ii) pins that a
+   re-POST of a raise-shaped (NULL) session must replay, not re-extract. A raised tail is REPORTED
+   (exception retrieved, ERROR log), never marked.
+   ⛔ **One owner of the slot at every instant**, and it is decided once per request:
+   * joined + reported → the request releases (`complete_tail` + `worker_done`) in a `finally`;
+   * deferred → `_schedule_capture_completion` owns both, on the continuation, because the
+     extraction future finishes MID-capture (releasing there would leave `_report_capture` writing
+     `capture_ok` with the key already free — the #3129 window this gate exists to close);
+   * **request cancelled mid-join** → cancel the coroutine, `complete_tail` only. Capacity stays with
+     the WORKER: `_run_capture_bounded` bound `slot.worker_done` to the concurrent future precisely
+     because a cancelled `await` cannot cancel a parked pool thread (#3060, pinned by
+     `test_capture_loop_responsiveness.py::test_capture_slot_is_held_until_the_worker_finishes`).
+     The endpoint's `CancelledError` arm writes the abandoned marker, as today;
+   * **the extraction raises inside the join** → `finally` releases both, because on that arm the
+     `worker_done` call is idempotent with the future's own binding and the alternative is what was
+     measured: a **409 "already in flight"** on the re-POST where raise-shape (ii) says replay.
+   Each of those four is a test in `tests/test_14232_ingest_ack_split.py`, because each one was a
+   real defect found by an existing suite rather than by reading the code.
 5. **Record durability is inside the ack.** *Test:* at the moment the ack arrives, the `:Session`,
    the turn `:Point`s and the `:Source` exist in the graph (queried by the test right after the POST).
    This is R1's evidence and the §2.0 re-derivability claim.
@@ -173,9 +207,15 @@ research comment, and the missing-doc gap is reported rather than worked around.
    OPEN at the deadline; `stages_ms` carries only stages that FINISHED, `read_stages.py:423`) and
    `body["stages_ms"]["capture_gates"]` is present. Mutation-proved by deleting the
    `capture_write` mark: `stage` must fall back to `capture_gates`.
-9. **Acceptance drain (50 sessions).** `tools/acceptance_14232_drain.py` drives the real app over
-   ASGI with the real extractor: 50 sessions, p95 ack, zero 504s, every session terminal, then reads
-   one session back and counts points/entities/edges.
+9. **Acceptance drain (50 sessions).** `tools/acceptance_14232_drain.py`: `--base-url` + `--api-key`
+   drains the SPOOLED corpus against a deployment (the real acceptance run); with no `--base-url` it
+   runs in process against a private embedded graph and says **rehearsal** on its first line, with the
+   host load beside it, because latency and extractor are then this box's. It grades four criteria on
+   one run — ack p95 ≤ 1 s, zero refusals, every session terminal on its own, and extraction
+   demonstrably behind the ack (points, plus entities/edges where the extractor emits them; the
+   offline seam emits a bare claim with no entity, measured, so requiring entities there would fail a
+   healthy run — a deployment run passes `--require-entities`). It writes a `--json` report and exits
+   non-zero on any criterion, so the acceptance claim is reproducible rather than asserted.
 
 ## 8. Review Scope Contract
 
@@ -191,8 +231,9 @@ research comment, and the missing-doc gap is reported rather than worked around.
   reintroduced by a body that says `extracted: 0` while extraction is running. `STATUS_ACCEPTED` is
   *declared* in the protocol's status vocabulary (`write_verb.py:65`) but has **no emitter anywhere
   in the tree until this change**, so the ack is the first emission on a pinned wire contract. →
-  caught by **value** assertions, not key presence: `status == "accepted"`, `complete is False`,
-  `extracted == 0`, `points == []`, `extraction.status == "stored"`, `outcome_known is False`,
+  caught by **value** assertions, not key presence: `status == "accepted"`,
+  `extracted == 0`, `points == []`, `extraction_mode is None`, `errors == []`,
+  `extraction.status == "stored"`, `outcome_known is False`,
   `phase` in the declared set, HTTP 200; **plus** the ack carries the client's own
   unrecorded-outcome marker (`extraction_outcome: "unknown"` — `capture_spool
   .UNRECORDED_OUTCOME_KEY/VALUE`, the ONE definition `tortoise/__main__.py:9391` and the spool drain
@@ -201,16 +242,26 @@ research comment, and the missing-doc gap is reported rather than worked around.
   the wire body's values, and the CLI sentence that body produces.
 - **R3b the response body is decided by a wall-clock race** (alternative E returns today's full
   receipt when completion lands inside the ack window, the ack otherwise) → caught by two
-  deterministic tests: a parked extractor must produce the ack shape; the mock extractor must still
-  produce today's full body (`extracted >= 1`, `extraction_mode == "llm:mock"`). Neither may be
-  asserted through a sleep, and both must run under the same fixture.
+  deterministic tests: the ack path is driven by commuting `_capture_ack_grace_s` to **0** (so "did the
+  caller get the ack" is a fact about the code path, not about load), and the receipt path runs with
+  the real window and asserts today's body. Neither asserts through a sleep.
+- **R3c the SUITE races the window** — the same risk one level up, and it was REAL: with the
+  production 1 s window in place, `assert body["extracted"] >= 1` became a question about machine
+  load (the offline `MockModel` seam's capture measured **0.008 s to 0.95 s** on one host depending on
+  the test before it), and two pre-existing tests flaked exactly there. `#5049` rule 1 forbids a
+  deadline expiry producing a verdict, so `tests/conftest.py` opens the window for the whole suite
+  (the transport bound still clamps it) and clears `_CAPTURE_TAIL_TASKS` — whose entries can belong
+  to a loop that no longer exists.
 
 - **R4 — session in-flight key released before the tail finishes** (a same-session retry replays a
   200 over a live tail — the #3129 residual) → caught by step 7's 409-during-tail test.
 - **R5 — stage vocabulary drift** (`STAGES` closed set, `read_stage` analytics validation) → caught by
   the existing vocabulary tests plus step 1's additions.
 - **R6 — capacity leak** (slot never released → every later capture 429) → caught by step 7's
-  capacity-return assertion, and by the existing leak-log test.
+  capacity-return assertion, the existing leak-log test, and the two arms that only exist after this
+  change: a completion that dies BEFORE submitting (`_run_capture_bounded` raising — the slot was
+  already handed off, so nothing else would ever release it) and a cancelled request (releases the
+  tail claim but must NOT release capacity out from under a parked worker, which is R6's inverse).
 
 **Out of scope — must NOT be raised** (note; file; do not chase):
 

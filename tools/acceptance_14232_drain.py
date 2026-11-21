@@ -1,0 +1,543 @@
+#!/usr/bin/env python
+"""Drain N session captures and grade #14232's acceptance criteria.
+
+WHAT THIS MEASURES, AND WHY THOSE FOUR THINGS
+---------------------------------------------
+#14232's done-when is four observations on ONE run, not four separate claims:
+
+1. **ack p95** — `POST /v1/sessions` answers inside the transport wait bound
+   (`#3834`, 10 s, and it must NOT be raised). The target is p95 <= 1 s, which is
+   the whole point of moving extraction off the request: a caller should not pay
+   for the model.
+2. **zero 504s** — the bound's refusal is the symptom this change exists to
+   remove. A single 504 fails the run BY ITSELF: it is the production defect,
+   reproduced.
+3. **every session reaches a TERMINAL state on its own** — the ack is only
+   honest if completion follows without the client doing anything. "Terminal" is
+   read from the SAME projection the product serves (`capture_ok` present and the
+   in-flight phase cleared), so the check cannot agree with a state no client can
+   see.
+4. **extraction demonstrably ran behind the ack** — points, entities and edges
+   for a drained session. Without this, 1-3 are all satisfiable by a capture that
+   stores turns and never extracts, i.e. by the bug.
+
+    uv run python tools/acceptance_14232_drain.py --n 50
+    uv run python tools/acceptance_14232_drain.py --n 50 --json
+
+TWO MODES, AND THE DIFFERENCE MATTERS
+-------------------------------------
+* Against a DEPLOYMENT (`--base-url https://app.premiselabs.co` +
+  `--api-key`/`TORTOISE_API_KEY`) this is the real acceptance run: the spooled
+  corpus, the real database, the real provider, the real wait-bound middleware.
+* With no `--base-url` it runs **in process** against `hosted_api.app` and a
+  local embedded graph. That is a REHEARSAL, and the report says so on its first
+  line: the criteria are the same code path, but the latency is this box's, not
+  production's, and the extractor is the offline `MockModel` seam unless a
+  provider key is configured.
+
+The corpus: `--sessions-dir` (default `$TORTOISE_CAPTURE_SPOOL_DIR`, else
+`~/.tortoise/capture-spool`) is read for spooled captures when it exists, because
+the acceptance run is meant to be the 50 sessions that were parked — re-deriving
+a synthetic corpus would test a shape no user produces. When the directory is
+absent (the normal case off the deployment box) the run SYNTHESISES captures of
+the same shape and says so; it never silently substitutes one for the other.
+
+Exit codes: 0 all four criteria met · 1 a criterion failed (the report names
+which) · 2 usage/precondition (no app, no auth, bad corpus).
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import statistics
+import sys
+import time
+from pathlib import Path
+
+#: The ack budget this issue is graded on (p95, seconds).
+DEFAULT_MAX_ACK_P95_S = 1.0
+#: How long a drained session may take to reach a terminal state before the run
+#: calls it stuck. Generous on purpose: the criterion is "on its own", not "fast".
+DEFAULT_TERMINAL_TIMEOUT_S = 300.0
+#: Poll interval while waiting for a session to finish extracting.
+POLL_S = 0.25
+
+_SPOOL_DIR_ENV = "TORTOISE_CAPTURE_SPOOL_DIR"
+_DEFAULT_SPOOL_DIR = "~/.tortoise/capture-spool"
+
+
+def _p(ok: bool, label: str, detail: str) -> str:
+    return f"  [{'PASS' if ok else 'FAIL'}] {label}: {detail}"
+
+
+# ── corpus ────────────────────────────────────────────────────────────────
+
+def _synthetic_corpus(n: int) -> list[dict]:
+    """Captures shaped like a real agent session: alternating turns, a claim.
+
+    Deliberately NOT one-turn stubs: a one-turn capture cannot show that the ack
+    is independent of the number of points an extraction has to mint, which is the
+    quantity #14232 is about.
+    """
+    out = []
+    for i in range(n):
+        out.append({
+            "session_id": f"acc14232-{i:03d}",
+            # A REAL harness member: the boundary validates it against a closed
+            # set, and an invented name is a 422 that would make the run grade
+            # nothing at all (measured). `source` carries the acceptance mark.
+            "harness": "pi",
+            "source": "acceptance-14232",
+            "conversation": [
+                {"role": "user",
+                 "content": (f"Acceptance capture {i}: the ingest worker must "
+                             "acknowledge before it extracts anything.")},
+                {"role": "assistant",
+                 "content": ("Agreed — the receipt says accepted and the status "
+                             f"surface names the phase for capture {i}.")},
+                {"role": "user",
+                 "content": (f"Capture {i} also asserts that extraction runs "
+                             "behind the ack, on a worker.")},
+            ],
+        })
+    return out
+
+
+def _spooled_corpus(spool_dir: Path, n: int) -> list[dict]:
+    """The first `n` captures the spool holds, in spool order (oldest first).
+
+    The spool is the source of truth for "what was parked": each entry is a JSON
+    object with the captured conversation. An entry this tool cannot read is
+    SKIPPED and counted, never silently dropped — a corpus that shrank without
+    saying so would make the run's denominator a fiction.
+    """
+    files = sorted(p for p in spool_dir.rglob("*.json") if p.is_file())
+    out: list[dict] = []
+    skipped = 0
+    for path in files:
+        if len(out) >= n:
+            break
+        try:
+            entry = json.loads(path.read_text())
+        except (OSError, ValueError):
+            skipped += 1
+            continue
+        conv = entry.get("conversation") or entry.get("turns")
+        sid = (entry.get("session_id") or entry.get("sessionId")
+               or path.stem)
+        if not conv:
+            skipped += 1
+            continue
+        out.append({"session_id": sid, "harness": entry.get("harness") or "pi",
+                    "source": "acceptance-14232", "conversation": conv})
+    if skipped:
+        print(f"  corpus: skipped {skipped} unreadable/empty spool entries")
+    return out
+
+
+# ── transports ────────────────────────────────────────────────────────────
+
+class _HttpTransport:
+    """Real HTTP against a deployment — the acceptance run proper."""
+
+    label = "deployment"
+
+    def __init__(self, base_url: str, api_key: str) -> None:
+        import httpx
+
+        self._client = httpx.Client(
+            base_url=base_url.rstrip("/"),
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=120.0,
+        )
+
+    def post_capture(self, body: dict):
+        return self._client.post("/v1/sessions", json=body)
+
+    def get_session(self, session_id: str):
+        return self._client.get(f"/v1/sessions/{session_id}")
+
+    def extraction_evidence(self, session_id: str) -> dict:
+        """Points/entities/edges FROM THE SERVED SURFACE only.
+
+        A deployment probed over HTTP cannot be asked for a graph query, and
+        inventing one for this tool would mean a new endpoint (a surface change).
+        The detail body carries the extraction block and the point count it is
+        derived from; entities and edges are reported as NOT MEASURED rather than
+        assumed present.
+        """
+        r = self.get_session(session_id)
+        if r.status_code != 200:
+            return {"measured": False, "why": f"detail read {r.status_code}"}
+        body = r.json()
+        return {
+            "measured": False,
+            "why": "detail surface only (no graph read over HTTP)",
+            "points": len(body.get("points") or []),
+            "extraction": body.get("extraction"),
+        }
+
+
+class _InProcessTransport:
+    """`hosted_api.app` in process, local embedded graph — a REHEARSAL."""
+
+    label = "in-process rehearsal"
+
+    def __init__(self, org_id: str) -> None:
+        import tempfile
+
+        from fastapi.testclient import TestClient
+
+        import tortoise.hosted_api as ha
+
+        self._ha = ha
+        self._org_id = org_id
+        # A private DB per run: an acceptance drain must not read or write the
+        # state a previous run left, or "terminal on its own" could be satisfied
+        # by work an earlier run did.
+        self._tmp = tempfile.TemporaryDirectory(prefix="acc14232-")
+        self._db_path = os.path.join(self._tmp.name, "acc.db")
+        # The SDK resolves its embedded graph from `TORTOISE_DB_PATH`, so the pin
+        # IS the private DB. Restored in `close()`.
+        self._prev_db_path = os.environ.get("TORTOISE_DB_PATH")
+        os.environ["TORTOISE_DB_PATH"] = self._db_path
+        self._client = TestClient(ha.app, raise_server_exceptions=False)
+        self._client.__enter__()
+
+    def authenticate(self, org_id: str) -> None:
+        """Mint a real API key and let the REAL auth dependency resolve the org.
+
+        ⛔ Not a `dependency_overrides` stub. The capture lane's quota gate reads
+        its limits straight off the authenticated org dict (`#683`), so a stub
+        that carries only an id makes every capture a fail-closed 500
+        ("team limits missing max_sessions") — measured, three attempts — and the
+        run would then grade the quota gate's refusal as if it were the ack
+        defect. Minting a key exercises the same door production uses, including
+        the limits resolution.
+
+        The two seeds a real tenant already has, and that the rehearsal must
+        therefore create: the `:Team` row (`apply_limits` is a `MATCH … SET`), its
+        tier limits (which also encode `#4010`'s unlimited sessions as NULL), and
+        `session_recording=True` (without it every capture is a 403).
+        """
+        from tortoise.billing import apply_limits
+        from tortoise.hosted_api import (
+            _get_onboarding_state, _make_sdk, _update_onboarding_state,
+        )
+
+        registry = _make_sdk(namespace="registry")._get_registry()
+        registry.query(
+            "MERGE (t:Team {id:$id}) SET t.onboarding_state=$st",
+            params={"id": org_id, "st": "{}"})
+        apply_limits(_make_sdk(namespace="registry"), org_id, "free")
+        _update_onboarding_state(org_id, session_recording=True)
+        state = _get_onboarding_state(org_id)
+        if state.get("session_recording") is not True:  # pragma: no cover
+            raise SystemExit(
+                f"rehearsal consent seed did not persist: {state} — every "
+                "capture would 403 and the run would grade an empty corpus")
+        key = _make_sdk(namespace="registry")._apikey_create(
+            org_id, "00000000-0000-4000-8000-000000000142")
+        self._client.headers["Authorization"] = f"Bearer {key['api_key']}"
+
+    def post_capture(self, body: dict):
+        return self._client.post("/v1/sessions", json=body)
+
+    def get_session(self, session_id: str):
+        return self._client.get(f"/v1/sessions/{session_id}")
+
+    def extraction_evidence(self, session_id: str) -> dict:
+        """GRAPH evidence: extracted points, entity links and edges.
+
+        This is the arm that can answer criterion 4 properly. It reads the same
+        projection the read surfaces serve, and counts the three things the issue
+        names — separately, because 'points exist' has been true before while
+        nothing was WIRED to them.
+        """
+        ha = self._ha
+        try:
+            # ⛔ The ORG's data graph, not `registry`: extracted points live in
+            # the tenant namespace, and a registry-namespace read reports 0 for a
+            # capture that extracted fine (measured — it made the evidence check
+            # fail on a PASSing run).
+            proj = ha._make_sdk(namespace=self._org_id)._get_proj()
+        except Exception as exc:  # pragma: no cover — rehearsal-only path
+            return {"measured": False, "why": f"no graph handle: {exc}"}
+        q = proj.g.query
+        points = q(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+            "WHERE p.pointKind IS NULL OR p.pointKind <> 'event' "
+            "RETURN count(p)", params={"sid": session_id}).result_set
+        entities = q(
+            "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+            "MATCH (p)-[r]->(e:Entity) "
+            "RETURN count(DISTINCT e), count(r)",
+            params={"sid": session_id}).result_set
+        return {
+            "measured": True,
+            "points": int(points[0][0]) if points else 0,
+            "entities": int(entities[0][0]) if entities else 0,
+            "edges": int(entities[0][1]) if entities else 0,
+        }
+
+    def close(self) -> None:
+        self._client.__exit__(None, None, None)
+        if self._prev_db_path is None:
+            os.environ.pop("TORTOISE_DB_PATH", None)
+        else:
+            os.environ["TORTOISE_DB_PATH"] = self._prev_db_path
+        self._tmp.cleanup()
+
+
+# ── the run ───────────────────────────────────────────────────────────────
+
+def _percentile(values: list[float], pct: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    # Nearest-rank: with n=50 a p95 must be an OBSERVED value, never a spline
+    # through two of them — the claim "p95 ack" has to be a request the run made.
+    idx = min(len(ordered) - 1, max(0, int(round(pct / 100.0 * len(ordered))) - 1))
+    return ordered[idx]
+
+
+def _is_terminal(detail: dict) -> tuple[bool, str]:
+    """Terminal = an outcome is known and no in-flight phase is published."""
+    ex = detail.get("extraction") or {}
+    if ex.get("phase"):
+        return False, f"phase={ex['phase']}"
+    if ex.get("outcome_known") is True:
+        return True, f"status={ex.get('status')}"
+    return False, f"status={ex.get('status')} outcome_known={ex.get('outcome_known')}"
+
+
+def run(args) -> int:
+    corpus: list[dict]
+    if args.sessions_dir:
+        spool = Path(os.path.expanduser(args.sessions_dir))
+        if not spool.is_dir():
+            print(f"error: --sessions-dir {spool} is not a directory",
+                  file=sys.stderr)
+            return 2
+        corpus = _spooled_corpus(spool, args.n)
+        corpus_label = f"spooled ({spool})"
+    else:
+        corpus = _synthetic_corpus(args.n)
+        corpus_label = "synthesised (no spool on this box)"
+    if not corpus:
+        print("error: the corpus is empty — nothing to drain", file=sys.stderr)
+        return 2
+
+    if args.base_url:
+        api_key = args.api_key or os.environ.get("TORTOISE_API_KEY")
+        if not api_key:
+            print("error: --base-url needs --api-key or $TORTOISE_API_KEY",
+                  file=sys.stderr)
+            return 2
+        transport = _HttpTransport(args.base_url, api_key)
+    else:
+        if not os.environ.get("TORTOISE_SESSION_LLM_MOCK") and not (
+                os.environ.get("DEEPSEEK_API_KEY")
+                or os.environ.get("OPENROUTER_API_KEY")):
+            # Keyless in-process would 503 the extraction and the run would then
+            # grade a capture that never extracted — the exact confusion
+            # criterion 4 exists to catch. Refuse instead.
+            print("error: no provider key and TORTOISE_SESSION_LLM_MOCK unset — "
+                  "the rehearsal would grade a keyless capture. Set "
+                  "TORTOISE_SESSION_LLM_MOCK=1 for the offline seam, or export "
+                  "a provider key.", file=sys.stderr)
+            return 2
+        transport = _InProcessTransport(args.org)
+
+    if isinstance(transport, _InProcessTransport):
+        transport.authenticate(args.org)
+
+    print(f"#14232 acceptance drain — {transport.label}")
+    print(f"  corpus: {corpus_label}, n={len(corpus)}")
+    if not args.base_url:
+        load = os.getloadavg()[0] if hasattr(os, "getloadavg") else None
+        print("  ⚠ rehearsal: latency and extractor are THIS box's, not "
+              "production's" + (f" (load {load:.1f} on {os.cpu_count()} cpus)"
+                                if load is not None else ""))
+
+    acks: list[float] = []
+    refusals: list[dict] = []
+    outcomes: list[dict] = []
+
+    for cap in corpus:
+        started = time.monotonic()
+        r = transport.post_capture(cap)
+        elapsed = time.monotonic() - started
+        acks.append(elapsed)
+        body = None
+        try:
+            body = r.json()
+        except ValueError:
+            body = None
+        if r.status_code == 504:
+            refusals.append({"session_id": cap["session_id"],
+                             "stage": (body or {}).get("stage"),
+                             "spent_ms": (body or {}).get("stages_ms")})
+        elif r.status_code != 200:
+            refusals.append({"session_id": cap["session_id"],
+                             "status": r.status_code,
+                             "detail": (body or {}) if isinstance(body, dict) else str(r.text)[:200]})
+        outcomes.append({
+            "session_id": cap["session_id"],
+            "status_code": r.status_code,
+            "ack_ms": round(elapsed * 1000.0, 1),
+            "ack_status": (body or {}).get("status") if isinstance(body, dict) else None,
+            "phase_at_ack": (((body or {}).get("extraction") or {})
+                             .get("phase")) if isinstance(body, dict) else None,
+        })
+
+    # ── criterion 3: every session reaches a terminal state, on its own ──
+    stuck: list[dict] = []
+    terminals: list[dict] = []
+    for cap in corpus:
+        if any(o["session_id"] == cap["session_id"] and o["status_code"] != 200
+               for o in outcomes):
+            continue
+        deadline = time.monotonic() + args.terminal_timeout
+        last = "not read"
+        while time.monotonic() < deadline:
+            r = transport.get_session(cap["session_id"])
+            if r.status_code == 200:
+                detail = r.json()
+                done, last = _is_terminal(detail)
+                if done:
+                    terminals.append({"session_id": cap["session_id"],
+                                      "status": last})
+                    break
+            else:
+                last = f"detail read {r.status_code}"
+            time.sleep(POLL_S)
+        else:
+            stuck.append({"session_id": cap["session_id"], "last": last})
+
+    # ── criterion 4: extraction demonstrably ran, on ONE drained session ──
+    evidence = {"measured": False, "why": "no session drained"}
+    if terminals:
+        evidence = transport.extraction_evidence(terminals[0]["session_id"])
+        evidence["session_id"] = terminals[0]["session_id"]
+
+    p95 = _percentile(acks, 95)
+    p50 = statistics.median(acks) if acks else 0.0
+    ok_ack = p95 <= args.max_ack_p95
+    ok_refusal = not refusals
+    accepted = sum(1 for o in outcomes if o["status_code"] == 200)
+    ok_terminal = (not stuck) and accepted > 0 and len(terminals) == accepted
+    # Points are the non-negotiable half: without an extracted point the capture
+    # stored turns and never extracted, which is the defect. Entities and edges
+    # are asserted only where the extractor emits them — the offline `MockModel`
+    # seam emits a bare claim with NO entity, measured, so requiring them there
+    # would fail a healthy run. A deployment run passes `--require-entities`,
+    # because a real extractor that produces no entity is a finding.
+    ok_points = (evidence.get("points") or 0) >= 1
+    ok_entities = (not args.require_entities) or (
+        (evidence.get("entities") or 0) >= 1
+        and (evidence.get("edges") or 0) >= 1)
+    ok_extract = bool(evidence.get("measured") and ok_points and ok_entities)
+    if not evidence.get("measured"):
+        # An unmeasured claim is not a PASS: report it as not-met.
+        ok_extract = False
+
+    load = os.getloadavg() if hasattr(os, "getloadavg") else (None, None, None)
+    report = {
+        "mode": transport.label,
+        "host_load_1m": round(load[0], 2) if load[0] is not None else None,
+        "cpu_count": os.cpu_count(),
+        "corpus": corpus_label,
+        "n": len(corpus),
+        "ack_ms": {"p50": round(p50 * 1000.0, 1),
+                   "p95": round(p95 * 1000.0, 1),
+                   "max": round((max(acks) if acks else 0.0) * 1000.0, 1)},
+        "refusals": refusals,
+        "accepted": accepted,
+        "terminal": len(terminals),
+        "stuck": stuck,
+        "extraction_evidence": evidence,
+        "outcomes": outcomes,
+        "criteria": {
+            "ack_p95_within_budget": ok_ack,
+            "zero_refusals": ok_refusal,
+            "all_terminal": ok_terminal,
+            "extraction_demonstrably_ran": ok_extract,
+        },
+        "verdict": "PASS" if all((ok_ack, ok_refusal, ok_terminal, ok_extract))
+                   else "FAIL",
+    }
+
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print()
+        print(_p(ok_ack, "ack p95",
+                 f"{report['ack_ms']['p95']} ms <= {args.max_ack_p95 * 1000:.0f} ms "
+                 f"(p50 {report['ack_ms']['p50']} ms, max {report['ack_ms']['max']} ms)"))
+        print(_p(ok_refusal, "zero refusals",
+                 "none" if ok_refusal
+                 else f"{len(refusals)} refusal(s): {refusals[:3]}"))
+        print(_p(ok_terminal, "terminal on its own",
+                 f"{len(terminals)}/{accepted} accepted"
+                 + ("" if ok_terminal else f" — stuck: {stuck[:3]}")))
+        print(_p(ok_extract, "extraction ran behind the ack",
+                 json.dumps(evidence, default=str)))
+        print()
+        print(f"VERDICT: {report['verdict']}")
+
+    if isinstance(transport, _InProcessTransport):
+        transport.close()
+    return 0 if report["verdict"] == "PASS" else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(
+        description="#14232 acceptance: drain N captures, grade ack p95, "
+                    "zero 504s, terminal state, and extraction evidence.")
+    ap.add_argument("--n", type=int, default=50,
+                    help="how many sessions to drain (default 50 — the parked corpus)")
+    ap.add_argument("--base-url", default=None,
+                    help="deployment URL; omit for the in-process rehearsal")
+    ap.add_argument("--api-key", default=None,
+                    help="API key for --base-url (else $TORTOISE_API_KEY)")
+    ap.add_argument("--sessions-dir", default=None,
+                    help="spool directory to draw the corpus from (default: "
+                         f"${_SPOOL_DIR_ENV} or {_DEFAULT_SPOOL_DIR} when it "
+                         "exists; otherwise a synthesised corpus, and the report "
+                         "says which)")
+    ap.add_argument("--org", default=os.environ.get("TORTOISE_ACCEPTANCE_ORG",
+                                                   "acc14232"),
+                    help="org id for the in-process rehearsal")
+    ap.add_argument("--max-ack-p95", type=float, default=DEFAULT_MAX_ACK_P95_S,
+                    help=f"p95 ack budget, seconds (default {DEFAULT_MAX_ACK_P95_S})")
+    ap.add_argument("--terminal-timeout", type=float,
+                    default=DEFAULT_TERMINAL_TIMEOUT_S,
+                    help="how long a session may take to finish extracting "
+                         f"(default {DEFAULT_TERMINAL_TIMEOUT_S:.0f}s)")
+    ap.add_argument("--require-entities", action="store_true",
+                    help="also require extracted entities AND edges (pass this "
+                         "against a deployment with a real extractor; the "
+                         "offline MockModel seam emits none)")
+    ap.add_argument("--json", action="store_true", help="machine-readable report")
+    args = ap.parse_args(argv)
+
+    if args.n <= 0:
+        print("error: --n must be positive", file=sys.stderr)
+        return 2
+    if args.sessions_dir is None:
+        # A MISSING DEFAULT is not an error — most boxes have no spool, and the
+        # synthesised corpus is the documented fallback. Only an EXPLICIT
+        # `--sessions-dir` that does not exist is a usage error, because that is a
+        # caller who asked for a specific corpus and would otherwise be silently
+        # graded on a different one.
+        for candidate in (os.environ.get(_SPOOL_DIR_ENV), _DEFAULT_SPOOL_DIR):
+            if candidate and Path(os.path.expanduser(candidate)).is_dir():
+                args.sessions_dir = candidate
+                break
+    return run(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

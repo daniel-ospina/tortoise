@@ -618,7 +618,18 @@ def _capture_slot_decrement() -> None:
 #: deliberately HALF the transport bound at most (#3834's 10 s is a ceiling this
 #: must never approach), so a future change to that constant cannot silently put
 #: the response back on the wrong side of it.
-_CAPTURE_ACK_DEADLINE_S = 1.0
+#:
+#: ⛔ HALF A SECOND, not a full one, and the number is a measurement: the window
+#: is paid IN FULL on every capture whose extraction outlives it (a real
+#: extraction always does — it is a network model call), so the ack's own latency
+#: is `record phase + window`. With a 1 s window the in-process acceptance drain
+#: measured p95 **1.14 s** against this issue's 1 s target; the window bought
+#: nothing there, because a 1 s extraction is not what the compatibility half is
+#: for. 0.5 s keeps the fast path (a replayed/cached/small capture, which is where
+#: a client can still be handed the full receipt) while leaving the ack clear of
+#: the target on any host. Lowering it further would start to make the receipt
+#: unreachable; raising it puts the metric back at the wall.
+_CAPTURE_ACK_DEADLINE_S = 0.5
 
 #: A join that returned a value cannot be confused with a join that did not
 #: happen: `None` is a legitimate lane result for some paths, so the miss needs
@@ -641,24 +652,25 @@ def _capture_ack_grace_s(request) -> float:
     zero: the window is what makes the join worth doing, and its absence from a
     test harness must not silently disable the join.
     """
-    # The window is `_CAPTURE_ACK_DEADLINE_S` of JOIN from NOW — the ack is built
-    # after the record phase, and shrinking the window by that phase's cost would
-    # make the join unreachable on any slow graph (the extractor would have to be
-    # faster than the record write). ⛔ What must NOT move is the transport
-    # ceiling, so the window is also clamped to half of `#3834`'s bound measured
-    # from ARRIVAL: on a healthy request the clamp is inert, and on a request
-    # whose record phase already spent most of the budget it collapses the join
-    # to zero rather than let the response approach the refusal it exists to
+    # ⛔ THE ACK IS ANCHORED ON ARRIVAL, not on the join's start. The constant
+    # names when this request stops waiting for the extraction — `#3834`'s bound
+    # is what must not be approached, and the p95 ack budget #14232 is graded on
+    # is a property of the REQUEST, so a slow record phase must SHRINK the join
+    # rather than be paid twice. Measured on the in-process acceptance drain with
+    # a window measured from the join instead: p95 ack 1.95 s (0.95 s record +
+    # a full 1 s of join that could never land) against a 1 s target.
+    #
+    # A missing binding (a direct call, a unit test) gets the full constant: the
+    # window is what makes the join worth doing, and an absent middleware must not
+    # silently disable the compatibility half. The transport ceiling still clamps
+    # it, so the response can never approach the refusal this change exists to
     # avoid.
-    ceiling = _mcp_auth._TRANSPORT_WAIT_BOUND_S / 2.0
+    ceiling = min(_CAPTURE_ACK_DEADLINE_S,
+                  _mcp_auth._TRANSPORT_WAIT_BOUND_S / 2.0)
     t0 = getattr(getattr(request, "state", None), "_wait_bound_t0", None)
     if not isinstance(t0, (int, float)):
-        # No bound binding (a direct call, a unit test): the window is the
-        # constant, never zero — an absent bound must not silently disable the
-        # join that makes this change additive.
         return _CAPTURE_ACK_DEADLINE_S
-    return max(0.0, min(_CAPTURE_ACK_DEADLINE_S,
-                        (t0 + ceiling) - time.monotonic()))
+    return max(0.0, (t0 + ceiling) - time.monotonic())
 
 
 def _write_capture_phase(proj, session_id: str, phase: str, at: str) -> None:
@@ -707,9 +719,11 @@ async def _capture_extraction_started(proj, session_id: str, view: dict,
     """
     if not view.get("armed"):
         return
-    view["phase"] = "extracting"
-    _mark_capture_stage(STAGE_CAPTURE_EXTRACT)
     await _mark_capture_extraction_phase(proj, session_id, "extracting", now)
+    # AFTER the write, so the view never claims a phase the record does not carry
+    # yet: the ACK is built from this dict, and a body that is ahead of its own
+    # record is the one thing this change must not produce.
+    view["phase"] = "extracting"
 
 
 def _schedule_capture_completion(task, report, slot, proj, session_id,
@@ -21247,6 +21261,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # compile fails with manifests present (surfaced as an additive capture
         # warning below — the default vocabulary produces no minted kinds to
         # flag, so a log line alone would leave the degradation invisible).
+        # `capture_extract` is marked on EVERY lane, not only the deferred one:
+        # `mark` ENTERS a stage (closing the previous one), so this is what makes
+        # a breach DURING the extraction name `capture_extract` with
+        # `capture_write` timed beside it — on the MCP lane too, where no phase is
+        # ever written. Gating the mark with the phase write left the inline lanes
+        # reporting the extraction as part of the write.
+        _mark_capture_stage(STAGE_CAPTURE_EXTRACT)
         tenant_vocab_warning: str | None = None
         # #14232: `extracted` is INITIALISED INSIDE the coroutine because it is
         # also ASSIGNED inside it (the m2/v2 branches). A name assigned anywhere
@@ -22912,6 +22933,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # in-flight key set forever and the next re-POST of that session getting a 409
     # in place of the documented replay.
     _handed_over = False
+    #: True when the REQUEST went away mid-join. The worker keeps the capacity
+    #: then (#3060's own contract, pinned by
+    #: `test_capture_loop_responsiveness.py::test_capture_slot_is_held_until_the_worker_finishes`):
+    #: the slot tracks REAL pool work, not the awaiting task, so releasing here
+    #: would let the cap be exceeded while the thread is still parked.
+    _abandoned = False
     try:
         if _grace > 0.0:
             try:
@@ -22924,12 +22951,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 _joined = _NO_JOIN
             except asyncio.CancelledError:
                 # The REQUEST went away mid-join. Today that abandoned the
-                # extraction, and this keeps that shape exactly: drop the work,
-                # release below, and let the endpoint's `CancelledError` arm write
-                # the abandoned marker (it keys on `attempted and not finalized`,
-                # which is this state). Continuing the extraction under a
-                # cancelled request would race the marker against the terminal
-                # write, and the marker would land second.
+                # extraction, and the shape is preserved exactly: drop the
+                # coroutine, leave CAPACITY to the worker's own future (it cannot
+                # be cancelled), end the tail claim, and let the endpoint's
+                # `CancelledError` arm write the abandoned marker (it keys on
+                # `attempted and not finalized`, which is this state). Continuing
+                # the extraction under a cancelled request would race that marker
+                # against the terminal write, and the marker would land second.
+                _abandoned = True
                 task.cancel()
                 raise
 
@@ -22948,8 +22977,17 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         _handed_over = True
     finally:
         if not _handed_over:
-            slot.worker_done()
+            # The tail claim ends HERE whatever happened — with the request gone
+            # there is nothing left that would ever call `complete_tail`, and the
+            # key would then be held for the life of the process (a permanent 409
+            # for that session). `worker_done` is the other half and is NOT
+            # unconditional: when the worker still runs, its own future releases
+            # capacity (`_run_capture_bounded` binds it), and on the raising arm
+            # the call is idempotent with that binding — but on the ABANDONED arm
+            # calling it would free a slot the parked thread still occupies.
             slot.complete_tail()
+            if not _abandoned:
+                slot.worker_done()
 
     # ── THE ACK ───────────────────────────────────────────────────────────
     # Built from the RECORD-phase facts only. ⛔ `extracted: 0` here is not a
