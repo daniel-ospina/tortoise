@@ -329,12 +329,24 @@ class _AnchorHrefParser(HTMLParser):
     #: everything opened inside it. `<summary>` is on this list, which is what puts the
     #: `<summary>` where a browser puts it and keeps this stack from carrying a `<p>`'s
     #: descendants past the point the browser closed them (#14073 review round 9).
+    #:
+    #: ⛔ `li`, `dd` and `dt` belong here and were missing at first (#14073 review
+    #: round 9, P2, measured). They are NOT in the block-start list — they carry their
+    #: OWN rule with the same step, *"If the stack of open elements has a `p` element in
+    #: button scope, then close a `p` element"*. Chrome: `<p>one<li>two` leaves 0
+    #: element children in the `<p>` with `nextElementSibling` `LI` (`DD`/`DT` likewise),
+    #: so the `<p>` is closed. `<td>` is the control that shows the rule is not "any
+    #: token": outside a table it inserts no element and the `<p>` stays open
+    #: (`nextElementSibling` is null) — which is why it is deliberately absent.
+    #: second, so no painted text is dropped, and `<summary>` (a member) pops that `<p>`
+    #: before any painted summary is judged. It was still wrong: this set's docstring
+    #: claims to be the spec's, and an unpinned set is how the `_SELECT_POP` gap happened.
     _P_CLOSERS = frozenset({
-        "address", "article", "aside", "blockquote", "center", "details",
-        "dialog", "dir", "div", "dl", "fieldset", "figcaption", "figure",
+        "address", "article", "aside", "blockquote", "center", "dd", "details",
+        "dialog", "dir", "div", "dl", "dt", "fieldset", "figcaption", "figure",
         "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header",
-        "hgroup", "hr", "listing", "main", "menu", "nav", "ol", "p", "pre",
-        "section", "summary", "table", "ul", "xmp",
+        "hgroup", "hr", "li", "listing", "main", "menu", "nav", "ol", "p",
+        "pre", "section", "summary", "table", "ul", "xmp",
     })
     #: The "button scope" boundaries for that test (spec: the scope element list —
     #: applet, caption, html, table, td, th, marquee, object, template — plus
