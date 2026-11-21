@@ -980,8 +980,13 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
     # not written here", and the single-head check stayed green through it. ⛔ IT IS NOT
     # THE WHOLE TABLE, and the claim is now scoped because the docstring legitimately
     # NAMES two phrasings as illustrations of the ending question ("has anything been
-    # withdrawn", "what ended") — a pin derived from every quoted row in `ROUTING_NOTE`
-    # would red on those. What is pinned is what must not come back: the two headings,
+    # withdrawn", "what ended"). ⛔ AND THE TWO ARE NOT THE SAME KIND OF ROW (round-13
+    # delta review, P3 — this comment first said a whole-table pin "would red on those",
+    # which is true of ONE of them): `what ended` IS a quoted row of `ROUTING_NOTE`
+    # (measured: `re.findall(r"`([^`]+)`", ROUTING_NOTE)` contains it), while `has
+    # anything been withdrawn` is NOT — the note's row is `has anything we relied on
+    # been withdrawn` — so such a pin would red on the first and miss the second.
+    # What is pinned is what must not come back: the two headings,
     # the specific rows that were restated here, and the qualifier rule.
     _docstring = tortoise_search.__doc__ or ""
     for _copied in (
