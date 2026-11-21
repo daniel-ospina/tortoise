@@ -92,7 +92,8 @@ purpose-built index, or an external API.
 Two structural gaps explain most of the ✗ rows above:
 
 1. **The read path does the expensive, batchable work synchronously.** A single query embed costs ~2–4 s here; batched it is
-   ~0.36 s per item — a ~5–10× difference that is pure scheduling, not hardware.
+   ~0.36 s per item — **5.3×** (1.9 s vs 0.36 s per item, both arms of the same paired bench), a difference that is pure
+   scheduling, not hardware.
 2. **The write path is inline.** We already *have* the queue in embryo: `journal_event` is an append-only log and the
    projection is a fold over it. What is missing is a **worker that consumes it on its own schedule**.
 
@@ -112,7 +113,10 @@ The remaining two ✗ rows — success-path stage metrics and the scaling unit �
   opposite: the query's embedding is computed **inside** the read.
 - **Latency is set by the slowest branch, not the sum** — *"Recall latency is determined by the slowest parallel branch
   rather than the sum of all branches."* Our stages are a chain (`pre_handler → embed_encode → retrieval → ep → ordering`), so
-  we pay **the sum**; that is why we measure 6 s where a parallel design measures 600 ms.
+  we pay **the sum** — but ⚠️ **only the three legs INSIDE `retrieval` can overlap at all**: `retrieval` is 1,199 ms of an
+  11,354 ms chain, while `pre_handler` (6–9 s) and `embed_encode` (2–4 s) are not branches of anything, so parallelising the legs
+  buys at most a fraction of 1.2 s, never the ~5.4 s. Hindsight's 100–600 ms is the payoff of the bullet above — **cost moved to
+  writes** — not of parallelism alone.
 - **Bounded graph traversal** and **hierarchical compression** (facts → observations → mental models) — the compression ladder
   is shape-identical to our Point → Object/Event → goal map.
 - **Memlake:** durable data lives in **object storage**, and **servers are disposable caches**.
@@ -174,7 +178,7 @@ So: move 2 is universal, move 3 is near-universal, move 1 is **two of five** and
 |---|---|---|---|
 | **A1** | **Make the projection consume `journal_event` on a worker loop** (same box, separate process) instead of inline | the log and the fold already exist | writes ack fast; a slow projection stops being a slow request. Mem0's < 50 ms ack without new infra |
 | **A2** | **An embedder seam**: one interface with three backings — in-process model, local worker, external API | a seam is code, not hardware | we can move the embedder to its own process/machine/API **by configuration**, and benchmark each |
-| **A3** | **Query-embed micro-batching** with a hard maximum wait (e.g. ≤ 50 ms collection window) | pure code | ~5–10× throughput on the same cores; bounded tail latency by construction |
+| **A3** | **Query-embed micro-batching** with a hard maximum wait (e.g. ≤ 50 ms collection window) | pure code | **5.3×** throughput on the same cores (the paired bench: 1.9 s → 0.36 s per item); bounded tail latency by construction |
 | **A4** | **Stage timings on SUCCESS**, not only in a 504 body (p50/p95 per stage, exported) | instrumentation | every later decision (A3, CPU, external API) becomes a measurement instead of an argument |
 | **A5** | **Define the scaling unit** in one paragraph: *N tenants' working sets + 1 embedder + 1 record connection pool*, with the per-tenant footprint from `#14015` (M5) | a written definition + a measured number | "how many machines" stops being a guess; autoscaling later has a predicate to scale on |
 
