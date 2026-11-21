@@ -1757,6 +1757,66 @@ def test_a_waiver_over_a_STUB_ONLY_base_does_not_send_the_reader_to_the_base(
     assert "drop the flag" in waived[0], waived[0]
 
 
+def test_a_waiver_over_a_STUB_ONLY_base_whose_row_is_at_the_BASE_says_it_too(
+    tree: Path,
+) -> None:
+    """The OTHER copy of the sentence, reachable when the stub row was committed at the base.
+
+    Two rounds in a row fixed the `elif symbol in base_modules` copy and left this one — the
+    `key in base_entries` branch — emitting "restore the source from a commit that still holds
+    it" over a repo in which `git log --all -- tortoise/stubby.py` is empty, and calling a correct
+    stub-only row "not a record of the source". The two copies contradicted each other for the
+    same state depending only on WHERE the row was committed.
+
+    Discriminating: the had-runtime wording contains "FROZE ONLY A STUB" and "restore the source"
+    and neither is asserted absent, so this row is what pins the split at this site.
+    """
+    (tree / "tortoise").mkdir(exist_ok=True)
+    (tree / "tortoise" / "stubby.pyi").write_text(
+        "def value() -> int: ...\n", encoding="utf-8"
+    )
+    _commit(tree, ".")
+    arch.archive_symbol(arch.MODULE, "tortoise.stubby", "batch-a", "review F1", root=tree)
+    _commit(tree, ".")  # the BASE carries the row
+    subprocess.run(["git", "rm", "-q", "tortoise/stubby.pyi"], cwd=tree, check=True)
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD~1", allowed=["module:tortoise.stubby"]
+    )
+    waived = [p for p in problems if "waives nothing" in p]
+    assert waived, f"the unconsumed waiver must still be reported: {problems}"
+    assert "no runtime source to record" in waived[0], waived[0]
+    assert "drop the flag" in waived[0], waived[0]
+    assert "FROZE ONLY A STUB" not in waived[0], (
+        "the base held only a stub, so the row is the writer's correct output — not a stub "
+        f"frozen over a deleted body: {waived[0]}"
+    )
+    assert "from the base" not in waived[0], waived[0]
+
+
+def test_the_stub_waiver_text_names_the_head_carrier_it_can_see() -> None:
+    """`base_paths_by_module` proves the BASE side only (review F2).
+
+    The sentence said "and no `.py` on either side", which that map cannot support: it is built
+    from `base_paths` alone, and the head can hold a `.py` — an emptied one, or a docstring
+    `__init__.py` that `module_name` collapses onto the same symbol. The head carrier is now named
+    explicitly and never claimed absent.
+
+    Discriminating: the previous wording asserted "no `.py` on either side" while holding a head
+    `.py`, and this assertion rejects exactly that string.
+    """
+    said = arch._stub_waiver_why("P", "tortoise/x.pyi", "tortoise/x.py")
+    assert "tortoise/x.py" in said, said
+    assert "no `.py` on either side" not in said, said
+    assert arch._stub_waiver_why("P", "tortoise/x.pyi", "").endswith(
+        "this tree carries no module file, so there was no runtime source to record. The "
+        "`module` entry you also passed is the writer's own output for a stub-only module (a "
+        "stub-only module's only code IS the stub), and nothing was removed for the waiver to "
+        "waive: drop the flag"
+    )
+
+
 def test_a_module_body_replaced_by_UNPARSEABLE_text_is_a_removal(tree: Path) -> None:
     """A body that no longer parses holds no statements a caller can reach (round-6 review).
 
