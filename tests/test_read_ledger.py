@@ -34,7 +34,8 @@ output is in the PR body):
   ``sdk._tortoise_fts_query`` → ``test_the_funnel_records_each_returned_key`` RED.
   ⚠️ The header used to say ``sdk.tortoise_fts_query``: that name does not resolve
   on the class (it is in ``REMOVED_SDK_METHODS``, and ``hasattr`` is False) — the
-  hook lives inside ``_tortoise_fts_query`` (sdk.py:45555).
+  hook is ``_read_ledger.record_rows(label, rows)`` inside ``_tortoise_fts_query``
+  (the method starts at sdk.py:45555; the hook is at sdk.py:46481).
 * **Record the tag POPULATION a door scanned instead of the page it served** — drop
   the ``_record_reads=False`` at the ``search_knowledge(mode="tag")`` call site →
   ``test_the_caller_facing_row_paths_feed_the_ledger`` RED (``p9`` is scanned and
@@ -404,7 +405,9 @@ def hooked_sdk(ledger, monkeypatch):
     ⚠️ THE STUB MODELS FOUR THINGS, AND NAMES THE REST AS NOT ITS JOB:
     `SKIP $skip`/`LIMIT $limit`, the `count(n)` population **after the same
     WHERE**, the terminal-status exclusion, and the kind filter
-    (`n.pointKind = $kind` / `n.pointKind IN [...]`) — each is a clause the
+    (`n.pointKind = $kind`; the `IN [...]` form is the multi-spelling arm of the
+    same clause and cannot be reached here — see the expansion note below) — each
+    is a clause the
     production code builds into BOTH the count and the page query, so the
     envelope a paged read reports can disagree with the page it serves if either
     drops one. What it does NOT model is the kind EXPANSION:
@@ -605,8 +608,8 @@ def test_the_tag_accessor_default_arm_records_the_caller_arm(hooked_sdk):
 
     `_query_points_by_tag` declares ``_record_reads: bool = True`` and its
     docstring says recording is right for the SDK caller and wrong for the
-    paginated caller that receives one page. ⚠️ No in-repo caller takes the
-    default today — BOTH of them pass ``_record_reads=False``
+    paginated caller that receives one page. ⚠️ No in-repo PRODUCTION caller takes
+    the default today — both of those pass ``_record_reads=False``
     (``search_knowledge``'s tag arm at sdk.py:30893, and
     ``mcp_server``'s at ``tortoise/mcp_server.py:5135``) — so this pins the
     ACCESSOR'S CONTRACT rather than a live path, which is exactly the contract
