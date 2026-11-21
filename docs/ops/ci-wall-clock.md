@@ -283,15 +283,18 @@ base that branch first merged (`2c67c0cf99`). ⛔ **`#14012` then moved it to 25
 mechanism one minute further** — and it is measured by SUBTRACTION, not inferred: with its three
 `core` suites in the pool (`tests/test_14012_outside_view.py`, `tests/test_14012_resident_pin.py`,
 `tests/test_14012_resident_cli.py`) `--emit-push-matrix` reads **25 m** at `est_seconds` **720.6**;
-⛔ RE-MEASURED AT THE HEAD THAT SHIPS: with those three `core` suites removed from the pool it STILL
-reads **25 m** at 720.6, so the subtraction no longer separates the two at this tree — the earlier
-`24 m` / `719.8` arm (and the `720.4` reading this sentence used to quote) were carried from an
-earlier head and are withdrawn here rather than restated. ⛔ THE FIX IS NOT TO LOWER A WEIGHT: the three enter at
+⛔ RE-MEASURED AT THE HEAD THAT SHIPS: with those three `core` suites removed from the pool it reads
+**24 m** at **720.0**, so the subtraction STILL separates the two at this tree — the earlier
+`24 m` arm was right and only its `719.8` `est_seconds` was stale, because the pack as a whole moved
+to `720.0` (720.0 × 2.0 / 60 = 24.00, which `shard_watchdog_minutes` ceils to **24**; 720.6 lands at
+24.02, which ceils to **25**). ⛔ An earlier cut of this sentence claimed the subtraction had stopped
+separating the pair and withdrew the `24 m` arm on that basis — that reading does NOT reproduce and
+is itself withdrawn here. ⛔ THE FIX IS NOT TO LOWER A WEIGHT: the three enter at
 the pool's own default (`DEFAULT_FAST_WEIGHT = 2.0`, `tools/ci_selection.py:105`), identical to
 their `durations:` rows, so removing or shrinking those rows changes nothing (measured: dropping
 all three `durations:` rows still emits 720.6) — the three files' +6 s over 11 shards is what was
-measured to cross the minute boundary at the earlier head, and at THIS head the boundary is held by
-the pack as a whole, which is why removing them no longer takes it back to 24 m. The three
+measured to cross the minute boundary, and removing them takes it back to 24 m — at THIS head as at
+the earlier one. The three
 hand-added figures are re-added from the
 emitted 25 m: 56.6 m / **85.0 m** / **5.0 m** (the row above, and `config/ci-surfaces.yml`'s own
 record for this same quantity), which is the 1-decimal restatement of the terms' own total,
