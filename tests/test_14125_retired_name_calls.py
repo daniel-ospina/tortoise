@@ -3434,6 +3434,22 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     class this gate has filed as a P1 twice — and `_function_scope_bindings` was
     #     rewritten from a whole-tree `ast.walk` to the scoped form during this repair, so a
     #     silent regression there is invisible without these rows.
+    #
+    #     ⛔ THE `_function_local_bindings` HALF IS PINNED HERE TOO, and it was the hole a
+    #     later review named twice (Finding 2 of the `298ead5261` review; P2-4 of the
+    #     `e29bc97887` review). Each term is load-bearing and each was deletable with the
+    #     whole file green — measured on the parent head, one mutant per term, shape →
+    #     head/mutant:
+    #
+    #       def/class NAME add   `def _probe(): def torch(): pass`  graded → `()` (FAIL-OPEN
+    #                            over OUR client: the probe's `torch` is no longer the import)
+    #       decorator_list       `@_reg(torch := …)` on a nested def    graded → `()`
+    #       _header_expressions  `def _inner(x=(torch := …))` nested   graded → `()`
+    #
+    #     The module-scope twin of the header family is `4j-octies`; that row does NOT reach
+    #     these terms, because a probe inside a function is resolved by the function walk and
+    #     `_module_scope_bindings` never descends a body. Hence one row per spelling below,
+    #     in the scope this walk owns.
     for _label, _source in {
         # formal parameters of the function that HOLDS the probe
         "a positional parameter of the probe-holding function": (
@@ -3485,6 +3501,66 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             "import torch\n"
             "def _probe():\n"
             "    _ = [(torch := c) for c in _clients()]\n"
+            "    try:\n"
+            '        torch.query("SELECT 1")\n'
+            "        return True\n"
+            "    except Exception:\n"
+            "        return False\n"
+            "TORCH_AVAILABLE = _probe()\n"
+        ),
+        # ⛔ A NESTED FUNCTION'S **NAME** BINDS IN THE PROBE'S OWN SCOPE (Finding 2 of the
+        # `298ead5261` review). The BODY is another scope and must not be descended; the
+        # NAME is this scope's, so `def torch(): …` before the `try` re-points `torch` and
+        # the `.query` is no longer the optional extra. Deleting `out.add(node.name)` left
+        # the whole file green while this shape silently read EXEMPT — a FAIL-OPEN over our
+        # own client, which is the direction that matters. A `class` is a separate spelling
+        # of the same branch, so it gets its own row: a partial fix must red exactly one.
+        "a nested `def` name shadowing the import inside the probe-holding function": (
+            "import torch\n"
+            "def _probe():\n"
+            "    def torch():\n"
+            "        pass\n"
+            "    try:\n"
+            '        torch.query("SELECT 1")\n'
+            "        return True\n"
+            "    except Exception:\n"
+            "        return False\n"
+            "TORCH_AVAILABLE = _probe()\n"
+        ),
+        "a nested `class` name shadowing the import inside the probe-holding function": (
+            "import torch\n"
+            "def _probe():\n"
+            "    class torch:\n"
+            "        pass\n"
+            "    try:\n"
+            '        torch.query("SELECT 1")\n'
+            "        return True\n"
+            "    except Exception:\n"
+            "        return False\n"
+            "TORCH_AVAILABLE = _probe()\n"
+        ),
+        # …and the nested definition's HEADER evaluates in the probe's scope, so a walrus
+        # there rebinds it. Decorators are collected from `decorator_list` and everything
+        # else from `_header_expressions` — two terms, two rows, so deleting one reds only
+        # its own (P2-4 of the `e29bc97887` review).
+        "a walrus in a nested `def`'s decorator inside the probe-holding function": (
+            "import torch\n"
+            "def _probe():\n"
+            "    @_reg(torch := _make_client())\n"
+            "    def _inner():\n"
+            "        pass\n"
+            "    try:\n"
+            '        torch.query("SELECT 1")\n'
+            "        return True\n"
+            "    except Exception:\n"
+            "        return False\n"
+            "TORCH_AVAILABLE = _probe()\n"
+        ),
+        "a walrus in a nested `def`'s default inside the probe-holding function": (
+            "import torch\n"
+            "def _probe():\n"
+            "    def _inner(x=(torch := _make_client())):\n"
+            "        return x\n"
             "    try:\n"
             '        torch.query("SELECT 1")\n'
             "        return True\n"
@@ -3555,6 +3631,37 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "outer function's probe reads, so it must not cancel the third-party exemption "
         "— descending into the nested body grades a legitimate optional-extra guard as "
         f"a ROOT: {roots(_nested_scope_control)}"
+    )
+
+    # 4j-septies-bis. THE OTHER DIRECTION OF THE COMPREHENSION TERM, in the FUNCTION walk.
+    #     `4j-quinquies`' "a module-level comprehension target" pins the MODULE half only —
+    #     a probe inside a function is resolved by `_function_local_bindings`, which is a
+    #     different walk with its own comprehension branch. Deleting THAT branch left the
+    #     whole file green while this shape flipped to GRADED (measured on the parent head:
+    #     `()` at head, `((6, (), True, False, True),)` with the branch removed), i.e. the
+    #     fix for an unwitnessed rule was itself unwitnessed — the P1 class twice filed.
+    #     Finding 2 of the `298ead5261` review named this direction explicitly.
+    _fn_comprehension_target_control = textwrap.dedent(
+        """
+        import torch
+
+        def _probe():
+            _ = [torch for torch in range(3)]
+
+            try:
+                torch.query("SELECT 1")
+                return True
+            except Exception:
+                return False
+
+        TORCH_AVAILABLE = _probe()
+        """
+    )
+    assert roots(_fn_comprehension_target_control) == (), (
+        "a comprehension has its own scope in Python 3, so a FUNCTION-level iteration "
+        "target cannot shadow the name the enclosing function's probe reads — descending "
+        "it cancels the exemption for a legitimate optional-extra guard and grades a "
+        f"non-probe as a ROOT: {roots(_fn_comprehension_target_control)}"
     )
 
     # 4j-sexdecies. AN IMPORT STATEMENT NEVER CANCELS THE EXEMPTION — NOT EVEN AN
