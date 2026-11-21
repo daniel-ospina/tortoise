@@ -56,9 +56,13 @@ ROOT = Path(__file__).resolve().parent.parent
 #: ⛔ The bound is what the census implements, not everything a probe could be
 #: (review P2): it scans `tests/**/test_*.py` (so a probe in a `conftest.py` or a
 #: non-test helper module is outside it), and it matches `ast.Attribute` CALLS
-#: whose name is in `_PROBE_WRITE_DOORS` (so an aliased door — `f = sdk.create_entity;
-#: f(…)` — is too). Stated, not hidden: the clause above used to claim a probe
-#: "cannot ride along unseen" without either bound named.
+#: whose name is in `_PROBE_WRITE_DOORS` — so a call through a LOCAL ALIAS
+#: (`f = sdk.create_entity; f(…)`) or through `getattr` is OUTSIDE it, because
+#: `_module_level_write_probe_lines` requires `isinstance(n.func, ast.Attribute)`
+#: and an aliased call is `ast.Call(func=ast.Name(id="f"))`. Stated, not hidden:
+#: the clause above used to claim a probe "cannot ride along unseen" without any
+#: bound named, and an earlier draft of THIS note named the alias case as the
+#: one it catches — the single shape it is blind to (#14127 review round 2).
 PROBE_MODULES = (
     "tests/test_assembly_sdk.py",
     "tests/test_assembly_fixtures.py",
