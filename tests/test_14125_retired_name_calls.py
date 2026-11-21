@@ -4183,7 +4183,10 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     that would refuse a legitimate optional-extra probe (review of #14160, cycle 5).
     for _label, _body in (
         ("outermost iterable", "len([None for torch in torch.query('SELECT 1')])"),
-        ("later generator iterable", "len([None for _x in [1] for torch in torch.query('SELECT 1')])"),
+        (
+            "later generator iterable",
+            "len([None for _x in [1] for torch in torch.query('SELECT 1')])",
+        ),
     ):
         _outermost_row = roots(
             textwrap.dedent(
