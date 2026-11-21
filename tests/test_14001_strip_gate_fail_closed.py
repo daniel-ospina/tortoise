@@ -70,7 +70,10 @@ def _record_write(*args, **kwargs) -> None:
     """
     # ⛔ DO NOT CLEAR HERE (`#14001`, measured by the cycle-4 review): `_oracle` resets per run, and
     # clearing on entry meant a handoff-then-`_write(props)` arm recorded only the LAST call — the
-    # false "documents nothing" that would get a real row deleted on a false premise.
+    # false "documents nothing" that would get a real row deleted on a false premise. PINNED by
+    # `REBUILD_RESIDUAL_ROWS["rebuilt-mapping-handoff-then-rehandoff"]`, whose stop arm calls this
+    # channel twice; restoring `_HANDED.clear()` here reds that row and nothing else (the rebase
+    # review measured that nothing else reached it, so the row is what makes the change non-inert).
     _HANDED.extend(args)
     # ⛔ A KEYWORD HANDOFF IS THE SAME HANDOFF (`#14001`, measured by the review of this branch):
     # `_write(props={**props, k: vec})` certifies and lands, and an oracle that recorded only
@@ -957,6 +960,21 @@ REBUILD_RESIDUAL_ROWS = (
         return None
     _write(props)
 """),
+    # ⛔ THE ROW THAT PINS `_record_write`'s NO-CLEAR (`#14001`, measured by the rebase review
+    # of this branch, F5): the STOP arm calls the write channel TWICE — first with the mapping
+    # that carries the vector, then with bare `props`. Clearing `_HANDED` on entry to
+    # `_record_write` would leave only the LAST call recorded, `handed` would be `False`, and
+    # this row would read `lands is False` — a real handoff deleted on a false premise. With the
+    # no-clear the first call survives and the row measures the store. Mutant: restore
+    # `_HANDED.clear()` at `_record_write`'s entry → this row is the ONLY one that reds.
+    ("rebuilt-mapping-handoff-then-rehandoff", """
+    k = "embed" + "ding"
+    if not _derived_mirror_required("object"):
+        _write({**props, k: _encode(ev)})
+        _write(props)
+        return None
+    _write(props)
+"""),
     ("handed-on", """
     k = "embed" + "ding"
     if not _derived_mirror_required("object"):
@@ -982,9 +1000,13 @@ REBUILD_RESIDUAL_ROWS = (
 """),
     # ⛔ THE CALLER-SUPPLIED MAPPING IS PART OF THE SAME FAMILY (`#14001`, measured by the
     # review of this branch): `_write({**props, **extra})` hands the write channel whatever the
-    # caller passed, so it stores whenever `extra` carries the property. The 13629 fixture that
-    # called this an "honest control" is now `over_refused` for the same reason; `_oracle` takes
-    # the caller argument so the row can be measured rather than assumed.
+    # caller passed, so it stores whenever `extra` carries the property. `_oracle` takes the
+    # caller argument so the row can be measured rather than assumed. ⛔ The 13629 fixture that
+    # used to call this an "honest control" was DELETED from that file's `accepted` tuple and is
+    # in NEITHER of its tuples — it is not an `over_refused` row either, because the gate
+    # CERTIFIES this shape rather than refusing it. It is pinned HERE, as a known fail-open;
+    # `tests/test_13629_entity_vector_retire.py` carries the pointer in its `over_refused`
+    # preamble ("neither an honest control nor an over-refusal").
     ("rebuilt-mapping-extra-unpack", """
     if not _derived_mirror_required("object"):
         _write({**props, **extra})

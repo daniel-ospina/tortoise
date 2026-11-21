@@ -174,8 +174,7 @@ confidence:
    witness is `list(map(props.update, [{"embedding": vec}]))` — pinned by
    `test_the_helper_call_residual_is_PINNED_as_a_known_fail_open`, so it cannot change silently.
    `exec(code)` with NO namespace argument is the same class (it rebinds a fast local on 3.13+;
-   on 3.12 the writer stores nothing — measured here — so the witness is the PEP 667 case, not
-   this host) and is not separately pinned. ⛔ `exec(code, globals())` is NOT part of this
+   on 3.12 the writer stores nothing — measured here) and is not separately pinned. ⛔ `exec(code, globals())` is NOT part of this
    residual any more: the mention rule refuses it (`globals` is named), measured — an earlier
    revision of this paragraph still called it a certifying witness, and it was stale.
    The same class covers a local `def` written in the arm and CALLED there
@@ -250,9 +249,15 @@ confidence:
    refuses — a writer that merely READS a dynamic namespace is refused too, which is the
    over-refusal the doctrine accepts and which costs nothing on the real population (pinned: no
    declared entity writer mentions one). ⛔ AND EVERY NAME IS UNPROVEN, not only the declared ones:
-   PEP 667 (3.13+) makes `locals()` write-through, so `locals()["k"] = …` rebinds a FAST LOCAL —
-   on 3.12 that write reaches nothing (measured), on 3.13+ it does, and the answer cannot depend
-   on the interpreter a lane happens to run. Measured cost: zero (of 15,090 functions in this
+   a class or module body's `locals()` IS the real namespace — PEP 667 left that alone in every
+   version, `locals()` "will act the same as it does now for class and modules scopes" — so
+   `class _C: locals()["k"] = "embedding"` writes a REAL name that no `global`/`nonlocal`
+   declaration covers, and refusing only the declared names would have missed it. ⛔ The PEP 667
+   FAST-LOCAL case is a different, still-open residual: 3.13+ makes `frame.f_locals` a
+   write-through proxy, while `locals()` in an optimized scope returns an instantaneous SNAPSHOT,
+   so `locals()["k"] = …` inside a FUNCTION reaches nothing on 3.13 just as it does on 3.12 — that
+   spelling is residual 5's `frame-introspection` row, pinned as a known fail-open, and this rule
+   covers it only by over-refusal. Measured cost: zero (of 15,090 functions in this
    repo, 8 mention a namespace and all 8 already refused).
    The legal spellings of the mention are pinned as the `globals-*` / `namespace-*` rows in
    `DEFEATED_RESOLVER_ROWS`: a `Name`, an `Attribute`, an import `alias`, a string-keyed
@@ -4976,10 +4981,15 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
     # by all of its arms — an over-approximation, which on this arm can only refuse more.
     bindings: dict[str, frozenset[str] | None] = {}
     if _namespace_mentioned:
-        # ⛔ EVERY NAME, NOT ONLY THE `global`/`nonlocal` DECLARED ONES (`#14001`, raised by the
-        # cycle-4 review): PEP 667 (3.13+) makes `locals()` a write-through proxy, so
-        # `locals()["k"] = "embedding"` rebinds a FAST LOCAL — which the declared-name set never
-        # covers. Measured cost on the real population: zero (only 8 of 15,090 functions in this
+        # ⛔ EVERY NAME, NOT ONLY THE `global`/`nonlocal` DECLARED ONES (`#14001`): a class or
+        # module body's `locals()` IS the real namespace in EVERY version (PEP 667 keeps that:
+        # `locals()` "will act the same as it does now for class and modules scopes"), so
+        # `class _C: locals()["k"] = "embedding"` binds a REAL name that no `global`/`nonlocal`
+        # declaration covers. ⛔ NOT because of PEP 667's fast-local write-through — that is
+        # `frame.f_locals`, and `locals()` in an optimized scope returns an instantaneous
+        # SNAPSHOT, so `locals()["k"] = …` inside a FUNCTION reaches nothing on 3.13 either; that
+        # spelling is residual 5's `frame-introspection` row, pinned as a known fail-open.
+        # Measured cost on the real population: zero (only 8 of 15,090 functions in this
         # repo mention a dynamic namespace at all, and every one of them already refuses).
         return {name: None for name in assigned}
     for _round in range(8):
