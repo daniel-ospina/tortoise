@@ -1718,3 +1718,129 @@ def test_a_DRY_RUN_pass_that_plans_clears_an_earlier_pin_hold():
     assert report.deleted == (), (
         f"a dry run deleted {len(report.deleted)} node(s) — a plan may not execute"
     )
+
+
+def test_a_window_wholly_unanswerable_at_plan_time_names_the_UNANSWERABLE_pin():
+    """The plan-time `pin-unanswerable` arm — the last branch of the carry-out with no row.
+
+    ⛔ One word at `cache_evictor.py:1170` (`"pin-unanswerable"` -> `"pinned"`) left all 211
+    tests in the five covering files GREEN while the shipped report said "0 node(s) are
+    PINNED … unpin some of them" for a window whose predicate RAISED for every node: the
+    `unpin` remedy both `pin-unanswerable` message arms exist to withhold, on the CLI's own
+    default path (`dry_run=not args.execute`). The count in that sentence was 0 as well,
+    because no node in the window was ever established as pinned.
+    """
+    g = _FakeGraph(["p0", "p1", "p2", "p3"])
+
+    def pin_cannot_answer(candidate: Candidate) -> bool:
+        raise RuntimeError("pin store unreachable")
+
+    report = evict(
+        _assessment(nodes=4), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=pin_cannot_answer,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=2, max_passes=3),
+    )
+
+    assert report.deleted == (), "a wholly unanswerable window deleted something"
+    assert len(report.skipped_pinned) == 0, (
+        "a node whose predicate RAISED was counted as PINNED, so the remedy reported for it "
+        "is the one this file says cannot clear it"
+    )
+    assert len(report.skipped_pin_unanswerable) > 0, (
+        "the raised asks did not land in their own bucket"
+    )
+    assert "could not answer" in report.reason, (
+        "the plan-time arm did not name the unanswerable predicate, so the report routes the "
+        f"operator to `unpin`. reason={report.reason!r}"
+    )
+    assert "are PINNED" not in report.reason, (
+        "the plan-time arm reported an UNANSWERABLE hold as a pin. reason="
+        f"{report.reason!r}"
+    )
+
+
+def test_a_plan_time_window_holding_BOTH_pin_states_names_the_UNANSWERABLE_one():
+    """The plan-time precedence, when a window holds a pinned node AND an unanswerable one.
+
+    ⛔ Swapping the two arms at `cache_evictor.py:1170` (asking `pinned` before
+    `pin-unanswerable`) left all 211 tests green, while the report offered `unpin` for the
+    nodes nothing established as pinned. Both hold-backs present in ONE pass is the only
+    state where the order is observable, so it needs a row rather than a convention: the
+    file already reads the other way round in the `reach` block, which is exactly why a
+    silent inversion is possible.
+    """
+    g = _FakeGraph(["p0", "p1", "p2", "p3"])
+
+    def one_pinned_one_unanswerable(candidate: Candidate) -> bool:
+        if candidate.key == "p0":
+            return True                       # answered: a real pin
+        raise RuntimeError("pin store unreachable")
+
+    report = evict(
+        _assessment(nodes=4), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=one_pinned_one_unanswerable,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=2, max_passes=3),
+    )
+
+    assert report.deleted == ()
+    assert len(report.skipped_pinned) >= 1 and len(report.skipped_pin_unanswerable) >= 1, (
+        "this row grades the precedence, so BOTH hold-backs must be present in the pass: "
+        f"pinned={report.skipped_pinned!r} unanswerable={report.skipped_pin_unanswerable!r}"
+    )
+    assert "could not answer" in report.reason, (
+        "with both hold-backs present the plan-time arm named the PIN, so the operator is "
+        "sent to `unpin` for nodes whose predicate raised. reason="
+        f"{report.reason!r}"
+    )
+
+
+def test_a_LAST_HOP_window_holding_BOTH_pin_states_names_the_UNANSWERABLE_one():
+    """The last-hop precedence, when one node answers and another RAISES at the statement.
+
+    ⛔ Swapping the carry ternary at `cache_evictor.py:1325` (the arm a widened pass takes
+    when it is the last the budget allows) left all 211 tests green. The last hop is the
+    second site where the operator's remedy is chosen, so the same both-holds condition has
+    to be graded there too: a pin that answers and a pin that raises are different facts,
+    and `unpin` clears only the first.
+
+    ⛔ THE SCENARIO IS BUILT SO THE PLAN-TIME ARM CANNOT ANSWER INSTEAD. `max_passes=1`
+    makes THIS pass the only one, so the sweep ends on the last hop's carried diagnosis —
+    the first cut of this row used `max_passes=2` and exited through pass 2's PLAN-TIME
+    arm instead, which graded the other site and stayed green when the last-hop ternary was
+    swapped (measured: nothing killed that mutant).
+    """
+    g = _FakeGraph([f"p{i}" for i in range(8)])
+    asks: dict[int, int] = {}
+
+    def answers_at_the_delete(candidate: Candidate) -> bool:
+        asks[candidate.node_id] = asks.get(candidate.node_id, 0) + 1
+        if asks[candidate.node_id] == 1:
+            return False                      # planned, so it reaches the last hop
+        if candidate.key == "p0":
+            return True                       # answered at the statement: a real pin
+        raise RuntimeError("pin store unreachable")
+
+    report = evict(
+        _assessment(nodes=8), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=answers_at_the_delete,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=2, max_passes=1),
+    )
+
+    assert report.deleted == ()
+    assert len(report.skipped_pinned) >= 1 and len(report.skipped_pin_unanswerable) >= 1, (
+        "this row grades the last-hop precedence, so BOTH hold-backs must be present: "
+        f"pinned={report.skipped_pinned!r} unanswerable={report.skipped_pin_unanswerable!r}"
+    )
+    assert "could not answer" in report.reason, (
+        "at the last hop the PIN was named over the unanswerable one, so the operator is "
+        f"sent to `unpin` for nodes nothing established as pinned. reason={report.reason!r}"
+    )
