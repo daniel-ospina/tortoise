@@ -175,8 +175,10 @@ STAGE_SET = frozenset(STAGES)
 #:
 #: ⛔ PARTS ARE TELEMETRY ONLY, never wire. A caller cannot act on "4 s of my
 #: budget was spent before my handler ran" — only an operator can — so
-#: :meth:`ReadStages.wire_snapshot` is untouched and a breached caller's body
-#: stays byte-identical.
+#: :meth:`ReadStages.wire_snapshot` still publishes the same keys (it DROPS
+#: ``pre_handler_parts`` before returning — that one line is what keeps the
+#: decomposition off the wire, so it must never be "simplified" back to
+#: ``return self.snapshot()``) and a breached caller's body stays byte-identical.
 PRE_HANDLER_PARTS: tuple[str, ...] = (
     #: Arrival → the handler task created. The middleware chain, plus any time
     #: this request spent waiting for the loop BEFORE its task existed.
