@@ -81,12 +81,37 @@ Usage:
 
 from __future__ import annotations
 
+import sys
+
+# ⛔ #5128 / #14181 — THE INTERPRETER FLOOR, BEFORE EVERY OTHER IMPORT.
+# This tool is a `tools/` ENTRY POINT, and the suite enforces the floor on every
+# such file (`tests/test_entry_point_python_guard.py`, `_guard_index`), which is
+# why the guard is here even though THIS module's product imports
+# (`tortoise.record_projection`, `falkordb`, `psycopg2`) are all deferred into
+# functions: on an old interpreter they would fail at CALL time, deep inside a
+# reader, naming neither this file nor the floor. Refuse first, and say which.
+#
+# EXIT 2, NOT 1: this file's own `EXIT CODES` table above reserves 1 for the
+# PRODUCED `not_covered` verdict and 2 for "could not run" — and an interpreter
+# below the floor is exactly "could not run". `SystemExit(<message>)` would wear
+# status 1 and be read downstream as "the record is short" on a run that never
+# read it, the same collision `tests/test_13094_graphevent_home.py` pins for a
+# missing `psycopg2`. So the message goes to stderr and the code is the spare 2
+# (#4053's shape), pinned per-file in `REFUSAL_CODES`.
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    print(
+        "tools/graphevent_home.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        "`uv run python tools/graphevent_home.py`",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
 import argparse
 import hashlib
 import json
 import os
 import re
-import sys
 from collections import Counter
 from collections.abc import Mapping
 from typing import Any
