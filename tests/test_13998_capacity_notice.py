@@ -3320,3 +3320,48 @@ def test_a_failed_owner_lookup_is_logged_and_not_reported_as_absent(caplog):
     assert "are all empty" not in lines, (
         "the no-address line asserts the owner rung was EMPTY, which this run "
         "cannot know — it was unreadable")
+
+
+def test_a_SILENTLY_swallowed_owner_lookup_is_reported_as_logged_NOWHERE(caplog):
+    """⛔ The rung's fourth state writes NO record, and the line must say so.
+
+    `supabase_control.owner_email` answers `None` with no log record on four paths — no active
+    owner, an unset `SUPABASE_URL`/service-role key, an `httpx` transport error, and any non-200
+    (a rotated key's 401, a deleted user's 404) — because its contract is "never raises". Only
+    an exception that ESCAPES it reaches `_owner_email`'s `logger.warning`, and that is the arm
+    the sibling test above covers.
+
+    So a fleet-wide silence caused by a GoTrue outage leaves NOTHING above to read, and copy
+    that tells the operator the lookup failed "and logged a warning above" sends them looking
+    for a record that was never written — the same mis-diagnosis this line exists to prevent,
+    one level down. This arm is the one the raising-arm test cannot see: it patches the lookup
+    to answer `None` the way a swallowed transport error does, with no exception and no record.
+    """
+    cp = _fake_cp(email=None, customer_email=None)
+    send = _Sender()
+    with patch("tortoise.quota.resolve_org_limits", lambda org_id: _limits(102)), \
+         patch("tortoise.allowance_gate.read_dimension",
+               lambda dimension, org_id: _Reading(90.0)), \
+         patch("tortoise.supabase_control.owner_email", return_value=None), \
+         caplog.at_level(logging.INFO, logger="tortoise.capacity_notice"):
+        out = _pass(cp=cp, send=send, enumerate_orgs=lambda limit=None: [
+            _org_row(email=None, customer_email=None)])
+
+    assert out["statuses"]["no-email"] == 1 and send.calls == []
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings == [], (
+        "this fixture models the SILENT swallow; a warning here means the case is not "
+        f"testing what it claims: {[r.getMessage() for r in warnings]}")
+    line = " ".join(r.getMessage() for r in caplog.records)
+    # ⛔ THE DISCRIMINATOR IS THE SILENT CLASS ITSELF, never a bare "logged" test: the copy
+    # legitimately says the RAISING arm logged a warning, so a phrase test on "logged" reds
+    # against the CORRECT text (measured — the first cut of this test did exactly that). The
+    # regression is the wording that named this state ONLY as "the lookup FAILED and logged a
+    # warning above", which cannot produce "LOGGED NOWHERE" nor name any swallowed cause.
+    assert "LOGGED NOWHERE" in line, (
+        "the no-email line does not tell the operator this state leaves no record, so a "
+        f"GoTrue outage still reads as a population with no address. Emitted: {line!r}")
+    for cause in ("transport error", "non-200", "missing config"):
+        assert cause in line, (
+            f"the silent-lookup arm does not name `{cause}`, one of the paths "
+            f"`supabase_control.owner_email` swallows with no record. Emitted: {line!r}")
