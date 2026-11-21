@@ -92,8 +92,10 @@ purpose-built index, or an external API.
 Two structural gaps explain most of the ✗ rows above:
 
 1. **The read path does the expensive, batchable work synchronously.** A single query embed costs ~2–4 s here; batched it is
-   ~0.36 s per item — **5.3×** (1.9 s vs 0.36 s per item, both arms of the same paired bench), a difference that is pure
-   scheduling, not hardware.
+   **0.36 s/item of THROUGHPUT** (32 items in 11.6 s — that 11.6 s is the *batch's* wall time, not a request's latency), i.e.
+   **5.3×** on the same cores (1.9 s vs 0.36 s per item, both arms of the same paired bench) — a difference that is pure
+   scheduling, not hardware. ⚠️ Turning throughput into latency needs a **maximum batch size**, not just a collection window
+   (A3 below).
 2. **The write path is inline.** We already *have* the queue in embryo: `journal_event` is an append-only log and the
    projection is a fold over it. What is missing is a **worker that consumes it on its own schedule**.
 
@@ -178,7 +180,7 @@ So: move 2 is universal, move 3 is near-universal, move 1 is **two of five** and
 |---|---|---|---|
 | **A1** | **Make the projection consume `journal_event` on a worker loop** (same box, separate process) instead of inline | the log and the fold already exist | writes ack fast; a slow projection stops being a slow request. Mem0's < 50 ms ack without new infra |
 | **A2** | **An embedder seam**: one interface with three backings — in-process model, local worker, external API | a seam is code, not hardware | we can move the embedder to its own process/machine/API **by configuration**, and benchmark each |
-| **A3** | **Query-embed micro-batching** with a hard maximum wait (e.g. ≤ 50 ms collection window) | pure code | **5.3×** throughput on the same cores (the paired bench: 1.9 s → 0.36 s per item); bounded tail latency by construction |
+| **A3** | **Query-embed micro-batching** with **two** bounds: a hard maximum WAIT (e.g. ≤ 50 ms collection window) **and a maximum BATCH SIZE** (small for interactive traffic — 4–8; deep queues belong to backfill) | pure code | **5.3×** throughput on the same cores (the paired bench: 1.9 s → 0.36 s per item at batch occupancy N). The window bounds **wait-to-admit**; only the batch-size cap bounds **tail latency**, and at 32 arrivals the uncapped batch is an 11.6 s wall time — worse than the 1.9 s sequential arm |
 | **A4** | **Stage timings on SUCCESS**, not only in a 504 body (p50/p95 per stage, exported) | instrumentation | every later decision (A3, CPU, external API) becomes a measurement instead of an argument |
 | **A5** | **Define the scaling unit** in one paragraph: *N tenants' working sets + 1 embedder + 1 record connection pool*, with the per-tenant footprint from `#14015` (M5) | a written definition + a measured number | "how many machines" stops being a guess; autoscaling later has a predicate to scale on |
 
@@ -199,7 +201,9 @@ So: move 2 is universal, move 3 is near-universal, move 1 is **two of five** and
 ## 4. What we should explicitly NOT copy
 
 - **Batching without a max-wait bound.** The literature is explicit: batching improves throughput and worsens tail latency. A
-  hard, small collection window is what keeps an interactive search interactive.
+  hard, small collection window is what keeps an interactive search interactive — **and it is only half the bound**: the window
+  caps how long a request waits to be admitted, while the batch's own size caps how long it can then be trapped. A3 specifies
+  both, because a window alone admits a 32-item batch and hands the last arrival an 11.6 s wait.
 - **"Just add replicas".** With embeddings in-process, each replica carries its own 432 MB model and its own cold start; the
   unit is more expensive than it looks. Replicate *after* A1–A3, when a replica is a thin API process.
 - **Hiding the delay.** Zep *states* that new facts appear after a processing delay. We already have the vocabulary for this
@@ -209,10 +213,12 @@ So: move 2 is universal, move 3 is near-universal, move 1 is **two of five** and
 ## 5. The one-line version
 
 **Our topology already matches the leaders — record + derived layer + hybrid legs. What differs is that they moved the expensive,
-batchable work into queues and workers, and we still do it inside the request.** Phase A is entirely free, and it is the
-difference between a read path that spends **6–9 s in `pre_handler`** and 2–4 s embedding inline, and one that acks the write,
-pays **0.36 s/item** for a batched embed instead of 2–4 s inline, and pays only the **~1.2 s** of retrieval legs — the rest of the
-budget is what S3 exists to write down.
+batchable work into queues and workers, and we still do it inside the request.** Phase A is entirely free and removes **one whole
+stage** of the chain: **A3** takes the embed from 2–4 s inline to **0.36 s/item of throughput** (with both bounds — see A3), and
+**A1** takes the write off the request. ⚠️ **Nothing in Phase A touches `pre_handler`** — the queue wait that dominates the slow
+trace is Track F's job (**F0** stops the retry storm; **S4** lands the guards) — and the leg parallelisation is `#14192` (**F1**),
+which buys at most a fraction of the 1.2 s (§2.5). On the same slow trace, Phase A's own residual is therefore
+`pre_handler` 5,996 ms + ~0.36 s + ~1.2 s ≈ **7.6 s** — better, still not a budget, which is what **S3** exists to write down.
 
 **Contradiction test:** no recorded decision is reversed. `STORAGE-ARCHITECTURE.md` §2.0 (record is truth, graph is derived) *requires* A1 — the fold is
 already the mechanism. `#11758` (per-account storage) and `#4495`/`#5331` (no node pricing) are untouched. A2 does not pick a
