@@ -1573,9 +1573,16 @@ def _source_block(path: pathlib.Path, start_marker: str,
 _SUBJECT = re.compile(r"idempotency[-\s]?key|provider\s+key", re.IGNORECASE)
 #: The verbs that claim the key REMOVES a duplicate. Voice and order do not
 #: matter: both operands are searched over the whole sentence, because a passive
-#: construction puts the verb first and a rewrite can pick any of these.
+#: construction puts the verb first and a rewrite can pick any of these. The set
+#: is not a guess — a review defeated the previous cut with each of
+#: "covered"/"prevents"/"avoids"/"removes"/"eliminates"/"blocks"/"makes a
+#: replay safe"/"ensures ... the notice is sent at most once", so every one of
+#: them is here and is a case in the discrimination test below.
 _COLLAPSE = re.compile(
-    r"collaps|dedup|suppress|exactly[-\s]once|single\s+delivery|only\s+once",
+    r"collaps|dedup|suppress|prevent|avoid|remov|eliminat|block|cover"
+    r"|makes?.{0,24}(?:safe|forgiving)"
+    r"|exactly[-\s]once|single\s+delivery|only\s+once|at\s+most\s+once"
+    r"|ensures?.{0,40}once",
     re.IGNORECASE)
 #: A DURATION, never a durationless "window" — "inside its window" is the wording
 #: the original finding rejected. `<=24h` counts: `hosted_api` already writes the
@@ -1585,6 +1592,22 @@ _RETENTION_BOUND = re.compile(
     r"|\b24\s?-?h(?:ours?)?\b"     # the short form these comments use
     r"|24[- ]hour",
     re.IGNORECASE)
+
+
+#: The claim must also be ABOUT a delivered thing. `stamp`/`accept` are here
+#: because the SITE THE REVIEW FOUND MISSED worded it as "the crash window
+#: between accept and stamp is covered by the provider Idempotency-Key" — a
+#: send-object-only rule read that sentence as not-a-claim, which is how the
+#: guard stayed blind to the very site it was written for.
+_SEND_OBJECT = re.compile(
+    r"\bemail|\bnotice|\bsend|\bsent|\bdeliver|\bstamp|\baccept|\bduplicate",
+    re.IGNORECASE)
+#: ...but NOT the session-create idempotency key, which is a different promise
+#: (one row per click) that no provider window governs. Both `hosted_api.py`
+#: comments below are excluded by measurement, not by taste — they are cases in
+#: the discrimination test, asserted NOT to be provider-send claims.
+_NOT_PROVIDER_SEND = re.compile(
+    r"session_id|one\s+click|non-episodic|\b402\b", re.IGNORECASE)
 
 
 def _prose_units(text: str) -> list[str]:
@@ -1635,7 +1658,9 @@ def _idempotency_claims(text: str) -> tuple[list[str], list[str]]:
     claims: list[str] = []
     unbounded: list[str] = []
     for sentence in _sentences(text):
-        if not (_SUBJECT.search(sentence) and _COLLAPSE.search(sentence)):
+        if not (_SUBJECT.search(sentence) and _COLLAPSE.search(sentence)
+                and _SEND_OBJECT.search(sentence)
+                and not _NOT_PROVIDER_SEND.search(sentence)):
             continue
         claims.append(sentence)
         if not _RETENTION_BOUND.search(sentence):
@@ -1696,7 +1721,6 @@ def test_every_idempotency_key_claim_names_the_providers_retention_window():
         "across the four files at this head; dropping below that floor means the "
         "scan lost a site, not that the site was fixed")
 
-
 def test_the_idempotency_bound_guard_grades_a_bound_and_an_unbounded_claim():
     """The detector's own discriminating power, pinned on what BEAT earlier cuts.
 
@@ -1713,8 +1737,22 @@ def test_the_idempotency_bound_guard_grades_a_bound_and_an_unbounded_claim():
         # the pre-fix wording of the key's own dedupe note
         "the Idempotency-Key below dedupes only the SAME threshold; closing the "
         "order window needs a pre-send reservation.",
-        # the runtime log STRING that cut 2 never read
-        "replaying this threshold is collapsed by the provider key",
+        # the pre-fix wording of `set_org_storage_notice_pct`, which a previous
+        # review found BYTE-IDENTICAL to the unfixed text: "covered" is not a
+        # synonym any earlier cut's verb list carried
+        "The crash window between accept and stamp is covered by the provider "
+        "Idempotency-Key ``capacity-notice:{org_id}:{pct}``.",
+        # the rest of the family a review measured as NO-CLAIM
+        "the provider Idempotency-Key prevents the duplicate send",
+        "the provider Idempotency-Key avoids a second email",
+        "the provider Idempotency-Key removes the duplicate notice",
+        "the provider Idempotency-Key makes the duplicate send safe",
+        "the provider Idempotency-Key ensures the notice is sent at most once",
+        # the runtime log STRING that cut 2 never read (the full message, since a
+        # claim is judged in its real sentence, not as a fragment)
+        "capacity notice: sent to team %s at %s%% but the mark moved concurrently "
+        "(replaying this threshold is collapsed by the provider key; a DIFFERENT "
+        "threshold's notice is not)",
         # PASSIVE voice — the verb precedes the subject
         "a duplicate send is collapsed by the provider Idempotency-Key",
         # no "collapse" anywhere in the sentence
@@ -1742,6 +1780,23 @@ def test_the_idempotency_bound_guard_grades_a_bound_and_an_unbounded_claim():
         _claims, unbounded = _idempotency_claims(sample)
         assert not unbounded, (
             f"a bounded sentence was graded unbounded: {sample!r}")
+    # ⛔ AND NOT A CLAIM AT ALL: the session-create idempotency key is a different
+    # promise (one row per click) that no provider window governs. Grading it
+    # would demand a provider window in a sentence about Postgres rows, so the
+    # exclusion is measured on both live comments rather than assumed.
+    for not_a_provider_send in (
+        "#1727: resolve the idempotency key + probe EARLY so session_existed runs "
+        "BEFORE the quota estimate — a re-POST of an existing session_id writes "
+        "ZERO non-episodic points (the replay path below skips extraction) and "
+        "must never be 402-blocked by an as-if-fresh estimate.",
+        "Do NOT release its reservation — this request never took it, and "
+        "dropping it lets a third request claim afresh and record a SECOND row "
+        "for one click (the duplicate the idempotency key exists to prevent).",
+    ):
+        claims, _unbounded = _idempotency_claims(not_a_provider_send)
+        assert not claims, (
+            f"a session-create idempotency-key sentence was graded as a "
+            f"provider-send claim: {not_a_provider_send!r}")
 
 
 def test_the_module_docstring_names_the_post_rename_table():
