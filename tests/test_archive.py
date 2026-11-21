@@ -1658,12 +1658,18 @@ def test_a_waiver_for_a_row_that_FROZE_A_STUB_does_not_say_the_removal_IS_record
 ) -> None:
     """One run must not print two contradicting statements about the same entry (review F1).
 
-    Writer-driven shape, nothing spliced: base carries `tortoise/stubby.py`; the tree deletes it
-    and leaves `tortoise/stubby.pyi`; `archive module` then freezes the STUB (`_module_source`'s
-    stub fallback sets `blocks[0].path` to the `.pyi`). Arm 1b sees `_row_froze_a_stub` → True,
+    **Writer-driven, nothing spliced.** Base carries `tortoise/stubby.py`; the tree deletes it and
+    leaves `tortoise/stubby.pyi`; `archive_symbol` then freezes the STUB — measured, that row's
+    `archived_from` and `blocks[0].path` are BOTH `tortoise/stubby.pyi` (`archive_symbol` sets
+    `archived_from = blocks[0][0] if kind == MODULE`), so `_row_froze_a_stub` is True. Arm 1b then
     appends "THE RECORD FROZE A STUB" and `continue`s BEFORE consuming the waiver — so the
     diagnostic loop re-derives the same key and, asking only `key in working`, printed "the
     removal IS recorded by the `module` entry you also passed" in the same run.
+
+    ⛔ Built through `archive_symbol`, not by hand: a hand-built row here would advertise a
+    writer-side property it never calls, and a later change to what the writer freezes would
+    leave it green. This also pins `archived_from` to the `.pyi`, which is the fact that makes
+    the anti-stub rule fire on a module that still has a stub on disk.
 
     Discriminating: the sibling test above covers the opposite arm — its row froze the REAL body,
     so `_row_froze_a_stub` is False there and a key-presence-only check is right. Only this row
@@ -1676,15 +1682,15 @@ def test_a_waiver_for_a_row_that_FROZE_A_STUB_does_not_say_the_removal_IS_record
     )
     _commit(tree, ".")
     subprocess.run(["git", "rm", "-q", "tortoise/stubby.py"], cwd=tree, check=True)
-    entry = _entry(arch.MODULE, "tortoise.stubby")
-    entry["archived_from"] = "tortoise/stubby.py"
-    entry["blocks"] = [{"path": "tortoise/stubby.pyi", "sha256": "a" * 64}]
-    arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
-    frozen = tree / entry["file"]
-    frozen.parent.mkdir(parents=True, exist_ok=True)
-    frozen.write_text("def value() -> int: ...\n", encoding="utf-8")
+    entry = arch.archive_symbol(
+        arch.MODULE, "tortoise.stubby", "batch-a", "review F1", root=tree
+    )
     _commit(tree, ".")
 
+    assert entry["archived_from"] == "tortoise/stubby.pyi", (
+        "the writer froze a stub, so the row itself must say so — this is what makes the "
+        f"anti-stub rule fire: {entry}"
+    )
     assert arch._row_froze_a_stub(entry), "this fixture must freeze the stub, not the body"
     problems = arch.shrink_violations(
         tree, base_ref="HEAD~1", allowed=["module:tortoise.stubby"]
