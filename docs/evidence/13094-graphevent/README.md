@@ -110,7 +110,8 @@ never manages to create (see `measure_graphevent_residency.py`'s docstring). ⛔
 QUOTED BELOW WERE MEASURED WITHOUT THAT CONSTRAINT**, and this is the sentence that has to say so
 rather than leave it to a footnote: both committed JSONs record it REFUSED
 (`schema[1].installed == false`, the graph-key-slot defect the instrument names), so those slopes are
-a **LOWER BOUND** — an un-indexed graph understates the cost, never overstates it — and re-running the
+a **LOWER BOUND** — a graph without that constraint's index understates the cost, never overstates it
+(the two plain `CREATE INDEX` statements WERE installed; only the constraint was refused) — and re-running the
 instrument (it issues the constraint the module way, the only form that runs) is what would make them
 a coverage claim about production's intent.
 
