@@ -729,6 +729,29 @@ def _skip_gating_functions(tree: ast.Module) -> set[str]:
     return names
 
 
+_SKIP_CALLS = frozenset({"skip", "skipif", "xfail"})
+
+
+def _skip_call_read_names(fn: ast.AST) -> set[str]:
+    """Names a `skip`/`skipif`/`xfail` call INSIDE this function reads.
+
+    `_skip_condition_names` answers the module-DECORATOR half (`skipif(not LIVE)`
+    above a `def`), and `_skip_gating_functions` answers the "module-level helper
+    that produces the flag" half. Neither reaches a probe inside a `def test_…`
+    body that decides its own skip — the widening the `_probe_roots` contract asks
+    for (review P1).
+    """
+    out: set[str] = set()
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call):
+            continue
+        if getattr(node.func, "attr", None) not in _SKIP_CALLS:
+            continue
+        for arg in list(node.args) + [kw.value for kw in node.keywords]:
+            out |= {sub.id for sub in ast.walk(arg) if isinstance(sub, ast.Name)}
+    return out
+
+
 def _control_flow_tries(body: list[ast.stmt]) -> list[ast.Try]:
     """The `try` blocks in a helper body, descending through control flow.
 
@@ -986,11 +1009,21 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     census reports `UNARMED == ()`. It is DECLARED here rather than silently left out,
     and the widening is named: admit any function containing a `skip`/`skipif`/`xfail`
     call that ALSO binds a name the call reads, reusing the sentinel set
-    `_skip_guard_call_names` already computes. NOT done here because it changes the
-    population and needs a decision first: the named block tolerates unsupported
-    engines on purpose (a legitimate skip), so grading it demands knowing which errors
-    must re-raise — a design call, not a mechanical edit (review P1, declared not
-    dropped).
+    `_skip_guard_call_names` already computes.
+
+    ✅ THAT DECISION IS NOW MADE AND THE WIDENING IS APPLIED (review P1, closed).
+    It was declared because grading the named block "demands knowing which errors
+    must re-raise — a design call, not a mechanical edit". The design answer is the
+    one every other probe in this census already uses: re-raise
+    `(AttributeError, NameError, TypeError)` ahead of the broad arm and LEAVE THE
+    BROAD ARM. That is safe for exactly this block because an engine that cannot
+    hold a fulltext index answers with a `redis.exceptions.ResponseError` — a
+    `RedisError`, not a `TypeError`, so the legitimate skip is untouched while a
+    moved door or a changed call shape now fails loudly instead of being recorded
+    as "this engine has no FTS" (see `tests/test_index_surfacing.py:269`).
+    Measured blast radius of the widening on the real tree, before it was written:
+    EXACTLY ONE new root, that block. It is armed, so `UNARMED` stays `()`, and the
+    population pin moves 64 rows / 56 roots / 54 files → 65 / 57 / 55.
 
     Nested `try`s inside a probe body are not roots: a `try/_proj.close()/except
     Exception: pass` cleanup is not the availability decision. The import-seam
@@ -1103,6 +1136,38 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
                     or _reaches_capability_seam(block, third_party)
                 )
             )
+    # ── ANY OTHER function whose probe feeds its own SKIP decision (review P1) ──
+    #
+    # The two passes above are module-level by construction: one reads `tree.body`
+    # for helpers a SKIP DECISION calls, the other `tree.body` for the resolvers a
+    # flag is assigned from. A probe inside a `def test_…` body that computes its
+    # own `skip` sentinel is in neither — the previously DECLARED residual, whose
+    # live instance was `tests/test_index_surfacing.py:269`. The admission rule and
+    # the narrowing are the ones the skip-gated helper branch already uses; only the
+    # set of functions searched changes. Blocks graded above are skipped by identity
+    # so no root is counted twice.
+    graded = {id(block) for block in roots}
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if fn.name in resolvers or fn.name in skip_gated:
+            continue  # already searched above, from its module-level entry
+        skip_read = _skip_call_read_names(fn)
+        if not skip_read:
+            continue
+        own_names = _own_imported_names(fn.body) | module_own
+        for block in _control_flow_tries(fn.body):
+            if id(block) in graded:
+                continue
+            if not (_bound_names(block) & skip_read):
+                continue
+            if (
+                _imports_own_code(block)
+                or _touches_own_code(block, own_names)
+                or _reaches_capability_seam(block, third_party)
+            ):
+                graded.add(id(block))
+                roots.append(block)
     return roots
 
 
@@ -2416,6 +2481,51 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "a module-body guard whose client was BUILT above the `try` must still be "
         "graded — `PROJ` is neither an import nor a module-level own name, so only "
         f"the capability arm can admit it: {module_body_client_bound_above}"
+    )
+
+    # 4p. The last admission arm to get a witness: a probe inside a `def test_…`
+    #     BODY that decides its own skip. It was the census's DECLARED RESIDUAL
+    #     until the widening below was applied (review P1); its live instance is
+    #     `tests/test_index_surfacing.py:269`, where a broad `except Exception`
+    #     captures into `unsupported` and feeds `pytest.skip(…)`, so a moved door
+    #     there read as "this engine cannot hold a fulltext index".
+    test_body_probe_feeding_skip = roots(
+        """
+        def test_a_engine_probe():
+            unsupported = None
+            for probe in ("one", "two"):
+                try:
+                    g.query(probe)
+                    unsupported = None
+                    break
+                except Exception as e:
+                    unsupported = e
+            if unsupported is not None:
+                pytest.skip(f"unsupported: {unsupported}")
+        """
+    )
+    assert test_body_probe_feeding_skip == ((5, (), True, False, True),), (
+        "a probe inside a TEST BODY that feeds its own `pytest.skip` sentinel is "
+        "the same class-2 decision as a module-level one, and it must be graded: "
+        f"{test_body_probe_feeding_skip}"
+    )
+    # ...but the arm is conditional on the SKIP BINDING, not a blanket grading of
+    # every `try` in every function: the identical block with no skip decision must
+    # stay ungraded, or 4p would be satisfied by grading the whole tree.
+    test_body_probe_without_skip = roots(
+        """
+        def test_b_unrelated():
+            note = None
+            try:
+                g.query("one")
+            except Exception as e:
+                note = e
+            assert note is None
+        """
+    )
+    assert test_body_probe_without_skip == (), (
+        "a `try` in a test body that decides NO skip is not the availability "
+        f"decision and must not be graded: {test_body_probe_without_skip}"
     )
 
     # 5. The real tree must carry all four shapes, or every assertion above is a
