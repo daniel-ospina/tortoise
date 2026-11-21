@@ -317,7 +317,10 @@ def test_an_empty_view_says_so_rather_than_showing_a_zero_count():
     graph = _Graph(["p0"])
     view = _view(graph, _Conn(_record_rows(["p0"])))
     assert view.outside == 0
-    assert "currently held in the fast layer" in view.headline
+    # ⛔ The zero case is SCOPED to the view's label: "everything in your record" was a
+    # completeness claim made from a single-label count (#2952).
+    assert "Nothing outside the fast layer for the Point items" in view.headline
+    assert "everything in your record" not in view.headline.lower()
 
 
 def test_a_refused_record_read_is_unmeasured_not_zero():
@@ -379,3 +382,65 @@ def test_a_useless_key_bound_is_refused_rather_than_read_as_an_empty_cache():
     for bad in (0, -1, True, "10"):
         with pytest.raises(ValueError):
             outside_view.resident_keys(graph, limit=bad)
+
+
+# ── review round 1 ─────────────────────────────────────────────────────────────
+def test_a_scope_refusal_is_unmeasured_not_a_traceback():
+    """`_apply_tenant_scope` REFUSES by design; outside the guard it escaped as one.
+
+    A DSN whose role bypasses RLS, a GUC that could not be set, or an unverifiable scope
+    makes it raise (#9600). Outside the `try`, that escaped out of the verb as a
+    traceback whose exit 1 is the USAGE code — telling a scheduler to retry FLAGS against
+    a DSN that can never work.
+    """
+    class _Mismatched(_Cursor):
+        def execute(self, sql, params=None):
+            if "bypassing" in sql:
+                self.executed.append((sql, params or ()))
+                self._last = [{"tenant": "someone_else", "bypassing": False}]
+                return
+            return super().execute(sql, params)
+
+    class _Conn2(_Conn):
+        def cursor(self):
+            cur = _Mismatched(self.rows)
+            self.cursors.append(cur)
+            return cur
+
+    view = _view(_Graph(["p0"]), _Conn2(_record_rows(["p0"])))
+    assert view.complete is False
+    assert view.outside is None
+    assert "record could not be read" in view.reason
+    assert "tenant GUC" in view.reason, "the refusal's own reason was swallowed"
+
+
+def test_a_grouping_column_that_is_not_a_record_column_is_refused():
+    """`--topic-column` is GROUP BY input, so a SQL EXPRESSION must not reach the record.
+
+    Verified before the guard: `(SELECT count(*) FROM public.point)` rendered as the
+    grouping expression, so any column of any table was disclosable through `topics`, and
+    an expensive subquery could be forced on every call.
+    """
+    graph = _Graph(["p0"])
+    conn = _Conn(_record_rows(["p0"]))
+    for bad in ("(SELECT count(*) FROM public.point)", "point_kind; DROP TABLE point",
+                "nope_not_a_column"):
+        with pytest.raises(ValueError):
+            _view(graph, conn, topic_column=bad)
+    assert not [s for s, _ in conn.executed if "GROUP BY" in s], (
+        "a rejected grouping column still reached the record"
+    )
+
+
+def test_complete_is_false_beside_a_field_nothing_measured():
+    """`complete: true` beside `resident: null` reads as a healthy empty."""
+    class _NoCount(_Graph):
+        def query(self, statement, params=None):
+            if "RETURN count(n)" in statement:
+                raise RuntimeError("count blip")
+            return super().query(statement, params=params)
+
+    view = _view(_NoCount(["p0"]), _Conn(_record_rows(["p0"])))
+    assert view.resident is None
+    assert view.complete is False
+    assert "resident" in view.reason

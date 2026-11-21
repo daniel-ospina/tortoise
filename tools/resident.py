@@ -107,10 +107,16 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--graph-uri", required=True,
                        help="docker://[:pass@]host:port/graph (the fast layer)")
         p.add_argument("--graph", required=True, help="the graph name inside that URI")
-        p.add_argument("--label", default="Point",
-                       help="the label a pin addresses (default: Point)")
-        p.add_argument("--key-prop", default="id", metavar="PROP",
-                       help="the node property holding the record key (default: id)")
+        # ⛔ NO DEFAULTS on the pair: `pin` needs one and supplies `Point`/`id`
+        # explicitly, while `unpin` must be able to say "I named nothing", so an
+        # explicit mismatch can be refused instead of silently overriding the set's own
+        # population. A flag default here would be indistinguishable from an operator
+        # naming it (the failure `unpin` was just fixed for, one layer up).
+        p.add_argument("--label", default=None,
+                       help="the label a pin addresses (default for `pin`: Point)")
+        p.add_argument("--key-prop", default=None, metavar="PROP",
+                       help="the node property holding the record key "
+                            "(default for `pin`: id)")
         p.add_argument("--window-nodes", type=int, default=None, metavar="N",
                        help=("the residency window's node budget — the number the pin "
                              "cap is derived from. Defaults to "
@@ -180,13 +186,23 @@ def main(argv: list[str] | None = None) -> int:
                 parser.error(
                     f"{resident_pin.EVICTION_MAX_NODES_ENV}={raw!r} is not an integer"
                 )
+    # ⛔ `show` and `unpin` do not NEED a budget: `show` reports one when it can (so an
+    # over-budget set is visible) and `unpin` is the documented REMEDY for that state —
+    # so requiring a budget for either made the remedy unreachable exactly when it was
+    # needed (a lowered window or a window too small for a pin). Only `pin` requires one.
+    budget: resident_pin.PinBudget | None
     try:
         budget = resident_pin.PinBudget.resolve(
             max_nodes=args.max_pins, max_degree=args.max_degree, window_nodes=window
         )
     except resident_pin.PinConfigError as exc:
-        _emit({"verdict": "REFUSED", "reason": f"config refused: {exc}"}, args.out)
-        return EXIT_REFUSED
+        if args.verb == "pin":
+            _emit({"verdict": "REFUSED", "reason": f"config refused: {exc}"}, args.out)
+            return EXIT_REFUSED
+        budget = None
+        if args.verb == "show":
+            print(f"#14012: no pin budget could be resolved ({exc}); the declaration is "
+                  f"reported WITHOUT a cap check", file=sys.stderr)
 
     client = graph = None
     try:
@@ -209,13 +225,23 @@ def main(argv: list[str] | None = None) -> int:
         if args.verb == "pin":
             try:
                 result = resident_pin.pin(
-                    graph, args.key, label=args.label, key_prop=args.key_prop,
+                    graph, args.key,
+                    label=args.label or "Point", key_prop=args.key_prop or "id",
                     budget=budget,
                 )
             except resident_pin.PinRefused as exc:
                 _emit({"verdict": "REFUSED", "graph": args.graph,
                        "code": exc.code, "reason": exc.reason,
-                       "budget": budget.as_dict()}, args.out)
+                       "budget": budget.as_dict() if budget else None}, args.out)
+                return EXIT_REFUSED
+            except resident_pin.PinConfigError as exc:
+                # ⛔ A REFUSAL WITH A CODE, not a traceback. `--label '1bad'` (an
+                # identifier interpolated into Cypher) raises this, and uncaught it
+                # escaped as a traceback whose exit 1 is this tool's USAGE code — telling
+                # a scheduler to retry its flags against a declaration that will never
+                # parse.
+                _emit({"verdict": "REFUSED", "graph": args.graph, "code": "config",
+                       "reason": str(exc)}, args.out)
                 return EXIT_REFUSED
             _emit({"verdict": "OK", "graph": args.graph, "pin": result.as_dict()},
                   args.out)
@@ -230,7 +256,11 @@ def main(argv: list[str] | None = None) -> int:
             except resident_pin.PinRefused as exc:
                 _emit({"verdict": "REFUSED", "graph": args.graph,
                        "code": exc.code, "reason": exc.reason,
-                       "budget": budget.as_dict()}, args.out)
+                       "budget": budget.as_dict() if budget else None}, args.out)
+                return EXIT_REFUSED
+            except resident_pin.PinConfigError as exc:
+                _emit({"verdict": "REFUSED", "graph": args.graph, "code": "config",
+                       "reason": str(exc)}, args.out)
                 return EXIT_REFUSED
             _emit({"verdict": "OK", "graph": args.graph, "pin": result.as_dict()},
                   args.out)
@@ -274,11 +304,18 @@ def main(argv: list[str] | None = None) -> int:
             view = outside_view.read(
                 graph, conn,
                 org_id=args.org_id, graph_id=args.graph_id,
-                label=args.label, key_prop=args.key_prop,
+                label=args.label or "Point", key_prop=args.key_prop or "id",
                 topic_column=args.topic_column or outside_view.TOPIC_COLUMN,
                 top=args.top or outside_view.DEFAULT_TOP_TOPICS,
                 key_limit=args.max_keys or outside_view.DEFAULT_RESIDENT_KEY_LIMIT,
             )
+        except ValueError as exc:
+            # A flag that names something the view may not read is a USAGE mistake
+            # (`--topic-column` is ORDER BY input, `--label` is interpolated into Cypher).
+            # It is refused BEFORE any read, and it is not an unmeasured view.
+            conn.close()
+            parser.error(str(exc))
+            return EXIT_USAGE  # unreachable; parser.error exits
         finally:
             with contextlib.suppress(Exception):
                 conn.close()

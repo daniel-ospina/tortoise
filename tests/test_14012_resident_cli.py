@@ -56,6 +56,8 @@ class _Graph:
         if "MATCH (n:Meta {key:$key}) DETACH DELETE n" in statement:
             self.meta.pop(params["key"], None)
             return _Result([])
+        if "MATCH (n:Point) RETURN count(n)" in statement:
+            return _Result([[len(self.nodes)]])
         if "UNWIND $keys AS k" in statement:
             rows = []
             for key in params["keys"]:
@@ -324,7 +326,7 @@ def _report_file(tmp_path):
 
 
 def test_a_sweep_with_no_pin_set_passes_no_gate_and_proceeds(sweep, capsys, tmp_path):
-    graph, calls = sweep
+    _, calls = sweep
     code = cache_evict.main(_sweep_argv(_report_file(tmp_path), "--max-nodes", "1000"))
     assert code == 0
     assert len(calls) == 1
@@ -371,12 +373,120 @@ def test_a_pin_set_over_its_budget_stops_the_sweep_before_evict(sweep, capsys,
     assert "pinned closure is 2 node(s)" in out["reason"]
 
 
-def test_a_pin_set_for_another_key_space_stops_the_sweep(sweep, capsys, tmp_path):
+def test_a_pin_set_for_another_key_space_is_reported_not_applied(sweep, capsys,
+                                                                tmp_path):
+    """A per-graph pin set addressing `Source.url` holds nothing in an `id` sweep.
+
+    ⛔ Neither of the two "obvious" answers is right, and both were tried: REFUSING
+    blocks every sweep of another population for as long as any pin exists (a set is
+    declared once, per graph), while APPLYING it compares keys that mean different
+    things. So the sweep proceeds with the declaration NOT applied — and says so on both
+    surfaces an operator reads, because a pin that silently stops protecting is the
+    failure this control exists to prevent.
+    """
     graph, calls = sweep
     graph.meta[PINS_META_KEY] = {"label": "Source", "key_prop": "url",
                                  "keys": ["https://example.test"]}
     code = cache_evict.main(_sweep_argv(_report_file(tmp_path), "--max-nodes", "1000"))
+    assert code == 0
+    assert len(calls) == 1 and calls[0]["pinned"] is None
+    out = json.loads(capsys.readouterr().out)
+    assert out["pins"]["applied"] is False
+    assert "NOT applied" in out["pins"]["not_applied_reason"]
+
+
+# ── review round 1: a pin problem must not block sweeps that do not use it ─────
+def test_a_pin_budget_misconfiguration_does_not_refuse_a_sweep_with_NOTHING_pinned(
+        sweep, capsys, tmp_path):
+    """#10976's state (an over-budget cache) must not be reached through a pin typo.
+
+    Resolving the pin budget before reading the declaration refused EVERY sweep — with
+    nothing pinned — on an unrelated env typo or a window too small for a pin to exist.
+    """
+    _, calls = sweep
+    import os
+
+    os.environ["TORTOISE_PIN_MAX_NODES"] = "not-a-number"
+    try:
+        code = cache_evict.main(_sweep_argv(_report_file(tmp_path),
+                                            "--max-nodes", "1000"))
+    finally:
+        del os.environ["TORTOISE_PIN_MAX_NODES"]
+    assert code == 0, "an unused pin budget refused a sweep with nothing pinned"
+    assert len(calls) == 1 and calls[0]["pinned"] is None
+
+
+def test_the_same_misconfiguration_IS_refused_once_something_is_pinned(
+        sweep, capsys, tmp_path):
+    graph, calls = sweep
+    graph.meta[PINS_META_KEY] = {"label": "Point", "key_prop": "id", "keys": ["p0"]}
+    import os
+
+    os.environ["TORTOISE_PIN_MAX_NODES"] = "not-a-number"
+    try:
+        code = cache_evict.main(_sweep_argv(_report_file(tmp_path),
+                                            "--max-nodes", "1000"))
+    finally:
+        del os.environ["TORTOISE_PIN_MAX_NODES"]
     assert code == cache_evict.CACHE_EVICTION_EXIT_REFUSED
     assert len(calls) == 0
     out = json.loads(capsys.readouterr().out)
-    assert "unmatched pin set" in out["reason"]
+    assert "a pin declaration exists and its budget cannot be resolved" in out["reason"]
+
+
+def test_an_unreadable_declaration_is_reported_as_unreadable_not_as_a_config_error(
+        sweep, capsys, tmp_path):
+    graph, calls = sweep
+    graph.meta[PINS_META_KEY] = {"label": "Point", "key_prop": "id", "keys": 7}
+    code = cache_evict.main(_sweep_argv(_report_file(tmp_path), "--max-nodes", "1000"))
+    assert code == cache_evict.CACHE_EVICTION_EXIT_REFUSED
+    assert len(calls) == 0
+    assert "could not be read" in json.loads(capsys.readouterr().out)["reason"]
+
+
+# ── review round 1: usage vs unmeasured, and the record-view doors ─────────────
+def test_a_grouping_column_that_is_not_a_record_column_is_a_usage_error(
+        wired, capsys, monkeypatch):
+    _fake_psycopg(monkeypatch, _Conn())
+    with pytest.raises(SystemExit) as exc:
+        resident.main(["outside", *BASE, "--dsn", "postgresql://x", "--org-id",
+                       "org_a", "--graph-id", "g_1", "--window-nodes", "1000",
+                       "--topic-column", "(SELECT count(*) FROM public.point)"])
+    assert exc.value.code == resident.EXIT_USAGE, (
+        "an injected grouping expression was refused as UNMEASURED (exit 4) rather than "
+        "as a usage mistake — and exit 4 is what an operator retries"
+    )
+
+
+def test_a_record_scope_refusal_exits_4_with_the_reason(wired, capsys, monkeypatch):
+    class _Mismatched(_Cursor):
+        def execute(self, sql, params=None):
+            if "bypassing" in sql:
+                self._last = [{"tenant": "someone_else", "bypassing": False}]
+                return
+            return super().execute(sql, params)
+
+    class _Conn2(_Conn):
+        def cursor(self):
+            return _Mismatched(self.ok)
+
+    _fake_psycopg(monkeypatch, _Conn2())
+    code = resident.main(["outside", *BASE, "--dsn", "postgresql://x", "--org-id",
+                          "org_a", "--graph-id", "g_1", "--window-nodes", "1000"])
+    assert code == resident.EXIT_UNMEASURED
+    view = json.loads(capsys.readouterr().out)["outside"]
+    assert "tenant GUC" in view["reason"], (
+        "the record's own refusal was swallowed — the operator gets 'unmeasured' with no "
+        "cause"
+    )
+
+
+def test_show_and_unpin_need_no_budget(wired, capsys, monkeypatch):
+    """`unpin` is the documented remedy for an over-budget set, so it must not need one."""
+    monkeypatch.delenv("TORTOISE_CACHE_MAX_NODES", raising=False)
+    monkeypatch.delenv("TORTOISE_PIN_MAX_NODES", raising=False)
+    wired.meta[PINS_META_KEY] = {"label": "Point", "key_prop": "id", "keys": ["p0"]}
+    assert resident.main(["show", *BASE]) == resident.EXIT_OK
+    capsys.readouterr()
+    assert resident.main(["unpin", *BASE, "--key", "p0"]) == resident.EXIT_OK
+    assert PINS_META_KEY not in wired.meta

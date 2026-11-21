@@ -58,6 +58,7 @@ from typing import Any
 
 from . import record_projection as _rp
 from .cache_projection import NODE_TABLES
+from .resident_pin import PinConfigError, bare_identifier
 
 #: How many resident keys one read may pull. A bounded read is what makes the answer
 #: either COMPLETE or explicitly UNMEASURED — never a silently short one.
@@ -138,7 +139,14 @@ class OutsideView:
     # ── the promise, stated where a caller reads it ──────────────────────
     @property
     def headline(self) -> str:
-        """One plain sentence a non-technical surface can show verbatim."""
+        """One plain sentence a non-technical surface can show verbatim.
+
+        ⛔ The zero case is scoped to THIS VIEW's label, deliberately. It used to read
+        *"Everything in your record is currently held in the fast layer"* — a
+        COMPLETENESS claim about the whole record, made from a single-label count. Sweep
+        `Source` while this view counts `Point` and the customer is told nothing is
+        outside while a whole population is (`#2952`: never imply completeness).
+        """
         if self.outside is None:
             return (
                 "How much of your data is outside the fast layer could not be measured "
@@ -146,8 +154,9 @@ class OutsideView:
             )
         if self.outside == 0:
             return (
-                "Everything in your record is currently held in the fast layer, so "
-                "nothing is being fetched back when you search."
+                f"Nothing outside the fast layer for the {self.label} items this view "
+                f"covers — they are answered from it, so nothing is fetched back on a "
+                f"search."
             )
         span = ""
         if self.oldest or self.newest:
@@ -175,6 +184,20 @@ class OutsideView:
             "source": self.source,
             "headline": self.headline,
         }
+
+
+def _checked(value: str, *, what: str) -> str:
+    """Validate an identifier for THIS module's SQL, as a ``ValueError``.
+
+    ``bare_identifier`` is the package's one shape check; its own error type is the pin's
+    (``PinConfigError``, a configuration refusal). A bad ``--topic-column`` is a USAGE
+    mistake, so it is re-raised as ``ValueError`` — which is what the verb turns into
+    exit 1 (usage), not exit 4 (unmeasured).
+    """
+    try:
+        return bare_identifier(value, what=what)
+    except PinConfigError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def _rows(cur: Any, sql: str, params: Sequence[Any]) -> list[dict[str, Any]]:
@@ -211,11 +234,8 @@ def resident_keys(graph: Any, *, label: str = "Point", key_prop: str = "id",
         raise ValueError(
             f"label {label!r} is not a record label {sorted(NODE_TABLES)}"
         )
-    # One identifier validator for this package, not a second copy.
-    from .resident_pin import bare_identifier
-
-    bare_identifier(label, what="label")
-    bare_identifier(key_prop, what="key property")
+    _checked(label, what="label")
+    _checked(key_prop, what="key property")
     # ⛔ The bound is INTERPOLATED, not parameterised: `LIMIT $limit` is not accepted by
     # every engine version this runs against, and a rejected statement would turn the
     # whole view into "could not be read" — a control that never works rather than one
@@ -239,9 +259,7 @@ def resident_count(graph: Any, *, label: str = "Point") -> int | None:
     """How many nodes of this label the graph holds. ``None`` when unreadable."""
     if label not in NODE_TABLES:
         raise ValueError(f"label {label!r} is not a record label {sorted(NODE_TABLES)}")
-    from .resident_pin import bare_identifier
-
-    bare_identifier(label, what="label")
+    _checked(label, what="label")
     try:
         rows = graph.query(
             f"MATCH (n:{label}) RETURN count(n)", params={}
@@ -282,6 +300,21 @@ def read(
 
     table = NODE_TABLES[label]
     tier = _tier_predicate(table)
+    # ⛔ THE GROUPING COLUMN IS INTERPOLATED, SO IT IS VALIDATED — as a bare identifier
+    # AND as a column the record actually has. The CLI feeds `--topic-column` straight
+    # through, so without this any SQL EXPRESSION ran against the record under the tool's
+    # DSN and its value came back in `topics`: every column of every table was readable
+    # through a view that is supposed to describe one grouping dimension, and an
+    # expensive subquery could be forced on every call. `READ_COLUMNS` is the declared
+    # surface; the schema is the authority it is checked against.
+    _checked(topic_column, what="topic column")
+    columns = _rp.table_columns().get(table)
+    if columns is not None and topic_column not in columns:
+        raise ValueError(
+            f"topic column {topic_column!r} is not a column of public.{table} "
+            f"(record_projection.table_columns()) — a grouping dimension this view may "
+            f"quote has to be a real column of the table it groups"
+        )
     resident_total = resident_count(graph, label=label)
     try:
         keys, truncated = resident_keys(graph, label=label, key_prop=key_prop,
@@ -312,8 +345,16 @@ def read(
             source=f"graph:{label}",
         )
 
-    cur = _rp.scope_connection(conn, org_id)
+    # ⛔ THE TENANT SCOPE IS INSIDE THE GUARD, because installing it is one of the
+    # things that REFUSES: `record_projection._apply_tenant_scope` raises by design on a
+    # role that bypasses RLS, on a GUC it could not set, and on a scope it could not
+    # verify (#9600) — and `conn.cursor()` raises on a dead connection. Outside the
+    # `try`, those escaped as a traceback out of the verb, whose exit 1 is the USAGE
+    # code: a scheduler was told to retry its FLAGS against a DSN that can never work,
+    # and the module's own contract (an unanswerable read returns `outside=None` with a
+    # reason) was broken on exactly the refusal it exists to report.
     try:
+        cur = _rp.scope_connection(conn, org_id)
         span = _rows(cur, SPAN_SQL.format(table=table, tier=tier),
                      (org_id, graph_id, list(keys)))
         buckets = _rows(
@@ -346,6 +387,13 @@ def read(
         for b in buckets
         if b.get("topic") is not None
     )
+    # ⛔ `complete` is a claim about the MEASUREMENT, so it may not be `True` beside a
+    # field nothing measured: `resident=None` (the count query failed) or
+    # `record_total=None` (the total failed) are partial readings, and a monitor that
+    # reads `complete: true` would take the nulls for a healthy empty.
+    missing = [name for name, value in
+               (("resident", resident_total), ("record_total", record_total),
+                ("outside", outside)) if value is None]
     return OutsideView(
         org_id=org_id,
         graph_id=graph_id,
@@ -356,9 +404,10 @@ def read(
         oldest=_text(row.get("oldest")),
         newest=_text(row.get("newest")),
         topics=topics,
-        complete=True,
+        complete=not missing,
         truncated=False,
-        reason="",
+        reason=("" if not missing else
+                f"{', '.join(missing)} could not be measured — the view is partial"),
         source=f"graph:{label}+record:{table}",
     )
 

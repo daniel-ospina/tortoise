@@ -142,7 +142,7 @@ def bare_identifier(value: str, *, what: str) -> str:
     if not isinstance(value, str) or not value or not set(value) <= _BARE_SAFE:
         raise PinConfigError(
             f"{what} {value!r} is not a bare Cypher identifier ([A-Za-z_][A-Za-z0-9_]*) "
-            f"— it is interpolated into the pin query, so it may not carry quotes, "
+            f"— it is interpolated into a query, so it may not carry quotes, "
             f"spaces or punctuation"
         )
     if value[0].isdigit():
@@ -180,11 +180,21 @@ class PinBudget:
         # pinned closure may fill the cache entirely, i.e. "no eviction" — the one
         # outcome the docs page promises cannot happen.
         if self.window_nodes is not None and self.max_nodes >= self.window_nodes:
+            # ⛔ A WINDOW OF ONE HAS NO ROOM FOR A PIN AT ALL, and the remedy has to say
+            # so. The previous message named "pin at most 1 node" for a 1-node window —
+            # a value this very check then refuses, i.e. an instruction that cannot be
+            # followed (the same class as the evictor's "re-run to continue" defect).
+            if self.window_nodes <= 1:
+                raise PinConfigError(
+                    f"the residency window is {self.window_nodes} node(s), which cannot "
+                    f"carry a pin at all: any pin would BE the whole fast layer, i.e. "
+                    f"'no eviction'. Raise the window before pinning anything."
+                )
             raise PinConfigError(
                 f"max_nodes {self.max_nodes} is not smaller than the residency window "
                 f"({self.window_nodes}) — pins could then claim the whole fast layer, "
                 f"which is 'no eviction' by another name. Pin at most "
-                f"{max(1, self.window_nodes - 1)} node(s)."
+                f"{self.window_nodes - 1} node(s)."
             )
 
     @classmethod
@@ -324,6 +334,18 @@ class PinReading:
         names both ways out.
         """
         if self.budget is None:
+            # ⛔ TRUNCATION IS NOT A BUDGET QUESTION, so it is answered BEFORE the
+            # `budget is None` early return: a reading that could not see the whole
+            # declaration has an UNKNOWN footprint whether or not a budget was supplied,
+            # and reporting "fine" because no budget was passed is the fail-open
+            # direction on the one field a sweep reads.
+            if self.truncated:
+                return (
+                    "the pin set's closure could not be read in full (the key read hit "
+                    f"its {DEFAULT_KEY_LIMIT}-key bound), so how much of the fast layer "
+                    "it claims is UNKNOWN — a sweep may not proceed on an unmeasured pin "
+                    "footprint"
+                )
             return None
         if self.truncated:
             return (
@@ -467,9 +489,18 @@ def read(graph: Any, *, budget: PinBudget | None = None) -> PinReading:
     try:
         rows = _rows(
             graph,
+            # ⛔ THE NEIGHBOUR IS LABEL-SCOPED, and that is a correctness fix rather
+            # than tidiness: `(n)--(m)` collects the key of a neighbour in ANY label, so
+            # a `:Point` whose neighbour is an `:Object` carrying a same-named property
+            # was counted into the closure AND gated by that key — an inflated footprint
+            # (false budget refusals) over nodes this control cannot protect anyway.
+            # Verified on falkordb: `--(m:Point)` returns 1 neighbour where `--(m)`
+            # returns 2 on the same graph. Cost of the narrow reading, stated so it is
+            # not read as an oversight: DEGREE is same-population degree, which is the
+            # footprint this control actually claims.
             f"UNWIND $keys AS k "
             f"MATCH (n:{label} {{{key_prop}: k}}) "
-            f"OPTIONAL MATCH (n)--(m) "
+            f"OPTIONAL MATCH (n)--(m:{label}) "
             f"RETURN k, collect(DISTINCT id(m)), collect(DISTINCT m.{key_prop})",
             {"keys": asked},
         )
@@ -490,7 +521,12 @@ def read(graph: Any, *, budget: PinBudget | None = None) -> PinReading:
         held.add(key)
         nbr_ids = row[1] if len(row) > 1 and row[1] is not None else []
         nbr_keys = row[2] if len(row) > 2 and row[2] is not None else []
-        degrees[key] = len({i for i in nbr_ids if i is not None})
+        # ⛔ MAX, not last-wins: `key_prop` is not a uniqueness guarantee at the engine
+        # level (the record's key is unique; a hand-written node need not be), and a
+        # duplicate key value split across two nodes under-reported its degree — which is
+        # the one number the ceiling reads, in the direction that lets a hub through.
+        degrees[key] = max(degrees.get(key, 0),
+                           len({i for i in nbr_ids if i is not None}))
         for neighbour in nbr_keys:
             # A neighbour with no key in this key space (another label, or a node whose
             # key property is unset) cannot be gated by key. It is NOT counted into the
@@ -558,6 +594,17 @@ def pin(
         )
 
     current = read(graph, budget=resolved)
+    if current.truncated:
+        # ⛔ A PARTIAL READ CANNOT BE THE BASIS OF A FULL WRITE. The rewrite at the end of
+        # this function replaces the key list wholesale, so extending a declaration that
+        # only part of which was read would DROP every key past the read bound — a silent
+        # loss of the user's declaration, from an operation that reports success.
+        raise PinRefused(
+            f"the existing pin declaration holds more keys than one read can see "
+            f"({DEFAULT_KEY_LIMIT}), so it cannot be extended without dropping the rest "
+            f"— release keys first, or raise the read bound",
+            code="truncated",
+        )
     if not current.readable:
         raise PinRefused(
             f"the existing pin declaration could not be read "
@@ -657,9 +704,18 @@ def _closure_for(
     try:
         rows = _rows(
             graph,
+            # ⛔ THE NEIGHBOUR IS LABEL-SCOPED, and that is a correctness fix rather
+            # than tidiness: `(n)--(m)` collects the key of a neighbour in ANY label, so
+            # a `:Point` whose neighbour is an `:Object` carrying a same-named property
+            # was counted into the closure AND gated by that key — an inflated footprint
+            # (false budget refusals) over nodes this control cannot protect anyway.
+            # Verified on falkordb: `--(m:Point)` returns 1 neighbour where `--(m)`
+            # returns 2 on the same graph. Cost of the narrow reading, stated so it is
+            # not read as an oversight: DEGREE is same-population degree, which is the
+            # footprint this control actually claims.
             f"UNWIND $keys AS k "
             f"MATCH (n:{label} {{{key_prop}: k}}) "
-            f"OPTIONAL MATCH (n)--(m) "
+            f"OPTIONAL MATCH (n)--(m:{label}) "
             f"RETURN k, collect(DISTINCT id(m)), collect(DISTINCT m.{key_prop})",
             {"keys": list(keys)},
         )
@@ -679,7 +735,12 @@ def _closure_for(
         held.add(key)
         nbr_ids = row[1] if len(row) > 1 and row[1] is not None else []
         nbr_keys = row[2] if len(row) > 2 and row[2] is not None else []
-        degrees[key] = len({i for i in nbr_ids if i is not None})
+        # ⛔ MAX, not last-wins: `key_prop` is not a uniqueness guarantee at the engine
+        # level (the record's key is unique; a hand-written node need not be), and a
+        # duplicate key value split across two nodes under-reported its degree — which is
+        # the one number the ceiling reads, in the direction that lets a hub through.
+        degrees[key] = max(degrees.get(key, 0),
+                           len({i for i in nbr_ids if i is not None}))
         for neighbour in nbr_keys:
             if isinstance(neighbour, str) and neighbour:
                 neighbours.add(neighbour)
@@ -712,15 +773,39 @@ def unpin(
     still claimed them. The set is the set; releasing keys from it cannot change what it
     addresses.
     """
+    # ⛔ NO BUDGET IS REQUIRED, and it must not be resolved anyway: releasing keys is the
+    # documented REMEDY for an over-budget set, so requiring the budget to be derivable
+    # would refuse the remedy exactly when it is needed (a lowered window, or a window too
+    # small for a pin to exist). The budget here only ever populates the report.
     resolved = budget
-    if resolved is None:
-        resolved = PinBudget.resolve()
     current = read(graph, budget=resolved)
     if not current.readable:
         raise PinRefused(
             f"the pin declaration could not be read ({current.source or 'unreadable'}), "
             f"so removing from it would silently replace a set nobody could see",
             code="unreadable",
+        )
+    if current.truncated:
+        raise PinRefused(
+            f"the pin declaration holds more keys than one read can see "
+            f"({DEFAULT_KEY_LIMIT}), so releasing keys would rewrite it from a PARTIAL "
+            f"read and drop the rest",
+            code="truncated",
+        )
+    # ⛔ A caller that names a DIFFERENT population is refused, not quietly obeyed: with
+    # the rewrite adopting the declaration's own pair, a wrong-population `unpin` would
+    # otherwise report `verdict: OK, written: false` and release nothing — the control
+    # saying it worked while the declaration is untouched. `pin()` refuses this state for
+    # the same reason, and the two must not disagree.
+    if current.keys and (
+        (label is not None and label != current.label)
+        or (key_prop is not None and key_prop != current.key_prop)
+    ):
+        raise PinRefused(
+            f"the pin set addresses {current.label!r} by {current.key_prop!r}, but this "
+            f"call names {label!r} by {key_prop!r} — the set is the set; release keys "
+            f"from it by the population it addresses",
+            code="population-mismatch",
         )
     eff_label = current.label if current.keys else (label or "Point")
     eff_key_prop = current.key_prop if current.keys else (key_prop or "id")
