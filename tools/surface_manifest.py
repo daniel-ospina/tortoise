@@ -4224,7 +4224,8 @@ def property_count_note(*, provenance_answered: bool, shrink_graded: bool) -> tu
 
     So each component is counted only when it produced a verdict, and the verdicts that did
     not happen are NAMED on the same line rather than silently dropped. A pure function on
-    purpose: the four reachable totals are pinned in the suite without paying `cmd_check`'s
+    purpose: the four reachable CASES produce three totals (13/14/15), pinned in the suite without
+    paying `cmd_check`'s
     surface derivation. The word is spelled out to keep the line readable.
     """
     counted = 13  # eleven structural + one derived-from-code + one declared-vs-approved
@@ -4579,7 +4580,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     # ⛔ THE COUNT IS THE ONE THIS RUN ACTUALLY PRODUCED (review F2 of PR #14039, rounds 12-13):
     # the provenance arm and the shrink arm can each be defined without being answered, so the
     # count is computed from the two verdicts — see `property_count_note` for why, and for the
-    # four reachable totals.
+    # four reachable CASES -> three totals (13/14/15).
     _shrink_note = (
         f"; shrink checked against {_shrink_compared}" if _shrink_graded else ""
     )
