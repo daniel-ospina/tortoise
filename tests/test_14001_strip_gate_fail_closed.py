@@ -1461,12 +1461,14 @@ def _folding(
     synthesis left BOTH tests green: the pin exercised `_env_source` directly, so it graded the
     helper while nothing graded the control's use of it. One builder, one wiring.
 
-    ⛔ RESIDUAL — THE CONTROL'S *USE* OF THESE HELPERS IS A SHAPE GUARD, NOT A MEASURED ONE
-    (`#14099`). The helpers above ARE measured (`test_the_environment_refusal_is_carried_not_
-    re_synthesised`, mutants in its docstring). Whether the CONTROL binds them is visible in a
-    diff, not caught by a test: measured, giving the control its own local pre-F1 fake again —
-    helpers untouched — leaves the whole file GREEN (95 passed). So a revert here is a reviewer's
-    catch, and this comment is the record of that, not a claim of coverage.
+    ⛔ THE CONTROL'S *USE* OF THESE HELPERS IS PINNED TOO (`#14099`, review of `5de131e6`). The
+    helpers above are measured by `test_the_environment_refusal_is_carried_not_re_synthesised`;
+    whether the CONTROL still BINDS them is measured by `test_the_control_binds_the_shared_helpers`
+    — a spy on both names, which this control reaches 13 / 212 times (measured). Without that spy,
+    giving the control its own local pre-F1 fake left the whole file GREEN (95 passed, measured).
+    ⛔ The paragraph here previously said a test COULD NOT catch that revert, calling it a
+    reviewer's catch. That was false — a spy catches it — and the false version discouraged
+    exactly the arm that now closes it.
 
     The fallback is `_env_source`, never an inline raise: a module this venv could not read must
     re-raise THE ENVIRONMENT'S OWN refusal instead of a tailored copy of it.
@@ -1858,6 +1860,41 @@ def test_the_environment_refusal_is_carried_not_re_synthesised(monkeypatch):
     # bug, and a silent `KeyError`-swallowed ``stray`` would hide it.
     with pytest.raises(KeyError, match="was never read"):
         _env_source("tortoise.not_in_the_population", sources, refusals)
+
+
+def test_the_control_binds_the_shared_helpers(monkeypatch):
+    """⛔ THE CONTROL MUST REACH THE MODULE-LEVEL HELPERS, NOT A LOCAL COPY (`#14099` F2).
+
+    Measured before this arm existed: giving the control its own local pre-F1 fake again — the
+    helpers at `_folding`/`_env_source` untouched — left the whole file GREEN (95 passed). So the
+    F2 revert (rebuilding the fabricated refusal INSIDE the control) was invisible to every pin
+    that exists, and reverting it undetected is the bug the F2 finding named.
+
+    ⛔ A SPY, NOT A COMMENT. An earlier revision recorded this gap as a residual "visible in a
+    diff, not caught by a test" — false: patching the two module-level names and driving the
+    control catches it, because the control's `partial(_folding, …)`/`partial(_env_source, …)`
+    resolve against the module globals at call time. Measured: this head binds them 13 / 212
+    times; the local-copy revert drops both counters to 0 and reds on the assertion below.
+    """
+    calls = {"_folding": 0, "_env_source": 0}
+    real_folding, real_env_source = _folding, _env_source
+
+    def spy_folding(*args, **kwargs):
+        calls["_folding"] += 1
+        return real_folding(*args, **kwargs)
+
+    def spy_env_source(*args, **kwargs):
+        calls["_env_source"] += 1
+        return real_env_source(*args, **kwargs)
+
+    monkeypatch.setattr(sys.modules[__name__], "_folding", spy_folding)
+    monkeypatch.setattr(sys.modules[__name__], "_env_source", spy_env_source)
+
+    test_the_over_refusal_population_is_itself_pinned(monkeypatch)
+
+    assert calls["_folding"] and calls["_env_source"], (
+        "the control stopped binding the module-level helpers, so a pre-F1 fake can be rebuilt "
+        f"locally with every helper still correct — that revert is otherwise invisible: {calls}")
 
 
 #: ⛔ RESIDUAL — A NAME the mention rule cannot READ (`#14001`, measured by the cycle-4 review).
