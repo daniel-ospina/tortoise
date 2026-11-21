@@ -678,7 +678,30 @@ SWEEP_NAMES = 66
 #: merge, and `seen.update` is **101** — `main`'s −1, which is `tests/test_13337_cache_graph_declaration.py`
 #: accumulating by APPEND rather than `update` (#14108), a file this branch does not touch. That the
 #: figure lands at 11845 − 1 = 11844 is a CROSS-CHECK of the measurement, not the evidence for it.
-SWEEP_RESIDUE = (11844, "70d6cfdcd8b769e4")
+#:
+#: ⛔ THE BLOCK ABOVE IS `main`'s MEASUREMENT ON ITS OWN TREE; the one below is THIS
+#: branch's on an earlier one. Neither is dropped: each is true of the tree it was
+#: measured on. Neither is the answer for THIS tree — the pin below is `--repin` on
+#: it, and the cross-check against both is arithmetic, never the evidence.
+#: run from each `-`/`+` pair leaves the pair identical, so it cannot move a receiver population. The
+#: reason the gate is red here is the recurrence `#14062` and `#14058` both document, now a THIRD
+#: time: the pin is graded on PULL REQUESTS only, so `main` merges with nothing grading it — and
+#: `main`'s own tree today derives 11833 against its own 11825 pin, i.e. `--check` is RED on `main`.
+#: The real fix for the recurrence is grading the pin on `main`; carrying the re-cut is what unblocks
+#: a PR that touches nothing in this population, which is the same remedy the two blocks above took.
+#: ⛔ #14086 RE-PIN, measured on this head (`65cf27c01b`) — NOT arithmetic on the block above.
+#: The pin above (11833) is 2 rows above what THIS tree derives, because it was taken on a
+#: different tree; measured today with the tool's own verbs:
+#:     origin/main (df0525a7a9)   derives 11831   (so main is itself 2 rows off its 11833 pin)
+#:     this head                  derives 11832   (+1 over main, the PR's own row)
+#: The +1 is attributed by a row-by-row dump of both residue sets, not by count — exactly one row
+#: differs: `captured.update` 30 → 31, from `tests/test_10893_pre_handler_parts.py:279`,
+#: `lambda org, ev, props: captured.update(props=dict(props))` — a plain `dict.update` inside a
+#: monkeypatched analytics capture, NOT an SDK reference, and already a pinned shape (no new shape
+#: appears). So the count is DECLARED, not rewritten, and the SDK population did not move
+#: (`typed references still pointing at a public name: 0`), so no typed call site is legitimised.
+#: Derivation: `uv run python tools/sdk_privatise.py --repin` -> (11832, '0ac463c1ce605ae9').
+SWEEP_RESIDUE = (11845, "3d845b4a39da2ac8")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
