@@ -3588,6 +3588,21 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # network) and `core` is where it is registered. Pinned by
              # tests/test_ci_selection.py::test_cache_evict_runs_on_a_tools_only_change.
              "tools/cache_evict.py",
+             # #14012: the PIN's operator verb, the same shape one level out and for the
+             # same reason. `tools/resident.py` is a flat NON_PYTHON_PREFIXES entry with
+             # no SOURCE_PATTERNS row, so a diff touching ONLY it filtered to
+             # `changed == []` and took the docs-only early return — MEASURED at this
+             # head with the entry absent: `select(["tools/resident.py"],
+             # "pull_request", load_manifest())` -> surfaces=[], 105 files, NOT ONE of
+             # `test_14012_resident_pin.py` / `test_14012_outside_view.py` /
+             # `test_14012_resident_cli.py`. Every refusal this control exists to make
+             # (the `--label`/`--key-prop` REFUSED envelope, the UNMEASURED-vs-OK split,
+             # the "a refused pin wrote nothing" arm) could then be weakened by a
+             # later PR and merge green-by-omission. CORE_ALSO for the reason the two
+             # entries above state: the suites are hermetic (a statement-recording fake
+             # graph, no network) and `core` is where they are registered. Pinned by
+             # tests/test_ci_selection.py::test_resident_tool_runs_on_a_tools_only_change.
+             "tools/resident.py",
              # #11320: the census that holds every GUARDED `tools/` entry point's
              # #5128 interpreter guard could not SEE
              # `tools/test_design_map_check.py`'s — the same #1349/#3332/#3616
