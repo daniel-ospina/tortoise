@@ -942,28 +942,21 @@ def _third_party_receivers(tree: ast.Module) -> set[str]:
     ``((6, (), True, False, True),)``, scoped ``()``. An import binds through its ALIAS,
     so ``import x`` alone never removes ``x``, and the parameter / passed-in-client
     witnesses are unaffected because those receiver names are not in the import set.
+
+    ⛔ THE SCOPE APPLIES TO THE ``str``-FIELD FAMILIES TOO (review P2): collecting the
+    capture families with ``ast.walk(tree)`` exempted nothing less than the scope-blind
+    version did for Store targets — an ``except Exception as torch:`` in an UNRELATED
+    helper cancelled the exemption for a legitimate module-level ``torch.query(…)``
+    probe, the same false red. Every family is now collected by the scoped walks
+    (``_module_scope_bindings`` for module scope, ``_function_local_bindings`` for a
+    function that HOLDS a probe) plus ``_rebinds_within`` for the block itself, so the
+    direction claim is uniform: a term can only be subtracted where it can reach the
+    probe.
     """
     bound = _non_own_imported_names(tree.body)
     if not bound:
         return set()
-    rebound = _probe_scope_bindings(tree)
-    for node in ast.walk(tree):
-        # Capture families bind through plain `str` fields, never an `ast.Name` Store,
-        # so they are collected tree-wide: they are rare, and missing one leaves the
-        # escape open while adding one can only make the gate grade MORE.
-        if isinstance(node, ast.MatchMapping) and node.rest is not None:
-            # `case {**rest}:`
-            rebound.add(node.rest)
-        elif isinstance(node, ast.MatchAs) and node.name is not None:
-            # `case name:` (`None` for `case _`)
-            rebound.add(node.name)
-        elif isinstance(node, ast.MatchStar) and node.name is not None:
-            # `case [*name]:` (`None` for `[*_]`)
-            rebound.add(node.name)
-        elif isinstance(node, ast.ExceptHandler) and node.name is not None:
-            # `except E as name` / `except* E as name`
-            rebound.add(node.name)
-    return bound - rebound
+    return bound - _probe_scope_bindings(tree)
 
 
 def _module_scope_bindings(tree: ast.Module) -> set[str]:
@@ -989,10 +982,31 @@ def _module_scope_bindings(tree: ast.Module) -> set[str]:
             # the exemption for a module-level `torch.query` probe — a false red
             # (review of #14160, P1).
             continue
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-            out.add(node.id)
+        _collect_binding(node, out)
         stack.extend(ast.iter_child_nodes(node))
     return out
+
+
+def _collect_binding(node: ast.AST, out: set[str]) -> None:
+    """Add the name this ONE node binds, for every binding family §4.2.1 lists.
+
+    Two of those families are plain ``str`` fields and unreachable from an
+    ``ast.Name`` walk: ``ExceptHandler.name`` (``except E as name`` / ``except*``) and
+    the structural-pattern captures ``MatchAs.name`` / ``MatchStar.name`` /
+    ``MatchMapping.rest``. Both walks that collect bindings — module scope and a
+    probe-holding function — call this, so neither can silently miss a family the other
+    has.
+    """
+    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+        out.add(node.id)
+    elif isinstance(node, ast.ExceptHandler) and node.name is not None:
+        out.add(node.name)
+    elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name is not None:
+        # `case name:` / `case [*name]:` (`None` for the wildcards `_` / `[*_]`)
+        out.add(node.name)
+    elif isinstance(node, ast.MatchMapping) and node.rest is not None:
+        # `case {**rest}:`
+        out.add(node.rest)
 
 
 def _is_probe_container(try_node: ast.Try) -> bool:
@@ -1037,6 +1051,10 @@ def _probe_scope_bindings(tree: ast.Module) -> set[str]:
     function's locals — and ONLY for a function that actually holds a probe, because
     gating on "any handler-bearing try" over-corrected in the other direction (an
     unrelated `try: int('x')` made an import-named parameter cancel the exemption).
+    The function's OWN locals are what this adds, never a NESTED function's or class's
+    (see ``_function_local_bindings``): a local of an inner `def` cannot shadow the name
+    the outer function's probe reads, so descending into it is the same false red one
+    level in.
     """
     out = _module_scope_bindings(tree)
     resolvers = _resolver_functions(tree)
@@ -1054,11 +1072,43 @@ def _probe_scope_bindings(tree: ast.Module) -> set[str]:
         args = node.args
         out |= {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
         out |= {a.arg for a in (args.vararg, args.kwarg) if a is not None}
-        out |= {
-            sub.id
-            for sub in ast.walk(node)
-            if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store)
-        }
+        out |= _function_local_bindings(node)
+    return out
+
+
+def _function_local_bindings(func: ast.AST) -> set[str]:
+    """Every name a FUNCTION's own body binds — never descending into a NESTED scope.
+
+    A nested `def`/`class` binds its NAME in this function's scope, but its BODY is
+    another scope, and a `lambda` body (or a comprehension's iteration target) is
+    another scope entirely: a local there cannot shadow the name this function's probe
+    reads, so descending into it cancels the exemption for a legitimate third-party
+    probe — the same false red the module-scope walk avoids, one level in. Measured on
+    the descending version `((6, (), True, False, True),)`; here `()`.
+    """
+    out: set[str] = set()
+    stack: list[ast.AST] = list(getattr(func, "body", []))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.add(node.name)  # the name binds HERE; the body is a different scope
+            if isinstance(node, ast.ClassDef):
+                # decorators, bases and keywords evaluate in THIS scope
+                stack.extend(node.decorator_list)
+                stack.extend(node.bases)
+                stack.extend(keyword.value for keyword in node.keywords)
+            else:
+                # decorators and defaults evaluate in THIS scope too
+                stack.extend(node.decorator_list)
+                stack.extend(node.args.defaults)
+                stack.extend(d for d in node.args.kw_defaults if d is not None)
+            continue
+        if isinstance(node, ast.Lambda):
+            continue
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            continue
+        _collect_binding(node, out)
+        stack.extend(ast.iter_child_nodes(node))
     return out
 
 
@@ -2752,9 +2802,28 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     )
     for _label, _unrelated in {
         "a parameter of an unrelated helper": "def _helper(torch):\n    return torch",
+        # the review's own witness for `_is_probe_container`: a helper that DOES hold a
+        # handler-bearing `try` used to contribute ALL its parameters, so an import-named
+        # one cancelled the exemption below. `try: int(x)` decides nothing about a probe.
+        "a parameter of an unrelated helper that holds a try": (
+            "def _helper(torch, x):\n"
+            "    try:\n"
+            "        int(x)\n"
+            "    except ValueError:\n"
+            "        pass"
+        ),
         "an unrelated loop target": "def _helper():\n    for torch in range(3):\n        pass",
         # a comprehension has its OWN scope in Python 3, so its target does not bind here
         "a module-level comprehension target": "_ = [torch for torch in range(3)]",
+        # the `str`-field families are SCOPED too: an `except … as` in an unrelated
+        # helper used to be collected tree-wide and cancelled this exemption (review P2)
+        "a capture in an unrelated function": (
+            "def _helper():\n"
+            "    try:\n"
+            '        raise RuntimeError("boom")\n'
+            "    except Exception as torch:\n"
+            "        pass"
+        ),
     }.items():
         _scope_row = roots(_scope_control_prelude + _unrelated + "\n\n" + _scope_control_guard)
         assert _scope_row == (), (
@@ -2786,6 +2855,36 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "a LOCAL of the probe-holding function can reach the block, so it rebinds the "
         "non-own import and the guard must be graded — exempting it leaves a swallowed "
         f"rename reading as 'capability unavailable': {roots(_local_shadowing_the_import)}"
+    )
+
+    # 4j-septies. The line between 4j-sexies and 4j-quinquies: a local of a NESTED
+    #     function cannot reach the outer function's probe, so it must NOT cancel the
+    #     exemption. `_probe_scope_bindings` claimed non-descent and implemented
+    #     `ast.walk`, which descended — the same false red as the unrelated helper, one
+    #     level in (review of #14160 on the over-correction).
+    _nested_scope_control = textwrap.dedent(
+        """
+        import torch
+
+        def _probe():
+            def _inner():
+                torch = _make_client()
+                return torch
+
+            try:
+                torch.query("SELECT 1")
+                return True
+            except Exception:
+                return False
+
+        TORCH_AVAILABLE = _probe()
+        """
+    )
+    assert roots(_nested_scope_control) == (), (
+        "a NESTED function's local is a different scope and cannot shadow the name the "
+        "outer function's probe reads, so it must not cancel the third-party exemption "
+        "— descending into the nested body grades a legitimate optional-extra guard as "
+        f"a ROOT: {roots(_nested_scope_control)}"
     )
 
     # 4m. THE GAP THIS SLOT PINNED AS ACCEPTED IS CLOSED BY RULE (review of
