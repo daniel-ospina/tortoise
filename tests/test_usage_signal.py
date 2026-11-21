@@ -1474,11 +1474,22 @@ def test_no_graph_dependency() -> None:
         return _matching(_probe_modules(import_stmt, *injected))
 
     # ⛔ AND THIS LEG NEEDS POSITIVE CONTROLS, not only the negative assertion.
-    # Everything above asserts the probe finds NOTHING, so every way of breaking the
-    # detector reads GREEN: an emptied derivation (`forbidden=()`), the historical
-    # hardcoded pair, or the subprocess call replaced by a constant all left the file
-    # at 101 passed (measured). A detector that cannot be shown to detect is not a
-    # detector — the same defect as the substring scan one level up.
+    # Everything above asserts the probe finds NOTHING, so a break that makes the
+    # detector answer empty is invisible to it. On the DELETED in-child design that
+    # asymmetry is measured, and it is NARROWER than "anything broken reads green":
+    # emptying the list (`forbidden=()`) and replacing the subprocess with a constant
+    # were already **1 failed / 101 passed**, so the negative rows above saw them.
+    # What stayed **102 passed** — fully green, on a guard certifying a live miss — was
+    # a NARROWING THAT KEPT the roots the existing controls named:
+    # `forbidden={('falkordb', 'redis')!r}`, and later
+    # `and r in ('redis', 'tortoise.ep')` (#14118 item 1). A control that names the
+    # roots it KEEPS cannot witness a narrowing that drops the others, which is why
+    # the controls are per-root over the whole derivation below. At THIS head no list
+    # is interpolated into the child at all, and each of those shapes reds: emptying
+    # `_probe_forbidden()`, narrowing the child's print to the named controls, and
+    # replacing the subprocess with a constant are **1 failed / 101 each** (measured).
+    # A detector that cannot be shown to detect is not a detector — the same defect as
+    # the substring scan one level up.
     #
     # ⛔ AND THEY GRADE WHAT THE PROBE FINDS, NOT THE TEXT OF ITS PROGRAM, because a
     # text pin cannot see a narrowing written AROUND the text it looks for. That was
