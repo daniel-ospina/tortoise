@@ -60,7 +60,8 @@ D3 retry loop + live session writes
             + D2 sequential legs 1,199 ms
                = 9.3–11.2 s — under the 10 s wait bound (#3834) only while the embed is below 2,805 ms
                  (5,996 + 1,199 = 7,195); the embed range's own midpoint (3,040 ms) already sums to
-                 10.2 s, its top to 11.2 s (11.35 s with fusion + ep, the trace this came from) → 504
+                 10.2 s, its top to 11.2 s (11.35 s with the trace's own `ep` — 11.55 s once its
+                 0.2 s fusion is added — the trace this came from) → 504
 ```
 
 D5 refuses writes once the corpus outgrows the graph; D6 hides all of it behind deploy churn.
@@ -173,5 +174,7 @@ No measurement is taken "to see". Each exists to gate a phase or size a decision
 ## 8. Open decisions (owner)
 
 1. **The ~40 session-writes/min source** — wanted traffic during beta, or a runaway loop to stop?
-2. **The capture backlog** — **1,852** spool entries (dormant since 2026-11-17T02:25Z) plus the day-file series: drain into the graph (demo prerequisite) or discard as stale and start clean?
+2. **The capture backlog** — **5,604** spool entries on this box (dormant since 2026-11-13T03:21Z; the 1,852 figure quoted
+   earlier does not reproduce here, so the count is stated with the box it came from) plus the day-file series: drain into the
+   graph (demo prerequisite) or discard as stale and start clean?
 3. **`#1677` guards** — pull S4 forward now (free, unblocks the cores we pay for) or leave it in Track S order?
