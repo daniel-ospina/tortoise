@@ -399,6 +399,17 @@ def test_the_sweep_is_not_vacuous():
 # over a broken tree.
 _RAISED = frozenset({"AttributeError", "NameError", "TypeError", "ImportError"})
 
+#: The subclass spellings that mean the SAME event as an `_RAISED` member, normalised on
+#: the way in (charging) and on the way out (coverage credit). `ModuleNotFoundError` is how
+#: a moved/renamed module actually raises — it is `ImportError`'s canonical spelling at the
+#: seam this file exists for — and `UnboundLocalError` is `NameError`'s. Without the map,
+#: `except ModuleNotFoundError:` alone was neither CHARGED as swallowing nor CREDITED as
+#: coverage: the same block read green in both gates when it dropped, and RED when it
+#: re-raised correctly, so a lane that fixed a block with the more precise name was redded
+#: for having fixed it (review of #14160, cycle 10, P1-2).
+_RAISED_ALIAS = {"ModuleNotFoundError": "ImportError", "UnboundLocalError": "NameError"}
+_RAISED_ALL = _RAISED | set(_RAISED_ALIAS)
+
 #: What counts as a BROAD arm. `BaseException` belongs here: it swallows the
 #: same programming errors `Exception` does (and more), so a census that asked
 #: only for the word `Exception` read `except BaseException: AVAILABLE = False`
@@ -458,9 +469,15 @@ def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
     predicate charges it. There is no allowance for it: the shape has 0 instances in the
     tree, and a module-keyed allowance would be machinery for a population that does not
     exist. Charging it is the fail-closed direction (a false red on a latent shape is
-    recoverable; a rename hidden behind an `ImportError` arm is not), and the repair the
-    gates print — re-raise the programming errors, keep the broad arm — is what real code
-    should do. Re-read this paragraph before adding the first live instance.
+    recoverable; a rename hidden behind an `ImportError` arm is not).
+
+    ⛔ NEITHER REPAIR THE GATES PRINT APPLIES TO THIS SHAPE, and a lane must not read this
+    paragraph as "run the printed fix": re-raising `ImportError` turns the legitimate skip
+    into a collection error (the rule stated above `_RAISED`), and hoisting
+    `from tortoise.embeddings import …` above the `try` makes the module unimportable when
+    the extra is absent — the same error, earlier. The first live instance needs a
+    module-keyed allowance naming the extra-gated module, which is why it is deferred
+    rather than guessed at. Re-read this paragraph before adding one.
 
     Whether the handler re-raises is part of the question, not a separate one:
     the property is *"the programming error never reaches the caller"*, and a
@@ -483,7 +500,7 @@ def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
         #: "re-raises, drops nothing" while `_reraises` called it "no coverage", so the block
         #: was green in BOTH gates (review of #14160, cycle 8, P2-2). `_reraises` accepts all
         #: three propagation forms, so nothing real is lost.
-        (names == {"<bare>"} or names & (_BROAD | _RAISED)) and not _reraises(h)
+        (names == {"<bare>"} or names & (_BROAD | _RAISED_ALL)) and not _reraises(h)
         for h, names in ((h, _handler_names(h)) for h in handlers)
     )
 
@@ -509,16 +526,26 @@ def _covered(handlers: list[ast.ExceptHandler]) -> set[str]:
     `except Exception: …` then `except ImportError: raise` reads as armed to a
     set-membership check, while behaving exactly like the pre-fix code. Coverage
     is therefore what the narrow arms BEFORE the first broad arm can still catch.
+
+    ⛔ AND ORDER APPLIES AMONG THE NARROW ARMS TOO, which is the half this walked past
+    (review of #14160, cycle 10, P1-1). Python runs the FIRST matching arm, so an EARLIER
+    narrow arm that DROPS a name has already handled it; a LATER re-raising arm naming the
+    same name is unreachable for it and credits nothing. Crediting it defeats exactly the
+    substitution `_swallows_everything` charges, and the shape is one the gate's own repair
+    message produces — "Insert the re-raise arm immediately before the broad handler" — on a
+    block that already carries an `except ImportError:` skip: the charged ImportError drop
+    stayed green in BOTH gates. Measured, and the population is unchanged (70/58/0).
     """
     out: set[str] = set()
+    caught_earlier: set[str] = set()
     for handler in handlers:
         names = _handler_names(handler)
         if names == {"<bare>"} or names & _BROAD:
             break  # nothing below a broad arm can ever run
-        if not _reraises(handler):
-            continue
-        out |= names
-    return out
+        if _reraises(handler):
+            out |= names - caught_earlier
+        caught_earlier |= names
+    return {_RAISED_ALIAS.get(name, name) for name in out}
 
 
 def _reraises(handler: ast.ExceptHandler) -> bool:
@@ -530,6 +557,17 @@ def _reraises(handler: ast.ExceptHandler) -> bool:
     became a root (review of `ee5457f`, P3). The shape is exercised by the
     `cleanup_raise` self-test below rather than by a live probe: the one probe
     that had it now propagates with a bare `raise`, which is stricter.
+
+    ⛔ DECLARED RESIDUAL (issue #14125): this predicate sees the HANDLER only, so a `Try`
+    whose `finalbody` ends in `return`/`break`/`continue` discards the raise it credits —
+    `try: … except Exception: raise finally: return ok` reads as propagating while the
+    probe still converts the failure into "capability unavailable", and because
+    `_probe_blocks_with_an_uncovered_import_seam` is conditioned on `swallows`, both gates
+    skip it. That rationale claims a `try/finally` probe propagates its import error, which
+    is false for this shape. It needs the owning `ast.Try`, not the handlers; the shape has
+    0 instances in `tests/`+`tools/` (no probe there has `finally:` + `return`), so the
+    machinery is deferred and this paragraph is the record. Re-read it before adding the
+    first live instance.
 
     A trailing bare `raise` keeps the anti-`except ImportError: return False`
     property: the clause is only coverage if it actually propagates.
@@ -4527,6 +4565,99 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             f"a generic's {_label} must be {'GRADED (the TypeVar is in scope)' if _want else 'EXEMPT (the module import is)'}"
             f": {_generic_row}"
         )
+
+    # 4j-svicesimus. ORDER AMONG THE NARROW ARMS — an EARLIER dropping arm has already
+    #     handled the name, so a LATER re-raising arm naming it is unreachable and credits
+    #     nothing. `_covered` unioned every re-raising narrow arm, so the charged
+    #     `except ImportError:` drop came back green in BOTH gates whenever the gate's own
+    #     repair message was followed ("Insert the re-raise arm immediately before the broad
+    #     handler") on a block that already carried the skip (review of #14160, cycle 10,
+    #     P1-1). The control is the same two arms in the FIXED order: a re-raising arm ABOVE
+    #     an unreachable dropping arm drops nothing and does credit.
+    _unreachable_credit = [
+        node
+        for node in ast.walk(
+            ast.parse(
+                textwrap.dedent(
+                    """
+                    try:
+                        _probe = _make()
+                    except ImportError:
+                        pass
+                    except (AttributeError, NameError, TypeError, ImportError):
+                        raise
+                    except Exception:
+                        _probe = None
+                    """
+                )
+            )
+        )
+        if isinstance(node, ast.ExceptHandler)
+    ]
+    assert "ImportError" not in _covered(_unreachable_credit), (
+        "the FIRST matching arm handles `ImportError`, so the later re-raising arm is "
+        "unreachable for it and must not credit it — crediting it is how a charged "
+        "ImportError drop reads armed again"
+    )
+    _reachable_credit = [
+        node
+        for node in ast.walk(
+            ast.parse(
+                textwrap.dedent(
+                    """
+                    try:
+                        _probe = _make()
+                    except (AttributeError, NameError, TypeError, ImportError):
+                        raise
+                    except ImportError:
+                        pass
+                    except Exception:
+                        _probe = None
+                    """
+                )
+            )
+        )
+        if isinstance(node, ast.ExceptHandler)
+    ]
+    assert "ImportError" in _covered(_reachable_credit), (
+        "the control: the same two arms in the other order — the re-raising arm runs "
+        "first, drops nothing, and DOES credit `ImportError`"
+    )
+
+    # 4j-octovicesimus-bis. THE SUBCLASS SPELLINGS are the same event: `ModuleNotFoundError`
+    #     is how a moved module actually raises at the seam this file exists for, and
+    #     `UnboundLocalError` is `NameError`'s. Neither `_RAISED` (charging) nor the
+    #     coverage credit recognised them, so `except ModuleNotFoundError:` alone was GREEN
+    #     in both gates when it dropped and RED when it re-raised correctly — the exact
+    #     "redded for having fixed it" defect fixed for `raise exc` (review of #14160,
+    #     cycle 10, P1-2).
+    _subclass_drop = [
+        node
+        for node in ast.walk(
+            ast.parse(
+                "try:\n    _probe = _make()\nexcept ModuleNotFoundError:\n    _probe = None\n"
+            )
+        )
+        if isinstance(node, ast.ExceptHandler)
+    ]
+    assert _swallows_everything(_subclass_drop) is True, (
+        "a `ModuleNotFoundError` arm that DROPS the error swallows the module rename just as "
+        "an `ImportError` arm does"
+    )
+    _subclass_credit = [
+        node
+        for node in ast.walk(
+            ast.parse(
+                "try:\n    _probe = _make()\nexcept (AttributeError, ModuleNotFoundError, "
+                "NameError, TypeError):\n    raise\n"
+            )
+        )
+        if isinstance(node, ast.ExceptHandler)
+    ]
+    assert _covered(_subclass_credit) >= _RAISED, (
+        "the control: `ModuleNotFoundError` normalises to `ImportError`, so a re-raise that "
+        f"names it credits the required set: {_covered(_subclass_credit)}"
+    )
 
     # 4j-quadrovicesimus. `type Y[torch] = torch.query(…)` — THE TYPE PARAMETER IS BOUND IN
     #     THE ALIAS VALUE. Measured on 3.12.3: `__value__` raises `AttributeError:
