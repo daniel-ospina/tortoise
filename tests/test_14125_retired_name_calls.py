@@ -316,9 +316,12 @@ _RAISED = frozenset({"AttributeError", "NameError", "TypeError", "ImportError"})
 # `tests/test_rebuild_graph_only_derived_parity.py` wraps `from tortoise.embeddings`
 # in a broad `try` with a deliberate fallback. Demanding a re-raise there would turn
 # a legitimate skip into a collection error and contradict the recorded rule that
-# an absent capability skips. (That block binds no skip gate and imports no own code
-# inside its `try`, so it is not graded today — but it is the shape a future
-# widening must not charge.)
+# an absent capability skips. (That block DOES import own code inside its `try`
+# and is still not graded today — but for a different reason: it binds no
+# availability decision and sits in no skip-gated helper, so `_probe_roots`
+# never reaches it. A future widening that grades ANY module-body `try` that
+# imports own code WOULD charge it, and that is the sentence to re-read before
+# widening.)
 _OWN_CODE_ROOTS = frozenset({"tortoise", "tests", "tools"})
 
 
