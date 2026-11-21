@@ -26,6 +26,7 @@ Postgres cannot run in every lane.
 """
 from __future__ import annotations
 
+import collections
 import os
 import signal
 import sys
@@ -68,6 +69,26 @@ class _Log:
         self.seq += 1
         self.appended.append(event)
         return self.seq
+
+
+class _IterationCountingDeque(collections.deque):
+    """A deque that RECORDS every iteration it serves.
+
+    #14222 review, P2. The producer's critical section had grown a full walk of
+    the queue (the position count), which no wall-clock assertion can see — 10 000
+    iterations cost ~0.5 ms against the ack's 250 ms bound. Making the scan
+    OBSERVABLE is what turns "the lock is held for an append and nothing else"
+    into a property a mutation can red: `iteration_count` must stay 0 on every
+    path that runs under `_cond`.
+    """
+
+    def __init__(self, items=()):
+        super().__init__(items)
+        self.iteration_count = 0
+
+    def __iter__(self):
+        self.iteration_count += 1
+        return super().__iter__()
 
 
 class _SlowProjector:
@@ -160,6 +181,59 @@ def test_a_write_ack_excludes_the_projection_time(armed):
     assert projection_worker.wait_for_drain(10) is True
     assert slow.finished.is_set()
     assert [c[0]["type"] for c in slow.calls] == ["PointAdded"]
+
+
+def test_the_ack_never_WALKS_the_queue_it_is_acked_behind(armed, monkeypatch):
+    """⛔ THE ACK'S CRITICAL SECTION IS O(1) AT THE BOUND THIS MODULE PERMITS.
+
+    #14222 review, P2. Property 2 says ``submit`` holds ``_cond`` "for an append
+    and nothing else", and that was FALSE: the snapshot stamped under the lock
+    computed the position count by WALKING the deque
+    (``sum(1 for i in self._pending …)``). Two consequences, both the reviewer's:
+    the ack is O(queue depth) at the very bound
+    ``TORTOISE_PROJECTION_QUEUE_MAX`` exists to allow (10 000 by default), on the
+    same lock the consumer needs to POP — so a deep backlog both floors the ack
+    and slows the drain that would shorten it.
+
+    ⛔ THIS LEG PINS BEHAVIOUR, NOT A CLOCK. A wall-clock assertion cannot see it
+    (10 000 iterations is ~0.5 ms against the 250 ms ack bound, which is why the
+    review predicted the existing ack legs would stay green either way). Instead
+    the queue is replaced with a deque that RECORDS every iteration, so a single
+    scan is a hard failure. The counter's own correctness is pinned beside it:
+    if the increment at the append is dropped, the count is one short.
+    """
+    instance = projection_worker.worker()
+    bound = instance.max_queue
+    assert bound >= 1000, (
+        "this leg measures the DEFAULT bound's critical section; if the default "
+        f"is ever lowered the deque walk stops mattering — bound={bound}")
+
+    project = _fast_projector()
+
+    def item(seq):
+        return projection_worker.PendingProjection(
+            record={"type": "PointAdded"}, seq=seq, tenant=_TENANT,
+            journal_skipped=False, project=project,
+            enqueued_at=time.monotonic())
+
+    counting = _IterationCountingDeque([item(seq) for seq in range(1, bound)])
+    instance._pending = counting
+    instance._pending_positioned = len(counting)
+    # ⛔ The consumer must not run: a live loop pops items and moves every value
+    # under assertion. The pin is about the PRODUCER's critical section, and
+    # `submit` is called exactly as the chokepoint calls it.
+    monkeypatch.setattr(instance, "_ensure_started", lambda: None)
+
+    assert instance.submit(item(bound)) is True, "the queue was full at bound-1"
+
+    assert counting.iteration_count == 0, (
+        "the ACK iterated the queue while holding `_cond` — the ack is O(queue "
+        "depth), and it is the consumer's own lock (property 2 says otherwise)")
+    assert instance._pending_positions_locked() == bound, (
+        "the maintained position count disagrees with what was enqueued")
+    assert len(counting) == bound
+    stats = instance.stats()
+    assert (stats.pending_positions, stats.queue_depth) == (bound, bound)
 
 
 def test_the_settled_projection_is_reported_as_armed_not_as_an_unarmed_write(armed):

@@ -1998,6 +1998,15 @@ class TestTheDeferredWrite:
         payload = seed.as_dict()
         assert seed.record_deferred == 1, payload
         assert (seed.record_applied, seed.record_unprojected) == (0, 0), payload
+        assert seed._fold_needed() is False, payload
+        # ⛔ THE PREDICATE IS READ HERE, ON THE REPORT THE DEFERRED RUN ACTUALLY
+        # PRODUCED (#14222 review, P3). It used to be asserted on a hand-built
+        # `SeedReport` with `record_unprojected=0` / `positions_unproven=0`, where
+        # `_fold_needed()` answers False by its own INPUTS whatever the deferred
+        # path does — the assertion varied under no mutation of the branch this
+        # class exists to prove. From this run it DOES vary: make `_fold_needed()`
+        # count a deferred write as a fold and this reds, which is the "repair
+        # command that cannot work" defect (the queue was already drained).
         assert payload["record_deferred"] == 1, payload
         assert "fold" not in payload, payload.get("fold")
         assert log.positions == [1], (
@@ -2013,6 +2022,15 @@ class TestTheDeferredWrite:
         repair emitted here sends the operator after a fold that has already run —
         the same "repair command that cannot work" class as a rejected-by-argparse
         command or a decline with no durable line.
+
+        ⛔ THE PREDICATE IS ASSERTED WHERE IT IS REACHABLE, NOT HERE (#14222
+        review, P3). A `SeedReport` built by hand with `record_unprojected=0` and
+        `positions_unproven=0` answers `_fold_needed() is False` by its own inputs,
+        so asserting it in this leg varied under no mutation — the finding was
+        correctly about reachability, not about the value. The varying assertion
+        lives in `TestTheDeferredWrite.test_a_DEFERRED_write_is_COUNTED_apart_and_
+        names_NO_repair`, on the report the REAL chokepoint produced. What varies
+        HERE is the payload: `record_deferred` must survive `as_dict()`.
         """
         report = tool_mod.SeedReport(
             journal="/tmp/j.jsonl",
@@ -2028,7 +2046,6 @@ class TestTheDeferredWrite:
             first_seq=1,
             last_seq=2,
         )
-        assert report._fold_needed() is False, report.as_dict()
         payload = report.as_dict()
         assert payload["record_deferred"] == 2, payload
         assert "fold" not in payload, payload.get("fold")

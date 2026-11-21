@@ -69,7 +69,12 @@ THE FOUR PROPERTIES THE ISSUE ASKS FOR, AND WHERE EACH LIVES
 2. **A write's ack excludes projection time.** :func:`submit` appends to a deque
    under a lock that is held for an append and nothing else — the ``project``
    call always runs **outside** it. The write returns as soon as the append has
-   committed and the item is queued.
+   committed and the item is queued. ⛔ **"An append and nothing else" is literal,
+   and it was false until #14222's review found it**: the snapshot stamped under
+   that lock used to COUNT the deque (``sum(1 for i in self._pending …)``), so the
+   ack was O(queue depth) at the bound this module permits. The position count is
+   now maintained at the deque's two ends, so every statement inside the critical
+   section is O(1) — see :meth:`ProjectionWorker._pending_positions_locked`.
 3. **Lag is a metric.** :meth:`ProjectionWorker.stats` reports the queue depth,
    the count of journal POSITIONS not yet in the record, and the age of the
    OLDEST pending item; :mod:`tortoise.monitoring` exports them as gauges.
@@ -387,6 +392,18 @@ class ProjectionWorker:
         #: taken, and on a wedged fold it is the ONLY pending item — reporting 0
         #: there would make a stalled projection read as a caught-up record.
         self._inflight: PendingProjection | None = None
+        #: HOW MANY QUEUED ITEMS CARRY A JOURNAL POSITION, maintained rather than
+        #: counted (#14222 review, P2). The published lag used to be
+        #: ``sum(1 for i in self._pending if i.seq is not None)`` — a full walk of
+        #: the deque performed on the ACK path while holding ``_cond``, which
+        #: contradicted property 2 below ("a lock held for an append and
+        #: nothing else") and made the ACK O(queue depth) at the very bound
+        #: ``TORTOISE_PROJECTION_QUEUE_MAX`` exists to permit, on the same lock the
+        #: consumer needs to pop. It is now O(1) in every direction: incremented at
+        #: the ONE append, decremented at the ONE pop, and zeroed by the fork
+        #: reset. Any future `_pending` mutation must maintain it — the deque is
+        #: not iterated here any more, so a stale counter would be invisible.
+        self._pending_positioned = 0
         self._thread: threading.Thread | None = None
         self._stopping = False
         #: ⛔ TERMINAL, unlike ``_stopping``: a shutdown sets it so a concurrent
@@ -444,6 +461,8 @@ class ProjectionWorker:
                 declined = "worker_stopping" if unstartable else "queue_full"
             else:
                 self._pending.append(item)
+                if item.seq is not None:
+                    self._pending_positioned += 1
                 self._submitted += 1
                 declined = False
                 snapshot = self._stamp_locked()
@@ -710,6 +729,7 @@ class ProjectionWorker:
         self._cond_pid = os.getpid()
         self._publish_lock = threading.Lock()
         self._pending = collections.deque()
+        self._pending_positioned = 0
         self._inflight = None
         self._thread = None
         self._stopping = False
@@ -733,6 +753,8 @@ class ProjectionWorker:
                 if self._stopping and not self._pending:
                     return
                 item = self._pending.popleft()
+                if item.seq is not None:
+                    self._pending_positioned -= 1
                 self._inflight = item
                 self._cond.notify_all()
             # ⛔ THE FOLD RUNS WITH NO LOCK HELD. That single fact is what makes
@@ -810,9 +832,19 @@ class ProjectionWorker:
         return len(self._pending) + (1 if self._inflight is not None else 0)
 
     def _pending_positions_locked(self) -> int:
+        """Journal positions the record has not taken. **O(1) and no iteration.**
+
+        ⛔ THIS MUST NOT WALK THE DEQUE (#14222 review, P2). It is called from
+        :meth:`submit` while ``_cond`` is held, so a scan here is an O(depth)
+        critical section on the ACK path — at the ``TORTOISE_PROJECTION_QUEUE_MAX``
+        bound (10 000 by default) that is the ACK's latency floor, and it delays
+        the consumer's pop on the same lock. The position count is therefore
+        MAINTAINED at the deque's two ends (:meth:`submit` and :meth:`_run`) and
+        reset on fork; the only walk left in this class is ``len`` (O(1)).
+        """
         in_flight = 1 if (self._inflight is not None
                           and self._inflight.seq is not None) else 0
-        return in_flight + sum(1 for i in self._pending if i.seq is not None)
+        return in_flight + self._pending_positioned
 
     def _oldest_age_locked(self) -> float:
         if self._inflight is not None:
