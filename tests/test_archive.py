@@ -2285,6 +2285,48 @@ def test_a_row_that_froze_the_STUB_beside_a_SCAFFOLD_py_is_a_RECORD(tree: Path) 
     assert problems == [], problems
 
 
+def test_a_row_that_froze_the_STUB_over_a_REMOVED_py_BODY_is_not_a_record(tree: Path) -> None:
+    """The head is a body-less `.py`, not a stub — and the row still froze the stub (round-23).
+
+    The FAIL-OPEN mirror of the row above, reached through the writer's own route. Base:
+    `tortoise/x.py` carries the module's statements and `tortoise/x.pyi` is a stub. Head: `x.py`
+    reduced to a docstring, `x.pyi` untouched — arm 1b's `MODULE BODY REMOVED`, correctly.
+    Following that violation, `archive module tortoise.x` now walks the module's carrier set
+    (round-23 review, F1) and freezes the `.pyi`, because a body-less `.py` cannot be a source of
+    record. But the anti-stub guard was gated on `stubbed` — "the HEAD carrier is a `.pyi` and the
+    base's was not" — which is FALSE here (the head carrier is the `.py`), so the row's EXISTENCE
+    credited the removal: measured `shrink_violations(...) -> []` with base's `real()` in no file
+    under `archive/`, the one direction this whole function exists to prevent.
+
+    Mutation: gate the arm-1b stub check on `stubbed` again -> `[]` and this row reds.
+    """
+    (tree / "tortoise" / "x.py").write_text("def real():\n    return 1\n", encoding="utf-8")
+    (tree / "tortoise" / "x.pyi").write_text("def api() -> int: ...\n", encoding="utf-8")
+    _commit(tree, "tortoise/x.py", "tortoise/x.pyi")
+    (tree / "tortoise" / "x.py").write_text('"""Scaffolding."""\n', encoding="utf-8")
+    _commit(tree, ".")
+
+    entry = arch.archive_symbol(arch.MODULE, "tortoise.x", "batch-a", "review", root=tree)
+    assert entry["archived_from"] == "tortoise/x.pyi", (
+        "the writer refuses a body-less `.py` and freezes the carrier that holds code: "
+        f"{entry}"
+    )
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~2")
+    frozen = [p for p in problems if "THE RECORD FROZE A STUB" in p]
+    assert frozen, (
+        "the base's `real()` was in `tortoise/x.py` and no file under `archive/` holds it, so "
+        f"the row that froze the stub must not credit the removal: {problems}"
+    )
+    assert "tortoise/x.py`" in frozen[0] and "carried the module's statements" in frozen[0], (
+        f"the violation must name the carrier the statements were in: {frozen[0]}"
+    )
+    assert "carries none" in frozen[0], (
+        f"the head carrier is a body-less `.py`, not a stub, and the text must say so: {frozen[0]}"
+    )
+
+
 def test_a_MODULE_REMOVED_names_the_carrier_that_HELD_the_code(tree: Path) -> None:
     """Two carriers, one symbol: the route must name the file the statements were in.
 
