@@ -732,17 +732,68 @@ def _skip_gating_functions(tree: ast.Module) -> set[str]:
 _SKIP_CALLS = frozenset({"skip", "skipif", "xfail"})
 
 
+def _own_scope_nodes(fn: ast.AST) -> list[ast.AST]:
+    """Every node in THIS function's own scope, not its nested definitions'.
+
+    A nested `def`/`lambda` binds its own names, so a nested parameter or local
+    merely sharing a sentinel's name must not decide the OUTER probe's skip — and
+    that nested def is visited by its own turn of the `ast.walk(tree)` loop, so
+    nothing is lost by stopping here (review of `cd75ec7144`, P2).
+    """
+    out: list[ast.AST] = []
+    stack: list[ast.AST] = [fn]
+    while stack:
+        node = stack.pop()
+        out.append(node)
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue
+            stack.append(child)
+    return out
+
+
 def _skip_call_read_names(fn: ast.AST) -> set[str]:
-    """Names a `skip`/`skipif`/`xfail` call INSIDE this function reads.
+    """Names that DECIDE a skip inside this function.
 
     `_skip_condition_names` answers the module-DECORATOR half (`skipif(not LIVE)`
     above a `def`), and `_skip_gating_functions` answers the "module-level helper
     that produces the flag" half. Neither reaches a probe inside a `def test_…`
-    body that decides its own skip — the widening the `_probe_roots` contract asks
-    for (review P1).
+    body that decides its own skip.
+
+    ⛔ TWO SHAPES, AND THE GUARD IS THE ONE THAT MATTERS (review of `cd75ec7144`,
+    P1). The first version of this helper read only the skip call's ARGUMENTS, so a
+    sentinel carried by a GUARD —
+
+        if not dropped:
+            pytest.skip("engine has no Point fulltext drop procedure")
+
+    — contributed NOTHING, while the decision plainly reads `dropped`. Keying on
+    arguments alone closed the residual only for skips whose message INTERPOLATES
+    the sentinel, and four live probes of exactly this class stayed ungraded
+    (`tests/test_indexes.py:1422`, `tests/test_11682_quote_indexed.py:438` and
+    `:651`, `tests/test_session_semantic_retrieval.py:298`). The guard half is the
+    reading `_skip_guard_call_names` already applies at module level; this is the
+    same rule scoped to one function.
+
+    Scope-aware on purpose (`_own_scope_nodes`): a name in a NESTED function is
+    that scope's decision, not this one's.
     """
     out: set[str] = set()
-    for node in ast.walk(fn):
+    for node in _own_scope_nodes(fn):
+        if isinstance(node, (ast.If, ast.Assert)):
+            body = list(getattr(node, "body", []) or [])
+            orelse = list(getattr(node, "orelse", []) or [])
+            skips = any(
+                isinstance(sub, ast.Call)
+                and getattr(sub.func, "attr", None) in _SKIP_CALLS
+                for stmt in body + orelse
+                for sub in ast.walk(stmt)
+            )
+            if skips:
+                out |= {
+                    sub.id for sub in ast.walk(node.test) if isinstance(sub, ast.Name)
+                }
+            continue
         if not isinstance(node, ast.Call):
             continue
         if getattr(node.func, "attr", None) not in _SKIP_CALLS:
@@ -1021,9 +1072,21 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     `RedisError`, not a `TypeError`, so the legitimate skip is untouched while a
     moved door or a changed call shape now fails loudly instead of being recorded
     as "this engine has no FTS" (see `tests/test_index_surfacing.py:269`).
-    Measured blast radius of the widening on the real tree, before it was written:
-    EXACTLY ONE new root, that block. It is armed, so `UNARMED` stays `()`, and the
-    population pin moves 64 rows / 56 roots / 54 files → 65 / 57 / 55.
+    Measured blast radius of the widening on the real tree: **5** new roots in 3 files
+    — `tests/test_index_surfacing.py:269` (the declared-residual instance),
+    `tests/test_indexes.py:1422`, `tests/test_11682_quote_indexed.py:438` and `:656`,
+    and `tests/test_session_semantic_retrieval.py:298`. Population pin moves
+    64 rows / 56 roots / 54 files → **70 / 62 / 58**, and `UNARMED` stays `()`
+    because all four previously-unarmed blocks are ARMED in the same change.
+
+    ⛔ THE SENTINEL IS USUALLY CARRIED BY A GUARD, NOT BY THE MESSAGE (review of
+    `cd75ec7144`, P1). The first version of this widening keyed only on the skip
+    call's ARGUMENTS, so `if not dropped: pytest.skip("engine has no drop
+    procedure")` — where the decision plainly reads `dropped` — contributed
+    NOTHING and the residual was closed for interpolated messages only. It keys on
+    the `if`/`assert` GUARD now (`_skip_call_read_names`), which is also what
+    surfaced the four unarmed blocks above; that is why the blast radius grew from
+    the 1 measured against the argument-only rule to 5.
 
     Nested `try`s inside a probe body are not roots: a `try/_proj.close()/except
     Exception: pass` cleanup is not the availability decision. The import-seam
@@ -1147,10 +1210,19 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     # set of functions searched changes. Blocks graded above are skipped by identity
     # so no root is counted twice.
     graded = {id(block) for block in roots}
+    module_level = {
+        id(stmt)
+        for stmt in tree.body
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
     for fn in ast.walk(tree):
         if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        if fn.name in resolvers or fn.name in skip_gated:
+        # Skip by IDENTITY, not by name: a NESTED def that merely shares a name
+        # with a module-level resolver/skip-gated helper is a different function
+        # with its own probes, and skipping it by name dropped them silently
+        # (review of `cd75ec7144`, P2).
+        if id(fn) in module_level and (fn.name in resolvers or fn.name in skip_gated):
             continue  # already searched above, from its module-level entry
         skip_read = _skip_call_read_names(fn)
         if not skip_read:
@@ -2526,6 +2598,55 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     assert test_body_probe_without_skip == (), (
         "a `try` in a test body that decides NO skip is not the availability "
         f"decision and must not be graded: {test_body_probe_without_skip}"
+    )
+
+    # 4q. The GUARD half of that widening, which is the half that actually exists in
+    #     this tree. `_skip_call_read_names` first read only the skip call's
+    #     ARGUMENTS, so a sentinel carried by the `if` that guards the skip —
+    #     `if not dropped: pytest.skip("engine has no drop procedure")` — contributed
+    #     nothing and the residual stayed open for four live probes (review of
+    #     `cd75ec7144`, P1). This row is the sentinel-in-the-guard shape, a bare
+    #     string message that interpolates NOTHING, so only the guard reading can
+    #     admit it.
+    test_body_guard_carried_sentinel = roots(
+        """
+        def test_a_engine_probe():
+            dropped = False
+            for proc in ("one", "two"):
+                try:
+                    g.query(f"CALL {proc}('Point')")
+                    dropped = True
+                    break
+                except Exception:
+                    continue
+            if not dropped:
+                pytest.skip("engine has no drop procedure")
+        """
+    )
+    assert test_body_guard_carried_sentinel == ((5, (), True, False, True),), (
+        "a skip whose MESSAGE interpolates nothing is still decided by the guard "
+        "that carries the sentinel — keying on the call's arguments alone left this "
+        f"live shape ungraded: {test_body_guard_carried_sentinel}"
+    )
+    # ...and the guard must actually SKIP: the identical block whose guard asserts
+    # instead is not a skip decision, so it stays ungraded.
+    test_body_guard_without_skip = roots(
+        """
+        def test_b_unrelated():
+            dropped = False
+            for proc in ("one", "two"):
+                try:
+                    g.query(f"CALL {proc}('Point')")
+                    dropped = True
+                    break
+                except Exception:
+                    continue
+            assert dropped
+        """
+    )
+    assert test_body_guard_without_skip == (), (
+        "a guard that does not SKIP is not the availability decision: "
+        f"{test_body_guard_without_skip}"
     )
 
     # 5. The real tree must carry all four shapes, or every assertion above is a
