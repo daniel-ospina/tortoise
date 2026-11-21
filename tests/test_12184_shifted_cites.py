@@ -679,9 +679,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "159 of this document's 229",
-        "dedupes the **345** as-written spellings to 229 — **116**",
-        "345 written spellings → 229 pairs → 116 collisions → 159 drifters of the 229",
+        "155 of this document's 227",
+        "dedupes the **345** as-written spellings to 227 — **118**",
+        "345 written spellings → 227 pairs → 118 collisions → 155 drifters of the 227",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
