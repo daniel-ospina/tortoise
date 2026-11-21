@@ -827,10 +827,16 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — �
                                                           # whatever the head you merge derives. ⛔ **The two figures this
                                                           # note once typed (`:15228`, then `:15391`) are both refuted by
                                                           # later commits on this branch (#13802 review, P2)**: no line number
-                                                          # is typed HERE for that figure; the `:16585` cite earlier in this block IS the
+                                                          # is typed HERE for that figure; the (`:16585`) cite earlier in this block IS the
                                                           # derived value the guard reads at this head — named by the value, never by its
                                                           # DISTANCE from this comment, which is the same rotted-positional class this file
                                                           # exists to catch (#13802 review, P2: this said "six lines up", measured 10).
+                                                          # ⛔ IT IS PARENTHESISED IN BOTH PLACES ON PURPOSE (#14060 review, P3): the arm
+                                                          # that guards it needle-matches the parenthesised form, so a BARE occurrence
+                                                          # here was read by nothing — measured, mutating this one to its previous
+                                                          # head's value left the
+                                                          # whole reconcile subset green (16 passed), while the same mutation at the
+                                                          # first occurrence red it. Both are now counted.
                                                           # finder's own conditions (#12569), and the fourth is
                                                           # a prose line about `#11001`'s in-place correction
 # ⛔⛔ THIS GREP COUNTS LINES, NOT READERS — do not read the per-file numbers as "who consumes the

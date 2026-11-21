@@ -16606,9 +16606,16 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # token-only match would be ambiguous — the `startswith` pins the generator.
         if line.strip().startswith("n for n, line in enumerate(ext, 1)")
         and 'result["relations"]' in line)
-    assert f"(`:{_self_scan_line}`)" in text, (
-        f"the record must cite the scan that derives `_relations_cite` at `:{_self_scan_line}` — "
-        "it is the number this file's OWN diff moves, so a typed value re-stales the moment "
+    # ⛔ BOTH occurrences, not `in text` (#14060 review, P3 — MEASURED): the record cites this value
+    # TWICE, and the second one was BARE, so the substring needle never read it — mutating THAT
+    # occurrence to its previous head's `:16566` left the whole reconcile subset green (16 passed)
+    # while the same mutation at the first one red it. The record's own reason for parenthesising
+    # is that a bare cite is the shape no arm sees, so the arm now counts the form it can read.
+    _self_scan_cites = text.count(f"(`:{_self_scan_line}`)")
+    assert _self_scan_cites == 2, (
+        f"the record must cite the scan that derives `_relations_cite` at `:{_self_scan_line}` in "
+        f"BOTH places it names it — found {_self_scan_cites} parenthesised occurrence(s); it is the "
+        "number this file's OWN diff moves, so a typed value re-stales the moment "
         "a row is added above it (#12569's own rows moved it repeatedly — re-derive, never type)")
     # The SAME line is cited a SECOND time as a bare `:12487`, inside the
     # reproduction block's comment. A bare cite carries no file token, so the
