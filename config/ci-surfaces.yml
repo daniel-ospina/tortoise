@@ -9530,19 +9530,6 @@ surfaces:
   # NOT what either row is for. Hermetic on the fast lane: an embedded
   # `tmp_path` store per test, no docker, no network, no model call.
   - test_13036_capstone_v2.py
-  # #14012: the resident-pin and outside-view suites. BOTH are explicitly HERMETIC
-  # (each file's header says why): `tests/test_14012_resident_pin.py` exists
-  # precisely because the LIVE eviction suite (`tests/test_cache_eviction_evictor.py`)
-  # is `uri_requiring`, and `ci_selection` subtracts a `uri_requiring` file from the
-  # tier-2 PR lane — so leaving the pin covered only there means a change to the pin
-  # gate merges on a green PR with no pin test executed at all (the silent-green
-  # class). Both drive the REAL `evict()` against a fake graph and a fake record
-  # cursor: no URI, no docker, no network, no model call. The `core` row is also what
-  # covers the `tortoise/outside_view.py` / `tortoise/resident_pin.py` halves of a
-  # module-only diff, which no SOURCE_PATTERNS entry matches (the `core` fallback).
-  # `--integrity` reported `manifest drift` for both files before these rows existed.
-  - test_14012_outside_view.py
-  - test_14012_resident_pin.py
   # #14012: the two controls the capacity notices promise — "keep this resident" (a
   # BOUNDED pin: cap, degree ceiling, closure unit) and "see what's outside" (the
   # view derived from the projection's own state). Three files, one `core` row each,
@@ -15198,29 +15185,14 @@ durations:
   # derivation and its two refusals, the closure read, gate 6 in the executor
   # (including a raising predicate and a window made entirely of pinned nodes), and
   # the CLI's arg/exit-code arms incl. the sweep refusing before `evict` is reached.
+  # All three are also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`, because
+  # that ENTRY-RULE pin iterates an EXPLICIT tuple and cannot see a file nobody listed.
   test_14012_resident_pin.py: 2.0
   test_14012_outside_view.py: 2.0
   test_14012_resident_cli.py: 2.0
   test_journal_segments.py: 0.3
   test_journal_segments_falsifier.py: 0.2
   test_name_entropy_12294.py: 0.1
-  # #14012. The #3400/#4348 trap applies: a file a PR ADDS cannot carry a CI junit
-  # reading yet (the `durations` refresher samples push-to-main runs only), so these are
-  # the flat `DEFAULT_FAST_WEIGHT` and NOT local readings, which this map forbids as a
-  # SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a
-  # default is not a reading"): the `core` rows above are what put the files in
-  # `fast_pool()`, and `--integrity` stays green either way, so only these rows record
-  # the weight. Both files are also named in
-  # `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`, because that ENTRY-RULE pin
-  # iterates an EXPLICIT tuple and cannot see a file nobody listed.
-  # `tools/ci_timing.py --refresh-durations` replaces them from the first push-to-main
-  # junit sweep that includes them. ⛔ No local timing and no case count are quoted on
-  # purpose. What the weight covers, hermetically (a fake graph that EXECUTES the
-  # delete and records every statement, plus a fake record cursor): the pin's cap and
-  # refusal paths, the declaration read, and the outside view's derivation from the
-  # eviction's own `deleted` tuple.
-  test_14012_outside_view.py: 2.0
-  test_14012_resident_pin.py: 2.0
 # ── THE NON-GATING LANE (`on_demand:`) ──
 #
 # A file listed here RUNS but does not GATE: it is excluded from every pre-merge

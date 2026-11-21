@@ -10549,14 +10549,15 @@ ROWED_BY_THIS_FOLD = (
     # `tests/test_uri_requiring_selection.py::test_declared_list_matches_the_observation`,
     # which re-derives the set from a real URI-less collection.
     "test_evictor_invalidates_fallback_snapshot_13123.py",
-    # #14012 — the pin/outside-view pair. Both ADDED by this PR and registered on `core`
+    # #14012 — the pin/outside-view trio. All ADDED by this PR and registered on `core`
     # + `durations:` above. Listed here because the ENTRY-RULE pin above iterates this
-    # EXPLICIT tuple: a file nobody names is INVISIBLE to it, so dropping either
+    # EXPLICIT tuple: a file nobody names is INVISIBLE to it, so dropping a
     # `durations:` row would be silent. `--integrity` caught the missing SURFACE rows
     # (`manifest drift: ['test_14012_outside_view.py', 'test_14012_resident_pin.py']`);
-    # this entry is what puts the missing DURATIONS row behind an assertion too.
+    # this entry is what puts a missing DURATIONS row behind an assertion too.
     "test_14012_outside_view.py",
     "test_14012_resident_pin.py",
+    "test_14012_resident_cli.py",
     # ⛔ `test_usage_signal.py` IS NOT REPEATED HERE. This is the SECOND copy the merge of
     # `origin/main` created, and the #14070 argument above is why it must not stay: carrying
     # a second copy of a file that already has a row is exactly the duplicate shape that
