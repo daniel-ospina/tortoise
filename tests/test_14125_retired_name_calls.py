@@ -919,13 +919,17 @@ def _third_party_receivers(tree: ast.Module) -> set[str]:
 
     ⛔ "RE-BOUND" IS PYTHON'S OWN LIST OF BINDING CONSTRUCTS (Language Reference §4.2.1),
     NOT A SUBSET OF IT: the ``ast.Name`` Store contexts (assignment, walrus, ``for``,
-    ``with … as``, comprehension, and ``type X = …``), FORMAL PARAMETERS of a function
-    that HOLDS a probe, ``def`` / ``class`` names, ``except`` / ``except*`` ``as``
-    targets, and the structural-pattern captures ``MatchAs`` / ``MatchStar`` /
-    ``MatchMapping.rest`` — collected by ``_module_scope_bindings`` /
-    ``_probe_scope_bindings``, and by ``_rebinds_within`` for the block itself. Only the
-    Store contexts are ``ast.Name``; the rest are ``ast.arg`` or plain ``str`` fields,
-    so a walk that read only ``ast.Name`` missed every other family.
+    ``with … as``, and ``type X = …``), the ``ast.Name`` **Del** context (``del name``,
+    which §4.2.1 counts as bound), FORMAL PARAMETERS of a function that HOLDS a probe,
+    ``def`` / ``class`` names, ``except`` / ``except*`` ``as`` targets, and the
+    structural-pattern captures ``MatchAs`` / ``MatchStar`` / ``MatchMapping.rest`` —
+    collected by ``_module_scope_bindings`` / ``_probe_scope_bindings``, and by
+    ``_rebinds_within`` for the block itself. Only the Store/Del contexts are
+    ``ast.Name``; the rest are ``ast.arg`` or plain ``str`` fields, so a walk that read
+    only ``ast.Name`` missed every other family. Of §4.2.1's list, two families are
+    collected by NOTHING on purpose — a comprehension's iteration target and a type
+    parameter list — because each binds in its OWN scope and so cannot shadow the name
+    the probe reads (see ``_collect_binding``).
 
     ⛔ AND THE SCOPE IS AS LOAD-BEARING AS THE LIST (review P2): a binding only cancels
     the exemption when it can REACH the probe. Subtracting every binding construct
@@ -990,8 +994,26 @@ def _collect_binding(node: ast.AST, out: set[str]) -> None:
     ``MatchMapping.rest``. Both walks that collect bindings — module scope and a
     probe-holding function — call this, so neither can silently miss a family the other
     has.
+
+    ⛔ ``del`` IS A BINDING CONSTRUCT, AND NOT A ``Store`` ONE (§4.2.1: "a target
+    occurring in a ``del`` statement is also considered bound"). Its targets are
+    ``ast.Name`` with ``Del`` context, so a walk that read ``Store`` ALONE left
+    ``del some_optional_dep`` buying the exemption for a ``.query`` that can no longer
+    reach the import — the silent drop this narrowing exists to forbid, one context
+    flag over (measured: ``()`` exempt before, graded after).
+
+    ⛔ TWO FURTHER §4.2.1 FAMILIES ARE DELIBERATELY NOT COLLECTED, because they bind in
+    their OWN scope and so cannot shadow the name a probe reads: a COMPREHENSION's
+    iteration target (Python 3 gives a comprehension its own scope — see
+    ``_module_scope_bindings``) and a TYPE PARAMETER LIST (``def f[T](…)``,
+    ``class C[T]``, ``type X[T] = …``; PEP 695 puts ``T`` in an ANNOTATION scope).
+    Verified on 3.12: with a module-level ``T`` shadowed by a generic's ``[T]``, the
+    function BODY and the class BODY both still read the module ``T`` — the type
+    parameter is not visible there — so a ``[torch]`` on some helper cannot rebind an
+    imported ``torch`` for a probe's ``.query``. Witnessed as a control in
+    `4j-quinquies` so a later lane cannot "complete the list" into a false red.
     """
-    if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+    if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
         out.add(node.id)
     elif isinstance(node, ast.ExceptHandler) and node.name is not None:
         out.add(node.name)
@@ -2731,6 +2753,8 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     for _family, _rebinding in {
         # a function definition binds its NAME (a `str` field, not an `ast.Name`)
         "def": "def falkordb():\n    pass",
+        # `del name` binds too (§4.2.1) — an `ast.Name` with `Del`, not `Store`, context
+        "del": "del falkordb",
         # …and so does a class definition
         "class": "class falkordb:\n    pass",
         # `except E as name` / `except* E as name` bind `ExceptHandler.name`
@@ -2783,6 +2807,13 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "an unrelated loop target": "def _helper():\n    for torch in range(3):\n        pass",
         # a comprehension has its OWN scope in Python 3, so its target does not bind here
         "a module-level comprehension target": "_ = [torch for torch in range(3)]",
+        # …and so does a TYPE PARAMETER LIST (PEP 695 annotation scope): a `[torch]` on a
+        # generic binds nothing the function BODY or the module can see (verified on
+        # 3.12 — the body still reads the module `torch`), so it cancels nothing here.
+        "a type parameter list": (
+            "def _generic[torch](x):\n"
+            "    return torch"
+        ),
         # the `str`-field families are SCOPED too: an `except … as` in an unrelated
         # helper used to be collected tree-wide and cancelled this exemption (review P2)
         "a capture in an unrelated function": (
