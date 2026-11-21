@@ -46865,13 +46865,31 @@ class TortoiseSDK:
         _seam_remote = _seam_backing != _embed_seam.BACKING_INPROCESS
         if strategies.get("vector") and query and query.strip() and _seam_remote:
             _mark_read_stage(STAGE_EMBED_ENCODE)
+            _declined = False
             try:
                 query_vec = _embed_seam.encode_query(_dense_query)
-                if query_vec is None:
-                    # The backing answered "encoder unavailable" — the same
-                    # designed absence the local ladder records.
-                    _vec_reason = "encoder_unavailable"
+                # The backing produced no vector. Recorded with the term the local
+                # encode arm already uses rather than a new one: the leg trace's
+                # reason vocabulary is read by operators and pinned by rows, and a
+                # synonym for "the encode produced nothing" would split one
+                # population into two.
+                _declined = query_vec is None
             except Exception:  # noqa: BLE001, RUF100
+                _declined = True
+            if _declined:
+                # ⛔ #5275 STILL BINDS ON THIS PATH. ``_unavailable`` raises iff
+                # ``TORTOISE_EMBEDDING_MODEL_REQUIRED`` is armed — an armed process
+                # must never be handed a keyword-only read. With a remote backing
+                # the local ``get()`` ladder is never reached, and that ladder is
+                # the only place the flag used to decide this; skipping it here
+                # would turn the flag's named refusal into the designed-absence
+                # degrade with no error and no signal, which is exactly the
+                # ``#2985`` shape #5275 was opened for.
+                from .embeddings import EmbeddingModel
+
+                EmbeddingModel._unavailable(
+                    context="read: the configured embed backing declined",
+                    kind=EmbeddingModel.absent_reason())
                 _vec_reason = "encode_failed"
         elif strategies.get("vector") and query and query.strip():
             from .embeddings import READ_EMBED_BUDGET_S, EmbeddingModel

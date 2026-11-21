@@ -1003,6 +1003,74 @@ class TestTheCallersRouteThroughTheSeam:
             "move that encode out of the request")
 
 
+# ── the #5275 contract survives the move off the local model ────────────────
+
+
+class TestTheRequiredEmbedderFlagBindsOnARemoteBacking:
+    """``TORTOISE_EMBEDDING_MODEL_REQUIRED`` must still refuse on a remote backing.
+
+    ⛔ WHY THIS IS A REAL GAP AND NOT A NICETY. #5275's contract is that a
+    process which ARMED the flag must never be handed a keyword-only read. The
+    only place the flag used to decide this is ``EmbeddingModel.get()``'s refusal
+    path — which the remote branch never reaches, because there is no local model
+    to acquire. Left unhandled, arming the flag next to a dead worker would
+    silently produce the designed-absence degrade with no error and no signal:
+    exactly the #2985 shape #5275 was opened for, in a new place.
+
+    These rows drive the ONE read path (``_tortoise_fts_query``) rather than a
+    helper, because the obligation lives in that branch of that function.
+    """
+
+    @staticmethod
+    def _sdk(tmp_path):
+        from tortoise.sdk import TortoiseSDK
+
+        return TortoiseSDK(db_path=str(tmp_path / "read14186.db"))
+
+    @staticmethod
+    def _dead_backing(monkeypatch):
+        # A backing that is configured but cannot answer: the decline path.
+        monkeypatch.setenv(embed_seam.ENV_BACKING, embed_seam.BACKING_EXTERNAL)
+        monkeypatch.delenv(embed_seam.ENV_EXTERNAL_URL, raising=False)
+
+    def test_an_armed_process_refuses_instead_of_reading_keyword_only(
+            self, monkeypatch, tmp_path):
+        from tortoise.exceptions import EmbedderUnavailableError
+
+        monkeypatch.setenv("TORTOISE_EMBEDDING_MODEL_REQUIRED", "1")
+        self._dead_backing(monkeypatch)
+        sdk = self._sdk(tmp_path)
+        try:
+            with pytest.raises(EmbedderUnavailableError):
+                sdk._tortoise_fts_query("retention window", limit=3)
+        finally:
+            sdk.close()
+
+    def test_an_unarmed_process_declares_the_degrade_with_the_existing_reason(
+            self, monkeypatch, tmp_path):
+        """Unarmed ⇒ the read still answers, and its trace names the failure.
+
+        The vocabulary is the one the local encode arm already uses
+        (``encode_failed``) — a new synonym would split one operator-facing
+        population into two for the same event.
+        """
+        monkeypatch.delenv("TORTOISE_EMBEDDING_MODEL_REQUIRED", raising=False)
+        self._dead_backing(monkeypatch)
+        sdk = self._sdk(tmp_path)
+        trace: list = []
+        try:
+            sdk._tortoise_fts_query("retention window", limit=3, leg_trace=trace)
+        finally:
+            sdk.close()
+        vector_entries = [e for e in trace if e.get("leg") == "vector"]
+        assert vector_entries, f"the read recorded no vector entry: {trace!r}"
+        entry = vector_entries[0]
+        assert entry.get("ran") is False, entry
+        assert entry.get("reason") == "encode_failed", (
+            f"the remote decline did not use the local encode arm's vocabulary: "
+            f"{entry!r}")
+
+
 # ── teardown ────────────────────────────────────────────────────────────────
 
 

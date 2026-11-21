@@ -811,7 +811,25 @@ class _Collector:
             batch = self._collect()
             if batch is None:
                 return
-            self._fire(batch)
+            # ⛔ THE COLLECTOR MUST NOT DIE. If it did, every later submission
+            # would sit until its own bound expired and then raise, which
+            # presents as "the embedder got slow" rather than "the scheduler
+            # stopped". `_fire` already hands any backing failure to every
+            # waiter; this is the belt for a fault in the bookkeeping between
+            # that and the ticket loop, so one bad batch cannot take the seam
+            # down for the rest of the process.
+            try:
+                self._fire(batch)
+            except Exception:
+                _logger.warning(
+                    "embed seam: a batch faulted outside the backing call — the "
+                    "collector continues (#14186)", exc_info=True)
+                for ticket in batch:
+                    if not ticket.done.is_set():
+                        ticket.error = RuntimeError(
+                            "embed seam: batch failed before this query's "
+                            "answer was produced")
+                        ticket.done.set()
 
     def _collect(self) -> list[_Ticket] | None:
         """Take the next batch, honouring the hard window. ``None`` ⇒ stop."""
