@@ -70,7 +70,12 @@ def test_the_parts_sum_to_pre_handler_exactly(monkeypatch):
     ``middleware`` part is defined as — *arrival → the handler task created* —
     is exactly that gap. Making the two origins the same instant (as this row
     used to) leaves the sum invariant true under the mutant the invariant
-    exists to prevent: ``self._parts_t0 = now`` (``read_stages.py:335``).
+    exists to prevent: ``self._parts_t0 = now`` (``read_stages.py:359``).
+
+    ⛔ A ``file:line`` cite in a docstring is the pointer a fixer follows to re-run
+    the mutant, and this one had already gone stale: it read ``:335`` until the
+    ``_NOT_MARKABLE`` block above it inserted exactly 24 lines (#14086 round-3
+    review, R3-2). Re-measured at this head rather than adjusted by arithmetic.
     """
     clock = {"t": 1000.0}
     monkeypatch.setattr(rs.time, "monotonic", lambda: clock["t"])
