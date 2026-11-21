@@ -453,27 +453,7 @@ SWEEP_NAMES = 66
 #: The SDK population did not move either (`typed references still pointing at a public name: 0`),
 #: so no typed call site is legitimised by this re-cut. `#13998`'s own +7 above survives intact:
 #: `cp.query` **269** and `row.update` **60** carry the seven rows that record enumerates.
-
-#: ⛔ RE-CUT DOWN by this lane, and the move is a REMOVAL it made — not drift and not absorption:
-#: eight call sites in `tests/test_9572_discriminator_not_clobbered.py` spelled a RETIRED public SDK
-#: name (`surface.create_subject(…)`) on an untyped receiver, so this sweep counted them as residue.
-#: `_OrgSeedSurface` / `_SdkSeedSurface` are the two duck-typed onboarding seed surfaces, and
-#: `seed.py` calls the PRIVATE spelling (`_create_subject`, `_create_edge`) — which is the real SDK's
-#: own shape, pinned by `tests/test_onboarding_seed.py` running against a live SDK. The surfaces
-#: still exposed the pre-retirement PUBLIC names, so every self-hosted AND hosted seed raised
-#: `AttributeError` (measured: 11 failed in `tests/test_onboarding_selfhost_w12.py`). Renaming the
-#: two surfaces to the private spelling fixes the callers and removes residue in the same act — the
-#: rows were residue BECAUSE they spelled the retired public name. The eight call sites moved with
-#: them; the FastAPI route `create_subject` in `hosted_api.py` is NOT renamed, because that is an
-#: HTTP endpoint and not a seed-surface method.
-#: ⛔ THE PIN MOVED BY SIX, NOT EIGHT, and that number is MEASURED rather than derived from the site
-#: count: `--repin` printed (11838, "63ba2bae2c53c633") on the base this was rebased onto and
-#: (11832, "3c543a79221c65bb") on this tree. ⛔ The row-to-site mapping was NOT isolated — the sweep
-#: publishes no per-file residue breakdown, and `--report` shows 0 untyped receivers left — so this
-#: record names the SITES that changed and the MEASURED delta, and does not claim the two are an
-#: equation. What is exact is the changed set: two surface `def` lines and eight test call sites, in
-#: three files.
-SWEEP_RESIDUE = (11832, "3c543a79221c65bb")
+SWEEP_RESIDUE = (11838, "63ba2bae2c53c633")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
