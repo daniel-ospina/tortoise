@@ -9,13 +9,13 @@ out = {}
 # --- 1. Reuse the existing Object. Record the second spelling as an alias,
 #        not as a new node (same legal entity, abbreviated in the SOW).
 try:
-    out["object_update"] = sdk.update_entity(
+    out["object_update"] = sdk.update_knowledge(
         NORTHWIND_ID,
         alternateNames=["Northwind Logistics Ltd"],
         alsoKnownAs="Northwind Logistics Ltd",
     )
 except Exception as e:
-    print("update_entity failed:", type(e).__name__, e)
+    print("update_knowledge failed:", type(e).__name__, e)
     out["object_update"] = None
 
 # --- 2. The signed SOW as the document of record for the name variant.
@@ -107,7 +107,7 @@ edge("wasDerivedFrom", out["renewal"]["id"], out["sow"]["id"])
 edge("managedBy", NORTHWIND_ID, marta["id"])
 edge("hasMember", NORTHWIND_ID, marta["id"])
 
-print("TAXONOMY:", sdk.taxonomy())
+print("TAXONOMY:", sdk.graph_overview("taxonomy"))
 
 # --- 7. Document-of-record link for the event (Event)-[:aboutDocument]->(Source)
 edge("aboutDocument", out["event"]["id"], out["sow"]["id"])   # Source carries documentKind, so the document edge is valid

@@ -506,11 +506,21 @@ def _live_target() -> str | None:
             from tortoise.projection import FalkorProjection
 
             proj = FalkorProjection.from_uri(uri)
+        except (AttributeError, NameError, TypeError, ImportError):
+            # ⛔ A moved or renamed seam is a PROGRAMMING error, not "no
+            #   reachable target": the sentinel this helper returns decides a
+            #   SKIP, so swallowing it skips the whole live proof green
+            #   (#14114 class 2, #14125).
+            raise
         except Exception:
             # an unreachable/refusing target is not a failure of this probe
             continue
         try:
             proj.g.query("RETURN 1")
+        except (AttributeError, NameError, TypeError, ImportError):
+            # ⛔ same seam one statement over (#14114 class 2, #14125)
+            proj.close()
+            raise
         except Exception:
             proj.close()
             continue
