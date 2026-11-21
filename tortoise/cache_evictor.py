@@ -87,10 +87,16 @@ is not the trigger, and this header said it was until #11709 corrected it.
    the assessment and the handle together. A handle that names no graph, or a
    different one, is a REFUSAL.
 6. **The pin** (#14012) — a candidate the caller's ``pinned`` predicate reports as
-   resident is NEVER deleted, whatever the selector offered. Like the record probe
-   this is a SEAM, not a policy: what is pinned belongs to the user's declaration
-   (``tortoise/resident_pin.py``), and this module only asks. ⛔ It is checked BEFORE
-   the lease and BEFORE the record probe, because a pin is the one answer the score
+   resident **as of the reading the caller took** is not deleted, whatever the selector
+   offered. Like the record probe this is a SEAM, not a policy: what is pinned belongs to
+   the user's declaration (``tortoise/resident_pin.py``), and this module only asks. ⚠️ THE
+   SCOPE IS THE SNAPSHOT, and an earlier revision of this bullet said "NEVER deleted",
+   which the code cannot deliver: ``tools/cache_evict.py`` passes ``read(...).gate()``, a
+   lambda over the frozenset one read computed, so re-asking it at the last hop re-answers
+   the same reading. A ``pin`` issued DURING a sweep is therefore not honoured by that
+   sweep — the window is narrowed to the caller's own read, not closed (filed as #14214: the live
+   re-ask needs one declaration query per candidate at the last hop). ⛔ It is checked
+   BEFORE the lease and BEFORE the record probe, because a pin is the one answer the score
    may not overrule, and a node reported as "pinned" must not be reported as held for
    a reader or for an unservable record instead. A predicate that RAISES holds the
    node back: *could not ask* and *not pinned* are opposite findings, and the safe
@@ -755,7 +761,10 @@ def evict(
 
     *pinned* (#14012) is ``Candidate -> bool``: is this node inside the user's
     *keep this resident* declaration (its 1-hop closure included)? Checked FIRST, so a
-    pinned node is never deleted whatever the score said. ``None`` means the caller has
+    node the predicate holds is not deleted whatever the score said. ⛔ THE SCOPE IS THE
+    PREDICATE, not a time window: what the last hop can honor is the answer the caller's
+    OWN reading gives, so a declaration written DURING a sweep is not seen by it (#14214
+    carries the live re-read). ``None`` means the caller has
     no pin set — which is a different statement from an empty one, and this module does
     not choose it: reading the declaration, refusing an over-budget set and building the
     gate are ``tortoise/resident_pin.py``'s, and a sweeper that must not proceed without
@@ -971,6 +980,14 @@ def evict(
     #: The selector window, carried across passes so it can GROW (see below). Starts at
     #: 0; the first pass sets it from `budget` alone.
     window = 0
+    #: ⛔ CARRIED OUT OF THE LOOP, because a pass that ends with its whole window held
+    #: back at the DELETE STATEMENT does not end the loop — it widens and tries again. When
+    #: `max_passes` then runs out, `stop_reason` is still its `"pass_budget"` initial value,
+    #: and that arm tells the operator to RE-RUN — which cannot converge: the window restarts
+    #: at `budget`, the selector is deterministic, and the same nodes are held at the same
+    #: asks. The actionable reply (`unpin …`, or wait for the reader) lives in the pin/lease
+    #: arms, so the diagnosis is carried here and applied after the loop.
+    hold_reason: str | None = None
 
     for _ in range(resolved.max_passes):
         over = after_nodes - resolved.max_nodes
@@ -1107,7 +1124,8 @@ def evict(
             # in `skipped_pin_unanswerable`. `deleted` then intersected
             # `skipped_pin_unanswerable`, which is precisely the "stale held entry" the
             # record-probe list above clears for its own, and the pin's invariant is the
-            # stronger one ("a pinned node is never deleted").
+            # stronger one ("a node the pin predicate holds is not deleted" — the header
+            # bullet states its exact scope: pinned as of the caller's own reading).
             if candidate.node_id in held_pinned_ids:
                 held_pinned_ids.discard(candidate.node_id)
                 held_pinned[:] = [
@@ -1131,34 +1149,68 @@ def evict(
             # "did not hold enough evictable nodes" — which is false.
             held_grew = (len(held_record_ids), len(held_leased_ids),
                          len(held_pinned_ids)) != held_before
+            # ⛔ WHICH hold-back stopped this pass is REPORTED, not assumed, and the answer
+            # is computed ONCE because both exits below must agree about it. An
+            # all-LEASED window is not an exhausted population: the nodes are there
+            # and a reader is holding them, so "the population did not hold enough
+            # evictable nodes" sends the next reader to widen a population that was
+            # never the problem — and the real answer ("reads are holding these") is
+            # in no population query. When BOTH hold-backs are present the RECORD is
+            # the binding one (those nodes can never be taken), so it keeps
+            # "population".
+            # ⛔ #14012 ADDS A THIRD HOLD-BACK and it needs its own word for the same
+            # reason: a window made entirely of PINNED nodes is not an exhausted
+            # population either — the answer is "unpin, or raise the pin budget",
+            # and neither is reachable from a message about widening a selector.
+            # ⛔ AND THE PIN OUTRANKS THE LEASE IN THIS ARM TOO — the same ordering as
+            # gate 6 itself and as the last-hop arm below, because `unpin` is the only
+            # remedy that clears a pin while a lease clears itself.
+            if held_record_ids:
+                this_hold = "population"
+            elif held_pinned_unanswerable:
+                this_hold = "pin-unanswerable"
+            elif held_pinned_ids:
+                this_hold = "pinned"
+            elif held_leased_ids:
+                this_hold = "leased"
+            else:
+                this_hold = "population"
             if window >= after_nodes or not held_grew:
-                # ⛔ WHICH hold-back stopped this pass is REPORTED, not assumed. An
-                # all-LEASED window is not an exhausted population: the nodes are there
-                # and a reader is holding them, so "the population did not hold enough
-                # evictable nodes" sends the next reader to widen a population that was
-                # never the problem — and the real answer ("reads are holding these") is
-                # in no population query. When BOTH hold-backs are present the RECORD is
-                # the binding one (those nodes can never be taken), so it keeps
-                # "population".
-                # ⛔ #14012 ADDS A THIRD HOLD-BACK and it needs its own word for the same
-                # reason: a window made entirely of PINNED nodes is not an exhausted
-                # population either — the answer is "unpin, or raise the pin budget",
-                # and neither is reachable from a message about widening a selector.
-                if held_record_ids:
-                    stop_reason = "population"
-                elif held_leased_ids:
-                    stop_reason = "leased"
-                elif held_pinned_unanswerable:
-                    stop_reason = "pin-unanswerable"
-                elif held_pinned_ids:
-                    stop_reason = "pinned"
-                else:
-                    stop_reason = "population"
+                stop_reason = this_hold
                 break
-            # The window grew but this pass found nothing new to take: keep widening.
+            # The window grew but this pass found nothing new to take: keep widening —
+            # and carry THIS pass's diagnosis, because leaving `hold_reason` untouched here
+            # let an EARLIER pass's hold speak for a later pass that stopped on a different
+            # one: measured (6 nodes, max_nodes=2, batch=1, max_passes=2, a reader taking
+            # `p0` in the plan->statement window while the record could not serve
+            # `p1`/`p2`) the report named the in-flight READ and never mentioned
+            # `skipped_record_cannot_serve`, although this arm's own precedence says the
+            # RECORD is the binding hold.
+            #
+            # ⛔ A RECORD HOLD IS CARRIED AS *NOTHING*, not as `"population"`. The
+            # carry-out exists to replace an unusable `pass_budget` with an ACTIONABLE
+            # hold (`unpin …`, wait for the reader); a record that cannot serve has no
+            # such remedy, and turning it into a stop reason here would ALSO hide the
+            # binding constraint, which is the pass budget — `window` does not survive a
+            # call, so `test_a_long_unservable_head_is_reached_and_the_budget_state_is_
+            # named` requires that case to keep saying "re-running will not converge".
+            # Clearing it is the honest middle: no stale hold is reported, and no hold is
+            # blamed for a stop the budget caused.
+            hold_reason = this_hold if this_hold != "population" else None
             continue
         settled.update(local_ids)
         licence_remaining -= len(local)
+        # ⛔ A PASS THAT PLANNED NODES CLEARS ANY EARLIER HOLD, and this reset belongs HERE —
+        # above the `if dry_run:` branch, not next to the delete. It used to sit just before
+        # the `_delete_nodes` call, so a DRY RUN (the CLI's DEFAULT mode: `dry_run=not
+        # args.execute`) never reached it, and a later planning pass inherited an earlier
+        # pass's pin hold: measured (20 nodes, three pinned at the cold head, `dry_run=True`,
+        # max_nodes=2, batch_size=1, max_passes=4) the report flipped
+        # `pass_budget_exhausted` True→False and replaced "this pass budget could plan no
+        # more" with "3 node(s) are PINNED … unpin some of them", i.e. an earlier hold
+        # reported for a stop the pass budget caused — the exact class this loop's carry-out
+        # exists to remove, in a field the CLI emits (`tools/cache_evict.py`'s `metric`).
+        hold_reason = None
 
         if dry_run:
             planned.extend(local)
@@ -1168,12 +1220,23 @@ def evict(
         # plan-time check is not enough: a read can start between planning and the
         # statement, which is exactly the window a lease exists to close.
         #
-        # ⛔ AND GATE 6 GETS THE SAME SECOND HALF, FOR THE SAME WINDOW. The header's promise
-        # ("a pinned node is NEVER deleted, whatever the selector offered") is the STRONGER
-        # one, so it cannot be the weaker one that goes un-re-asked: a `pin` declaration
-        # written between planning and the DELETE used to let those nodes be deleted AND
-        # reported in `deleted`, so the report could not even show that it happened. The
-        # polarity is gate 6's own — anything truthy holds, and a predicate that RAISES
+        # ⛔ AND GATE 6 IS RE-ASKED HERE, BUT ONLY OVER THE CALLER'S OWN SNAPSHOT — say
+        # that plainly, because an earlier revision of this comment (and the header bullet
+        # it points at) claimed the WINDOW was closed and it is not. `pinned` is whatever
+        # the caller passed: `tools/cache_evict.py` passes `resident_pin.read(...).gate()`,
+        # a lambda closing over the frozenset that ONE read computed, so asking it again is
+        # a pure function of the same snapshot and answers the same thing. Measured: with
+        # the real wiring, `pin(g, ["p1"])` issued after that read leaves `gate(p1)` False,
+        # while a fresh `read(g).gate()(p1)` is True — so a declaration written mid-sweep
+        # is NOT seen at the last hop. What this loop DOES buy is that a caller whose
+        # predicate is live (the interface allows it, and the row that exercises it passes
+        # a stateful fake) is consulted immediately before the DELETE rather than only at
+        # plan time, so the seam is in the right place for the day the caller re-reads.
+        # Closing the window itself needs a re-read per ask in `tools/cache_evict.py`,
+        # which costs a declaration query per candidate — a design decision, filed as #14214.
+        # Until then the honest statement is the header's: pinned-as-of-the-read.
+        #
+        # The polarity is gate 6's own — anything truthy holds, and a predicate that RAISES
         # holds too (unanswerable is not "unpinned"), reported apart because the remedies
         # differ.
         holds = leases.held()
@@ -1181,11 +1244,12 @@ def evict(
         late_pinned = 0
         late_pinned_unanswerable = 0
         for candidate in local:
-            if candidate.node_id in holds:
-                if candidate.node_id not in held_leased_ids:
-                    held_leased_ids.add(candidate.node_id)
-                    held_leased.append(candidate)
-                continue
+            # ⛔ THE PIN IS ASKED BEFORE THE LEASE HERE TOO, so all three sites agree
+            # (plan-time gate 6, this loop, and both stop-reason arms below). The ordering
+            # is not cosmetic: the buckets exist to route the operator to the remedy that
+            # clears the state, `unpin` is the only one that clears a pin, and the module
+            # header's rule is that a node reported as "pinned" must not be reported as
+            # held for a reader instead.
             if pinned is not None:
                 answered = True
                 try:
@@ -1203,28 +1267,68 @@ def evict(
                     else:
                         late_pinned_unanswerable += 1
                     continue
+            if candidate.node_id in holds:
+                if candidate.node_id not in held_leased_ids:
+                    held_leased_ids.add(candidate.node_id)
+                    held_leased.append(candidate)
+                continue
             final.append(candidate)
 
         if not final:
-            # ⛔ NOT "population". Every node this pass was about to take is held by a
-            # READER (skipped_leased) or by a pin declared mid-sweep (skipped_pinned), so
-            # blaming the population sends the next reader to research an exhausted
-            # selector that is not the problem — the same misattribution class
-            # `stop_reason` exists to separate ("satisfied" | "population" | "licence" |
-            # "pass_budget"), and worse here because the answer is "something is holding
-            # these", which no population query reveals. The pin arms come first because
-            # the pin is the control a reader can clear themselves (`unpin`), whereas a
-            # lease is a reader that was live at statement time.
-            # `pinned` is the only other way a candidate leaves this loop, so an empty
-            # `final` is exhausted by the two pin arms and the lease arm below — the
-            # fallback is a construction, not an assumption about what happened.
-            if late_pinned_unanswerable:
-                stop_reason = "pin-unanswerable"
-            elif late_pinned:
-                stop_reason = "pinned"
-            else:
-                stop_reason = "leased"
-            break
+            # ⛔ REFUND THE LICENCE FIRST. `local` was debited above and this arm takes
+            # nothing, so without the refund the next pass computes
+            # `budget = min(batch, remaining_plan, licence_remaining) = 0` and stops with
+            # the FALSE reason `licence` — a debit that no delete explains.
+            licence_remaining += len(local)
+            # ⛔ AND DO NOT BREAK JUST BECAUSE THIS WINDOW WAS ENTIRELY HELD BACK — the
+            # same rule the `if not local:` arm above states, for the same reason. The
+            # window widens on the NEXT pass (it is recomputed from the held sets each
+            # pass), so breaking here means the widening never applies in the case it was
+            # written for: a pin that becomes visible only at the delete statement would
+            # abandon the remaining passes and report zero evictions while the identical
+            # declaration, seen one ask earlier, would have delivered them.
+            #
+            # ⛔ AND `window >= after_nodes` IS NOT "nothing left to ask", which is the
+            # reading the FIRST cut of this fix shipped and a fresh review measured as
+            # #14161's defect put back in a narrower case. `window` grows
+            # MULTIPLICATIVELY (`max(window*2, budget + held + settled)`), so it saturates
+            # at `after_nodes` while `local` is still capped at `budget` = min(batch_size,
+            # remaining_plan, licence_remaining): every candidate ranked beyond that cap
+            # was never asked in this pass, and the next pass DOES ask them — the ones
+            # just held are skipped (`held_leased_ids` in the plan loop; a pin is re-asked
+            # and held at PLAN time, so it never re-enters `local`). Measured at 40 nodes,
+            # max_nodes=8, batch=5, a reader taking `p15..p19` in the plan->statement
+            # window: the shipped arm stopped at pass 4 with 15 evicted, while the
+            # identical run with this `break` neutralised reached the budget at pass 8
+            # with 32 — 6 of 10 passes and 17 evictions lost to a window that had merely
+            # finished GROWING, and the reason offered a remedy (wait for the read) that
+            # clears 5 nodes out of 17.
+            #
+            # So break only when there is nothing left to widen AND nothing left to ask;
+            # `max_passes` remains the loop's own bound, so this cannot spin.
+            if window >= after_nodes and len(local) >= len(offered):
+                # ⛔ WHICH hold-back stopped this pass is REPORTED, not assumed. The PIN
+                # arms come first: the pin is the control a reader can clear themselves
+                # (`unpin`), whereas a lease is a reader that was live at statement time,
+                # and the same ordering governs the `if not local:` arm above so the two
+                # cannot disagree about the same both-holds condition.
+                if late_pinned_unanswerable:
+                    stop_reason = "pin-unanswerable"
+                elif late_pinned:
+                    stop_reason = "pinned"
+                else:
+                    stop_reason = "leased"
+                break
+            # The window is not yet the whole graph: widen and try the next pass, carrying
+            # the diagnosis in case this is the last pass the budget allows.
+            hold_reason = (
+                "pin-unanswerable" if late_pinned_unanswerable
+                else "pinned" if late_pinned
+                else "leased"
+            )
+            continue
+        # (The `hold_reason` reset a pass that PLANS needs is up above the `if dry_run:`
+        # branch — a dry run plans without deleting, and it must clear the carry too.)
         # ⛔ `snapshot_out` IS HOW THE ABORT PATH LEARNS WHAT THE INVALIDATION DID. On a
         # raise the tuple below never arrives, so without this channel the report would
         # have to say `None` — "not applicable" — about a statement whose effect is
@@ -1323,6 +1427,15 @@ def evict(
         if removed == 0:
             stop_reason = "population"
             break
+
+    # ⛔ CARRY THE HOLD DIAGNOSIS OUT OF THE LOOP. The last pass may have been entirely
+    # held back at the delete statement and then run out of `max_passes`, leaving
+    # `stop_reason` at its initial `"pass_budget"`. That arm advises a RE-RUN, which cannot
+    # converge here (the window does not survive the call and the selector is deterministic,
+    # so the same nodes are held at the same asks) — while the answer the operator needs
+    # ("unpin these", "wait for those readers") is in the arms this mapping selects.
+    if stop_reason == "pass_budget" and hold_reason is not None:
+        stop_reason = hold_reason
 
     # ⛔ A refusal reached AFTER an earlier pass already deleted something must not
     # report "nothing was deleted" — the metric would be false and the only record of
