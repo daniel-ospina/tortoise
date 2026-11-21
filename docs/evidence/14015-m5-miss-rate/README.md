@@ -43,7 +43,9 @@ actually use (`F ≈ 0.5`), ordering residency by usage instead of at random rem
 criterion 1 is worth three times the tariff.
 
 - **Artifact:** [`measurement.json`](./measurement.json)
-- **Instrument:** `tools/miss_rate_m5.py` · **git head:** see the artifact's `git_head`
+- **Instrument:** `tools/miss_rate_m5.py` · **git head:** `5cc6bad05cf2` (the head the run
+  was performed at; the artifact's `git_head`, pinned against this line and against the
+  instrument's bytes at that commit)
 - **Corpus:** `~/.tortoise/session-events/*.jsonl` — 27 files, 738 lines
 - **Labels measured:** `:Point` (711 nodes, 250 queries per weighting) and `:Object` (1000 nodes,
   250 per weighting). **No aggregate across labels is published anywhere** (`#13989`'s rule).

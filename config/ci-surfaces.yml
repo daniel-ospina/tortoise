@@ -3073,9 +3073,13 @@ surfaces:
   - test_window_quality_m2.py
   # #14015 M5: the §9 miss-rate record must re-derive — the curve, the shipped-window
   # table, the largest-tenant inversion and the pp-per-doubling marginals are checked
-  # against `measurement.json`, the five invariants are asserted ON the committed
-  # artifact, the windows are asserted equal to `product/pricing.json`, and the
-  # instrument's pure arithmetic is pinned. ⛔ The guarded artifacts are under `docs/`
+  # against `measurement.json`, the windows are asserted equal to `product/pricing.json`,
+  # and the instrument's pure arithmetic and invariant guards are driven directly on the
+  # module. ⛔ It does NOT claim every invariant is re-asserted ON the artifact: the
+  # artifact carries counts, not per-query ids, so INVARIANT 1's population cross-check
+  # has no subject there, and INVARIANT 5 is arithmetic inside `lorenz()`. What the
+  # artifact DOES carry is re-checked on it — the miss rate's own decomposition, that a
+  # demoted node is never returned, and the coverage each arm requested and delivered. ⛔ The guarded artifacts are under `docs/`
   # and `tools/`, and a docs-only diff takes the tier1 early return and selects NO
   # surface — so a `core`-only row would run this pin ZERO times on exactly the change
   # class that re-stales the figures `#13989`'s allowance sizing quotes (the
@@ -3097,7 +3101,15 @@ surfaces:
   # complete-arm guard (`#14162` F3/F5 — the identity it replaced was algebra over
   # two complementary slices of one list and could not fail under any mutation);
   # and the inputs the artifact publishes, including that the shipped windows are
-  # READ from `product/pricing.json` and not copied into the tool. Hermetic: the
+  # READ from `product/pricing.json` and not copied into the tool (asserted by walking
+  # the tool's AST for a numeric literal, not by one spelling of `= 77`). Its SHAPE is
+  # pinned too, because that is where a cross-label figure would be added: the
+  # top-level key set is closed, no dict anywhere may be keyed with a pooling name, and
+  # the retrieval mode is held consistent with the legs it claims and with the sentence
+  # the record prints, in both directions. `git_head` was written and read by nothing,
+  # so the record now prints it, the artifact's own copy must match that line, and the
+  # instrument's bytes at that commit must hash to `provenance.tool_sha256` wherever
+  # the commit is present in the clone. Hermetic: the
   # module's pure functions, one JSON read and one `ast.parse` — no DB, no graph,
   # no docker, no network, no model call (the measurement itself needs a live
   # FalkorDB and a capture corpus and is never run here). ⛔ No case count is

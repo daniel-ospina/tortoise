@@ -59,6 +59,7 @@ import ast
 import hashlib
 import json
 import re
+import subprocess
 import sys
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
@@ -366,10 +367,34 @@ def test_the_windows_are_read_from_the_price_artifact_and_are_the_shipped_values
 
 
 def test_the_tool_holds_no_copy_of_a_window_value():
-    """The registration above is worthless if a literal beside it can disagree."""
+    """The registration above is worthless if a literal beside it can disagree.
+
+    ⛔ The pre-fix shape of this test was `f"= {value}\n" not in source`, which
+    caught ONE SPELLING. Measured: appending
+    `WINDOW_DEFAULTS = {"solo": 77, "pro": 102, "team": 615}` to the tool — a
+    second copy of all three windows, in a shape code would actually read — left
+    the suite green. So the tool's AST is walked and ANY numeric literal equal to
+    a shipped window is refused, wherever it sits: a dict, a tuple, a default
+    argument, a comparison. The prose counts in the tool's docstrings are prose, so
+    string constants are out of scope by construction — a literal that can DRIVE
+    the instrument is what a second source of truth looks like.
+    """
+    pricing = json.loads(PRICING.read_text())
+    shipped = {int(pricing["tiers"][t]["max_graph_storage_mb"]) for t in TIERS}
     source = TOOL.read_text()
-    for value in (77, 102, 615):
-        assert f"= {value}\n" not in source, f"{value} looks hardcoded in the tool"
+    copied = sorted(
+        (node.lineno, node.value)
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Constant)
+        and not isinstance(node.value, bool)
+        and isinstance(node.value, (int, float))
+        and node.value in shipped
+    )
+    assert not copied, (
+        f"the tool carries a shipped window as a literal at line(s) "
+        f"{[(line, value) for line, value in copied]} — `PRICING` is the one "
+        f"owner of the windows, and a copy beside it silently disagrees the "
+        f"moment the price artifact moves")
     assert ('PRICING = Path(__file__).resolve().parent.parent / "product" / '
             '"pricing.json"') in source, (
         "the price artifact of record is no longer the one owner of the windows")
@@ -452,13 +477,59 @@ def test_the_windows_in_the_artifact_are_the_shipped_prices():
     assert art["windows"]["mb"]["team"] == 615
 
 
+# The artifact's TOP-LEVEL shape, closed on purpose. #13989's rule is "per label,
+# never aggregate", and a top-level row is exactly where a pooled figure would be
+# added — so adding one is a deliberate edit that has to come past this list.
+_TOP_LEVEL_KEYS = {
+    "cleanup", "consumed_by", "corpus", "coverage_map", "document",
+    "full_corpus_curves", "generated_at", "git_head", "issue", "labels",
+    "labels_measured", "measurement", "params", "provenance", "retrieval",
+    "uniform_query_control", "windows", "⛔not_this",
+}
+
+# Keys that NAME a pooled figure. Exact matches only: `total` and `total_mass`
+# are one population's sums, not a cross-label rate.
+_POOLED_KEY_NAMES = {
+    "aggregate", "aggregated", "all", "combined", "pooled", "both",
+    "overall", "lumped", "labels_combined", "mean_across_labels",
+    "across_labels",
+}
+
+
 def test_the_artifact_names_its_label_set_and_refuses_an_aggregate():
     art = _artifact()
     assert set(art["labels"]) == {"point", "object"}
-    # #13989's rule: per label, never aggregate. No key may pool the labels.
-    for key in art["labels"]:
-        assert key not in ("all", "total", "aggregate")
-    assert "⛔not_measured" in art["labels_measured"]
+    # #13989's rule: per label, never aggregate. ⛔ The pre-fix shape iterated
+    # `art["labels"]` and asserted those KEYS aren't named "aggregate" — a loop
+    # over the two label names that could never look at anything else. Measured:
+    # adding a top-level `"aggregate": {"miss": 0.31, ...}` left it green, i.e.
+    # the prohibition was invisible at the level it would be violated. The rule is
+    # about the artifact's SHAPE, so the shape is what is pinned.
+    assert set(art) == _TOP_LEVEL_KEYS, (
+        "the artifact's top-level shape changed: "
+        f"added={sorted(set(art) - _TOP_LEVEL_KEYS)} "
+        f"removed={sorted(_TOP_LEVEL_KEYS - set(art))} — a new top-level row is "
+        "where a cross-label figure would land, and #13989 forbids one")
+    pooled: list[str] = []
+
+    def walk(node: object, path: str) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if str(key).lower() in _POOLED_KEY_NAMES:
+                    pooled.append(f"{path}.{key}")
+                walk(value, f"{path}.{key}")
+        elif isinstance(node, list):
+            for i, value in enumerate(node):
+                walk(value, f"{path}[{i}]")
+
+    walk(art, "$")
+    assert not pooled, (
+        f"the artifact pools the labels at {pooled} — #13989 publishes per label, "
+        f"never across them")
+    assert set(art["labels_measured"]) <= {"point", "object", "⛔not_measured"}
+    assert "No aggregate across labels is published" in (
+        art["labels_measured"]["⛔not_measured"]), (
+        "the artifact must SAY that no aggregate exists, not merely not carry one")
 
 
 def test_the_artifact_says_which_m5_it_is():
@@ -508,11 +579,84 @@ def test_the_artifact_binds_its_params_and_its_corpus():
 
 def test_the_artifact_declares_which_retrieval_leg_it_measured():
     """A `keyword_only` run is a figure about the LEXICAL leg. The artifact must
-    say so rather than let a reader assume the fused read was measured."""
+    say so rather than let a reader assume the fused read was measured.
+
+    ⛔ The pre-fix shape was `mode in ("keyword_only", "hybrid")` — true for both
+    legal values, so no edit inside the artifact's own vocabulary could red it, and
+    `legs_seen.vector` was unpinned. Measured: setting the artifact to `hybrid`
+    with `vector: true` (and the record's mode line to match) left it green while
+    the sentence around it still called the figure lexical. So the mode is pinned
+    against the LEGS it claims, against the embedder a dense leg needs, and against
+    the sentence the record prints — in BOTH directions.
+    """
     art = _artifact()
-    assert art["retrieval"]["mode"] in ("keyword_only", "hybrid")
-    if art["retrieval"]["mode"] == "keyword_only":
-        assert art["retrieval"]["has_embedder"] is False
+    retrieval = art["retrieval"]
+    mode = retrieval["mode"]
+    assert mode in ("keyword_only", "hybrid"), f"unknown retrieval mode {mode!r}"
+    assert set(retrieval["legs_seen"]) == {"fts", "structural", "vector", "fallback"}
+    dense = mode == "hybrid"
+    assert retrieval["legs_seen"]["vector"] is dense, (
+        f"mode={mode!r} with legs_seen.vector={retrieval['legs_seen']['vector']!r} "
+        f"is a record contradicting itself about which legs ran")
+    assert retrieval["has_embedder"] is dense, (
+        f"mode={mode!r} with has_embedder={retrieval['has_embedder']!r}: a dense "
+        f"leg needs an embedder, and a keyword-only run cannot have had one")
+    readme = README.read_text()
+    assert f"**Retrieval mode:** `{mode}`" in readme, (
+        f"the record does not state the mode the artifact measured ({mode!r})")
+    if mode == "keyword_only":
+        assert "a figure about the **lexical** leg" in readme, (
+            "a keyword-only figure is a claim about the LEXICAL leg and the record "
+            "must say so, not leave a reader to assume the fused read was measured")
+    else:
+        # ⛔ The other direction, which the first shape of this pin missed: the
+        # measured mutant set the artifact to `hybrid` + `vector: true` +
+        # `has_embedder: true` and the record's MODE line to match, and the lexical
+        # sentence was left standing — green, while the record called a merged-leg
+        # figure lexical. Self-consistent artifact, contradicting prose.
+        assert "a figure about the **lexical** leg" not in readme, (
+            "the artifact says the dense leg contributed, and the record still calls "
+            "the figure lexical — one of the two is wrong about which legs ran")
+
+
+def test_the_recorded_git_head_names_a_commit_where_the_instrument_bytes_exist():
+    """`provenance.tool_sha256` had a pin and `git_head` had NONE — it was written
+    by the run and read by no test, so the recorded commit could go stale while the
+    digest stayed green.
+
+    Two halves, and only one of them can run everywhere. The RECORD half is
+    unconditional: the README prints the head it was written at, and those twelve
+    characters must be the artifact's own `git_head`. The GIT half verifies the
+    bytes: at the recorded commit, `tools/miss_rate_m5.py` must hash to
+    `tool_sha256` — the one check that can tell a genuine anchor from a stale one.
+    It needs the commit to be IN the clone, and a history rewrite (this branch was
+    rebased) or a shallow checkout can drop it; in that case the anchor is
+    unverifiable HERE and this test says so instead of passing quietly, because a
+    skip is visible in the output and a false pass is not.
+    """
+    art = _artifact()
+    head = art["git_head"]
+    assert re.fullmatch(r"[0-9a-f]{40}", head), (
+        f"git_head is not a commit sha: {head!r} — a truncated or symbolic value "
+        f"cannot be resolved to the instrument's bytes")
+    assert f"`{head[:12]}`" in README.read_text(), (
+        f"the record must print the head it was written at (`{head[:12]}`); it is "
+        f"the reader's only pointer to the run the figures came from")
+    recorded = subprocess.run(
+        ["git", "cat-file", "-e", f"{head}^{{commit}}"],
+        cwd=ROOT, capture_output=True, text=True)
+    if recorded.returncode != 0:
+        pytest.skip(
+            f"git_head {head[:12]} is not in this clone (a rebased history or a "
+            f"shallow checkout), so the anchor cannot be verified here — the "
+            f"re-cut commits the artifact and re-anchors it at a reachable head")
+    blob = subprocess.run(
+        ["git", "show", f"{head}:tools/miss_rate_m5.py"],
+        cwd=ROOT, capture_output=True, check=True).stdout
+    assert hashlib.sha256(blob).hexdigest() == art["provenance"]["tool_sha256"], (
+        "the instrument's bytes at the recorded git_head are NOT the bytes "
+        "provenance.tool_sha256 names — the anchor is stale or the digest was "
+        "hand-edited away from the run that produced it")
 
 
 def test_the_artifact_declares_the_graphs_it_leaves_behind():
