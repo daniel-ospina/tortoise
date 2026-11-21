@@ -299,6 +299,22 @@ def read(
         raise ValueError(f"label {label!r} is not a record label {sorted(NODE_TABLES)}")
 
     table = NODE_TABLES[label]
+    # ⛔ THE ONE IDENTIFIER THAT REACHES A **SQL** STRING, and therefore the one that
+    # must be allowlisted rather than merely quoted: `TOPICS_SQL` puts `{topic}` in the
+    # SELECT list and `GROUP BY 1`, which is an IDENTIFIER position — `%s` covers
+    # VALUES only (psycopg docs, and the reason `sql.Identifier` exists). Every other
+    # identifier here is already checked (`label`/`key_prop` through `bare_identifier`,
+    # `table` through `NODE_TABLES`, `tier` from two literals, `limit` type-checked) —
+    # a `.format` that skipped the check would make the injection surface a DEFAULT for
+    # the next caller of this library door instead of a decision they have to make.
+    # An allowlist, not just quoting: it also refuses a REAL column of the wrong table.
+    valid_columns = _rp.table_columns().get(table, frozenset())
+    if topic_column not in valid_columns:
+        raise ValueError(
+            f"topic_column {topic_column!r} is not a column of public.{table} "
+            f"— it is interpolated into the SELECT list, so it must name one of "
+            f"{sorted(valid_columns)}; nothing was read"
+        )
     tier = _tier_predicate(table)
     # ⛔ THE GROUPING COLUMN IS INTERPOLATED, SO IT IS VALIDATED — as a bare identifier
     # AND as a column the record actually has. The CLI feeds `--topic-column` straight
@@ -387,13 +403,29 @@ def read(
         for b in buckets
         if b.get("topic") is not None
     )
-    # ⛔ `complete` is a claim about the MEASUREMENT, so it may not be `True` beside a
-    # field nothing measured: `resident=None` (the count query failed) or
-    # `record_total=None` (the total failed) are partial readings, and a monitor that
-    # reads `complete: true` would take the nulls for a healthy empty.
+    # ⛔ `complete` is DERIVED, not assumed — and this block is the MERGE of two lanes
+    # that closed the same fail-open independently, rather than a pick of one side.
+    # Every number on this path can fail ALONE: `resident_total` is its own count query,
+    # `_record_total` issues its own statement after SPAN_SQL/TOPICS_SQL have already
+    # succeeded (a statement timeout, a dropped connection mid-scope, a `count(*)`
+    # permission the aggregates do not need), and an empty span leaves `outside`
+    # unmeasured. This field is what a monitor keys on and what `tools/resident.py` turns
+    # into `verdict: OK` / exit 0, so an unmeasured number under `complete=True` is the
+    # flag failing OPEN over a partial read — exactly what this module's thesis forbids.
     missing = [name for name, value in
                (("resident", resident_total), ("record_total", record_total),
                 ("outside", outside)) if value is None]
+    reason = ""
+    if outside is None:
+        reason = ("the record answered its count with no row, so how much is outside "
+                  "could not be measured — nothing is claimed")
+    elif record_total is None:
+        reason = ("the record's own total could not be read, so the cross-check that "
+                  "makes a resident/outside disagreement visible is missing — this "
+                  "view is not a census")
+    elif resident_total is None:
+        reason = ("the fast layer's own node count could not be read, so what is "
+                  "outside is reported without the resident figure that explains it")
     return OutsideView(
         org_id=org_id,
         graph_id=graph_id,
@@ -406,8 +438,7 @@ def read(
         topics=topics,
         complete=not missing,
         truncated=False,
-        reason=("" if not missing else
-                f"{', '.join(missing)} could not be measured — the view is partial"),
+        reason=reason if missing else "",
         source=f"graph:{label}+record:{table}",
     )
 

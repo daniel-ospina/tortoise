@@ -271,6 +271,92 @@ def test_outside_without_a_record_dsn_is_a_usage_error(wired, capsys, monkeypatc
     assert exc.value.code == resident.EXIT_USAGE
 
 
+def test_an_unmeasured_cross_check_exits_4_never_0(wired, capsys, monkeypatch):
+    """`record_total` failing alone must not become `verdict: OK` / exit 0.
+
+    The span read succeeded, so `outside` is a real number — but the cross-check that
+    makes a resident/outside disagreement visible is missing, so the view is not a
+    census. A scheduler must not record this run as "nothing is outside".
+    """
+
+    class _NoTotal(_Conn):
+        def cursor(self):
+            cur = super().cursor()
+
+            def _boom(sql, params=None):
+                # ⛔ `GROUP BY` excluded: the TOPIC statement also carries a
+                # `count(*) AS n`, so the narrower match is the record-total
+                # statement alone.
+                if "count(*) AS n" in sql and "GROUP BY" not in sql:
+                    raise RuntimeError("permission denied for relation point")
+                return _Cursor.execute(cur, sql, params)
+
+            cur.execute = _boom  # type: ignore[method-assign]
+            return cur
+
+    _fake_psycopg(monkeypatch, _NoTotal())
+    code = resident.main(["outside", *BASE, "--dsn", "postgresql://x", "--org-id",
+                          "org_a", "--graph-id", "g_1", "--window-nodes", "1000"])
+    assert code == resident.EXIT_UNMEASURED
+    view = json.loads(capsys.readouterr().out)["outside"]
+    assert view["outside"] == 1, "sanity: the span read succeeded"
+    assert view["record_total"] is None
+    assert view["complete"] is False
+
+
+def test_outside_with_an_unknown_label_is_a_usage_error_not_a_traceback(
+        wired, capsys, monkeypatch):
+    """A `--label` the record has no table for is a FLAG mistake, so it is exit 1."""
+    _fake_psycopg(monkeypatch, _Conn())
+    with pytest.raises(SystemExit) as exc:
+        resident.main(["outside", *BASE, "--label", "Nonesuch", "--dsn",
+                       "postgresql://x", "--org-id", "org_a", "--graph-id", "g_1",
+                       "--window-nodes", "1000"])
+    assert exc.value.code == resident.EXIT_USAGE, (
+        "an unknown label escaped as something other than the declared usage code"
+    )
+
+
+def test_outside_with_an_unvalidated_topic_column_is_a_usage_error(
+        wired, capsys, monkeypatch):
+    """The one identifier that reaches SQL must be refused, not interpolated."""
+    _fake_psycopg(monkeypatch, _Conn())
+    with pytest.raises(SystemExit) as exc:
+        resident.main(["outside", *BASE, "--dsn", "postgresql://x", "--org-id",
+                       "org_a", "--graph-id", "g_1", "--topic-column",
+                       "node_key; DROP TABLE point", "--window-nodes", "1000"])
+    assert exc.value.code == resident.EXIT_USAGE
+
+
+def test_pin_with_a_non_bare_label_is_a_refusal_not_a_traceback(wired, capsys):
+    """A first pin on an EMPTY declaration reaches `bare_identifier` inside `pin`.
+
+    `read()` validates the DECLARATION's pair and returns early when nothing is
+    declared, so the caller's `--label` is only checked in `_closure_for` — where it
+    used to raise `PinConfigError` straight out of `main()` as a traceback instead of
+    the REFUSED envelope this tool's exit-code vocabulary promises.
+    """
+    assert PINS_META_KEY not in wired.meta, "sanity: nothing is declared yet"
+    code = resident.main(["pin", *BASE, "--key", "p0", "--label", "Bad Label",
+                          "--window-nodes", "1000"])
+    assert code == resident.EXIT_REFUSED
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdict"] == "REFUSED"
+    assert out["code"] == "config"
+    assert "bare Cypher identifier" in out["reason"]
+    assert PINS_META_KEY not in wired.meta, "a refused pin wrote a declaration"
+    assert wired.mutations == []
+
+
+def test_pin_with_a_non_bare_key_prop_is_a_refusal_not_a_traceback(wired, capsys):
+    code = resident.main(["pin", *BASE, "--key", "p0", "--key-prop", "i d",
+                          "--window-nodes", "1000"])
+    assert code == resident.EXIT_REFUSED
+    out = json.loads(capsys.readouterr().out)
+    assert out["code"] == "config"
+    assert wired.mutations == []
+
+
 # ── the sweep honours the pin, with no off-switch ──────────────────────────────
 def _assessment() -> Assessment:
     return Assessment(

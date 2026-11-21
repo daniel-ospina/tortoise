@@ -36,12 +36,15 @@ Exit codes — the census's vocabulary, so a scheduler keys on one table
 ---------------------------------------------------------------------
     0  OK          the declaration was applied / read cleanly, or the view was measured
     3  REFUSED     a DECLARED refusal: over the pin budget, over the degree ceiling, a
-                   key the fast layer does not hold, an unreadable declaration, or a pin
-                   set whose budget no longer covers it. Nothing was written.
+                   key the fast layer does not hold, an unreadable declaration, a pin
+                   set whose budget no longer covers it, or a `--label`/`--key-prop`
+                   that is not a bare identifier. Nothing was written.
     4  UNMEASURED  what is outside could not be measured (a partial resident read, an
                    unreachable record). ⛔ NOT zero: a missing measurement read as a
                    healthy zero is the defect both controls exist to avoid.
-    1  usage       a flag, import or IO mistake
+    1  usage       a flag, import or IO mistake — including a `--label` the record
+                   has no table for, and a `--topic-column` that is not a real column
+                   of it
 """
 from __future__ import annotations
 
@@ -204,6 +207,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"#14012: no pin budget could be resolved ({exc}); the declaration is "
                   f"reported WITHOUT a cap check", file=sys.stderr)
 
+    def _refused(reason: str, code: str) -> int:
+        """ONE refusal envelope, so a new refusal path cannot invent a second shape."""
+        _emit({"verdict": "REFUSED", "graph": args.graph, "code": code,
+               "reason": reason,
+               # ⛔ `show`/`unpin` may hold NO budget (they do not need one — `unpin` is
+               # the documented remedy for an over-budget set), so an unconditional
+               # `budget.as_dict()` here is an AttributeError on exactly the refusal an
+               # operator reaches for the remedy.
+               "budget": budget.as_dict() if budget else None}, args.out)
+        return EXIT_REFUSED
+
     client = graph = None
     try:
         try:
@@ -230,19 +244,16 @@ def main(argv: list[str] | None = None) -> int:
                     budget=budget,
                 )
             except resident_pin.PinRefused as exc:
-                _emit({"verdict": "REFUSED", "graph": args.graph,
-                       "code": exc.code, "reason": exc.reason,
-                       "budget": budget.as_dict() if budget else None}, args.out)
-                return EXIT_REFUSED
+                return _refused(exc.reason, exc.code)
             except resident_pin.PinConfigError as exc:
-                # ⛔ A REFUSAL WITH A CODE, not a traceback. `--label '1bad'` (an
-                # identifier interpolated into Cypher) raises this, and uncaught it
-                # escaped as a traceback whose exit 1 is this tool's USAGE code — telling
-                # a scheduler to retry its flags against a declaration that will never
-                # parse.
-                _emit({"verdict": "REFUSED", "graph": args.graph, "code": "config",
-                       "reason": str(exc)}, args.out)
-                return EXIT_REFUSED
+                # ⛔ A REFUSAL WITH A CODE, not a traceback. A non-bare
+                # `--label`/`--key-prop` reaches `bare_identifier` INSIDE `pin` (via
+                # `_closure_for`) on a graph with no declaration yet, because `read()`
+                # validates the DECLARATION's pair and returns early when there is
+                # nothing declared — and uncaught it escaped as a traceback whose exit 1
+                # is this tool's USAGE code, telling a scheduler to retry flags against a
+                # declaration that will never parse.
+                return _refused(f"config refused: {exc}", "config")
             _emit({"verdict": "OK", "graph": args.graph, "pin": result.as_dict()},
                   args.out)
             return EXIT_OK
@@ -254,14 +265,9 @@ def main(argv: list[str] | None = None) -> int:
                     budget=budget,
                 )
             except resident_pin.PinRefused as exc:
-                _emit({"verdict": "REFUSED", "graph": args.graph,
-                       "code": exc.code, "reason": exc.reason,
-                       "budget": budget.as_dict() if budget else None}, args.out)
-                return EXIT_REFUSED
+                return _refused(exc.reason, exc.code)
             except resident_pin.PinConfigError as exc:
-                _emit({"verdict": "REFUSED", "graph": args.graph, "code": "config",
-                       "reason": str(exc)}, args.out)
-                return EXIT_REFUSED
+                return _refused(f"config refused: {exc}", "config")
             _emit({"verdict": "OK", "graph": args.graph, "pin": result.as_dict()},
                   args.out)
             return EXIT_OK
@@ -301,21 +307,27 @@ def main(argv: list[str] | None = None) -> int:
                   args.out)
             return EXIT_UNMEASURED
         try:
-            view = outside_view.read(
-                graph, conn,
-                org_id=args.org_id, graph_id=args.graph_id,
-                label=args.label or "Point", key_prop=args.key_prop or "id",
-                topic_column=args.topic_column or outside_view.TOPIC_COLUMN,
-                top=args.top or outside_view.DEFAULT_TOP_TOPICS,
-                key_limit=args.max_keys or outside_view.DEFAULT_RESIDENT_KEY_LIMIT,
-            )
-        except ValueError as exc:
-            # A flag that names something the view may not read is a USAGE mistake
-            # (`--topic-column` is ORDER BY input, `--label` is interpolated into Cypher).
-            # It is refused BEFORE any read, and it is not an unmeasured view.
-            conn.close()
-            parser.error(str(exc))
-            return EXIT_USAGE  # unreachable; parser.error exits
+            try:
+                view = outside_view.read(
+                    graph, conn,
+                    org_id=args.org_id, graph_id=args.graph_id,
+                    # ⛔ `or` the documented defaults: the flags default to `None` so
+                    # `unpin` can tell "the operator named nothing" from "the operator
+                    # named a different population" (an explicit mismatch is REFUSED, not
+                    # silently overridden). `pin`/`outside` resolve their own defaults.
+                    label=args.label or "Point", key_prop=args.key_prop or "id",
+                    topic_column=args.topic_column or outside_view.TOPIC_COLUMN,
+                    top=args.top or outside_view.DEFAULT_TOP_TOPICS,
+                    key_limit=args.max_keys or outside_view.DEFAULT_RESIDENT_KEY_LIMIT,
+                )
+            except (ValueError, resident_pin.PinConfigError) as exc:
+                # A `--label` the record has no table for, or a `--topic-column` that is
+                # not a real column of it: a FLAG mistake, so it is a usage error with the
+                # flag named — not a traceback, and not UNMEASURED (which would tell a
+                # scheduler the measurement failed rather than the command). `conn` is
+                # closed by the `finally` below.
+                parser.error(str(exc))
+                return EXIT_USAGE  # unreachable; parser.error exits
         finally:
             with contextlib.suppress(Exception):
                 conn.close()

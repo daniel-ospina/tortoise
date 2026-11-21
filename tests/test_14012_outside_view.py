@@ -384,7 +384,81 @@ def test_a_useless_key_bound_is_refused_rather_than_read_as_an_empty_cache():
             outside_view.resident_keys(graph, limit=bad)
 
 
-# ── review round 1 ─────────────────────────────────────────────────────────────
+# ── the two fail-open paths review round 2 found ────────────────────────────────
+def test_a_topic_column_that_is_not_a_record_column_is_refused():
+    """`topic_column` is the ONE identifier that reaches a SQL string — allowlisted.
+
+    `TOPICS_SQL` puts it in the SELECT list and `GROUP BY 1`, which is an IDENTIFIER
+    position: `%s` covers values only, so a `.format` that skips the check turns a
+    caller-supplied value into SQL structure (psycopg's own guidance: allowlist the
+    identifier, do not merely interpolate it). Every other identifier in this module is
+    already checked, so this one must be too — it is a library door, and the next
+    caller of it is the customer-facing API verb.
+    """
+    for bad in ("point_kind; DROP TABLE point", "(SELECT max(node_key) FROM public.point)",
+                "not_a_column", "created_at2"):
+        conn = _Conn(_record_rows(["p0"]))
+        with pytest.raises(ValueError) as exc:
+            _view(_Graph(["p0"]), conn, topic_column=bad)
+        assert "not a column of public.point" in str(exc.value)
+        assert not [s for s, _ in conn.executed if "FROM public.point" in s], (
+            f"the refused topic_column {bad!r} still reached a statement"
+        )
+
+
+def test_a_real_topic_column_reaches_the_statement():
+    """Non-vacuity for the allowlist above: it must not refuse EVERY column."""
+    conn = _Conn(_record_rows(["p0"]))
+    _view(_Graph(["p0"]), conn, topic_column="created_at")
+    topics = [s for s, _ in conn.executed if "GROUP BY 1" in s]
+    assert topics, "the topic statement was never issued"
+    assert "SELECT created_at AS topic" in topics[0], (
+        "a real `point` column was not the one interpolated — the allowlist accepted "
+        f"it but the statement does not carry it: {topics[0]!r}"
+    )
+
+
+def test_an_unmeasured_cross_check_is_not_complete():
+    """`record_total` failing ALONE must still make `complete` False.
+
+    `_record_total` issues its own statement after the span and topic reads have already
+    succeeded, so it can fail alone (a statement timeout, a dropped connection, a
+    `count(*)` permission the aggregates do not need). It swallows the exception and
+    returns None — and `complete` used to be a literal `True` on this path, so the field
+    a monitor keys on, and `tools/resident.py`'s `verdict: OK` / exit 0, both failed
+    OPEN over a partial read.
+    """
+
+    class _NoTotal(_Conn):
+        def cursor(self):
+            cur = super().cursor()
+
+            def _boom(sql, params=None):
+                # ⛔ `GROUP BY` excluded: the TOPIC statement also carries
+                # `count(*) AS n FROM public.…`, so the narrower match is the
+                # record-total statement alone.
+                if ("count(*) AS n FROM public" in sql
+                        and "GROUP BY" not in sql):
+                    raise RuntimeError("permission denied for relation point")
+                return _Cursor.execute(cur, sql, params)
+
+            cur.execute = _boom  # type: ignore[method-assign]
+            return cur
+
+    view = _view(_Graph(["p0"]), _NoTotal(_record_rows(["p0", "p1"])))
+
+    assert view.outside == 1, "sanity: the span read itself succeeded"
+    assert view.record_total is None, "sanity: the cross-check could not be read"
+    assert view.complete is False, (
+        "an unmeasured cross-check was reported as a COMPLETE view — `complete` is `True` "
+        "only when both halves were read in full, and it is what the CLI turns into "
+        "`verdict: OK` / exit 0"
+    )
+    assert "cross-check" in view.reason, (
+        f"the reason does not name what was missing — got {view.reason!r}"
+    )
+
+# ── merged from review round 1 (this lane) — two cases round 2 did not cover ───
 def test_a_scope_refusal_is_unmeasured_not_a_traceback():
     """`_apply_tenant_scope` REFUSES by design; outside the guard it escaped as one.
 
@@ -414,26 +488,8 @@ def test_a_scope_refusal_is_unmeasured_not_a_traceback():
     assert "tenant GUC" in view.reason, "the refusal's own reason was swallowed"
 
 
-def test_a_grouping_column_that_is_not_a_record_column_is_refused():
-    """`--topic-column` is GROUP BY input, so a SQL EXPRESSION must not reach the record.
-
-    Verified before the guard: `(SELECT count(*) FROM public.point)` rendered as the
-    grouping expression, so any column of any table was disclosable through `topics`, and
-    an expensive subquery could be forced on every call.
-    """
-    graph = _Graph(["p0"])
-    conn = _Conn(_record_rows(["p0"]))
-    for bad in ("(SELECT count(*) FROM public.point)", "point_kind; DROP TABLE point",
-                "nope_not_a_column"):
-        with pytest.raises(ValueError):
-            _view(graph, conn, topic_column=bad)
-    assert not [s for s, _ in conn.executed if "GROUP BY" in s], (
-        "a rejected grouping column still reached the record"
-    )
-
-
-def test_complete_is_false_beside_a_field_nothing_measured():
-    """`complete: true` beside `resident: null` reads as a healthy empty."""
+def test_complete_is_false_when_the_RESIDENT_count_alone_fails():
+    """The third number that can fail alone — round 2's arm covers `record_total`."""
     class _NoCount(_Graph):
         def query(self, statement, params=None):
             if "RETURN count(n)" in statement:
@@ -443,4 +499,4 @@ def test_complete_is_false_beside_a_field_nothing_measured():
     view = _view(_NoCount(["p0"]), _Conn(_record_rows(["p0"])))
     assert view.resident is None
     assert view.complete is False
-    assert "resident" in view.reason
+    assert "resident figure" in view.reason
