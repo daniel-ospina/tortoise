@@ -743,6 +743,26 @@ def test_a_record_scope_refusal_exits_4_with_the_reason(wired, capsys, monkeypat
     )
 
 
+def test_an_unwritable_out_keeps_the_verdict_and_the_exit_code(
+        wired, capsys, tmp_path):
+    """An IO fault must not become "retry the FLAGS".
+
+    ⛔ `_emit()` was unguarded, so `--out` into an impossible path raised straight out of
+    `main()`: a REFUSED (3) — or, on `pin`/`unpin`, a declaration that HAD been written —
+    became a traceback with exit 1, this tool's USAGE code. The exit code the verb
+    computed survives, the report goes to stdout, and the fault is named on stderr.
+    """
+    # `afile` is a FILE, so `afile/deep/` cannot exist: an OSError on mkdir.
+    (tmp_path / "afile").write_text("x")
+    code = resident.main(["pin", *BASE, "--key", "p0", "--window-nodes", "1000",
+                          "--out", str(tmp_path / "afile" / "deep" / "r.json")])
+    captured = capsys.readouterr()
+    assert code == resident.EXIT_OK, "the verdict was replaced by the IO fault"
+    payload = json.loads(captured.out)
+    assert payload["verdict"] == "OK"
+    assert "could not write" in captured.err
+
+
 def test_unpin_needs_no_budget_even_when_the_cap_cannot_be_checked(
         wired, capsys, monkeypatch):
     """`unpin` is the documented remedy for an over-budget set, so it must not need one.

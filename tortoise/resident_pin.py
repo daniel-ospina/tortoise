@@ -361,7 +361,8 @@ class PinReading:
     ``readable``  ``False`` when the declaration or the closure could not be read. A
                   sweep that cannot tell what is pinned must REFUSE (:func:`gate_reason`),
                   never assume an empty set.
-    ``truncated`` ``True`` when the key read hit :data:`DEFAULT_KEY_LIMIT`. The closure is
+    ``truncated`` ``True`` when the key read hit its bound — :func:`key_limit`, i.e.
+                  ``$TORTOISE_PIN_KEY_LIMIT`` when set, else :data:`DEFAULT_KEY_LIMIT`. The closure is
                   then a PARTIAL one, and its size is a lower bound — reported, never
                   silently used as if complete.
     """

@@ -39,9 +39,12 @@ Exit codes — the census's vocabulary, so a scheduler keys on one table
                    key the fast layer does not hold, an unreadable declaration, a pin
                    set whose budget no longer covers it, or a `--label`/`--key-prop`
                    that is not a bare identifier. Nothing was written.
-    4  UNMEASURED  what is outside could not be measured (a partial resident read, an
-                   unreachable record). ⛔ NOT zero: a missing measurement read as a
-                   healthy zero is the defect both controls exist to avoid.
+    4  UNMEASURED  the question this verb exists to answer could not be measured: what
+                   is outside (a partial resident read, an unreachable record), or —
+                   for `show` — whether a DECLARED set is inside its cap, when no
+                   residency window is resolvable. ⛔ NOT zero and NOT OK: a missing
+                   measurement read as a healthy pass is the defect both controls exist
+                   to avoid, and a scheduler keys on this code.
     1  usage       a flag, import or IO mistake — including a `--label` the record
                    has no table for, and a `--topic-column` that is not a real column
                    of it
@@ -93,8 +96,20 @@ def _emit(body: dict[str, Any], out: Path | None) -> None:
     if out is None:
         print(text)
         return
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(text + "\n", encoding="utf-8")
+    # ⛔ AN UNWRITABLE `--out` MUST NOT EAT THE VERDICT. Unguarded this raised straight
+    # out of `main()`: a REFUSED (3) became a traceback with exit 1 — this tool's USAGE
+    # code, i.e. "retry the FLAGS" for an IO fault — and on `pin`/`unpin` it sat AFTER the
+    # write, so a declaration that HAD been written was reported as a flag error with no
+    # report body. `tools/cache_evict.py::_emit` already fixes exactly this class; this is
+    # the same fix, and the exit code the verb computed is what survives.
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(text + "\n", encoding="utf-8")
+    except OSError as exc:
+        print(f"#14012: could not write --out {out} ({type(exc).__name__}: {exc}); the "
+              f"report follows on stdout and the exit code is unchanged",
+              file=sys.stderr)
+        print(text)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -118,15 +133,24 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--label", default=None,
                        help="the label a pin addresses (default for `pin`: Point)")
         p.add_argument("--key-prop", default=None, metavar="PROP",
-                       help="the node property holding the record key "
-                            "(default for `pin`: id)")
+                       help=("the node property holding the record key (default: the label's "
+                      "CONTRACT key from cache_projection.KEY_PROPERTY — `id` for Point/"
+                      "Subject/Object/Session, `eventId` for Event, `url` for Source; a "
+                      "non-contract property is REFUSED, because the outside view reads "
+                      "the graph by it and compares the record's node_key)"))
         p.add_argument("--window-nodes", type=int, default=None, metavar="N",
                        help=("the residency window's node budget — the number the pin "
                              "cap is derived from. Defaults to "
                              "$TORTOISE_CACHE_MAX_NODES."))
         p.add_argument("--max-pins", type=int, default=None, metavar="N",
                        help=("the pin budget, closure included. Defaults to a tenth of "
-                             "the window; it may never equal the window."))
+                             "the window; it may never equal the window. ⛔ A "
+                             "per-invocation cap is NOT recorded in the declaration: a "
+                             "SWEEP resolves its own from $TORTOISE_PIN_MAX_NODES (or a "
+                             "tenth of the window), so set that variable if the cap is "
+                             "meant to bind the sweep too — otherwise `show --max-pins "
+                             "N` and `tools/cache_evict.py` can disagree about whether "
+                             "the set is over budget."))
         p.add_argument("--max-degree", type=int, default=None, metavar="N",
                        help="the degree ceiling (§7); a bigger hub is refused.")
         p.add_argument("--out", type=Path,

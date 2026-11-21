@@ -807,7 +807,12 @@ def test_a_pin_held_head_at_the_reach_bound_is_not_told_to_re_run():
         "an all-pinned head was told to re-run: re-running examines the same nodes and "
         f"stops in the same place. reason={report.reason}"
     )
-    assert "pinned" in report.reason.lower()
+    # ⛔ The remedy must be IN the message. The breakdown string ("N pinned, M
+    # pin-unanswerable) has reached the widest prefix …") satisfies a bare "pinned"
+    # check while offering only "raise the batch or the pass budget, or widen the proven
+    # population" — none of which unpins anything. The cheapest working reply is the
+    # one that must appear.
+    assert "unpin" in report.reason.lower(), report.reason
 
 
 def test_a_node_taken_after_the_pin_predicate_recovered_leaves_no_stale_held_entry():

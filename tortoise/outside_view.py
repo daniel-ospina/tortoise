@@ -468,14 +468,24 @@ def read(
     # That is the shape a wrong `key_prop` produced (see above), and it is also what a
     # partially-populated key property produces on its own. Either way the view cannot
     # claim a number: it is unmeasured, not "everything is outside".
-    if not keys and (resident_total or 0) > 0:
+    # ⛔ ANY DISAGREEMENT, not just "the read returned nothing". Both are reads of the
+    # SAME population, so on a non-truncated read they must agree; a graph holding a node
+    # under a NULL or malformed key is simply INVISIBLE to the key list, and the SQL
+    # complement then counts that node as outside — a fabricated demotion reported with
+    # `complete=True` and exit 0. MEASURED with one of three nodes keyed NULL: resident 3,
+    # record 3, outside 1 (truth 0), `complete: True`. Reachable by any writer outside
+    # `record_projection` (it refuses a NULL contract key, so this needs a foreign, older
+    # or manual writer) — which is exactly the case a reader is the last line of defence
+    # for.
+    if (not truncated and resident_total is not None
+            and len(keys) != resident_total):
         return OutsideView(
             org_id=org_id, graph_id=graph_id, label=label,
             resident=resident_total,
             complete=False,
             reason=(f"the graph reports {resident_total} resident {label} node(s) but "
-                    f"its key read ({key_prop!r}) returned none — the two halves of this "
-                    f"view disagree, so how much is outside cannot be measured"),
+                    f"its key read ({key_prop!r}) yielded {len(keys)} — the two halves of "
+                    f"this view disagree, so how much is outside cannot be measured"),
             source=f"graph:{label}",
         )
 

@@ -1415,8 +1415,15 @@ def evict(
                     f"reached the widest prefix ONE call can examine "
                     f"({reach} = batch {resolved.batch_size} x "
                     f"2^(max_passes-1 {resolved.max_passes - 1})); re-running will not "
-                    f"converge — raise the batch or the pass budget, or widen the "
-                    f"proven population"
+                    f"converge — "
+                    + (
+                        "unpin some of them, or raise TORTOISE_PIN_MAX_NODES while "
+                        "keeping it smaller than the window"
+                        if len(held_pinned) >= reach
+                        or len(held_pinned_unanswerable) >= reach
+                        else "raise the batch or the pass budget, or widen the proven "
+                             "population"
+                    )
                 )
             else:
                 reason += (

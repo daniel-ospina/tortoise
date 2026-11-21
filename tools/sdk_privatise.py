@@ -984,7 +984,15 @@ SWEEP_NAMES = 66
 #: one in `readers.json`). `11848 + 8 = 11856` is a CROSS-CHECK of the two measurements, never their
 #: evidence. `--check` exits 0 on this tree:
 #: `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11856, "e9249c5490bc38d7")
+#:
+#: RE-CUT → (11857, "28611b0c960d0070") by the SAME lane's review rounds 3-4, and the +1 is
+#: ATTRIBUTED by the tool's own row diff (`--report --base 28ca66878d7c --top 5000` on both
+#: trees, sorted and diffed): EXACTLY ONE row differs — `super().query` 71 → 72, the
+#: `_PartiallyKeyed` fake in `tests/test_14012_outside_view.py` delegating to its parent for
+#: the statements it does not answer. An ordinary-word receiver on an object no typing can
+#: decide, which is what this counter reports; `typed references still pointing at a public
+#: name` stays **0**, so no SDK-typed site is legitimised.
+SWEEP_RESIDUE = (11857, "28611b0c960d0070")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

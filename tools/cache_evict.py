@@ -412,13 +412,17 @@ def main(argv: list[str] | None = None) -> int:
                 return CACHE_EVICTION_EXIT_REFUSED
             # ⛔ A PIN SET ADDRESSES ONE KEY SPACE, and this sweep addresses the one its
             # `--key-prop` names. On a mismatch the set holds nothing in THIS population,
-            # so it is NOT applied — and that is REPORTED rather than refused, because
-            # refusing would block every sweep of another population for as long as any
-            # pin exists (a per-graph set is declared once), and applying it would compare
-            # keys that mean different things. The flag pair that used to decide this is
-            # GONE: `--pins-label/--pins-key-prop` were both an over-block (any `Point`
-            # pin refused a `Source` sweep) and a bypass (naming the declaration's own pair
-            # rather than the sweep's re-armed it).
+            # so it must not be applied. ⛔ AND IT IS REFUSED BY DEFAULT rather than
+            # reported-and-proceeded (an earlier revision of this comment described the
+            # proceed-by-default behaviour, which is gone): the comparison is on the
+            # PROPERTY NAME, so it does not PROVE the two key spaces hold different
+            # populations — a sweep keying the same nodes by another property would evict a
+            # pinned closure while the report read `held_pinned: 0`. The over-block that
+            # motivated proceeding (a per-graph set is declared once) is real and is
+            # answered by ONE auditable flag, `--allow-unapplied-pin-set`. The flag pair
+            # that used to decide this is GONE: `--pins-label/--pins-key-prop` were both an
+            # over-block (any `Point` pin refused a `Source` sweep) and a bypass (naming
+            # the declaration's own pair rather than the sweep's re-armed it).
             if pins.keys and pins.key_prop != args.key_prop:
                 pin_note = (
                     f"the pin declaration addresses keys named by {pins.key_prop!r} "

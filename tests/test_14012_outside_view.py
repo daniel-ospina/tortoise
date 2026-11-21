@@ -475,6 +475,38 @@ def test_a_graph_reporting_residents_it_cannot_key_is_unmeasured_never_everythin
     assert "disagree" in view.reason
 
 
+def test_a_partially_unkeyed_graph_is_unmeasured_not_a_fabricated_outside_count():
+    """A node the key read cannot see must not be counted as OUTSIDE.
+
+    ⛔ The disagreement guard used to fire only when the key read returned NOTHING. A
+    graph holding one node under a NULL contract key is just as invisible to the key list
+    — and the SQL complement then counts that node as outside, so a fully-resident
+    population was reported as partly demoted with `complete=True` and exit 0. MEASURED
+    with one of three nodes keyed NULL: resident 3, record 3, outside 1 (truth 0).
+    """
+    keys = ["p0", "p1", "p2"]
+
+    class _PartiallyKeyed(_Graph):
+        def query(self, statement, params=None):
+            if "AS key" in statement:
+                self.statements.append(statement)
+                return _Result([["p0"], ["p1"], [None]])
+            return super().query(statement, params=params)
+
+    view = _view(_PartiallyKeyed(keys), _Conn(_record_rows(keys)))
+    assert view.complete is False, (
+        "the view claimed completeness from two reads that disagree"
+    )
+    assert view.outside is None, (
+        "a node the key read could not see was counted as OUTSIDE — a fabricated "
+        "demotion, reported as a measured number"
+    )
+    assert "disagree" in view.reason
+    assert "3" in view.reason and "2" in view.reason, (
+        "the reason must name both halves so the disagreement is checkable"
+    )
+
+
 def test_a_label_whose_table_has_no_kind_column_demands_one_instead_of_defaulting():
     """`session` carries no `*_kind`, so the grouping dimension has no default.
 
