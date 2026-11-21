@@ -337,6 +337,12 @@ NOT_SELECTED = [
     # "simplification" cannot let them route again.
     "have any users reported the vendor has been deprecated",
     "have any customers said the feature has been deprecated",
+    # …and the MODAL PASSIVE of the same class, which the first cut of the narrowing still
+    # let through (measured on `0bde9536`: whole ended population served, the caller's own
+    # `noticed` dropped). The guard now requires `been` after the finite verb rather than a
+    # closed list of auxiliaries, so `will have been` is caught like `has been` — the same
+    # class one auxiliary deeper, and no verb list to be one spelling short of.
+    "have any users noticed the vendor will have been deprecated",
     # ── the VERB-AND-OBJECT class on the attributive `which` row ─────────────
     # `which cancelled the deal` puts a finite past-tense verb with its own object
     # where a MODIFIER should be; the row now refuses a determiner after the
@@ -558,10 +564,11 @@ NOTICE_ONLY = [
     "has anything changed since the old pricing has been deprecated",
     "have any customers churned after the tier has been deprecated",
     # …including the asyndetic second clause the narrowed guard still refuses
-    # (`<det> <noun> has been`): reported, never routed, though it reads like the
-    # relative-clause form — the two are separated by which verb supplies `been`.
+    # (`<det> <noun> <finite verb> been`): reported, never routed, though it reads like
+    # the relative-clause form — the two are separated by which clause supplies `been`.
     "have any users reported the vendor has been deprecated",
     "have any customers said the feature has been deprecated",
+    "have any users noticed the vendor will have been deprecated",
     "is the SOC2 audit and its evidence package archived",
     "is the onboarding flow and its partner variants retired",
 ]
