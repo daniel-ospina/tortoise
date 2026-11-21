@@ -5127,13 +5127,14 @@ def test_the_d5_count_reader_reads_an_UNQUOTED_pattern_and_refuses_an_ambiguous_
         "flag word with an attached value; grep runs it (rc 1, nothing matches). Pinned `None` "
         "before the split, which is the model that hid `-cDread` (#14027 round 9, P2 — MEASURED)")
     # ⛔ AND THE SPELLING THAT MOTIVATED THE SPLIT IS GRADED, NOT MERELY DESCRIBED (#14027 round 9,
-    # P3 — MEASURED): no earlier row pinned `-Dread`/`-cDread` as READ, so the fix's own outcome was
-    # unwitnessed and a revert could not be told from a regression. `grep -c -Dread '^[+-]$'` really
-    # counts the blank class (`2` on the probe, rc 0), and `-cDread` is the same argv with `-c` in
-    # front of it (`2`, rc 0), so both must be READ. Under the one-name model this row refuses,
-    # `-cDread` is a single word whose LAST character (`d`, directories) is the one still awaiting a
-    # value (`_d5_needs_a_separate_value("-cDread")` is `True`), so the quoted expression is
-    # consumed there and the invocation answers `[]`.
+    # P3 — MEASURED): no earlier row pinned `-Dread`/`-cDread` as READ, and the rows above do not see
+    # a TAIL-level revert — a reader that splits at the cluster's LAST argument-taking character (or
+    # at index 1) keeps the `-ce`/`-ec` rows green and flips only this spelling (measured). `grep -c
+    # -Dread '^[+-]$'` really counts the blank class (`2` on the probe, rc 0), and `-cDread` is the
+    # same argv with `-c` in front of it (`2`, rc 0), so both must be READ. Under the one-name model
+    # this row refuses, `-cDread` is a single word whose LAST character (`d`, directories) is the one
+    # still awaiting a value (`_d5_needs_a_separate_value("-cDread")` is `True`), so the quoted
+    # expression is consumed there and the invocation answers `[]`.
     for read_spelling in ("grep -c -Dread '^[+-]$'", "grep -c -cDread '^[+-]$'"):
         assert _d5_blank_class_prescriptions(f"a count: `{read_spelling}`\n") == ["^[+-]$"], (
             f"{read_spelling!r} counts the blank class — `-D` takes `read` as its value and `-c` "
