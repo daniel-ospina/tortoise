@@ -403,8 +403,7 @@ SWEEP_NAMES = 66
 #:
 #: RE-CUT AT THE MERGE TREE (#14068 × `main`), and BOTH blocks above are carried because BOTH of their
 #: facts are true of THIS tree: `main`'s −6 (the `poisoned.update` shape `#14001` deleted, so five arms
-#: are now `poisoned |= …` and one dead branch is gone) AND `#14068`'s +8 receiver rows
-#: (`2fe01fc775e`). ⛔ Neither
+#: are now `poisoned |= …` and one dead branch is gone) AND this PR's +8 receiver rows. ⛔ Neither
 #: block's pin is this tree's pin — each was measured on ITS OWN tree, and a merged tree is a THIRD
 #: tree — so the pair below was RE-DERIVED with `--repin` on the MERGE tree, which is the rule both
 #: blocks cite above: measured, never arithmetic on the last pin. (11839 − 6 = 11833 would have been
