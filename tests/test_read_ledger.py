@@ -42,10 +42,14 @@ output is in the PR body):
 * **Record the tag scan BEFORE dropping tombstones** — move the ``_ledger_record``
   above the ``include_retracted`` filter → the same test RED (`p10` is a retracted
   row the caller is never served; measuring it as read biases `f` HIGH).
-* **Record the HEAD of the scan instead of the page** — ``_ledger_record("Point",
-  page[:1], …)`` → the same test RED, which is why the served page in that test is
-  TWO rows and starts at ``offset=1``: a one-row page at offset 0 cannot tell "the
-  page" from "the first scanned row".
+* **Record the HEAD of the scan, or a SHORTER slice, instead of the page** —
+  ``_ledger_record("Point", page[:1], …)`` or ``page[:2]`` → the same test RED,
+  which is why the served page is THREE rows starting at ``offset=1``: a one- or
+  two-row page cannot tell a truncated record from a faithful one.
+* **Gate the record on ``hasMore``** — record only when the page is not the last →
+  the same test RED, because a SECOND call takes the TAIL page: the last page is
+  served too, and leaving it unrecorded is the served-but-uncounted mass `f` must
+  not have.
 * **Stop the tag accessor's own default arm recording** — delete the
   ``if _record_reads:`` hook in ``_query_points_by_tag`` →
   ``test_the_tag_accessor_default_arm_records_the_caller_arm`` RED.
@@ -443,7 +447,7 @@ def test_the_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
     inst, graph = hooked_sdk
     # The keys must exist as STOCK first, or every read is (correctly) reported
     # as `unregistered` and there is no row to count on.
-    for key in ("p1", "p2", "p7", "p8", "p9", "p10", "p11", "p12"):
+    for key in ("p1", "p2", "p7", "p8", "p9", "p10", "p11", "p12", "p13"):
         record_stock("Point", key, nbytes=100)
 
     graph.rows = [{"id": "p1"}, {"id": "p2"}]
@@ -453,23 +457,34 @@ def test_the_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
     # THE TAG SCAN CARRIES EVERY HAZARD ON PURPOSE:
     #   * `p10` is a TOMBSTONE, ahead of the page in scan order — a door that
     #     records before applying `include_retracted` shows up as `p10: 1`;
-    #   * the page is TWO rows at `offset=1`, so it is neither the whole scan
-    #     (`p9`/`p11` are scanned and never served → `p9: 1`/`p11: 1` if the
-    #     population is recorded) NOR the head of the scan (a `page[:1]` record
-    #     would leave `p12` at 0). A one-row page at offset 0 would make all
-    #     three of those shapes indistinguishable.
+    #   * `p11` is scanned and never served (the `offset=1` page starts after
+    #     it) — recording the POPULATION shows up as `p11: 1`;
+    #   * the served page is THREE rows in the MIDDLE of the scan, so it is
+    #     neither the whole scan nor its head: `page[:1]` leaves `p12`/`p9` at
+    #     0, and `page[:2]` leaves `p9` at 0 (a one- or two-row page cannot tell
+    #     a truncated record from a faithful one);
+    #   * and a SECOND call takes the TAIL page, where `hasMore` is False — a
+    #     record gated on `hasMore` would leave the last page served and
+    #     unrecorded, which is the served-but-uncounted mass `f` must not have.
+    #     `p13` is that witness.
     graph.rows = [
         {"id": "p10", "status": "retracted"},
         {"id": "p11"},
         {"id": "p8"},
         {"id": "p12"},
         {"id": "p9"},
+        {"id": "p13"},
     ]
-    served = inst.search_knowledge(mode="tag", tag="t", offset=1, limit=2)
-    assert served["results"] == [{"id": "p8"}, {"id": "p12"}]
+    served = inst.search_knowledge(mode="tag", tag="t", offset=1, limit=3)
+    assert served["results"] == [{"id": "p8"}, {"id": "p12"}, {"id": "p9"}]
+    assert served["hasMore"] is True
     # `total` describes the population the caller ASKED for: the tombstone is
-    # dropped BEFORE the slice (sdk.py:30905-30907), so 4, not 5.
-    assert served["total"] == 4
+    # dropped BEFORE the slice (sdk.py:30905-30907), so 5, not 6.
+    assert served["total"] == 5
+
+    tail = inst.search_knowledge(mode="tag", tag="t", offset=4, limit=3)
+    assert tail["results"] == [{"id": "p13"}]
+    assert tail["hasMore"] is False, "the tail page is SERVED, so it must be recorded"
 
     graph.rows = [{"id": "p7"}]
     assert inst._get_point("p7") == {"id": "p7"}
@@ -478,12 +493,13 @@ def test_the_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
     counts = {k[2]: row.read_count for k, row in folded.rows.items()}
     # `p7` stays at ZERO: `_get_point` is the internal accessor the write paths
     # use, so it must record NOTHING — if it ever starts recording, a
-    # written-but-never-read node looks read and `f` is biased HIGH. `p9`, `p10`
-    # and `p11` stay at ZERO for the opposite reason — they were scanned and NOT
-    # served (a tombstone, and two rows outside the page).
+    # written-but-never-read node looks read and `f` is biased HIGH. `p10` and
+    # `p11` stay at ZERO for the opposite reason — they were scanned and NOT
+    # served (a tombstone, and the one row the first page skipped). `p13` is 1
+    # even though its page had `hasMore == False`: the LAST page is served.
     assert counts == {
-        "p1": 1, "p2": 1, "p7": 0, "p8": 1, "p9": 0,
-        "p10": 0, "p11": 0, "p12": 1,
+        "p1": 1, "p2": 1, "p7": 0, "p8": 1, "p9": 1,
+        "p10": 0, "p11": 0, "p12": 1, "p13": 1,
     }
     assert folded.unresolved_reads == 0
 
