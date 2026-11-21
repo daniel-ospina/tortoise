@@ -616,12 +616,11 @@ def _skipif_conditions(tree: ast.Module) -> list[ast.expr]:
             if isinstance(func, ast.Name)
             else None
         )
-        # `xfail(cond)` decides a resolution exactly as `skipif(cond)` does, and it
-        # is the MORE dangerous of the two for this gate: a rename inside the probe
-        # makes the test XFAILED, so the failure the probe exists to surface is
-        # marked as EXPECTED instead of redding (review of `61fc96cdd8`, P2-3 —
-        # measured `()` for `xfail(not LIVE)` while the identical
-        # `skipif(not LIVE)` form graded).
+        # `xfail(cond)` decides a resolution exactly as `skipif(cond)` does, and it is
+        # the MORE dangerous of the two for this gate: a rename inside the probe makes
+        # the test XFAILED, so the failure the probe exists to surface is marked as
+        # EXPECTED instead of redding (review of `61fc96cdd8`, P2-3 — measured `()`
+        # for `xfail(not LIVE)` while the identical `skipif(not LIVE)` form graded).
         if name in {"skipif", "skip", "xfail"}:
             out.append(node.args[0])
     return out
@@ -701,63 +700,6 @@ def _skip_guard_call_names(tree: ast.Module) -> set[str]:
     return out
 
 
-def _skip_decision_names(node: ast.AST) -> set[str]:
-    """Every NAME a `skip`/`skipif`/`xfail` CALL inside this node READS.
-
-    The complement of ``_bound_names``: one says what a block binds, this says
-    what its skip decision reads, and their intersection is the sentinel shape
-    ``_skips_on_a_bound_name`` admits. ``skipif`` is matched as a CALL here (the
-    decorator form `@pytest.mark.skipif(cond)` is an Attribute call with
-    `attr == "skipif"`), so the decorator and the `pytest.skip(...)` statement
-    are graded by the same walk.
-    """
-    out: set[str] = set()
-    for sub in ast.walk(node):
-        if not isinstance(sub, ast.Call):
-            continue
-        func = sub.func
-        name = (
-            func.attr
-            if isinstance(func, ast.Attribute)
-            else func.id
-            if isinstance(func, ast.Name)
-            else None
-        )
-        if name not in {"skip", "skipif", "xfail"}:
-            continue
-        for arg in sub.args:
-            out |= {n.id for n in ast.walk(arg) if isinstance(n, ast.Name)}
-    return out
-
-
-def _skips_on_a_bound_name(func: ast.AST) -> bool:
-    """Whether this function SKIPS on a sentinel it bound ITSELF.
-
-    `unsupported = e` … `pytest.skip(f"… {unsupported}")` inside a `def test_…`
-    body is the class-2 decision: the `try` that produced `unsupported` swallowed
-    a programming error, and the test skips instead of redding. `_probe_roots`
-    admitted only MODULE-LEVEL helpers a `skipif` names, so a test body was graded
-    by nothing at all (review of `61fc96cdd8`, P1-1; live instance
-    `tests/test_index_surfacing.py:269-281`).
-
-    Deliberately NOT "any function that skips": both halves are required. A body
-    that skips on a MODULE-level flag is already graded by the module-body branch,
-    and admitting every skipping function would make the whole `tests/` tree a
-    root population with no arm to give it meaning.
-
-    Measured blast radius of this rule on the real tree: 64 -> 66 rows,
-    54 -> 55 files, 56 -> 58 roots — two new roots, `tests/test_index_surfacing.py`
-    (the live instance) and `tests/test_8870_version_anchor_write_order.py::_live_proj`,
-    BOTH unarmed at the moment the rule landed and both armed by the same commit.
-    The objection that grading them "requires knowing which errors must re-raise"
-    is already answered by `_required_names(own_import=False)`: a block that imports
-    no own code must re-raise `AttributeError`/`NameError`/`TypeError` and nothing
-    more.
-    """
-    read = _skip_decision_names(func)
-    return bool(read) and bool(_bound_names(func) & read)
-
-
 def _skip_gating_functions(tree: ast.Module) -> set[str]:
     """Module-level helpers whose value decides a SKIP at import/collection.
 
@@ -790,6 +732,33 @@ def _skip_gating_functions(tree: ast.Module) -> set[str]:
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
                 names.add(node.func.id)
     return names
+
+
+_SKIP_CALLS = frozenset({"skip", "skipif", "xfail"})
+
+
+def _skip_call_read_names(fn: ast.AST) -> set[str]:
+    """Names a `skip`/`skipif`/`xfail` call INSIDE this function reads.
+
+    `_skip_condition_names` answers the module-DECORATOR half (`skipif(not LIVE)`
+    above a `def`), and `_skip_gating_functions` answers the "module-level helper
+    that produces the flag" half. Neither reaches a probe inside a `def test_…`
+    body that decides its own skip — the widening the `_probe_roots` contract asks
+    for (review P1).
+    """
+    out: set[str] = set()
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call):
+            continue
+        # The `pytest.skip(...)` / `@pytest.mark.skipif(...)` forms are Attribute
+        # calls; a bare `skip(...)` / `xfail(...)` imported by name is the same
+        # decision, and matching only the attribute form graded it as nothing.
+        name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+        if name not in _SKIP_CALLS:
+            continue
+        for arg in list(node.args) + [kw.value for kw in node.keywords]:
+            out |= {sub.id for sub in ast.walk(arg) if isinstance(sub, ast.Name)}
+    return out
 
 
 def _control_flow_tries(body: list[ast.stmt]) -> list[ast.Try]:
@@ -834,10 +803,8 @@ def _control_flow_tries(body: list[ast.stmt]) -> list[ast.Try]:
         if isinstance(node, ast.Try):
             if node.handlers:
                 out.append(node)
-                # NOTE: `ast.TryStar` (`except*`) reaches this arm too — it has the
-                # same shape — so the two descent lines below cover it.
-                # …and keep looking INSIDE it: `orelse`/`finalbody` are part of
-                # the same construct (`try/except/else` is one decision shape).
+                # …and keep looking INSIDE it: `orelse`/`finalbody` are part of the
+                # same construct (`try/except/else` is one decision shape).
                 stack.extend(node.orelse)
                 stack.extend(node.finalbody)
             else:
@@ -850,10 +817,10 @@ def _control_flow_tries(body: list[ast.stmt]) -> list[ast.Try]:
             stack.extend(node.body)
             stack.extend(getattr(node, "orelse", []) or [])
         elif isinstance(node, ast.ClassDef):
-            # A class BODY is module-level control flow: `class _C: try: <probe>`
-            # binds a flag exactly as one at module scope does. Method bodies are
-            # NOT descended — a `def` is skipped by this walk, exactly as it is in
-            # a plain module body (they get their own pass).
+            # A class BODY is module-level control flow: `class _C: try: <probe>` binds
+            # a flag exactly as one at module scope does. Method bodies are NOT
+            # descended — a `def` is skipped by this walk, exactly as it is in a plain
+            # module body (they get their own pass).
             stack.extend(node.body)
         elif isinstance(node, ast.Match):
             for case in node.cases:
@@ -1055,30 +1022,61 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
         helper's control flow — the guard may sit inside a `for`;
       * the probe `try` inside a helper a SKIP decision calls — directly from a
         `skipif`, or through a sentinel (`uri = _live_target()` … `if uri is None:
-        pytest.skip(…)`), where no flag exists at all. **Any function, at any
-        nesting depth** — a `def test_…` body that skips on a sentinel it bound
-        itself is the same decision and was graded by nothing (review of
-        `61fc96cdd8`, P1-1, live instance `tests/test_index_surfacing.py:269`).
+        pytest.skip(…)`), where no flag exists at all.
 
     The contract above is the code's, not an aspiration: a docstring that said
     "two shapes" while the function admitted four told any lane auditing this
     gate from its own contract that half its population was ungraded (review of
     3ce7ffdd867, P2). Measured per-branch root counts at that head: 26 / 5 / 15 / 5.
 
-    Both module-body rules walk module-level CONTROL FLOW (`if`/`for`/`with`/`match`,
-    a `class` body, and through a handler-less `try/finally` — a pure wrapper, see
+    Both module-body rules walk module-level CONTROL FLOW (`if`/`for`/`with`, and
+    through a handler-less `try/finally` — a pure wrapper, see
     `_control_flow_tries`).
 
-    ⛔ THE "FOUR RULES" LINE ABOVE NOW COVERS A WIDER POPULATION THAN THE FOURTH
-    BULLET FIRST SAID, and the widening was DECLARED as a residual on this branch
-    before it was closed. The declaration was right about the hole and wrong about
-    the cost: grading a test-body probe does not need a design decision about which
-    errors re-raise, because `_required_names(own_import=False)` already answers it
-    for any block that imports no own code (`AttributeError`, `NameError`,
-    `TypeError`). What it needed was arming the two probes the rule newly graded —
-    `tests/test_index_surfacing.py:269` and
-    `tests/test_8870_version_anchor_write_order.py::_live_proj` — which is done, so
-    the population grew 64 -> 66 rows with `UNARMED == ()`.
+    ⛔ DECLARED RESIDUAL — a probe inside a `def test_…` BODY is graded by NOTHING.
+    The population is module-body `try`s plus `try`s inside module-LEVEL helpers that
+    the flag is resolved by, or that a skip decision calls; a test function is in
+    neither set, even when it is the same shape (`except Exception` → sentinel →
+    `pytest.skip`). Live instance at this writing: `tests/test_index_surfacing.py:269`
+    — a broad `except Exception` inside a `for` in a test body, capturing into
+    `unsupported` and feeding `pytest.skip(...)`; measured `_reaches_capability_seam`
+    TRUE, `_assigns_availability` FALSE, and absent from `_probe_report()` while the
+    census reports `UNARMED == ()`. It is DECLARED here rather than silently left out,
+    and the widening is named: admit any function containing a `skip`/`skipif`/`xfail`
+    call that ALSO binds a name the call reads, reusing the sentinel set
+    `_skip_guard_call_names` already computes.
+
+    ✅ THAT DECISION IS NOW MADE AND THE WIDENING IS APPLIED (review P1, closed).
+    It was declared because grading the named block "demands knowing which errors
+    must re-raise — a design call, not a mechanical edit". The design answer is the
+    one every other probe in this census already uses: re-raise
+    `(AttributeError, NameError, TypeError)` ahead of the broad arm and LEAVE THE
+    BROAD ARM. That is safe for exactly this block because an engine that cannot
+    hold a fulltext index answers with a `redis.exceptions.ResponseError` — a
+    `RedisError`, not a `TypeError`, so the legitimate skip is untouched while a
+    moved door or a changed call shape now fails loudly instead of being recorded
+    as "this engine has no FTS" (see `tests/test_index_surfacing.py:269`).
+    Measured blast radius of the widening on the real tree, before it was written:
+    EXACTLY TWO new roots, and BOTH are armed in the same commit, so `UNARMED` stays
+    `()` — the population pin moves 64 rows / 56 roots / 54 files → 66 / 58 / 55.
+
+    ⛔ THE SECOND OF THOSE TWO IS THE SENTINEL-COMPUTED-AFTER-THE-GUARD SHAPE, and it
+    is why the sentinel test is FUNCTION-scoped rather than block-scoped. The first
+    landed version tested `_bound_names(block) & skip_read` over each guarded block,
+    which grades a probe whose `pytest.skip` sits INSIDE the same `try` and misses the
+    spelling the live instance actually uses — the guarded block binds the CLIENT, the
+    sentinel is derived from it BELOW the guard, and the skip reads that sentinel:
+
+        try: <capability call>
+        except Exception as e: pytest.skip(…)      # the PROBE swallows HERE
+        SENTINEL = <derived from the client>       # bound AFTER the guard
+        if SENTINEL is not None: pytest.skip(SENTINEL)
+
+    `tests/test_8870_version_anchor_write_order.py::_live_proj` is that shape, and it
+    was measured UNGRADED under the block-scoped test while `from_uri` / `proj.g.query`
+    sat inside the guarded block. The skip decision and the name it reads are both
+    properties of the FUNCTION, so that is the bound; blocks already graded above are
+    skipped by IDENTITY, so widening the search cannot double-count a root.
 
     Nested `try`s inside a probe body are not roots: a `try/_proj.close()/except
     Exception: pass` cleanup is not the availability decision. The import-seam
@@ -1191,52 +1189,64 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
                     or _reaches_capability_seam(block, third_party)
                 )
             )
-
-    # ⛔ …AND THIS ARM REACHES **EVERY** FUNCTION, NOT ONLY THE MODULE-LEVEL
-    # HELPERS A `skipif` NAMES (review of `61fc96cdd8`, P1-1; measured, not
-    # declared). A `def test_…` body that binds a sentinel and then skips on it is
-    # the SAME decision — and the census graded NOTHING there while
-    # `_skip_guard_call_names` already walked the whole tree to find the sentinel
-    # names. That asymmetry was the hole. Live instance:
-    # `tests/test_index_surfacing.py:269-281` — a broad `except Exception` in a
-    # `for` inside a test body, capturing the error into `unsupported` and feeding
-    # `pytest.skip(f"… {unsupported}")`; the file was absent from the census and
-    # its swallowed arm was invisible while `UNARMED == ()`.
+    # ── ANY OTHER function whose probe feeds its own SKIP decision (review P1) ──
     #
-    # The test named in that finding is only HALF the class, so the rule is the
-    # general one: any function (nested, method, test, helper) that (a) contains a
-    # `skip`/`skipif`/`xfail` call and (b) BINDS a name that call READS is a
-    # skip-gated decision, and the same three admission arms apply to it. Measured
-    # blast radius on the real tree: 64 -> 66 rows, 54 -> 55 files, 56 -> 58 roots,
-    # and both new roots are armed in the same commit.
-    module_level = {
-        id(stmt)
-        for stmt in tree.body
-        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    for func in ast.walk(tree):
-        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+    # The two passes above are module-level by construction: one reads `tree.body`
+    # for helpers a SKIP DECISION calls, the other `tree.body` for the resolvers a
+    # flag is assigned from. A probe inside a `def test_…` body that computes its
+    # own `skip` sentinel is in neither — the previously DECLARED residual, whose
+    # live instance was `tests/test_index_surfacing.py:269`. The admission rule and
+    # the narrowing are the ones the skip-gated helper branch already uses; only the
+    # set of functions searched changes. Blocks graded above are skipped by identity
+    # so no root is counted twice.
+    #
+    # ⛔ THE SENTINEL TEST IS **FUNCTION**-SCOPED, NOT BLOCK-SCOPED, and that is the
+    # difference between grading the class-2 shape and grading only half of it. The
+    # shape this census names by hand is
+    #
+    #     try: … capability call …
+    #     except Exception as e: pytest.skip(…)   # the PROBE swallows here
+    #     SENTINEL = <derived from the client>    # bound AFTER the guard
+    #     if SENTINEL is not None: pytest.skip(SENTINEL)
+    #
+    # — the guarded block binds the CLIENT, the sentinel is derived from it below the
+    # guard, and the skip reads that sentinel. A block-scoped test
+    # (`_bound_names(block) & skip_read`) therefore misses EVERY probe whose sentinel
+    # is computed after the guard:
+    # `tests/test_8870_version_anchor_write_order.py::_live_proj` was measured
+    # UNGRADED under it while `from_uri`/`proj.g.query` sit in the guarded block and
+    # `pytest.skip(reason)` sits below it. Function scope is the honest bound: the
+    # skip decision and the thing it reads are both properties of the FUNCTION.
+    #
+    # Measured blast radius on the real tree at this head: exactly TWO new roots —
+    # `tests/test_index_surfacing.py:269` and the `_live_proj` block above — and both
+    # are armed in the same commit, so `UNARMED` stays `()` (a widening that only
+    # moves the hole is not a fix).
+    graded = {id(block) for block in roots}
+    for fn in ast.walk(tree):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        # A module-level function the branches above already graded keeps its OWN
-        # branch: the two rules were an if/elif over `tree.body`, and re-admitting one
-        # here would grade it TWICE — measured, that double-counted 9 roots (66 -> 75
-        # rows, key set unchanged), which is a population inflation, not coverage.
-        if id(func) in module_level and (
-            func.name in resolvers or func.name in skip_gated
-        ):
+        skip_read = _skip_call_read_names(fn)
+        if not skip_read:
             continue
-        if func.name not in skip_gated and not _skips_on_a_bound_name(func):
+        # The sentinel may be ANY name this function binds — module-level helpers
+        # included: a block admitted above is skipped by identity, so searching them
+        # again cannot double-count, and a nested function that happens to share a
+        # resolver's NAME is graded rather than silently skipped by that collision.
+        fn_bound = _bound_names(fn)
+        if not (fn_bound & skip_read):
             continue
-        own_names = _own_imported_names(func.body) | module_own
-        roots.extend(
-            block
-            for block in _control_flow_tries(func.body)
+        own_names = _own_imported_names(fn.body) | module_own
+        for block in _control_flow_tries(fn.body):
+            if id(block) in graded:
+                continue
             if (
                 _imports_own_code(block)
                 or _touches_own_code(block, own_names)
                 or _reaches_capability_seam(block, third_party)
-            )
-        )
+            ):
+                graded.add(id(block))
+                roots.append(block)
     return roots
 
 
@@ -2484,177 +2494,6 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     `4k`, and the skip-gated branch is `3c`. Per-branch mutants: delete exactly one
     #     `or _reaches_capability_seam(…)` term and the named row goes red, each time.
 
-    # 4n. A `def test_…` BODY that skips on a sentinel it bound ITSELF is the same
-    #     decision as a module-level helper — and it was graded by NOTHING, because
-    #     `_probe_roots` admitted only MODULE-LEVEL functions whose NAME a `skipif`
-    #     names, while `_skip_guard_call_names` already walked the whole tree to find
-    #     the sentinels (review of `61fc96cdd8`, P1-1). Live instance:
-    #     `tests/test_index_surfacing.py:269-281`. Deleting `_skips_on_a_bound_name`
-    #     from the walk reddens exactly this row.
-    test_body_sentinel = roots(
-        """
-        import pytest
-
-        def test_fts_index_supported(g):
-            unsupported = None
-            for probe in ("A", "B"):
-                try:
-                    g.query(probe)
-                    unsupported = None
-                    break
-                except Exception as e:
-                    unsupported = e
-            if unsupported is not None:
-                pytest.skip(f"unsupported: {unsupported}")
-        """
-    )
-    assert test_body_sentinel == ((7, (), True, False, True),), (
-        "a probe inside a `def test_…` body that skips on a sentinel it bound "
-        f"must be graded like any other skip decision: {test_body_sentinel}"
-    )
-    # 4n-bis. The same rule is NOT a test-body special case: a `def` that is neither a
-    #     resolver nor a `skipif`-called helper, and that skips on a value it bound, is
-    #     admitted by `_skips_on_a_bound_name` alone.
-    #     `tests/test_8870_version_anchor_write_order.py::_live_proj` is that shape.
-    helper_sentinel = roots(
-        """
-        import pytest
-
-        def _live_proj():
-            reason = None
-            try:
-                proj = _from_uri("redis://x")
-                proj.g.query("MATCH (n) DETACH DELETE n")
-            except Exception as exc:
-                reason = type(exc).__name__
-            if reason is not None:
-                pytest.skip(f"unusable: {reason}")
-            return proj
-        """
-    )
-    assert helper_sentinel == ((6, (), True, False, True),), (
-        "a non-resolver helper that skips on a value it bound must be graded — the "
-        f"skip call reads the sentinel: {helper_sentinel}"
-    )
-    # 4n-ter. `_reaches_capability_seam` takes its exemption set as a REQUIRED argument
-    #     (review P2-4). The old default was `frozenset()` — the UNGATED arm — so a
-    #     fifth call site that forgot it would silently restore the third-party false
-    #     red and no row could see it. A missing argument is now a `TypeError` at
-    #     collection: fail closed, not fail open.
-    with pytest.raises(TypeError):
-        _reaches_capability_seam(ast.parse("pass"))  # type: ignore[call-arg]
-
-    # 5. DESCENT GAPS in `_control_flow_tries` (review of `61fc96cdd8`, P2-2), each
-    #    measured as `()` before the fix — a probe behind one produced NO row at all,
-    #    which reads exactly like "there is no probe here".
-    #
-    #  5a. a `class` body: `ClassDef` was not descended, so a module-level probe in one
-    #      was invisible.
-    class_body_probe = roots(
-        """
-        FALKORDB_AVAILABLE = False
-
-        class _Probe:
-            try:
-                from tortoise.sdk import TortoiseSDK
-                TortoiseSDK()
-                FALKORDB_AVAILABLE = True
-            except Exception:
-                pass
-        """
-    )
-    assert class_body_probe == ((5, (), True, True, True),), (
-        "a probe in a module-level `class` body is module-level control flow and "
-        f"must be graded: {class_body_probe}"
-    )
-    #  5b. a `match` ARM: `ast.Match` has no `body`/`orelse` — its statements live on
-    #      the `match_case`s — so the generic descent skipped it entirely.
-    match_arm_probe = roots(
-        """
-        import pytest
-
-        LIVE = False
-        match "x":
-            case "x":
-                try:
-                    from tortoise.sdk import TortoiseSDK
-                    TortoiseSDK()
-                    LIVE = True
-                except Exception:
-                    LIVE = False
-
-        @pytest.mark.skipif(not LIVE, reason="live")
-        def test_live():
-            pass
-        """
-    )
-    assert match_arm_probe == ((7, (), True, True, True),), (
-        "a probe in a `match` arm must be graded — `Match` carries its statements "
-        f"on its cases, not on `body`: {match_arm_probe}"
-    )
-    #  5c. a `try` WITH handlers was appended and then `continue`d, so its `orelse` and
-    #      `finalbody` were never visited: a probe in an `else` arm was invisible. The
-    #      outer row is PRE-EXISTING and unchanged (a handler-bearing `try` at module
-    #      level was always a root; its arm here re-raises, so it swallows nothing); the
-    #      row at 10 is the one this fix adds.
-    orelse_probe = roots(
-        """
-        import pytest
-
-        LIVE = False
-        try:
-            _setup()
-        except Exception:
-            raise
-        else:
-            try:
-                from tortoise.sdk import TortoiseSDK
-                TortoiseSDK()
-                LIVE = True
-            except Exception:
-                LIVE = False
-
-        @pytest.mark.skipif(not LIVE, reason="live")
-        def test_live():
-            pass
-        """
-    )
-    assert orelse_probe == (
-        (5, (), False, False, True),
-        (10, (), True, True, False),
-        (10, (), True, True, True),
-    ), (
-        "a probe in a `try/except/else` `else` arm must be graded — the walk "
-        f"appended the outer `try` and `continue`d past its `orelse`: {orelse_probe}"
-    )
-
-    # 6. `@pytest.mark.xfail(cond)` is a graded RESOLUTION (review of `61fc96cdd8`,
-    #    P2-3). It is the more dangerous of the two: a rename inside the probe makes the
-    #    test XFAILED, i.e. it marks as EXPECTED the exact failure the probe exists to
-    #    surface. Measured `()` for this source before `xfail` joined
-    #    `_skipif_conditions`, while the identical `skipif(not LIVE)` form graded.
-    xfail_resolution = roots(
-        """
-        import pytest
-
-        LIVE = False
-        try:
-            from tortoise.sdk import TortoiseSDK
-            TortoiseSDK()
-            LIVE = True
-        except Exception:
-            LIVE = False
-
-        @pytest.mark.xfail(not LIVE, reason="live")
-        def test_live():
-            pass
-        """
-    )
-    assert xfail_resolution == ((5, (), True, True, True),), (
-        "`xfail(cond)` decides a resolution exactly as `skipif(cond)` does, so the "
-        f"probe feeding it is the availability decision: {xfail_resolution}"
-    )
-
     # 4k-/4l-. `_reaches_capability_seam` matches the GENERIC attribute `query`, so it
     #     must not admit a third-party-only probe: at the module body, nor in either
     #     helper branch. That holds for a receiver whose ROOT NAME an import bound and
@@ -2737,6 +2576,202 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         f"the capability arm can admit it: {module_body_client_bound_above}"
     )
 
+    # 4p. The last admission arm to get a witness: a probe inside a `def test_…`
+    #     BODY that decides its own skip. It was the census's DECLARED RESIDUAL
+    #     until the widening below was applied (review P1); its live instance is
+    #     `tests/test_index_surfacing.py:269`, where a broad `except Exception`
+    #     captures into `unsupported` and feeds `pytest.skip(…)`, so a moved door
+    #     there read as "this engine cannot hold a fulltext index".
+    test_body_probe_feeding_skip = roots(
+        """
+        def test_a_engine_probe():
+            unsupported = None
+            for probe in ("one", "two"):
+                try:
+                    g.query(probe)
+                    unsupported = None
+                    break
+                except Exception as e:
+                    unsupported = e
+            if unsupported is not None:
+                pytest.skip(f"unsupported: {unsupported}")
+        """
+    )
+    assert test_body_probe_feeding_skip == ((5, (), True, False, True),), (
+        "a probe inside a TEST BODY that feeds its own `pytest.skip` sentinel is "
+        "the same class-2 decision as a module-level one, and it must be graded: "
+        f"{test_body_probe_feeding_skip}"
+    )
+    # ...but the arm is conditional on the SKIP BINDING, not a blanket grading of
+    # every `try` in every function: the identical block with no skip decision must
+    # stay ungraded, or 4p would be satisfied by grading the whole tree.
+    test_body_probe_without_skip = roots(
+        """
+        def test_b_unrelated():
+            note = None
+            try:
+                g.query("one")
+            except Exception as e:
+                note = e
+            assert note is None
+        """
+    )
+    assert test_body_probe_without_skip == (), (
+        "a `try` in a test body that decides NO skip is not the availability "
+        f"decision and must not be graded: {test_body_probe_without_skip}"
+    )
+
+    # 4p-bis. …and the sentinel test is FUNCTION-scoped, because the real spelling
+    #     of this shape computes its skip sentinel AFTER the guard, not inside it.
+    #     `tests/test_8870_version_anchor_write_order.py::_live_proj` is that shape:
+    #     `from_uri` / `proj.g.query` are inside the `try`, the probe's reason is
+    #     derived from `proj` BELOW it, and the skip reads that reason. A
+    #     block-scoped sentinel test (`_bound_names(block) & skip_read`) sees only
+    #     `proj` in the guard while the skip reads `reason`/`type`/`exc`, so it
+    #     grades NOTHING — measured `()` under that narrowing, which is exactly the
+    #     probe the census had left unarmed. Narrowing the read back to the block
+    #     reddens this row and keeps 4p green, so the two rows isolate the scopes.
+    sentinel_computed_after_guard = roots(
+        """
+        def _live_proj():
+            try:
+                proj = _from_uri("redis://x")
+                proj.g.query("MATCH (n) DETACH DELETE n")
+            except Exception as exc:
+                pytest.skip(f"unusable: {type(exc).__name__}")
+            reason = _skip_reason(_probe_set_order(proj))
+            if reason is not None:
+                proj.close()
+                pytest.skip(reason)
+            return proj
+        """
+    )
+    assert sentinel_computed_after_guard == ((3, (), True, False, True),), (
+        "a probe whose skip sentinel is computed AFTER the guard is the class-2 "
+        "shape — a BLOCK-scoped sentinel test misses it entirely, which is how "
+        f"`_live_proj` stayed ungraded: {sentinel_computed_after_guard}"
+    )
+
+    # 4p-ter. `_reaches_capability_seam` takes its exemption set as a REQUIRED
+    #     argument (review P2-4). The old default was `frozenset()` — the UNGATED
+    #     arm — so a fifth call site that forgot it would silently restore the
+    #     third-party false red and no row could see it. A missing argument is now a
+    #     `TypeError` at collection: fail closed, not fail open.
+    with pytest.raises(TypeError):
+        _reaches_capability_seam(ast.parse("pass"))  # type: ignore[call-arg]
+
+    # 4q. DESCENT GAPS in `_control_flow_tries` (review of `61fc96cdd8`, P2-2), each
+    #    measured as `()` before the fix — a probe behind one produced NO row at all,
+    #    which reads exactly like "there is no probe here".
+    #
+    #  4q-a. a `class` body: `ClassDef` was not descended, so a module-level probe in
+    #        one was invisible.
+    class_body_probe = roots(
+        """
+        FALKORDB_AVAILABLE = False
+
+        class _Probe:
+            try:
+                from tortoise.sdk import TortoiseSDK
+                TortoiseSDK()
+                FALKORDB_AVAILABLE = True
+            except Exception:
+                pass
+        """
+    )
+    assert class_body_probe == ((5, (), True, True, True),), (
+        "a probe in a module-level `class` body is module-level control flow and "
+        f"must be graded: {class_body_probe}"
+    )
+    #  4q-b. a `match` ARM: `ast.Match` has no `body`/`orelse` — its statements live
+    #        on the `match_case`s — so the generic descent skipped it entirely.
+    match_arm_probe = roots(
+        """
+        import pytest
+
+        LIVE = False
+        match "x":
+            case "x":
+                try:
+                    from tortoise.sdk import TortoiseSDK
+                    TortoiseSDK()
+                    LIVE = True
+                except Exception:
+                    LIVE = False
+
+        @pytest.mark.skipif(not LIVE, reason="live")
+        def test_live():
+            pass
+        """
+    )
+    assert match_arm_probe == ((7, (), True, True, True),), (
+        "a probe in a `match` arm must be graded — `Match` carries its statements "
+        f"on its cases, not on `body`: {match_arm_probe}"
+    )
+    #  4q-c. a `try` WITH handlers was appended and then `continue`d, so its `orelse`
+    #        and `finalbody` were never visited: a probe in an `else` arm was
+    #        invisible. The outer row is PRE-EXISTING and unchanged (a handler-bearing
+    #        `try` at module level was always a root; its arm here re-raises, so it
+    #        swallows nothing); the row at 10 is the one this fix adds.
+    orelse_probe = roots(
+        """
+        import pytest
+
+        LIVE = False
+        try:
+            _setup()
+        except Exception:
+            raise
+        else:
+            try:
+                from tortoise.sdk import TortoiseSDK
+                TortoiseSDK()
+                LIVE = True
+            except Exception:
+                LIVE = False
+
+        @pytest.mark.skipif(not LIVE, reason="live")
+        def test_live():
+            pass
+        """
+    )
+    assert orelse_probe == (
+        (5, (), False, False, True),
+        (10, (), True, True, False),
+        (10, (), True, True, True),
+    ), (
+        "a probe in a `try/except/else` `else` arm must be graded — the walk "
+        f"appended the outer `try` and `continue`d past its `orelse`: {orelse_probe}"
+    )
+
+    # 4r. `@pytest.mark.xfail(cond)` is a graded RESOLUTION (review of
+    #    `61fc96cdd8`, P2-3). It is the more dangerous of the two: a rename inside
+    #    the probe makes the test XFAILED, i.e. it marks as EXPECTED the exact
+    #    failure the probe exists to surface. Measured `()` for this source before
+    #    `xfail` joined `_skipif_conditions`, while the identical `skipif(not LIVE)`
+    #    form graded.
+    xfail_resolution = roots(
+        """
+        import pytest
+
+        LIVE = False
+        try:
+            from tortoise.sdk import TortoiseSDK
+            TortoiseSDK()
+            LIVE = True
+        except Exception:
+            LIVE = False
+
+        @pytest.mark.xfail(not LIVE, reason="live")
+        def test_live():
+            pass
+        """
+    )
+    assert xfail_resolution == ((5, (), True, True, True),), (
+        "`xfail(cond)` decides a resolution exactly as `skipif(cond)` does, so the "
+        f"probe feeding it is the availability decision: {xfail_resolution}"
+    )
+
     # 5. The real tree must carry all four shapes, or every assertion above is a
     #    statement about a sample rather than about the code it is meant to guard.
     graded = {row[0] for row in _probe_report()}
@@ -2761,11 +2796,10 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         # (a pure wrapper the walk must descend). Its absence is the signal that
         # the walk has gone back to stopping at every `try`.
         "tests/test_integration_search.py",
-        # … and the two `def`-body sentinels the any-function widening added (P1-1):
-        # a probe in a TEST body, and one in a fixture helper, that skip on a value
-        # they bound. Both were graded by nothing before that fix, and both now carry
-        # an arm (`except (AttributeError, NameError, TypeError): raise`), so their
-        # presence also pins that the arms were not dropped.
+        # … and the `except:`-binds-the-sentinel probe the function-scoped sentinel
+        # test grades: `from_uri` / `proj.g.query` inside the guard, the skip decided
+        # BELOW it. Both are armed (`except (AttributeError, NameError, TypeError):
+        # raise`), so presence also pins that the arms were not dropped.
         "tests/test_index_surfacing.py",
         "tests/test_8870_version_anchor_write_order.py",
     ):
