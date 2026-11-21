@@ -1504,6 +1504,48 @@ def _folding(
     return fake
 
 
+# pytest's rewritten-assert renderer appends its own line to the AssertionError it raises:
+#   "<the message the assert was written with>\nassert <expr>\n  <detail>"
+# So the pin's own message is everything BEFORE that line. Verified against the interpreter this
+# suite runs on (`pytest 9.1.1`, `python 3.12.13`): `str(excinfo.value)` for
+# `assert stray == [], (msg)` is exactly `msg + "\nassert ['tortoise.api::_emit'] == []\n  ..."`.
+_PYTEST_RENDER_SEPARATOR = "\nassert "
+
+
+def _pin_message(exc: AssertionError) -> str:
+    """The message the PIN wrote — pytest's rendered assertion line cut off, and the cut PINNED.
+
+    ⛔ THE DELIMITER IS AN ASSUMPTION ABOUT ANOTHER PROJECT'S RENDERER, SO IT IS PUSHED BACK TO
+    FAIL-CLOSED (`#14099`, unreviewed tail of the message-grading sweep). The three arms below
+    fix one measured defect: `assert key in str(exc)` is a NO-OP CONJUNCT, because pytest's
+    rewritten-assert introspection appends `assert ['<key>'] == []` to the rendering
+    UNCONDITIONALLY, so it can never be False while that assertion is the one reddening. Cutting
+    at the separator removes the key the RENDER supplies — but it re-introduces the SAME class of
+    defect one level up if the separator silently stops existing: `str.split()` on a missing
+    separator returns the WHOLE string, so `[:1][0]` of a list is the rendering again and every
+    arm goes vacuous again, with nothing red to say so.
+
+    Hence the assertion: an absent separator is a RED naming the reason, never a silent fallback
+    to grading the render. That is the only direction that can be trusted — this file's own
+    subject is pins that report green while measuring less.
+
+    `rsplit`-once, not `split`, because the RENDERED line is the last `\nassert ` in the string: a
+    pin whose own message happened to contain a line starting with `assert ` would otherwise be
+    truncated rather than graded in full.
+    """
+    text = str(exc)
+    assert _PYTEST_RENDER_SEPARATOR in text, (
+        "pytest's assertion rendering no longer carries the '"
+        f"{_PYTEST_RENDER_SEPARATOR}' line these arms cut at, so the pin's own message cannot be "
+        "separated from the render — the message-grading arms would silently grade the RENDER "
+        f"they exist to replace: {text!r}")
+    message = text.rsplit(_PYTEST_RENDER_SEPARATOR, 1)[0]
+    assert message, (
+        "the pin's message prefix is EMPTY, so this arm grades nothing and would pass on any "
+        f"rendering: {text!r}")
+    return message
+
+
 def test_no_declared_entity_writer_mentions_a_dynamic_namespace():
     """The blanket dynamic-namespace rule costs ZERO refusals on the real population — PINNED.
 
@@ -1734,8 +1776,9 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
     # fires, pytest's rewritten-assert introspection appends `assert ['<key>'] == []` to the
     # rendering UNCONDITIONALLY, so the key appears even after the pin's own message stops naming
     # it (measured: dropping `{population[...]}` from the message left the arm GREEN). The message
-    # is the prefix before the rendered `assert` line; grade THAT.
-    missing_msg = str(red_missing.value).split("\nassert ")[0]
+    # is the prefix before the rendered `assert` line; grade THAT — `_pin_message` cuts it, and
+    # reds if that line ever stops existing rather than silently grading the render again.
+    missing_msg = _pin_message(red_missing.value)
     assert outsider in missing_msg and "register names a writer" in missing_msg, (
         f"the pin does not red — or reds without naming the key — for a register writer whose "
         f"`def` the module no longer contains: {red_missing.value}")
@@ -1763,8 +1806,8 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
         with pytest.raises(AssertionError) as red_offenders:
             test_no_declared_entity_writer_mentions_a_dynamic_namespace()
     # …GRADED ON THE PIN'S OWN MESSAGE, for the reason spelled out at the `missing` arm above:
-    # pytest's render supplies the key whether or not the message does.
-    offenders_msg = str(red_offenders.value).split("\nassert ")[0]
+    # pytest's render supplies the key whether or not the message does (`_pin_message` cuts it).
+    offenders_msg = _pin_message(red_offenders.value)
     assert outsider in offenders_msg and "mentions a dynamic namespace" in offenders_msg, (
         "the pin does not red — or reds without naming the key — for a declared writer that "
         f"mentions a dynamic namespace, so the rule's cost is unreported: {red_offenders.value}")
@@ -1783,8 +1826,9 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
     # left this arm GREEN because pytest's render still carried `assert ['tortoise.api::_emit'] ==
     # []`. A previous review's mutation table recorded this row as RED — measurably false at this
     # head — so fixing two of three would have made the survivor newly misleading rather than
-    # uniformly sloppy.
-    stray_msg = str(red.value).split("\nassert ")[0]
+    # uniformly sloppy. Both conjuncts grade `_pin_message`, which reds fail-closed if pytest's
+    # `\nassert ` separator ever moves instead of handing back the render.
+    stray_msg = _pin_message(red.value)
     assert outsider in stray_msg, (
         f"the pin reds without naming the key that left its population: {red.value}")
     assert f"of {len(keys)}" in stray_msg, (
