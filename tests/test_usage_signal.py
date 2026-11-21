@@ -59,8 +59,16 @@ named test goes RED):
   with the predicate narrowed to ``falkordb`` alone. The ``falkordb``-only witness
   (``cypher_guard``) reddens the symmetric case, dropping that root, which the
   coverage row cannot see because its importers are already banned.
+* **Leave the ATTRIBUTE spelling out of the reachability scan** (drop
+  ``_package_root_attributes`` from ``_module_reaches_a_store``) →
+  ``test_the_store_reach_scan_sees_the_REDIS_spelling_too`` RED on the synthetic
+  attr-only module — measured, 1 failed / 100 passed, while the coverage row stays
+  GREEN because no tree module reaches a store ONLY that way (the leg flags 0 of
+  305 files). The ban already saw that spelling, so the two directions disagreed
+  about one file — the same defect as the substring, one spelling over.
 * **Forget a root in the ban floor** (drop ``redislite`` from
-  ``_FORBIDDEN_GRAPH_ROOTS``) → ``test_the_ban_covers_all_three_roots`` RED —
+  ``_FORBIDDEN_GRAPH_ROOTS``) →
+  ``test_the_ban_covers_all_three_roots_the_tree_actually_uses`` RED —
   measured, together with the scan row whose ``"tortoise"`` witness reaches the
   client through ``redislite.falkordb_client``. The parametrized row cannot see it
   (removing an entry removes its own case), which is why this floor exists: it is
@@ -1091,6 +1099,15 @@ def test_no_graph_dependency() -> None:
     decide the guard is sufficient.
     """
     source = Path(usage_signal.__file__).read_text(encoding="utf-8")
+    # ⛔ THE SUBJECT OF THIS BAN IS PINNED TOO. Every synthetic assert below feeds
+    # `_offending` a LITERAL, so the one call that reads the real module could be
+    # made to read nothing (`source = ""`, a wrong path, a cached constant) and
+    # every row stayed green (measured: 101 passed) — the guard protecting
+    # `usage_signal` itself, silently disabled, with nothing to notice it.
+    assert source.strip() and usage_signal.__file__.endswith("usage_signal.py"), (
+        f"the ban read {usage_signal.__file__!r} as "
+        f"{len(source)} chars — this test's whole subject is that module's source, "
+        "and an empty or misdirected read makes every assertion below vacuous")
     offending = _offending(source)
     assert not offending, (
         f"usage_signal imports a graph client: {sorted(offending)} — a residency "
@@ -1345,6 +1362,16 @@ def test_no_graph_dependency_pins_the_package_root_EXPORT_form() -> None:
     assert _offending(
         'import tortoise\nc = tortoise.__getattr__(name="FalkorDB")\n'
     ) == {"tortoise.FalkorDB"}
+    # ⛔ AND THE RECEIVER GOES THROUGH `_dotted_base`, not a bare `ast.Name`.
+    # Reverting that one call site kept every row green (measured: 101 passed)
+    # while the `.__init__` spelling of the CHAIN silently stopped being seen —
+    # although `_fold_init`'s docstring claims the fold is applied to every name
+    # this module derives rather than to one call site.
+    assert _offending(
+        'import tortoise.__init__\nc = tortoise.__init__.__getattr__("FalkorDB")\n'
+    ) == {"tortoise.FalkorDB"}, (
+        "the `.__getattr__` receiver must be folded through `_dotted_base` like "
+        "every other name this module derives")
     # ⚠️ The remaining literal-name indirections are DECLARED out of scope in the
     # scope note rather than resolved; pinned here so the boundary is visible and a
     # future reader cannot mistake silence for coverage.
@@ -1398,10 +1425,18 @@ def _modules_reaching_a_store() -> frozenset[str]:
     `found` (98 passed) while `_offending()` on the same source returned
     `['tortoise.FalkorDB']` — the scan and the ban disagreeing about one file. A
     direction scan narrower than the ban it certifies is the same defect as a scan
-    narrower than the roots it declares, one layer in. `tortoise.FalkorDB` as a
-    plain ATTRIBUTE is not matched here either, for the same reason it cannot be
-    told apart from an unrelated attribute read at this granularity; the AST ban
-    covers it, and that asymmetry is what this note exists to state.
+    narrower than the roots it declares, one layer in.
+
+    ⛔ AND THE ATTRIBUTE SPELLING IS NOW THE THIRD LEG. It used to be left out with
+    the reason "it cannot be told apart from an unrelated attribute read at this
+    granularity" — measurably FALSE: `_package_root_attributes` IS that
+    distinction (it filters through `_REACHABLE_FROM_ROOT`, so an unrelated
+    `tortoise.__version__` read returns nothing), and it flags 0 of the 305 tree
+    modules, so wiring it in costs no false positive. Left out, this row was blind
+    to a module whose only reach is `import tortoise; tortoise.FalkorDB` while
+    `_offending` caught it — the scan/ban disagreement this docstring already
+    calls out one paragraph up, one spelling over. `_module_reaches_a_store` is
+    the ONE per-file predicate both this scan and its pin call.
 
     ⚠️ NOT the whole ban set. `_FORBIDDEN_GRAPH_ROOTS` also lists modules that are
     ORDINARY imports (`tortoise.sdk`, `tortoise.ep`, `tortoise.retry`, …) and
@@ -1441,11 +1476,27 @@ def _modules_reaching_a_store() -> frozenset[str]:
         rel = path.relative_to(package).with_suffix("")
         parts = [part for part in rel.parts if part != "__init__"]
         module = "tortoise" + ("." + ".".join(parts) if parts else "")
-        if _reaches_a_store_client(
-            _imports_of(path.read_text(encoding="utf-8"))
-        ):
+        if _module_reaches_a_store(path.read_text(encoding="utf-8")):
             found.add(module)
     return frozenset(found)
+
+
+def _module_reaches_a_store(source: str) -> bool:
+    """Does ONE module's source reach a store client — by any of the THREE legs?
+
+    ⛔ EXTRACTED SO THE LEGS ARE PINNABLE INDIVIDUALLY, and so the scan cannot
+    hold a predicate its own pin does not exercise. The three legs are the store
+    roots, the package-root EXPORTS (`from tortoise import FalkorDB`), and the
+    package-root ATTRIBUTES (`import tortoise; tortoise.FalkorDB` /
+    `getattr(tortoise, "FalkorDB")`). The attribute leg was missing here for two
+    rounds while `_offending` applied it — a direction scan narrower than the ban
+    it certifies, which is this PR's whole subject. Synthetic input is the only
+    input that can hold that leg: no tree module reaches a store ONLY that way
+    (measured: `_package_root_attributes` flags 0 of 305 files).
+    """
+    return _reaches_a_store_client(_imports_of(source)) or bool(
+        _package_root_attributes(source)
+    )
 
 
 def _reaches_a_store_client(imported: set[str]) -> bool:
@@ -1525,6 +1576,22 @@ def test_the_store_reach_scan_sees_the_REDIS_spelling_too() -> None:
     assert not _reaches_a_store_client(
         _imports_of("from .projection import FalkorProjection\n")
     )
+    # ⛔ AND THE ATTRIBUTE LEG, synthetically — the third spelling, and the one the
+    # scan was blind to while the ban saw it. No tree module reaches a store ONLY
+    # through an attribute read (measured: `_package_root_attributes` flags 0 of
+    # 305 files), so tree data could never hold this leg either; without these two
+    # asserting the SCAN's own predicate, deleting `_package_root_attributes` from
+    # `_module_reaches_a_store` kept every row green (measured: 101 passed).
+    attr_only = "import tortoise\n\ndef f():\n    return tortoise.FalkorDB\n"
+    assert _module_reaches_a_store(attr_only), (
+        "the reachability scan does not see `import tortoise; tortoise.FalkorDB`, "
+        "while the ban does — a scan narrower than the ban it certifies")
+    assert _offending(attr_only) == {"tortoise.FalkorDB"}, (
+        "the scan and the ban must agree about the attribute spelling: the scan "
+        "now sees it, so `_offending` must still name it")
+    assert _module_reaches_a_store(
+        'import tortoise\nc = getattr(tortoise, "FalkorDB")\n'
+    ), "the attribute leg must cover the `getattr` form too, not only the plain read"
 
 
 def test_the_direction_scan_agrees_with_the_ban_on_the_FOLDED_spelling() -> None:
@@ -1611,8 +1678,11 @@ def test_the_no_graph_guard_covers_every_module_that_reaches_a_store() -> None:
         "root may be excused (it is in `sys.modules` by construction, and banning "
         "the package would ban the module itself). A store-reaching module added "
         "here is invisible to the AST ban — ban it instead.")
-    # The two roles must not overlap, or the split above buys nothing.
-    assert set(_PROBE_EXEMPT) & set(_COVERAGE_EXEMPT) == set()
+    # ⛔ The disjointness of the two roles is NOT asserted again here: both lists
+    # are pinned EXACTLY above (`_PROBE_EXEMPT` to one banned module, `_COVERAGE_EXEMPT`
+    # to `{"tortoise"}`, which is not banned), so the intersection is empty before
+    # any line here executes and no mutant could ever redden a third check — an
+    # assertion that cannot fail is a claim of coverage it does not deliver.
 
 
 def test_recording_never_raises_on_a_broken_path(tmp_path: Path) -> None:
