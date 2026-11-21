@@ -1,3 +1,14 @@
+---
+title: "Plan — private beta now, scale-ready by design (diagnosis → two parallel tracks → gates)"
+type: engineering
+domain: platform
+doc_status: draft
+created: 2026-11-21
+subjects.team: epistemic-team
+aboutSubjects: epistemic-team
+aboutObjects: "PLAN-private-beta-and-scale.md, SCALING-ROADMAP.md, issue #14216"
+---
+
 # Plan — private beta now, scale-ready by design (diagnosis → two parallel tracks → gates)
 
 **Date:** 2026-11-21 · **Supersedes ad-hoc next-step lists.**
@@ -15,7 +26,7 @@ competitor research (`SCALING-ROADMAP.md` §1–§2.5) · trackers `#11081` (rel
 
 - **Product (private beta, owner 2026-11-20):** storage migration done enough that new writes never need re-migrating ·
   extractor v4 verified · the approved surface **answered, not merely counted**: 22/27 tools and 27/40 SDK methods answered, 12 SDK
-  methods `UNMEASURED` — the capstone's own recorded verdict is **NOT 27/40** (`docs/evidence/11609-surface-capstone/`) · **and the
+  methods `UNMEASURED`, 1 arm gap (`approve_merge`) — the capstone's own recorded verdict is **NOT 27/40** (`docs/evidence/11609-surface-capstone/`) · **and the
   product works: onboarding, writing, search**.
 - **Demonstration:** session A states a fact, session B contradicts it, the contradiction is **surfaced automatically**.
 - **Destination (not this release):** a service that stays responsive as tenants and corpus grow, with the expensive work
@@ -45,7 +56,7 @@ D3 retry loop + live session writes
       → pre_handler 6–9 s
          + D1 inline embed 2–4 s
             + D2 sequential legs 1.2 s
-               = beyond the 10 s wait bound (owner decision #3834) → 504
+               = 9.2–14.2 s against the 10 s wait bound (owner decision #3834) — the upper part of that range crosses it → 504
 ```
 
 D5 refuses writes once the corpus outgrows the graph; D6 hides all of it behind deploy churn.

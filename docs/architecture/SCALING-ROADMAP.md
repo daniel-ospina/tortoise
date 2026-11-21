@@ -1,3 +1,14 @@
+---
+title: "Scaling roadmap — what comparable memory systems do, and the free prep work"
+type: engineering
+domain: platform
+doc_status: draft
+created: 2026-11-21
+subjects.team: epistemic-team
+aboutSubjects: epistemic-team
+aboutObjects: "SCALING-ROADMAP.md, PLAN-private-beta-and-scale.md, issue #14216"
+---
+
 # Scaling roadmap — what comparable memory systems do, and the free prep work
 
 **Date:** 2026-11-21 · **Status:** research + roadmap · **Owner ask:** *"research how competitors (memory systems) approach
