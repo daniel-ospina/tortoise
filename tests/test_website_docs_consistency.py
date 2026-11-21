@@ -1771,13 +1771,21 @@ def test_the_storage_section_uses_no_internal_vocabulary() -> None:
     ⛔ THE SCAN IS OVER VISIBLE TEXT, which is NARROWER than an earlier version of
     this pin that folded the raw markup — declared here so a reader does not have
     to infer it from the body (#14073 review, P2). Tag and attribute text left
-    the scan: `class="hot-cache"` and `href="#tier"` used to red this pin for
-    strings no browser renders. What that does NOT cost is coverage of a claim a
-    reader meets, because `_attributes_outside_allowlist` refuses every attribute
-    on the section beyond `id`, `class` and `href` BY NAME — the only attributes
-    that reach a reader (`title`, `aria-*`, `alt`) are rejected outright, so the
-    two pins cannot leave a gap between them. Widening the allowlist later means
-    re-widening this scan in the same change.
+    the scan: `class="hot-cache"` used to red this pin for a string no browser
+    renders. What that does NOT cost is coverage of an attribute NAME a reader
+    meets, because `_attributes_outside_allowlist` refuses every attribute on the
+    section beyond `id`, `class` and `href` — the only attributes that carry
+    reader-facing TEXT (`title`, `aria-*`, `alt`) are rejected outright.
+
+    ⛔ IT DOES COST `href` VALUES, WHICH IS WHY A THIRD PIN EXISTS. `href` is
+    admitted by name and its VALUE is what a reader acts on — hover shows it,
+    clicking follows it — so an anchor retargeted to another address is invisible
+    to this scan (text unchanged) and to the allowlist (name unchanged). That gap
+    is closed by `_REVIEWED_SECTION_HREFS`, asserted in
+    `test_the_storage_section_says_exactly_what_was_reviewed`; an earlier version
+    of this docstring claimed the allowlist closed it, which was measured false
+    (#14073 review). Widening the allowlist later means re-widening this scan in
+    the same change.
     """
     section = re.sub(r"[^a-z0-9]+", " ", _visible_text(_docs_section()).lower())
     for word, why in _BANNED_VOCABULARY.items():
@@ -1875,6 +1883,23 @@ def test_the_storage_section_says_exactly_what_was_reviewed() -> None:
     `test_the_storage_attribute_allowlist_catches_every_legal_spelling`).
     """
     markup = _docs_section()
+    _assert_storage_section_reviewed(markup)
+
+
+def _assert_storage_section_reviewed(markup: str) -> None:
+    """The three #storage pins, as ONE callable so a control can drive them.
+
+    ⛔ A CONTROL THAT RE-IMPLEMENTS A PIN DOES NOT TEST IT. The destination
+    control below used to negate this comparison inline, so deleting the pin from
+    the test left the control green and the retargeted page passing every storage
+    pin again — a discriminating control that vouched for nothing (measured,
+    #14073 review round 2). Extracting the body makes the control drive the
+    implementation: remove the pin and the control fails.
+
+    The pins, in the order the docstring above gives them: attribute NAMES
+    (allowlist), attribute VALUES a reader acts on (`href` destinations), then the
+    reviewed WORDING.
+    """
     present = _attributes_outside_allowlist(markup)
     assert not present, (
         f"the #storage section carries attribute(s) {present} beyond "
@@ -1882,7 +1907,7 @@ def test_the_storage_section_says_exactly_what_was_reviewed() -> None:
         f"reader-facing claim in an attribute would never be reviewed against it."
     )
     # ⛔ THE DESTINATIONS TOO, because the allowlist above judges a name and this
-    # is the admitted attribute whose VALUE a reader meets. See this docstring's
+    # is the admitted attribute whose VALUE a reader meets. See the docstring's
     # "THE ALLOWLIST IS NOT ENOUGH ON ITS OWN" paragraph.
     destinations = sorted(set(extract_anchor_hrefs(markup)))
     assert destinations == list(_REVIEWED_SECTION_HREFS), (
@@ -2915,10 +2940,12 @@ def test_the_storage_section_destinations_are_pinned_not_just_their_names() -> N
             f"measuring the destination pin"
         )
 
-        # …and the pin that does look at the value names it.
-        assert sorted(set(extract_anchor_hrefs(mutant))) != list(
-            _REVIEWED_SECTION_HREFS
-        ), f"{label}: the destination pin did not notice the retarget"
+        # …and the pin that does look at the value names it — DRIVEN, not
+        # re-implemented: this calls the same `_assert_storage_section_reviewed`
+        # the real test calls, so deleting the pin from the implementation reds
+        # this control instead of leaving it green (#14073 review round 2).
+        with pytest.raises(AssertionError, match="links to"):
+            _assert_storage_section_reviewed(mutant)
 
 
 def test_a_base_element_moves_what_the_section_advertises() -> None:
@@ -2977,6 +3004,17 @@ def test_a_base_element_moves_what_the_section_advertises() -> None:
     marked = page.replace("<head>", '<head><base href="/">', 1)
     assert marked != page, "website/docs.html has no `<head>` to inject a base into"
     assert _document_base_url(marked, DOCS) == urljoin(canonical, "/")
+
+    # ⛔ AND THROUGH THE REAL BOUND, not only through the predicate. Asserting the
+    # seam and the derivation leaves the WIRING — `_docs_section` passing
+    # `base=_document_base_url(html, DOCS)` — untested, so deleting that argument
+    # kept every storage pin green while a `<base href="/">` sent every
+    # fragment-only TOC link off the page (measured, #14073 review round 2).
+    assert _docs_section(page=marked) != _docs_section(), (
+        "a `<base href=\"/\">` no longer moves the section bound: `_docs_section` "
+        "is resolving TOC entries against the page URL instead of the document "
+        "base URL, so every fragment-only link is read as same-page"
+    )
     # A `<base>` a browser never parses must NOT move the base.
     assert extract_first_base_href(
         page.replace("<head>", '<head><template><base href="https://evil.example/">'
