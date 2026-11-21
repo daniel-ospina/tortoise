@@ -141,7 +141,7 @@ The four moves, and how many of the five actually exhibit each:
 3. **Expensive work at write time, behind a queue** — **4 of 5** (Mem0, Zep, Hindsight, Supermemory) — we do not.
 4. **Parallel retrieval legs with bounded traversal** — **1 of 5** (Hindsight alone) — we do not (we chain them).
 
-So: move 2 is universal, move 3 is near-universal, move 1 is a majority, and **move 4 rests on a single competitor's publish design** — worth adopting, and worth labelling as one source rather than a convergence. Item 3 is Phase A work (`A1`); item 4 is `#14192`, tracked as PLAN `F1`. Both cost only code.
+So: move 2 is universal, move 3 is near-universal, move 1 is a majority, and **move 4 rests on a single competitor's published design** — worth adopting, and worth labelling as one source rather than a convergence. Item 3 is Phase A work (`A1`); item 4 is `#14192`, tracked as PLAN `F1`. Both cost only code.
 
 ## 3. The roadmap — phase A is free
 
@@ -167,6 +167,26 @@ So: move 2 is universal, move 3 is near-universal, move 1 is a majority, and **m
 - **C2. Scale API replicas on queue depth / in-flight requests**, not CPU.
 - **C3. Move the keyword leg to Postgres** (`#14000`) so the graph holds only what it is uniquely good at, and the read path stops
   paying graph round-trips for text search.
+
+## 4. What we should explicitly NOT copy
+
+- **Batching without a max-wait bound.** The literature is explicit: batching improves throughput and worsens tail latency. A
+  hard, small collection window is what keeps an interactive search interactive.
+- **"Just add replicas".** With embeddings in-process, each replica carries its own 432 MB model and its own cold start; the
+  unit is more expensive than it looks. Replicate *after* A1–A3, when a replica is a thin API process.
+- **Hiding the delay.** Zep *states* that new facts appear after a processing delay. We already have the vocabulary for this
+  (`#2952`: a degraded read is declared); the async write path must use it rather than pretending the data is instantly
+  searchable.
+
+## 5. The one-line version
+
+**Our topology already matches the leaders — record + derived layer + hybrid legs. What differs is that they moved the expensive,
+batchable work into queues and workers, and we still do it inside the request.** Phase A is entirely free, and it is the
+difference between "a machine that answers in 6 s" and "a machine that answers in 300 ms and catches up in the background".
+
+**Contradiction test:** no recorded decision is reversed. §2.0 (record is truth, graph is derived) *requires* A1 — the fold is
+already the mechanism. `#11758` (per-account storage) and `#4495`/`#5331` (no node pricing) are untouched. A2 does not pick a
+vendor; it makes the choice reversible.
 
 ---
 
@@ -206,23 +226,3 @@ LLM's job), with the closure arithmetic done in code. That is a strictly smaller
 and it is the difference between "memory that accumulates" and "memory that resolves".
 
 **Filed as `#14198`.** It also gives the demo a second, stronger variant (a noun substitution, not only a number).
-
-## 4. What we should explicitly NOT copy
-
-- **Batching without a max-wait bound.** The literature is explicit: batching improves throughput and worsens tail latency. A
-  hard, small collection window is what keeps an interactive search interactive.
-- **"Just add replicas".** With embeddings in-process, each replica carries its own 432 MB model and its own cold start; the
-  unit is more expensive than it looks. Replicate *after* A1–A3, when a replica is a thin API process.
-- **Hiding the delay.** Zep *states* that new facts appear after a processing delay. We already have the vocabulary for this
-  (`#2952`: a degraded read is declared); the async write path must use it rather than pretending the data is instantly
-  searchable.
-
-## 5. The one-line version
-
-**Our topology already matches the leaders — record + derived layer + hybrid legs. What differs is that they moved the expensive,
-batchable work into queues and workers, and we still do it inside the request.** Phase A is entirely free, and it is the
-difference between "a machine that answers in 6 s" and "a machine that answers in 300 ms and catches up in the background".
-
-**Contradiction test:** no recorded decision is reversed. §2.0 (record is truth, graph is derived) *requires* A1 — the fold is
-already the mechanism. `#11758` (per-account storage) and `#4495`/`#5331` (no node pricing) are untouched. A2 does not pick a
-vendor; it makes the choice reversible.
