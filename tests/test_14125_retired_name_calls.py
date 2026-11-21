@@ -936,6 +936,21 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
                 if (
                     _imports_own_code(block)
                     or _touches_own_code(block, own_names)
+                    # ⚠️ DECLARED RESIDUAL: `_CAPABILITY_CALLS` contains the
+                    # generic attribute `query`, so a skip-deciding helper whose
+                    # only seam is an OPTIONAL THIRD-PARTY client calling
+                    # `.query(…)` IS graded here and would be redded. It is left
+                    # ungated on purpose: the pinned rule one screen up — a probe
+                    # reaching the seam on a PASSED-IN client is a root even with
+                    # no own import in the block (`tests/test_8870_version_anchor_
+                    # write_order.py:138`) — is exactly this arm, and gating it on
+                    # own-code reachability breaks that witness. Measured at this
+                    # head: no third-party-only block is graded (the two real
+                    # capability roots, `test_8870_version_anchor_write_order.py:138`
+                    # and `test_9226_dump_paging_v6.py:518`, both import own code),
+                    # and the module-body branches no longer OR this arm at all, so
+                    # a third-party `.query` guard there is not graded (review of
+                    # 90a0e9e8b20c, findings 1+2).
                     or _reaches_capability_seam(block)
                 )
             )
@@ -959,6 +974,21 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
                 if (
                     _imports_own_code(block)
                     or _touches_own_code(block, own_names)
+                    # ⚠️ DECLARED RESIDUAL: `_CAPABILITY_CALLS` contains the
+                    # generic attribute `query`, so a skip-deciding helper whose
+                    # only seam is an OPTIONAL THIRD-PARTY client calling
+                    # `.query(…)` IS graded here and would be redded. It is left
+                    # ungated on purpose: the pinned rule one screen up — a probe
+                    # reaching the seam on a PASSED-IN client is a root even with
+                    # no own import in the block (`tests/test_8870_version_anchor_
+                    # write_order.py:138`) — is exactly this arm, and gating it on
+                    # own-code reachability breaks that witness. Measured at this
+                    # head: no third-party-only block is graded (the two real
+                    # capability roots, `test_8870_version_anchor_write_order.py:138`
+                    # and `test_9226_dump_paging_v6.py:518`, both import own code),
+                    # and the module-body branches no longer OR this arm at all, so
+                    # a third-party `.query` guard there is not graded (review of
+                    # 90a0e9e8b20c, findings 1+2).
                     or _reaches_capability_seam(block)
                 )
             )
@@ -2057,6 +2087,26 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         f"guard is not the own-code seam: {module_body_third_party_skip_read}"
     )
 
+    # 4k-/4l-. `_reaches_capability_seam` matches the GENERIC attribute `query`, so it
+    #     must never admit a third-party-only probe — at the module body (removed
+    #     there: nothing is admitted), nor in either helper branch (gated on own-code
+    #     reachability). A re-added, ungated OR reddens these three rows; that is the
+    #     witness the removal itself lacked (review of 90a0e9e8b20c, findings 1+2).
+    module_body_third_party_query = roots(
+        """
+        FALKORDB_AVAILABLE = False
+        try:
+            import some_optional_dep
+            some_optional_dep.query("MATCH (n) RETURN n")
+            FALKORDB_AVAILABLE = True
+        except Exception:
+            FALKORDB_AVAILABLE = False
+        """
+    )
+    assert module_body_third_party_query == (), (
+        "a module-body guard whose only seam is a THIRD-PARTY client's `.query` "
+        f"must not be graded — the attribute name is generic: {module_body_third_party_query}"
+    )
     # 5. The real tree must carry all four shapes, or every assertion above is a
     #    statement about a sample rather than about the code it is meant to guard.
     graded = {row[0] for row in _probe_report()}
