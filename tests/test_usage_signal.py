@@ -1617,21 +1617,32 @@ def test_no_graph_dependency() -> None:
     # row could see. Supplying the submodule form instead makes it visible: the name
     # comes from outside the child, so its absence from the result is a defect rather
     # than an ambiguity — the same argument the `_all_roots` row makes for exact names.
-    _sub_name = _probe_forbidden()[0] + ".probe_child"
-    _sub = _probe("pass", _sub_name)
-    assert _sub_name in _sub, (
-        f"the probe must report `<root>.<sub>` forms, not only exact derivation "
-        f"members: got {sorted(_sub)!r} for an injected {_sub_name!r}. A returned-set "
-        "filter narrowed to `_probe_forbidden()` inside `_probe` drops exactly this "
-        "name while every exact-root row above stays green (#14118 item 1)")
+    # ⛔ AND IT IS WITNESSED FOR EVERY ROOT, IN ONE CHILD — not for
+    # `_probe_forbidden()[0]` alone, which is what this row did first: measured at
+    # `71be1dce75`, a returned-set filter keeping `<root>.<sub>` for the FIRST root
+    # only is **102 passed**, because no other production row ever hands the child a
+    # `<sub>` form. All the submodule forms go through the child together, so this
+    # costs no extra subprocess, and each one must come back.
+    _sub_names = tuple(_root + ".probe_child" for _root in _probe_forbidden())
+    _sub = _probe("pass", *_sub_names)
+    for _sub_name in _sub_names:
+        assert _sub_name in _sub, (
+            f"the probe must report `<root>.<sub>` forms, not only exact derivation "
+            f"members: got {sorted(_sub)!r} for an injected {_sub_name!r}. A "
+            "returned-set filter narrowed to `_probe_forbidden()`, or to the FIRST "
+            "root's `<sub>` form, drops names here while every exact-root row above "
+            "stays green (#14118 item 1)")
     # ⛔ AND EVERY ROOT IS IMPORTED FOR REAL, one at a time, with NOTHING injected —
     # the row that cannot be satisfied by a keep-list. The expected name is the module
     # the import statement ITSELF put in `sys.modules`, so a filter keyed on
     # `set(injected)` (empty here) or on any fixed list of controls must include the
-    # WHOLE derivation to stay green. Measured on the previous head: a keep-list of six
-    # literals — the three named controls plus the three roots the old `projection` row
-    # named — left the probe blind to `tortoise.acl_graph_users` and
-    # `tortoise.hosted_backup` and was still **102 passed**. It reds wherever the
+    # WHOLE derivation to stay green. Measured at `8ddafd4776` — the last head before
+    # the `_all_roots` row, i.e. before ANY row required the whole derivation back — a
+    # keep-list of six literals (the three named controls plus the three roots the old
+    # `projection` row named) left the probe blind to `tortoise.acl_graph_users` and
+    # `tortoise.hosted_backup` and was still **102 passed**. At `647ca930ce` and here,
+    # the same keep-list is **1 failed / 101**, so neither side of that line is green
+    # at a head carrying `_all_roots`. It reds wherever the
     # witness reaches — matcher, child print, parent parse — and the production verdict
     # below is graded across a clean and a leaking import in ONE comparison, so a
     # filter there reds the leaking half instead of silencing the clean one.
@@ -1668,14 +1679,22 @@ def test_no_graph_dependency() -> None:
 
     # ⛔ AND THE INJECTED ROWS ABOVE TAKE THEIR EXPECTATION FROM THE SAME TUPLE THEY
     # HAND IN — so a `_probe` that DERIVES its answer from `injected` satisfies all
-    # three BY CONSTRUCTION. Measured: short-circuiting `_probe` to
+    # three BY CONSTRUCTION. Measured at this head: short-circuiting `_probe` to
     # `_matching(injected)` when `injected` is non-empty leaves `_all_roots`, `_sub`
-    # and `leaked` every one of them green (**102 passed**), and so does intersecting
-    # the real result with `set(injected)`. That is an ECHO pin, not a witness, and no
-    # row above can tell the difference because each supplies one input and asks for
-    # it back. The row below demands a REAL root back in the SAME run as the injected
-    # witness, which neither shape can fake: `tortoise.hosted_backup` is a banned root
-    # that no injected name implies, so an answer built from `injected` loses it.
+    # and `leaked` every one of them green, and so does intersecting the real result
+    # with `set(injected)` under the same condition (which is the same short-circuit,
+    # so it is not a second shape). No row above can tell the difference, because each
+    # supplies one input and asks for it back; the "**102 passed**" this sentence used
+    # to claim was an ECHO pin measured on a head that did not yet have the row below,
+    # and at this head it is **1 failed / 101 passed** — the measurement-without-its-
+    # head class, #14118 item 2. ⛔ THE UNCONDITIONAL intersection is a DIFFERENT
+    # shape and reds a different row — the POSITIVE control `assert "redis" in _ep`,
+    # **1 failed / 101 passed** — because applying it to an un-injected run intersects
+    # with the empty set.
+    #
+    # The row below demands a REAL root back in the SAME run as the injected witness,
+    # which neither shape can fake: `tortoise.hosted_backup` is a banned root that no
+    # injected name implies, so an answer built from `injected` loses it.
     _mixed = _probe("import tortoise.hosted_backup", "falkordb")
     assert {"tortoise.hosted_backup", "falkordb"} <= _mixed, (
         f"a run that both imports a real root and carries an injected witness must "
