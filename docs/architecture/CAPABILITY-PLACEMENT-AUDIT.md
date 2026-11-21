@@ -188,7 +188,7 @@ named is the pin's `:23046`, which is not one of them:
 `sdk.py:22267` (the capture writer) with its read-back `:22390`, and `hosted_api.py:23501` (the commit
 door's `MERGE (s:Source {url:$did})`) with `_execute_commit_writes` at `:23313`. ⚠️ **The `hosted_api.py`
 pair is head-bound and has FIVE readings on record** — `:22301`/`:22113` at the pin, `:22919`/`:22731` at
-`ae54df166d` (`#13394` was re-cut onto it — `9d20f74886`, whose own subject says so — and ⚠️ **not** the
+`ae54df166d` (`#13394` was re-cut onto it — `85d66f786c62`, whose own subject says so — and ⚠️ **not** the
 head `#14059` wrote them on; the clause above names `ae54df166d` only to say these four addresses were NOT
 pinned there, which is
 why the row-13 note below still records this reading alongside the pin's), 23082 / 22894 as the `#14022`-rot repair `#14059` LEFT them on `main` — `32441c280d`, its SQUASH commit; that PR's own head is `57cb42f642` and is not on `main`, which is why the squash is the commit named here — 23503 / 23315 at the base this
@@ -200,11 +200,11 @@ did not change between those heads — only the offsets above it did), so this p
 that reading appears. ⛔ **Re-derive by CONTENT:
 never reuse the delta.** The `+419` that all three of this
 row's and row 15's sites take between that squash (`32441c280d`) and this one is **not** one insert: that
-interval is **569 inserted and 59 deleted** lines in `tortoise/hosted_api.py`
-(`git diff --numstat 32441c280d HEAD -- tortoise/hosted_api.py`), across **25** hunks — and the convention,
+interval is **577 inserted and 63 deleted** lines in `tortoise/hosted_api.py`
+(`git diff --numstat 32441c280d HEAD -- tortoise/hosted_api.py`), across **27** hunks — and the convention,
 the pathspec and the endpoint all travel with that second figure, because
-`git diff -U0 32441c280d HEAD -- tortoise/hosted_api.py | grep -c '^@@'` gives 25 while git's default `-U3`
-gives 23 (and `--numstat` prints no hunk count at all; without the pathspec both commands describe the whole
+`git diff -U0 32441c280d HEAD -- tortoise/hosted_api.py | grep -c '^@@'` gives 27 while git's default `-U3`
+gives 25 (and `--numstat` prints no hunk count at all; without the pathspec both commands describe the whole
 repo instead — every file in the interval, not this row's — and the repo-wide totals are **deliberately not
 quoted here**, because they depend on the commits you run the command at; re-run it rather than read a figure
 here). `+419` of the growth sits above the three sites (20 hunks, largest net `+157`)
@@ -645,7 +645,9 @@ addresses opened at this head and re-checked in this pass (#13879 review, P2): t
 one was stale at main's head, at `:11280` → `:11281` (`#13991`), and this branch's own `sdk.py`
 insertions then moved the four `sdk.py` addresses by `+31` — each re-derived by the fragment it
 quotes (`grep -nF`), never by applying that delta — while the `mcp_server.py` one landed where
-`#13991` left it, and stayed there until `#14169` rewrote `mcp_server.py` (`+356/-34`), which moved it
+`#13991` left it, and stayed there until `#14169` rewrote `mcp_server.py` (`348/30` by `--numstat` — the `+356/-34`
+this row used to print is the `mcp_server.py` + `hosted_api.py` total (`348+8`, `30+4`),
+not that file alone), which moved it
 to `:11590`; re-derived by content again in this pass, and the row above carries the new address. ⚠️ **The correction did not arrive on `main` from this pass.** This pass
 re-derived the address itself (commit `143b1fea07`, 12:26Z) on parent `1f7ae03e`, where this document
 still carried the stale address and not the corrected one; **#13992** (`8747965ad5`) put the same

@@ -1080,7 +1080,7 @@ SWEEP_NAMES = 66
 #:
 #: ⛔ MERGED `origin/main` (`e74cf1d13d`, the `#14012` lane's "keep this resident" + "see what's
 #: outside") INTO THIS BRANCH. ⛔ ITS "ZERO ROWS" PREMISE IS `main`'s OWN and NOT THIS BRANCH'S, and
-#: leaving it unscoped would make the log contradict itself nineteen lines below: on `main`'s tree the
+#: leaving it unscoped would make the log contradict itself in the block below: on `main`'s tree the
 #: diff against this branch adds no executable line, but THIS branch's end-proof adds THREE untyped
 #: receivers (`g.query` ×2 in `tools/graphevent_home.py`, `super().query` ×1 in the test stub), which
 #: is why `--repin` on the tree this branch resolved prints `(11860, "267dce26b4191743")` and not the
@@ -1111,7 +1111,7 @@ SWEEP_NAMES = 66
 #: measurements, never their evidence. `--check` exits 0 on this tree with
 #: `typed references still pointing at a public name: 0`.
 #: ⛔ THE BASE FIGURE IS THE BASE **TREE's** MEASUREMENT, never the `SWEEP_RESIDUE` line committed on
-#: it. `origin/main` at `e74cf1d13d` commits `(11835, "891187f5a4636487")` while its tree MEASURES a
+#: it. `origin/main` at `69908d006b3d` commits `(11835, "891187f5a4636487")` while its tree MEASURES a
 #: different pair — so a reader who takes the committed line as the base concludes a live pin is off
 #: by rows it is not off by, and that a green `--check` is false. It is not: re-measured on the tree
 #: `--check` is pointed at, the pair is the one that tree prints (#14183 review round 5, finding 2 —
