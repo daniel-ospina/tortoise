@@ -317,7 +317,7 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
     #   number behind the wrong mechanism.
     assert len(advertising) >= 32, (
         f"the advertising population collapsed to {len(advertising)} tool(s) — expected "
-        "at least 32 (35 HTTP-filtered live tools minus the 3 excluded names in that "
+        "at least 32 (34 HTTP-filtered live tools minus the 2 excluded names in that "
         "view); a lower number means the registry lost entries, not that a pin moved")
     # …and the served view must BE that population, name for name, so a name that is
     # registered-but-unserved is caught too (the floor above cannot see a substitution).

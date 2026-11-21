@@ -1021,9 +1021,12 @@ def _claim_wait_bound_count() -> bool:
 #:
 #:   * NOT_SENT — no dispatch was started, so nothing was sent at all.
 #:   * PREVIEW  — the call declared itself a preview (``dry_run=True`` — explicit
-#:                or the handler's documented default — or ``tortoise_delete``
-#:                with no ``confirmation``) and wrote nothing, so a repeat is
-#:                safe REGARDLESS of idempotency.
+#:                or the handler's documented default — or a
+#:                ``_confirmation_tool_names()`` door called with no
+#:                ``confirmation``; the ADVERTISED one is
+#:                ``tortoise_delete_knowledge``, and naming only its retired
+#:                spelling here is what let the guard miss the live door) and
+#:                wrote nothing, so a repeat is safe REGARDLESS of idempotency.
 #:   * SAFE     — the registry declared the operation idempotent AND this call's
 #:                arguments did not switch that off.
 #:
@@ -1107,8 +1110,10 @@ _WAIT_BOUND_RETRY_RULE_NOT_SENT = (
 #: it: "may have committed" is false for it, and "do NOT repeat it" forbids the
 #: one safe action — which is the action that matters most for a preview of a
 #: destructive operation. Two shapes are previews: ``dry_run=True`` on a tool
-#: that declares the parameter, and ``tortoise_delete`` with no ``confirmation``
-#: (its two-call design — the first call only mints the token).
+#: that declares the parameter, and a ``_confirmation_tool_names()`` door (the
+#: ADVERTISED one is ``tortoise_delete_knowledge``; the derivation is
+#: signature-based precisely so a rename cannot move this arm off the door) with
+#: no ``confirmation`` (its two-call design — the first call only mints the token).
 _WAIT_BOUND_RETRY_RULE_PREVIEW = (
     "this call was a PREVIEW and wrote nothing, so repeating it is safe — no "
     "reconciliation is needed"
@@ -1519,9 +1524,11 @@ def _wait_bound_refusal_result(name: str | None = None,
       ``"none"`` when nothing can have been committed. ``"none"`` has THREE
       producers, all knowable at this call site: ``dispatched=False`` (no
       dispatch was ever started), ``dry_run`` on a tool that declares it (the
-      explicit true or the handler's own default), and ``tortoise_delete`` with
-      no ``confirmation`` (its two-call design: the first call only mints the
-      token). There is deliberately NO "this call only reads" producer: an
+      explicit true or the handler's own default), and a
+      ``_confirmation_tool_names()`` door with no ``confirmation`` (the
+      ADVERTISED one is ``tortoise_delete_knowledge``; its two-call design: the
+      first call only mints the token). There is deliberately NO "this call only
+      reads" producer: an
       argument that looks read-only cannot be trusted to be one — see
       ``_arguments_say_preview``'s neighbourhood and #10849's review, where
       ``tortoise_manage_sources(action="list")`` turned out to materialise
