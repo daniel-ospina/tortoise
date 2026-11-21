@@ -460,10 +460,12 @@ def test_the_row_paths_record_the_served_page_and_never_an_internal_read(hooked_
         "the tag arm records the page it SERVES, not the population it read")
 
     graph.rows = [{"id": "p7"}]
-    # `get_point` retired in the #12901 FINAL batch (its ledger row names `get_entity`
-    # as the approved reader, a DIFFERENT contract) — but the pin here is not the
-    # public name, it is the SDK's INTERNAL accessor, which is where the write paths
-    # read by id and which must record NOTHING (#7983, argued at `_get_point`).
+    # `get_point` retired in the #12901 FINAL batch with an EMPTY destination tuple
+    # (its ledger REASON prose names `get_entity` as the approved reader — a
+    # DIFFERENT contract, and explicitly not recorded against this name) — but the pin
+    # here is not the public name, it is the SDK's INTERNAL accessor, which is where
+    # the write paths read by id and which must record NOTHING (#7983, argued at
+    # `_get_point`).
     # ⛔ AND IT CARRIES NO MIGRATION HINT: a name retired with an EMPTY ledger row
     # emits none at all, so grepping the retirement table for a destination misses
     # it — this migration stopped here once, which is why it is migrated by RUNNING
