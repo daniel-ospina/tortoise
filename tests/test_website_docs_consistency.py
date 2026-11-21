@@ -8553,6 +8553,28 @@ def test_the_document_roots_a_browser_ignores_insert_nothing() -> None:
         "control: without `hidden` the pre-root text stays, so the row above is about the "
         "attribute and not about dropping earlier text on any root token"
     )
+    # ⛔ AND THE CLEAR MUST NOT FIRE FOR A TOKEN A BROWSER *IGNORES* (#14073 review round
+    # 24, P1). Inside an open `<select>` a start tag the mode does not list is a parse error
+    # that IGNORES the token (`_SELECT_POP` cites the same rule), so `hidden` never reaches
+    # the body — while the clear would still throw away text the browser paints:
+    assert extract_visible_text("<p>ONE<select><body hidden></select><p>TWO") == "ONE TWO", (
+        "the root token was honoured inside an open `<select>`, where a browser ignores it: "
+        "`ONE` was dropped although the body keeps rendering — the DROP direction, the one "
+        "`_text_is_painted`'s docstring calls out as how three P1s shipped"
+    )
+    assert extract_visible_text("<p>ONE<select>X") == "ONE X", (
+        "control: the same shape without the root token keeps both words"
+    )
+    # ⛔ A PRE-ROOT HEADING CANNOT BOUND EITHER (#14073 review round 24, P2): the clear the
+    # row above pins for `text` has to cover `headings` too, or the boundary question answers
+    # a heading no reader meets.
+    assert extract_heading_positions('<h2 id="h">H</h2><body hidden><p>X') == [], (
+        "a `<h2>` read BEFORE the hidden root survived: it would then BOUND the section at "
+        "a heading `[hidden] { display: none }` on the body paints nowhere"
+    )
+    assert extract_heading_positions('<body><h2 id="h">H</h2>') == [("h", 6)], (
+        "control: the same heading on a visible body is still recorded"
+    )
     for never_an_extent in ("body", "html"):
         try:
             extract_anchors_within(
@@ -8569,10 +8591,14 @@ def test_the_document_roots_a_browser_ignores_insert_nothing() -> None:
             raise AssertionError(
                 f"`{never_an_extent}` was accepted as a container tag and returned a "
                 "silent ZERO containers: the tag inserts no element, so it can never be "
-                "an extent, and the tags this helper REFUSES (`_IMPLICITLY_CLOSED`, plus "
-                "`image`) refuse rather than answer zero. ⛔ NOT a universal over the "
+                "an extent, and the tags this helper REFUSES (`_IMPLICITLY_CLOSED`) "
+                "refuse rather than answer zero. ⛔ NOT a universal over the "
                 "ignored-token class: `head` and `frame` are members of "
-                "`_IGNORED_OUTSIDE_TABLE` and still answer a silent `[]` (#14073 review, P3)"
+                "`_IGNORED_OUTSIDE_TABLE` and still answer a silent `[]` (#14073 review, P3), "
+                "and `image` is NOT refused either — it is ACCEPTED when the block is "
+                "closed (`[['#x']]`) and raises only through the unrelated "
+                "never-closed rule when it is not (measured; the parenthetical that "
+                "claimed otherwise is gone, #14073 review round 24)"
             )
 
 

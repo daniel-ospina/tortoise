@@ -2167,6 +2167,15 @@ class _AnchorHrefParser(HTMLParser):
         # disable that. `_open` has already run by now, so skipping only the PUSH keeps
         # the frameset arm intact.
         if tag in ("html", "body"):
+            # ⛔ THE TOKEN IS *IGNORED* IN THE "IN SELECT" MODE, and that has to be answered
+            # BEFORE either the flag or the clear: `<select>`'s rule ignores any start tag it
+            # does not list (the same rule `_SELECT_POP` cites), so `<body hidden>` there
+            # inserts nothing and its `hidden` NEVER reaches the body — while the clear below
+            # would still throw away text the browser paints. Measured (#14073 review round
+            # 24, P1): `<p>ONE<select><body hidden></select><p>TWO` is `'ONE TWO'` in a
+            # browser, was `'ONE'` before the clear existed, and became `''` with it.
+            if self._in_select():
+                return
             # ⛔ THE `hidden` FLAG STILL HAS TO LAND SOMEWHERE. No element is inserted, so
             # the inherited `renders` flag cannot carry it — and before `_root_renders`
             # existed this early return turned `<body hidden><p>CLAIM` INTO VISIBLE TEXT
@@ -2178,12 +2187,18 @@ class _AnchorHrefParser(HTMLParser):
             if any(name == "hidden" for name, _value in attrs):
                 self._root_renders = False
                 # The token MERGES into a root the browser already inserted, so it hides
-                # text this parser read BEFORE it too — `'<p>ONE<body hidden><p>TWO'` is
-                # `'ONE'` without this clear and `''` with it, and the browser paints
+                # content this parser read BEFORE it too — `'<p>ONE<body hidden><p>TWO'` is
+                # `'ONE'` without these clears and `''` with them, and the browser paints
                 # neither (#14073 review round 23, P2). Same reasoning as
-                # `_clear_recordings`' replaced tree: text read before the flag flipped
+                # `_clear_recordings`' replaced tree: what was read before the flag flipped
                 # does not describe a tree a reader can see.
+                #
+                # ⛔ BOTH READER-FACING RECORDINGS, not just `text` (#14073 review round 24,
+                # P2): a `<h2>` read before the token cannot be a slice boundary either —
+                # `'<h2 id="h">H</h2><body hidden><p>X'` kept `[('h', 0)]` while the text
+                # was dropped, i.e. the boundary question answered a heading no reader meets.
                 self.text.clear()
+                self.headings.clear()
             return
         opened_container = False
         if self._container is not None:
