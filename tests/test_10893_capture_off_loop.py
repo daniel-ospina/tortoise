@@ -62,7 +62,7 @@ import time
 import pytest
 
 from tests.test_hosted_api import TEST_ORG_ID, TEST_TEAM  # noqa: F401  (fixture side effects)
-from tests.test_hosted_api import client as client  # noqa: F401
+from tests.test_hosted_api import client as client
 from tortoise.sdk import TortoiseSDK
 
 _CONV = [
@@ -229,6 +229,21 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
     totals: dict[str, float] = {}
     for row in rows:
         totals[row["method"]] = totals.get(row["method"], 0.0) + row["ms"]
+
+    # ⛔ THE INSTRUMENT MUST BE PROVEN LIVE BEFORE ITS SILENCE MEANS ANYTHING.
+    # `saved` only says some methods were WRAPPED. With `rows == []` every
+    # assertion below passes vacuously (`totals == {}` -> `blocking == {}` ->
+    # `undeclared == {}`) — so a wrapper that stops INTERCEPTING the capture's
+    # SDK path (methods relocated to a base class, generated on a subclass,
+    # `vars(TortoiseSDK)` no longer holding them) would read as a clean census,
+    # which is precisely the failure this census exists to detect. `_get_registry`
+    # is the leg the docstring measures on every instrumented run; if #4451
+    # removes it, this assertion moves with it.
+    assert "_get_registry" in totals, (
+        "the census observed no residual leg — the instrumentation did not "
+        "intercept the capture's SDK path, so this run proves nothing about "
+        f"what is left on the loop (methods wrapped: {len(saved)}; "
+        f"methods observed: {sorted(totals) or 'none'})")
 
     # 1 ms of TOTAL on-loop time is the "not a blocker" bar (see the docstring).
     blocking = {m: ms for m, ms in totals.items() if ms >= 1.0}
