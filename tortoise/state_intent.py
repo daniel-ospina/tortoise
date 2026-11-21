@@ -562,7 +562,9 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
 #: asymmetry is pre-existing and deliberate (see its note above), so it is excluded by
 #: CONSTRUCTION here rather than by somebody remembering to leave it out.
 #:
-#: ⛔ ``which_names_an_ending`` IS THE ONE HAND-WRITTEN ROW, and it is the ATTRIBUTIVE
+#: ⛔ ``which_names_an_ending`` IS ONE OF THE HAND-WRITTEN ROWS — with
+#: ``existence_unguarded``, ``which_modified_noun`` and ``is_copula_long_subject``, the
+#: four the module's notice-scope paragraph names — and it is the ATTRIBUTIVE
 #: case: the ending word immediately followed by the NOUN it modifies, inside a
 #: ``which`` question. That is #14033's fourth row — `which of our withdrawn claims
 #: affected pricing` — whose ending word is a modifier and whose own predicate
