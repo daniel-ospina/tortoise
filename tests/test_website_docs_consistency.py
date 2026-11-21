@@ -3446,6 +3446,57 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
         "must not reach the visible-text scan"
     )
 
+    # 3c. …and the FALLBACK SLOTS, which `_UNRENDERED` used to drop from this recording
+    #    (#14073 review round 7, P2, measured). The set answers the BOUNDARY question,
+    #    not this one: a browser paints a fallback slot whenever its own condition
+    #    fails, and the page controls several of those conditions itself. `<object>` is
+    #    the page-controlled extreme — with no `data` the spec never enters the resource
+    #    branch and the children ARE the rendering (HTML Standard 4.8.7) — but a page
+    #    that offers no supported `<source>` decides the same thing for `<video>`, and
+    #    a browser without canvas support paints a `<canvas>`'s children. Dropping them
+    #    was the QUIET side; counting can only over-count, i.e. the loud one.
+    #    Driven per element, with the premise asserted so the allowlist and the
+    #    destination pin provably cannot be what catches it.
+    for fallback_tag in (
+        "object", "video", "audio", "canvas", "meter", "progress", "datalist",
+    ):
+        fallback_claim = section.replace(
+            "</h2>",
+            f"</h2><{fallback_tag}><p>FalkorDB permanently deletes your record once "
+            f"the allowance for your tier is reached</p></{fallback_tag}>",
+            1,
+        )
+        assert fallback_claim != section, f"the `<{fallback_tag}>` control could not inject"
+        assert _attributes_outside_allowlist(fallback_claim) == [], (
+            f"premise: a bare `<{fallback_tag}>` adds no attribute, so the allowlist "
+            f"cannot be what catches this"
+        )
+        assert sorted(set(extract_anchor_hrefs(fallback_claim))) == list(
+            _REVIEWED_SECTION_HREFS
+        ), f"premise: `<{fallback_tag}>` adds no href, so the destination pin cannot catch this"
+        assert "falkor" in _banned_vocabulary(fallback_claim), (
+            f"a `<{fallback_tag}>` paints its children whenever its own condition fails "
+            f"and the page controls several of those conditions, so its copy is one a "
+            f"reader may meet; `_UNRENDERED` answers the BOUNDARY question, and dropping "
+            f"the text here hides the claim from the pin that exists to catch it"
+        )
+        with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
+            _assert_storage_section_reviewed(fallback_claim)
+    # …and what a browser genuinely never paints STAYS dropped, at depth, or "count
+    # everything" would pass the rows above: a closed `<details>` body, a `hidden`
+    # subtree, and a `<dialog>` without `open`.
+    for name, unreadable in (
+        ("closed details body", "<details><summary></summary><p>FalkorDB deletes</p></details>"),
+        ("hidden subtree", "<div hidden><p>FalkorDB deletes</p></div>"),
+        ("closed dialog", "<dialog><p>FalkorDB deletes</p></dialog>"),
+    ):
+        mutant = section.replace("</h2>", f"</h2>{unreadable}", 1)
+        assert mutant != section, f"the {name} control could not inject"
+        assert "falkor" not in _banned_vocabulary(mutant), (
+            f"{name}: no reader meets this copy in a supporting browser, so counting it "
+            f"reddens the golden on legal markup"
+        )
+
     # 4. …and the OTHER over-drop, which the loud rows above cannot see: a raw-text
     #    element whose content a reader DOES meet must be counted. `_RAW` is
     #    suppressed for the TOKENIZER's sake, so "suppressed" is not "unreadable" —

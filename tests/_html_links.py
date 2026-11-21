@@ -300,18 +300,38 @@ class _AnchorHrefParser(HTMLParser):
     _UNRENDERED = frozenset({
         "datalist", "canvas", "video", "audio", "object", "meter", "progress",
     })
-    #: ⛔ THIS SET ANSWERS TWO QUESTIONS WITH OPPOSITE FAIL-OPEN DIRECTIONS, and the
-    #: reason above argues only the first (#14073 review round 6, P2):
+    #: ⛔ THIS SET ANSWERS THE **BOUNDARY** QUESTION ONLY, and the paragraph above is
+    #: about that question (#14073 review round 6, then round 7).
     #:
-    #: * the BOUNDARY question (`_unmet_by_reader`) wants a LONG slice, so refusing a
-    #:   heading inside a fallback slot is the loud side — that is the paragraph above;
-    #: * the TEXT question (`extract_visible_text`) wants the LONGEST text, so DROPPING
-    #:   fallback content is the loud side there, and it is what the recording does.
-    #:   Chromium agrees in the cases measured (`<video>`, `<canvas>`, `<audio>`,
-    #:   `<object>`, `<meter>`, `<progress>`, `<datalist>` children are not painted in a
-    #:   supporting browser), and the deliberate cost is stated at `handle_data`: a
-    #:   reader whose browser falls back DOES meet that copy, and the wording pin would
-    #:   not see it. One flag, two loud directions, named rather than assumed.
+    #: The BOUNDARY question (`_unmet_by_reader`) wants a LONG slice, so refusing a
+    #: heading inside a fallback slot is the loud side — that is the paragraph above.
+    #:
+    #: ⛔ THE TEXT QUESTION DOES NOT CONSULT THIS SET AT ALL, and an earlier revision
+    #: of this comment stated its direction BACKWARDS ("the TEXT question wants the
+    #: LONGEST text, so DROPPING fallback content is the loud side there"). Dropping
+    #: text cannot be loud: the wording golden compares the section to a fixture, so a
+    #: dropped claim is one the golden, the vocabulary scan and the allowlist all
+    #: report CLEAN — that is the quiet, fail-open side. COUNTING is loud (the golden
+    #: reds on copy the fixture does not carry), so counting is what the recording must
+    #: do for content a reader MAY meet.
+    #:
+    #: Two measured reasons it must, not merely may:
+    #: * `<object>` with NO `data` renders its children in EVERY browser — the spec's
+    #:   resource branch is entered only "If the `data` attribute is present and its
+    #:   value is not the empty string", and otherwise "The object element represents
+    #:   the element's children. This is the element's fallback content" (HTML
+    #:   Standard 4.8.7, fetched at RUNG 3). Page-controlled, not a support condition.
+    #:   Measured before this: `<object><p>FalkorDB … the allowance for your tier …
+    #:   permanently deleted</p></object>` in `#storage` left the allowlist, the
+    #:   destination pin, the vocabulary scan and the golden ALL green.
+    #: * every other member puts its children in a slot a browser paints when its own
+    #:   condition fails (no supported source, a failed load, no canvas support) — and
+    #:   the page controls whether a `<source>` is offered at all, so "no supporting
+    #:   browser shows it" is a statement this parser cannot make.
+    #:
+    #: The cost of counting is a possible false red on a page that writes copy in a
+    #: fallback slot no reader reaches, i.e. the loud direction, and it is bounded: the
+    #: reviewed section's fixture is regenerated deliberately, never pasted.
     #: Elements whose content renders only WITH an attribute: `<dialog>` without
     #: `open` is not in the rendering at all, and `<details>` without `open` shows
     #: its `<summary>` and hides the rest. Presence is what counts — an empty `open`
@@ -896,8 +916,12 @@ class _AnchorHrefParser(HTMLParser):
         (#14073 review, both directions measured).
 
         The third field is the inherited "a reader meets this element" flag that
-        `_unmet_by_reader` reads — the `hidden` attribute, `_UNRENDERED` element
-        types, and `_RENDERS_WITH_ATTR` elements before their attribute arrives.
+        `_unmet_by_reader` reads — the `hidden` attribute and `_RENDERS_WITH_ATTR`
+        elements before their attribute arrives. It is NOT where `_UNRENDERED`
+        element types are refused: that refusal is the BOUNDARY question and
+        `_unmet_by_reader` reads it from the TAGS, so the flag can stay a faithful
+        answer to the TEXT question for a fallback slot a page controls itself
+        (#14073 review round 7, P2 — see `_UNRENDERED`).
         It is INTERNAL to this stack: `ids` and `attrs` describe the document tree
         and are recorded regardless (an element is in the DOM whether or not CSS
         shows it), which is the distinction the class docstring draws.
@@ -918,9 +942,14 @@ class _AnchorHrefParser(HTMLParser):
                 self._open_containers.append(inside)
                 opened_container = True
         names = {name for name, _value in attrs}
+        # ⛔ NO `_UNRENDERED` TERM HERE (#14073 review round 7, P2). This flag answers the
+        # TEXT question — "does a reader meet the text under this element" — and the
+        # answer for a fallback slot is "may or may not", decided by conditions the page
+        # often controls itself (`<object>` with no `data` paints its children in every
+        # browser). Dropping them was the quiet direction; `_unmet_by_reader` keeps the
+        # tag-based refusal for the BOUNDARY question, so nothing is lost there.
         renders = not (
             "hidden" in names
-            or tag in self._UNRENDERED
             or (tag in self._RENDERS_WITH_ATTR and "open" not in names)
         )
         # Inherited, so `<div hidden><section><h2>` hides the heading without
@@ -1065,9 +1094,8 @@ class _AnchorHrefParser(HTMLParser):
             self.wedged_reason = "script-data-escaped"
         # The text a reader MEETS: outside every suppressed region (raw text, inert
         # `<template>` content, `<noscript>` under scripting) and inside a subtree
-        # that renders (`_open_elements`' inherited flag: `hidden`, `_UNRENDERED`
-        # element types, a `_RENDERS_WITH_ATTR` element before its attribute
-        # arrives).
+        # that renders (`_open_elements`' inherited flag: `hidden`, a
+        # `_RENDERS_WITH_ATTR` element before its attribute arrives).
         #
         # ⛔ `_RAW_RENDERS` IS THE OTHER HALF, and it is a fail-open if dropped: the
         # raw-text family is suppressed for the TOKENIZER's sake, and three of its
@@ -1523,8 +1551,8 @@ def extract_visible_text(html: str) -> str:
     directions come from the same mistake, so the answer comes from the same tree the
     rest of this module reads: raw-text and inert regions are dropped by `_suppress`
     (except the ones that DO paint their text, `_RAW_RENDERS`), and a subtree a reader
-    does not meet is dropped by the inherited render flag (`hidden`, `_UNRENDERED`, a
-    closed `<dialog>` — see `_unmet_by_reader`).
+    does not meet is dropped by the inherited render flag (`hidden`, a closed
+    `<dialog>` — see `_unmet_by_reader`).
 
     ⛔ WHERE THIS DELIBERATELY DIFFERS FROM `_unmet_by_reader`, because the two
     questions have OPPOSITE loud directions (#14073 review round 6):
@@ -1532,15 +1560,20 @@ def extract_visible_text(html: str) -> str:
       painted, and dropping it hid a rendered claim from the wording golden (P1,
       measured); the closed BODY stays dropped, as the browser drops it;
     * `<datalist>`/`<canvas>`/`<video>`/`<audio>`/`<object>`/`<meter>`/`<progress>`
-      FALLBACK content is dropped here (`_UNRENDERED`) even though a browser without
-      support paints it — for the text question that is the loud side, since the
-      alternative is a wording pin that reads copy from a slot no supporting browser
-      shows. The cost is named: a fallback-only claim is invisible to the golden;
+      FALLBACK content is RECORDED here, and `_UNRENDERED` is deliberately not
+      consulted (round 7, P2, measured). Those children live in a slot a browser paints
+      whenever its own condition fails, and the page controls several of those
+      conditions itself — `<object>` with no `data` paints them in EVERY browser
+      (HTML Standard 4.8.7: the resource branch needs a non-empty `data`, otherwise
+      "The object element represents the element's children"). Dropping them was the
+      QUIET side: `<object><p>FalkorDB … the allowance for your tier …</p></object>` in
+      `#storage` left all four pins green. Counting them can only over-count, i.e. red a
+      page that writes copy where no reader looks — the loud direction, and the reason
+      `_unmet_by_reader` keeps the wider refusal for the BOUNDARY question;
     * FOREIGN text is recorded whatever it is (see the declared residual at
       `handle_data`): a foreign `<title>`/`<desc>`/`<style>`/`<script>` therefore
       contributes text a browser never paints. That is the false-red direction, not a
       fail-open, and it is named rather than implied.
-
     Text nodes are returned joined by a single space, in document order, so an inline
     element still separates words the way the tags it replaced did. Whitespace is NOT
     folded here: the caller decides how to compare, and this module does not know
