@@ -583,7 +583,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 
 **What users complain about:**
 - **Complexity / steep learning curve.** GitHub issue #490: MemGPT is "one of the hardest pieces of AI software to get to grips with." A third-party comparison: Letta "has a steeper learning curve, with concepts like core/recall/archival memory and Python-only setup taking more time to internalize"
-- **Integration friction.** Issue #689: MemGPT "did not update the expected memory layer"
+- **Integration friction.** Issue #689: MemGPT did not update the expected memory layer (our summary of the report — the thread states the symptom, not this wording)
 - **Concept churn.** MemGPT → Letta server → Letta Code pivot; heartbeats deprecated; memory blocks now "legacy." Docs explicitly tell users to migrate off the shared-blocks pattern
 - **Self-hosting/ops effort** and **unpredictable usage cost** — their own docs warn casual coding users to expect ~$100/mo+ and power users $200+/mo
 - No semantic index by default — retrieval quality rests on the agent's own file-reading behavior
