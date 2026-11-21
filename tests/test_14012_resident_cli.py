@@ -626,6 +626,29 @@ def test_show_with_a_budget_says_the_cap_was_checked(wired, capsys):
     assert out["reason"] == ""
 
 
+def test_a_sweep_with_no_declaration_reports_pins_applied_as_NOT_APPLICABLE(
+        sweep, capsys, tmp_path):
+    """`pins.applied` is `None` when there is nothing to apply — never `False`.
+
+    ⛔ MUTATION-VERIFIED GAP: only the `False` (wrong-key-space) arm was asserted, so
+    reverting the field to `pinned_gate is not None` left the suite GREEN. The consequence
+    is an alarm with no cause: `False` is otherwise emitted only beside a sentence
+    explaining the refusal, so a monitor keying on this field — the consumer it was added
+    for — alarms on every clean sweep of an unpinned graph.
+    """
+    _, calls = sweep
+    code = cache_evict.main(_sweep_argv(_report_file(tmp_path), "--max-nodes", "1000"))
+    assert code == 0
+    assert len(calls) == 1 and calls[0]["pinned"] is None
+    out = json.loads(capsys.readouterr().out)
+    assert out["pins"]["applied"] is None, (
+        "a sweep with NOTHING declared reported `applied` as a boolean — `False` here is "
+        "an alarm with no cause, and it is indistinguishable from the wrong-key-space "
+        "refusal, which always carries a reason"
+    )
+    assert out["pins"]["not_applied_reason"] == "no pin declaration — nothing to apply"
+
+
 def test_a_pin_set_for_another_key_space_refuses_the_sweep(sweep, capsys, tmp_path):
     """A pin declaration in ANOTHER key space REFUSES the sweep, rather than not applying.
 
