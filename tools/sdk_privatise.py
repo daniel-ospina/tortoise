@@ -426,12 +426,16 @@ SWEEP_NAMES = 66
 #: So `graph.query` is **276** here, `super().query` **68**, `client.delete` **43** — read with
 #: `--report`, not with a grep. A raw whole-tree grep is NOT that reading: it counts OCCURRENCES,
 #: prose included, not the pinned residue ROW, and it counts this block's OWN prose about the
-#: shape — so any figure it prints is a function of the sentence quoting it, and NO head figure is
-#: stable. It is quoted here only against a NAMED revision, and with the pattern that actually
+#: shape — so any WHOLE-TREE figure it prints is a function of the sentence quoting it, and no
+#: whole-tree head figure is stable. It is quoted here only against a NAMED revision, and with the
+#: pattern that actually
 #: produced the number: `git grep -hoE '\bclient\.delete\b' <rev> -- '*.py'` reads **48** at
-#: `2fe01fc775e`. ⛔ NO **GREP** FIGURE FOR THIS HEAD IS PUBLISHED, DELIBERATELY — the AST `--report`
-#: rows six lines above ARE head figures and are fine, because an AST count does not read this
-#: block's prose; only the grep does. The reason is measured:
+#: `2fe01fc775e`. ⛔ NO **WHOLE-TREE** GREP FIGURE FOR THIS HEAD IS PUBLISHED, DELIBERATELY. Two
+#: distinctions, because an earlier draft of this very sentence got it wrong twice (raised by
+#: review): the AST `--report` rows ABOVE are head figures and are fine, because an AST count does
+#: not read this block's prose — only the grep does; and the SCOPED grep below **does** publish a
+#: head figure (`45`), because excluding this file makes it stable. What is deliberately withheld is
+#: the WHOLE-TREE figure, the only one the prose moves. The reason is measured:
 #: a PREVIOUS DRAFT named the wrong pattern here — it published its figures beside
 #: `\bclient\.(query|update|delete)\b`, which also counts the 3 `client.query` hits and therefore
 #: reads **51** at that same rev, not 48 — a figure that does not reproduce against the command in
@@ -441,7 +445,8 @@ SWEEP_NAMES = 66
 #: STABLE number is the SCOPE, not the digit: excluding this file
 #: (`… -- '*.py' ':!tools/sdk_privatise.py'`) that same `\bclient\.delete\b` grep reads **45** at
 #: BOTH `2fe01fc775e` AND this head — the prose population did not move at all, so the whole-tree
-#: movement is entirely this block's own words, which is precisely why no head figure is published.
+#: movement is entirely this block's own words, which is precisely why no WHOLE-TREE head figure is
+#: published.
 #: ⛔ AND "46" WAS REAL: `git grep -hoE '\bclient\.delete\b' ad79129cb5 -- '*.py'` reads **46** —
 #: `ad79129cb5` being the very tree whose `graph.query` the old sentence quoted as "274 here"
 #: (that reading is cited nine lines above). Its defect was that the sentence shipped on LATER
@@ -459,11 +464,13 @@ SWEEP_NAMES = 66
 #: SCOPED, and an earlier draft of THIS sentence got it wrong: it said `--repin` reads the same pair
 #: "on `origin/main` and on this head, so … nothing in it moves a receiver row", which CONTRADICTED
 #: the re-cut paragraph FURTHER DOWN THIS BLOCK ("The −1 is THIS LANE's own"). ⛔ No line distance is
-#: quoted on purpose: an earlier draft of this very sentence said "36 lines later", the measurement
-#: was 38, and the figure moves whenever this block is edited — the same self-falsifying shape the
-#: paragraphs above describe. Measured, and both halves
-#: are true of different trees: `--repin` reads the SAME pair — `(11839, '0a7e60fa05aa31b9')` — on
-#: `origin/main` (`2fe01fc775e`) AND on the capture rewrite's PARENT head (`83e94826a8a`), so
+#: quoted on purpose, here or anywhere else in this correction: a line distance in a block that is
+#: edited moves with the edit, and an earlier draft of this sentence quoted one that no longer
+#: reproduced from the tree — the same self-falsifying shape the paragraphs above describe. Measured,
+#: and both halves are true of different trees: `--repin` reads the SAME pair —
+#: `(11839, '0a7e60fa05aa31b9')` — on `main` AT `2fe01fc775e` (⛔ the revision, not the branch name:
+#: `origin/main` has since moved, and at the current `origin/main` this command prints the 11838 pair
+#: below) AND on the capture rewrite's PARENT head (`83e94826a8a`), so
 #: everything up to that point moves no receiver row; the ONE row this lane's later capture rewrite
 #: moves is `seen.update` **102 → 101** (the re-cut paragraph below attributes it and states why a
 #: `dict` accumulator in a test is a swept receiver). ⛔ A reader must not have to reconcile two
