@@ -333,7 +333,7 @@ Supports swapping backends: graph stores (Kuzu/Ladybug default, Neo4j, FalkorDB,
 3. The ontology then feeds **forward into extraction**: *"before extracting, cognee picks the entity and relation types to look for, from your ontology if you have one, or otherwise from a quick scan of each document."*
 4. And **into retrieval**: *"When you ask a question, cognee uses these types to find relevant entities before retrieving the information needed to answer."* → **the ontology is a retrieval router.**
 5. **Editing:** the Ontology Editor takes plain language — *"Tell the Ontology Editor to 'merge Decision and DecisionRecord,' and review the proposed changes before applying them."*
-6. **Interop:** *"Already have an ontology? Bring it in — cognee reads OWL, Turtle, JSON-LD and the other standard RDF formats."* → standards import is treated as table stakes.
+6. **Interop:** *"Already have an ontology? Bring it in — cognee reads OWL, Turtle, JSON-LD and the other standard RDF formats, and builds on the ontology you've defined."* → standards import is treated as table stakes.
 7. **Explore:** graph browsable level by level — *"domains, subdomains, entity types, and individual entities."*
 
 **What the supplied-ontology path mechanically does and does not do** (documented, verified against `docs.cognee.ai`):
