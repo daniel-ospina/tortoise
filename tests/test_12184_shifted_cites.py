@@ -1775,8 +1775,10 @@ def test_a_carried_forward_figure_is_reported() -> None:
         # literal `{2: alt_drifters + 7}` and the two distances it needs — the band's SLACK, and how far the
         # literal sits above it — are properties of the DOCUMENT.
         # ⛔ TWO different distances, named here so they are not swapped again: the band's SLACK below its
-        # edge is `extra_pairs - (alt - primary)` — MEASURED 0 or 1 over every edition reachable from this
-        # head (44 of them touch the document; `extra_pairs` is 1, 3 or 4 there against a gap of 1 or 3) —
+        # edge is `extra_pairs - (alt - primary)` — MEASURED 0 or 1 on the 35 editions that publish the
+        # alternative basis (of the 44 reachable from this head; `extra_pairs` is 1, 3 or 4 there against
+        # a gap of 1 or 3, and 0 on the nine that predate the two-code-span disclosure, where neither
+        # distance exists) —
         # and the `+7` literal sits ABOVE the edge by `7 - slack`, i.e. 6 or 7, which is the figure this
         # rationale once published under the slack's name (0 is not 6). So the literal never went legal here.
         # ⛔ TWO counts must not be confused: 3 UNCOUNTED added pairs here (the `_TWO_SPAN_NEW` arm's
@@ -1785,10 +1787,11 @@ def test_a_carried_forward_figure_is_reported() -> None:
         # unrelated, §2.5's `:Tag` count), so grep the sentence, not the marker — that `5` is
         # `3 uncounted + 2 already counted`, so it is neither the band's slack nor the literal's distance
         # above the edge, and must not be read as either. That misreading is how this rationale first
-        # claimed the branch 'had already carried 5'; the uncounted count on those 44 editions is 1, 3 or
-        # 4, and the only editions carrying 5 are on `feat/13971-point-strip`, which is not an ancestor
-        # here. ⚠️ Those are ONE scope with ONE set of values: an earlier form of this block printed
-        # `extra_pairs` `1..4` in one sentence and "never left 3..4" eight lines later for the same
+        # claimed the branch 'had already carried 5'; the uncounted count those 44 editions STATE is 3 or
+        # 4 (never 1), while measured `extra_pairs` there is 0, 1, 3 or 4 — the 0s are the nine editions
+        # above — and the only editions carrying 5 are on `feat/13971-point-strip`, which is not an
+        # ancestor here. ⚠️ Those are ONE scope with ONE set of values: an earlier form of this block
+        # printed `extra_pairs` `1..4` in one sentence and "never left 3..4" eight lines later for the same
         # quantity (`:1586` grades the two equal), so a reader got two ranges under one heading.
         # A fixed `+offset` therefore goes legal when `extra_pairs - (alt_drifters - drifters) >= offset`,
         # which is `extra_pairs >= 10` at this head, NOT `>= 7`: at extra_pairs=8 the band is `155..163`
