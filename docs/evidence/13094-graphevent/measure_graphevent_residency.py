@@ -1,0 +1,223 @@
+#!/usr/bin/env python
+"""Measure what a `:GraphEvent` row ACTUALLY costs a FalkorDB graph (#13094).
+
+WHY THIS EXISTS. `docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` §5.1 is explicit
+that the residency half of its own census is **UNMEASURED**: `#13083` measured the
+PAYLOAD per node exactly (12,768 B over 67 `:GraphEvent` rows) and measured nothing
+about what those rows cost the SERVER, because the only per-graph figure it trusted
+was run-dependent drift. `#13094` needs the other number — *does moving this shape
+out of the graph buy anything?* — so it is measured here rather than asserted.
+
+WHAT IS MEASURED, and what the number means:
+
+* `GRAPH.MEMORY USAGE <graph>` (per-graph, `total_graph_sz_mb`) — integer MB, far
+  too coarse for a test-sized population, so it is reported but NOT used for the
+  per-node slope;
+* `INFO memory` `used_memory` at THREE populations — the slope between them is the
+  per-node cost, and the slope is what is quoted. A single delta from an empty
+  graph would fold in the two indexes' fixed cost and report a constant as a
+  slope, which is the #13083 §5.1 error in the other direction.
+
+The SCHEMA IS PRODUCTION'S: the three DDL statements below are `event_store.
+ensure_event_schema`'s verbatim (`tortoise/event_store.py:410`, `:415`, `:421`), so
+the measurement includes the `event_id` index, the `seq` index and the unique
+constraint a production graph carries. A measurement against an un-indexed graph
+would understate the residency of the exact shape this issue is about.
+
+The PAYLOAD is the census's own size: `#13083` §4 measured 12,768 B over 67
+`:GraphEvent` nodes ≈ 190 B each, which is the `PointAdded`-with-actor shape below.
+
+READ-ONLY AGAINST PRODUCTION — this script never runs there. It REQUIRES
+`TORTOISE_DB_URI` naming its OWN throwaway graph and deletes that graph at the end;
+`--keep` leaves it for inspection.
+
+Usage:
+
+    uv run python docs/evidence/13094-graphevent/measure_graphevent_residency.py \
+        --graph probe_13094_measure --sizes 20000 40000 60000 [--keep]
+
+⚠️ Run it on a lane container (`tools/test_lane.py run -- <noop>`), never against a
+tenant graph: it writes N synthetic `:GraphEvent` rows.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+
+GRAPH_PREFIX = "probe_13094"
+
+#: `event_store.ensure_event_schema`'s three statements, verbatim (`:410`, `:415`,
+#: `:421`), each with HOW it must be issued. The measurement is meaningless without
+#: them — see the module docstring.
+#:
+#: ⚠️ The third one is NOT Cypher and cannot go down `graph.query()`: `GRAPH.
+#: CONSTRAINT` is a module command, and `ensure_event_schema` sends it through
+#: `g.query()` inside a `try/except` that only logs (its own comment: *"FalkorDB
+#: #664 crash reports on string-property unique constraints"*). So on THIS server
+#: the constraint is REFUSED and production runs without it too — which is why the
+#: script records per-statement whether it was installed or refused instead of
+#: claiming a schema it may not have.
+SCHEMA_STATEMENTS: tuple[tuple[str, str], ...] = (
+    ("cypher", "CREATE INDEX FOR (n:GraphEvent) ON (n.event_id)"),
+    ("command", "GRAPH.CONSTRAINT CREATE tortoise_ge_uid UNIQUE NODE GraphEvent "
+                "PROPERTIES 1 event_id"),
+    ("cypher", "CREATE INDEX FOR (n:GraphEvent) ON (n.seq)"),
+)
+
+PAYLOAD = json.dumps({
+    "id": "01J8ZK3M4N5P6Q7R8S9T0V1W2X",
+    "pointKind": "claim",
+    "actor_user_id": "usr_01HZX",
+})
+
+
+def _payload(width: int | None) -> str:
+    """The measured payload, padded (or not) to `width` bytes.
+
+    `#13083` §4 measured **12,768 B over 67** `:GraphEvent` nodes ≈ **190 B each**
+    on real tenant data, so `190` is the faithful figure and the default. The
+    unpadded shape above is 88 B — the two are both reported so the slope can be
+    read against the payload it was measured with, rather than assumed
+    payload-independent.
+    """
+    if width is None or width <= len(PAYLOAD):
+        return PAYLOAD
+    return PAYLOAD[:-1] + ("x" * (width - len(PAYLOAD))) + "}"
+TS = "2026-11-21T07:40:00.123456+00:00"
+BATCH = 500
+
+
+def _connection(uri: str):
+    from falkordb import FalkorDB
+
+    return FalkorDB.from_url(uri.replace("docker://", "redis://"))
+
+
+def _used_memory(db) -> int:
+    """The server's `used_memory`, in bytes. The only figure with byte resolution."""
+    return int(db.connection.execute_command("INFO", "memory")["used_memory"])
+
+
+def _graph_usage(db, graph: str) -> dict:
+    """`GRAPH.MEMORY USAGE` as a dict. Reported, never used for the slope (MB)."""
+    flat = db.connection.execute_command("GRAPH.MEMORY", "USAGE", graph)
+    return dict(zip(flat[0::2], flat[1::2], strict=True))
+
+
+def _create_batch(g, start: int, stop: int, payload: str) -> None:
+    rows = [
+        {
+            "seq": i + 1,
+            "ts": TS,
+            "type": "PointAdded",
+            "event_id": f"01J8ZK3M4N5P6Q7R8S9T{i:07d}",
+            "payload": payload,
+        }
+        for i in range(start, stop)
+    ]
+    g.query(
+        "UNWIND $rows AS r CREATE (:GraphEvent {seq:r.seq, ts:r.ts, "
+        "type:r.type, event_id:r.event_id, payload:r.payload})",
+        params={"rows": rows},
+    )
+
+
+def measure(uri: str, graph: str, sizes: list[int], keep: bool,
+            payload_bytes: int | None = 190) -> dict:
+    db = _connection(uri)
+    if not graph.startswith(GRAPH_PREFIX):
+        raise SystemExit(
+            f"refusing to write synthetic :GraphEvent rows into {graph!r}: the "
+            f"name must start with {GRAPH_PREFIX!r} so a production graph can "
+            f"never be measured by accident")
+    try:
+        db.connection.execute_command("GRAPH.DELETE", graph)
+    except Exception:  # noqa: BLE001 — an absent graph is the desired state
+        pass
+    g = db.select_graph(graph)
+    g.query("CREATE (n:Warmup {i:0})")  # materialise the key before reading usage
+    baseline_used = _used_memory(db)
+    applied = []
+    for kind, statement in SCHEMA_STATEMENTS:
+        try:
+            if kind == "cypher":
+                g.query(statement)
+            else:
+                db.connection.execute_command(*statement.split())
+            applied.append({"statement": statement, "installed": True})
+        except Exception as exc:  # noqa: BLE001 — the same tolerance production has
+            applied.append({"statement": statement, "installed": False,
+                            "refused": f"{type(exc).__name__}: {exc}"})
+    g.query("MATCH (n:Warmup) DETACH DELETE n")
+    after_schema = _used_memory(db)
+    per_graph_after_schema = _graph_usage(db, graph)
+
+    payload = _payload(payload_bytes)
+    points = []
+    created = 0
+    for target in sizes:
+        while created < target:
+            stop = min(created + BATCH, target)
+            _create_batch(g, created, stop, payload)
+            created = stop
+        points.append({"nodes": created, "used_memory": _used_memory(db)})
+
+    out = {
+        "graph": graph,
+        "payload_bytes_per_event": len(payload),
+        "schema": applied,
+        "used_memory_baseline": baseline_used,
+        "used_memory_after_schema": after_schema,
+        "schema_bytes": after_schema - baseline_used,
+        "graph_memory_usage_after_schema": per_graph_after_schema,
+        "points": points,
+        "slope_bytes_per_node": _slope(points),
+        "graph_memory_usage_final": _graph_usage(db, graph),
+    }
+    if not keep:
+        db.connection.execute_command("GRAPH.DELETE", graph)
+    return out
+
+
+def _slope(points: list[dict]) -> float | None:
+    """Bytes per node from the LAST two populations — the marginal cost.
+
+    Two neighbouring populations, not the first and the last: the graph's own
+    fixed cost (key tables, the two indexes above, the unique constraint) is
+    paid once and would otherwise be divided into every node and reported as if
+    it recurred. The marginal figure is the one that answers "does removing these
+    rows give the memory back?".
+    """
+    if len(points) < 2:
+        return None
+    a, b = points[-2], points[-1]
+    if b["nodes"] <= a["nodes"]:
+        return None
+    return (b["used_memory"] - a["used_memory"]) / (b["nodes"] - a["nodes"])
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--graph", default=f"{GRAPH_PREFIX}_measure")
+    parser.add_argument("--sizes", type=int, nargs="+", default=[20000, 40000, 60000])
+    parser.add_argument("--payload-bytes", type=int, default=190,
+                        help="pad the synthetic payload to this width (default 190, "
+                             "#13083 §4's measured average)")
+    parser.add_argument("--keep", action="store_true",
+                        help="leave the measurement graph in place")
+    args = parser.parse_args(argv)
+    uri = os.environ.get("TORTOISE_DB_URI")
+    if not uri:
+        print("TORTOISE_DB_URI is not set — this measurement needs its own graph",
+              file=sys.stderr)
+        return 2
+    print(json.dumps(measure(uri, args.graph, args.sizes, args.keep,
+                             args.payload_bytes), indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

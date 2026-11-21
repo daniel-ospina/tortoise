@@ -10549,6 +10549,12 @@ ROWED_BY_THIS_FOLD = (
     # `tests/test_uri_requiring_selection.py::test_declared_list_matches_the_observation`,
     # which re-derives the set from a real URI-less collection.
     "test_evictor_invalidates_fallback_snapshot_13123.py",
+    # #13094 — a file this fold ADDED, so its `durations:` row must exist and be
+    # pinned here: the entry-rule test iterates an EXPLICIT tuple, so a row for a
+    # file nobody listed is invisible (`#13110`'s round-5 review recorded that
+    # variant surviving a round; `test_13826_write_gate.py`'s row records the
+    # sibling that was found entirely unregistered).
+    "test_13094_graphevent_home.py",
     # ⛔ `test_usage_signal.py` IS NOT REPEATED HERE. This is the SECOND copy the merge of
     # `origin/main` created, and the #14070 argument above is why it must not stay: carrying
     # a second copy of a file that already has a row is exactly the duplicate shape that
