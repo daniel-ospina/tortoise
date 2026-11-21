@@ -1533,8 +1533,8 @@ def test_no_graph_dependency() -> None:
     # later: measured on the previous head, narrowing the child's print to the three
     # named controls was **102 passed** with `import tortoise.projection` coming back
     # empty, and suppressing one name in the parent's parse was **102 passed** too.
-    # Both are red below, and this is why: the injected roots are KNOWN to be present,
-    # so their absence from the result is a defect rather than an ambiguity.
+    # Both are red below: the injected roots are KNOWN to be present, so their absence
+    # from the result is a defect rather than an ambiguity.
     _all_roots = _probe("pass", *_probe_forbidden())
     assert _all_roots == set(_probe_forbidden()), (
         f"with every root supplied to the child, the probe reported "
@@ -1543,6 +1543,19 @@ def test_no_graph_dependency() -> None:
         "on the way into `_matching` (the parent's parse), or inside the matcher; each "
         "is a live miss for that root and none of them is visible to a row that "
         "imports a real module (#14118 item 1)")
+    # ⛔ AND ONE ROW IS KEYED ON A REAL IMPORT, because the composition row above
+    # cannot catch a filter keyed on ITS OWN INPUT: its expected set IS the injected
+    # set, so `… if n in set(injected) | {the three named controls}` passes it by
+    # construction — measured GREEN on this head before this row, with
+    # `import tortoise.projection` then returning an empty set. This import is fixed by
+    # the tree, supplies no injected name, and pulls three distinct banned roots, so an
+    # injected-or-controls filter keeps NONE of them and reds here.
+    _real = _probe("import tortoise.projection")
+    assert {"tortoise.cypher_guard", "tortoise.projection", "tortoise.retry"} <= _real, (
+        f"`import tortoise.projection` left only {sorted(_real)} — it puts those three "
+        "banned roots in `sys.modules`, so a filter keyed on the witness rows' own "
+        "inputs (`set(injected) | the named controls`) drops them and reds here "
+        "(#14118 item 1)")
     assert _matching(["redis_probe", "tortoise_ep", "notfalkordb"]) == set(), (
         "the matcher must not treat a name that merely CONTAINS a banned root as "
         "being under it — `redis_probe` is not `redis.*`, and matching it would make "
