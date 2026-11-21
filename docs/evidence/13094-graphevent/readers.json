@@ -57,7 +57,7 @@
       ],
       "needs": "DDL: a uniqueness constraint on event_id",
       "class": "maintenance",
-      "why": "the belt behind the dedupe pre-check (the app-side probe is the suspenders). \u26a0\ufe0f Issued through `g.query()` inside a `try/except` that only logs, so it does not raise the reader \u2014 and on the server this was measured against it was REFUSED while the `event_id` exact-match index was present and installed: `ResponseError: missing supporting exact-match index` (`measurement-payload88.json`). FalkorDB builds the index asynchronously, so a constraint issued immediately after its index can fail for that reason; that `installed` flag in the measurement records \"the command did not raise\", NOT \"the index is usable\". Production runs on the app-side probe either way."
+      "why": "the belt behind the dedupe pre-check (the app-side probe is the suspenders). \u26a0\ufe0f `ensure_event_schema` issues it through `g.query()`, which cannot parse a module command, so the constraint is never created in production and the store admits a duplicated `(seq, event_id)` row \u2014 the app-side probe is the belt that is actually there. \u26d4 THE `missing supporting exact-match index` THIS ROW ONCE RECORDED WAS A SCRIPT DEFECT, NOT A SERVER LIMIT (#14183 review round 9, measured): the measurement put `tortoise_ge_uid` in the GRAPH-KEY slot of the module command, so it ran against a freshly minted graph with no `event_id` index at all. Correctly formed against a graph WITH that index the command is ACCEPTED (`PENDING`) on `falkordb-server:v4.20.6`, empty and 20k-node graphs alike \u2014 there is no asynchronous-index race to allow for."
     },
     {
       "file": "tortoise/event_store.py",
@@ -172,7 +172,7 @@
       "occurrences": 4,
       "needs": "a full label-agnostic read of the target graph",
       "class": "maintenance",
-      "why": "this is `restore_graph`'s pre-check (`hosted_backup.py:1333`, inside `def restore_graph` at `:1098`), NOT the export: it refuses a dirty target before the rebuild, so a re-home must keep it reading every node whatever shape it carries. \u26a0\ufe0f It is censused because the restore must decide what it does with a `:GraphEvent` node, not because it reads one. \u26a0\ufe0f NEITHER EXPORT-SIDE READER IS IN THIS CENSUS: the paged dump's node statement is `_DUMP_NODE_PAGE_QUERY` (`hosted_backup.py:454`, consumed by `dump_graph` at `:647`), and the export endpoint's own whole-graph scan is `hosted_api.py:33400` (`_export_graph_snapshot`, defined at `:33386`, which branches on `\"GraphEvent\" in labels` and appends it to the export payload \u2014 a SERVING reader under this census's own class rule, so the `serving: 1` count in this file excludes it). No row carries either (#14204). \u26a0\ufe0f This statement occurs FOUR times in `hosted_backup.py` \u2014 `:1333`, `:1534`, the live read at `:3603` (`_restore_into_temp_verify_swap`) and a docstring mention at `:3442` \u2014 and the exact count is pinned, so deleting any of them reds. What the pin cannot do is say WHICH occurrence a row addresses: the `line` is that address and nothing grades it."
+      "why": "this is `restore_graph`'s pre-check (`hosted_backup.py:1333`, inside `def restore_graph` at `:1098`), NOT the export: it refuses a dirty target before the rebuild, so a re-home must keep it reading every node whatever shape it carries. \u26a0\ufe0f It is censused because the restore must decide what it does with a `:GraphEvent` node, not because it reads one. \u26a0\ufe0f NEITHER EXPORT-SIDE READER IS IN THIS CENSUS: the paged dump's node statement is `_DUMP_NODE_PAGE_QUERY` (`hosted_backup.py:454`, consumed by `dump_graph` at `:647`), and the export endpoint's own whole-graph scan is `hosted_api.py:33400` (`_export_graph_snapshot`; the `\"GraphEvent\" in labels` branch is `:33416` and the append `:33424` \u2014 a SERVING reader under this census's own class rule, so the `serving: 1` count in this file excludes it). No row carries either (#14204). \u26a0\ufe0f This statement occurs FOUR times in `hosted_backup.py` \u2014 `:1333`, `:1534`, the live read at `:3603` (`_restore_into_temp_verify_swap`) and a docstring mention at `:3442` \u2014 and the exact count is pinned, so deleting any of them reds. What the pin cannot do is say WHICH occurrence a row addresses: the `line` is that address and nothing grades it."
     },
     {
       "file": "tortoise/hosted_backup.py",
@@ -185,7 +185,7 @@
       "occurrences": 4,
       "needs": "a full label-agnostic read of the graph",
       "class": "maintenance",
-      "why": "the second restore-side scan (the restore's `actual_nodes` verification, `hosted_backup.py:1533-1534`): the same statement shape as the line above, so both rows pin the same four occurrences \u2014 see the residual noted on that row."
+      "why": "the second restore-side scan (the restore's `actual_nodes` verification, `hosted_backup.py:1533-1534`): the same statement shape as the line above, so both rows require two occurrences \u2014 see the residual noted on that row."
     }
   ],
   "counts": {

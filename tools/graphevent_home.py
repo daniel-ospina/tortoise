@@ -81,37 +81,12 @@ Usage:
 
 from __future__ import annotations
 
-import sys
-
-# ⛔ #5128 / #14181 — THE INTERPRETER FLOOR, BEFORE EVERY OTHER IMPORT.
-# This tool is a `tools/` ENTRY POINT, and the suite enforces the floor on every
-# such file (`tests/test_entry_point_python_guard.py`, `_guard_index`), which is
-# why the guard is here even though THIS module's product imports
-# (`tortoise.record_projection`, `falkordb`, `psycopg2`) are all deferred into
-# functions: on an old interpreter they would fail at CALL time, deep inside a
-# reader, naming neither this file nor the floor. Refuse first, and say which.
-#
-# EXIT 2, NOT 1: this file's own `EXIT CODES` table above reserves 1 for the
-# PRODUCED `not_covered` verdict and 2 for "could not run" — and an interpreter
-# below the floor is exactly "could not run". `SystemExit(<message>)` would wear
-# status 1 and be read downstream as "the record is short" on a run that never
-# read it, the same collision `tests/test_13094_graphevent_home.py` pins for a
-# missing `psycopg2`. So the message goes to stderr and the code is the spare 2
-# (#4053's shape), pinned per-file in `REFUSAL_CODES`.
-if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
-    print(
-        "tools/graphevent_home.py requires Python >= 3.12 (got "
-        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
-        "`uv run python tools/graphevent_home.py`",
-        file=sys.stderr,
-    )
-    raise SystemExit(2)
-
 import argparse
 import hashlib
 import json
 import os
 import re
+import sys
 from collections import Counter
 from collections.abc import Mapping
 from typing import Any
@@ -130,17 +105,15 @@ from typing import Any
 #: ⚠️ It is the table `#13094`'s PR carries, made checkable:
 #: `tests/test_13094_graphevent_home.py` asserts every `snippets` entry still
 #: appears in its `file` (whitespace-collapsed, so a re-indent is not a false red
-#: while a reword is a real one), `min_occurrences` where one file holds the same
-#: statement twice, and `occurrences` where a row must declare the EXACT count.
-#: ⛔ WHERE THAT WORKS AND WHERE IT DOES NOT, because the two cases differ and only
-#: one is a proof: the `event_store.py` dedupe pair is the ONLY two occurrences of
-#: its text in that file, so deleting one reds the census; the two restore-side
-#: scans share their text with four occurrences in `hosted_backup.py`, so those
-#: rows declare `occurrences: 4` and the test asserts that EXACT count — measured,
-#: a `min_occurrences: 2` floor stayed GREEN when BOTH censused sites were
-#: deleted, because two other occurrences survived the floor. What the pin still
-#: cannot do is say WHICH occurrence a row addresses: the `line` is that address
-#: and nothing grades it.
+#: while a reword is a real one) and `min_occurrences` where one file holds the
+#: same statement twice. ⛔ WHERE THAT WORKS AND WHERE IT DOES NOT: the
+#: `event_store.py` dedupe pair is the ONLY two occurrences of its text in that
+#: file, so deleting one reds the census; the two restore-side scans share their
+#: text with two more occurrences in `hosted_backup.py` (four in total), so those
+#: rows pin the EXACT count in `occurrences` — deleting ANY of the four reds, which
+#: a bare `min_occurrences` floor did NOT do (measured: deleting both censused
+#: sites left two and stayed green). What no pin can do is say WHICH occurrence a
+#: row addresses: the `line` is that address and nothing grades it.
 #:
 #: CLASSIFICATION — the three classes, and what each one can justify:
 #:
@@ -211,17 +184,18 @@ READERS: tuple[dict[str, Any], ...] = (
         "needs": "DDL: a uniqueness constraint on event_id",
         "class": "maintenance",
         "why": "the belt behind the dedupe pre-check (the app-side probe is the "
-               "suspenders). ⚠️ Issued through `g.query()` inside a `try/except` "
-               "that only logs, so it does not raise the reader — and on the "
-               "server this was measured against it was REFUSED while the "
-               "`event_id` exact-match index was present and installed: "
-               "`ResponseError: missing supporting exact-match index` "
-               "(`measurement-payload88.json`). FalkorDB builds the index "
-               "asynchronously, so a constraint issued immediately after its "
-               "index can fail for that reason; that `installed` flag in the "
-               "measurement records \"the command did not raise\", NOT \"the "
-               "index is usable\". Production runs on the app-side probe "
-               "either way.",
+               "suspenders). ⚠️ `ensure_event_schema` issues it through `g.query()`, "
+               "which cannot parse a module command, so the constraint is never "
+               "created in production and the store admits a duplicated "
+               "`(seq, event_id)` row — the app-side probe is the belt that is "
+               "actually there. ⛔ THE `missing supporting exact-match index` THIS "
+               "ROW ONCE RECORDED WAS A SCRIPT DEFECT, NOT A SERVER LIMIT (#14183 "
+               "review round 9, measured): the measurement put `tortoise_ge_uid` in "
+               "the GRAPH-KEY slot of the module command, so it ran against a "
+               "freshly minted graph with no `event_id` index at all. Correctly "
+               "formed against a graph WITH that index the command is ACCEPTED "
+               "(`PENDING`) on `falkordb-server:v4.20.6`, empty and 20k-node graphs "
+               "alike — there is no asynchronous-index race to allow for.",
     },
     {
         "file": "tortoise/event_store.py",
@@ -328,8 +302,8 @@ READERS: tuple[dict[str, Any], ...] = (
                "EXPORT-SIDE READER IS IN THIS CENSUS: the paged dump's node statement is "
                "`_DUMP_NODE_PAGE_QUERY` (`hosted_backup.py:454`, consumed by `dump_graph` "
                "at `:647`), and the export endpoint's own whole-graph scan is "
-               "`hosted_api.py:33400` (`_export_graph_snapshot`, defined at `:33386`, which branches on "
-               "`\"GraphEvent\" in labels` and appends it to the export payload — a "
+               "`hosted_api.py:33400` (`_export_graph_snapshot`; the `"
+               "\"GraphEvent\" in labels` branch is `:33416` and the append `:33424` — a "
                "SERVING reader under this census's own class rule, so the `serving: 1` "
                "count in this file excludes it). No row carries either (#14204). ⚠️ This "
                "statement occurs FOUR times in `hosted_backup.py` — `:1333`, `:1534`, the "
@@ -348,8 +322,9 @@ READERS: tuple[dict[str, Any], ...] = (
         "needs": "a full label-agnostic read of the graph",
         "class": "maintenance",
         "why": "the second restore-side scan (the restore's `actual_nodes` verification, "
-               "`hosted_backup.py:1533-1534`): the same statement shape as the line above, so "
-               "both rows pin the same four occurrences — see the residual noted on that row.",
+               "`hosted_backup.py:1533-1534`): "
+               "the same statement shape as the line above, so both rows require two "
+               "occurrences — see the residual noted on that row.",
     },
 )
 
@@ -453,7 +428,9 @@ def _graph_rows(db, graph: str, batch: int = 2000) -> list[dict[str, Any]]:
       hand-written `3.5`, and an `int()` cursor would never advance past it — an
       unbounded loop. The cursor keeps the value the server returned, so `> 3.5`
       advances.
-    * a row with NO `event_id` cannot take part in that cursor, so a page whose
+    * a row with no STRING `event_id` — absent, or a non-string that cannot be
+      compared with a string cursor (the same mixed-type ordering trap the
+      end-proof guards) — cannot take part in that cursor, so a page whose
       LAST row has none is a NAMED refusal: silently stopping there would be a
       partial read reported as a verdict.
 
@@ -467,10 +444,11 @@ def _graph_rows(db, graph: str, batch: int = 2000) -> list[dict[str, Any]]:
     hit makes `len(rows) < total` and the walk REFUSES (`Unpageable`) rather than
     returning a silently merged list. That includes the genuinely duplicated
     `(seq, event_id, type, payload)` row this store admits where the uniqueness
-    constraint is refused (`measurement-payload88.json`): it is refused as a
-    short read, never merged away. So the dedupe's only remaining effect is to
-    keep `len(rows)` meaning "distinct keys" — it must not be described as, and
-    must not be trusted to perform, a merge.
+    constraint never exists (production issues it through `g.query()`, which cannot
+    parse the module command): it is refused as a short read, never merged away. So
+    the dedupe's only remaining effect is to keep `len(rows)` meaning "distinct
+    keys" — it must not be described as, and must not be trusted to perform, a
+    merge.
     """
     # ⛔ THE REFUSAL LIVES HERE, not in a verb: `residency` and `superset` both
     # call this function, and a guard installed in one of them is how a
@@ -518,11 +496,13 @@ def _graph_rows(db, graph: str, batch: int = 2000) -> list[dict[str, Any]]:
         cursor_seq, _, cursor_id = page[-1][0], page[-1][1], page[-1][2]
         if not isinstance(cursor_id, str) or not cursor_id:
             raise Unpageable(
-                f"the row at seq {cursor_seq!r} carries no `event_id`, so the "
-                f"composite cursor cannot advance past it and the rest of the feed "
-                f"cannot be read. A partial read is not a verdict, so none is "
-                f"produced — repair the row (append_event always writes one) or "
-                f"read the feed with `read_after`, which pages on `seq` alone.")
+                f"the row at seq {cursor_seq!r} carries no STRING `event_id` — it is "
+                f"absent, or it is not a string and so cannot be compared with a "
+                f"string cursor — so the composite cursor cannot advance past it and "
+                f"the rest of the feed cannot be read. A partial read is not a "
+                f"verdict, so none is produced — repair the row (append_event always "
+                f"writes one) or read the feed with `read_after`, which pages on "
+                f"`seq` alone.")
         if not added:
             raise Unpageable(
                 f"the feed could not be paged past seq {cursor_seq!r}/"
