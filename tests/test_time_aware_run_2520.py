@@ -127,6 +127,12 @@ def _falkordb_available() -> bool:
         _probe._get_proj().g.query("RETURN 1")
         _probe.close()
         return True
+    # ⛔ A moved or renamed seam — including an import of a moved module — is a
+    #   PROGRAMMING error, not "no server" (#14114 class 2, #14125). The two
+    #   `skipif`s below call this probe at collection, so an arm-less swallow
+    #   SKIPPED the run-level tests over a broken tree.
+    except (AttributeError, NameError, TypeError, ImportError):
+        raise
     except Exception:
         return False
     finally:
