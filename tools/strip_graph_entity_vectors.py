@@ -4768,7 +4768,7 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
     # the scope declares `global`/`nonlocal` could be what the write rebinds, so all are unproven.
     _namespace_mentioned = any(_is_dynamic_namespace_reference(node) for node in whole)
     if _namespace_mentioned:
-        poisoned |= _scope_declarations    # `|=`: see the residue note in `_poison`'s arm
+        poisoned |= _scope_declarations    # `|=`, not `.update(…)`: see the residue note below
 
     # ⛔ AND A PARAMETER IS A BINDING THAT HAS **ALREADY** HAPPENED (`#14001`, measured by the
     # round-2 review): `def w(props, ev, key="x"): … props[key] = vec … key = "y"` resolved
@@ -4793,18 +4793,18 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
         elif isinstance(target, _ast.Tuple | _ast.List):
             for element in target.elts:
                 _poison(element)
-        elif _dynamic_namespace_write(target):
-            # ⛔ A DYNAMIC-NAMESPACE SUBSCRIPT IS A BINDING IN **EVERY** FORM THAT CAN BIND IT
-            # (`#14001`, measured by the review of the `AnnAssign` repair): `Assign`,
-            # `AnnAssign`, `AugAssign`, a `for` target, a comprehension target and a
-            # `with … as` target all reached this function, and a `Subscript` poisoned nothing
-            # — so `globals()["gk"] += "embedding"` and
-            # `for globals()["gk"] in ("embedding",)` CERTIFIED while storing. Teaching the
-            # poison function once closes all of them, in the writer's own scope AND one level
-            # down, instead of one arm per spelling — per-spelling arms are how this issue
-            # accumulated six peers. The dynamic name is not statically readable, so the write
-            # poisons EVERY name the scope declares `global`/`nonlocal`.
-            poisoned |= _scope_declarations    # `|=`: see the residue note in the caller's arm
+        # ☠️ NO `_dynamic_namespace_write` ARM HERE, deliberately (`#14001`, measured by the
+        # rebase review of this branch): it looks like the natural home — "teach the poison
+        # function once and every binding form is closed" — but it CANNOT change a verdict.
+        # The MENTION rule above fires first and `_namespace_mentioned` short-circuits to
+        # `{name: None for name in assigned}` before `poisoned` is ever read, and every node
+        # this arm could match (`X()[…]` with `X` = `globals`/`locals`/`vars`) necessarily puts
+        # the `ast.Name`/`ast.Attribute` that the mention rule matches in the same tree. A
+        # mutant deleting the arm reds no row. It also cannot be written as `|=` here at all:
+        # the augmented assignment would rebind `poisoned` as a LOCAL of this nested function
+        # (`UnboundLocalError` on the first `poisoned.add`), and `.update(…)` re-adds the
+        # untyped-receiver residue row #14058 removed. The LIVE spelling is the mention rule;
+        # the narrow per-spelling arms below are kept only as that rule's fallback.
 
     for sub in nodes:
         if isinstance(sub, ast.AugAssign | ast.For | ast.AsyncFor | ast.comprehension):
@@ -4837,6 +4837,15 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
             # poisons EVERY name the scope declares `global` or `nonlocal` — the only names such
             # a write can reach from here. `Assign`, `AnnAssign` and `AugAssign`, with the
             # subscript nested in a tuple/list target, are ONE write (review of `#14050`).
+            #
+            # ⚠️ THE MENTION RULE ABOVE REFUSES FIRST — this arm is its narrow FALLBACK, not the
+            # mechanism (`#14001`, measured by the rebase review of this branch): every
+            # `X()[…]` write requires `X` to be the `ast.Name`/`ast.Attribute` the mention rule
+            # matches, so `_namespace_mentioned` is already `True` wherever this could fire, and
+            # the early `{name: None …}` return settles the scope. Deleting this arm (and the
+            # nested one below) reds no row; it is kept because it states the write in
+            # vocabulary that does not depend on that inference, and it is what the
+            # `globals-*` rows name.
             #
             # ⛔ `|=`, NOT `poisoned.update(…)` (`#14001`, measured 2026-11-20): both are the
             # same `set` operation, but the `surface-guard` job's privatisation sweep
@@ -4877,8 +4886,8 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
         # `Assign` arm below caught it first and `_poison` only understands Name/Starred/Tuple/
         # List targets — the branch written for it was unreachable.
         if _assigns_into_dynamic_namespace(sub):
-            # `|=`: see the residue note in the own-scope arm (`Assign` / `AnnAssign` /
-            # `AugAssign` with the subscript nested in a tuple/list target are ONE write).
+            # the narrow FALLBACK to the mention rule — see the own-scope arm's note; `|=`
+            # because `.update(…)` re-adds the untyped-receiver residue row (#14058).
             poisoned |= _scope_declarations
             continue
         if isinstance(sub, ast.Assign | ast.AnnAssign):
