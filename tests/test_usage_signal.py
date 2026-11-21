@@ -1635,15 +1635,19 @@ def test_no_graph_dependency() -> None:
     # filter placed INSIDE the production path is graded here too, because the injected witness
     # above answers "is this run OBSERVED", not "would a REAL leak be SEEN". Measured on
     # the head before either row: a filter keeping only `set(injected) | <six literals>`
-    # left `leaked == {'falkordb'}` satisfied while a module-level
-    # `import tortoise.hosted_backup` added to `usage_signal.py` shipped GREEN — a real,
-    # executing leak. (The AST ban DOES catch a module-level import of a banned root —
-    # measured with this file's own `_offending`: `import tortoise.hosted_backup` added
-    # to the subject source reports `{'tortoise.hosted_backup'}`. The probe's exclusive
-    # value is the TRANSITIVE reach, a banned client pulled through a legitimately
-    # imported module, which is the declared one-hop gap in the AST ban.) The leaking
-    # import carries no injected names, so an injected-keyed filter empties THIS row
-    # instead of hiding it.
+    # left the PROBE's verdict green for the subject run — and the probe is the only leg
+    # that sees the class this row must cover. That class is NOT a module-level import of
+    # a banned root: the AST ban catches those (measured with this file's own
+    # `_offending`: adding `import tortoise.hosted_backup` to the subject source reports
+    # `{'tortoise.hosted_backup'}`, and the row at :1253 reds). It is the TRANSITIVE
+    # reach — a banned client pulled in through a legitimately imported module — and,
+    # beyond that, a module-scope `__import__(...)`, which the ban is documented to miss.
+    # Measured for the transitive shape: a helper imported by `usage_signal` that does
+    # `import redis` at module scope is `_offending(...) == set()` while the probe
+    # reports the reach, and `__import__("tortoise.hosted_backup")` appended to a copy of
+    # the subject reds this row as `got ['falkordb', 'tortoise.hosted_backup']`. The
+    # leaking import carries no injected names, so an injected-keyed filter empties THIS
+    # row instead of hiding it.
     _cases = {
         "from tortoise import usage_signal": set(),
         "import tortoise.hosted_backup": {"tortoise.hosted_backup"},
