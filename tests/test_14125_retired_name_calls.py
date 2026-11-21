@@ -953,14 +953,29 @@ def _third_party_receivers(tree: ast.Module) -> set[str]:
     capture families with ``ast.walk(tree)`` exempted nothing less than the scope-blind
     version did for Store targets — an ``except Exception as torch:`` in an UNRELATED
     helper cancelled the exemption for a legitimate module-level ``torch.query(…)``
-    probe, the same false red. Every family is now collected by a SCOPED walk plus
-    ``_rebinds_within`` for the block itself, so the direction claim is uniform: a term
-    can only be subtracted where it can reach the probe. The scopes are the module
+    probe, the same false red. Every family is now collected by a SCOPED walk, so the
+    direction claim is uniform: a term can only be subtracted where it can reach the
+    probe. The scopes are the module
     (``_module_scope_bindings``) and, per probe, the FUNCTION chain that lexically
     encloses it (``_enclosing_bindings`` → ``_function_scope_bindings``: parameters,
     type parameters and locals, up the closure). Per probe, not per module, because one
     module-wide set holds a neighbouring function's locals too and was measured to red
     its legitimate third-party probe (review of #14160, P2).
+
+    ⛔ AND THERE IS NO SEPARATE "the block rebinds it" TERM, measured, not omitted. A
+    ``_rebinds_within(block, name)`` clause stood at ``_reaches_capability_seam``'s
+    exemption and DELETING it left the whole file green (measured: 8 passed) — an
+    unwitnessed arm, the defect class this gate exists to forbid. It is also redundant:
+    ``_shadowed(block)`` is the probe's whole enclosing FUNCTION chain, collected by
+    descending each function's statements, so an in-block ``falkordb = proj`` (or a
+    ``with … as`` / ``for`` / ``def`` / ``except … as`` / walrus rebind) is already in it;
+    a module-scope block has the name subtracted module-wide by this function; and a
+    class body — the one scope neither reaches — is never a probe root
+    (``_probe_roots`` walks ``tree.body`` and functions, not class bodies). Measured on a
+    probe-local rebind: ``third_party=['falkordb']``, ``_shadowed=['falkordb', 'proj']``
+    — the exemption is cancelled without it. Removed; it had also drifted from the family
+    list it was credited with (``ast.Name``/``Store`` only — no ``Del``, no
+    ``def``/``class`` names), so it was never the backstop its prose claimed.
     """
     bound = _non_own_imported_names(tree.body)
     if not bound:
@@ -1198,22 +1213,6 @@ def _walrus_targets(node: ast.AST) -> set[str]:
     }
 
 
-def _rebinds_within(block: ast.AST, name: str) -> bool:
-    """Whether `name` is RE-BOUND inside `block` — the probe's own body."""
-    for node in ast.walk(block):
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id == name:
-            return True
-        if isinstance(node, ast.ExceptHandler) and node.name == name:
-            return True
-        if isinstance(node, ast.MatchAs) and node.name == name:
-            return True
-        if isinstance(node, ast.MatchStar) and node.name == name:
-            return True
-        if isinstance(node, ast.MatchMapping) and node.rest == name:
-            return True
-    return False
-
-
 def _receiver_root_name(node: ast.expr) -> str | None:
     """The NAME at the root of a receiver chain — `PROJ.g.query` -> `PROJ`.
 
@@ -1313,12 +1312,12 @@ def _reaches_capability_seam(
         if isinstance(func, ast.Attribute) and func.attr in _CAPABILITY_CALLS:
             root = _receiver_root_name(func.value)
             # Exempt only when the name still denotes the import WHERE THE PROBE RUNS:
-            # module scope is already subtracted in `third_party`, `shadowed` carries
-            # the enclosing function scopes, and `_rebinds_within` covers the block's
-            # own body.
-            if root in third_party and root not in shadowed and not _rebinds_within(
-                block, root
-            ):
+            # module scope is already subtracted in `third_party` and `shadowed` carries
+            # the enclosing function chain — which INCLUDES the block's own body, because
+            # a function scope's bindings are collected by descending its statements. A
+            # separate "the block rebinds it" term stood here and was measured DEAD and
+            # unwitnessed; see `_third_party_receivers`.
+            if root in third_party and root not in shadowed:
                 continue
             return True
         if isinstance(func, ast.Name) and func.id in _CAPABILITY_NAMES:
@@ -3024,7 +3023,7 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     # 4j-sexies. The OTHER direction: a LOCAL of the function that HOLDS the probe CAN
     #     reach it, so it must be graded. `_function_scope_bindings` supplies it from the
     #     probe's own ancestor chain; before that, a local bound before the block was
-    #     subtracted by neither the module set nor `_rebinds_within`, so the exemption
+    #     subtracted by neither the module set nor a block-local term, so the exemption
     #     survived over OUR client (review of #14160, P1-2).
     _local_shadowing_the_import = textwrap.dedent(
         """
