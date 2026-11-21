@@ -27,6 +27,7 @@ import importlib.util
 import json
 import re
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -39,14 +40,19 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # ── fixtures ────────────────────────────────────────────────────────────────────
 
-def _surface(tools=(), methods=(), forward=(), sdk_retired=(), modules=()) -> dict:
-    return {
+def _surface(
+    tools=(), methods=(), forward=(), sdk_retired=(), modules=(), modules_with_a_body=None
+) -> dict:
+    surface = {
         "tools": set(tools),
         "methods": set(methods),
         "forward": set(forward),
         "sdk_retired": set(sdk_retired),
         "modules": set(modules),
     }
+    if modules_with_a_body is not None:
+        surface["modules_with_a_body"] = set(modules_with_a_body)
+    return surface
 
 
 def _entry(kind: str, symbol: str, *, batch: str = "batch-a", file: str | None = None) -> dict:
@@ -1304,3 +1310,1834 @@ class TestRestoreDependenciesResolve:
         monkeypatch.delattr(mcp_mod, "ERR_UNAUTHORIZED", raising=True)
         with pytest.raises(AssertionError, match="NameError on the first call"):
             self.test_every_free_name_in_a_frozen_handler_resolves_in_its_module()
+
+
+# ── 10. the SHRINK direction (#12402 + #12291) ────────────────────────────────
+#
+# Every arm above iterates the entries the manifest FINDS. These two questions are the ones
+# that shape cannot ask, and each is proven BOTH ways here: the guard must red on the
+# violation (performed, in a scratch repo, not simulated) and stay green on the legitimate
+# case. A guard nobody has seen fire is the defect #12402/#12291 were filed about.
+
+def _commit_drop(root: Path, path: str) -> None:
+    """Delete a tracked path and commit — the violation, performed for real."""
+    subprocess.run(["git", "rm", "-q", path], cwd=root, check=True)
+    _commit(root, ".")
+
+
+def _archive_module(tree: Path, module: str) -> dict:
+    """Record a `module` entry AND write its frozen file — what `archive` actually lands.
+
+    Both halves matter: the row alone makes the "row **and** its file" scenario unreachable,
+    and a test that claims to delete a file it never created proves nothing about the guard
+    (review F4).
+    """
+    entry = _entry(arch.MODULE, module, batch="b-shrink", file=f"archive/modules/b-shrink/{module}.py")
+    arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
+    frozen = tree / entry["file"]
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    frozen.write_text(f"# frozen {module}\n", encoding="utf-8")
+    return entry
+
+
+def test_a_module_removal_with_no_archive_entry_is_reported(tree: Path) -> None:
+    """#12402: a whole module leaves `tortoise/` and every other gate is blind to it."""
+    (tree / "tortoise" / "gone.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    _commit_drop(tree, "tortoise/gone.py")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any("tortoise.gone" in p and "MODULE REMOVED" in p for p in problems), problems
+    joined = " ".join(problems)
+    assert "archive module" in joined and "WORKING TREE" in joined, (
+        "the violation must print the runnable route, including the order trap (the writer "
+        f"reads the WORKING TREE, so archiving after the deletion refuses): {problems}"
+    )
+
+
+def test_a_module_removal_with_an_archive_entry_is_green(tree: Path) -> None:
+    """The legitimate case: the module was frozen, so the deletion has its record."""
+    (tree / "tortoise" / "gone.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    _commit_drop(tree, "tortoise/gone.py")
+    _archive_module(tree, "tortoise.gone")
+
+    assert arch.shrink_violations(tree, base_ref="HEAD~1") == []
+
+
+def test_a_renamed_module_is_a_removal_of_the_old_path(tree: Path) -> None:
+    """#12402's acceptance names renaming: the old DOTTED PATH stops existing either way."""
+    (tree / "tortoise" / "old_name.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/old_name.py")
+    subprocess.run(["git", "mv", "tortoise/old_name.py", "tortoise/new_name.py"], cwd=tree, check=True)
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    removed = [p for p in problems if "MODULE REMOVED" in p]
+    assert [p.split(":", 1)[0] for p in removed] == ["tortoise.old_name"], (
+        "exactly the OLD dotted path is a removal. Asserting only that `new_name` is absent is "
+        "dead weight (an ADDED path cannot enter `base - head`); asserting the SET is what reds "
+        f"a head-side or symmetric-difference mutant that calls new code a removal: {problems}"
+    )
+
+
+def test_deleting_an_init_py_whose_package_still_imports_is_not_a_removal(tree: Path) -> None:
+    """A directory that still holds submodules is an importable namespace package."""
+    (tree / "tortoise" / "pkg").mkdir()
+    (tree / "tortoise" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (tree / "tortoise" / "pkg" / "sub.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/pkg")
+    _commit_drop(tree, "tortoise/pkg/__init__.py")
+
+    assert arch.shrink_violations(tree, base_ref="HEAD~1") == [], (
+        "`tortoise.pkg` still imports through `pkg/sub.py`, so nothing a caller could import "
+        "was removed — reding this is the false block that makes an operator disable the gate"
+    )
+
+
+def test_a_module_that_was_scaffolding_on_both_sides_is_not_a_removal(tree: Path) -> None:
+    """Non-vacuity for the emptied-in-place arm: a placeholder that stays one removed nothing."""
+    (tree / "tortoise" / "stub.py").write_text('"""Placeholder."""\n', encoding="utf-8")
+    _commit(tree, "tortoise/stub.py")
+    (tree / "tortoise" / "stub.py").write_text("", encoding="utf-8")
+    _commit(tree, "tortoise/stub.py")
+
+    assert arch.shrink_violations(tree, base_ref="HEAD~1") == [], (
+        "a module that carried no statements on EITHER side is scaffolding on both sides; "
+        "reding it is the false block that makes an operator disable the gate"
+    )
+
+
+def test_a_module_replaced_by_a_pyi_STUB_is_a_removal(tree: Path) -> None:
+    """A `.pyi` has no runtime statements, so it cannot stand in for a module (round-6 review).
+
+    `module_name` collapses `.py` and `.pyi` onto one dotted name and the content rule only read
+    `/__init__.py`, so `git rm x.py` + a stub `x.pyi` satisfied the name set AND the content test
+    — arm 1 saw the name on both sides and arm 1b read the STUB as a body. Graded green, with the
+    module's runtime code gone (measured in review; `main` carries zero `.pyi` files under
+    `tortoise/`, so nothing had ever exercised the shape).
+    Mutation: `stubbed = False` -> RED here (the arm falls back to the content read, and a
+    non-empty stub reads as a body). The carrier-map determinism is `test_a_pyi_stub_beside_a_
+    live_module_is_NOT_a_removal`'s question, not this one.
+    """
+    (tree / "tortoise" / "stubby.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/stubby.py")
+    subprocess.run(["git", "rm", "-q", "tortoise/stubby.py"], cwd=tree, check=True)
+    (tree / "tortoise" / "stubby.pyi").write_text("def value() -> int: ...\n", encoding="utf-8")
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    removed = [p for p in problems if "MODULE BODY REMOVED" in p]
+    assert [p.split(":", 1)[0] for p in removed] == ["tortoise.stubby"], (
+        "a stub is not the module's runtime code: the name resolves, the code is gone — "
+        f"{problems}"
+    )
+    assert ".pyi" in removed[0], f"the violation must name the stub it graded: {removed[0]}"
+
+
+def test_a_module_row_that_froze_the_STUB_is_not_a_record(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row whose frozen SOURCE was the stub records nothing (fresh-context review, P0).
+
+    `_module_source`'s `.pyi` fallback resolves the stub when the only file left is `x.pyi`, so
+    the writer freezes `def value() -> int: ...` as the SOURCE OF RECORD for a module whose body
+    this same run reports as removed — and the credit rule above (`if key in working:
+    continue`) then reads "the removal has its record" over a record holding no code. Every arm
+    green, the removed body in no file under `archive/`: the false PASS `archive/` exists to
+    prevent.
+
+    ⛔ This row drives the WRITER on purpose. The first version hand-built a row with
+    `file=".../tortoise.stubby.pyi"` and the guard keyed on that suffix — a shape `archive_rel`
+    cannot produce (every module row is rendered `.py`), so the guard was dead code on the
+    product's own path and this test could not see that. The row's `archived_from` DOES name
+    `tortoise/stubby.pyi` (and `file_violations` binds it to the frozen header), which is the
+    fact the guard now reads.
+
+    ⛔ `_init_carries_a_body` cannot be the test here even though it guards the sibling scaffold
+    shape: it is an AST question, and a stub IS statements. Arm 1b's own rule is that a `.pyi` is
+    never runtime code, so the credit rule asks THAT question instead.
+
+    THIS row is the stub-LEFT shape (`base ∩ head`, arm 1b — `stubbed`); the row below is the
+    deleted-stub shape (`base - head`, arm 1), because both credit sites can silence the same
+    false PASS and a guard at only one of them is a guard at neither.
+
+    Discriminating: removing the `stubbed and _row_froze_a_stub(...)` arm leaves this row with no
+    violation, and the negative control below (same base, same stub, a row that froze the REAL
+    body) stays green either way — measured, both directions.
+    """
+    (tree / "tortoise" / "stubby.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/stubby.py")
+    base = _head_sha(tree)
+    subprocess.run(["git", "rm", "-q", "tortoise/stubby.py"], cwd=tree, check=True)
+    (tree / "tortoise" / "stubby.pyi").write_text("def value() -> int: ...\n", encoding="utf-8")
+    _commit(tree, ".")
+
+    entry = arch.archive_symbol(arch.MODULE, "tortoise.stubby", "batch-a", "review", root=tree)
+    assert entry["archived_from"] == "tortoise/stubby.pyi", (
+        "the row must record WHICH source it froze — that is the fact the guard reads: " f"{entry}"
+    )
+    assert entry["file"].endswith(".py") and not entry["file"].endswith(".pyi"), (
+        "the writer renders a module row as `.py` whatever it froze from — which is exactly why "
+        f"the archived-path suffix cannot be the test: {entry['file']}"
+    )
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref=base)
+    froze = [p for p in problems if "THE RECORD FROZE A STUB" in p]
+    assert froze, f"a row that froze the stub must not credit the removal: {problems}"
+    assert "tortoise.stubby" in froze[0], froze[0]
+    assert "tortoise/stubby.pyi" in froze[0], f"the violation must name the stub source: {froze[0]}"
+
+    # …and the GATE, which is where the false PASS was measured.
+    monkeypatch.setattr(arch, "ROOT", tree)
+    monkeypatch.setattr(arch, "live_surface", lambda root=None: _surface())
+    monkeypatch.setattr(arch, "index_violations", lambda entries, root=None: [])
+    rc = arch.main(["archive_surface.py", "check", "--base-ref", base])
+    assert rc == 1, "the gate itself must red, not only the helper"
+
+
+def test_a_stub_row_credits_nothing_after_the_stub_is_deleted(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same false PASS one step later: the stub is deleted, as the writer's own output says.
+
+    `archive module tortoise.x` prints "now delete it from tortoise/x.pyi in this batch", so the
+    operator does — and the module is then in `base - head` (arm 1), NOT in `base ∩ head`
+    (arm 1b, where the P0 guard was first written). Measured on the pre-fix bytes through the
+    writer and the real CLI: `check --base-ref` answered
+
+        OK — archive consistent: 1 entries (… 1 modules). Shrink checked against …
+
+    with the removed body in NO file under `archive/`, and `shrink_violations` returned `[]`.
+    A guard placed only in arm 1b could not see that, which is why the rule lives in one helper
+    and both credit sites call it.
+
+    Discriminating: delete the arm-1 call site (`if runtime_carrier is not None and
+    _row_froze_a_stub(...)`) -> RED here, and the row above stays green.
+    """
+    (tree / "tortoise" / "stubby.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/stubby.py")
+    base = _head_sha(tree)
+    subprocess.run(["git", "rm", "-q", "tortoise/stubby.py"], cwd=tree, check=True)
+    (tree / "tortoise" / "stubby.pyi").write_text("def value() -> int: ...\n", encoding="utf-8")
+    _commit(tree, ".")
+    arch.archive_symbol(arch.MODULE, "tortoise.stubby", "batch-a", "review", root=tree)
+    _commit_drop(tree, "tortoise/stubby.pyi")  # the deletion the writer printed
+
+    assert not (tree / "tortoise" / "stubby.py").exists()
+    assert not (tree / "tortoise" / "stubby.pyi").exists()
+
+    problems = arch.shrink_violations(tree, base_ref=base)
+    froze = [p for p in problems if "THE RECORD FROZE A STUB" in p]
+    assert froze, f"the deleted-stub shape credits the same empty record: {problems}"
+    assert "no module file at all" in froze[0], froze[0]
+
+    monkeypatch.setattr(arch, "ROOT", tree)
+    monkeypatch.setattr(arch, "live_surface", lambda root=None: _surface())
+    monkeypatch.setattr(arch, "index_violations", lambda entries, root=None: [])
+    assert arch.main(["archive_surface.py", "check", "--base-ref", base]) == 1, (
+        "the measured false PASS was `check --base-ref` answering OK on this exact tree"
+    )
+
+
+def test_a_module_row_that_LIES_about_archived_from_cannot_credit_a_stub(
+    tree: Path,
+) -> None:
+    """The row's claim field is writable by the splicer; `blocks[].path` is not (review P1).
+
+    `archived_from` is bound only to the frozen file's `ARCHIVED_FROM` header — a string the same
+    hand-splicing author writes. `tools/archive_surface.py` records that limit in
+    `_reanchor_is_verified`'s "EVERY OTHER CLAIM FIELD IS FIXED" note ("bound to nothing else on
+    this path … so a consistent lie passed both"), and hand-splicing is the procedure `MEMORY.md`
+    recommends, so this is a REACHABLE shape, not a contrived one. Measured before the fix: a spliced row saying `tortoise/stubby.py` over frozen
+    STUB bytes was credited, with `shrink_violations` AND `file_violations` BOTH empty.
+
+    The field tied to the bytes is `blocks[].path`: `file_violations` requires it to equal the path
+    baked into the frozen file's verbatim banner and `blocks[].sha256` to equal that body's digest,
+    so it cannot be re-pointed without the bytes following.
+
+    Discriminating: an arm keyed on `archived_from` credits this row (measured) — which is why the
+    writer-driven row above cannot catch it on its own; there `archived_from` and the block path
+    agree, so only this row separates the two answers.
+    """
+    (tree / "tortoise" / "stubby.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/stubby.py")
+    subprocess.run(["git", "rm", "-q", "tortoise/stubby.py"], cwd=tree, check=True)
+    stub = "def value() -> int: ...\n"
+    (tree / "tortoise" / "stubby.pyi").write_text(stub, encoding="utf-8")
+
+    entry = _entry(arch.MODULE, "tortoise.stubby")
+    entry["archived_from"] = "tortoise/stubby.py"  # the lie
+    entry["blocks"] = [{"path": "tortoise/stubby.pyi", "sha256": "a" * 64}]  # the truth
+    frozen = tree / entry["file"]
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    frozen.write_text(stub, encoding="utf-8")
+    arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
+    _commit(tree, ".")
+
+    assert arch._row_froze_a_stub(entry), (
+        "the block path is bound to the frozen banner and digest, so it decides even when the "
+        f"claim field says otherwise: {entry}"
+    )
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    froze = [p for p in problems if "THE RECORD FROZE A STUB" in p]
+    assert froze, f"a spliced row that froze the stub must not be credited: {problems}"
+    assert "tortoise/stubby.pyi" in froze[0], froze[0]
+
+
+def test_a_module_row_that_froze_the_REAL_body_is_still_credited(tree: Path) -> None:
+    """The negative control for both rows above, through the writer's restore-then-freeze route.
+
+    Same base, same stub left in the tree, same `stubbed` — only `archived_from` differs (the
+    real `.py` body, frozen BEFORE the file was deleted, which is `archive/README.md`'s documented
+    route). If the arm keyed on `stubbed` alone, or on the row merely existing, this legitimate
+    record would red and that route would stop working. Measured: collapsing the condition to
+    `if stubbed:` reds this row.
+    """
+    (tree / "tortoise" / "stubby.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/stubby.py")
+    base = _head_sha(tree)
+    entry = arch.archive_symbol(arch.MODULE, "tortoise.stubby", "batch-a", "review", root=tree)
+    assert entry["archived_from"] == "tortoise/stubby.py"
+    _commit(tree, ".")
+    _commit_drop(tree, "tortoise/stubby.py")
+    (tree / "tortoise" / "stubby.pyi").write_text("def value() -> int: ...\n", encoding="utf-8")
+    _commit(tree, "tortoise/stubby.pyi")
+
+    problems = arch.shrink_violations(tree, base_ref=base)
+    assert not [p for p in problems if "THE RECORD FROZE A STUB" in p], (
+        f"a row holding the real body is the legitimate record and must not red: {problems}"
+    )
+
+
+def test_a_module_waiver_does_not_claim_the_tree_carries_a_module_it_only_STUBBED(
+    tree: Path,
+) -> None:
+    """The waiver diagnostic must not disagree with arm 1b about a `.pyi` stub (review P2).
+
+    Base carries `tortoise/stubby.py` (+ a stub, so the anchor resolves); the tree keeps only the
+    stub; the `module` row freezes the REAL body, so arm 1b credits the row and the waiver this
+    run was given is left UNCONSUMED. The diagnostic then has to answer "does this tree still
+    carry the module?" — and the body-only answer it used to carry counts a stub as a body,
+    printing "this tree still carries it, so nothing was removed" over the very removal the same
+    run graded and credited. It now asks `_head_carries_runtime_body`, the single predicate arm
+    1b also decides on.
+
+    Discriminating: answering that diagnostic with a body-only test ("the file exists and
+    parses") reds the `still carries it` assertion below, because a `.pyi` stub passes it.
+    """
+    (tree / "tortoise" / "stubby.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    (tree / "tortoise" / "stubby.pyi").write_text(
+        "def value() -> int: ...\n", encoding="utf-8"
+    )
+    _commit(tree, ".")
+    subprocess.run(["git", "rm", "-q", "tortoise/stubby.py"], cwd=tree, check=True)
+    entry = _entry(arch.MODULE, "tortoise.stubby")
+    entry["archived_from"] = "tortoise/stubby.py"
+    arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
+    frozen = tree / entry["file"]
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    frozen.write_text("def value():\n    return 1\n", encoding="utf-8")
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD~1", allowed=["module:tortoise.stubby"]
+    )
+    waived = [p for p in problems if "waives nothing" in p]
+    assert waived, f"the unconsumed waiver must still be reported: {problems}"
+    assert "still carries it" not in waived[0], (
+        "a `.pyi` stub is not the module's runtime body, and arm 1b already graded its removal "
+        f"in this same run: {waived[0]}"
+    )
+    assert "this tree does not" in waived[0], waived[0]
+
+
+def test_a_waiver_for_a_row_that_FROZE_A_STUB_does_not_say_the_removal_IS_recorded(
+    tree: Path,
+) -> None:
+    """One run must not print two contradicting statements about the same entry (review F1).
+
+    Writer-driven shape, nothing spliced: base carries `tortoise/stubby.py`; the tree deletes it
+    and leaves `tortoise/stubby.pyi`; `archive module` then freezes the STUB (`_module_source`'s
+    stub fallback sets `blocks[0].path` to the `.pyi`). Arm 1b sees `_row_froze_a_stub` → True,
+    appends "THE RECORD FROZE A STUB" and `continue`s BEFORE consuming the waiver — so the
+    diagnostic loop re-derives the same key and, asking only `key in working`, printed "the
+    removal IS recorded by the `module` entry you also passed" in the same run.
+
+    Discriminating: the sibling test above covers the opposite arm — its row froze the REAL body,
+    so `_row_froze_a_stub` is False there and a key-presence-only check is right. Only this row
+    separates "an entry exists" from "an entry that records the source", which is the whole
+    point of the anti-stub rule it sits beside.
+    """
+    (tree / "tortoise" / "stubby.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    (tree / "tortoise" / "stubby.pyi").write_text(
+        "def value() -> int: ...\n", encoding="utf-8"
+    )
+    _commit(tree, ".")
+    subprocess.run(["git", "rm", "-q", "tortoise/stubby.py"], cwd=tree, check=True)
+    entry = _entry(arch.MODULE, "tortoise.stubby")
+    entry["archived_from"] = "tortoise/stubby.py"
+    entry["blocks"] = [{"path": "tortoise/stubby.pyi", "sha256": "a" * 64}]
+    arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
+    frozen = tree / entry["file"]
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    frozen.write_text("def value() -> int: ...\n", encoding="utf-8")
+    _commit(tree, ".")
+
+    assert arch._row_froze_a_stub(entry), "this fixture must freeze the stub, not the body"
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD~1", allowed=["module:tortoise.stubby"]
+    )
+    assert [p for p in problems if "THE RECORD FROZE A STUB" in p], (
+        f"the stub row must not credit the removal: {problems}"
+    )
+    waived = [p for p in problems if "waives nothing" in p]
+    assert waived, f"the unconsumed waiver must still be reported: {problems}"
+    assert "IS recorded" not in waived[0], (
+        "the same run just graded this entry as having frozen a stub — saying the removal IS "
+        f"recorded by it contradicts that and points away from the fix: {waived[0]}"
+    )
+    assert "FROZE ONLY A STUB" in waived[0], waived[0]
+
+
+def test_a_module_body_replaced_by_UNPARSEABLE_text_is_a_removal(tree: Path) -> None:
+    """A body that no longer parses holds no statements a caller can reach (round-6 review).
+
+    `_init_carries_a_body` returned True on `SyntaxError` while its docstring called that "fail
+    CLOSED toward the violation" — it was the GREEN direction: a 40-function module rewritten to
+    `this is not python {{{` graded green on every arm. The arm now reports the removal.
+    Mutation: `except SyntaxError: return True` -> RED here.
+    """
+    (tree / "tortoise" / "victim.py").write_text(
+        "".join(f"def f{i}():\n    return {i}\n" for i in range(40)), encoding="utf-8"
+    )
+    _commit(tree, "tortoise/victim.py")
+    (tree / "tortoise" / "victim.py").write_text("this is not python {{{\n", encoding="utf-8")
+    _commit(tree, "tortoise/victim.py")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any(
+        p.startswith("tortoise.victim: MODULE BODY REMOVED") for p in problems
+    ), f"unparseable is not content — the code left: {problems}"
+    hit = next(p for p in problems if p.startswith("tortoise.victim: MODULE BODY REMOVED"))
+    assert "no longer parses" in hit, (
+        "the verdict is right but the stated fact must not send the operator looking for an "
+        f"EMPTIED file: {hit}"
+    )
+
+
+def test_emptying_a_module_in_place_is_a_removal(tree: Path) -> None:
+    """`> tortoise/x.py` kept every gate green while the code left (review P2 of #14039).
+
+    The content rule was applied to `/__init__.py` only, so a file truncated to zero bytes (or
+    to a bare docstring) stayed in BOTH module-name sets and arm 1 reported nothing — the same
+    fail-open round-3 F2 closed for the package init, one path shape over. Mutation: restrict
+    the read back to `endswith('/__init__.py')` -> RED (green on a module whose body is gone).
+    """
+    (tree / "tortoise" / "gone.py").write_text("def secret():\n    return 1\n", encoding="utf-8")
+    (tree / "tortoise" / "stays.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise")
+    (tree / "tortoise" / "gone.py").write_text("", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    removed = [p for p in problems if "MODULE BODY REMOVED" in p]
+    assert [p.split(":", 1)[0] for p in removed] == ["tortoise.gone"], (
+        "the emptied module must be reported, and as the BODY arm — a name-set comparison "
+        f"cannot see it (the path survived). Problems: {problems}"
+    )
+    assert not any("tortoise.stays" in p for p in problems), problems
+    assert "archive module" in " ".join(problems), (
+        "the same runnable route as a deletion, or the operator has a red with no way out"
+    )
+
+
+def test_a_package_is_archivable_by_its_dotted_path(tree: Path) -> None:
+    """The route arm 1 PRINTS must run for the shape arm 1 grades (review P1 of #14039).
+
+    Arm 1 grades an `__init__.py` by CONTENT (round-3 F2), so deleting `tortoise/__init__.py`
+    reports `tortoise: MODULE REMOVED` and prints `archive module tortoise`. The writer resolved
+    only `<dotted>.py`, so that command refused with "no file at tortoise.py" and the only other
+    route is a waiver the workflow never passes — a correct red with no way out.
+    Mutation: drop the `__init__.py` fallback -> RED (ArchiveRefused).
+    """
+    (tree / "tortoise" / "__init__.py").write_text(
+        "from tortoise.core import X\n\n__all__ = ['X']\n", encoding="utf-8"
+    )
+    (tree / "tortoise" / "core.py").write_text("X = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise")
+
+    entry = arch.archive_symbol(arch.MODULE, "tortoise", "batch-a", "r", root=tree)
+    assert entry["archived_from"] == "tortoise/__init__.py", (
+        "the frozen body came from the package __init__, so that is what the record must cite"
+    )
+    assert entry["file"] == "archive/modules/batch-a/tortoise.py", (
+        "the archived FILE must not be an `__init__.py`: `archive/` is a readable source tree, "
+        "not an importable package, and `package_violations` refuses one — a writer that wrote "
+        "one would create a file its own gate reds"
+    )
+    assert arch.package_violations(tree) == [], arch.package_violations(tree)
+
+    _commit(tree, ".")
+    _commit_drop(tree, "tortoise/__init__.py")
+    assert arch.shrink_violations(tree, base_ref="HEAD~1") == [], (
+        "the archive row this writer just wrote must be the record that clears the removal — "
+        "otherwise the printed remedy still leaves the operator red"
+    )
+
+
+def test_archiving_a_module_must_not_freeze_a_LEFTOVER_scaffold(tree: Path) -> None:
+    """The package fallback must not record a SCAFFOLD as the module's source of record.
+
+    Fresh-context review of PR #14039 (P2). The fallback above resolves `<dotted>/__init__.py`
+    whatever it holds, so `archive module <dotted>` on a DELETED body whose package was left as a
+    bare docstring froze that docstring — and `shrink_violations` credits the removal on the
+    row's EXISTENCE, so `check --base-ref` then reported "archive consistent", `verify-anchors`
+    said OK, and the removed code was in NO file under `archive/`. Measured on the pre-fix bytes
+    (scratch repo, `tortoise/x.py` = `def f39`): the CLI printed "archived module tortoise.x" /
+    "now delete it from tortoise/x/__init__.py", the frozen file held only the docstring, and
+    `f39` was in no archived file. A record that names code it does not hold is the one thing
+    `archive/` exists to make impossible.
+
+    Mutation: delete `if package_fallback and not _init_carries_a_body(source)` from
+    `_module_source` -> RED here (the writer succeeds and writes the scaffold). The positive
+    control is `test_a_package_is_archivable_by_its_dotted_path` above, whose `__init__.py`
+    carries statements and must STAY archivable.
+    """
+    (tree / "tortoise" / "x.py").write_text("def f39():\n    return 39\n", encoding="utf-8")
+    _commit(tree, "tortoise/x.py")
+    subprocess.run(["git", "rm", "-q", "tortoise/x.py"], cwd=tree, check=True)
+    (tree / "tortoise" / "x").mkdir()
+    (tree / "tortoise" / "x" / "__init__.py").write_text('"""Scaffolding."""\n', encoding="utf-8")
+    (tree / "tortoise" / "x" / "sub.py").write_text("Y = 1\n", encoding="utf-8")
+    _commit(tree, ".")
+
+    with pytest.raises(arch.ArchiveRefused, match="SCAFFOLDING"):
+        arch.archive_symbol(arch.MODULE, "tortoise.x", "batch-a", "r", root=tree)
+    assert not list((tree / "archive").rglob("*.py")), (
+        "the refusal must not leave a record behind: a row frozen from a scaffold is the false "
+        "record this guard exists to prevent"
+    )
+
+
+def test_the_CLI_refuses_to_freeze_a_leftover_scaffold(
+    tree: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """The row above is API-level; the OPERATOR sees `main()`'s exit code and stderr.
+
+    The review asked for a CLI-level row, and the arm it pins is a different one: `main()`'s
+    `except ArchiveRefused -> print("REFUSED …", stderr); return 2`. That mapping is pinned
+    NOWHERE else for the `archive` verb, so a refusal that exited 0 would read as a successful
+    archive that wrote nothing — the fail-open direction, on the writer's only refusal path.
+
+    Mutation: `return 0` in `main()`'s `except ArchiveRefused` arm -> RED here (rc is 0 and the
+    operator reads success), while every API-level assertion above stays green.
+    """
+    (tree / "tortoise" / "x.py").write_text("def f39():\n    return 39\n", encoding="utf-8")
+    _commit(tree, "tortoise/x.py")
+    _commit_drop(tree, "tortoise/x.py")
+    (tree / "tortoise" / "x").mkdir()
+    (tree / "tortoise" / "x" / "__init__.py").write_text(
+        '"""Scaffolding."""\n', encoding="utf-8"
+    )
+    (tree / "tortoise" / "x" / "sub.py").write_text("Y = 1\n", encoding="utf-8")
+    _commit(tree, ".")
+    monkeypatch.setattr(arch, "ROOT", tree)
+
+    rc = arch.main(
+        ["archive_surface.py", "archive", "module", "tortoise.x", "--batch", "b1",
+         "--reason", "split"]
+    )
+    err = capsys.readouterr().err
+    assert rc == 2, f"a refusal must not read as a successful archive (exit {rc})"
+    assert "REFUSED" in err and "git checkout <base-sha> -- tortoise/x.py" in err, (
+        f"the refusal must name the route that clears the red it came from: {err}"
+    )
+    assert not (tree / "archive" / "modules").exists(), (
+        "and it must write nothing — a row frozen from a scaffold IS the false record"
+    )
+    assert any(
+        p.startswith("tortoise.x: MODULE") and "REMOVED" in p
+        for p in arch.shrink_violations(tree, base_ref="HEAD~2")
+    ), (
+        "and the removal stays a red (arm 1: the module left the product) — declining to write "
+        "the record must not read as having written it"
+    )
+
+
+def test_an_archive_entry_dropped_from_the_manifest_is_reported(tree: Path) -> None:
+    """#12291: the index of what was removed loses a row, and every gate stays green."""
+    _archive_module(tree, "tortoise.gone")
+    _commit(tree, ".")
+    arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any("tortoise.gone" in p and "REMOVED from archive/MANIFEST.json" in p for p in problems), (
+        problems
+    )
+
+
+def test_dropping_the_row_and_its_file_is_STILL_reported(tree: Path) -> None:
+    """The tidy deletion — row AND frozen file — is an unexplained drop, not a restore.
+
+    The file is CREATED and then deleted, so this is the scenario the PR body's mutation table
+    claims to perform (review F4: it used to be byte-identical to the row-only test, and the
+    file never existed, so no mutation could tell the two apart).
+    """
+    entry = _archive_module(tree, "tortoise.gone")
+    _commit(tree, ".")
+    assert (tree / entry["file"]).exists(), "the frozen file must exist to be dropped"
+    arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+    _commit_drop(tree, entry["file"])
+    assert not (tree / entry["file"]).exists(), "the row is not the only thing that must go"
+    assert arch.load_manifest(tree / "archive" / "MANIFEST.json")["entries"] == []
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any("tortoise.gone" in p and "REMOVED from archive/MANIFEST.json" in p for p in problems), (
+        "an entry whose file is gone is already a `manifest_violations` finding in the OTHER "
+        f"direction; dropping BOTH is still a record that vanished: {problems}"
+    )
+
+
+def test_a_row_dropped_for_a_RESTORED_module_is_green(tree: Path) -> None:
+    """The documented restore path, WITH the shrink arm ON — the false block of review F1.
+
+    `archive/README.md` step 3 deletes the row and the frozen file, because the code came back;
+    direction one reds the row if it stays, so dropping it is the only consistent shape. The
+    surface-guard job runs this arm on every PR, so a restore that reds here reds the repo's own
+    documented procedure with no waiver reachable from CI.
+    """
+    entry = _archive_module(tree, "tortoise.gone")
+    _commit(tree, ".")
+    arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+    _commit_drop(tree, entry["file"])
+
+    restored = [p for p in arch.shrink_violations(
+        tree, base_ref="HEAD~1", surface=_surface(modules={"tortoise/gone.py"})
+    ) if "tortoise.gone" in p]
+    assert restored == [], f"a restore is not a loss: {restored}"
+
+    # NON-VACUITY: the SAME drop with the symbol NOT back is still the loss #12291 is about.
+    lost = arch.shrink_violations(tree, base_ref="HEAD~1", surface=_surface())
+    assert any("REMOVED from archive/MANIFEST.json" in p for p in lost), lost
+
+
+def _sdk_entry_with_a_real_body(tree: Path, name: str = "old_method") -> dict:
+    """An `sdk-method` row whose recorded block is the body that actually lives in `sdk.py`.
+
+    ⛔ The earlier fixture built the row with `_entry(...)`, which records NO blocks and wrote no
+    live `sdk.py` at all — so the restore credit was granted by the NAME and the body question
+    was unreachable (round-8 review). A restore fixture has to contain the code that came back.
+    """
+    text = f"class TortoiseSDK:\n    def {name}(self):\n        return 1\n"
+    (tree / "tortoise" / "sdk.py").write_text(text, encoding="utf-8")
+    _commit(tree, "tortoise/sdk.py")
+    segment = arch.expected_block(arch.SDK_METHOD, name, "tortoise/sdk.py", text)
+    assert segment is not None, "the fixture must hold the shape the extractor keys"
+    row = {
+        "path": "tortoise/sdk.py",
+        "node": None,
+        "sha256": arch._sha256(segment.strip("\n")),
+    }
+    return dict(
+        _entry(arch.SDK_METHOD, name),
+        blocks=[row],
+        sources=["tortoise/sdk.py"],
+    )
+
+
+def test_a_row_dropped_for_a_RESTORED_sdk_method_is_green(tree: Path) -> None:
+    """The same rule for the other two kinds: liveness is per-kind, not module-only.
+
+    And the credit is the BODY, not the name — `test_a_row_dropped_for_a_STUBBED_sdk_method`
+    is the negative control (round-8 review: the body check was unreachable for `sdk-method`
+    and `mcp-tool`, because `live_return` returns a SYMBOL for those kinds and the old code
+    tried to read a file named after it).
+    """
+    entry = _sdk_entry_with_a_real_body(tree)
+    arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
+    frozen = tree / entry["file"]
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    frozen.write_text("def old_method():\n    return 1\n", encoding="utf-8")
+    _commit(tree, ".")
+    arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+    _commit_drop(tree, entry["file"])
+
+    assert arch.shrink_violations(
+        tree, base_ref="HEAD~1", surface=_surface(methods={"old_method"})
+    ) == [], "a verbatim restore of the recorded body IS the restore"
+    assert arch.shrink_violations(tree, base_ref="HEAD~1", surface=_surface()), (
+        "without the method live again the row drop is unrecorded code loss"
+    )
+
+
+def test_a_row_dropped_for_a_STUBBED_sdk_method_is_a_loss(tree: Path) -> None:
+    """A live NAME whose body is not the recorded one is a STUB, not the code coming back.
+
+    Measured in round-8 review: the credit was name-only for `sdk-method` / `mcp-tool` (the
+    carrier `live_return` returns is a SYMBOL, so the body check read a file named `old_method`
+    and every one of those rows fell into "cannot tell"), so dropping the row and the frozen
+    file while leaving a three-line stub destroyed the record with every arm green.
+    Mutation: make `_live_body_is_the_recorded_one` return None instead of False for an
+    unreadable path -> RED here.
+    """
+    entry = _sdk_entry_with_a_real_body(tree)
+    arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
+    frozen = tree / entry["file"]
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    frozen.write_text("def old_method():\n    return 1\n", encoding="utf-8")
+    _commit(tree, ".")
+    arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+    subprocess.run(["git", "rm", "-q", entry["file"]], cwd=tree, check=True)
+    (tree / "tortoise" / "sdk.py").write_text(
+        "class TortoiseSDK:\n    def old_method(self):  # re-added as a stub\n        ...\n",
+        encoding="utf-8",
+    )
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD~1", surface=_surface(methods={"old_method"})
+    )
+    assert any("REMOVED from archive/MANIFEST.json" in p for p in problems), (
+        "the name is back and the BODY is not — the frozen record is the only copy of what was "
+        f"removed: {problems}"
+    )
+
+
+def test_a_MULTI_block_restore_needs_EVERY_block_back(tree: Path) -> None:
+    """A two-block row restored verbatim in ONE file is not a restore (round-8 review).
+
+    Only `rows[0]` was compared, and all four committed `mcp-tool` rows are two-block
+    (`tool_registry.py` `ToolDefinition` + `mcp_server.py` handler). Measured: registry block
+    restored verbatim, the handler nowhere in the tree, `_live_body_is_the_recorded_one: True`.
+    Mutation: `for row in rows` -> `for row in rows[:1]` -> RED here.
+    """
+    registry_text = 'TOOL = ToolDefinition(name="old_tool", description="x")\n'
+    handler = "def old_tool():\n    return 1"
+    (tree / "tortoise" / "tool_registry.py").write_text(registry_text, encoding="utf-8")
+    _commit(tree, "tortoise/tool_registry.py")
+    registry_segment = arch.expected_block(
+        arch.MCP_TOOL, "old_tool", "tortoise/tool_registry.py", registry_text,
+        "ToolDefinition:old_tool",
+    )
+    assert registry_segment is not None, "the fixture must hold the shape the extractor keys"
+    rows = [
+        {"path": "tortoise/tool_registry.py", "node": "ToolDefinition:old_tool",
+         "sha256": arch._sha256(registry_segment.strip("\n"))},
+        {"path": "tortoise/mcp_server.py", "node": "FunctionDef:old_tool",
+         "sha256": arch._sha256(handler)},
+    ]
+    entry = dict(
+        _entry(arch.MCP_TOOL, "old_tool"),
+        blocks=rows,
+        sources=["tortoise/tool_registry.py", "tortoise/mcp_server.py"],
+    )
+    arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
+    frozen = tree / entry["file"]
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    frozen.write_text("# frozen\n", encoding="utf-8")
+    _commit(tree, ".")
+    arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+    _commit_drop(tree, entry["file"])
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD~1", surface=_surface(tools={"old_tool"})
+    )
+    assert any("REMOVED from archive/MANIFEST.json" in p for p in problems), (
+        "the handler block is not in the tree at all, so this is not a restore: " f"{problems}"
+    )
+
+
+def test_a_restore_whose_recorded_FILE_is_gone_is_not_a_restore(tree: Path) -> None:
+    """A row whose own source file is not in the tree is not back (round-8 review).
+
+    The credit branch reads each row's `path`; an absent file is `False`, not "cannot tell" —
+    `None` there was credit, and for `sdk-method` / `mcp-tool` it was ALWAYS `None` because
+    `live_return` returns a SYMBOL for those kinds, so the body check was unreachable for 110
+    of the archive's 111 entries.
+    Mutation: `if text is None: return None` -> RED here.
+    """
+    entry = dict(
+        _entry(arch.SDK_METHOD, "old_method"),
+        blocks=[{"path": "tortoise/gone_sdk.py", "node": None, "sha256": "0" * 64}],
+        sources=["tortoise/gone_sdk.py"],
+    )
+    arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
+    frozen = tree / entry["file"]
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    frozen.write_text("# frozen\n", encoding="utf-8")
+    _commit(tree, ".")
+    arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+    _commit_drop(tree, entry["file"])
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD~1", surface=_surface(methods={"old_method"})
+    )
+    assert any("REMOVED from archive/MANIFEST.json" in p for p in problems), (
+        "the recorded source file is not in the tree, so nothing came back: " f"{problems}"
+    )
+
+
+def test_a_module_left_behind_as_an_EMPTY_file_is_not_a_return(tree: Path) -> None:
+    """Direction one must agree with arm 1b: a leftover emptied file is not the code (round-8).
+
+    Arm 1b calls an emptied module a removal; `live_return` used to credit it as "the module
+    came back", so carrying out arm 1b's own printed remedy (archive it, delete the body again)
+    RED the sibling arm on the leftover file — a red with no CI-passable route.
+    Mutation: drop the `root is not None` content check in `live_return` -> RED here.
+    """
+    (tree / "tortoise" / "splitmod.py").write_text("def body():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/splitmod.py")
+    (tree / "tortoise" / "splitmod.py").write_text("", encoding="utf-8")
+    _commit(tree, "tortoise/splitmod.py")
+    entry = dict(_entry(arch.MODULE, "tortoise.splitmod"), blocks=[], sources=[])
+
+    # The body-carrier set production would build for THIS tree: `_modules_with_a_body` filters
+    # only a scaffolding `__init__.py`, so a plain empty `.py` is still a CARRIER. Omitting the
+    # name here (an empty set, or the misspelt key that made this argument inert until review 10)
+    # short-circuits on the carriers guard ABOVE and the test could then no longer pin the on-disk
+    # content check its docstring names.
+    surface = _surface(
+        modules={"tortoise/splitmod.py"}, modules_with_a_body={"tortoise.splitmod"}
+    )
+    assert arch.live_return(entry, surface, tree) is None, (
+        "an emptied leftover file is not the module coming back"
+    )
+    assert arch.surface_violations([entry], surface, tree) == [], (
+        "and direction one must not red the file arm 1b's remedy leaves behind"
+    )
+
+
+def test_the_body_carrier_set_decides_when_there_is_no_tree_to_read() -> None:
+    """`root=None` is the ONE place `modules_with_a_body` decides the answer (round-11 review).
+
+    Both other consumers pass `root`, and there `_init_carries_a_body` re-derives the answer from
+    the file, so the carriers guard never changes it — which meant nothing pinned the KEY the
+    fixture writes, and round-10's defect (the fixture writing `modules_with_body`, a key no
+    production code reads) could return silently with every other test still green. With no tree
+    to read, a scaffolding-only carrier is "not the module coming back" and a body-carrying one
+    is.
+
+    Mutation: revert `_surface`'s key to `modules_with_body` -> the FIRST assertion REDs, because
+    `carriers` becomes `None` and `live_return` credits the scaffolding path.
+    """
+    entry = dict(_entry(arch.MODULE, "tortoise.splitmod"), blocks=[], sources=[])
+    scaffolding = {"tortoise/splitmod/__init__.py"}
+
+    assert (
+        arch.live_return(entry, _surface(modules=scaffolding, modules_with_a_body=set()), None)
+        is None
+    ), "the surface says the name resolves and carries no body, so nothing came back"
+
+    assert (
+        arch.live_return(
+            entry, _surface(modules=scaffolding, modules_with_a_body={"tortoise.splitmod"}), None
+        )
+        == "tortoise/splitmod/__init__.py"
+    ), "a carrier the surface names IS the module coming back"
+
+
+def test_the_restore_credit_needs_a_KNOWN_surface(tree: Path) -> None:
+    """`surface=None` means liveness UNKNOWN, and that must fail CLOSED (still a violation).
+
+    A caller that has not read the surface can never turn a loss into a green; only `check`
+    (and a test that supplies one) earns the restore credit.
+    """
+    entry = _archive_module(tree, "tortoise.gone")
+    _commit(tree, ".")
+    arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+    _commit_drop(tree, entry["file"])
+
+    assert arch.shrink_violations(tree, base_ref="HEAD~1"), (
+        "an unknown surface was read as 'the symbol is live' — that is the fail-open shape"
+    )
+
+
+def test_check_hands_the_live_surface_to_the_shrink_arm(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CALL SITE, not just the helper: `check` must pass the surface it already read.
+
+    Deleting `surface=surface` from `check`'s call would red every restore in CI while every
+    helper-level test above stayed green — the call-site shape this section exists for.
+    """
+    entry = _archive_module(tree, "tortoise.gone")
+    _commit(tree, ".")
+    arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+    _commit_drop(tree, entry["file"])
+    monkeypatch.setattr(
+        arch, "live_surface", lambda root=None: _surface(modules={"tortoise/gone.py"})
+    )
+    monkeypatch.setattr(arch, "index_violations", lambda entries, root=None: [])
+
+    problems = arch.check(tree, base_ref="HEAD~1")
+    assert not any("tortoise.gone" in p for p in problems), (
+        "check() did not hand the live surface to the shrink arm, so a documented restore reds: "
+        f"{problems}"
+    )
+
+
+def test_a_rewritten_manifest_entry_is_reported(tree: Path) -> None:
+    """A recorded entry edited in place leaves the same faithless record as a deleted one."""
+    entry = _archive_module(tree, "tortoise.gone")
+    _commit(tree, ".")
+    rewired = dict(entry, archived_at="b" * 40)
+    arch.save_manifest({"entries": [rewired]}, tree / "archive" / "MANIFEST.json")
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any("REWRITTEN" in p and "archived_at" in p for p in problems), problems
+
+
+def test_a_VERIFIED_reanchor_is_not_a_rewrite(tree: Path) -> None:
+    """A correction the SIBLING arm requires must not be refused here (review P2, #14039).
+
+    `verify-anchors` — the step that runs immediately BEFORE this arm in the same
+    `surface-guard` job — requires an entry to cite a commit that still HOLDS the frozen body,
+    so when `main` edits an archived file the anchor must move. The only route this arm printed
+    was `--allow-archive-shrink`, a local-shell waiver the workflow deliberately never passes:
+    gate against gate, with no way through a PR. The correction is accepted ONLY on the evidence
+    the anchor arm already uses — the frozen file still matches the record AND the new anchor
+    holds each recorded body byte-for-byte. Mutation: delete the `_reanchor_is_verified` call ->
+    RED here; drop its `_anchor_violations` loop -> the negative control below goes green.
+    """
+    (tree / "tortoise" / "gone.py").write_text("def secret():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    entry = arch.archive_symbol(arch.MODULE, "tortoise.gone", "batch-a", "r", root=tree)
+    _commit(tree, ".")
+    # A LATER commit that still holds this module's body unchanged — a real, readable anchor.
+    (tree / "tortoise" / "other.py").write_text("Y = 2\n", encoding="utf-8")
+    _commit(tree, "tortoise/other.py")
+    newer = arch._git(tree, "rev-parse", "HEAD")[1].strip()
+    assert newer != entry["archived_at"], "the fixture must actually move the anchor"
+    arch.save_manifest(
+        {"entries": [dict(entry, archived_at=newer)]}, tree / "archive" / "MANIFEST.json"
+    )
+    _commit(tree, ".")
+
+    assert arch.shrink_violations(tree, base_ref="HEAD~1") == [], (
+        "a re-anchor whose new commit provably holds the recorded body is the correction "
+        "`verify-anchors` asks for, not a faithless edit"
+    )
+
+
+def test_a_reanchor_to_a_commit_that_does_not_hold_the_body_is_still_reported(
+    tree: Path,
+) -> None:
+    """The negative control: the evidence is the BODY, not the presence of a real sha.
+
+    Without this, `_reanchor_is_verified` would accept any rewrite that merely names a commit
+    this clone happens to hold — which is the forged-anchor shape #12291 exists to catch.
+
+    ⚠️ WHAT ACTUALLY ANSWERS THIS FIXTURE (measured, round-12 mutation pass): it anchors at an
+    ANCESTOR (`before`), so the ROLLBACK guard refuses before the body read is reached — deleting
+    the per-row `_anchor_violations` body read alone leaves this row GREEN. The row that
+    discriminates the BODY guard is
+    `test_a_reanchor_to_a_LATER_commit_that_CHANGED_the_body_is_still_reported`, which moves the
+    anchor FORWARD on the default branch and changes the body, so rollback and the
+    default-branch check both pass and only the body evidence can refuse.
+    """
+    (tree / "tortoise" / "gone.py").write_text("def secret():\n    return 1\n", encoding="utf-8")
+    before = arch._git(tree, "rev-parse", "HEAD")[1].strip()
+    _commit(tree, "tortoise/gone.py")
+    entry = arch.archive_symbol(arch.MODULE, "tortoise.gone", "batch-a", "r", root=tree)
+    _commit(tree, ".")
+    arch.save_manifest(
+        {"entries": [dict(entry, archived_at=before)]}, tree / "archive" / "MANIFEST.json"
+    )
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any("REWRITTEN" in p and "archived_at" in p for p in problems), (
+        "a commit that exists but does not carry the frozen body is not a re-anchor: "
+        f"{problems}"
+    )
+
+
+def test_a_reanchor_to_a_LATER_commit_that_CHANGED_the_body_is_still_reported(tree: Path) -> None:
+    """The BODY guard on its own — the existing row is not discriminating about it (round-12).
+
+    `test_a_reanchor_to_a_commit_that_does_not_hold_the_body_is_still_reported` anchors at an
+    ANCESTOR, so the ROLLBACK guard answers it as well. Measured in the round-12 mutation pass:
+    removing the per-row `_anchor_violations` body read alone left that row GREEN, and removing
+    the rollback check alone left it GREEN too — only all three together reddened it. So it never
+    discriminated the guard it names.
+
+    This fixture is built the other way round: the anchor MOVES FORWARD on the default branch and
+    simply does not hold the frozen body, so rollback and default-branch both pass and the body
+    evidence is the only guard left that can refuse.
+
+    Mutation: delete the per-row `_anchor_violations(...)` call -> RED here, and only here.
+    """
+    (tree / "tortoise" / "gone.py").write_text("def secret():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    entry = arch.archive_symbol(arch.MODULE, "tortoise.gone", "batch-a", "r", root=tree)
+    _commit(tree, ".")
+    # A LATER commit on the default branch edits the file: a descendant of the archived revision
+    # (so no rollback) and on the branch (so a valid citation) — but it no longer holds the body.
+    (tree / "tortoise" / "gone.py").write_text("def secret():\n    return 2\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    later = arch._git(tree, "rev-parse", "HEAD")[1].strip()
+    assert later != entry["archived_at"], (
+        "the fixture needs a FORWARD anchor, or the rollback guard answers instead of the body"
+    )
+    arch.save_manifest(
+        {"entries": [dict(entry, archived_at=later)]}, tree / "archive" / "MANIFEST.json"
+    )
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any("REWRITTEN" in p and "archived_at" in p for p in problems), (
+        "a FORWARD anchor that does not hold the frozen body is not a re-anchor — the evidence "
+        f"is the BODY, not the direction of the sha: {problems}"
+    )
+
+
+def test_a_reanchor_cannot_DELETE_a_frozen_block(tree: Path) -> None:
+    """The escape is a RE-ANCHOR, not a licence to shrink the evidence (round-6 review).
+
+    The first version was handed only the NEW entry, so "the new record is internally consistent
+    with the new file" was the whole question — and a rewrite that DELETED a frozen block while
+    deleting its row from the manifest passed EVERY arm: the row stays, its evidence shrinks, and
+    the removed code now exists nowhere, which is the loss #12291 was filed for. A re-anchor
+    RE-HASHES bodies; it does not delete them, so the base entry's block count and block keys
+    are required to match.
+    Mutation: drop the BASE-entry comparisons (block count / block keys / `sources`) -> RED
+    here. ⚠️ THE THREE ARE MUTUALLY SUBSUMING, and the round-12 mutation pass measured it:
+    deleting the block-COUNT comparison alone leaves this row GREEN, because the block-KEY
+    multiset then refuses the same fixture, and vice versa. Only removing all three (or the
+    `sources` check on the rewrite that edits `sources`) reds it. So this row pins the
+    PROPERTY, not one comparison — an attribution table cannot name a single load-bearing
+    mutant for it, and should not pretend to. A per-guard mutant is meaningful only for a guard
+    something else does not already answer.
+    """
+    entry = arch.archive_symbol(arch.MCP_TOOL, "tortoise_search", "batch-a", "r", root=tree)
+    _commit(tree, ".")
+    assert len(entry["blocks"]) >= 2, "the fixture needs a MULTI-block entry to be able to shrink"
+    kept = entry["blocks"][:1]
+    text, frozen = arch.render_archive_file(
+        entry["kind"], entry["symbol"], entry["batch"], entry["reason"],
+        entry["archived_from"], entry["archived_at"],
+        [(row["path"], arch.frozen_blocks((tree / entry["file"]).read_text(encoding="utf-8"))[i][1], row["node"])
+         for i, row in enumerate(kept)],
+    )
+    (tree / entry["file"]).write_text(text, encoding="utf-8")
+    shrunk = dict(entry, blocks=frozen, sources=[row["path"] for row in frozen])
+    arch.save_manifest({"entries": [shrunk]}, tree / "archive" / "MANIFEST.json")
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any("REWRITTEN" in p and "blocks" in p for p in problems), (
+        "dropping a frozen block while keeping the row is exactly the faithless record this arm "
+        f"grades — the code it held now exists nowhere: {problems}"
+    )
+
+
+def test_a_reanchor_to_an_ANCESTOR_commit_is_a_ROLLBACK(tree: Path) -> None:
+    """A readable anchor is not enough: the evidence must not roll BACKWARDS (round-7 review).
+
+    Re-rendering the frozen body from an OLDER revision of the same symbol and re-pointing
+    `archived_at` at it satisfies every byte check — the file matches the record, and the commit
+    really holds that body — so the escape accepted it and the record silently named an earlier,
+    weaker revision. That is the TUF rollback shape this module cites at its top. A side-branch
+    anchor is refused for the same reason `anchor_sha` refuses to WRITE one.
+    Mutation: drop the `merge-base --is-ancestor previous sha` check -> RED here.
+    """
+    (tree / "tortoise" / "gone.py").write_text("def secret():\n    return 1\n", encoding="utf-8")
+    older = None
+    _commit(tree, "tortoise/gone.py")
+    older = arch._git(tree, "rev-parse", "HEAD")[1].strip()
+    (tree / "tortoise" / "gone.py").write_text(
+        "def secret():\n    return 2\n\ndef more():\n    return 3\n", encoding="utf-8"
+    )
+    _commit(tree, "tortoise/gone.py")
+    entry = arch.archive_symbol(arch.MODULE, "tortoise.gone", "batch-a", "r", root=tree)
+    _commit(tree, ".")
+    assert entry["archived_at"] != older
+    # ROLL BACK: the frozen body from the OLDER revision, anchored at the OLDER commit.
+    old_body = arch._git_blob(tree, older, "tortoise/gone.py")
+    assert old_body is not None
+    text, frozen = arch.render_archive_file(
+        entry["kind"], entry["symbol"], entry["batch"], entry["reason"],
+        entry["archived_from"], older, [("tortoise/gone.py", old_body, None)],
+    )
+    (tree / entry["file"]).write_text(text, encoding="utf-8")
+    arch.save_manifest(
+        {"entries": [dict(entry, archived_at=older, blocks=frozen, sources=["tortoise/gone.py"])]},
+        tree / "archive" / "MANIFEST.json",
+    )
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any("REWRITTEN" in p for p in problems), (
+        "a re-anchor to an ANCESTOR of the recorded anchor is a ROLLBACK, not a refresh — the "
+        f"record would name an earlier revision than the one it already trusted: {problems}"
+    )
+
+
+def test_a_reanchor_accepts_sources_in_ANOTHER_order(tree: Path) -> None:
+    """`sources` is compared as a MULTISET, because a committed row carries a different order.
+
+    The writer derives `sources` in block order, but `archive/MANIFEST.json`'s `tortoise_analyze`
+    row lists `[mcp_server.py, tool_registry.py]` over blocks in the opposite order — so an
+    order-sensitive comparison refused the ONE legitimate re-anchor for that row, with a remedy
+    ("restore the recorded field(s)") that `verify-anchors` reds: a false block with no route, for
+    1 of 111 rows (round-9 review). Order carries no claim; every block tuple is still bound to
+    its own path by the per-row comparison.
+    Mutation: compare `entry["sources"]` to the derived list with order-sensitive `!=` -> RED.
+    """
+    (tree / "tortoise" / "tool_registry.py").write_text(
+        'TOOL = ToolDefinition(name="old_tool", description="x")\n', encoding="utf-8"
+    )
+    (tree / "tortoise" / "mcp_server.py").write_text(
+        "def old_tool():\n    return 1\n", encoding="utf-8"
+    )
+    _commit(tree, "tortoise/tool_registry.py", "tortoise/mcp_server.py")
+    entry = arch.archive_symbol(arch.MCP_TOOL, "old_tool", "batch-a", "r", root=tree)
+    _commit(tree, ".")
+    assert len(entry["blocks"]) >= 2, "the fixture needs a MULTI-block row to reorder"
+    (tree / "tortoise" / "note.py").write_text("Z = 5\n", encoding="utf-8")
+    _commit(tree, "tortoise/note.py")
+    newer = arch._git(tree, "rev-parse", "HEAD")[1].strip()
+    reversed_sources = list(reversed([str(row["path"]) for row in entry["blocks"]]))
+    assert reversed_sources != [str(row["path"]) for row in entry["blocks"]]
+    arch.save_manifest(
+        {"entries": [dict(entry, archived_at=newer, sources=reversed_sources)]},
+        tree / "archive" / "MANIFEST.json",
+    )
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert not [p for p in problems if "REWRITTEN" in p], (
+        "a faithful re-anchor whose `sources` merely lists the same paths in another order is "
+        f"not a rewrite — and the remedy for calling it one cannot be carried out: {problems}"
+    )
+
+
+def test_a_reanchor_off_the_default_branch_is_a_violation(tree: Path) -> None:
+    """The new anchor must be a CITATION, i.e. on the default branch (round-7 review).
+
+    `anchor_unverified` already refuses to read such an entry; accepting it here made the two
+    arms disagree about the same record, and a squash merge orphans a side-branch anchor.
+    Mutation: drop the `--is-ancestor sha <default ref>` check -> RED here.
+    """
+    (tree / "tortoise" / "gone.py").write_text("def secret():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    entry = arch.archive_symbol(arch.MODULE, "tortoise.gone", "batch-a", "r", root=tree)
+    _commit(tree, ".")
+    # A real commit that holds the same body, but on a branch that is not `main`.
+    arch._git(tree, "checkout", "-q", "-b", "side")
+    (tree / "tortoise" / "side_note.py").write_text("Z = 9\n", encoding="utf-8")
+    _commit(tree, "tortoise/side_note.py")
+    side = arch._git(tree, "rev-parse", "HEAD")[1].strip()
+    arch._git(tree, "checkout", "-q", "main")
+    body = "def secret():\n    return 1"
+    text, frozen = arch.render_archive_file(
+        entry["kind"], entry["symbol"], entry["batch"], entry["reason"],
+        entry["archived_from"], side, [("tortoise/gone.py", body, None)],
+    )
+    (tree / entry["file"]).write_text(text, encoding="utf-8")
+    arch.save_manifest(
+        {"entries": [dict(entry, archived_at=side, blocks=frozen, sources=["tortoise/gone.py"])]},
+        tree / "archive" / "MANIFEST.json",
+    )
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any("REWRITTEN" in p for p in problems), (
+        "an anchor that is not an ancestor of the default branch is not a citation: "
+        f"{problems}"
+    )
+
+
+def test_a_reanchor_cannot_REWRITE_archived_from(tree: Path) -> None:
+    """`archived_from` is a CLAIM_FIELD bound to nothing else on the rewrite path (round-7).
+
+    `_anchor_violations` reads the block rows' `path`, and `file_violations` only makes the
+    FILE's metadata agree with the manifest — so a consistent lie passed both (measured: the
+    field rewritten to a file that never held the body, every block byte-identical).
+    Mutation: drop the `CLAIM_FIELDS` equality loop -> RED here.
+    """
+    (tree / "tortoise" / "gone.py").write_text("def secret():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    entry = arch.archive_symbol(arch.MODULE, "tortoise.gone", "batch-a", "r", root=tree)
+    _commit(tree, ".")
+    bogus = "tortoise/a/file/that/never/held/it.py"
+    text, frozen = arch.render_archive_file(
+        entry["kind"], entry["symbol"], entry["batch"], entry["reason"],
+        bogus, entry["archived_at"],
+        [(row["path"],
+          arch.frozen_blocks((tree / entry["file"]).read_text(encoding="utf-8"))[i][1],
+          row["node"]) for i, row in enumerate(entry["blocks"])],
+    )
+    (tree / entry["file"]).write_text(text, encoding="utf-8")
+    arch.save_manifest(
+        {"entries": [dict(entry, archived_from=bogus, blocks=frozen)]},
+        tree / "archive" / "MANIFEST.json",
+    )
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any("REWRITTEN" in p for p in problems), (
+        "a re-anchor moves the anchor and re-hashes bodies — it does not restate where the "
+        f"body came from: {problems}"
+    )
+
+
+def test_a_dropped_row_reattached_to_a_STUB_is_not_a_restore(tree: Path) -> None:
+    """A live NAME is not a restore: the BODY has to come back (round-7 review).
+
+    Dropping the row and the frozen file earned the restore credit whenever the name was live
+    again, so writing a three-line stub at the dotted path destroyed the record of what was
+    removed while nothing came back (measured on a 30-function module: every arm green, the
+    frozen bytes gone).
+    Mutation: drop the `_live_body_is_the_recorded_one` call -> RED here.
+    """
+    body = "".join(f"def f{i}():\n    return {i}\n" for i in range(30))
+    (tree / "tortoise" / "gone.py").write_text(body, encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    entry = arch.archive_symbol(arch.MODULE, "tortoise.gone", "batch-a", "r", root=tree)
+    _commit(tree, ".")
+    arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+    subprocess.run(["git", "rm", "-q", entry["file"]], cwd=tree, check=True)
+    (tree / "tortoise" / "gone.py").write_text("X = 1  # nothing of the module\n", encoding="utf-8")
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD~1", surface=_surface(modules={"tortoise/gone.py"})
+    )
+    assert any("REMOVED from archive/MANIFEST.json" in p for p in problems), (
+        "the row's frozen body is gone and a stub stands at the path — that is a loss, not a "
+        f"restore: {problems}"
+    )
+
+
+def test_a_pyi_only_module_is_archivable_by_its_dotted_path(tree: Path) -> None:
+    """The remedy must reach a shape the gate grades (round-7 review).
+
+    `.pyi` carriers are graded everywhere (`_package_modules`, `module_name`, arm 1b's stub
+    rule), so deleting a stub-only module reported `MODULE REMOVED` and printed a route that
+    resolved neither `<dotted>.py` nor `<dotted>/__init__.py` — a correct red with no route,
+    one suffix over from the package fallback.
+    Mutation: drop the `.pyi` fallback in `_module_source` -> RED (ArchiveRefused).
+    """
+    (tree / "tortoise" / "stubonly.pyi").write_text("def f() -> int: ...\n", encoding="utf-8")
+    _commit(tree, "tortoise/stubonly.pyi")
+
+    entry = arch.archive_symbol(arch.MODULE, "tortoise.stubonly", "batch-a", "r", root=tree)
+    assert entry["archived_from"] == "tortoise/stubonly.pyi"
+    assert entry["file"] == "archive/modules/batch-a/tortoise/stubonly.py"
+    _commit(tree, ".")
+    _commit_drop(tree, "tortoise/stubonly.pyi")
+    assert arch.shrink_violations(tree, base_ref="HEAD~1") == [], (
+        "the row the remedy wrote must clear the removal it was printed for"
+    )
+
+
+def test_an_UNREADABLE_head_carrier_counts_as_the_body_gone(tree: Path) -> None:
+    """A carrier that exists but cannot be read holds no code (round-7 review).
+
+    A dangling symlink (or a DIRECTORY named `x.py`) passes `exists()` while holding nothing; the
+    arm used to skip it as "not evidence", which is the green direction. The opposite polarity
+    to `_modules_with_a_body` is deliberate — there a `None` means the BASE commit could not be
+    read (a shallow clone), where "counts as content" is the only safe reading.
+    """
+    (tree / "tortoise" / "sym.py").write_text("def secret():\n    return 1\n", encoding="utf-8")
+    (tree / "tortoise" / "dir.py").write_text("def other():\n    return 2\n", encoding="utf-8")
+    _commit(tree, "tortoise/sym.py", "tortoise/dir.py")
+    subprocess.run(["git", "rm", "-q", "tortoise/sym.py"], cwd=tree, check=True)
+    (tree / "tortoise" / "sym.py").symlink_to("/nonexistent/target.py")
+    subprocess.run(["git", "rm", "-q", "tortoise/dir.py"], cwd=tree, check=True)
+    (tree / "tortoise" / "dir.py").mkdir()
+    (tree / "tortoise" / "dir.py" / "inner.txt").write_text("x\n", encoding="utf-8")
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    removed = sorted(p.split(":", 1)[0] for p in problems if "MODULE BODY REMOVED" in p)
+    assert removed == ["tortoise.dir", "tortoise.sym"], (
+        "an unreadable carrier holds no code: a dangling symlink and a directory named `.py` "
+        f"are both the body gone — {problems}"
+    )
+
+
+def test_a_pyi_stub_beside_a_live_module_is_NOT_a_removal(tree: Path) -> None:
+    """The `.pyi` preference's real load: a stub ADDED beside the module must stay green.
+
+    A name that carries BOTH `x.py` and `x.pyi` must resolve to the RUNTIME file, or a `.pyi`
+    winning the carrier map would turn "add a stub beside the module" into a false
+    `MODULE BODY REMOVED`. The map is built from a SORTED path list, so the choice is a property
+    of the paths and not of a set's hash order — the determinism is the guard, and this test is
+    its non-vacuity (the replacement case is `test_a_module_replaced_by_a_pyi_STUB_is_a_removal`,
+    whose guard is the `stubbed` flag).
+    """
+    (tree / "tortoise" / "both.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/both.py")
+    (tree / "tortoise" / "both.pyi").write_text("def value() -> int: ...\n", encoding="utf-8")
+    _commit(tree, "tortoise/both.pyi")
+
+    assert arch.shrink_violations(tree, base_ref="HEAD~1") == [], (
+        "adding a stub beside a live module removes nothing"
+    )
+
+
+def test_a_tombstone_field_added_to_an_entry_is_not_a_rewrite(tree: Path) -> None:
+    """Appending to the record is what an append-only ledger DOES; editing it is not."""
+    entry = _archive_module(tree, "tortoise.gone")
+    _commit(tree, ".")
+    arch.save_manifest(
+        {"entries": [dict(entry, restored_in="PR #1")]}, tree / "archive" / "MANIFEST.json"
+    )
+    _commit(tree, ".")
+
+    assert arch.shrink_violations(tree, base_ref="HEAD~1") == []
+
+
+def test_a_recorded_archive_shrink_is_green(tree: Path) -> None:
+    """A DROPPED row is green when the drop's REASON is on the record (the waiver route).
+
+    ⛔ NOT the restore path: a restore needs no waiver at all, because the symbol is live again and
+    `live_return` credits it (`test_a_row_dropped_for_a_RESTORED_module_is_green`, the README's
+    step-3 procedure). This one is `--allow-archive-shrink-reason <why>` — a drop that is neither a
+    restore nor a mistake — so the row pins the waiver route, not the restore route.
+    """
+    _archive_module(tree, "tortoise.gone")
+    _commit(tree, ".")
+    arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
+    _commit(tree, ".")
+
+    assert arch.shrink_violations(
+        tree, base_ref="HEAD~1", allowed=["module:tortoise.gone"]
+    ) == []
+
+
+def test_a_waiver_that_waives_nothing_is_reported(tree: Path) -> None:
+    """A false record is worse than no record: it reads as a departure that was checked."""
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD", allowed=["module:tortoise.never_existed"]
+    )
+    assert any("waives nothing" in p for p in problems), problems
+
+
+def test_a_MODULE_waiver_that_waives_nothing_does_not_claim_the_base_lacks_it(tree: Path) -> None:
+    """Review F2 of PR #14039: the round-3 wording split never reached the MODULE branch.
+
+    `base_entries` is the ARCHIVE's rows, and arm 1's question — "does the base carry this
+    module?" — is answered by the PACKAGE TREE, so a module present at BOTH ends printed
+    "does not record `tortoise.sdk` (module) at all" while the same run compared it on both
+    sides. A verdict that is right and a stated fact that is false is the exact defect the
+    archive-row branch was fixed for, and it points the operator at a removal that never
+    happened.
+    """
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD", allowed=["module:tortoise.sdk"]
+    )
+    waived = [p for p in problems if "waives nothing" in p]
+    assert waived, problems
+    assert "does not record" not in waived[0], waived[0]
+    assert "still carries it" in waived[0], waived[0]
+
+
+def test_the_green_line_echoes_the_waiver_reason(
+    tree: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Review N1 of PR #14039: the reason is REQUIRED and was then discarded.
+
+    A WHY that is validated and never printed is a one-flag decoration, and this line is the
+    only surviving record that the departure was checked (`cut` already prints its reason).
+    """
+    (tree / "tortoise" / "gone.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    _commit_drop(tree, "tortoise/gone.py")
+    monkeypatch.setattr(arch, "ROOT", tree)
+    monkeypatch.setattr(arch, "live_surface", lambda root=None: _surface())
+    monkeypatch.setattr(arch, "index_violations", lambda entries, root=None: [])
+
+    rc = arch.main(
+        [
+            "archive_surface.py",
+            "check",
+            "--base-ref",
+            "HEAD~1",
+            "--allow-archive-shrink",
+            "module:tortoise.gone",
+            "--allow-archive-shrink-reason",
+            "deliberate: measured no callers",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "waived: module:tortoise.gone" in out, out
+    assert "reason: deliberate: measured no callers" in out, out
+    # ⛔ THE POSITIVE SIDE OF THE GREEN LINE (review note of PR #14039, "no red"): every row
+    # over this string asserted its ABSENCE (`test_the_shrink_arm_is_OFF_unless_a_base_ref_is
+    # _given` checks `check()`, not `main()`'s print), so deleting the `shrink = f" Shrink
+    # checked against {label}"` assignment kept the suite green and made a green shrink pass
+    # read identically to a run where the arm silently did nothing. Assert the RESOLVED label,
+    # not just the prefix — `resolve_base` is the one definition of what was compared.
+    assert "Shrink checked against HEAD~1 (merge base " in out, out
+
+
+def test_a_waiver_must_name_a_real_kind_and_symbol(tree: Path) -> None:
+    with pytest.raises(arch.ArchiveRefused, match="not `<kind>:<symbol>`"):
+        arch.shrink_violations(tree, base_ref="HEAD", allowed=["tortoise.gone"])
+
+
+def test_an_unchanged_tree_is_green(tree: Path) -> None:
+    """Non-vacuity: the arm must not red an ordinary merge."""
+    assert arch.shrink_violations(tree, base_ref="HEAD") == []
+    assert arch.shrink_violations(tree) == []  # default branch of the fixture
+
+
+def test_the_shrink_arm_is_OFF_unless_a_base_ref_is_given(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`check(tmp)` keeps its old meaning: an opt-in arm cannot red the depth-1 `test` job."""
+    (tree / "tortoise" / "gone.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    # ⛔ The fixture's DEFAULT branch is `main` and HEAD starts ON it, so a removal committed
+    # there makes `resolve_base(root, None)` return HEAD — the arm then compares HEAD with
+    # ITSELF and returns the same empty list as "the arm did not run". Measured (round-14
+    # review, P3-2): with the arm forced ON (`if base_ref is not None:` -> `if True:`) the whole
+    # of `tests/test_archive.py` stayed green at 128 passed, so this row could not red the gate
+    # it names. Commit the removal on a SIDE branch: the default branch then still holds the
+    # file, so a forced-on arm has a real removal to report.
+    subprocess.run(["git", "checkout", "-q", "-b", "side"], cwd=tree, check=True)
+    _commit_drop(tree, "tortoise/gone.py")
+    # Pin the premise, so the test cannot silently drift back to the vacuous shape: the ref the
+    # arm would use without a base ref must still carry the removed file.
+    default_sha = arch.resolve_base(tree, None)[0]
+    still_holds = subprocess.run(
+        ["git", "cat-file", "-e", f"{default_sha}:tortoise/gone.py"], cwd=tree
+    ).returncode
+    assert still_holds == 0, (
+        "the default branch no longer holds the removed file, so a forced-on arm would report "
+        "nothing and this row would be vacuous again"
+    )
+    assert arch.shrink_violations(tree, base_ref="HEAD~1"), "positive control: the arm fires"
+    monkeypatch.setattr(arch, "live_surface", lambda root=None: _surface())
+    monkeypatch.setattr(arch, "index_violations", lambda entries, root=None: [])
+    # `check` reaches the arm only when asked — through the SAME call site `main` uses.
+    off = arch.check(tree)
+    on = arch.check(tree, base_ref="HEAD~1")
+    assert not any("MODULE REMOVED" in problem for problem in off), (
+        f"check() ran the base-ref arm without being given a base ref: {off}"
+    )
+    assert any("MODULE REMOVED" in problem for problem in on), (
+        "the call site does not pass the base ref through, so the arm is unreachable from the "
+        f"CLI: {on}"
+    )
+
+
+def test_a_BLANK_or_whitespace_archive_reason_is_not_a_reason() -> None:
+    """P3-1 of the round-14 review: the pairing guard compared RAW truthiness.
+
+    Measured before the fix: `check --allow-archive-shrink-reason ""` with no waiver exited 0
+    silently, and a whitespace reason satisfied the pairing test beside a real waiver — an
+    unexplained removal waived by pressing space. `cmd_cut` normalises its own reason with
+    `.strip()`; this guard did not.
+    Mutation: drop the `.strip()`/`reason_given` normalisation -> the first case exits 0 again.
+    """
+
+    def run(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "archive_surface.py"), *args],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+
+    blank = run("check", "--allow-archive-shrink-reason", "")
+    assert blank.returncode == 2, blank.stdout + blank.stderr
+    assert "go together" in (blank.stdout + blank.stderr), (
+        "a reason flag with no waiver names an override that did not happen — including when "
+        f"the value is empty: {blank.stdout}{blank.stderr}"
+    )
+
+    spaces = run(
+        "check",
+        "--base-ref",
+        "HEAD",
+        "--allow-archive-shrink",
+        "module:tortoise.sdk",
+        "--allow-archive-shrink-reason",
+        "   ",
+    )
+    assert spaces.returncode == 2, spaces.stdout + spaces.stderr
+    assert "go together" in (spaces.stdout + spaces.stderr), (
+        "refused for the wrong reason: the PAIRING guard is what must answer here, not the "
+        f"needs--base-ref guard: {spaces.stdout}{spaces.stderr}"
+    )
+
+    # Positive control: a REAL reason beside a REAL waiver passes the pairing guard and is
+    # answered by the base-ref arm instead.
+    real = run(
+        "check",
+        "--base-ref",
+        "no-such-ref-14039",
+        "--allow-archive-shrink",
+        "module:tortoise.sdk",
+        "--allow-archive-shrink-reason",
+        "deliberate: measured",
+    )
+    assert real.returncode == 2, real.stdout + real.stderr
+    assert "go together" not in (real.stdout + real.stderr), (
+        "a stated reason must pass the pairing guard and fail on the base ref instead: "
+        f"{real.stdout}{real.stderr}"
+    )
+
+
+def test_an_unreadable_base_ref_is_a_refusal_not_a_pass(tree: Path) -> None:
+    """A gate that cannot answer must not answer 'nothing was removed'."""
+    with pytest.raises(arch.ArchiveRefused, match=r"merge base|base ref"):
+        arch.shrink_violations(tree, base_ref="no-such-ref")
+
+
+def test_the_cli_reds_on_a_module_removal_and_names_it(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The acceptance's own shape: the GATE exits non-zero, not just a helper returning text."""
+    (tree / "tortoise" / "gone.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    _commit_drop(tree, "tortoise/gone.py")
+    monkeypatch.setattr(arch, "ROOT", tree)
+    monkeypatch.setattr(arch, "live_surface", lambda root=None: _surface())
+    monkeypatch.setattr(arch, "index_violations", lambda entries, root=None: [])
+
+    rc = arch.main(["archive_surface.py", "check", "--base-ref", "HEAD~1"])
+    assert rc == 1, "the shrink arm did not reach the CLI's exit code"
+
+
+def test_the_cli_refuses_a_waiver_without_a_reason(tree: Path) -> None:
+    """An override with no stated reason is not a record (same rule as `cut --allow-removal`)."""
+    assert arch.main(
+        ["archive_surface.py", "check", "--base-ref", "HEAD", "--allow-archive-shrink", "module:x"]
+    ) == 2
+    assert arch.main(
+        ["archive_surface.py", "check", "--allow-archive-shrink-reason", "because"]
+    ) == 2
+
+
+def test_the_cli_refuses_a_shrink_waiver_without_a_base_ref(capsys: pytest.CaptureFixture) -> None:
+    """Review F5: the pairing guard needs its own assertion, or deleting it reds nothing.
+
+    A waiver names a removal only the shrink arm can see, so without `--base-ref` it waives
+    nothing while reading as a departure that was checked. Per agent-infra#3442 rule 1, every
+    new fail-closed guard gets a mutant: delete this block and this test is the only red.
+    """
+    rc = arch.main(
+        [
+            "archive_surface.py",
+            "check",
+            "--allow-archive-shrink",
+            "module:tortoise.gone",
+            "--allow-archive-shrink-reason",
+            "because",
+        ]
+    )
+    assert rc == 2, "a waiver with no arm to waive must be refused, not run against no base"
+    assert "--base-ref" in capsys.readouterr().err, (
+        "the refusal must name the flag the operator has to add"
+    )
+
+
+def test_every_readme_section_a_violation_cites_exists() -> None:
+    """Review F3: a printed REMEDY that cites a missing section is a remedy nobody can read.
+
+    The citation is the whole justification the message gives for existing, so it is pinned to
+    the README's own headings: adding a citation to a section that does not exist reds here.
+    """
+    source = (ROOT / "tools" / "archive_surface.py").read_text(encoding="utf-8")
+    readme = (ROOT / "archive" / "README.md").read_text(encoding="utf-8")
+    headings = "\n".join(line for line in readme.splitlines() if line.startswith("#"))
+    cited = set(re.findall(r"archive/README\.md, '([^']+)'", source))
+
+    assert cited, "positive control: the violations cite the procedure doc at all"
+    missing = sorted(section for section in cited if section not in headings)
+    assert missing == [], (
+        f"a violation cites archive/README.md section(s) that do not exist: {missing}; the "
+        "operator following the gate's own remedy would find nothing there"
+    )
+
+
+def test_the_ci_job_runs_the_shrink_arm_on_a_base_ref() -> None:
+    """Wiring: an arm no job invokes is a no-op gate (the measured #9075/#11057 shape)."""
+    workflow = (ROOT / ".github" / "workflows" / "python-ci.yml").read_text(encoding="utf-8")
+    assert "tools/archive_surface.py check --require-entries --base-ref" in workflow, (
+        "no workflow runs the shrink arm; deleting the flag from the step must red here, not "
+        "read as a cleanup"
+    )
+    index = workflow.index("tools/archive_surface.py check --require-entries --base-ref")
+    job = workflow.rfind("\n  surface-guard:", 0, index)
+    assert job != -1, "the shrink arm needs the job whose clone has real history"
+    assert "fetch-depth: 0" in workflow[job:index], (
+        "the job running the shrink arm must check out full history, or the merge base is "
+        "absent by construction and the gate cannot answer"
+    )
+
+
+# ── 11. review rounds 2-3: content, not paths (#12402, #12291) ────────────────
+
+def test_an_init_py_WITH_A_BODY_is_a_removal_even_when_the_package_still_imports(
+    tree: Path,
+) -> None:
+    """Round 3 F2: `tortoise/__init__.py` is 406 lines of the public API.
+
+    The dotted name still resolves through a surviving sibling, so a PATH-set comparison
+    cancels the deletion — measured: the pre-fix arm graded `git rm tortoise/__init__.py`
+    green on a tree that kept `tortoise/sdk.py`, with no `module` entry required. A module
+    body is content; only scaffolding may cancel.
+    """
+    (tree / "tortoise" / "core.py").write_text("X = 1\n", encoding="utf-8")
+    (tree / "tortoise" / "__init__.py").write_text(
+        "from tortoise.core import X\n\n__all__ = ['X']\n", encoding="utf-8"
+    )
+    _commit(tree, "tortoise")
+    _commit_drop(tree, "tortoise/__init__.py")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any("tortoise: MODULE REMOVED" in p for p in problems), (
+        "the package name still resolves through `core.py`, but its __init__ BODY left the "
+        f"product and no other arm can see that: {problems}"
+    )
+
+
+def test_a_docstring_only_init_py_is_scaffolding_and_still_cancels(tree: Path) -> None:
+    """The other direction: prose carries no API, so deleting it removes nothing."""
+    (tree / "tortoise" / "pkg2").mkdir()
+    (tree / "tortoise" / "pkg2" / "__init__.py").write_text(
+        '"""Package marker."""\n', encoding="utf-8"
+    )
+    (tree / "tortoise" / "pkg2" / "sub.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/pkg2")
+    _commit_drop(tree, "tortoise/pkg2/__init__.py")
+
+    assert arch.shrink_violations(tree, base_ref="HEAD~1") == []
+
+
+def test_a_waiver_must_name_a_real_kind(tree: Path) -> None:
+    """The `kind not in KINDS` half of the parser was unpinned (round 3 note)."""
+    with pytest.raises(arch.ArchiveRefused, match="not `<kind>:<symbol>`"):
+        arch.shrink_violations(tree, base_ref="HEAD", allowed=["widget:tortoise.gone"])
+
+
+def test_a_waiver_for_a_row_that_never_LEFT_says_so_without_claiming_the_base_lacks_it(
+    tree: Path,
+) -> None:
+    """Round 3 F1's sibling: the verdict was right, the stated fact was false.
+
+    The base RECORDS the row, so "does not record `x` at all" would send the operator looking
+    for a removal that never happened. That is what this row pins.
+
+    ⛔ AND `_archive_module` WRITES THE ROW, THE FROZEN FILE AND NO LIVE MODULE, so this shape
+    is an ARCHIVED module — a row at the base and a module on NEITHER side, the ordinary case
+    for `archive/`. The old assertion here demanded "still carries it" over a module this tree
+    does not carry at all, i.e. the test PINNED the falsity instead of catching it (review F1 of
+    the P8b landing). It now asserts the true pair: the base already records the removal, and
+    this tree does not carry the module.
+
+    ⛔ This is the ROW branch. The branch that answers from the package tree instead has its own
+    fixture below, because the two are distinct facts and a single fixture can only exercise one
+    (measured: the row-branch fixture never creates the module file, so it cannot tell "the tree
+    carries it" from "the base's MANIFEST records it").
+    """
+    _archive_module(tree, "tortoise.gone")
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD", allowed=["module:tortoise.gone"]
+    )
+    waived = [p for p in problems if "waives nothing" in p]
+    assert waived, problems
+    assert "still carries it" not in waived[0], waived[0]
+    assert "already records" in waived[0], waived[0]
+    assert "does not carry it" in waived[0], waived[0]
+    assert "does not record" not in waived[0], waived[0]
+
+
+def test_a_MODULE_waiver_for_a_RECORDED_row_over_a_LIVE_module_still_says_the_tree_carries_it(
+    tree: Path,
+) -> None:
+    """The OTHER half of the row branch's split (review F1 of the P8b landing).
+
+    The base records the `module` row AND the module is still live here, so nothing left and
+    "this tree still carries it" is the TRUE answer. Without this row the branch could be
+    "fixed" into always printing the archived wording and only the sibling above would run,
+    which is the shape that turns a fact into a constant. Discriminating: hardcoding the
+    "already records / does not carry" text reds here.
+    """
+    (tree / "tortoise" / "gone.py").write_text("Z = 1\n", encoding="utf-8")
+    _archive_module(tree, "tortoise.gone")
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD", allowed=["module:tortoise.gone"]
+    )
+    waived = [p for p in problems if "waives nothing" in p]
+    assert waived, problems
+    assert "still carries it" in waived[0], waived[0]
+    assert "does not carry it" not in waived[0], waived[0]
+
+
+def test_a_waiver_for_a_LIVE_module_the_base_never_recorded_says_so(
+    tree: Path,
+) -> None:
+    """The package-tree branch: a module the base CARRIES with NO archive row for it.
+
+    A `module` removal is answered by the package tree, so this shape must not claim the base
+    "does not record" it — the base never recorded it, but the MODULE was there, and a reader
+    told otherwise looks for a removal that never happened. Discriminating: on the row-branch
+    fix alone the arm prints "does not record `tortoise.gone` (module) at all" and this reds.
+    """
+    (tree / "tortoise" / "gone.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    assert arch.load_manifest(tree / "archive" / "MANIFEST.json")["entries"] == [], (
+        "the discriminating shape is a module the base carries with no archive row for it"
+    )
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD", allowed=["module:tortoise.gone"]
+    )
+    waived = [p for p in problems if "waives nothing" in p]
+    assert waived, problems
+    assert "still carries it" in waived[0], waived[0]
+    assert "does not record" not in waived[0], waived[0]
+
+
+def test_a_MODULE_waiver_for_a_RECORDED_deletion_does_not_claim_the_tree_still_carries_it(
+    tree: Path,
+) -> None:
+    """Review P2 of PR #14039: the SAME falsity, one branch over, on the removal path.
+
+    The reviewer's trace, performed: `tortoise/gone.py` had a body at the base, is deleted here,
+    and the deletion carries its `module` row — so arm 1 stays silent (it does NOT mark the
+    waiver used, because the record is what silenced it) and the waiver falls through as UNUSED.
+    The old `elif symbol in base_modules:` answered from the BASE alone and printed "this tree
+    still carries it, so nothing was removed for it to waive" over a module the same run had
+    just required a record for. Discriminating: that exact sentence, in the same run that
+    reports the record the operator passed to satisfy it.
+    """
+    (tree / "tortoise" / "gone.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    _commit_drop(tree, "tortoise/gone.py")
+    _archive_module(tree, "tortoise.gone")
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD~1", allowed=["module:tortoise.gone"]
+    )
+    waived = [p for p in problems if "waives nothing" in p]
+    assert waived, problems
+    assert "still carries it" not in waived[0], waived[0]
+    assert "nothing was removed" not in waived[0], waived[0]
+    assert "this tree does not" in waived[0], waived[0]
+    assert "IS recorded" in waived[0], waived[0]
+
+
+def test_a_MODULE_waiver_for_a_RECORDED_body_removal_does_not_claim_the_tree_still_carries_it(
+    tree: Path,
+) -> None:
+    """The second shape the PATH set cannot see: the file survives, its body does not (arm 1b).
+
+    A fix that asked only `symbol in head_modules` would still print "this tree still carries
+    it" here, because arm 1b exists precisely because the NAME stays in that set while the code
+    is gone — so the diagnostic has to ask the FILE. Discriminating: the membership-only
+    wording reds this row, and the pre-fix wording reds both.
+    """
+    (tree / "tortoise" / "gone.py").write_text("Z = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    (tree / "tortoise" / "gone.py").write_text("", encoding="utf-8")
+    _archive_module(tree, "tortoise.gone")
+    _commit(tree, "tortoise/gone.py")
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD~1", allowed=["module:tortoise.gone"]
+    )
+    waived = [p for p in problems if "waives nothing" in p]
+    assert waived, problems
+    assert "still carries it" not in waived[0], waived[0]
+    assert "this tree does not" in waived[0], waived[0]
+    assert "IS recorded" in waived[0], waived[0]
+
+
+# ── 12. the module→package split: arm 1's remedy must clear arm 2 (review C-F2) ─────
+
+def _head_sha(root: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def _surface_with_bodies(tree: Path) -> dict:
+    """The live surface `check` reads, built from a scratch tree — paths AND body-carriers.
+
+    `modules_with_a_body` is the half that makes "the module came back" ask the same question
+    arm 1 asks when it decides what LEFT, so a surface built without it exercises the old
+    path-set rule and cannot prove this one.
+    """
+    paths = arch._package_modules(tree)
+    return _surface(
+        modules=paths,
+        modules_with_a_body=arch._modules_with_a_body(
+            paths, lambda path: arch._file_text(tree, path)
+        ),
+    )
+
+
+def test_a_module_split_into_a_package_can_be_archived(tree: Path) -> None:
+    """Review C-F2: carrying out arm 1's own REMEDY must clear the other arm.
+
+    The split is ordinary code: `tortoise/x.py` becomes a package whose `__init__.py` is a
+    docstring and whose body lives in `x/sub.py`. That `__init__.py` is importable, so
+    `live_return`'s module branch used to call the archived module "shipped again" — one
+    legitimate refactor met two arms that disagreed, and the route arm 1 PRINTS could never be
+    completed: archiving was refused after it was prescribed, with no in-CI waiver.
+    """
+    (tree / "tortoise" / "x.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/x.py")
+    base = _head_sha(tree)
+
+    (tree / "tortoise" / "x").mkdir()
+    (tree / "tortoise" / "x" / "__init__.py").write_text(
+        '"""The x package."""\n', encoding="utf-8"
+    )
+    (tree / "tortoise" / "x" / "sub.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "rm", "-q", "tortoise/x.py"], cwd=tree, check=True)
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref=base)
+    assert any("tortoise.x: MODULE REMOVED" in p for p in problems), (
+        f"the module's own body left with `x.py` and no other arm can see it: {problems}"
+    )
+
+    # …now carry out the remedy the violation printed: record the module, then grade again.
+    entry = _archive_module(tree, "tortoise.x")
+    _commit(tree, "archive")
+
+    assert arch.shrink_violations(tree, base_ref=base) == [], (
+        "the row arm 1 demands reds arm 2: the archive row exists and arm 1 is satisfied"
+    )
+    assert arch.surface_violations([entry], _surface_with_bodies(tree)) == [], (
+        "the archive arm refuses the row the shrink arm PRESCRIBED — a scaffolding-only "
+        "`__init__.py` is not the module coming back, and grading it as one left a "
+        "module→package split with no route out of the red"
+    )
+
+
+def test_a_module_reappearing_as_a_PACKAGE_WITH_A_BODY_is_still_a_return(tree: Path) -> None:
+    """The contrast the scaffolding rule needs: a re-exporting `__init__.py` IS the module.
+
+    Without this direction "skip every `__init__.py`" would pass the test above while archived
+    code shipped again through a package's own front door.
+    """
+    entry = _archive_module(tree, "tortoise.y")
+    (tree / "tortoise" / "y").mkdir()
+    (tree / "tortoise" / "y" / "__init__.py").write_text(
+        "from tortoise.y.sub import VALUE\n\n__all__ = ['VALUE']\n", encoding="utf-8"
+    )
+    (tree / "tortoise" / "y" / "sub.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    problems = arch.surface_violations([entry], _surface_with_bodies(tree))
+    assert any("tortoise.y" in p and "REAPPEARED" in p for p in problems), (
+        f"the package's `__init__.py` carries statements, so the module shipped again: {problems}"
+    )

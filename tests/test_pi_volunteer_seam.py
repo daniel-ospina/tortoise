@@ -62,44 +62,23 @@ VOLUNTEER_TEST = HOOKS / "tortoise-volunteer.test.ts"
 
 _PY = sys.executable
 
-#: SAME SEEDED GRAPH as `tests/test_platform_seams.py` — the reflex only
+#: The same seeded graph `tests/test_platform_seams.py` uses: the reflex only
 #: surfaces EP-MEASURED points (a neutral Beta(1,1) prior sits below the 0.7
 #: gate), so the evidence→claim IMPL edge and the posteriors are wired
 #: directly. Copied deliberately rather than imported — a shared fixture would
 #: make one file's seeding change silently re-baseline the other's assertions.
-#: ⛔ SAME GRAPH, NOT THE SAME DOORS (measured; they have diverged):
-#: `test_platform_seams.py` still seeds through the PRIVATE `sdk._create_point`
-#: / `sdk._create_operator`, because #12901's final batch privatised those and
-#: its seed is written against the surviving internal defs. THIS file seeds
-#: through the CONSOLIDATED public doors `create_entity(type="point",
-#: props=…)` / `link_entities(…, operator=True)` — the approved replacement
-#: `tortoise/sdk_retired.py` records for the names #13899 retired. The two are
-#: therefore not interchangeable: `create_entity` forces
-#: `props.setdefault("dedup", True)` (`sdk.py` `_absorbed_point_write`),
-#: whereas `_create_point` leaves dedup unset, i.e. False. Harmless TODAY
-#: because the two points here have distinct contents, but a reader must not
-#: assume a later edit can be copied across the two seeds unchanged.
 _SEED = """
 import os
 from tortoise.sdk import TortoiseSDK
 sdk = TortoiseSDK(db_path=os.environ["TORTOISE_DB_PATH"])
 proj = sdk._get_proj()
-# `create_point`/`create_operator` were retired by #13899; the consolidated
-# doors are `create_entity(type="point", props={"pointKind": …})` (which
-# returns `{"node": …, "nudges": …}`, so the id is `res["node"]["id"]`) and
-# `link_entities(relation, from, to, operator=True)` — `operator=True` is what
-# keeps the IMPL edge carried by an operator Point, the shape this seed needs
-# for `ep.py` to build a factor. Omitting it would degrade to a bare
-# `create_direct_edge` and the reflex would never surface the claim.
-ev = sdk.create_entity(
-    "point",
-    "CI deploys on main merge via GitHub Actions [supporting record]",
-    props={"pointKind": "evidence"})["node"]
-claim = sdk.create_entity(
-    "point",
-    "The CI pipeline deploys via GitHub Actions on main merge.",
-    props={"pointKind": "statement"})["node"]
-sdk.link_entities("IMPL", ev["id"], claim["id"], operator=True)
+ev = sdk._create_point(
+    "evidence",
+    "CI deploys on main merge via GitHub Actions [supporting record]")
+claim = sdk._create_point(
+    "statement",
+    "The CI pipeline deploys via GitHub Actions on main merge.")
+sdk._create_operator("IMPL", ev["id"], [claim["id"]])
 for pid, a, b in ((claim["id"], 12.0, 1.0), (ev["id"], 12.0, 1.0)):
     m = round(a / (a + b), 4)
     proj.g.query(

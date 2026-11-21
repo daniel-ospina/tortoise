@@ -43,19 +43,30 @@ dependencies = [
     # FLOOR only: dependency hygiene, NOT the fix for #3459. Durable owner
     # decision (2026-09-13). Full rationale: PR #3476.
     "redis>=7.1,<8",
-    # CEILING, and it is not taste: PyYAML 6.0.4 regressed merge-key precedence
-    # (upstream yaml/pyyaml#953, open — the DoS fix in #937 dedupes merged pairs
-    # by the KEY VALUE's identity, so a merged mapping's own override is dropped;
-    # single-character keys only survived by CPython string interning). Measured
-    # here at 6.0.4: `mid: {<<: *b, x: 2}` merged by `top: {<<: *m, y: 3}`
-    # resolves to `{'x': 1, 'y': 3}` — the ANCHOR's stale pair — where
-    # `yaml.safe_load` at 6.0.3 gives `{'x': 2, 'y': 3}`. That value is
-    # `config/ci-surfaces.yml`'s own override winning over its anchor, so a
-    # silently-wrong parse mis-sizes every shard. LIFT this ceiling when a
-    # release after the upstream fix is out, and re-measure — never because the
-    # resolver offered a newer wheel (`tests/test_ci_selection.py` reds if the
-    # bound is dropped while the parser still disagrees with 6.0.3).
-    "pyyaml>=6.0,<6.0.4",
+    # ⛔ 6.0.4 IS EXCLUDED (2026-11-21, #14060's required `python-ci-gate` red). Its
+    # `flatten_mapping` change (upstream PR yaml/pyyaml#937, "Fix merge key performance")
+    # de-duplicates merge-key pairs ACROSS a nested `<<: *anchor` chain, so a document's own
+    # override no longer wins over a value inherited one level down: measured, PyYAML 6.0.3
+    # parses `top: {<<: *mid, y: 3}` with `mid: {<<: *base, x: 2}` as `top.x == 2`, and 6.0.4
+    # returns `top.x == 1`. `tools/ci_selection.py` parses this repo's manifests with
+    # `yaml.SafeLoader`, and `tests/test_ci_selection.py` pins that resolved VALUE (not just
+    # "no exception"), so 4 of its cases red on 6.0.4 — reproduced on this box with the 6.0.4
+    # sdist ahead of site-packages: exact failing set {
+    # test_a_merge_key_override_resolves_to_the_documents_own_value,
+    # test_a_sequence_merge_overrides_the_LAST_applied_mapping,
+    # test_an_override_of_a_NESTED_anchor_is_NOT_a_duplicate,
+    # test_the_same_chain_flat_in_document_order_is_also_accepted}. That file is in the SLOW
+    # pool, so the red lands in `test-slow` and therefore in the REQUIRED aggregate
+    # (`python-ci-gate` needs `test-slow`), on every PR that selects the core slow pool.
+    # ⚠️ The pin matters because the CI legs install with `pip install -e '.[test,…]'` — an
+    # UNBOUNDED resolve — before `uv sync --frozen`; the lock carries 6.0.3, so a box that
+    # resolves through the lock never sees this. `!=` and not `<`: 6.0.5+ may restore the
+    # nested-override semantics, and a ceiling would refuse the fix when it arrives.
+    # The upstream report is yaml/pyyaml#953 (OPEN, no fix release as of 2026-11-21): it names
+    # the mechanism this comment reads off the diff — the dedupe keys on `id(pair[0].value)`,
+    # the KEY VALUE, so single-character keys only escape by CPython string interning. Watch
+    # THAT issue, not a version number, for the release that restores the override.
+    "pyyaml>=6.0,!=6.0.4",
     "fastmcp==3.4.6",
     "prometheus-client>=0.16",
     "posthog>=3.0",

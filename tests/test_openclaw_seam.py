@@ -673,16 +673,14 @@ sdk = TortoiseSDK(db_path=os.environ["TORTOISE_DB_PATH"])
 proj = sdk._get_proj()
 
 def add(stmt):
-    # `create_point`/`create_operator` were retired by #13899 — see the same
-    # repair in `tests/test_pi_volunteer_seam.py`: the consolidated doors are
-    # `create_entity(type="point", …)` (id at `res["node"]["id"]`) and
-    # `link_entities(…, operator=True)`, which is what keeps the IMPL edge
-    # carried by an operator Point.
-    ev = sdk.create_entity("point", stmt + " [supporting record]",
-                           props={"pointKind": "evidence"})["node"]
-    claim = sdk.create_entity("point", stmt,
-                              props={"pointKind": "statement"})["node"]
-    sdk.link_entities("IMPL", ev["id"], claim["id"], operator=True)
+    # `create_point` was RETIRED in #4282 (→ `create_entity`), and a retired
+    # name RAISES at call time (#3836 (c)) — so this seed script died on its
+    # first statement and every assertion below the `check=True` subprocess
+    # never ran. It lives in the `_SEED` STRING, which is why no AST scan saw
+    # it. The private door is the one the retired public door delegated to.
+    ev = sdk._create_point("evidence", stmt + " [supporting record]")
+    claim = sdk._create_point("statement", stmt)
+    sdk._create_operator("IMPL", ev["id"], [claim["id"]])
     for pid in (claim["id"], ev["id"]):
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.confidence=0.9231, "

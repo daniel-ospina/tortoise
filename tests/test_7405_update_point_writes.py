@@ -5464,6 +5464,13 @@ def test_a_fifo_at_the_journal_path_cannot_park_the_absent_write(tmp_path):
             os.mkfifo(journal)
             pid = str(uuid.uuid4())
             before = monitoring.silent_revision_loss_counts()
+            # `update_point` was RETIRED in #4282 (→ `update_knowledge`), and a
+            # retired name RAISES at call time (#3836 (c)) — so the retired
+            # spelling made this test fail 100% of the time while its assertions
+            # never ran. It lives in a `textwrap.dedent` STRING, which is why no
+            # AST scan saw it. The private door is the one the retired public
+            # door delegated to, and the sibling case in this module already
+            # calls it that way (see `sdk._update_point` above).
             reply = sdk._update_point(pid, confidence=0.9)
             after = monitoring.silent_revision_loss_counts()
             print(json.dumps({

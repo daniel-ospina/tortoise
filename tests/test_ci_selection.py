@@ -8492,8 +8492,8 @@ def _pyyaml_requirement() -> str:
     return matches[0]
 
 
-def test_the_pyyaml_ceiling_that_keeps_merge_overrides_is_declared_and_satisfied():
-    """The merge-key pins above are only true while pyyaml is below 6.0.4.
+def test_the_pyyaml_exclusion_that_keeps_merge_overrides_is_declared_and_satisfied():
+    """The merge-key pins above are only true on a pyyaml that is NOT 6.0.4.
 
     Upstream yaml/pyyaml#953 (OPEN): the DoS fix in #937 dedupes the pairs a
     `<<:` merge inserts by the KEY VALUE's identity, so — inside ONE merged
@@ -8506,23 +8506,30 @@ def test_the_pyyaml_ceiling_that_keeps_merge_overrides_is_declared_and_satisfied
     That is not cosmetic here: the overridden pair in `config/ci-surfaces.yml`
     IS a `durations` weight, so a silently-wrong parse mis-sizes shards for
     every lane — the class that ends in a watchdog kill, not a red test. So the
-    ceiling is a dependency contract, and this test owns it in three places
+    exclusion is a dependency contract, and this test owns it in three places
     that can drift apart independently: the DECLARATION, the LOCK, and the
     INTERPRETER actually running the suite. `pip install -U pyyaml` on a dev
     box reds the third with a message that names the cause instead of leaving
     the four merge-key pins above to fail as if our parser were at fault.
+
+    ⛔ The subject of the assertion is EXACTLY 6.0.4, not "anything newer": the
+    declared form is `!=6.0.4` and not a `<6.0.4` ceiling, because 6.0.5+ may
+    restore the nested-override semantics and a ceiling would refuse the fix on
+    the release that carries it. A `<` form is still accepted here (it excludes
+    6.0.4 too), so tightening later does not red this test for the wrong reason.
     """
     from tools import ci_selection  # noqa: F401 — this test guards ITS parser's dependency
 
     requirement = _pyyaml_requirement()
-    assert ",<6.0.4" in requirement.replace(" ", ""), (
-        "pyyaml needs its 6.0.4 ceiling (#953 drops a merge override and "
-        f"silently changes parsed durations); declared: {requirement!r}"
+    spec = requirement.replace(" ", "")
+    assert "!=6.0.4" in spec or "<6.0.4" in spec, (
+        "pyyaml must exclude 6.0.4 (#953 drops a merge override and silently "
+        f"changes parsed durations); declared: {requirement!r}"
     )
 
-    def _below_6_0_4(version: str) -> bool:
+    def _is_the_excluded_release(version: str) -> bool:
         parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
-        return parts < [6, 0, 4]
+        return parts == [6, 0, 4]
 
     import tomllib
 
@@ -8531,15 +8538,15 @@ def test_the_pyyaml_ceiling_that_keeps_merge_overrides_is_declared_and_satisfied
         pkg["version"] for pkg in tomllib.loads(lockfile.read_text())["package"]
         if pkg["name"] == "pyyaml"
     ]
-    assert locked, "pyyaml is missing from uv.lock — the ceiling is unenforced there"
-    assert all(_below_6_0_4(v) for v in locked), (
-        f"uv.lock resolved pyyaml {locked}, which the declared ceiling excludes"
+    assert locked, "pyyaml is missing from uv.lock — the exclusion is unenforced there"
+    assert not any(_is_the_excluded_release(v) for v in locked), (
+        f"uv.lock resolved pyyaml {locked}, the exact release the declaration excludes"
     )
 
     installed = yaml.__version__
-    assert _below_6_0_4(installed), (
-        f"the interpreter running this suite has pyyaml {installed}, which is "
-        "excluded by the declared ceiling: upstream yaml/pyyaml#953 makes a "
+    assert not _is_the_excluded_release(installed), (
+        f"the interpreter running this suite has pyyaml {installed}, the exact "
+        "release the declaration excludes: upstream yaml/pyyaml#953 makes a "
         "merged mapping's own override lose to its anchor, so "
         "`parse_manifest_text` returns the anchor's stale `durations` weight. "
         "Reinstall the locked version (`uv sync`) — do not relax the pins above."
