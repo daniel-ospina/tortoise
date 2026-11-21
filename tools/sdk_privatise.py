@@ -789,10 +789,10 @@ SWEEP_NAMES = 66
 #: the blocks above without the false premise.
 #:
 #: RE-MEASURED ON THE REBASED TREE (#14086 rebased onto `main` `e0accb8fe6`, then the review-round-3
-#: commit `41672df4f9` landed on top): `--repin` on THIS tree prints the pair below. ⛔ NEITHER block
-#: above is this tree's answer and neither was carried: `main` (`e0accb8fe6`) pins
-#: `(11844, "70d6cfdcd8b769e4")`, the FIFTH merge tree measured 11839, and THIS tree measures
-#: **11846** — three different trees, three different pins, one of them live.
+#: commit `41672df4f9` landed on top): `--repin` on THAT tree printed **11846**. ⛔ NEITHER block
+#: above was that tree's answer and neither was carried: `main` (`e0accb8fe6`) pinned
+#: `(11844, "70d6cfdcd8b769e4")` and the FIFTH merge tree measured 11839 — three different trees,
+#: three different figures, NONE of which is this tree's (see the last block for the live pin).
 #: ⛔ THE +2 IS ATTRIBUTED BY A ROW-BY-ROW DIFF, NOT BY ARITHMETIC. `--report --base 28ca66878d7c
 #: --top 5000` was run in a worktree at `origin/main` (`e0accb8fe6`) AND on this tree, both row sets
 #: sorted and diffed: EXACTLY TWO rows differ, and both are DECLARED rather than legitimised —
@@ -817,13 +817,15 @@ SWEEP_NAMES = 66
 #: ⛔ AND ONE MORE ROW ON THE MERGED TREE (#14086 review round 4): the COMPLEMENT of that pin —
 #: `test_a_bound_DEFAULT_key_keeps_the_org_level_checkpoint` — issues the SAME registry probe
 #: (`ha_mod._make_sdk(namespace='registry')._.query` 11 → 12), so `--repin` here prints
-#: `(11847, '327c14afa2e43e7c')`, which is the pin below. Same class as the two rows above: a test
+#: `(11847, '327c14afa2e43e7c')` — the pin at that round, NOT this tree's. Same class as the two
+#: rows above: a test
 #: double, not a typed reference to a swept name — no call site is legitimised by it.
 #: ⛔ AND ONE MORE OF THE SAME SHAPE (#14086 fixer):
 #: `test_the_graph_bound_default_resolve_rides_the_worker_not_the_loop` seeds the `Graph` row its
 #: graph-bound capture needs through the SAME registry control plane, so
 #: `ha_mod._make_sdk(namespace='registry')._.query` moves **12 → 13** and `--repin` prints
-#: `(11848, '5e58f2032543c415')` — the pin below. Attributed by the row-by-row diff this block
+#: `(11848, '5e58f2032543c415')` — the pin at that round, NOT this tree's. Attributed by the
+#: row-by-row diff this block
 #: requires (`--report --base 28ca66878d7c --top 5000` run in a detached worktree at the pre-change
 #: head `60bfeb1a55` AND on this tree, both row sets sorted and diffed): EXACTLY that one row differs,
 #: so no shape was silently absorbed in the other direction and NO NEW SHAPE APPEARED. `hosted_api.py`
@@ -835,8 +837,8 @@ SWEEP_NAMES = 66
 #: count, because stale conflict markers were still embedded in `activation_scorecard.py` and added
 #: rows. Removing them returned the set to 11847 rows / `327c14afa2e43e7c` — this is the value
 #: `--repin` prints on the RESOLVED tree, and the sibling commit that reverted the inert `dispatch`
-#: note is already accounted for in it. This is the pin below; no other digest in this block is
-#: current.
+#: note is already accounted for in it. That was the pin at that round; the live pin is the
+#: `SWEEP_RESIDUE` line itself, and the last paragraph above it is the one that describes it.
 #: MERGED `origin/main` (`e022fc935b2d`, #14100/#14108) — both sides' histories above are kept, and the
 #: pin is RE-MEASURED on THIS tree with `--repin`, never combined arithmetically: it prints
 #: `(11844, "70d6cfdcd8b769e4")` and `--check` exits 0 with `typed references still pointing at a
@@ -900,8 +902,9 @@ SWEEP_NAMES = 66
 #: arithmetic: `--report --base 28ca66878d… --top 5000` was run in a detached worktree at the
 #: pre-merge head `b18b89e7` AND on this tree, both row sets sorted and diffed, and EXACTLY ONE row
 #: differs — `create_point (unexpected span)` **2 → 0**. That row is `main`'s own between
-#: `ba0eab1d86` and `05d218fcaf` (the `#14125` door work re-pointed those two arm-2 controls), not
-#: this branch's: this branch adds no row here and removes none. No other row differs, so no shape
+#: `ba0eab1d86` and `05d218fcaf` — **#14129**, which re-pointed exactly those two arm-2 controls
+#: (`tools/measure_13436_write_costs.py`, `sdk.create_point(` → `sdk._create_point(`) — not this
+#: branch's: this branch adds no row here and removes none. No other row differs, so no shape
 #: was absorbed in the other direction. `11837 − 2 = 11835` is a CROSS-CHECK of that measurement,
 #: never its evidence. `--check` exits 0 on this tree:
 #: `typed references still pointing at a public name: 0`.
