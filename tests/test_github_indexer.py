@@ -3324,16 +3324,6 @@ _CITATION_PINS: dict[tuple[str, int, int], tuple[str, str | None]] = {
     # each row below was re-found by its own pinned text on the MERGED tree. The historical
     # paragraphs are kept because they record real measurements of real trees; the pin
     # table is what resolves HERE.
-    # ⛔ RE-DERIVED ONCE MORE at the de-conflict head `548aabe8fe` (this PR's merge of
-    # `origin/main` `f392bb67d5`) — by the same method, and the deltas are NOT one offset
-    # either: `update_knowledge` moved **+55** at BOTH ends (`22932-23107` ->
-    # `22987-23162`, its end still located as the function's own last line), while the
-    # three rows below it moved **+62** (`55910-55912` -> `55972-55974`, `56062-56071` ->
-    # `56124-56133`, `56568` -> `56630`). A single `+55` applied across the block — which
-    # is what the previous attempt on this worktree wrote, producing the impossible range
-    # `56117-56071` — mis-pins the three later rows. `if (_np_dead == [_SUPERSEDED_STATUS]`
-    # STILL occurs twice (`56124`, `56163`) and only the first is terminated by the arm's
-    # own `continue` at `56133`, so that row keeps its terminator locator.
     ("sdk.py", 55972, 55974): (
         "A row that ALREADY holds a non-scalar", "be REFUSED, not raised at."),
     ("sdk.py", 56124, 56133): ("if (_np_dead == [_SUPERSEDED_STATUS]", "continue"),

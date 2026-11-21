@@ -190,15 +190,30 @@ then have nothing to prove. `#13826` is its partial form (writers ask a gate at 
    is safe; it is proof about ONE question, asked of source text.
 
 ⛔ **THE STATED RESIDUALS.** The polarity closes the KEY-SOURCE family — every shape `#13864`,
-`#13910`, `#13915`, `#13920` and `#13936` measured. Three things it does NOT close, plus one note, each named
+`#13910`, `#13915`, `#13920` and `#13936` measured. Four things it does NOT close (1–3 and 5), plus one note, each named
 because a completeness claim narrower than the code is how the next lane re-derives false
 confidence:
 
 1. **A store that reaches the arm through an UNRECOGNISED HELPER CALL.** The reproducible
    witness is `list(map(props.update, [{"embedding": vec}]))` — pinned by
    `test_the_helper_call_residual_is_PINNED_as_a_known_fail_open`, so it cannot change silently.
-   `exec(code, globals())` after a `global` declaration is the same class (the CALLEE is what the
-   gate cannot read), measured as a certifying witness and not separately pinned.
+   An `exec(code)` whose STRING the gate cannot read is the same class, and the spelling that
+   actually lands is a store through the MAPPING OBJECT: `exec('props["embedding"] = _encode(ev)')`
+   — or `exec('props.update({…})')` — CERTIFIES and LANDS on every supported version, because a
+   subscript/method store mutates the dict object whether `props` is read from a fast local or a
+   snapshot. PINNED by `test_the_exec_string_residual_is_PINNED_as_a_known_fail_open`.
+   ⛔ A BARE NAME WRITE FROM `exec` IS **NOT** A LEAK, on ANY supported version — the claim that it
+   "rebinds a fast local on 3.13+" was the inverse of PEP 667 and is corrected here (measured, and
+   from the PEP's own text): on 3.12 `exec('k = …')` lands in the un-flushed `locals()` cache and is
+   discarded by the next refresh (measured here: the writer still reads its own assignment), and on
+   3.13 PEP 667 makes `locals()` an independent snapshot per call "so that attempts to change the
+   values of local variables via `exec()` would be consistently ignored" (§Impact on exec() and
+   eval()). A `global` STATEMENT inside the exec'd string does rebind the module name and lands —
+   but the gate REFUSES it (`gated=False`, measured: the rebound name resolves to no proven
+   binding), so it is not a witness either. Nothing to pin on either spelling.
+   ⛔ `exec(code, globals())` is NOT part of this residual any more: the mention rule refuses it
+   (`globals` is named), measured — an earlier revision of this paragraph still called it a
+   certifying witness, and it was stale.
    The same class covers a local `def` written in the arm and CALLED there
    (`def _bg(): props["embedding"] = …; _bg()`): the body is not this arm's text, the call is a
    callee the gate cannot read, and `_stop_arm_walk` prunes it for that reason. `_set(props, k,
@@ -207,6 +222,12 @@ confidence:
    vec)` ARE refused (the third-argument and alias rules, measured), and
    `functools.partial(props.update, …)` is refused by the dynamic-callee rule. Resolving the
    class needs defence 1's structural seam: `#13826`'s work, not another recogniser row here.
+   ⛔ THE SAME CLASS, ONE DOOR OVER (`#14001`, measured by the cycle-5 review): a namespace that
+   comes from a helper the writer CALLS — `ns = _namespace()` where `_namespace()` returns
+   `globals()` — names nothing in the writer's text, so the mention rule cannot see it and the
+   writer CERTIFIES while storing (`_namespace()`'s own body is a different function's source).
+   DISCLOSED AND UNPINNED on purpose: pinning it needs a module-level preamble in the synthetic
+   writer harness, and the honest statement is that nothing reds if it closes.
 2. **A store in the statements the STOP RUN FALLS THROUGH TO**, after a guard whose own arm is
    clean — `if not gate("object"): props.pop("embedding", None)` followed by
    `props.update({"embedding": vec})` certifies today (measured by the round-5 review; it is
@@ -217,26 +238,94 @@ confidence:
    "embedding": embedding}`) or an unreadable mapping (`props.update(_gated_labels_of(…))`).
    Making it precise needs value flow (which local holds the placeholder on the stop path),
    which is a change of its own — and an inert enforcer that refuses every real writer is the
-   worse error of the two.
+   worse error of the two. PINNED by `test_the_fallthrough_residual_is_PINNED_as_a_known_fail_open`.
 3. **A MAPPING THE ARM BUILDS AND HANDS ON** (`params = {**props, k: vec}; _write(params)`,
    `_write({**props, k: vec} if f else props)`, or a rebuild behind `.copy()`). The store lands
    in the mapping the write channel
    receives, so no `Subscript` target exists and the recogniser abstains. ⛔ A rebuild SITE was
-   written, measured and WITHDRAWN (round-9 review): it must resolve transparent wrappers first,
-   and the positional version certified every wrapped spelling while refusing two honest
-   fixtures — the same "partial rule claims coverage and leaks" failure this issue is about.
+   written, measured and WITHDRAWN (round-9 review): the positional version certified every
+   WRAPPED spelling while refusing honest fixtures — the same "partial rule claims coverage and
+   leaks" failure this issue is about. ⛔ THE WITHDRAWN RULE REFUSED `_write({**props, **extra})`
+   AND WAS RIGHT TO: that shape DOES place the vector whenever the caller's `extra` carries it
+   (measured by the review of `#14050`: with `extra={"embedding": VECTOR}` the vector is handed
+   to `_write`, and `props | extra` does it too), so it is not an honest fixture and the refusal
+   was not the rule's cost — the withdrawal rests on the wrapped-spelling leak alone. ⛔ THE
+   SHIPPED GATE STILL CERTIFIES IT (this channel is not proved), and it is therefore a KNOWN
+   FAIL-OPEN, not a control: it is PINNED with its caller argument as
+   `rebuilt-mapping-extra-unpack` / `-bitor` in `REBUILD_RESIDUAL_ROWS`, and the 13629 fixture
+   that called it an "honest control" is gone (it was neither honest nor an over-refusal). The
+   two spellings
+   the rule was written for — `_write({**props, k: vec})` and `_write(props | {k: vec})` — are
+   PINNED as known fail-opens
+   in `REBUILD_RESIDUAL_ROWS`, so closing them cannot happen silently and no later rule can
+   pass every pin while they stay open.
    Pinned by `test_the_rebuild_residual_is_PINNED_as_a_known_fail_open`; closing it needs a
    mapping-VALUE analysis (which expressions can evaluate to a mapping, in every position), not
    another positional arm.
-4. **Dynamic-namespace writes — CLOSED for every shape measured, stated because the rule has a
-   scope.** `globals()[…] = …` / `locals()[…] = …` / `vars()[…] = …` (any index, constant or
-   computed) and their mutator spellings (`globals().update({…})`) poison EVERY name the scope
+4. **Dynamic-namespace writes — CLOSED for every spelling that NAMES one, which is what the
+   pinned rows measure; what is left is residual 5.** `globals()[…] = …` / `locals()[…] = …` /
+   `vars()[…] = …` (any index, constant or computed) and their mutator spellings
+   (`globals().update({…})`) make EVERY name the scope assigns unproven, and every name it
    declares `global`/`nonlocal` — **in the writer's own statements AND one level down**, which is
    where the round-10 review measured the hole (`class _C: globals()["k"] = "embedding"` runs at
-   definition time and was unreachable in the nested-scope walk). A name with no `global`/
-   `nonlocal` declaration is either unproven (absent from the binding map ⇒ refuse) or out of
-   reach (a `locals()` write does not rebind a fast local — measured: the writer stores nothing).
-   Pinned by the `globals-*` rows in `DEFEATED_RESOLVER_ROWS`.
+   definition time and was unreachable in the nested-scope walk). **Every assignment spelling is
+   the same write** (`#14001`, measured by the review of `#14050` at its merged head): `Assign`,
+   `AnnAssign` (`globals()["k"]: str = "embedding"`) and `AugAssign`, with the dynamic subscript
+   nested inside a `Tuple`/`List` target — an `AnnAssign` target reached the generic assignment
+   arm, where `_poison` understands names only, and the writer certified while storing. **And the
+   RECEIVER is not modelled at all** (`#14001`, measured by the reviews of this branch): every
+   attempt to model which expressions CARRY the namespace lost one spelling later —
+   `ns = globals(); ns["k"] = …` (the arm required a CALL), then `ns, *_r = globals(), 1, 2`, a
+   conditional value `globals() if f else {}`, `globals() or {}`, `[globals()][0]`,
+   `box = (ns,); box[0]["k"] = …`, `for ns in (globals(),)`, `match globals(): case ns:`, a
+   parameter default `ns=globals()`, and the FUNCTION alias `g = globals; g()["k"] = …`. So the
+   tool stops asking *which value is the namespace* and asks the only question it can answer:
+   **does the writer mention one at all** (`_is_dynamic_namespace_reference`, a
+   `globals`/`locals`/`vars` NAME anywhere, including the `builtins.globals` attribute form). If
+   it does, every name the scope declares `global`/`nonlocal` is unproven and the stop arm
+   refuses — a writer that merely READS a dynamic namespace is refused too, which is the
+   over-refusal the doctrine accepts and which costs nothing on the real population (pinned: no
+   declared entity writer mentions one). ⛔ AND EVERY NAME IS UNPROVEN, not only the declared ones:
+   a class or module body's `locals()` IS the real namespace — PEP 667 left that alone in every
+   version, `locals()` "will act the same as it does now for class and modules scopes" — so
+   `class _C: locals()["k"] = "embedding"` writes a REAL name that no `global`/`nonlocal`
+   declaration covers, and refusing only the declared names would have missed it. ⛔ The PEP 667
+   FAST-LOCAL case is a different, still-open residual: 3.13+ makes `frame.f_locals` a
+   write-through proxy, while `locals()` in an optimized scope returns an instantaneous SNAPSHOT,
+   so `locals()["k"] = …` inside a FUNCTION reaches nothing on 3.13 just as it does on 3.12 — that
+   spelling is residual 5's `frame-introspection` row, pinned as a known fail-open, and this rule
+   covers it only by over-refusal. Measured cost: zero (of 15,090 functions in this
+   repo, 8 mention a namespace and all 8 already refused).
+   The legal spellings of the mention are pinned as the `globals-*` / `namespace-*` rows in
+   `DEFEATED_RESOLVER_ROWS`: a `Name`, an `Attribute`, an import `alias`, a string-keyed
+   `__dict__`/`__builtins__` subscript, in any binding form, any scope depth.
+   ⛔ THE BOUNDARY, stated as a scope and not a completeness claim. Two entries; each names its pin,
+   or says plainly that it has none:
+     * residual 1 — an `exec(code)` whose STRING the gate cannot read. PINNED, as
+       `test_the_exec_string_residual_is_PINNED_as_a_known_fail_open` (an exec'd subscript/method
+       store on `props` certifies and LANDS, measured). The bare name-write spelling is not a leak
+       on any supported version, so it has nothing to pin — see residual 1 above.
+     * residual 5 — a name the scanner cannot READ. COMPOSED at runtime
+       (`builtins.__dict__["glob"+"als"]`) and reached by frame introspection
+       (`sys._getframe(0).f_globals`) are both PINNED, as the two rows of
+       `DYNAMIC_NAMESPACE_NAME_COMPOSITION` (`composed-string-key`, `frame-introspection`); a
+       helper that RETURNS a namespace (`ns = _namespace()`) is DISCLOSED AND UNPINNED — no test
+       reds if it closes, and a writer shaped that way still certifies (measured).
+   Everything OUTSIDE these rows is not claimed to refuse.
+
+5. **A DYNAMIC NAMESPACE THE WRITER NEVER NAMES.** Two spellings, measured by the cycle-4/cycle-5
+   reviews:
+   * a name COMPOSED at runtime (`builtins.__dict__["glob" + "als"]()`) or reached by FRAME
+     introspection (`sys._getframe(0).f_globals`) — PINNED, as the two rows of
+     `DYNAMIC_NAMESPACE_NAME_COMPOSITION`
+     (`test_the_composed_name_residual_is_PINNED_as_a_known_fail_open`);
+   * a helper that RETURNS one (`ns = _namespace()`, with `_namespace()` at module scope) —
+     DISCLOSED AND UNPINNED: the writer's own text names nothing, so the mention rule cannot see
+     it and the writer certifies while storing (measured). Pinning it needs a module-level
+     preamble in the synthetic writer harness; until then nothing reds if it closes, and this
+     line is the record that it is open.
+   Chasing string composition is the unbounded recogniser this issue exists to stop; the structural
+   seam (`#13826`) is the real answer for the helper case.
 
 THE REMOVAL ITSELF
 ==================
@@ -4565,24 +4654,79 @@ _TRANSPARENT_SOURCE_CALLS = frozenset({
 })
 
 
+_DYNAMIC_NAMESPACE_NAMES = ("globals", "locals", "vars")
+
+
+def _is_dynamic_namespace_reference(node) -> bool:
+    """Does this node MENTION a dynamic namespace at all — `globals`, `builtins.globals`, `g()`?
+
+    ⛔ THE ONLY QUESTION THIS TOOL IS ENTITLED TO ASK HERE (`#14001`, measured by the reviews of
+    this branch). Every attempt to model *which expressions carry the namespace* was defeated one
+    spelling later, each time the same way: `ns = globals(); ns["k"] = …` was missed because the
+    arm required a CALL; then `ns, *_r = globals(), 1, 2`, `ns = globals() if f else {}`, `ns =
+    globals() or {}`, `ns = [globals()][0]`, `ns = globals(); box = (ns,); box[0]["k"] = …`,
+    `for ns in (globals(),)`, `match globals(): case ns:`, a parameter DEFAULT `ns=globals()`, and
+    the FUNCTION alias `g = globals; g()["k"] = …` each defeated the next cut. That is the issue's
+    own root: a recogniser of a Turing-complete language, extended one row at a time.
+
+    So the question is not "can I prove this value is the namespace" but "does this writer touch a
+    dynamic namespace at all". If it does, EVERY name the scope declares `global`/`nonlocal` is
+    unproven — the write could reach any of them — and the stop arm refuses. No spelling can
+    evade it, because the mention is what is checked, not the path from the mention to the write.
+    A writer that only READS `globals()` is refused too: that is the over-refusal the doctrine
+    accepts, and it costs nothing on the real population (no entity writer mentions one — pinned).
+
+    ⛔ THIS IS NOT A TOTALITY CLAIM. A namespace obtained WITHOUT the writer naming it — a helper
+    that returns one, a name composed at runtime, frame introspection — is outside it; see
+    residual 5 in the module docstring, which states which of those are pinned and which are not.
+    """
+    import ast
+
+    if isinstance(node, ast.Name) and node.id in _DYNAMIC_NAMESPACE_NAMES:
+        return True
+    # `builtins.globals()` / `import builtins as b; b.globals()` — the attribute spelling.
+    if isinstance(node, ast.Attribute) and node.attr in _DYNAMIC_NAMESPACE_NAMES:
+        return True
+    # `from builtins import globals as _g` — the IMPORT spelling names it without a Name node
+    # (`#14001`, measured by the cycle-4 review, which found `ast.alias` was never inspected).
+    if isinstance(node, ast.Import | ast.ImportFrom):
+        return any((alias.name.rsplit(".", 1)[-1] in _DYNAMIC_NAMESPACE_NAMES
+                    or alias.asname in _DYNAMIC_NAMESPACE_NAMES) for alias in node.names)
+    # `builtins.__dict__["globals"]()` / `__builtins__["globals"]()` — the string-key spelling,
+    # the same mention one indirection over (measured by the same review).
+    return (isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant)
+            and node.slice.value in _DYNAMIC_NAMESPACE_NAMES)
+
+
+def _is_namespace_source(expr) -> bool:
+    """Is this expression the module/scope namespace itself — `globals()`, `locals()`, `vars()`?"""
+    import ast
+
+    return isinstance(expr, ast.Call) and _callee_name(expr) in _DYNAMIC_NAMESPACE_NAMES
+
+
 def _dynamic_namespace_mutation(call) -> bool:
     """Is this CALL a write into a dynamic namespace — `globals().update({…})`?
 
     ⛔ THE MUTATOR SPELLING IS THE SUBSCRIPT SPELLING ONE VERB OVER (`#14001`, measured by the
     round-8 review): `globals().update({"k": "embedding"})` rebinds a module name, and an arm
     that only recognised `globals()[k] = …` certified it. The receiver must be a CALL to the
-    namespace function, so `props.update(…)` is untouched.
+    namespace function here; a NAME that holds the namespace is covered by the MENTION rule in
+    `_string_bindings`, not by this predicate, so `props.update(…)` stays untouched.
     """
     import ast
 
-    receiver = call.func.value if isinstance(call.func, ast.Attribute) else None
-    if isinstance(receiver, ast.Call) and _callee_name(receiver) in ("globals", "locals",
-                                                                   "vars"):
+    func = call.func
+    receiver = func.value if isinstance(func, ast.Attribute) else None
+    if _is_namespace_source(receiver):
         return True
-    if isinstance(call.func, ast.Name) and call.func.id in ("setattr",) and call.args:
-        first = call.args[0]
-        return (isinstance(first, ast.Call)
-                and _callee_name(first) in ("globals", "locals", "vars"))
+    # `dict.__setitem__(globals(), …)` / `dict.update(globals(), …)` — the unbound method form.
+    if (isinstance(func, ast.Attribute) and getattr(func.value, "id", None) == "dict"
+            and func.attr in ("__setitem__", "update") and call.args
+            and _is_namespace_source(call.args[0])):
+        return True
+    if isinstance(func, ast.Name) and func.id in ("setattr",) and call.args:
+        return _is_namespace_source(call.args[0])
     return False
 
 
@@ -4603,8 +4747,44 @@ def _dynamic_namespace_write(target) -> bool:
     if not isinstance(target, ast.Subscript):
         return False
     value = target.value
-    return (isinstance(value, ast.Call)
-            and _callee_name(value) in ("globals", "locals", "vars"))
+    return _is_namespace_source(value)
+
+
+def _dynamic_namespace_target(target) -> bool:
+    """Does this assignment TARGET write into a dynamic namespace, however deeply nested?
+
+    ⛔ `globals()["k"], _z = …` IS THE SAME WRITE INSIDE A TUPLE TARGET (`#14001`, measured by
+    the review of `#14050` at its merged head): the subscript is one element of a `Tuple`/
+    `List` target, which the direct-subscript test never looked inside.
+    """
+    import ast
+
+    if _dynamic_namespace_write(target):
+        return True
+    if isinstance(target, ast.Starred):
+        return _dynamic_namespace_target(target.value)
+    if isinstance(target, ast.Tuple | ast.List):
+        return any(_dynamic_namespace_target(element) for element in target.elts)
+    return False
+
+
+def _assigns_into_dynamic_namespace(node) -> bool:
+    """Does this assignment rebind a dynamic-namespace name — `Assign`, `AnnAssign` or `AugAssign`?
+
+    ⛔ THE SPELLINGS ARE ONE WRITE (`#14001`, measured by the review of `#14050` at its merged
+    head): `globals()["gk"]: str = "embedding"` is an `ast.AnnAssign`, which fell to the generic
+    `Assign | AnnAssign` arm where `_poison` understands `Name`/`Starred`/`Tuple`/`List`
+    targets only — so nothing was poisoned and the writer certified while storing.
+    """
+    import ast
+
+    if isinstance(node, ast.Assign):
+        targets = node.targets
+    elif isinstance(node, ast.AnnAssign | ast.AugAssign):
+        targets = [node.target]
+    else:
+        return False
+    return any(_dynamic_namespace_target(target) for target in targets)
 
 
 def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
@@ -4640,7 +4820,10 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
              if isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef)
              else list(_own_walk(scope)))
     # the unfiltered view, for the BINDING question only (nested scopes included)
-    whole = ast.walk(scope)
+    # ⛔ A LIST, NOT `ast.walk`'s GENERATOR: the alias pass below re-iterates it (and its own
+    # fixpoint re-scans), so a generator would be exhausted before the nested walk ran —
+    # measured while writing this: the class-body rows silently certified.
+    whole = list(ast.walk(scope))
     # ⛔ EVERY OTHER BINDING FORM POISONS THE NAME — see the docstring. A name that is
     # rebound anywhere in the writer is `None` (unproven), whatever a plain assign also said.
     poisoned: set[str] = set()
@@ -4649,6 +4832,22 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
         name for statement in (getattr(scope, "body", ()) or ())
         for leaf in ast.walk(statement)
         if isinstance(leaf, ast.Nonlocal | ast.Global) for name in leaf.names}
+
+    # ⛔ A WRITER THAT MENTIONS A DYNAMIC NAMESPACE AT ALL CANNOT PROVE ANY DECLARED NAME
+    # (`#14001`, measured by the reviews of this branch — see `_is_dynamic_namespace_reference`):
+    # `ns = globals(); ns["gk"] = "embedding"`, a chain, a tuple target, a conditional value, a
+    # `for`/`match` binding, a parameter default and the FUNCTION alias `g = globals; g()[…]` each
+    # defeated a receiver-shape model one spelling later. The mention is the evidence; every name
+    # the scope declares `global`/`nonlocal` could be what the write rebinds, so all are unproven.
+    # ⛔ THE MENTION SETTLES THE SCOPE BY ITSELF — no blanket scope-declaration poison belongs
+    # here. The early `{name: None …}` return below covers EVERY name, so one at this point is
+    # dead: nothing reads `poisoned` once `_namespace_mentioned` is true, and a mutant deleting it
+    # reds no row (measured — this is the same inert-arm shape the `_poison` arm was deleted for, so
+    # it is deleted here too rather than annotated as a mechanism it is not). ⛔ IF THAT RETURN IS
+    # EVER NARROWED, the declarations must be re-poisoned HERE: an exec'd or `globals()`-routed write
+    # can only reach a name the scope declares `global`/`nonlocal`, which is why the four narrow arms
+    # below still carry their own declaration poison.
+    _namespace_mentioned = any(_is_dynamic_namespace_reference(node) for node in whole)
 
     # ⛔ AND A PARAMETER IS A BINDING THAT HAS **ALREADY** HAPPENED (`#14001`, measured by the
     # round-2 review): `def w(props, ev, key="x"): … props[key] = vec … key = "y"` resolved
@@ -4673,6 +4872,18 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
         elif isinstance(target, _ast.Tuple | _ast.List):
             for element in target.elts:
                 _poison(element)
+        # ☠️ NO `_dynamic_namespace_write` ARM HERE, deliberately (`#14001`, measured by the
+        # rebase review of this branch): it looks like the natural home — "teach the poison
+        # function once and every binding form is closed" — but it CANNOT change a verdict.
+        # The MENTION rule above fires first and `_namespace_mentioned` short-circuits to
+        # `{name: None for name in assigned}` before `poisoned` is ever read, and every node
+        # this arm could match (`X()[…]` with `X` = `globals`/`locals`/`vars`) necessarily puts
+        # the `ast.Name`/`ast.Attribute` that the mention rule matches in the same tree. A
+        # mutant deleting the arm reds no row. It also cannot be written as `|=` here at all:
+        # the augmented assignment would rebind `poisoned` as a LOCAL of this nested function
+        # (`UnboundLocalError` on the first `poisoned.add`), and `.update(…)` re-adds the
+        # untyped-receiver residue row #14058 removed. The LIVE spelling is the mention rule;
+        # the narrow per-spelling arms below are kept only as that rule's fallback.
 
     for sub in nodes:
         if isinstance(sub, ast.AugAssign | ast.For | ast.AsyncFor | ast.comprehension):
@@ -4697,15 +4908,23 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
                 poisoned.add(sub.rest)
         elif isinstance(sub, ast.MatchMapping) and getattr(sub, "rest", None):
             poisoned.add(sub.rest)
-        elif isinstance(sub, ast.Assign) and any(
-                isinstance(target, ast.Subscript) and _dynamic_namespace_write(target)
-                for target in sub.targets):
+        elif _assigns_into_dynamic_namespace(sub):
             # ⛔ `globals()[<name>] = …` REBINDS A NAME THIS WALK BELIEVES IT PROVED (`#14001`,
             # measured by the round-5 review): the store's VALUE is a constant, so the
             # Subscript arm above is not even a key-bearing site, and the poisoned-name set
             # never heard about it. The dynamic name is not statically readable, so the write
             # poisons EVERY name the scope declares `global` or `nonlocal` — the only names such
-            # a write can reach from here.
+            # a write can reach from here. `Assign`, `AnnAssign` and `AugAssign`, with the
+            # subscript nested in a tuple/list target, are ONE write (review of `#14050`).
+            #
+            # ⚠️ THE MENTION RULE ABOVE REFUSES FIRST — this arm is its narrow FALLBACK, not the
+            # mechanism (`#14001`, measured by the rebase review of this branch): every
+            # `X()[…]` write requires `X` to be the `ast.Name`/`ast.Attribute` the mention rule
+            # matches, so `_namespace_mentioned` is already `True` wherever this could fire, and
+            # the early `{name: None …}` return settles the scope. Deleting this arm (and the
+            # nested one below) reds no row; it is kept because it states the write in
+            # vocabulary that does not depend on that inference, and it is what the
+            # `globals-*` rows name.
             #
             # ⛔ `|=`, NOT `poisoned.update(…)` (`#14001`, measured 2026-11-20): both are the
             # same `set` operation, but the `surface-guard` job's privatisation sweep
@@ -4745,10 +4964,10 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
         # definition time, and its `Subscript` target poisoned nothing because the generic
         # `Assign` arm below caught it first and `_poison` only understands Name/Starred/Tuple/
         # List targets — the branch written for it was unreachable.
-        if isinstance(sub, ast.Assign) and any(
-                isinstance(target, ast.Subscript) and _dynamic_namespace_write(target)
-                for target in sub.targets):
-            poisoned |= _scope_declarations    # `|=`: see the residue note in the own-scope arm
+        if _assigns_into_dynamic_namespace(sub):
+            # the narrow FALLBACK to the mention rule — see the own-scope arm's note; `|=`
+            # because `.update(…)` re-adds the untyped-receiver residue row (#14058).
+            poisoned |= _scope_declarations
             continue
         if isinstance(sub, ast.Assign | ast.AnnAssign):
             targets = sub.targets if isinstance(sub, ast.Assign) else [sub.target]
@@ -4835,6 +5054,21 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
     # EVERY value bound to a name is UNIONED, and a conditional rebinding is therefore answered
     # by all of its arms — an over-approximation, which on this arm can only refuse more.
     bindings: dict[str, frozenset[str] | None] = {}
+    if _namespace_mentioned:
+        # ⛔ EVERY NAME, NOT ONLY THE `global`/`nonlocal` DECLARED ONES (`#14001`): a class or
+        # module body's `locals()` IS the real namespace in EVERY version (PEP 667 keeps that:
+        # `locals()` "will act the same as it does now for class and modules scopes"), so
+        # `class _C: locals()["k"] = "embedding"` binds a REAL name that no `global`/`nonlocal`
+        # declaration covers. ⛔ NOT because of PEP 667's fast-local write-through — that is
+        # `frame.f_locals`, and `locals()` in an optimized scope returns an instantaneous
+        # SNAPSHOT, so `locals()["k"] = …` inside a FUNCTION reaches nothing on 3.13 either; that
+        # spelling is residual 5's `frame-introspection` row, pinned as a known fail-open.
+        # Measured cost on the real population: zero (only 8 of 15,090 functions in this
+        # repo mention a dynamic namespace at all, and every one of them already refuses).
+        # ⛔ THIS RETURN IS THE MECHANISM, and it is what every `namespace-alias-*` row attributes
+        # to. Narrowing it re-opens the blanket case and must re-add the scope-declaration poison
+        # at the mention above; a mutant that deletes THAT poison reds no row today (measured).
+        return {name: None for name in assigned}
     for _round in range(8):
         changed = False
         for name, values in assigned.items():
@@ -4974,7 +5208,8 @@ def _pairs_are_proven(pairs) -> bool:
     ``mapping_pairs(...) is None`` does not fire — and the recogniser then DROPS the unreadable
     operand and answers the remainder. `{**dict(zip(_keys(), [1]))}` therefore answered
     ``frozenset()`` ("proven clean") while it iterates `_keys()`, and the identical store WITHOUT
-    the `{**}` wrapper was refused. Twelve wrapper spellings leaked through it.
+    the `{**}` wrapper was refused. The wrapper spelling leaked through it, and the four
+    `wrapper-*` rows in `DEFEATED_RESOLVER_ROWS` are the pinned witnesses.
     """
     return pairs is not None and all(keys is not None for keys, _value in pairs)
 

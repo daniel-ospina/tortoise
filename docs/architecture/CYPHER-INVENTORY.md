@@ -24,7 +24,7 @@ this document classifies **statements**.
 
 | what | count |
 |---|---|
-| product surface (`tortoise/**/*.py`, test modules excluded) | **302** files scanned |
+| product surface (`tortoise/**/*.py`, test modules excluded) | **303** files scanned |
 | files carrying at least one statement site | **100** |
 | **statement sites (this census)** | **1318** |
 | of those, shape **`plain`** — no traversal, no adjacency, no fulltext, no EP | **868** (586 read, 282 write) |
@@ -92,7 +92,7 @@ two reasons given below the block, so the block does not pretend it does:
 
 ```text
 population: every tracked `tortoise/**/*.py` except `tortoise/test_*.py`
-            (the 302 files the tool reports as `py_files`), scanned as WHOLE TEXT
+            (the 303 files the tool reports as `py_files`), scanned as WHOLE TEXT
 
 door predicate   : re.compile(r"\.(?:ro_)?(?:query|execute)\s*\()")
 verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
@@ -109,16 +109,16 @@ verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
-The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (302 files; the tool
+The population is every TRACKED `tortoise/**/*.py` except `tortoise/test_*.py` (303 files; the tool
 prints it as `py_files`), scanned as WHOLE TEXT — so `\s` spans a newline, which a line-based `rg`
 cannot do. Measured on this tree:
 
-* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 302 files>` → **1,634** across **108** files: exactly the
+* `rg -o '\.(ro_)?(query|execute)\s*\(' <those 303 files>` → **1,634** across **108** files: exactly the
 tool's number. A bare `rg … tortoise/` gives 1,638 / 109, the 6 extra occurrences living in
 `tortoise/test_*.py`; `--glob '!tortoise/test_*.py'` reproduces 1,634 / 108 on this tree, because
 every excluded test module here is TOP LEVEL, so the glob's scope and `TEST_MODULE`'s scope coincide
 — they would diverge if a nested `tortoise/**/test_*.py` ever appeared.
-* `rg -io '\b(MATCH|MERGE)\s*\(' <those 302 files>` → **2,352** across **146** files, while the tool
+* `rg -io '\b(MATCH|MERGE)\s*\(' <those 303 files>` → **2,352** across **146** files, while the tool
 reports 2,365 / 147. The 13-occurrence, one-file gap is the WHOLE-TEXT class — and ⚠️ it is **not**
 string concatenation, which this paragraph claimed until now: all 13 CROSS-LINE matches (a line that
 ends on the verb whose next line opens the parenthesis) are a comment, docstring or wrapped Cypher
@@ -131,7 +131,7 @@ not inferred — and ⛔ **BY COMMAND, never by
 citing `file:line` in this paragraph**: a line number written here rots on the next main-move (this
 sentence carried one that a merge shifted, and a reader sent to it finds prose with no `MATCH (` in
 it). Re-enumerate at your head by keeping only whole-text matches whose span contains a newline. That
-predicate over the same 302 files finds exactly 13 — the verb-at-end-of-line scan alone finds **182**,
+predicate over the same 303 files finds exactly 13 — the verb-at-end-of-line scan alone finds **182**,
 and the number is not a second version of the 13: **13** of those lines are the cross-line matches just
 enumerated, and the other **169** are a COMMENT or docstring line that simply ENDS on the word (“any
 failure on the read/parse/merge”, “first match”, “the old name-keyed MERGE”, `projection/__init__.py`'s
@@ -143,7 +143,7 @@ concatenation (`"… MATCH " "("` occurs nowhere in this tree): the break is pro
 example INSIDE a docstring, which is why the tool's verb total is an upper bound.
 (A bare case-sensitive `rg` gives 2,083, and `-i` without the exclusion 2,424 — ⛔ both over
 `tortoise/` with **no type filter**, which is not the population this row is about and is why the
-number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 302
+number beside it was un-reproducible before `#13098`'s review asked for the predicate. Over the 303
 `.py` files the same two predicates read **2,080** and **2,352**; with `-t py` and the test-module
 exclusion dropped they read **2,082** and **2,355**. The 69-occurrence 2,355→2,424 gap is entirely
 `*.ts` / `*.mjs` / `*.sh` — enumerated, it is `tortoise/pi-hooks/tortoise-volunteer.test.ts` 49,
@@ -417,6 +417,8 @@ halves:
 2. **Re-run `--check`** and commit the regenerated doc in the same PR that added or removed the
    statement. A product PR that adds a query owns the one-line pin update; the alternative (a census
    that only counts its own diff) is a snapshot wearing a census's name.
+
+**The cut this PR (#14011, `feat/14011-usage-signal`) makes — a file that carries NO statement, which is why exactly one number moves.** `tortoise/usage_signal.py` (the window-local per-node usage counter that `SEARCH-ARCHITECTURE.md` §7 requires as its own artifact) is product surface and the census SCANS it, so `files_scanned` 302→**303** — the same class of move `state_intent.py` made in the #13557 row below (a scanned file carrying nothing). `files` stays **100** (it counts files that CARRY a site, and this one carries none: the module issues no Cypher and imports no store client, which its own test pins), `sites` **1318**, `unresolved` **103**, `non_cypher_door_calls` **262**, `ast_door_calls` **1580**, `partial` **318** and every shape pin are unchanged — no Cypher statement was added, removed, re-classified or re-shaped, so the migration metric §0 is about does not move. §1's `rg` reconciliation is also unchanged (door **1,634 / 108** whole-text, bare **1,638 / 109**, verb **2,365 / 147**): the new file carries neither a `MATCH`/`MERGE` nor a door CALL. Appendix A gains no row for this file either — it lists SITES, and this file contributes none — **but its existing rows are re-derived in this same diff**: `tortoise/sdk.py`'s insertions (`#14065`, merged WITHOUT a census re-cut, so `main`'s rows carry the pre-insertion `file:line`) shift the line number of every site after them, and this PR re-cuts them at this head (363 `tortoise/sdk.py` rows move on each side; e.g. `sdk.py:17948` → `18003`). ⚠️ Five further rows move for a cause that is NOT `sdk.py`'s insertions: `main` grew the files they cite — `tortoise/cache_evictor.py` ×2 (`504`→`669`, `514`→`689`), `tortoise/fallback_snapshot.py` ×2, `tortoise/monitoring.py` ×1 — so this PR re-cuts those too, and none of those three files is touched by this PR. ⛔ Read the two halves as one fact: **no ROW is added or removed by this file, and the ROW SET is not stable while `sdk.py` grows** — which is why `--markdown` output, not arithmetic on the old table, is what `tests/test_13098_cypher_inventory.py` grades.
 
 **The cut this PR (#14002, `feat/14002-record-only-journal`) makes — one non-Cypher door call AND one unresolved site, both from the read-side classifier — re-cut by RUNNING the tool on the tree merged with `origin/main` `a296e6741e`, not by arithmetic on the markers.** `record_projection._journal_is_export` asks the RECORD whether it owns a graph's ordinal with `cursor.execute(CURSOR_PRESENCE_SQL, …)` — a statement named by a module constant, exactly the shape the census folds to `non_cypher_door_calls` — and its savepoint bookkeeping (the transaction-hygiene fix for review cycle 4, P2) issues `cursor.execute(statement)` from a helper whose SQL is a PARAMETER, which lands in the documented **over-report** arm (`unresolved`). So `sites` 1317→**1318**, `unresolved` 102→**103** with `shape_unresolved` and `shape_unresolved_unresolved` (`unresolved` was already 102 at this branch's previous head — the review cycle that added the presence read did not re-cut it, which is the drift `--check` reported on the `differential` job: `doc=1578 tool=1579` / `doc=261 tool=262`), `non_cypher_door_calls` 261→**262** (`record_projection.py` already carries sites, so `files` **100** and `files_scanned` **302** do not move), and `ast_door_calls` 1578→**1580** (= 1318 + 262). `plain` **868** / `candidates` **586** / `partial` **318** and every other shape are unchanged — no Cypher statement was added, removed, re-classified or re-shaped, which is why the migration metric §0 is about does not move. §1's `rg` reconciliation moves with the same two lines: door **1,634 / 108** whole-text, bare **1,638 / 109**, verb **2,365 / 147** unchanged (neither line carries a `MATCH`/`MERGE`). Appendix A is regenerated with `--markdown` at this tree.
 
@@ -925,43 +927,31 @@ LAST**, deliberately: a base-drift pin must still red the job (the doc's numbers
 it must not be able to mask whether the harness can fail at all — which is exactly what it did before
 the order was fixed (`#13098` review F8).
 
-⚠️ **`files_scanned` is the ONE count this PR's de-conflict move changed, and it is `main`'s:**
-the merged tree scans **303** files against this branch's pre-merge head's **302**, and the pins
-below carry the MEASURED pair rather than either side's. Every other pinned count is unmoved
-(`sites` **1318**, `files` **100**, `unresolved` **103**, `shape_*` as pinned), which is what makes
-the identification checkable in both directions: `python tools/cypher_inventory.py` at `origin/main`
-`ad79129cb5` reads `files scanned : 303 / sites 1318 / door calls 262` — the same three figures as
-this tree — so the file that joined the scan came in with the merge and carried no statement site,
-and no row of this PR's diff added one. Appendix A below is the tool's own output at this head
-(`--markdown`), regenerated rather than edited — its churn is whatever
-`git diff --numstat -- docs/architecture/CYPHER-INVENTORY.md` prints, and every one of those rows
-is the `file:line`-versus-SCALAR gap this section names, measured once more.
-
-<!-- cypher-inventory:sites = 1318 -->
+<!-- cypher-inventory:ast_door_calls = 1580 -->
+<!-- cypher-inventory:candidates = 586 -->
 <!-- cypher-inventory:files = 100 -->
 <!-- cypher-inventory:files_scanned = 303 -->
-<!-- cypher-inventory:unresolved = 103 -->
-<!-- cypher-inventory:candidates = 586 -->
+<!-- cypher-inventory:non_cypher_door_calls = 262 -->
+<!-- cypher-inventory:partial = 318 -->
 <!-- cypher-inventory:shape_adjacency = 293 -->
-<!-- cypher-inventory:shape_ddl = 17 -->
-<!-- cypher-inventory:shape_ep = 32 -->
-<!-- cypher-inventory:shape_fulltext = 2 -->
-<!-- cypher-inventory:shape_plain = 868 -->
-<!-- cypher-inventory:shape_traversal = 3 -->
-<!-- cypher-inventory:shape_unresolved = 103 -->
-<!-- cypher-inventory:shape_plain_read = 586 -->
-<!-- cypher-inventory:shape_plain_write = 282 -->
 <!-- cypher-inventory:shape_adjacency_read = 192 -->
 <!-- cypher-inventory:shape_adjacency_write = 101 -->
+<!-- cypher-inventory:shape_ddl = 17 -->
+<!-- cypher-inventory:shape_ddl_ddl = 17 -->
+<!-- cypher-inventory:shape_ep = 32 -->
 <!-- cypher-inventory:shape_ep_read = 21 -->
 <!-- cypher-inventory:shape_ep_write = 11 -->
-<!-- cypher-inventory:shape_ddl_ddl = 17 -->
-<!-- cypher-inventory:shape_traversal_read = 3 -->
+<!-- cypher-inventory:shape_fulltext = 2 -->
 <!-- cypher-inventory:shape_fulltext_read = 2 -->
+<!-- cypher-inventory:shape_plain = 868 -->
+<!-- cypher-inventory:shape_plain_read = 586 -->
+<!-- cypher-inventory:shape_plain_write = 282 -->
+<!-- cypher-inventory:shape_traversal = 3 -->
+<!-- cypher-inventory:shape_traversal_read = 3 -->
+<!-- cypher-inventory:shape_unresolved = 103 -->
 <!-- cypher-inventory:shape_unresolved_unresolved = 103 -->
-<!-- cypher-inventory:non_cypher_door_calls = 262 -->
-<!-- cypher-inventory:ast_door_calls = 1580 -->
-<!-- cypher-inventory:partial = 318 -->
+<!-- cypher-inventory:sites = 1318 -->
+<!-- cypher-inventory:unresolved = 103 -->
 
 ---
 
@@ -969,17 +959,17 @@ is the `file:line`-versus-SCALAR gap this section names, measured once more.
 
 | file:line | fn | shape | role | verdict | statement |
 |---|---|---|---|---|---|
-| `tortoise/__main__.py:769` | `_cmd_reconcile` | plain | read | candidate:SQL-shaped | `UNWIND $ids AS eid MATCH (e:Event {eventId:eid}) RETURN e.eventId` |
-| `tortoise/__main__.py:2023` | `_cmd_init` | plain | read | candidate:SQL-shaped | `RETURN 1` |
-| `tortoise/__main__.py:2047` | `_cmd_init` | plain | read | candidate:SQL-shaped | `RETURN 1` |
-| `tortoise/__main__.py:13318` | `_cmd_verify` | plain | read | candidate:SQL-shaped | `MATCH (p:Point {id: 'test-verify'}) RETURN p` |
-| `tortoise/__main__.py:13326` | `_cmd_verify` | plain | read | candidate:SQL-shaped | `MATCH (p:Point {id: 'test-verify'}) RETURN p.content` |
-| `tortoise/__main__.py:13331` | `_cmd_verify` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (p:Point {id: 'test-verify'}) DELETE p` |
-| `tortoise/__main__.py:13964` | `_cmd_backfill` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (p:Point) WHERE p.status IS NULL SET p.status = 'live' RETURN …` |
-| `tortoise/__main__.py:13966` | `_cmd_backfill` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (p:Point) WHERE p.createdAt IS NULL SET p.createdAt = $now RET…` |
-| `tortoise/__main__.py:15817` | `_cmd_doctor` | plain | read | candidate:SQL-shaped | `RETURN 1` |
-| `tortoise/__main__.py:17424` | `_cmd_key_create` | plain | read | candidate:SQL-shaped | `MATCH (t:Team) RETURN t.id, t.name` |
-| `tortoise/__main__.py:17453` | `_cmd_key_create` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (:TeamMeta {name: $name, created: $now})` |
+| `tortoise/__main__.py:777` | `_cmd_reconcile` | plain | read | candidate:SQL-shaped | `UNWIND $ids AS eid MATCH (e:Event {eventId:eid}) RETURN e.eventId` |
+| `tortoise/__main__.py:2031` | `_cmd_init` | plain | read | candidate:SQL-shaped | `RETURN 1` |
+| `tortoise/__main__.py:2055` | `_cmd_init` | plain | read | candidate:SQL-shaped | `RETURN 1` |
+| `tortoise/__main__.py:13326` | `_cmd_verify` | plain | read | candidate:SQL-shaped | `MATCH (p:Point {id: 'test-verify'}) RETURN p` |
+| `tortoise/__main__.py:13334` | `_cmd_verify` | plain | read | candidate:SQL-shaped | `MATCH (p:Point {id: 'test-verify'}) RETURN p.content` |
+| `tortoise/__main__.py:13339` | `_cmd_verify` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (p:Point {id: 'test-verify'}) DELETE p` |
+| `tortoise/__main__.py:13972` | `_cmd_backfill` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (p:Point) WHERE p.status IS NULL SET p.status = 'live' RETURN …` |
+| `tortoise/__main__.py:13974` | `_cmd_backfill` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (p:Point) WHERE p.createdAt IS NULL SET p.createdAt = $now RET…` |
+| `tortoise/__main__.py:15825` | `_cmd_doctor` | plain | read | candidate:SQL-shaped | `RETURN 1` |
+| `tortoise/__main__.py:17432` | `_cmd_key_create` | plain | read | candidate:SQL-shaped | `MATCH (t:Team) RETURN t.id, t.name` |
+| `tortoise/__main__.py:17461` | `_cmd_key_create` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `CREATE (:TeamMeta {name: $name, created: $now})` |
 | `tortoise/acl_graph_users.py:455` | `_registry_store_credential` | plain | write | stays:graph-maintenance (candidate when #13083 makes the shape record_only) | `MATCH (g:Graph {id:$gid, org_id:$tid}) SET g.acl_user=$u, g.acl_pass…` |
 | `tortoise/acl_graph_users.py:477` | `_stored_acl_password` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {id:$gid, org_id:$tid}) RETURN g.acl_pass` |
 | `tortoise/acl_graph_users.py:705` | `credential_for_graph` | plain | read | candidate:SQL-shaped | `MATCH (g:Graph {id:$gid, org_id:$tid}) RETURN g.acl_user, g.acl_pass` |
@@ -1787,8 +1777,8 @@ is the `file:line`-versus-SCALAR gap this section names, measured once more.
 | `tortoise/record_allocator.py:534` | `_transition` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/record_allocator.py:658` | `execute_allocation` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/record_backup.py:512` | `require_bypassing_role` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
-| `tortoise/record_projection.py:8044` | `_export_statement` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
-| `tortoise/record_projection.py:8316` | `replay` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
+| `tortoise/record_projection.py:8055` | `_export_statement` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
+| `tortoise/record_projection.py:8334` | `replay` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |
 | `tortoise/record_reconcile.py:581` | `scan_cache_view` | plain | read | candidate:SQL-shaped | `MATCH (n:{}) RETURN properties(n)` |
 | `tortoise/record_restore.py:474` | `_target_nodes_before` | plain | read | candidate:SQL-shaped | `MATCH (n) WHERE any(l IN labels(n) WHERE l IN $labels) RETURN count(…` |
 | `tortoise/record_vector.py:2899` | `vector_search` | unresolved | unresolved | unclassified:statement not resolvable statically | `<unresolved>` |

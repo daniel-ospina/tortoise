@@ -7133,7 +7133,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # the four suites GREEN. Measured with it, per statement (cycle 5): the two claims the
     # first cut covered red, and the OTHER TWO — the `grep` output and the mid clause — stayed
     # green at 458 passed, so a half-done move was still reachable. All FOUR are asserted here
-    # because D5 is one markdown LINE carrying 281 cite-shaped `:N` tokens (the `~50` these
+    # because D5 is one markdown LINE carrying 278 cite-shaped `:N` tokens (the `~50` these
     # comments used to say was about five times low, `265/50 ≈ 5.3`, not a tenfold one —
     # #13900 review, finding 5): a row cannot separate two
     # statements on one line, and an arm that covers half of them reports a guarantee it does
@@ -16823,7 +16823,7 @@ def test_every_bundle_table_row_carries_its_headers_cell_count():
 
 
 def test_the_D5_row_is_still_one_table_row():
-    """D5 is the row this bundle re-derives 281 cite-shaped tokens on at this head, and it is
+    """D5 is the row this bundle re-derives 278 cite-shaped tokens on at this head, and it is
     ONE line. ⛔ THAT FIGURE IS A READING, NOT A PIN, AND IT IS NOW READ: the arm below derives
     the line's own count and compares it with every `<n> cite-shaped` sentence in this file, so
     any commit moving the line off `270` reds instead of leaving four comments behind (a
@@ -17037,7 +17037,7 @@ def test_the_D5_row_does_not_restate_a_refuted_reading():
 #: D5's PRESENT-TENSE anchors, each bound to the line of the tree it names. ⛔ The clause
 #: below had NO reader before this pin, which is why it rotted while the suite was green
 #: (#13602 review, finding 1): a `_pin_row_failures` row asserts the number appears
-#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 281 cite-shaped tokens at
+#: SOMEWHERE on the markdown line, and D5 is ONE line carrying 278 cite-shaped tokens at
 #: this head, so any
 #: occurrence satisfied every row — including the historical ones — and a number asserted
 #: as CURRENT could name prose, a comment or an unrelated statement indefinitely. These
@@ -17070,7 +17070,7 @@ _D5_CURRENT_CLAIMS: tuple[tuple[str, str, str, str], ...] = (
     ),
     # ⛔ THE QUOTA GUARD, BOUND TO ITS OWN SENTENCE (#13845 review, finding 1, P1). The
     # `_pin_row_failures` row for this line was satisfied by ANY `:N` on it, and the D5 row
-    # carries 281 cite-shaped `:N` tokens at this head (re-derived from the row this branch
+    # carries 278 cite-shaped `:N` tokens at this head (re-derived from the row this branch
     # ships, at the merge that brought `origin/main` in; measured here with
     # `len(re.findall(r":\d{2,}", <the `| **D5**` line>)` — the `~50` this comment used to
     # say was about five times low (`265/50 ≈ 5.3`), which is the same rot one layer up) — so `:20329`
@@ -17337,10 +17337,10 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # "CARRIES" (#13879 re-cut — MEASURED: `04-plan.md` contains `sdk.py:28935` and
     # NOT `sdk.py:28718`). Both ends are still pinned so the row cannot drift back to
     # the base's value, which is what a re-derivation-by-offset produces.
-    for _provenance in ("its own row now reads `sdk.py:29121`", "the base read `sdk.py:28935`"):
+    for _provenance in ("its own row now reads `sdk.py:29121`", "the base read `sdk.py:28718`"):
         assert _provenance in text, (
             f"D5 no longer states {_provenance!r} about `04-plan.md`. The row carries "
-            "`sdk.py:29121` at this head and the base carried `sdk.py:28935` — pinning "
+            "`sdk.py:29121` at this head and the base carried `sdk.py:28718` — pinning "
             "both ends is what catches a re-derivation that keeps the base's value "
             "(#13750 review, cycle 3; re-derived at the `ef1d6f7561` merge)")
     assert "is the pair `04-plan.md` carries at this head" not in text, (
@@ -17348,12 +17348,11 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         "head, while its row reads ONE address and the file is not in this diff at all "
         "(`git diff --numstat origin/main...HEAD -- …/04-plan.md` prints nothing). "
         "That sentence was deleted for being false at this head (#13879 review, cycle 3)")
-    assert "IS in this diff at this head" in text, (
-        "D5 no longer states that `04-plan.md` is present in this diff. At this head it "
-        "IS present, by exactly its own row (`git diff --numstat origin/main...HEAD -- "
-        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` prints `1 1`) — the "
-        "branch re-pointed that row from the base's `sdk.py:28935` to `:29121`, so a row "
-        "that calls the file absent names a membership the head does not have")
+    assert "NOT in this diff at this head" in text, (
+        "D5 no longer states that `04-plan.md` is absent from this diff. At this head it "
+        "IS absent (`git diff --numstat origin/main...HEAD -- "
+        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` prints nothing), "
+        "and a row that implies otherwise names a membership the head does not have")
     # and the chimera is refused, not merely absent from the message above
     # ⛔ A REGEX, NOT A LITERAL (#13879 review, cycle 4 — MEASURED): the row writes its
     # pair-lists in BOTH arrow conventions (ASCII `->` and unicode `→`) and does not always
