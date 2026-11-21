@@ -45,6 +45,7 @@ document.
 """
 from __future__ import annotations
 
+import functools
 import re
 import subprocess
 from pathlib import Path
@@ -67,6 +68,7 @@ _SDK = "tortoise/sdk.py"
 _MCP = "tortoise/mcp_server.py"
 _RS = "tortoise/record_serve.py"
 _GJ = "tortoise/goal_judgement.py"
+_LIVE = "tortoise/live.py"
 _HB = "tortoise/hosted_backup.py"
 _SSM = "tortoise/session_source_prose_migration.py"
 #: `#13854`'s vector-index-parity plan. Its reader table cites `hosted_backup.py:2683` for
@@ -385,6 +387,16 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, '`:15873`', _SDK, 15873, '"MATCH (m:GraphEventMeta) RETURN m.first_seq"'),
     (_AUDIT, '`:16077-16081`', _SDK, 16077, '**JSONL event log (#548):** written when *point* is provided'),
     (_AUDIT, '`:3801`', _SDK, 3801, 'sdk._emit_event("PointRetracted", _deleted_point_payload(tid))'),
+    # ⛔ THREE OF THE SIX BARE SITES IN THAT SAME SENTENCE WERE LEFT UNGRADED, which is the
+    # sentence's own failure one level up: it says "All nine are pinned by content", and `:667`,
+    # `:844` and `:916` had NO row — neither `_SPELLING` (`path.py:NNNN`) nor `_TWO_SPAN`
+    # (`` `path` `` `:NNNN` ``) matches the bare `` `:NNNN` `` form, so nothing else could grade
+    # them either. MEASURED: re-pointing each by `+1` left the whole file green (29 passed) while
+    # the three siblings that DID get rows red immediately — a claim of coverage three sites
+    # short. One ROW per SITE, and the token appears TWICE in the document for each.
+    (_AUDIT, '`:667`', _LIVE, 667, 'EPISTEMIC_LABELS = ("Point", "Subject", "Object", "Event")'),
+    (_AUDIT, '`:844`', _HB, 844, '"MATCH (m:GraphEventMeta) RETURN max(m.last_seq), max(m.first_seq)"'),
+    (_AUDIT, '`:916`', _HB, 916, '"MERGE (m:GraphEventMeta) SET m.last_seq = $last, m.first_seq = $first"'),
 )
 
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
@@ -439,6 +451,9 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
 #: until this removal. #9314 is the pytest-level guard this file does not have.
 _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:3841'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:667`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:844`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:916`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:4950-4954'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:6837'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:7196'): 1,
@@ -748,18 +763,43 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
 _DRIFT_PIN = "ccb49741b2ec"
 
 
-def _pin_blob_lines(path: str, rev: str = _DRIFT_PIN) -> list[str] | None:
-    """*path*'s lines at *rev*, or `None` when this checkout cannot read that blob.
+def _rev_is_readable(rev: str = _DRIFT_PIN) -> bool:
+    """Can this checkout resolve *rev* at all? — the ONLY "cannot run" condition below.
 
-    `None` is a fact about the CHECKOUT — a `fetch-depth: 1` clone has no history — never about the
-    artifact. Same distinction, and same reason, as `tests/test_docs_citation_refs.py` draws for
-    `origin/main`: a check that cannot run must be a SKIP, not a failure on a correct document.
+    ⛔ SEPARATED FROM `_pin_blob_lines` ON PURPOSE. `git show <rev>:<path>` exits 128 for TWO
+    different facts: this checkout has no history (a `fetch-depth: 1` clone), and the PATH does not
+    exist at *rev*. The first is about the CHECKOUT and must SKIP, as
+    `tests/test_docs_citation_refs.py` does for `origin/main`. The SECOND is about the ARTIFACT and
+    must be graded — a module created after the pin is exactly the case a file:line census meets
+    first (this PR adds `tortoise/capacity_notice.py`), and folding it into the skip would stop
+    grading the numerator for the whole document while the message blamed CI history
+    (#14038 review, P2). The header already counts that class as "not comparable" rather than
+    hiding it, which is where such a path now lands.
     """
+    out = subprocess.run(
+        ["git", "rev-parse", "--verify", "-q", f"{rev}^{{commit}}"],
+        cwd=REPO, capture_output=True, text=True, check=False,
+    )
+    return out.returncode == 0
+
+
+@functools.lru_cache(maxsize=None)
+def _pin_blob_lines(path: str, rev: str = _DRIFT_PIN) -> list[str] | None:
+    """*path*'s lines at *rev*, or `None` when *rev* is unreadable (a fact about the CHECKOUT).
+
+    A path that is ABSENT at *rev* returns an empty list — an artifact fact, which the caller grades
+    rather than skips. ⛔ MEMOISED per `(rev, path)`: the caller walks one entry per cited LINE, so
+    without this the same module is re-rendered once per cite (measured at 227 `git show` calls over
+    53 distinct paths, the slowest arm in this file at 12.56 s; 53 calls after).
+    """
+    if not _rev_is_readable(rev):
+        return None
     out = subprocess.run(
         ["git", "show", f"{rev}:{path}"], cwd=REPO, capture_output=True, text=True, check=False
     )
     if out.returncode != 0:
-        return None
+        # the rev IS readable, so this is "the path is absent at that rev" — the artifact, not us.
+        return []
     return out.stdout.splitlines()
 
 
@@ -774,11 +814,17 @@ def _re_derived_drift(text: str, repo: Path = REPO) -> tuple[int, int, int, int]
     comparable = drifted = 0
     for path, line in pairs:
         pin = _pin_blob_lines(path)
-        head_file = repo / path
-        if pin is None or not head_file.is_file():
+        if pin is None:
+            # the PIN REVISION itself is unreadable — a shallow clone is the only legitimate cause.
             return None
+        head_file = repo / path
+        if not head_file.is_file():
+            # the head does not carry the module the document cites: an artifact fact, graded
+            # below as "not comparable" rather than skipped.
+            continue
         head = head_file.read_text(encoding="utf-8").splitlines()
-        if line > len(pin):
+        if not pin or line > len(pin):
+            # absent at the pin (or past its end) — NOT comparable; the header counts these.
             continue
         comparable += 1
         if line > len(head) or pin[line - 1] != head[line - 1]:
@@ -2079,7 +2125,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # row) and the LIST endpoint's `actor_user_id` condition (long-form in §2.4, bare twice in the
     # header's comparability clause). Both had rotted to `45028-45045` / `:50935`, both still
     # resolved at `ae26adf963`, and NEITHER had a row that could redden. Same shape again.
-    assert len(_PINS) == 98
+    assert len(_PINS) == 101
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
