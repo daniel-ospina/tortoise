@@ -413,6 +413,27 @@ _DRIVE_OVERRIDES: dict[str, tuple[tuple[str, tuple, dict], ...]] = {
             },
         ),
     ),
+    # #11609 lane P7: the ONE linking verb that absorbed `tortoise_create_edge` and
+    # `tortoise_create_operator`. Its declared binding is `link_entities`, and NEITHER
+    # generic vector reaches it: with no `to_id` and no `target_ids` the handler answers
+    # "link_entities requires a target", and with the typed vector's `target_ids=[]` it
+    # answers "target list is empty" — both BEFORE any SDK read, which is the exact
+    # early-return shape `_DRIVE_OVERRIDES` exists for. Two vectors, one per arm: the
+    # relation-decided arm reads the declared `link_entities`, and the LIST arm reads
+    # `_create_operator`, the second writer behind the same declaration (so the union
+    # is what proves the declaration is consumed rather than the arm being lucky).
+    "tortoise_link_entities": (
+        (
+            "relation-arm",
+            ("performs", "x", "y"),  # scalar `to_id` -> the SDK's own dispatch
+            {},
+        ),
+        (
+            "operator-arm-list",
+            ("NAND", "x", ["y"]),  # a LIST `to_id` -> the operator writer
+            {},
+        ),
+    ),
 }
 
 

@@ -438,9 +438,19 @@ async def test_no_registry_tool_can_deliver_a_payload_its_schema_rejects(
     # therefore reds on a recorded decision, and accidental surface shrinkage is
     # already the canonical gate's verdict (`tools/surface-guard.py` against the
     # frozen baseline, plus `config/surface-manifest.yml`) — not this file's.
-    assert repaired >= 11, (
-        f"sweep saw only {repaired} wrap-envelope tools; 11 was the measured "
-        "baseline when this guard was written, and they are the population "
+    # ⛔ 11 -> 10 on 2026-11-21 (#11609 lane P7). P7 registered ONE linking verb,
+    # `tortoise_link_entities`, and retired `tortoise_create_edge` +
+    # `tortoise_create_operator` into it — so two wrap-envelope doors became one and
+    # the population legitimately shrank by one. Measured, not assumed: the sweep at
+    # that merge reports 10 wrap-envelope tools. The floor moves to the MEASUREMENT
+    # (11 -> 10), which is the same re-cut shape the `unions` floor below took when P6
+    # retired its second `anyOf` door — a floor left one above the measurement is a
+    # red on a recorded decision, and a floor lowered WITHOUT the measurement is the
+    # drift this file exists to catch.
+    assert repaired >= 10, (
+        f"sweep saw only {repaired} wrap-envelope tools; 10 is the measured "
+        "population at the #11609 P7 merge (11 before it, when two of these doors "
+        "were `create_edge` and `create_operator`), and they are the population "
         "#8482 actually occurs in")
 
 
@@ -629,11 +639,16 @@ async def test_every_wrap_envelope_tool_cannot_satisfy_a_failed_payload():
     # floor, and the copy is what goes stale — this message still claimed "10 + 2"
     # long after P6 took `unions` to 1, which steered the next operator to a
     # population that no longer existed (review finding, #13648).
-    floor_typed, floor_unions = 10, 1
+    # ⛔ `typed` 10 -> 9 on 2026-11-21 (#11609 lane P7), for the SAME reason and by the
+    # same measurement as the wrap floor above: two wrap-envelope doors (`create_edge`,
+    # `create_operator`) retired into one (`tortoise_link_entities`). The number is the
+    # sweep's own output at that merge (9 typed + 1 union), not a target.
+    floor_typed, floor_unions = 9, 1
     assert typed >= floor_typed and unions >= floor_unions, (
         f"sweep found {typed} typed + {unions} union envelopes; the floors are "
         f"{floor_typed} + {floor_unions}, each sitting ON its measured value "
-        "(#11609 P6 retired the second `anyOf` door, so `unions` moved 2 -> 1). "
+        "(#11609 P6 retired the second `anyOf` door, so `unions` moved 2 -> 1; P7 "
+        "then retired two wrap doors into one, so `typed` moved 10 -> 9). "
         "Shrinkage is what this floor guards, so it follows a deliberate "
         "removal; growth is covered by the loop itself.")
 
