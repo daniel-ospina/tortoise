@@ -1445,26 +1445,40 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
     # exemption is for (measured: only `prometheus_client` absent → `tortoise.sdk` folds, the PIN
     # PASSES and this test died with an uncaught `_UnreadableFold`, then with `KeyError` once the
     # fake indexed `sources`). A module this venv cannot read is simply not cached.
+    # ⛔ …AND THE ENVIRONMENT'S OWN REFUSAL IS RE-RAISED VERBATIM, NEVER FABRICATED (`#14099` F2,
+    # review of `ed6ff2ab`). `env_source` used to re-raise `ModuleNotFoundError(name)` —
+    # POSITIONALLY, so `.name` is `None` (CPython's `name`/`path` are keyword-only) and the message
+    # carries no `from '<module>'` token — which the origin gate correctly REFUSES. The declared
+    # module's keys then landed in `stray`, so the `missing`-bucket arm below red-ed through the
+    # STRAY assertion instead of the one it exists to drive, in the one venv this exemption exists
+    # for (measured: with `prometheus_client` blocked, that arm failed while the pin it guards
+    # passed). The real cause the loader folded — `ModuleNotFoundError('prometheus_client')`, whose
+    # `.name` is set — carries the origin, so keep it and re-raise THAT.
     sources: dict[str, str] = {}
+    env_failure: dict[str, BaseException] = {}
     for key in keys:
         module_name = key.partition("::")[0]
-        if module_name in sources:
+        if module_name in sources or module_name in env_failure:
             continue
         try:
             sources[module_name] = strip._module_source(module_name)
-        except strip._UnreadableFold:
-            continue
+        except strip._UnreadableFold as exc:
+            # `_UnreadableFold` is always raised `from exc`, so the cause is the environment's own
+            # fact; the fallback stays FAIL-CLOSED (no origin → `stray`), never an excuse.
+            env_failure[module_name] = exc.__cause__ or ModuleNotFoundError(module_name)
     outsider = next(k for k in keys if k.partition("::")[0] not in _UNREADABLE_EXEMPT_MODULES)
     declared = next((k for k in keys if k.partition("::")[0] in _UNREADABLE_EXEMPT_MODULES), None)
 
     def env_source(name: str) -> str:
-        # ⛔ THE ENVIRONMENT'S OWN REFUSAL MUST OUTLIVE THE FAKE. A module this venv cannot read is
-        # absent from `sources`; indexing it died with `KeyError: 'tortoise.sdk'` in exactly the
-        # environment the exemption exists for. The declaration's own arms cover that module, so
-        # every other fake re-raises the environment's refusal instead.
+        # ⛔ THE ENVIRONMENT'S OWN REFUSAL MUST OUTLIVE THE FAKE, ORIGIN INCLUDED. A module this venv
+        # cannot read is absent from `sources`; indexing it died with `KeyError: 'tortoise.sdk'` in
+        # exactly the environment the exemption exists for, and fabricating a cause from the
+        # module's own NAME classified that refusal as repo-side. The declaration's own arms cover
+        # the declared module, so every other fake re-raises the environment's refusal instead.
         if name in sources:
             return sources[name]
-        raise strip._UnreadableFold(f"{name} unreadable") from ModuleNotFoundError(name)
+        raise strip._UnreadableFold(f"{name} unreadable") from env_failure.get(
+            name, ModuleNotFoundError(name))
 
     def folding(module_name: str, cause: BaseException):
         def fake(name: str) -> str:
@@ -1593,8 +1607,8 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
     # reporting one. Measured at `00a5804`: deleting the pin's `assert missing == []` left this
     # whole file GREEN (94 passed) — the `stray` bucket had the red below, `missing` had nothing,
     # so a renamed writer could silently leave the population the declaration exists to bound.
-    monkeypatch.setattr(
-        strip, "_module_source", lambda name: "" if name == blanked else env_source(name))
+    # `_module_source` is still the blanked fake installed above (nothing reset it), so the walk
+    # still folds exactly one module and this arm reaches `missing` on the real population.
     with pytest.raises(AssertionError) as red_missing:
         test_no_declared_entity_writer_mentions_a_dynamic_namespace()
     assert outsider in str(red_missing.value) and "register names a writer" in str(
