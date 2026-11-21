@@ -115,7 +115,10 @@ CAPABILITY_CONTROLS = (
     # literal expectation here fixes arm PRECEDENCE, not just detection.
     ("re-spaced directed adjacency",
      "MATCH (e:GraphEvent) - [r:T]-> (p)", "cypher:-["),
-    # the live EP / belief walk, verbatim from CAPABILITY-PLACEMENT-AUDIT.md
+    # the live EP / belief walk CAPABILITY-PLACEMENT-AUDIT.md quotes (`:410`, sourced from
+    # `ep.py:1620-1632`), with its `{label}` placeholder FILLED BY `GraphEvent` — a label the walk
+    # is never swept over (`live.py:667`'s `EPISTEMIC_LABELS` is Point/Subject/Object/Event), so this
+    # row pins the SHAPE the capability arms must catch, not a placement claim.
     ("EP walk",
      "MATCH (a:GraphEvent) WHERE a.id IN $ids WITH * MATCH (a)-[r:IMPL|NAND]-(b)",
      "cypher:-["),
