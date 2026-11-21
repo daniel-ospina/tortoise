@@ -762,14 +762,25 @@ def test_the_verbs_never_shadow_the_DSNs_ROLE_with_a_connect_kwarg(monkeypatch):
     No database is contacted: ``psycopg2.connect`` is replaced, and both DSN
     forms are covered because a deployment may use either.
 
-    ⛔ The replacement is a STUB MODULE in ``sys.modules``, not an
-    ``import psycopg2`` + ``setattr`` — the same seam every other store-free row
-    in this file uses (`_stub_psycopg2`). ``psycopg2-binary`` is declared in the
-    `postgres` extra ONLY; neither the `test` extra nor the `dev` group installs
-    it, so a real import makes this pin ERROR (not skip) on every leg that does
-    not provision a record — measured on a `uv sync --extra embeddings --extra
-    parity` worktree: `ModuleNotFoundError: No module named 'psycopg2'`. The
-    module is imported INSIDE `_connect_record`, so the stub intercepts it.
+    ⛔ The driver is the OPTIONAL ``[postgres]`` extra (`pyproject.toml`), and this
+    file is in ``fast_pool()`` on two surfaces (``api`` and ``core``), so a bare
+    ``import psycopg2`` here ERRORS — not skips — on every job that installs
+    ``.[test,embeddings]`` alone. That is the sharded ``test`` matrix, i.e. a
+    required context Red on an import rather than on the behaviour, while the row
+    itself never runs. Measured on a ``uv sync --extra embeddings --extra parity``
+    worktree: ``ModuleNotFoundError: No module named 'psycopg2'`` at this row.
+
+    ⛔ NOT ``importorskip``: this row needs NO record and NO driver — it asserts
+    what is handed to ``connect()``, and ``_connect_record`` imports the driver
+    INSIDE the function, so a STUB MODULE in ``sys.modules`` intercepts it. That
+    is the seam every other store-free row in this file already uses
+    (``_stub_psycopg2``), and it keeps the pin EXECUTING on every leg instead of
+    moving it into the "pinned only where a store is provisioned" shape this PR's
+    first review cycle raised as a finding (a test that skips on the fast pool is
+    invisible to the matrix that gates the merge). ``importorskip`` remains the
+    right polarity for rows that genuinely need a live store, e.g.
+    ``tests/test_12943_cache_leg.py::_both_stores`` and this file's
+    ``_both_stores`` — not for this one.
     """
     import types
 
