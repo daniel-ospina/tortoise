@@ -39363,13 +39363,24 @@ def _maybe_apply_completion(org_id: str, *, sdk=None) -> bool:
     ``_org_proj`` inside the inline gate) and this change neither adds nor moves
     it — but it means the SDK construction must stay on whatever thread the lane
     already runs it on, and must never move into the capture-pool worker.
-    ⛔ FOR A GRAPH-BOUND CREDENTIAL THIS FUNCTION IS NO LONGER CALLED AT ALL: the
-    capture route now skips the whole org-level block for such a key, so it never
-    constructs ``_org_sdk`` and never performs that ``organizations.graph_name``
-    read. The paragraph above is therefore about the ORG-WIDE path only — an
-    earlier draft of it asserted the read happened "in either lane" for a
-    graph-bound credential, which stopped being true when that guard landed
-    (#14086 review, P2; the user-facing half of the same guard is #14131).
+    ⛔ THE CAPTURE ROUTE NO LONGER CALLS THIS FOR A GRAPH-BOUND CREDENTIAL — and
+    that is TRUE OF THE CAPTURE ROUTE ONLY, not of every caller. The capture's
+    org-level block is skipped for such a key (``completion_sdk = None if
+    org.get("graph_id") else …``), so on THAT path no ``_org_sdk`` is
+    constructed and the ``organizations.graph_name`` read above does not happen.
+    The other caller still reaches it: ``mcp_server._maybe_onboarding_auto_complete``
+    calls this with ``sdk=None`` for any hosted org, and the MCP tools that reach
+    it (``tortoise_create_point`` at ``mcp_server.py``'s ``_maybe_onboarding_auto_complete``
+    call site, and the decision/observe paths beside it) are NOT behind
+    ``_reject_graph_bound_mcp_org_surface`` — so for a graph-bound MCP credential
+    this function IS still called and ``_org_proj(org_id)`` DOES perform that one
+    primary-key ``organizations.graph_name`` read, exactly as
+    ``_org_default_namespace``'s own docstring states for a GRAPH-BOUND
+    credential. So the paragraph above remains accurate for the MCP auto-onboarding
+    lane as well as the ORG-WIDE one, and only the CAPTURE lane's graph-bound case
+    is exempt (#14086 review round 3, P2: an earlier draft of this sentence said
+    the function was "no longer called at all" for such a key, which the tree
+    refutes — the user-facing half of the capture guard is #14131).
 
     Left as ``None`` the historical behaviour is unchanged for every other
     caller."""
