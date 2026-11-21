@@ -888,6 +888,17 @@ def _notice_recipient(account: Account, cp) -> str | None:
     true bound is ONE CALL PAIR PER DUE ACCOUNT PER PASS — the DUE POPULATION, not
     the send cap. The cap bounds SPEND; it has never bounded this read.
 
+    ⛔ AND A RUNG IS REACHED WHEN THE ONE ABOVE IT IS NOT AN ADDRESS, not when it
+    is merely non-empty (#14038 review, mutation pass, P2). `email` and
+    `customer_email` are contact columns, and `email` holds non-addresses in this
+    same codebase (`"api"`, a Supabase user UUID — `hosted_api._billing_email_like`
+    documents both, and #1765 demoted that column as stale-prone), so a truthiness
+    test on rung 1 SHADOWS a deliverable rung 2: the send fails, the mark is never
+    stamped, and every later pass retries the same undeliverable string — reported
+    as ``failed``, never as ``no-email``, which is the exact outcome the rung order
+    exists to remove. The gate is `_deliverable_address` below, which REUSES
+    `hosted_api._billing_email_like` rather than respelling it here.
+
     ⛔ RESIDUAL, STATED RATHER THAN IMPLIED: an account with none of the three
     (a registry/agent-minted org carries no address at all) still answers
     ``no-email`` and is still not mailed — the copy greets a PERSON, so there is
@@ -904,31 +915,54 @@ def _notice_recipient(account: Account, cp) -> str | None:
     the provider ACCEPTS — an "unsendable" mark would be a SECOND ledger, i.e. a
     schema change and a decision for #13998's owner rather than for a fix lane.
     """
-    own = account.email
-    if own and str(own).strip():
-        return str(own).strip()
-    billing = account.customer_email
-    if billing and str(billing).strip():
+    own = _deliverable_address(account.email)
+    if own:
+        return own
+    billing = _deliverable_address(account.customer_email)
+    if billing:
         # ⛔ A FALLBACK IS A DELIVERY DECISION, so it is RECORDED — by RUNG, never
         # by address (a log is not the place to copy a customer's address). The
-        # account's own column was empty, so this notice reaches a different
-        # mailbox than the account recorded; whoever reads a bounce, or asks "who
-        # was actually told", cannot recover that from the send path alone.
+        # account's own column was empty OR NOT AN ADDRESS, so this notice reaches a
+        # different mailbox than the account recorded; whoever reads a bounce, or
+        # asks "who was actually told", cannot recover that from the send path alone.
         logger.info(
-            "capacity notice: team %s carries no organizations.email — the "
+            "capacity notice: team %s carries no deliverable organizations.email — the "
             "notice resolves on the SECOND rung of the recipient chain "
             "(organizations.customer_email, the Stripe billing contact)",
             account.org_id)
-        return str(billing).strip()
-    resolved = _owner_email(account.org_id, cp)
-    if resolved and resolved.strip():
+        return billing
+    resolved = _deliverable_address(_owner_email(account.org_id, cp))
+    if resolved:
         logger.info(
-            "capacity notice: team %s carries no organizations.email and no "
+            "capacity notice: team %s carries no deliverable organizations.email and no "
             "customer_email — the notice resolves on the THIRD rung of the "
             "recipient chain (the active owner's GoTrue address)",
             account.org_id)
-        return resolved.strip()
+        return resolved
     return None
+
+
+def _deliverable_address(value: object) -> str | None:
+    """The address to hand the mailer, or ``None`` when *value* is not one.
+
+    ⛔ ONE DEFINITION, IMPORTED: `hosted_api._billing_email_like` is the codebase's
+    shape gate for this exact question (single ``@``, non-empty local part and
+    domain, no interior whitespace, surrounding whitespace trimmed), and its
+    history — #4504, #1765 — is why a truthy string is not an address: the same
+    writers put ``"api"`` and Supabase user UUIDs into these columns. Respelling
+    it here would be a second owner of one rule, which is how the two drift, so
+    the billing chain's predicate is reused even though that couples this module
+    to it.
+
+    The import is INSIDE the function on purpose: `hosted_api` imports this module
+    (lazily, in the sweep loop), so a module-level import here would be a cycle.
+    """
+    from .hosted_api import _billing_email_like
+
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    return trimmed if _billing_email_like(trimmed) else None
 
 
 async def notify_account(org_id: str, *, cp=None, account: Account | None = None,
