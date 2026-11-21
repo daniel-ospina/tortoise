@@ -71,8 +71,12 @@ The **serving** row is exactly one statement, so a re-home re-points one read an
 * `tests/test_13094_graphevent_home.py::test_every_declared_reader_still_names_its_statement_in_the_tree`
   — every row's statements must still resolve **in its file** (content-matched, whitespace-collapsed, so
   a re-indent is not a false red while a reword is a real one), and `min_occurrences` is asserted where
-  one file holds the same statement twice (the dedupe probe and `_event_row_exists`; the two export
-  scans), so one survivor cannot vouch for two rows.
+  one file holds the same statement twice. ⛔ **Where that is a proof and where it is not**: the
+  `event_store.py` dedupe pair is the ONLY two occurrences of its text in that file, so deleting one reds
+  the census; the two export scans are byte-identical to two OTHER occurrences in `hosted_backup.py`
+  (four in total), so there `min_occurrences: 2` proves the file still carries the statement twice and
+  **not** that both censused sites survive — the `line` is the address for those two, and the residual is
+  named on the rows.
 * `…::test_the_census_covers_the_labels_schema_as_well_as_its_readers` — the three DDL rows exist and are
   `maintenance`; an earlier cut of this census omitted them, which is how a re-home ships a store with no
   indexes.
@@ -125,11 +129,19 @@ allowance**, which is why this is the census's largest single item.
 
 ### 2.1 The share — corrected, because the briefing's figure is arithmetically impossible
 
-`:GraphEvent` is **61 %** of that census's node total on the largest legacy graph
-(**72,488 of 118,755** = 0.6104), which is the largest non-`:Point` population in the store. The
-`#13094` dispatch brief states "72,488 nodes of 118,755 — **42 %** of the store", and 42 % cannot be
-derived from those two numbers; the figure is wrong at the source, and it is corrected here rather than
-quoted.
+⚠️ **The share, and whose denominator it is.** The `#13094` dispatch brief states "72,488 nodes of
+118,755 — **42 %** of the store", and 42 % cannot be derived from those two numbers: 72,488 / 118,755 =
+**0.6104, i.e. 61 %**. Both figures are the BRIEF's, not the tree's — `118,755` appears nowhere in this
+repository — so the correction is arithmetic on the brief's own pair, and it is stated that way rather
+than dressed up as a measurement.
+
+⛔ **And the tree's own recorded share is a DIFFERENT number from a different census, which is why none
+of this is quoted as "the" share.** `graph-scripts/business_map_13880/business_map.json` records
+**76,610 of 126,908 = 60 %** from a live Falkor read on 2026-11-20, and it carries the rule against
+mixing the two (*"No share is derived from mixing them … only the second states a denominator"*): the
+72,488 is a label census over the graph **exports** (2026-11-19) with no denominator recorded here. So
+the projection below uses the node COUNT from that census and multiplies it by the measured slope — it
+never divides by a node total — and 42 % is corrected to 61 % only as arithmetic on the brief's pair.
 
 ⛔ **Do not mix the two censuses**, which is why the share is stated twice with its own denominator:
 `#13880`'s **label census over the graph EXPORTS** (2026-11-19) counts **72,488**; a **live Falkor read a
@@ -190,8 +202,13 @@ answer, with the refutations executed rather than argued:
 
 The verb that answers this on a **real tenant**, per event type and by payload multiset, is
 `tools/graphevent_home.py superset` — read-only, and it refuses to mint the graph it is asked about
-(see §3.1). Exit `1` = not covered, exit `2` = **no verdict** (never "covered"), including for an EMPTY
-feed on either side. ⚠️ Its own verdict carries the limit that matters: **even at `covered`, the
+(see §3.1). Exit `1` = not covered, exit `2` = **no verdict** (never "covered") — for an empty feed on
+**either** side (an empty graph is the purged/mistyped case; an empty RECORD is the mistyped
+`--org-id`/`--graph-id` or never-armed-scope case, and reporting that as "the record is short" would send
+an operator to backfill a record that was never asked), and for a feed the cursor could **not prove it
+reached the end of** — the walk ends with a `count()` comparison and a NULL-`seq` check, because three
+shapes the store admits (a NULL `seq`, a `seq` stored as a string, a duplicated `(seq, event_id)` pair
+past a page boundary) make an empty page indistinguishable from the end. ⚠️ Its own verdict carries the limit that matters: **even at `covered`, the
 producers disagree** (refutation 1 is a property of the producer, not of any tenant's history), so a
 `covered` tenant is not evidence that a re-point would not drop future events. And a type the record
 carries under another name (`PointRetracted` / `EntityMutated`) is reported as a **named deficit**
@@ -204,8 +221,12 @@ A Cypher read against a graph the server does not hold **creates** it — measur
 (`tortoise/projection/__init__.py`: a plain `MATCH (n) RETURN 1 LIMIT 1` "ADDED it to `GRAPH.LIST`",
 `#11113`), and reproduced while building this bundle. So both verbs require an **explicit** `--graph`
 (there is no default: defaulting to `tortoise` would mint an empty, sweep-unowned graph on every
-multi-tenant server) and refuse a name `GRAPH.LIST` does not carry — **before** binding it. Pinned by
-`test_a_graph_the_server_does_not_hold_is_refused_before_it_is_read`.
+multi-tenant server) and refuse a name `GRAPH.LIST` does not carry — **before** binding it. The refusal
+lives in the ONE reader both verbs call (`_graph_rows`), not in a verb: round 1 put it in `residency`
+only, so `superset` — the verb whose verdict gates a re-home — was the one that could mint a graph.
+Pinned at the reader AND at the verb
+(`test_a_graph_the_server_does_not_hold_is_refused_before_it_is_read`,
+`test_the_superset_verb_refuses_an_unknown_graph_too`).
 
 ---
 
@@ -275,7 +296,7 @@ Both suites are re-run after this PR's last push; counts are in `WORKTREE-REPORT
 | file | what it is |
 |---|---|
 | `tools/graphevent_home.py` | the census as data (`READERS`), the residency reader, and the **`superset` verb** that answers `#13094`'s blocking question on a real tenant — read-only by mechanism (§3.1), with exit `2` for "no verdict" |
-| `tests/test_13094_graphevent_home.py` | 21 pins: the census resolving (with `min_occurrences`), its DDL completeness, the capability vocabulary, the two producer refutations (executed, with a positive control), the `#4664` mechanism refusal (executed), the verdict's three deficit classes (missing type, missing row, mapped type), the empty-feed vacuity, the paging cursor against duplicate and fractional `seq`, the graph-minting refusal, the exit-code contract, and the tool's own selection |
+| `tests/test_13094_graphevent_home.py` | 24 pins: the census resolving (with `min_occurrences`), its DDL completeness, the capability vocabulary, the two producer refutations (executed, with a positive control), the `#4664` mechanism refusal (executed), the verdict's three deficit classes (missing type, missing row, mapped type), the empty-feed vacuity on BOTH sides, the paging cursor against duplicate and fractional `seq`, the completeness counts (NULL `seq`, a short read), the graph-minting refusal at the reader AND at `superset`, and the exit-code contract |
 | `docs/evidence/13094-graphevent/measure_graphevent_residency.py` + 2 JSON outputs | the residency measurement above, reproducible |
 | `docs/evidence/13094-graphevent/readers.json` | the census table, as the verb emits it |
 

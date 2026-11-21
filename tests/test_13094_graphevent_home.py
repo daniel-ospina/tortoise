@@ -425,10 +425,27 @@ def test_a_type_the_record_carries_under_another_name_is_a_named_deficit():
     assert verdict["verdict"] == "not_covered"
     assert verdict["mapped_types"] == ["PointRetracted"]
     assert verdict["missing_types"] == []
+    assert verdict["missing_rows"] == 0, (
+        "a mapped type must not ALSO be counted as missing rows — it is a "
+        "separate deficit class")
     assert verdict["per_type"]["PointRetracted"] == {
         "graph_rows": 1, "record_has_type": False,
         "record_has_alias_type": ["EntityMutated"],
         "row_coverage": "not_comparable"}
+
+
+def test_an_empty_record_is_not_coverage_either():
+    """Symmetry: an unarmed or mistyped RECORD scope is not "the record is short".
+
+    Round 2 found the claim ("an empty feed on EITHER side") was true of the
+    graph side only: an empty record with a non-empty graph was `not_covered`
+    (exit 1), which tells the operator to go and backfill a record that was
+    never asked — the same typo class the graph guard exists for.
+    """
+    module = _tool()
+    verdict = module.superset([{"type": "PointAdded", "payload": '{"id": "a"}'}], [])
+    assert verdict["verdict"] == "no_verdict"
+    assert verdict["record_events"] == 0
 
 
 def test_an_empty_feed_is_not_coverage():
@@ -461,7 +478,15 @@ def test_a_payload_is_compared_by_value_not_by_its_storage_spelling():
 # ── 5. paging: the two shapes that break a keyset read ─────────────────────
 
 class _StubGraph:
-    """A graph whose `:GraphEvent` rows are a scripted list — no server."""
+    """A graph whose `:GraphEvent` rows are a scripted list — no server.
+
+    ⛔ IT ASSERTS ON THE MODULE'S OWN STATEMENTS, and that is the whole point
+    (review round 2, P2): an earlier version re-implemented the composite filter
+    here, so reverting the module's `WHERE` to a strict `seq > $after`, or
+    dropping the `event_id` tie-break from its `ORDER BY`, left the test GREEN —
+    the test was pinning itself. The two `assert`s below make the SQL under test
+    part of the fixture, so a one-clause simplification reds.
+    """
 
     def __init__(self, rows):
         self.rows = rows
@@ -471,6 +496,16 @@ class _StubGraph:
         self.pages += 1
         if self.pages > 50:
             raise AssertionError("the reader never advanced — an unbounded loop")
+        # the completeness guards run AFTER the walk; answer them from the data
+        if "RETURN count(e)" in statement:
+            if "e.seq IS NULL" in statement:
+                return type("_R", (), {
+                    "result_set": [[sum(1 for r in self.rows if r[0] is None)]]})()
+            return type("_R", (), {"result_set": [[len(self.rows)]]})()
+        assert "ORDER BY e.seq ASC, e.event_id ASC" in statement, (
+            "the page order must tie-break on `event_id` — without it two rows "
+            f"sharing a seq can be returned in an order the cursor cannot resume "
+            f"from, losing one. Statement: {statement!r}")
         params = params or {}
         limit = params.get("limit")
         after = params.get("after")
@@ -478,10 +513,20 @@ class _StubGraph:
         if after is None:
             candidates = list(self.rows)
         else:
-            # the COMPOSITE cursor the module uses: (seq, event_id)
+            assert "e.seq > $after OR (e.seq = $after AND e.event_id > $last_id)" \
+                in statement, (
+                "the cursor must be COMPOSITE — a strict `seq > $after` drops rows "
+                f"sharing a seq at a page boundary. Statement: {statement!r}")
+            # a NULL seq is UNREACHABLE by the cursor (that is the defect the
+            # completeness guard exists for), so the stub emulates the engine:
+            # such a row never appears on a later page.
             candidates = [r for r in self.rows
-                          if r[0] > after or (r[0] == after and r[2] > last_id)]
-        candidates.sort(key=lambda r: (r[0], r[2]))
+                          if r[0] is not None
+                          and (r[0] > after or (r[0] == after and r[2] > last_id))]
+        # the engine sorts NULL LAST; Python cannot compare None with int, so the
+        # key spells that order out.
+        candidates.sort(key=lambda r: (r[0] is None, r[0] if r[0] is not None else 0,
+                                       str(r[2])))
         page = candidates[:limit] if limit else candidates
         return type("_R", (), {"result_set": page})()
 
@@ -559,13 +604,89 @@ def test_a_graph_the_server_does_not_hold_is_refused_before_it_is_read():
     So the verb cannot "just look": it must refuse a name the server does not
     hold, or a read-only instrument writes — and then compares an empty graph it
     has just minted.
+
+    ⛔ THE PIN IS ON THE READER, NOT ON THE GUARD (review round 2, P2). Round 1
+    pinned `_require_graph` in isolation, so deleting the call from `residency`
+    (and never adding one to `superset`, which is the P1 that survived) left the
+    test GREEN. `_graph_rows` is what both verbs actually call, so the
+    assertion is on it — and on `select_graph` never being reached.
     """
     module = _tool()
     db = _StubDB(_StubGraph([]))
     with pytest.raises(module.Unpageable) as refused:
-        module._require_graph(db, "g_never_existed")
+        module._graph_rows(db, "g_never_existed")
     assert "CREATES it" in str(refused.value)
     assert db.selected == [], "the refusal must happen BEFORE any graph is bound"
+
+
+def test_the_superset_verb_refuses_an_unknown_graph_too(monkeypatch, capsys):
+    """The verb an operator points at a TENANT must not mint it either.
+
+    `residency` was guarded and `superset` was not (review round 2, P1): the
+    guard sat in one verb, so the one whose verdict gates a re-home was the one
+    that would create an empty graph from a `--graph` typo and then compare it.
+    """
+    module = _tool()
+    db = _StubDB(_StubGraph([]))
+    monkeypatch.setattr(module, "_graph_connection", lambda uri: db)
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:1/x")
+    monkeypatch.setattr(module, "_record_connection",
+                        lambda dsn, org: (_ for _ in ()).throw(
+                            AssertionError("the record must not be read for a "
+                                           "graph that does not exist")))
+
+    class _NoRecord:
+        def cursor(self):
+            return type("_C", (), {"execute": staticmethod(lambda *a: None),
+                                   "fetchall": staticmethod(lambda: [])})()
+
+    monkeypatch.setattr(module, "_record_connection", lambda dsn, org: _NoRecord())
+    assert module.main(["superset", "--graph", "g_never_existed", "--org-id", "o",
+                        "--graph-id", "g"]) == 2
+    assert "NO VERDICT" in capsys.readouterr().err
+    assert db.selected == [], "superset bound a graph the server does not hold"
+
+
+def test_a_null_seq_row_refuses_instead_of_shortening_the_read():
+    """A NULL `seq` can never satisfy a `seq` cursor, so the walk must not call it an end.
+
+    Measured in review round 2: with `batch=1` a NULL-seq row was silently
+    skipped and the shortened read was `covered`; with the whole feed in one page
+    the same row REFUSED. Both directions from one input is the signature of a
+    guard that is not on the path, so the guard is now a count, after the walk.
+    """
+    module = _tool()
+    rows = [
+        (1, "PointAdded", "e1", '{"id": "a"}'),
+        (None, "PointAdded", "e2", '{"id": "b"}'),
+    ]
+    with pytest.raises(module.Unpageable) as refused:
+        module._graph_rows(_StubDB(_StubGraph(rows)), "g_real", batch=1)
+    assert "no `seq`" in str(refused.value)
+
+
+def test_a_short_read_is_refused_even_when_the_pages_look_exhausted():
+    """The count is what proves completeness: pages alone cannot.
+
+    A `seq` stored as a STRING is the shape that breaks it — the engine orders
+    strings before numbers, so a numeric cursor matches no row and the walk ends
+    early with a page that looks like the end of the feed. The stub's `>`
+    comparison would retrieve it, so this arm drives the count guard directly by
+    making the walk's own pages stop short.
+    """
+    module = _tool()
+
+    class _Truncating(_StubGraph):
+        def query(self, statement, params=None):
+            if "RETURN count(e)" in statement and "e.seq IS NULL" not in statement:
+                return type("_R", (), {"result_set": [[3]]})()
+            return super().query(statement, params)
+
+    rows = [(1, "PointAdded", "e1", '{"id": "a"}'),
+            (10, "PointAdded", "e2", '{"id": "b"}')]
+    with pytest.raises(module.Unpageable) as refused:
+        module._graph_rows(_StubDB(_Truncating(rows)), "g_real", batch=2000)
+    assert "the cursor reached" in str(refused.value)
 
 
 # ── 6. the exit codes, and the instrument's own selection ─────────────────
