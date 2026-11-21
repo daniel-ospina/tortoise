@@ -252,12 +252,10 @@ none.
 `aboutDocument` **edge** is retargeted at `:Source` — that asymmetry is the
 whole fold, and it is why L1 and L2 could close. The retirement mechanism is a
 symbol pair this guard does check: the writers' retired-key allowlist
-`_DOC_RETIRED_KEYS` (`projection/entities.py:2343`, at this head — re-derived by
+`_DOC_RETIRED_KEYS` (`projection/entities.py:2297`, at this head — re-derived by
 `grep -nF '_DOC_RETIRED_KEYS: frozenset' tortoise/projection/entities.py`, which
-returns that one line; the sentence has followed the symbol through `2297` → `2313` →
-`2343` as `#13971`'s review round corrected the capture path's own docstring above and then
-added the restore-door residual there, and before that
-`2257`, a comment at that head, and `1584` at `4f68a2aa7`) and the graph migration
+returns that one line; the sentence used to name `2257`, a comment at this head, and
+`1584` at `4f68a2aa7`) and the graph migration
 `relabel_legacy_documents` (`migrate_kinds.py:167`).
 
 **How to read a line pointer in this section:** the LINE NUMBERS from §5's
@@ -306,18 +304,17 @@ map had to go) — measured at this head as `tortoise/live.py:1237,1247` and
 `tortoise/why.py:200`. That move is the same kind as the five before it — prose that
 names the retired label in order to explain a rule about it — and it is the first
 one whose point is a WIDENING rather than a retirement. The seventh, #12434's `:Document`
-retirement prose in `tortoise/mcp_server.py:4477`, IS a retirement. The eighth
+retirement prose in `tortoise/mcp_server.py:4430`, IS a retirement. The eighth
 is #12915's (`#4282` Phase 2, lane B) `record_decision` docstring —
-`tortoise/sdk.py:37492` and `_file_human_approval`'s `:37434`, one line each in a file this population already
+`tortoise/sdk.py:37547` and `_file_human_approval`'s `:37547`, one line each in a file this population already
 reached (⛔ **the `:4382` and `:36687,36718` addresses this sentence carried are
-DELETED, re-measured at this head: `mcp_server.py:4382` is the `# prop named "error"
-must not suppress the onboarding observation.` comment (not blank) and the
-`:Document` retirement prose is at `:4477`; `sdk.py:36971` is a
-``# `[a, a, b]` was answered with the `[a, b, b]` operator`` comment and `:37002`
+DELETED, re-measured at this head: `mcp_server.py:4382` is a BLANK line and the
+`:Document` retirement prose is at `:4430`; `sdk.py:36745` is a
+``# `[a, a, b]` was answered with the `[a, b, b]` operator`` comment and `:36776`
 is `conds.append("o.label IS NULL")`, neither naming `:Document` — the two
-`:Document` docstring lines are `:37392` in `record_decision` (opening `:37372`;
-`:37391` is the `:Source` line immediately above it, which is what a re-measure by that
-phrase alone lands on) and `:37434` in `_file_human_approval` (opening `:37412`)**), whose
+`:Document` docstring lines are `:37166` in `record_decision` (opening `:37146`;
+`:37165` is the `:Source` line immediately above it, which is what a re-measure by that
+phrase alone lands on) and `:37547` in `_file_human_approval` (opening `:37186`)**), whose
 `Args:` block for `artifact_id` says the artifact may be "the url of the document
 Source" and parenthesises the D10 rule ("a document is a ``:Source``, not a
 ``:Document`` node") because the retired label is what a reader arriving from the
