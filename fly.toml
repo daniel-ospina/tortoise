@@ -72,8 +72,9 @@ kill_timeout = 30
   #   if you take it, move that table in the same change (it carries this
   #   snapshot) rather than leaving two dates disagreeing.
   #   ⚠️ LIST-PRICE ESTIMATE, NOT A QUOTE, AND DATED (snapshot 2026-09-10).
-  #   Fly bills actual usage; live rates have since moved (in BOTH directions by
-  #   line item — runbook §6.5 records the 2026-11-21 re-fetch). Re-fetch
+  #   Fly bills actual usage; live rates have since moved — EVERY line item is
+  #   HIGHER on the 2026-11-21 re-fetch (runbook §6.5 records it), so these are
+  #   lower bounds, not a spread. Re-fetch
   #   Fly's pricing page before a spend decision. Full caveat: runbook §6.5.
   auto_stop_machines = "off"
   auto_start_machines = true
@@ -305,7 +306,7 @@ kill_timeout = 30
   # 2×$2.19 = +$4.38 of CPU, while the RAM-above-preset line FALLS as the
   # preset's included RAM doubles (512MB→1GB): 3.5GB→3.0GB = −$3.00. Net
   # +$1.38/mo. The COST note above's older 2026-09-10 sheet ($1.945/core,
-  # $5/GB) gives +$3.90 − $2.50 = +$1.39/mo for the same reason, so the DELTA
+  # $5/GB) gives +$3.89 − $2.50 = +$1.39/mo for the same reason, so the DELTA
   # does not depend on which sheet is used — only the absolute total does (that
   # sheet's 2-core total is $21.40; today's rates make it ~$25.38). ⚠️ LIST-PRICE
   # ESTIMATE, not a quote. Re-fetch before a spend decision — and note that

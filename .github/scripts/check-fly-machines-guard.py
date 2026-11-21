@@ -75,7 +75,7 @@ RESIDUAL GAPS (documented, not blocked):
    the running machine with no red signal: #13665 found the box running 4 cores
    while ``fly.toml`` declared 2, unnoticed for a whole measurement window. A
    shape leg (compare ``config.guest.*`` against ``[[vm]]``, fail-closed like
-   the env gate) is the follow-up; until it lands, versioning ``cpus`` in
+   the env gate) is #14159; until it lands, versioning ``cpus`` in
    ``fly.toml`` is what makes the size survive a deploy.
 
    Crash-loop detection applies to TRAFFIC groups only (the ``[processes]``

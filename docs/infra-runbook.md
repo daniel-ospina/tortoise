@@ -2398,11 +2398,15 @@ curl -s -m 5 -w '\n%{time_total}s\n' https://api.premiselabs.co/liveness
 > [pricing page](https://fly.io/docs/about/pricing/) **is the source of truth;
 > re-fetch it before making a spend decision.** (Re-fetched 2026-11-21 for the
 > `[[vm]]` comment: $2.19/mo per shared vCPU including 256 MB of RAM per vCPU,
-> plus $6.00/GB/mo beyond the preset. The lines move in BOTH directions — that
-> 512 MB preset is now ≈$3.69, *below* the $4.04 recorded here, while a
-> 4096 MB two-core machine is ≈$25.38, well above the $21.40 this table
-> carries — so the monthly TOTALS below remain low, but do not read any single
-> line item as directionally safe. That is why the table is dated.)
+> plus $6.00/GB/mo beyond the preset. EVERY line moved UP on that re-fetch —
+> the 512 MB preset (2 vCPU) is now ≈$4.38, *above* the $4.04 recorded here,
+> and a 4096 MB two-core machine ≈$25.38, well above the $21.40 this table
+> carries — so the monthly TOTALS below are low, and no line item should be
+> read as directionally safe. The only line that moves DOWN is
+> RAM-above-preset on the SAME 4096 MB machine as cores rise, because the
+> preset's INCLUDED RAM scales per vCPU (256 MB/core): 3.5 GB at 2 cores →
+> 3.0 GB at 4 → −$3.00, which is what makes the 2→4 step ≈+$1.38 rather than
+> +$4.38. That is why the table is dated.)
 >
 > *Controller follow-up: re-fetch and re-derive this table (and the `fly.toml`
 > COST comment, which carries the same snapshot) — flagged, not silently
