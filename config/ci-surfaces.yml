@@ -44,11 +44,13 @@ version: 1
 # 6.6 m of headroom), and #14015's M5 row moved it once more: the emitted worst-shard watchdog
 # is 25 m, arm-2 SUM 56.64 m, x 1.5 = 85.0 m against the 90 m cap, 5.0 m of headroom.
 # ⛔ THAT IS A PER-TREE MEASUREMENT, not a constant — and at THIS head it is re-measured, not
-# carried: `--emit-push-matrix` packs six shards (a, b, c, d, i, k) at 720.2 s and the other
-# five (e, f, g, h, j) at 720.1 s, so `ceil(720.2/60 x 2)` = 25 m governs (a shard's job-level
-# wall clock is the SLOWEST shard's). The 0.1 s over #14015's own emission is this branch's
-# `tests/test_13998_capacity_notice.py` registering at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and
-# it matters only because it is a hundredth of a second from rounding the OTHER way: two
+# carried: `--emit-push-matrix` packs ten shards (a, b, c, d, e, g, h, i, j, k) at 720.7 s and the
+# eleventh (f) at 720.6 s, so `ceil(720.7/60 x 2)` = 25 m governs (a shard's job-level
+# wall clock is the SLOWEST shard's) — and the same emission prints `watchdog_minutes: 25`, so
+# the two agree by construction rather than by a hand re-read. The 0.3 s over the LARGER parent's
+# own emission (#14012's 720.4 s) is the union of both parents' registrations plus this branch's
+# `tests/test_13998_capacity_notice.py` at the flat 2.0 s `DEFAULT_FAST_WEIGHT`, and it matters only
+# because it sits a fraction of a second from rounding the OTHER way: two
 # intermediate folds of this branch emitted 24 m before main's next fold re-packed the pool down
 # to 720.0 s, and this head is one main fold away from that again. Re-run
 # `--emit-push-matrix`; never carry the last revision's minute. Those numerals are a

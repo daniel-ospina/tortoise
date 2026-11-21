@@ -1106,11 +1106,18 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
             "DELIVERABLE address — organizations.email and "
             "organizations.customer_email are empty OR do not have an address "
             "shape (`_deliverable_address`), and the owner's GoTrue address "
-            "answered none EITHER (absent, present but not an address shape "
-            "(`_deliverable_address` refuses it silently — no line is logged "
-            "for that one), or the lookup FAILED and logged a warning above; "
-            "these are THREE states and this line does not claim which) — "
-            "nothing is sent for it",
+            "answered none EITHER. That third rung has FOUR states and this "
+            "line does not claim which: the owner row is absent; the value it "
+            "carries is not an address shape (`_deliverable_address` refuses "
+            "it silently, logging nothing); resolving the owner RAISED and "
+            "logged a warning above; or the GoTrue admin call itself failed — "
+            "and ⛔ THAT ONE IS LOGGED NOWHERE: `supabase_control.owner_email` "
+            "swallows a transport error, a non-200 and missing config with "
+            "`return None` (its contract is 'never raises'), so an auth outage "
+            "reaches this line looking exactly like an account with no "
+            "address. Read the SET, not this line: a burst of these while the "
+            "control plane is otherwise healthy is an outage; a single one is "
+            "a missing address.",
             org_id, notice.threshold)
         return {"status": "no-email", "org_id": org_id}
     copy = render(notice.threshold,
