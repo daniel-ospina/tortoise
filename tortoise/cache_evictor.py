@@ -1167,24 +1167,63 @@ def evict(
         # ⛔ GATE 4's second half — a lease taken DURING the probe must still win. The
         # plan-time check is not enough: a read can start between planning and the
         # statement, which is exactly the window a lease exists to close.
+        #
+        # ⛔ AND GATE 6 GETS THE SAME SECOND HALF, FOR THE SAME WINDOW. The header's promise
+        # ("a pinned node is NEVER deleted, whatever the selector offered") is the STRONGER
+        # one, so it cannot be the weaker one that goes un-re-asked: a `pin` declaration
+        # written between planning and the DELETE used to let those nodes be deleted AND
+        # reported in `deleted`, so the report could not even show that it happened. The
+        # polarity is gate 6's own — anything truthy holds, and a predicate that RAISES
+        # holds too (unanswerable is not "unpinned"), reported apart because the remedies
+        # differ.
         holds = leases.held()
         final: list[Candidate] = []
+        late_pinned = 0
+        late_pinned_unanswerable = 0
         for candidate in local:
             if candidate.node_id in holds:
                 if candidate.node_id not in held_leased_ids:
                     held_leased_ids.add(candidate.node_id)
                     held_leased.append(candidate)
                 continue
+            if pinned is not None:
+                answered = True
+                try:
+                    is_pinned = bool(pinned(candidate))
+                except Exception:
+                    is_pinned = True
+                    answered = False
+                if is_pinned:
+                    if candidate.node_id not in held_pinned_ids:
+                        held_pinned_ids.add(candidate.node_id)
+                        seen_ids = held_pinned if answered else held_pinned_unanswerable
+                        seen_ids.append(candidate)
+                    if answered:
+                        late_pinned += 1
+                    else:
+                        late_pinned_unanswerable += 1
+                    continue
             final.append(candidate)
 
         if not final:
             # ⛔ NOT "population". Every node this pass was about to take is held by a
-            # READER (skipped_leased), so blaming the population sends the next reader
-            # to research an exhausted selector that is not the problem — the same
-            # misattribution class `stop_reason` exists to separate ("satisfied" |
-            # "population" | "licence" | "pass_budget"), and worse here because the
-            # answer is "a reader is holding these", which no population query reveals.
-            stop_reason = "leased"
+            # READER (skipped_leased) or by a pin declared mid-sweep (skipped_pinned), so
+            # blaming the population sends the next reader to research an exhausted
+            # selector that is not the problem — the same misattribution class
+            # `stop_reason` exists to separate ("satisfied" | "population" | "licence" |
+            # "pass_budget"), and worse here because the answer is "something is holding
+            # these", which no population query reveals. The pin arms come first because
+            # the pin is the control a reader can clear themselves (`unpin`), whereas a
+            # lease is a reader that was live at statement time.
+            # `pinned` is the only other way a candidate leaves this loop, so an empty
+            # `final` is exhausted by the two pin arms and the lease arm below — the
+            # fallback is a construction, not an assumption about what happened.
+            if late_pinned_unanswerable:
+                stop_reason = "pin-unanswerable"
+            elif late_pinned:
+                stop_reason = "pinned"
+            else:
+                stop_reason = "leased"
             break
         # ⛔ `snapshot_out` IS HOW THE ABORT PATH LEARNS WHAT THE INVALIDATION DID. On a
         # raise the tuple below never arrives, so without this channel the report would

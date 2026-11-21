@@ -1038,3 +1038,122 @@ def test_the_declaration_time_closure_is_label_scoped_too_not_just_the_read():
         "label scope is gone, and the budget/degree ceilings are computed over nodes this "
         "control cannot protect"
     )
+
+
+def test_gate_refuses_a_reading_it_could_not_read_or_that_is_truncated():
+    """The fail-closed guard on `.gate()` itself, not only via `gate_reason()`.
+
+    ⛔ `PinReading.gate()` carries a `⛔` comment calling its unconditional comparison
+    "a fail-open on this door": for `readable=False` the closure is EMPTY, so a caller that
+    skipped `gate_reason()` deletes the entire pinned population while the report reads
+    `held_pinned: 0`; for `truncated=True` the closure is PARTIAL, so it deletes exactly the
+    pinned nodes past the read bound. Every production caller checks `gate_reason()` first,
+    but `read(g).gate()` is the natural low-level spelling, so the door must refuse on its
+    own — and until this row existed, deleting the guard left the whole suite green.
+    """
+    from tortoise.resident_pin import PinReading
+
+    unreadable = PinReading(label="Point", key_prop="id", readable=False,
+                            source="declaration unreadable")
+    with pytest.raises(PinRefused) as unread:
+        unreadable.gate()
+    assert unread.value.code == "unreadable", (
+        "an unreadable reading did not refuse with the `unreadable` code — a gate built "
+        "from an empty closure reports `held_pinned: 0` and deletes the pinned population"
+    )
+
+    truncated = PinReading(label="Point", key_prop="id", truncated=True,
+                           keys=frozenset({"p0"}), closure=frozenset({"p0"}))
+    with pytest.raises(PinRefused) as short:
+        truncated.gate()
+    assert short.value.code == "truncated", (
+        "a TRUNCATED reading built a gate anyway — its closure is a lower bound, so the "
+        "gate would delete exactly the pinned nodes past the read bound"
+    )
+
+
+def test_a_pinned_node_held_by_a_reader_is_reported_pinned_not_leased():
+    """The `before the lease` half of gate 6's ordering, which had no row at all.
+
+    ⛔ The ordering test next door is named `..._before_the_record_probe_and_the_lease` but
+    never passed `leases`, so only the record half was graded: moving the pin check AFTER
+    `leases.held()` left every row green. The order matters because the two remedies are
+    different — `unpin` clears a pin, nothing but time clears a live reader — and a pinned
+    node reported as `skipped_leased` sends an operator to wait for a reader that is not
+    the reason it was kept.
+    """
+    from tortoise.cache_evictor import ReadLeases
+    from tortoise.resident_pin import PinReading
+
+    g = _FakeGraph(["p0", "p1"])
+    leases = ReadLeases()
+    leases.acquire(g.id_of("p0"))
+    pinned = PinReading(label="Point", key_prop="id",
+                        keys=frozenset({"p0"}), closure=frozenset({"p0"}),
+                        budget=PinBudget(max_nodes=10))
+
+    report = evict(
+        _assessment(nodes=1), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest,
+        record_probe=_record,          # the record CAN serve it, so only the two gates decide
+        pinned=pinned.gate(),
+        leases=leases,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=1, batch_size=10, max_passes=2),
+    )
+
+    assert "p0" in g.node_keys()
+    assert {c.key for c in report.skipped_pinned} == {"p0"}, (
+        "a node that is BOTH pinned and leased was not reported as pinned — the pin gate "
+        "is being asked after the lease, so the operator is sent to wait on a reader"
+    )
+    assert report.skipped_leased == (), (
+        "the pin gate ran AFTER `leases.held()` — the 'before the lease' ordering in the "
+        "module header is unenforced"
+    )
+
+
+def test_a_pin_declared_between_planning_and_the_delete_still_wins():
+    """Gate 6's second half — the same window the lease already re-checks.
+
+    ⛔ `final` re-asks `leases.held()` immediately before `_delete_nodes` because "a read can
+    start between planning and the statement". The pin is the STRONGER promise ("a pinned
+    node is NEVER deleted, whatever the selector offered") and had no equivalent re-ask, so
+    a declaration written in that window let the nodes be deleted AND reported in `deleted`
+    — the report could not even show that it happened.
+    """
+    g = _FakeGraph(["p0", "p1"])
+
+    # ⛔ ASKED TWICE IS THE SIMULATION. The predicate answers False on the FIRST ask for a
+    # node (so it is planned and reaches `final`) and True on any later ask — which is
+    # exactly a declaration written between planning and the DELETE. Order-independent, so
+    # it does not depend on how many times the plan-time gate happens to be consulted.
+    asks: dict[int, int] = {}
+
+    def pin_appears_mid_sweep(candidate: Candidate) -> bool:
+        asks[candidate.node_id] = asks.get(candidate.node_id, 0) + 1
+        return asks[candidate.node_id] > 1
+
+    report = evict(
+        _assessment(nodes=1), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=pin_appears_mid_sweep,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=1, batch_size=10, max_passes=1),
+    )
+
+    assert asks.get(g.id_of("p0"), 0) > 1, (
+        "the pin predicate was never re-asked before the delete — gate 6 has no second "
+        "half, so no window is closed"
+    )
+    assert report.deleted == (), (
+        "the pin gate is only asked at PLAN time — a declaration written between planning "
+        "and the delete statement did not hold the node, so a pinned node was deleted "
+        "while the report called it `deleted`"
+    )
+    assert {c.key for c in report.skipped_pinned} == {"p0"}, (
+        "the node was held but not reported as pinned, so the operator cannot see that a "
+        "declaration written mid-sweep is what kept it"
+    )
