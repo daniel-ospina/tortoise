@@ -1231,6 +1231,13 @@ def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]
                 out |= {
                     sub.id for sub in ast.walk(generator.target) if isinstance(sub, ast.Name)
                 }
+            # ⛔ AND THE CLASS HALF IS THE OPPOSITE: a comprehension in a CLASS BODY cannot
+            # read the class-body names — `class C: torch = object(); rows = [torch for
+            # _ in …]` raises `NameError` (measured on this interpreter), while the same
+            # comprehension inside a FUNCTION does see that function's locals. So the flag
+            # set here suppresses ONLY the class-body contribution below, never a function
+            # scope's (final review of #14160, P2).
+            crossed_comprehension = True
         elif isinstance(node, ast.ClassDef):
             # ⛔ A GENERIC CLASS'S TYPE PARAMETER REACHES ITS METHODS. PEP 695: a class type
             # parameter "is valid within the class body and inner scopes contained
@@ -1246,11 +1253,6 @@ def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]
                 # which is exactly the descent `_function_local_bindings` implements.
                 out |= _function_local_bindings(node)
             crossed_callable = True
-        elif isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
-            # a comprehension is its own scope: it cannot read a CLASS BODY's names
-            # (measured `NameError`), though it does read the enclosing FUNCTION's
-            # locals, which is why this flag gates only the class-body contribution.
-            crossed_comprehension = True
         node = parents.get(id(node))
     return out
 
