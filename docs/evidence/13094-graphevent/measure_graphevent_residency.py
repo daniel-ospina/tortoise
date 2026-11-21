@@ -130,10 +130,13 @@ def measure(uri: str, graph: str, sizes: list[int], keep: bool,
             payload_bytes: int | None = 190) -> dict:
     db = _connection(uri)
     if not graph.startswith(GRAPH_PREFIX):
-        raise SystemExit(
-            f"refusing to write synthetic :GraphEvent rows into {graph!r}: the "
-            f"name must start with {GRAPH_PREFIX!r} so a production graph can "
-            f"never be measured by accident")
+        # exit 2, the code `tools/graphevent_home.py` uses for "could not run" —
+        # a REFUSAL is not a measurement, and `1` is reserved for a produced
+        # verdict in the sibling verb.
+        print(f"refusing to write synthetic :GraphEvent rows into {graph!r}: the "
+              f"name must start with {GRAPH_PREFIX!r} so a production graph can "
+              f"never be measured by accident", file=sys.stderr)
+        raise SystemExit(2)
     with contextlib.suppress(Exception):
         # an absent graph is the desired state
         db.connection.execute_command("GRAPH.DELETE", graph)
