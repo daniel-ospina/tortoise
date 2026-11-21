@@ -9664,6 +9664,10 @@ surfaces:
   # `test_a_tool_only_diff_selects_this_pin` in this file is what keeps both.
   # Hermetic: source loading plus pure `dict` comparison — no DB, no graph, no docker, no
   # network, no model call.
+  # #14192 review(): the HARNESS's own verdict must be able to go red — the
+  # rank-identity pin. Registered because it guards `tools/read_wave_latency.py`
+  # and a revert of `_result_id`/`compare()` would otherwise ship with CI green
+  # (the false PASS the pin exists to remove).
   - test_14192_read_wave_tool.py
   ep:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry

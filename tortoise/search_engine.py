@@ -6705,6 +6705,38 @@ class RelationshipDecoration(dict):
 _READ_WAVE_WIDTH = 5
 
 
+class _InlineMember:
+    """#14192 — a pool member's role, run on the CALLER's thread when no worker
+    can be had. Minimal duck-type of ``concurrent.futures.Future`` for the one
+    method ``_ReadWave.result`` uses.
+
+    It exists so a thread-exhausted host degrades to the PRE-change behaviour
+    (the read runs on the caller's thread, where every ContextVar the graph
+    handle reads is already bound) instead of losing the read. Lazy on purpose:
+    ``submit`` must not block on the read it just failed to schedule, and the
+    consuming thread already blocks at ``result()``.
+    """
+
+    __slots__ = ("_thunk", "_done", "_value", "_exc")
+
+    def __init__(self, thunk) -> None:
+        self._thunk = thunk
+        self._done = False
+        self._value = None
+        self._exc: BaseException | None = None
+
+    def result(self):
+        if not self._done:
+            self._done = True
+            try:
+                self._value = self._thunk()
+            except BaseException as exc:  # noqa: BLE001 — re-raised below
+                self._exc = exc
+        if self._exc is not None:
+            raise self._exc
+        return self._value
+
+
 class _ReadWave:
     """#14192 — independent graph reads, dispatched together, consumed later.
 
@@ -6740,13 +6772,26 @@ class _ReadWave:
     around the read still sees it and the degradation contract (#2952/#6971)
     does not move: a raise still resets the whole decoration and labels it.
 
-    ⛔ A MEMBER THAT CANNOT BE STARTED COSTS ITS OWN ROWS, NOT THE BATCH.
+    ⛔ A MEMBER THAT CANNOT BE STARTED RUNS ON THE CALLER'S THREAD.
     ``submit`` never raises: a scheduling failure (``RuntimeError: can't start
-    new thread`` on a thread-exhausted host) records the member as ABSENT, so
-    the other members still answer. Before this class existed such a host paid
-    nothing — the reads were on the caller's own thread — and a scheduling
-    failure must not be allowed to destroy a whole batch's decoration that the
-    reads themselves are perfectly able to produce.
+    new thread`` on a thread-exhausted host) hands the member to an
+    ``_InlineMember``, so it executes where every ContextVar the graph handle
+    reads is already bound — the PRE-change behaviour, restored. ⛔ It is
+    deliberately NOT dropped: a dropped member is an empty read that the batch
+    cannot distinguish from "this point has no relationships", so a claim with a
+    disputed NAND / contested peer would render as undisputed and #6971's marker
+    would not fire (the batch is labelled only when something RAISES).
+
+    ⛔ WHICH ContextVars A WORKER INHERITS IS A STATED LIST, because this is the
+    seam a future member will read: the worker gets the TWO METERING vars
+    (``graph_ops._ACTIVE``/``_PHASE``) via ``bind_metering_context`` and NOTHING
+    ELSE — not ``_CACHE_WRITE_AUTHORIZED`` (§17.1), not
+    ``_TOLERATE_ALTERED_NUMBERS``, not the stage timeline. That is sound only
+    because every member is a READ statement; a member that issued a write would
+    be measured as an undeclared cache write (or refused once the handle guard is
+    armed) while the caller's identical write was allowed. If a write-classified
+    member is ever needed here, bind those vars too or run it inline — do not
+    assume this comment covers it.
 
     ⛔ THE ORDER OF A MEMBER'S OWN ROWS IS UNCHANGED — each query still returns
     its own result set, so a re-schedule can reorder WORK, never ROWS, and the
@@ -6803,22 +6848,28 @@ class _ReadWave:
             self._futures[name] = self._pool.submit(metered)
         except Exception:  # noqa: BLE001 — a scheduler failure is not the read's
             # ``ThreadPoolExecutor.submit`` starts a thread, and a host that
-            # refuses one (thread/FD exhaustion) raises here. Recording the
-            # member as ABSENT keeps the ``never raises`` contract and costs
-            # this member's rows only — the alternative is the caller's
-            # blanket handler resetting EVERY point's decoration (#6971).
+            # refuses one (thread/FD exhaustion) raises here. ⛔ THE MEMBER IS
+            # NOT DROPPED — it runs INLINE on the caller's thread, which is
+            # exactly what happened before this class existed and is the only
+            # honest answer: these are READS the caller's own thread is
+            # perfectly able to perform. Dropping it would return a
+            # complete-looking decoration with the cap-exempt critical classes
+            # (NAND / terminal / contested peers, D3/D4) silently missing, and
+            # #6971's marker would not fire, because the batch was never
+            # labelled — a disputed claim rendering as undisputed. A read that
+            # RAISES inline re-raises through ``result()`` like any other, so
+            # the caller's handler still resets and labels the batch.
             logger.warning(
-                "read wave could not start member %r — it reads as absent",
-                name, exc_info=True)
-            self._futures[name] = None
+                "read wave could not start member %r — running it inline on "
+                "the caller's thread", name, exc_info=True)
+            self._futures[name] = _InlineMember(thunk)
 
     def result(self, name: str):
         """Block on ``name`` and return its value (``[]`` if never submitted).
 
         An ABSENT member is an empty read, not an error: the call sites submit
         conditionally (``if op_ids:``), and a caller must not have to
-        distinguish "the guard was false" from "the read answered nothing"
-        from "the scheduler refused it".
+        distinguish "the guard was false" from "the read answered nothing".
         """
         fut = self._futures.get(name)
         return [] if fut is None else fut.result()

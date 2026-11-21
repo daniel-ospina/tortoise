@@ -260,14 +260,21 @@ def run(args) -> dict:
 
     install_timers()
     if args.no_embed:
-        # A DETERMINISTIC ARM. This box's embedder is contended (measured:
-        # ``embed_get`` bimodal between 0 ms and ~330 ms, and the dense leg
-        # DECLARED ``vector:load_in_flight`` on most queries), which swamps a
-        # p50/p95 comparison of the SCHEDULING change being measured. Pinning
-        # the embedder off makes the dense leg declare ``no_embedder`` (#2952)
-        # in BOTH arms, so the comparison isolates what the change touches. It
-        # is NOT a claim about production latency — the stage table says the
-        # leg declined.
+        # AN ARM WITHOUT A WARM EMBEDDER. This box's embedder is contended
+        # (measured: ``embed_get`` bimodal between 0 ms and ~330 ms, and the
+        # dense leg DECLARED ``vector:load_in_flight`` on most queries), which
+        # swamps a p50/p95 comparison of the SCHEDULING change being measured.
+        # ⛔ WHAT THIS FLAG ACTUALLY CONTROLS, and what it does not: it patches
+        # ``EmbeddingModel.get``, but the read resolves its decline FIRST through
+        # ``EmbeddingModel.await_read_ready_reason(...)`` (sdk.py, the read
+        # path's first step after the stage mark), which answers
+        # ``load_in_flight`` when the model has not warmed inside the read's
+        # budget — so on a cold box the patched ``get`` is never reached and the
+        # DECLARATION comes from the box, not from this flag. That is why the
+        # recorded arms declare ``vector:load_in_flight`` rather than
+        # ``no_embedder``: both arms, same declaration, same box, which is what
+        # makes the comparison fair — not this flag. It is not a claim about
+        # production latency.
         from tortoise.embeddings import EmbeddingModel
         EmbeddingModel.get = staticmethod(lambda *_a, **_k: None)  # type: ignore[method-assign]
     sdk = TortoiseSDK()
@@ -466,9 +473,13 @@ def main() -> None:
                     help="a previous run's JSON — prints the delta and the "
                          "rank-identity verdict")
     ap.add_argument("--no-embed", action="store_true",
-                    help="pin the embedder off so the dense leg DECLARES "
-                         "no_embedder in both arms (the deterministic arm; "
-                         "see run())")
+                    help="run without a warm embedder: both arms then take the "
+                         "SAME declined dense leg, so the comparison isolates "
+                         "the scheduling change. ⛔ It patches "
+                         "EmbeddingModel.get only — on a cold box the read "
+                         "declines earlier, via "
+                         "await_read_ready_reason, and the declaration comes "
+                         "from the box (see run())")
     ap.add_argument("--ab-relationships-from", default="",
                     help="a git revision: interleave its "
                          "get_relationships_bounded against the working tree's "

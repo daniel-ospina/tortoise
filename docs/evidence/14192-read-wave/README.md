@@ -16,7 +16,7 @@ answer the two halves of the issue's *Done when*: **a measured p50/p95 delta** a
 | queries | the first 24 of `benchmarks/query_mix.json`, identical in both arms |
 | read | `TortoiseSDK._tortoise_fts_query` — what `/v1/search` and the MCP `tortoise_search` call |
 | arms | pre-change `get_relationships_bounded` out of `e74cf1d13d` vs the working tree, **in one process, alternating** |
-| code measured | harness commit `381620c407` + the fixes in the same PR (`ab-relationships.json` records that sha) |
+| code measured | the tree at harness commit `381620c407` + the review fixes. `ab-relationships.json` records `0667b5358950`, the PRE-amend/pre-rebase copy of that tree: `git diff 0667b5358950 1c07761e69` touches only `config/ci-surfaces.yml` and this README, so `tortoise/`, `tests/` and `tools/` are byte-identical to the merged head. The pointer is recorded rather than rewritten so a reader can check that claim |
 
 ⛔ **The absolute numbers are this box's, not production's.** They price the
 *change*, not the read: this container answers a graph query in single-digit
@@ -27,7 +27,13 @@ the milliseconds are not.
 ⚠️ **The dense leg is DECLARED absent in both arms.** This box's embedder is
 contended (`embed_get` bimodal 0 ms / ~330 ms; the dense leg declared
 `vector:load_in_flight` on every query), which would swamp a p50 comparison. Both
-arms ran with `--no-embed`, so both declare:
+arms ran with `--no-embed`. ⚠️ **Read what that flag does and does not do:** it
+patches `EmbeddingModel.get`, but the read resolves its decline FIRST via
+`EmbeddingModel.await_read_ready_reason(...)`, which returns `load_in_flight` when
+the model has not warmed inside the read's budget — so on this box the flag never
+executed and the declaration below is the BOX's, not the flag's. That is still a
+deterministic comparison (both arms, same declaration, same box), and it is
+stated here rather than credited to the flag. Both arms declare:
 
 ```
 vector:load_in_flight · fts:ok · structural:empty_results · valid_time:no-prefer-latest-intent
@@ -107,11 +113,12 @@ The changed function in isolation, 9 alternating rounds on the same 12 ids:
    budget is untouched. A member that raises still re-raises on the consuming
    thread (pinned by `test_a_raising_wave_member_resets_the_batch_and_labels_it`),
    so the whole-batch reset + `decoration_error` labelling (#6971) is unchanged.
-   Each member is submitted wrapped in `graph_ops.bind_metering_context` and
-   `retrieval_metering.bind_worker_context` — without them the capture's graph-op
-   counter and the retrieval tally would silently miss every read the wave
+   Each member is submitted wrapped in `graph_ops.bind_metering_context` — without
+   it the capture's graph-op counter silently missed every read the wave
    performs (that is exactly what `tests/test_capture_graph_ops.py` measured
-   before the wrappers were added).
+   before the wrapper was added: 6 reads recorded 1). ⛔ `retrieval_metering`
+   is deliberately **NOT** bound: that tally accounts the retrieval LEGS, and
+   these are decoration graph ops, not legs (#2952).
 2. **The one query that dominated the wave.** Parallelising five reads only helps
    if no single member dominates — and Q2-crit did: it evaluates a per-row
    Beta-variance division to decide whether a peer is *contested*.
