@@ -11,7 +11,7 @@
 | Honcho (Plastic Labs) | [honcho.md](honcho.md) | Agent memory (reasoning-based, pure-usage pricing) | 1 | ⚠️ Partial — thin stub |
 | **Mem0** | [mem0.md](mem0.md) | Agent memory infrastructure (Apache-2.0 SDK + cloud; co-occurrence "graph") | 1 | ✅ Complete (rewritten 2026-09-11) |
 | **Supermemory** | [supermemory.md](supermemory.md) | Agent memory + retrieval (vector-graph + "dreaming" derived facts/profiles) | 1 | ⚠️ Bootstrap — mechanism captured; §7–11 incomplete (2026-09-11) |
-| **Cognee** | [letta-cognee.md](letta-cognee.md) | Open-source knowledge-graph memory engine (Python) — `contradicts` edge + bi-temporal validity | 1 | ✅ Complete |
+| **Cognee** | [letta-cognee.md](letta-cognee.md) | Open-source knowledge-graph memory engine (Python) — `contradicts` edge + bi-temporal validity; **since 2026-11-19 also a "company brain" with auto-ontology (learned taxonomy, Premium $99/mo)** + human conflict adjudication. No belief propagation, no axiom enforcement | 1 | ✅ Complete — **re-researched 2026-11-21** (ontology pivot, 1.6.6 conflict review, 10× repricing); see `_analysis.md` §10 |
 | **Kumiho** | [kumiho.md](kumiho.md) | Graph-native cognitive memory — formal AGM belief revision over a versioned property graph | 1 | ✅ Complete |
 | **Letta** (formerly MemGPT) | [letta-cognee.md](letta-cognee.md) | Stateful-agent harness + agent-managed memory (git-backed Markdown filesystem) | 1 | ✅ Complete (combined profile) |
 | **Emergence AI** | [emergence-ai.md](emergence-ai.md) | Enterprise agentic platform (CRAFT); memory = "Context Packs" | 2 | ✅ Complete |
@@ -32,6 +32,6 @@
 
 ## Coverage note
 
-Profiles are factual (11 dimensions + Notes & Sources). Interpretation, threat classification, the primitives matrix and the strategic implications live in `_analysis.md` (§1–§3). Raw research is bootstrapped from `_template.md`.
+Profiles are factual (11 dimensions + Notes & Sources). Interpretation, threat classification, the primitives matrix and the strategic implications live in `_analysis.md` (§1–§3, §10). Raw research is bootstrapped from `_template.md`.
 
-*Last updated: 2026-09-11*
+*Last updated: 2026-11-21.*
