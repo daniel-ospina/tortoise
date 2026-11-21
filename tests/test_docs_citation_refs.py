@@ -3055,18 +3055,1301 @@ _D5_BLANK_COUNT_RE = re.compile(
     r"that counts the BLANK ones at YOUR head")
 
 
-#: ANY `grep -c…` prescription in the bundle, whatever command prefix and whatever sentence
-#: follows it, plus the shape that makes a prescription BLANK-class. Keying "exactly one" on
-#: the COMMAND PREFIX was still a spelling rather than a property (#13956 review, cycle 5):
+#: The COUNT READER: it walks every `grep` INVOCATION in the bundle and reads the expression out
+#: of the words that follow it. `-`-anchored flag words are followed by a quoted expression, and
+#: a flag that takes an argument CONSUMES the next word as its value — so a flag's own quoted
+#: argument (`--exclude '*.md'`, `-A '2'`) is never mistaken for the expression beside it. The
+#: block also carries the shape that makes a prescription BLANK-class.
+#:
+#: ⛔ IT IS A WORD WALK, NOT ONE REGEX OVER RAW TEXT (#13995 review, P2 — MEASURED). The reader
+#: this replaces matched the whole invocation with a single pattern in which the flag run was a
+#: character class and the expression was "the next quoted token", so a SEPARATE value belonging
+#: to a flag was read as the expression: `grep -c --exclude '*.md' '^[+-]$'` was reported as a
+#: count of `*.md`, and `grep -c -A '2' '^[+-]$'` as a count of `2`. That is not merely a miss —
+#: the wrong expression is neither the blank class nor a shape the residual block below names,
+#: so a SECOND blank-class prescription appended in that spelling left the arm GREEN, which is
+#: the false PASS #13962 exists to retire. Parsing to a command/option tree is how the comparable
+#: static analysers solve it (ShellCheck, ESLint and semgrep all dispatch on AST NODES rather than
+#: on text, precisely because text cannot tell a command from text that looks like one, nor an
+#: option's VALUE from an operand): the walk below consumes each argument-taking flag's value,
+#: so the shapes it still does not reach are the ones stated at the foot of this block.
+#:
+#: ⛔ AND THE CLASS IS THE MATCH SET THAT SURVIVES THE FLAGS, NOT THE EXPRESSION ALONE
+#: (#13995 review round 4, P2 — MEASURED on GNU grep 3.11). A `-`-anchored `c` does not by itself
+#: say a command counts THIS class: `-v` INVERTS the match set, so `grep -vc '^[+-]$'` counts the
+#: NON-blank lines (measured: on the 4-line probe `+`, `-`, blank, `++`, `-c` gives 2 and `-vc`
+#: gives the 2 lines that are not `+`/`-` — same number, different class), and `-l`, `-L` and
+#: `-q` WIN over `-c` entirely (`-lc` prints the FILENAME, `-Lc` prints the files WITHOUT a match,
+#: `-qc` prints nothing — all measured). So the flags are read for what they do to the count: an
+#: INVERTED count is SEEN (`_d5_count_prescriptions`) and deliberately NOT graded against the
+#: positive class (`_d5_blank_class_prescriptions`), and a word carrying a count-SUPPRESSING flag
+#: is not a count request at all (`_requests_a_count`). Grading a complement count as this class
+#: would red a document that prescribes the blank count AND its complement — the false RED on a
+#: correct document this file treats as the worse direction.
+#: ⛔ THAT SENTENCE IS A SHAPE AND NOT A PROMISE ABOUT SPELLING (#13995 review, P2 — MEASURED).
+#: Earlier cuts claimed EVERY count prescription in the bundle regardless of how it was prefixed
+#: or worded, which is the false-PASS guarantee #13962 was filed against. That claim is FALSE in
+#: both directions: the reader does not see `grep -cE ^[+-]$` (unquoted, `[]`), and it DOES read
+#: `grep --count '^\+$'`, which is not `-c`-spelled at all. The shapes it does not read are listed
+#: at the foot of this block; that list is a list, not the closure. Keying "exactly one" on the
+#: COMMAND PREFIX was still a spelling rather than a property (#13956 review, cycle 5):
 #: this row already prescribes `git diff origin/main...HEAD -- tortoise/` five times, so a
 #: second BLANK-class command written that way left the count GREEN while the row carried two
 #: prescriptions — the retired, narrower one among the ungraded ones — and, in the other
 #: direction, it redded a legitimately different command of the same shape
-#: (`grep -cE '^\+import '`), which is an over-block on a correct document. Keying on the
-#: EXPRESSION is prefix-independent and refuses only what the class is: a count of the blank
-#: `+`/`-` lines.
-_D5_ANY_COUNT_EXPR_RE = re.compile(r"grep -c[A-Za-z]* '([^']+)'")
-_D5_BLANK_CLASS_EXPR_RE = re.compile(r"\^(?:\\[+-]|\[[-+]+\])\$")
+#: (`grep -cE '^\+import '`), which is an over-block on a correct document. Refusing on the
+#: CLASS (a count of the blank `+`/`-` lines) rather than on the prefix is what avoids that
+#: over-block; the walk below carries the SPELLING, because a shape is the most a guard of this
+#: kind can honestly claim.
+#:
+#:
+#: ⛔ AND THE FLAGS AND THE QUOTE ARE PART OF THE MATCH — AN EARLIER CUT OF THIS BLOCK CALLED
+#: ITSELF "PREFIX-INDEPENDENT" AND IT WAS NOT (#13962, MEASURED). The cut above read
+#: `grep -c[A-Za-z]* '<expr>'` — ONE spelling of a count command — while claiming to read the
+#: expression "whatever command prefix". SEVEN other spellings of the SAME prescription left
+#: this arm GREEN, each measured by appending one line to the bundle and running the cell that
+#: calls `_d5_blank_count_expression` (`1 passed` for every one): `grep -Ec '^\+$'` (flag
+#: before the `c`), `grep -cE "^\+$"` (double-quoted
+#: expression), `grep -c -E '^\+$'` (flags split), `grep --count '^\+$'` (long form),
+#: `grep -c -- '^\+$'` (POSIX end-of-flags `--`), `grep -c --color=never '^\+$'` (a long flag
+#: WITH a value) and `grep -c $'^\+$'` (ANSI-C quoting). In every one the row carried TWO
+#: BLANK-class prescriptions — the retired, narrower one among the ungraded ones — while the arm
+#: whose whole job is to refuse that reported the class as graded once.
+#: ⛔ THE FIRST CUT OF THIS FIX READ FOUR OF THESE AND WAS ITSELF GUILTY OF THE SAME OVER-CLAIM
+#: (#13995 review, P1 — MEASURED): its flag word was `-{1,2}[A-Za-z][\w-]*`, which cannot
+#: express a bare `--` (a letter is required after the dashes) nor `--flag=value` (`=` is outside
+#: `[\w-]`), and its quote could not express `$'…'` — so the last three mutants above were
+#: invisible to it while its own paragraph called the claim "every count command spelled
+#: `grep <flags> '<expr>'`". A flag word may also carry an ATTACHED quoted value
+#: (`--include='*.py'`, `-e'^[+-]$'`), which is that flag's own argument and not the expression
+#: beside it; the expression itself may be single-, double- or ANSI-C-quoted.
+#:
+#: ⛔ AND A NON-FLAG WORD IS THE EXPRESSION OR NOTHING (#13995 review round 2, P2 — MEASURED).
+#: The round-1 wording said the run "keeps a non-flag token (a filename, a revision) out of the
+#: run", which reads as *the token is skipped and the expression is still found*. It is not: a
+#: word that does not begin with `-` ENDS the flag run, and the reader then takes THAT word as the
+#: expression — quoted, or the command is unread. So an unquoted first operand (the expression
+#: itself, or a filename written before it) makes the whole invocation UNSEEN rather than
+#: parsed-around, which is why that spelling is listed below as unread: it returns `[]`, so a
+#: second BLANK-class prescription written that way is invisible, exactly as #13962's original
+#: mutants were.
+#:
+#: ⛔ WHAT IT STILL DOES NOT READ, stated because a guard may be narrow but may not describe
+#: itself as complete — this file's own rule (the "Said plainly because a guard may be narrow"
+#: sentence in `_typed_answers_to_tortoise_cmd`'s docstring, cited by FUNCTION NAME rather than by
+#: line because the number is exactly what rots, and by the sentence's own opening words because
+#: "closing sentence" was wrong: the docstring continues past it). Every
+#: bullet is MEASURED against `_d5_count_prescriptions` — `[]` for all but the concatenation,
+#: which is pinned at its FIRST FRAGMENT (`['^']`), as its own bullet says — in TWO groups that
+#: the previous wording wrongly merged (#13995 review round 3, P2):
+#:
+#: A. SHAPES THAT REALLY ARE BLANK-CLASS PRESCRIPTIONS, and that this reader does not see — so
+#:    a second one appended to the row leaves the arm GREEN, exactly as #13962's mutants did:
+#:      * an UNQUOTED first operand — `grep -cE ^[+-]$` (and equally a bare filename before the
+#:        expression, `grep -c FILE '^\+$'`, whose pattern is the word `FILE`);
+#:      * flags written AFTER the expression — `grep '^\+$' -c` (the flag run read is empty, so
+#:        nothing asks for a count);
+#:      * a pattern supplied from a FILE — `grep -c -f /tmp/pats '^[+-]$'`. With `-f`/
+#:        `--file` the quoted token is a FILE operand (measured `No such file or directory`), so
+#:        the walk declines the invocation rather than invent a count of it. ⛔ The `-e` half of
+#:        this bullet is GONE, not glossed (#13995, MEASURED): `grep -c -e'^[+-]$'`,
+#:        `grep -ce'^[+-]$'`, `grep --count --regexp='^[+-]$'` and `grep -c -e 'foo' -e '^[+-]$'`
+#:        are READ, and every `-e` argument is reported as its own prescription — a command with
+#:        two `-e` flags counts the UNION of both patterns, so the second one hiding behind the
+#:        first was exactly the false PASS this bullet used to certify as unreadable;
+#:      * a count performed by another tool — `rg -c '^\+$'`, `awk`;
+#:      * an expression built by CONCATENATION — `grep -cE '^'"[+-]"'$'` is read only up to its
+#:        first quoted fragment (`^`), so a class constraint living in the tail is invisible.
+#:        This is NOT uniform (`"^[+-]$"''` reads the whole class, because the class is inside
+#:        the first quoted fragment) — which is why it is listed as a shape to check rather
+#:        than dismissed.
+#:
+#: B. SHAPES THAT ARE **NOT A COUNT PRESCRIPTION AT ALL**, pinned `[]` so that a future widening
+#:    cannot start treating one as a prescription — a maintainer who trusted the previous
+#:    "every one is a second BLANK-class prescription" lead-in would have widened to catch them
+#:    and introduced a false RED (#13995 review round 3, P2 — each MEASURED with `grep` on a
+#:    4-line sample, non-zero exit and nothing counted):
+#:      * `grep -c'^[+-]$'` and `grep -c, '^[+-]$'` — INVALID: `-c` takes no argument, so the
+#:        attached text is parsed as more options (`grep: invalid option`);
+#:      * `grep -ec 'x'` and `grep -e'c'` — here `c` belongs to `-e`'s pattern, not to a count
+#:        flag. `_requests_a_count` scans a short cluster left to right and STOPS at a flag that
+#:        takes an argument, so both are correctly not counts.
+#: One shape is seen but NOT classifiable, which is a different thing and is said separately so
+#: the lists above are not read as covering it: an expression held in a shell variable
+#: (`grep -cE "$RE"` IS read — its expression arrives as `$RE`, which no class test can
+#: classify). Each of these carries a second prescription this reader cannot grade, so "exactly
+#: one BLANK-class count command" is a claim about count commands whose quoted expression the
+#: reader can SEE — never a claim that the class is prescribed once in the document.
+#:
+#: ⛔ AND THE FLAG WORD IS A FLAG TOKEN, NOT A BAG OF CHARACTERS (#13995 review round 3, P2 —
+#: MEASURED, and this one was a REGRESSION against `origin/main`). While the word was
+#: `[^\s'\"]*` it admitted the CLOSING BACKTICK, `,`, `)` and `;`, so the character separating
+#: the command from the next quoted token was swallowed INTO the flag word and the
+#: quote-adjacency requirement was defeated: the prose `` `grep -c`, '^[+-]$' `` — a sentence
+#: saying what the row does NOT mean — was read as a second BLANK-class prescription and redded
+#: a correct document (`prescribes 2 BLANK-line count commands`). `grep -c[A-Za-z]* '…'`, the
+#: reader this replaced, returned `[]` for it. The walk keeps that protection in three places: a
+#: word ends at whitespace or at a character that cannot appear inside a `grep` argument in prose
+#: (`` ` `` closes the code span; `;`/`|`/`&`/`(`/`)`/`<`/`>` are shell operators); a flag TOKEN
+#: is `--`/`-` then alphanumerics (which still expresses `-c`, `-Ec`, `--count`,
+#: `--color=never`, `-C3`, `-m2`); a QUOTED tail is an attached VALUE on a SHORT cluster that
+#: CONTAINS an argument-taking flag, at ANY position in it (`-e'…'`, `-ce'…'`, `-ec'…'`), and on
+#: every other cluster it is MORE FLAG CHARACTERS, because the shell has already removed the quotes
+#: — an alphanumeric residue is read as one word (`grep -c'x'` is argv `-cx`, so it IS a count and
+#: the quoted token after it is its expression) while a non-alphanumeric one is unreadable
+#: (`grep -c'^\+$'` is argv `-c^\+$`, which grep rejects).
+#: ⛔ ONE RULE COVERS BOTH QUOTINGS: A SHORT CLUSTER SPLITS AT ITS FIRST ARGUMENT-TAKING FLAG AND
+#: THAT FLAG OWNS THE REST AS ITS VALUE (#14027 round 10, P1 — MEASURED, correcting this block).
+#: `-e'…'`, `-ce'…'` and `-ec^[+-]$` are all "the flag, then its value"; `-ec^[+-]$` is `-e`
+#: with the value `c^[+-]$` and IS a flag word, pinned as that tuple below. This block used to
+#: describe TWO different tests (quoted: the cluster CONTAINS an argument-taking flag, `any(...)`;
+#: unquoted: its LAST character takes one, `option[-1] in …`) and called `-ec^[+-]$` "not a flag
+#: word at all" — refuted by this file's own pin. The split runs before both of those tests, so
+#: neither decides anything for a cluster that carries an argument-taking flag, and the sentence
+#: that named them as the model is what the pins now contradict.
+#: `grep -c, '…'` is unreadable because `-c,` is not a flag cluster at all. On a
+#: LONG option a quoted tail is MORE NAME with the
+#: quotes removed (`--count'x'` is argv `--countx`), so the acceptance test refuses it, while a
+#: tail that is a `=`-separated value (`--regexp='x'`) is read as that value. A QUOTED section
+#: may hold spaces and still be one word, which is what makes `--label='x -c'` one flag word
+#: rather than three.
+_D5_GREP_INVOCATION_RE = re.compile(r"\bgrep(?=\s)")
+
+#: GNU grep's short flags that TAKE AN ARGUMENT: `-e`/`-f` (pattern source), `-m` (max count),
+#: `-A`/`-B`/`-C` (context), `-d` (directories action), `-D` (devices action). A `c` after one
+#: of these belongs to THAT flag's argument, not to the count flag (`-ec` is `-e c`), so the
+#: count scan stops there. `-D` was missing until #13995's round-3 verification measured
+#: `_requests_a_count("-Dc")` returning True while the docstring said "the short flags that take
+#: an argument" — the list is the whole set, not a sample.
+_ARG_TAKING_SHORT_FLAGS = "efmABCdD"
+
+#: GNU grep's LONG options that REQUIRE an argument, from `grep --help` (GNU grep 3.11). A long
+#: option's value is the NEXT word when it is not attached with `=`, and it is never the
+#: expression: `grep -c --exclude '*.md' '^[+-]$'` counts the blank lines (measured: `2` on a
+#: 4-line probe), so reading `'*.md'` as its expression was a FALSE PASS (#13995 review, P2).
+#: `--color` is deliberately ABSENT, and that is the ONE long option here whose argument is
+#: optional: `grep --color always 'x'` takes `always` as the PATTERN and `'x'` as a FILE, exiting 2
+#: on the missing file (measured: `printf 'always\n' | grep --color always` prints `always`), so
+#: consuming the next word for it would swallow a real expression.
+#: ⛔ `--context` IS PRESENT — a single measurement used to be generalised to both, and it was
+#: wrong for this one (#13995, MEASURED): `grep -c --context 2 '^[+-]$'` prints `2` and exits 0,
+#: i.e. the `2` IS its argument; with `--context` outside this set, the reader took `2` as the
+#: EXPRESSION and the invocation went unseen — a false PASS on a real blank-class count.
+_ARG_TAKING_LONG_FLAGS = frozenset({
+    "--after-context", "--before-context", "--binary-files", "--context", "--devices",
+    "--directories", "--exclude", "--exclude-dir", "--exclude-from", "--file",
+    "--group-separator", "--include", "--label", "--max-count", "--regexp",
+})
+
+#: GNU grep's ONE undocumented alias that this reader ACCEPTS, declared on its own so that the
+#: block below stays a description of the UNION rather than of this one-element allowance —
+#: `_comment_block_above` scopes a prose guard to the comment run above its anchor, so a description
+#: sitting between a constant and its set would be read as that constant's (#14027 review, P3).
+#:
+#: ⛔ IT IS HERE BECAUSE GREP RUNS IT, AND LEAVING IT OUT LOST A REAL COUNT
+#: (#14027 review round 2, P2 — MEASURED). `grep --help` never mentions `--unix-byte-offsets`, but
+#: grep accepts it — and every prefix of it, `--u`/`--un`/`--uni`/`--unix` — as the obsolete `-u`
+#: (`warning: --unix-byte-offsets (-u) is obsolete`), and `grep -c --unix-byte-offsets '^[+-]$'`
+#: really counts the blank class (`2`). Declined as unknown, a SECOND blank-class prescription in
+#: that spelling sat invisible beside the one that was read — the false PASS this cell exists to
+#: refuse. `--fixed-regexp` is the other undocumented alias and stays OUT deliberately: it shares
+#: `-F`'s identity, so admitting it would make `--fixed-` falsely ambiguous (measured: `grep -c
+#: --fixed-` is ACCEPTED), and it retargets the match semantics rather than the arity.
+_D5_UNDOCUMENTED_LONG_OPTIONS = frozenset({"--unix-byte-offsets"})
+
+#: Every long option `grep --help` documents PLUS `_D5_UNDOCUMENTED_LONG_OPTIONS`, for ONE
+#: purpose: whether a prefix is AMBIGUOUS.
+#: `_resolved_long_option` may only resolve a prefix that names a single option in this whole set,
+#: because that is the rule `getopt_long` applies — `--re` names `--regexp` in the arity set but is
+#: refused by grep as ambiguous against `--recursive` (measured), and certifying it graded a
+#: command grep will not run (#13995, MEASURED). Pinned against `grep --help` by
+#: `test_the_d5_count_reader_knows_every_long_option_grep_documents`, so a grep that adds one
+#: reds there rather than quietly making a new prefix ambiguous — and that cell asserts the union
+#: equals `grep --help` ∪ the declared allowance, so an allowance member the universe lost reds by name.
+_D5_ALL_LONG_OPTIONS = frozenset({
+    "--after-context", "--basic-regexp", "--before-context", "--binary", "--binary-files",
+    "--byte-offset",
+    "--color", "--colour", "--context", "--count", "--devices", "--directories",
+    "--dereference-recursive", "--exclude", "--exclude-dir", "--exclude-from",
+    "--extended-regexp", "--file", "--files-with-matches", "--files-without-match",
+    "--fixed-strings", "--group-separator", "--help", "--ignore-case", "--include",
+    "--initial-tab", "--invert-match", "--label", "--line-buffered", "--line-number",
+    "--line-regexp", "--max-count", "--no-filename", "--no-group-separator", "--no-ignore-case",
+    "--no-messages",
+    "--null", "--null-data", "--only-matching", "--perl-regexp", "--quiet", "--recursive",
+    "--regexp", "--silent", "--text", "--unix-byte-offsets", "--version", "--with-filename",
+    "--word-regexp",
+})
+
+
+def _d5_long_option_candidates(name: str) -> list[str]:
+    """The long options `name` could be an abbreviation OF, one entry per GREP option.
+
+    ⛔ MEASURED ON GNU grep 3.11, and the `--colour` ALIAS is the whole difficulty (#13995):
+      * `--col`, `--colo`, `--colou` and `--colour` are all accepted, and `--col=always` colours
+        the output — the `-u` spelling is an alias of `--color`, not a second option;
+      * `--cou=always` is refused with `option '--count' doesn't allow an argument`, so a prefix
+        that matches `--count` resolves to `--count` and the ALIAS is not a rival;
+      * but `--colou` matches NOTHING once `--colour` is set aside, so the alias has to be a
+        FALLBACK — otherwise a spelling grep runs (`2` printed) is declined and a real
+        prescription can hide behind the one that was read (a false PASS, the defect this cell
+        exists to refuse);
+      * `--c`/`--co` are REFUSED and grep's own message lists the colour spellings among the
+        possibilities, while `--re` is refused naming `--recursive` and `--regexp` — so ambiguity
+        is counted over the distinct options minus the alias, which is what this returns.
+    """
+    if name in _D5_ALL_LONG_OPTIONS:
+        # ⛔ AN EXACT NAME IS UNAMBIGUOUS EVEN WHEN IT PREFIXES LONGER ONES (#13995, MEASURED):
+        # `--exclude` IS an option while `--exclude-dir` and `--exclude-from` also start with it,
+        # and getopt takes the exact match — counting the longer names as rivals declined
+        # `grep -c --exclude '*.md' '^[+-]$'`, which grep runs and counts (measured: 2).
+        return [name]
+    candidates = [option for option in _D5_ALL_LONG_OPTIONS
+                  if option != "--colour" and option.startswith(name)]
+    if not candidates and "--colour".startswith(name):
+        candidates = ["--colour"]
+    return candidates
+
+
+def _long_option_is_accepted(name: str) -> bool:
+    """Will `grep` accept this long option SPELLING — as written, or as an abbreviation?
+
+    ⛔ `grep` REFUSES an unknown name and an AMBIGUOUS prefix (`--re` names both `--regexp` and
+    `--recursive`; measured: `option '--re' is ambiguous`). Grading the expression of a command
+    grep will not run is a false RED on a document that merely mentions it, so the walk declines
+    such an invocation instead (#13995, MEASURED).
+    """
+    return name == "--" or len(_d5_long_option_candidates(name)) == 1
+
+
+def _resolved_long_option(option: str) -> str | None:
+    """The long option `option` names, honouring GNU getopt_long UNAMBIGUOUS ABBREVIATION.
+
+    ⛔ AN ABBREVIATION IS A SPELLING OF THE SAME FLAG (#13995, MEASURED). `grep -c --max-c 2
+    '^[+-]$'` is a real count of the blank class (measured: prints `2`, exit 0), and while the
+    arity test was exact membership its `2` was read as the EXPRESSION — a second BLANK-class
+    prescription in that spelling left the arm GREEN. The rule is getopt's own: a prefix that
+    names EXACTLY ONE member names that member; one that names several (`--ex`, `--d`) is
+    ambiguous and answered `None` rather than guessed. The set searched is grep's WHOLE
+    long-option universe — every name `grep --help` documents, PLUS the one declared undocumented
+    alias grep still accepts (`_D5_UNDOCUMENTED_LONG_OPTIONS`, which `_D5_ALL_LONG_OPTIONS` now
+    carries), — ⛔ NOT the `_ARG_TAKING_LONG_FLAGS` ∪
+    `_PATTERN_SUPPLYING_LONG_FLAGS` pair, which answer a DIFFERENT question (what a resolved
+    option's ARGUMENT is, in `_d5_argument_role`) and are too narrow to decide ambiguity: `--re`
+    names `--regexp` among them and still names `--recursive` in grep's own terms. A sentence here
+    used to name that pair as the searched universe (#13995 review, P3 — MEASURED); it stopped
+    being true when the ambiguity fix landed one function over, and the guard it described as
+    still-holding is the one the acceptance gate below now carries.
+
+    ⛔ AND THE ARITY SET GETS NO SHORT-CIRCUIT (#14027 review round 7 — MEASURED): the line
+    `if option in _ARG_TAKING_LONG_FLAGS: return option` used to sit here and was INERT — every
+    member of that set is one exact word of `_D5_ALL_LONG_OPTIONS`, so the candidate rule below
+    answers `[option]` for each of them (measured over all fifteen; deleting the line reds 0 of
+    the 8 cells that touch this function). A member the arity set could reach but the universe
+    could not would be exactly the drift `test_…knows_every_long_option_grep_documents` pins, so
+    the shortcut could never be the thing that kept the two in step — and that subset relation is
+    now ASSERTED there rather than inferred, so an arity entry outside grep's documented set reds
+    by name instead of resolving through a branch that no longer exists.
+    """
+    # ⛔ AND THE PREFIX MUST BE UNAMBIGUOUS IN GREP'S OWN TERMS, not only among the options whose
+    # arity this reader needs: `--re` names `--regexp` here but `--recursive` too, and grep
+    # refuses it (measured). `_d5_long_option_candidates` is that test, alias handling included.
+    candidates = _d5_long_option_candidates(option)
+    return candidates[0] if len(candidates) == 1 else None
+
+
+#: The long options that SUPPLY THE PATTERN (`-e`/`-f` long forms). Once one of them is present
+#: the positional operands of the command are FILES, never an expression — `grep -c -f /tmp/pats
+#: '^[+-]$'` fails with `No such file or directory` rather than counting anything (measured) — so
+#: the walk declines such an invocation instead of reporting a count of a FILE OPERAND.
+#: ⛔ THAT IS TRUE OF THE FILE-SUPPLYING HALF ONLY, AND THE SENTENCE USED TO SAY IT OF BOTH
+#: (#14027 round 6, P3 — MEASURED): `--file` (and `-f`) make the invocation UNREAD, while
+#: `--regexp` (and `-e`) make the POSITIONALS files and report the flag's OWN argument as the
+#: prescription — `_d5_count_prescriptions("grep -c --regexp '^[+-]$'")` is `['^[+-]$']`, which
+#: grep really counts (`2`). Declining `--regexp` would have been the false PASS #13962 retires.
+_PATTERN_SUPPLYING_LONG_FLAGS = frozenset({"--regexp", "--file"})
+
+#: GNU grep's short flags that SUPPRESS a count, or replace its output with something else —
+#: measured on GNU grep 3.11: `-lc` prints the FILENAME, `-Lc` prints the files WITHOUT a match,
+#: `-qc` prints nothing at all. They WIN over `-c` whatever the cluster order (`-cl` is the same
+#: command as `-lc`), so a word carrying one of them is not a count request however the rest of
+#: its cluster is spelled (#13995 review round 4, P2).
+_D5_COUNT_SUPPRESSING_SHORT_FLAGS = frozenset("lLq")
+
+#: The LONG spellings of the same suppression — `--files-with-matches` prints a FILENAME,
+#: `--files-without-match` prints the files WITHOUT a match, `--quiet`/`--silent` print nothing
+#: (measured on GNU grep 3.11). Without this set `grep -c --quiet '^[+-]$'` is GRADED as a
+#: BLANK-class prescription, so a sentence mentioning one in prose is refused with "prescribes 2
+#: BLANK-line count commands" — a false RED on a correct document, the direction this file calls
+#: the worse one (#13995, MEASURED).
+_D5_COUNT_SUPPRESSING_LONG_FLAGS = frozenset({
+    "--files-with-matches", "--files-without-match", "--quiet", "--silent",
+})
+
+
+def _long_flag_matches(word: str, flag: str, rivals: tuple[str, ...] = ()) -> bool:
+    """Is `word` the long flag `flag`, or an UNAMBIGUOUS ABBREVIATION of it?
+
+    `rivals` states the prefixes that name a DIFFERENT option, so `--c`/`--co` (ambiguous between
+    `--count`, `--color` and `--context`, and refused by grep — measured) are not read as counts
+    while `--cou`/`--coun` are. The `=value` tail is stripped and a bare `--` is not a flag.
+    """
+    name = word.split("=", 1)[0]
+    if name == "--":
+        return False
+    return flag.startswith(name) and not any(rival.startswith(name) for rival in rivals)
+
+#: The characters that END a shell word in this document's prose: whitespace, plus the characters
+#: that cannot appear inside a `grep` argument there — `` ` `` closes the code span, and
+#: `;`/`|`/`&`/`(`/`)`/`<`/`>` are shell operators. Used by `_d5_words`, which is a walk rather
+#: than `str.split` because a QUOTED section may hold spaces (`--label='x -c'` is ONE word).
+_D5_WORD_END = frozenset(" \t\r\n`;|&()<>")
+
+
+def _d5_words(text: str, start: int):
+    """Yield `(word, end)` for consecutive shell-ish words of a command beginning at `start`.
+
+    `word` keeps its quotes, so the caller can tell a quoted operand from a bare one; `end` is
+    the index just past it. A quoted section is part of the word it is attached to and may
+    contain spaces (`--label='x -c'`), which is why this is a walk and not `str.split`. A word
+    ends at `_D5_WORD_END`: at whitespace the walk continues, at any other end character it
+    STOPS, because that character is where the code span or the shell command ends.
+    """
+    i, n = start, len(text)
+    while i < n:
+        if text[i].isspace():
+            i += 1
+            continue
+        if text[i] in _D5_WORD_END:
+            return
+        word: list[str] = []
+        while i < n and text[i] not in _D5_WORD_END:
+            if text[i] in "'\"":
+                close = text.find(text[i], i + 1)
+                if close < 0:
+                    return  # an unterminated quote is not a word this reader can read
+                word.append(text[i:close + 1])
+                i = close + 1
+                continue
+            word.append(text[i])
+            i += 1
+        yield "".join(word), i
+
+
+def _d5_flag_word(text: str) -> tuple[str, str] | None:
+    r"""`(option, attached_value)` for a plausible `grep` flag TOKEN, or `None` if it is not one.
+
+    `None` is what keeps prose out: while the flag word was a bag of characters it swallowed
+    the closing backtick and the comma, so `` `grep -c`, '^[+-]$' `` became a prescription. A
+    flag token here is `--`/`-` plus alphanumerics (which still expresses `-c`, `-Ec`,
+    `--count`, `-C3`, `-m2`), optionally followed by an ATTACHED value — `=value` or a quoted
+    section. ⛔ A QUOTED SECTION ON A CLUSTER THAT TAKES NO ARGUMENT IS MORE FLAG CHARACTERS, NOT
+    A VALUE (#13995, MEASURED — the shell does exactly this): `grep -c'x' '^\+$'` is argv
+    `-cx '^\+$'` and really counts, so it is READ; a NON-alphanumeric suffix is what stays
+    unread, because grep answers `invalid option` to `` `-c'^\+$'` `` → `grep: invalid option --
+    '^'`, rc 2. So `-e'…'` is an attached value while `-c'x'` is a flag character — the docstring
+    used to say `grep -c'…'` is "not read at all", which was false and pinned a real count as
+    unread (#14027 review round 2, P3). Whether grep would accept the unquoted residue elsewhere
+    is grep's question, not this reader's.
+    ⛔ ITS RESIDUAL IS A VALUE GRAMMAR THIS READER DOES NOT MODEL, AND IT SAYS SO (#14027 third
+    review round, P3 — MEASURED): an argument-taking SHORT flag's attached value is not validated,
+    so `grep -c -A, '^[+-]$'` — which grep refuses (`,: invalid context length argument`, rc 2) —
+    is read and graded. NO SHAPE TEST CLOSES IT: grep runs `-A2` and `-m-1` and refuses `-A,` and
+    `-Anever`, while `-e`/`-f` take arbitrary text, so the sound rule would be a per-flag VALUE
+    grammar — a model this reader deliberately does not carry. Pinned as a KNOWN-UNGRADED spelling
+    in `test_the_d5_count_reader_reads_an_UNQUOTED_pattern_and_refuses_an_ambiguous_prefix`, so the
+    gap is visible rather than implied.
+    """
+    if text in ("-", "--"):
+        return text, ""
+    # grep is the judge of the NAME (`-mc`, `-Dc`, `-Ac` are all rejected by it, measured), so no
+    # name is validated here. `_ARG_TAKING_SHORT_FLAGS` IS consulted, for one purpose: whether an
+    # QUOTED section on a short cluster is its ATTACHED VALUE or more FLAG CHARACTERS — `-e'…'`
+    # is a value, `-c'x'` is `-cx` (#13995, MEASURED, and the shell does the same). ⛔ THE ROWS
+    # BELOW ARE PINNED, because a sentence about a set that nothing varies on is the
+    # inert-narration defect this file bans: `grep -c'x' '^\+$'` becomes a READABLE count (`-cx`,
+    # then the quoted token IS the expression — real grep counts it), which falsifies an "attached
+    # value is inadmissible" rule that pinned a real count as unread. ⛔ THE WITNESS FOR THE
+    # ALPHANUMERIC TEST IS `grep -c'-' '^[+-]$'`, NOT `grep -c'^\+$'` (#14027 review round 7, P2 —
+    # MEASURED): the pair this comment used to nominate did not witness anything, because
+    # `grep -c'^\+$'` has NO trailing operand at all, so it is `[]` for a cause that has nothing
+    # to do with the test — deleting the condition leaves both nominated rows unchanged (measured).
+    # `grep -c'-' '^[+-]$'` DOES vary: `[]` here, `['^[+-]$']` with the condition deleted, because
+    # argv `-c-` is not a flag cluster and a non-alphanumeric suffix stays unread. ⛔ THE LONG
+    # FORM'S QUOTED TAIL IS *ALSO* MORE NAME, AND THE SAME
+    # REASON APPLIES (#14027 final review, P2 — MEASURED): the shell removes the quotes, so
+    # `grep -c --count'x' '^[+-]$'` is argv `--countx` and grep refuses it (`unrecognized option
+    # '--countx'`, rc 2). This sentence used to declare that spelling READ "because grep is the
+    # judge of the name and not a table of ours" — but `_long_option_is_accepted` IS that table
+    # and it is what declines `--count,`/`--countx` one branch below, so the declared residual was
+    # a false PASS sitting beside the rule that refuses it. The name returned here is therefore
+    # the WHOLE word with the quotes removed (`--count''` is argv `--count` and IS read), and the
+    # acceptance test decides.
+    if text.startswith("--"):
+        match = re.fullmatch(r"(--[A-Za-z0-9][A-Za-z0-9-]*)(.*)", text, re.S)
+    elif text.startswith("-"):
+        match = re.fullmatch(r"(-[A-Za-z0-9]+)(.*)", text, re.S)
+    else:
+        return None
+    if match is None:
+        return None
+    option, rest = match.group(1), match.group(2)
+    # ⛔ A SHORT CLUSTER SPLITS AT ITS FIRST ARGUMENT-TAKING FLAG, AND THE TAIL IS THAT FLAG'S
+    # VALUE (#14027 round 9, P2 — MEASURED, and this was a live false PASS). grep parses a cluster
+    # left to right and the first flag that takes an argument OWNS the rest: `grep -c -Dread
+    # '^[+-]$'` is `-c` then `-D` with the value `read`, and it prints `2` on the probe, so it
+    # COUNTS the blank class. Treating the whole alphanumeric run as the name (`-cDread`) left its
+    # last character looking like a flag still awaiting a separate word, so the quoted expression
+    # was consumed as that value and the invocation came back UNREAD — a second blank-class
+    # prescription in this spelling sat invisible beside the one that was read. Without this split
+    # the reader also disagreed with its own `-A2` pin in spirit (there the tail IS the value)
+    # purely because `A` happened to be the last character.
+    if not option.startswith("--"):
+        for split_at in range(1, len(option)):
+            if option[split_at] in _ARG_TAKING_SHORT_FLAGS:
+                value = option[split_at + 1:] + rest
+                # ⛔ QUOTE REMOVAL IS OURS, AND ONLY WHERE THE SHELL DID IT (#14027 round 9, P5 —
+                # MEASURED): `grep -c -ec'^[+-]$'` is argv `-e` + `c^[+-]$`, so the VALUE is
+                # `c^[+-]$` — those quotes were the shell's, not the pattern's. Reporting
+                # `c'^[+-]$'` handed back a string no argv can contain (verdict-neutral, the class
+                # test rejects it either way, but a reported prescription must be an argument).
+                # ⛔ A TAIL THAT STARTS WITH A QUOTE (`-ce'…'`) IS RETURNED WITH THAT QUOTE, AND
+                # THAT IS THIS FUNCTION'S OWN DOING — NOT THE SHELL'S (#14027 round 11, P2 —
+                # MEASURED). The sentence here used to say "the shell removed only the OUTER
+                # quotes there, and that form is read by the quoted branch below"; both halves are
+                # false. The shell removes EVERY quote character (`set -- -ce'^[+-]$'` gives argv
+                # `-ce^[+-]$`, and `-e`'s value is `^[+-]$`), and the quoted branch below is not
+                # reached at all: the split returns first, and that branch is reachable only when
+                # nothing in the cluster takes an argument. The leading quote is therefore the one
+                # shape this slice still hands back as a value that is not itself an argv element
+                # — a declared residual, stripped downstream by `_d5_quoted_literal` and rejected
+                # by the class test, so no verdict depends on it (`-ce'^[+-]$'` and `-ce^[+-]$`
+                # both end as `['^[+-]$']`). ⛔ THE READER HAS NO BACKSLASH MODEL, SO THIS RULE IS
+                # NARROWER THAN "quotes the shell removed": `grep -c -ec"it's"` is the word
+                # `-ecit's`, whose value is `cit's`, and the quote-strip here answers `cits`
+                # (verdict-neutral — neither string is the class — but not an argv element either).
+                if value and value[0] not in "'\"":
+                    value = value.replace("'", "").replace('"', "")
+                return option[:split_at + 1], value
+    if not rest:
+        return option, ""
+    if not (rest.startswith("=") or rest[0] in "'\""):
+        # ⛔ AN UNQUOTED ATTACHED VALUE IS STILL A VALUE (#13995, MEASURED): `grep -c -e^[+-]$`
+        # is `-e` with the pattern `^[+-]$`, and real grep counts the blank class with it. That
+        # case never reaches here any more — the cluster SPLIT at the top of this function takes
+        # `-e^[+-]$` apart as `-e` + `^[+-]$` (#14027 round 9, P2) — so a token that arrives with
+        # an unquoted, non-`=` tail has NO argument-taking character in it, and is therefore not a
+        # flag word at all: `-c^[+-]$` is argv `grep: invalid option`, rc 2 (measured).
+        if option.startswith("--"):
+            # ⛔ A LONG OPTION NEVER OWNS AN UNQUOTED VALUE, SO NOTHING IS ATTACHED HERE AND THE
+            # TAIL IS PART OF THE NAME (#13995 review, P3 — MEASURED): getopt requires `=` for a
+            # long option's argument, so an unquoted tail is not a value but MORE NAME, and a name
+            # grep refuses must stay refused. ⛔ THE TAIL IS RETURNED, NOT DISCARDED (#14027 final
+            # review, P3 — MEASURED): this used to `return option, None`, which threw `rest` away
+            # so `grep -c --count, '^\+$'` was graded as `--count` — while real grep answers
+            # `unrecognized option '--count,'`, rc 2. Grading the expression of a command grep
+            # will not run is a false PASS here (the invocation counts nothing) and a false RED in
+            # the other direction (a document that merely mentions it). `_long_option_is_accepted`
+            # declines `--count,`/`--countx` because neither names an option; the earlier form of
+            # this line returned `--count`, which that test ACCEPTS, so the tail was discarded and
+            # never declined — the prose claimed a check the code did not run.
+            return option + rest, ""
+        # ⛔ THIS IS `None`, NOT A MEMBERSHIP TEST (#14027 round 10, P3 — MEASURED). The split
+        # above iterates `range(1, len(option))` — every index of `option[1:]` — and the short
+        # regex `(-[A-Za-z0-9]+)` guarantees `len(option) >= 2`, so `option[-1]` is always inside
+        # `option[1:]`. A token that reaches this line therefore has NO argument-taking character
+        # there, which makes `option[-1] in _ARG_TAKING_SHORT_FLAGS` unreachable-True: the
+        # `(option, rest)` branch was dead. Measured, zero exceptions: instrumented over every
+        # 1-3 character alphanumeric cluster, over 6,055,850 enumerated tokens, and over this
+        # repo's own docs corpus the branch never fired, and
+        # `_d5_flag_word` / `_d5_blank_class_prescriptions` / `_d5_count_prescriptions` are
+        # unchanged by its removal. The file's own rule bans a member nothing can reach, and the
+        # one spelling the test was written for (`-e^[+-]$`) is read by the split one branch up.
+        # ⛔ NO TOKEN TOTAL IS STATED: the reach count is always a multiple of the number of
+        # clusters with no argument-taking character in `option[1:]`, so a total-and-hits pair is
+        # arithmetic that can silently stop agreeing — which the previous cut of this comment
+        # demonstrated by getting it wrong (#14027, P3). ⛔ AND THE CORPUS SWEEP'S RESULT IS STATED
+        # WITHOUT A REACH COUNT, FOR THE SAME REASON (#14027 review of this head, P3 — MEASURED):
+        # the sweep needs a naive whitespace splitter while the reader's own `_d5_words` yields 0
+        # by construction, so repeated sweeps of the same corpus answered anywhere from 927 to 947
+        # depending on the tokeniser, and this line used to carry one such figure. What is
+        # reproducible is the claim it supported — the branch never fires — so that is what is
+        # stated.
+        return None
+    if option.startswith("--"):
+        if rest.startswith("="):
+            return option, rest  # `--regexp=^[+-]$` — for a LONG option the `=` IS the separator
+        # ⛔ A QUOTED TAIL IS MORE NAME, NOT A VALUE — unless the quotes were hiding the `=` that
+        # makes it an argument (#14027 final review, P2 — MEASURED): `--count'x'` is argv
+        # `--countx` once the shell has removed the quotes, and grep refuses it. Returning it as
+        # an ATTACHED value read the word as `--count` and graded a command grep will not run as
+        # the blank class — the same false PASS the unquoted tail closes one branch above.
+        # `--count''` collapses to `--count`, which grep runs and counts (measured 2), so this is
+        # quote removal and not a blanket refusal.
+        tail = rest.replace("'", "").replace('"', "")
+        if tail.startswith("="):
+            # …and a `=` that SURVIVES the quote removal is still the SEPARATOR (#14027 second
+            # review round, P3 — MEASURED): `--context'=2'` is argv `--context=2`, which grep
+            # runs and counts (`2` on the 4-line probe), and `--regexp'=^[+-]$'` is argv
+            # `--regexp=^[+-]$`, i.e. the blank class. Appending that tail to the NAME made both
+            # unread — a false RED on commands grep executes, and a REGRESSION this arm did not
+            # have before the quoted-tail rule. Quote removal first, then the separator rule.
+            return option, tail
+        return option + tail, ""
+    # ⛔ THE SHELL HAS ALREADY REMOVED THE QUOTES, SO A QUOTED SECTION ON A CLUSTER THAT TAKES NO
+    # ARGUMENT IS MORE FLAG CHARACTERS (#13995, MEASURED). `grep -c'a' '^[+-]$'` is argv `-ca`
+    # and really counts the BLANK class (`2` measured) — the quote does not make `a` a value, and
+    # declining the word left that spelling an invisible second prescription. `grep -c'^[+-]$'`
+    # is argv `-c^[+-]$`, which grep rejects (`invalid option`), so a NON-alphanumeric suffix is
+    # still `None`. An argument-taking cluster keeps the attached-value reading (`-e'\'^[+-]$\''`).
+    # ⛔ NO SECOND ARGUMENT-TAKING TEST HERE (#14027 round 10, P3 — MEASURED): the split above
+    # has already returned for every short cluster carrying one, so this point is reachable ONLY
+    # when nothing in `option[1:]` takes an argument. The guard that used to sit here
+    # (`if not any(char in _ARG_TAKING_SHORT_FLAGS for char in option[1:])`) was therefore
+    # constant-True — instrumented, it never once took the False branch — and the
+    # `return option, rest` beneath it was unreachable. The file's own rule bans a member nothing
+    # can reach, so the guard is gone and the branch states what it is.
+    unquoted = option + rest.replace("'", "").replace('"', "")
+    return (unquoted, "") if re.fullmatch(r"-[A-Za-z0-9]+", unquoted) else None
+
+
+def _d5_needs_a_separate_value(option: str) -> bool:
+    """Does this flag token still await its argument as the NEXT word?
+
+    Only where the flag takes an argument and none is ATTACHED: a short cluster's LAST character
+    (`-A` in `grep -c -A '2' '^[+-]$'`), or a required-argument long option written without `=`.
+    """
+    if option.startswith("--"):
+        # An UNAMBIGUOUS ABBREVIATION awaits its argument exactly as the full spelling does:
+        # `--max-c 2` is `--max-count 2` (measured), and reading that `2` as the expression was
+        # the false PASS `_resolved_long_option` closes (#13995).
+        return _resolved_long_option(option) in _ARG_TAKING_LONG_FLAGS
+    return bool(option[1:]) and option[-1] in _ARG_TAKING_SHORT_FLAGS
+
+
+def _d5_supplies_the_pattern(option: str) -> bool:
+    """Does this flag token supply the PATTERN, so that every positional operand is a FILE?"""
+    if option.startswith("--"):
+        return _resolved_long_option(option) in _PATTERN_SUPPLYING_LONG_FLAGS
+    for char in option[1:]:
+        if char in "ef":
+            return True
+        if char in _ARG_TAKING_SHORT_FLAGS:
+            return False  # the rest of this word is THAT flag's attached value
+    return False
+
+
+def _d5_quoted_literal(word: str) -> str | None:
+    """The text of the FIRST quoted section of `word`, or `None` if it does not open with one.
+
+    The expression must be quoted, so an unquoted operand is a declared residual rather than a
+    guess. Only the first literal is read, which is why a CONCATENATED expression is read up to
+    its first fragment. `$'…'` (ANSI-C quoting) reads as the same literal.
+    """
+    if word.startswith("$"):
+        word = word[1:]
+    if not word or word[0] not in "'\"":
+        return None
+    close = word.find(word[0], 1)
+    return None if close < 0 else word[1:close]
+
+
+def _d5_argument_role(option: str) -> str | None:
+    """What this flag's ARGUMENT is: `pattern` (`-e`/`--regexp`), `file` (`-f`/`--file`), `other`.
+
+    `other` is every argument-taking flag whose value is not a pattern (`-A`, `-m`,
+    `--exclude`, …); `None` is a flag that takes no argument at all. The distinction is what
+    lets a MATCHED argument be collected as a prescription instead of thrown away — a command
+    with two `-e` flags counts the UNION of both patterns, so both are prescriptions
+    (#13995, MEASURED).
+    """
+    if option.startswith("--"):
+        resolved = _resolved_long_option(option)
+        if resolved == "--regexp":
+            return "pattern"
+        if resolved == "--file":
+            return "file"
+        return "other" if resolved in _ARG_TAKING_LONG_FLAGS else None
+    for index, char in enumerate(option[1:]):
+        if char in _ARG_TAKING_SHORT_FLAGS:
+            if option[2 + index:]:
+                return "other"  # the rest of this word is that flag's ATTACHED value
+            return "pattern" if char == "e" else "file" if char == "f" else "other"
+    return None
+
+
+def _d5_command_expression(text: str, start: int) -> list[tuple[str, str]] | None:
+    """`(flags, expression)` for EVERY prescription the `grep` at `start` carries, or `None`.
+
+    ⛔ A COMMAND MAY CARRY SEVERAL PATTERNS, AND EVERY ONE OF THEM IS A PRESCRIPTION
+    (#13995, MEASURED). `grep -c -e 'decoy' -e '^[+-]$'` counts the union of both patterns, so
+    the blank class IS counted; while the reader returned the FIRST `-e` pattern only — or, worse,
+    declined the command because a pattern was supplied — a second BLANK-class prescription
+    written as a second `-e` left the arm GREEN. Each `-e`/`--regexp` argument is reported now,
+    and the positional operand is still a FILE (so it is not reported).
+
+    ⛔ A FLAG'S VALUE IS CONSUMED, NEVER READ AS THE EXPRESSION (#13995 review, P2 — MEASURED).
+    `grep -c --exclude '*.md' '^[+-]$'` counts the blank lines (measured: `2` on the 4-line
+    probe); the quoted token `'*.md'` is `--exclude`'s GLOB. The raw-text reader this replaces
+    reported `*.md` as the expression, so the command was neither the blank class nor a shape the
+    residual list names — a SECOND blank-class prescription appended that way left the arm GREEN,
+    the false PASS #13962 exists to retire. An argument-taking flag therefore consumes the next
+    word, and the expression is the first non-flag word after that.
+
+    `None` means the invocation is UNREAD, which the constant's residual list names: a flag word
+    that is not a plausible `grep` option; a non-flag word with no quote (an unquoted operand —
+    the expression itself, or a filename before it); a quoted operand when a flag already supplies
+    the pattern FROM A FILE (`-f`/`--file` make the positionals FILES and leave nothing to report);
+    and an invocation that ends while a flag still awaits its value.
+    ⛔ `-e`/`--regexp` IS NOT ONE OF THESE CAUSES (#14027 round 6, P3 — MEASURED): it also makes the
+    positionals FILES, but its OWN argument is returned as a prescription —
+    `grep -c -e 'decoy' '^[+-]$'` yields `['decoy']` — so the invocation is read, not unread.
+    """
+    flags: list[str] = []
+    patterns: list[str] = []
+    supplies_the_pattern = False
+    awaiting_role: str | None = None
+    for word, _end in _d5_words(text, start):
+        if awaiting_role is not None:
+            if awaiting_role == "pattern":
+                # ⛔ AN UNQUOTED `-e` VALUE IS STILL THE PATTERN (#13995, MEASURED):
+                # `grep -c -e ^[+-]$ …` counts the blank class, and requiring a quote here made
+                # that a second prescription the arm could not see. The quote requirement stays
+                # for a POSITIONAL operand, where an unquoted word is the declared residual.
+                literal = _d5_quoted_literal(word)
+                patterns.append(literal if literal is not None else word)
+            awaiting_role = None
+            continue  # this word IS that flag's value, not the expression
+        if word.startswith("-"):
+            parts = _d5_flag_word(word)
+            if parts is None:
+                return None
+            option, attached = parts
+            if option.startswith("--") and not _long_option_is_accepted(option):
+                return None  # grep refuses this spelling, so there is no command to grade
+            flags.append(option)
+            supplies_the_pattern = supplies_the_pattern or _d5_supplies_the_pattern(option)
+            role = _d5_argument_role(option)
+            if role in ("pattern", "file") and attached:
+                # an ATTACHED pattern: `-e'^[+-]$'`, `--regexp='^[+-]$'`
+                # ⛔ `=` SEPARATES A LONG OPTION'S ARGUMENT, NOT A SHORT ONE'S (#14027 final
+                # review, P2 — MEASURED): getopt gives a short option the REST OF THE WORD as its
+                # value, so in `grep -c -e=^[+-]$` the pattern IS `=^[+-]$` and grep counts 0 of
+                # the blank class (`printf '+\n-\nxx\n\n' | grep -c -e=^[+-]$` → 0, rc 1),
+                # while `grep -c -e=a` on a file holding `=a` prints 1 — the `=` is not a
+                # separator. Stripping it unconditionally graded a command that counts ZERO of
+                # this class AS the class: the false PASS #13962 exists to refuse, and one this
+                # reader INTRODUCED (before it, `literal` stayed `None`, `patterns` stayed empty
+                # and the invocation was UNREAD, i.e. fail-closed).
+                raw = (attached[1:] if option.startswith("--") and attached.startswith("=")
+                       else attached)
+                literal = _d5_quoted_literal(raw)
+                if role == "pattern":
+                    # …and an UNQUOTED attached value is the pattern too: `--regexp=^[+-]$`
+                    # counts the blank class (measured), `-e^[+-]$` likewise (#13995).
+                    patterns.append(literal if literal is not None else raw)
+                awaiting_role = None
+            else:
+                # ⛔ ONLY A FLAG WHOSE ARGUMENT IS STILL MISSING AWAITS THE NEXT WORD, AND IT IS
+                # `not attached` THAT ESTABLISHES IT (#14027 round 11, P3 — MEASURED). `-A2` is
+                # split into `('-A', '2')` before it reaches here, so `option`'s last character IS
+                # an argument-taking one and `_d5_needs_a_separate_value("-A")` answers True; what
+                # keeps the expression from being eaten is the non-empty `attached`, which
+                # short-circuits the condition. A comment attributing it to the last-character
+                # test invites a fixer to drop `not attached` and reopen the false PASS.
+                awaiting_role = (role if role is not None and not attached
+                                 and _d5_needs_a_separate_value(option) else None)
+            continue
+        literal = _d5_quoted_literal(word)
+        if literal is None or supplies_the_pattern:
+            break  # an unquoted operand, or a FILE operand beside an `-e`/`-f` pattern
+        patterns.append(literal)
+        break
+    if not patterns:
+        return None
+    return [(" ".join(flags), literal) for literal in patterns]
+
+
+def _short_flag_head(word: str) -> str:
+    """The part of a short-flag cluster that is FLAGS — up to the first flag that takes an
+    argument (`-A2`: only `A` is a flag, `2` is its argument; `-ec`: `c` is `-e`'s pattern).
+
+    Shared by `_requests_a_count` and `_suppresses_the_count` so the two cannot disagree about
+    where a word stops being a run of flags (#13995 review round 4, P2).
+    """
+    head = []
+    for char in word[1:]:
+        if char in _ARG_TAKING_SHORT_FLAGS:
+            break  # the remainder of this word is that flag's argument
+        head.append(char)
+    return "".join(head)
+
+
+def _suppresses_the_count(word: str) -> bool:
+    """Does this ONE grep flag word suppress the count (`-l`, `-L`, `-q` in its FLAG part)?
+
+    Only the part before an argument-taking flag is examined: `-A2l` carries an `l` inside `-A`'s
+    argument, which is not a flag at all. Long words (`--count`, `--color=never`, `--`) cannot
+    carry a short cluster and are answered `False`.
+
+    ⛔ THE ONE PLACE A SUPPRESS LETTER IS STILL INVISIBLE IS A DECLARED RESIDUAL, AND IT IS NOT
+    THE SPELLING IT LOOKS LIKE (#13995 review, P2 — MEASURED). During `#13995`'s round 4 this
+    docstring said a value ATTACHED to a short flag is read as part of the cluster, so a path
+    holding an `l`/`L`/`q` makes this answer `True` — that is false of a flag that TAKES an
+    argument: `_suppresses_the_count("-f/tmp/lpats")` is `False`, because the scan stops at `f`
+    and the `l` is inside that flag's value. The only word on which the mechanism holds is a
+    suppress letter inside a value attached to a flag that takes NO argument (`-c/lpats` →
+    `True`), i.e. `grep: invalid option`, a command that cannot run. So the value of an
+    argument-taking flag is excluded here CORRECTLY, and there is no ungraded-valid-spelling to
+    declare.
+    """
+    if word.startswith("--"):
+        # ⛔ UNIQUENESS ACROSS THE SET, NOT MEMBERSHIP OF ONE NAME (#13995, MEASURED). `--quie`
+        # and `--files-with-match` suppress in grep, so they must suppress here; `--files` matches
+        # BOTH `--files-with-matches` and `--files-without-match` and grep refuses it as AMBIGUOUS
+        # (measured), so neither may be certified.
+        # ⛔ THE CERTIFICATION IS THE LENGTH TEST ALONE (#13995 review, MEASURED). An
+        # `and not "--file".startswith(name)` clause stood here, on the prose that "`--f` also
+        # names `--file`" — and it was INERT: every name it could see (`--f`, `--fi`, `--fil`,
+        # `--file`) already matches BOTH `--files-*` members, so `len(candidates) == 1` is false and
+        # the `and` is never consulted. `--f` is still refused here, by the length test, because
+        # grep refuses it (measured: `option '--f' is ambiguous; possibilities: '--fixed-regexp'
+        # '--file' '--files-with-matches' '--files-without-match'`), and `--file` is itself no
+        # suppressor: it refuses by that same LENGTH test, because it also matches BOTH
+        # `--files-*` members (measured: `'--files-with-matches'.startswith('--file')` is True,
+        # and likewise `--files-without-match`) — not because it matches nothing. Pinned in the
+        # long-spelling cell, so the refusal cannot be lost.
+        name = word.split("=", 1)[0]
+        candidates = [flag for flag in _D5_COUNT_SUPPRESSING_LONG_FLAGS if flag.startswith(name)]
+        return len(candidates) == 1
+    return (
+        word.startswith("-")
+        and any(ch in _D5_COUNT_SUPPRESSING_SHORT_FLAGS for ch in _short_flag_head(word))
+    )
+
+
+def _inverts_the_match_set(flags: str) -> bool:
+    """Does this run of grep flags INVERT the match set (`-v` / `--invert-match`)?
+
+    A count under `-v` counts the COMPLEMENT of the expression, so the expression is not the class
+    that was counted — `grep -vc '^[+-]$'` counts the NON-blank lines. It is still a count of the
+    same SHAPE, and a document may legitimately prescribe both, so this is answered separately
+    from `_requests_a_count` rather than folding the two into one predicate: the inversion is
+    carried to `_d5_blank_class_prescriptions`, which declines to grade it against the positive
+    class (#13995 review round 4, P2 — MEASURED).
+
+    ⛔ THE LONG SPELLING IS MATCHED WITH NO RIVAL LIST, AND NOTHING OBSERVABLE IS LOST BY THAT
+    (#13995 review — MEASURED). `--i` and `--in` ARE ambiguous in grep (`grep --i` prints
+    `option '--i' is ambiguous; possibilities: '--include' '--ignore-case' '--initial-tab'
+    '--invert-match'`, exit 2), but neither can reach this predicate:
+    `_long_option_is_accepted` REFUSES both — `--i` names FOUR options in grep's whole set and
+    `--in` three (`grep --in` measured: `'--include' '--initial-tab' '--invert-match'`) — so
+    `_d5_command_expression` declines the invocation before any flag is read
+    (`grep -c --i '^[+-]$'` is pinned as `[]` in the complement cell, with the reason). ⛔ THE
+    MECHANISM IS NAMED BECAUSE IT MOVED (#13995, MEASURED): while `_resolved_long_option` alone
+    judged this, it read `--i` as `--include`, an ARITY option, and the decline came from the next
+    word being taken as its argument — a different cause with the same `[]`, and a claim that
+    `_resolved_long_option` returns `'--include'` here is now simply false (it returns `None`;
+    the prefix is ambiguous). The prefixes grep DOES accept (`--inv`, `--inver`, `--invert`) are
+    read as the inversion and pinned, so a rival list added "for symmetry" with
+    `_requests_a_count` would be a no-op WHOSE DIFFERENCE NO PIN CAN SEE (measured: adding one
+    leaves all eight `test_the_d5_*` cells green) — which is why the asymmetry is recorded here
+    rather than left to be re-derived.
+    """
+    for word in flags.split():
+        if _long_flag_matches(word, "--invert-match"):
+            return True
+        if word.startswith("--") or not word.startswith("-"):
+            continue
+        if "v" in _short_flag_head(word):
+            return True
+    return False
+
+
+#: GNU grep's flags that keep the COUNT shape and change WHAT THE EXPRESSION MATCHES: `-F` reads
+#: the pattern as LITERAL TEXT and `-z` ends a record at a NUL byte instead of a newline. MEASURED
+#: on GNU grep 3.11, on a probe diff whose two
+#: blank lines are exactly `+` and `-`: `grep -c '^[+-]$'` prints `2`, while `-Fc`, `-zc`,
+#: `--fixed` and `--null-d` print `0` — none of them counts this class. So grading one of them as
+#: "exactly the lines that are one `+` or one `-`" is the `-v` defect one axis over: a command is
+#: graded on WHAT IT COUNTS, never on the literal it prints beside the count.
+#: ⛔ `--fixed-regexp` IS `--fixed-strings` UNDER ANOTHER NAME, AND IS DELIBERATELY NOT A MEMBER
+#: (#13995 review, P2 — MEASURED). grep ACCEPTS it (`grep -c --fixed-regexp '^[+-]$'` -> rc 1,
+#: prints 0), but `grep --help` does not document it, so it is absent from `_D5_ALL_LONG_OPTIONS`
+#: — deliberately, because LISTING it there would make `--fixed-` falsely ambiguous (grep accepts
+#: `--fixed-`, measured) and decline a command grep runs. The consequence is that
+#: `_long_option_is_accepted` declines every alias spelling (`--fixed-regexp`, `--fixed-r`,
+#: `--fixed-re`), so a member here would be UNREACHABLE: this line used to carry one and nothing
+#: witnessed it — dropping it left the suite green, which is the inert-table-member defect
+#: (agent-infra#3442). The residual is that those spellings are UNREAD, and ALL THREE are pinned
+#: — `--fixed-regexp`, `--fixed-r` and `--fixed-re` — in
+#: `test_the_d5_count_reader_does_not_grade_a_command_whose_pattern_is_NOT_A_REGEX`'s
+#: `alias_spelling` loop, and `--fixed-regexp` again as a control in
+#: `test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS` — the second witness is
+#: REAL and MEASURED (making every long spelling readable reds both), and this paragraph is where a
+#: previous version said "NOWHERE ELSE" and was wrong (#14027 round 8, P3). What that paragraph got
+#: right, and what stays: the LONG-SPELLING cell is NOT a witness — it asserts nothing about an
+#: alias (measured: `--fixed-regexp` occurs there only inside grep's own ambiguity message), which
+#: is the `_D5_RETIRED_OVERCLAIMS` defect this file bans (#13962). It is FAIL-CLOSED: `-F` prints
+#: `0` on the blank-class probe, so declining the alias can never grade a non-class as this class.
+#: ⛔ THE NEIGHBOURS THAT ARE **NOT** HERE, measured on the same probe: `-i`, `-w`, `-x`, `-E`, `-G`
+#: and `-P` all print `2`, so they leave this class intact; `--null` is `-Z` (a NUL after the FILE
+#: name) and prints `2`, so it is a RIVAL of the `--null-data` prefix rather than a shortening of it.
+#:
+#: ⛔ AND THE RESIDUAL THIS TABLE DOES NOT COVER — `-m`/`--max-count` CAPS THE COUNT (#14027 round 4,
+#: P3 — MEASURED). It changes nothing about what the pattern selects, only how much of the class is
+#: counted: on a probe holding `+`, `-`, `+import os`, ` a`, `grep -c '^[+-]$'` prints `2` while
+#: `grep -c -m1 '^[+-]$'` and `grep -c --max-count=1 '^[+-]$'` print `1`. Such a command is therefore
+#: GRADED as this class, with a number smaller than the class; the cell's `-m 2` rows agree with the
+#: class only because that cap is at or above its size. This is FAIL-CLOSED in the direction that
+#: matters here — the executed row is bound by `_D5_BLANK_COUNT_RE`, so a capped command cannot make
+#: a wrong count look right — and the cost is a false RED on a document that legitimately prescribes
+#: a CAPPED second count. ⛔ AND A CROSS-FLAG CONFLICT IS GRADED TOO (#14027 round 9, P3 —
+#: MEASURED): grep refuses `-cEG`/`-cEP`/`-cGP` (`conflicting matchers specified`, rc 2) and every
+#: value in such a cluster is valid, so it sits outside the invalid-value cluster below and is
+#: declared nowhere else — the same bounded false RED (the executed row is still
+#: `_D5_BLANK_COUNT_RE`), closable by refusing an invocation that carries two of `-E`/`-G`/`-P`.
+#: `egrep -c` is blind for the same reason (another tool spelling): measured
+#: `2` on the probe, and this reader only knows `grep`.
+#:
+#: ⛔ AND A CLUSTER WHOSE ARGUMENT-TAKING MEMBER HAS AN INVALID VALUE IS GRADED, NOT DECLINED
+#: (#14027 round 8, P3 — MEASURED, and the same on `origin/main`, so this is a DECLARATION of
+#: pre-existing behaviour rather than a regression here). `_d5_flag_word` does not validate a
+#: short flag's value — grep is the judge of the NAME — so the word is read as a count request and
+#: its tail is never checked: `grep -cmw '^[+-]$'` is `grep: invalid max count` (rc 2) yet is
+#: graded, and so are `grep -cDE` (`unknown devices method`) and `grep -cAc` (`invalid context
+#: length argument`). This is the FALSE-RED direction — a document that merely MENTIONS such a
+#: spelling would red the arm — and it is bounded: the executed row is still `_D5_BLANK_COUNT_RE`,
+#: so nothing here can make a wrong count look right. Closing it means validating `m`/`A`/`B`/`C`
+#: as numeric and `d`/`D` against their allowed sets; until then the classification above matches
+#: the code. It was already true on `origin/main` at `d4a8dddc4e` — ⛔ the earlier cut of this
+#: sentence cited `af3e8b0ffa`, which is THIS branch's first commit and therefore carries the
+#: reader under test; it cannot witness what `origin/main` does (#14027 round 9, P3 — MEASURED:
+#: `git merge-base --is-ancestor af3e8b0ffa origin/main` is rc 1, `d4a8dddc4e` is rc 0, and
+#: `origin/main`'s own `_d5_count_prescriptions` answers `['^[+-]$']` for all three spellings).
+_D5_RETARGETING_SHORT_FLAGS = frozenset("Fz")
+_D5_RETARGETING_LONG_FLAGS = frozenset({"--fixed-strings", "--null-data"})
+_D5_RETARGETING_LONG_RIVALS = ("--null",)
+
+
+def _retargets_the_matched_text(flags: str) -> bool:
+    """Does this run of grep flags make the EXPRESSION select a DIFFERENT set (`-F`, `-z`)?
+
+    Answered separately from `_inverts_the_match_set` and from `_requests_a_count`, because the
+    command IS a count and the expression IS the class literal — what changed is what `grep` reads
+    that literal AS: with `-F` it is text, with `-z` the whole diff is one record.
+
+    Long spellings are resolved by the same UNAMBIGUOUS-PREFIX rule `_resolved_long_option` uses,
+    over this predicate's own name set, with `--null` declared a rival of `--null-data` — both
+    measured: `--null-d` prints `0` on the probe and `--null` prints `2`. The BOUNDARY is stated
+    rather than implied: the rival list reaches only as far as the one measured prefix that would
+    otherwise be a false MATCH, so `--n` (a prefix of `--null`) is NOT retargeting while `--f`/`--fi`
+    ARE, even though grep refuses both (measured: `option '--n' is ambiguous`, `option '--fi' is
+    ambiguous`, rc 2). That over-inclusion is currently UNREACHABLE, and measurably so:
+    `_long_option_is_accepted` refuses both spellings, so `_d5_command_expression` declines the
+    invocation before any flag is judged (`grep -c --fi '^[+-]$'` and `grep -c --f '^[+-]$'` are
+    both pinned as `[]`, not merely ungraded). ⛔ THE REASON MOVED (#13995): it used to be
+    `_resolved_long_option` reading both as `--file` and eating the next word as its argument,
+    which is no longer what happens (it returns `None` — the prefix is ambiguous). It is kept as
+    the safe direction for a future change to `_long_option_is_accepted`, which would otherwise
+    silently grade an ambiguous prefix as this class.
+
+    ⛔ AND THE TABLE CARRIES NO MEMBER AN INVOCATION CANNOT REACH (#13995 review, P2 — MEASURED):
+    `--fixed-regexp` used to be one, and it was UNWITNESSED — the acceptance gate declines every
+    alias spelling before this predicate is asked, so dropping it left the suite green. Its reason
+    is stated on the table's header rather than encoded as a member nothing can exercise, and
+    `test_the_d5_count_reader_does_not_grade_a_command_whose_pattern_is_NOT_A_REGEX` pins the
+    invariant that keeps a dead member from coming back: every name in the table must be one
+    `_long_option_is_accepted` accepts.
+    """
+    for word in flags.split():
+        if word.startswith("--"):
+            name = word.split("=", 1)[0]
+            if name == "--":
+                continue
+            if any(flag.startswith(name) and not any(
+                    rival.startswith(name) for rival in _D5_RETARGETING_LONG_RIVALS)
+                   for flag in _D5_RETARGETING_LONG_FLAGS):
+                return True
+            continue
+        if word.startswith("-") and any(
+                char in _D5_RETARGETING_SHORT_FLAGS for char in _short_flag_head(word)):
+            return True
+    return False
+
+
+def _requests_a_count(flags: str) -> bool:
+    r"""Does this run of grep flags ask for a COUNT?
+
+    Word by word, because the flag run is not always ONE word: the measured spellings split it
+    as `-c -E`, `-c --` and `-c --color=never`. A whole-run test (`-` then `[\w-]*c[\w-]*`
+    anchored at both ends) reads the single-word forms and NOT the split one — the defect this
+    function exists for, one size smaller.
+
+    ⛔ A SHORT CLUSTER IS SCANNED LEFT TO RIGHT AND STOPS AT A FLAG THAT TAKES AN ARGUMENT
+    (#13995 review round 3, P2 — MEASURED). "a short word containing `c`" was false in the
+    other direction: `-ec` is `-e` with the pattern `c`, not a count, and reading it as one
+    would pair the NEXT quoted token to a command that counts nothing. Once a flag that takes
+    an argument is seen — the WHOLE set lives on `_ARG_TAKING_SHORT_FLAGS`, not enumerated here
+    so this sentence cannot go stale the way a list does — the rest of the word is its argument
+    (`-A2`), so the scan ends there. `c` before such a flag is still a count (`-cA2`, `-ce`).
+    A long flag is a count only
+    as the one long spelling, `--count` — which is why `--` (end of flags) and `--color=never`
+    are correctly not counts.
+
+    ⛔ BUT "HAS A `c`" IS NOT THE SAME AS "COUNTS THIS CLASS", IN TWO DIRECTIONS
+    (#13995 review round 4, P2 — MEASURED on GNU grep 3.11). A flag can leave the count's SHAPE
+    intact while changing WHAT is counted, or can suppress the count outright:
+
+      * `-v` INVERTS the match set, so `grep -vc '^[+-]$'` counts the NON-blank lines. That IS a
+        count and is answered `True` here — the inversion travels with the flags to
+        `_d5_blank_class_prescriptions`, which refuses to grade it against the positive class
+        (`grep -vc '^[+-]$'` counts a DIFFERENT class, not a second prescription of this one).
+      * `-l`, `-L` and `-q` WIN over `-c`: `-lc` prints the FILENAME, `-Lc` prints the files
+        WITHOUT a match, `-qc` prints nothing. None of them counts anything, so a word carrying
+        one — the whole set lives on `_D5_COUNT_SUPPRESSING_SHORT_FLAGS` — is answered `False`
+        however its cluster is ordered (`-cl` is the same command as `-lc`).
+    """
+    words = flags.split()
+    # The suppressor check runs over the WHOLE run, not word by word in order: `--count -q` is
+    # `-q` winning over a long-spelled count, so an early `return True` at `--count` would read a
+    # command that prints nothing as a count (#13995 review round 4, P2).
+    if any(_suppresses_the_count(word) for word in words):
+        return False
+    for word in words:
+        if _long_flag_matches(word, "--count", rivals=("--color", "--context")):
+            return True
+        if word.startswith("--") or not word.startswith("-"):
+            continue
+        if "c" in _short_flag_head(word):
+            return True
+    return False
+
+
+def _d5_count_commands(bundle: str) -> list[tuple[str, str]]:
+    """`(flags, expression)` for every prescription `_d5_command_expression` reads, once
+    `_requests_a_count` has admitted the flags.
+
+    Split out so the two consumers below cannot disagree about what was seen: the FLAGS have to
+    travel with the expression, because a count under `-v` is a count of a different class and is
+    not decidable from the expression alone (#13995 review round 4, P2). ONE INVOCATION MAY
+    CONTRIBUTE SEVERAL ENTRIES — a command with two `-e` patterns counts the union of them, and
+    each pattern is a prescription in its own right (#13995, MEASURED).
+    """
+    commands: list[tuple[str, str]] = []
+    for match in _D5_GREP_INVOCATION_RE.finditer(bundle):
+        found = _d5_command_expression(bundle, match.end())
+        if found is None:
+            continue
+        commands.extend(pair for pair in found if _requests_a_count(pair[0]))
+    return commands
+
+
+def _d5_split_top_level(body: str, sep: str) -> list[str] | None:
+    """Split `body` on `sep` where it is NOT inside a `[...]` class or a `(...)` group.
+
+    `None` when a group or a class is left open — an unbalanced body is not a spelling this
+    reader may interpret.
+    """
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    in_class = False
+    escaped = False
+    for char in body:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            current.append(char)
+            escaped = True
+            continue
+        if in_class:
+            in_class = char != "]"
+        elif char == "[":
+            in_class = True
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth < 0:
+                return None
+        elif char == sep and depth == 0:
+            parts.append("".join(current))
+            current = []
+            continue
+        current.append(char)
+    if depth or in_class or escaped:
+        return None
+    parts.append("".join(current))
+    return parts
+
+
+def _d5_class_members(char_class: str) -> set[str] | None:
+    r"""The single characters a `[...]` class matches, or `None` if it is not a plain set of them.
+
+    A negated class, a RANGE (`[a-z]`, and `[+-z]` where the hyphen sits between two members) and
+    an incomplete escape are all answered `None` rather than interpreted.
+
+    ⛔ `[\-+]` IS REFUSED AS A DESCENDING RANGE, AND THAT IS NOT THE CLAIM "backslash is not an
+    escape here" (#13995 review round 12, P2; stated precisely by #14026 review, P2 — MEASURED).
+    `[\-+]` is the range `\`–`+` (`grep: Invalid range end`, rc 2), and this helper used to read it
+    as the members `{-, +}` by consuming `\-` as an escaped hyphen.
+
+    ⛔ BUT THE ESCAPE MACHINERY SURVIVES, AND POSIX HAS NO SUCH THING — so this helper really does
+    over-accept, deliberately, with the cost stated (#14026 review, P2 — MEASURED). A backslash
+    inside a bracket is an ORDINARY MEMBER: `^[+\-]$` is the class `{+,-,\}` and counts `3` on a
+    probe carrying a lone `\` line, where this class counts `2` — on a `\`-free probe that
+    carries both signs they agree, not only on the 4-line one. So the escape model, answering
+    `{+,-}`, grades a SUPERSET as the class. That over-acceptance is the DECLARED superset at
+    `_d5_counts_the_blank_class` and pinned as ACCEPTED in the spellings cell, and its cost is one
+    impossible diff line (no line of a unified diff is a bare `\`: every diff BODY line carries a
+    `+`/`-`/space prefix, and the header lines — `diff --git`, `index`, `---`/`+++`, `@@` — and
+    the `\ No newline at end of file` marker are all multi-character). Removing the machinery would
+    be stricter and would reverse a landed decision, so it is a reopen rather than a tidy-up —
+    which is why the case for keeping it rests on what the CODE does and on that decision, rather
+    than on POSIX's reading.
+    """
+    content = char_class[1:-1]
+    if not content or content[0] == "^":
+        return None
+    members: set[str] = set()
+    escaped = False
+    for index, char in enumerate(content):
+        if escaped:
+            members.add(char)
+            escaped = False
+            continue
+        if char == "\\":
+            # ⛔ POSIX BRACKET EXPRESSIONS HAVE NO BACKSLASH ESCAPES, AND GNU grep ERRORS HERE
+            # (#13995 review round 12, P2 — MEASURED). `[\-+]` reads as the DESCENDING RANGE
+            # `\`–`+` — `grep -cE '^[\-+]$'` → `grep: Invalid range end`, rc 2, in BRE and ERE —
+            # so consuming `\-` as an escaped member (which this helper did) graded a command that
+            # cannot run as a BLANK-class prescription. The rule, exactly as the escape branch
+            # below, the `if escaped:` consumer at the top of the loop and the two `return None`
+            # branches implement it (#14026 review, P2 — MEASURED: this comment used to merge three
+            # different spellings into one sentence, and then two of them into a second one):
+            #   * an escaped `-` with any character after it is refused as a RANGE. grep agrees
+            #     where that range DESCENDS (`grep -cE` refuses `^[\-+]$` and `^[+\-+]$` with
+            #     `Invalid range end`, rc 2) — and DISAGREES for a range whose endpoints are
+            #     EQUAL or that ASCENDS, both of which grep RUNS: `^[+\-\]$` is `{+}` plus the
+            #     range `\`..`\`, and `^[+\-z]$` is `{+}` plus `\`..`z`; each exits 0 and counts
+            #     the `+` and the `\` lines of the 6-line probe (`2`, measured). This helper
+            #     answers `None` to all of them, an over-refusal in the safe direction rather
+            #     than agreement with grep;
+            #   * an escaped `-` in the LAST position is consumed as the member `-`, which is
+            #     what keeps `[+\-]` accepted — it also matches a lone `\`, so it counts `3` on
+            #     a probe carrying one where this class counts `2`;
+            #   * a backslash before any OTHER character is consumed as that character, which is
+            #     what keeps `[-\+]` accepted; there the ESCAPED character is `+` and the leading
+            #     hyphen is unescaped, so it reaches the same backslash-bearing superset (`3`);
+            #   * the UNESCAPED `[-+]` is the plain class, no `\` member at all (counts `2` on
+            #     that probe), and it is kept as the class itself — not as a superset.
+            # What the superset costs is stated in the docstring above: one impossible diff line.
+            if index + 2 < len(content) and content[index + 1] == "-":
+                return None  # a `-` between members is a RANGE, escaped or not
+            escaped = True
+            continue
+        if char == "-" and 0 < index < len(content) - 1:
+            return None  # an unescaped `-` between members is a RANGE, not a member
+        members.add(char)
+    return None if escaped else members
+
+
+def _d5_counts_the_blank_class(expr: str) -> bool:
+    r"""Does `expr` count exactly the lines that are one `+` or one `-`?
+
+    ⛔ A BOUNDED EQUIVALENCE, NOT A REGEX-EQUIVALENCE DECISION (#13995 review, P2 — MEASURED).
+    The test this replaces was a SPELLING LIST, `\^(?:\\[+-]|\[[-+]+\])\$`, so `^(\+|-)$` — the
+    same class as the row's own `^[+-]$`, measured `2` on the 4-line probe — was read as an
+    expression of some OTHER class. Two consequences, both measured: a second blank-class
+    prescription spelled `^(\+|-)$` left the arm GREEN (a false PASS), and putting one in place
+    of the row's own expression tripped the ZERO assertion, whose message blames the count READER
+    for a spelling the CLASS TEST was the one to reject (a false RED with a misattributed cause).
+
+    ⛔ AND THIS SENTENCE USED TO NAME A SECOND SPELLING BESIDE IT, ON A PREMISE THAT IS FALSE
+    (#14026 review, P2 — MEASURED). It read that `^[+\-]$` and `^(\+|-)$` were "the same class,
+    measured `2` on the 4-line probe" and were read as expressions of some OTHER class. Only
+    `^(\+|-)$` is this class; `^[+\-]$` is NOT — a POSIX bracket has no escapes, so its members
+    are `{+,-,\}` and it counts `3` on a probe carrying a lone `\` line, which is the DECLARED
+    SUPERSET documented in the NEXT paragraph. On a `\`-free probe that carries both signs they
+    agree, not only on the 4-line one. So the retired list REFUSING `^[+\-]$` was reading it as
+    what it is — NOT this class — rather than mis-reading it; that `main` now accepts the spelling
+    as a DECLARED
+    SUPERSET is a deliberate widening (stated below), not a claim that it IS the class. The
+    sentence therefore used a true statement about one spelling to carry a false one about the
+    other — contradicting this docstring's own next paragraph, in the paragraph that justifies the
+    widening.
+
+    Accepted here, each measured — SPELLINGS CHECKED, NOT A GRAMMAR: `^[+-]$`, `^[-+]$`,
+    `^[+\-]$`, and the alternation forms `^(\+|-)$` / `^(-|\+)$` (PLAIN groups, each counting `2`
+    on the `x`/`+`/`-`/empty probe). ⛔ A BACKSLASH-BEARING BRACKET BUILT FROM THAT TABLE IS A
+    DECLARED SUPERSET, not an equivalence (#13995 review rounds 13 and 16, P3, MEASURED): a POSIX
+    bracket has no escapes, so the `\` is a MEMBER, and `^[+\-]$` counts `3` on a probe that
+    carries a `\` line where the class counts 2. Accepted because it is a spelling a document
+    plausibly writes, with the cost (one impossible diff line) stated rather than implied. Two
+    backslashes can still pass (`^[\+\-]$` counts `3` — the same superset, not a separate case).
+    The REAL rule, stated exactly as the code implements it (#13995 review rounds 17-20, MEASURED):
+    a bracket is accepted IFF `_d5_class_members` returns exactly `{"+", "-"}`. That helper answers
+    `None` — a refusal — for a NEGATED class, for a RANGE (an unescaped `-` with members on both
+    sides, so `^[\-+]$` is refused, and grep refuses it too: `Invalid range end`, rc 2), for an
+    escaped `-` in that same between-members position, and for an INCOMPLETE ESCAPE (a `\` that
+    ends the content, which `_d5_class_members("[+\\]") is None` states directly — note that
+    `[+-\\]` is refused by the RANGE rule before the trailing `\` is even reached). An escaped `\`
+    is a MEMBER, which is why `^[\\+-]$` is refused as well: its set is `{+,-,\}`, not `{+,-}`.
+    ⛔ AND `^[-+\]$` IS REFUSED BY TWO STAGES, NOT ONE (#13995 review round 21, P2 — MEASURED on
+    GNU grep 3.11, which runs it and counts `3`): its class is never CLOSED, so
+    `_d5_split_top_level` answers `None` before the helper is called, and the helper would answer
+    `None` for the trailing `\` on its own. A pin on the expression therefore witnesses the
+    COMPOSITION, which is why the helper has its own row below.
+    Those refusals are the safe direction, and the only guarantee offered is one-sided and
+    measured: an ACCEPTED spelling counts `2` or `3` (3 when the bracket carries a literal `\`),
+    never more — which is what makes the superset cost one impossible diff line. Three spellings are NOT among them, all measured: `^[\-+]$` (the
+    DESCENDING range `\`–`+`: `grep: Invalid range end`, rc 2, and this test now refuses it too),
+    `^(?:\+|-)$` (POSIX ERE has no non-capturing group: `warning: ? at start of expression`,
+    counts `1` under `-E` and `0` under BRE) and `^+$`/`^-$` (one sign, half the class). What it
+    does NOT decide is stated at
+    the assertion that uses it: a regex equivalent to this class but spelled differently
+    (`^[+]$|^[-]$`, a lookahead, a POSIX class) is not recognised — a declared residual, not a
+    claim of closure. ⛔ A LONE SIGN IS NOT THIS CLASS, AND IS REJECTED (#13995 review round 10,
+    P2 — MEASURED): this test used to accept `^-$` and `^+$` as "one `+` or one `-`", which is
+    false in both directions — `^-$` counts ONLY the removed half (measured `0` on a diff whose
+    only blank line is added), and `^+$` names ONE shape, but WHICH shape depends on the dialect
+    (#13995 review round 13, P3, MEASURED, correcting the sentence round 11 wrote): under `-E`,
+    the dialect this arm grades, it warns `+ at start of expression` and matches the EMPTY line
+    (`grep -nE '^+$'` -> the blank line, count 1); under BRE it matches a lone `+` line instead.
+    Either way one shape, never the class. Accepting them let a row re-spell its way out of
+    half the class
+    while this arm still called it graded; arm (5) of this cell caught it, which is why this is a
+    second guard's weakness rather than an open hole — and why it is closed here rather than left
+    to that one. The same reasoning retires `^(?:\+|-)$`: POSIX ERE has no non-capturing group, so
+    GNU grep warns `? at start of expression` and counts ONE sign (`1`, where the class counts 2).
+    """
+    if not (expr.startswith("^") and expr.endswith("$")):
+        return False
+    body = expr[1:-1]
+    alternatives = _d5_split_top_level(body, "|")
+    if alternatives is None:
+        return False
+    grouped = False
+    if len(alternatives) == 1 and body.startswith("(") and body.endswith(")"):
+        inner = body[1:-1]
+        # ⛔ NO `?:` STRIPPING: POSIX ERE has no non-capturing group, so `^(?:\+|-)$` is not the
+        # two-sign alternation it looks like — GNU grep warns `? at start of expression` and
+        # counts ONE sign (measured 1 on `x`/`+`/`-`/empty; the class counts 2). Left unstripped,
+        # the body is `?:\+|-` and the sign loop refuses it below.
+        nested = _d5_split_top_level(inner, "|")
+        alternatives = nested if nested is not None else alternatives
+        grouped = True
+    if len(alternatives) == 1:
+        alternative = alternatives[0]
+        if alternative.startswith("[") and alternative.endswith("]"):
+            return _d5_class_members(alternative) == {"+", "-"}
+        # A single anchor with no bracket and no two-branch alternation names ONE line shape —
+        # `^-$`, `^\+$`, `^(\-)$` — never both halves of this class.
+        return False
+    # AN UNGROUPED ALTERNATION IS NOT A CLASS (#13995 review round 14, P2, MEASURED). ERE binds
+    # the anchors to each BRANCH, so `^\+|-$` is `(^\+)|(-$)`: starts with `+` OR ends with `-`.
+    # Measured on `x`/`+`/`-`/empty/`++`/`+-`/`-+`/`--`/`a`/`\`/`1`/`~` it matches FIVE lines
+    # (`+ - ++ +- --`) where the class has two — and 22 two- and three-branch spellings WERE
+    # accepted here before this guard (4 at k=2, 18 at k=3; the count grows with the branch count:
+    # 64 at k=4, 210 at k=5), none of them the class, while the retired spelling-list regex refused
+    # all of them — so this was a widening onto a WRONG class, not a residual. A multi-branch body
+    # must therefore be a GROUP; only the `( ... )` branch above may set `grouped`.
+    if len(alternatives) > 1 and not grouped:
+        return False
+    # A BARE `+` IS NOT A BRANCH OF THIS CLASS (#13995 review round 13, P2, MEASURED). The
+    # blanket `alternative.replace("\\", "")` read `^(+|-)$` as the two signs, but under `-E`
+    # (the dialect this arm grades) that expression WARNS `+ at start of expression` and matches
+    # the `-` line AND the EMPTY line: 2 on the probe, never a lone `+`, so it is half the class
+    # plus a shape the class excludes; `^(-|+)$` does not even run (`Unmatched ( or \(`, rc 2).
+    # Accept the escaped forms and a leading bare `-` (grep reads that literally: `^(-|\+)$` -> 2),
+    # refuse everything else.
+    signs = set()
+    for alternative in alternatives:
+        if alternative == "\\+":
+            sign = "+"
+        elif alternative in ("-", "\\-"):
+            sign = "-"
+        else:
+            return False
+        signs.add(sign)
+    return signs == {"+", "-"}
+
+
+def _d5_blank_class_prescriptions(bundle: str) -> list[str]:
+    """The expressions of the count commands that count THIS class — positive match set only.
+
+    A `-v`-bearing count is deliberately EXCLUDED even when its expression is the BLANK class: it
+    counts the complement, i.e. a different class, so it is not a second prescription of this
+    one. Grading it would red a correct document that prescribes the blank count and its
+    complement together — with "so this arm would execute one of them while a reader follows
+    another", a sentence that is false in that case — and a false RED on a correct document is
+    the failure mode this file treats as the worse one (#13995 review round 4, P2 — MEASURED).
+
+    ⛔ THE EXCLUSION HAS A RESIDUAL AND IT IS STATED, NOT IMPLIED: because the test is on the
+    FLAGS, an inverted command whose expression is NOT the blank-class literal is unread even when
+    it would count the blank lines (`grep -vc '^[+-][^+-]'`). That is a shape this arm does not
+    read — pinned as `[]` in
+    `test_the_d5_count_reader_does_not_grade_a_complement_or_suppressed_count_as_this_class` —
+    never a claim that the class is prescribed once in the document. A guard may be narrow, but may
+    not describe itself as complete (this file's own rule).
+
+    ⛔ AND THE SAME FIX ONE AXIS OVER: a command whose FLAGS make the expression select a different
+    set is not graded either (#13995 review — MEASURED). `grep -Fc '^[+-]$'` counts the LITERAL text
+    (`0` on the 4-line probe) and `grep -zc '^[+-]$'` counts nothing (`0`), while
+    `-Ec`/`-ic`/`-wc`/`-xc` print `2` — so `_retargets_the_matched_text` is the second reason this
+    filter reads the FLAGS and not the expression alone, and why the expression-only test cannot
+    answer this question. Its residual is stated at that helper: another flag that changes what the
+    pattern selects, and is not in its table, is graded as this class until it is added and pinned —
+    ⛔ AND ONE SUCH FLAG IS KNOWN AND DECLARED THERE RATHER THAN LEFT IMPLIED: `-m`/`--max-count`
+    changes the SHAPE OF THE COUNT (measured `1` where the class has `2`) without changing what the
+    pattern selects, so a capped command is graded with a number below the class; `egrep -c`, which
+    really counts this class (`2` measured), is blind for the same reason (#14027 round 4, P3).
+    """
+    return [
+        expr for flags, expr in _d5_count_commands(bundle)
+        if not _inverts_the_match_set(flags)
+        and not _retargets_the_matched_text(flags)
+        and _d5_counts_the_blank_class(expr)
+    ]
+
+
+def _d5_count_prescriptions(bundle: str) -> list[str]:
+    r"""The EXPRESSION of every `grep` count command in `bundle` whose `-`-anchored flag words
+    are followed by a quoted expression.
+
+    ⛔ THAT IS A SHAPE, NOT A CLAIM ABOUT SPELLING, and the sentence it replaces claimed the other
+    thing (banned by `test_the_d5_count_reader_does_not_describe_itself_as_complete` —
+    #13995 review, P2). The count commands this does NOT read are named in
+    `_D5_GREP_INVOCATION_RE`'s residual block above — an unquoted first operand; flags written
+    after the expression; a
+    pattern supplied from a FILE (`-f`/`--file`); another tool; a concatenation past
+    its first fragment — and EACH OF THOSE IS PINNED in
+    `test_the_d5_count_reader_sees_one_command_however_it_is_spelled`, as `[]` for all but the
+    concatenation, which is pinned at its first fragment. So "every" here is bounded by that
+    list, and that list is a list rather than the closure.
+
+    ⛔ THE `-e`/`--regexp` HALF OF THAT BULLET IS GONE, NOT GLOSSED (#14027 review round 5, P3 —
+    MEASURED). This paragraph said "a pattern supplied on a flag (`-e`/`-f`/`--regexp`/`--file`)"
+    and that every item is pinned `[]`; at this head `-e`/`--regexp` are READ, and the very test it
+    names pins `grep -c -e 'decoy' -e '^[+-]$'` as `["decoy", "^[+-]$"]` — the bullet contradicted
+    the pin it cited. Only the FILE-supplying half is a residual: `-f`/`--file` name a file whose
+    contents the document does not carry.
+
+    The count flag is what makes a `grep` a prescription to be counted, so the filter is
+    `_requests_a_count`, never a spelling of the flag run. Measured control: each of #13962's
+    SEVEN mutants returns exactly one expression here and exactly one BLANK-class expression from
+    `_d5_blank_class_prescriptions`, and the two filter stages in the same cell (`grep -E`,
+    `grep -vE`) return none.
+
+    ⛔ THIS IS THE SEEN SET, NOT THE GRADED SET, and that is deliberate: a `-v` count is seen here
+    (`grep -vc '^[+-]$'` IS a count command) and excluded by `_d5_blank_class_prescriptions`,
+    because it counts the complement rather than this class. Keeping it visible is what lets the
+    exclusion be falsifiable — the cell pins both halves (#13995 review round 4, P2).
+    """
+    return [expr for _flags, expr in _d5_count_commands(bundle)]
 
 
 def _d5_blank_count_expression() -> str:
@@ -3082,8 +4365,38 @@ def _d5_blank_count_expression() -> str:
     """
     bundle = (DOCS / "epics" / "2026-11-04-7949-extractor-v4-capstone"
               / "05-verify.md").read_text(encoding="utf-8")
-    prescriptions = _D5_ANY_COUNT_EXPR_RE.findall(bundle)
-    blank_prescriptions = [e for e in prescriptions if _D5_BLANK_CLASS_EXPR_RE.fullmatch(e)]
+    prescriptions = _d5_count_prescriptions(bundle)
+    # ⛔ NOT `[e for e in prescriptions if fullmatch(e)]`: the EXPRESSION alone does not say what
+    # was counted. `grep -vc '^[+-]$'` is a count of the COMPLEMENT, so it must not be graded
+    # against the positive class — the filter owns the flags too (#13995 review round 4, P2).
+    blank_prescriptions = _d5_blank_class_prescriptions(bundle)
+    # ⛔ ZERO AND MANY ARE TWO DIFFERENT DEFECTS AND GET TWO DIFFERENT MESSAGES (#13962). The
+    # single `== 1` this replaces rendered the ZERO case as "prescribes 0 BLANK-line count
+    # commands ([] of […]), so this arm would execute one of them while a reader follows
+    # another" — a sentence about picking between two prescriptions, printed over an EMPTY list,
+    # on the head where the sentence's expression had merely been re-spelled (`^-$`). A fixer
+    # reading it is told to look for a second command that does not exist.
+    assert blank_prescriptions, (
+        "this arm SEES no BLANK-line count command at this head "
+        f"(count commands read: {prescriptions!r}), so it executes nothing — and FIVE different "
+        "stages can be the reason, so check all five before editing anything: the `05-verify.md` "
+        "row may still PRESCRIBE one in a spelling the count reader cannot see (an unquoted "
+        "expression; a pattern supplied from a FILE, `-f`/`--file`) — ⛔ NOT `-e`/`--regexp`, which "
+        "this reader DOES read and grade (#14027 round 6, P3 — MEASURED: "
+        "`_d5_blank_class_prescriptions('grep -c -e \'^[+-]$\'')` is `['^[+-]$']`); or the reader "
+        "DID read it and "
+        "`_d5_counts_the_blank_class` rejected the spelling — measured on a row spelled "
+        "`^(\\+|-)$`, which counts the same class and is graded as this one now — which is a "
+        "class-test gap and not a reader gap; or the row prescribes the COMPLEMENT "
+        "(`grep -vc '^[+-] …'`) — read, and refused BY DESIGN by `_inverts_the_match_set`; or the "
+        "row asks for a count whose output `grep` SUPPRESSES OR REPLACES (`-q` prints nothing, "
+        "`-l`/`-L` print filenames) — also refused by design, by `_requests_a_count`'s "
+        "`_D5_COUNT_SUPPRESSING_SHORT_FLAGS` scan; or the row's command carries a flag that makes "
+        "the expression select a DIFFERENT set (`-F` reads it as literal text, `-z` ends a record "
+        "at a NUL) — read and refused by design by `_retargets_the_matched_text`. Only the first "
+        "two are gaps; the last three are the arm working. Naming only the reader was a false "
+        "attribution, and naming fewer than all five is the same defect one round later "
+        "(#13962, #13995 reviews)")
     assert len(blank_prescriptions) == 1, (
         f"05-verify.md prescribes {len(blank_prescriptions)} BLANK-line count commands "
         f"({blank_prescriptions!r} of {prescriptions!r}), so this arm would execute one of "
@@ -3092,7 +4405,10 @@ def _d5_blank_count_expression() -> str:
     assert len(found) == 1, (
         "05-verify.md no longer states exactly one `git diff … | grep -cE '<expr>'` command "
         f"bound to the BLANK-line class (found {found!r}), so this arm executes nothing")
-    # ⛔ THE GATE ABOVE COUNTS PRESCRIPTIONS ANYWHERE IN THE BUNDLE; THIS ONE BINDS THE
+    # ⛔ THE GATE ABOVE COUNTS PRESCRIPTIONS ANYWHERE IN THE BUNDLE, IN EVERY SPELLING THE
+    # READER READS (#13962 — the SEVEN mutants on the `grep -c[A-Za-z]* '…'` reader it replaced);
+    # the residual block on `_D5_GREP_INVOCATION_RE` names the spellings it does NOT, so that is
+    # a shape and not a promise about spelling. THIS ONE BINDS
     # EXECUTED EXPRESSION TO THE CLASS (#13956 review, P2 — MEASURED). The two are NOT
     # equivalent, and the gap is a fail-open on the exact defect this cell exists to retire: a
     # second, correctly-spelled BLANK-class prescription anywhere in the bundle keeps
@@ -3104,12 +4420,15 @@ def _d5_blank_count_expression() -> str:
     # `--collect-only -q` at that head) stayed green, while the row's own sentence
     # ("… and ONLY that class: it does not count the sign-opening one (`++i`, `--counter`,
     # `+- 2)`)") became FALSE. With this assertion the same two-edit mutant reds HERE.
-    assert _D5_BLANK_CLASS_EXPR_RE.fullmatch(found[0]), (
+    assert _d5_counts_the_blank_class(found[0]), (
         f"05-verify.md's BLANK-line sentence prescribes {found[0]!r} at this head, which is not "
         "the BLANK class the row names — so the document tells the reader to count a wider "
         "class than the one it claims to count. A decoy BLANK-class prescription elsewhere in "
         "the bundle keeps the count above green, which is why the EXECUTED expression has to "
-        "be bound to the class here (#13956 review, P2)")
+        "be bound to the class here (#13956 review, P2). NOTE the residual: the class test is a "
+        "BOUNDED equivalence (see `_d5_counts_the_blank_class`), so an equivalent spelling it "
+        "does not recognise (`^[+]$|^[-]$`, a lookahead) reds this arm — a declared residual, "
+        "not a fact about the document")
     return found[0]
 
 
@@ -3128,6 +4447,1211 @@ def _blank_line_count(diff: str) -> int:
     assert out.returncode in (0, 1), (
         f"grep refused the document's own expression: {out.stderr!r}")
     return int(out.stdout.strip() or 0)
+
+
+def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
+    """#13962 — the count arm must read a COMMAND, not one SPELLING of one.
+
+    MEASURED on the pre-fix reader, which was `re.compile(r"grep -c[A-Za-z]* '([^']+)'")`
+    (if you are tempted to narrow it back, run this test first): each of the SEVEN MUTANTS in
+    the loop below was appended to `05-verify.md` on its own and the cell that calls
+    `_d5_blank_count_expression()` was run — `1 passed` every time. Each mutant is a SECOND
+    prescription for the same BLANK class, and the arm whose entire job is to refuse a second
+    prescription reported the class as graded once, so the row told its reader to run one
+    command while it carried two. (The loop's LAST entry is not a mutant: it is the spelling
+    that already worked before the fix, kept as the floor so a future narrowing cannot pass by
+    breaking the case that was never broken.)
+
+    ⛔ THE LAST THREE MUTANTS WERE MISSED BY THE FIRST CUT OF THIS FIX AND FOUND BY REVIEW
+    (#13995 review, P1 — MEASURED, and the reader was widened in the same commit that added
+    them here): its flag word required a LETTER after the dashes, so a bare `--` and a
+    `--flag=value` were unreadable, and its quote could not express `$'…'`. All three are
+    POSIX-idiomatic spellings of the row's own command, i.e. the shape a future hardening pass
+    would actually write — which is why they are pinned rather than just described.
+
+    The control is the mutation itself, not a list of regexes: what is asserted is the outcome
+    the arm needs — one BLANK-class expression seen per spelling, and none from the two
+    non-count `grep` stages the same cell prescribes.
+
+    ⛔ THE EXPRESSION IN THESE FIXTURES IS `^[+-]$`, THE CLASS THE ROW ACTUALLY CARRIES — NOT A
+    SINGLE SIGN BETWEEN ANCHORS (#13995 review round 10, P2 — MEASURED). One sign is HALF the
+    class (`^-$` counts only removed lines), and a bare `+` between anchors is not a regex grep
+    accepts at all. The class test now says so, so a fixture spelled that way would assert "this
+    is a BLANK-class count" over an expression that is not one; these fixtures are about the
+    FLAG/spelling axis, so they carry an expression that really is the class.
+    """
+    for spelling in (
+        "grep -Ec '^[+-]$'",           # flag BEFORE the `c`
+        'grep -cE "^[+-]$"',           # double-quoted expression
+        "grep -c -E '^[+-]$'",         # flags split across two words
+        "grep --count '^[+-]$'",       # the long form
+        "grep -c -- '^[+-]$'",         # POSIX end-of-flags `--`
+        "grep -c --color=never '^[+-]$'",  # a long flag WITH a value
+        "grep -c $'^[+-]$'",           # ANSI-C quoting
+        "grep -c '^[+-]$'",            # the spelling that already worked, kept as the floor
+    ):
+        seen = _d5_count_prescriptions(f"a prescription: `{spelling}`\n")
+        assert len(seen) == 1 and _d5_counts_the_blank_class(seen[0]), (
+            f"{spelling!r} is ONE BLANK-class count command and the reader must see exactly "
+            f"one BLANK-class expression for it — #13962's mutants each stayed green while "
+            f"the bundle carried two prescriptions. Seen: {seen!r}")
+
+    # …and the reader is a COUNT reader, not a `grep` reader: the two filter stages this same
+    # cell prescribes are not prescriptions to be counted, and admitting them would red a
+    # correct document. `grep -cE '^\+import '` is the other direction the reader is
+    # deliberately NOT keyed on a command prefix to protect — it IS a count, it is just not
+    # this class, so it is seen and then excluded by the class filter.
+    assert _d5_count_prescriptions(
+        "`grep -E '^[+-][^+-]'` and `grep -vE '^[+-][[:space:]]*#'`") == []
+    assert _d5_count_prescriptions("`grep -cE '^\\+import '") == ["^\\+import "]
+    # `-C3` is CONTEXT, not count — a short flag containing no `c` — and it must not be read as
+    # a prescription at all (#13995 review measured it too, on the pre-widening regex).
+    assert _d5_count_prescriptions("`grep -C3 '^\\+$'`") == []
+    # ⛔ …AND A COUNT WHOSE OUTPUT IS SUPPRESSED IS NOT A COUNT REQUEST EITHER (#13995 review
+    # round 8, P3 — MEASURED at this head). `-q` prints nothing, `-l`/`-L` print filenames, so
+    # `_requests_a_count` declines the whole word BY DESIGN — which makes this one of the causes a
+    # ZERO-graded class can have, and one the ZERO message names so a fixer does not go
+    # widening the reader for a spelling that is correctly refused.
+    for suppressing in ("grep -qc '^\\+$'", "grep -lc '^\\+$'", "grep -Lc '^\\+$'"):
+        assert _d5_count_prescriptions(f"`{suppressing}`") == [], (
+            f"{suppressing!r} asks for a count whose output `grep` suppresses or replaces, so "
+            f"it must NOT be read as a count request (by design — the ZERO message names it)")
+    # …and the residual is pinned as a residual, so the comment's "does not read" list cannot
+    # silently become false in the other direction: an expression in a shell variable IS read
+    # (the command is seen) and is NOT classifiable, which is the sentence the comment now
+    # makes. `rg -c` is not read at all.
+    assert _d5_count_prescriptions('`grep -cE "$RE"`') == ["$RE"]
+    assert _d5_count_prescriptions("`rg -c '^\\+$'`") == []
+
+    # ⛔ A FLAG'S OWN QUOTED ARGUMENT IS PART OF THE FLAG WORD, NOT THE EXPRESSION
+    # (#13995 review round 2, P2 — MEASURED). Before this round `--include='*.py'` broke the
+    # match entirely, so the expression beside it went unseen; it is read now, and the two
+    # spellings below are the control.
+    for with_flag_value in (
+        "grep -c --include='*.py' '^\\+$'",
+        "grep -c --color='never' '^\\+$'",
+    ):
+        seen = _d5_count_prescriptions(f"a prescription: `{with_flag_value}`\n")
+        assert seen == ["^\\+$"], (
+            f"{with_flag_value!r} carries its expression AFTER a flag's own quoted argument, "
+            f"and the reader must still find it — a flag's value is not the pattern "
+            f"(#13995 review round 2). Seen: {seen!r}")
+
+    # ⛔ A FLAG'S SEPARATE VALUE IS CONSUMED, NOT READ AS THE EXPRESSION (#13995 review, P2 —
+    # MEASURED). This is the finding the word walk replaces the raw-text regex for. On the PRE-FIX
+    # reader the four spellings below gave `['*.md']`, `['2']`, `[]` and `['2']` — the flag's VALUE
+    # reported as the count's expression (or, for the bare `2`, the command unread) — all four
+    # measured `2` on the 4-line probe, i.e. real blank-line counts. A wrong expression is a FALSE
+    # PASS, not a miss: it is neither the blank class nor a shape the residual list names, so a
+    # second BLANK-class prescription appended in that spelling left the arm GREEN.
+    for separate_value in (
+        "grep -c --exclude '*.md' '^[+-]$'",   # a long flag's separate GLOB
+        "grep -c -A '2' '^[+-]$'",            # a context flag's separate NUM, quoted
+        "grep -c -m 2 '^[+-]$'",              # …same, bare
+        "grep -c -m '2' '^[+-]$'",            # …same, quoted
+    ):
+        seen = _d5_count_prescriptions(f"a prescription: `{separate_value}`\n")
+        assert seen == ["^[+-]$"], (
+            f"{separate_value!r} counts the BLANK lines (measured `2` on the 4-line probe) and "
+            f"its expression is the quoted token AFTER the flag's own value — reading the value "
+            f"instead was a false PASS, not a miss (#13995 review, P2). Seen: {seen!r}")
+    # …and the shape that must STAY declined, so consuming a flag's value cannot be widened into
+    # a guess: `-f`/`--file` supply the pattern FROM A FILE, so the positional operands are FILES
+    # — measured `No such file or directory` rather than a count.
+    for pattern_from_a_file in (
+        "grep -c -f/tmp/pats '^[+-]$'",
+        "grep -c -f /tmp/pats '^[+-]$'",
+        "grep -c --file /tmp/pats '^[+-]$'",
+    ):
+        assert _d5_count_prescriptions(f"a prescription: `{pattern_from_a_file}`\n") == [], (
+            f"{pattern_from_a_file!r} takes its PATTERN from a file, so no positional word in "
+            "it is an expression — reading one would report a count of a FILE operand "
+            "(#13995 review, P2)")
+    # ⛔ BUT AN `-e` ARGUMENT *IS* A PATTERN, AND EVERY ONE OF THEM IS A PRESCRIPTION (#13995,
+    # MEASURED). This pair used to be pinned `[]` above, on the reasoning that a pattern-supplying
+    # flag means "no expression here". That is true of `-f` (which supplies a FILE) and false of
+    # `-e`: `grep -c -e 'decoy' -e '^[+-]$'` counts the UNION of both patterns, so the blank class
+    # IS counted, and a second BLANK-class prescription written as a second `-e` left the arm GREEN
+    # while this pin certified the shape as unreadable. Both patterns are reported now.
+    # ⛔ `grep -c'x' '^\+$'` IS A COUNT, AND THAT CORRECTS A PIN (#13995, MEASURED). The shell
+    # removes the quotes before grep runs, so the command is argv `-cx '^\+$'` = `-c -x` and it
+    # really counts. It was pinned `[]` on the reasoning that "`x` is not a value" — true, and
+    # beside the point: the quote makes `x` MORE FLAG CHARACTERS, not a value, so the operand IS
+    # the pattern. ⛔ THE WITNESS FOR THE ALPHANUMERIC TEST IS THE ROW BELOW IT, NOT THIS ONE, AND
+    # NOT `grep -c'^\+$'` (#14027 review round 7, P2 — MEASURED). This row is unchanged when that
+    # test is deleted (it becomes readable for the `-cx` reason, whatever the suffix test says), and
+    # `grep -c'^\+$'` has no trailing operand at all, so its `[]` has a different cause. The mutant
+    # that reds is `grep -c'-' '^[+-]$'` → `['^[+-]$']`: argv `-c-` is not a flag cluster.
+    assert _d5_count_prescriptions("a command: `grep -c'x' '^\\+$'`\n") == ["^\\+$"], (
+        "`grep -c'x'` is argv `-cx` — `-c` plus the flag `x` — so the quoted token after it IS the "
+        "pattern and the command counts (measured). Reading the quote as an attached VALUE would "
+        "decline a real prescription (#13995, MEASURED)")
+    assert _d5_count_prescriptions("a command: `grep -c'-' '^[+-]$'`\n") == [], (
+        "a NON-alphanumeric quoted suffix is not a flag character, so `-c'-'` is argv `-c-` — which "
+        "grep REFUSES (`invalid option`, rc 2) — and the quoted token after it is no expression. "
+        "THIS ROW IS THE WITNESS FOR THE ALPHANUMERIC TEST ITSELF: delete the test at "
+        "`_d5_flag_word`'s quoted-suffix branch and this row goes `[]` → `['^[+-]$']`, while the "
+        "rows the comment used to nominate do not move at all (#14027 review round 7, P2 — "
+        "MEASURED)")
+
+    assert _d5_count_prescriptions(
+        "a prescription: `grep -c -e 'decoy' -e '^[+-]$'`\n") == ["decoy", "^[+-]$"], (
+        "a command with two `-e` patterns counts the union of them, so BOTH are prescriptions: "
+        "reporting only the first — or declining the command — lets the second hide behind the "
+        "first (#13995, MEASURED)")
+    assert _d5_count_prescriptions("a prescription: `grep -c -e'^[+-]$'`\n") == ["^[+-]$"], (
+        "an ATTACHED `-e` argument is the pattern itself (`-e'^[+-]$'`), so it is a prescription "
+        "and MUST be graded — declining it was a false PASS (#13995, MEASURED)")
+    assert _d5_count_prescriptions("a prescription: `grep -c --regexp='^[+-]$'`\n") == ["^[+-]$"], (
+        "the long spelling of the same attachment takes the same route (#13995, MEASURED)")
+
+    # ⛔ AND THE RESIDUALS THE COMMENT DECLARES ARE PINNED AS RESIDUALS (#13995 review round 2,
+    # P2 — MEASURED; split into the comment's two groups in round 3, and SHRUNK in round 6 when
+    # the `-e`-supplied patterns became readable — the bullet went with the pin, in the same
+    # commit, rather than staying beside code that contradicts it). GROUP A is real BLANK-class
+    # prescriptions the reader does not see, so a second one appended to the row leaves the arm
+    # green; reading these two cannot be done without parsing a shell, and a guess there reports
+    # a false RED on a correct document — the worse direction. Pinning `[]` is what makes the
+    # comment's list falsifiable: a future widening that starts reading one of them reds HERE.
+    for residual in (
+        "grep -cE ^\\+$",                 # unquoted expression
+        "grep '^\\+$' -c",                # flags AFTER the expression
+    ):
+        assert _d5_count_prescriptions(f"a prescription: `{residual}`\n") == [], (
+            f"{residual!r} is now READ by the word walk. That may be an improvement — "
+            "but the comment on `_D5_GREP_INVOCATION_RE` lists it as a shape the reader does not "
+            "read, so delete the bullet (or narrow the reader again) in the same commit instead "
+            "of leaving a false statement beside the code (#13995 review round 2, P2)")
+
+    # ⛔ GROUP B is NOT a count prescription at all — and the pins say so with a MEASUREMENT, not
+    # with a label, because round 2's comment called `grep -c'^\+$'` "the same, with no
+    # separating space" and that is false: `-c` takes no argument, so `grep -c'^[+-]$'` exits 2
+    # with `grep: invalid option` and counts nothing (#13995 review round 3, P2). They are pinned
+    # `[]` so a future widening cannot start certifying an invalid command as a prescription.
+    for not_a_prescription in (
+        "grep -c'^\\+$'",                # `-c` takes no argument -> invalid option, exit 2
+        "grep -c, '^\\+$'",              # …same, the `,` is parsed as another option
+        "grep -c -f /tmp/pats '^\\+$'",   # `-f` supplies the PATTERN; the quoted token is a FILE
+        "grep -ec '^\\+$'",              # `-e` takes `c` as ITS pattern; this is not a count
+        "grep -e'c' '^\\+$'",            # …same, attached
+    ):
+        assert _d5_count_prescriptions(f"a command: `{not_a_prescription}`\n") == [], (
+            f"{not_a_prescription!r} is not a count of anything and must not be read as a "
+            "prescription — widen this and a correct document can red (#13995 review round 3)")
+
+    # ⛔ AND THE ARG-TAKING SET IS A SET, NOT A SAMPLE — EVERY MEMBER HAS ITS OWN ROW
+    # (#13995 review, P2 — MEASURED). `_ARG_TAKING_SHORT_FLAGS` narrates a repair that a round-3
+    # verification measured (`-D` added, because `_requests_a_count("-Dc")` answered True) and
+    # says its list is "the whole set, not a sample". Measured at `53f7535e657` by deleting one
+    # letter at a time and re-running THIS cell: only `m` and `A` were pinned (by the
+    # separate-value rows further down), while `B`, `C`, `d` and `D` left the cell GREEN with
+    # `grep -Dc '^\+$'` graded a BLANK-class prescription again — the exact round-3 defect, a
+    # false RED on a correct document; and `e`/`f` left it GREEN because the command is never
+    # graded either way (`_d5_supplies_the_pattern` declines it on a literal `ef` before the set
+    # is consulted), so their membership had no witness at all. Real grep counts none of the
+    # eight clusters (measured on GNU grep 3.11, on the 4-line `+`/`-`/`+import os`/` a` probe):
+    # `-Dc` ⇒ `grep: unknown devices method`, rc 2; `-mc` ⇒ `invalid max count`, rc 2;
+    # `-Ac`/`-Bc`/`-Cc` ⇒ `invalid context length argument`, rc 2; `-dc` ⇒ `invalid argument 'c'
+    # for '--directories'`, rc 1; `-fc` ⇒ `c: No such file or directory` (that is `-f c`, a
+    # pattern FILE), rc 2; `-ec` ⇒ the pattern `c`, with `'^\+$'` as a FILE, rc 2.
+    #
+    # ⛔ `pinned_members` IS WRITTEN OUT, NOT DERIVED FROM THE CONSTANT, ON PURPOSE. A table that
+    # iterates its own subject cannot witness an OMISSION — the direction this row exists for
+    # (agent-infra#3442 rule 3: an assertion whose value cannot vary under the mutation it claims
+    # to guard). The set-equality row below then makes an ADDITION equally impossible without a
+    # witness, which is the other half of the same claim: a letter that does NOT take an argument
+    # would stop the cluster scan early and hide a real `c` after it (`grep -xc` is `-x -c`, a
+    # count), so it may not arrive silently either.
+    pinned_members = ("e", "f", "m", "A", "B", "C", "d", "D")
+    for arg_taking in pinned_members:
+        assert _short_flag_head(f"-{arg_taking}c") == "", (
+            f"`-{arg_taking}c` must END the cluster scan at `{arg_taking}` — the rest of that "
+            "word is its ARGUMENT, not a run of flags (`-A2`, `-fc`, `-Dc`) — so "
+            f"`_ARG_TAKING_SHORT_FLAGS` must still carry `{arg_taking}`. Drop that letter and "
+            "this word reads as a count request again, which is the round-3 defect (#13995 "
+            "review, P2)")
+        assert _d5_count_prescriptions(f"a command: `grep -{arg_taking}c '^\\+$'`\n") == [], (
+            f"`-{arg_taking}c` is `-{arg_taking} c` — a VALUE, not the count flag — so this "
+            "command counts nothing (measured on GNU grep 3.11: it exits 1/2 rejecting the "
+            "argument). Reading it as a BLANK-class prescription is a false RED on a correct "
+            "document, and no row pinned that before #13995's review (#13995 review, P2)")
+    assert set(_ARG_TAKING_SHORT_FLAGS) == set(pinned_members), (
+        "`_ARG_TAKING_SHORT_FLAGS` must be exactly the short flags MEASURED to take an "
+        f"argument ({sorted(pinned_members)}). A letter added without its own row above stops "
+        "the cluster scan early, so a real `c` after it goes unread (a false PASS); a letter "
+        "removed puts a flag's VALUE back into the flag run (a false RED). Take the "
+        "measurement against `grep --help`, then extend `pinned_members` in the same commit "
+        "(#13995 review, P2)")
+
+    # ⛔ AND PROSE THAT MERELY NAMES THE COUNT COMMAND IS NOT A PRESCRIPTION — the regression
+    # round 3 caught, measured against the reader it replaced. While the flag word was a bag of
+    # characters (`[^\s'\"]*`) it swallowed the CLOSING BACKTICK, `,`, `)` and `;`, so the quote
+    # ADJACENCY rule was defeated and a sentence saying what the row does NOT mean was read as a
+    # second BLANK-class prescription — a FALSE RED on a correct document (`prescribes 2
+    # BLANK-line count commands`), where `grep -c[A-Za-z]* '…'` returned `[]`. These five shapes
+    # are that regression's control.
+    for prose in (
+        "`grep -c`, '^\\+$'",
+        "(`grep -c`) '^\\+$'",
+        "`grep -c`; '^\\+$'",
+        "grep -c, '^\\+$'",
+        '`grep -c`, "^\\+$"',
+    ):
+        assert _d5_count_prescriptions(f"⚠️ a count like {prose} is not what this row means.\n") == [], (
+            f"{prose!r} names a command inside prose and carries no expression of its own; "
+            "reading the NEXT quoted token as its pattern is a false RED on a correct document "
+            "(#13995 review round 3, P2)")
+
+    # …and CONCATENATION is the one residual that is neither read nor unread: the first quoted
+    # fragment IS read, and everything after it is not — which is what makes a class constraint
+    # in the tail invisible. Asserted with its fragment so the bullet's wording stays exact
+    # ("read only up to its first quoted fragment") rather than collapsing into either bucket.
+    assert _d5_count_prescriptions("a prescription: `grep -cE '^'\"[+-]\"'$'`\n") == ["^"], (
+        "a concatenated expression must be read as its FIRST fragment only — if it is now read "
+        "whole, the comment's concatenation bullet is stale; if it is not read at all, the "
+        "fragment claim is stale (#13995 review rounds 1-2)")
+
+    # ⛔ THE BLANK-CLASS TEST IS A BOUNDED EQUIVALENCE, NOT A SPELLING LIST (#13995 review, P2 —
+    # MEASURED). Each spelling below counts the SAME class on the 4-line probe — `2`, which is what
+    # makes them controls here — although `^[+\-]$` reaches that `2` as a DECLARED SUPERSET rather
+    # than as an equivalence: it also matches a lone `\`, so on a probe carrying one it counts `3`
+    # where the class counts `2` (see `_d5_counts_the_blank_class`). Stated rather than implied,
+    # because "the SAME class" on its own was false for that row (#14026 review, P2 — MEASURED).
+    # The old spelling list, `\^(?:\\[+-]|\[[-+]+\])\$`, carried `^[+-]$` and `^[-+]$` — the two
+    # controls — and REJECTED `^(\+|-)$`, which IS this class: measured on the pre-fix reader that
+    # cost in both directions, as a SECOND prescription it left the arm GREEN (false PASS) and in
+    # place of the row's own expression it tripped the ZERO assertion whose message blamed the
+    # count READER (false RED, misattributed). ⛔ IT ALSO REJECTED `^[+\-]$`, AND THAT ONE WAS NOT A
+    # DEFECT (#14026 review, P2 — MEASURED): `^[+\-]$` is not this class (it is the declared
+    # superset above), so the list's refusal was the CORRECT class verdict, and `main` accepts the
+    # spelling now as a deliberate widening rather than because the list mis-read it. The two the
+    # list already carried are kept as controls, so a narrowing that loses them reds here too.
+    for equivalent_class in (
+        "grep -cE '^[+-]$'",           # the form the row itself uses
+        "grep -cE '^[+\\-]$'",         # the hyphen escaped inside the class
+        "grep -cE '^[-+]$'",           # members in the other order
+        "grep -cE '^(\\+|-)$'",       # alternation inside a plain group
+        # ⛔ NOT `^(?:\+|-)$` (#13995 review round 11, P2 — MEASURED): POSIX ERE has no
+        # non-capturing group, so GNU grep warns `? at start of expression` and the expression
+        # counts ONE sign (1 on `x`/`+`/`-`/empty, where the class counts 2). It is pinned as a
+        # REJECTION in the `half_class` loop below, not as an accepted spelling here.
+    ):
+        assert _d5_blank_class_prescriptions(
+            f"a prescription: `{equivalent_class}`\n") == [
+                _d5_count_prescriptions(f"a prescription: `{equivalent_class}`\n")[0]], (
+            f"{equivalent_class!r} counts the BLANK lines and must be graded as this class — "
+            "a spelling list read it as some OTHER class, which left a second prescription green "
+            "and misattributed the ZERO message (#13995 review, P2)")
+    # ⛔ THE TWO REFUSALS THE RULE NAMES ARE PINNED TOO, or the paragraph can go false beside
+    # green code — which is how it survived a round (#13995 review round 20, P3 — MEASURED):
+    # `^[-+\]$` ends in a `\` (incomplete escape) and `^[\\+-]$` carries a literal `\` member;
+    # grep runs both and counts `3`, and this test refuses both.
+    assert not _d5_counts_the_blank_class("^[-+\\]$"), (
+        "a bracket whose content ENDS in a backslash is an incomplete escape: refused, although "
+        "grep runs it and counts 3 (measured)")
+    assert not _d5_counts_the_blank_class("^[\\\\+-]$"), (
+        "an escaped backslash is a MEMBER, so this bracket's set is `{+,-,\\}`, not `{+,-}`: "
+        "refused, although grep runs it and counts 3 (measured)")
+    # …and the HELPER's own verdicts, because a pinned EXPRESSION witnesses the whole composition:
+    # `^[-+\]$` never reaches the helper (its class is unclosed, so the splitter refuses it first),
+    # so the trailing-backslash rule needs a row that calls the helper directly
+    # (#13995 review round 21, P2 — MEASURED: with `return None if escaped else members` changed to
+    # `return members`, every d5 test stayed GREEN because only the expression was pinned).
+    assert _d5_class_members("[+\\]") is None, (
+        "a bracket whose content ends in a backslash is an INCOMPLETE ESCAPE and the helper must "
+        "answer None on its own: `[+\\]` has no `-` for the RANGE rule to refuse, so dropping "
+        "`return None if escaped else members` is visible HERE and nowhere else — `^[-+\\]$` never "
+        "reaches the helper at all (the splitter refuses its unclosed class first), which is why "
+        "an expression-level pin cannot witness this rule (#13995 review round 21, P2)")
+    assert _d5_class_members("[+\\-]") == {"+", "-"}, (
+        "and the ordinary escaped-hyphen spelling is a plain set: `[+\\-]` is `{+,-}`")
+    assert _d5_class_members("[-\\+]") == {"+", "-"}, (
+        "and the spelling whose ESCAPED character is the `+` is the same plain set: `[-\\+]` "
+        "consumes an escaped `+` over an UNESCAPED leading hyphen, so the bullet list in "
+        "`_d5_class_members` is witnessed here too — `grep -cE '^[-\\+]$'` counts 3 on a "
+        "`\\`-carrying probe (measured)")
+
+    # ⛔ THE DECLARED SUPERSET IS PINNED, because the docstring makes a claim about it
+    # (#13995 review round 18, P2 — MEASURED). Refusing a bracket that carries TWO backslashes
+    # left all eight d5 tests GREEN while the paragraph above became false beside green code: the
+    # sentence "two backslashes can still pass" had no witness.
+    assert _d5_counts_the_blank_class("^[+\\-]$"), (
+        "a backslash-bearing bracket is ACCEPTED as a DECLARED SUPERSET — it counts the two class "
+        "lines plus a literal `\\` (3, measured). If this reads False, the superset paragraph in "
+        "`_d5_counts_the_blank_class` is false and must be corrected in the same commit")
+    assert _d5_counts_the_blank_class("^[\\+\\-]$"), (
+        "two backslashes do not change the superset: `^[\\+\\-]$` is still accepted and still "
+        "counts 3 (`grep -cE` rc 0, measured) — the sentence says so, so it must be witnessed")
+
+    # …and the residual the class test DECLARES: regexes equivalent to this class but spelled
+    # outside the measured forms are not recognised. Pinned so a widening reds HERE and the
+    # docstring at `_d5_counts_the_blank_class` is corrected in the same commit.
+    for unrecognised_spelling in (
+        "grep -cE '^[+]$|^[-]$'",       # two anchored alternatives, one per line-half
+        "grep -cE '^(?=[+-])[+-]$'",    # a lookahead does the work, the class is wider
+    ):
+        assert _d5_blank_class_prescriptions(
+            f"a prescription: `{unrecognised_spelling}`\n") == [], (
+            f"{unrecognised_spelling!r} is now GRADED as the blank class. That may be an "
+            "improvement — but the class test describes itself as a BOUNDED equivalence and "
+            "names this as a residual, so update that docstring in the same commit instead of "
+            "leaving a false statement beside the code (#13995 review, P2)")
+    # ⛔ AND A LONE SIGN IS NOT THIS CLASS (#13995 review round 10, P2 — MEASURED). `^-$` counts
+    # ONLY the removed half — 0 on a diff whose only blank line is added — and `^+$` matches only
+    # `+` lines (`+` is literal there, measured 1 on `x`/`+`/`-`/empty where the class counts 2).
+    # Grading either as this
+    # class let a row re-spell its way out of half of it while the arm still called it graded,
+    # which is a false PASS in the direction that matters: the arm cannot tell a narrower
+    # instrument from the one the sentence names. The third row is the alternation spelling of the
+    # same half-class (`?` unsupported in ERE → one sign, measured), so the rejection is not a
+    # special case for the literal form.
+    for half_class in ("^-$", "^+$", "^(\\-)$", "^(?:\\+|-)$", "^[-]$", "^[\\-+]$",
+                       "^(+|-)$", "^(-|+)$", "^\\+|-$", "^-|\\+$",
+                       # ⛔ AND A THREE-BRANCH BODY, so the guard cannot be narrowed to `== 2`
+                       # without a row going RED (#13995 review round 15, P2 — MEASURED: with the
+                       # guard rewritten as `len(alternatives) == 2`, every d5 test still passed and
+                       # these two were graded as the class, on a `grep -cE` count of 6).
+                       "^\\+|-|-$", "^-|\\-|\\+$",
+                       # ⛔ AND A FOUR-BRANCH BODY (#13995 review round 16, P3 — MEASURED: with the
+                       # guard rewritten as `1 < len(alternatives) < 4` every d5 test still passed
+                       # and this one was graded as the class on a `grep -cE` count of 6).
+                       "^\\+|-|\\+|-$",
+                       # ⛔ AND A RANGE, because the docstring's rule names it. WHICH branch each
+                       # row witnesses, measured one at a time on copies (#13995 review rounds
+                       # 20-21, P3): `^[+-+-+]$` is the witness for the PLAIN-HYPHEN rule (delete
+                       # that rule and it becomes the only newly-accepted row), while the escaped
+                       # `-` branch is witnessed by `^[\-+]$` above (delete it and `^[\-+]$` is
+                       # the only one newly accepted).
+                       "^[+-+-+]$"):
+        assert not _d5_counts_the_blank_class(half_class), (
+            f"{half_class!r} must NOT be graded as the blank class: none of these counts exactly "
+            "the two class lines (`^-$` counts only the removed half, measured 0 on a diff whose "
+            "only blank line is added; `^+$` names one shape — the EMPTY line under `-E`; "
+            "`^(?:\\+|-)$` loses its group to POSIX ERE; `^\\+|-$` and its siblings are UNGROUPED "
+            "alternations, where ERE binds `^` to one branch and `$` to another and five or more "
+            "lines match). "
+            "Grading it would let the "
+            "row's instrument narrow while this arm reported the class as graded "
+            "(#13995 review rounds 10-11, P2)")
+
+    # ⛔ …AND FOUR SPELLINGS THAT LOOK EQUIVALENT ARE **NOT** THIS CLASS, EACH MEASURED (#13995
+    # review round 11, P2; #14027). The predicate graded all of these as the class while the
+    # docstring called them accepted equivalences — "state what you measured" failed in CODE
+    # this time, not in prose. Probe for every number below: a file holding `+`, `-`, a lone
+    # `\`, a blank line, `++` and `--`. ⛔ `^[+\-]$` and `^[\+\-]$` USED to be in this loop and
+    # are NOT any more: they carry a literal `\` member and count 3, and the class test ACCEPTS
+    # them as a DECLARED SUPERSET (cost: one impossible diff line) rather than reding a document
+    # that writes a plausible spelling — the decision and its cost are stated and pinned at
+    # `_d5_counts_the_blank_class`.
+    for not_the_class, why in (
+        ("^[\\-]$",
+         "names `{\\, -}`, i.e. the lone backslash and the hyphen — 2 on the probe for the "
+         "WRONG reason, so grading it as the class is false in both directions"),
+        ("^[\\-+]$",
+         "is not an expression grep will run at all: `grep: Invalid range end`, rc 2 — `-` "
+         "between two members is a RANGE and `\\`(0x5C)..`+`(0x2B) is reversed — so a row "
+         "spelled this way counts NOTHING, not this class"),
+        # ⛔ A DOUBLED BACKSLASH IS NOT AN ESCAPED SIGN (#14027 second review round, P3 —
+        # MEASURED). The alternation branch used to strip EVERY backslash from each alternative,
+        # so both rows below were graded as this class; in a POSIX ERE `\\` is a literal
+        # backslash and the `+` after it is a QUANTIFIER. ⛔ ON THE PROBE DECLARED ABOVE THE
+        # DIFFERENCE IS MEMBERSHIP, NOT THE COUNT, and the two rows say which (#14027 — a review
+        # round measured `1`/`0` on the four-line probe and wrote "for every number below" beside
+        # a six-line one, so the numbers are re-measured on the declared probe here).
+        ("^(\\\\+|-)$",
+         "matches the `\\` line and the `-` line and NEVER the `+` line (measured: `grep -nE` "
+         "reports lines 2 and 3 of the declared probe), so its count is 2 — the SAME number as "
+         "this class, for two different lines. Grading it as the class reports an instrument "
+         "that counts the wrong two lines"),
+        ("^(\\\\+|\\\\-)$",
+         "counts 1, not 2: both branches are literal-backslash runs, so on the declared probe it "
+         "matches only the lone `\\` line and no `+` or `-` line at all (measured -> 1, rc 0) — "
+         "the class is graded onto a command that counts none of it, which is the false PASS "
+         "#13962 exists to retire"),
+    ):
+        assert not _d5_counts_the_blank_class(not_the_class), (
+            f"{not_the_class!r} must NOT be graded as the blank class: it {why}. Grading it "
+            "reports the row's instrument as the one the sentence names while grep counts "
+            "something else — the false PASS #13962 exists to retire (#13995 review round 11, "
+            "P2)")
+        assert _d5_blank_class_prescriptions(
+            f"a prescription: `grep -cE '{not_the_class}'`\n") == [], (
+            f"a prescription spelled {not_the_class!r} must not be GRADED as a BLANK-class "
+            "count — as a second prescription it would leave the `== 1` arm GREEN while the row "
+            "carried an instrument that does not count this class (#13995 review round 11, P2)")
+
+
+def test_the_d5_count_reader_knows_every_long_option_grep_documents():
+    r"""`_D5_ALL_LONG_OPTIONS` matches `grep --help`, and not through the argument-taking oracle.
+
+    ⛔ WHY THIS EXISTS (#13995, final-head review P1/P3 — MEASURED). `_resolved_long_option` and
+    `_long_option_is_accepted` need to know whether a prefix is AMBIGUOUS *in grep's own terms*,
+    and the answer is only correct against grep's whole DOCUMENTED set (`grep --help`) — not
+    against the smaller set whose arity this reader happens to need. ⛔ GREP HAS TWO UNDOCUMENTED
+    ALIASES, and only one of them belongs here: `--fixed-regexp` (`grep --f` lists it among the
+    possibilities, measured, while `grep --help` does not mention it) is deliberately ABSENT,
+    because it shares `-F`'s identity — including it would make `--fixed-` falsely ambiguous
+    (measured: `grep -c --fixed-` is ACCEPTED) and it counts nothing of this class;
+    `--unix-byte-offsets` is PRESENT, in `_D5_UNDOCUMENTED_LONG_OPTIONS`, because grep runs it and
+    it really counts the blank class. Measured on GNU grep 3.11:
+      * `grep -c --context 2 '^[+-]$'` prints `2` and exits 0, so `--context` DOES take a separate
+        word — it was excluded on a `--color` measurement, and the reader then took the `2` as the
+        EXPRESSION and the invocation vanished (false PASS);
+      * `grep --re` is REFUSED (`option '--re' is ambiguous; possibilities: '--recursive'
+        '--regexp'`) although `--regexp` is the only rival inside the arity set, so certifying
+        `--re` graded a command grep will not run.
+    Two specifiers cannot both be right, so this test derives the set from `grep --help` itself.
+    Non-vacuity: adding a long option to grep, or dropping one from `_D5_ALL_LONG_OPTIONS`, reds
+    here by name; the derived set also has to be big enough to be a real universe (≥ 40), so a
+    parser that silently matched nothing cannot pass.
+    """
+    completed = subprocess.run(["grep", "--help"], capture_output=True, text=True, check=True)
+    documented = set(re.findall(r"(?<![\w-])(--[a-z][a-z-]+)", completed.stdout))
+    assert len(documented) >= 40, (
+        f"only {len(documented)} long options were parsed out of `grep --help` — the derivation "
+        "is broken, and a broken derivation must not be able to certify anything")
+    # ⛔ THE UNDOCUMENTED ALLOWANCE IS EXACTLY THE SPELLING THIS READER MUST SEE, AND IT IS PINNED
+    # (#14027 review round 2, P2 — MEASURED). `grep --help` is silent about `--unix-byte-offsets`
+    # while grep runs it, so the set is `documented` PLUS that one spelling; a second undocumented
+    # spelling may not be added without adding it here, and grep's ACCEPTANCE of it is measured
+    # against the binary in the alias test below rather than asserted from memory (#14027 round 3,
+    # P3 — this comment used to point at a "grep call below" that did not exist).
+    assert documented | _D5_UNDOCUMENTED_LONG_OPTIONS == set(_D5_ALL_LONG_OPTIONS), (
+        f"`_D5_ALL_LONG_OPTIONS` has drifted from `grep --help` + the declared undocumented "
+        f"allowance: missing "
+        f"{sorted((documented | _D5_UNDOCUMENTED_LONG_OPTIONS) - _D5_ALL_LONG_OPTIONS)}, extra "
+        f"{sorted(set(_D5_ALL_LONG_OPTIONS) - documented - _D5_UNDOCUMENTED_LONG_OPTIONS)}. "
+        f"The ambiguity test is only as correct as "
+        "this universe (#13995)")
+    # ⛔ EVERY ARITY ENTRY IS IN THAT UNIVERSE, AND IT IS PINNED (#14027 review round 7, P3 —
+    # MEASURED). `_resolved_long_option` used to short-circuit on `_ARG_TAKING_LONG_FLAGS`
+    # membership before consulting the universe, which is inert only BECAUSE this holds: a member
+    # of the arity set that grep does not document would have been resolved by the short-circuit
+    # and not by the universe. With the subset pinned, the short-circuit's removal is safe and a
+    # future member added outside grep's set reds HERE rather than silently changing resolution.
+    assert _ARG_TAKING_LONG_FLAGS <= _D5_ALL_LONG_OPTIONS, (
+        f"`_ARG_TAKING_LONG_FLAGS` names spellings outside the universe grep documents: "
+        f"{sorted(_ARG_TAKING_LONG_FLAGS - _D5_ALL_LONG_OPTIONS)} — `_resolved_long_option` "
+        "resolves every arity entry through `_d5_long_option_candidates`, which can only answer "
+        "about documented names (#14027 review round 7, P3 — MEASURED)")
+
+
+def test_the_d5_count_reader_covers_the_undocumented_alias_grep_ACCEPTS():
+    r"""The declared undocumented allowance is exactly one spelling, and it is the one grep RUNS.
+
+    ⛔ BOTH DIRECTIONS MEASURED ON GNU grep 3.11 (#14027 review round 2, P2 and P3):
+      * `--unix-byte-offsets` (`-u`) is absent from `grep --help` and ACCEPTED by grep — at every
+        prefix, `--u`/`--un`/`--uni`/`--unix` — and `grep -c --unix-byte-offsets '^[+-]$'` really
+        counts the blank class (`2` on the probe). Declined as unknown, a SECOND blank-class
+        prescription in that spelling sat invisible beside the one that was read: the false PASS
+        this whole cell exists to refuse. It is IN the universe, and the "exactly one" arm now
+        counts two prescriptions for such a document.
+      * `--fixed-regexp` is the other undocumented alias and stays OUT: it shares `-F`'s identity
+        (so admitting it would make `--fixed-` falsely ambiguous — measured: `grep -c --fixed-` is
+        ACCEPTED) and it counts NOTHING of this class: `grep -c --fixed-regexp '^[+-]$'` prints `0`
+        on the same probe because a literal pattern matches no line. Declining it cannot hide a
+        prescription, which is what makes the exclusion safe rather than merely convenient.
+    Non-vacuity: dropping `--unix-byte-offsets` from `_D5_UNDOCUMENTED_LONG_OPTIONS` and the
+    universe reds the first assertion AND the two-prescription row; adding `--fixed-regexp` to the
+    universe reds the `--fixed-` row.
+    """
+    # ⛔ GREP'S OWN VERDICT IS MEASURED HERE, NOT REMEMBERED (#14027 round 3, P3). The two
+    # directions the exclusion rests on are exactly what a future grep could change: if `-u` were
+    # dropped, this alias would be a spelling grep REFUSES that the reader still grades (the worse
+    # direction); if `--fixed-regexp` ever retargeted the arity, excluding it would lose a count.
+    probe = "++\n+\nxx\n-\n\n"
+    for accepted, expected in (("--unix-byte-offsets", "2"), ("--u", "2"), ("--fixed-regexp", "0")):
+        ran = subprocess.run(["grep", "-c", accepted, "^[+-]$"], input=probe, capture_output=True,
+                             text=True)
+        assert ran.returncode in (0, 1), (
+            f"`grep -c {accepted} '^[+-]$'` was REFUSED by this grep ({ran.stderr.strip()}) — the "
+            "reader's treatment of it is calibrated on the measurements named here, so this reds "
+            "rather than silently grading a command grep will not run (#14027)")
+        assert ran.stdout.strip() == expected, (
+            f"`grep -c {accepted} '^[+-]$'` printed {ran.stdout.strip()!r} on the probe "
+            f"({expected!r} expected) — `--unix-byte-offsets` must count THIS class for the false "
+            "PASS argument to hold, and `--fixed-regexp` must count NOTHING for its exclusion to "
+            "be safe (#14027, MEASURED)")
+    assert {"--unix-byte-offsets"} == set(_D5_UNDOCUMENTED_LONG_OPTIONS), (
+        "the undocumented allowance is a DECLARED set of the spellings THIS READER accepts although "
+        "`grep --help` omits them; a second one needs its own measurement here (#14027) — grep has "
+        "two such aliases in total and `--fixed-regexp` is excluded below")
+    for spelling in ("grep -c --unix-byte-offsets '^[+-]$'", "grep -c --u '^[+-]$'",
+                     "grep -c --un '^[+-]$'", "grep -c --uni '^[+-]$'",
+                     "grep -c --unix '^[+-]$'"):
+        assert _d5_count_prescriptions(f"a count: `{spelling}`\n") == ["^[+-]$"], (
+            f"{spelling!r} is the obsolete `-u` and grep runs it (measured: `2` printed, one "
+            "warning) — declining it left a real blank-class prescription unread (#14027, P2)")
+    hidden = ("row: `grep -c '^[+-]$'`\n"
+              "and: `grep -c --unix-byte-offsets '^[+-]$'`\n")
+    assert _d5_blank_class_prescriptions(hidden) == ["^[+-]$", "^[+-]$"], (
+        "a document carrying the row's command AND the alias spelling prescribes the blank class "
+        "TWICE (both really count it), so the `exactly one` arm must see two and RED — seeing one "
+        "is the false PASS this cell exists to refuse (#14027 review round 2, P2 — MEASURED)")
+
+    assert "--fixed-regexp" not in _D5_ALL_LONG_OPTIONS, (
+        "`--fixed-regexp` would make `--fixed-` falsely ambiguous against `--fixed-strings`, and "
+        "grep ACCEPTS `--fixed-` (measured) — the alias must stay out of the universe")
+    assert _d5_long_option_candidates("--fixed-") == ["--fixed-strings"], (
+        "`--fixed-` abbreviates `--fixed-strings` and nothing else in the universe — the reason "
+        "`--fixed-regexp` may not be added (#14027)")
+    assert _d5_count_prescriptions("a count: `grep -c --fixed-regexp '^[+-]$'`\n") == [], (
+        "`--fixed-regexp` is `-F`: a LITERAL pattern, which counts `0` of this class on the probe "
+        "(measured), so declining it cannot hide a blank-class prescription — that measurement is "
+        "what makes the exclusion safe (#14027)")
+
+
+def test_the_d5_count_reader_reads_an_UNQUOTED_pattern_and_refuses_an_ambiguous_prefix():
+    r"""The final-head review's four findings, each pinned with the measurement that decides it.
+
+    ⛔ ALL FOUR MEASURED ON GNU grep 3.11 (#13995, MEASURED — the reviewer's P1/P2/P3, verified
+    one at a time rather than applied on the strength of the prose):
+      * `grep -c --context 2 '^[+-]$'` counts 2, so `--context` consumes a separate word. Reading
+        `2` as the expression made a real blank-class count invisible → false PASS.
+      * `grep -c -e^[+-]$` and `grep -c --regexp=^[+-]$` count 2: an UNQUOTED `-e`/`--regexp`
+        value is still the pattern, and demanding a quote let a second prescription hide → false
+        PASS. `grep -c -e 'x' -e^[+-]$` counts the union of both, so BOTH are prescriptions.
+      * `grep -c'a' '^[+-]$'` counts 2: the shell has already removed the quotes, so this is argv
+        `-ca` and the operand IS the pattern — the old pin called it "not a count" and that was a
+        false PASS dressed as a safety pin. `grep -c'^[+-]$'` is argv `-c^[+-]$` and grep rejects
+        it (`invalid option`), so a NON-alphanumeric quoted suffix stays unread.
+      * `grep -c --re '^[+-]$'` is REFUSED (`option '--re' is ambiguous`), so declining the whole
+        invocation is right: grading the operand of a command grep will not run is the false RED
+        this file calls the worse direction.
+    ⛔ AND THE FINAL REVIEW'S TWO FALSE VERDICTS (#14027 final review, P2/P3 — MEASURED ON GNU
+    grep 3.11). Both were introduced by this reader, both were fail-closed before it, and each is
+    pinned below with the grep output that decides it:
+      * `grep -c -e=^[+-]$` counts **0**, rc 1 — `=` does not separate a SHORT option's argument,
+        so the pattern is `=^[+-]$` and the row counts NOTHING of the blank class (`grep -c -e=a`
+        prints 1 on a file holding `=a`, rc 0). Stripping the `=` graded a command that counts
+        zero as the class. The invocation is still READ — the pattern is just `=^[+-]$` — and the
+        assertion below is on the EXPRESSION, so a revert reds here by name.
+      * `grep -c --count, '^\+$'` is REFUSED (`unrecognized option '--count,'`, rc 2) — the
+        unquoted tail is part of the NAME. Discarding it graded the invocation as `--count`, a
+        command grep will not run, and that was reachable both ways (a false PASS when it is the
+        row's only command, a false RED as a second prescription).
+    Non-vacuity: dropping `--context` from `_ARG_TAKING_LONG_FLAGS` reds the first row; restoring
+    the quote requirement reds the `-e ^[+-]$`/`--regexp ^[+-]$`/`-e^[+-]$`/`--regexp=` rows;
+    restoring the old pin reds the `-c'a'` row; removing `_long_option_is_accepted` reds the
+    `--re`/`--counts`/`--count,` rows; restoring the unconditional `=` strip reds the `-e=` row;
+    restoring `return option, None` in `_d5_flag_word` reds the `--count,` row; restoring
+    `return option, rest` for a long option's QUOTED tail reds the `--count'x'` row, and a blanket
+    refusal of that tail reds its `--count''` control.
+    ⛔ A SHORT CLUSTER SPLITS AT ITS FIRST ARGUMENT-TAKING FLAG, AND THAT FLAG OWNS THE REST AS
+    ITS VALUE — quoted or not (#14027 round 9, P2; round 10, P1 — MEASURED). This paragraph used
+    to describe TWO different tests (quoted: `any(...)`; unquoted: `option[-1] in …`) and to
+    call `-ec^[+-]$` "not a flag word at all". The split runs before both, so neither test decides
+    anything for a cluster that carries an argument-taking flag, and BOTH `-ec'^[+-]$'` and
+    `-ec^[+-]$` are `-e` with the value `c^[+-]$`. A cluster with NO argument-taking flag is the
+    only place a two-quoting distinction survives, and there it is quote REMOVAL: an alphanumeric
+    residue is one word (`grep -c'x'` is argv `-cx`), a non-alphanumeric one is unreadable
+    (`grep -c'^\+$'` is argv `-c^\+$`, rejected). The pins below therefore witness the SPLIT,
+    not an asymmetry — reverting it moves them — which is why they are reader pins and not graded
+    rows: `-e`'s value is a pattern that is not this class, so no prescription changes either way.
+    """
+    for context in ("grep -c --context 2 '^[+-]$'", "grep -c --context=2 '^[+-]$'",
+                    "grep -c -C 2 '^[+-]$'"):
+        assert _d5_count_prescriptions(f"a count: `{context}`\n") == ["^[+-]$"], (
+            f"{context!r} counts the blank class (measured: 2) — the long form takes a SEPARATE "
+            "word, exactly like `-C`, and reading that word as the expression is a false PASS "
+            "(#13995, MEASURED)")
+
+    # ⛔ TWO DIFFERENT CODE PATHS READ AN UNQUOTED PATTERN, AND EACH NEEDS ITS OWN ROW (#13995
+    # final-head review, P2 — MEASURED). A SEPARATE-word value (`-e ^[+-]$`) is consumed by
+    # `_d5_command_expression`'s `awaiting_role == "pattern"` branch; an ATTACHED one
+    # (`-e^[+-]$`, `--regexp=^[+-]$`) by its `attached` branch. The guard was added for the
+    # SEPARATE-word spelling its comment names, but every row here used to be ATTACHED, so the
+    # separate-word branch had NO assertion at all: reverting it to the old quote-requiring form
+    # left the whole suite GREEN, the only observable change being
+    # `_d5_count_prescriptions("grep -c -e ^[+-]$")` going `['^[+-]$']` -> `[]`. Both spellings are
+    # pinned now, so each branch reds by name.
+    for unquoted in (
+        "grep -c -e ^[+-]$",               # SEPARATE word: the branch the comment names
+        "grep -c --regexp ^[+-]$",         # …the long spelling of the same
+        "grep -c -e x -e ^[+-]$",          # …and the union of two separate-word patterns,
+                                          #    where the quoted one must not swallow its mate
+        "grep -c -e^[+-]$",                # ATTACHED, short
+        "grep -c --regexp=^[+-]$",         # ATTACHED, long with `=`
+        "grep -c -e 'x' -e^[+-]$",         # …attached beside a quoted first pattern
+    ):
+        expected = ["x", "^[+-]$"] if " -e 'x'" in unquoted or " -e x " in unquoted else [
+            "^[+-]$"]
+        assert _d5_count_prescriptions(f"a count: `{unquoted}`\n") == expected, (
+            f"{unquoted!r} is a count of the blank class (measured: 2) — an unquoted `-e` value is "
+            "STILL the pattern, and requiring a quote let a second prescription hide behind the "
+            "first (#13995, MEASURED). The SEPARATE-word row is not decoration: it is the only "
+            "witness for `_d5_command_expression`'s `awaiting_role == 'pattern'` branch, and "
+            "without it that branch can be reverted with the suite staying green")
+
+    assert _d5_count_prescriptions("a count: `grep -c'a' '^\\+$'`\n") == ["^\\+$"], (
+        "`grep -c'a'` is argv `-ca` — the shell removed the quotes, so the quoted text is MORE "
+        "FLAG CHARACTERS and the operand IS the pattern (measured: it counts). The old pin called "
+        "this `not a count`, which was a false PASS (#13995, MEASURED)")
+    assert _d5_count_prescriptions("a count: `grep -c'^\\+$'`\n") == [], (
+        "`grep -c'^\\+$'` is argv `-c^\\+$`, which grep rejects (`invalid option`) — a "
+        "non-alphanumeric quoted suffix is not a flag, so the word is unreadable, not a count")
+
+    # ⛔ AN UNQUOTED TAIL ON A LONG OPTION IS PART OF THE NAME, NOT A VALUE (#14027 final review,
+    # P3 — MEASURED): `grep -c --count, '^\+$'` is refused (`unrecognized option '--count,'`, rc
+    # 2), so the invocation must be UNREAD. Discarding the tail read it as `--count` and graded a
+    # command grep will not run — a false PASS when it is the row's only command, a false RED as a
+    # second prescription. Pinned apart from the two above because it reds through a DIFFERENT
+    # revert (`_d5_flag_word`'s `return option, None`), not `_long_option_is_accepted`.
+    assert _d5_count_prescriptions("a count: `grep -c --count, '^\\+$'`\n") == [], (
+        "`grep -c --count,` is REFUSED by grep (`unrecognized option '--count,'`) — the unquoted "
+        "tail belongs to the NAME, so the word is unreadable and no command is graded "
+        "(#14027 final review, P3 — MEASURED)")
+
+    # ⛔ `=` IS NOT A SEPARATOR ON A SHORT OPTION (#14027 final review, P2 — MEASURED ON GNU grep
+    # 3.11): `printf '+\n-\nxx\n\n' | grep -c -e=^[+-]$` prints 0, rc 1, and `grep -c -e=a`
+    # prints 1 on a file holding `=a` (rc 0) — the pattern IS `=^[+-]$`. The invocation is READ
+    # (unlike `--count,` above), but its expression is `=^[+-]$`, which is NOT the blank class:
+    # stripping the `=` made a command that counts ZERO of the class grade AS the class, the false
+    # PASS #13962 exists to refuse. Both halves are asserted so a revert cannot pass on either.
+    assert _d5_count_prescriptions("a count: `grep -c -e=^[+-]$`\n") == ["=^[+-]$"], (
+        "`grep -c -e=^[+-]$` is `-e` with the pattern `=^[+-]$` (measured: counts 0, rc 1) — the "
+        "`=` separates a LONG option's argument and not a short one's, so stripping it invented a "
+        "blank-class prescription out of a command that counts none of it (#14027 final review, "
+        "P2 — MEASURED)")
+    assert _d5_blank_class_prescriptions("a count: `grep -c -e=^[+-]$`\n") == [], (
+        "`grep -c -e=^[+-]$` must NOT be graded as the blank class: its pattern is `=^[+-]$` "
+        "(measured 0, rc 1), so grading it is a false PASS in the direction this arm exists to "
+        "refuse (#14027 final review, P2 — MEASURED)")
+
+    # ⛔ A QUOTED TAIL ON A LONG OPTION IS MORE NAME, NOT A VALUE (#14027 final review, P2 —
+    # MEASURED): the shell removes the quotes, so `grep -c --count'x' '^[+-]$'` is argv
+    # `--countx`, which grep REFUSES (`unrecognized option '--countx'`, rc 2) — the invocation is
+    # unread. Reading that tail as `--count`'s attached value graded a command grep will not run
+    # AS the blank class, the same defect the `--count,` rule above closes. The CONTROL is the
+    # same word with an EMPTY quote pair: it collapses to argv `--count` (measured, prints 2), so
+    # this is QUOTE REMOVAL and not "every quoted tail is unread" — the pair says which one it is.
+    assert _d5_count_prescriptions("a count: `grep -c --count'x' '^[+-]$'`\n") == [], (
+        "`grep -c --count'x' '^[+-]$'` is argv `--countx` and grep refuses it (`unrecognized "
+        "option '--countx'`), so no command is graded — grading it is the false PASS the "
+        "unquoted-tail rule closes (#14027 final review, P2 — MEASURED)")
+    assert _d5_count_prescriptions("a count: `grep -c --count'' '^[+-]$'`\n") == ["^[+-]$"], (
+        "`grep -c --count'' '^[+-]$'` collapses to argv `--count` and really counts the blank "
+        "class (measured: 2). Reading this row as unread would mean the quoted tail is refused "
+        "wholesale instead of having its quotes removed, and a REAL count would go invisible "
+        "(#14027 final review, P2 — MEASURED)")
+
+    # ⛔ QUOTE REMOVAL FIRST, THEN THE SEPARATOR RULE (#14027 second review round, P3 —
+    # MEASURED). Making every quoted tail "more name" made a `=`-shaped one unread, and grep RUNS
+    # those: `--context'=2'` is argv `--context=2` (prints 2, rc 0) and `--regexp'=^[+-]$'` is argv
+    # `--regexp=^[+-]$`, whose pattern IS the blank class. ⛔ THE TWO ROWS ARE NOT THE SAME KIND OF
+    # PIN (#14027 third review round, P3 — MEASURED): `--context'=2'` IS a regression pin (HEAD
+    # read `['^[+-]$']`), while `--regexp'=^[+-]$'` CORRECTS a false PASS that HEAD and the merge
+    # base both carried — they reported the expression `=^[+-]$`, which grep counts 0 of on the
+    # probe (rc 1), over a command whose real pattern counts 2.
+    assert _d5_count_prescriptions("a count: `grep -c --context'=2' '^[+-]$'`\n") == ["^[+-]$"], (
+        "`grep -c --context'=2' '^[+-]$'` is argv `--context=2` and grep counts the blank class "
+        "(measured: 2, rc 0) — a `=` that survives quote removal is STILL the separator, and "
+        "reading the whole word as the NAME declines a command grep executes "
+        "(#14027 second review round, P3 — MEASURED)")
+    assert _d5_count_prescriptions("a count: `grep -c --regexp'=^[+-]$'`\n") == ["^[+-]$"], (
+        "`grep -c --regexp'=^[+-]$'` is argv `--regexp=^[+-]$`, so the pattern is `^[+-]$` and "
+        "grep counts the blank class (measured: 2) — treating `'=^[+-]$'` as an attached "
+        "value's LITERAL text would report the expression `=^[+-]$`, which is not this class "
+        "(#14027 second review round, P3 — MEASURED)")
+
+    # ⛔ THIS ROW IS THE ONE THE MODULE COMMENT CITES, and a claim nothing varies on is the
+    # inert-narration defect this file bans (#14027 P3 — MEASURED). `grep -c -ce'^[+-]$'` is argv
+    # `-c -e ^[+-]$` — the cluster `-ce` splits at the `e`, so the count flag and the pattern are
+    # separate words — and real grep prints `2` with it. A reader that treated every quoted tail
+    # as more flag characters would call it unreadable and leave a REAL count invisible behind it,
+    # which is the false PASS this arm exists to refuse. ⛔ THE TWO `-ec` PINS BELOW ARE WITNESSES OF
+    # THE SPLIT, NOT OF AN ASYMMETRY, and this comment used to claim the opposite on a measurement
+    # that no longer holds: it said all three rows were "green on `origin/main`'s reader" and that
+    # the `any(...)`/`option[-1]` mutants moved them. Measured since the split landed: the `-ec`
+    # rows are NOT green on the base reader and neither mutant moves them, because the split
+    # returns before both branches (#14027 round 10, P2). Revert the split and all three move.
+    # Measured real grep: `-ec'^[+-]$'` is argv `-ec^[+-]$` = `-e c^[+-]$` (rc 1, nothing counted)
+    # and `-ec^[+-]$` is the same argv, so `-e`'s pattern is `c^[+-]$` and neither token carries a
+    # count flag of its own.
+    assert _d5_blank_class_prescriptions("a count: `grep -c -ce'^[+-]$'`\n") == ["^[+-]$"], (
+        "`grep -c -ce'^[+-]$'` is argv `-c -e ^[+-]$` and grep counts the blank class (measured: "
+        "2, rc 0) — the class lives in the quoted tail of a cluster whose first character is the "
+        "count, and the module comment cites this spelling as READ. A reader that treated every "
+        "quoted tail as more flag characters would call it unreadable and leave a REAL count "
+        "invisible behind it, which is the false PASS this arm exists to refuse "
+        "(#14027 P3 — MEASURED)")
+    # ⛔ BOTH SHAPES BELOW CHANGED WHEN THE CLUSTER STARTED SPLITTING AT ITS FIRST
+    # ARGUMENT-TAKING FLAG (#14027 round 9, P2 — MEASURED). grep parses a cluster left to right
+    # and the FIRST flag that takes an argument owns the rest, so `-ec'^[+-]$'` and `-ec^[+-]$` are
+    # both argv `-ec^[+-]$` = `-e` with the pattern `c^[+-]$` — the NAME is `-e`, not `-ec`, and
+    # the value starts at the `c`. The pins used to assert the opposite (`-ec` + `'^[+-]$'`, and
+    # `None` for the unquoted form) because the reader looked at the cluster's LAST character; that
+    # model is what let `grep -c -Dread '^[+-]$'` — which really counts the blank class — come back
+    # UNREAD, a live false PASS. Neither shape is graded either way (`-e`'s value is a pattern that
+    # is not this class), so the correction costs no row.
+    assert _d5_flag_word("-ec'^[+-]$'") == ("-e", "c^[+-]$"), (
+        "`-ec'^[+-]$'` is `-e` with an attached value `c^[+-]$`: the FIRST argument-taking "
+        "character owns the tail, as grep parses it, and the quotes are the shell's — argv "
+        "`-ec^[+-]$` is `-e c^[+-]$`, so a reported value of `c'^[+-]$'` is a string no command "
+        "can contain (#14027 round 9, P2/P5 — MEASURED)")
+    assert _d5_flag_word("-ec^[+-]$") == ("-e", "c^[+-]$"), (
+        "`-ec^[+-]$` is the same argv and the same reading — `-e`, pattern `c^[+-]$` — so it IS a "
+        "flag word with an attached value; grep runs it (rc 1, nothing matches). Pinned `None` "
+        "before the split, which is the model that hid `-cDread` (#14027 round 9, P2 — MEASURED)")
+    # ⛔ AND THE SPELLING THAT MOTIVATED THE SPLIT IS GRADED, NOT MERELY DESCRIBED (#14027 round 9,
+    # P3 — MEASURED): no earlier row pinned `-Dread`/`-cDread` as READ, and the rows above do not see
+    # a TAIL-level revert — a reader that splits at the cluster's LAST argument-taking character
+    # keeps the `-ce`/`-ec` rows green and flips only this spelling (measured). `grep -c
+    # -Dread '^[+-]$'` really counts the blank class (`2` on the probe, rc 0), and `-cDread` is the
+    # same argv with `-c` in front of it (`2`, rc 0), so both must be READ. Under the one-name model
+    # this row refuses, `-cDread` is a single word whose LAST character (`d`, directories) is the one
+    # still awaiting a value (`_d5_needs_a_separate_value("-cDread")` is `True`), so the quoted
+    # expression is consumed there and the invocation answers `[]`.
+    for read_spelling in ("grep -c -Dread '^[+-]$'", "grep -c -cDread '^[+-]$'"):
+        assert _d5_blank_class_prescriptions(f"a count: `{read_spelling}`\n") == ["^[+-]$"], (
+            f"{read_spelling!r} counts the blank class — `-D` takes `read` as its value and `-c` "
+            "still counts (measured: 2, rc 0) — so the expression must be READ. Answering `[]` is "
+            "the false PASS the round-9 split closed (#14027 round 9, P3 — MEASURED)")
+
+    # ⛔ DECLARED RESIDUAL, AND IT IS PINNED AS ONE (#14027 third review round, P3 —
+    # MEASURED): this reader checks that an argument-taking SHORT flag HAS an argument, never that
+    # the argument VALUE is one grep accepts. So `grep -c -A, '^[+-]$'` — grep answers `,: invalid
+    # context length argument`, rc 2 — is graded as a blank-class count. The merge base was
+    # FAIL-CLOSED here (an unquoted tail returned `None`); the unquoted-tail rule that reads
+    # `-e^[+-]$` (a REAL count) is what made this spelling reachable, so the residual is stated
+    # rather than implied. It is not closable with a shape test: grep runs `-m-1` and `-A2` and
+    # refuses `-A,` and `-Anever`, and `-e`/`-f` take arbitrary text — a value grammar this
+    # reader does not model, pinned here so a widening (or a narrowing) reds at this row.
+    assert _d5_blank_class_prescriptions("a count: `grep -c -A, '^[+-]$'`\n") == ["^[+-]$"], (
+        "KNOWN-UNGRADED SPELLING, pinned as a declared residual rather than a verdict: `grep -c "
+        "-A, '^[+-]$'` is refused by grep (`,: invalid context length argument`, rc 2) and this "
+        "reader grades it as the blank class, because it validates the flag NAME and not the "
+        "argument VALUE. If this row ever returns [], the residual has been closed — delete the "
+        "residual sentence in `_d5_flag_word`'s docstring in the same commit (#14027 third review "
+        "round, P3 — MEASURED)")
+
+    for refused in ("grep -c --re '^[+-]$'", "grep -c --counts '^[+-]$'"):
+        assert _d5_count_prescriptions(f"a count: `{refused}`\n") == [], (
+            f"{refused!r} is REFUSED by grep (ambiguous `--re`; unknown `--counts`), so the "
+            "invocation is declined rather than graded — grading it reds a document that merely "
+            "mentions the spelling (#13995, MEASURED)")
+    # ⛔ THE `--colour` ALIAS IS A FALLBACK, NOT A RIVAL (#13995, MEASURED — and this pair is the
+    # whole rule). `--cou=always` is refused with `option '--count' doesn't allow an argument`, so
+    # a prefix matching `--count` resolves to it and the `-u` spelling is no rival; but `--colou`
+    # matches NOTHING once the alias is set aside, and grep runs it (`2` printed), so declining it
+    # made a real BLANK-class prescription invisible behind one that was read — a false PASS in
+    # the exact direction this cell exists to refuse. Measured: `--col`, `--colo`, `--colou`,
+    # `--colour` are all accepted and `--col=always` colours the output.
+    for coloured in ("grep -c --col '^[+-]$'", "grep -c --colo '^[+-]$'",
+                     "grep -c --colou '^[+-]$'", "grep -c --colour '^[+-]$'"):
+        assert _d5_count_prescriptions(f"a count: `{coloured}`\n") == ["^[+-]$"], (
+            f"{coloured!r} is accepted by grep as `--colour` (measured: it counts 2) — refusing it "
+            "because the alias was excluded from the candidate set left a real prescription "
+            "unread (#13995, MEASURED)")
+
+    for accepted in ("grep -c --coun '^[+-]$'", "grep -c --cou '^[+-]$'",
+                     "grep -c --max-c 2 '^[+-]$'", "grep -c --count '^[+-]$'",
+                     "grep -c -- '^[+-]$'"):
+        assert _d5_count_prescriptions(f"a count: `{accepted}`\n") == ["^[+-]$"], (
+            f"{accepted!r} IS accepted by grep (measured) — the refusal above must not overshoot "
+            "into declining real spellings (#13995)")
+
+def test_the_d5_count_reader_reads_the_LONG_spelling_and_the_ABBREVIATION_of_a_flag():
+    r"""A long spelling and its unambiguous abbreviation are the SAME flag — for count, for
+    inversion, and for suppression — and an ambiguous prefix is neither.
+
+    ⛔ MEASURED ON GNU grep 3.11, BOTH DIRECTIONS (#13995, after the word walk landed):
+      * `grep --cou`/`--coun` ARE `--count` (`2` printed), while `--c`/`--co` are AMBIGUOUS between
+        `--count`, `--color` and `--context` and grep refuses them (`option '--c' is ambiguous`);
+      * `--max-c 2` IS `--max-count 2`, so its `2` is the flag's ARGUMENT — reading it as the
+        expression was a false PASS;
+      * `--files-with-matches` prints a FILENAME and `--quiet`/`--silent` print NOTHING: none is a
+        count, and grading one reds a document that merely mentions it in prose — the false RED
+        this file calls the worse direction;
+      * `--inv`/`--inver`/`--invert` ARE the inversion (the complement is printed), so the command
+        stays SEEN and stays OUT of the graded set.
+    Non-vacuity: dropping `_resolved_long_option` reds the `--max-c` row; dropping
+    `_D5_COUNT_SUPPRESSING_LONG_FLAGS` reds the suppressed rows; making `_long_flag_matches` ignore
+    its `rivals` reds the `--c`/`--co` rows.
+    """
+    for spelled_count in ("grep --count '^[+-]$'", "grep --coun '^[+-]$'", "grep --cou '^[+-]$'"):
+        assert _d5_count_prescriptions(f"a count: `{spelled_count}`\n") == ["^[+-]$"], (
+            f"{spelled_count!r} is a count of the blank class — the long spelling and its "
+            "UNAMBIGUOUS abbreviations are accepted by grep (measured: `--cou` prints 2 where "
+            "`--c`/`--co` are ambiguous) (#13995, MEASURED)")
+    for ambiguous in ("grep --c '^[+-]$'", "grep --co '^[+-]$'"):
+        assert _d5_count_prescriptions(f"a count: `{ambiguous}`\n") == [], (
+            f"{ambiguous!r} is AMBIGUOUS between `--count`, `--color` and `--context` and grep "
+            "refuses the command, so reading it as a count would grade an invalid command "
+            "(#13995, MEASURED)")
+
+    assert _d5_count_prescriptions("a count: `grep -c --max-c 2 '^[+-]$'`\n") == ["^[+-]$"], (
+        "`--max-c 2` is `--max-count 2` (measured), so its `2` is the flag's ARGUMENT and the "
+        "quoted token is the expression — reading the `2` instead was a false PASS (#13995)")
+
+    for suppressed in ("grep -c --files-with-matches '^[+-]$'", "grep -c --quiet '^[+-]$'",
+                       "grep -c --silent '^[+-]$'", "grep -c --quie '^[+-]$'",
+                       "grep -c --files-with-match '^[+-]$'"):
+        assert _d5_count_prescriptions(f"a count: `{suppressed}`\n") == [], (
+            f"{suppressed!r} prints a FILENAME or nothing (measured on GNU grep 3.11) — it counts "
+            "nothing, so it is not a prescription and must not be graded (#13995, MEASURED)")
+    # ⛔ THE REFUSAL IS THE LENGTH TEST ALONE, AND THE PROSE CREDITED A CLAUSE THAT COULD NEVER
+    # FIRE (#13995 review, MEASURED). `_suppresses_the_count` carried
+    # `len(candidates) == 1 and not "--file".startswith(name)`; for every prefix of `--file` the
+    # set already yields BOTH `--files-*` members, so the `and` was never consulted — `--file`
+    # itself matches no suppressor. The rows below pin the outcome a refactor must keep, and
+    # `grep --f`/`--fi`/`--fil` really are AMBIGUOUS (measured: `option '--f' is ambiguous;
+    # possibilities: '--fixed-regexp' '--file' '--files-with-matches' '--files-without-match'`).
+    assert not any(_suppresses_the_count(word) for word in (
+        "--files", "--f", "--fi", "--fil", "--file")), (
+        "`--files`/`--f`/`--fi`/`--fil` are AMBIGUOUS in grep (measured: `option '--fil' is "
+        "ambiguous; possibilities: '--file' '--files-with-matches' '--files-without-match'`) and "
+        "`--file` is an option of grep's that takes an ARGUMENT (measured: `option '--file' requires "
+        "an argument`), so none may be certified as a suppressor — the test is uniqueness across "
+        "the set, not membership of one name, and it does not need (and cannot use) a `--file` "
+        "clause (#13995; #14027 round 4, P3 — this message said grep refused ALL FIVE as ambiguous, "
+        "which is false for `--file`)")
+    assert [_suppresses_the_count(word) for word in ("--quie", "--s", "--files-with-match")] == [
+        True, True, True], (
+        "the suppressor set is still certified where grep accepts the spelling (measured: "
+        "`--quie` is `--quiet`, `--s` is `--silent`, `--files-with-match` is "
+        "`--files-with-matches`) — a narrowing that loses these reds here instead of silently "
+        "ungrading the six rows above")
+
+    for inverted in ("grep -c --invert '^[+-]$'", "grep -c --inver '^[+-]$'"):
+        assert _d5_count_prescriptions(f"a count: `{inverted}`\n") == ["^[+-]$"], (
+            f"{inverted!r} IS the long spelling of the inversion (measured: the complement is "
+            "printed), so the command must stay seen (#13995, MEASURED)")
+        assert _d5_blank_class_prescriptions(f"a count: `{inverted}`\n") == [], (
+            f"{inverted!r} counts the COMPLEMENT, so it must not be graded against the positive "
+            "class — grading it reds a document that prescribes both (#13995 round 4, long "
+            "spelling in the word walk)")
+
+
+def test_the_d5_count_reader_does_not_grade_a_complement_or_suppressed_count_as_this_class():
+    """#13995 review round 4 — a count is graded on WHAT IT COUNTS, not on `c` alone.
+
+    ⛔ MEASURED ON THE PRE-FIX READER, BOTH DIRECTIONS (GNU grep 3.11). `_requests_a_count`
+    answered `True` to every short cluster holding a `c`, which is false in two ways:
+
+      * `-l`, `-L` and `-q` WIN over `-c` — `-lc` prints the FILENAME, `-Lc` prints the files
+        WITHOUT a match, `-qc` prints nothing. No count, yet each was read as a count command.
+      * `-v` INVERTS the match set, so `grep -vc '^[+-]$'` counts the NON-blank lines — a
+        DIFFERENT class — yet it was graded as a BLANK-class prescription. A document that
+        legitimately prescribes the blank count AND its complement therefore made
+        `len(blank_prescriptions) == 2`, and `_d5_blank_count_expression` redded a CORRECT
+        document with "so this arm would execute one of them while a reader follows another",
+        which is false in that case — the false RED on a correct document this file calls the
+        worse direction.
+
+    Non-vacuity: making `_requests_a_count` ignore `_D5_COUNT_SUPPRESSING_SHORT_FLAGS` reds every
+    row in the first loop; dropping the flags from the graded filter
+    (`_d5_blank_class_prescriptions` → the expression-only list) reds every row in the second loop
+    and the control below.
+    """
+    # (1) A word carrying a count-SUPPRESSING flag is not a count request at all — `-c` is there,
+    # and it does not win. One measured spelling per suppressor, plus the order-reversed pair.
+    for suppressed in (
+        "grep -lc '^\\+$'",            # `-l` wins: prints the filename
+        "grep -Lc '^\\+$'",            # `-L` wins: prints the files WITHOUT a match
+        "grep -qc '^\\+$'",            # `-q` wins: prints nothing
+        "grep -cl '^\\+$'",            # …same command, cluster ordered the other way
+        "grep -c -q '^\\+$'",          # …same, flags split
+        "grep --count -l '^\\+$'",     # …same, long count form beside the suppressor
+    ):
+        assert _d5_count_prescriptions(f"a prescription: `{suppressed}`\n") == [], (
+            f"{suppressed!r} does not COUNT anything — `-l`/`-L`/`-q` win over `-c` (measured on "
+            "GNU grep 3.11) — so it is not a count prescription the reader may report, and it "
+            "certainly cannot be graded as this class (#13995 review round 4, P2)")
+
+    # (2) An INVERTED count IS a count, and it counts the COMPLEMENT — so the reader must SEE it
+    # and must NOT grade it against the positive class. Both halves are asserted: dropping it from
+    # the seen set would hide the command, and grading it would red a correct document.
+    for inverted in (
+        "grep -vc '^[+-]$'",              # `-v` clustered with `c`
+        "grep -cv '^[+-]$'",              # …same command, cluster ordered the other way
+        "grep -c -v '^[+-]$'",            # …same, flags split
+        "grep -Evc '^[+-]$'",             # …same, beside another short flag
+        "grep -c --invert-match '^[+-]$'",  # …same, the long spelling
+    ):
+        assert _d5_count_prescriptions(f"a prescription: `{inverted}`\n") == ["^[+-]$"], (
+            f"{inverted!r} IS a count command, so the reader must see it — the exclusion from "
+            "the graded set is what handles the inversion, not an omission from the seen set "
+            "(#13995 review round 4, P2)")
+        assert _d5_blank_class_prescriptions(f"a prescription: `{inverted}`\n") == [], (
+            f"{inverted!r} counts the COMPLEMENT of `^[+-]$`, i.e. a different class — counting "
+            "it as a BLANK-class prescription would red a document that prescribes the blank "
+            "count and its complement together (#13995 review round 4, P2)")
+        # …and the exclusion's RESIDUAL, stated so nothing here claims more than it does: the graded
+        # set never sees a `-v` count, so a command that counts the blank lines by inverting the
+        # NON-blank class (`grep -vc '^[+-][^+-]'`) is not graded here either. That is a shape this
+        # arm does not read — it is pinned, not glossed, so a future widening reds here.
+        assert _d5_blank_class_prescriptions(
+            "a prescription: `grep -vc '^[+-][^+-]'`\n") == [], (
+            "an inverted count is never graded against the positive class — which means the one "
+            "inverted spelling that WOULD count the blank lines is unread as well. Keep that "
+            "declared in the helper's docstring rather than implying the exclusion is lossless "
+            "(#13995 review round 4, P2)")
+
+    # (3) THE CONTROL — a document MAY carry both, and the arm still sees exactly ONE BLANK-class
+    # prescription. This is the false RED the fix removes, asserted as an outcome rather than as a
+    # rewrite of the predicate.
+    both = (
+        "- BLANK lines: `git diff origin/main...HEAD | grep -c '^[+-]$'`\n"
+        "- and the complement: `git diff origin/main...HEAD | grep -vc '^[+-]$'`\n")
+    assert _d5_count_prescriptions(both) == ["^[+-]$", "^[+-]$"], (
+        "both prescriptions are counts and both must be SEEN")
+    assert _d5_blank_class_prescriptions(both) == ["^[+-]$"], (
+        "a document prescribing the blank count AND its complement must yield exactly ONE "
+        "BLANK-class prescription — two would red it with 'so this arm would execute one of "
+        "them while a reader follows another', which is false for a complement count "
+        "(#13995 review round 4, P2 — the worse direction is a false RED on a correct document)")
+
+    # …and the LONG inversion spelling's ambiguous prefixes are UNREAD, which is the reason the
+    # helper needs no rival list (#13995 review, MEASURED): `grep --i`/`--in` are ambiguous in grep
+    # (exit 2), and `_long_option_is_accepted` REFUSES both — 4 and 3 candidates in grep's whole
+    # set — so `_d5_command_expression` declines the invocation before the inversion is ever asked.
+    # ⛔ THE CAUSE IS NAMED, NOT APPROXIMATED (#14027 review round 2, P3): this comment used to say
+    # `_resolved_long_option` reads both as `--include` and eats the next word as its argument,
+    # which is false at this head (it returns `None`). Pinned as `[]`, so a change that makes the
+    # row read cannot happen quietly.
+    for refused_and_unread in (
+        "grep -c --i '^[+-]$'",
+        "grep -c --in '^[+-]$'",
+    ):
+        assert _d5_count_prescriptions(f"a prescription: `{refused_and_unread}`\n") == [], (
+            f"{refused_and_unread!r} must stay UNREAD: grep refuses the ambiguous prefix (measured) "
+            "and `_long_option_is_accepted` declines it before any flag is judged — that is why "
+            "`_inverts_the_match_set` needs no rival list, and a resolution change that makes this "
+            "row read has to restate the reason in its docstring")
+    # …and the prefixes grep DOES accept are the control, read as the inversion.
+    for accepted_inversion in ("grep -c --inv '^[+-]$'", "grep -c --inver '^[+-]$'"):
+        assert _d5_count_prescriptions(f"a prescription: `{accepted_inversion}`\n") == [
+            "^[+-]$"], (
+            f"{accepted_inversion!r} IS the long spelling of the inversion (measured: the "
+            "complement is printed), so the command must stay SEEN")
+        assert _d5_blank_class_prescriptions(
+            f"a prescription: `{accepted_inversion}`\n") == [], (
+            f"{accepted_inversion!r} counts the COMPLEMENT, so it must not be graded against the "
+            "positive class (#13995 round 4, long spelling in the word walk)")
+
+
+def test_the_d5_count_reader_does_not_grade_a_command_whose_pattern_is_NOT_A_REGEX():
+    r"""#13995 review — `-F`/`-z` keep the count and change WHAT IT MATCHES, so a test that reads the
+    EXPRESSION cannot answer whether this class was counted.
+
+    ⛔ MEASURED ON GNU grep 3.11, on a probe diff whose two blank lines are exactly `+` and `-`:
+    `grep -c '^[+-]$'` prints `2`; `-Fc` (the pattern is LITERAL TEXT, so `^[+-]$` matches the
+    literal seven characters and nothing in the diff) and `-zc` (a record ends at a NUL byte, so
+    the whole file is ONE line) print `0`; `--fixed` and `--null-d` print `0` too, while `-i`,
+    `-w`, `-x`, `-E`, `-G`, `-P` and `--null` print `2`. Grading a `0` as "exactly the lines that
+    are one `+` or one `-`" is the same false claim the `-v` exclusion exists to prevent, one axis
+    over: the command IS a count and the expression IS the class literal, and only the FLAGS say
+    the literal is no longer a regex.
+
+    Non-vacuity: dropping `_retargets_the_matched_text` from `_d5_blank_class_prescriptions` reds
+    every row of the first loop (measured: `1 failed` on that mutation); adding `-w` to
+    `_D5_RETARGETING_SHORT_FLAGS` reds the `-wc` control row. ⛔ NOT `--null`: adding it to
+    `_D5_RETARGETING_LONG_FLAGS` reds NOTHING, because `_D5_RETARGETING_LONG_RIVALS` neutralises
+    it — the RIVAL LIST is doing that work, not the table, and the control row stays green
+    either way (#13995 review, P3 — MEASURED).
+    """
+    for retargeted in (
+        "grep -Fc '^[+-]$'",                  # the pattern is literal text
+        "grep -c -F '^[+-]$'",                # …same, flags split
+        "grep -cF '^[+-]$'",                  # …same, attached to the count
+        "grep --fixed-strings -c '^[+-]$'",   # …the long spelling
+        "grep --fixed -c '^[+-]$'",           # …and its accepted abbreviation (measured `0`)
+        "grep -zc '^[+-]$'",                  # a NUL-terminated record: the diff is ONE line
+        "grep -c --null-data '^[+-]$'",       # …the long spelling
+        "grep -c --null-d '^[+-]$'",          # …and its accepted abbreviation (measured `0`)
+    ):
+        assert _d5_count_prescriptions(f"a prescription: `{retargeted}`\n") == ["^[+-]$"], (
+            f"{retargeted!r} IS a count command, so it must be SEEN — the exclusion from the "
+            "graded set is what handles the retargeting, not an omission from the seen set")
+        assert _d5_blank_class_prescriptions(f"a prescription: `{retargeted}`\n") == [], (
+            f"{retargeted!r} does not count the BLANK class (measured `0` where the row's own "
+            "command prints `2`), so grading it as the class would let a row re-spell its "
+            "instrument while this arm reported the class as graded (#13995 review, MEASURED)")
+    # …and the CONTROL, measured on the same probe: every one of these leaves the class intact and
+    # must still be graded. `--null` is here on purpose — it is the long prefix that LOOKS like
+    # `--null-data` and is not (`-Z`: a NUL after the FILE name, `2` on the probe).
+    for control in (
+        "grep -Ec '^[+-]$'", "grep -ic '^[+-]$'", "grep -wc '^[+-]$'", "grep -xc '^[+-]$'",
+        "grep -Gc '^[+-]$'", "grep -Pc '^[+-]$'", "grep -c --null '^[+-]$'",
+    ):
+        assert _d5_blank_class_prescriptions(f"a prescription: `{control}`\n") == ["^[+-]$"], (
+            f"{control!r} prints `2` on the same probe as the row's own command (measured), so it "
+            "counts THIS class and the retargeting exclusion must not reach it")
+    # …and the one BOUNDARY the helper declares, pinned where it is measurable: `--f`/`--fi` are
+    # AMBIGUOUS in grep (`option '--fi' is ambiguous; possibilities: '--fixed-regexp' '--file'
+    # '--files-with-matches' '--files-without-match'`, measured, rc 2) and
+    # `_long_option_is_accepted` refuses both spellings (4 candidates each) — so the invocation is
+    # DECLINED before any flag is judged, which is why the helper's over-inclusion changes nothing
+    # today. ⛔ THIS SAID `_resolved_long_option` reads them as `--file` and makes the expression its
+    # argument; that is false at this head (it returns `None`), corrected in #14027 round 2.
+    for ambiguous_prefix in ("grep -c --fi '^[+-]$'", "grep -c --f '^[+-]$'"):
+        assert _d5_count_prescriptions(f"a prescription: `{ambiguous_prefix}`\n") == [], (
+            f"{ambiguous_prefix!r} must stay UNREAD — `_long_option_is_accepted` refuses the "
+            "ambiguous prefix, so the invocation never reaches a flag; if this row reads, the "
+            "helper's declared over-inclusion became observable and its docstring has to say so")
+    # ⛔ EVERY LONG SPELLING IN THE RETARGETING TABLE MUST BE ONE THE ACCEPTANCE ORACLE ACCEPTS,
+    # or the member is UNREACHABLE and nothing witnesses it (#13995 final-head review, P2 —
+    # MEASURED). This is the invariant, not an example: `--fixed-regexp` used to sit in the table
+    # while `_long_option_is_accepted` declined it (grep accepts the alias, but `grep --help`
+    # does not document it, so it is absent from `_D5_ALL_LONG_OPTIONS` deliberately — listing it
+    # would make `--fixed-` falsely ambiguous and decline a command grep RUNS). A member the walk
+    # can never reach is the inert-narration defect this file bans, and its mutant was silent:
+    # dropping it from the table left the whole suite green. Re-adding it — or any other declined
+    # spelling — reds HERE by name.
+    for retargeting_flag in sorted(_D5_RETARGETING_LONG_FLAGS):
+        assert _long_option_is_accepted(retargeting_flag), (
+            f"{retargeting_flag!r} is in `_D5_RETARGETING_LONG_FLAGS` but "
+            "`_long_option_is_accepted` REFUSES it, so `_retargets_the_matched_text` can never "
+            "see it — `_d5_command_expression` declines the invocation first. Delete the member "
+            "and state the residual, or teach the acceptance oracle the spelling "
+            "(#13995 final-head review, P2)")
+    # …and the residual that DEAD MEMBER left behind, pinned so it is a stated shape rather than
+    # an implied claim of closure: grep ACCEPTS `--fixed-regexp` / `--fixed-r` / `--fixed-re`
+    # (measured: all three print `0`, i.e. `-F` semantics, so none counts this class) and this
+    # reader DECLINES them, because the alias is undocumented in `grep --help`. Fail-closed, and
+    # pinned as such — ALL THREE, because the paragraph that describes this residual NAMES three and
+    # a row set of two left `--fixed-re` unpinned while the prose implied it was covered (#14027
+    # review, P3 — MEASURED: `_d5_count_prescriptions` answers `[]` for all three).
+    for alias_spelling in ("grep -c --fixed-regexp '^[+-]$'", "grep -c --fixed-r '^[+-]$'",
+                           "grep -c --fixed-re '^[+-]$'"):
+        # ⛔ `--fixed-re` is NOT decoration: it is the THIRD spelling the residual paragraph
+        # NAMES, so a two-row loop leaves that paragraph claiming three witnesses with two — the
+        # defect the previous cycle found. ⛔ AND IT IS NOT A BOUNDARY, which this comment used to
+        # call it ("the longest prefix that is still an alias"): measured on GNU grep 3.11,
+        # `--fixed-reg`, `--fixed-rege` and `--fixed-regex` are ALL accepted as the same alias and
+        # print `0`, while `--fixed-regexx` is `unrecognized option` — a contiguous accepted range,
+        # of which this row is one sample. The row's reason is the three-name claim, not a limit.
+        assert _d5_count_prescriptions(f"a prescription: `{alias_spelling}`\n") == [], (
+            f"{alias_spelling!r} is now READ — grep accepts it as `-F` and it prints `0` on the "
+            "blank-class probe, so if the reader sees it, `_retargets_the_matched_text` must "
+            "also exclude it or the row gets graded as a class it does not count "
+            "(#13995 final-head review, P2)")
+
+
+#: The prose claims about the count reader that #13995's reviews retired, each paired with the
+#: PRE-FIX text it was cut from. Every needle is assembled from fragments so that it appears
+#: contiguously in the pre-fix snippet and NEVER in this file's own source — otherwise the ban row
+#: below would match the ban itself. ⛔ A NEW PROSE GUARD ABOUT THIS READER BELONGS HERE IN THE SAME
+#: COMMIT: the cell can only ban sentences it is told about, and three separate rounds have now
+#: found a FRESH over-claim in new words beside a ban that only knew the old ones.
+_D5_RETIRED_OVERCLAIMS = (
+    ("prescription in the bundle, "  "whatever command prefix",
+     "#: ANY `grep -c…` prescription in the bundle, "  "whatever command prefix and whatever "
+     "sentence"),
+    ("EXPRESSION is "  "prefix-independent",
+     "#: EXPRESSION is "  "prefix-independent and refuses only what the class is"),
+    ("count command in `bundle`, "  "whatever its spelling",
+     '    """The EXPRESSION of every `grep` count command in `bundle`, '  'whatever its spelling.'),
+    # #13995 review, P2 — the ZERO-vs-MANY comment claimed the gate counts a prescription "whatever
+    # their flag spelling" while the artifact beside it listed seven flag spellings it does not
+    # count. Measured at `de79fcdb53`: `grep '^\+$' -c` and `grep -c -m 2 '^\+$'` both returned `[]`.
+    ("COUNTS THEM "  "WHATEVER",
+     "# ⛔ THE GATE ABOVE COUNTS PRESCRIPTIONS ANYWHERE IN THE BUNDLE, AND IT COUNTS THEM "
+     "WHATEVER"),
+    # #13995 review, P3 — the helper docstring named two spellings and said they were all pinned,
+    # while neither string occurred in the cell it named (measured with `grep -n`).
+    ("every one of them "  "is pinned",
+     "and every one of them "  "is pinned in"),
+    # #13995 review, P2 — `_suppresses_the_count`'s docstring claimed an attached value makes it
+    # answer `True` and that the spelling is "already listed as unread"; measured, `-f/tmp/lpats`
+    # answers `False` and `grep -c -f/tmp/pats '^[+-]$'` was graded, not unread.
+    ("keeps the reader "  "on the side of NOT grading it",
+     "and answering it `False` here "  "keeps the reader "  "on the side of NOT grading it"),
+    # #14027 review round 6, P3 — three sites named `-e`/`--regexp` among the spellings the count
+    # reader CANNOT see, while the reader reads and grades them (`grep -c -e '^[+-]$'` yields
+    # `['^[+-]$']` and grep really counts `2`). A fixer following the ZERO message would look for a
+    # second prescription that cannot be there. Banned by sentence so the fourth copy cannot land.
+    ("a pattern supplied on "
+     "`-e`/`-f`",
+     "(an unquoted expression; a pattern supplied on "  "`-e`/`-f`)"),
+)
+
+
+def _comment_block_above(source: str, anchor: str) -> str:
+    """The contiguous run of comment lines sitting immediately above `anchor` in `source`.
+
+    ⛔ SCOPED ON PURPOSE (#13995 review round 4, P2 — MEASURED). The shape sentence below is
+    asserted PRESENT so that deleting it cannot pass, and a whole-file search cannot carry that:
+    the needle is also a plain literal in the assertion that checks it, so the row was satisfied
+    by its own source text and a mutant that deleted the sentence from the constant's header
+    stayed GREEN (agent-infra#3442 rule 3 — an assertion whose value cannot vary under the
+    mutation it claims to guard). Handing the check only the comment block that IS the header
+    leaves the needle one possible location: the region under test.
+    """
+    lines = source.splitlines()
+    at = next(i for i, line in enumerate(lines) if line.startswith(anchor))
+    first = at
+    while first and lines[first - 1].lstrip().startswith("#"):
+        first -= 1
+    return "\n".join(lines[first:at])
+
+
+def test_the_d5_count_reader_does_not_describe_itself_as_complete():
+    """#13995 — the reader's prose may not promise more than its own residual list gives.
+
+    ⛔ NON-VACUOUS BY CONSTRUCTION, which is why a prose finding gets a cell at all. Each needle
+    below is a substring of the PRE-FIX SNIPPET recorded beside it in `_D5_RETIRED_OVERCLAIMS`, and
+    both checks are made against THAT SNIPPET and this file's own source — never against a named
+    commit, because the tuple does not record one per row: the rows were cut from successive review
+    rounds whose texts live on `origin/main` and on earlier states of this branch, and the round
+    comment above a row names its round only where one was written. ⛔ NEITHER A COUNT NOR A
+    PER-COMMIT MAP IS STATED HERE ON PURPOSE (#14027 round 7, P3 — this sentence used to say
+    "measured: four of the six needles do not occur in `git show origin/main:…`", and appending a
+    needle made both integers false; its replacement then said the provenance "is beside each row",
+    which does not resolve either, since not every row carries a round comment). A hardcoded
+    census inside the cell whose subject is "a claim that outruns its own artifact" is that same
+    defect one tuple entry later. The ban therefore REDS on
+    code a review round actually graded — it is not a test written beside a wording edit, it IS the
+    wording edit asserted. The
+    checks run in the control direction first: every needle must still be found in the pre-fix
+    snippet it was cut from (a typo'd needle is an inert ban, and an inert ban is the failure
+    this file bans elsewhere in the document).
+
+    The defect: the constant's header claimed ANY count prescription regardless of how it was
+    prefixed and worded, the same block called the reader prefix-independent eleven lines above a
+    paragraph opening "BECAUSE … WAS NOT", and `_d5_count_prescriptions`'s docstring (the first
+    thing a fixer reads about the function) claimed every count command regardless of spelling —
+    while the reader does not read the shapes its own residual block declares. One guard, three
+    present-tense completeness claims refuted in its own block, and this file's rule
+    (`_typed_answers_to_tortoise_cmd`'s closing sentence) is that a guard may be narrow but may
+    not describe itself as complete. #13962's category-A argument is that a lane reads such a
+    sentence as a guarantee and does not check — so the sentence is the defect, not a nit.
+    Rounds 5-6 added three more, in new words each time: a "whatever their flag spelling" the
+    residual list refutes, an "every one of them …" claim the named cell does not carry, and a
+    residual paragraph true of an INVALID command and false of the valid one it names.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    for needle, pre_fix in _D5_RETIRED_OVERCLAIMS:
+        assert needle in pre_fix, (
+            f"retired-over-claim needle {needle!r} is not in the pre-fix snippet {pre_fix!r} — "
+            "the row is inert and would let the completeness claim back in (#13995 review, P2)")
+        assert needle not in source, (
+            f"`tests/test_docs_citation_refs.py` states {needle!r} again. That is a completeness "
+            "claim about the count reader, and the reader does not read the shapes its own "
+            "residual block declares — so the claim is false, and it is precisely the "
+            "false-PASS guarantee #13962 was filed against. State the SHAPE instead: "
+            "`-`-anchored flag words followed by a quoted expression "
+            "(#13995 review, P2)")
+    # …and the replacement must be PRESENT, so this cannot pass by deleting both halves — the
+    # shape sentence lives once on the constant and once in the helper's own docstring, and each
+    # is checked IN ITS OWN REGION (#13995 review round 4, P2 — MEASURED). The previous cut searched
+    # the WHOLE file for both needles; the constant's needle is a plain literal ~450 lines below the
+    # header it guards, so it also occurred in this assertion's own tuple and the row was satisfied
+    # by its own source text — deleting the sentence from the constant's header left it GREEN
+    # (agent-infra#3442 rule 3). Scoping each haystack to the region under test makes the needle's
+    # only possible location the region it grades.
+    for where, haystack, shape_claim in (
+            ("the constant's header",
+             _comment_block_above(source, "_D5_GREP_INVOCATION_RE = re.compile("),
+             "`-`-anchored flag words are followed by a quoted expression"),
+            ("the helper's docstring",
+             _d5_count_prescriptions.__doc__ or "",
+             "`-`-anchored flag words\n    are followed by a quoted expression")):
+        assert shape_claim in haystack, (
+            f"the shape sentence that replaced the retired over-claims is gone from {where} — a "
+            "deletion is not a fix; the reader's scope must be stated as the SHAPE it reads "
+            "(#13995 review, P2)")
 
 
 def test_the_comment_filter_is_not_described_by_a_property_its_input_cannot_have():

@@ -1145,8 +1145,22 @@ class TestTheBootPrewarm:
             self, tmp_path):
         """#13674 review F3 — the switch gates WARM-UP; `get()` is NOT gated.
 
-        `TORTOISE_EMBEDDER_WARMUP` gates exactly `start_warm_up`, `warm_up`, the
-        write-path warm-up and the hosted lifespan pre-warm. `EmbeddingModel.get()`
+        `TORTOISE_EMBEDDER_WARMUP` gates FIVE read sites, and this docstring
+        names them by FUNCTION because the names are the invariant (line numbers
+        rot on every merge that grows `embeddings.py`): `start_warm_up` (the SDK
+        engine-init warm-up), `await_write_ready_reason` and
+        `await_read_ready_reason` (the write- and read-path bounds), the hosted
+        lifespan pre-warm (`tortoise.hosted_api._lifespan`), and
+        `entrypoint.sh::_prewarm_embedder` (the boot pre-warm). `warm_up` is NOT
+        one of the five — it never reads the flag itself; `start_warm_up` is what
+        gates it. Three warm-up surfaces plus two readiness bounds is the unit: a
+        "four readers" count drops the read-path bound and the shell, which is
+        what this docstring said until #13941 re-derived it. The line-citing copy
+        of that list is `docs/infra-runbook.md` §"The embedder warm-up switch",
+        re-pinned on a merge by
+        `tests/test_fly_secret_drift.py::test_the_embedder_warmup_runbook_citations_resolve_to_the_flag_readers`
+        — do not add a second line-citing copy.
+        `EmbeddingModel.get()`
         — the request path — is not gated, and `tortoise/mcp_auth.py` says so
         verbatim: "``TORTOISE_EMBEDDER_WARMUP`` does NOT gate this path, and that
         is the point". The pre-fix skip message claimed "the in-process load is

@@ -244,6 +244,7 @@ __all__ = [
     "record_dsn",
     "record_holds_turns",
     "record_live_allocate",
+    "record_owns_position",
     "record_tenant",
     "record_tenant_effective",
     "record_tenant_for",
@@ -303,6 +304,20 @@ RECORD_SINGLE_TENANT_ENV = "TORTOISE_RECORD_SINGLE_TENANT"
 #: record's counter for the number (`allocate=True`), and cross-checks it against
 #: the append's own position — a mismatch REFUSES the write and rolls the
 #: allocation back (see `write_live_record`).
+#:
+#: ⛔ ON A CUT-OVER GRAPH IT ALSO TAKES THE JSONL OFF THE WRITE PATH (#14002).
+#: While both allocators existed they had to AGREE, and under concurrent writers
+#: they cannot (the journal is ordered by append, the counter by allocation), so
+#: the door refused a steady trickle of writes with `position_divergence` and the
+#: product read `degraded`. Armed + an `active` cursor row therefore means the
+#: record is the ONLY allocator: `tortoise.live_write.write` asks
+#: :func:`record_owns_position` BEFORE it appends and skips the file append
+#: entirely, and the counted number comes from the counter alone. The JSONL is a
+#: FROZEN PREFIX from that point — an OPTIONAL copy, not an export: nothing writes
+#: it yet (no drainer ships; `event_id`/`initiated_by`/`projection_version` have
+#: no column, `§A7.8` item 6). What is true either way is that it is no longer a
+#: POSITION SOURCE, so nothing numbers off it and the truncation class of failure
+#: is gone.
 #:
 #: ⛔ IT IS SAFE TO SET ONLY ON A CUT-OVER GRAPH (`record_cursor` row in mode
 #: `active`, written by `tools/record_allocator_cli.py`). ON with no cursor row is
@@ -2708,6 +2723,170 @@ def record_live_allocate() -> bool:
     return env_flag(RECORD_ALLOCATE_ENV, False)
 
 
+#: How often the "the cutover could not be MEASURED, so the append stays"
+#: WARNING may repeat, in seconds. Same posture and same reason as
+#: :data:`POSITION_UNPROVEN_WARN_SECONDS`: the condition repeats on every write
+#: while it lasts, so an unthrottled line would be the whole log.
+OWNS_POSITION_WARN_SECONDS = 60.0
+_owns_position_warned_at = 0.0
+
+
+def _warn_owns_position_unmeasured(exc: BaseException) -> None:
+    """Say once per window why the cutover read fell back to the APPEND (#14002).
+
+    The fallback is the SAFE direction (see :func:`record_owns_position`), so it
+    is not a failure — but it is not silent either: an operator reading
+    ``position_divergence`` refusals back after a cutover needs to know whether
+    the door refused to skip the append or failed to ask, and those have
+    different remedies (a flag/cursor problem vs a database that cannot be
+    reached).
+    """
+    global _owns_position_warned_at
+    now = time.monotonic()
+    if now - _owns_position_warned_at < OWNS_POSITION_WARN_SECONDS:
+        return
+    _owns_position_warned_at = now
+    _logger.warning(
+        "the record's cutover could not be MEASURED (%s: %s), so this write "
+        "appends to the JSONL and the door allocates against the journal's "
+        "position — the two-allocator state that produces "
+        "`position_divergence` under concurrent writers (#14002). Nothing is "
+        "lost: the line is the durable copy and the guard still refuses a "
+        "disagreement rather than renumbering. Check `%s` on THIS process and "
+        "the graph's cursor with `tools/record_allocator_cli.py status`. This "
+        "line repeats at most once per %.0fs",
+        type(exc).__name__, _bounded_cause(exc), RECORD_ALLOCATE_ENV,
+        OWNS_POSITION_WARN_SECONDS,
+    )
+
+
+def record_owns_position(*, tenant: tuple[str, str] | None = None,
+                         durable: bool = True) -> bool:
+    """Does the RECORD own this write's ordinal — i.e. must the caller NOT
+    append to the journal? (#14002, `#12894`'s target architecture)
+
+    THE DEFECT THIS CLOSES. While BOTH allocators exist they must agree, and
+    they CANNOT under concurrency: the journal is ordered by **append** (the SDK
+    site appends, then calls the door, holding no lock across the two) while the
+    counter is ordered by **allocation**, so two in-flight writes can be numbered
+    in the opposite order to their lines. The one that allocated first refuses,
+    the other applies, and the counter is left exactly ONE BEHIND the journal —
+    and on a cut-over graph that gap never closes, because an enumerated replay is
+    itself refused there (`_refuse_an_enumerated_replay`), so EVERY later armed
+    write refuses until an operator re-seeds. With 20+ agents writing
+    continuously that is not an edge case; it is steady state, and the record
+    reads `ok: false` while some writes land and some are refused.
+
+    THE FIX IS NOT IN THE GUARD — the guard is right, and it is the only thing
+    that kept the record honest while both allocators existed. The fix is to
+    remove the SECOND allocator: while the record owns the ordinal, the write path
+    must not append to the JSONL at all. Then there is one number space, writing
+    the file becomes OPTIONAL (nothing on the write path depends on it) and — on a
+    cut-over graph — the file is a FROZEN PREFIX rather than an export: the append
+    stops when the BOX's `TORTOISE_RECORD_ALLOCATE` is rolled with the row
+    `active`, NOT at the per-graph `arm` (the arm→roll window still appends), and
+    no exporter exists (`event_id`/`initiated_by`/
+    `projection_version` have no column, so a line rendered from the record would
+    be a different journal; §A7.8 item 6 and §A7.5.6's drainer are unbuilt).
+    ⛔ Do not describe it as "an export" until they are. Concurrent writers then
+    serialise on a real database transaction, and the truncation class of failure
+    disappears because nothing numbers off the file.
+
+    THE CONDITION IS TWO FACTS, BOTH REQUIRED:
+
+    * :func:`record_live_allocate` — the deployment is armed. OFF is today's
+      behaviour byte for byte, checked FIRST so an unarmed deployment pays no
+      socket and no read (this is the switch's whole cost story: one path, two
+      arms).
+    * the graph's `public.record_cursor` row is in mode ``active``. The ROW says
+      the graph was cut over and the MODE says positions may be issued from it —
+      and both are needed, in the same direction `ALLOCATION_SQL` needs them: a
+      `seeded`/`halted`/absent row means the door's write will be REFUSED
+      (`cursor_not_active`), and on THAT arm the journal line is the only durable
+      copy of the write. So the append stays exactly where the allocation would
+      refuse, and the line is not lost.
+
+    ⛔ IT FAILS OPEN TO THE APPEND, and the direction is deliberate. Every way this
+    question can go unmeasured — no DSN, a read error, the connect breaker open —
+    answers ``False``, which leaves the pre-#14002 path in place: append, then let
+    the divergence guard refuse a disagreement. The alternative (assume the record
+    owns it) would skip the append for a graph that may not be cut over, and a
+    record write that then fails has NO line behind it — the write is gone from
+    both stores. A refusal is recoverable; a skipped append behind a refused write
+    is not. So the unmeasured arm is named on a rate-limited WARNING
+    (:func:`_warn_owns_position_unmeasured`) and not absorbed.
+
+    ⚠️ WHICH ARMS OF THE FALLBACK ARE LOUD, STATED SO THE SENTENCE ABOVE IS NOT
+    READ WIDER THAN IT IS. `_warn_owns_position_unmeasured` is reached from the
+    `except` around the connect/read — the arms where the question was ASKED and
+    failed. EVERY arm :func:`_live_write_verdict` can refuse BEFORE a socket is
+    SILENT here (``unarmed``, ``malformed_dsn``, ``no_durable_journal``,
+    ``no_tenant``, ``no_tenant_carried``, ``circuit_open``), and they are not one
+    fact: on ``unarmed``/``malformed_dsn`` nothing on the write path can allocate
+    either, so no two-allocator state exists and there is nothing to warn about;
+    the tenant and durability tokens are refused by the door for the same reason;
+    ``circuit_open`` DOES fall back to two allocators, and it is already loud on
+    its own channel — the door's ``circuit_open`` refusal WARNING, which says a
+    write was declined.
+
+    ⛔ AND IT IS NOT CACHED, on purpose. A cached POSITIVE lets a graph that has
+    since been halted (or whose counter row was deleted) keep skipping the append
+    for the length of the TTL — during which every write is refused AND unline'd.
+    A cached NEGATIVE delays the cutover by the same window. The read is one
+    scoped ``SELECT`` on the pooled handle the record write is about to use
+    anyway, and it replaces the file append this call exists to remove.
+    ⚠️ NO LATENCY MEASUREMENT IS CLAIMED FOR THAT TRADE: what was measured is the
+    correctness property (120 concurrent writes on 12 threads, positions 1..120,
+    zero refusals, no file growth) — the acceptance window in
+    `tests/test_14002_record_only_journal.py` — and NOT a p50/p99 against the
+    append it replaces. Both designs concentrate a tenant-graph's writes on one
+    lock (a file lock, or the counter's row lock), so "it serialises better" is
+    not an argument this change makes.
+
+    Callers: `tortoise.live_write.write` asks this BEFORE it appends, and forwards
+    the answer to :func:`write_live_record` as ``journal_skipped=`` so the door can
+    tell "no line, the counter is the only allocator" from the #9307 "the append
+    could not prove a position" state. The two must never be one value: the first
+    is healthy on a cut-over graph, the second is a refusal.
+    """
+    if not record_live_allocate():
+        return False
+    refusal, resolved, _detail = _live_write_verdict(
+        durable=durable, tenant=tenant)
+    if refusal is not None or resolved is None:
+        # Nothing to measure: the write is refused before a socket anyway (or the
+        # breaker is open), so the append must stay — the line is the durable copy
+        # of a write the record is about to decline.
+        return False
+    connection: Any | None = None
+    active = record_projection.MODE_ACTIVE
+    try:
+        from . import record_allocator as ra
+
+        dsn = record_dsn()
+        if dsn is None:
+            return False
+        connection = _default_connect(dsn)
+        row = ra.read_cursor(connection, org_id=resolved[0],
+                             graph_id=resolved[1])
+    except Exception as exc:  # noqa: BLE001, RUF100
+        _warn_owns_position_unmeasured(exc)
+        return False
+    finally:
+        if connection is not None:
+            # END THE READ'S TRANSACTION, then release the handle. `read_cursor`
+            # scopes the connection, so the SELECT opened one; committing here is
+            # what keeps a parked handle from sitting INTRANS with an
+            # AccessShareLock between writes (#9558's lock-leak rule), and the
+            # close is a RELEASE to the pool (`_PooledConnection`), not a kernel
+            # goodbye.
+            with contextlib.suppress(Exception):
+                connection.commit()
+            with contextlib.suppress(Exception):
+                connection.close()
+    return row is not None and row[1] == active
+
+
 def _live_write_verdict(
     *, durable: bool = True, tenant: tuple[str, str] | None = None,
     consult_breaker: bool = True,
@@ -3039,6 +3218,7 @@ def write_live_record(record: Mapping[str, Any], *,
                       seq: int | None = None,
                       tenant: tuple[str, str] | None = None,
                       allocate: bool = False,
+                      journal_skipped: bool = False,
                       ) -> RecordWrite | None:
     """The LIVE door: one journal record that has ALREADY been appended.
 
@@ -3274,6 +3454,27 @@ def write_live_record(record: Mapping[str, Any], *,
     from `public.record_cursor` and the resulting number is what this call
     reports as `first_seq`/`last_seq` and what the byte meter reads.
 
+    ``journal_skipped`` says the CALLER did not append at all, because the record
+    owns the ordinal (#14002). It is set by `tortoise.live_write.write` from
+    :func:`record_owns_position` and it exists because the two ``seq is None``
+    states must never collapse into one: on the ``#9307`` arm the append SUCCEEDED
+    and could not prove a position (a refusal below), while on THIS arm there is no
+    line at all — the counter is the only allocator, so there is nothing to
+    corroborate the number against and nothing to diverge from. Concretely it
+    changes three things and nothing else:
+
+    1. it implies ``allocate`` (a skipped append can only be numbered by the
+       counter), so ``allocate or record_live_allocate() or journal_skipped``;
+    2. ``seq is None`` is then HEALTHY rather than ``position_unverifiable``;
+    3. the cutover invariant is not checked, because there is no second reading to
+       check — one number space is the whole point of the change, not a gap in it.
+
+    ⛔ IT IS NOT A WAY TO SKIP THE JOURNAL ON A GRAPH THE RECORD DOES NOT OWN. A
+    ``journal_skipped`` write on a graph with no ``active`` cursor row is refused
+    by the allocator itself (``cursor_not_active``, with `arm`/`seed` named as the
+    remedy) — the fail-closed direction. Only `record_owns_position`, which reads
+    the flag AND the row, may set it.
+
     ⛔ ON THAT ARM ``seq`` IS **NOT** IGNORED — it is the OTHER SIDE of the
     cutover invariant. The record's counter issues the number and the journal's
     append reported one, and while BOTH allocators exist they must AGREE; a
@@ -3286,6 +3487,15 @@ def write_live_record(record: Mapping[str, Any], *,
     both arms did not apply; a fresh-context review measured the door and found
     the claim false (#12894 review cycle 4, P1), the same defect class this
     file's history already records once.
+
+    ⛔ AND SINCE #14002 THE AGREEMENT ARM IS A WINDOW, NOT A PERMANENT STATE. On
+    a CUT-OVER graph the chokepoint stops appending altogether, so there IS no
+    second reading and nothing to diverge from: `journal_skipped=True` with
+    ``seq=None`` allocates and applies, which is the shape the guard cannot
+    produce a refusal for. The guard is NOT weakened — it still refuses every
+    out-of-order ordinal a caller hands it, which is what pins the invariant for
+    direct callers and for every pre-cutover graph; what changed is that the
+    production path no longer manufactures the disagreement it refuses.
 
     The graph's cursor must be in mode ``active``. ⛔ A `seeded` /
     `halted` / absent cursor, or a duplicate position, comes back as
@@ -3336,7 +3546,7 @@ def write_live_record(record: Mapping[str, Any], *,
     # onto a counter-issued graph, which is the split the cutover invariant exists
     # to prevent. A caller that must stay enumerated halts the GRAPH, it does not
     # pass `False` here.
-    allocate = allocate or record_live_allocate()
+    allocate = allocate or record_live_allocate() or journal_skipped
     org_id, graph_id = tenant
     connection: Any | None = None
     if seq is None and not allocate:
@@ -3344,7 +3554,7 @@ def write_live_record(record: Mapping[str, Any], *,
         # (see `seq` above): layer 1 gets no row for this record, which is a
         # NAMED skip and never a silent one (#9307 review F1).
         _note_unproven_position(record)
-    if seq is None and allocate:
+    if seq is None and allocate and not journal_skipped:
         # ⛔ THE ALLOCATED ARM NEEDS THE JOURNAL'S NUMBER TO CHECK AGAINST, so
         # "the append succeeded but could not prove the position" is a REFUSAL
         # here rather than a row-less write: the counter would issue a number
@@ -3359,6 +3569,15 @@ def write_live_record(record: Mapping[str, Any], *,
         # same one-behind gap the divergence arm produces is armed here too, and
         # every later armed write refuses for the same reason. The remedy is the
         # allocator's operator path, named in the warning below.
+        #
+        # ⛔ AND THIS ARM IS NOW THE ONLY ONE THAT READING CAN REACH ON A
+        # CUT-OVER GRAPH, because the healthy path no longer appends at all
+        # (#14002): `journal_skipped` is what separates the two `seq is None`
+        # states, and a caller that dropped it turns every write on a cut-over
+        # graph into this refusal — a permanent, counted, WARNed one. That is
+        # why the chokepoint forwards it and why
+        # `tools/record_wiring_check.py::live_call_sites_forward_the_journal_skip`
+        # holds every door to it.
         _count_write_failure("write_failed")
         _logger.warning(
             "the record write was REFUSED (position_unverifiable) — the journal "
@@ -3400,6 +3619,13 @@ def write_live_record(record: Mapping[str, Any], *,
         connection = write.connection
         # ⛔ THE CUTOVER INVARIANT (#12894): while BOTH allocators exist they must
         # AGREE, and a disagreement is a REFUSAL — never a silent renumbering.
+        #
+        # ⛔ THIS ARM IS UNREACHABLE WHEN THE APPEND WAS SKIPPED (#14002) — not
+        # because the check was relaxed, but because `seq` is then `None` and
+        # there is no second reading in existence. The guard below stays exactly
+        # as it is for every ordinal a caller DOES hold (a direct caller, a
+        # pre-cutover graph, a `backfill_copy_turns` batch): removing the second
+        # allocator is the fix, weakening the comparison is not.
         #
         # On the allocated arm the record's counter issues the number and the
         # journal's append reported one; if they differ, writing the row anyway

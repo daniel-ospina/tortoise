@@ -7,7 +7,7 @@ that fails OPEN the day someone deletes a branch.
 
 | test | claim it falsifies | it goes RED when … |
 |---|---|---|
-| `test_the_retired_population_is_the_four_labels_and_never_point` | the population is the issue's four labels | `:Point` enters the set a destructive tool iterates |
+| `test_the_retired_population_is_every_served_label_including_point` | the population is EVERY served label (five, `:Point` included since `#13971`) | a label leaves the set a destructive tool iterates |
 | `test_affected_entity_types_is_derived_and_source_serves_document` | the `entity_type` consequence is DERIVED | a second spelling of the label↔type map appears (the `#11405` two-of-five cell) |
 | `test_the_census_prints_the_unmatched_count_including_zero` | "**including zero**" | a parity row omits `graph_only` when it is 0 |
 | `test_a_graph_only_vector_blocks_the_label_and_names_it` | a graph-only vector is a REFUSAL | the label reads `PARITY` while the graph holds the only copy |
@@ -70,6 +70,15 @@ from tools import strip_graph_entity_vectors as strip
 #: that monkeypatched the package-qualified one would patch a module the code under
 #: test never calls — the patch would appear to work and assert nothing.
 parity = strip.parity
+
+#: The declared population, in the tool's own order — **derived, never re-spelled**. A
+#: label entering `RETIRED` (`#13971` added `:Point`) must not mean hunting hard-coded
+#: label lists through this file: an assertion that outlives its population is either
+#: edited in a hurry or silently weakened, and both are worse than deriving it. The
+#: assertions below say what they MEAN ("every declared label except the one planned")
+#: and this list answers.
+DECLARED_LABELS = [label for _t, label, _k in parity.RETIRED]
+DECLARED_EXCEPT_OBJECT = sorted(lbl for lbl in DECLARED_LABELS if lbl != "Object")
 
 
 def _census_strip():
@@ -265,18 +274,28 @@ def _execute(graph, plan, **over):
 # ── the population ──────────────────────────────────────────────────────────
 
 
-def test_the_retired_population_is_the_four_labels_and_never_point():
-    """`#13629`'s population, and its scope boundary, in one place.
+def test_the_retired_population_is_every_served_label_including_point():
+    """`#13971`'s population, and the reversal it records, in one place.
 
-    `:Point` is owned by the armed cutover and `#13330`; the issue's brief forbids
-    touching it. A destructive tool whose population grew by one label would strip the
-    Point vectors `#5004` calls record truth, so the exclusion is asserted BY NAME
-    rather than as a count that a future edit could preserve while widening the set.
+    `:Point` was OUT of this set under `#13629` (`NOT_IN_SCOPE == ("Point",)`), because
+    the armed cutover and `#13330` owned it while its record coverage was unproven and
+    every writer still mirrored it unconditionally. `#13971` removes the MEASUREMENT
+    condition — coverage for `point`/`operator` is now taken from a fresh process — and
+    the exclusion is therefore no longer asserted; what IS asserted is that the population
+    is COMPLETE, so a future edit cannot silently drop a label from a destructive tool's
+    set either. ⚠️ Joining the population is not the same as being strip-ready: the writer
+    gate still refuses `:Point` (see
+    `test_the_plan_REFUSES_POINT_and_names_the_two_sole_carrier_writers`), which is a
+    statement about WHERE the copy is the only one, not about scope.
     """
     assert [label for _t, label, _k in parity.RETIRED] == [
-        "Object", "Subject", "Event", "Source"]
-    assert "Point" not in {label for _t, label, _k in parity.RETIRED}
-    assert parity.NOT_IN_SCOPE == ("Point",)
+        "Object", "Subject", "Event", "Source", "Point"]
+    # Every served type addresses a planned label — the population is the whole vocabulary.
+    from tortoise.security import ENTITY_TYPE_LABELS
+
+    assert set(ENTITY_TYPE_LABELS.values()) == {label for _t, label, _k in parity.RETIRED}
+    # …and nothing is declared out of scope now, by NAME rather than by count.
+    assert parity.NOT_IN_SCOPE == ()
 
 
 def test_affected_entity_types_is_derived_and_source_serves_document():
@@ -814,6 +833,32 @@ def test_a_comment_mentioning_the_gate_is_not_a_gate(tmp_path, monkeypatch):
     assert strip._writer_consults_gate(prose, "_upsert_object", ("object",))[0] is False
 
 
+#: ⛔ WRITERS THAT MUST **NOT** ASK, per label — a RECORDED EXCEPTION, not a gap
+#: (`#13971` review, P1). The rule the census below enforces is "a strip must not be undone by
+#: the label's next writer"; these two writers break the PREMISE of that rule rather than the
+#: rule, because the graph copy they place is the SOLE store on their lanes:
+#:
+#:   * `sdk::_write_capture_turns` — the turn batch write runs exactly where the record cannot
+#:     hold the turn (no journal, a scratch buffer, no tenant, an open connect breaker), and the
+#:     per-turn fallback runs for a turn the record REFUSED. Gating it on `record_vector.coverage`
+#:     (a LABEL aggregate) blanked `emb` there and wrote the turn's vector to NEITHER store;
+#:   * `projection::_rebuild_all_replay` — pass-1b restores a snapshot vector only for ids the
+#:     journal wrote NO vector for (`pid not in journal_embed_write`), i.e. only where the
+#:     snapshot is the sole carrier of a graph-only id's vector.
+#:
+#: The set is EXACT and per label, so a THIRD writer losing its gate reds this test; and the
+#: strip's own census names both, so its plan refuses `:Point` on that arm once coverage
+#: verifies (today it refuses on the coverage verdict first — see
+#: `test_the_plan_REFUSES_POINT_and_names_the_two_sole_carrier_writers`, which seeds parity so
+#: the census arm is the one that answers).
+SOLE_CARRIER_WRITERS: dict[str, frozenset[str]] = {
+    "Point": frozenset({
+        "tortoise.sdk::_write_capture_turns",
+        "tortoise.projection::_rebuild_all_replay",
+    }),
+}
+
+
 def test_every_declared_writer_of_a_retired_label_asks_the_gate():
     """⛔ `#13626`'s DELIVERABLE, AS A CENSUS OVER THE REAL TREES.
 
@@ -825,13 +870,24 @@ def test_every_declared_writer_of_a_retired_label_asks_the_gate():
 
     Mutation: un-wire any single writer (drop its `if _derived_mirror_required(...)`, or its
     `props.pop("embedding")` stop arm) and the label it serves reds here with its name.
+    ⛔ EXCEPT the two `:Point` writers in `SOLE_CARRIER_WRITERS`, which may not ask because
+    their copy is the only one on the lanes they run on (`#13971` review, P1) — and that
+    exception is itself pinned, both by set membership and by the equality below.
     """
     ungated: dict[str, list[str]] = {}
     for _table, label, _key in parity.RETIRED:
         writers, refusal = strip._writers_for(label)
         assert refusal is None, f":{label} population unreadable: {refusal}"
         types = tuple(parity.affected_entity_types(label))
+        excused = SOLE_CARRIER_WRITERS.get(label, frozenset())
+        # every excused name must still be a DECLARED writer of this label: an exemption for a
+        # writer that no longer stores it would silently outlive the code it was written for.
+        assert excused <= set(writers), (
+            f"SOLE_CARRIER_WRITERS names a writer that is not a declared writer of :{label}: "
+            f"{sorted(excused - set(writers))}")
         for key in writers:
+            if key in excused:
+                continue
             module_name, _, symbol = key.partition("::")
             if not any(strip._writer_consults_gate(module_name, symbol, (t,))[0]
                        for t in types):
@@ -839,6 +895,11 @@ def test_every_declared_writer_of_a_retired_label_asks_the_gate():
     assert ungated == {}, (
         "a declared writer of a retired label still sets `embedding` without asking the "
         f"gate, so a strip would be undone by its next call: {ungated}")
+    # ⛔ AND THE EXCEPTION IS NOT A DOOR LEFT AJAR: `:Point`'s two, and only those two.
+    assert {"Point": frozenset({
+        "tortoise.sdk::_write_capture_turns",
+        "tortoise.projection::_rebuild_all_replay",
+    })} == SOLE_CARRIER_WRITERS, SOLE_CARRIER_WRITERS
 
 
 def _fake_writer_module(tmp_path, monkeypatch, body, name="fake_writer_13629"):
@@ -2132,6 +2193,106 @@ def test_the_plan_refuses_a_SHORT_record_for_the_MEASURED_reason(stores, monkeyp
     assert "has not proved" not in blocked, blocked
 
 
+def test_the_plan_REFUSES_POINT_and_names_the_two_sole_carrier_writers(stores, monkeypatch):
+    """`#13971` (review P1, corrected): `:Point` is MEASURED from a fresh process and
+    REFUSED on the writer half — the honest state, and the one the first cut of this PR
+    certified as `strip_ready: True`.
+
+    ⛔ NO `_fold_consults_gate` MONKEYPATCH — the REAL census runs here, which is the whole
+    difference between this pin and the two `#13796` tests above. The first cut asserted
+    `strip_ready is True` for `:Point` and stayed green only because two writers were gated
+    on a LABEL aggregate that is not an authority over them:
+
+      * `tortoise.sdk::_write_capture_turns` — its graph batch runs exactly where the record
+        cannot hold the turn (no journal, no tenant, an open connect breaker, or a record
+        write that REFUSED it), so the graph copy there is the SOLE store, not a mirror;
+      * `tortoise.projection::_rebuild_all_replay` — pass-1b restores a snapshot vector only
+        for ids the journal wrote NO vector for, i.e. only where the snapshot is the sole
+        carrier of a graph-only id.
+
+    Gating either on `record_vector.coverage` (`record_vectors >= graph_vectors` over a
+    LABEL) wrote those vectors to NEITHER store. Both are reverted, so the plan must now
+    refuse and NAME them: the refusal is the artefact, and it is checkable rather than a
+    shrug. ⛔ A `strip_ready: True` here would be the vacuous pass this file exists to
+    prevent.
+
+    The MEASUREMENT half is still asserted, and it must be: the coverage verdict for
+    `point`/`operator` is taken in THIS process (the counts sentence names both numbers),
+    and it is only the WRITER arm that refuses.
+    """
+    graph, record = stores
+    for key in ("pt-1", "pt-2"):
+        graph.add("Point", key)
+        record.holds("point", key)
+    _fresh_record_leg(monkeypatch, record_vectors=2)
+
+    plan = strip.build_plan(
+        g=graph, record_dsn="postgresql://localhost/record", org_id="org",
+        graph_id="graph", graph_name="g", graph_uri="docker://x/g",
+        labels=["Point"], batch=strip.DEFAULT_BATCH,
+        graph_population=strip.graph_vector_population(_Projection(graph)))
+
+    row = plan["labels"][0]
+    assert row["strip_ready"] is False, (
+        "the plan certified a `:Point` strip while two writers keep that copy on the lanes "
+        f"where it is the only one ({row})")
+    assert plan["ready"] is False
+    blocked = row["blocked_reason"]
+    # ⛔ BOTH `:Point` TYPES WERE ASKED (one label, two populations, `#13854`'s rule one
+    # label over) — the census's writer walk asks each entity type of the label.
+    assert "point" in blocked or "operator" in blocked, blocked
+    # …and the refusal NAMES the two writers, so an operator can see what must change.
+    assert "_write_capture_turns" in blocked, blocked
+    assert "_rebuild_all_replay" in blocked, blocked
+    # ⛔ THE OTHER TWO WRITERS ARE STILL CLEARED — `_update_entity` and `restore_graph` DO
+    # ask, and a refusal that named them would hide the two that genuinely must keep the
+    # copy behind writers that have already stopped.
+    assert "_update_entity" not in blocked, blocked
+    assert "restore_graph" not in blocked, blocked
+    # …and the MEASUREMENT half is the reason on the READY side of the gate: the coverage
+    # verdict for `point` was taken in this process and names both counts, so the refusal
+    # above is the writer arm and not "this process took no verdict".
+    ready, reason = strip.readiness_probe(
+        graph_population=strip.graph_vector_population(_Projection(graph)),
+        org_id="org", graph_id="graph",
+        record_dsn="postgresql://localhost/record")("Point")
+    assert ready is False
+    assert _counts_sentence(2, 2, label="point") in reason, reason
+    assert "has not proved" not in reason, reason
+
+
+def test_the_plan_refuses_a_SHORT_record_for_POINT_and_names_both_counts(stores, monkeypatch):
+    """`#13971` FALSIFIER: with the record short of the graph for `point`, the plan refuses
+    and names both counts.
+
+    Parity is held OPEN on purpose — every graph key is readable in the record — so the
+    only arm left that can refuse is the COVERAGE comparison. A stripper that refused with
+    "has not proved" would be unable to tell an unbackfilled deployment from a tested one,
+    which is the `#13796` defect; one that did not refuse would delete the only copy.
+    """
+    graph, record = stores
+    for key in ("pt-1", "pt-2", "pt-3"):
+        graph.add("Point", key)
+        record.holds("point", key)
+    # …but the record's own aggregate holds ONE vector against a graph that serves three.
+    _fresh_record_leg(monkeypatch, record_vectors=1)
+
+    plan = strip.build_plan(
+        g=graph, record_dsn="postgresql://localhost/record", org_id="org",
+        graph_id="graph", graph_name="g", graph_uri="docker://x/g",
+        labels=["Point"], batch=strip.DEFAULT_BATCH,
+        graph_population=strip.graph_vector_population(_Projection(graph)))
+
+    row = plan["labels"][0]
+    assert row["strip_ready"] is False, (
+        "a short record certified a `:Point` strip — the graph holds vectors the record "
+        f"cannot answer with ({row})")
+    blocked = row["blocked_reason"]
+    assert _counts_sentence(1, 3, label="point") in blocked, blocked
+    assert "has not proved" not in blocked, blocked
+    assert plan["ready"] is False
+
+
 # ── #13796: the CLIs must hand the gate THEIR OWN measurement context ───────
 
 
@@ -3251,7 +3412,7 @@ def test_expect_empty_does_not_acknowledge_a_NARROWED_scope(stores, monkeypatch)
     assert narrowed["total_nodes"] == 0
     result = _execute(graph, narrowed, expect_empty=True)
     assert result["empty"] is True
-    assert result["unmeasured_by_label"] == ["Event", "Source", "Subject"]
+    assert result["unmeasured_by_label"] == DECLARED_EXCEPT_OBJECT
     assert strip.result_exit_code(result) == 5, (
         "an empty NARROWED plan published exit 0 over three unstripped labels")
 
@@ -3523,14 +3684,14 @@ def test_a_narrowed_census_certifies_only_the_labels_it_measured(stores):
     record.holds("object", "obj-1")
     report = _census(graph, labels=["Object"])
     assert report["population"] == ["Object"]
-    assert report["declared_population"] == ["Object", "Subject", "Event", "Source"]
+    assert report["declared_population"] == DECLARED_LABELS
     assert report["narrowed"] is True
     text = parity.render(report, "g")
     assert "every label MEASURED (Object)" in text
     assert "NARROWED" in text
     # …and the un-measured labels are NAMED as unmeasured, never silently omitted.
     narrowed_line = text.split("NARROWED", 1)[1]
-    for absent in ("Event", "Source", "Subject"):
+    for absent in DECLARED_EXCEPT_OBJECT:
         assert absent in narrowed_line
 
 
@@ -3746,7 +3907,7 @@ def test_a_narrowed_execution_records_the_labels_it_did_not_touch(stores, monkey
     record.holds("object", "obj-1")
     plan = _plan(graph, labels=["Object"])
     result = _execute(graph, plan)
-    assert result["unmeasured_by_label"] == ["Event", "Source", "Subject"]
+    assert result["unmeasured_by_label"] == DECLARED_EXCEPT_OBJECT
     assert result["removed"] == 1
 
 
@@ -3781,11 +3942,12 @@ def test_a_narrowed_execution_is_not_exit_0(stores, monkeypatch):
     assert strip.result_exit_code(acknowledged) == 0
 
     # A plan that covers EVERY declared label is unaffected: nothing was left unmeasured.
-    for label, key in (("Event", "ev-1"), ("Source", "src-1"), ("Subject", "subj-1")):
+    for label, key in (("Event", "ev-1"), ("Source", "src-1"), ("Subject", "subj-1"),
+                       ("Point", "pt-1")):
         graph.add(label, key)
         record.holds(label.lower(), key)
     whole = _plan(graph)
-    assert sorted(whole["declared_population"]) == ["Event", "Object", "Source", "Subject"]
+    assert sorted(whole["declared_population"]) == sorted(DECLARED_LABELS)
     assert strip.result_exit_code(_execute(graph, whole)) == 0
 
 
@@ -4273,7 +4435,7 @@ def test_the_preview_renders_every_label_and_the_digest(stores):
     record.holds("object", "obj-1")
     plan = _plan(graph)
     text = strip.render_plan(plan)
-    for label in ("Object", "Subject", "Event", "Source"):
+    for label in DECLARED_LABELS:
         assert label in text
     assert plan["digest"] in text
     assert "PREVIEW — nothing was removed" in text
@@ -8865,24 +9027,10 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= {v: k for k, v in [("embedding", _encode(ev))]}
-        return None
-    _write(props)
-""",
         # ⛔ …and a comprehension KEYED BY A NAME THE CLAUSE DOES NOT BIND: it keys the mapping
         # by that name and places nothing (`{"other": vec}`), so refusing it was an
         # over-refusal — the same reason the arm that did so was removed. The ALIASED twin is
         # the one that stores, and it has its own refused row.
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= {other: v for k, v in [("embedding", _encode(ev))]}
-        return None
-    _write(props)
-""",
         # ⛔ …and a MENTION: a comprehension handed to an UNKNOWN callee writes nothing
         # (`_audit` reports, it does not store). Recognising it in the REBUILD walk refused
         # this honest writer (measured), which is why the rebuild recognition is keyed to the
@@ -8900,13 +9048,6 @@ def _upsert_object(props, ev):
         # refused both of these honest writers (measured with a runtime oracle: the merge
         # places no top-level key), so only the generators are scanned and these rows keep the
         # branch from widening back over them.
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= {x: [("embedding", _encode(ev))] for x in _keys()}
-        return None
-    _write(props)
-""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -9075,13 +9216,6 @@ def _upsert_object(props, ev):
         """
 def _upsert_object(props, ev, **kwargs):
     if not _derived_mirror_required("object"):
-        props.update(**kwargs)
-        return None
-    _write(props)
-""",
-        """
-def _upsert_object(props, ev, **kwargs):
-    if not _derived_mirror_required("object"):
         _set(props, **kwargs)
         return None
     _write(props)
@@ -9135,13 +9269,6 @@ def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props.__setitem__(embedding=None)
         props.pop("embedding", None)
-        return None
-    _write(props)
-""",
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props.__setitem__(*_pair(ev))
         return None
     _write(props)
 """,
@@ -9220,42 +9347,15 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= dict.fromkeys(_keys(ev), _encode(ev))
-        return None
-    _write(props)
-""",
-        # ⛔ THE VALUE-SIDE `Starred` BOUNDARY, BOTH DIRECTIONS PINNED (`#13788`, measured at
-        # `bcb710a5`). A `Starred` in the unpack VALUE spreads an UNKNOWN number of elements, so
-        # the walk does not flatten it — and an unnamed boundary is the exact defect the reviews
-        # of `4748044f7d` kept finding. Two rows:
-        #  - an HONEST control: `x` is paired with the star itself, binds nothing, and in this
-        #    fixture `rest = ("a", "b")` leaves `x = "a"` — nothing is stored, so the writer
-        #    must CERTIFY (if this row ever refuses, the arm has started inventing positions);
-        #  - a MEASURED, DISCLOSED FALSE PASS: `x, *r = *rest, 1` with `rest = ("embedding",)`
-        #    binds `x = "embedding"` and PLACES the vector (runtime-checked), and the row still
-        #    CERTIFIES. It is pinned as a residual, exactly like the folding-key and `zip`
-        #    residuals beside it, so a future fix reds here and must argue the boundary first.
-        """
-def _upsert_object(props, ev):
-    rest = ("a", "b")
-    x, y, *r = *rest, 1
-    if not _derived_mirror_required("object"):
-        props[x] = _encode(ev)
-        return None
-    _write(props)
-""",
-        """
-def _upsert_object(props, ev):
-    rest = ("embedding",)
-    x, *_r = *rest, 1
-    if not _derived_mirror_required("object"):
-        props[x] = _encode(ev)
-        return None
-    _write(props)
-""",
+        # ⛔ THE VALUE-SIDE `Starred` BOUNDARY (`#13788`, measured at `bcb710a5`). A `Starred`
+        # in the unpack VALUE spreads an UNKNOWN number of elements, so the walk does not
+        # flatten it. ⛔ BOTH OF ITS ROWS MOVED TO `over_refused` UNDER `#14001`, and one of
+        # them was this file's last measured FALSE PASS:
+        #   `x, *r = *rest, 1` with `rest = ("embedding",)` binds `x = "embedding"` and PLACES
+        #   the vector (runtime-checked) — and it CERTIFIED here, pinned as a residual.
+        # The inverted polarity refuses an unbound name in a key position, so the false PASS is
+        # closed and its honest twin (`rest = ("a", "b")`, `x = "a"`) is refused too, as the
+        # permitted over-refusal. Resolving either needs the value's own binding model.
         # ⛔ THE `zip` RESIDUAL THAT STAYS RESIDUAL (`#13788`): a zip whose COLUMNS ARE NAMES is
         # data flow this module does not do, and the two narrowings of the literal form must
         # each keep an honest writer certified — a keys literal naming ANOTHER property, a
@@ -9263,13 +9363,6 @@ def _upsert_object(props, ev):
         # `dict(zip(("embedding",), ()))` is `{}`), and a CONSTANT value (the pre-guard reset
         # `embedding = None`, which places nothing). Without these the new arm costs an honest
         # writer its gate.
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= dict(zip(_keys(ev), (_encode(ev),)))
-        return None
-    _write(props)
-""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -9360,20 +9453,6 @@ def _upsert_object(props, ev):
         # strengthened recursion must not swallow a MENTION or an identity-triple rebuild —
         # `_write({**props, **extra})` merges an unknown and names no key, and
         # `_write({**props, "embedding_model": …})` merges only the identity triple.
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        _write({**props, **extra})
-        return None
-    _write(props)
-""",
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        _write({**props, "embedding_model": _m()})
-        return None
-    _write(props)
-""",
         # ⛔ THE HONEST-STOP CONTROLS FOR THE `**` VALUE WALK (`#13788` F5): a READ whose
         # default is a literal must still CERTIFY, and the identity triple must stay certified
         # behind the same wrapper — otherwise the walk costs an honest writer its gate.
@@ -9506,13 +9585,6 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props.update(_merged[0])
-        return None
-    _write(props)
-""",
         # ⛔ AND THE CONTROLS FOR THE UNION ARM: the wrapper recognition must not swallow a
         # union that places nothing — the identity triple behind `.copy()` in the same
         # position still CERTIFIES, and so does a union of two empty displays.
@@ -9548,16 +9620,11 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
-        # …the key is bound to the property but the SOURCE is a name — the disclosed residual.
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= {k: _encode(ev) for k in _keys()}
-        return None
-    _write(props)
-""",
         # …and the pair is consumed WHOLE, so the mapping is keyed by the pair and no
         # top-level `embedding` key is placed.
+        # ⛔ THE "KEY BOUND TO THE PROPERTY, SOURCE IS A NAME" control that used to sit here is
+        # GONE — `#14001` refuses it and its row is pinned in `over_refused` below (verified by
+        # the round-2 review: the comment had been left orphaned above an unrelated row).
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -9587,6 +9654,13 @@ def _upsert_object(props, ev):
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
         props |= {k: _encode(ev) for k in ChainMap({"embedding_model": 1})}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        _write({**props, "embedding_model": _m()})
         return None
     _write(props)
 """,
@@ -9672,13 +9746,6 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= {k: _encode(ev) for k in {**{"embedding_model": 1}, **d}}
-        return None
-    _write(props)
-""",
         # ⛔ THE NEW OPERAND FORMS MUST NOT SWALLOW A NON-STORE EITHER (`#13788` review round 8):
         # a MIXED constructor and a `|` UNION whose only property-looking key is absent are
         # honest write-stops, so the collection loop and the union arm are pinned against the
@@ -9693,28 +9760,7 @@ def _upsert_object(props, ev):
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
-        props |= {k: _encode(ev) for k, _v in ({"embedding_model": 1} | d).items()}
-        return None
-    _write(props)
-""",
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= {k: _encode(ev) for k, _v in dict(d).items()}
-        return None
-    _write(props)
-""",
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
         props |= {k: _encode(ev) for k, _v in {kk: 1 for kk in ["embedding_model"]}.items()}
-        return None
-    _write(props)
-""",
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= {k: _encode(ev) for k, _v in dict([d]).items()}
         return None
     _write(props)
 """,
@@ -9727,13 +9773,6 @@ def _upsert_object(props, ev):
         #    a record that overstates its own coverage is how the next lane measures the wrong
         #    row. `dict([d]).items()` earns its place as an honest-write-stop control, not as an
         #    arity witness.
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= {k: _encode(ev) for k in dict([d])}
-        return None
-    _write(props)
-""",
         # ⛔ AND THE TWO `dict([d])` ROWS ARE CERTIFIED BECAUSE `d` IS A NAME, NOT BECAUSE THE
         #    STORE IS HARMLESS (`#13788` review round 10, P2, measured): bound to a real pair or
         #    a mapping, BOTH rows place the vector at runtime. They sit in the tuple whose block
@@ -9773,20 +9812,6 @@ def _upsert_object(props, ev):
         #    `for k in m.values()` reads the view as a KEY source, not as pairs, so a blanket
         #    "a values view is a pairs sequence" rule would refuse an honest writer. Pinned as
         #    an accepted control because that is the cheaper error to police.
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= {k: _encode(ev) for k in d.values()}
-        return None
-    _write(props)
-""",
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        props |= {k: _encode(ev) for k in d.items()}
-        return None
-    _write(props)
-""",
         # ⛔ THE OPERAND-SEAM VIEW ARMS MUST NOT SWALLOW A NON-STORE (`#13788` review rounds
         #    11/12). A values view of SCALAR values is not a pairs view at all, a pairs view
         #    whose key names a different property places nothing, a CONSTANT value places the
@@ -9884,6 +9909,167 @@ def _upsert_object(props, ev):
     # this tuple is that these rows are NOT stores: widening acceptance here needs the doctrine
     # argued first, not a quiet key-reading improvement.
     over_refused = (
+        # ⛔ `_write({**props, **extra})` USED TO LIVE HERE AS AN "HONEST CONTROL" AND IT IS
+        # NOT ONE (`#14001`, measured by the review of this branch): `extra` is CALLER-SUPPLIED,
+        # so the arm hands the write channel the property whenever that mapping carries it —
+        # measured, `extra={"embedding": VECTOR}` hands the vector to `_write`, and `props |
+        # extra` does too. The shipped gate still CERTIFIES it (that channel is not proved), so
+        # it is neither an honest control nor an over-refusal: it is a KNOWN FAIL-OPEN, pinned
+        # with its caller argument in
+        # `tests/test_14001_strip_gate_fail_closed.py::REBUILD_RESIDUAL_ROWS`
+        # (`rebuilt-mapping-extra-unpack` / `-bitor`), where closing it reds instead of
+        # silently widening this tuple.
+        # ⛔ THESE ROWS ARE REFUSED **BECAUSE OF THE POLARITY INVERSION** (`#14001`).
+        # Every one of them was in `accepted` while the stop arm's key source was a shape
+        # the gate ABSTAINED on — a call (`_keys()`, `_pair(ev)`, `zip(_keys(ev), …)`), a
+        # mapping reached through a NAME, a `**kwargs` splat, or a value-side `Starred` —
+        # and abstention was read as "no store". That reading is the DEFECT: `props |=
+        # {k: vec for k in _keys()}` PLACES the vector the moment `_keys()` answers
+        # `["embedding"]`, and the old gate certified it. Under the inverted polarity an
+        # unprovable key source REFUSES, which costs these honest writers their gate and
+        # is the cheaper error by the doctrine above. They stay PINNED as refusals: making
+        # any of them certify again needs the doctrine argued first, exactly as before.
+        # (SEVERAL of these rows really store once their key source answers `embedding` —
+        # `props |= {k: vec for k in _keys()}` does, and `x, *_r = *rest, 1` with
+        # `rest = ("embedding",)` is statically certain to — so they are fail-OPENs this
+        # polarity closes, not only over-refusals.)
+        #
+        # ⛔ AND ONE OF THEM IS THE CANONICAL ROW OF THE WHOLE ISSUE, kept here because a
+        # review of an earlier cut of this branch found it had been DELETED and not re-pinned
+        # (the pin is what `assert over_refused` exists to protect):
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in _keys()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {v: k for k, v in [("embedding", _encode(ev))]}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {other: v for k, v in [("embedding", _encode(ev))]}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {x: [("embedding", _encode(ev))] for x in _keys()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev, **kwargs):
+    if not _derived_mirror_required("object"):
+        props.update(**kwargs)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.__setitem__(*_pair(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict.fromkeys(_keys(ev), _encode(ev))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    rest = ("a", "b")
+    x, y, *r = *rest, 1
+    if not _derived_mirror_required("object"):
+        props[x] = _encode(ev)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    rest = ("embedding",)
+    x, *_r = *rest, 1
+    if not _derived_mirror_required("object"):
+        props[x] = _encode(ev)
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= dict(zip(_keys(ev), (_encode(ev),)))
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props.update(_merged[0])
+        return None
+    _write(props)
+""",
+        # ⛔ THE SAME CLASS ONE OPERATOR OVER (`#14001`): a `{|}` / `{**}` merge whose OTHER
+        # operand is a NAME (`d`) — the keys are `d`'s, which this walk cannot read, so
+        # `d = {"embedding": vec}` would place the vector.
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in {**{"embedding_model": 1}, **d}}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in ({"embedding_model": 1} | d).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict(d).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k, _v in dict([d]).items()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in dict([d])}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in d.values()}
+        return None
+    _write(props)
+""",
+        """
+def _upsert_object(props, ev):
+    if not _derived_mirror_required("object"):
+        props |= {k: _encode(ev) for k in d.items()}
+        return None
+    _write(props)
+""",
         # ⛔ THE VALUE-SIDE `Starred` IS THE THIRD PERMITTED OVER-REFUSAL, and it is the price of
         # not following a value's binding (`#13788`, measured at `bcb710a5`). `*rest` spreads an
         # UNKNOWN number of elements, so a HEAD target positioned after it may or may not land
@@ -10354,7 +10540,7 @@ def test_a_live_census_without_its_declaration_cannot_be_narrowed_by_the_PLAN(
 
     monkeypatch.setattr(strip.parity, "census", _census_without_the_declaration)
     result = _execute(graph, plan)
-    assert result["unmeasured_by_label"] == ["Event", "Source", "Subject"]
+    assert result["unmeasured_by_label"] == DECLARED_EXCEPT_OBJECT
     assert strip.result_exit_code(result) == 5, (
         "a narrowed sweep published exit 0 from the plan's own declaration")
 

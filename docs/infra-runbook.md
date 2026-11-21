@@ -4117,7 +4117,10 @@ whole reason this path exists.
 #        regenerate;
 #      • neither present (an image) → the image lost its package data; ship it.
 #
-# 2. Restore. --cache-graph is REQUIRED and has no default (see below).
+# 2. Restore. --cache-graph is OPTIONAL when the control plane can answer: the
+#    name is READ from public.graphs.namespace for this tenant, never derived.
+#    With NO readable fact the verb REFUSES (exit 2) — an assumed name is not
+#    enough for a verb that WIPES (see below).
 python -m tortoise record-restore \
     --db "docker://<user>:<pw>@<falkordb-host>:<port>" \
     --org <org_id> --graph <graph_id> \
@@ -4166,12 +4169,21 @@ record is unreachable".
    off the graph after the write, so a projection that wiped and materialised
    nothing reports `0` (and the printed `N node(s)` on a healthy run is the
    number of nodes actually in the cache, not the size of the record slice).
-3. **`--cache-graph` cannot be guessed.** The cache graph's name is not the
+3. **`--cache-graph` is never GUESSED — it is read, or the run refuses.** The
+   cache graph's name is not the
    record's `graph_id` scope column: this tree names it `org_<org_id>` (the org
    SDK's isolated graph) or `org_<org_id>_<graph_id>` (the registry/ACL
-   namespace). A wrong guess does **not** fail — FalkorDB opens an EMPTY graph —
+   namespace). Without the flag the verb asks the control plane for
+   `public.graphs.namespace` (the same read `hosted_api._assert_graph_owned`
+   makes); with no readable fact it REFUSES with exit `2` and names the spelling
+   it would have used. A wrong guess does **not** fail — FalkorDB opens an EMPTY
+   graph —
    so the run would report a restore into a graph nobody reads while the real
-   graph stayed destroyed. The result prints the target's **pre-wipe count of
+   graph stayed destroyed. The resolved coordinate and its source are printed
+   **before** anything is opened or deleted ("restore target: 'org_x' —
+   control_plane (public.graphs.namespace for <graph_id>)"), and the result
+   prints the target's **pre-wipe
+   count of
    RESTORABLE nodes** (the labels the record can put back) for the same reason:
    `target held 0 node(s) before the wipe` beside `wrote 412` is either a
    correct restore into a freshly-minted graph or a restore into the wrong one,
@@ -4384,7 +4396,8 @@ operator who read the line above as "CI defends this" would never run it.
 | BILLING_NOTIFY_TO | ✅ (ops inbox for billing email) | — | ✅ |
 | TORTOISE_RECORD_DSN | ✅ **AUTHORISED (owner 2026-11-03) — the 2026-11-01 postponement is SUPERSEDED; read [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) below before acting.** The value **is already on Fly**. `GET /health` (`api.premiselabs.co`) read `"record":{"armed":true,"ok":true,…,"record_write_failures":{},"record_non_journal_skips":{},"record_position_unproven":0,…}` at **2026-11-05T11:38:16Z** (re-measured). ⚠️ **Read that emptiness for exactly what it is:** it **falsifies "writes are failing"** — the `write_failed: 32` this row used to quote is a 2026-11-02 reading — but it **cannot establish that a row was written** (see this section's own rule **"`record_write_failures: {}` is NOT evidence that a row was written"** and its capture-verification step — an empty counter has more than one cause and does not say which). It is **not** evidence the record is healthy, and an empty counter **cannot** say whether the dropping stopped — and the dropped rows recorded on `#9548` (302 at the 2026-11-02 measurement, 331 in the 2026-11-03 owner decision) remain unreaped. ⚠️ **The build attribution this cell used to carry is SUPERSEDED:** it read *"the serving build is `fc6a8a64b` (`migrations_head: 20261030000001_oauth_consent_tickets`), which predates `#10648`/`fafb8fdcc` and does not carry it"* — true until the deploy at **2026-11-05T23:14:03Z**. Re-read **2026-11-05T23:54:47Z**: `build.commit_sha` = **`46ea687dc`** and `migrations_head` = **`20261102000002_record_point_search_keys_text`**, and `git merge-base --is-ancestor fafb8fdcc 46ea687dc` exits **0** — so the deployed code **does** carry `#10648`. ⛔ **Do not read `migrations_head` as the applied schema** (this file's own `migrations_head` row: it is the highest migration the IMAGE CARRIES): whether `20261102000002` is applied to the database is read from `supabase_migrations.schema_migrations` — **not by that `/health` read**, but it **WAS measured, 2026-11-05T23:07:38Z**, by the fail-closed drift gate (see §"Arming the Postgres record" below: both migrations RECORDED APPLIED). Re-read `/health` before reusing any *endpoint* value here; the LEDGER question is the gate's to answer, and `/health` cannot answer it at all. Setting it **arms the Postgres record** (epic #7879 R1) via GitHub secret → Fly — already done, so **the arming is not the remaining work.** ⛔ **The remaining work is ORDERED, and it is not "migration + backup":** the 2026-11-03 decision puts a **verified backup FIRST** (*"No migration runs on an unbacked store"*), and **that first step is the live blocker** — a missing `TORTOISE_RECORD_BACKUP_DSN` (see the credential table in §"Arming the Postgres record"). This row is not a licence to run the apply. ⚠️ Its **user must be `tortoise_record_app`** (R6, #9554), never `postgres`/`service_role` — see [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ **set** — the GitHub secret and the Fly secret both exist; the app has reported `armed: true` continuously since at least 2026-10-26 (**measured on #9548**, quoted here, not re-measured — the row's former "value NOT created yet / no such GitHub secret exists today" was measured false). The *arming* procedure is [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) — ✅ authorised 2026-11-03, gated by its own backup-first precondition |
 | TORTOISE_RECORD_SERVE | ✅ **A live Fly secret, armed `prefer` out-of-band** (a **mode flag**, not a credential — no secret material to rotate) — declared `fly-only:#13209`, so it is deliberately absent from version control; the `fly secrets unset` in §"Arming the READ path" below must delete that declaration in the same change | — | — (no GitHub secret, so CI stays `off`) |
-| TORTOISE_EMBEDDER_WARMUP | ✅ **A live Fly secret — the embedder warm-up's ON/OFF EMERGENCY SWITCH** (a **warm-up switch**, not a credential — no secret material to rotate; `0`/`false`/`no`/`off` **DISABLE** the warm-up, anything else including unset leaves it **ON**) — declared `fly-only:#13674`; the `fly secrets unset` in §"The embedder warm-up switch" below must delete that declaration in the same change. ⛔ **Not yet a *deliberate* absence:** the `fly-only:` token is reserved for a RECORDED ruling and `#13674` does not carry one — see the section below | — | — (no GitHub secret, and it must stay OUT of the deploy payload: a deploy-set emergency switch is not out of band) |
+| TORTOISE_RECORD_ALLOCATE | ✅ **The record allocator's CUTOVER switch** (a **mode flag**, not a credential — no secret material to rotate; shipped default **OFF**, and a value it cannot parse reads OFF too) — set out-of-band with `fly secrets set TORTOISE_RECORD_ALLOCATE=1` **only after** every graph is seeded and armed, per §"Arming the allocator's cutover" below. Declared `fly-only:#12894`, so it is deliberately absent from version control; the `fly secrets unset` below must delete that declaration in the same change. ⛔ **Unsetting is NOT the revert** — read the section before touching it | — | — (no GitHub secret, and one must not exist: an assignment from CI would either arm a graph nobody seeded or never run at all) |
+| TORTOISE_EMBEDDER_WARMUP | ✅ **The embedder warm-up's ON/OFF EMERGENCY SWITCH** (a **warm-up switch**, not a credential — no secret material to rotate; `0`/`false`/`no`/`off` **DISABLE** the warm-up, anything else including unset leaves it **ON**) — the value is **version-controlled** in `fly.toml [env]` (`TORTOISE_EMBEDDER_WARMUP = "0"`, production's live value) and declared `fly-toml-env` in `.github/scripts/fly-managed-secrets.txt` (#13923 / #13926), so flipping it is a merged `[env]` edit, not an out-of-band secret. ⛔ **While a Fly secret of this name is on the app it SHADOWS `[env]`** — true as of **2026-11-20**, and a VOLATILE fact, so re-measure (`flyctl secrets list -a tortoise-y4mjjq`) rather than trusting this sentence — so the versioned value is dead until that secret is unset **after** a deploy applied `[env]` — the four steps and their failure modes live in the manifest's route-(b) block, and the transition is tracked in #13923. See §"The embedder warm-up switch" below | — | — (no GitHub secret, and it must stay OUT of the deploy payload: the manifest's own VCS declaration is the source) |
 
 ### The embedder warm-up switch — `TORTOISE_EMBEDDER_WARMUP` (#13674)
 
@@ -4407,10 +4420,19 @@ operator who read the line above as "CI defends this" would never run it.
 > ⛔ Count these in the right UNIT: **three warm-up surfaces** (1, 4, 5) **+ two readiness bounds**
 > (2, 3) **= five read sites**. "Five warm-up surfaces" is wrong; "three read sites" omits the bound
 > pair. The **function names** are the invariant — the line numbers are a convenience and they move
-> whenever `embeddings.py` grows, so re-pin them on a merge. ⛔ **Both copies of this list are pinned:**
-> this one by `tests/test_fly_secret_drift.py::test_the_embedder_warmup_runbook_citations_resolve_to_the_flag_readers`,
-> the manifest's by its sibling, so a merge that moves the code reds instead of rotting one copy
-> silently while the other stays green.
+> whenever `embeddings.py` grows, so re-pin them on a merge. ⛔ **This copy is the only line-citing
+> one left, and it is pinned:** `tests/test_fly_secret_drift.py::test_the_embedder_warmup_runbook_citations_resolve_to_the_flag_readers`
+> resolves each cite above by NAME↔NUMBER, so a merge that moves the code reds instead of rotting it
+> silently. The manifest used to carry a sibling copy and its own pin; **this change** deletes the
+> `fly-only:#13674` block that carried it (#13926 had already taken the name to route (b), and that
+> block landed on top of it seven minutes later — which is what produced the duplicate), so there is
+> no second copy to keep in step: do not reintroduce one without its own arm.
+>
+> ⛔ **What that arm does NOT cover.** Its region stops at the "When to flip it" sentence, so the three
+> timing/cold-load cites further down this section — the `_prewarm_embedder` window in `entrypoint.sh`,
+> the cold-load timing in `embeddings.py`, and the boot override beside it — are read by NO test and rot
+> silently: re-pinning one to a neighbouring line leaves the suite green (measured). The manifest
+> paragraph that used to disclose this went with the `fly-only:` block, so the disclosure lives here now.
 >
 > Number 4 is the one an operator is most likely to miss: it is the production pre-warm, not the SDK
 > path, so a box that looks quiet to an SDK-based check can still be paying the load.
@@ -4429,65 +4451,82 @@ Quote the **cold load**, not the import: imports alone measured **156.5 s** (`im
 by 39.3 s.
 
 ```bash
-fly secrets set TORTOISE_EMBEDDER_WARMUP=0 -a tortoise-y4mjjq     # stop paying warm-up cost, deliberately
-fly secrets unset TORTOISE_EMBEDDER_WARMUP -a tortoise-y4mjjq     # back to the shipped default (ON)
+# Flipping it is a MERGED change — the value is version-controlled:
+#   fly.toml [env]                           TORTOISE_EMBEDDER_WARMUP = "0"   # or "1" for the shipped default (ON)
+#   .github/scripts/fly-managed-secrets.txt  TORTOISE_EMBEDDER_WARMUP        fly-toml-env
+# ⛔ NOT `fly secrets set`: that creates a Fly secret, and a Fly secret SHADOWS `[env]`,
+#    so the versioned value would be dead — the gate refuses exactly that state (below).
 ```
 
-⚠️ **An unset does not finish the job, and NO two-step order is green.** The provenance gate holds
-*both* halves of a `fly-only:` exception, so a revert split across two changes is RED in the window
-between them — **whichever step comes first**:
+⚠️ **While a Fly secret of this name is on the box it SHADOWS `[env]`** — measured **2026-11-20**, and this is a
+VOLATILE production fact, not a property of the tree: re-measure `flyctl secrets list -a tortoise-y4mjjq`
+before relying on it. Until that secret is unset,
+the versioned value is not what the app reads, so the provenance gate is RED on this name by design.
+⛔ **The ORDER is not this section's to restate** — the manifest's route-(b) block owns the four steps
+and their failure modes: `[env]` must be **on the machine before the unset**, because until a deploy
+applies it the box is running the pre-`[env]` `fly.toml`, and a flag unset on that release falls back to
+the shipped default (ON) until one does — ~196 s of extra boot on every boot in the window, measured and
+recorded on #13926, **not** an outage and **not** the ~5 h absence of #4568 (which is a different flag,
+and the *shape* to avoid: a value missing from the MERGED `fly.toml`). Follow that block; the transition
+is tracked in #13923.
 
-| order | the state in between | what the gate prints |
-|---|---|---|
-| `fly secrets unset` first, declaration deleted later | the declaration stands, no Fly secret | `STALE DECLARATION — 'TORTOISE_EMBEDDER_WARMUP' is declared fly-only:#13674 but exists neither on Fly nor in the deploy payload` |
-| declaration deleted first, `fly secrets unset` later | the Fly secret is still live, no declaration | `UNDECLARED — 'TORTOISE_EMBEDDER_WARMUP' is on Fly but declared nowhere in fly-managed-secrets.txt` |
+Two red states an operator will meet while moving this name. **Both are expected states, not a
+regression** — the first is the interval the sanctioned transition passes through, the second is what a
+revert split across two changes looks like — and neither can be cleared by editing prose:
 
-So both steps must land **in one window, with no deploy and no drift-gate run between them**: `fly
-secrets unset TORTOISE_EMBEDDER_WARMUP` on Fly, and this name's declaration deleted from
-`.github/scripts/fly-managed-secrets.txt`, in the same change. Do **not** read either red as "the
-revert broke something", and do not "unset now, file the revert change later" — the interval is red
-and it reads like a regression. (The other end-state is the version-controlled route, `fly-toml-env`,
-and it is only reachable once the secret is **gone**: a Fly secret SHADOWS a `fly.toml [env]` value of
-the same name, so the versioned value would be dead until the secret is unset — fly.io's `[env]`
-reference states the precedence explicitly. ⚠️ And that route's ORDER is not interchangeable with
-this one: put the `fly.toml [env]` value on the machine **before** the unset, never unset-first —
-the manifest's route (b) works the four steps in that order for a measured reason (#4568: a
-value absent from the MERGED `fly.toml` is removed by the next deploy, and an unset-first window
-leaves the name absent for hours). See `.github/scripts/fly-managed-secrets.txt` "ORDER MATTERS"
-and the "WHY THE MERGED COMMIT" note beneath it.)
+| state | what the gate prints |
+|---|---|
+| the `fly-toml-env` declaration stands while the Fly secret is still live | `STALE DECLARATION — 'TORTOISE_EMBEDDER_WARMUP' is declared fly-toml-env but is also a Fly secret, which shadows [env] (declare the real source instead; for a sanctioned fly-toml-env transition the shadow is unset LAST, after [env] is on the machine — docs/infra-runbook.md §8.4)` |
+| the declaration is deleted while the Fly secret is still live | `UNDECLARED — 'TORTOISE_EMBEDDER_WARMUP' is on Fly but declared nowhere in fly-managed-secrets.txt` |
 
-That is fail-closed and intended: the exception exists for a REAL out-of-band secret, so its removal
-is a visible revert rather than a silent staleness.
+The first is resolved only by unsetting the secret **after** a deploy applied `[env]`; the second by
+restoring the declaration — and note that an unset ALONE clears the violation while leaving the name
+declared NOWHERE, which the shipped-artifacts test reds on (`no longer declared at all`): an unset is
+not a substitute for the declaration.
+⛔ **The unset itself is not a third red — it is the one step that is GREEN.** Unsetting the secret while
+the `fly-toml-env` declaration stands produces **no violation for this name** (`fly.toml [env]` alone
+satisfies the declaration), so an unset that lands BEFORE `[env]` is on the machine is **not** caught
+here: its cost is behavioural (flag unset ⇒ warm-up ON ⇒ the ~196 s cold load, #13926's recorded
+correction) and the order is prescribed by the manifest's route-(b) block, **not enforced by a red**.
+Do not read a green run as permission to unset first. What is NOT green, and must never be merged as
+if it were, is DELETING the declaration while the secret lives — that is row 2 above, `UNDECLARED`.
+The quotes above are bound to the messages the gate **actually prints** by
+`tests/test_fly_secret_drift.py::test_the_warmup_revert_guidance_names_both_red_states`, so a reworded
+violation reds here instead of leaving the runbook quoting a sentence no operator will ever see.
 
-⛔ **A revert is not one line, and its guards RED rather than passing quietly.** Deleting this name's
-declaration alone — or deleting it together with `fly secrets unset` but leaving the prose — leaves
-three guards red: `test_shipped_manifest_matches_the_real_workflow_and_recorded_debt`,
-`test_the_reserved_member_paragraph_names_every_fly_only_member` and
-`test_the_reviewer_entry_point_names_every_fly_only_member`. ⛔ They are **not three copies of one
-check**, so do not read a traceback as a broken test: the first fails on the **missing declaration**
-(naming it, and printing the `fly-only:` set the file does declare — two names), the second on the
-**gap paragraph outliving its member** ("carries a DECLARED GAP paragraph while no `fly-only:` ref is
-declared a gap") and reports no count at all, and only the third **compares a count the prose STATES
-against one it derives** — "entry point says THREE name(s) … but the manifest declares 2".
-The deletion therefore has to carry its prose: drop the manifest's
-`⚠️ ONE DECLARED GAP` paragraph (the one naming `#13674`) and change the reviewer entry point's
-`THREE names` to `TWO`. Read those reds as the guards working, not as a regression — measured at the
-`#13814` head by deleting the entry line alone, which gives `3 failed, 142 passed` on
-`tests/test_fly_secret_drift.py`.
+⛔ **And the transition must be PERFORMED AND VERIFIED — but it cannot START from `main`, and that is
+the requirement the LANDING satisfies.** While the manifest is
+unparseable (`main`'s duplicate pair) every `deploy-hosted` run dies at exit **2**, and exit 2 has no
+bypass at all (`deploy-hosted.yml:743` gates RC=1 only) — so no release can carry `[env]` to the box
+and #13923's steps 2–4 cannot begin. Its own status comment states it: *"Steps 2-4 are
+blocked until the duplicate is removed."* Removing the duplicate is therefore the PRECONDITION of the transition,
+not a substitute for it: follow the manifest's route-(b) block for the four steps (the deploy must be the
+`deploy-api` JOB's Deploy step, not the run, and step 4 requires BOTH `flyctl secrets list` and
+`printenv`), then re-measure. ⛔ What must not happen is
+anyone reading the exit-1 state as done — it is the bypassable class, not the green one. ⛔ **A green suite is not that
+verification:** the three states measure differently and only one is green — `main`'s duplicate pair
+is exit **2** (`manifest unusable`, NOT bypassable), this route-(b) declaration is exit **1**, and
+the REJECTED direction — `fly-only:#13674` with the `[env]` row removed, i.e. reverting #13926, which is
+an owner decision (#13923) and not a lane's — is exit **0**, but only while the secret is LIVE: withhold
+it and `fly-only:` reds with a STALE declaration (its message is the `fly-only:`-specific one — no test
+binds that wording, so it is deliberately not quoted here), because that token requires a real
+out-of-band secret (#13941's direction check, measured 2026-11-20). ⛔ The false green is the
+other way round: THIS route-(b) state reads exit **0** for this name if the secret list is seeded
+WITHOUT it, which is exactly what a fixture that models the transition away does.
+The route-(b) PAIR — exit 1 with the shadow, exit 0 with it withheld — is pinned by
+`tests/test_fly_secret_drift.py::test_shipped_manifest_matches_the_real_workflow_and_recorded_debt`
+(it seeds this name as the live shadow, so this state cannot be reported as clean again). The rejected
+direction's exit 0 is a HAND measurement above and is NOT pinned — that test reds first on its
+`open_route_b` guard (`… is recorded here as an OPEN route-(b) transition but this manifest declares
+it 'fly-only:#13674'`), before the gate even runs. The exit-2 half is pinned by
+`::test_duplicate_declaration_is_exit_2`, on a fixture manifest — which is why the duplicate must never
+be re-created.
 
-⚠️ **The `fly-only:` ruling is still owed.** `#13674` records the lever's emergency nature but does not
-carry the `OVERRIDES:` marker the token's contract requires (`.github/scripts/fly-managed-secrets.txt:51-54`,
-`:81-90`), so the ref is checkable by **shape only** until that ruling lands on the issue. Measured
-**2026-11-19** at the head that added the declaration: the issue **body** carries `grep -ci 'overrides:'`
-→ **0**, and the **marker form** (`**OVERRIDES:**`) occurs **exactly once** anywhere on the issue — in a
-self-described **proposal** that says writing it here would be forging the ruling. Quote the **marker
-form**, not the string: "the string appears nowhere" is false, and a RUNNING TOTAL of the bare string is
-unstable — it increments with every comment about it, ruling or not (measured **6** at `252ce3e011`'s
-head and **7** a minute later when this PR's own status comment counted itself, and **20** at
-`e5df6714a2`'s as the review rounds added mentions — so quote it only WITH its head, or quote the
-anchored line-form count the manifest block publishes instead).
-⛔ Re-measure before quoting this — it is a volatile GitHub fact, not a property of the tree, and it goes
-stale the moment the owner rules.
+⛔ **The `fly-toml-env` declaration is NOT `fly-only:` and must not be rewritten as one.** `fly-only:`
+is RESERVED for a deliberate, PERMANENT out-of-band secret whose issue carries a recorded `OVERRIDES:`
+ruling; this value is non-secret config whose source is version control, which is the `fly-toml-env`
+route. The checker also refuses a `fly-only:` line for an `[env]` key
+(`tests/test_fly_secret_drift.py::test_fly_only_on_a_fly_toml_env_key_is_stale`).
 
 ### Arming the READ path — `TORTOISE_RECORD_SERVE` (epic #7879, #12941)
 
@@ -4581,6 +4620,59 @@ load-bearing:
 - ⚠️ **The declaration is a LIVE state, not a permanent one.** The checker refuses a `fly-only:`
   name that no longer exists on Fly, so the `flyctl secrets unset` above must delete that line in
   the same change — fail-closed on purpose, so a revert is visible in review.
+
+### Arming the allocator's cutover — `TORTOISE_RECORD_ALLOCATE` (#12894)
+
+> ⛔ **THIS FLAG RENUMBERS LIVE WRITES, AND IT IS ROLLED LAST — AFTER THE GRAPHS, NEVER BEFORE.**
+> `record_writer.record_live_allocate()` (`tortoise/record_writer.py:2697-2708`) reads
+> `TORTOISE_RECORD_ALLOCATE` **at call time** through `env_flag(..., False)` — read per call, never cached
+> at import — and its default is **OFF**, including for any value `env_flag` cannot parse. That fail-safe
+> direction is deliberate: the ON arm refuses writes on a graph that has not been seeded.
+
+**What it gates.** With it ON, the live door **allocates** the journal ordinal for a graph instead of
+enumerating one. With it OFF, nothing changes on a graph that has not been cut over. Two
+consequences, both load-bearing:
+
+1. **On a graph that holds a `public.record_cursor` row, the ENUMERATED arm is REFUSED by name** —
+   `record_projection._refuse_an_enumerated_replay` (`tortoise/record_projection.py:7566`). The cursor
+   ROW is the fact, not the mode, which is exactly why the flag must be rolled **after** the seeding.
+2. **The order is `sweep` → `seed --journal <path>` → `arm` (per graph) → THEN the flag for the box.**
+   `tortoise/live_write.py:89-95` states that order and names
+   `tools/record_allocator_cli.py`'s `CUTOVER_ACK_TEXT` (`:119-147`) as its authority — that text is the
+   procedure, not this paragraph; it also carries the four preconditions `arm` refuses without
+   `--acknowledge-cutover` (the flag lives in the WRITER's environment; every graph written after the
+   cutover needs its own counter row and the provisioning hook is not in this tree; cutover is per graph;
+   and `tools/backfill_copy_turns.py` needs the flag too).
+
+⚠️ **`set` and `unset` both RESTART the Machine.** App secrets are injected at boot, so the restart is
+the mechanism by which the change takes effect — schedule it, do not read the brief 502s as a regression.
+⛔ **Do NOT reach for `--stage` to dodge that restart.** A staged secret is *stored but not applied*: it
+takes effect when the Machines are next started or updated, i.e. at the next `fly deploy`
+([Fly docs — Secrets and Fly Apps](https://docs.fly.io/apps/secrets)). That hands the arming moment to
+a deploy, which is the one thing this declaration refuses (see **Provenance** below). The restart is the
+deliberate act: take it in a window instead.
+
+```bash
+fly secrets set TORTOISE_RECORD_ALLOCATE=1 -a tortoise-y4mjjq     # ONLY after every graph is seeded + armed
+fly secrets unset TORTOISE_RECORD_ALLOCATE -a tortoise-y4mjjq     # see the warning below before running this
+```
+
+⛔ **UNSETTING IS NOT THE REVERT, AND IT MUST NOT BE USED AS ONE.** On a graph that has been cut over,
+clearing the flag does **not** return that graph to enumeration — `_refuse_an_enumerated_replay` still
+refuses on the cursor row — so an unset turns the record path **OFF** for that graph rather than back to
+the old behaviour. The way back is `halt` → `seed --journal <path>` → `reopen` → `arm`, stated in
+`CUTOVER_ACK_TEXT` itself.
+
+**Provenance — the deploy's gate knows this name is out-of-band BY DESIGN.** It is declared
+`fly-only:#12894` in `.github/scripts/fly-managed-secrets.txt`, which is why the fail-closed Fly
+secret-provenance check no longer reports it as `UNDECLARED`. ⛔ **Do not "fix" it by declaring
+`gh-secret:` or by moving the value into `fly.toml [env]`.** Either one makes the deploy the managing
+source, and a deploy cannot know the moment a cutover is safe: it would arm a graph nobody seeded (the
+ON arm's own refusal) or never run at all — the #4126 shape the manifest exists to make impossible.
+
+⚠️ **The declaration is a LIVE state, not a permanent one.** The checker refuses a `fly-only:` name that
+no longer exists on Fly, so the `fly secrets unset` above must delete that declaration line in the same
+change — fail-closed on purpose, so dropping the lever is visible in review rather than silently stale.
 
 ### Arming the Postgres record — `TORTOISE_RECORD_DSN` (epic #7879 R1, #9548)
 

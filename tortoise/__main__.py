@@ -70,9 +70,114 @@ def _markdown_files(root: Path | str) -> list[Path]:
     )
 
 
+def _journal_rebuild_refusal(*, journal_is_complete: bool = False) -> str | None:
+    """Why `tortoise rebuild` must REFUSE on this deployment, or ``None`` (#14002).
+
+    ⛔ THE CONSEQUENCE #14002 CREATES, NAMED AT THE DOOR THAT WOULD ACT ON IT.
+    `tortoise rebuild` is a wipe + journal-only replay, and
+    `docs/architecture/STORAGE-ARCHITECTURE.md` §3 states the precondition it
+    relies on verbatim: *"`derived = replay(journal)` holds only if every write is
+    carried by the journal … Journal completeness is a PRECONDITION of this
+    design, not an observation about it"* (the gap is tracked as `#5089`). On a
+    CUT-OVER graph the journal stops being appended to — but the append stops
+    when THIS BOX's `TORTOISE_RECORD_ALLOCATE` is rolled with the graph's row
+    `active`, NOT at the per-graph `arm` (the documented order arms every graph
+    first and rolls the flag afterwards, so that window is normal and the file
+    STILL GROWS in it); once the flag is rolled nothing appends it (no exporter
+    writes it yet: §A7.8 item 6 and §A7.5.6's drainer are unbuilt) — so a
+    rebuild from it would produce a graph as of the flag roll and **silently
+    drop every later record**, which is the direction nothing can see:
+    `rebuild_all` prints `Done:` and the counts it prints are the journal's, not
+    the record's.
+
+    ⛔ THE POLARITY IS FAIL-CLOSED ON THE RECORD'S **EXISTENCE**, NOT ON A FLAG
+    (#14002 review cycle 3, P2). The first cut refused only when
+    `TORTOISE_RECORD_ALLOCATE` was set — a WRITER switch that an operator's
+    shell, a cron job and a maintenance one-off do not carry, so the destructive
+    door failed OPEN exactly where the operators who run it live. The condition
+    is now: **a record DSN resolves ⇒ refuse**, and the escape is an explicit
+    acknowledgement of the thing that actually matters — `--journal-is-complete`,
+    i.e. "no graph on this record is cut over, so the file IS the full log".
+    That is a deliberate over-block (it can refuse a rebuild on a configured
+    record with no cutover at all) chosen against the alternative, because the
+    two directions are not symmetric: refused friction is one flag, and a partial
+    rebuild presented as a full one destroys work with no error.
+
+    ⚠️ A MALFORMED DSN IN THE SHELL IS NOT AN ANSWER: it means the shell could not
+    say, so the deployment's `.env` is asked instead — the same second source, for
+    the same reason. Only "no record in the env AND none in the `.env`" allows a
+    journal rebuild.
+    """
+    try:
+        from tortoise import record_writer
+    except Exception:  # noqa: BLE001, RUF100 — an unimportable seam must not
+        # turn a recovery tool into an error; the pre-#14002 behaviour stands.
+        return None
+    try:
+        configured = record_writer.record_dsn() is not None
+    except Exception:  # noqa: BLE001, RUF100 — the shell could not answer
+        # see the docstring: fall through and ask the DEPLOYMENT
+        configured = False
+    if not configured:
+        # ⛔ AND THE SHELL IS NOT THE DEPLOYMENT (#14002 review cycle 4, P2).
+        # `record_dsn()` reads `os.environ` only, and `tortoise rebuild` loads no
+        # `.env` (the daemon does, via `mcp_server._load_dotenv`), so a
+        # FalkorDB-only rebuild run from an operator shell — which has no reason
+        # to export a record DSN — saw "no record" and wiped the graph from a
+        # frozen journal. So the DEPLOYMENT's own `.env` is read too, with the
+        # reader this repo already uses for exactly this (`doctor`), and either
+        # source naming a record is enough.
+        configured = _deployment_names_a_record()
+    if not configured:
+        # No record anywhere: the journal IS this deployment's rebuild source.
+        return None
+    if journal_is_complete:
+        return None
+    return (
+        "this deployment has a RECORD configured, and on any graph that has been "
+        "cut over (its `record_cursor` row is `active`) the record owns the "
+        "journal's ordinal — the JSONL stops being appended to once this box's "
+        "`TORTOISE_RECORD_ALLOCATE` is rolled, NOT at the per-graph `arm` (it is "
+        "NOT an export yet: nothing writes it, §A7.8 item 6), so `derived = "
+        "replay(journal)` no longer holds for it (STORAGE-ARCHITECTURE.md §3; "
+        "#14002, #5089). A rebuild from it would produce a graph as of the "
+        "point the append stopped — later than the per-graph arm, later than "
+        "cutover — and silently drop every later record. Nothing was wiped. If "
+        "NO graph on this record is cut over — so the journal really is the full "
+        "log — re-run with `--journal-is-complete`; otherwise restore the graph "
+        "from the record's own backup, not from the journal"
+    )
+
+
+def _deployment_names_a_record() -> bool:
+    """Does this DEPLOYMENT's `.env` name a record, even if the shell does not?
+
+    `record_dsn()` answers for the PROCESS environment; the daemon and the
+    reporting verbs load `.env` through `dotenv_file`, and a FalkorDB-only
+    maintenance command has no reason to. Reads the same file `doctor` reads, with
+    the same parser, and swallows its own failures: an unreadable `.env` answers
+    "not named here", which leaves the pre-#14002 behaviour rather than turning a
+    recovery tool into an exception.
+    """
+    try:
+        from tortoise import dotenv_file
+
+        values = dotenv_file.parse_dotenv(dotenv_file.dotenv_path())
+    except Exception:  # noqa: BLE001, RUF100 — see the docstring
+        return False
+    from tortoise import record_writer
+
+    return bool(values.get(record_writer.RECORD_DSN_ENV))
+
+
 def _cmd_rebuild(args):
     from tortoise.log import TornTailResurrectionError
 
+    refusal = _journal_rebuild_refusal(
+        journal_is_complete=bool(getattr(args, "journal_is_complete", False)))
+    if refusal is not None:
+        print(f"Refused: {refusal}", file=sys.stderr)
+        return 1
     print(f"Rebuilding from {args.dir} → {args.db}")
     proj = None
     try:
@@ -690,6 +795,82 @@ def _cmd_reconcile(args):
     return 0
 
 
+def _record_options(dsn: str, bound_ms: int) -> str:
+    """The DSN's own libpq `options`, with the read bound APPENDED — never replaced.
+
+    libpq's `options` is ONE string, and psycopg2 REPLACES the one a DSN carries
+    when `options=` is also passed as a connect keyword. `options=-c role=<name>`
+    is the connect-time spelling of `SET ROLE`, i.e. how a deployment (and every
+    live test) reaches the record's application role without a second
+    credential — so replacing it silently demoted the session to the
+    provisioning SUPERUSER, which the tenant prologue
+    (`record_projection.scope_connection`) then correctly refused.
+
+    Both DSN forms are read with the STDLIB, so this answer does not depend on a
+    driver object (the DB-free suites stub `psycopg2` as a bare module):
+
+    * URI form — `postgresql://…?options=-c%20role%3D…`;
+    * keyword form — `options='-c role=…'` (via `shlex`, so a quoted value is
+      not split on its space).
+
+    ⛔ Do NOT widen this into "pass the timeout some other way" without keeping
+    ONE thing true: whatever the DSN says about `options` reaches the server.
+    """
+    existing = ""
+    if dsn.startswith(("postgresql://", "postgres://")):
+        from urllib.parse import parse_qs
+
+        # `partition`, not `urlsplit(...).query`: the parsed URL object's `.query`
+        # is an untyped `.query` receiver, i.e. one more row on
+        # `tools/sdk_privatise.py`'s residue pin — a gate this change has no
+        # business moving for a string split (#14068).
+        _, _, query = dsn.partition("?")
+        query = query.partition("#")[0]
+        existing = (parse_qs(query).get("options") or [""])[0]
+    else:
+        import shlex
+
+        try:
+            parts = shlex.split(dsn)
+        except ValueError:              # unbalanced quotes: leave libpq's error alone
+            parts = dsn.split()
+        for part in parts:
+            if part.startswith("options="):
+                existing = part[len("options="):]
+                break
+    bound = f"-c statement_timeout={int(bound_ms)}"
+    return f"{existing} {bound}".strip()
+
+
+def _connect_record(dsn: str):
+    """A record connection bounded by `statement_timeout`, with the DSN's ROLE kept.
+
+    See `_record_options`, which is the whole fix, and the two measurements
+    behind it — the SAME clobber found twice, once per verb family:
+
+    * `record-serve` — PR #9862 review P1: the session stayed on the
+      provisioning superuser and the verb exited 2 on a DSN that worked
+      everywhere else;
+    * `record-reconcile` and `record-restore` — PR #14068's armed legs on
+      `test-record-postgres` reported "record is unreadable
+      (RecordProjectionError)" for the same reason. On the restore side the
+      clobber cannot wipe (the refusal is upstream of the first write) but it
+      cannot VERDICT either: an UNKNOWN where a clean run was available.
+    """
+    import psycopg2
+
+    from tortoise.record_reconcile import (
+        RECORD_CONNECT_TIMEOUT_S,
+        RECORD_STATEMENT_TIMEOUT_MS,
+    )
+
+    return psycopg2.connect(
+        dsn,
+        connect_timeout=RECORD_CONNECT_TIMEOUT_S,
+        options=_record_options(dsn, RECORD_STATEMENT_TIMEOUT_MS),
+    )
+
+
 def _cmd_record_reconcile(args):
     """#9189 / §17.2 — the record↔cache reconciler's PRODUCTION TRIGGER.
 
@@ -717,14 +898,28 @@ def _cmd_record_reconcile(args):
     as "your cron line is malformed": it means only *no verdict was produced*.
     ``0`` and ``3`` are the answers this verb promises.
 
-    ⛔ **``--cache-graph`` is REQUIRED, with no derived default.** The cache
-    graph's name is NOT the record's ``graph_id`` scope column: this tree names
-    it ``org_<org_id>`` (the org SDK's isolated graph) or
-    ``org_<org_id>_<graph_id>`` (the registry/ACL namespace). Guessing wrong
-    does not fail — FalkorDB opens an EMPTY graph — and an empty cache reports
-    every record key as ``missing_in_cache``, i.e. a coherent cache exits ``3``.
-    A wrong VERDICT is worse than no verdict, so an absent name is a refusal
-    (``2``) that prints both conventions.
+    ⛔ **``--cache-graph`` is OPTIONAL WHERE A FACT EXISTS, and the name is READ
+    rather than derived (#13337).** The cache graph's name is NOT the record's
+    ``graph_id`` scope column: this tree names it ``org_<org_id>`` (the org's
+    DEFAULT graph, the legacy namespace) or ``org_<org_id>_<graph_id>`` (the
+    registry/ACL spelling). Guessing wrong does not fail — FalkorDB opens an
+    EMPTY graph — and an empty cache reports every record key as
+    ``missing_in_cache``, i.e. a coherent cache exits ``3``. A wrong VERDICT is
+    worse than no verdict, which is why this verb REFUSED to derive the name at
+    all until a FACT existed. It exists now:
+    ``tortoise.cache_graph.declared_cache_graph`` reads
+    ``public.graphs.namespace`` through the control plane (the same read
+    ``hosted_api._assert_graph_owned`` makes), so an org-wide write that landed
+    in ``org_<org>`` grades ``clean`` on the name the tenant actually has
+    instead of ``divergent`` on a spelling it never used. ⛔ When nothing can
+    answer (a self-host with no control plane) the verb still REFUSES (exit 2)
+    and names the spelling it would have used: #13337's ruling is that the old
+    refusal "is correct and must stay: guessing would make an empty graph read
+    as ``divergent``, i.e. a wrong verdict instead of no verdict", and a
+    scheduler keys on the EXIT CODE, so a labelled exit-3 verdict on an assumed
+    coordinate is still the false divergence the issue was filed about. A stated
+    ``--cache-graph`` always wins, and a readable fact that disagrees with it is
+    printed as a WARNING rather than silently graded.
 
     Both stores are BOUNDED: the cache read by ``--timeout-ms``
     (:data:`tortoise.record_reconcile.CACHE_READ_TIMEOUT_MS` by default) and the
@@ -741,8 +936,6 @@ def _cmd_record_reconcile(args):
     from tortoise.record_reconcile import (
         CACHE_READ_TIMEOUT_MS,
         EXIT_UNAVAILABLE,
-        RECORD_CONNECT_TIMEOUT_S,
-        RECORD_STATEMENT_TIMEOUT_MS,
         VERDICT_CLEAN,
         exit_code_for,
         log_result,
@@ -770,30 +963,86 @@ def _cmd_record_reconcile(args):
               "UNKNOWN, not zero.", file=sys.stderr)
         return EXIT_UNAVAILABLE
     try:
-        import psycopg2
+        import psycopg2  # noqa: F401 — availability probe; `_connect_record` connects
     except ImportError:
         print("Error: psycopg2 is not installed — the record cannot be read, "
               "so divergence is UNKNOWN, not zero. Install the `postgres` "
               "extra.", file=sys.stderr)
         return EXIT_UNAVAILABLE
 
+    # The cache graph's name is READ, not derived (#13337). `--cache-graph`
+    # still wins outright; without it the name is the FACT the control plane
+    # holds for this tenant (`public.graphs.namespace` — the org's default graph
+    # lives at the legacy `org_<org>`, which no derivation of
+    # `org_<org>_<graph_id>` can produce). ⛔ When nothing can answer the verb
+    # REFUSES rather than grade the registry spelling: #13337's ruling is that
+    # "guessing would make an empty graph read as `divergent`, i.e. a wrong
+    # verdict instead of no verdict", and a scheduler keyed on exit 3 cannot
+    # tell an assumed coordinate from a read one. What changed is only that the
+    # flag is now optional WHERE A FACT EXISTS.
+    from tortoise.cache_graph import (
+        SOURCE_DERIVED,
+        SOURCE_FLAG,
+        declared_cache_graph,
+        namespace_from_control_plane,
+    )
     from tortoise.projection import FalkorProjection
     from tortoise.residency import read_declaration
 
-    # The cache graph's name is NOT the record's `graph_id` scope column (see
-    # this function's docstring): refuse rather than open an empty graph and
-    # report a coherent cache as divergent.
-    if not args.cache_graph:
+    # ONE read, so the stated-name warning and the resolution cannot disagree.
+    # `None` when the control plane is disabled or cannot answer — which is why
+    # the derived arm below is still reachable and still labelled.
+    namespace_fact = namespace_from_control_plane(args.org, args.graph)
+    declared = declared_cache_graph(
+        org_id=args.org, graph_id=args.graph,
+        cache_graph=args.cache_graph,
+        read_namespace=lambda _org, _gid: namespace_fact)
+    cache_graph = declared.name
+    # ⛔ THE WARNING IS ROUTED OFF THE RESOLVED SOURCE, NOT OFF `args.cache_graph`
+    # (#14068 review P3-3b). A whitespace-only `--cache-graph "   "` is TRUTHY,
+    # so keying on the raw flag both fired a disagreement warning about a name the
+    # operator never stated and SKIPPED the derived-arm arm below — reporting a
+    # verdict on a coordinate it had not established as read. `declared.source` is
+    # the same fact with the blank case already folded (`declared_cache_graph`
+    # trims before it decides), so the arms can no longer disagree with it.
+    # ⛔ THE CONTROL-PLANE READ ABOVE IS NOT SKIPPED WHEN THE FLAG IS STATED, and
+    # that is deliberate (#14068 review P3-3a): the disagreement warning IS the
+    # read's purpose — a stated name is exactly the coordinate that can be wrong,
+    # and skipping the read would delete the only signal that says so. One
+    # control-plane lookup, on a verb that then scans a whole tenant's cache, is
+    # not the cost that matters here.
+    if namespace_fact and declared.source == SOURCE_FLAG and namespace_fact != declared.name:
+        # A stated name is a fact and is never overridden — but grading the
+        # wrong coordinate produces a WRONG VERDICT, which is the thing this
+        # verb exists to refuse. Say it, grade what was asked for.
+        print(f"WARNING: --cache-graph {declared.name!r} disagrees with the "
+              f"control plane's namespace for {args.graph} ({namespace_fact!r}). "
+              f"This run grades the name you stated; if the tenant's writes go "
+              f"to {namespace_fact!r}, every key reports missing_in_cache and a "
+              f"coherent cache exits 3 (#13337).", file=sys.stderr)
+    elif declared.source == SOURCE_DERIVED:
+        # ⛔ NO VERDICT ON AN ASSUMED COORDINATE — #13337's ruling, kept.
+        # "The shipped refusal ... (`--cache-graph` has no derived default, with
+        # the reason spelled out) is correct and must stay: guessing would make
+        # an empty graph read as `divergent`, i.e. a wrong verdict instead of no
+        # verdict." A stderr note does not reach the consumer: a scheduler keys
+        # on the EXIT CODE, and exit 3 on an assumed coordinate is exactly the
+        # false divergence the issue was filed about. What the fact arm buys is
+        # the flag becoming optional WHERE A FACT EXISTS — the derived arm is
+        # the old refusal, made actionable: it names the spelling it would have
+        # used and the two ways to supply the fact.
         print(
-            "Error: --cache-graph is required — the cache graph's name is not "
-            "the record's --graph scope. This tree names it org_<org_id> (the "
-            "org SDK's isolated graph) or org_<org_id>_<graph_id> (the "
-            "registry/ACL namespace); guessing wrong opens an EMPTY graph, so "
-            "every record key would report missing_in_cache and a coherent "
-            "cache would exit 3. Nothing was compared, so divergence is "
-            "UNKNOWN, not zero.", file=sys.stderr)
+            f"Error: the cache graph name could not be READ — no control-plane "
+            f"namespace is available for {args.graph}, so the name would be "
+            f"DERIVED ({declared.name!r}), and this tree names an org's DEFAULT "
+            f"graph org_<org_id> (the registry/ACL spelling "
+            f"org_<org_id>_<graph_id> is the other). Grading an assumed "
+            f"coordinate reports a coherent cache as divergent — a wrong "
+            f"verdict instead of no verdict (#13337). Nothing was compared, so "
+            f"divergence is UNKNOWN, not zero. Supply the fact: pass "
+            f"--cache-graph, or run with a reachable control plane.",
+            file=sys.stderr)
         return EXIT_UNAVAILABLE
-    cache_graph = args.cache_graph
     timeout_ms = args.timeout_ms if args.timeout_ms is not None \
         else CACHE_READ_TIMEOUT_MS
     # A non-positive bound is not a bound: the driver reads 0 as "wait forever",
@@ -809,11 +1058,10 @@ def _cmd_record_reconcile(args):
     proj = None
     try:
         try:
-            conn = psycopg2.connect(
-                dsn,
-                connect_timeout=RECORD_CONNECT_TIMEOUT_S,
-                options=f"-c statement_timeout={RECORD_STATEMENT_TIMEOUT_MS}",
-            )
+            # ⛔ `_connect_record`, never `connect(options=…)`: the keyword form
+            # REPLACES a DSN's own `options`, which is where the record's
+            # application role rides (measured on PR #14068's armed legs).
+            conn = _connect_record(dsn)
             view = read_record_view(conn, org_id=args.org, graph_id=args.graph)
         except PlacementTableUnavailable:
             # A fault in the INSTALL, not in the record (#10663). Collapsing it
@@ -931,10 +1179,23 @@ def _cmd_record_reconcile(args):
             conn.close()
 
     line = log_result(result)
+    # ⛔ THE COORDINATE IS PART OF THE VERDICT (#13337). A divergence count is a
+    # statement about ONE cache graph; a reader who cannot see WHICH name was
+    # graded (and whether it was read or assumed) cannot tell a real cache gap
+    # from a wrong coordinate — which is exactly how the org-wide tenant in
+    # #13337 read `divergent` on a graph its writes never used.
+    declaration_fields = {
+        "cache_graph": declared.name,
+        "cache_graph_source": declared.source,
+        "cache_graph_detail": declared.detail,
+    }
     if args.json:
-        print(_json.dumps(result.as_dict(), indent=2, sort_keys=True))
+        payload = result.as_dict()
+        payload.update(declaration_fields)
+        print(_json.dumps(payload, indent=2, sort_keys=True))
     else:
         print(line)
+        print(f"  cache graph   {declared.name} ({declared.source})")
         if result.verdict() == VERDICT_CLEAN:
             # ⛔ `not_hot > 0` means keys were NOT compared: after a `partial`
             # declaration they were removed from the truth side, so this run
@@ -1259,14 +1520,23 @@ def _cmd_record_restore(args):
       inherited verbatim: argparse's own ``error()`` also exits ``2``, so ``2``
       means only *no verdict was produced*.
 
-    ⛔ ``--cache-graph`` is REQUIRED, with no derived default, for the reason
-    ``record-reconcile`` requires it — and the consequence here is worse than a
-    wrong verdict: a wrong guess opens an EMPTY graph, so the run would report
-    a restore into a graph nobody reads while the operator's real graph stayed
-    destroyed. That is why the pre-wipe node count is reported too, and why the
-    counts the verb prints are read back off the cache after the rebuild
-    (``record_restore``): a number the code did not measure is a claim, not a
-    restore.
+    ⛔ ``--cache-graph`` is OPTIONAL for the same reason and by the same
+    declaration as ``record-reconcile`` (#13337): the name is READ from the
+    control plane's ``public.graphs.namespace``. ⛔ A DERIVED name is REFUSED
+    here (exit 2) — `record-reconcile` refuses it too, because a graded assumed
+    coordinate is a wrong verdict, but the consequence here is WORSE: a wrong
+    guess opens an EMPTY graph, so the run would
+    report a restore into a graph nobody reads while the operator's real graph
+    stayed destroyed. That is why the pre-wipe node count is reported too, why
+    the resolved coordinate and its source are stated BEFORE anything is opened
+    or deleted, and why the counts the verb prints are read back off the cache
+    after the rebuild (``record_restore``): a number the code did not measure is
+    a claim, not a restore. A stated ``--cache-graph`` still wins outright, and
+    a readable fact that disagrees with it is printed as a WARNING naming both.
+    ⛔ Both messages are gated on the DECLARATION'S ``source``, never on the raw
+    ``args.cache_graph``: the declaration strips the stated value, so a
+    whitespace-only flag (`--cache-graph "$UNSET_VAR"`) lands on the derived arm
+    and must still be refused (#14068 review).
 
     ⛔ Both reads are BOUNDED (connect timeout + session ``statement_timeout``
     on the record, ``CACHE_READ_TIMEOUT_MS`` on the pre-wipe count — the same
@@ -1282,10 +1552,6 @@ def _cmd_record_restore(args):
     from tortoise.cache_projection import (
         PlacementTableUnavailable,
         read_record_view,
-    )
-    from tortoise.record_reconcile import (
-        RECORD_CONNECT_TIMEOUT_S,
-        RECORD_STATEMENT_TIMEOUT_MS,
     )
     from tortoise.record_restore import (
         EXIT_REFUSED,
@@ -1317,19 +1583,63 @@ def _cmd_record_restore(args):
               "neither. The cache's state is UNCHANGED.", file=sys.stderr)
         return EXIT_UNAVAILABLE
     # Usage-shaped refusals come BEFORE the optional-dependency check: an
-    # operator who forgot `--cache-graph` must not be told to install an extra
-    # first (measured — that ordering answered a missing flag with "psycopg2 is
-    # not installed" on a lane without the `postgres` extra).
-    if not args.cache_graph:
+    # operator who gave a bad value must not be told to install an extra first
+    # (measured — that ordering answered a missing flag with "psycopg2 is not
+    # installed" on a lane without the `postgres` extra).
+    #
+    # The cache graph's name is READ, not derived — the ONE declaration
+    # ``record-reconcile`` uses (#13337), so the two verbs cannot disagree about
+    # a tenant's coordinate.
+    from tortoise.cache_graph import (
+        SOURCE_DERIVED,
+        SOURCE_FLAG,
+        declared_cache_graph,
+        namespace_from_control_plane,
+    )
+
+    namespace_fact = namespace_from_control_plane(args.org, args.graph)
+    declared = declared_cache_graph(
+        org_id=args.org, graph_id=args.graph,
+        cache_graph=args.cache_graph,
+        read_namespace=lambda _org, _gid: namespace_fact)
+    if namespace_fact and declared.source == SOURCE_FLAG and namespace_fact != declared.name:
+        print(f"WARNING: --cache-graph {declared.name!r} disagrees with the "
+              f"control plane's namespace for {args.graph} ({namespace_fact!r}). "
+              f"This run restores into the name you stated; if the tenant's "
+              f"graph is {namespace_fact!r} that is a restore into a graph "
+              f"nobody reads (#13337).", file=sys.stderr)
+    elif declared.source == SOURCE_DERIVED:
+        # ⛔ A DERIVED NAME IS NOT ENOUGH FOR A DESTRUCTIVE VERB (#9556).
+        # `record-reconcile` refuses the same arm for consent reasons (an #13337
+        # assumption is never GRADED, so it cannot surface as a divergence a
+        # scheduler acts on). This verb WIPES the graph it is given and refills
+        # it, so an assumption here destroys a graph the operator never named and
+        # reports a restore into one nobody reads. The refusal therefore STAYS for
+        # the derived arm and is now actionable rather than blind: it names the
+        # spelling it would have used and the two ways to supply the fact.
         print(
-            "Error: --cache-graph is required — the cache graph's name is not "
-            "the record's --graph scope. This tree names it org_<org_id> (the "
-            "org SDK's isolated graph) or org_<org_id>_<graph_id> (the "
-            "registry/ACL namespace); guessing wrong opens an EMPTY graph, so "
-            "this run would report a restore into a graph nobody reads while "
-            "the real graph stayed destroyed. Nothing was restored.",
+            "Error: --cache-graph is required — no control-plane namespace could "
+            f"be read for {args.graph}, so the name would be DERIVED "
+            f"({declared.name!r}), and this tree names an org's DEFAULT graph "
+            "org_<org_id> (the registry/ACL spelling is the other). Guessing "
+            "wrong opens an EMPTY graph, so this run would report a restore "
+            "into a graph nobody reads while the real graph stayed destroyed. "
+            "Nothing was restored. Supply the fact: pass --cache-graph, or run "
+            "with a reachable control plane (#13337).",
             file=sys.stderr)
         return EXIT_UNAVAILABLE
+    args.cache_graph = declared.name
+    # ⛔ A DESTRUCTIVE VERB STATES ITS COORDINATE BEFORE IT TOUCHES IT (#14068
+    # review P2-1). The derived arm refuses above; the fact arms fall through —
+    # and before this line the FIRST thing such a run emitted was the
+    # post-restore outcome, so an operator learned WHICH graph had been wiped
+    # only after it was gone. `record-reconcile` states its coordinate in the
+    # verdict; this verb wipes, so it states it up front, with the source and the
+    # detail that produced it. Printed before `FalkorProjection.from_uri`, which
+    # CREATES the target, so the statement always precedes the first touch.
+    print(f"restore target: {declared.name!r} — {declared.source}"
+          f"{' (' + declared.detail + ')' if declared.detail else ''}",
+          file=sys.stderr)
     if args.limit is not None and args.limit < 1:
         print(f"Error: --limit must be >= 1, got {args.limit} — 0 wipes the "
               f"cache and writes nothing, so it is refused before any write. "
@@ -1338,7 +1648,7 @@ def _cmd_record_restore(args):
         return EXIT_UNAVAILABLE
 
     try:
-        import psycopg2
+        import psycopg2  # noqa: F401 — availability probe; `_connect_record` connects
     except ImportError:
         print("Error: psycopg2 is not installed — the record cannot be read, "
               "so nothing was restored and the cache's state is UNCHANGED. "
@@ -1351,11 +1661,10 @@ def _cmd_record_restore(args):
     proj = None
     try:
         try:
-            conn = psycopg2.connect(
-                dsn,
-                connect_timeout=RECORD_CONNECT_TIMEOUT_S,
-                options=f"-c statement_timeout={RECORD_STATEMENT_TIMEOUT_MS}",
-            )
+            # The same construction as `record-reconcile` (`_connect_record`):
+            # a `connect(options=…)` kwarg REPLACES the DSN's own `options` and
+            # takes the record's application role with it.
+            conn = _connect_record(dsn)
             view = read_record_view(conn, org_id=args.org, graph_id=args.graph)
         except PlacementTableUnavailable:
             # As in `record-reconcile` (#10663): a packaging fault, not a
@@ -1504,7 +1813,7 @@ def _cmd_record_text(args):
         return EXIT_UNAVAILABLE
 
     try:
-        import psycopg2
+        import psycopg2  # noqa: F401 — availability probe; `_connect_record` connects
     except ImportError:
         print("Error: psycopg2 is not installed — the record cannot be read, "
               "so no text was served. Install the `postgres` extra.",
@@ -1512,34 +1821,22 @@ def _cmd_record_text(args):
         return EXIT_UNAVAILABLE
 
     from tortoise.record_read import RecordReadError
-    from tortoise.record_reconcile import (
-        RECORD_CONNECT_TIMEOUT_S,
-        RECORD_STATEMENT_TIMEOUT_MS,
-    )
 
     conn = None
     try:
         try:
-            conn = psycopg2.connect(dsn, connect_timeout=RECORD_CONNECT_TIMEOUT_S)
-            # ⛔ THE BOUND IS SET AS A SESSION SETTING, NOT AS A CONNECT KWARG.
-            # Passing `options=…` to `connect()` REPLACES the DSN's own
-            # `options` parameter — and libpq's `options=-c role=<name>` is the
-            # connect-time spelling of `SET ROLE`, which is how a deployment
-            # (and this verb's live tests) connects as `tortoise_record_app`
-            # without a separate credential. Overriding it left the session on
-            # the provisioning superuser, which the tenant prologue then
-            # correctly refused — measured: the verb exited 2 on a DSN that
-            # worked everywhere else (PR #9862 review, P1). `set_config` also
-            # accepts a bind parameter, which `SET` does not.
-            # (autocommit for this one statement: `set_config` would otherwise
-            # open a transaction, and `conn.autocommit = False` below cannot be
-            # assigned inside one — measured, "set_session cannot be used inside
-            # a transaction".)
-            conn.autocommit = True
-            conn.cursor().execute(
-                "SELECT set_config('statement_timeout', %s, false)",
-                (str(int(RECORD_STATEMENT_TIMEOUT_MS)),),
-            )
+            # ⛔ THE BOUND IS A SESSION SETTING, NEVER A `connect(options=…)` KWARG.
+            # The keyword form REPLACES the DSN's own `options`, and that is
+            # where the record's application role rides
+            # (`options=-c role=tortoise_record_app`, libpq's connect-time
+            # `SET ROLE`). This verb's measurement -- PR #9862 review, P1: the
+            # session stayed on the provisioning superuser and the tenant
+            # prologue correctly refused a DSN that worked everywhere else --
+            # lives on `_connect_record`, together with the second instance of
+            # the same clobber PR #14068 found in `record-reconcile` /
+            # `record-restore`. One construction, so it cannot come back once
+            # per verb.
+            conn = _connect_record(dsn)
         except Exception as e:
             print(f"Error: the record is unreadable ({type(e).__name__}) — no "
                   f"text was served and no verdict was produced.",
@@ -17496,6 +17793,15 @@ def main(argv: list[str] | None = None) -> int:
     rb = sp.add_parser("rebuild", help="Rebuild FalkorDB from all .jsonl files")
     rb.add_argument("--db", required=True)
     rb.add_argument("--dir", default=".")
+    # #14002: a wipe + journal-only replay on a deployment whose RECORD owns the
+    # journal's ordinal drops every record after the cutover point, silently. The
+    # refusal is the default and this flag is the assertion that no graph on the
+    # record is cut over (so the file IS the full log) — an acknowledgement of the
+    # fact that decides it, not a bypass of the check.
+    rb.add_argument(
+        "--journal-is-complete", dest="journal_is_complete", action="store_true",
+        help="Proceed on a deployment with a RECORD configured: assert that NO "
+             "graph is cut over, so the journal is the complete log (#14002)")
     sp.add_parser("demo", help="Run mock extractor on sample transcript")
     sp.add_parser("backfill", help="Backfill missing Point properties (status, createdAt)").add_argument("--db", required=True, help="Docker URI or file path")
     vf = sp.add_parser("verify", help="Write/read/delete test Point — health check")
@@ -17570,13 +17876,18 @@ def main(argv: list[str] | None = None) -> int:
     rr.add_argument("--org", required=True, help="Record org_id (the scope)")
     rr.add_argument("--graph", required=True, help="Record graph_id (the scope)")
     rr.add_argument("--cache-graph", default=None,
-                    help="Cache graph name — REQUIRED in practice (the verb "
-                         "refuses without it, exit 2). The cache graph is NOT "
-                         "the record's --graph scope: this tree names it "
-                         "org_<org_id> (org SDK) or org_<org_id>_<graph_id> "
-                         "(registry/ACL namespace). No default is derived: a "
-                         "wrong guess opens an EMPTY graph and a coherent "
-                         "cache would report divergent")
+                    help="Cache graph name — OPTIONAL when the control plane "
+                         "can answer; NEVER derived. Without it the name is "
+                         "READ from public.graphs.namespace for this tenant: "
+                         "the cache graph is NOT the record's --graph scope, "
+                         "and this tree names it org_<org_id> (the org's "
+                         "DEFAULT graph, the legacy namespace) or "
+                         "org_<org_id>_<graph_id> (registry/ACL). A stated "
+                         "name wins; a readable fact that disagrees WARNs. "
+                         "With NO readable fact the verb refuses (exit 2) "
+                         "rather than guess: a wrong guess opens an EMPTY "
+                         "graph and a coherent cache would report divergent "
+                         "(#13337)")
     rr.add_argument("--timeout-ms", type=int, default=None,
                     help="Bound on EACH cache-label read (default: 2000, must "
                          "be positive). A read that hits it refuses (exit 2) "
@@ -17697,12 +18008,17 @@ def main(argv: list[str] | None = None) -> int:
     rr2.add_argument("--graph", required=True,
                      help="Record graph_id (the scope)")
     rr2.add_argument("--cache-graph", default=None,
-                     help="Cache graph to RESTORE — REQUIRED in practice (the "
-                          "verb refuses without it, exit 2). NOT the record's "
-                          "--graph scope: this tree names it org_<org_id> or "
-                          "org_<org_id>_<graph_id>. No default is derived — a "
-                          "wrong guess opens an EMPTY graph and the run would "
-                          "report a restore into a graph nobody reads")
+                     help="Cache graph to RESTORE — OPTIONAL when the control "
+                          "plane can answer; NEVER derived. Without it the "
+                          "name is READ from public.graphs.namespace for this "
+                          "tenant. NOT the record's --graph scope: this tree "
+                          "names it org_<org_id> (the org's DEFAULT graph) or "
+                          "org_<org_id>_<graph_id> (registry/ACL). ⛔ With NO "
+                          "readable fact the verb REFUSES (exit 2): it WIPES "
+                          "the target, so a wrong guess opens an EMPTY graph "
+                          "and the run would report a restore into a graph "
+                          "nobody reads while the real one stayed destroyed "
+                          "(#13337)")
     rr2.add_argument("--limit", type=int, default=None,
                      help="Write at most N nodes (N >= 1). A bounded run is "
                           "`bounded`, NOT necessarily partial: a bound at or "

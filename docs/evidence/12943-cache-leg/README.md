@@ -403,3 +403,67 @@ passed explicitly) is ALSO unavailable: `PERPLEXITY_API_KEY not set` (and
 external reading above is therefore rung 3 — `web_fetch` on primary sources
 (Chris Richardson's pattern catalogue), quoted rather than paraphrased where it
 matters.
+
+---
+
+## The residual, resolved: the name was DERIVED, not read (#13337)
+
+The reopening's table said *"8 objects / 39 events / 5 operators in Postgres, 0 in
+FalkorDB"*. The per-door matrix above measured every door writing BOTH stores —
+so the writes were not lost; the **count was taken on a spelling the tenant never
+used**.
+
+A record tenant `(org_id, graph_id)` does not name one cache graph when the name
+is derived from the CREDENTIAL. An **org-wide** credential opens the org's
+**default** graph, whose namespace is the legacy `org_<org>` (`#10180`); the
+registry spelling this tree derived, `org_<org>_<gid>`, is a *different* graph —
+and on this measurement it was **never created at all**.
+
+`orgwide_two_graphs.py` — one run-unique throwaway tenant, ONE write through the
+shipped org-wide door (`hosted_api._data_sdk`, no `graph_id` on the credential),
+the record counted through the OWNER role, the cache counted on BOTH candidate
+graphs, and the product's own reconciler run on each. Capture:
+`orgwide-two-graphs.json`.
+
+| where | objects | events |
+|---|---|---|
+| record `public.object` / `public.event` under `(org, gid)` | **1** | **1** |
+| cache `org_<org>` — the FACT in `graphs.namespace` | **1** | **1** |
+| cache `org_<org>_<gid>` — the derived spelling | **absent** (never created) | |
+
+| `record-reconcile` on | verdict | `checked` | `missing_in_cache` | `field_mismatches` |
+|---|---|---|---|---|
+| `org_<org>_<gid>` (derived) | `divergent` | 2 | **2** | 0 |
+| `org_<org>` (the FACT) | `divergent` (`#12949`) | 2 | **0** | 6 |
+
+The first row is the whole issue: a tenant whose cache is complete, graded
+`missing_in_cache=2`. The second row's divergence is **not** a lost write — it is
+the Event's field defaults (`classificationLevel='internal'`, `format='jsonl'`,
+`participants=[]`, `startedAt=''` written by the fold where the record holds NULL),
+which is the `#12949` root already filed, and it is why the fix is the NAME and not
+a data move.
+
+### What changed
+
+`tortoise/cache_graph.py` is the ONE declared mapping `#13337` asks for:
+`(org_id, graph_id)` → the cache graph, read from `public.graphs.namespace` through
+the same table and the same two filters `hosted_api._assert_graph_owned` uses, and
+falling back to the registry spelling only when nothing can answer — **labelled**
+`derived`, so a verdict computed on an assumed coordinate cannot read like one
+computed on a read coordinate. `record-reconcile` and `record-restore` derive
+`--cache-graph` from it (the flag stays, and a stated name that disagrees with a
+readable fact now WARNS and names both), and the verdict carries `cache_graph` /
+`cache_graph_source`, so a divergence count can no longer be quoted without the
+coordinate it is about.
+
+⛔ **This moves no data.** `org_<org>` stays the default graph's home; relocating it
+is `#13337` option 2, a `#10180` reopen, and an OWNER decision. What the change
+removes is the **false divergence**, not the second graph.
+
+⚠️ **`shipped_reader_on_this_box` is `null` in the capture, and that is the honest
+reading.** This box has no Supabase, so the shipped control-plane reader answers
+`None` and the declaration falls back to the labelled derivation — the arm the
+self-host shape takes. The capture states its declared result through the
+`read_namespace` seam (the same value the control plane holds for this tenant,
+seeded into `public.graphs.namespace`), which is what the DB-backed test exercises
+through the shipped query with a fake control-plane client.

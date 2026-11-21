@@ -42,10 +42,10 @@ line does not establish). `record_only` is the readable rows this graph holds no
 for. The
 paragraph's refutation does not depend on either reading of `record=` — `fillable=0` and
 `unmatched=16,982` are what refute the "~9,106 graph-only" inference, and neither moved.
-`:Point` is still in this tool's DEFAULT population, because the
-change is harmless and additive (this tool only FILLS, `WHERE … embedding IS NULL`) and
-`#13685`'s scope-addition comment asks for it — not because it holds a copyable gap. See
-:data:`BACKFILLED` for why it lives here and NOT in the census's `RETIRED`.
+`:Point` is in this tool's DEFAULT population because the change is harmless and additive
+(this tool only FILLS, `WHERE … embedding IS NULL`) and `#13685`'s scope-addition comment
+asks for it — not because it holds a copyable gap. Since `#13971` the label is in the
+census's `RETIRED` too, so :data:`BACKFILLED` is exactly that tuple (`*parity.RETIRED`).
 
 WHY THIS IS A COPY AND NOT A RE-EMBED
 =====================================
@@ -110,12 +110,10 @@ is not the backfill that was approved. ⚠️ That definition is the census's as
 `render_collision` term, and this tool still joins on the RAW key; :func:`_measure_label`
 carries the exact boundary and what it costs.
 
-⚠️ WHY IT IS THE CENSUS'S LEGS AND NOT `parity.census()` ITSELF. `:Point` is not in
-that function's population (see :data:`BACKFILLED`), so calling it with the five
-labels this tool copies would raise `CensusError` and refuse EVERY execution; calling
-it with four and measuring Point separately would give one run two definitions of the
-same number. And a second full census read would double a 46k-Point run's graph cost
-for no information. So one function measures every label, from the census's own graph
+⚠️ WHY IT IS THE CENSUS'S LEGS AND NOT `parity.census()` ITSELF. The census can measure
+`:Point` since `#13971`, so this is a cost/single-definition choice rather than a scope
+one: calling it here would double a 46k-Point run's graph cost for no information, and a
+second full census read would give one run two definitions of the same number. So one function measures every label, from the census's own graph
 leg, and `test_the_per_label_numbers_are_the_census_numbers` pins the equality with
 `parity.census()` for the labels the census does measure — the census stays the
 instrument, this tool only runs its legs.
@@ -158,10 +156,10 @@ Both sides are keyed by the node's IDENTITY, and neither spelling is invented he
 * **graph side** — the property the vector leg itself returns as the node's id
   (`tortoise/search_engine.run_vector_query`'s `id_field`: `url` for
   `source`/`document`, `eventId` for `event`, `id` otherwise). Read from
-  :data:`BACKFILLED`, whose first four rows ARE
-  `entity_vector_parity_census.RETIRED` (`*parity.RETIRED` — imported, never restated;
-  `#9553`: a second declaration of a key column silently filed no row for a whole
-  Event arm). `:Point` is the fifth row and its property is `id`.
+  :data:`BACKFILLED`, whose five rows ARE `entity_vector_parity_census.RETIRED`
+  (`*parity.RETIRED` — imported, never restated; `#9553`: a second declaration of a key
+  column silently filed no row for a whole Event arm). `:Point` is the fifth row and its
+  property is `id`.
 * **record side** — `node_key`, the record's one identity column across every table
   (`NodeSnapshot`'s key, `node_identity`'s PK component, and the column the
   `chk_*_node_key_is_contract_key` constraints pin). Since `#9881` it IS the `id` for
@@ -304,14 +302,15 @@ PLAN_VERSION = 3
 #: The labels this tool copies, in the order they are reported: the CENSUS's own
 #: declared population (`entity_vector_parity_census.RETIRED`, imported rather than
 #: restated — a second spelling of the key map is what `#9553` records silently filing
-#: no row for a whole Event arm) PLUS `:Point`, appended last.
+#: no row for a whole Event arm). That tuple covers all five labels, `:Point` included.
 #:
-#: ⛔ WHY `:Point` IS HERE AND NOT IN `RETIRED`. That tuple is the population a
-#: DESTRUCTIVE tool iterates — `strip_graph_entity_vectors` REMOVEs every vector its
-#: plan names — so widening it would widen the strip, which is exactly why the census
-#: declares `:Point` in `NOT_IN_SCOPE` and a pin asserts its absence BY NAME. THIS
-#: tool only FILLS (`UPDATE … WHERE embedding IS NULL`), so the same label is safe
-#: here and `#13685`'s scope comment asks for it. ⚠️ Its measured `fillable` on
+#: ⛔ `:Point` USED TO BE APPENDED HERE BY HAND, and `#13971` removed the duplicate. The
+#: reason it was appended was that `RETIRED` — the population a DESTRUCTIVE tool
+#: iterates — excluded it (`NOT_IN_SCOPE`), so this fill-only tool had to add it itself.
+#: `#13971` moved `:Point` INTO `RETIRED` (the record's coverage is measurable, and two of
+#: its four declared writers ask that gate), so appending it again would run the
+#: fill twice for one label and make this constant disagree with the population it says
+#: it derives from. ⚠️ Its measured `fillable` on
 #: production was **0** (`Point graph=31,610 record=36,942 unmatched=16,982 existing=
 #: 14,628`, the `record=` figure being the TENANT-WIDE readable count as the tool
 #: reported it before `#13647` narrowed that field to the label's graph keys; the
@@ -321,12 +320,7 @@ PLAN_VERSION = 3
 #: and harmless rather than a fix for a copyable gap — see the module docstring. One
 #: population, derived once, and
 #: `tests/test_13685_entity_vector_backfill.py` iterates THIS constant.
-BACKFILLED: tuple[tuple[str, str, str], ...] = (
-    *parity.RETIRED,
-    # `chk_point_node_key_is_contract_key`: `node_key = id`, exactly as for the
-    # object/subject twins since `#9881`.
-    ("point", "Point", "id"),
-)
+BACKFILLED: tuple[tuple[str, str, str], ...] = (*parity.RETIRED,)
 
 #: Rows per `UPDATE`. Small enough that one `IN $keys` graph read and one statement
 #: stay far UNDER FalkorDB's `RESULTSET_SIZE` (the silent truncation
@@ -939,9 +933,9 @@ def _measure_label(g: Any, door: RecordDoor, table: str, label: str) -> dict:
     plan and execution cannot measure two different things.
 
     ⚠️ `parity.census()` ITSELF IS DELIBERATELY NOT CALLED — see the module docstring:
-    it cannot be given `:Point` (that label is outside its `RETIRED` population, which
-    gates a destructive tool), and calling it for the other four would both double the
-    graph read on a 46k-Point corpus and give one run two definitions of one number.
+    `:Point` IS in its `RETIRED` population since `#13971`, so this is a cost choice, not a
+    scope one — calling it would double the graph read on a 46k-Point corpus and give one
+    run two definitions of one number.
     `tests/test_13685_entity_vector_backfill.py::test_the_per_label_numbers_are_the_census_numbers`
     pins this function's output equal to `parity.census()`'s for the labels the census
     does measure, and the scratch-Postgres end-to-end leg runs the census tool itself.

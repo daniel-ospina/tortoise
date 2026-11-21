@@ -1517,6 +1517,24 @@ def test_the_site_icon_set_and_card_select_the_guard_that_reads_their_bytes():
             f"{changed} does not select test_website_static.py")
         assert r["slow_run"] is False, f"{changed} must not pull a slow leg"
 
+    # ⛔ AND THE SHARED PRICING SOURCE — the one asset this population cannot
+    # derive. `tortoise-pricing.js` is not an icon and not an `og:image`, so the
+    # derivation above never sees it. #13696 review cycle 2 (P2, measured): its
+    # `SOURCE_PATTERNS['onboarding']` row was unpinned — deleting it left this
+    # file 526 passed, while `select(["website/assets/tortoise-pricing.js"])`
+    # returned `surfaces: []` with `test_website_static.py` absent. That is the
+    # exact silent drop the row's own comment cites as its reason for existing
+    # ("a diff that … changed a price selected NOTHING").
+    for asset in ("website/assets/tortoise-pricing.js",):
+        r = _sel([asset])
+        assert r["surfaces"] == ["onboarding"], (
+            f"{asset} selects {r['surfaces']} — the ONE price table both "
+            "product pages render would change with no surface selected and "
+            "no row run (#13696)")
+        assert "test_website_static.py" in r["test_files"], (
+            f"{asset} does not select test_website_static.py")
+        assert r["slow_run"] is False, f"{asset} must not pull a slow leg"
+
 
 def test_the_crawler_surface_selects_the_guard_that_reads_it():
     """#11615: `robots.txt` and the sitemaps must select the sitemap contract.
@@ -8460,6 +8478,81 @@ top:
     assert cs.parse_manifest_text(doc) == expected
 
 
+def _pyyaml_requirement() -> str:
+    """The declared `pyyaml` requirement from `[project].dependencies`."""
+    import tomllib
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    declared = tomllib.loads(pyproject.read_text())["project"]["dependencies"]
+    matches = [d for d in declared if d.split("=")[0].split("<")[0].split(">")[0].strip() == "pyyaml"]
+    assert len(matches) == 1, (
+        "pyyaml must be a declared dependency of the package itself, not a "
+        f"transitive of the test extras — found {matches!r} in {declared!r}"
+    )
+    return matches[0]
+
+
+def test_the_pyyaml_exclusion_that_keeps_merge_overrides_is_declared_and_satisfied():
+    """The merge-key pins above are only true on a pyyaml that is NOT 6.0.4.
+
+    Upstream yaml/pyyaml#953 (OPEN): the DoS fix in #937 dedupes the pairs a
+    `<<:` merge inserts by the KEY VALUE's identity, so — inside ONE merged
+    mapping — the anchor's pair survives and the document's own override is
+    DROPPED. Single-character keys only escaped by CPython string interning.
+    MEASURED here at 6.0.4: `mid: &m {<<: *b, x: 2}` merged by
+    `top: {<<: *m, y: 3}` resolves to `{'x': 1, 'y': 3}`; 6.0.3 gives
+    `{'x': 2, 'y': 3}`.
+
+    That is not cosmetic here: the overridden pair in `config/ci-surfaces.yml`
+    IS a `durations` weight, so a silently-wrong parse mis-sizes shards for
+    every lane — the class that ends in a watchdog kill, not a red test. So the
+    exclusion is a dependency contract, and this test owns it in three places
+    that can drift apart independently: the DECLARATION, the LOCK, and the
+    INTERPRETER actually running the suite. `pip install -U pyyaml` on a dev
+    box reds the third with a message that names the cause instead of leaving
+    the four merge-key pins above to fail as if our parser were at fault.
+
+    ⛔ The subject of the assertion is EXACTLY 6.0.4, not "anything newer": the
+    declared form is `!=6.0.4` and not a `<6.0.4` ceiling, because 6.0.5+ may
+    restore the nested-override semantics and a ceiling would refuse the fix on
+    the release that carries it. A `<` form is still accepted here (it excludes
+    6.0.4 too), so tightening later does not red this test for the wrong reason.
+    """
+    from tools import ci_selection  # noqa: F401 — this test guards ITS parser's dependency
+
+    requirement = _pyyaml_requirement()
+    spec = requirement.replace(" ", "")
+    assert "!=6.0.4" in spec or "<6.0.4" in spec, (
+        "pyyaml must exclude 6.0.4 (#953 drops a merge override and silently "
+        f"changes parsed durations); declared: {requirement!r}"
+    )
+
+    def _is_the_excluded_release(version: str) -> bool:
+        parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
+        return parts == [6, 0, 4]
+
+    import tomllib
+
+    lockfile = Path(__file__).resolve().parents[1] / "uv.lock"
+    locked = [
+        pkg["version"] for pkg in tomllib.loads(lockfile.read_text())["package"]
+        if pkg["name"] == "pyyaml"
+    ]
+    assert locked, "pyyaml is missing from uv.lock — the exclusion is unenforced there"
+    assert not any(_is_the_excluded_release(v) for v in locked), (
+        f"uv.lock resolved pyyaml {locked}, the exact release the declaration excludes"
+    )
+
+    installed = yaml.__version__
+    assert not _is_the_excluded_release(installed), (
+        f"the interpreter running this suite has pyyaml {installed}, the exact "
+        "release the declaration excludes: upstream yaml/pyyaml#953 makes a "
+        "merged mapping's own override lose to its anchor, so "
+        "`parse_manifest_text` returns the anchor's stale `durations` weight. "
+        "Reinstall the locked version (`uv sync`) — do not relax the pins above."
+    )
+
+
 def test_an_unhashable_key_is_refused_with_pyyaml_OWN_exception():
     """`safe_load` parity is a claim of this module's own docstrings, and it is
     the claim a caller catching pyyaml's error relies on.
@@ -10336,6 +10429,13 @@ ROWED_BY_THIS_FOLD = (
     # reported it — the same defect `#13110`'s own comment records surviving a round, which is
     # the reason this ENTRY-RULE tuple is explicit rather than derived.
     "test_13422_object_subject_dense_leg.py",
+    # #14011 — the fold that adds `tortoise/usage_signal.py` (SEARCH-ARCHITECTURE.md §7's
+    # window-local counter). A file this fold ADDED and registered on `core` for the same
+    # reason as the two rows above: `tortoise/usage_signal.py` matches no `SOURCE_PATTERNS`
+    # entry, so it falls through to `core` and a module-only diff selects nothing narrower.
+    # The first cut shipped NO row and NO surface entry at all — the manifest-integrity
+    # drift the reviewer caught, which is exactly what this ENTRY-RULE tuple exists for.
+    "test_usage_signal.py",
     # #13610 — the fold that retires the graph-stored `:Object`/`:Subject` copy per deployment,
     # once the record's coverage count proves it. A file this fold ADDED and registered on
     # `core` for the same reason as the row above: `tortoise/record_vector.py`,
@@ -10350,6 +10450,13 @@ ROWED_BY_THIS_FOLD = (
     # run. The row is here for the same reason as the one above: the ENTRY-RULE pin
     # iterates this EXPLICIT tuple, so a file nobody listed has no row and nothing reds.
     "test_13629_entity_vector_retire.py",
+    # #14001 — the fail-closed POLARITY of that same write gate's stop arm (defence 2 of
+    # the four the issue ranks). A file this fold ADDED, registered on `core` because its
+    # only subject (`tools/strip_graph_entity_vectors.py`) is under `NON_PYTHON_PREFIXES`;
+    # the existing `CORE_ALSO` entry for that tool is what makes a tools-only diff select
+    # it. Listed here for the reason every row above states: the ENTRY-RULE pin iterates
+    # this EXPLICIT tuple, so a file nobody listed has no `durations:` row and nothing reds.
+    "test_14001_strip_gate_fail_closed.py",
     # #13685 — the BACKFILL that unblocks that retirement
     # (`tools/entity_vector_backfill.py`): the additive half of the same contract, which
     # copies the graph's vectors into the record so the strip is finally allowed to run.
@@ -10422,6 +10529,38 @@ ROWED_BY_THIS_FOLD = (
     # pin iterates this EXPLICIT tuple, so a file nobody listed has no `durations:`
     # row and nothing reds.
     "test_vector_parity_13906.py",
+    # #13337 (PR #14068) — the fold that READ a tenant's cache graph instead of
+    # deriving it from the credential. A file this fold ADDED and registered on
+    # `api` + `core`; its first cut shipped the surface rows but no `durations:`
+    # row, which is exactly the #3400/#4348 trap (a default is not a reading), so
+    # it is listed here. Its end-to-end legs are armed in `test-record-postgres`
+    # (see that file's `test_the_armed_CI_job_supplies_BOTH_stores`), not here.
+    "test_13337_cache_graph_declaration.py",
+    # #13123 — the eviction path's OWN end-to-end suite (`evict()` → the cache the
+    # degraded read path actually consults, `FallbackSnapshotStore.get_or_build`), a
+    # file this fold ADDED and registered on `core` + `uri_requiring:` + `durations:`.
+    # Listed here because the ENTRY-RULE pin above iterates this EXPLICIT tuple: a file
+    # nobody names is INVISIBLE to it, so dropping the `durations:` row is silent
+    # (measured at this PR's head before this entry: `grep -c
+    # test_evictor_invalidates_fallback_snapshot_13123 tests/test_ci_selection.py` → 0,
+    # i.e. the registration had no reddening assertion behind it — the inert-guard shape
+    # #13110's round-5 review records and the five sibling `new in #…` rows guard).
+    # ⛔ The `uri_requiring:` half is NOT guarded by this set: its enforcer is
+    # `tests/test_uri_requiring_selection.py::test_declared_list_matches_the_observation`,
+    # which re-derives the set from a real URI-less collection.
+    "test_evictor_invalidates_fallback_snapshot_13123.py",
+    # ⛔ `test_usage_signal.py` IS NOT REPEATED HERE. This is the SECOND copy the merge of
+    # `origin/main` created, and the #14070 argument above is why it must not stay: carrying
+    # a second copy of a file that already has a row is exactly the duplicate shape that
+    # argument refuses. MEASURED, not assumed — the duplicate is INERT on this tree today,
+    # because nothing pins this particular file: `tests/test_ci_selection.py` passes 528 with
+    # it present (`grep test_usage_signal` finds no `== [name]` pin for it). What it does
+    # break is the next such pin: the list-equality form these ENTRY-RULE pins use
+    # (`[f for f in ROWED_BY_THIS_FOLD if f not in holed] == [name]`) yields
+    # `['test_usage_signal.py', 'test_usage_signal.py']` against a one-element expectation,
+    # i.e. a pin written for this file could never pass. The entry above (the `#14011`
+    # block) is the survivor; the `config/ci-surfaces.yml` `core` scalar was de-unioned the
+    # same way in the same merge.
 )
 
 
@@ -10436,6 +10575,36 @@ def test_every_fast_file_this_fold_rows_carries_a_durations_row():
         "ENTRY RULE requires the row to EXIST (#3400/#4348) — add it with the "
         "`new in …` note; `tools/ci_timing.py --refresh-durations` fills the value "
         "from a push-to-main junit sweep later.")
+
+
+def test_the_eviction_suite_is_in_the_entry_rule_set_13123():
+    """#13123 non-vacuity: the ENTRY-RULE pin can only see what this set NAMES.
+
+    The pin above is silent for a file nobody listed — that is the defect the #14067
+    review measured on this PR's own head (`grep -c` for the filename in this module
+    was 0), and a `durations:` row is not enough on its own: the row can be dropped
+    again and nothing reds while the file is absent from the tuple. So the membership
+    itself is pinned, in both directions, from the LIVE map — the same shape as
+    `test_the_entry_rule_bites_on_the_two_rows_this_fold_registered` above.
+
+    Red on the pre-fix tree: the file is registered in `config/ci-surfaces.yml` and
+    carries a `durations:` row, but is not in this set, so the first assertion fails.
+    """
+    from tools.ci_selection import load_manifest
+    name = "test_evictor_invalidates_fallback_snapshot_13123.py"
+    assert name in ROWED_BY_THIS_FOLD, (
+        f"#13123 registers {name} in a fast surface, but it is not in "
+        "ROWED_BY_THIS_FOLD — the ENTRY-RULE pin cannot see it, so dropping its "
+        "`durations:` row would be silent")
+    real = load_manifest()["durations"]
+    assert name in real, (
+        f"#13123 put {name} in a fast surface but shipped no `durations:` row, so it "
+        "packs at the flat default")
+    holed = {k: v for k, v in real.items() if k != name}
+    assert [f for f in ROWED_BY_THIS_FOLD if f not in holed] == [name], (
+        "dropping THIS row from the live map must name exactly this file as rowless; "
+        "if another member of the guarded set is missing a row this pin cannot "
+        "distinguish that state from the one it guards")
 
 
 def test_the_entry_rule_bites_on_the_two_rows_this_fold_registered():

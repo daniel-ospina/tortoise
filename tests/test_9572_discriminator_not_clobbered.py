@@ -174,8 +174,8 @@ def test_org_seed_surface_does_not_fabricate_a_kind(sdk):
     from tortoise.hosted_api import _OrgSeedSurface
 
     surface = _OrgSeedSurface(sdk)
-    surface.create_subject("Probe Seed Z", "team")
-    node = surface.create_subject("Probe Seed Z")
+    surface.create_subject_anchor("Probe Seed Z", "team")
+    node = surface.create_subject_anchor("Probe Seed Z")
     assert node["subjectKind"] == "team"
 
 
@@ -183,8 +183,8 @@ def test_selfhost_seed_surface_does_not_fabricate_a_kind(sdk):
     from tortoise.onboarding.selfhost import _SdkSeedSurface
 
     surface = _SdkSeedSurface(sdk)
-    surface.create_subject("Probe Seed Y", "team")
-    node = surface.create_subject("Probe Seed Y")
+    surface.create_subject_anchor("Probe Seed Y", "team")
+    node = surface.create_subject_anchor("Probe Seed Y")
     assert node["subjectKind"] == "team"
 
 
@@ -584,12 +584,12 @@ def test_seed_surfaces_do_not_write_a_blank_kind(sdk):
     from tortoise.onboarding.selfhost import _SdkSeedSurface
 
     org = _OrgSeedSurface(sdk)
-    org.create_subject("Probe Blank Seed Z", "team")
-    assert org.create_subject("Probe Blank Seed Z", "")["subjectKind"] == "team"
+    org.create_subject_anchor("Probe Blank Seed Z", "team")
+    assert org.create_subject_anchor("Probe Blank Seed Z", "")["subjectKind"] == "team"
 
     selfhost = _SdkSeedSurface(sdk)
-    selfhost.create_subject("Probe Blank Seed Y", "organization")
-    node = selfhost.create_subject("Probe Blank Seed Y", "  ")
+    selfhost.create_subject_anchor("Probe Blank Seed Y", "organization")
+    node = selfhost.create_subject_anchor("Probe Blank Seed Y", "  ")
     assert node["subjectKind"] == "organization", node.get("subjectKind")
 
 

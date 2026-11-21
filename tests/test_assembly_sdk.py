@@ -149,13 +149,22 @@ try:
     with _live_utils.mask_embedder():
         _probe = _ProbeSDK()
         _probe._get_proj().g.query("RETURN 1")
-        _probe.create_point(
-            "statement", "probe zzqfulltext roundtrip token 7f3a9c", id="pProbe",
+        _probe.create_entity("point",
+            "probe zzqfulltext roundtrip token 7f3a9c", id="pProbe",
             session_id="sess-probe", is_episodic=True, status="draft")
-        _hits = _probe.tortoise_fts_query(
+        _hits = _probe._tortoise_fts_query(
             "zzqfulltext roundtrip token", entity_type="point", limit=3)
         if _hits and _hits[0].get("id") == "pProbe":
             FALKORDB_AVAILABLE = True
+    # ⛔ ⛔ A rename or typo in a seam this probe touches must NOT be read as
+    #   "storage unavailable": that is exactly how #13899's retirement hid for a
+    #   whole wave — the probe's own `except Exception` turned an AttributeError
+    #   into a SKIP locally and a hard refusal in CI that names no retired door
+    #   (#14114 class 2, #14125). `AttributeError`/`NameError`/`TypeError`/`ImportError` are
+    #   PROGRAMMING errors and are re-raised; only genuine transport/driver
+    #   failures fall through to the unavailable arm.
+except (AttributeError, NameError, TypeError, ImportError):
+    raise
 except Exception:
     FALKORDB_AVAILABLE = False
 finally:

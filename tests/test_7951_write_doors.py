@@ -187,6 +187,18 @@ _DOORS: dict[tuple[str, str], tuple[str, int]] = {
     ("tortoise/consistency.py", "recover_from_log"): ("exempt:replay", 2),
     ("tortoise/__main__.py", "_cmd_reconcile"): ("exempt:replay", 1),
 
+    # ── NOT A PROJECTION — an in-memory fold over a read stream ───────────
+    # `usage_signal._consume` folds serve events out of the usage LEDGER (a
+    # JSONL stream this module reads) into `_State`, a plain dataclass whose
+    # `entries` dict is the checkpoint payload. `_State.apply` updates that dict
+    # — count, latest and earliest stamp per `(tenant, label, key)` — and has no
+    # projection, no graph handle and no journal handle in scope: there is no
+    # fold of a graph write here to journal. Classified `not-a-projection`
+    # rather than exempted, so the declaration says what the site IS (the
+    # scanner cannot tell a dataframe/dict `.apply` from a `FalkorProjection`
+    # one, and a receiver heuristic is the hole review round 3 closed).
+    ("tortoise/usage_signal.py", "_consume"): ("not-a-projection", 2),
+
     # ── EXEMPT: TEST SEAM / NON-USER WRITE ────────────────────────────────
     # `_cmd_verify` (`tortoise verify`) writes a scratch `test-verify` Point and
     # deletes it again in the same command — a health probe, not a user write.

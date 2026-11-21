@@ -12,9 +12,17 @@ Mirrors ``tortoise/onboarding/state.py`` hygiene: importable without
 hosted_api (no circular import), every writer takes a duck-typed handle.
 The required handle surface (hosted org SDK / MCP SDK / W12 self-host SDK):
 
-- ``create_subject(name, subjectKind=..., **props)`` → node dict (id etc.)
+- ``create_subject_anchor(name, subjectKind=..., **props)`` → node dict (id etc.)
 - ``create_edge(relation, from_id, to_id)`` → {created: bool, ...}
 - ``query(cypher, **params)`` → result with ``.result_set``
+
+⛔ The anchor door is ``create_subject_anchor``, NEVER ``create_subject``. That spelling is a
+RETIRED SDK method name (``tortoise/sdk_retired.py``, #12901), the repo-wide census that refuses
+one is receiver-blind, and it cannot exempt a surface reached through a function parameter
+(#13863 P1) — so a surface door spelled like it reds a correct call (#13971). A handle that
+implements THIS header with ``create_subject`` therefore raises ``AttributeError`` on every
+production run of both lanes; the two real surfaces publish ``create_subject_anchor`` and
+this module calls it by that name (``_write_anchor``).
 
 Pins (epic plan §2 WF-2, §4 DM-3; test-design #1992 surfaces 7/15; W5 scope
 pin 12): collision check BEFORE any MERGE-with-refs (a same-name Subject
@@ -152,7 +160,7 @@ def _run(handle: Any, cypher: str, params: dict[str, Any] | None = None):
     ⛔ It is NOT a §17.1 declaration, and it must not be read as one. The
     onboarding lane's declaration lives in ``onboarding.state._run`` (see
     ``ONBOARDING_WRITE_LANE`` there); this module writes through the SDK's
-    journalled doors (``create_subject`` / ``create_edge``), so a mutating
+    journalled doors (``create_subject_anchor`` / ``create_edge``), so a mutating
     statement added to THIS primitive is a NEW unjournaled writer: it gets no
     authorization from the onboarding declaration, and on a journal-backed
     projection whose handle guard is armed it is refused rather than silently
@@ -171,8 +179,8 @@ def _run(handle: Any, cypher: str, params: dict[str, Any] | None = None):
 def _name_key_space(name: str) -> tuple[str, dict]:
     """(WHERE clause, params) selecting EVERY holder of ``name`` — the writer's key space.
 
-    #12120 finding 3 (P2): ``create_subject`` — the write this module's collision
-    guard protects — resolves on the folded UNION (``name`` · ``canonical_name`` ·
+    #12120 finding 3 (P2): ``create_subject_anchor`` — the write this module's
+    collision guard protects — resolves on the folded UNION (``name`` · ``canonical_name`` ·
     ``aliases``, over the raw and the folded spelling). A guard that enumerates
     only the raw ``name`` can therefore classify a fold-colliding anchor "safe to
     create", and the write resolves onto the OTHER identity's node. The arms come
@@ -200,7 +208,7 @@ def find_subject_by_name(handle: Any, name: str) -> dict[str, Any] | None:
     — or collide against — the wrong identity.
 
     **No status filter — deliberately.** This probe guards a name-keyed WRITE:
-    ``_write_anchor`` -> ``create_subject`` -> ``_upsert_subject`` MERGEs on
+    ``_write_anchor`` -> ``create_subject_anchor`` -> ``_upsert_subject`` MERGEs on
     ``(s:Subject {name:$name})`` (ON MATCH reuses the node). Filtering terminal
     holders out of the READ would make a retracted anchor invisible here and
     then silently ADOPTED by that MERGE for a DIFFERENT org — identity
@@ -240,7 +248,7 @@ def find_subject_by_name(handle: Any, name: str) -> dict[str, Any] | None:
             props.append(dict(existing) if isinstance(existing, dict) else {})
     # ⛔ Collapse merged-away carriers BEFORE the 1-vs-2 decision (#12120): one
     # entity reached through two rows (a non-destructive merge) is ONE holder,
-    # which is the answer `create_subject` gives. Without it a re-seed of an org
+    # which is the answer `create_subject_anchor` gives. Without it a re-seed of an org
     # whose anchor was ever merged raised `SubjectCollision` for a name the write
     # resolves to a single node.
     holders = _collapse_merged_anchor_rows(handle, props)
@@ -276,7 +284,7 @@ def _collapse_merged_anchor_rows(handle: Any,
     (#12120 finding 3, completed here). ``apply_entity_merge`` is
     NON-destructive: the candidate stays live and keeps a folded key, so after a
     merge the name union legitimately returns TWO rows for ONE entity — and
-    ``create_subject`` collapses them (``_live_holders_same_entity``). Counting
+    ``create_subject_anchor`` collapses them (``_live_holders_same_entity``). Counting
     rows raised ``AmbiguousEntityName`` (→ ``SubjectCollision``) for a name the
     write resolves to a single node, so a re-seed of an org whose anchor was ever
     merged failed at a door that worked before the widening. Agreeing on the
@@ -321,7 +329,7 @@ def _collapse_merged_anchor_rows(handle: Any,
 
 # ── two-Subject seed ─────────────────────────────────────────
 
-def seed_onboarding_anchors(sdk: Any, *, org_name: str, org_id: str,
+def seed_onboarding_anchors(surface: Any, *, org_name: str, org_id: str,
                             person_name: str | None = None,
                             user_id: str | None = None,
                             person_email: str | None = None,
@@ -351,7 +359,7 @@ def seed_onboarding_anchors(sdk: Any, *, org_name: str, org_id: str,
     #    all-or-nothing contract — a disambiguation round never leaves a
     #    half-seed behind). ────────────────────────────────────────────
     org_class = _classify_anchor(
-        sdk, name=org_name, kind=ORG_ANCHOR_KIND,
+        surface, name=org_name, kind=ORG_ANCHOR_KIND,
         ours_refs={"org_id": org_id})
     person_class = None
     if include_person:
@@ -361,12 +369,12 @@ def seed_onboarding_anchors(sdk: Any, *, org_name: str, org_id: str,
         if person_email is not None:
             person_refs[EMAIL_REF] = person_email
         person_class = _classify_anchor(
-            sdk, name=person_name, kind=PERSON_ANCHOR_KIND,
+            surface, name=person_name, kind=PERSON_ANCHOR_KIND,
             ours_refs={"user_id": user_id, "email": person_email})
 
     # ── PHASE 2 (writes) ─────────────────────────────────────────────
     org_subject, org_created, org_normalized = _write_anchor(
-        sdk, name=org_name, kind=ORG_ANCHOR_KIND, refs={"org_id": org_id},
+        surface, name=org_name, kind=ORG_ANCHOR_KIND, refs={"org_id": org_id},
         classification=org_class)
     report: dict[str, Any] = {
         "org_subject": org_subject,
@@ -380,9 +388,9 @@ def seed_onboarding_anchors(sdk: Any, *, org_name: str, org_id: str,
         report["member_of"] = None
         return report
     user_subject, person_created, person_normalized = _write_anchor(
-        sdk, name=person_name, kind=PERSON_ANCHOR_KIND, refs=person_refs,
+        surface, name=person_name, kind=PERSON_ANCHOR_KIND, refs=person_refs,
         classification=person_class)
-    member_of = sdk._create_edge(MEMBER_OF_RELATION,
+    member_of = surface.create_edge(MEMBER_OF_RELATION,
                                 user_subject["id"], org_subject["id"])
     report.update({
         "user_subject": user_subject,
@@ -399,14 +407,14 @@ def _require_name(name: str | None, label: str) -> str:
     return name.strip()
 
 
-def _classify_anchor(sdk: Any, *, name: str, kind: str,
+def _classify_anchor(surface: Any, *, name: str, kind: str,
                      ours_refs: dict[str, Any]) -> dict[str, Any] | None:
     """Phase-1 collision classification: None = safe to create;
     {"subject": props} = OURS (reuse + normalize on match); raises
     ``SubjectCollision`` when a same-name Subject exists that is not ours
     (identity-unprovable or ref-mismatch). Zero writes."""
     try:
-        existing = find_subject_by_name(sdk, name)
+        existing = find_subject_by_name(surface, name)
     except AmbiguousEntityName as exc:
         # #3633: a name held by two live Subjects has no single identity to
         # classify — refuse through the seed's OWN contract (callers map
@@ -432,7 +440,7 @@ def _classify_anchor(sdk: Any, *, name: str, kind: str,
     return {"subject": existing}
 
 
-def _write_anchor(sdk: Any, *, name: str, kind: str,
+def _write_anchor(surface: Any, *, name: str, kind: str,
                   refs: dict[str, Any],
                   classification: dict[str, Any] | None,
                   ) -> tuple[dict, bool, bool]:
@@ -445,11 +453,20 @@ def _write_anchor(sdk: Any, *, name: str, kind: str,
     created = classification is None
     normalized = False
     existing = (classification or {}).get("subject")
+    # ⛔ ``surface`` HERE IS THE SEED SURFACE, NOT THE SDK (``_OrgSeedSurface`` /
+    # ``_SdkSeedSurface``), and its published door is ``create_subject_anchor`` — the
+    # private ``_create_subject`` is what the surface itself calls on the real SDK
+    # underneath.
+    # `#13899` retired the public ``create_subject`` spelling from the SDK, and this
+    # door is deliberately NOT spelled that way: the retired-name census
+    # (`test_11609_write_containers.py`) is receiver-blind and cannot exempt a door
+    # reached through a function parameter, so the shared spelling was a red on a
+    # correct call. The surfaces' own comments record the reasoning.
     if existing is not None and existing.get("subjectKind") != kind:
         # legacy free-string kind on OUR anchor → canonical kind on MATCH
-        return (dict(sdk._create_subject(name, subjectKind=kind, **refs)),
+        return (dict(surface.create_subject_anchor(name, subjectKind=kind, **refs)),
                 False, True)
     if existing is not None and not refs:
         return (dict(existing), False, False)
-    node = dict(sdk._create_subject(name, subjectKind=kind, **refs))
+    node = dict(surface.create_subject_anchor(name, subjectKind=kind, **refs))
     return node, created, normalized

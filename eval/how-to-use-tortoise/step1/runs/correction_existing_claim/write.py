@@ -83,5 +83,5 @@ print("EDGE old->src:", sdk._create_edge("wasDerivedFrom", OLD_ID, SRC))
 print("EDGE new->src:", sdk._create_edge("wasDerivedFrom", NEW_ID, SRC))
 print("EDGE defect->src:", sdk._create_edge("references", DEFECT_ID, SRC))
 
-print("TAXONOMY:", json.dumps(sdk.taxonomy(), default=str))
+print("TAXONOMY:", json.dumps(sdk.graph_overview("taxonomy"), default=str))
 print("POINTS:", json.dumps(sdk._paginated_query(limit=50, include_retracted=True), indent=2, default=str))

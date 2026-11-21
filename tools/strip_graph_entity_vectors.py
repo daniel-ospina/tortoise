@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""#13629 step 3 — strip `embedding` from `:Object`/`:Subject`/`:Event`/`:Source` nodes.
+"""#13629 step 3 — strip `embedding` from `:Object`/`:Subject`/`:Event`/`:Source`/`:Point`
+nodes.
+
+`:Point` joined the population in `#13971` (see `entity_vector_parity_census.RETIRED`
+for why the old exclusion was reversed, and the `:Point` paragraph below).
 
 **A PREVIEW IS THE DEFAULT. There is no `--dry-run`: the ABSENCE of `--execute` is
 the preview.** The preview reads both stores, prints the exact population it would
@@ -61,15 +65,35 @@ raises MID-RUN cannot be refused — earlier batches are already stripped. That 
     `tortoise.hosted_backup::restore_graph` (all five labels) and, for `:Event`, by five
     more `sdk`/`session_indexer` writers. Every one of those re-adds the vector on the next
     call, so the requirement this gate enforces is **every declared writer of the label
-    asks the gate** — not "the fold does". The gate therefore refuses all four labels
-    today, INCLUDING after #13617 lands. When the coverage predicate is present it names
-    each un-cleared writer; while the predicate is ABSENT it returns before that walk, so
-    it names the requirement rather than the writers. That is the
-    true state of a two-pronged retirement, and it is a satisfiable one: as each
-    writer's `stores` entry loses the label, the gate opens for it. Testing that the gate
-    CAN open (rather than only that it refuses) is
+    asks the gate** — not "the fold does". The gate therefore refused all four entity
+    labels until `#13854` closed them, and it REFUSES `:Point` today on TWO INDEPENDENT
+    arms — the coverage verdict, which currently measures a shortfall, and the writer
+    census, which names two of its four declared writers that must keep the copy:
+    `tortoise.sdk::_write_capture_turns` (the graph write is the SOLE store on every lane
+    where the record cannot hold the turn — no journal, no tenant, an open connect breaker,
+    or a record write that REFUSED the turn) and `tortoise.projection::_rebuild_all_replay`
+    (pass-1b restores a snapshot vector only for ids the journal wrote NO vector for, i.e.
+    only where the snapshot is the sole carrier). `#13971`'s first cut gated all four on the
+    label's coverage verdict and was reverted on review: that verdict is
+    `record_vectors >= graph_vectors` over a LABEL, so blanking on it wrote those turns'
+    vectors to NEITHER store. The two writers that place a genuinely redundant copy
+    (`tortoise.sdk::_update_entity`, `tortoise.hosted_backup::restore_graph`) DO ask, and
+    do stop. When the coverage verdict answers STOP it names each un-cleared writer; while
+    it answers KEEP, or cannot be read, it returns before that walk and names the counts
+    (or, with the predicate symbol absent, the requirement). That is the
+    true state of a two-pronged retirement, and the WRITER prong is a satisfiable one: as
+    each writer's `stores` entry loses the label, that arm opens for it. ⛔ THE COVERAGE
+    PRONG IS NOT, for this label: `operator`'s graph denominator is the whole `:Point`
+    label while its record numerator is the operator subset, so `record_vectors >=
+    graph_vectors` is UNREACHABLE while any plain point carries an embedding
+    (`tortoise/record_vector.py`, pinned by
+    `test_13610_graph_vector_copy.py::test_the_operator_denominator_is_the_whole_Point_label_so_the_gate_can_never_verify`).
+    `:Point`'s cut-over is therefore an OPERATOR act — or a later, kind-aware denominator —
+    not a backfill that will eventually measure true. Testing that the writer arm CAN open
+    (rather than only that it refuses) is
     `test_the_gate_OPENS_when_every_declared_writer_asks` — an enforcer whose firing
-    condition can never hold would be the defect, not the refusal.
+    condition can never hold would be the defect, not the refusal, which is exactly why
+    the third condition above is stated rather than waited on.
 ``REFUSE_TARGET_DRIFT``
     The target this run resolved is not the one the plan was built against — compared on
     all four axes that name a store: the graph NAME, `org_id`, `graph_id` and the graph
@@ -124,6 +148,185 @@ raises MID-RUN cannot be refused — earlier batches are already stripped. That 
     which token is raised — a zero-stripped failure that reported "part-stripped" would
     teach an operator to distrust exit 6 on the one occasion it matters.
 
+WHICH OF `#14001`'s FOUR DEFENCES THIS GATE IMPLEMENTS
+=====================================================
+`#14001` ranks four defences and says only one of them can be trusted as an ENFORCEMENT point.
+This tool implements **defence 2 — the fail-closed polarity** — and only that. A reader must
+not mistake it for the others:
+
+1. **Structural impossibility (⭐, NOT implemented here).** One seam that refuses `embedding`
+   for a retired label, being the only path that can put a property on a node — the gate would
+then have nothing to prove. `#13826` is its partial form (writers ask a gate at RUNTIME), and
+   until that lands, `#13806`'s population — the writers that never consult ANY gate, measured
+   at Object 2/3, Subject 2/3, Event 9/9 — is **not closed by this tool**, and no amount of
+   scanner quality can close it. That is `#13826`'s wiring, never a relaxation here.
+2. **Fail-closed polarity (✅ IMPLEMENTED).** `gated=True` only for a stop arm the scanner can
+   PROVE places nothing: an ALLOW-LIST of key shapes (`_stop_arm_key_values` and the resolvers
+   beside it) that each answer with the set of strings they can produce, and **a shape no arm
+   matches REFUSES**. That is the inversion `#14001` asks for, and it is the reason six issues
+   could each add one recogniser row and open the next hole: before it, an unrecognised shape
+   answered "no store" and certified the writer as write-stopped.
+
+   ⛔ THAT CLAIM IS ABOUT UNMODELLED SYNTAX, NOT ABOUT WRONG MODELLING, and the difference is
+   the whole of the review record: a resolver that answered a STALE or PARTIAL set would still
+   certify. Four such answers were measured on the first cut of this change and are closed,
+   with a permanent row each in
+   `tests/test_14001_strip_gate_fail_closed.py::DEFEATED_RESOLVER_ROWS` — a name rebound by
+   anything other than a plain assignment (`k += "ding"`, a `for` target, a walrus,
+   `with … as`); a `zip` whose value column is constant; a conditional or `|` source with ONE
+   unreadable branch (the recogniser's union policy DROPS it, and `_stop_arm_source_forms` is
+   the proof-polarity wrapper that refuses instead); and a dynamically resolved callee
+   (`getattr(props, "update")(…)`). The rule they produced: **a key expression is proven only
+   when every operand it reads resolves.**
+3. **A runtime oracle as the verdict (NOT implemented).** `#14001`'s third defence — execute
+   each declared writer with a sentinel vector and assert the property never reaches `props` —
+   is what
+   `tests/test_14001_strip_gate_fail_closed.py` runs on every regression row, because a
+   measurement is what settles "does this store". It is NOT the running verdict: this tool
+   runs against a live graph and must not execute arbitrary writer code with a sentinel, so the
+   source scanner remains the instrument it ships, and the oracle remains the falsifier.
+4. **Trusting `REFUSE_WRITE_STILL_EMITS` (NOT yet).** `#14001` makes that trust the LAST step,
+   behind 1–3. It is stated so no reader treats this gate's `gated=True` as proof that a strip
+   is safe; it is proof about ONE question, asked of source text.
+
+⛔ **THE STATED RESIDUALS.** The polarity closes the KEY-SOURCE family — every shape `#13864`,
+`#13910`, `#13915`, `#13920` and `#13936` measured. Four things it does NOT close (1–3 and 5), plus one note, each named
+because a completeness claim narrower than the code is how the next lane re-derives false
+confidence:
+
+1. **A store that reaches the arm through an UNRECOGNISED HELPER CALL.** The reproducible
+   witness is `list(map(props.update, [{"embedding": vec}]))` — pinned by
+   `test_the_helper_call_residual_is_PINNED_as_a_known_fail_open`, so it cannot change silently.
+   An `exec(code)` whose STRING the gate cannot read is the same class, and the spelling that
+   actually lands is a store through the MAPPING OBJECT: `exec('props["embedding"] = _encode(ev)')`
+   — or `exec('props.update({…})')` — CERTIFIES and LANDS on every supported version, because a
+   subscript/method store mutates the dict object whether `props` is read from a fast local or a
+   snapshot. PINNED by `test_the_exec_string_residual_is_PINNED_as_a_known_fail_open`.
+   ⛔ A BARE NAME WRITE FROM `exec` IS **NOT** A LEAK, on ANY supported version — the claim that it
+   "rebinds a fast local on 3.13+" was the inverse of PEP 667 and is corrected here (measured, and
+   from the PEP's own text): on 3.12 `exec('k = …')` lands in the un-flushed `locals()` cache and is
+   discarded by the next refresh (measured here: the writer still reads its own assignment), and on
+   3.13 PEP 667 makes `locals()` an independent snapshot per call "so that attempts to change the
+   values of local variables via `exec()` would be consistently ignored" (§Impact on exec() and
+   eval()). A `global` STATEMENT inside the exec'd string does rebind the module name and lands —
+   but the gate REFUSES it (`gated=False`, measured: the rebound name resolves to no proven
+   binding), so it is not a witness either. Nothing to pin on either spelling.
+   ⛔ `exec(code, globals())` is NOT part of this residual any more: the mention rule refuses it
+   (`globals` is named), measured — an earlier revision of this paragraph still called it a
+   certifying witness, and it was stale.
+   The same class covers a local `def` written in the arm and CALLED there
+   (`def _bg(): props["embedding"] = …; _bg()`): the body is not this arm's text, the call is a
+   callee the gate cannot read, and `_stop_arm_walk` prunes it for that reason. `_set(props, k,
+   vec)` belongs here too **when the key is not resolvable by the alias rule** (`k = "embed"
+   + "ding"`, a parameter): `_set(props, "embedding", vec)` and `k = "embedding"; _set(props, k,
+   vec)` ARE refused (the third-argument and alias rules, measured), and
+   `functools.partial(props.update, …)` is refused by the dynamic-callee rule. Resolving the
+   class needs defence 1's structural seam: `#13826`'s work, not another recogniser row here.
+   ⛔ THE SAME CLASS, ONE DOOR OVER (`#14001`, measured by the cycle-5 review): a namespace that
+   comes from a helper the writer CALLS — `ns = _namespace()` where `_namespace()` returns
+   `globals()` — names nothing in the writer's text, so the mention rule cannot see it and the
+   writer CERTIFIES while storing (`_namespace()`'s own body is a different function's source).
+   DISCLOSED AND UNPINNED on purpose: pinning it needs a module-level preamble in the synthetic
+   writer harness, and the honest statement is that nothing reds if it closes.
+2. **A store in the statements the STOP RUN FALLS THROUGH TO**, after a guard whose own arm is
+   clean — `if not gate("object"): props.pop("embedding", None)` followed by
+   `props.update({"embedding": vec})` certifies today (measured by the round-5 review; it is
+   pre-existing on `main`). The obvious repair — prove the fall-through too — was written,
+   measured, and WITHDRAWN: it refuses five REAL writers (`_upsert_document`,
+   `restore_graph`, `_event_raw_write_door`, `_ingest_corpus`, `session_indexer::main`) whose
+   trailing code legitimately carries the encode-guard's placeholder (`query_params = {…
+   "embedding": embedding}`) or an unreadable mapping (`props.update(_gated_labels_of(…))`).
+   Making it precise needs value flow (which local holds the placeholder on the stop path),
+   which is a change of its own — and an inert enforcer that refuses every real writer is the
+   worse error of the two. PINNED by `test_the_fallthrough_residual_is_PINNED_as_a_known_fail_open`.
+3. **A MAPPING THE ARM BUILDS AND HANDS ON** (`params = {**props, k: vec}; _write(params)`,
+   `_write({**props, k: vec} if f else props)`, or a rebuild behind `.copy()`). The store lands
+   in the mapping the write channel
+   receives, so no `Subscript` target exists and the recogniser abstains. ⛔ A rebuild SITE was
+   written, measured and WITHDRAWN (round-9 review): the positional version certified every
+   WRAPPED spelling while refusing honest fixtures — the same "partial rule claims coverage and
+   leaks" failure this issue is about. ⛔ THE WITHDRAWN RULE REFUSED `_write({**props, **extra})`
+   AND WAS RIGHT TO: that shape DOES place the vector whenever the caller's `extra` carries it
+   (measured by the review of `#14050`: with `extra={"embedding": VECTOR}` the vector is handed
+   to `_write`, and `props | extra` does it too), so it is not an honest fixture and the refusal
+   was not the rule's cost — the withdrawal rests on the wrapped-spelling leak alone. ⛔ THE
+   SHIPPED GATE STILL CERTIFIES IT (this channel is not proved), and it is therefore a KNOWN
+   FAIL-OPEN, not a control: it is PINNED with its caller argument as
+   `rebuilt-mapping-extra-unpack` / `-bitor` in `REBUILD_RESIDUAL_ROWS`, and the 13629 fixture
+   that called it an "honest control" is gone (it was neither honest nor an over-refusal). The
+   two spellings
+   the rule was written for — `_write({**props, k: vec})` and `_write(props | {k: vec})` — are
+   PINNED as known fail-opens
+   in `REBUILD_RESIDUAL_ROWS`, so closing them cannot happen silently and no later rule can
+   pass every pin while they stay open.
+   Pinned by `test_the_rebuild_residual_is_PINNED_as_a_known_fail_open`; closing it needs a
+   mapping-VALUE analysis (which expressions can evaluate to a mapping, in every position), not
+   another positional arm.
+4. **Dynamic-namespace writes — CLOSED for every spelling that NAMES one, which is what the
+   pinned rows measure; what is left is residual 5.** `globals()[…] = …` / `locals()[…] = …` /
+   `vars()[…] = …` (any index, constant or computed) and their mutator spellings
+   (`globals().update({…})`) make EVERY name the scope assigns unproven, and every name it
+   declares `global`/`nonlocal` — **in the writer's own statements AND one level down**, which is
+   where the round-10 review measured the hole (`class _C: globals()["k"] = "embedding"` runs at
+   definition time and was unreachable in the nested-scope walk). **Every assignment spelling is
+   the same write** (`#14001`, measured by the review of `#14050` at its merged head): `Assign`,
+   `AnnAssign` (`globals()["k"]: str = "embedding"`) and `AugAssign`, with the dynamic subscript
+   nested inside a `Tuple`/`List` target — an `AnnAssign` target reached the generic assignment
+   arm, where `_poison` understands names only, and the writer certified while storing. **And the
+   RECEIVER is not modelled at all** (`#14001`, measured by the reviews of this branch): every
+   attempt to model which expressions CARRY the namespace lost one spelling later —
+   `ns = globals(); ns["k"] = …` (the arm required a CALL), then `ns, *_r = globals(), 1, 2`, a
+   conditional value `globals() if f else {}`, `globals() or {}`, `[globals()][0]`,
+   `box = (ns,); box[0]["k"] = …`, `for ns in (globals(),)`, `match globals(): case ns:`, a
+   parameter default `ns=globals()`, and the FUNCTION alias `g = globals; g()["k"] = …`. So the
+   tool stops asking *which value is the namespace* and asks the only question it can answer:
+   **does the writer mention one at all** (`_is_dynamic_namespace_reference`, a
+   `globals`/`locals`/`vars` NAME anywhere, including the `builtins.globals` attribute form). If
+   it does, every name the scope declares `global`/`nonlocal` is unproven and the stop arm
+   refuses — a writer that merely READS a dynamic namespace is refused too, which is the
+   over-refusal the doctrine accepts and which costs nothing on the real population (pinned: no
+   declared entity writer mentions one). ⛔ AND EVERY NAME IS UNPROVEN, not only the declared ones:
+   a class or module body's `locals()` IS the real namespace — PEP 667 left that alone in every
+   version, `locals()` "will act the same as it does now for class and modules scopes" — so
+   `class _C: locals()["k"] = "embedding"` writes a REAL name that no `global`/`nonlocal`
+   declaration covers, and refusing only the declared names would have missed it. ⛔ The PEP 667
+   FAST-LOCAL case is a different, still-open residual: 3.13+ makes `frame.f_locals` a
+   write-through proxy, while `locals()` in an optimized scope returns an instantaneous SNAPSHOT,
+   so `locals()["k"] = …` inside a FUNCTION reaches nothing on 3.13 just as it does on 3.12 — that
+   spelling is residual 5's `frame-introspection` row, pinned as a known fail-open, and this rule
+   covers it only by over-refusal. Measured cost: zero (of 15,090 functions in this
+   repo, 8 mention a namespace and all 8 already refused).
+   The legal spellings of the mention are pinned as the `globals-*` / `namespace-*` rows in
+   `DEFEATED_RESOLVER_ROWS`: a `Name`, an `Attribute`, an import `alias`, a string-keyed
+   `__dict__`/`__builtins__` subscript, in any binding form, any scope depth.
+   ⛔ THE BOUNDARY, stated as a scope and not a completeness claim. Two entries; each names its pin,
+   or says plainly that it has none:
+     * residual 1 — an `exec(code)` whose STRING the gate cannot read. PINNED, as
+       `test_the_exec_string_residual_is_PINNED_as_a_known_fail_open` (an exec'd subscript/method
+       store on `props` certifies and LANDS, measured). The bare name-write spelling is not a leak
+       on any supported version, so it has nothing to pin — see residual 1 above.
+     * residual 5 — a name the scanner cannot READ. COMPOSED at runtime
+       (`builtins.__dict__["glob"+"als"]`) and reached by frame introspection
+       (`sys._getframe(0).f_globals`) are both PINNED, as the two rows of
+       `DYNAMIC_NAMESPACE_NAME_COMPOSITION` (`composed-string-key`, `frame-introspection`); a
+       helper that RETURNS a namespace (`ns = _namespace()`) is DISCLOSED AND UNPINNED — no test
+       reds if it closes, and a writer shaped that way still certifies (measured).
+   Everything OUTSIDE these rows is not claimed to refuse.
+
+5. **A DYNAMIC NAMESPACE THE WRITER NEVER NAMES.** Two spellings, measured by the cycle-4/cycle-5
+   reviews:
+   * a name COMPOSED at runtime (`builtins.__dict__["glob" + "als"]()`) or reached by FRAME
+     introspection (`sys._getframe(0).f_globals`) — PINNED, as the two rows of
+     `DYNAMIC_NAMESPACE_NAME_COMPOSITION`
+     (`test_the_composed_name_residual_is_PINNED_as_a_known_fail_open`);
+   * a helper that RETURNS one (`ns = _namespace()`, with `_namespace()` at module scope) —
+     DISCLOSED AND UNPINNED: the writer's own text names nothing, so the mention rule cannot see
+     it and the writer certifies while storing (measured). Pinning it needs a module-level
+     preamble in the synthetic writer harness; until then nothing reds if it closes, and this
+     line is the record that it is open.
+   Chasing string composition is the unbounded recogniser this issue exists to stop; the structural
+   seam (`#13826`) is the real answer for the helper case.
+
 THE REMOVAL ITSELF
 ==================
 Per label, batched (`--batch`, default 200), and IDEMPOTENT BY CONSTRUCTION:
@@ -156,8 +359,21 @@ journal IS mandatory: those rows are the transcript, and a rebuild that resurrec
 is the failure. Here a rebuild that re-derives a vector is the SEQUENCED re-write, and
 the write gate above is what keeps it from happening by accident.
 
-⚠️ **The graph-side `:Point` vector is NOT in scope** — the armed cutover and `#13330`
-own it, and `#13629`'s brief forbids touching it. The population is
+⚠️ **The graph-side `:Point` vector is IN `RETIRED` since `#13971`** — it joined
+`entity_vector_parity_census.RETIRED` once its record coverage became measurable from a
+fresh process. It is the
+largest reclaimable block left (37,158 stored vectors, ≈67 MB), the in-graph `:Point`
+HNSW index is RETIRED (`#13330`) so nothing reads the property, and `#5004`'s "a Point
+vector is RECORD TRUTH" is now the reason a graph copy that the record also holds is a
+redundant MIRROR — not a reason to keep it. ⛔ **BUT THE PLAN STILL REFUSES `:Point`**, and
+the refusal is the honest half: two declared writers must keep the copy because on their
+lanes it is the SOLE carrier (`sdk::_write_capture_turns` on every lane where the record
+cannot hold the turn; `projection::_rebuild_all_replay`, whose pass-1b restore runs only
+for ids the journal wrote no vector for). The census names them once coverage verifies, so
+that arm of the refusal is checkable rather than a shrug; the coverage arm names both
+counts instead. The tool's refusals are otherwise unchanged: it will not
+strip `:Point` unless the record's coverage for `point`/`operator` MEASURES true in this
+process. The population remains
 `entity_vector_parity_census.RETIRED` and nothing else.
 
 Usage::
@@ -325,6 +541,21 @@ FOLD_MODULE = "tortoise.projection.entities"
 FOLD_WRITERS: dict[str, tuple[str, ...]] = {
     "Object": ("_upsert_object",),
     "Subject": ("_upsert_subject",),
+    # ⛔ `:Point` IS DELIBERATELY ABSENT (#13971), and that is a RECORDED EXCEPTION, not an
+    # oversight. `_upsert_point_props` is the journal fold: its vector is the JOURNAL's own
+    # record truth (`#5004`), so it must restore what the journal holds or
+    # `derived == replay(journal)` goes false. Two shipped pins state the product decision:
+    # `record_vector.MIRROR_RETIRED_LABELS` must NOT contain `point`, and that set must equal
+    # the labels the folds stop writing
+    # (`tests/test_13610_graph_vector_copy.py::
+    # test_a_verified_label_whose_fold_still_writes_the_graph_keeps_the_fallback`). The
+    # consequence is stated in the tool's own refusal text rather than hidden: a
+    # `rebuild_all` re-materialises the journal's `:Point` vectors, so the strip is an
+    # operator action that has to be RE-RUN after a rebuild. TWO of the four declared
+    # `:Point` writers ask the gate (the SDK update door and `restore_graph`); the live
+    # capture and the pass-1b snapshot restore must NOT, because on their lanes the graph
+    # copy is the SOLE store — which is why the census REFUSES `:Point` once coverage
+    # verifies, naming both.
     "Event": ("_upsert_event", "_event_plain_merge"),
     # ⛔ NOT `_event_plain_merge`: it MERGEs `(s:Source {url:$id})` but every `embedding`
     # touch in it is on `e` (`clear_embedding(..., "e", ...)` and
@@ -475,7 +706,7 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
     (measured at `622e9935`). "No store" is judged ANYWHERE in the arm (`_own_walk`: live
     conditionals and `finally` included), not just unconditionally — on this arm an
     unplaceable store is evidence AGAINST the write-stop, so the fail-closed answer is to
-    refuse. What this still cannot see is residual 4's family: a store reached through a
+    refuse. What this still cannot see is residual 1's family: a store reached through a
     helper ARGUMENT (`_set(props, embedding)`), which no arm-level walk can attribute.
 
     ⛔ AND THE POSITIVE ASK'S `else` IS THAT SAME STOP ARM (`#13647`, measured at
@@ -542,7 +773,21 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
     A DYNAMIC form (``getattr(record_vector, "mirror_required")(…)``) is deliberately not
     accepted — it cannot be told apart from an accident, and refusing it costs a refactor
     rather than a strip.
+
+    ⛔ AND THE STOP ARM MUST BE PROVEN CLEAN, NOT MERELY UNRECOGNISED (`#14001`). Both stop-arm
+    reads below (`the negated branch`, and a positive ask's `else`) go through
+    `_stop_arm_places_the_property`, whose second stage refuses any key-bearing shape the gate
+    cannot ENUMERATE. That is the polarity inversion this issue asked for: before it, only the
+    store shapes this file models counted, so six different spellings certified the arm by
+    being unusual. See the CLOSED VOCABULARY block for the allow-list and for what it does not
+    cover.
     """
+    return _gate_decision(node, entity_types)[0]
+
+
+def _gate_decision(node, entity_types: tuple[str, ...]) -> tuple[bool, str]:
+    """``(answers, why)`` behind `_asks_the_gate` — the reason is what the refusal quotes."""
+
     wanted = set(entity_types)
     import ast
 
@@ -551,6 +796,7 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
     # relies on (see `_swallowed_from_outside`). Parent links are built once, not per `if`.
     parents = {child: parent for parent in ast.walk(node)
                for child in ast.iter_child_nodes(parent)}
+    verdict: str | None = None
     for sub in _reachable_ifs(node):
         if _statically_falsy(sub.test):
             continue                          # `if False:` / `if not True:` — dead
@@ -564,7 +810,27 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
         # encode-guard form `#13617` uses (`embedding = derived_embedding.encode(...)`).
         polarity = _gate_polarity(sub.test, wanted)
         if polarity == 0:
-            continue                          # masked: `… is False`, `bool(…)`, a lookup
+            # ⛔ A MASKED ASK IS UNPROVEN, NOT IGNORABLE (`#14001`, measured by the round-11
+            # review): `if not gate("object") is True:` ASKS the gate, and the old `continue`
+            # discarded it — so a LATER, decidable guard certified the writer while this arm
+            # stored on exactly the run a strip creates. Abstention must never read as clean,
+            # which is the whole issue; a masked shape is the abstention of the POLARITY
+            # reader. Measured cost: FOUR writer fixtures across the corpus carry a masked ask
+            # (one literal — `test_13629`'s `… or self.force_vectors` — and three generated by
+            # its masking loop) and every one is ALREADY refused; and every real writer's ask is
+            # ±1 (21 asks across 19 writers: 11 positive, 10 negated, zero masked), so this adds
+            # a refusal and cannot become an inert enforcer.
+            return False, ("the guard asks the write gate but its polarity cannot be decided "
+                           "(`not gate(…) is True`, `bool(gate(…))`, a lookup), so the stop "
+                           "arm it guards is unproven")
+        # ⛔ AND THE TEST ITSELF RUNS ON EVERY ARM (`#14001`, measured by the round-3 review):
+        # `if not gate("object") and props.update({"embedding": vec}): return None` stores the
+        # vector on the stop run AND on the mirror run, and only `sub.body`/`sub.orelse` were
+        # ever proved. A store in the TEST is therefore refused for BOTH polarities — it is not
+        # an arm, so no arm's proof can cover it.
+        places, why_not = _stop_arm_places_the_property([sub.test], node)
+        if places:
+            return False, why_not
         # ⛔ AN EXIT IS ONLY A WRITE-STOP IF IT DOES NOT *WRITE*. `if gate(l): return
         # self._write(ev)` RETURNS A WRITE on the mirror arm — that is a store, and under a
         # negated test it stores exactly when the gate said stop, i.e. the polarity
@@ -591,20 +857,35 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
         # the check cannot place is exactly the evidence that refuses the strip:
         # `anywhere=True` takes `_own_walk` (which descends live conditionals and `finally`)
         # rather than `_unconditional_walk`. This arm can only ever refuse MORE.
-        if polarity < 0 and any(_stores_embedding(statement, anywhere=True, scope=node)
-                                for statement in sub.body):
-            continue
+        if polarity < 0:
+            # ⛔ `#14001`: this arm is the STOP arm, so it must be PROVEN free of the
+            # property — not merely free of the shapes `_stores_embedding` recognises. The
+            # inverted-polarity verdict lives in `_stop_arm_places_the_property`, whose
+            # default on a shape it cannot read is STORES.
+            #
+            # ⛔ AND AN UNPROVEN STOP ARM IS **TERMINAL**, not one opinion among several
+            # (`#14001`, measured by the round-2 review): this walk used to `continue` to the
+            # next `if`, so a writer with TWO gate-asking guards was certified by whichever
+            # arm looked clean — and both arms run when the gate answers stop. Measured,
+            # `if not gate("object"): props |= {k: vec for k in _keys()}; return None` followed
+            # by `if not gate("object"): props.pop("embedding")` CERTIFIED while the writer
+            # stored the vector. The real folds already carry two gate asks
+            # (`_upsert_document`, `sdk::_ingest_corpus`), so the shape is not hypothetical.
+            places, why_not = _stop_arm_places_the_property(sub.body, node)
+            if places:
+                return False, why_not
         # ⛔ AND THE EXIT MUST ACTUALLY LEAVE. `_unconditional_exits` withholds a `raise`
         # that a `try` handler or a context manager can swallow — a swallowed raise is
         # not a write-stop, and counting it lifted `REFUSE_WRITE_STILL_EMITS` for a writer
         # that stored unconditionally (round-9 F1, measured at `1cc61230`: GATED).
+        certified: str | None = None
         if polarity < 0 and any(_is_write_stop_exit(statement)
                                 for statement in sub.body
                                 for statement in _unconditional_exits(
                                     statement,
                                     swallowable=_swallowed_from_outside(
                                         node, sub, parents))):
-            return True
+            certified = "the negated branch exits the writer before it stores"
         # ⛔ THE POLARITY DECIDES WHICH BODY IS A WRITE-STOP, and getting this wrong in
         # either direction is a defect that was measured:
         #   +1 (positive ask, `if gate(l): …`)   → the branch runs when the graph must
@@ -627,15 +908,24 @@ def _asks_the_gate(node, entity_types: tuple[str, ...]) -> bool:
         # `finally`) still places the vector, so the fail-closed answer is to refuse. This
         # can only ever refuse MORE — the stated posture of every rule in this function.
         # A `try`'s `orelse` is unrelated (`_reachable_ifs` yields `If` nodes only).
-        if polarity > 0 and any(_stores_embedding(statement, anywhere=True, scope=node)
-                                for statement in sub.orelse):
-            continue                         # the stop arm STORES — not a write-stop
+        if polarity > 0:
+            places, why_not = _stop_arm_places_the_property(sub.orelse, node)
+            if places:
+                return False, why_not        # the stop arm STORES — not a write-stop
         if polarity > 0 and any(_stores_embedding(statement, scope=node)
                                 for statement in sub.body):
-            return True                      # the mirror arm: writing here is correct
+            certified = "the guarded branch stores the vector"
         if polarity < 0 and any(_removes_embedding(statement) for statement in sub.body):
-            return True
-    return False
+            certified = "the negated branch removes the vector"
+        if certified:
+            # ⛔ CERTIFYING ONE `if` DOES NOT END THE QUESTION (`#14001`, measured by the
+            # round-2 review): the walk continues, because a LATER guard's stop arm may be
+            # unprovable and the terminal refusal in the arms above must win over it. The
+            # order of `_reachable_ifs` is not a contract, so a short-circuit here made the
+            # verdict depend on which guard the walk happened to reach first.
+            verdict = certified
+    return ((True, verdict) if verdict else
+            (False, "no reachable `if` asks the write gate about this label"))
 
 
 def _is_write_stop_exit(statement) -> bool:
@@ -4306,6 +4596,1560 @@ def _names_property_key(node, alias_keys: frozenset[str]) -> bool:
             or (isinstance(node, ast.Name) and node.id in alias_keys))
 
 
+# ── the stop arm's CLOSED VOCABULARY — the polarity inversion (#14001) ───────
+#
+# ⛔ READ THIS BEFORE ADDING A ROW TO ANY RECOGNISER ABOVE. Every other function in this
+# section answers "does this shape STORE the property?", and its answer on a shape it has
+# never seen is NO — which the gate reads as "the stop arm is clean", which is how six
+# issues (`#13864`, `#13910`, `#13915`, `#13920`, `#13936`, and the family they consolidated
+# into `#14001`) each added one recogniser row and opened the next hole: a false PASS on the
+# boolean that authorises deleting the only readable copy of a fingerprint.
+#
+# So the stop arm's verdict asks the OPPOSITE question, and its default is the safe one:
+#
+#     not "is there a store I recognise?"  →  "can I PROVE every key it can place is not
+#                                              the property?"
+#
+# The proof is a CLOSED VOCABULARY. `_stop_arm_key_values` enumerates the constant strings
+# an expression can evaluate to; an expression form is admitted only by matching one of the
+# arms below, and EVERYTHING ELSE ANSWERS ``None``, which the verdict treats as a store.
+# That is the whole change: no new spelling can certify itself by being unusual, because
+# being unusual is now the refusing answer.
+#
+# ⛔ THE TWO STAGES COMPOSE, AND THE SECOND CAN ONLY REFUSE MORE. `_stores_embedding`'s
+# recogniser still runs first, so every shape it already refuses stays refused (a fix may add
+# refusals, never acceptances). The closure is the second stage: it fires where the
+# recogniser ABSTAINED, and it converts abstention from a PASS into a REFUSAL.
+#
+# ⛔ STATED RESIDUAL, because a completeness claim narrower than the code is how the next lane
+# re-derives false confidence: this closure covers KEY-BEARING POSITIONS (a dict or mapping
+# key, a subscript's key, a comprehension's produced key, and the key operands of the
+# callees in `_KEY_BEARING_CALLEES`). A store reached through an UNRECOGNISED HELPER CALL
+# (`_set(props, k, vec)` where the helper is not named in that list) is still the residual
+# `_mutator_stores_the_vector` has always named — closing it needs the structural seam of
+# `#13826`, not another row here.
+
+#: The callee names whose arguments carry a MAPPING's keys. The include list is
+#: `_mutator_stores_the_vector`'s — asked there to RECOGNISE a store, and here for the
+#: opposite reason: once a callee CAN put a key on the receiver, its key operands must be
+#: PROVEN free of the property before the arm may certify.
+_KEY_BEARING_CALLEES = frozenset({
+    "update", "dict", "__setitem__", "__ior__", "__or__", "ior", "or_", "setdefault",
+    "setitem", "setattr", "fromkeys",
+    # ⛔ `__init__` ON A RECEIVER REPLACES ITS CONTENTS (`#14001`, measured by the round-5
+    # review): `props.__init__({"embedding": vec})` and `dict.__init__(props, {…})` place the
+    # vector in place and CERTIFIED, because the family above named every mutator except the
+    # one that rewrites the mapping. (The "a bare `dict(…)` is a copy" carve-out does not
+    # apply to a METHOD call on an existing mapping.)
+    "__init__",
+})
+
+
+#: The call names that RETURN the same elements they are given, so a closed resolution of the
+#: operand is a closed resolution of the call. Same family `_CONTAINER_CALLS` / the
+#: `reversed`/`sorted`/`iter` pass-throughs already name; this list is the KEYS view of it.
+_TRANSPARENT_SOURCE_CALLS = frozenset({
+    "list", "tuple", "set", "sorted", "reversed", "iter", "dict", "fromkeys",
+    "OrderedDict", "Counter", "defaultdict", "ChainMap", "MappingProxyType",
+})
+
+
+_DYNAMIC_NAMESPACE_NAMES = ("globals", "locals", "vars")
+
+
+def _is_dynamic_namespace_reference(node) -> bool:
+    """Does this node MENTION a dynamic namespace at all — `globals`, `builtins.globals`, `g()`?
+
+    ⛔ THE ONLY QUESTION THIS TOOL IS ENTITLED TO ASK HERE (`#14001`, measured by the reviews of
+    this branch). Every attempt to model *which expressions carry the namespace* was defeated one
+    spelling later, each time the same way: `ns = globals(); ns["k"] = …` was missed because the
+    arm required a CALL; then `ns, *_r = globals(), 1, 2`, `ns = globals() if f else {}`, `ns =
+    globals() or {}`, `ns = [globals()][0]`, `ns = globals(); box = (ns,); box[0]["k"] = …`,
+    `for ns in (globals(),)`, `match globals(): case ns:`, a parameter DEFAULT `ns=globals()`, and
+    the FUNCTION alias `g = globals; g()["k"] = …` each defeated the next cut. That is the issue's
+    own root: a recogniser of a Turing-complete language, extended one row at a time.
+
+    So the question is not "can I prove this value is the namespace" but "does this writer touch a
+    dynamic namespace at all". If it does, EVERY name the scope declares `global`/`nonlocal` is
+    unproven — the write could reach any of them — and the stop arm refuses. No spelling can
+    evade it, because the mention is what is checked, not the path from the mention to the write.
+    A writer that only READS `globals()` is refused too: that is the over-refusal the doctrine
+    accepts, and it costs nothing on the real population (no entity writer mentions one — pinned).
+
+    ⛔ THIS IS NOT A TOTALITY CLAIM. A namespace obtained WITHOUT the writer naming it — a helper
+    that returns one, a name composed at runtime, frame introspection — is outside it; see
+    residual 5 in the module docstring, which states which of those are pinned and which are not.
+    """
+    import ast
+
+    if isinstance(node, ast.Name) and node.id in _DYNAMIC_NAMESPACE_NAMES:
+        return True
+    # `builtins.globals()` / `import builtins as b; b.globals()` — the attribute spelling.
+    if isinstance(node, ast.Attribute) and node.attr in _DYNAMIC_NAMESPACE_NAMES:
+        return True
+    # `from builtins import globals as _g` — the IMPORT spelling names it without a Name node
+    # (`#14001`, measured by the cycle-4 review, which found `ast.alias` was never inspected).
+    if isinstance(node, ast.Import | ast.ImportFrom):
+        return any((alias.name.rsplit(".", 1)[-1] in _DYNAMIC_NAMESPACE_NAMES
+                    or alias.asname in _DYNAMIC_NAMESPACE_NAMES) for alias in node.names)
+    # `builtins.__dict__["globals"]()` / `__builtins__["globals"]()` — the string-key spelling,
+    # the same mention one indirection over (measured by the same review).
+    return (isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant)
+            and node.slice.value in _DYNAMIC_NAMESPACE_NAMES)
+
+
+def _is_namespace_source(expr) -> bool:
+    """Is this expression the module/scope namespace itself — `globals()`, `locals()`, `vars()`?"""
+    import ast
+
+    return isinstance(expr, ast.Call) and _callee_name(expr) in _DYNAMIC_NAMESPACE_NAMES
+
+
+def _dynamic_namespace_mutation(call) -> bool:
+    """Is this CALL a write into a dynamic namespace — `globals().update({…})`?
+
+    ⛔ THE MUTATOR SPELLING IS THE SUBSCRIPT SPELLING ONE VERB OVER (`#14001`, measured by the
+    round-8 review): `globals().update({"k": "embedding"})` rebinds a module name, and an arm
+    that only recognised `globals()[k] = …` certified it. The receiver must be a CALL to the
+    namespace function here; a NAME that holds the namespace is covered by the MENTION rule in
+    `_string_bindings`, not by this predicate, so `props.update(…)` stays untouched.
+    """
+    import ast
+
+    func = call.func
+    receiver = func.value if isinstance(func, ast.Attribute) else None
+    if _is_namespace_source(receiver):
+        return True
+    # `dict.__setitem__(globals(), …)` / `dict.update(globals(), …)` — the unbound method form.
+    if (isinstance(func, ast.Attribute) and getattr(func.value, "id", None) == "dict"
+            and func.attr in ("__setitem__", "update") and call.args
+            and _is_namespace_source(call.args[0])):
+        return True
+    if isinstance(func, ast.Name) and func.id in ("setattr",) and call.args:
+        return _is_namespace_source(call.args[0])
+    return False
+
+
+def _dynamic_namespace_write(target) -> bool:
+    """Is this subscript target a write into a DYNAMIC namespace — `globals()[k] = …`?
+
+    ⛔ THAT WRITE REBINDS A NAME THE BINDING WALK BELIEVES IT PROVED (`#14001`, measured by the
+    round-5 review): `global _gk; _gk = "x"; globals()["_gk"] = "embedding"` left `_gk` bound to
+    the SAFE set, and `props[_gk] = vec` then certified a stop arm that stored. The key is a
+    constant, so no key-shape rule can see it and the name is not an assignment target.
+
+    ⛔ AND **ANY** INDEX, not just a constant one (`#14001`, round-7 review): a COMPUTED name is
+    not readable at all, so the write could rebind any declared name — exactly as unproven as
+    the constant spelling, and refusing it costs a refusal rather than a strip.
+    """
+    import ast
+
+    if not isinstance(target, ast.Subscript):
+        return False
+    value = target.value
+    return _is_namespace_source(value)
+
+
+def _dynamic_namespace_target(target) -> bool:
+    """Does this assignment TARGET write into a dynamic namespace, however deeply nested?
+
+    ⛔ `globals()["k"], _z = …` IS THE SAME WRITE INSIDE A TUPLE TARGET (`#14001`, measured by
+    the review of `#14050` at its merged head): the subscript is one element of a `Tuple`/
+    `List` target, which the direct-subscript test never looked inside.
+    """
+    import ast
+
+    if _dynamic_namespace_write(target):
+        return True
+    if isinstance(target, ast.Starred):
+        return _dynamic_namespace_target(target.value)
+    if isinstance(target, ast.Tuple | ast.List):
+        return any(_dynamic_namespace_target(element) for element in target.elts)
+    return False
+
+
+def _assigns_into_dynamic_namespace(node) -> bool:
+    """Does this assignment rebind a dynamic-namespace name — `Assign`, `AnnAssign` or `AugAssign`?
+
+    ⛔ THE SPELLINGS ARE ONE WRITE (`#14001`, measured by the review of `#14050` at its merged
+    head): `globals()["gk"]: str = "embedding"` is an `ast.AnnAssign`, which fell to the generic
+    `Assign | AnnAssign` arm where `_poison` understands `Name`/`Starred`/`Tuple`/`List`
+    targets only — so nothing was poisoned and the writer certified while storing.
+    """
+    import ast
+
+    if isinstance(node, ast.Assign):
+        targets = node.targets
+    elif isinstance(node, ast.AnnAssign | ast.AugAssign):
+        targets = [node.target]
+    else:
+        return False
+    return any(_dynamic_namespace_target(target) for target in targets)
+
+
+def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
+    """``name -> every constant string it can hold`` in this scope; ``None`` is "cannot tell".
+
+    The positive half of `_property_alias_names`: that function collects only the names bound
+    to the PROPERTY (so a name bound to anything else is simply absent, and absence reads as
+    "not the property"), while the closure needs the opposite default — a name it cannot
+    place answers ``None``, i.e. *possibly* the property. Same walk, opposite polarity.
+
+    ⛔ A NAME WITH **ANY OTHER BINDING** IS UNPROVEN, NOT "WHATEVER THE PLAIN ASSIGN SAID"
+    (measured by the review of this branch: `k = "embed"; k += "ding"`, `k = "x"; for k in
+    ["embedding"]`, `if (k := "embedding")` and `with … as k` all CERTIFIED a stop arm that
+    stored the vector). Collecting only ``Assign``/``AnnAssign`` left the stale, SAFE set in
+    the map while a later binding replaced it at runtime — so the answer described a value the
+    name no longer held. Every other binding form therefore POISONS the name to ``None``:
+    `AugAssign`, `for`/`async for`, `with`/`async with`, `NamedExpr`, `except … as`,
+    comprehension targets, and `del`. A parameter, a module-level constant or anything else
+    absent from the map is unproven for the same reason.
+
+    Narrowed to what makes the answer TRUE rather than mere: a plain ``name = <expr>``, and a
+    flat unpack whose value is a sequence of the same length. A name this walk cannot pair
+    (a `Starred` target, a nested target) is left ABSENT — so `_stop_arm_key_values` answers
+    ``None`` for it and the arm refuses. That is the fail-closed direction: absent data must
+    never read as clean.
+    """
+    import ast
+
+    if scope is None:
+        return {}
+    nodes = ([leaf for statement in getattr(scope, "body", ())
+              for leaf in _own_walk(statement)]
+             if isinstance(scope, ast.FunctionDef | ast.AsyncFunctionDef)
+             else list(_own_walk(scope)))
+    # the unfiltered view, for the BINDING question only (nested scopes included)
+    # ⛔ A LIST, NOT `ast.walk`'s GENERATOR: the alias pass below re-iterates it (and its own
+    # fixpoint re-scans), so a generator would be exhausted before the nested walk ran —
+    # measured while writing this: the class-body rows silently certified.
+    whole = list(ast.walk(scope))
+    # ⛔ EVERY OTHER BINDING FORM POISONS THE NAME — see the docstring. A name that is
+    # rebound anywhere in the writer is `None` (unproven), whatever a plain assign also said.
+    poisoned: set[str] = set()
+    # names this scope declares `global`/`nonlocal` — the reachable targets of a dynamic write
+    _scope_declarations: set[str] = {
+        name for statement in (getattr(scope, "body", ()) or ())
+        for leaf in ast.walk(statement)
+        if isinstance(leaf, ast.Nonlocal | ast.Global) for name in leaf.names}
+
+    # ⛔ A WRITER THAT MENTIONS A DYNAMIC NAMESPACE AT ALL CANNOT PROVE ANY DECLARED NAME
+    # (`#14001`, measured by the reviews of this branch — see `_is_dynamic_namespace_reference`):
+    # `ns = globals(); ns["gk"] = "embedding"`, a chain, a tuple target, a conditional value, a
+    # `for`/`match` binding, a parameter default and the FUNCTION alias `g = globals; g()[…]` each
+    # defeated a receiver-shape model one spelling later. The mention is the evidence; every name
+    # the scope declares `global`/`nonlocal` could be what the write rebinds, so all are unproven.
+    # ⛔ THE MENTION SETTLES THE SCOPE BY ITSELF — no blanket scope-declaration poison belongs
+    # here. The early `{name: None …}` return below covers EVERY name, so one at this point is
+    # dead: nothing reads `poisoned` once `_namespace_mentioned` is true, and a mutant deleting it
+    # reds no row (measured — this is the same inert-arm shape the `_poison` arm was deleted for, so
+    # it is deleted here too rather than annotated as a mechanism it is not). ⛔ IF THAT RETURN IS
+    # EVER NARROWED, the declarations must be re-poisoned HERE: an exec'd or `globals()`-routed write
+    # can only reach a name the scope declares `global`/`nonlocal`, which is why the four narrow arms
+    # below still carry their own declaration poison.
+    _namespace_mentioned = any(_is_dynamic_namespace_reference(node) for node in whole)
+
+    # ⛔ AND A PARAMETER IS A BINDING THAT HAS **ALREADY** HAPPENED (`#14001`, measured by the
+    # round-2 review): `def w(props, ev, key="x"): … props[key] = vec … key = "y"` resolved
+    # `key` to the assigned value, which the store ran BEFORE. Seed the poison set with every
+    # argument name, of every kind.
+    arguments = getattr(scope, "args", None)
+    for group in ("posonlyargs", "args", "kwonlyargs", "vararg", "kwarg"):
+        value = getattr(arguments, group, None)
+        if value is None:
+            continue
+        for argument in (value if isinstance(value, list) else [value]):
+            if getattr(argument, "arg", None):
+                poisoned.add(argument.arg)
+
+    def _poison(target) -> None:
+        import ast as _ast
+
+        if isinstance(target, _ast.Starred):
+            _poison(target.value)
+        elif isinstance(target, _ast.Name):
+            poisoned.add(target.id)
+        elif isinstance(target, _ast.Tuple | _ast.List):
+            for element in target.elts:
+                _poison(element)
+        # ☠️ NO `_dynamic_namespace_write` ARM HERE, deliberately (`#14001`, measured by the
+        # rebase review of this branch): it looks like the natural home — "teach the poison
+        # function once and every binding form is closed" — but it CANNOT change a verdict.
+        # The MENTION rule above fires first and `_namespace_mentioned` short-circuits to
+        # `{name: None for name in assigned}` before `poisoned` is ever read, and every node
+        # this arm could match (`X()[…]` with `X` = `globals`/`locals`/`vars`) necessarily puts
+        # the `ast.Name`/`ast.Attribute` that the mention rule matches in the same tree. A
+        # mutant deleting the arm reds no row. It also cannot be written as `|=` here at all:
+        # the augmented assignment would rebind `poisoned` as a LOCAL of this nested function
+        # (`UnboundLocalError` on the first `poisoned.add`), and `.update(…)` re-adds the
+        # untyped-receiver residue row #14058 removed. The LIVE spelling is the mention rule;
+        # the narrow per-spelling arms below are kept only as that rule's fallback.
+
+    for sub in nodes:
+        if isinstance(sub, ast.AugAssign | ast.For | ast.AsyncFor | ast.comprehension):
+            _poison(sub.target)
+        elif isinstance(sub, ast.With | ast.AsyncWith):
+            for item in sub.items:
+                if item.optional_vars is not None:
+                    _poison(item.optional_vars)
+        elif isinstance(sub, ast.NamedExpr):
+            _poison(sub.target)
+        elif isinstance(sub, ast.ExceptHandler) and sub.name:
+            poisoned.add(sub.name)
+        elif isinstance(sub, ast.Delete):
+            for target in sub.targets:
+                _poison(target)
+        elif isinstance(sub, ast.MatchAs | ast.MatchStar):
+            # ⛔ A `match` CAPTURE IS AN ASSIGNMENT (`#14001`, measured by the round-2 review):
+            # `case {"kk": k}` binds `k`, and the pattern vocabulary is not the statement one.
+            if getattr(sub, "name", None):
+                poisoned.add(sub.name)
+            if getattr(sub, "rest", None):
+                poisoned.add(sub.rest)
+        elif isinstance(sub, ast.MatchMapping) and getattr(sub, "rest", None):
+            poisoned.add(sub.rest)
+        elif _assigns_into_dynamic_namespace(sub):
+            # ⛔ `globals()[<name>] = …` REBINDS A NAME THIS WALK BELIEVES IT PROVED (`#14001`,
+            # measured by the round-5 review): the store's VALUE is a constant, so the
+            # Subscript arm above is not even a key-bearing site, and the poisoned-name set
+            # never heard about it. The dynamic name is not statically readable, so the write
+            # poisons EVERY name the scope declares `global` or `nonlocal` — the only names such
+            # a write can reach from here. `Assign`, `AnnAssign` and `AugAssign`, with the
+            # subscript nested in a tuple/list target, are ONE write (review of `#14050`).
+            #
+            # ⚠️ THE MENTION RULE ABOVE REFUSES FIRST — this arm is its narrow FALLBACK, not the
+            # mechanism (`#14001`, measured by the rebase review of this branch): every
+            # `X()[…]` write requires `X` to be the `ast.Name`/`ast.Attribute` the mention rule
+            # matches, so `_namespace_mentioned` is already `True` wherever this could fire, and
+            # the early `{name: None …}` return settles the scope. Deleting this arm (and the
+            # nested one below) reds no row; it is kept because it states the write in
+            # vocabulary that does not depend on that inference, and it is what the
+            # `globals-*` rows name.
+            #
+            # ⛔ `|=`, NOT `poisoned.update(…)` (`#14001`, measured 2026-11-20): both are the
+            # same `set` operation, but the `surface-guard` job's privatisation sweep
+            # (`tools/sdk_privatise.py --check`) counts every `<ordinary-word receiver>.update`
+            # on the tree as UNTYPED residue it cannot type, and that residue SET is PINNED —
+            # these arms moved it off the pin (11821 → 11829 with two concurrent-merge rows),
+            # reddening the job for a receiver that is provably a `set[str]` local while the
+            # typed-reference count it exists for stayed 0. The augmented assignment is the same
+            # store and adds no row that has to be declared.
+            poisoned |= _scope_declarations
+        elif isinstance(sub, ast.Call) and _dynamic_namespace_mutation(sub):
+            # ⛔ `globals().update({…})` IS THE SAME WRITE ONE SPELLING OVER (`#14001`,
+            # measured by the round-8 review): the mutator form rebinds a module name exactly
+            # as the subscript form does, and the subscript-only arm certified it.
+            poisoned |= _scope_declarations    # `|=`: see the residue note above
+    # ⛔ AND SO IS A BINDING IN A **NESTED SCOPE** (`#14001`, measured by the round-2 review):
+    # `_own_walk` prunes an inner `def`/`lambda`/`class`, so a `nonlocal k; k = "embedding"`
+    # there was invisible while the outer stop arm used `k`. Every name assigned ANYWHERE in
+    # the writer is poisoned — an inner scope's plain assign included. A nested rebinding
+    # that in fact cannot reach the outer name costs a refusal (fail-closed) and never a
+    # strip.
+    own = {id(node) for node in nodes}
+    for sub in whole:
+        if id(sub) in own:
+            # the SCOPE's OWN statements are handled above, where a star-headed unpack is
+            # paired by Python's own rule; poisoning them here would refuse `*_r, x = 1, key, 2`
+            # (which binds `x = 2` and stores nothing).
+            continue
+        # ⛔ EVERY BINDING FORM, ONE LEVEL DOWN — including a `:=` inside a nested `def`'s
+        # DEFAULT, which runs at definition time and binds THIS scope (`#14001`, measured by
+        # the round-4 review: `def _bg(_d=(k := "embedding")): pass` then `props[k] = vec`
+        # CERTIFIED). An inner binding that cannot actually reach the outer name only costs a
+        # refusal.
+        #
+        # ⛔ AND A DYNAMIC-NAMESPACE WRITE IS TESTED **FIRST** (`#14001`, measured by the
+        # round-10 review): `class _C: globals()["k"] = "embedding"` inside the arm runs at
+        # definition time, and its `Subscript` target poisoned nothing because the generic
+        # `Assign` arm below caught it first and `_poison` only understands Name/Starred/Tuple/
+        # List targets — the branch written for it was unreachable.
+        if _assigns_into_dynamic_namespace(sub):
+            # the narrow FALLBACK to the mention rule — see the own-scope arm's note; `|=`
+            # because `.update(…)` re-adds the untyped-receiver residue row (#14058).
+            poisoned |= _scope_declarations
+            continue
+        if isinstance(sub, ast.Assign | ast.AnnAssign):
+            targets = sub.targets if isinstance(sub, ast.Assign) else [sub.target]
+            for target in targets:
+                _poison(target)
+        elif isinstance(sub, ast.AugAssign | ast.For | ast.AsyncFor | ast.comprehension):
+            _poison(sub.target)
+        elif isinstance(sub, ast.With | ast.AsyncWith):
+            for item in sub.items:
+                if item.optional_vars is not None:
+                    _poison(item.optional_vars)
+        elif isinstance(sub, ast.NamedExpr):
+            _poison(sub.target)
+        elif isinstance(sub, ast.ExceptHandler) and sub.name:
+            poisoned.add(sub.name)
+        elif isinstance(sub, ast.Delete):
+            for target in sub.targets:
+                _poison(target)
+        elif isinstance(sub, ast.MatchAs | ast.MatchStar):
+            if getattr(sub, "name", None):
+                poisoned.add(sub.name)
+            if getattr(sub, "rest", None):
+                poisoned.add(sub.rest)
+        elif isinstance(sub, ast.MatchMapping) and getattr(sub, "rest", None):
+            poisoned.add(sub.rest)
+        # ☠️ NO `Assign` + `_dynamic_namespace_write` ARM HERE, deliberately (`#14001`, measured
+        # 2026-11-20): every `Assign` that reaches this point was already consumed ABOVE — the
+        # dynamic-namespace block `continue`s, and the generic `ast.Assign | ast.AnnAssign` arm
+        # `_poison`s the rest — so the arm that used to sit here could not run, and it only cost
+        # a residue row the privatisation sweep had to declare. Do not re-add it; the LIVE
+        # spelling is the block above, pinned by `globals-subscript-in-class-body`.
+        elif isinstance(sub, ast.Call) and _dynamic_namespace_mutation(sub):
+            # ⛔ `globals().update({…})` IS THE SAME WRITE ONE SPELLING OVER (`#14001`,
+            # measured by the round-8 review): the mutator form rebinds a module name exactly
+            # as the subscript form does, and the subscript-only arm certified it.
+            poisoned |= _scope_declarations    # `|=`: see the residue note in the own-scope arm
+        elif isinstance(sub, ast.Nonlocal | ast.Global):
+            # ⛔ `set(...)` IS REQUIRED, not decoration: `ast.Global.names` /
+            # `ast.Nonlocal.names` are `list[str]`, and `set |= list` raises `TypeError`
+            # (`set.__ior__` takes a set, unlike `.update`, which takes any iterable).
+            poisoned |= set(sub.names)
+    assigned: dict[str, list] = {}
+    for sub in nodes:
+        if not isinstance(sub, ast.Assign | ast.AnnAssign):
+            continue
+        targets = sub.targets if isinstance(sub, ast.Assign) else [sub.target]
+        value = sub.value
+        if value is None:
+            continue
+        if (len(targets) == 1 and isinstance(targets[0], ast.Tuple | ast.List)
+                and isinstance(value, ast.Tuple | ast.List)):
+            # ⛔ PYTHON'S OWN PAIRING RULE, not positional zip (`#13788` measured that the
+            # naive version mis-pairs as soon as a `Starred` target is present): the elements
+            # BEFORE the star take the LEADING values, the elements AFTER it take the
+            # TRAILING ones, and the star absorbs the middle. A target this walk cannot pair
+            # is left ABSENT, which `_stop_arm_key_values` reads as UNPROVEN.
+            elements = list(targets[0].elts)
+            values = list(value.elts)
+            stars = [position for position, element in enumerate(elements)
+                     if isinstance(element, ast.Starred)]
+            pairs: list = []
+            if any(not isinstance(element, ast.Name | ast.Starred) for element in elements):
+                pairs = []                  # a nested or subscript target: unprovable
+            elif len(stars) > 1:
+                pairs = []
+            elif stars:
+                head, tail = elements[:stars[0]], elements[stars[0] + 1:]
+                if len(values) >= len(head) + len(tail):
+                    pairs = list(zip(head, values[:len(head)], strict=False))
+                    if tail:
+                        pairs += list(zip(tail, values[len(values) - len(tail):],
+                                          strict=False))
+            elif len(elements) == len(values):
+                pairs = list(zip(elements, values, strict=False))
+            for element, element_value in pairs:
+                if isinstance(element, ast.Name):
+                    assigned.setdefault(element.id, []).append(element_value)
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                assigned.setdefault(target.id, []).append(value)
+    # ⛔ A FIXPOINT, not one pass, so `k = a` after `a = "embedding"` resolves (the alias walk
+    # has the same closure problem and `#13788` F19 measured the one-pass version missing it).
+    # EVERY value bound to a name is UNIONED, and a conditional rebinding is therefore answered
+    # by all of its arms — an over-approximation, which on this arm can only refuse more.
+    bindings: dict[str, frozenset[str] | None] = {}
+    if _namespace_mentioned:
+        # ⛔ EVERY NAME, NOT ONLY THE `global`/`nonlocal` DECLARED ONES (`#14001`): a class or
+        # module body's `locals()` IS the real namespace in EVERY version (PEP 667 keeps that:
+        # `locals()` "will act the same as it does now for class and modules scopes"), so
+        # `class _C: locals()["k"] = "embedding"` binds a REAL name that no `global`/`nonlocal`
+        # declaration covers. ⛔ NOT because of PEP 667's fast-local write-through — that is
+        # `frame.f_locals`, and `locals()` in an optimized scope returns an instantaneous
+        # SNAPSHOT, so `locals()["k"] = …` inside a FUNCTION reaches nothing on 3.13 either; that
+        # spelling is residual 5's `frame-introspection` row, pinned as a known fail-open.
+        # Measured cost on the real population: zero (only 8 of 15,090 functions in this
+        # repo mention a dynamic namespace at all, and every one of them already refuses).
+        # ⛔ THIS RETURN IS THE MECHANISM, and it is what every `namespace-alias-*` row attributes
+        # to. Narrowing it re-opens the blanket case and must re-add the scope-declaration poison
+        # at the mention above; a mutant that deletes THAT poison reds no row today (measured).
+        return {name: None for name in assigned}
+    for _round in range(8):
+        changed = False
+        for name, values in assigned.items():
+            if name in poisoned:
+                if bindings.get(name, "—absent—") is not None:
+                    bindings[name] = None
+                    changed = True
+                continue
+            resolved: set[str] = set()
+            unknown = False
+            for value in values:
+                answer = _stop_arm_key_values(value, bindings)
+                if answer is None:
+                    unknown = True
+                    break
+                resolved |= answer
+            answer = None if unknown else frozenset(resolved)
+            if bindings.get(name, "—absent—") != answer:
+                bindings[name] = answer
+                changed = True
+        if not changed:
+            break
+    return bindings
+
+
+def _stop_arm_key_values(node, bindings, _depth: int = 0):
+    """The constant STRING values this expression can evaluate to — or ``None`` (UNPROVEN).
+
+    ⛔ THE CLOSED VOCABULARY OF `#14001`'s DEFENCE 2, and the only function in this tool whose
+    answer decides whether an UNRECOGNISED shape passes. Its admitted forms are:
+
+    * a string ``Constant``;
+    * a ``Name`` whose EVERY binding is a plain ``name = <expr>`` this function can resolve
+      (`_string_bindings`) — any other binding form poisons it to ``None``;
+    * a transparent CONDITIONAL wrapper — every branch must resolve, through the one
+      definition of that family (`_conditional_branches`);
+    * a ``Starred`` of one of these;
+    * a CONSTANT index into a sequence this module resolves (`_sequence_options`), because that
+      is the same element the store names;
+    * a ZERO-ARGUMENT method of ``str`` applied to a resolved receiver — the one CALL form
+      admitted, and only because its answer is EVALUATED rather than assumed.
+
+    ⛔ EVERYTHING ELSE ANSWERS ``None``: an f-string, a `%`/`str.format`, an attribute, any
+    other call, a comprehension value, a name bound outside the writer. That is not an
+    omission list to be extended one issue at a time — ``None`` is the REFUSING answer, so a
+    shape nobody modelled is refused until someone proves it, which is the inversion this
+    issue asked for.
+
+    ⛔ THE ANSWER IS THE SET OF **STRING** VALUES the expression can produce, not "the exact
+    value": a non-string constant, and the non-``str`` result of an evaluated method, collapse
+    to a sentinel that is provably not the property (`props[1] = …`, `props[k.encode()] = …
+    place nothing this gate removes), and two different keys can share one string.
+    """
+    import ast
+
+    if _depth > 8:                          # a wrapper stack is finite in real code; bound it
+        return None
+    branches = _conditional_branches(node)
+    if len(branches) > 1 or branches[0] is not node:
+        # ⛔ EVERY BRANCH MUST RESOLVE (`#14001`): the old union-of-readable-branches policy
+        # (`_comprehension_source_yields`) is what let a selector over `reversed(...)` certify.
+        resolved: set[str] = set()
+        for branch in branches:
+            answer = _stop_arm_key_values(branch, bindings, _depth + 1)
+            if answer is None:
+                return None
+            resolved |= answer
+        return frozenset(resolved)
+    if isinstance(node, ast.Starred):
+        return _stop_arm_key_values(node.value, bindings, _depth + 1)
+    if isinstance(node, ast.Constant):
+        return frozenset({node.value}) if isinstance(node.value, str) else frozenset()
+    if isinstance(node, ast.Name):
+        return bindings.get(node.id)        # absent ⇒ None ⇒ unproven ⇒ the arm refuses
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+            and not node.args and not node.keywords:
+        # ⛔ A ZERO-ARGUMENT `str` METHOD IS **EVALUABLE**, so it is PROVEN rather than
+        # assumed: apply the method to every value the receiver can hold. This is the one
+        # call form the vocabulary admits, and it admits it because the answer is EXACT
+        # (`"embedding".upper()` is `"EMBEDDING"`, not a guess) — a transforming
+        # comprehension (`[x.upper() for x in ["embedding"]]`) is otherwise unreadable and
+        # would have to be refused. Only a real, non-dunder method of `str` qualifies, and
+        # only with the receiver's values enumerated: anything else is `None` (refuse).
+        receiver = _stop_arm_key_values(node.func.value, bindings, _depth + 1)
+        method = getattr(str, node.func.attr, None)
+        if receiver is None or not node.func.attr.isidentifier() \
+                or node.func.attr.startswith("__") or not callable(method):
+            return None
+        evaluated: set[str] = set()
+        for value in receiver:
+            try:
+                produced = method(value)
+            except Exception:               # a method that refuses this value proves nothing
+                return None
+            evaluated.add(produced if isinstance(produced, str) else "")
+        return frozenset(evaluated)
+    if isinstance(node, ast.Subscript):
+        index = _constant_index(node.slice)
+        if index is None:
+            return None
+        return _stop_arm_indexed_key_values(node.value, index, bindings, _depth + 1)
+    return None
+
+
+def _stop_arm_indexed_key_values(container, index: int, bindings, _depth: int = 0):
+    """The strings a CONSTANT index into `container` can select — ``None`` when unprovable.
+
+    The same element question `_const_index_candidates` answers for the store rules, asked
+    here to PROVE an absence: `[['embedding'][0]]` is the row `#13910` measured certified, and
+    it resolves through this arm because the element it selects IS the property.
+    """
+    import ast
+
+    options = _sequence_options(container)
+    if options is None:
+        return None
+    resolved: set[str] = set()
+    for option in options:
+        if index >= len(option) or index < -len(option):
+            return None                     # an index this option does not have: unproven
+        element = option[index]
+        if isinstance(element, ast.Starred):
+            return None                     # a spliced element moves every later position
+        answer = _stop_arm_key_values(element, bindings, _depth + 1)
+        if answer is None:
+            return None
+        resolved |= answer
+    return frozenset(resolved)
+
+
+def _pairs_are_proven(pairs) -> bool:
+    """Is this pairs list a PROOF — every pair's key set resolved?
+
+    ⛔ A LIST IS NOT A PROOF (`#14001`, measured by the round-10 review):
+    `_stop_arm_mapping_pairs` returns a NON-``None`` list carrying ``keys=None`` for a mapping it
+    only half-read (`dict(zip(_keys(), [1]))` -> ``[(None, [1])]``), so a guard written as
+    ``mapping_pairs(...) is None`` does not fire — and the recogniser then DROPS the unreadable
+    operand and answers the remainder. `{**dict(zip(_keys(), [1]))}` therefore answered
+    ``frozenset()`` ("proven clean") while it iterates `_keys()`, and the identical store WITHOUT
+    the `{**}` wrapper was refused. The wrapper spelling leaked through it, and the four
+    `wrapper-*` rows in `DEFEATED_RESOLVER_ROWS` are the pinned witnesses.
+    """
+    return pairs is not None and all(keys is not None for keys, _value in pairs)
+
+
+def _stop_arm_source_forms(source, bindings, _depth: int = 0):
+    """What ONE iteration of a clause over `source` yields — in PROOF polarity.
+
+    ⛔ `_comprehension_source_yields` IS A **RECOGNISER** AND ITS POLICY IS WRONG HERE
+    (`#14001`, measured by the review of this branch). Its conditional arms UNION the readable
+    branches and let an unreadable one "contribute nothing", which is the right shape for
+    "did I find a store?" and exactly the fail-OPEN shape for "can I prove there is none":
+    with `d = {"embedding": 1}`, `{k: vec for k in (["a"] if not _f() else d)}` CERTIFIED
+    because the readable branch supplied the proof for the branch that stores.
+
+    So the conditional family (`x if c else y`, `a or b`, `(p := x)`) and the `|` merge are
+    resolved HERE under the opposite rule — **EVERY** branch must resolve, or the answer is
+    ``None`` — and any conditional/`|` that survives deeper in the tree is refused rather than
+    handed to the dropping resolver. This wrapper is the one place the proof polarity is
+    applied to a SOURCE; the two consumers (`_stop_arm_yielded_key_values` and
+    `_stop_arm_pairs_key_values`) both go through it.
+    """
+    import ast
+
+    if _depth > 8:
+        return None
+    branches = _conditional_branches(source)
+    if len(branches) > 1 or branches[0] is not source:
+        out: list = []
+        for branch in branches:
+            forms = _stop_arm_source_forms(branch, bindings, _depth + 1)
+            if forms is None:
+                return None
+            out.extend(forms)
+        return out
+    if isinstance(source, ast.BinOp) and isinstance(source.op, ast.BitOr):
+        left = _stop_arm_source_forms(source.left, bindings, _depth + 1)
+        right = _stop_arm_source_forms(source.right, bindings, _depth + 1)
+        if left is None or right is None:
+            return None
+        return list(left) + list(right)
+    for node in ast.walk(source):
+        if node is not source and (
+                isinstance(node, ast.IfExp | ast.BoolOp | ast.NamedExpr) or (
+                    isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr))):
+            # a conditional/merge the strict arms above did not resolve: the resolver would
+            # DROP its unreadable branch, so it is not a proof
+            return None
+        if isinstance(node, ast.Call) and _callee_name(node) in (
+                _TRANSPARENT_SOURCE_CALLS | set(_MAPPING_CONSTRUCTORS)) \
+                and (len(node.args) + len(node.keywords) > 1
+                     or any(keyword.arg is None for keyword in node.keywords)) \
+                and not _pairs_are_proven(
+                    _stop_arm_mapping_pairs(node, bindings, _depth + 1)):
+            # ⛔ A CONSTRUCTOR WHOSE OPERAND SET IS ONLY PARTIALLY READABLE IS NOT A PROOF
+            # (`#14001`, measured by the round-7 review). `dict({"x": 1}, **d)` is
+            # `{"x": 1, **d}`, and the RECOGNISER drops an operand it cannot read — so
+            # `props |= {k: vec for k in dict({"x": 1}, **d)}` answered "keys = {'x'}" and
+            # CERTIFIED while `d = {"embedding": vec}` placed the vector. 36 spellings in that
+            # family certified. Everything the tool models is resolved from ONE operand, so a
+            # multi-operand or keyword-bearing constructor is simply unproven here; the MERGE
+            # seam has its own, more precise arm for `defaultdict(factory, mapping)`.
+            return None
+        if isinstance(node, ast.Dict) and any(key is None for key in node.keys) \
+                and not _pairs_are_proven(
+                    _stop_arm_mapping_pairs(node, bindings, _depth + 1)):
+            # ⛔ A `{**d}` OPERAND THE MAPPING RESOLVER CANNOT READ IS **NOT** "NO KEYS"
+            # (`#14001`, measured by the review of this branch): iterating such a dict yields
+            # `d`'s keys, and `_comprehension_source_yields` dropped the unreadable operand
+            # and answered "empty", certifying `props |= {**d}` / `props |= ({**d} | {})` on a
+            # `d` that holds the vector.
+            return None
+    forms = _comprehension_source_yields(source)
+    return None if forms is None else list(forms)
+
+
+def _stop_arm_yielded_key_values(source, bindings, _depth: int = 0):
+    """The strings a KEYS source yields (one name iterating it) — ``None`` when unprovable.
+
+    Built on the one element resolver (`_comprehension_source_yields`), so this is not a
+    second vocabulary: the allow-list here is *"a source that resolver can read"*, and its
+    abstention (``None``) is now a REFUSAL rather than a pass. `#13920`'s unbound
+    ``dict.keys({…})`` is exactly such an abstention, and it is refused by this arm.
+    """
+    import ast
+
+    if _depth > 8:
+        return None
+    if isinstance(source, ast.ListComp | ast.SetComp | ast.GeneratorExp) \
+            and len(source.generators) == 1:
+        # ⛔ A TRANSFORMING COMPREHENSION IS PROVEN WHEN THE TRANSFORM IS EVALUABLE (`#14001`).
+        # `[x.upper() for x in ["embedding"]]` yields `"EMBEDDING"`, so the arm is a
+        # write-stop rather than an unreadable shape — and the proof runs through the SAME
+        # evaluated-call arm `_stop_arm_key_values` uses, with the clause's own binding added
+        # to the environment. A clause this walk cannot bind (a tuple target, an unreadable
+        # source, a transform it cannot evaluate) answers `None` and the arm refuses.
+        clause = source.generators[0]
+        if isinstance(clause.target, ast.Name):
+            yielded = _stop_arm_yielded_key_values(clause.iter, bindings, _depth + 1)
+            if yielded is not None:
+                extended = dict(bindings)
+                extended[clause.target.id] = yielded
+                answer = _stop_arm_key_values(source.elt, extended, _depth + 1)
+                if answer is not None:
+                    return answer
+        return None
+    forms = _stop_arm_source_forms(source, bindings, _depth)
+    if forms is None:
+        return _stop_arm_view_key_values(source, bindings, _depth)
+    resolved: set[str] = set()
+    for form in forms:
+        if len(form) != 1:
+            continue                        # a tuple binds a tuple, never a string key
+        answer = _stop_arm_key_values(form[0], bindings, _depth + 1)
+        if answer is None:
+            return None
+        resolved |= answer
+    return frozenset(resolved)
+
+
+def _stop_arm_pairs_key_values(source, bindings, _depth: int = 0):
+    """The strings a pairs/mapping source places as a KEY, with a NON-CONSTANT value.
+
+    Same one resolver, read at the key position: `["embedding", vec]` and
+    `(1, "embedding", vec)` differ only in WHICH element the store reads, which is the
+    `#13936` row — its property sits at index 1 and every pairs rule demanded index 0.
+
+    ⛔ THE VALUE SIDE IS PART OF THE QUESTION (`#14001`): `{… : None}` and `(k, None)` are the
+    PRE-GUARD RESET this repo uses as its write-stop (`embedding = None`), so a constant
+    value places nothing and is skipped. Without that narrowing the closure refused a dozen
+    honest fixtures (`{"embedding": None for …}`, `[("embedding", None)]`,
+    `update(embedding=None)`), i.e. it would have turned the gate into an inert enforcer.
+    """
+    import ast
+
+    if _depth > 8:
+        return None
+    pairs = _stop_arm_mapping_pairs(source, bindings, _depth, merge=True)
+    if pairs is not None:
+        resolved: set[str] = set()
+        for keys, value_node in pairs:
+            if value_node is not None and isinstance(value_node, ast.Constant):
+                continue                    # a constant value places nothing
+            if keys is None:
+                return None
+            resolved |= keys
+        return frozenset(resolved)
+    forms = _stop_arm_source_forms(source, bindings, _depth)
+    if forms is None:
+        return _stop_arm_view_key_values(source, bindings, _depth)
+    resolved = set()
+    for form in forms:
+        if len(form) < 2:
+            # a SCALAR element where a pair is unpacked. A CONSTANT one places nothing —
+            # unpacking a string yields single characters (or raises), never a multi-character
+            # property. A DICT literal element is iterated as its KEYS: two of them unpack as
+            # `(k, v)` (so the first key is the property position), and any other length
+            # raises. A non-constant scalar could be a two-element container: unproven.
+            element = form[0] if form else None
+            if isinstance(element, ast.Constant):
+                continue
+            if isinstance(element, ast.Dict):
+                if len(element.keys) != 2 or any(key is None for key in element.keys):
+                    continue
+                answer = _stop_arm_key_values(element.keys[0], bindings, _depth + 1)
+                if answer is None:
+                    return None
+                resolved |= answer
+                continue
+            return None
+        value = form[1]
+        if value is None or isinstance(value, ast.Constant):
+            continue                        # a constant value places nothing
+        answer = _stop_arm_key_values(form[0], bindings, _depth + 1)
+        if answer is None:
+            return None
+        resolved |= answer
+    return frozenset(resolved)
+
+
+def _stop_arm_mapping_pairs(mapping, bindings, _depth: int = 0, *, merge: bool = False):
+    """Every ``(resolved key set, value expression)`` pair a MAPPING source holds — or ``None``.
+
+    A mapping is not a pairs sequence: iterating it yields its KEYS and building one from it
+    carries its key/value PAIRS, which is why the pairs arm cannot read a mapping's key
+    column through the element resolver alone (`props.update({"embedding": None})` and
+    `props.update({k: vec})` are one dict literal apart and must not answer the same).
+
+    The key side is resolved HERE rather than handed back as a node, because a DICT
+    COMPREHENSION's key can be bound by its own clause (`{kk: 1 for kk in [...]}`) — the same
+    reason `_stop_arm_dict_comp_key_values` takes the node.
+    """
+    import ast
+
+    if _depth > 8 or mapping is None:
+        return None
+    branches = _conditional_branches(mapping)
+    if len(branches) > 1 or branches[0] is not mapping:
+        out: list = []
+        for branch in branches:
+            pairs = _stop_arm_mapping_pairs(branch, bindings, _depth + 1, merge=merge)
+            if pairs is None:
+                return None
+            out.extend(pairs)
+        return out
+    copied = _transparent_copy_operand(mapping)
+    if copied is not None:
+        return _stop_arm_mapping_pairs(copied, bindings, _depth + 1, merge=merge)
+    if isinstance(mapping, ast.Starred):
+        return _stop_arm_mapping_pairs(mapping.value, bindings, _depth + 1, merge=merge)
+    if isinstance(mapping, ast.Attribute) and mapping.attr == "items":
+        return _stop_arm_mapping_pairs(mapping.value, bindings, _depth + 1, merge=merge)
+    if isinstance(mapping, ast.Call) and _callee_name(mapping) == "items" \
+            and len(mapping.args) == 1 and not mapping.keywords:
+        return _stop_arm_mapping_pairs(mapping.args[0], bindings, _depth + 1, merge=merge)
+    if isinstance(mapping, ast.Subscript):
+        # ⛔ A CONSTANT-INDEXED MAPPING IS THAT MAPPING (`#14001`): `[{…}, {}][1:][0]` selects
+        # an element statically, and the element it selects is what the merge sees.
+        index = _constant_index(mapping.slice)
+        options = _stop_arm_sequence_options(mapping.value) if index is not None else None
+        if index is None or options is None:
+            return None
+        out = []
+        for option in options:
+            if index >= len(option) or index < -len(option):
+                return None
+            element = option[index]
+            if isinstance(element, ast.Starred):
+                return None
+            pairs = _stop_arm_mapping_pairs(element, bindings, _depth + 1, merge=merge)
+            if pairs is None:
+                return None
+            out.extend(pairs)
+        return out
+    if isinstance(mapping, ast.DictComp):
+        return [(_stop_arm_dict_comp_key_values(mapping, bindings, _depth + 1),
+                 mapping.value)]
+    if isinstance(mapping, ast.BinOp) and isinstance(mapping.op, ast.BitOr):
+        # ⛔ A `|` OF TWO MAPPINGS IS BOTH MAPPINGS' PAIRS (`#14001`): PEP 584 merges them,
+        # so the keys of each arm are keys of the result. ⛔ AND **EITHER** ARM BEING
+        # UNREADABLE REFUSES — "the readable one is clean, so the operand contributes nothing"
+        # is the DROPPING policy of the RECOGNISER, and under the proof polarity it is
+        # fail-OPEN: measured by the review of this branch, `props |= ({**d} | {})` with
+        # `d = {"embedding": 1}` CERTIFIED because `{}` was the readable arm.
+        left = _stop_arm_mapping_pairs(mapping.left, bindings, _depth + 1, merge=merge)
+        right = _stop_arm_mapping_pairs(mapping.right, bindings, _depth + 1, merge=merge)
+        if left is None or right is None:
+            return None
+        return left + right
+    if isinstance(mapping, ast.Attribute) and mapping.attr in ("values", "keys"):
+        return _stop_arm_view_pairs(mapping.value, bindings,
+                                   values=mapping.attr == "values", _depth=_depth + 1)
+    if isinstance(mapping, ast.Call):
+        name = _callee_name(mapping)
+        arguments = [argument for argument in mapping.args]
+        # ⛔ THE MAPPING CONSTRUCTORS ARE THE ONE FAMILY THAT TAKES KEYWORD OPERANDS — the
+        # literal keyword NAME is itself a known key (`dict({"a": 1}, b=2)`) — so they are read
+        # below rather than gated out with the `**`-bearing spellings.
+        if name in ("dict", "OrderedDict", "Counter", "MappingProxyType"):
+            return _stop_arm_constructor_pairs(mapping, bindings, _depth + 1, merge=merge)
+        if not any(mapping.keywords):
+            if name in ("values", "keys") and len(arguments) <= 1:
+                # the UNBOUND spelling (`dict.values(M)`) and the BOUND one (`M.values()`),
+                # which is the same view (`#13920`).
+                receiver = arguments[0] if arguments else (
+                    mapping.func.value if isinstance(mapping.func, ast.Attribute) else None)
+                return _stop_arm_view_pairs(receiver, bindings,
+                                           values=name == "values", _depth=_depth + 1)
+            if name == "items" and len(arguments) <= 1:
+                receiver = arguments[0] if arguments else (
+                    mapping.func.value if isinstance(mapping.func, ast.Attribute) else None)
+                return _stop_arm_mapping_pairs(receiver, bindings, _depth + 1, merge=merge)
+            if name in ("list", "tuple", "sorted", "reversed", "iter", "set") \
+                    and len(arguments) == 1:
+                return _stop_arm_mapping_pairs(arguments[0], bindings, _depth + 1,
+                                               merge=merge)
+            if name == "defaultdict" and len(arguments) >= 2:
+                return _stop_arm_mapping_pairs(arguments[1], bindings, _depth + 1,
+                                               merge=merge)
+            if name == "fromkeys":
+                keys = (_stop_arm_yielded_key_values(arguments[0], bindings, _depth + 1)
+                        if arguments else frozenset())
+                # ⛔ OMITTING THE VALUE MEANS `None` (`#14001`), and `None` is the pre-guard
+                # RESET the write-stops use — so it is a CONSTANT node here, not the
+                # "no value expression" the pairs list uses for a keys view.
+                value = arguments[1] if len(arguments) > 1 else ast.Constant(value=None)
+                return [(keys, value)]
+            if name == "zip" and len(arguments) >= 2:
+                # ⛔ `zip(K, V)` HAS TWO ANSWERS AND THEY MUST NOT BE CONFLATED (`#14001`,
+                # measured by the review of this branch). At the MERGE seam a constant value
+                # column means the merge places nothing, whatever the keys are — but at the
+                # ELEMENT seam (`for k, _v in zip(K, V)`) the KEY is still `K`'s element, so
+                # answering "no pairs" there certified `{k: vec for k, _v in zip(["embedding"],
+                # [1])}` while the writer, executed, stored the vector. So the pairs are always
+                # returned, and the merge seam applies the constant-value narrowing itself.
+                if merge:
+                    column = _sequence_options(arguments[1])
+                    if column is not None and all(
+                            isinstance(element, ast.Constant)
+                            for option in column for element in option):
+                        return []
+                return [(_stop_arm_yielded_key_values(arguments[0], bindings, _depth + 1),
+                         arguments[1])]
+        return None
+    if not isinstance(mapping, ast.Dict):
+        return None
+    out = []
+    for key, value in zip(mapping.keys, mapping.values, strict=False):
+        if key is None:                     # `{**m}` — the pairs come from `m`
+            inner = _stop_arm_mapping_pairs(value, bindings, _depth + 1, merge=merge)
+            if inner is None:
+                return None
+            out.extend(inner)
+            continue
+        out.append((_stop_arm_key_values(key, bindings, _depth + 1), value))
+    return out
+
+
+def _stop_arm_constructor_pairs(mapping, bindings, _depth: int = 0, *, merge: bool = False):
+    """Every pair a MAPPING CONSTRUCTOR call contributes — ``None`` when any operand is unread.
+
+    ⛔ EVERY OPERAND IS PART OF THE ANSWER (`#14001`, round-7 review): `dict({"a": 1}, b=2)`
+    merges BOTH, and resolving only the first is how `dict({"x": 1}, **d)` certified while `d`
+    held the vector. A literal keyword's NAME is a known key; a `**` operand contributes its
+    pairs; a positional contributes the pairs of the mapping it builds; anything unreadable
+    answers ``None`` so the arm refuses.
+    """
+    import ast
+
+    out: list = []
+    for argument in mapping.args:
+        if isinstance(argument, ast.Starred):
+            return None
+        inner = _stop_arm_mapping_pairs(argument, bindings, _depth + 1, merge=merge)
+        if inner is None:
+            return None
+        out.extend(inner)
+    for keyword in mapping.keywords:
+        if keyword.arg is None:
+            inner = _stop_arm_mapping_pairs(keyword.value, bindings, _depth + 1, merge=merge)
+            if inner is None:
+                return None
+            out.extend(inner)
+        else:
+            out.append((frozenset({keyword.arg}), keyword.value))
+    return out
+
+
+def _stop_arm_view_pairs(mapping, bindings, *, values: bool, _depth: int = 0):
+    """The pairs a `.values()` / `.keys()` view can contribute when it is MERGED.
+
+    ⛔ THE VIEW IS NOT THE MAPPING (`#14001`). `.values()` yields the mapping's VALUES, so in
+    a merge each value expression is a candidate PAIR (``{"a": ("embedding", vec)}.values()``
+    merges the pair, not the key), while `.keys()` yields the keys as SCALAR elements — and
+    a scalar string can never unpack into ``(k, v)`` = ``("embedding", …)``: a string whose
+    length is not two raises on two targets, and a two-character one binds two single
+    characters. A non-constant scalar is therefore the only unproven case.
+    """
+    import ast
+
+    if _depth > 8 or mapping is None:
+        return None
+    if values:
+        elements = _stop_arm_element_expressions(mapping)
+        if elements is None:
+            return None
+        out = []
+        for element in elements:
+            if isinstance(element, ast.Constant):
+                continue                    # a constant value cannot be a key/value pair
+            if isinstance(element, ast.Tuple | ast.List) and len(element.elts) >= 2:
+                out.append((_stop_arm_key_values(element.elts[0], bindings, _depth + 1),
+                            element.elts[1]))
+                continue
+            return None
+        return out
+    keys = _stop_arm_element_expressions(mapping)
+    if keys is None:
+        return None
+    for key in keys:
+        if not isinstance(key, ast.Constant):
+            return None                     # a computed key could be a 2-character string
+    return []                               # every key is a constant: no pair can be formed
+
+
+def _stop_arm_sequence_options(node, _depth: int = 0):
+    """`_sequence_options`, plus the CONSTANT SLICE the module's resolver declines.
+
+    ⛔ A PARTIAL SLICE IS REFUSED BY THE STORE RULES on purpose (it changes WHICH element an
+    index picks), but a slice with CONSTANT bounds picks exactly the elements arithmetically,
+    so the closure can PROVE what the store rules decline to guess — `[{…}, {}][1:][0]` is
+    `{}` and places nothing. Only a constant `lower`/`upper` with no `step` is resolved; any
+    other slice stays `None` (refuse).
+    """
+    import ast
+
+    if _depth > 8:
+        return None
+    options = _sequence_options(node)
+    if options is not None:
+        return options
+    if not isinstance(node, ast.Subscript) or not isinstance(node.slice, ast.Slice):
+        return None
+    span = node.slice
+    if span.step is not None:
+        return None
+    lower = _constant_index(span.lower) if span.lower is not None else 0
+    upper = _constant_index(span.upper) if span.upper is not None else None
+    if lower is None or (span.upper is not None and upper is None):
+        return None
+    inner = _stop_arm_sequence_options(node.value, _depth + 1)
+    if inner is None:
+        return None
+    out = []
+    for option in inner:
+        end = len(option) if upper is None else upper
+        if lower < 0 or end > len(option):
+            return None
+        out.append(option[lower:end])
+    return out
+
+
+def _stop_arm_element_expressions(mapping, _depth: int = 0):
+    """Every VALUE expression a MAPPING literal holds — ``None`` when not a readable mapping."""
+    import ast
+
+    if _depth > 8 or mapping is None:
+        return None
+    branches = _conditional_branches(mapping)
+    if len(branches) > 1 or branches[0] is not mapping:
+        out: list = []
+        for branch in branches:
+            elements = _stop_arm_element_expressions(branch, _depth + 1)
+            if elements is None:
+                return None
+            out.extend(elements)
+        return out
+    copied = _transparent_copy_operand(mapping)
+    if copied is not None:
+        return _stop_arm_element_expressions(copied, _depth + 1)
+    if isinstance(mapping, ast.Starred):
+        return _stop_arm_element_expressions(mapping.value, _depth + 1)
+    if not isinstance(mapping, ast.Dict):
+        return None
+    out = []
+    for key, value in zip(mapping.keys, mapping.values, strict=False):
+        if key is None:
+            inner = _stop_arm_element_expressions(value, _depth + 1)
+            if inner is None:
+                return None
+            out.extend(inner)
+            continue
+        out.append(value)
+    return out
+
+
+def _stop_arm_element_key_values(source, index: int, bindings, _depth: int = 0):
+    """The strings at POSITION `index` of every element a source yields — or ``None``.
+
+    `{p[1]: … for p in [(1, "embedding", vec)]}` — the `#13936` spelling: the comprehension
+    binds the whole element and the store reads one position of it.
+    """
+    if _depth > 8:
+        return None
+    # ⛔ **NOT** `merge=True`: this is the ELEMENT seam (`for k, _v in <source>`), where a
+    # constant value column does not make the KEY column clean — measured by the review of
+    # this branch: `{k: vec for k, _v in zip(["embedding"], [1])}` stores the vector and the
+    # merge-mode shortcut certified it.
+    pairs = _stop_arm_mapping_pairs(source, bindings, _depth)
+    if pairs is not None:
+        # ⛔ A MAPPING YIELDS A PAIR, NOT A TUPLE (`#14001`): `for k, _v in <mapping>.items()`
+        # binds position 0 to the KEY and position 1 to the VALUE, and a dict comprehension's
+        # `.items()` is exactly the receiver `{kk: 1 for kk in […]}.items()`.
+        resolved: set[str] = set()
+        for keys, value_node in pairs:
+            if index == 0:
+                if keys is None:
+                    return None
+                resolved |= keys
+            elif index == 1:
+                if value_node is None:
+                    return None
+                answer = _stop_arm_key_values(value_node, bindings, _depth + 1)
+                if answer is None:
+                    return None
+                resolved |= answer
+            else:
+                return None
+        return frozenset(resolved)
+    forms = _stop_arm_source_forms(source, bindings, _depth)
+    if forms is None:
+        return None
+    resolved: set[str] = set()
+    for form in forms:
+        if len(form) != 1 and index < len(form):
+            answer = _stop_arm_key_values(form[index], bindings, _depth + 1)
+        else:
+            answer = None
+        if answer is None:
+            return None
+        resolved |= answer
+    return frozenset(resolved)
+
+
+def _stop_arm_view_key_values(source, bindings, _depth: int = 0):
+    """The strings a mapping VIEW or a pass-through call yields as a key source — or ``None``.
+
+    The allow-list of view/constructor forms, each resolved through the mapping it views:
+    a mapping's KEYS (iterating it, `.keys()`, `.items()`'s first position), a mapping's
+    VALUES read as a key source (`.values()`, `#13920`'s second half), and `zip(K, V)`'s key
+    column. The UNBOUND spelling (`dict.keys(M)`, `dict.values(M)`) resolves through its
+    receiver exactly as the bound one does — that IS the `#13920` fix, and `#13920` measured the
+    unbound form CERTIFIED before it. Anything NOT in this list answers ``None``, which refuses.
+    """
+    import ast
+
+    if _depth > 8 or source is None:
+        return None
+    if isinstance(source, ast.Attribute) and source.attr in ("keys", "values", "items"):
+        return _stop_arm_mapping_strings(
+            source.value, bindings, values=source.attr == "values", _depth=_depth + 1)
+    if isinstance(source, ast.Call):
+        name = _callee_name(source)
+        if name == "zip" and source.args and not source.keywords:
+            return _stop_arm_yielded_key_values(source.args[0], bindings, _depth + 1)
+        if name in ("keys", "values", "items") and len(source.args) == 1 \
+                and not source.keywords:
+            # ⛔ THE UNBOUND SPELLING IS THE SAME VIEW (`#13920`): `dict.keys(M)` resolves
+            # through the receiver instead of abstaining.
+            return _stop_arm_mapping_strings(
+                source.args[0], bindings, values=name == "values", _depth=_depth + 1)
+        if name in _TRANSPARENT_SOURCE_CALLS and len(source.args) == 1 \
+                and not source.keywords:
+            # ⛔ A KEYS SEAM ITERATES; IT DOES NOT MERGE (`#14001`, measured by the round-5
+            # review). This arm borrowed the MERGE resolver, whose `zip`/constant-value-column
+            # shortcut answers "places nothing" — a proof about the VALUES, which is not the
+            # question at a keys seam: `{kk: vec for kk in dict(zip(_keys(), [1]))}` iterates
+            # the mapping's KEYS (`_keys()`, unreadable) and CERTIFIED on that borrowed proof.
+            # Iterating a mapping yields its keys whatever its values are, so the keys-semantics
+            # resolver is the right one here.
+            #
+            # ⛔ AND ONLY A SINGLE-OPERAND CALL IS TRANSPARENT (`#14001`, measured by the
+            # round-6 review): `ChainMap(a, b)` iterates the keys of EVERY operand, so
+            # resolving `args[0]` proves nothing about the property living in `b` —
+            # `{k: vec for k in ChainMap({"x": 1}, {"embedding": 2})}` CERTIFIED and stored.
+            # Every sibling arm in this function already demands the arity; this one did not.
+            return _stop_arm_yielded_key_values(source.args[0], bindings, _depth + 1)
+    return None
+
+
+def _stop_arm_mapping_strings(mapping, bindings, *, values: bool, _depth: int = 0):
+    """The strings a MAPPING literal's keys (or values) can hold — ``None`` when unprovable.
+
+    Only a literal is resolved here. A mapping bound to a NAME is deliberately NOT followed:
+    the binding would have to carry element structure, not just a string set, and an
+    unprovable mapping must refuse (`_mutator_stores_the_vector`'s residual #1 is the
+    fail-OPEN twin of this, and it closes here for every arm this closure reaches).
+    """
+    import ast
+
+    if _depth > 8:
+        return None
+    branches = _conditional_branches(mapping)
+    if len(branches) > 1 or branches[0] is not mapping:
+        resolved: set[str] = set()
+        for branch in branches:
+            answer = _stop_arm_mapping_strings(branch, bindings, values=values,
+                                               _depth=_depth + 1)
+            if answer is None:
+                return None
+            resolved |= answer
+        return frozenset(resolved)
+    copied = _transparent_copy_operand(mapping)
+    if copied is not None:
+        return _stop_arm_mapping_strings(copied, bindings, values=values, _depth=_depth + 1)
+    if isinstance(mapping, ast.Starred):
+        return _stop_arm_mapping_strings(mapping.value, bindings, values=values,
+                                         _depth=_depth + 1)
+    if not isinstance(mapping, ast.Dict):
+        return None
+    resolved = set()
+    for key, value in zip(mapping.keys, mapping.values, strict=False):
+        if key is None:
+            answer = _stop_arm_mapping_strings(value, bindings, values=values,
+                                               _depth=_depth + 1)
+        else:
+            answer = _stop_arm_key_values(value if values else key, bindings, _depth + 1)
+        if answer is None:
+            return None
+        resolved |= answer
+    return frozenset(resolved)
+
+
+def _stop_arm_dict_comp_key_values(node, bindings, _depth: int = 0):
+    """The keys a DICT COMPREHENSION can produce — ``None`` when the clause cannot be read.
+
+    One generator only: a second generator (`{… for k in A for v in B}`) multiplies the key
+    positions and is answered ``None`` (refuse) rather than half-read. The produced key is
+    resolved in the three forms the measured rows use — the bound name itself, a constant
+    index into the bound element (`#13936`), and a FLAT unpacking position — and anything else
+    must resolve as a plain constant key, or it refuses.
+    """
+    import ast
+
+    if _depth > 8 or len(node.generators) != 1:
+        return None
+    clause = node.generators[0]
+    key = node.key
+    target = clause.target
+    if isinstance(target, ast.Name):
+        if isinstance(key, ast.Name) and key.id == target.id:
+            return _stop_arm_yielded_key_values(clause.iter, bindings, _depth + 1)
+        if (isinstance(key, ast.Subscript) and isinstance(key.value, ast.Name)
+                and key.value.id == target.id):
+            index = _constant_index(key.slice)
+            if index is None:
+                return None
+            return _stop_arm_element_key_values(clause.iter, index, bindings, _depth + 1)
+    if isinstance(target, ast.Tuple | ast.List) and isinstance(key, ast.Name):
+        names = [element.id for element in target.elts if isinstance(element, ast.Name)]
+        if len(names) == len(target.elts) and key.id in names:
+            return _stop_arm_element_key_values(
+                clause.iter, names.index(key.id), bindings, _depth + 1)
+    # a key the clause does not bind must be closed on its own (a constant, typically)
+    return _stop_arm_key_values(key, bindings, _depth + 1)
+
+
+def _keys_reason(values, site: str) -> str | None:
+    """The refusal for ONE key-closure answer — ``None`` when the keys are proven safe.
+
+    ⛔ ONE PLACE DECIDES WHAT "PROVEN" MEANS FOR A KEY SET, so a resolver cannot answer
+    ``frozenset({'embedding'})`` and be read as clean by a caller that only checked for
+    ``None``. Measured: `props.update({k: vec})` with `k` folding to the property resolved to
+    a key set CONTAINING it and certified the writer, because the mutator arm tested only the
+    unproven arm.
+    """
+    if values is None:
+        return (f"{site} is not in the gate's closed vocabulary, so whether it places "
+                f"`{EMBEDDING_PROPERTY}` cannot be proven")
+    if EMBEDDING_PROPERTY in values:
+        return f"{site} resolves a key to `{EMBEDDING_PROPERTY}`"
+    return None
+
+
+def _stop_arm_mutator_key_values(call, bindings, _depth: int = 0) -> str | None:
+    """The reason a mutator CALL's keys cannot be proven — or ``None`` when they can.
+
+    The key POSITION depends on the callee, which is why the arities are spelled out rather
+    than guessed: a two-argument `__setitem__(key, value)` vs the unbound
+    `dict.__setitem__(mapping, key, value)`, and `setattr(object, key, value)`.
+
+    ⛔ AND THE VALUE SIDE IS PART OF THE PROOF: `props.setdefault("embedding", None)` places the
+    pre-guard RESET, not a vector, so a constant value closes the site — the same narrowing the
+    store vocabulary's own rules make (`embedding = None` is not a store).
+    """
+    import ast
+
+    if isinstance(call.func, ast.Call):
+        return ("a dynamically resolved callee cannot be proven not to be a mapping "
+                "mutator")
+    name = _callee_name(call)
+    positional = [argument for argument in call.args]
+    if any(isinstance(argument, ast.Starred) for argument in positional):
+        return (f"`{name}(…)` splats its arguments (`*`), so the key position cannot be "
+                "read")
+    if name in ("update", "dict", "__ior__", "ior", "or_", "__or__", "__init__"):
+        # ⛔ THE FIRST POSITIONAL IS THE RECEIVER IN EVERY TWO-OR-MORE-ARGUMENT SPELLING
+        # (`operator.ior(props, {…})`, `dict.__ior__(props, {…})`) and the SOURCE in every
+        # one-argument one (`props.__ior__({…})`), so the receiver is dropped rather than
+        # refused: a receiver contributes no key the arm did not already hold, and refusing
+        # it would shut the gate on the `operator`/unbound spellings for a shape they make
+        # strictly narrower.
+        sources = (positional[1:] if len(positional) >= 2 else positional) + [
+            keyword.value for keyword in call.keywords if keyword.arg is None]
+        for source in sources:
+            reason = _keys_reason(
+                _stop_arm_pairs_key_values(source, bindings, _depth + 1),
+                f"`{name}(…)`'s mapping ({_render(source)})")
+            if reason:
+                return reason
+        return None
+    if name == "fromkeys":
+        value = positional[1] if len(positional) > 1 else next(
+            (keyword.value for keyword in call.keywords if keyword.arg == "value"), None)
+        if value is None or isinstance(value, ast.Constant):
+            return None                     # omitting it means `None`: places nothing
+        if not positional:
+            return "`fromkeys(…)` has no key sequence"
+        return _keys_reason(
+            _stop_arm_yielded_key_values(positional[0], bindings, _depth + 1),
+            f"`fromkeys(…)`'s key sequence ({_render(positional[0])})")
+    if name in ("__setitem__", "setitem", "setdefault"):
+        key_keyword = next((keyword.value for keyword in call.keywords
+                            if keyword.arg == "key"), None)
+        value_keyword = next((keyword.value for keyword in call.keywords
+                              if keyword.arg in ("value", "default")), None)
+        if key_keyword is not None:
+            # `props.setdefault(key="embedding", default=None)` — the keyword spelling; the
+            # value/default keyword is the value, and a constant one places nothing.
+            if value_keyword is not None and isinstance(value_keyword, ast.Constant):
+                return None
+            return _keys_reason(_stop_arm_key_values(key_keyword, bindings, _depth + 1),
+                                f"`{name}(…)`'s key ({_render(key_keyword)})")
+        if any(keyword.arg == EMBEDDING_PROPERTY and isinstance(keyword.value, ast.Constant)
+               for keyword in call.keywords):
+            return None                     # `props.__setitem__(embedding=None)`
+        if name == "setdefault":
+            position = 0
+        else:
+            position = 0 if len(positional) == 2 else 1 if len(positional) == 3 else None
+        if position is None or len(positional) <= position:
+            return f"`{name}(…)` has an arity this gate does not model"
+        if len(positional) > position + 1 and isinstance(
+                positional[position + 1], ast.Constant):
+            return None                     # a constant value places nothing
+        return _keys_reason(
+            _stop_arm_key_values(positional[position], bindings, _depth + 1),
+            f"`{name}(…)`'s key ({_render(positional[position])})")
+    if name == "setattr":
+        if len(positional) < 2:
+            return "`setattr(…)` has an arity this gate does not model"
+        if len(positional) > 2 and isinstance(positional[2], ast.Constant):
+            return None                     # a constant value places nothing
+        return _keys_reason(
+            _stop_arm_key_values(positional[1], bindings, _depth + 1),
+            f"`setattr(…)`'s key ({_render(positional[1])})")
+    return None
+
+
+def _key_bearing_call(call) -> bool:
+    """Is this call a MUTATION of a receiver, or a CONSTRUCTOR that merely returns a mapping?
+
+    ⛔ THE DISTINCTION IS LOAD-BEARING AND WAS MEASURED (`#14001`): `dict(_props_base)` is a
+    COPY, and a real write-stop uses it (`props = dict(ev); props.pop("embedding", None)` in
+    `_upsert_source` and in `sdk::_update_entity`). Treating a bare `dict(…)` as a mutator of
+    whatever it is handed refused BOTH real writers — the inert-enforcer direction, in a
+    branch whose whole point is not to refactor every writer in the repo. So the receiver
+    FORMS are the method spellings (`props.update(…)`, `props.__setitem__(…)`,
+    `dict.__setitem__(props, …)`, `operator.ior(props, …)`) plus the two bare functional
+    spellings that take the mapping first (`setitem`, `setattr`). A bare `dict(…)`/
+    `OrderedDict(…)` constructs a new mapping and is answered by `_rebuild_stores_the_vector`
+    when it is actually handed on.
+    """
+    import ast
+
+    if isinstance(call.func, ast.Call):
+        # ⛔ A DYNAMICALLY RESOLVED CALLEE IS KEY-BEARING BY DEFAULT (`#14001`, measured by
+        # the review of this branch): `getattr(props, "update")({"embedding": vec})` CERTIFIED
+        # a stop arm that stored, because the callee name is not a literal. The store
+        # vocabulary calls this "out of AST reach by construction" and leaves it a residual;
+        # on the proof side it is simply UNPROVEN, so it refuses here.
+        return True
+    name = _callee_name(call)
+    if name not in _KEY_BEARING_CALLEES:
+        return False
+    if isinstance(call.func, ast.Attribute):
+        return True
+    return name in ("setitem", "setattr")
+
+
+def _render(node) -> str:
+    """A short, stable rendering of a node for a refusal message — never the whole arm."""
+    import ast
+
+    try:
+        text = ast.unparse(node)
+    except Exception:                       # an unparseable node is still nameable
+        return type(node).__name__
+    text = " ".join(text.split())
+    return text if len(text) <= 60 else text[:57] + "…"
+
+
+def _stop_arm_walk(node):
+    """`_own_walk` PLUS the parts of a nested scope that EXECUTE where the statement sits.
+
+    ⛔ A DECORATOR, A DEFAULT ARGUMENT, A BASE CLASS AND A CLASS BODY RUN IN THE STOP ARM
+    (`#14001`, measured by the round-2 review): `_own_walk` prunes a `def`/`lambda`/`class`
+    wholesale, which is right for "is this the arm's own statement" and wrong for "what does
+    this statement DO". All four spellings below CERTIFIED a stop arm that left the vector in
+    `props`, and none of them involves a helper call, so the disclosed helper-call residual
+    does not cover them:
+
+        @props.__setitem__("embedding", vec)
+        def _bg(): pass
+        def _bg(_x=props.update({"embedding": vec})): pass
+        class _C(props.__ior__): pass
+        class _C: marker = props.__setitem__("embedding", vec)
+
+    So a nested scope is descended for its definition-time expressions and its (executed)
+    class body, and a `def`'s FUNCTION BODY is still pruned (it really is not this arm's code)
+    while a LAMBDA's body IS walked — a lambda has no other place to be spelled, and its
+    consumer runs in this arm.
+    """
+    import ast
+
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        yield current
+        if isinstance(current, ast.ClassDef):
+            stack.extend(current.decorator_list)
+            stack.extend(current.bases)
+            stack.extend(keyword.value for keyword in current.keywords)
+            stack.extend(current.body)             # a class body RUNS at definition time
+            continue
+        if isinstance(current, ast.Lambda):
+            # ⛔ A LAMBDA BODY IS SPELLED **IN** THE ARM AND RUNS WHEN ITS CONSUMER RUNS
+            # (`#14001`, measured by the round-4 review): `list(map(lambda _x:
+            # props.update({"embedding": vec}), [1]))` and
+            # `(lambda: props.update({…}))()` both CERTIFIED a stop arm that stored, because the
+            # body was pruned while its `update(…)` call is exactly the callee the vocabulary
+            # DOES recognise. The consumer may be a dead function this gate cannot see, and that
+            # costs a refusal — the declared direction.
+            stack.append(current.body)
+            stack.extend(current.args.defaults)
+            stack.extend(default for default in current.args.kw_defaults
+                         if default is not None)
+            continue
+        if isinstance(current, ast.FunctionDef | ast.AsyncFunctionDef):
+            stack.extend(current.decorator_list)
+            arguments = current.args
+            stack.extend(arguments.defaults)
+            stack.extend(default for default in arguments.kw_defaults if default is not None)
+            for group in ("posonlyargs", "args", "kwonlyargs"):
+                for argument in getattr(arguments, group, ()):
+                    if argument.annotation is not None:
+                        stack.append(argument.annotation)
+            for extra in (arguments.vararg, arguments.kwarg):
+                if extra is not None and extra.annotation is not None:
+                    stack.append(extra.annotation)
+            if getattr(current, "returns", None) is not None:
+                stack.append(current.returns)
+            continue
+        if isinstance(current, ast.If | ast.While) and _statically_falsy(current.test):
+            stack.extend(current.orelse)           # the dead BODY is not evidence; `else` is
+            continue
+        stack.extend(ast.iter_child_nodes(current))
+
+
+def _stop_arm_places_the_property(statements, scope) -> tuple[bool, str]:
+    """Does this STOP arm place the property? ``(places, reason)``, and UNKNOWN PLACES IT.
+
+    ⛔ THIS IS `#14001`'s DEFENCE 2 and the whole point of this block. The two stages are:
+
+    1. the store vocabulary (`_stores_embedding(anywhere=True)`), unchanged — so every shape
+       this gate already refused stays refused;
+    2. the CLOSED VOCABULARY above, which fires where stage 1 ABSTAINED and refuses unless
+       EVERY key-bearing position in the arm is positively enumerated without the property.
+
+    Before this function existed, stage 2 did not exist: an arm whose store the vocabulary did
+    not model answered "no store" and the writer was certified write-stopped. Six issues in
+    the same tool, days apart, each added one row to stage 1. Stage 2 cannot be extended one
+    row at a time, because its default is the refusing one.
+    """
+    import ast
+
+    for statement in statements:
+        if _stores_embedding(statement, anywhere=True, scope=scope):
+            return True, ("the stop arm stores `embedding`, or stores through a shape the "
+                          "gate refuses rather than assumes")
+    bindings = _string_bindings(scope)
+    handled: set[int] = set()
+    for statement in statements:
+        for node in _stop_arm_walk(statement):
+            problem = None
+            if isinstance(node, ast.Assign | ast.AnnAssign):
+                # ⛔ A STORE'S KEY AND ITS VALUE ARE ONE QUESTION (`#14001`): a constant
+                # value is the pre-guard RESET the write-stops use (`props[k] = None`), so
+                # the key only matters when something real is placed.
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    problem = _unproven_target_keys(target, node.value, bindings, handled)
+                    if problem:
+                        break
+                # ⛔ A MAPPING THE ARM **BUILDS** AND HANDS ON IS NOT PROVED HERE — see
+                # residual 3 in the module docstring. A positional rebuild check was written
+                # and withdrawn: it refused two honest fixtures and, measured by the round-9
+                # review, still certified every WRAPPED rebuild (`if/else`, `.copy()`, a
+                # walrus, a `*`-splat, a comprehension, a rebuild nested under the Cypher
+                # `$props` key) — a partial rule that claims coverage and leaks is worse than a
+                # disclosed boundary.
+            elif isinstance(node, ast.AugAssign):
+                # ⛔ A `|=` MERGE IS A KEY-BEARING SITE WHATEVER ITS OPERAND SPELLING
+                # (`#14001`): the mapping, the pairs sequence, the comprehension and the
+                # `dict.fromkeys(…)` builder are all the same merge, and the operand's keys
+                # must be enumerated before the arm may certify. This is the row family
+                # `#13864`/`#13910`/`#13915`/`#13936` each measured.
+                problem = _unproven_target_keys(node.target, node.value, bindings, handled)
+                if not problem and isinstance(node.op, ast.BitOr):
+                    values = _stop_arm_pairs_key_values(node.value, bindings)
+                    if values is None:
+                        problem = (f"a `|=` merge ({_render(node.value)}) is handed a "
+                                   "mapping or pairs sequence this gate cannot enumerate")
+                    elif EMBEDDING_PROPERTY in values:
+                        problem = (f"a `|=` merge resolves a key to "
+                                   f"`{EMBEDDING_PROPERTY}`")
+            elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store) \
+                    and id(node) not in handled:
+                # a target the assignment pairing did not reach — a `for`/`with` binding, a
+                # comprehension target, or an `|=` on a subscript: unproven.
+                problem = _unproven_key_slice(node.slice, bindings, "a subscript store")
+            elif isinstance(node, ast.Call) and _key_bearing_call(node):
+                problem = _stop_arm_mutator_key_values(node, bindings)
+            if problem:
+                return True, problem
+    return False, "the stop arm places no key this gate cannot rule out"
+
+
+def _unproven_target_keys(target, value, bindings, handled: set[int]) -> str | None:
+    """The reason an ASSIGNMENT target's key is unproven — pairing each target with its value.
+
+    ``handled`` records the Subscript nodes this pairing answered, so the arm's node walk does
+    not ask about them a second time with the value unknown (which would refuse an honest
+    `props[k] = None`).
+    """
+    import ast
+
+    if isinstance(target, ast.Subscript):
+        handled.add(id(target))
+        if value is None or isinstance(value, ast.Constant):
+            return None                     # a constant value places nothing
+        return _unproven_key_slice(target.slice, bindings, "a subscript store")
+    if isinstance(target, ast.Starred):
+        return _unproven_target_keys(target.value, value, bindings, handled)
+    if isinstance(target, ast.Tuple | ast.List):
+        paired = (isinstance(value, ast.Tuple | ast.List)
+                  and len(value.elts) == len(target.elts))
+        for index, element in enumerate(target.elts):
+            problem = _unproven_target_keys(
+                element, value.elts[index] if paired else value, bindings, handled)
+            if problem:
+                return problem
+    return None
+
+
+def _unproven_key_slice(key, bindings, site: str) -> str | None:
+    """The reason a KEY expression is unproven (or places the property) — or ``None``."""
+    return _keys_reason(_stop_arm_key_values(key, bindings),
+                        f"{site}'s key ({_render(key)})")
+
+
 def _dict_stores_the_vector(node, *, stop_arm: bool = False,
                             alias_keys: frozenset[str] = frozenset()) -> bool:
     """Does this dict LITERAL set the vector — directly, or through a `{**{…}}` merge?
@@ -4425,15 +6269,22 @@ def _writer_consults_gate(module_name: str, symbol: str,
             "stopped")
     # EVERY definition must ask, not just one: a shadowed first definition is a writer too.
     wanted = tuple(entity_types or ())
-    ungated = [d.lineno for d in definitions
-               if not (wanted and _asks_the_gate(d, wanted))]
+    decisions = [(definition, _gate_decision(definition, wanted)) for definition in definitions]
+    ungated = [(definition, why) for definition, (answers, why) in decisions
+               if not (wanted and answers)]
     if ungated:
+        # ⛔ THE REFUSAL NAMES THE SHAPE (`#14001`, acceptance 3). "It did not ask" and "I
+        # could not PROVE the stop arm clean" are different findings, and a reader who cannot
+        # tell them apart cannot tell a proven stop from an unrecognised spelling.
+        detail = "; ".join(f"line {definition.lineno}: {why}"
+                           for definition, why in ungated)
         return False, (
             f"`{module_name}::{symbol}` (definition at line(s) "
-            f"{', '.join(str(n) for n in ungated)}) writes `embedding` without an `if` "
+            f"{', '.join(str(definition.lineno) for definition, _ in ungated)})"
+            " writes `embedding` without an `if` "
             f"that asks `{WRITE_GATE_SYMBOL}`/`_derived_mirror_required` about THIS label "
             "and either stores the vector in the guarded branch or returns/raises from "
-            "it")
+            f"it — the refusing shape: {detail}")
     return True, f"{module_name}::{symbol} calls the gate"
 
 
@@ -4973,6 +6824,21 @@ def render_plan(plan: dict) -> str:
         "  --execute --plan <this file> --confirm-plan-digest "
         f"{plan['digest']}",
     ]
+    if any(row["label"] == "Point" for row in plan["labels"]):
+        # ⛔ THE CAVEAT IS PRINTED, NOT HELD IN A COMMENT (`#13971`). `:Point` is the one
+        # label whose JOURNAL FOLD keeps writing the graph copy by decision
+        # (`record_vector.MIRROR_RETIRED_LABELS` must not contain `point`), so a rebuild
+        # re-materialises what this plan removes. An operator who is not told that reads the
+        # next rebuild as "the strip silently failed".
+        lines += [
+            "",
+            "⚠️ `:Point` durability: the JOURNAL FOLD re-adds the vector, so this plan is "
+            "undone by a `rebuild_all` AND by any journalled point write that carries one "
+            "— re-run this tool afterwards. Only the SDK update door and the DR restore "
+            "ask the gate and stop; the capture writer, the pass-1b snapshot restore and "
+            "the fold keep the copy on the lanes where it is the ONLY one, which is why "
+            "this plan refuses `:Point` while the census names them once coverage verifies.",
+        ]
     measured = plan.get("population") or [r["label"] for r in plan["labels"]]
     declared = plan.get("declared_population") or measured
     dropped = sorted(set(declared) - set(measured))
@@ -5789,7 +7655,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="record tenant graph")
     parser.add_argument("--label", action="append", default=None,
                         choices=[label for _, label, _ in parity.RETIRED],
-                        help="plan only this label (repeatable); default: all four")
+                        help="plan only this label (repeatable); default: all five")
     parser.add_argument("--batch", type=int, default=None,
                         help="nodes per removal statement (default: the plan's recorded "
                              f"batch on --execute, else {DEFAULT_BATCH})")

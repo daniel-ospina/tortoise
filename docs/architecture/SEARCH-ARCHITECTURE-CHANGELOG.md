@@ -390,3 +390,11 @@ retired), the `Object` and `Subject` rows of the per-label gate table, and the a
 last two *"gated on the status fold"*. **No measurement was re-read and no figure was retired.** The live arm is
 `tests/test_11642_vector_move_live.py` (the file `test-record-postgres` runs) on `pgvector/pgvector:pg16`; the
 structural pins are `tests/test_13422_object_subject_dense_leg.py`.
+
+## `#13123` — the 60 s fallback corpus is invalidated on the eviction path (landed via `#14067`)
+
+`SEARCH-ARCHITECTURE.md`'s finding-6 sentence said the fallback corpus's invalidation was outstanding. It is not:
+`tortoise/cache_evictor.py::_delete_nodes` invalidates it explicitly, so the sentence now states that as the
+design fact and carries no issue state. **In `SEARCH-ARCHITECTURE.md`:** the finding-6 parenthetical only — no
+measurement was re-read and no figure moved. Structural pin: `tests/test_14001_strip_gate_fail_closed.py` does
+not cover it; the shape is graded by `tests/test_extractor_v4_citation_rot.py::test_the_design_documents_carry_no_issue_state_or_change_narration`.

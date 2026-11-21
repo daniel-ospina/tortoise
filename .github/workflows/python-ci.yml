@@ -4275,9 +4275,16 @@ jobs:
       # ── THE ARCHIVE'S RESTORE ANCHORS MUST BE PROVABLE (#11609) ─────────────────
       # `archive/` keeps removed code so a removal can be undone, and every entry cites
       # the commit on the DEFAULT BRANCH that held it (not the batch PR's HEAD, which a
-      # squash merge orphans). The ordinary `archive_surface.py check` runs in the `test`
-      # job, which checks out at `fetch-depth: 1` — where the anchored commit is an absent
-      # ancestor by construction, so the anchor arm says nothing and proves nothing. That is the #9075/#11057 shape exactly: a gate that runs only where it
+      # squash merge orphans). ⛔ NO CI JOB RUNS THE BARE `check`, so there is no depth-1
+      # `test`-job arm to keep honest here: the only invocations of this tool in
+      # `.github/workflows/` are the two `run:` lines below (`verify-anchors`, and `check`
+      # with `--require-entries --base-ref`), both inside THIS job. (Round-11 review: this
+      # block used to claim the ordinary `check` ran in the depth-1 `test` job. It did not —
+      # no job invoked it at all, which is why the strict form had to get a caller.)
+      # The depth-1 problem is why the strict arm must live HERE instead: on a
+      # `fetch-depth: 1` checkout the anchored commit is an absent ancestor by construction,
+      # so a bare `check` there would say nothing and prove nothing. That is the #9075/#11057
+      # shape exactly: a gate that runs only where it
       # cannot answer is a no-op gate, and before this step NO workflow invoked the strict
       # form at all (measured: `rg -- '--anchors'` outside the tool → no match).
       # This job already pays for `fetch-depth: 0`, which is what the proof NEEDS.
@@ -4294,9 +4301,22 @@ jobs:
       - name: The archive's restore anchors resolve and hold their frozen bodies
         # `--require-entries` too: with no entries every other arm is silent, so an emptied
         # manifest must be a RED in the job that runs on every PR — not a vacuous OK.
+        #
+        # ── AND THE SHRINK DIRECTION (#12402, #12291) ─────────────────────────────
+        # Every other arm in that tool iterates the entries the manifest FINDS, so two
+        # removals were invisible to all of them: a whole MODULE deleted from `tortoise/`
+        # (the surface baseline carries no `module` rows, so `cut`'s removal gate compares
+        # nothing) and an entry DROPPED or REWRITTEN in `archive/MANIFEST.json` (the record
+        # of what was removed, shrinking with every gate green). Both are graded against the
+        # MERGE BASE, which is why this step belongs in THIS job: the comparison needs a ref
+        # the diff does not author, and `fetch-depth: 0` above is what makes the merge base
+        # resolvable (the #9075/#11057 shape again — a gate that only runs where it cannot
+        # answer proves nothing). `--base-ref` with no value means "the default branch", so
+        # the step needs no `github.base_ref` interpolation and cannot break on a push run.
+        # An unresolvable ref is a REFUSAL (exit 2), never a quiet pass.
         run: |
           python3 tools/archive_surface.py verify-anchors
-          python3 tools/archive_surface.py check --require-entries
+          python3 tools/archive_surface.py check --require-entries --base-ref
       # ── THE PRIVATISATION SWEEP'S VERIFIER MUST HAVE A CALLER (#13899 F3) ──────
       # `tools/sdk_privatise.py --check` is the ONLY walk that can answer the review
       # question the #12901 batch rests on — "how many typed references still point at a
@@ -4399,8 +4419,30 @@ jobs:
         # a `::notice::` where the checkout cannot answer; the strict step above is what
         # turns that state into a red.
         run: python3 tools/surface-guard.py
-      - name: The ordering lint (AC13)
-        run: python3 tools/surface_manifest.py check
+      - name: The ordering lint (AC13), and the committed surface may only shrink with a record
+        # `--base-ref` (#12327) is folded into THIS step rather than a new job or a new step,
+        # for the reason the owner's CI-cost ruling gives (2026-11-20): an assertion inside an
+        # existing job costs nothing, while a job costs a runner, a `pip install -e .` and a
+        # second queue slot on every PR — and this lint already pays the expensive half (the
+        # `build_doc` derivation, ~14 s CPU) that a separate step would pay AGAIN. Zero new
+        # jobs, zero new steps.
+        #
+        # It belongs in THIS job because the comparison reads the MERGE BASE, and `fetch-depth:
+        # 0` above is what makes that resolvable (#9075/#11057: a gate that only runs where it
+        # cannot answer proves nothing). `--base-ref` with no value means "the default branch",
+        # so the step needs no `github.base_ref` interpolation and cannot break on a push run;
+        # an unresolvable ref is a REFUSAL (exit 2), never a quiet pass. It is OFF unless given,
+        # which keeps a bare `check` at its documented shallow-clone meaning. (Round-11 review
+        # replaced "the depth-1 `test` job runs it"; ⛔ and "the only CI caller" was false too.
+        # THREE invocations, all in THIS full-history job — :4274 strict, this one, `render` below.)
+        #
+        # ⚠️ ACCEPTED RESIDUAL, the same one the two steps above name: this runs the CHECKOUT'S
+        # OWN `tools/surface_manifest.py`, so a PR that neuters the arm in the same commit that
+        # splices the baseline grades itself. Pinning this file was measured as a DEADLOCK (see
+        # the pin step's note) and `tools/surface-guard.py` — the pinned copy — cannot carry the
+        # rule without a second implementation of `removal_report`'s accounting. A test pins the
+        # wiring so DELETING the flag reds instead of reading as cleanup.
+        run: python3 tools/surface_manifest.py check --base-ref
       - name: The list is generated from the manifest and cannot drift from it
         run: |
           python3 tools/surface_manifest.py render
@@ -5058,6 +5100,15 @@ jobs:
           # migration, so nothing another file asserts on may run after it
           # without its own re-read.
           #
+          # #14002: the hosted write path stops appending to the JSONL once the
+          # graph is cut over, which takes the `position_divergence` wedge under
+          # concurrent writers out of reach. Its DB-FREE legs run in the fast
+          # matrix (registered on `core`); the legs that need THIS job's DSN are
+          # the issue's own acceptance — a 120-write concurrent burst with zero
+          # divergence refusals and the JSONL's size/mtime unchanged, plus the
+          # falsifier that restores the append and asserts it wedges — so they
+          # must arm where the leg gate reds on a skip.
+          #
           # #9881: `test_9881_rename_reaches_the_record.py` is armed HERE for
           # the same reason — its end-to-end leg (public `update_entity(name=…)`
           # -> journal -> record row, live == replay) SKIPS without this job's
@@ -5113,6 +5164,7 @@ jobs:
             tests/test_12894_record_cursor_live.py \
             tests/test_12894_record_cursor.py \
             tests/test_13043_record_allocator_cli.py \
+            tests/test_14002_record_only_journal.py \
             tests/test_9558_record_write_cost.py \
             tests/test_9567_record_capstone.py \
             -v --timeout=300 -p no:cacheprovider -r fEs \
@@ -5153,6 +5205,79 @@ jobs:
           path: |
             ${{ runner.temp }}/record-postgres/pytest.log
             ${{ runner.temp }}/record-postgres/junit.xml
+          if-no-files-found: ignore
+      # ── #13337: the cache-graph declaration's END-TO-END legs ───────────────
+      #
+      # ⛔ WHY THEY ARE HERE AND NOT ON A SURFACE LANE (PR #14068 review, finding
+      # 3). `test_13337_cache_graph_declaration.py` is registered on `api` + `core`
+      # so its DB-FREE pins run on any diff that can break them — but its two
+      # end-to-end legs (an org-wide write reconciling CLEAN on the READ name, and
+      # the same tenant written through BOTH doors) need a record DSN **and** a
+      # graph URI. On the fast matrix they collect and SKIP, so the issue's own
+      # acceptance — the headline claim of this change — had NO machine coverage
+      # anywhere, and a revert of the very block they pin would have merged green.
+      #
+      # ⛔ THE FALKORDB PROVISION IS PLACED AFTER EVERY ARMED RECORD STEP, on
+      # purpose: `uri_graph` exports `TORTOISE_DB_URI` into `$GITHUB_ENV`, so it is
+      # visible to every LATER step of this job. The twelve files above are record
+      # lanes that build their graphs themselves and deliberately run with NO URI
+      # (this job's `TORTOISE_TEST_CARVE_OUT: 1` is that opt-in), so provisioning
+      # before them would silently hand them a server they were never written for.
+      # `legacy: "false"` — this job had no `services:` block to preserve, and the
+      # file reads only `TORTOISE_DB_URI`; the passwordless 16379 family is not
+      # used by anything here.
+      - name: Provision FalkorDB for the cache-graph end-to-end legs (#13337)
+        uses: ./.github/actions/falkordb-provision
+        with:
+          uri_graph: tortoise_test_matrix
+          legacy: "false"
+      - name: Run the cache-graph declaration's end-to-end legs (#13337 — both stores)
+        # The whole FILE runs, not a `-k` subset: its DB-free cases are cheap and
+        # re-running them here means an armed lane never reports a smaller set of
+        # pins than the surface lane that skipped its end-to-end half.
+        #
+        # ⛔ WHY THIS IS AN ARM AND NOT A HOPE: the file's own `_both_stores()`
+        # reads the ENVIRONMENT, never a switch — `TEST_RECORD_DB_URI` (this
+        # job) and `TORTOISE_DB_URI` (the provision above) both set means the
+        # legs MUST run, and neither set means there is nothing to test here.
+        # ⛔ THE TWO VARIABLES ARE NOT SYMMETRIC (review, this round): a record
+        # DSN with NO cache URI is a FAILURE — that is the arm that reds if the
+        # `falkordb-provision` step after this one is deleted, and only THIS job
+        # exports a record DSN. A cache URI with no record DSN is the ordinary
+        # docker lane (the sharded `test` matrix, `tools/test_lane.py`) and
+        # SKIPS; making that arm fail reds `test (f)` on every `full` selection.
+        # A `REQUIRE_*` switch nobody exports would be an inert guard that only
+        # ever skips, which is why there is none here.
+        # The wiring itself is pinned by
+        # `test_the_armed_CI_job_supplies_BOTH_stores` in this file, so deleting
+        # the step or the provision reds a test instead of quietly restoring the
+        # unexecuted gate (#13337 review, finding 3).
+        run: |
+          set +e
+          SCRATCH="${RUNNER_TEMP:-/tmp}/record-postgres"
+          mkdir -p "$SCRATCH"
+          timeout -s INT -k 10 5m stdbuf -oL python -m pytest \
+            tests/test_13337_cache_graph_declaration.py \
+            -v --timeout=300 -p no:cacheprovider -r fEs \
+            --junitxml="$SCRATCH/junit-13337.xml" -o junit_family=xunit1 \
+            2>&1 | tee "$SCRATCH/pytest-13337.log"
+          rc=${PIPESTATUS[0]}
+          echo "$rc" > "$SCRATCH/pytest-13337-rc"
+          bash .github/scripts/pytest-attribution.sh --log "$SCRATCH/pytest-13337.log" --rc "$rc" \
+            --junit "$SCRATCH/junit-13337.xml"
+          exit $rc
+      - name: Stop FalkorDB for the cache-graph end-to-end legs (#13337)
+        if: always()
+        uses: ./.github/actions/falkordb-teardown
+      - name: Upload the cache-graph end-to-end log (#13337)
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log-13337-cache-graph
+          path: |
+            ${{ runner.temp }}/record-postgres/pytest-13337.log
+            ${{ runner.temp }}/record-postgres/junit-13337.xml
           if-no-files-found: ignore
       - name: Stop Postgres (#9551)
         if: always()

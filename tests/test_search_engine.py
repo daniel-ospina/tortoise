@@ -28,6 +28,14 @@ try:
     _probe = _FP.from_uri(os.environ["TORTOISE_DB_URI"])
     _probe.close()
     FALKORDB_AVAILABLE = True
+    # ⛔ A rename or typo in a seam this probe touches must NOT be read as
+    #   "storage unavailable": that is exactly how #13899's retirement hid for
+    #   a whole wave — the probe's own `except Exception` turned an AttributeError
+    #   into a SKIP locally and a hard refusal in CI (#14114 class 2, #14125).
+    #   `AttributeError`/`NameError`/`TypeError`/`ImportError` are PROGRAMMING errors and are
+    #   re-raised; only genuine transport/driver failures fall through.
+except (AttributeError, NameError, TypeError, ImportError):
+    raise
 except Exception:
     FALKORDB_AVAILABLE = False
 finally:
@@ -881,6 +889,12 @@ try:
     _probe = _FP_escape.from_uri(_FTS_LANE_URI)
     _probe.close()
     _FTS_ESCAPE_LIVE = True
+# ⛔ A moved or renamed seam — including an import of a moved module — is a
+#   PROGRAMMING error, not "no server": the flag this block sets decides a
+#   SKIP, so swallowing it is a green family over a broken tree
+#   (#14114 class 2, #14125).
+except (AttributeError, NameError, TypeError, ImportError):
+    raise
 except Exception:
     _FTS_ESCAPE_LIVE = False
 finally:

@@ -146,6 +146,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import threading
 import time
@@ -191,6 +192,8 @@ __all__ = [
 ]
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+_LOGGER = logging.getLogger(__name__)
 
 RECORD_MIGRATIONS: tuple[str, ...] = (
     # THE REGISTRY, not merely the set of files that shape a column. Every
@@ -7809,6 +7812,28 @@ class JournalCoverage:
     #: coverage `#5090` Q2 forbids. APPENDED LAST for the positional-rebind
     #: reason `RecordReconcileResult.journal` is.
     gap_measured: bool = True
+    #: Does the RECORD own the ordinal on this graph — so the journal is no longer
+    #: an INPUT (#14002)? ⚠️ **THE NAME IS HISTORICAL AND THE FILE IS NOT AN
+    #: EXPORT**: no DRAINER writes or renders it (§A7.8 item 6 / §A7.5.6 unbuilt),
+    #: so it is a FROZEN PREFIX of the journal, not a rendered copy — see
+    #: :func:`_journal_is_export`. ⚠️ "Frozen" is a claim about the DRAINER, not
+    #: about every `active` row: the write path's own append stops when the box
+    #: flag is rolled, not at `arm` (see below). The name and the ``as_dict()`` key
+    #: are kept because that key is a payload surface a rename would break.
+    #: ``True`` means the graph's `record_cursor` row is in mode `active` — the ROW
+    #: ALONE decides (:func:`_journal_is_export`), never the reading process's
+    #: ``TORTOISE_RECORD_ALLOCATE``. :func:`record_writer.record_owns_position`
+    #: ADDITIONALLY requires the deployment to be armed, so on a row-`active` graph
+    #: whose flag is not rolled yet the door STILL APPENDS and the file keeps
+    #: growing (the documented cutover order arms rows first, then the flag). What
+    #: this field buys is the reading's: on a row-`active` graph ``present >
+    #: enumerated`` is the healthy state, not a contradiction.
+    #: ⛔ THAT MAKES ``present > enumerated`` THE HEALTHY STATE, not the
+    #: contradiction :attr:`unprojected_unknown_reason` was written to refuse —
+    #: see its docstring. Default ``False`` keeps every pre-cutover reading (and
+    #: every hand-built `JournalCoverage` in a test) byte-identical. APPENDED
+    #: LAST for the same positional-rebind reason as the field above.
+    journal_is_export: bool = False
 
     @property
     def unprojected_unknown_reason(self) -> str | None:
@@ -7846,6 +7871,19 @@ class JournalCoverage:
         """
         if self.enumerated is None:
             return "the journal could NOT be counted"
+        if self.journal_is_export:
+            # ⛔ NOT A CONTRADICTION ON A CUT-OVER GRAPH (#14002). The arm below
+            # is right about a journal that is still an INPUT — a record cannot
+            # hold a position its journal never issued. But where the RECORD owns
+            # the ordinal the append stops and `public.journal_event` keeps
+            # growing, so `present > enumerated` is the NORMAL, healthy state and
+            # the file is behind by construction. Reporting it as impossible
+            # disarmed the dense leg (`record_vector._measure_readiness` reads
+            # this `None` as "contradiction" and falls back to the graph for
+            # ever) and made `record-reconcile --journal` unable to report clean
+            # on a healthy cut-over pair — the arming step `journal_ready`'s own
+            # docstring tells an operator to run.
+            return None
         if int(self.present) > int(self.enumerated):
             if int(self.enumerated) == 0:
                 return (f"the journal enumerates NO records while the record "
@@ -7903,6 +7941,7 @@ class JournalCoverage:
             "unprojected": self.unprojected,
             "contiguous": self.contiguous,
             "gap_measured": self.gap_measured,
+            "journal_is_export": self.journal_is_export,
         }
 
 
@@ -7918,6 +7957,21 @@ def journal_coverage(conn: Any, *, org_id: str, graph_id: str,
     reads ``unprojected``/``present`` alone, and every statement it issues costs
     the request's own budget (#13331 review F3). ``unprojected`` is unaffected —
     it is ``enumerated - within_prefix``.
+
+    ⛔ ``want_gap`` SWITCHES OFF THE HOLE STATEMENT AND NOTHING ELSE (#14002
+    review cycle 4, P3-3). Every call ALSO issues ``CURSOR_PRESENCE_SQL`` (one
+    row, one statement) to classify the journal, and that statement is NOT
+    optional — :attr:`JournalCoverage.unprojected` reads
+    :attr:`~JournalCoverage.unprojected_unknown_reason`, which refuses
+    ``present > enumerated`` UNLESS this is a cut-over graph, so the readiness
+    gate consumes the classification indirectly on every request. Gating it on
+    ``want_gap`` (as this docstring's earlier text invited a reader to assume)
+    would restore exactly the FOR EVER-disarmed dense leg #14002 cycle 2's P1
+    was about: on a cut-over graph ``present > enumerated`` is the healthy
+    shape, so a reading that skipped the classification would report the
+    contradiction and keep the graph branch. The budget therefore buys the gap
+    statement plus the presence read's own savepoint bookkeeping
+    (:func:`_journal_is_export`) — stated here so the cost map matches the code.
 
     SCOPES THE CONNECTION (§R6): `journal_event`'s policy filters on
     `app.current_org_id`, so an unscoped read returns ZERO rows and this would
@@ -7956,6 +8010,7 @@ def journal_coverage(conn: Any, *, org_id: str, graph_id: str,
             if gap_row:
                 gap = gap_row["gap"] if isinstance(gap_row, Mapping) else gap_row[0]
                 gap = None if gap is None else int(gap)
+        export = _journal_is_export(cursor, org_id, graph_id, conn=conn)
     finally:
         cursor.close()
     return JournalCoverage(
@@ -7963,7 +8018,136 @@ def journal_coverage(conn: Any, *, org_id: str, graph_id: str,
         first_gap=gap,
         enumerated=None if enumerated is None else int(enumerated),
         gap_measured=bool(want_gap),
+        journal_is_export=export,
     )
+
+
+#: The savepoint that keeps a FAILED presence read from aborting the caller's
+#: transaction (#14002 review cycle 4, P2). Same mechanism, and the same reason,
+#: as `postgres_bytes._METER_SAVEPOINT`: in PostgreSQL a failed statement leaves
+#: the enclosing transaction ABORTED (`25P02`) until a `ROLLBACK`, so a
+#: "tolerated" miss inside a read helper poisons every statement the caller runs
+#: after it. That module MEASURED the difference (#12781: without the savepoint
+#: the caller's `commit()` silently became a ROLLBACK and the write was gone).
+_EXPORT_READ_SAVEPOINT = "tortoise_journal_is_export"
+
+
+def _export_statement(cursor: Any, statement: str, *, why: str) -> None:
+    """Issue one savepoint statement, or SAY the transaction may now be dirty.
+
+    ⛔ THE RECOVERY IS THE SAFETY PROPERTY, SO ITS OWN FAILURE MUST NOT LOOK LIKE
+    THE HARMLESS ONE. :func:`_journal_is_export` is total — its documented answer
+    on an unreadable record is ``False`` — and that is right for *reading* the
+    cursor row. It is wrong for the savepoint bookkeeping: if ``ROLLBACK TO
+    SAVEPOINT`` cannot be issued, the caller's transaction is left ABORTED, which
+    is the state this savepoint exists to prevent. A DEBUG line beside the benign
+    "the read answered no" case is how that hides, so this raises AFTER naming the
+    consequence at WARNING — the same split `postgres_bytes._meter_statement`
+    makes, for the same measured reason (`#12781`).
+
+    ⛔ THE RESIDUAL ARM IS DISCLOSED, NOT REPAIRED: nothing inside this helper can
+    rescue a transaction that was ALREADY unusable when the read ran (`25P02` on
+    the `SAVEPOINT` itself, `25P01` outside a transaction block, a dead
+    connection). The WARNING is the whole of the protection there, and it may
+    never be downgraded to the DEBUG skip the benign arm gets.
+    """
+    try:
+        cursor.execute(statement)
+    except Exception:
+        _LOGGER.warning(
+            "journal_is_export: could not issue `%s` (%s) — the caller's "
+            "transaction may now be ABORTED, so its next statement fails with "
+            "25P02 and any `commit()` becomes a ROLLBACK (#14002). This is NOT "
+            "the harmless 'the classification answered False' path: the "
+            "presence read is fail-closed, the caller's transaction is not.",
+            statement, why, exc_info=True,
+        )
+        raise
+
+
+def _journal_is_export(cursor: Any, org_id: str, graph_id: str, *,
+                       conn: Any | None = None) -> bool:
+    """Does the RECORD own this graph's ordinal — so the file is NOT an input (#14002)?
+
+    ⚠️ NOT "an export" — no DRAINER writes or renders the file (§A7.8 item 6 /
+    §A7.5.6 unbuilt), so it is a FROZEN PREFIX of the journal, not a rendered one.
+    "Frozen" is a claim about the drainer: the write path's append stops when the
+    box flag is rolled, not at `arm`, so on a row-`active` graph whose flag is not
+    rolled yet this reading is `True` and the door STILL APPENDS. The question this
+    answers is the READING's: may `present > enumerated` be treated as the healthy
+    shape rather than as an impossible journal?
+    ⛔ ASKED OF THE RECORD, NEVER OF THE CALLER'S ENVIRONMENT (#14002 review
+    cycle 3, P2). The first cut of this function also required
+    ``record_writer.record_live_allocate()`` — a WRITER switch, read from the
+    READING process. So `python -m tortoise record-reconcile --journal <path>`
+    (the arming step `journal_ready` tells an operator to run) answered
+    "unanswerable — that file cannot be the journal that fed this record" on a
+    healthy cut-over pair whenever the operator's shell did not carry the flag,
+    pointing them at destructive remedies for a contradiction that does not
+    exist. The ROW is the fact `ALLOCATION_SQL` keys on, and it is the record's
+    own statement about itself — so the row alone decides.
+
+    ⚠️ AND ROW-ACTIVE + ``present > enumerated`` CANNOT mean a rotated journal:
+    with the row `active` and the writers NOT armed, the enumerated arm is
+    refused outright (`_refuse_an_enumerated_replay`), so the record cannot gain
+    positions while the journal does. A record that holds more positions than its
+    file enumerates, on an `active` row, is therefore one the allocator fed.
+
+    ⚠️ A READ THAT FAILS ANSWERS ``False``, deliberately: the pre-#14002 reading
+    then stands (a `present > enumerated` file is treated as the contradiction it
+    always was), so a failed read keeps the dense leg on the graph branch for one
+    request instead of quietly blessing a rotated journal on the one surface that
+    exists to detect it. Read on the caller's ALREADY-SCOPED cursor, so this costs
+    one SELECT on a connection the reading holds anyway and never a second
+    `scope_connection`.
+
+    ⛔ AND THE FAILED READ MUST NOT LEAVE THAT CONNECTION POISONED (#14002 review
+    cycle 4, P2). Swallowing the exception was NOT enough: it is a statement on
+    the CALLER's cursor, so in PostgreSQL the enclosing transaction is ABORTED
+    (`25P02`) until a `ROLLBACK` — the module says so itself where its sibling
+    guard refuses the same pattern
+    (:func:`_refuse_an_enumerated_replay`) — and `journal_coverage` hands that
+    connection back to a caller which may still use it (`record-reconcile` holds
+    one handle for the whole verb, and a pooled handle outlives both). A
+    "tolerated" miss would then poison every statement after it, which converts
+    one unreadable row into a spurious failure somewhere else entirely.
+
+    So the read runs under a SAVEPOINT and a failure rolls back TO it, which
+    leaves the transaction USABLE with its tenant GUC intact — a plain
+    `conn.rollback()` would also un-scope the handle (`set_config(…, true)` is
+    transaction-local, §R6), re-opening the silent zero-row shape #9600 closed.
+    The bookkeeping is skipped only when the connection is KNOWN to be in
+    autocommit, where a failed statement aborts nothing the caller owns (the
+    `postgres_bytes._in_caller_transaction` rule). Its own failure is raised and
+    warned about, never hidden — see :func:`_export_statement`.
+    """
+    savepoints = conn is None or not bool(getattr(conn, "autocommit", False))
+    if savepoints:
+        _export_statement(cursor, f"SAVEPOINT {_EXPORT_READ_SAVEPOINT}",
+                          why="opening the presence read's savepoint")
+    try:
+        cursor.execute(CURSOR_PRESENCE_SQL, (org_id, graph_id))
+        row = cursor.fetchone()
+    except Exception as exc:  # noqa: BLE001, RUF100 — see the docstring's fail-closed note
+        if savepoints:
+            _export_statement(cursor,
+                              f"ROLLBACK TO SAVEPOINT {_EXPORT_READ_SAVEPOINT}",
+                              why="recovering the caller's transaction")
+            _export_statement(cursor,
+                              f"RELEASE SAVEPOINT {_EXPORT_READ_SAVEPOINT}",
+                              why="after the rollback")
+        _LOGGER.debug(
+            "journal_is_export: the presence read failed (%s) — answering "
+            "False so the pre-#14002 reading stands (fail-closed)",
+            type(exc).__name__)
+        return False
+    if savepoints:
+        _export_statement(cursor, f"RELEASE SAVEPOINT {_EXPORT_READ_SAVEPOINT}",
+                          why="after a successful presence read")
+    if not row:
+        return False
+    mode = row["mode"] if isinstance(row, Mapping) else row[1]
+    return str(mode) == MODE_ACTIVE
 
 
 def replay(records: Sequence[Mapping[str, Any]], conn: Any, *, org_id: str,

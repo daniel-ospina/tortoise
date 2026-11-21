@@ -101,8 +101,9 @@
 # `create_entity(type=...)`. NO row was archived: the archive is for doors with NO
 # destination (`archive/README.md`), and a forwarded name is still served.
 # ⛔ WHY ONLY SEVEN. At that cut the other 25 live names absent from the 27-target were each
-# protected by a RECORDED decision, and the list is in `tortoise/tool_registry.py` beside the
-# new rows so the next lane does not re-derive it. ⛔ IT IS 17 NOW — and a CHECKED POPULATION,
+# protected by a RECORDED decision, and the LIST is a checked table in
+# `tests/test_11609_door_retirement.py` so the next lane does not re-derive it. ⛔ IT IS 17
+# NOW — and a CHECKED POPULATION,
 # not prose: `tests/test_11609_door_retirement.py` asserts that the 10 `PROTECTED` names plus
 # the 7 `NO_CONTAINER_YET` names COVER it (10 + 7 = 17), so a live door dropped from either
 # table reds there instead of surviving as a comment. `PROTECTED` holds a retaining property:
@@ -2656,16 +2657,16 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.adjust_relationship.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  dependency: 'reached by no registered MCP tool; caller categories: other-tooling'
   lifecycle: active
   used_by: tooling, docs
   recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
+  reason: 'no MCP tool binds it; callers: other-tooling'
   recommended_family: null
   proposed: false
   exemption: false
   approval: null
-  class: no-caller-found
+  class: internal
 - name: sdk:approve_merge
   method: approve_merge
   approved: true
@@ -2841,16 +2842,16 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.delete_knowledge.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  dependency: 'reached by no registered MCP tool; caller categories: other-tooling'
   lifecycle: active
   used_by: tooling, docs
   recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
+  reason: 'no MCP tool binds it; callers: other-tooling'
   recommended_family: null
   proposed: false
   exemption: false
   approval: null
-  class: no-caller-found
+  class: internal
 - name: sdk:delete_memory_graph
   method: delete_memory_graph
   approved: true
@@ -2979,11 +2980,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.graph_overview.
-  dependency: 'reached by no registered MCP tool; caller categories: cli, engine, mcp-handler'
+  dependency: 'reached by no registered MCP tool; caller categories: cli, engine, mcp-handler, other-tooling'
   lifecycle: active
   used_by: tooling, docs
   recommendation: review
-  reason: 'no MCP tool binds it; callers: cli, engine, mcp-handler'
+  reason: 'no MCP tool binds it; callers: cli, engine, mcp-handler, other-tooling'
   recommended_family: null
   proposed: false
   exemption: false
@@ -3255,16 +3256,16 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.refresh_confidence.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  dependency: 'reached by no registered MCP tool; caller categories: other-tooling'
   lifecycle: active
   used_by: tooling, docs
   recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
+  reason: 'no MCP tool binds it; callers: other-tooling'
   recommended_family: null
   proposed: false
   exemption: false
   approval: null
-  class: no-caller-found
+  class: internal
 - name: sdk:register_source
   method: register_source
   approved: true
@@ -3486,16 +3487,16 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.write_knowledge_batch.
-  dependency: 'reached by no registered MCP tool; caller categories: none outside tests'
+  dependency: 'reached by no registered MCP tool; caller categories: other-tooling'
   lifecycle: active
   used_by: tooling, docs
   recommendation: review
-  reason: no MCP tool binds it, and no caller outside tests was found
+  reason: 'no MCP tool binds it; callers: other-tooling'
   recommended_family: null
   proposed: false
   exemption: false
   approval: null
-  class: no-caller-found
+  class: internal
 - name: sdk:write_question
   method: write_question
   approved: true

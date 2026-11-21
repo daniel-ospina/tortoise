@@ -483,10 +483,12 @@ class RecordVectorWithoutFallback(RecordVectorError):
     answering after it would return a SMALLER cohort and report it as the answer.
     That is the `#5090` Q2 defect on the branch that carries production traffic.
     ⛔ AND THAT PREMISE IS PER LABEL, not universal: only the labels in
-    :data:`MIRROR_RETIRED_LABELS` have writers that stop storing, so only they
+    :data:`MIRROR_RETIRED_LABELS` have folds that stop writing, so only they
     raise this. `point` and `operator` are still mirrored after their count
-    verifies (a `:Point`'s vector is record TRUTH and no fold derives it), so a
-    graph answer for them is a complete copy and they keep the named fallback.
+    verifies, because the JOURNAL FOLD never stops writing (a `:Point`'s vector is
+    record TRUTH and no fold derives it), so the graph leg stays fed on the primary
+    retrieval label and a graph answer for them is a complete copy — it keeps the
+    named fallback even though the SDK update door and the DR restore DO stop.
 
     So post-contract the leg does not fall back: it reports that it could not look
     (`degraded`, ``reason="query_failed"``), which is the honest answer and the
@@ -691,11 +693,15 @@ COVERAGE_GATED_LABELS: frozenset[str] = frozenset(LABEL_SERVED)
 #: premise is produced by exactly ONE thing: the writer consulting
 #: :func:`mirror_required` before it stores. `#13626` wired that for every writer of
 #: `object`, `subject`, `event`, `document` and `source`, so those five are here; a
-#: `:Point`'s vector is RECORD TRUTH (`#5004`) and is never derived, and `operator`
-#: (a `:Point` subset, `#13630`) has no fold of its own — nothing answers the gate
-#: for either, so their graph copy is still maintained and refusing it on a record
-#: blip would empty the dense leg for `point` (the primary retrieval label) on the
-#: DEFAULT posture, where `main` answered from that same copy.
+#: `:Point`'s vector is RECORD TRUTH (`#5004`) and its JOURNAL FOLD never stops writing,
+#: and `operator` (a `:Point` subset, `#13630`) has no fold of its own — so the dense leg
+#: keeps the graph as a named fallback on `point`, the primary retrieval label, exactly as
+#: `main` answered (`#13617` review F1). ⛔ `#13971` retires the STORED `:Point` vectors and
+#: gates the two writers that place a redundant copy (`sdk::_update_entity` and
+#: `hosted_backup.restore_graph`), and it deliberately does NOT gate the journal fold — so
+#: this set must stay without `point`, which
+#: `test_13610_graph_vector_copy.py::
+#: test_a_verified_label_whose_fold_still_writes_the_graph_keeps_the_fallback` pins.
 #:
 #: ⛔ AND THE SET NOW COVERS BOTH HALVES OF `:Source` (`document` AND `source`), which
 #: is not a re-cut of the union rule: each half is written by its own fold (`_upsert_document`
@@ -2190,6 +2196,18 @@ def _measure_readiness(scope: _Scope, *, record_dsn: str | None,
       readiness asks only ``unprojected`` and ``present``. Issuing it would
       spend the read's budget on a fact nobody consumes.
 
+    ⛔ AND IT IS ``_FIRST_GAP_SQL`` AND NOTHING ELSE THAT ``want_gap`` SWITCHES
+    OFF (#14002 review cycle 4, P3-3). Every coverage read still issues
+    ``CURSOR_PRESENCE_SQL`` (plus its savepoint bookkeeping) to classify the
+    journal, because ``unprojected`` — the ONE thing this gate reads — depends on
+    that classification: :attr:`JournalCoverage.unprojected_unknown_reason`
+    refuses ``present > enumerated`` unless the record owns the ordinal, and on a
+    cut-over graph that shape is the HEALTHY one. Gating the classification on
+    ``want_gap`` would therefore re-arm the cycle-2 P1 this change exists to
+    close (the dense leg disarmed for ever on every cut-over graph), so the cost
+    of this gate is two statements plus the savepoint, never one. Stated because
+    the budget rule here is what the neighbouring refusals cite.
+
     ⛔ AND THE JOURNAL IS COUNTED READ-ONLY (#13331 review F2).
     `EventLog.position_readonly()` is `position()` without its side effects: no
     append lock (so a wedged peer cannot park this call, and a timeout here can
@@ -2257,6 +2275,13 @@ def _measure_readiness(scope: _Scope, *, record_dsn: str | None,
     # #13371/#13345 P2/F2). The `None` cannot come
     # from an uncountable journal here — that arm returned above — so it is
     # exactly that contradiction, and it is REPORTED rather than silently off.
+    # ⛔ AND IT IS NOT THAT CONTRADICTION ON A CUT-OVER GRAPH (#14002): there the
+    # journal stops being appended to while the record keeps gaining positions, so
+    # `present > enumerated` is the HEALTHY shape and `journal_coverage` answers
+    # `unprojected == 0` (`JournalCoverage.journal_is_export`). Without that, this
+    # gate read the cutover as a contradiction and kept the graph branch for ever —
+    # disarming the very leg the record exists to serve, with a WARNING claiming
+    # the journal could not have fed the record.
     if cov.unprojected is None:
         _warn_readiness_contradictory(path, cov)
         return False

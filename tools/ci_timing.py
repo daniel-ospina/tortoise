@@ -21,8 +21,8 @@ wrong weight can red `python-ci-gate` with zero test failures (#3395). The gate
 is still `ci_selection.py --integrity`; this tool only writes the map it reads.
 Stdlib at import (Python 3.12); `--refresh-durations` additionally requires PyYAML
 (the manifest-side checks load the refreshed text through `yaml.safe_load`) —
-`ci-timing.yml` pins `pyyaml==6.0.2` for that step, exactly as `manifest-integrity`
-does — outside that pin the import is unguarded, so a missing/broken PyYAML
+`ci-timing.yml` pins `pyyaml==6.0.3` for that step (the `.[test]` extra's number) —
+outside that pin the import is unguarded, so a missing/broken PyYAML
 surfaces as rc=2 (UNKNOWN), with the import error named on stderr —
 `ModuleNotFoundError` for a missing PyYAML, `ImportError` for a broken one — and
 the process boundary is total, so it is no longer distinguishable by exit code

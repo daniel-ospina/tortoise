@@ -61,11 +61,15 @@ _CP = "tortoise/cache_projection.py"
 _AU = "tortoise/audit.py"
 _PI = "tortoise/projection/__init__.py"
 _SDK = "tortoise/sdk.py"
+#: `#14087` review round 7: `00_index.md`'s entity-verdict row points at this file's `:43` in the
+#: PRESENT tense ("the bullet is `entity_verdict.py:43`"), so the address is head-relative.
+_EV = "tortoise/entity_verdict.py"
 _MCP = "tortoise/mcp_server.py"
 _RS = "tortoise/record_serve.py"
 _GJ = "tortoise/goal_judgement.py"
 _HB = "tortoise/hosted_backup.py"
-#: `#13854`'s vector-index-parity plan. Its reader table cites `hosted_backup.py:2666` for
+_SSM = "tortoise/session_source_prose_migration.py"
+#: `#13854`'s vector-index-parity plan. Its reader table cites `hosted_backup.py:2683` for
 #: `_index_has_is_operator()`, and that row is in this branch's diff.
 _PLAN_4997 = "docs/plans/2026-09-25-4997-vector-index-parity.md"
 
@@ -107,23 +111,23 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # moved them, and the reader rule sent the reader to the wrong line. A pin per entry is what turns
     # the list into a guard.
     (_AUDIT, "`:2921`", _SDK, 2921, "MATCH (s:Session {id:$sid}) SET s.capture_redactions=$redactions"),
-    (_AUDIT, "`sdk.py:37697`", _SDK, 37697, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
-    (_AUDIT, "`:37720`", _SDK, 37720, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`sdk.py:37883`", "tortoise/sdk.py", 37883, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`:37906`", "tortoise/sdk.py", 37906, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
     # ⛔ The three rows below pin SITES the pair rows above cannot reach, because those rows carry
     # TABLE/ROW context on purpose (a bare `:37467` is satisfied by the header enumeration or by the
     # proximity paragraph, so the §2.5 rows could be re-pointed alone with nothing red). MEASURED, at
-    # the head before this pin: §2.5's adjacency row and row 8 both cited `sdk.py:37228` for the
+    # the head before this pin: §2.5's adjacency row and row 8 both cited `sdk.py:37283` for the
     # `-[r]->(n)` walk — a line that is `bd_id: bd.confidence_mean` at this head, a document line at
     # the pin's neighbours and `RETURN type(r)…` on `:37467` — so the walk's ADDRESS resolved on NO
     # head the row named, while `len(_PINS)` and every count arm stayed green. The proximity
     # paragraph above §2.5 carried the same rot in the other direction: it named `:37183` (a `#11702`
     # comment at every head) as the address "the row carries" — the one thing that paragraph says
     # must never disagree with the row.
-    (_AUDIT, "| `tortoise/sdk.py:37720` |", _SDK, 37720, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
-    (_AUDIT, "the `-[r]->` walk (`sdk.py:37720`)", _SDK, 37720, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
-    (_AUDIT, "they are `:37697` and", _SDK, 37697, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "| `tortoise/sdk.py:37906` |", "tortoise/sdk.py", 37906, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "the `-[r]->` walk (`sdk.py:37906`)", "tortoise/sdk.py", 37906, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "they are `:37883` and", "tortoise/sdk.py", 37883, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
     # ⛔ The FTS leg's `entity_type="event"` cite, pinned at the site because the row's other numbers
-    # (`:3062`, `:6984`) were pinned and this one was not. MEASURED: `sdk.py:57147` — the value the
+    # (`:3062`, `:6984`) were pinned and this one was not. MEASURED: `sdk.py:57209` — the value the
     # `#13551` lane's previous pass re-derived on the PRE-merge tree — is NOT the statement at this
     # head (at this head `:57090` is a BLANK line inside `_no_source_advisory`'s docstring, which
     # opens at `:57089`; `scored.append({` is `:57284`), nor on
@@ -145,13 +149,13 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⛔ The "comparable" denominator: this pair names a line past the pin's `sdk.py` (56,415 lines),
     # so the header counts it as drifted rather than compared, and it is ONE OF THREE that are
     # incomparable at the pin — measured at this head: 211 comparable, 119 of them drifted, plus
-    # those three (`sdk.py:57889`, `search_engine.py:7196`, `:7198`) = 122 of the 214. ⛔ The
+    # those three (`sdk.py:58099`, `search_engine.py:7196`, `:7198`) = 122 of the 214. ⛔ The
     # earlier form of this comment said "the seam above it is line-neutral, so nothing moved" and
     # carried `57276`: the seam wrap sits above the cite, and the statement has moved +341 since
     # the head this pin was written at (+147 to the pre-`#13833` tip, then `main`'s `#13833` a
     # further 194), so the token moves WITH the line — a pin whose token and
     # target disagree cannot red on the stale cite it exists to catch (#13750 VGATE).
-    (_AUDIT, '`sdk.py:57889` passes `"event"`', _SDK, 57889, 'entity_type="event"'),
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`sdk.py:58099` passes `\"event\"`", "tortoise/sdk.py", 58099, "entity_type=\"event\""),
     (_AUDIT, "`audit.py:817`", _AU, 817, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2452`", _AU, 2452, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2463`", _AU, 2463, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
@@ -160,7 +164,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # it (`grep -rn 11281 tests/` -> nothing): the audit document's header promises a reader for
     # every entry it re-derives, and this one had none. `:11280` is the `g.query(` call; the
     # document cites the query LITERAL's first line, which is `:11281` (its siblings in the same
-    # paragraph follow the same convention — `sdk.py:31347` is the literal while `:31346` is the call).
+    # paragraph follow the same convention — `sdk.py:31533` is the literal while `:31377` is the call).
     (_AUDIT, "`mcp_server.py:11281`", _MCP, 11281, "OPTIONAL MATCH (t)<-[:TAGGED]-(q)"),
     # ⛔ The SAME address has a SECOND written site — the header enumeration spells it BARE
     # (`` `mcp_server.py:5184`/`:8206`/`:11281` ``), and the §2.5 token above cannot see a bare
@@ -174,8 +178,43 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # bare-token row with count 2 (header + §2.5). This row and its count are the site the re-derived
     # §2.5 row left behind.
     (_AUDIT, "`:11281`", _MCP, 11281, "OPTIONAL MATCH (t)<-[:TAGGED]-(q)"),
+    # 1 -> 3 at the #13991 merge of `origin/main` `0656b056d7`: the branch's OWN prose adds two more
+    # BARE sites of this same address, so the bare-token row DIRECTLY ABOVE (`` `:11281` ``, count
+    # 1 -> 3) can no longer see every spelling of it; the `mcp_server.py:11281` row above it (count 1,
+    # unchanged — the row whose token carries the path, not a bare `:NNNN`) covers only the §2.5
+    # one-token spelling. Deliberately no "N lines above": that distance moved twice on this branch
+    # already, and a stated count is the defect class this file exists to catch. Measured on the merged document
+    # (`.venv/bin/python -c 'from pathlib import Path; t=Path("docs/architecture/
+    # CAPABILITY-PLACEMENT-AUDIT.md").read_text(); print(t.count("`:11281`"))'` -> 3), with the site
+    # lines RE-MEASURED on this document rather than carried — `grep -n '`:11281`' on the MERGED
+    # document gives `:173` / `:186` / `:592`. They have moved twice since the pre-merge `:182`/`:585`
+    # edition: `main`'s merge `0656b056d7` shifted two of them, the P2 fix above (which sits BETWEEN
+    # them) added +2 to the third, and the two-line "five pairs as two code spans" correction
+    # (#13991 review P2-A, which sits ABOVE all three) then shifted every one of them by +2 again —
+    # which is why this block states the MEASUREMENT and not a delta:
+    #   :173  the header trio above — main's site, the one this row was created for;
+    #   :186  the §2.5 `:Tag`-family enumeration this branch adds, which lists all five reader
+    #         addresses (the four `sdk.py` ones plus this `mcp_server.py` one) as BARE siblings so the
+    #         `_REDEFINED_13854` one-token counts are not doubled;
+    #   :592  the same branch's §2.5 provenance sentence, `:11280` -> `:11281`.
+    # Re-derive with `grep -n '`:11281`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` before
+    # trusting this list on a later head: a line number in prose is exactly the claim this file pins
+    # for the document, and it drifts the same way.
+    # All three name ONE address with ONE meaning, so this is not the `b9e7822362c6` class (two
+    # addresses for one reader). The count is kept at the measured number rather than deleting a
+    # spelling: re-pointing any one of the three now reds here, which is the discrimination the row
+    # exists for.
     (_AUDIT, "`:5654`", _MCP, 5654, "entity_type=entity_type"),
     (_AUDIT, "`:8206`", _MCP, 8206, "entity_type=entity_type"),
+    # ⛔ The four `sdk.py` members of §2.5's `:Tag` row are enumerated in the header as BARE `:NNNN`
+    # siblings — a spelling none of the rows above reaches (they all require a path or the one-token
+    # form), which is the same one-site-vs-one-string gap the `:11281` header half and `:6989` were:
+    # re-pointing any one of them to a stale number left every arm green. One ROW per SITE, pinned by
+    # the fragment the header paragraph quotes for it.
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`:31551`", "tortoise/sdk.py", 31551, "MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag})"),
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`:31533`", "tortoise/sdk.py", 31533, "\"MATCH (t:Tag) \""),
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`:24513`", "tortoise/sdk.py", 24513, "MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) "),
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`:24857`", "tortoise/sdk.py", 24857, "MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t"),
     (_AUDIT, "`:6974-6990`", _PI, 6974, "_FULLTEXT_INDEX_LABEL_FIELDS"),
     (_AUDIT, "`:6984`", _PI, 6984, '("Event", ["subject", "name"])'),
     (_AUDIT, "`:6985`", _PI, 6985, '("Subject", ["name"])'),
@@ -188,7 +227,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:6990`", _PI, 6990, '("Source", ["_searchText"])'),
     (_AUDIT, "record_serve.py:468", _RS, 468, "READ_POINT_BY_ID: AnchoredRead("),
     (_AUDIT, "goal_judgement.py:1128", _GJ, 1128, "where = \"MATCH (e:Event)-[:aboutObject]->(o) WHERE o.id = $indicator\""),
-    (_AUDIT, "sdk.py:24440", _SDK, 24440, "(n:Point {id:$id})-[:TAGGED]->()"),
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "sdk.py:24626", "tortoise/sdk.py", 24626, "(n:Point {id:$id})-[:TAGGED]->()"),
     (_AUDIT, "search_engine.py:6891", _SE, 6891, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
     # --- docs/architecture/SUBSTRATE-REBUILD-MAP.md §5's move list (the #11682 corpus-join block)
     (_SUBSTRATE, "tortoise/search_engine.py:3508", _SE, 3508, "``:Source``/``:Document`` row must not contribute"),
@@ -199,8 +238,8 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # `:Document`; `grep -nF 'D10: a document is a ``:Source``, not a'` returns the line ABOVE the
     # `:Document` one, which is how the +35-instead-of-+36 arithmetic was introduced and never caught).
     # Pinned by CONTENT on the line that carries `:Document`, so the next re-measure by that phrase reds.
-    (_SUBSTRATE, "tortoise/sdk.py:37361", _SDK, 37361, "``:Document`` node)."),
-    (_SUBSTRATE, "`:37403` in `_file_human_approval`", _SDK, 37403, "``:Document`` node)."),
+    ("docs/architecture/SUBSTRATE-REBUILD-MAP.md", "tortoise/sdk.py:37547", "tortoise/sdk.py", 37547, "``:Document`` node)."),
+    ("docs/architecture/SUBSTRATE-REBUILD-MAP.md", "`:37589` in `_file_human_approval`", "tortoise/sdk.py", 37589, "``:Document`` node)."),
     # --- docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md
     (_M3_BRIEF, "tortoise/search_engine.py:2945", _SE, 2945, "def run_fts_query"),
     (_M3_BRIEF, "search_engine.py:2787", _SE, 2787, "def recency_tie_clause"),
@@ -223,18 +262,18 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # `_TOKEN_OCCURRENCES` entry covered it. ⛔ `#13486` moved the writer under this row, so it is
     # re-derived here to the line that actually carries `search_text = _source_search_text(`
     # (`grep -n 'search_text = _source_search_text(topics=topics)' tortoise/sdk.py`), not carried.
-    (_AUDIT, 'sdk.py:22039', _SDK, 22039, 'search_text = _source_search_text(topics=topics)'),
-    (_AUDIT, 'sdk.py:22081', 'tortoise/sdk.py', 22081, 's.summary=CASE WHEN $sum'),
-    (_AUDIT, '`:22204`', 'tortoise/sdk.py', 22204, 's.summary, s.topics, s.'),
-    (_AUDIT, 'hosted_api.py:23046', 'tortoise/hosted_api.py', 23046, 'MERGE (s:Source {url:$did})'),
-    (_AUDIT, '`:22858`', 'tortoise/hosted_api.py', 22858, 'def _execute_commit_writes'),
-    (_AUDIT, '`:33809`', 'tortoise/hosted_api.py', 33809, 'MERGE (p:PackInstall {namespace: $ns})'),
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "sdk.py:22225", "tortoise/sdk.py", 22225, "search_text = _source_search_text(topics=topics)"),
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "sdk.py:22267", "tortoise/sdk.py", 22267, "s.summary=CASE WHEN $sum"),
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`:22390`", "tortoise/sdk.py", 22390, "s.summary, s.topics, s."),
+    (_AUDIT, 'hosted_api.py:23082', 'tortoise/hosted_api.py', 23082, 'MERGE (s:Source {url:$did})'),
+    (_AUDIT, '`:22894`', 'tortoise/hosted_api.py', 22894, 'def _execute_commit_writes'),
+    (_AUDIT, '`:33853`', 'tortoise/hosted_api.py', 33853, 'MERGE (p:PackInstall {namespace: $ns})'),
     # --- the four corrections this pass made that NO row reached (review cycle 3, F5). Each token
     # carries its own wording, not a bare number, because a bare `:NNNN` is satisfied by any sibling
     # spelling of the same digits — the defect `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence`
     # exists for, and the reason row 13's parenthetical and §2.1's count marker survived three passes.
-    (_AUDIT, '`:5375` at this head', 'tortoise/projection/entities.py', 5375, 'def _upsert_document(self, ev: dict) -> None:'),
-    (_AUDIT, '`:7181` at this head', 'tortoise/projection/entities.py', 7181, 'def _upsert_source('),
+    (_AUDIT, '`:5434` at this head', 'tortoise/projection/entities.py', 5434, 'def _upsert_document(self, ev: dict) -> None:'),
+    (_AUDIT, '`:7240` at this head', 'tortoise/projection/entities.py', 7240, 'def _upsert_source('),
     # ⚠️ Widened from the bare `` `:6681` `` this pass first wrote (review cycle 6, F5): a bare `:NNNN`
     # is exactly the shape the comment above says is excluded — it is satisfied by any sibling spelling
     # of the same digits — and this row was the one of the four that carried it.
@@ -243,24 +282,85 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # --- three re-derived addresses that had NO pin at all, so a `+1` mutation left 441 tests green
     # (review cycle 6, P2-2). `grep -rn '28008\|28372' tests/ tools/` returned nothing before these rows:
     # the guard set is per-token, and an unlisted token is coverage the file only APPEARED to have.
-    (_INDEX, '`sdk.py:28395` at this head', _SDK, 28395, 'WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL'),
-    (_EVIDENCE, '(`sdk.py:28395`), so any non-NULL', _SDK, 28395, 'WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL'),
-    (_EVIDENCE, 'called at `sdk.py:28759`', _SDK, 28759, 'result = apply_entity_merge('),
+    ("docs/00_index.md", "`sdk.py:28581` at this head", "tortoise/sdk.py", 28581, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
+    # ⛔ #14087 review round 7 (P3): the SAME `00_index.md:118` line writes a SECOND present-tense
+    # this-head address — `the bullet is entity_verdict.py:43` — and no arm read it. Its sibling
+    # (`sdk.py:28581`, the row above) was pinned, which is exactly how an unpinned neighbour hides:
+    # `grep -c 'entity_verdict\.py:43' tests/test_12184_shifted_cites.py` -> 0 before this row, so a
+    # re-point or a rotation of `entity_verdict.py` under it would have moved the address with every
+    # arm green. One ROW per SITE, never one row per STRING.
+    (_INDEX, "`entity_verdict.py:43`", _EV, 43, "writing `dedup_reviewed='link'` is worse than inert"),
+    ("docs/architecture/ENTITY-VERDICT-BANDS.md", "(`sdk.py:28581`), so any non-NULL", "tortoise/sdk.py", 28581, "WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL"),
+    ("docs/architecture/ENTITY-VERDICT-BANDS.md", "called at `sdk.py:28945`", "tortoise/sdk.py", 28945, "result = apply_entity_merge("),
     # --- docs/plans/2026-09-25-4997-vector-index-parity.md — the vector-index reader table
     # ⛔ The branch's `+147` to `hosted_backup.py` moved `def _index_has_is_operator()` from
-    # `origin/main`'s `:2519` to `:2666`, and this branch re-pointed the row to `:1548` — a `+4`
+    # `origin/main`'s `:2519` to `:2666` (`:2684` is that def's DOCSTRING line, so the `+4` that
+    # aimed at `2684` was aiming at prose), and this branch re-pointed the row to `:1548` — a `+4`
     # applied to a number that was ALREADY wrong at `main` (`:1544` there, on a `restore_graph`
     # comment block). `:1548` opens on a comment whose text has nothing to do with the symbol, so the
     # row shipped naming a symbol at a line that does not carry it. Re-derived by CONTENT:
-    # `grep -n 'def _index_has_is_operator' tortoise/hosted_backup.py` -> `2666`. Pinned here because
+    # `grep -n 'def _index_has_is_operator' tortoise/hosted_backup.py` -> `2683` on this tree (it was
+    # `2666` at the head that first re-derived this row; the pin below is what reddens if it moves
+    # again). Pinned here because
     # an unlisted token is coverage this file only APPEARED to have (the `:6989` shape).
-    (_PLAN_4997, "tortoise/hosted_backup.py:2666", _HB, 2666, "def _index_has_is_operator() -> bool:"),
+    (_PLAN_4997, "tortoise/hosted_backup.py:2683", _HB, 2683, "def _index_has_is_operator() -> bool:"),
+    # --- #14043 review, finding 3: FOUR addresses this revision writes at THIS head were in neither
+    # the header's enumeration nor any pin here, so the header's own reader rule resolved them to the
+    # PIN — where a review measured that all four land on something else (a docstring, a comment, an
+    # `if not rows` guard and a bare `)`). An unlisted token is coverage this file only APPEARED to
+    # have; these rows are the same shape as the `:6989` and `hosted_backup.py:2683` rows above.
+    # NON-VACUOUS: move any of the four by `+1` and the content arm reds (the token arm cannot fire —
+    # the document still carries the address); measured at this head, each fragment below is the
+    # line's own text, and at `ccb49741b2ec` none of the four numbers carries it.
+    (_AUDIT, "live.py:667", "tortoise/live.py", 667, 'EPISTEMIC_LABELS = ("Point", "Subject", "Object", "Event")'),
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "sdk.py:15873", "tortoise/sdk.py", 15873, "\"MATCH (m:GraphEventMeta) RETURN m.first_seq\""),
+    (_AUDIT, "hosted_backup.py:844", _HB, 844, '"MATCH (m:GraphEventMeta) RETURN max(m.last_seq), max(m.first_seq)"'),
+    (_AUDIT, "hosted_backup.py:916", _HB, 916, '"MERGE (m:GraphEventMeta) SET m.last_seq = $last, m.first_seq = $first"'),
+    # §2.6's row, re-pointed to this head by the same review: the census's `:890`/`:1182`/`:1383` do not land
+    # on these statements at this head, and `hosted_backup.py` drifts in TWO steps (`+2` above the pin's `:58`,
+    # `+132` above the pin's `:1175`) — so the offsets are `+2`/`+134`, not one delta. Pinned by content
+    # because the header's enumeration names them and promises exactly that.
+    (_AUDIT, "hosted_backup.py:892", _HB, 892, '"MATCH (e:GraphEvent) RETURN max(e.seq), min(e.seq)"'),
+    (_AUDIT, "hosted_backup.py:1333", _HB, 1333, 'MATCH (n) RETURN labels(n), properties(n)'),
+    (_AUDIT, "hosted_backup.py:1534", _HB, 1534, 'MATCH (n) RETURN labels(n), properties(n)'),
+    # --- #14043 review, finding 2 (the FINAL-head review): five addresses this revision writes in its
+    # new §2.2 `:Source` reader row and in row 13 had NO pin and no occurrence count, so the next merge
+    # that inserted into `tortoise/session_source_prose_migration.py` would have moved all five with
+    # nothing red. ⛔ These are NOT head declarations: that file is the SAME BLOB at the pin
+    # `ccb49741b2ec` and at this head (`git rev-parse ccb49741b2ec:tortoise/session_source_prose_migration.py`
+    # == `HEAD:` → `77c86b24e5`), so all five open at the pin exactly as they open here and the header's
+    # pin default resolves them CORRECTLY. What was missing is the guard, not the head — the live defect
+    # here is an unguarded cite, which is the same coverage this file only APPEARED to have that the
+    # `:6989` and `hosted_backup.py:2683` rows above were added for (the document's §2.7 note:
+    # file-scoped drift is "either fixed everywhere or trusted nowhere").
+    # NON-VACUOUS: move any of the five by `+1` and the content arm reds (the token arm cannot fire —
+    # the document still carries the address); each fragment below is the line's own text at this head,
+    # taken with `grep -n 'def …'/the SQL literal` on this tree, never by a delta. ⚠️ `:218-223` is
+    # pinned on the ONE-TOKEN spelling, whose two document sites are the same address (the §2.2 row's
+    # `tortoise/…` spelling and row 13's bare one) — a single content pin resolves both, and the
+    # occurrence count is what stops a third site appearing unannounced.
+    (_AUDIT, 'session_source_prose_migration.py:218-223', _SSM, 218, '_SOURCE_ROWS = ('),
+    (_AUDIT, '`:1263-1268`', _SSM, 1263, '_HITS_ROWS = ('),
+    (_AUDIT, '`:274-281`', _SSM, 274, '_REPAIR_PAIR = ('),
+    (_AUDIT, 'session_source_prose_migration.py:277-279', _SSM, 277, "AND coalesce(s.summary,'')=$old_sum "),
+    (_AUDIT, '`:1292-1300`', _SSM, 1292, '_CONTROL_LEXICON_ROWS = ('),
+    # --- #14043 review (finding 1, this cycle): §6.3's own two addresses were in neither list and
+    # unpinned, and the header's default resolves them to the PIN — where `sdk.py:16077` is unrelated
+    # prose and `sdk.py:3801` is an EMPTY LINE. Both are one-token spellings already, so no figure
+    # moves (345 as-written stays 345); NON-VACUOUS: `+1` reds the content arm at both.
+    # ⛔ #14087 review: the span's END was one short — `:16081` is the paragraph's PENULTIMATE line and
+    # `:16082` (the line reading "turns list is that same requirement for the record-held lane.") is its
+    # last, with `:16083` blank. A span token pins only its START, so the short end was invisible to `_PINS`;
+    # `test_the_jsonl_contract_span_ends_on_its_paragraphs_last_line` derives the end from the source
+    # and grades it.
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "sdk.py:16077-16082", "tortoise/sdk.py", 16077, "**JSONL event log (#548):** written when *point* is provided"),
+    (_AUDIT, 'sdk.py:3801', _SDK, 3801, 'sdk._emit_event("PointRetracted", _deleted_point_payload(tid))'),
 )
 
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
 #: header must carry, target file, 1-based line **on this branch's tree**, verbatim fragment on that
 #: line). Five of these
-#: are reached by `_PINS` already; `:2485`, `:2542` and `projection/entities.py:5765` were in NO pin at all
+#: are reached by `_PINS` already; `:2485`, `:2542` and `projection/entities.py:5797` were in NO pin at all
 #: before this one, and the header named none of the eight — which is the defect
 #: `test_the_main_set_enumeration_names_the_group_it_was_missing` exists for.
 #: ⚠️ The sdk/hosted_api rows here were `main`'s figures until `#13363` re-derived them: that branch's
@@ -276,17 +376,17 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
     (":2724-2726", _CP, 2724, "prose_columns = _EPISODIC_SOURCE_PROSE_COLUMNS"),
     (":2776", _CP, 2776, "tail_denied = forbidden | {"),
     (":3841", _CP, 3841, 'if table == "point"'),
-    (":5765", _ENT, 5765, "s.summary=coalesce($summary, s.summary, '')"),
+    (":5824", _ENT, 5824, "s.summary=coalesce($summary, s.summary, '')"),
     # Round 8: written at `main`, pinned at `main`, but absent from the enumeration — so the header's rule
-    # sent readers to the pin. ⛔ NOT "where every one is a comment": at the pin `sdk.py:24004` is a DELETE
+    # sent readers to the pin. ⛔ NOT "where every one is a comment": at the pin `sdk.py:24059` is a DELETE
     # statement and `hosted_api.py:22919` is `if is_subject_kind(...)`, both executable. The pin is wrong for
     # all six; it is a comment for most, and unrelated CODE for the two that matter most here.
-    ("sdk.py:24440", _SDK, 24440, "(n:Point {id:$id})-[:TAGGED]->()"),
+    ("sdk.py:24626", "tortoise/sdk.py", 24626, "(n:Point {id:$id})-[:TAGGED]->()"),
     ("search_engine.py:6891", _SE, 6891, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
-    ("sdk.py:22081", _SDK, 22081, "s.summary=CASE WHEN $sum"),
-    (":22204", _SDK, 22204, "s.summary, s.topics, s."),
-    ("hosted_api.py:23046", "tortoise/hosted_api.py", 23046, "MERGE (s:Source {url:$did})"),
-    (":22858", "tortoise/hosted_api.py", 22858, "def _execute_commit_writes"),
+    ("sdk.py:22267", "tortoise/sdk.py", 22267, "s.summary=CASE WHEN $sum"),
+    (":22390", "tortoise/sdk.py", 22390, "s.summary, s.topics, s."),
+    ("hosted_api.py:23082", "tortoise/hosted_api.py", 23082, "MERGE (s:Source {url:$did})"),
+    (":22894", "tortoise/hosted_api.py", 22894, "def _execute_commit_writes"),
 )
 
 
@@ -325,22 +425,33 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2714-2715`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2776'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2921`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:37697`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:37720`'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/sdk.py:37720` |'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'the `-[r]->` walk (`sdk.py:37720`)'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'they are `:37697` and'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:57889` passes `"event"`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:37883`'): 1,
+    # 3, not 2: the whole-node walk's address is written BARE at three sites — the header's pair
+    # (`sdk.py:37883`/`:37906`), the proximity paragraph's "they are `:37883` and `:37906` now", and
+    # §2.5's distance paragraph ("23 lines below at `:37906`", re-derived from the stale `:37751`).
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:37906`'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/sdk.py:37906` |'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'the `-[r]->` walk (`sdk.py:37906`)'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'they are `:37883` and'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:58099` passes `"event"`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`audit.py:817`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2452`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2463`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:5184`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:11281`'): 1,
-    # 1: the header's BARE spelling of the same address, counted as its own site. Measured at this
-    # head: `grep -o '`:11281`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 1.
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:11281`'): 1,
+    # 3: the header's BARE spelling of the same address, plus the two BARE sites the #13991 branch
+    # itself adds (§2.5's five-address enumeration and its `:11280` -> `:11281` provenance sentence) —
+    # see the row's own comment for the three line numbers. Measured on the merged document:
+    # `grep -o '`:11281`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 3.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:11281`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5654`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8206`'): 2,
+    # The four bare `sdk.py` `:Tag` siblings the header paragraph enumerates, one occurrence each —
+    # the §2.5 spellings are the one-token keys `sdk.py:31551` etc. and are a different key.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:31551`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:31533`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:24513`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:24857`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6974-6990`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6984`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6985`'): 1,
@@ -354,20 +465,20 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6990`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'record_serve.py:468'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'goal_judgement.py:1128'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:24440'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:24626'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'search_engine.py:6891'): 2,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/search_engine.py:3508'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:3506`'): 1,
-    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/sdk.py:37361'): 1,
-    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:37403` in `_file_human_approval`'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/sdk.py:37547'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:37589` in `_file_human_approval`'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:2945'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'search_engine.py:2787'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:5074'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', '`search_engine.py:4993`'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'search_engine.py:3138-3153'): 1,
-    # ⛔ `origin/main`'s two `sdk.py:28041` rows are DROPPED at this merge, not carried: `28019` is
+    # ⛔ `origin/main`'s two `sdk.py:28096` rows are DROPPED at this merge, not carried: `28019` is
     # `main`'s value for the content-review filter, and this branch re-derived that cite to `:28067`
-    # in BOTH documents. Measured at this head: `grep -rn 'sdk.py:28041' docs/00_index.md
+    # in BOTH documents. Measured at this head: `grep -rn 'sdk.py:28096' docs/00_index.md
     # docs/architecture/ENTITY-VERDICT-BANDS.md` -> no match (the token survives only in
     # `05-verify.md`'s sentence stating the re-point), so a row asserting 1 occurrence would be a
     # false pin over a token the documents no longer carry.
@@ -376,20 +487,59 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     # `tortoise/sdk.py` insertion independently landed it (`_PINS` above follows it). So `28019` and
     # `28067` are BOTH tokens the documents no longer carry, and a row for either is a false pin.
     ('docs/evidence/13083-capability-census/README.md', 'cache_projection.py:2776'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:22039'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:22081'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22204`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23046'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22858`'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:33809`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5375` at this head'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7181` at this head'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:22225'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:22267'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22390`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23082'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22894`'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:33853`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5434` at this head'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7240` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6834` inside the same function'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3062` derives the label'): 1,
-    ('docs/00_index.md', '`sdk.py:28395` at this head'): 1,
-    ('docs/architecture/ENTITY-VERDICT-BANDS.md', '(`sdk.py:28395`), so any non-NULL'): 1,
-    ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'called at `sdk.py:28759`'): 1,
-    ('docs/plans/2026-09-25-4997-vector-index-parity.md', 'tortoise/hosted_backup.py:2666'): 1,
+    ('docs/00_index.md', '`sdk.py:28581` at this head'): 1,
+    # ⛔ #14087 review round 7: the pin row added for the SAME line's other present-tense address.
+    # Occurs ONCE in the document (`grep -o 'entity_verdict\.py:43' docs/00_index.md | wc -l` -> 1), so a
+    # second site must not appear unannounced.
+    ('docs/00_index.md', '`entity_verdict.py:43`'): 1,
+    ('docs/architecture/ENTITY-VERDICT-BANDS.md', '(`sdk.py:28581`), so any non-NULL'): 1,
+    ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'called at `sdk.py:28945`'): 1,
+    ('docs/plans/2026-09-25-4997-vector-index-parity.md', 'tortoise/hosted_backup.py:2683'): 1,
+    # #14043 review, finding 3: the four addresses this revision writes at THIS head. ONE site each
+    # except `live.py:667`, which the document names three times (§2.1's table, the dead-pair paragraph
+    # and row 2's summary) — all three are the same address, so a re-point at any one of them is what
+    # the count is here to red. Measured: `grep -o 'live.py:667' <the document> | wc -l` -> 3.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'live.py:667'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:15873'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_backup.py:916'): 1,
+    # §2.6's re-pointed row: `:892` is written twice (the row, and the header's enumeration that promises it is
+    # pinned), the other two once each. The count is what reds a re-point at any of them.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_backup.py:892'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_backup.py:1333'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_backup.py:1534'): 1,
+    # #14043 review (P2, `hosted_backup.py` file-scoped drift): `hosted_backup.py:844` is now TWO sites,
+    # and both are deliberate. §2.7's `:GraphEventMeta` row carries the statement; §2.6's rule sentence
+    # must NAME the same address, because its claim is "all three of which §2.7 cites" — a cross-reference
+    # that could not be resolved by grep while it named the census's `:842`. Measured:
+    # `grep -o 'hosted_backup.py:844' <the document> | wc -l` -> 2.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_backup.py:844'): 2,
+    # #14043 review, finding 2: five UNPINNED addresses in this revision's own new §2.2 `:Source`
+    # reader row and in row 13 (pin-stable — the file is one blob at the pin and at this head — so these
+    # counts guard a RE-POINT, not a head), named once in the header and pinned above. Measured on
+    # this document at this head (`grep -o -F '<token>' <the document> | wc -l`): the one-token
+    # `:218-223` spelling is carried 2x (the §2.2 row's `tortoise/…` form contains it, plus row 13's
+    # bare form — one address, two sites), and each bare sibling is carried 2x (its row plus the
+    # header sentence that now enumerates it) except `:1263-1268`, which row 13, the §2.2 row and the
+    # header all carry — 3x.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'session_source_prose_migration.py:218-223'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:1263-1268`'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:274-281`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'session_source_prose_migration.py:277-279'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:1292-1300`'): 2,
+    # #14043 review (finding 1): one site each in §6.3. Measured on this document:
+    # `grep -o -F 'sdk.py:16077-16082' <doc> | wc -l` -> 1, `... 'sdk.py:3801' ...` -> 1.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:16077-16082'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:3801'): 1,
 }
 
 
@@ -422,8 +572,8 @@ def test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence() -> None:
 #: ⛔ RESTORED (#13494, fresh-context review at `1038810281`). This arm exists on `origin/main` and was
 #: DROPPED by the `#13345` integration merge (`66e5fe9293`) without a word in any commit message; every
 #: later forward merge re-dropped it because the branch tip already lacked it. It is RED on `main` (the
-#: D-1 promise is broken there: `docs/00_index.md` says `sdk.py:28041`, `ENTITY-VERDICT-BANDS.md` says
-#: `sdk.py:28041` and that line is `"IMPL", pid, [prior], label="alreadyDecided",`) and GREEN on this
+#: D-1 promise is broken there: `docs/00_index.md` says `sdk.py:28096`, `ENTITY-VERDICT-BANDS.md` says
+#: `sdk.py:28096` and that line is `"IMPL", pid, [prior], label="alreadyDecided",`) and GREEN on this
 #: PR's tree — so deleting it bought nothing and cost the only arm that DERIVES the address instead of
 #: comparing two hardcoded literals. `_PINS` cannot replace it: a coordinate edit of the doc token, the
 #: pin line and the pin fragment satisfies every pin while two documents still name two different lines.
@@ -437,8 +587,8 @@ def test_the_dedup_filter_is_one_address_in_both_documents_that_promise_it() -> 
     `docs/00_index.md`'s D-1 row states the promise in as many words: *"the filter it names is at
     `sdk.py:<n>` at this head, and `ENTITY-VERDICT-BANDS.md` carries the same number"*. Every row in
     `_PINS` is satisfied by its OWN document, so two documents naming two DIFFERENT lines both pass every
-    pin — which is the shipped `#13345` state, measured: `docs/00_index.md` `sdk.py:27888` (prose at the
-    head, and the filter at no head) against `ENTITY-VERDICT-BANDS.md` `sdk.py:27883` (the value before
+    pin — which is the shipped `#13345` state, measured: `docs/00_index.md` `sdk.py:27943` (prose at the
+    head, and the filter at no head) against `ENTITY-VERDICT-BANDS.md` `sdk.py:27938` (the value before
     `#13290` moved it). The row that claims agreement was the only thing that had to hold, and nothing
     checked it: the `+5` delta was applied to one document and not the other, and the promise broke
     while reading as a correction.
@@ -507,9 +657,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "127 of this document's 223",
-        "dedupes the **328** as-written spellings to 223 — **105**",
-        "328 written spellings → 223 pairs → 105 collisions → 127 drifters of the 223",
+        "138 of this document's 234",
+        "dedupes the **345** as-written spellings to 234 — **111**",
+        "345 written spellings → 234 pairs → 111 collisions → 138 drifters of the 234",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -528,7 +678,7 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
         # move — it is 124 under either basis". Both halves are claims about MEASUREMENT, and both were
         # asserted rather than measured: the basis-INVARIANCE is false (counting the two-code-span pairs
         # adds four addresses, THREE of them drifters (`cache_projection.py:2485` and `sdk.py:2917`;
-        # `sdk.py:61587` is past both heads' EOF, so it is non-comparable and adds nothing), so the
+        # `sdk.py:61649` is past both heads' EOF, so it is non-comparable and adds nothing), so the
         # numerator moves 127 -> 130 while the denominator moves 223 -> 227), and "±5"
         # names a fixed offset for a denominator that moves by whatever the counting decision moves it by. A
         # reader told to compare numerators across bases would have "corrected" a correct figure by
@@ -578,6 +728,164 @@ _QUADRUPLE = re.compile(
     r"(\d+) written spellings → (\d+) pairs → (\d+) collisions → (\d+) drifters of the (\d+)(?: comparable)?"
 )
 _ALT_BASIS = re.compile(r"counting that form gives (\d+) pairs and (\d+) drifters")
+#: The two-code-span disclosure's OWN counts — "writes N pairs as two code spans", and "M of them are
+#: resolved but not counted by the one-token rule". Both were PROSE ONLY until the `#13991` review (`ab6f915b8d`, finding
+#: P2-A) measured them: the sentence stated **three** pairs while the document writes **five**, so the one
+#: numeral that sanctions the alternative basis was the one figure in it nothing re-derived. A reader who
+#: took the reconciliation at its word could not reach the `227` published beside it — `223 + 3 != 227` — and
+#: the added-pair count was left to be inferred rather than read. The published `227`/`130` were measured by
+#: `_ALT_BASIS` the whole time; the sentence JUSTIFYING them was not, which is the `#13599` class one level
+#: up (a figure quoted from a document rots while the comparator beside it stays green). The prose was
+#: corrected by the lane that landed `#13991`; nothing GRADED it, so this arm is the durable half: without
+#: it the next re-measurement of this document can state any number here and the comparator stays green.
+#: The spelled numerals these two sentences may state a count in, and the ONLY source both the patterns
+#: and `_as_int` read — so the class the patterns ACCEPT cannot drift from the class the grader GRADES.
+#: ⛔ The ceiling is STATED here, not accidental. It used to stop at `ten` while `_NUMERALS` already
+#: graded `zero`, and the mismatch produced exactly the verdict this file's header forbids: an edition
+#: legitimately stating `zero pairs` (the form is cleaned up, nothing left to disclose) or `eleven pairs`
+#: got "the header no longer states how many…" about a sentence that is right there — the false-absence
+#: class of `#13599` finding 1, reported two review rounds running (`#14010` rounds 3 and 4). A prefix
+#: match (`four` inside `fourteen`) could never report a wrong FIGURE — the literal after the group cannot
+#: be completed by a prefix — so the only outcome above the ceiling was that false absence verdict.
+#: `zero`/`none` are entries, not decoration: an honest re-measurement can find NO two-code-span pair
+#: left, and `zero` shipped as a `_NUMERALS` key no pattern could ever feed (dead entry, `#14010` round 4).
+#: ⛔ The ZERO spellings are named once here, and both structures below are derived from this tuple — the
+#: table that used to write them out a second time and number the rest with `_SPELLED_NUMERALS[2:]` was
+#: coupled BY INDEX: inserting one spelling re-numbered every spelled count after it, so a correct
+#: `one of them …` was graded `2` and red on correct text. Extending the vocabulary is the edit the comment
+#: invited, and it silently broke the grader (`#14010` round-5 review, P2).
+_ZERO_NUMERALS: tuple[str, ...] = ("zero", "none")
+_SPELLED_NUMERALS: tuple[str, ...] = (
+    *_ZERO_NUMERALS,
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
+    "nineteen",
+    "twenty",
+)
+#: Spelled numerals are graded as NUMBERS, not treated as an absent statement. The edition this guard was
+#: written against states `three pairs` IN WORDS, so a digits-only pattern reported "the header no longer
+#: states how many pairs…" — a MISSING-SENTENCE verdict about a sentence that is right there, one digit
+#: wrong, which is the false-negative shape `#13599` finding 1 punished on the other side of this file.
+#: ⛔ DERIVED from `_SPELLED_NUMERALS`, never written out again: a third hand-kept copy of the vocabulary is
+#: how the pattern's ceiling and the grader's class came apart in the first place. The positive spellings are
+#: sliced off `_ZERO_NUMERALS`' own length, so adding a zero spelling moves the boundary with it.
+_NUMERALS: dict[str, int] = {
+    **dict.fromkeys(_ZERO_NUMERALS, 0),
+    **{
+        word: value
+        for value, word in enumerate(_SPELLED_NUMERALS[len(_ZERO_NUMERALS) :], start=1)
+    },
+}
+#: The examples the two not-found messages render (`zero/none/one`), DERIVED for the same reason: a literal
+#: `_SPELLED_NUMERALS[:3]` mislabels the accepted class the moment a spelling is inserted before `one`.
+_CLASS_EXAMPLES = "/".join((*_ZERO_NUMERALS, _SPELLED_NUMERALS[len(_ZERO_NUMERALS)]))
+#: Longest first, so `sixteen` is tried before `six`. An unanchored alternation over spelled words
+#: normally needs `\b` to stop `four` matching inside `fourteen`; here the required literal after the group
+#: (` pairs? as two code spans`, ` of them (?:is|are) resolved`) already makes a trailing prefix match
+#: unable to complete, so the ordering is defence and the literal is the guarantee on that side.
+#: ⛔ `\b` on the LEADING side is not defence — it is the guarantee there, and there was none. The literal
+#: after the group binds the right edge only, so `the recount rewrites five pairs as two code spans`
+#: matched `writes five pairs…` and `everyone of them are resolved…` matched `one of them…` — both
+#: LOWERCASE, because both patterns are case-SENSITIVE (an uppercase `REWRITES` matched nothing even before
+#: the fix, so quoting it as the evidence made this paragraph unverifiable: `#14010` round-7 review). Both
+#: arms grade the
+#: leftmost match, so an edition whose prose contains an earlier `…rewrites five pairs…` while its real
+#: disclosure says six would be graded on the wrong sentence, red on correct content — and a DISCLOSURE that
+#: is genuinely missing could be masked by such a sentence (`#14010` round-6 review, P2). Measured with the
+#: boundaries: both false matches are gone, and the shipped document (`also writes five pairs…`,
+#: `four of them…`), `none of them …` and the digit forms still match.
+_NUMERAL_ALT = "|".join(sorted(_NUMERALS, key=len, reverse=True))
+_TWO_SPAN_TOTAL = re.compile(rf"\bwrites (\d+|\b(?:{_NUMERAL_ALT})) pairs? as two code spans")
+#: ⛔ `(?:is|are)`, for the same reason `_TWO_SPAN_TOTAL` writes `pairs?`: number AGREEMENT is a property of
+#: the count, not of the claim. `one of them IS resolved` is how a lane re-measuring to a single uncounted
+#: pair writes that sentence — the singular form for the one count that takes it — and a plural-only pattern
+#: could not read it. That was never the false-ABSENCE verdict the messages above were reworded to avoid (it
+#: reported the count as one `in a form this guard reads`), which is worse in one way: the document is
+#: RIGHT, the guard says it cannot read it, and the lane re-measuring is sent to reword a correct sentence
+#: instead of to its figure (`#14010` re-review, P2). `zero`/`none`/`two`.. keep `are`.
+_TWO_SPAN_NEW = re.compile(
+    rf"(\d+|\b(?:{_NUMERAL_ALT})) of them (?:is|are) resolved but not counted by the one-token rule"
+)
+
+
+def _as_int(token: str) -> int:
+    """*token* as an int, spelling the numerals this header may write as words (`three`) as well as digits.
+
+    The spelled class is `_NUMERALS` — `zero`/`none` through `twenty` — and it is the SAME mapping the
+    patterns' alternation is built from, so a token the pattern captures is always a token this grades.
+    """
+    return int(token) if token.isdigit() else _NUMERALS[token]
+
+
+def _two_span_total_mutant(stated: int) -> int:
+    r"""A two-code-span pair count that CONTRADICTS *stated* and that `_TWO_SPAN_TOTAL` can still read.
+
+    ⛔ The control at `test_a_carried_forward_figure_is_reported` asserts only that the mutated document
+    reports SOME problem, so a mutant whose value the count pattern cannot parse proves nothing: the red
+    then comes from the ABSENT-SENTENCE arm, and the count comparison the control exists for was never
+    consulted (a false PASS of the control — `#14010` round-4 finding 1, reported as a `-1 pairs` value
+    that `\d+` will not read because the character after `writes ` is `-`).
+
+    The P2-A narrative is the BELOW direction (`three` stated where five are written), so that is kept
+    wherever it parses and decreases — `stated - 2` for every measurement of 2 or more. Below 2 it does
+    not exist (an honest edition measuring one pair gives `-1`, measuring none gives `-2`), so the mutant
+    takes the OVERSTATE direction instead: `+1` parses at every measurement including 0 and always
+    disagrees. There is no floor that repairs the below direction at 0 (`max(stated - 2, 0) == stated`
+    there), which is why the fallback is a direction, not a clamp.
+    """
+    below = stated - 2
+    return below if below >= 0 else stated + 1
+
+
+def _mutate_numeral(match: re.Match[str], value: int) -> str:
+    r"""The matched sentence with its OWN numeral rewritten to *value*, spelled or in digits.
+
+    `_mutate` splits on `\d+` and so cannot see a numeral the header SPELLS: both counts in the
+    two-code-span sentence are published as words (`writes five pairs`, `four of them`), which is
+    precisely the edition that shipped the wrong one. The positional guarantee `_mutate` exists for is
+    kept POSITIONALLY: `str.replace(…, 1)` rewrites the LEFTMOST occurrence, so the edit lands on
+    `group(1)` exactly when `group(1)` is where that leftmost occurrence sits — which is asserted here.
+
+    ⛔ Counting occurrences (`match.group(0).count(token) == 1`) proves something else, and it is FALSE BY
+    CONSTRUCTION for numerals this file's own patterns accept, on CORRECT text: the sentence scaffold
+    spells `two` (`… writes two pairs as TWO code spans`) and `one` (`… the ONE-token rule`), so a
+    document legitimately measuring two two-code-span pairs, or ONE uncounted pair, tripped it. Both are
+    real measurements — the patterns accept `_SPELLED_NUMERALS` and `_as_int` grades all of them — so the
+    count could only ever fire on correct content, at the next lane re-measuring this header, and pointed
+    them at this helper's token bookkeeping instead of at their figure (`#13599` review, finding 1: a
+    control that reds on CORRECT text). The offset comparison carries the same guarantee and is true
+    wherever the guarantee holds.
+
+    ⛔ "Asserted here" is worth nothing unless a red is REACHABLE: for both patterns that call this, the
+    capture sits at the numeral's own offset on every input they accept, so no document can violate it and
+    deleting this `assert` left the suite green (`#14010` round 3, finding 2 — dead weight under #3442
+    rule 3). `test_the_numeral_mutators_offset_assert_can_fire` supplies the synthetic match that DOES
+    violate it, so the guard has a red of its own rather than a claim in a docstring.
+    """
+    token = match.group(1)
+    offset = match.start(1) - match.start(0)
+    leftmost = match.group(0).index(token)
+    assert leftmost == offset, (
+        f"`{token}` first occurs at {leftmost} in {match.group(0)!r}, not at the captured numeral's "
+        f"offset {offset} — the leftmost rewrite would edit a different word than the one the pattern grades"
+    )
+    return match.group(0).replace(token, str(value), 1)
 
 
 def _resolved_pairs(text: str, repo: Path = REPO) -> tuple[int, set[tuple[str, int]]]:
@@ -643,6 +951,33 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
     if not quadruple:
         return ["the header no longer publishes the `N written spellings → P pairs → C collisions → D drifters` "
                 "sentence (matched with emphasis stripped)"]
+    # ⛔ The two-code-span form is MEASURED from this document, never asserted as an offset: `_SPELLING`
+    # cannot see it, so the count it contributes moves whenever the document does. Computed once here
+    # because TWO arms grade it — the disclosure's own stated counts below, and the alternative basis it
+    # justifies (whose `227`/`130` are these same pairs). ⛔ Placed AFTER the two early returns above:
+    # `_two_span_pairs` resolves each written path through `_resolve_path`, whose ambiguity check is an
+    # `AssertionError`. Hoisted above them, a header whose `_TRIPLE`/`_QUADRUPLE` sentence had been reworded
+    # — a case this function grades as a plain problem STRING — instead died on an assertion from a
+    # resolution the caller never needed, so the graded message became a crash (`#14010` final review,
+    # finding 3).
+    # ⛔ A resolution failure here is GRADED, never raised. `_resolve_path`'s ambiguity check is an
+    # `AssertionError`, and it fires on exactly the documents this function exists to REPORT — a header
+    # re-measured against a tree where a cite moved. Raising turns a graded verdict into a traceback AND
+    # takes every other arm's finding with it, which is the same class as the two missing-sentence states
+    # fixed just above, one state further on (`#14010` round-6 review, finding 2: the measurement landed
+    # below the `_TRIPLE`/`_QUADRUPLE` returns but still above `if not alt`).
+    try:
+        two_span: set[tuple[str, int]] | None = _two_span_pairs(text, repo)
+    except AssertionError as exc:
+        problems.append(
+            "the two-code-span form cannot be resolved against this tree, so the counts that depend on it "
+            f"are NOT graded: {exc}"
+        )
+        two_span = None
+    # ⛔ `None`, not `set()`: the alternative basis is `published_pairs + extra_pairs`, so a zero fallback
+    # would report a FIGURE this guard never measured — the false-figure class `#13599` finding 1 punished,
+    # in the opposite direction. Every arm that reads it below is skipped while it is unknown.
+    extra_pairs = None if two_span is None else len(pairs | two_span) - len(pairs)
     if tuple(map(int, triple.groups())) != (spellings, len(pairs), collisions):
         problems.append(
             f"the header publishes spellings/pairs/collisions {triple.groups()}, but this file MEASURES "
@@ -693,8 +1028,7 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
         # `_SPELLING`, so the count it adds is a property of THIS document and moves when the document does.
         # A hard-coded `+1` here enforced "one pair" while the document wrote four — the comparator became
         # the thing that was wrong, and it red on correct text the moment the document was measured.
-        extra_pairs = len(pairs | _two_span_pairs(text, repo)) - len(pairs)
-        if alt_pairs != published_pairs + extra_pairs:
+        if extra_pairs is not None and alt_pairs != published_pairs + extra_pairs:
             problems.append(
                 f"the alternative basis reads {alt_pairs} pairs, but this document writes {extra_pairs} "
                 f"pair(s) in the two-code-span form the one-token basis resolves but does not count, so "
@@ -709,12 +1043,55 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
         # finding 1 — measured on this head before the fix). It is the ONLY guard on this figure: the
         # three-mention agreement arm cannot reach the alternative basis, because the document publishes
         # `123` in that sentence alone, so there is no second mention to agree with.
-        if not drifters <= alt_drifters <= drifters + extra_pairs:
+        if extra_pairs is not None and not drifters <= alt_drifters <= drifters + extra_pairs:
             problems.append(
                 f"the alternative basis reads {alt_drifters} drifters against the primary basis's "
                 f"{drifters} — its {extra_pairs} added pair(s) can add at most {extra_pairs} drifter(s) and "
                 f"cannot remove one, so it is {drifters}..{drifters + extra_pairs}"
             )
+    # ⛔ The sentence that REACHES the alternative basis is graded here too. `#13991`'s review
+    # (`ab6f915b8d`, P2-A) measured it publishing `three` pairs where the document writes five, and
+    # `223 + 3 != 227`: the figure it sanctions was measured, the figure that sanctions it was not, so
+    # a reader reconciling the two bases by arithmetic on the STATED three concluded the document was
+    # inconsistent — and was right. Both counts are now measured from the same `two_span` set the
+    # alternative basis is computed from, so they cannot disagree with it or with each other.
+    total = _TWO_SPAN_TOTAL.search(body)
+    if not total:
+        # ⛔ Names the ACCEPTED CLASS and admits it cannot tell "reworded" from "dropped". The message it
+        # replaces asserted the sentence was GONE, which is FALSE whenever the sentence is present in a form
+        # the pattern does not read — the false-absence verdict `#13599` finding 1 punished, and the reason
+        # the vocabulary above is now derived rather than hand-copied (`#14010` rounds 3 and 4). A lane that
+        # re-measures this header must not be told to "restore" a sentence it is looking at.
+        problems.append(
+            "the header states no two-code-span pair count in a form this guard reads (digits, or "
+            f"{_CLASS_EXAMPLES}..{_SPELLED_NUMERALS[-1]}) — the sentence was reworded or "
+            "dropped, and neither this message nor `_TWO_SPAN_TOTAL` can tell which: re-point the pattern "
+            "against how the count is published now, do not delete this arm"
+        )
+    elif two_span is not None and _as_int(total.group(1)) != len(two_span):
+        # ⛔ Number AGREEMENT derived from the count, because the message quotes what "the header says" and
+        # the pattern accepts `pairs?`: a one-pair edition was graded `the header says it writes one PAIRS`
+        # — a statement about the header that the header does not make (`#14010` round-7 review, P2).
+        _pair = "pair" if _as_int(total.group(1)) == 1 else "pairs"
+        problems.append(
+            f"the header says it writes {total.group(1)} {_pair} as two code spans, but this document "
+            f"MEASURES {len(two_span)}"
+        )
+    uncounted = _TWO_SPAN_NEW.search(body)
+    if not uncounted:
+        problems.append(
+            "the header states no count of two-code-span pairs the one-token rule skips in a form this "
+            f"guard reads (digits, or {_CLASS_EXAMPLES}..{_SPELLED_NUMERALS[-1]}) — the "
+            "sentence was reworded or dropped: re-point `_TWO_SPAN_NEW` against how it is published now, "
+            "do not delete this arm"
+        )
+    elif extra_pairs is not None and _as_int(uncounted.group(1)) != extra_pairs:
+        _verb = "is" if _as_int(uncounted.group(1)) == 1 else "are"
+        problems.append(
+            f"the header says `{uncounted.group(1)} of them` {_verb} not counted by the one-token rule, "
+            f"but this document MEASURES {extra_pairs} of its {len(two_span)} two-code-span pairs as "
+            f"not-already-counted"
+        )
     return problems
 
 
@@ -754,6 +1131,35 @@ def test_the_published_denominator_is_the_count_of_this_file() -> None:
     )
 
 
+def test_the_five_header_siblings_already_carry_their_pair_from_section_2_5() -> None:
+    """The header's bare-sibling clause is only true while each of the five is ALSO written one-token.
+
+    The clause now says a `path.py:NNNN` re-spelling would add "five more **as-written spellings** —
+    345 → 350 — and so 114 → 119 collisions … while adding **no pair at all**: 231 either way, because
+    each of the five already carries its pair from §2.5". That last half is the load-bearing one, and it
+    was FALSE for the sentence it replaced: the previous edition claimed a pair spelling "would add five
+    more pairs to the populations the figures above are measured over" (`#13991` review, P2-1), while
+    measuring the same re-spelling with this file's own `_resolved_pairs` puts the delta at **0 pairs /
+    +5 spellings** — the pairs do not move and the collisions do.
+
+    That 0 is a set-membership fact, not an arithmetic one: a re-spelling adds no pair BECAUSE all five
+    `(resolved path, line)` pairs are already in the population, from the §2.5 one-token sites. Delete
+    ONE of those sites and this clause's promise goes false; no other arm checks THAT promise —
+    deleting the site reds other arms, but each for its own reason (the spelling denominator moves, and
+    the address's own pin loses its one occurrence), not for the pair-membership premise the clause
+    asserts. So the premise is recovered from the document here rather than trusted to the prose.
+    """
+    _spellings, pairs = _resolved_pairs((REPO / _AUDIT).read_text(encoding="utf-8"))
+    five = [(_SDK, 31551), (_SDK, 31533), (_SDK, 24513), (_SDK, 24857), (_MCP, 11281)]
+    missing = [pair for pair in five if pair not in pairs]
+    assert not missing, (
+        f"the header's §2.5 `:Tag` enumeration says each of these addresses 'already carries its pair "
+        f"from §2.5', but {missing} has no one-token `path.py:NNNN` spelling anywhere in the document — "
+        "so re-spelling the bare header siblings WOULD add pairs and the clause's 'no pair at all' "
+        "would be false. Restore the §2.5 one-token spelling, or correct the clause to the measurement."
+    )
+
+
 def test_a_carried_forward_figure_is_reported() -> None:
     """The comparator's negative case, reachable: a stale triple and a broken arithmetic relation red.
 
@@ -769,8 +1175,10 @@ def test_a_carried_forward_figure_is_reported() -> None:
     What cannot rot is the RELATION each mutant breaks: a pair count one under the measured one, an
     arithmetic figure that stops following its pair count, a ratio naming a denominator it does not carry,
     one of the three mentions of the ratio disagreeing with the others, an alternative basis level with the
-    primary, and an alternative basis whose numerator is inflated past what its added pairs can
-    contribute. Each is applied to the sentence AS SHIPPED, by capture-group position.
+    primary, an alternative basis whose numerator is inflated past what its added pairs can
+    contribute, a two-code-span pair count stated below what the document measures, and one more of those
+    pairs claimed uncounted than the union adds. Each is applied to the sentence AS SHIPPED, by
+    capture-group position.
 
     ⛔ The alternative basis is mutated on BOTH capture groups (`:1` pairs, `:2` drifters) on purpose: the
     drifter half used to be read and thrown away (`_alt_drifters`), so the guard on the only figure in this
@@ -784,11 +1192,15 @@ def test_a_carried_forward_figure_is_reported() -> None:
     quadruple = _QUADRUPLE.search(text)
     ratio = re.search(r"(\d+) of this document's (\d+)", text)
     alt = _ALT_BASIS.search(text)
+    two_total = _TWO_SPAN_TOTAL.search(text)
+    two_new = _TWO_SPAN_NEW.search(text)
     for found, what in ((triple, "triple"), (quadruple, "figures sentence"), (ratio, "`N of this document's M`"),
-                        (alt, "alternative basis")):
+                        (alt, "alternative basis"), (two_total, "two-code-span pair count"),
+                        (two_new, "two-code-span uncounted count")):
         assert found is not None, (
             f"the shipped document no longer carries the {what}, so this control has nothing to mutate — "
-            "re-point `_TRIPLE`/`_QUADRUPLE`/`_ALT_BASIS` at how it is published now"
+            "re-point `_TRIPLE`/`_QUADRUPLE`/`_ALT_BASIS`/`_TWO_SPAN_TOTAL`/`_TWO_SPAN_NEW` at how it is "
+            "published now"
         )
 
     def _mutate(match: re.Match[str], overrides: dict[int, int]) -> str:
@@ -810,6 +1222,8 @@ def test_a_carried_forward_figure_is_reported() -> None:
     _written, _pairs, collisions, _drifters, comparable = map(int, quadruple.groups())
     ratio_drifters, _ratio_pairs = map(int, ratio.groups())
     alt_pairs, alt_drifters = map(int, alt.groups())
+    two_span_stated = _as_int(two_total.group(1))
+    two_span_uncounted = _as_int(two_new.group(1))
 
     for match, overrides, why in (
         (
@@ -851,13 +1265,396 @@ def test_a_carried_forward_figure_is_reported() -> None:
             "is anchored to the PRIMARY numerator, not `alt - 2`, because a band wide enough for four added "
             "pairs would swallow `alt - 2` and the control would silently stop proving anything)",
         ),
+        (
+            two_total,
+            {1: _two_span_total_mutant(two_span_stated)},
+            "the two-code-span pair count DISAGREES with what the document measures — below it at the "
+            "shipped P2-A edition (`three` stated where five are written), which leaves the published "
+            "`227` unreachable from the `223` beside it and turns the reconciliation into arithmetic a "
+            "reader cannot close; above it when a below value would not be a count the pattern reads "
+            "(`_two_span_total_mutant`), so the mutant always lands on the COUNT arm rather than on the "
+            "absent-sentence arm",
+        ),
+        (
+            two_new,
+            {1: two_span_uncounted + 1},
+            "one more two-code-span pair is claimed uncounted than the union actually adds, so the stated "
+            "reconciliation overstates what the alternative basis contributes",
+        ),
     ):
-        stale = _mutate(match, overrides)
+        # ⛔ Both spell their numeral, so they go through the numeral-aware mutator; `_mutate` would
+        # split on digits that are not there and return the sentence unchanged, which its own
+        # `stale != match.group(0)` assertion would then catch as a broken control rather than a pass.
+        stale = (
+            _mutate_numeral(match, next(iter(overrides.values())))
+            if match in (two_total, two_new)
+            else _mutate(match, overrides)
+        )
         assert stale != match.group(0), f"the negative control for {why!r} did not change the figures"
         mutated = text.replace(match.group(0), stale, 1)
         assert mutated != text, f"the negative control for {why!r} did not change the text"
+        if match in (two_total, two_new):
+            # ⛔ RULE 2, ENFORCED HERE RATHER THAN ASSUMED: this mutant's red has to come from the COUNT
+            # comparison, and the only observation below is `_figure_problems(mutated) != []`, which the
+            # ABSENT-SENTENCE arm satisfies just as well. A value the pattern cannot parse (the old fixed
+            # `stated - 2`, which renders `-1` at an honest edition measuring one pair) therefore passed
+            # the control while the comparator it exists to prove was never consulted — a false PASS of the
+            # control (`#14010` round-4 finding 1). Asserting the mutated sentence still parses makes that
+            # state a red HERE, whatever the mutant value is.
+            arm = _TWO_SPAN_TOTAL if match is two_total else _TWO_SPAN_NEW
+            rematched = arm.search(_unbolded(mutated))
+            assert rematched is not None, (
+                f"the control for {why!r} produced {stale!r}, which its own pattern cannot read, so the "
+                "red would come from the absent-sentence arm and the count comparison would stay unproven "
+                "— fix the mutant VALUE, do not relax this control"
+            )
+            assert _as_int(rematched.group(1)) == next(iter(overrides.values())), (
+                f"the control for {why!r} rewrote the count the pattern grades, not its own figure: "
+                f"{rematched.group(1)!r} vs {next(iter(overrides.values()))!r}"
+            )
         assert _figure_problems(mutated) != [], (
             f"a document carrying {stale!r} ({why}) reported no problem — the comparator is decoration"
+        )
+
+
+def test_the_numeral_mutator_edits_the_stated_count_whatever_numeral_it_spells() -> None:
+    """`_mutate_numeral` mutates the numeral its own patterns accept, in every spelling they accept.
+
+    ⛔ Its positional guard used to be `match.group(0).count(token) == 1`, and that is FALSE BY
+    CONSTRUCTION for two of the numerals `_TWO_SPAN_TOTAL`/`_TWO_SPAN_NEW` accept — on CORRECT content:
+
+    * `writes TWO pairs as TWO code spans` — `_TWO_SPAN_TOTAL`'s own scaffold spells `two`, so a document
+      measuring two two-code-span pairs (`count("two") == 2`) tripped the assert;
+    * `ONE of them is resolved but not counted by the ONE-token rule` — the `one-token rule` is part of
+      the sentence, so `count("one") == 2` on the (entirely plausible) reading that one of the pairs is
+      not already counted. (`one` is the only count that takes the SINGULAR verb — `_TWO_SPAN_NEW`
+      accepts `(?:is|are)` on purpose, for this sentence in the form a lane would actually write it.)
+
+    Both are legitimate measurements of this document — the patterns accept `_SPELLED_NUMERALS` and
+    `_as_int` grades all of them — so the helper rejected numerals the rest of the guard is built to
+    accept. The one trigger it had was a false red on correct text, which is the class this file's own
+    header exists to
+    prevent (`#13599` review, finding 1: a comparator that reds on CORRECT text), and it pointed the
+    next re-measuring lane at the control's token bookkeeping rather than at their measurement.
+
+    NON-VACUOUS, measured: with the count assert in place this test reds with `the numeral two occurs
+    twice in 'writes two pairs as two code spans'` on the `two` case — the FIRST numeral in the iteration
+    that also occurs in the frame it is substituted into (`zero`, `none` and `one` all keep
+    `count == 1`, in `writes one pair …`), not on the first case tried; with the positional assert both
+    cases mutate their own capture group and re-match. It iterates the WHOLE accepted class, not the
+    two instances, because a guard written against one spelling of one numeral is the defect above — and
+    the class it iterates is DERIVED from `_NUMERALS`, so extending the vocabulary (the `eleven`/`zero`
+    end, `#14010` round 4) extends the pin in the same edit instead of leaving a hand-copied tuple to stop
+    at `ten` while the patterns accept more.
+    """
+    for pattern, template in (
+        (_TWO_SPAN_TOTAL, "the header writes {n} {pair} as two code spans"),
+        (_TWO_SPAN_NEW, "{n} of them {verb} resolved but not counted by the one-token rule"),
+    ):
+        for numeral in (*_NUMERALS, "7", "1"):
+            # Number AGREEMENT, from the count this numeral stands for: `one pair … IS`, `zero pairs …
+            # ARE`. Spelling the wrong one would test a frame the patterns are not required to accept,
+            # and the singular frame is exactly the one a one-pair edition writes.
+            singular = _as_int(numeral) == 1
+            sentence = template.format(
+                n=numeral, pair="pair" if singular else "pairs", verb="is" if singular else "are"
+            )
+            match = pattern.search(sentence)
+            assert match is not None, f"the pattern no longer matches its own sentence frame: {sentence!r}"
+            assert match.group(1) == numeral, (match.group(0), numeral)
+            mutated = _mutate_numeral(match, 9)
+            assert mutated == match.group(0).replace(numeral, "9", 1), (
+                f"mutating `{numeral}` in {match.group(0)!r} landed on the wrong occurrence: {mutated!r}"
+            )
+            rematched = pattern.search(mutated)
+            assert rematched is not None and rematched.group(1) == "9", (
+                f"the mutated sentence {mutated!r} no longer re-matches with its new count — the edit did "
+                "not land on the numeral the pattern grades"
+            )
+
+
+def test_the_numeral_mutators_offset_assert_can_fire() -> None:
+    """The offset assert has a red of its own, on the one shape that violates it.
+
+    ⛔ Both patterns `_mutate_numeral` serves capture at the numeral's own offset on EVERY input they accept
+    (`_TWO_SPAN_NEW` at 0; `_TWO_SPAN_TOTAL` at 7, behind a literal prefix that contains no numeral), so no
+    document can violate the assertion and DELETING it left the whole suite green (`#14010` round 3,
+    finding 2 — a guard no mutation can redden is dead weight under #3442 rule 3). The property it states
+    is still the one the edit depends on (`str.replace(…, 1)` rewrites the LEFTMOST occurrence), so the
+    repair is to reach it, not to delete it: this synthetic pattern captures the second `two`, which is the
+    exact state the assertion exists to refuse.
+    """
+    synthetic = re.compile(r"(?:two )?writes (two) pairs as two code spans")
+    match = synthetic.search("two writes two pairs as two code spans")
+    assert match is not None and match.group(1) == "two"
+    try:
+        _mutate_numeral(match, 9)
+    except AssertionError as exc:
+        assert "not at the captured numeral's offset" in str(exc), (
+            f"the offset assert fired, but not with its own message: {exc}"
+        )
+    else:
+        raise AssertionError(
+            "`_mutate_numeral` accepted a match whose captured numeral is NOT its leftmost occurrence: "
+            "the leftmost rewrite would have edited a different word than the one the pattern grades, and "
+            "the positional precondition is unenforced"
+        )
+
+
+def test_the_two_span_count_mutant_always_lands_on_the_count_arm() -> None:
+    r"""Every measurement this document can legitimately reach gets a mutant the count arm can READ.
+
+    ⛔ The control asserts only `_figure_problems(mutated) != []`, so a mutant value the count pattern
+    cannot parse still passes — on the ABSENT-SENTENCE arm, with the comparison it exists to prove never
+    consulted (a false PASS of the control, `#14010` round-4 finding 1). The fixed `stated - 2` did exactly
+    that at an honest edition measuring one two-code-span pair: `-1` is not a token `\d+` reads after
+    `writes `, so no sentence the store can hold carried this mutant onto the count arm.
+
+    NON-VACUOUS: with `_two_span_total_mutant` replaced by the `stated - 2` it replaces, this reds on its
+    first uncovered measurement (`stated=0` renders `writes -2 pairs…`, which the pattern does not match) —
+    a measurement the shipped document does not have today, which is exactly why the control could not see
+    it and why the property is pinned here rather than sampled. The loop starts at `0` and not at `1`, so
+    `-2` is the first value it meets, not `-1` (`#14010` round-5 review, P2: the sentence named the second).
+    """
+    for stated in range(0, len(_SPELLED_NUMERALS) + 3):
+        value = _two_span_total_mutant(stated)
+        sentence = f"the header writes {value} pairs as two code spans"
+        match = _TWO_SPAN_TOTAL.search(sentence)
+        assert match is not None, (
+            f"a document stating {value} pairs (the mutant for a stated {stated}) is not a sentence "
+            "`_TWO_SPAN_TOTAL` can read, so the control would pass on the absent-sentence arm"
+        )
+        assert _as_int(match.group(1)) == value, (match.group(0), value)
+        assert value != stated, f"the mutant for a stated {stated} states {value} — it proves nothing"
+        assert value >= 0, f"the mutant for a stated {stated} is negative: {value}"
+
+
+def test_the_accepted_numeral_class_is_pinned_by_literals_not_by_the_table_it_derives() -> None:
+    r"""The spelled vocabulary the two sentences may state a count in, pinned WITHOUT deriving it.
+
+    ⛔ Every other row that touches this class derives its iteration set from `_NUMERALS`, and the two
+    not-found messages derive their examples from the same table — so those rows can only ever AGREE with
+    whatever the table says. They could not report the round-4 fix being reverted: truncating
+    `_SPELLED_NUMERALS` back to the pre-fix ceiling of `ten` left all six new rows GREEN (measured,
+    `#14010` round-6 review, finding 1), which would reinstate the `#13599` false-absence class silently —
+    a correct `writes eleven pairs as two code spans` reported as a MISSING sentence.
+
+    The expectations here are LITERALS on purpose: `zero`/`none` because an honest re-measurement can find
+    nothing left to disclose, `one` because it is the only count that takes the singular verb, and
+    `eleven`/`twenty` because they are past the ceiling the defect stopped at. Narrowing the vocabulary
+    now reds by name (`eleven`), and widening it still extends the derived sweep beside this test.
+    """
+    for spelling, value in (
+        ("zero", 0),
+        ("none", 0),
+        ("one", 1),
+        ("ten", 10),
+        ("eleven", 11),
+        ("twenty", 20),
+    ):
+        pair, verb = ("pair", "is") if value == 1 else ("pairs", "are")
+        total = _TWO_SPAN_TOTAL.search(f"the header writes {spelling} {pair} as two code spans")
+        assert total is not None and total.group(1) == spelling, (
+            f"`{spelling}` is a count this header may state as a word, but `_TWO_SPAN_TOTAL` does not read "
+            "it — the pattern's ceiling and `_NUMERALS` have come apart again; a correct sentence would be "
+            "graded as a missing one"
+        )
+        uncounted = _TWO_SPAN_NEW.search(
+            f"{spelling} of them {verb} resolved but not counted by the one-token rule"
+        )
+        assert uncounted is not None and uncounted.group(1) == spelling, (
+            f"`{spelling}` is a count this header may state as a word, but `_TWO_SPAN_NEW` does not read it"
+        )
+        assert _as_int(spelling) == value, (
+            f"the patterns read `{spelling}` but `_as_int` grades it {_as_int(spelling)}, not {value} — the "
+            "grader and the patterns are one vocabulary or they are a defect"
+        )
+
+    # ⛔ EVERY value, not the six spellings exercised above: those come from an `enumerate` over a
+    # hand-ordered tuple, so a transposition (`six`/`seven`, `sixteen`/`seventeen`) renumbers every count
+    # after it and each derived row agrees with the table by construction. Measured before this assertion:
+    # swapping two entries left all rows GREEN while a correct `writes seventeen pairs as two code spans`
+    # was graded `16` (`#14010` round-7 review, P2 — the round-5 defect one spelling over). The equality is
+    # deliberately BOTH-WAYS: it reds on a narrowed class, a widened class and a reordered one.
+    assert _NUMERALS == {
+        "zero": 0,
+        "none": 0,
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+        "nine": 9,
+        "ten": 10,
+        "eleven": 11,
+        "twelve": 12,
+        "thirteen": 13,
+        "fourteen": 14,
+        "fifteen": 15,
+        "sixteen": 16,
+        "seventeen": 17,
+        "eighteen": 18,
+        "nineteen": 19,
+        "twenty": 20,
+    }, f"the graded vocabulary is not the one this file documents: {_NUMERALS!r}"
+
+    # ⛔ The LEFT boundary of both patterns, pinned. The trailing literal binds the right edge only, so
+    # without `\b` the arms read a count out of a sentence that is not the disclosure — `rewrites five
+    # pairs…` matches `writes five pairs…`, `everyone of them …` matches `one of them …`. Both arms grade
+    # the LEFTMOST match, so such a sentence earlier in the document can mask a genuinely missing
+    # disclosure (a false PASS) or grade the wrong one (a false red). Measured: dropping either `\b` reds
+    # exactly this assertion (`#14010` round-6 review, P2 — the fix shipped without a pin).
+    assert _TWO_SPAN_TOTAL.search("the recount rewrites five pairs as two code spans") is None, (
+        "`writes` matched inside `rewrites` — the leading boundary is gone"
+    )
+    assert _TWO_SPAN_NEW.search(
+        "everyone of them are resolved but not counted by the one-token rule"
+    ) is None, "`one` matched inside `everyone` — the leading boundary is gone"
+    assert _TWO_SPAN_TOTAL.search("this header also writes five pairs as two code spans") is not None, (
+        "the boundary must not cost the shipped phrasing (`also writes five pairs`)"
+    )
+    assert _TWO_SPAN_NEW.search(
+        "four of them are resolved but not counted by the one-token rule"
+    ) is not None, "the boundary must not cost the shipped phrasing (`four of them`)"
+
+
+def test_a_reworded_figures_sentence_is_graded_not_crashed_by_path_resolution() -> None:
+    r"""A header whose `_TRIPLE`/`_QUADRUPLE` sentence moved gets its problem STRING, not an assertion.
+
+    ⛔ `_two_span_pairs` resolves every written path through `_resolve_path`, whose ambiguity check is an
+    `AssertionError`. Hoisted above the two early returns that grade a reworded figures sentence as a plain
+    problem, that resolution ran on a header the function never needed it for, so a re-measurement that
+    reworded `dedupes the N …` — the case this function is written to REPORT — died on a traceback from an
+    unrelated cite instead (`#14010` final review, finding 3). The call is below those returns now, and this
+    test's fixture carries an unresolvable two-code-span cite AND no figures sentence.
+
+    ⛔ THE HOIST IS NOW AN EQUIVALENT MUTANT, and that is recorded here rather than left as a claim the code
+    no longer supports (`#3442` rule 3). Round 6 made a resolution failure GRADED (`except AssertionError`
+    → a problem string), so a hoisted call no longer raises: it appends a problem that the early `return`
+    then discards, and this test goes GREEN. Measured at this head — the hoist mutant is 24/24 green — so
+    this test can NOT tell the two orders apart any more. What it still pins is the property it is named
+    for: this state comes back as a GRADED problem, never a traceback. The crash path itself is pinned by
+    `test_a_two_span_cite_that_does_not_resolve_is_graded_not_raised`. The order is still kept — a header
+    whose figures sentence is gone never pays for the resolver.
+    """
+    text = (
+        "the header writes one pairs as two code spans and cites `no_such_module_zzz.py` `:1`, "
+        "with no figures sentence in this text"
+    )
+    problems = _figure_problems(text)
+    assert problems and "no longer publishes" in problems[0], (
+        "a header whose figures sentence was reworded must come back as a graded problem — getting an "
+        f"`AssertionError` out of `_resolve_path` instead means the two-code-span measurement is running "
+        f"before the early returns that own this state; got {problems!r}"
+    )
+
+
+def test_a_two_span_cite_that_does_not_resolve_is_graded_not_raised() -> None:
+    r"""A header whose two-code-span cite no longer resolves gets a problem STRING, not a traceback.
+
+    ⛔ `_two_span_pairs` resolves every written path through `_resolve_path`, whose ambiguity check is an
+    `AssertionError`, and a header re-measured against a tree where a cite moved is EXACTLY the state this
+    function exists to grade. The call was moved below the `_TRIPLE`/`_QUADRUPLE` early returns (`#14010`
+    final review, finding 3) but still ran above `if not alt`, so a header that had also lost the
+    alternative-basis sentence — a state graded as a plain problem two arms away — died on the cite instead
+    (`#14010` round-6 review, finding 2). The resolution failure is caught and GRADED now, and the arms
+    that would need its value are skipped rather than fed a zero: `extra_pairs` is `None` (unknown), not
+    `0` (a figure this guard never measured), which is what keeps the count comparisons from publishing a
+    wrong number (the `#13599` finding-1 class, opposite direction).
+
+    NON-VACUOUS: with the `try`/`except` removed this test does not fail an assertion — it ERRORS out of
+    `_figure_problems`, which is the defect stated as a red.
+    """
+    document = (REPO / _AUDIT).read_text(encoding="utf-8")
+    body = _unbolded(document)
+    total = _TWO_SPAN_TOTAL.search(body)
+    alt = _ALT_BASIS.search(body)
+    assert total is not None and alt is not None, "the shipped document must carry both sentences mutated here"
+    # Keep every OTHER sentence intact (so the `_TRIPLE`/`_QUADRUPLE` early returns do not own this state,
+    # and the alternative-basis arm is reached), and move the two-code-span cite onto a path that resolves
+    # to no file at all.
+    text = body.replace(
+        total.group(0), "writes six pairs as two code spans and cites `no_such_module_zzz.py` `:1`", 1
+    )
+    problems = _figure_problems(text)
+    unresolved = [p for p in problems if "cannot be resolved against this tree" in p]
+    assert unresolved, (
+        "a header whose two-code-span cite resolves to no file must come back as a graded problem; an "
+        f"`AssertionError` out of `_resolve_path` means the comparator crashes on the state it grades. "
+        f"got {problems!r}"
+    )
+    assert "no_such_module_zzz.py" in unresolved[0], (
+        f"the graded problem must NAME the cite that did not resolve: {unresolved[0]!r}"
+    )
+    measured = [p for p in problems if "MEASURES" in p and "two code spans" in p]
+    assert not measured, f"an unresolvable two-span count must not be graded against a fallback figure: {measured!r}"
+
+
+def test_an_unread_two_span_count_is_reported_as_UNREAD_not_as_absent() -> None:
+    """The two-code-span arms say the count is not in a readable form, never that the sentence is gone.
+
+    ⛔ Both messages used to assert *"the header no longer states how many pairs…"* on ANY unparsed input.
+    That was FALSE for the one state the guard was built to survive: a correct sentence using a form the
+    pattern did not read (`zero`, `none`, `eleven` — all of them honest re-measurements of this very
+    header) came back as a MISSING-SENTENCE verdict, the class `#13599` finding 1 punished and `#14010`
+    rounds 3 and 4 both blocked on. The vocabulary above is derived now so those particular forms read, but
+    the message must not re-acquire the false claim for whatever form the NEXT re-measurement invents.
+
+    NON-VACUOUS: against the previous wording BOTH frames red — on the `assert unread` line, because that
+    wording contained no `in a form this guard reads` clause at all, so `unread` came back empty. The
+    `all(...)` clause below is the durable guard on the message TEXT rather than on that one revert: it
+    reds if a future rewording mixes the two claims in a message that still passes the `unread` filter.
+    ⛔ Each frame substitutes with ITS OWN compiled pattern, not a shared alternation. Under `count=1` a
+    shared alternation replaces the FIRST match in the document — always the `writes … pairs as two code
+    spans` line, which comes first — so the `_TWO_SPAN_NEW` iteration used to rewrite the OTHER arm's
+    sentence, leave its own intact, and have its assertions satisfied by the other arm's message: a
+    vacuous frame that stayed green when `_TWO_SPAN_NEW`'s wording was reverted (`#14010` round-5 review,
+    P2). `assert marker in unread[0]` is what makes each iteration speak about its own arm.
+    ⛔ The search and the substitution both run on the UNBOLDED body — the surface `_figure_problems`
+    grades. Against the raw text, a correct edition that bolds the count (`writes **five** pairs as two code
+    spans`) matched nothing here, so this test redded on CORRECT content with its own false-absence message —
+    the exact class it exists to refuse (`#14010` round-7 review, P1).
+    """
+    document = _unbolded((REPO / _AUDIT).read_text(encoding="utf-8"))
+    for arm, sentence, frame, marker in (
+        (
+            _TWO_SPAN_TOTAL,
+            "writes a handful of pairs as two code spans",
+            "writes a handful of pairs as two code spans",
+            "two-code-span pair count",
+        ),
+        (
+            _TWO_SPAN_NEW,
+            "a handful of them are resolved but not counted by the one-token rule",
+            "a handful of them",
+            "the one-token rule skips",
+        ),
+    ):
+        assert arm.search(document) is not None, "the shipped document must carry the sentence mutated here"
+        mutated = arm.sub(sentence, document, count=1)
+        assert mutated != document
+        assert arm.search(mutated) is None, (
+            f"the {frame!r} frame must be GONE from the mutated document — {arm.pattern!r} still matches, so "
+            "the substitution landed on a different sentence"
+        )
+        problems = _figure_problems(mutated)
+        assert problems, f"a header carrying {frame!r} was reported clean"
+        unread = [p for p in problems if "in a form this guard reads" in p]
+        assert unread, (
+            f"a header carrying {frame!r} must be reported as a count this guard cannot READ (the accepted "
+            f"class named in the message); got {problems!r}"
+        )
+        assert marker in unread[0], (
+            f"the {frame!r} frame must be reported by ITS OWN arm — expected {marker!r} in the message, got "
+            f"{unread[0]!r}; a message from the other arm means the substitution landed on the wrong "
+            "sentence and this frame is vacuous"
+        )
+        assert all("no longer states" not in p for p in problems), (
+            "a message asserts the sentence is GONE, which is false for a sentence that is present in a "
+            f"form the pattern does not read: {problems!r}"
         )
 
 
@@ -893,6 +1690,202 @@ def test_every_pinned_cite_lands_on_the_content_the_document_quotes() -> None:
     """Fails on the pre-fix tree: the m3 brief names `:4552` and §5 names `:3392`/`:3388`."""
     errors = _resolve(_PINS)
     assert not errors, "\n".join(errors)
+
+
+_JSONL_DOC = "docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md"
+#: The first line of `_emit_event`'s JSONL half — the paragraph §6.3 item 1 quotes.
+_JSONL_QUOTE = "**JSONL event log (#548):** written when *point* is provided"
+
+
+def _cited_span_ends(doc_text: str, start: int) -> list[int]:
+    """Every END a `sdk.py:START-END` span opening at *start* states in *doc_text*."""
+    return [
+        int(match.group(1))
+        for match in re.finditer(rf"sdk\.py:{start}-(\d+)", doc_text)
+    ]
+
+
+def test_the_jsonl_contract_span_ends_on_its_paragraphs_last_line() -> None:
+    """A span cite must END on the last line of the paragraph it quotes, not one short.
+
+    #14087: §6.3 item 1 cited `sdk.py:16077-16081` while the contract's paragraph runs through
+    `:16082`, with `:16083` blank. A `_PINS` row pins a span's START only, so the short END was
+    green in every other test in this file — measured on a throwaway copy, moving the END back one
+    line left the whole suite passing. Derived, not hardcoded: the START is the line carrying the
+    quoted fragment, the END is the last line before the paragraph's blank terminator.
+    """
+    lines = (REPO / "tortoise/sdk.py").read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(lines, 1) if _JSONL_QUOTE in line)
+    end = start
+    while end < len(lines) and lines[end].strip():  # `lines[end]` is the line AFTER `end`
+        end += 1
+    assert end > start, (
+        f"`sdk.py:{start}` is a one-line paragraph, so this arm would grade nothing — re-point "
+        "`_JSONL_QUOTE` at the contract it is meant to cover."
+    )
+    doc_text = (REPO / _JSONL_DOC).read_text(encoding="utf-8")
+    cited = _cited_span_ends(doc_text, start)
+    assert cited == [end], (
+        f"§6.3 cites `sdk.py:{start}-{cited[0] if cited else '???'}` but that paragraph's last line is "
+        f"`:{end}` — a span "
+        "must end on it, not one short (`_PINS` pins the START, so the short END is green everywhere "
+        "else in this file)"
+    )
+    for mutant in (end - 1, end + 1):  # NON-VACUOUS: one short and one long both red
+        tampered = doc_text.replace(f"sdk.py:{start}-{end}", f"sdk.py:{start}-{mutant}")
+        assert _cited_span_ends(tampered, start) != [end], (
+            f"a span end moved to `:{mutant}` still passed this arm"
+        )
+
+
+#: The numeric span a cite token names: `:START` or `:START-END`.
+_TOKEN_SPAN = re.compile(r":(\d+)(?:-(\d+))?")
+
+
+def _token_spans(token: str) -> list[tuple[int, int]]:
+    """EVERY address the *token* names, as `(first, last)` spans — empty when it names none.
+
+    One span per address match, never the hull of a token's numbers: a token naming two
+    unrelated addresses (`:58315`/`:58317`) names two lines, NOT the line between them. Taking
+    `min..max` over every number turned such a token into a range, so the arm accepted the `58316`
+    the token never mentions — the exact false PASS this arm exists to refuse, one indirection
+    further out. Measured on the shipped tree: **0 of 96** rows carries more than one address, so
+    no row's verdict moves; only the door the next row could have walked through is closed.
+    """
+    return [
+        (int(match.group(1)), int(match.group(2) or match.group(1)))
+        for match in _TOKEN_SPAN.finditer(token)
+    ]
+
+
+def _rows_outside_their_token(rows) -> list[str]:
+    """Rows whose graded line is NOT inside the address the row's OWN token names.
+
+    *rows* is either `_PINS`' 5-tuples or `_MAIN_SET_MISSED`' 4-tuples; only the token, the
+    target and the graded line are read.
+    """
+    problems: list[str] = []
+    for row in rows:
+        token, target_rel, line = (
+            (row[1], row[2], row[3]) if len(row) == 5 else (row[0], row[1], row[2])
+        )
+        spans = _token_spans(token)
+        if not spans:
+            # A row whose token names NO address cannot be checked by this arm, so passing it
+            # silently would be the arm vouching for a claim it never read (fail-open).
+            problems.append(
+                f"{target_rel}: the row pins `{token}`, which names NO line address, so this "
+                f"arm cannot check the line it GRADES ({line}) — an unverifiable row passes by "
+                "being unreadable, which is a fail-open in a gate. Give the token the address "
+                "the fragment sits on."
+            )
+            continue
+        if any(first <= line <= last for first, last in spans):
+            continue
+        named = " / ".join(
+            f"{first}" if first == last else f"{first}..{last}" for first, last in spans
+        )
+        problems.append(
+            f"{target_rel}: the row pins `{token}`, which names {named}, but it "
+            f"GRADES line {line} — a graded line outside its own token is a DEFENDER: the "
+            "content arm opens the line the fragment lives on while the token arm only asks "
+            "whether the string occurs anywhere in the document, so a document that names a "
+            "stale address for that line stays green. Re-point the DOCUMENT to the address the "
+            "fragment actually sits on, then re-point this row to the same number."
+        )
+    return problems
+
+
+def test_every_pinned_row_grades_a_line_inside_the_address_its_token_names() -> None:
+    """The token IS the claim: a row that grades some other line defends a stale cite.
+
+    MEASURED, and shipped in the reviewed tree: two rows pinned a STALE address while grading the
+    CORRECT line — `("`:31496`", `sdk.py`, `31551`)` for the §2.5 `:Tag` header entry and
+    `("`:37534` in `_file_human_approval`", `sdk.py`, `37547`)` in the substrate map. Both arms were
+    green: `_resolve`'s content arm opened `31551` / `37547` (where the fragment is), and its token
+    arm only asks whether the token string occurs SOMEWHERE in the document (it did). So the
+    document could name an address 55 lines above the statement it describes — the `#13290` class this
+    file exists to stop — with nothing red, and the four `:31496`-family rows were in fact added BY a
+    review as coverage.
+
+    A RANGE is anchored on the line inside it that carries the fragment (the file's stated
+    convention), so the arm accepts any line in `START..END`; a single-value token must grade that
+    value exactly, and a token naming SEVERAL addresses accepts only a line one of them names —
+    never the hull between them, and never nothing at all (the two fail-open doors the controls
+    below re-open).
+
+    Non-vacuity is the negative control below, which re-introduces the shipped shape.
+    """
+    problems = _rows_outside_their_token(_PINS) + _rows_outside_their_token(_MAIN_SET_MISSED)
+    assert not problems, "\n".join(problems)
+
+
+def test_the_token_span_arm_reds_on_a_row_that_grades_another_line() -> None:
+    """Negative control — the SHIPPED pre-fix shape: stale token, correct line, green."""
+    stale = (_AUDIT, "`:31496`", _SDK, 31551, "MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag})")
+    problems = _rows_outside_their_token((stale,))
+    assert problems, "a token naming `:31496` must not be allowed to grade line 31551"
+    assert "31496" in problems[0] and "31551" in problems[0], problems[0]
+    # The substrate-map row the same review found, in its shipped form.
+    shipped = (_SUBSTRATE, "`:37534` in `_file_human_approval`", _SDK, 37547, "``:Document`` node).")
+    assert _rows_outside_their_token((shipped,)), "the `:37534` row graded 37547 must red"
+    # A range token is accepted on any line INSIDE the range it names (the anchor convention).
+    inside = (_AUDIT, "`:7195-7198`", _SE, 7198, "MATCH path = (seed)-[:IMPL|NAND*1..{max_hops}]-(n:Point)")
+    assert not _rows_outside_their_token((inside,)), "a line inside the named range must pass"
+
+
+def test_a_token_naming_two_addresses_does_not_vouch_for_the_hull_between_them() -> None:
+    """Negative control — the fail-open `min..max` left in this arm, re-opened here.
+
+    On the PRE-FIX code `_token_span` returned `(min(numbers), max(numbers))` over EVERY number a
+    token carries, so a token naming two unrelated addresses became a range spanning the gap: the
+    arm accepted the `58316` neither address names. That is the same false PASS this arm exists to
+    refuse — a row asserting an address the document does not carry — so it is refused here rather
+    than recorded as a residual. Measured on the shipped tree: 0 of 96 rows carries more than one
+    address, so no row's verdict moves.
+    """
+    between = (_AUDIT, "`:58315`/`:58317`", _SDK, 58316, "rows = proj.g.query(")
+    assert _rows_outside_their_token((between,)), (
+        "a token naming :58315 and :58317 must NOT vouch for the line between them"
+    )
+    # …and each address it DOES name is still accepted, so the tightening rejects only the hull.
+    for named in (58315, 58317):
+        row = (between[0], between[1], between[2], named, between[4])
+        assert not _rows_outside_their_token((row,)), (
+            f"{named} is an address the token names, so it must pass"
+        )
+
+
+def test_a_row_whose_token_names_no_address_is_reported_not_skipped() -> None:
+    """Negative control — an unreadable row must not pass by being unreadable.
+
+    On the PRE-FIX code `_token_span` returned `None` for a token with no digits and the loop
+    `continue`d, so such a row was silently exempt from the arm — the gate vouching for a claim it
+    never read. Measured on the shipped tree: 0 of 96 rows has a token with no address.
+    """
+    unaddressed = (_AUDIT, "`_file_human_approval`", _SDK, 37547, "``:Document`` node).")
+    assert _rows_outside_their_token((unaddressed,)), (
+        "a row whose token names no address must be REPORTED, not skipped"
+    )
+
+
+def test_the_resolve_content_arm_is_unchanged_by_the_token_arm() -> None:
+    """The two arms are independent: a row can be content-correct AND token-stale.
+
+    `_resolve` answers two questions — does the token still occur, and does the GRADED line carry the
+    fragment — and a row that pins one address while grading another satisfies BOTH (the token exists,
+    and the graded line does carry the fragment). That is what the shipped rows demonstrated, and why a
+    separate arm was needed instead of a stricter `_resolve`.
+    """
+    correct_line_wrong_token = (
+        _AUDIT, "`:58317`", _SDK, 58315, "rows = proj.g.query(",
+    )
+    assert _resolve((correct_line_wrong_token,)) == [], (
+        "the content arm must stay silent here — that silence is why the token arm exists"
+    )
+    assert _rows_outside_their_token((correct_line_wrong_token,)), (
+        "the token arm must red on the same row the content arm passes"
+    )
 
 
 def test_the_resolver_reds_on_a_double_applied_offset() -> None:
@@ -940,14 +1933,14 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # 48: `#13489`'s review added the `:6989` row (`("Object", ["name"])`, the §2.5 address that
     # had NO pin at all, which is how `:6869` stayed behind its three siblings — `:6984`/`:6985`/`:6990`
     # sit 115/116/121 lines below `:6869`, while `:6989`, the row that had no pin, is the 120th), and row
-    # 13b's Source-writer pin (`sdk.py:21714` — `:21648` before `#13486` moved the writer) is the
+    # 13b's Source-writer pin (`sdk.py:21769` — `:21648` before `#13486` moved the writer) is the
     # same shape added again, for the same reason.
     # 48 -> 52 at review cycle 3: four rows added for corrections whose sites had NO pin at all
     # (row 13's `entities.py` pair, §2.1's count marker, the Event row's label-derivation cite).
     # 52 -> 55 at review cycle 6: the three addresses review P2-2 measured as pinned NOWHERE —
-    # `sdk.py:28030` in `00_index.md` and in `ENTITY-VERDICT-BANDS.md`, and `sdk.py:28394` there too —
+    # `sdk.py:28085` in `00_index.md` and in `ENTITY-VERDICT-BANDS.md`, and `sdk.py:28449` there too —
     # where a `+1` mutation on all three left 441 tests green. Same shape, same reason.
-    # 55 -> 58 at the #13551 fix lane: the three §2.5 sites that cited `sdk.py:37228` (or, in the
+    # 55 -> 58 at the #13551 fix lane: the three §2.5 sites that cited `sdk.py:37283` (or, in the
     # proximity paragraph, `:37183`) for statements that are on `:37467` / `:37444` at every head the
     # row names — measured above the rows. The pair pins could not see them: a `:37467` anywhere on
     # the line satisfied the count arm, which is the same one-site-vs-one-string gap `:6989` was.
@@ -957,20 +1950,48 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # 59 -> 61 at the #13793 fix lane: the two `:Document` docstring addresses §5's #12915 move
     # names (`:37144` / `:37186`) had NO pin at all — both shipped one line high (on the `:Source`
     # lines `:37143`/`:37185`) and `git grep -n '37143\|37144' -- tests docs` reached only the prose
-    # sites, so no mutant reddened anything. Same shape as the `:6989` and `sdk.py:28030` rows above.
+    # sites, so no mutant reddened anything. Same shape as the `:6989` and `sdk.py:28085` rows above.
     # The arm is an anti-SHRINK arm, so it moves with a documented ADDITION, never with a deletion.
     # 61 -> 62 at the #13854 fix lane: the vector-index-parity plan's reader row was re-pointed to
-    # `hosted_backup.py:1548` (a comment) for `_index_has_is_operator()`, which is `:2666` at this head
+    # `hosted_backup.py:1548` (a comment) for `_index_has_is_operator()`, which was `:2666` at that lane's head
     # — and that document had NO pin at all, so nothing would have reddened the next rotation of it.
     # 62 -> 63 after #13879's merge: §2.5's `:Tag` row cites `mcp_server.py:11281`, re-derived from the
-    # pin-head `10730`, and NOTHING read it — the same class as the `:6989` and `hosted_backup.py:2666`
+    # pin-head `10730`, and NOTHING read it — the same class as the `:6989` and `hosted_backup.py:2683`
     # rows above.
     # 63 -> 64 at the #13992 review (P2): the SAME address is written TWICE in the document, and the
     # row above pins only the §2.5 spelling (`mcp_server.py:11281`) — the header enumerates it BARE as
     # `:11281`, where no row and no count reached. Reverting just the header half left every arm green,
     # measured above. One ROW per SITE, never one row per STRING: `:8206`/`:5654` on that same header
     # line are the neighbours that already carry their own bare-token row.
-    assert len(_PINS) == 64
+    # 68 -> 72 at the #14043 review (finding 3): four addresses the revision writes at THIS head were
+    # in neither the header's enumeration nor `_PINS`, so the header's reader rule sent a reader to the
+    # pin, where none of them opens. Same shape as the `:6989` / `hosted_backup.py:2683` rows above:
+    # one ROW per SITE, and an unlisted token is coverage this file only appeared to have.
+    # 72 -> 77 at the SAME review's finding 2: the class was still unclosed for FIVE addresses this
+    # revision writes — the new §2.2 `:Source` reader row's `session_source_prose_migration.py`
+    # cites (`:218-223`, `:1263-1268`, `:274-281`) and row 13's inner pair (`:277-279`) plus its
+    # `_CONTROL_LEXICON_ROWS` read (`:1292-1300`). ⛔ Those five are PIN-STABLE, not head-relative: one
+    # blob at both heads, so the header's default resolves them right and the defect was purely the
+    # missing guard — the document was the only thing naming them, so a merge inserting into that file
+    # moved them with nothing red. That is the failure mode the four rows above exist to stop, and
+    # §2.7's own note (file-scoped drift is "either fixed everywhere or trusted nowhere") is why the
+    # file's remaining unpinned sites are closed in the same commit.
+    # 77 -> 80 by the rc lane's §2.6 re-cut (`0a53ad23d8`): the three statements it re-pointed at this
+    # head — `hosted_backup.py:892`, `:1316`, `:1517` — needed rows of their own, because a re-point
+    # whose new address is unpinned "moves the defect rather than closing it" (that re-cut's own
+    # re-review). MEASURED, not inferred: the count of `_PINS` rows at each of these heads is
+    # 72 (ecb137107e) -> 77 (298d3328db, the five above) -> 80 (0a53ad23d8).
+    # 80 -> 82 at the #14043 review (finding 1, this cycle): §6.3's `sdk.py:16077-16082` and
+    # `sdk.py:3801` were in neither list and unpinned, and the pin default opens on prose and on an
+    # empty line respectively. (The span landed as `:16077-16081` in #13994, which re-derived this
+    # document on top of its own `:Point` join; the END stayed one short until #14087 re-derived it
+    # here. One ROW, one token — the row count did not move.)
+    # 82 -> 83 at the #14087 review round 7 (P3): `00_index.md`'s entity-verdict row carries a
+    # SECOND present-tense this-head address on the line this PR edits (`entity_verdict.py:43`),
+    # and NOTHING read it — its `sdk.py:28581` sibling was pinned and the neighbour was not, so a
+    # rotation of `entity_verdict.py` under that cite would have moved it silently. Same shape as
+    # the `:6989` / `sdk.py:28085` / `hosted_backup.py:2683` rows above.
+    assert len(_PINS) == 83
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
@@ -1328,47 +2349,47 @@ def test_the_13102_addendum_states_the_consume_pair_at_this_head() -> None:
 #:
 #: Every row below was re-taken by CONTENT on THIS tree (`grep -n '<the fragment the row quotes>' <path>`),
 #: never by arithmetic, and each is a claim about the line the DOCUMENT currently names. NON-VACUOUS on the
-#: pre-fix document: `sdk.py:38840` was `last_pass is None…` prose at this head (the statement is `:42105`),
-#: `sdk.py:52910` was a comment (statement `:58561`), and `entities.py:1223` was EMPTY (the declaration is
+#: pre-fix document: `sdk.py:38895` was `last_pass is None…` prose at this head (the statement is `:42105`),
+#: `sdk.py:52972` was a comment (statement `:58561`), and `entities.py:1223` was EMPTY (the declaration is
 #: `:1246`) — so the fragment arm reds on every one of them.
 #:
 #: ⚠️ A RANGE row anchors on the line INSIDE the cited range that carries the quoted fragment (the same
 #: convention `_PINS` states), and `test_..._range_anchors_are_inside_their_range` below proves the anchor is
 #: in the range the token names — without it a range row could pin a line the range does not cover.
 _REDEFINED_13854: tuple[tuple[str, str, int, str, int], ...] = (
-    ("sdk.py:17861", "tortoise/sdk.py", 17861, "\"MATCH (p:Point {id:$id})-[:extractedFrom]->\"", 2),
-    ("sdk.py:41542", "tortoise/sdk.py", 41542, "\"MATCH (n:Point) WHERE n.baseline_set = true AND n.ep_alpha IS NOT NUL", 2),
-    ("sdk.py:42300", "tortoise/sdk.py", 42300, "\"MATCH (s:Source)-[:references]->(o:Source) RETURN s.url, o.url\",", 1),
-    ("sdk.py:58756", "tortoise/sdk.py", 58756, "\"MATCH (s:Source {url:$url})-[:references]->(n) RETURN count(n)\",", 2),
-    ("sdk.py:19955-19958", "tortoise/sdk.py", 19958, "\"AND coalesce(n.is_episodic, false) <> true \")", 1),
-    ("sdk.py:19963", "tortoise/sdk.py", 19963, "_stamp_capture_provenance(", 1),
-    ("sdk.py:58105-58129", "tortoise/sdk.py", 58107, "\"s.turn_count, s.actor_user_id, s.harness, \"", 6),
-    ("sdk.py:58107-58129", "tortoise/sdk.py", 58107, "\"s.turn_count, s.actor_user_id, s.harness, \"", 1),
-    ("sdk.py:58107", "tortoise/sdk.py", 58107, "\"s.turn_count, s.actor_user_id, s.harness, \"", 3),
-    ("sdk.py:4234-4237", "tortoise/sdk.py", 4234, "\"s.client_captured_at_source=CASE WHEN s.client_captured_at IS NULL \"", 3),
-    ("sdk.py:4368-4375", "tortoise/sdk.py", 4373, "\"RETURN s.turn_max_index, s.turn_count, collect(t.id)\",", 2),
+    ("sdk.py:18035", "tortoise/sdk.py", 18035, "\"MATCH (p:Point {id:$id})-[:extractedFrom]->\"", 1),
+    ("sdk.py:41728", "tortoise/sdk.py", 41728, "\"MATCH (n:Point) WHERE n.baseline_set = true AND n.ep_alpha IS NOT NUL", 3),
+    (":42486", "tortoise/sdk.py", 42486, "\"MATCH (s:Source)-[:references]->(o:Source) RETURN s.url, o.url\",", 0),
+    ("sdk.py:58966", "tortoise/sdk.py", 58966, "\"MATCH (s:Source {url:$url})-[:references]->(n) RETURN count(n)\",", 2),
+    ("sdk.py:20141-20144", "tortoise/sdk.py", 20144, "\"AND coalesce(n.is_episodic, false) <> true \")", 1),
+    ("sdk.py:20149", "tortoise/sdk.py", 20149, "_stamp_capture_provenance(", 1),
+    ("sdk.py:58315-58339", "tortoise/sdk.py", 58317, "\"s.turn_count, s.actor_user_id, s.harness, \"", 1),
+    ("sdk.py:58317-58339", "tortoise/sdk.py", 58317, "\"s.turn_count, s.actor_user_id, s.harness, \"", 6),
+    ("sdk.py:58317", "tortoise/sdk.py", 58317, "\"s.turn_count, s.actor_user_id, s.harness, \"", 8),
+    ("sdk.py:4265-4268", "tortoise/sdk.py", 4265, "\"s.client_captured_at_source=CASE WHEN s.client_captured_at IS NULL \"", 3),
+    ("sdk.py:4399-4406", "tortoise/sdk.py", 4404, "\"RETURN s.turn_max_index, s.turn_count, collect(t.id)\",", 2),
     ("sdk.py:2898", "tortoise/sdk.py", 2898, "\"SET s.capture_redactions=$redactions \"", 1),
-    ("sdk.py:31347", "tortoise/sdk.py", 31347, "\"MATCH (t:Tag) \"", 1),
-    ("sdk.py:31365", "tortoise/sdk.py", 31365, "\"MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag}) \"", 1),
-    ("sdk.py:24327", "tortoise/sdk.py", 24327, "\"MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) \"", 1),
-    ("sdk.py:24671", "tortoise/sdk.py", 24671, "\"MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t\"),", 1),
-    ("sdk.py:27614", "tortoise/sdk.py", 27614, "\"MATCH (n:Point {id:$id}) RETURN properties(n)\",", 3),
-    (":28513", "tortoise/sdk.py", 28513, "\"MATCH (n:Point {id:$id}) RETURN properties(n)\",", 3),
-    (":30171", "tortoise/sdk.py", 30171, "f\"MATCH (n:Point) WHERE {where} RETURN properties(n)\",", 3),
-    (":30267", "tortoise/sdk.py", 30267, "f\"MATCH (n:Point) WHERE {where} RETURN properties(n)\"", 3),
-    (":30366", "tortoise/sdk.py", 30366, "\"MATCH (n:Point {id:$id}) RETURN properties(n)\",", 3),
-    (":43995", "tortoise/sdk.py", 43995, "\"RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $lim\",", 3),
-    ("entities.py:1246", "tortoise/projection/entities.py", 1246, "_POINT_JSON_RECORD_PROPS: frozenset = frozenset({\"mentions\"})", 2),
-    ("entities.py:2022-2030", "tortoise/projection/entities.py", 2022, "# once. MEASURED at #10389's review head, before this entry: one SDK", 1),
-    ("entities.py:2460", "tortoise/projection/entities.py", 2460, "\"operator\", \"provenance\", \"about_entities\", \"aboutEntities\",", 1),
-    ("entities.py:2509", "tortoise/projection/entities.py", 2509, "_POINT_DENY: frozenset = frozenset({", 1),
-    ("entities.py:2369-2370", "tortoise/projection/entities.py", 2370, "# out first, because the wipe destroys the only copy (\u00a717.2, `#11325`)", 1),
-    ("entities.py:2373-2374", "tortoise/projection/entities.py", 2374, "# `update_point(<id>, story_arc=None)` \u2014 #11325, and only on the rows ", 1),
-    ("entities.py:3118", "tortoise/projection/entities.py", 3118, "set_clauses.append(\"n.sourceVersionTransit=$sv\")", 1),
-    ("entities.py:3923", "tortoise/projection/entities.py", 3923, "\"MERGE (s:Session {id:$sid}) SET s.is_episodic=true\",", 1),
-    (":3236-3238", "tortoise/projection/entities.py", 3238, "self._POINT_HANDLED | self._POINT_DENY,", 1),
-    (":3280", "tortoise/projection/entities.py", 3280, "for key in self._POINT_DENY - self._POINT_HANDLED:", 1),
-    (":3330", "tortoise/projection/entities.py", 3330, "or key in self._POINT_DENY or key in self._META_KEYS:", 1),
+    ("sdk.py:31533", "tortoise/sdk.py", 31533, "\"MATCH (t:Tag) \"", 1),
+    ("sdk.py:31551", "tortoise/sdk.py", 31551, "\"MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag}) \"", 1),
+    ("sdk.py:24513", "tortoise/sdk.py", 24513, "\"MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) \"", 1),
+    ("sdk.py:24857", "tortoise/sdk.py", 24857, "\"MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t\"),", 1),
+    ("sdk.py:27800", "tortoise/sdk.py", 27800, "\"MATCH (n:Point {id:$id}) RETURN properties(n)\",", 2),
+    (":28699", "tortoise/sdk.py", 28699, "\"MATCH (n:Point {id:$id}) RETURN properties(n)\",", 0),
+    (":30357", "tortoise/sdk.py", 30357, "f\"MATCH (n:Point) WHERE {where} RETURN properties(n)\",", 0),
+    (":30453", "tortoise/sdk.py", 30453, "f\"MATCH (n:Point) WHERE {where} RETURN properties(n)\"", 0),
+    (":30552", "tortoise/sdk.py", 30552, "\"MATCH (n:Point {id:$id}) RETURN properties(n)\",", 0),
+    (":44181", "tortoise/sdk.py", 44181, "\"RETURN properties(n) ORDER BY n.createdAt DESC LIMIT $lim\",", 0),
+    ("entities.py:1292", "tortoise/projection/entities.py", 1292, "_POINT_JSON_RECORD_PROPS: frozenset = frozenset({\"mentions\"})", 2),
+    ("entities.py:2068-2076", "tortoise/projection/entities.py", 2068, "# once. MEASURED at #10389's review head, before this entry: one SDK", 1),
+    ("entities.py:2506", "tortoise/projection/entities.py", 2506, "\"operator\", \"provenance\", \"about_entities\", \"aboutEntities\",", 1),
+    ("entities.py:2555", "tortoise/projection/entities.py", 2555, "_POINT_DENY: frozenset = frozenset({", 1),
+    ("entities.py:2415-2416", "tortoise/projection/entities.py", 2416, "# out first, because the wipe destroys the only copy (\u00a717.2, `#11325`)", 1),
+    ("entities.py:2419-2420", "tortoise/projection/entities.py", 2420, "# `update_point(<id>, story_arc=None)` \u2014 #11325, and only on the rows ", 1),
+    ("entities.py:3177", "tortoise/projection/entities.py", 3177, "set_clauses.append(\"n.sourceVersionTransit=$sv\")", 1),
+    ("entities.py:3982", "tortoise/projection/entities.py", 3982, "\"MERGE (s:Session {id:$sid}) SET s.is_episodic=true\",", 1),
+    (":3295-3297", "tortoise/projection/entities.py", 3297, "self._POINT_HANDLED | self._POINT_DENY,", 1),
+    (":3339", "tortoise/projection/entities.py", 3339, "for key in self._POINT_DENY - self._POINT_HANDLED:", 1),
+    (":3389", "tortoise/projection/entities.py", 3389, "or key in self._POINT_DENY or key in self._META_KEYS:", 1),
 )
 
 

@@ -244,6 +244,8 @@ import os
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
 import json
+import re
+from pathlib import Path
 
 import pytest
 
@@ -2388,3 +2390,436 @@ class TestRelationshipsAndRemainingReads:
         assert status == 200
         assert isinstance(out, dict) and "error" in out, out
         assert "no-such-candidate" in str(out["error"]), out
+
+
+# ── the instrument's own denominator and refusals are MEASURED ──────────────
+# #13036 review F1/F2/F4. `tools/surface_capstone_probe.py` is what produces the two
+# headline numbers ("22/27 tools answered", "27/40 SDK methods answered"), so three
+# things about it cannot be assertions in its own prose:
+#   F1 — the 27-name DENOMINATOR (it was a hand-typed tuple, and the docstring claimed a
+#        test bound it that did not exist — `git grep` found the name in the docstring
+#        and nowhere else);
+#   F2 — the three `http_policy=False` rows (a constant `False` decided them, so the row
+#        read REFUSED whatever the door answered);
+#   F4 — an SDK method that RETURNS `{"error": …}` (recorded as PASS, so "answered"
+#        could not be separated from "errored").
+# Each case below FAILS on the pre-fix code. The probe is imported lazily: it is written
+# to run standalone and mutates `os.environ` at import, which this session must not keep.
+
+
+def _probe_module():
+    """The capstone probe module, imported with `os.environ` restored afterwards.
+
+    `tools/surface_capstone_probe.py` defaults `TORTOISE_SECRET_PEPPER` and POPS
+    `TORTOISE_DB_URI` at module import — correct for a standalone evidence generator
+    that must never write to a shared graph, and wrong to hand to every test that runs
+    after this one in the same process. The environment is therefore saved and restored
+    around the FIRST import; `sys.modules` caches the module, so it can happen only once.
+    """
+    saved = dict(os.environ)
+    try:
+        from tools import surface_capstone_probe as probe
+    finally:
+        os.environ.clear()
+        # ⛔ NOT `os.environ.update(saved)`: `update` is one of the retired SDK names, so
+        # the privatisation sweep counts that call as an untyped-receiver residue row and
+        # moves the `SWEEP_RESIDUE` pin (measured: this line alone took 11821 → 11822).
+        # Restoring through item assignment is the same restore with no counted row.
+        for key, value in saved.items():
+            os.environ[key] = value
+    return probe
+
+
+class _StubDoor:
+    """A tenant door that answers every call with ONE payload — no graph, no transport.
+
+    Only the DOOR-facing verdict logic is under test here (the probe's own instrument is
+    exercised by running it), so the responses are whatever the case needs and the seed
+    is a dict of ids.
+    """
+
+    def __init__(self, payload):
+        self.payload = payload
+        self.calls: list[str] = []
+
+    def call(self, name, arguments=None):
+        self.calls.append(name)
+        return 200, self.payload, 0.0
+
+
+#: Only the ids `_tool_request` reads out of the probe's seed (no graph is opened).
+_PROBE_SEED: dict = {
+    "org": "org-1", "api_key": "key-1",
+    "claim": "claim-1", "claim2": "claim-2", "calibrated": "calibrated-1",
+    "subject": "subject-1", "object": "object-1", "operator": "operator-1",
+    "source_url": "https://example.test/probe", "batch": "batch-1",
+    "topic": "probe-topic", "topic_object": "topic-object-1",
+    "topic_decision": "decision-1", "session": "session-1",
+}
+
+
+def test_the_approved_mcp_list_is_READ_from_the_documents_that_own_it():
+    """F1: the denominator of "N/27" is READ from the approval record, not typed.
+
+    `tools/mcp_surface_approval.py` parses the beta surface's **MCP twin** column and the
+    canonical doc's #3540 amendment, then checks the names against the count BOTH docs
+    state. Each assertion below is a separate DIMENSION of that parse, so a silent short
+    read cannot pass as "27 names".
+    """
+    from tools.mcp_surface_approval import load_approved_tools, mcp_target_count
+
+    names = load_approved_tools()
+    count = mcp_target_count()
+    assert len(names) == count, (
+        f"the two approval documents state an MCP target of {count} but yield "
+        f"{len(names)} name(s): {list(names)} — every 'answered N/27' figure would be "
+        "measured against a denominator the documents do not state")
+    assert len(names) == len(set(names)), f"a duplicated approved name: {list(names)}"
+    assert "manage_sources" in names, (
+        "the #3540 amendment's added tool is missing — the reader must take it from "
+        "`canonical-mcp-tools.md`, not from the beta table (it is not on that table)")
+    assert "graph_set_recording" in names, (
+        "beta row 30's twin is `graph_set_recording (recording only)` and the trailing "
+        "parenthetical must be dropped, not read as part of the name")
+    assert "check_connection" in names, (
+        "beta row 40 is inside the document's PLATFORM block and still carries an MCP twin")
+    assert "write_knowledge_batch" not in names, (
+        "beta row 13 is builder-only and has NO MCP twin — a reader that took every row "
+        "name would inflate the denominator")
+    assert "Tortoise" not in names and "close" not in names, (
+        "the constructor and `close` have no MCP twin")
+    assert "get_organisation_account" not in names, (
+        "rows 28-39 are the tenancy block: SDK/REST only, NOT on the MCP (row 30 excepted)")
+
+
+def test_the_approval_reader_REFUSES_a_document_that_moved_without_it(tmp_path):
+    """F1's non-vacuity: the reader refuses instead of measuring a drifted denominator."""
+    from tools.mcp_surface_approval import (
+        BETA_DOC,
+        CANONICAL_DOC,
+        ApprovalUnreadable,
+        load_approved_tools,
+    )
+
+    beta_text = BETA_DOC.read_text(encoding="utf-8")
+    canonical_text = CANONICAL_DOC.read_text(encoding="utf-8")
+
+    def _docs(tag, beta=None, canonical=None):
+        b = tmp_path / f"{tag}-beta.md"
+        c = tmp_path / f"{tag}-canonical.md"
+        b.write_text(beta if beta is not None else beta_text, encoding="utf-8")
+        c.write_text(canonical if canonical is not None else canonical_text, encoding="utf-8")
+        return b, c
+
+    # (a) a NAME added to the surface without the stated count moving
+    b, c = _docs("extra-row", beta=beta_text
+                 + "\n| 41 | `brand_new` | does a thing | `brand_new` | agent |\n")
+    with pytest.raises(ApprovalUnreadable) as exc:
+        load_approved_tools(beta=b, canonical=c)
+    assert "yield" in str(exc.value), exc.value
+
+    # (b) the two documents disagree about the count
+    b, c = _docs("count-moved",
+                 beta=beta_text.replace("**MCP: 27 tools**", "**MCP: 28 tools**"))
+    with pytest.raises(ApprovalUnreadable) as exc:
+        load_approved_tools(beta=b, canonical=c)
+    assert "disagree" in str(exc.value), exc.value
+
+    # (c) an unapproved record is not a target
+    b, c = _docs("unapproved", canonical=canonical_text.replace(
+        "approval_status: approved", "approval_status: pending"))
+    with pytest.raises(ApprovalUnreadable) as exc:
+        load_approved_tools(beta=b, canonical=c)
+    assert "approval_status" in str(exc.value), exc.value
+
+
+def test_an_http_excluded_row_is_only_REFUSED_when_the_door_actually_refused():
+    """F2: the three `http_policy=False` rows are decided by the CODE, not a constant.
+
+    Pre-fix, each of the three carried `lambda p: (False, "refused by the tenant door")`
+    and the verdict was `elif approved in HTTP_EXCLUDED and not ok` — so `ok is False`
+    always, and the row read REFUSED even if the door had served the tool and returned
+    the seeded content. Mutant: set `refresh_confidence`'s registry row to
+    `http_policy=True` and let it answer; before this pin nothing reddened.
+    """
+    probe = _probe_module()
+    excluded = sorted(probe.HTTP_EXCLUDED)
+    assert excluded, "no http_policy=False rows declared — this pin would measure nothing"
+
+    # (1) the door SERVED the tool → the row must not claim a measured refusal
+    served = {r.approved: r for r in probe.probe_tools(_StubDoor({"mean": 0.5}),
+                                                       _PROBE_SEED)}
+    for name in excluded:
+        assert served[name].status == probe.FAIL, (
+            f"`{name}` was recorded {served[name].status} although the tenant door "
+            f"ANSWERED — the exclusion is no longer in force, so this row is not a "
+            f"measured refusal: {served[name].note}")
+        assert "did NOT refuse" in served[name].note, served[name].note
+
+    # (2) the door refused with the transport's own -32004 → REFUSED, quoting that code
+    refused = {r.approved: r for r in probe.probe_tools(
+        _StubDoor({"jsonrpc": "2.0",
+                   "error": {"code": -32004, "message": "not available over HTTP"}}),
+        _PROBE_SEED)}
+    for name in excluded:
+        assert refused[name].status == probe.REFUSED, (
+            f"`{name}`: the door returned -32004 and the row read "
+            f"{refused[name].status} — the refusal IS this row's documented answer")
+        assert "not available over HTTP" in refused[name].note, refused[name].note
+
+    # (3) the code is what decides: another error code is NOT the exclusion refusal
+    other = {r.approved: r for r in probe.probe_tools(
+        _StubDoor({"jsonrpc": "2.0",
+                   "error": {"code": -32602, "message": "invalid params"}}), _PROBE_SEED)}
+    for name in excluded:
+        assert other[name].status == probe.FAIL, (
+            f"`{name}`: -32602 is not `http_policy=False` doing its job and must not be "
+            f"recorded as the exclusion refusal ({other[name].status})")
+
+
+def test_an_sdk_method_that_RETURNS_an_error_is_not_an_answer():
+    """F4: `_measure` must separate "answered" from "returned an error"."""
+    probe = _probe_module()
+
+    status, _ms, shape, note = probe._measure(lambda: {"error": {"message": "boom"}})
+    assert status == probe.REFUSED, (
+        f"a returned error payload was recorded as {status} — 'N answered' would rise "
+        f"as methods start failing: {note}")
+    assert shape == "dict{error}" and "boom" in note, (shape, note)
+
+    status, _ms, _shape, note = probe._measure(lambda: {"mean": 0.5})
+    assert status == probe.PASS and note == "", (status, note)
+
+    def _raises():
+        raise ValueError("cannot run")
+
+    status, _ms, shape, note = probe._measure(_raises)
+    assert status == probe.FAIL, (status, note)
+    assert shape == "exception" and "ValueError" in note, (shape, note)
+
+
+# ── the two artifacts the numbers are published in, pinned to their generator ─────
+# #14045 review F1/F2/F5. `probe-tables.md` and the evidence README carry the headline
+# figures, and the tables file is REGENERATED by a documented command — so anything written
+# into it by hand is deleted the next time someone follows that command, and anything the
+# README types beside it can drift from the table it describes.
+#   F1 — the provenance sha and the status legend were hand-written ABOVE a body the
+#        generator owns, and the sha recorded (`917c2a70fa`) predated the fix beside it;
+#   F2 — the README cited "rows 1–27" as answered while row 27 is the ARM GAP;
+#   F5 — the `delete_knowledge` note claimed a read-back the probe never performed.
+# Each case below FAILS on the pre-fix code.
+
+_EVIDENCE = Path(__file__).resolve().parent.parent / "docs/evidence/11609-surface-capstone"
+
+
+def test_the_markdown_generator_emits_its_own_provenance_and_legend():
+    """F1: the preamble is GENERATED, so a regeneration cannot delete it.
+
+    `probe-tables.md` is written WHOLE by `--markdown <this file>`, so the provenance and
+    legend that used to be hand-written into its header were deleted by the very command
+    the header told you to run. The sha is DERIVED now (`git rev-parse`), not typed.
+    """
+    probe = _probe_module()
+    md = probe._render_markdown([], [], provenance="0123456789")
+    preamble = md.split("\n## ")[0]
+    assert md.startswith("# #13036 — surface probe tables (GENERATED, do not hand-edit)")
+    assert "`uv run python tools/surface_capstone_probe.py --markdown <this file>`" in preamble
+    assert "Generated at `0123456789`" in preamble, (
+        "the generator does not record where the tables came from")
+    for status in ("**PASS**", "**REFUSED**", "**MISSING**", "**ARM GAP**",
+                   "**UNMEASURED**"):
+        assert status in preamble, (
+            f"the generator dropped `{status}` from the legend, so the next regeneration "
+            "deletes it from the committed artifact")
+
+
+def test_the_committed_tables_carry_exactly_this_generators_preamble():
+    """F1's second half: regenerating must be IDEMPOTENT over the header.
+
+    Only the one line a generated file cannot know — its own commit's sha — is
+    normalised. Everything above the first `## ` must be byte-identical to a fresh
+    render, so hand-editing the legend and losing it from the generator are both reds
+    instead of surviving until the next regeneration.
+    """
+    probe = _probe_module()
+    committed = (_EVIDENCE / "probe-tables.md").read_text(encoding="utf-8")
+    want = probe._render_markdown([], [], provenance="<SHA>")
+    normalised = re.sub(r"^Generated at `[^`]*`", "Generated at `<SHA>`", committed,
+                        count=1, flags=re.MULTILINE)
+    assert normalised.split("\n## ")[0] == want.split("\n## ")[0], (
+        "the committed probe-tables.md preamble is not what the generator emits — "
+        "regenerating would change or silently drop the provenance and the legend")
+
+
+def _sdk_table_rows() -> list[tuple[int, str, str]]:
+    """`(row, approved method, status)` for every row of the committed SDK table.
+
+    The row numbers are `tortoise/__all__.py`'s order, which is what makes the README's
+    citation checkable at all: it is derived here rather than trusted.
+    """
+    committed = (_EVIDENCE / "probe-tables.md").read_text(encoding="utf-8")
+    section = committed.split("## Approved SDK methods", 1)[1].split("\n## ", 1)[0]
+    rows: list[tuple[int, str, str]] = []
+    for line in section.splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) < 3 or not cells[0].isdigit():
+            continue
+        rows.append((int(cells[0]), cells[1].strip("`"), cells[2].strip("*")))
+    return rows
+
+
+def test_the_readme_cites_the_sdk_rows_the_table_actually_answers():
+    """F2: the README said "rows 1–27", and row 27 is the ARM GAP.
+
+    `approve_merge` (row 27) is recorded ARM GAP and `check_connection` (row 40) answered,
+    so the answered set is rows 1–26 plus 40. Typing that into the README is the defect
+    one level up, so the citation is DERIVED from the table here: a re-run that moves a
+    row reds this instead of leaving the README asserting a set the table contradicts.
+    """
+    rows = _sdk_table_rows()
+    assert len(rows) == 40, f"the SDK table has {len(rows)} rows, not 40"
+    answered = [n for n, _name, status in rows if status == "PASS"]
+    assert len(answered) == 27, (
+        f"the table shows {len(answered)} answered SDK rows, and the README's '27' is "
+        f"derived from this: {answered}")
+    assert answered == [*range(1, 27), 40], (
+        f"the answered SDK rows are {answered}, not 1–26 plus 40 — the README citation "
+        "is derived from this set, so both move together")
+    readme = (_EVIDENCE / "README.md").read_text(encoding="utf-8")
+    line = next((ln for ln in readme.splitlines()
+                 if ln.startswith("| answered in-process")), "")
+    assert "rows **1–26 plus 40**" in line, line
+    assert "1–27" not in line, (
+        f"the README still cites rows 1–27, which includes the ARM GAP row: {line}")
+
+
+class _ScriptedDoor:
+    """A door that answers each tool name from ITS OWN queue.
+
+    `_StubDoor` answers every name with one payload, which cannot express a branch that
+    calls the SAME name more than once — and `delete_knowledge`'s follow-up drives
+    `tortoise_delete` three times (alias preview, doomed preview, confirmed) and then
+    reads the node back.
+    """
+
+    def __init__(self, script: dict[str, list], *, default=None):
+        self._script = {name: list(vals) for name, vals in script.items()}
+        self._default = default
+        self.calls: list[tuple[str, dict | None]] = []
+
+    def call(self, name, arguments=None):
+        self.calls.append((name, arguments))
+        queue = self._script.get(name)
+        if not queue:
+            return 200, self._default, 0.0
+        return 200, (queue.pop(0) if len(queue) > 1 else queue[0]), 0.0
+
+
+def test_delete_knowledge_verifies_the_read_back_its_note_claims():
+    """F5: the note said "gone on read-back" and nothing read the node back.
+
+    `deleted: true` is the DELETE CALL'S OWN RECEIPT, and a node that answers
+    `deleted: true` while remaining readable is precisely the empty answer the probe
+    exists to refuse. The row must fetch the doomed id again through the same live door
+    and read PASS only when that read MISSES.
+    """
+    probe = _probe_module()
+    preview = {"deleted": False, "preview": True, "confirmation": "tok-1",
+               "id": "claim-1", "kind": "Point"}
+    made = {"node": {"id": "doomed-1"}}
+    confirmed = {"deleted": True, "id": "doomed-1"}
+
+    def _door(readback):
+        return _ScriptedDoor({
+            "tortoise_delete": [preview, preview, confirmed],
+            "tortoise_create_entity": [made],
+            "tortoise_get_entity": [readback],
+        }, default={})
+
+    # (a) the re-read MISSES → the claim is true and the row answers PASS
+    door = _door({})
+    row = {r.approved: r for r in probe.probe_tools(door, _PROBE_SEED)}["delete_knowledge"]
+    assert any(name == "tortoise_get_entity"
+               and (args or {}).get("id") == "doomed-1" for name, args in door.calls), (
+        "the row publishes a read-back and never read the node back: "
+        f"{[n for n, _a in door.calls]}")
+    assert row.status == probe.PASS, (row.status, row.note)
+    assert "no longer serves" in row.note, row.note
+
+    # (b) the node is STILL READABLE → `deleted: true` alone is not the claim
+    door = _door({"id": "doomed-1", "content": "still here"})
+    row = {r.approved: r for r in probe.probe_tools(door, _PROBE_SEED)}["delete_knowledge"]
+    assert row.status == probe.FAIL, (
+        "a node that answered `deleted: true` and is STILL readable was recorded "
+        f"{row.status}: {row.note}")
+    assert "STILL READABLE" in row.note, row.note
+
+    # (c) a read that could not be PERFORMED is not an absence either
+    door = _door({"error": "read failed"})
+    row = {r.approved: r for r in probe.probe_tools(door, _PROBE_SEED)}["delete_knowledge"]
+    assert row.status == probe.FAIL, (
+        f"an error envelope was read as proof the node is gone: {row.note}")
+
+    # (d) the follow-up may not MASK a FAIL the approved-name row recorded — the alias
+    #     preview answers no `preview`/`confirmation`, so that row's own check fails and
+    #     the (successful) confirm arm must not overwrite it
+    door = _ScriptedDoor({
+        "tortoise_delete": [{"id": "claim-1"}, preview, confirmed],
+        "tortoise_create_entity": [made],
+        "tortoise_get_entity": [{}],
+    }, default={})
+    row = {r.approved: r for r in probe.probe_tools(door, _PROBE_SEED)}["delete_knowledge"]
+    assert row.status == probe.FAIL, (
+        "the confirm arm upgraded a row the approved-name preview had already failed: "
+        f"{row.note}")
+
+
+def test_an_undeclared_error_is_a_FAIL_never_a_documented_refusal():
+    """FINDING 3: any error payload used to become REFUSED, and REFUSED exits 0.
+
+    `REFUSED` rows are `partial`, not `problems` (`main()` returns `1 if problems else 0`),
+    so a broken approved tool was filed as "a documented refusal", kept its stale note and
+    left the run's failure list. Mutant: make any approved tool return `{"error": …}`;
+    pre-fix the row read REFUSED and the probe exited 0 on a broken approved tool.
+    """
+    probe = _probe_module()
+    declared = sorted(probe.DECLARED_REFUSALS)
+    assert declared, "no declared refusals — this pin would measure nothing"
+    approved = set(probe.APPROVED_TOOLS) | set(probe.APPROVED_SDK)
+    assert set(declared) <= approved, (
+        "a declared refusal names something that is not an approved row: "
+        f"{sorted(set(declared) - approved)}")
+
+    errored = {r.approved: r
+               for r in probe.probe_tools(
+                   _StubDoor({"error": {"code": -32000, "message": "boom"}}), _PROBE_SEED)}
+
+    # a NON-declared approved tool that errors is a FAIL, and the note says why
+    undeclared = [n for n in probe.APPROVED_TOOLS
+                  if n not in probe.DECLARED_REFUSALS and n not in probe.HTTP_EXCLUDED
+                  and n not in probe.NO_LIVE_DOOR]
+    assert undeclared, "no undeclared approved tool left — the pin would be vacuous"
+    for name in undeclared:
+        assert errored[name].status == probe.FAIL, (
+            f"`{name}` returned an ERROR and was filed as {errored[name].status} — a "
+            f"broken approved tool must not read as a documented refusal: "
+            f"{errored[name].note}")
+        assert "NO declaration" in errored[name].note, errored[name].note
+
+    # a DECLARED refusal keeps its REFUSED status, quoting the record that declares it
+    for name in declared:
+        assert errored[name].status == probe.REFUSED, (name, errored[name].status)
+        assert probe.DECLARED_REFUSALS[name][:40] in errored[name].note, errored[name].note
+
+    # the SDK leg is held to the same rule, through the same pass
+    rows = [probe.Row(approved="search_knowledge", door="TortoiseSDK.search_knowledge",
+                      status=probe.REFUSED, note="returned an error"),
+            probe.Row(approved=declared[0], door="TortoiseSDK", status=probe.REFUSED,
+                      note="declared")]
+    probe._demote_undeclared_refusals(rows)
+    assert rows[0].status == probe.FAIL, (
+        "an UNDECLARED SDK error stayed REFUSED — it would leave `problems` and the probe "
+        "would exit 0 on a method that stopped answering")
+    assert "no declaration" in rows[0].note, rows[0].note
+    assert rows[1].status == probe.REFUSED, (
+        "a DECLARED refusal was demoted — the declaration IS the row's answer")
