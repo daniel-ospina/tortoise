@@ -199,10 +199,13 @@ longer names the door's `MERGE` line or its `def` (it is `+2` into a BYTE-IDENTI
 did not change between those heads — only the offsets above it did), so this paragraph is the only place
 that reading appears. ⛔ **Re-derive by CONTENT:
 never reuse the delta.** The `+419` all three of this
-row's and row 15's sites take between `#14059`'s head and this one is **not** one insert: that interval is
-**569 inserted and 59 deleted** lines (`git diff --numstat`), across **25** hunks — and the convention travels with
-that second figure, because `git diff -U0 … | grep -c '^@@'` gives 25 while git's default `-U3` gives 23, which
-`--numstat` does not print at all. `+419` of the growth sits above the three sites (20 hunks, largest net `+157`)
+row's and row 15's sites take between that squash (`32441c280d`) and this one is **not** one insert: that
+interval is **569 inserted and 59 deleted** lines in `tortoise/hosted_api.py`
+(`git diff --numstat 32441c280d HEAD -- tortoise/hosted_api.py`), across **25** hunks — and the convention,
+the pathspec and the endpoint all travel with that second figure, because
+`git diff -U0 32441c280d HEAD -- tortoise/hosted_api.py | grep -c '^@@'` gives 25 while git's default `-U3`
+gives 23 (and `--numstat` prints no hunk count at all; without the pathspec both commands describe the whole
+repo instead — 218 files, 38 679 inserted and 2 529 deleted — which is not this row's interval). `+419` of the growth sits above the three sites (20 hunks, largest net `+157`)
 and `+91` below them, and at the same two heads a cite at old 10500 moved `+97` while one at 40000
 moved `+499`. The three share a delta because **no hunk between them changes the count** — the cumulative
 shift is `+419` for every old address from 21885 to 38986, and that is a BAND, not a property of the file — a lane
