@@ -37,7 +37,7 @@
 | Markets | Global — developers building stateful/coding agents; also individual "personal agent" users |
 | Key milestones | MemGPT (Oct 2023) → out of stealth with $10M (Sep 2024) → Sleep-time Compute (Apr 2025) → Context Repositories, git-based memory (Feb 2026) → Letta Code launched (⚠️ Apr 6, 2026 — single-source) → Context Constitution (Apr 2026) → Memory Models (Jun 2026) |
 
-[Source](https://www.letta.com/) — retrieved 2026-09-11 · [TechCrunch](https://techcrunch.com/2024/09/23/letta-one-of-uc-berkeleys-most-anticipated-ai-startups-has-just-come-out-of-stealth/) — retrieved 2026-09-11 · [PR Newswire](https://www.prnewswire.com/news-releases/berkeley-ai-research-lab-spinout-letta-raises-10m-seed-financing-led-by-felicis-to-build-ai-with-memory-302257004.html) — retrieved 2026-09-11 · [LinkedIn](https://www.linkedin.com/company/letta-ai) — retrieved 2026-09-11 · [Tracxn](https://tracxn.com/d/companies/letta/__U0QCJ7iCo3pX97e44fpKmKTCiUKKF6Ki8rWRAUaHxHY) — retrieved 2026-09-11
+[Source](https://www.letta.com/) — retrieved 2026-09-11 · [TechCrunch](https://techcrunch.com/2024/09/23/letta-one-of-uc-berkeleys-most-anticipated-ai-startups-has-just-come-out-of-stealth/) — retrieved 2026-09-11 · [PR Newswire](https://www.prnewswire.com/news-releases/berkeley-ai-research-lab-spinout-letta-raises-10m-seed-financing-led-by-felicis-to-build-ai-with-memory-302257004.html) — retrieved 2026-09-11 · [LinkedIn](https://www.linkedin.com/company/letta-ai) — retrieved 2026-09-11 · `tracxn.com/d/companies/letta` — retrieved 2026-09-11
 
 ⚠️ No Series A announced as of 2026-09-11 — the only round on record remains the Sep 2024 $10M seed.
 ⚠️ Team size conflicts across sources: LinkedIn band 11–50 vs Tracxn point-in-time 16. Reported as a range.
@@ -611,7 +611,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 
 **Overall sentiment (both):** **Positive with material DX/ops friction.** Letta = strong research brand + community + git-memory, weak on ease-of-use and on explicit memory semantics. Cognee = strong star/download growth + benchmark/marketing machine + graph-native memory, weak on ingestion robustness and self-host operations.
 
-[Source](https://www.reddit.com/r/LLMDevs/comments/1uzyyja/cognee_10_oss_selfimproving_memory_for_agents_scoring_79_on_beam/) · [Reddit r/AI_Agents](https://www.reddit.com/r/AI_Agents/comments/1s42kmu/some_thoughts_on_working_with_memory_systems/) · [github.com/topoteretes/cognee/issues](https://github.com/topoteretes/cognee/issues) · [aitoolsatlas Cognee review](https://aitoolsatlas.ai/tools/cognee/review) — retrieved 2026-09-11
+`reddit.com/r/LLMDevs` · `reddit.com/r/AI_Agents` · [github.com/topoteretes/cognee/issues](https://github.com/topoteretes/cognee/issues) · [aitoolsatlas Cognee review](https://aitoolsatlas.ai/tools/cognee/review) — retrieved 2026-09-11
 
 *Last checked: 2026-09-11.*
 
@@ -638,7 +638,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 - [TechCrunch](https://techcrunch.com/2024/09/23/letta-one-of-uc-berkeleys-most-anticipated-ai-startups-has-just-come-out-of-stealth/) — $10M seed, $70M post-money, founders. Retrieved 2026-09-11
 - [PR Newswire seed announcement](https://www.prnewswire.com/news-releases/berkeley-ai-research-lab-spinout-letta-raises-10m-seed-financing-led-by-felicis-to-build-ai-with-memory-302257004.html) — Felicis lead, Sunflower Capital, Essence VC. Retrieved 2026-09-11
 - [LinkedIn company page](https://www.linkedin.com/company/letta-ai) — 11–50 employees, founded 2024. Retrieved 2026-09-11
-- [Tracxn profile](https://tracxn.com/d/companies/letta/__U0QCJ7iCo3pX97e44fpKmKTCiUKKF6Ki8rWRAUaHxHY) — 16 employees (2026-04-30), $10M raised. Retrieved 2026-09-11
+- `tracxn.com/d/companies/letta` — 16 employees (2026-04-30), $10M raised. Retrieved 2026-09-11
 
 **Cognee**
 - [cognee.ai](https://www.cognee.ai/) — homepage: positioning, three-segment framing, 5M+ SDK runs/month, 30.6k stars, Bayer/Knowunity case studies, testimonials, integration list, "Ask an AI" GEO block. Retrieved 2026-09-11
