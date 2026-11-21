@@ -316,7 +316,7 @@ class TestLinkEntitiesAnswersTheTwoDoorsItAbsorbs:
                 pytest.fail(
                     f"relation {meaning!r} dispatched op_type={op_type!r}, which the "
                     f"writer's own gate refuses: {exc}")
-            except Exception:  # noqa: BLE001 - past the gate; it failed on the graph
+            except Exception:
                 pass
 
     def test_a_MECHANISM_spelling_passes_through_untouched(self, served):
