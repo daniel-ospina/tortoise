@@ -661,7 +661,7 @@ def _seed_proc_scan(
 
 
 @pytest.mark.parametrize(
-    "argv,comm,exe,expected_socket_dir,identified_by",
+    "argv,comm,exe,expected_socket_dir,identified_by,census",
     [
         # THE MEASURED SHAPE (issue #10502, `pi-runner-x64-2`): ONE argv element
         # carrying the whole command line, so `redis-server` is not at end-of-
@@ -676,6 +676,7 @@ def _seed_proc_scan(
             # tokenised, so `argv[0]` IS the binary. Before the fix the element
             # was never split, and no row existed at all.
             "argv[0]",
+            1,
         ),
         # The wrapper-shape the brief names: `argv[0]` IS the wrapper's path.
         (
@@ -688,6 +689,7 @@ def _seed_proc_scan(
             None,
             "/tmp/tt_ab/tmpcd",
             "comm",
+            1,
         ),
         # Comm renamed away (`prctl`), binary on disk still the server.
         (
@@ -696,6 +698,7 @@ def _seed_proc_scan(
             REDIS_BIN,
             "/tmp/tt_ab/tmpcd",
             "comm",
+            1,
         ),
         # The fast path is UNCHANGED: a directly-started server still resolves
         # from argv[0] without a /proc/<pid>/comm read.
@@ -705,6 +708,10 @@ def _seed_proc_scan(
             None,
             "/tmp/tt_ab/tmpcd",
             "argv[0]",
+            # The census is the KERNEL-Named population (`comm`), read before any
+            # filter. This process is identified from argv alone, so it is a row
+            # that exists outside the census arithmetic — by design.
+            0,
         ),
         # `comm` renamed AND unreadable → the resolved exe is the last authority.
         (
@@ -713,11 +720,12 @@ def _seed_proc_scan(
             REDIS_BIN,
             "/tmp/tt_ab/tmpcd",
             "exe",
+            0,
         ),
     ],
 )
 def test_a_wrapper_execd_server_is_enumerated(
-    reaper, monkeypatch, argv, comm, exe, expected_socket_dir, identified_by
+    reaper, monkeypatch, argv, comm, exe, expected_socket_dir, identified_by, census
 ):
     """THE #10502 REGRESSION: every one of these counts ZERO on the pre-fix code.
 
@@ -736,7 +744,10 @@ def test_a_wrapper_execd_server_is_enumerated(
     )
     assert rows[4242]["socket_dir"] == expected_socket_dir
     assert rows[4242]["identified_by"] == identified_by
-    assert inventory.census == 1, "the census must count the process it identified"
+    assert inventory.census == census, (
+        "the census counts processes the KERNEL names redis-server (comm), "
+        "independently of how this row was identified"
+    )
 
 
 def test_the_seeded_wrapper_row_reaches_the_decision_table(reaper, monkeypatch, capsys):
@@ -825,18 +836,21 @@ def test_a_plain_tcp_redis_is_excluded_with_a_stated_reason(reaper, monkeypatch,
     assert reaper.main([]) == 0
     out = capsys.readouterr().out
     assert "census: 1 redis-server process(es)" in out, out
-    assert "0 enumerated; 1 excluded (no unix socket in argv)" in out, out
+    assert "0 accounted for as candidate(s); 1 excluded: no unix socket in argv" in out, out
+    assert "0 not accounted for" in out, out
     assert "0 candidate(s)" in out, out
 
 
 def test_a_census_the_inventory_cannot_account_for_is_exit_3(reaper, monkeypatch, capsys):
     """NON-VACUOUS: the pre-fix run printed `0 candidate(s)` and exited 0 here.
 
-    `census=1555, rows=0, excluded=0` is the measured shape of #10502: 1,555
+    `census=1555, accounted=0, excluded=0` is the measured shape of #10502: 1,555
     processes named `redis-server`, none of them enumerated. A parse/filter gap
     must say so and exit non-zero; only a genuine measured zero may exit 0.
     """
-    inventory = reaper.ProcInventory(rows=[], census=1555, excluded_no_socket=0, source="/proc")
+    inventory = reaper.ProcInventory(
+        rows=[], census=1555, census_accounted=0, census_excluded=0, source="/proc"
+    )
     assert inventory.unaccounted == 1555
     monkeypatch.setattr(reaper, "_iter_proc_inventory", lambda: inventory)
     assert reaper.main([]) == 3, "a gap must not exit 0 — that is the whole defect"
@@ -845,22 +859,101 @@ def test_a_census_the_inventory_cannot_account_for_is_exit_3(reaper, monkeypatch
     assert "NOT a measured zero" in err, err
 
 
+def test_the_census_fires_when_the_identity_gate_matches_nothing(reaper, monkeypatch, capsys):
+    """THE GUARD IS NOT INERT: a gate that matches nothing now REDS.
+
+    This is the shape of #10502 itself — the identity gate drops every server —
+    and it is the reason the census is read from the kernel's name BEFORE any
+    filter, rather than counted from the rows: a census derived from the gate
+    would collapse to 0 with it and report the same clean-looking zero. The
+    servers here are real `comm` census members, so an identity gate that returns
+    nothing leaves them unaccounted.
+    """
+    _seed_proc_scan(
+        reaper,
+        monkeypatch,
+        {
+            4242: ([REDIS_BIN, "unixsocket:/tmp/tt_ab/tmpcd/redis.socket"], "redis-server", None),
+            4243: ([f"{REDIS_BIN} unixsocket:/tmp/tt_ab/tmpcd/redis.socket"], "redis-server", None),
+        },
+    )
+    monkeypatch.setattr(reaper, "_redis_identity", lambda _pid, _argv, _comm=None: None)
+    assert reaper.main([]) == 3, (
+        "a gate that matches nothing must NOT report a measured zero — that is "
+        "exactly the output that read as a clean host over 1,537 orphans"
+    )
+    out = capsys.readouterr()
+    assert "census gap: 2" in out.err, (out.out, out.err)
+    assert "census: 2 redis-server process(es)" in out.out, out.out
+
+
 def test_an_accounted_census_is_not_a_gap(reaper):
     """The other direction, so the guard cannot fire on a healthy measurement."""
     assert (
         reaper.ProcInventory(
-            rows=[{"pid": 1}], census=1, excluded_no_socket=0, source="/proc"
+            rows=[{"pid": 1}], census=1, census_accounted=1, census_excluded=0, source="/proc"
         ).unaccounted
         == 0
     )
     assert (
-        reaper.ProcInventory(rows=[], census=2, excluded_no_socket=2, source="/proc").unaccounted
+        reaper.ProcInventory(
+            rows=[], census=2, census_accounted=0, census_excluded=2, source="/proc"
+        ).unaccounted
         == 0
     )
     assert (
-        reaper.ProcInventory(rows=[], census=0, excluded_no_socket=0, source="/proc").unaccounted
+        reaper.ProcInventory(
+            rows=[], census=0, census_accounted=0, census_excluded=0, source="/proc"
+        ).unaccounted
         == 0
     )
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc is Linux-only")
+def test_a_non_utf8_process_name_cannot_kill_the_run(reaper):
+    """Peer-review finding: any process can set a non-UTF-8 name, and that must
+    not abort the scan.
+
+    `_read_proc_name()` read `/proc/<pid>/comm` in text mode, so a name carrying
+    a non-UTF-8 byte (`prctl(PR_SET_NAME)`, unprivileged) raised
+    `UnicodeDecodeError` — a ValueError, not an OSError — out of
+    `_iter_proc_inventory()`: exit 1, no census line, nothing reaped, and (under
+    the shipped `... --apply || true` call sites) a GREEN cleanup step that did
+    nothing. Reading it with `errors="replace"` makes an undecodable name simply
+    "not redis-server".
+    """
+    setter = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import ctypes,time; "
+            "libc=ctypes.CDLL(None, use_errno=True); "
+            "libc.prctl(15, ctypes.c_char_p(b'\\xff\\xfe-bad'), 0, 0, 0); "
+            "time.sleep(60)",
+        ]
+    )
+    try:
+        raw = b""
+        for _ in range(200):
+            try:
+                with open(f"/proc/{setter.pid}/comm", "rb") as fh:
+                    raw = fh.read()
+            except OSError:
+                raw = b""
+            if raw.startswith(b"\xff\xfe"):
+                break
+            time.sleep(0.02)
+        assert raw.startswith(b"\xff\xfe"), (
+            "the fixture never carried a non-UTF-8 name, so this test proves nothing"
+        )
+        # The reader must return a string instead of raising...
+        assert isinstance(reaper._read_proc_name(setter.pid), str)
+        # ...and the whole run must survive it: a real measurement (exit 0, or 3
+        # if this host's census genuinely cannot be accounted for), never a crash.
+        assert reaper.main([]) in (0, 3)
+    finally:
+        setter.kill()
+        setter.wait(timeout=30)
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc is Linux-only")

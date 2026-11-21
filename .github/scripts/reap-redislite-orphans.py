@@ -57,9 +57,11 @@ longer the authority, and a command line that arrived as ONE argv element
 `argv[0] == '<bin>/redis-server unixsocket:<dir>/redis.socket'`) is tokenised
 before the socket directory is read out of it.
 
-Every run now prints the pre-filter **census** — every process named
-`redis-server`, counted independently of the inventory — so `0 candidate(s)` is
-never again indistinguishable from "could not see the host".
+Every run now prints the pre-filter **census** — every process the kernel names
+`redis-server`, read straight out of `comm` BEFORE any candidate filter runs —
+so `0 candidate(s)` is never again indistinguishable from "could not see the
+host". When a census member cannot be accounted for as a candidate or as a
+stated exclusion, the run says so and exits 3.
 
 ## What it does instead
 
@@ -122,12 +124,12 @@ from typing import NamedTuple
 # The redislite signature: the redis-server binary plus a unix socket in argv.
 _IS_REDIS = re.compile(r"(?:^|/)(redis-server)$")
 #: The kernel's name for a redis server (`/proc/<pid>/comm`, or the basename of
-#: the resolved `/proc/<pid>/exe`). Anchored, with a boundary that accepts the
-#: name redis gives itself when built with `setproctitle` ("redis-server *:6379")
-#: and the truncation `comm` applies at 15 bytes, while still refusing a name
-#: that merely STARTS the same ("redis-serverish"). Nothing else on a host is
-#: called `redis-server…`, so this cannot widen the population.
-_REDIS_KERNEL_NAME = re.compile(r"^redis-server(?![A-Za-z])")
+#: the resolved `/proc/<pid>/exe`). Anchored, and followed by end-of-string,
+#: whitespace or a colon: that accepts the name redis gives itself when built
+#: with `setproctitle` ("redis-server *:6379", and its 15-byte `comm`
+#: truncation "redis-server *:"), while refusing a name that merely starts the
+#: same ("redis-serverish", "redis-server-x").
+_REDIS_KERNEL_NAME = re.compile(r"^redis-server(?:$|[\s:])")
 _SOCKET_FLAG = "unixsocket"
 
 # ── the age arm: DERIVED from the cancel bound, never a remembered measurement ─
@@ -297,7 +299,12 @@ def _age_from_proc(pid: int) -> float | None:
     if uptime is None:
         return None
     try:
-        with open(f"/proc/{pid}/stat") as fh:
+        # `errors="replace"`: field 2 is `comm`, which any process can set to
+        # arbitrary non-UTF-8 bytes (`prctl(PR_SET_NAME)`). A decode failure here
+        # would abort the whole run — exit 1, nothing classified — which is the
+        # "cleanup that fails is a leak" outcome this file exists to avoid. The
+        # age is then simply unmeasurable, and an unmeasurable age is KEPT.
+        with open(f"/proc/{pid}/stat", errors="replace") as fh:
             raw = fh.read()
     except OSError:
         return None
@@ -337,7 +344,7 @@ def _process_age(pid: int) -> float | None:
 
 
 def _has_whitespace(token: str) -> bool:
-    return " " in token or "\t" in token
+    return any(ch.isspace() for ch in token)
 
 
 def _split_one_arg_line(argv: list[str]) -> list[str]:
@@ -378,9 +385,17 @@ def _read_proc_name(pid: int) -> str | None:
     Set at `exec` from the executed file's name, so a wrapper cannot disguise
     it from its own argv — the property #10502 needs. `comm` is world-readable,
     so a missing read means the process is gone, not that it is foreign.
+
+    `errors="replace"` is load-bearing, not cosmetic: ANY process on the host
+    can set its own name to non-UTF-8 bytes (`prctl(PR_SET_NAME)`) and an
+    unprivileged user can do it to break a cleanup tool. Without it a
+    `UnicodeDecodeError` — a `ValueError`, not an `OSError` — escapes the scan
+    and the run dies mid-inventory: exit 1, no census line, nothing reaped, and
+    (under the shipped `… || true` call sites) a GREEN step. A name we cannot
+    decode is simply a name that is not `redis-server`.
     """
     try:
-        with open(f"/proc/{pid}/comm") as fh:
+        with open(f"/proc/{pid}/comm", errors="replace") as fh:
             return fh.read().strip() or None
     except OSError:
         return None
@@ -394,7 +409,7 @@ def _read_proc_exe_name(pid: int) -> str | None:
         return None
 
 
-def _redis_identity(pid: int, argv: list[str] | None) -> str | None:
+def _redis_identity(pid: int, argv: list[str] | None, comm: str | None = None) -> str | None:
     """HOW this pid is known to be a redis server, or None for "not one".
 
     Three sources, in cost order, and the LAST two are the authority:
@@ -412,10 +427,13 @@ def _redis_identity(pid: int, argv: list[str] | None) -> str | None:
     helper, a launcher whose child is the server — and reaping it on that
     evidence would be the live-peer kill #3653 removed. Identity is a fact about
     the EXECUTED binary, never about a string in someone's arguments.
+
+    `comm` may be passed in when the caller has already read it (the scan reads
+    it once per pid for the CENSUS, before identity is decided).
     """
     if argv and _IS_REDIS.search(argv[0]):
         return "argv[0]"
-    name = _read_proc_name(pid)
+    name = comm if comm is not None else _read_proc_name(pid)
     if name is not None and _REDIS_KERNEL_NAME.search(name):
         return "comm"
     exe = _read_proc_exe_name(pid)
@@ -427,30 +445,36 @@ def _redis_identity(pid: int, argv: list[str] | None) -> str | None:
 class ProcInventory(NamedTuple):
     """What one pass over the process table measured.
 
-    `census` is measured INDEPENDENTLY of the rows: it counts every process the
-    kernel names `redis-server`, including the ones that never become a
-    candidate. Keeping the two apart is the point — a filter that excludes
-    everything then reports a number it cannot account for instead of printing
-    `0 candidate(s)` as if it had measured the host (#10502).
+    `census` is NOT derived from the rows, and deliberately not from
+    `_redis_identity()`'s verdict either: it counts every process the KERNEL
+    names `redis-server` (read straight out of `/proc/<pid>/comm`, or the `ps`
+    `comm` field), BEFORE any candidate filter runs. That is what makes the gap
+    signal in `main()` a real check instead of a restatement of the filter: if
+    the identity gate stops matching — the #10502 edit — `census` stays non-zero
+    and `census_accounted` collapses to 0.
+
+    `census_accounted` / `census_excluded` count CENSUS members only: one per
+    row, and one per stated `no unix socket in argv` exclusion. A row identified
+    by `argv[0]` exists outside this arithmetic and is counted in `rows` alone.
     """
 
     rows: list[dict]
     census: int
-    excluded_no_socket: int
+    census_accounted: int
+    census_excluded: int
     source: str
 
     @property
     def unaccounted(self) -> int:
         """Census members that are neither a candidate nor a stated exclusion.
 
-        Today this is 0 by construction: every census member is either returned
-        as a row or counted in `excluded_no_socket`. It is asserted anyway, and
-        `main()` exits 3 on it, because the edit that produced #10502 is exactly
-        the edit that would make it non-zero — a filter between "this IS a redis
-        server" and "therefore here is its row" — and that edit must RED, not
-        silently restore a measured zero to a host it never saw.
+        Structurally 0 on a healthy tree — every census member becomes a row or
+        a counted exclusion — which is exactly why it is asserted: the edit that
+        produced #10502 sits between "this IS a redis server" and "therefore
+        here is its row", and that edit must RED (exit 3), not silently restore
+        a measured zero on a host it never saw.
         """
-        return max(0, self.census - len(self.rows) - self.excluded_no_socket)
+        return max(0, self.census - self.census_accounted - self.census_excluded)
 
 
 def _iter_proc_inventory() -> ProcInventory | None:
@@ -480,7 +504,8 @@ def _iter_proc_inventory() -> ProcInventory | None:
     """
     rows: list[dict] = []
     census = 0
-    excluded_no_socket = 0
+    census_accounted = 0
+    census_excluded = 0
     proc = os.path.isdir("/proc/self")
     if proc:
         try:
@@ -491,13 +516,23 @@ def _iter_proc_inventory() -> ProcInventory | None:
             if not entry.isdigit():
                 continue
             pid = int(entry)
+            # ONE read of the kernel's name, and the CENSUS is taken from it
+            # before any filter: the count of processes named `redis-server`
+            # must not depend on the code that decides whether to enumerate one
+            # (that dependence is what made the pre-fix zero unverifiable).
+            comm = _read_proc_name(pid)
+            is_census = bool(comm is not None and _REDIS_KERNEL_NAME.search(comm))
+            if is_census:
+                census += 1
             argv = _read_proc_cmdline(pid)
             if argv is not None:
                 argv = _split_one_arg_line(argv)
-            source = _redis_identity(pid, argv)
+            source = _redis_identity(pid, argv, comm)
             if source is None:
+                # A census member can only land here if the identity gate has
+                # stopped matching the kernel's name — it stays UNACCOUNTED, and
+                # `main()` exits 3 on it. That is the #10502 tripwire firing.
                 continue
-            census += 1
             if not argv:
                 # Identified as a server, but there is no argv to read a socket
                 # out of (gone mid-scan, unreadable, or a zombie): KEEP it and
@@ -512,11 +547,12 @@ def _iter_proc_inventory() -> ProcInventory | None:
                         "identified_by": source,
                     }
                 )
+                census_accounted += int(is_census)
                 continue
             if not any(_SOCKET_FLAG in a for a in argv):
                 # A redis server with no unix socket is not redislite litter and
                 # is none of this tool's business. Stated, counted, never silent.
-                excluded_no_socket += 1
+                census_excluded += int(is_census)
                 continue
             rows.append(
                 {
@@ -527,7 +563,8 @@ def _iter_proc_inventory() -> ProcInventory | None:
                     "identified_by": source,
                 }
             )
-        return ProcInventory(rows, census, excluded_no_socket, "/proc")
+            census_accounted += int(is_census)
+        return ProcInventory(rows, census, census_accounted, census_excluded, "/proc")
 
     import subprocess
 
@@ -566,15 +603,20 @@ def _iter_proc_inventory() -> ProcInventory | None:
             continue
         comm, _, args = rest.strip().partition(" ")
         argv = args.split()
+        # Same rule as the /proc branch: the CENSUS is taken from the kernel's
+        # name before any candidate filter, so it cannot inherit a filter's zero.
+        comm_name = os.path.basename(comm)
+        is_census = bool(_REDIS_KERNEL_NAME.search(comm_name))
+        if is_census:
+            census += 1
         source = None
         if argv and _IS_REDIS.search(argv[0]):
             source = "argv[0]"
-        elif _REDIS_KERNEL_NAME.search(os.path.basename(comm)):
+        elif is_census:
             source = "comm"
         if source is None:
             continue
         pid = int(pid_str)
-        census += 1
         if not argv:
             rows.append(
                 {
@@ -585,9 +627,10 @@ def _iter_proc_inventory() -> ProcInventory | None:
                     "identified_by": source,
                 }
             )
+            census_accounted += int(is_census)
             continue
         if not any(_SOCKET_FLAG in a for a in argv):
-            excluded_no_socket += 1
+            census_excluded += int(is_census)
             continue
         rows.append(
             {
@@ -598,7 +641,8 @@ def _iter_proc_inventory() -> ProcInventory | None:
                 "identified_by": source,
             }
         )
-    return ProcInventory(rows, census, excluded_no_socket, "ps")
+        census_accounted += int(is_census)
+    return ProcInventory(rows, census, census_accounted, census_excluded, "ps")
 
 
 def classify(row: dict, max_age_s: float) -> tuple[bool, str]:
@@ -698,8 +742,9 @@ def main(argv: list[str] | None = None) -> int:
         # where this tool reported a clean sweep over 1,537 orphans (#10502).
         print(
             f"census: {inventory.census} redis-server process(es) by kernel name "
-            f"via {inventory.source}; {len(rows)} enumerated; "
-            f"{inventory.excluded_no_socket} excluded (no unix socket in argv)"
+            f"via {inventory.source}; {inventory.census_accounted} accounted for as "
+            f"candidate(s); {inventory.census_excluded} excluded: no unix socket in "
+            f"argv; {inventory.unaccounted} not accounted for"
         )
         if inventory.unaccounted:
             print(
