@@ -228,11 +228,20 @@ def capacity_pct(used: float, allowance: float) -> int | None:
     a non-positive allowance (an UNARMED tier — `free`/`anon` carry no hot window,
     so there is nothing for a percentage to be a percentage OF).
 
-    ⛔ FLOOR, AND CAPPED BELOW 100 UNTIL THE RATIO REACHES IT — the same
+    ⛔ FLOOR, AND NEVER 100 UNTIL THE RATIO REACHES IT — the same
     discipline `website/apps/dashboard/src/nodeUsage.js` pins for the node nudge
     (#4331): the DISPLAYED percentage may not cross a threshold the level has
     not, so 79.6 % may not read "80 %" (a notice the account has not earned) and
     99.6 % may not read "100 %" while the account is still under its allowance.
+    ⛔ THE 100 GUARD IS THE `ratio >= 1.0` BRANCH, not a clamp on the floor: a
+    `floor()` of a ratio below 1.0 cannot exceed 99 by itself. An earlier revision
+    wrote `min(99, math.floor(ratio * 100))` here, and #14038's mutation pass
+    measured that clamp as UNREACHABLE — no mutant of that line changes any
+    output, so no test can attribute it, and a second belt that can never fire is
+    what the next reader mistakes for the mechanism. Deleted rather than kept
+    "just in case": the property is enforced by the early return below — the line a
+    mutant has to break to red `test_capacity_pct`'s `(153, 102, 100)` row, where
+    removing it reads 150.
     """
     for value in (used, allowance):
         if not isinstance(value, (int, float)) or isinstance(value, bool):
@@ -244,7 +253,7 @@ def capacity_pct(used: float, allowance: float) -> int | None:
     ratio = float(used) / float(allowance)
     if ratio >= 1.0:
         return 100
-    return min(99, math.floor(ratio * 100))
+    return math.floor(ratio * 100)
 
 
 def threshold_reached(pct: int | None) -> int | None:

@@ -508,7 +508,7 @@ def test_an_unapproved_threshold_has_no_copy():
     (0, 102, 0),
     (40.8, 102, 40),
     (81.6, 102, 80),      # 80 % exactly, floored
-    (101.9, 102, 99),     # 99.9 % is NOT 100 % — the cap-at-99 rule
+    (101.9, 102, 99),     # 99.9 % is NOT 100 % — below the allowance floors to 99
     (102, 102, 100),
     (153, 102, 100),
     (5, 0, None),         # unarmed tier: nothing to be a percentage OF
