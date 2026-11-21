@@ -421,7 +421,15 @@ def test_the_row_paths_record_the_served_page_and_never_an_internal_read(hooked_
     `query_points_by_tag()`, is gone. The branch is still REACHABLE (tests/test_sdk.py
     calls the accessor on the default 24 times), so this is not dead code; it is a
     hook with no PRODUCT witness, and a pin here would witness a path no product
-    read takes. It is therefore not pinned, and no assertion below depends on it.
+    read takes. ⛔ AND THE 24 TEST CALLS WOULD NOT NOTICE A DELETION EITHER: they
+    run with `TORTOISE_READ_LEDGER` unset (nothing in CI or `tests/conftest.py`
+    exports it, and `_ledger_record` returns at its own gate, sdk.py:13677), so
+    "reachable" and "exercised ARMED" are different facts and only the first is
+    true here — the honest warrant for not pinning is the ARMING, not
+    reachability, and "no in-tree caller" would be the false version of it. (The
+    retired registry row still DECLARES this accessor as its `sdk_method`,
+    `tool_registry.py` — that is metadata the binding checks read, not a call
+    path.) It is therefore not pinned, and no assertion below depends on it.
     """
     inst, graph = hooked_sdk
     # The keys must exist as STOCK first, or every read is (correctly) reported
