@@ -1574,12 +1574,13 @@ def test_a_module_waiver_does_not_claim_the_tree_carries_a_module_it_only_STUBBE
     Base carries `tortoise/stubby.py` (+ a stub, so the anchor resolves); the tree keeps only the
     stub; the `module` row freezes the REAL body, so arm 1b credits the row and the waiver this
     run was given is left UNCONSUMED. The diagnostic then has to answer "does this tree still
-    carry the module?" — and it used to answer with `_path_carries_a_module_body`, which counts a
-    stub as a body, printing "this tree still carries it, so nothing was removed" over the very
-    removal the same run graded and credited.
+    carry the module?" — and the body-only answer it used to carry counts a stub as a body,
+    printing "this tree still carries it, so nothing was removed" over the very removal the same
+    run graded and credited. It now asks `_head_carries_runtime_body`, the single predicate arm
+    1b also decides on.
 
-    Discriminating: reverting the diagnostic to `_path_carries_a_module_body` reds the
-    `still carries it` assertion below, because a `.pyi` stub answers `True` there.
+    Discriminating: answering that diagnostic with a body-only test ("the file exists and
+    parses") reds the `still carries it` assertion below, because a `.pyi` stub passes it.
     """
     (tree / "tortoise" / "stubby.py").write_text("def value():\n    return 1\n", encoding="utf-8")
     (tree / "tortoise" / "stubby.pyi").write_text(
