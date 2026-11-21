@@ -1487,7 +1487,7 @@ def test_no_migration_after_the_tenancy_rename_writes_to_public_teams():
 
 @functools.cache
 def _parse(path: pathlib.Path) -> ast.Module:
-    """Parse each module ONCE — four guards in this file walk all of `tortoise/`."""
+    """Parse each module ONCE — the guards in this file walk all of `tortoise/`."""
     return ast.parse(path.read_text(), filename=str(path))
 
 
