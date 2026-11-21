@@ -803,7 +803,12 @@ class _AnchorHrefParser(HTMLParser):
         # and cleared only by a matching `</table>`, and it is DELIBERATELY
         # MONOTONE in the safe direction: it can only over-refuse, and over-refusal
         # keeps the slice LONG — the loud direction this module takes everywhere.
-        self._table_open_unmatched = False
+        #
+        # ⛔ A DEPTH, not a boolean (#14073 review, P0, measured): a nested table's
+        # own `</table>` cleared a boolean while the OUTER table was still open in the
+        # browser, so `<div><table><tr><td><table></table></div>` plus the heading put
+        # the claim inside `#storage` with all three pins green.
+        self._table_open_unmatched = 0
         # Open elements currently suppressing collection. A stack, not a counter,
         # so nested `<template><script>…</script></template>` unwinds correctly.
         self._suppress: list[str] = []
@@ -1152,7 +1157,7 @@ class _AnchorHrefParser(HTMLParser):
         # `_table_open_unmatched` catches a table it LOST while the browser kept it
         # (four measured shapes — see that attribute). Checking only the stack is
         # what left the first version of this refusal bypassable.
-        if self._table_open_unmatched:
+        if self._table_open_unmatched > 0:
             return True
         if any(open_tag == "table" for open_tag, _, _ in self._open_elements):
             return True
@@ -2023,11 +2028,16 @@ class _AnchorHrefParser(HTMLParser):
             if self._breaks_out(tag, attrs):
                 self._foreign = 0
             return
-        if tag == "table" and not self._suppress and not self.wedged_reason and not self._foreign:
-            # Set BEFORE `_open`, and at the TOKEN level — see the attribute's own
-            # comment for the four measured shapes where the stack loses the table.
-            self._table_open_unmatched = True
         suppressed = self._open(tag, attrs)
+        # ⛔ AFTER `_open`, because that is where `_breaks_out` clears `_foreign`, and
+        # `table` IS a breakout tag: `<svg><table>` / `<math><table>` opens a real HTML
+        # table in a browser ("in body", HTML namespace, foster parenting applies).
+        # Reading `_foreign` BEFORE `_open` skipped exactly those and left a
+        # browser-open table untracked — measured: `<li><svg><table><li>` plus the
+        # heading put the claim inside `#storage` with all three pins green (#14073
+        # review, P0 against the previous revision).
+        if tag == "table" and not self._suppress and not self.wedged_reason and not self._foreign:
+            self._table_open_unmatched += 1
         if not suppressed:
             self._collect(tag, attrs)
             self._record_base(tag, attrs)
@@ -2344,11 +2354,12 @@ class _AnchorHrefParser(HTMLParser):
                 or tag in self._RAW
             ) and self._aaa_would_relocate_a_painted_block(tag):
                 self.wedged_reason = "adoption-agency-relocation"
-            # Cleared only by the table's OWN end tag, at the token level — see
-            # `_table_open_unmatched`. A `</table>` under suppression is text or
+            # Decremented only by a table's OWN end tag, at the token level — see
+            # `_table_open_unmatched`. It is a DEPTH, so a nested `</table>` cannot
+            # clear the outer table. A `</table>` under suppression is text or
             # template-local and closes nothing here, so it must not clear it.
-            if tag == "table":
-                self._table_open_unmatched = False
+            if tag == "table" and self._table_open_unmatched > 0:
+                self._table_open_unmatched -= 1
             self._close_extent(tag)
         if tag in ("br", "p") and self._foreign:
             # Spec 13.2.6.5: `</br>`/`</p>` in foreign content pop it and are

@@ -3812,23 +3812,38 @@ def test_a_table_open_across_the_bound_refuses_rather_than_cutting_the_source() 
     # bypassable, so `_unmet_by_reader` also consults `_table_open_unmatched`.
     routes = {
         # the `<li>` start-tag loop STOPS at the first SPECIAL element, `table`
-        "<li> stops at a special element": "<li><table><li>",
+        "<li> stops at a special element": "<li><table><li>{h}",
         # the button rule is gated on "in scope", and `table` is a scope element
-        "<button> gated on table being in scope": "<button><table><button>",
+        "<button> gated on table being in scope": "<button><table><button>{h}",
         # AAA removes only the formatting node, never the table above it
-        "<a> adoption agency keeps the table": "<a><table><a>",
+        "<a> adoption agency keeps the table": "<a><table><a>{h}",
         # a browser IGNORES an end tag whose element is not in scope; `div` is not
-        "</div> is ignored while a table is open": "<div><table></div>",
+        "</div> is ignored while a table is open": "<div><table></div>{h}",
+        # ⛔ AND THE SHAPES THAT BEAT A PREVIOUS REVISION OF THIS GUARD. `table` is
+        # a BREAKOUT tag, so `<svg><table>` opens a real HTML table — a flag read
+        # before `_open` (which clears `_foreign`) missed it.
+        "<svg><table> breaks out to a real table": "<li><svg><table><li>{h}",
+        "<svg><table> under a scope-blocked end tag": "<div><svg><table></div>{h}",
+        "<math><table> breaks out to a real table": "<div><math><table></div>{h}",
+        # …and a boolean flag was cleared by a NESTED table's own `</table>` while
+        # the outer table stayed open, which is why the flag is now a depth.
+        "a nested `</table>` must not close the outer": (
+            "<li><table><tr><td><table></table><li>{h}"
+        ),
+        "a nested `</table>` under a scope-blocked end tag": (
+            "<div><table><tr><td><table></table></div>{h}"
+        ),
+        "a nested `</table>` with AAA keeping the outer": (
+            "<a><table><tr><td><table></table><a>{h}"
+        ),
     }
-    for why, prefix in routes.items():
+    for why, template in routes.items():
         mutant = (
             page[: heading.start()]
-            + prefix
+            + template.format(h=heading.group(0))
             + "<tr><td>"
-            + heading.group(0)
-            + "</td></tr>"
             + claim
-            + "</table>"
+            + "</td></tr></table>"
             + page[heading.end() :]
         )
         # Without the inversion this mutant proves nothing, so assert it first.
