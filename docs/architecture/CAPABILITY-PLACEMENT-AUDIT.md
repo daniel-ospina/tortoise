@@ -110,10 +110,11 @@ unpinned remainder below the old boundaries moved AGAIN, and the deltas **COMPOU
 the second insert sits on top of the first, so an address's drift is the sum of every insert above it,
 not the boundary nearest it. That is why the head cannot be recovered by arithmetic and why the rule is
 unchanged rather than relaxed — **an unpinned cite in these two files must be re-opened at the head its
-row names, never read at this one and never repaired by adding a delta.** The proportional maps for both
-inserts are carried where they are MEASURED (the `SWEEP_RESIDUE` block in `tools/sdk_privatise.py`, and
-§5's parenthesis in `SUBSTRATE-REBUILD-MAP.md`, which re-points its seven `sdk.py` addresses to the lines
-that carry them at this head); this header states the rule and the fact, not a delta to apply.
+row names, never read at this one and never repaired by adding a delta.** The proportional maps are
+carried where they are MEASURED — this header's `#14022` paragraph two above for the first insert, and
+§5's parenthesis in `SUBSTRATE-REBUILD-MAP.md` for the second, which re-points its seven `sdk.py`
+addresses to the lines that carry them at this head; this header states the rule and the fact, not a
+delta to apply.
 ⛔ **Take the head from the list, never from the row.** §2.1's whole-node row carries one of each
 (`record_serve.py:468` is in THIS revision's group above; `projection/__init__.py:14169` is in neither list, and opening it there confirms the pin),
 and reading a row's head off its neighbours is exactly how a cite gets opened on a line nobody read. The
