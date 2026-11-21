@@ -132,7 +132,10 @@ ALLOCATION_LINES: tuple[LineSpec, ...] = (
         name="fly_base",
         basis=BASIS_EVEN,
         total_cents=2140,
-        source="fly.toml COST note (iad list price snapshot; shared-cpu-2x:4096MB)",
+        source=(
+            "fly.toml COST note (dated 2026-09-10 snapshot; prices the pre-#13665 "
+            "shared-cpu-2x:4096MB shape — 4-core re-derivation pending runbook §6.5)"
+        ),
         as_of="2026-09-10",
         is_estimate=True,
         env_var="TORTOISE_COST_FLY_BASE_CENTS",
