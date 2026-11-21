@@ -1200,6 +1200,17 @@ def evict(
             continue
         settled.update(local_ids)
         licence_remaining -= len(local)
+        # ⛔ A PASS THAT PLANNED NODES CLEARS ANY EARLIER HOLD, and this reset belongs HERE —
+        # above the `if dry_run:` branch, not next to the delete. It used to sit just before
+        # the `_delete_nodes` call, so a DRY RUN (the CLI's DEFAULT mode: `dry_run=not
+        # args.execute`) never reached it, and a later planning pass inherited an earlier
+        # pass's pin hold: measured (20 nodes, three pinned at the cold head, `dry_run=True`,
+        # max_nodes=2, batch_size=1, max_passes=4) the report flipped
+        # `pass_budget_exhausted` True→False and replaced "this pass budget could plan no
+        # more" with "3 node(s) are PINNED … unpin some of them", i.e. an earlier hold
+        # reported for a stop the pass budget caused — the exact class this loop's carry-out
+        # exists to remove, in a field the CLI emits (`tools/cache_evict.py`'s `metric`).
+        hold_reason = None
 
         if dry_run:
             planned.extend(local)
@@ -1316,9 +1327,8 @@ def evict(
                 else "leased"
             )
             continue
-        # A pass that reached the delete statement is taking nodes, so an earlier pass's
-        # hold no longer explains why the sweep stopped.
-        hold_reason = None
+        # (The `hold_reason` reset a pass that PLANS needs is up above the `if dry_run:`
+        # branch — a dry run plans without deleting, and it must clear the carry too.)
         # ⛔ `snapshot_out` IS HOW THE ABORT PATH LEARNS WHAT THE INVALIDATION DID. On a
         # raise the tuple below never arrives, so without this channel the report would
         # have to say `None` — "not applicable" — about a statement whose effect is

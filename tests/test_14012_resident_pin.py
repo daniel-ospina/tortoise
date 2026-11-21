@@ -1671,3 +1671,42 @@ def test_a_window_wholly_held_at_plan_time_names_the_PIN_not_the_read():
         f"the lease was reported as the binding hold over the pin. reason={report.reason!r}"
     )
     assert report.metric()["pass_budget_exhausted"] is False
+
+def test_a_DRY_RUN_pass_that_plans_clears_an_earlier_pin_hold():
+    """The `hold_reason` reset must sit ABOVE `if dry_run:`, not next to the delete.
+
+    ⛔ It used to sit just before `_delete_nodes`, so a DRY RUN — the CLI's DEFAULT mode
+    (`dry_run=not args.execute`) — never reached it, and a later planning pass inherited an
+    earlier pass's hold: measured at 20 nodes with three pinned at the cold head,
+    `dry_run=True`, `max_nodes=2, batch_size=1, max_passes=4`, the report flipped
+    `pass_budget_exhausted` True→False and replaced "this pass budget could plan no more"
+    with "3 node(s) are PINNED (skipped_pinned) — … unpin some of them", i.e. an earlier
+    pass's hold reported for a stop the pass budget caused. `metric()` is emitted by the
+    CLI, so the wrong boolean and the wrong remedy both reach a consumer that deleted
+    nothing.
+    """
+    g = _FakeGraph([f"p{i}" for i in range(20)])
+    cold_head = {"p0", "p1", "p2"}
+
+    report = evict(
+        _assessment(nodes=20), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=_record,
+        pinned=lambda candidate: candidate.key in cold_head,
+        dry_run=True,
+        # pass 1 is fully held back by the pin; the pass budget then runs out, so the
+        # binding constraint is the budget, and the pin no longer explains the stop.
+        policy=EvictionPolicy(max_nodes=2, batch_size=1, max_passes=4),
+    )
+
+    assert report.metric()["pass_budget_exhausted"] is True, (
+        "a dry run that PLANNED on its last pass reported a pass budget that was not "
+        f"exhausted, because an earlier pass's pin hold was carried into it. "
+        f"reason={report.reason!r}"
+    )
+    assert "are PINNED" not in report.reason, (
+        "an EARLIER pass's pin hold was applied to a stop the pass budget caused, so the "
+        f"report offers `unpin` for a hold that is not what ended the sweep. "
+        f"reason={report.reason!r}"
+    )
+    assert g.node_keys(), "a dry run deleted nodes"
