@@ -1442,10 +1442,15 @@ def _modules_reaching_a_store() -> frozenset[str]:
     ORDINARY imports (`tortoise.sdk`, `tortoise.ep`, `tortoise.retry`, …) and
     matching those would demand a ban on every importer of the public SDK — a large
     share of the tree, and a direction scan that flags everything protects nothing.
-    ⛔ No count is quoted: this sentence previously said "measured, that flags most
-    of the package", and the measurement is 61 of 305 tree files (20%) — "most"
-    was wrong where a reader would take it as the reason the design is right. The
-    reason is the mechanism, not the size, so the size is gone.
+    ⛔ No count is quoted, and the sentence that used to be here said "measured,
+    that flags most of the package" — with a figure beside it, and then a SECOND
+    figure when the first was corrected. Both moved with the tree and both were
+    wrong by the time they were read, which is why no size figure belongs in a
+    justification (and why the commit that removed the first one said the count was
+    deleted rather than corrected). The reason this design is right is the
+    MECHANISM — a ban that demanded every SDK importer be banned collapses into
+    "ban most of the tree", and a direction scan that flags everything protects
+    nothing — not the size. If you want the size, measure it; do not read it here.
 
     ⚠️ AND THIS SCAN DOES NOT SEE A TREE-RELATIVE REACH: `from .projection import
     FalkorProjection` written in ANOTHER tree module is one hop from the client, and
