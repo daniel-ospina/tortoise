@@ -1279,11 +1279,15 @@ SWEEP_NAMES = 66
 #: exists to REPORT, not typed SDK call sites. `11857 + 3 = 11860` is a CROSS-CHECK of the two
 #: measurements, never their evidence. `--check` exits 0 on this tree with
 #: `typed references still pointing at a public name: 0`.
-#: ⛔ AN ERRATUM ON THAT ILLUSTRATION, then the rule this run lives by. (The pair `(11835,
-#: "891187f5a4636487")` named in an earlier cut of the block above is committed at `2c0d66e2ec`,
-#: where the committed line and the tree DO agree — it was the wrong EXAMPLE for the rule, not a
-#: wrong rule; `1b0db0489408` above is the instance where they genuinely disagree. Two lanes restored
-#: this block concurrently, which is why it says the rule once, above, and only the erratum here.)
+#: ⛔ AN ERRATUM ON THE ERRATUM, MEASURED, because the correction above named the wrong tree and
+#: then drew the wrong conclusion from it. The `(11835, "891187f5a4636487")` PAIR is committed at
+#: `2c0d66e2ec` and that tree does measure it — both true, and both beside the point: the
+#: illustration's claim is that a tree can PIN 11835 and MEASURE 11843, and the tree that does is
+#: the MERGE `8889f1140105` (the base before `27cd81d55ebd` re-pinned it): it commits
+#: `(11835, "891187f5a4636487")` — inherited from `main` — and `--repin` ON THAT TREE prints
+#: `(11843, "6aed5368ffa10513")`. So the example is a REAL instance of the rule, not "the wrong
+#: EXAMPLE"; what was wrong was reading its pair against `2c0d66e2ec`, where pin and tree agree.
+#: (Two lanes restored this block concurrently, which is why the rule is stated once, above.)
 #: ⛔ AND THE GROUND RULE FOR EVERY BLOCK IN THIS RUN: all blocks above are KEPT, because each is a
 #: true measurement of the tree it NAMES — including the ones no tree on this branch prints any more,
 #: which is what a measurement log is for. A later merge re-measures the pin rather than deleting a
