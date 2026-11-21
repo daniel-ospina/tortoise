@@ -701,3 +701,34 @@ def test_an_absent_resident_count_cannot_license_the_whole_record_as_outside():
     assert view.outside is None, "an unmeasured resident set produced a whole-population count"
     assert view.complete is False
     assert "count read failed" in view.reason
+
+
+def test_the_span_read_uses_the_labels_OWN_timestamp_end_to_end():
+    """F3 — the per-label timestamp was graded as a CONSTANT, not as what `read()` issues.
+
+    ⛔ The existing row formats `SPAN_SQL` with `TIMESTAMP_COLUMN_BY_LABEL[…]["Event"]`
+    itself, so it grades the map it just read. Rewriting `read()` to hand the span a fixed
+    `created_at` left every row green — and the failure mode of the real bug is a permanent
+    UNMEASURED on `--label Event` (the `Event` table has no `created_at`, so the statement
+    is rejected and the view can never answer). This row asserts the ISSUED statement.
+    """
+    class _EventGraph(_Graph):
+        def query(self, statement, params=None):
+            if "RETURN count(n)" in statement:
+                self.statements.append(statement)
+                return _Result([[len(self.nodes)]])
+            if "AS key" in statement:
+                self.statements.append(statement)
+                return _Result([[p["id"]] for p in self.nodes.values()])
+            return super().query(statement, params=params)
+
+    conn = _Conn(_record_rows(["e1"], kind="event"))
+    view = _view(_EventGraph(["e1"]), conn, label="Event", key_prop="eventId")
+    issued = [sql for sql, _params in conn.executed]
+    span = [sql for sql in issued if "min(" in sql]
+    assert span, f"no span statement was issued (view reason: {view.reason!r})"
+    assert "started_at" in span[0], (
+        f"the span read did not use the Event label's own timestamp column: {span[0]!r}"
+    )
+    assert "created_at" not in span[0]
+    assert view.label == "Event"

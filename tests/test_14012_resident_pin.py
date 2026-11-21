@@ -1045,3 +1045,31 @@ def test_the_closure_is_label_scoped_so_a_foreign_labels_neighbour_is_not_counte
         "budget computed from this footprint is inflated"
     )
     assert scoped.over_budget() is None
+
+
+def test_the_declaration_time_closure_is_label_scoped_too_not_just_the_read():
+    """F2 — the label scope is enforced at TWO sites and only one had a row.
+
+    ⛔ `read()` and `_closure_for` both build `OPTIONAL MATCH (n)--(m:{label})`, and both
+    carry the same ⛔ comment calling it a measured correctness fix. Reverting it at the
+    `read()` site reds the row above; reverting it at `_closure_for` — the WRITE path, which
+    sizes a declaration against the cap and the degree ceiling — left the whole suite green.
+    So a `:Point` joined to an `:Object` carrying the same key property could still inflate
+    a declaration's closure at `pin()` time, refusing a legitimate pin for "would need N
+    slots" over nodes this control cannot protect.
+    """
+    g = _LabelledGraph()
+    g.add("p0")
+    g.add("o1", extra={"label": "Object"})
+    g.link("p0", "o1")
+
+    # One slot is enough for the POINT alone; the :Object neighbour would need a second.
+    result = pin(g, ["p0"], budget=PinBudget(max_nodes=1))
+
+    assert result.written is True
+    assert result.added == frozenset({"p0"})
+    assert result.reading.degrees == {"p0": 0}, (
+        "the declaration-time closure counted the :Object neighbour — the write path's "
+        "label scope is gone, and the budget/degree ceilings are computed over nodes this "
+        "control cannot protect"
+    )

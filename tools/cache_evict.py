@@ -387,28 +387,38 @@ def main(argv: list[str] | None = None) -> int:
         # facts about the DECLARATION, not about the cap. Resolving a budget before them
         # reported a configuration error for a declaration nobody could read — the wrong
         # cause, on the one refusal an operator has to act on.
+        # ⛔ AND EVERY REFUSAL CARRIES THE SAME `pins` SHAPE. The success body and the
+        # key-space-mismatch refusal emit `applied`/`not_applied_reason`; the three
+        # refusals below emitted bare `pins.as_dict()`, so a consumer keying on
+        # `pins.applied` — the field the success body defines — hit a KeyError on exactly
+        # the refusals it has to act on. That is the "second shape for one refusal" class
+        # `tools/resident.py::_refused` already closed for its own envelopes.
+        def _pins_refused(reason: str) -> dict:
+            return {**pins.as_dict(), "applied": False, "not_applied_reason": reason}
+
         if not pins.readable or pins.truncated:
-            _emit({"verdict": "REFUSED",
-                   "reason": pins.gate_reason() or "the pin declaration is unusable",
-                   "pins": pins.as_dict(), "census": assessment.as_dict()}, args.out)
+            reason = pins.gate_reason() or "the pin declaration is unusable"
+            _emit({"verdict": "REFUSED", "reason": reason,
+                   "pins": _pins_refused(reason),
+                   "census": assessment.as_dict()}, args.out)
             return CACHE_EVICTION_EXIT_REFUSED
         if pins.keys:
             try:
                 pin_budget = resident_pin.PinBudget.resolve(
                     window_nodes=policy.max_nodes)
             except resident_pin.PinConfigError as exc:
-                _emit({"verdict": "REFUSED",
-                       "reason": (f"a pin declaration exists and its budget cannot be "
-                                  f"resolved: {exc}"),
-                       "pins": pins.as_dict(), "census": assessment.as_dict()},
-                      args.out)
+                reason = (f"a pin declaration exists and its budget cannot be "
+                          f"resolved: {exc}")
+                _emit({"verdict": "REFUSED", "reason": reason,
+                       "pins": _pins_refused(reason),
+                       "census": assessment.as_dict()}, args.out)
                 return CACHE_EVICTION_EXIT_REFUSED
             pins = resident_pin.read(graph, budget=pin_budget)
             pin_refusal = pins.gate_reason()
             if pin_refusal is not None:
                 _emit({"verdict": "REFUSED", "reason": pin_refusal,
-                       "pins": pins.as_dict(), "census": assessment.as_dict()},
-                      args.out)
+                       "pins": _pins_refused(pin_refusal),
+                       "census": assessment.as_dict()}, args.out)
                 return CACHE_EVICTION_EXIT_REFUSED
             # ⛔ A PIN SET ADDRESSES ONE KEY SPACE, and this sweep addresses the one its
             # `--key-prop` names. On a mismatch the set holds nothing in THIS population,

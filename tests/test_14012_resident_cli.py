@@ -895,3 +895,64 @@ def test_a_declaration_pinned_under_an_unbounded_budget_refuses_the_sweep_not_th
     assert "pinned closure" in out["reason"] or "budget" in out["reason"], out["reason"]
     # The low door still constructs the value it always did (an API constant, not a claim).
     assert PinBudget(max_nodes=10).window_nodes is None
+
+
+def test_every_pin_refusal_carries_the_same_pins_shape_as_the_success_body(
+        sweep, capsys, tmp_path, monkeypatch):
+    """F6 — three of five pin envelopes omitted `applied`/`not_applied_reason`.
+
+    ⛔ A consumer keying on `pins.applied` — the field the SUCCESS body defines and the
+    key-space-mismatch refusal asserts — hit a KeyError on exactly the refusals it must act
+    on. That is the "second shape for one refusal" class `tools/resident.py::_refused`
+    already closed for its own envelopes; the sweep's five arms now share it too.
+    """
+    graph, _calls = sweep
+    graph.meta[PINS_META_KEY] = {"label": "Point", "key_prop": "id", "keys": ["p0"]}
+
+    # arm 1: the declaration is unusable (truncated read)
+    from tortoise import resident_pin
+
+    # NB: restore by hand, NOT monkeypatch.undo() — the `sweep` fixture shares this
+    # monkeypatch instance, so an undo() would also unwire the CLI and the next arm would
+    # fail for the wrong reason (measured while writing this row).
+    original_limit = resident_pin.DEFAULT_KEY_LIMIT
+    monkeypatch.setattr(resident_pin, "DEFAULT_KEY_LIMIT", 0)
+    code = cache_evict.main(_sweep_argv(_report_file(tmp_path), "--max-nodes", "1000"))
+    assert code == cache_evict.CACHE_EVICTION_EXIT_REFUSED
+    body = json.loads(capsys.readouterr().out)
+    assert body["verdict"] == "REFUSED"
+    assert body["pins"]["applied"] is False
+    assert body["pins"]["not_applied_reason"]
+    monkeypatch.setattr(resident_pin, "DEFAULT_KEY_LIMIT", original_limit)
+
+    # arm 2: the budget cannot be resolved
+    monkeypatch.setenv("TORTOISE_PIN_MAX_NODES", "not-a-number")
+    code = cache_evict.main(_sweep_argv(_report_file(tmp_path), "--max-nodes", "1000"))
+    assert code == cache_evict.CACHE_EVICTION_EXIT_REFUSED
+    body = json.loads(capsys.readouterr().out)
+    assert body["pins"]["applied"] is False
+    assert "cannot be resolved" in body["pins"]["not_applied_reason"]
+
+
+def test_show_with_no_declaration_and_no_window_still_says_cap_checked_is_false(
+        wired, capsys, monkeypatch):
+    """F3 — the `cap_checked` OK-arm could be replaced by the constant `True` undetected.
+
+    ⛔ The positive row asserts `is True`, which a constant satisfies, and the `is False` row is
+    served by the separate hardcoded literal on the no-budget-with-keys path. The ONE state
+    where the OK arm's own expression yields `False` — no declaration AND no resolvable
+    window, so `show` falls through with `keys` empty — was reached by no test. Reporting
+    only (the verdict is `OK` over a declaration that claims nothing), but the whole point of
+    the field is that a monitor can trust it.
+    """
+    monkeypatch.delenv("TORTOISE_CACHE_MAX_NODES", raising=False)
+    monkeypatch.delenv("TORTOISE_PIN_MAX_NODES", raising=False)
+    assert PINS_META_KEY not in wired.meta, "sanity: nothing is declared"
+
+    assert resident.main(["show", *BASE]) == resident.EXIT_OK
+    out = json.loads(capsys.readouterr().out)
+    assert out["cap_checked"] is False, (
+        "the OK arm reported a cap check on a tree with no window and no declaration — the "
+        "`budget is not None` expression is not what this field is measuring"
+    )
+    assert "not checked" in out["reason"].lower()
