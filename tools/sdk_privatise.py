@@ -526,8 +526,11 @@ SWEEP_NAMES = 66
 #: BROKE the product: `onboarding/seed.py` calls `surface.create_subject(...)` and
 #: `surface.create_edge(...)` (three sites), neither surface defines `__getattr__`, so every hosted
 #: AND self-hosted seed raised `AttributeError` and the REST seed route 500'd — measured at
-#: `93ada9cece`, where `tests/test_onboarding_selfhost_w12.py` was **13 failed** and
-#: `tests/test_onboarding_seed.py` **2 failed**. The public doors are RESTORED (the surfaces again
+#: `93ada9cece`, where `tests/test_onboarding_selfhost_w12.py` was **11 failed** and
+#: `tests/test_onboarding_seed.py` **2 failed** (both re-MEASURED, `TORTOISE_TEST_CARVE_OUT=1`, with
+#: the doors put back to the private spelling — an earlier cut of this paragraph said "13 failed",
+#: which no measurement produces; the two suites are byte-identical between `93ada9cece` and the
+#: head that restored the doors, so the count is the same on either). The public doors are RESTORED (the surfaces again
 #: declare `create_subject`/`create_edge` and delegate to the SDK's private ones), and the eight
 #: test-double call sites in `tests/test_9572_discriminator_not_clobbered.py` were restored with
 #: them. ⛔ THIS IS THE SHAPE THE BLOCK BELOW FORBIDS, reached anyway: *"the alternative — giving a
@@ -541,7 +544,11 @@ SWEEP_NAMES = 66
 #: 11853), which is the eight restored call sites and nothing else — a CROSS-CHECK of the revert,
 #: not the evidence for the pin. The FastAPI route `create_subject` in `hosted_api.py` is NOT
 #: affected either way: that is an HTTP endpoint, not a seed-surface method.
-#: ⛔ THIS LANE IS NOT THE CAUSE OF THE +8 — but NOT for the reason an earlier draft gave. It said
+#: ⛔ TWO DIFFERENT `+8`s LIVE IN THIS BLOCK, and they must not be read as one figure: the REVERT's
+#: `+8` above (eight RESTORED double call sites → 11845 → 11853) and the FEATURE's own `+8` receiver
+#: rows the second-merge paragraphs below attribute. Separate changes, separate trees.
+#: ⛔ THIS LANE IS NOT THE CAUSE OF THE FEATURE'S `+8` (see the note directly above) — but NOT for
+#: the reason an earlier draft gave. It said
 #: "its whole diff is figure literals: stripping every digit run from each `-`/`+` pair leaves the
 #: pair identical", and that is FALSE at this head: this PR also rewrites
 #: `tests/test_13337_cache_graph_declaration.py` (the `_capture` helper and the anchors), so the
