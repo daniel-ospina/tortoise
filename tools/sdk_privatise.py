@@ -425,7 +425,7 @@ SWEEP_NAMES = 66
 #: `ad79129cb59` DROPPED this retraction and re-asserted the 12-count with no conflict reported,
 #: which is the same shape #14062 documents one paragraph up: a merge takes a rewritten side and
 #: nothing flags the prose it silently left behind.
-
+#:
 #:
 #: RE-CUT AT THE MERGE TREE (#14068 × `main`), and BOTH blocks above are carried because BOTH of their
 #: facts are true of THIS tree: `main`'s −6 (the `poisoned.update` shape `#14001` deleted, so five arms
@@ -582,7 +582,7 @@ SWEEP_NAMES = 66
 #: The SDK population did not move either (`typed references still pointing at a public name: 0`),
 #: so no typed call site is legitimised by this re-cut. `#13998`'s own +7 above survives intact:
 #: `cp.query` **270** and `row.update` **60** carry the seven rows that record enumerates.
-
+#:
 #: ⛔ REVERTED BY THE #14038 MERGE: an earlier cut of this file RECORDED a rename of the two
 #: duck-typed onboarding seed surfaces (`_OrgSeedSurface` in `hosted_api.py`, `_SdkSeedSurface` in
 #: `onboarding/selfhost.py`) from the PUBLIC doors `create_subject`/`create_edge` to the private
