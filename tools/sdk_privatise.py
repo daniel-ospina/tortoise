@@ -461,18 +461,22 @@ SWEEP_NAMES = 66
 #: the re-cut paragraph FURTHER DOWN THIS BLOCK ("The −1 is THIS LANE's own"). ⛔ No line distance is
 #: quoted on purpose: an earlier draft of this very sentence said "36 lines later", the measurement
 #: was 38, and the figure moves whenever this block is edited — the same self-falsifying shape the
-#: paragraphs above describe. Measured, and both halves
-#: are true of different trees: `--repin` reads the SAME pair — `(11839, '0a7e60fa05aa31b9')` — on
-#: `origin/main` (`2fe01fc775e`) AND on the capture rewrite's PARENT head (`83e94826a8a`), so
-#: everything up to that point moves no receiver row; the ONE row this lane's later capture rewrite
-#: moves is `seen.update` **102 → 101** (the re-cut paragraph below attributes it and states why a
-#: `dict` accumulator in a test is a swept receiver). ⛔ A reader must not have to reconcile two
-#: paragraphs that disagree, which is the "stale on arrival" class this block polices (raised by
-#: review).
+#: paragraphs above describe. Measured, and both halves are true of different trees: `--repin`
+#: reads the SAME pair — `(11839, '0a7e60fa05aa31b9')` — on `origin/main` (`2fe01fc775e`) AND on
+#: this commit's PRE-REWRITE tree (`83e94826a8a`: the pre-rebase draft of the commit that landed as
+#: `1b82cc7063`, whose `_capture` still recorded through `seen.update`, so no row had moved there
+#: yet), so everything up to the capture rewrite moves no receiver row; the ONE row this lane's
+#: capture rewrite moves is `seen.update` **102 → 101**, which is that rewrite's own pin delta
+#: `(11839, …)` → `(11838, …)` (the re-cut paragraph below attributes it, and states why a `dict`
+#: accumulator in a test is a swept receiver). ⛔ A reader must not have to reconcile two paragraphs
+#: that disagree, which is the "stale on arrival" class this block polices (raised by review).
 #: ⛔ THE "GATE IS RED HERE" NARRATION IS SCOPED, NOT PRESENT-TENSE. That paragraph described
 #: `ad79129cb5`, where the pin read 11825 while that tree derived 11833 — `--check` red. It is NOT
-#: the state of `main` TODAY: `origin/main` (`2fe01fc775e`) pins `(11839, "0a7e60fa05aa31b9")`,
-#: which is exactly what `--repin` derives there, so `--check` exits 0 on `main` and on this head.
+#: the state of `main` at `2fe01fc775e`, which pins `(11839, "0a7e60fa05aa31b9")` — exactly what
+#: `--repin` derives there, so `--check` exits 0 on that tree and on this head. `main` has since
+#: moved and re-cut to the pair THIS head pins, `(11838, "de5664dc98549d56")` (`1b82cc7063` made
+#: that re-cut; `e022fc935b`, this commit's `origin/main`, carries it) — so the 11839 above is a
+#: figure for the revision it names, never a stale claim about `main`'s head.
 #: The recurrence `#14062` and `#14058` document (the pin graded on PULL REQUESTS only) is real, but
 #: an earlier draft asserted it as a live red and a later review falsified that (raised by review);
 #: the fix for the recurrence is still to grade the pin on `main`.
