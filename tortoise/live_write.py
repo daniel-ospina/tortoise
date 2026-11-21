@@ -247,6 +247,25 @@ def _record_owns_position(*, durable: bool, tenant: tuple[str, str] | None,
         return False
 
 
+def _record_armed() -> bool:
+    """Is a record DSN configured? ``False`` on every doubt (#14222 review P1-3).
+
+    The same question `write_live_record` asks first, asked HERE because the
+    deferral decision needs it: a queued write on an unarmed record is a write
+    whose fold will answer "nothing was armed", so the ack would have been
+    deferred for a projection nobody was going to run. Guarded and fail-closed to
+    INLINE, which is the pre-#14185 path and therefore always correct — a
+    malformed DSN raises in `record_dsn`, and an unimportable `record_writer` is
+    a fault the inline arm already handles one frame down.
+    """
+    try:
+        from . import record_writer
+
+        return record_writer.record_dsn() is not None
+    except Exception:  # noqa: BLE001, RUF100
+        return False
+
+
 def _submitted_to_worker(*, event: Mapping[str, Any], seq: int | None,
                          project: Any, durable: bool,
                          journal_skipped: bool,
@@ -257,7 +276,7 @@ def _submitted_to_worker(*, event: Mapping[str, Any], seq: int | None,
     ``True`` ⇒ the fold is QUEUED and this write must not wait for it. ``False``
     ⇒ the caller folds inline, exactly as before the worker existed.
 
-    ⛔ THE FIVE CONDITIONS ARE CORRECTNESS, NOT CONFIGURATION, and each is a fact
+    ⛔ THE SIX CONDITIONS ARE CORRECTNESS, NOT CONFIGURATION, and each is a fact
     only this chokepoint holds:
 
     1. **A journal LINE exists** (``not journal_skipped``). On a cut-over graph
@@ -288,7 +307,20 @@ def _submitted_to_worker(*, event: Mapping[str, Any], seq: int | None,
        which is where its tenant resolution already worked. The SDK door passes
        ``tenant=self._record_tenant`` and defers; ``api.EventAPI._emit`` does not
        and does not.
-    5. **An operator armed the loop and the queue accepted the item.** Unset or
+    5. **The RECORD is armed** (a `TORTOISE_RECORD_DSN`) — ⛔ A SEPARATE SWITCH
+       FROM THE WORKER FLAG (#14222 review P1-3). `write_live_record` returns
+       ``None`` when no DSN is configured, so on a deployment with the loop
+       flagged on and the record off, the fold answers "nothing was armed" — and
+       the deferred arm would have had to report either ``armed=False`` (a lie
+       about a queued write) or ``armed=True``/``unprojected=1`` (a loss claim
+       for a write nothing was ever going to take). Both are wrong, and both
+       would have MOVED every write on such a box from "nothing claimed it,
+       nothing lost" to a permanent false alarm in
+       :attr:`LiveWrite.unprojected` — read by `tools/claim_dense_leg_13732.py`
+       as an unprojected position. Asking the record's own arming first keeps
+       that deployment byte-identical: it folds inline and reports exactly what
+       it reported before.
+    6. **An operator armed the loop and the queue accepted the item.** Unset or
        typo'd reads OFF (:func:`tortoise.env_truthy.env_flag`), which keeps every
        unarmed deployment byte-identical to the pre-#14185 inline fold.
 
@@ -302,6 +334,8 @@ def _submitted_to_worker(*, event: Mapping[str, Any], seq: int | None,
     if journal_skipped or record_sink is not None or not durable:
         return False
     if tenant is None:
+        return False
+    if not _record_armed():
         return False
     try:
         from . import projection_worker

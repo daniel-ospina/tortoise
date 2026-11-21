@@ -942,7 +942,10 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #:   ⛔ NOTHING IS DROPPED when the bound is reached — a dropped item would be a
 #:   silently short record — so the visible cost is a slower ACK, and this counter
 #:   is what makes it attributable rather than an unexplained latency.
-#:   ``reason`` is a closed vocabulary: ``queue_full``.
+#:   ``reason`` is a closed vocabulary of two: ``queue_full`` (the bound in
+#:   ``projection_worker.ENV_QUEUE_MAX`` was reached) and ``worker_stopping`` (the
+#:   loop was being shut down, or a wedged consumer kept it from restarting —
+#:   `stop()` does not clear its thread after a timed-out join).
 #:
 #: ``PROJECTION_WORKER_FAILURE_COUNT`` is separate from both: it counts deferred
 #: folds that RAISED. Unlike a lagging queue that is a real gap the journal heals
@@ -3037,7 +3040,8 @@ def record_projection_inline_fallback(reason: str) -> None:
 
     Single writer: ``tortoise.projection_worker.ProjectionWorker.submit``.
     ``reason`` vocabulary: ``queue_full`` (the bound in
-    ``projection_worker.ENV_QUEUE_MAX`` was reached, or the worker was stopping).
+    ``projection_worker.ENV_QUEUE_MAX`` was reached) or ``worker_stopping`` (the
+    loop was shutting down, or a wedged consumer kept it from being restarted).
 
     ⛔ This is a LATENCY event, not a loss: nothing was dropped and nothing needs
     a replay — the caller simply paid the fold it would have paid before #14185.

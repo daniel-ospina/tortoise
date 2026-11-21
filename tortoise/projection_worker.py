@@ -124,6 +124,7 @@ from __future__ import annotations
 
 import atexit
 import collections
+import copy
 import dataclasses
 import logging
 import os
@@ -178,7 +179,25 @@ class PendingProjection:
 
     ``seq`` is the journal position the append reported (#9190), kept here for
     ONE purpose: counting the positions the record is short of. It is never used
-    to number anything — the fold reads its ordinal from the caller's call."""
+    to number anything — the fold reads its ordinal from the caller's call.
+
+    ⛔ ``tenant`` IS GATE EVIDENCE AND NOT A FOLD PARAMETER (#14222 review P2-1),
+    and the distinction has to be stated because the field's presence invites the
+    other reading. It records the tenant the write CARRIED, which is the fact
+    `live_write` requires before it will defer at all — a write resolved from the
+    AMBIENT carrier is never queued, because a thread does not inherit the
+    caller's contextvars and the fold would re-resolve to the env pair instead
+    (#9192's class). What it does NOT do is force the fold to use it: the
+    caller's ``project`` callable resolves the tenant its own way, exactly as it
+    does on the inline path, and the SDK door reads ``self._record_tenant``
+    there. That is sound because the gate proves a carried tenant EXISTED and a
+    per-request SDK's binding cannot move, but it is a RESIDUAL rather than a
+    proof: a shared SDK re-bound between the enqueue and the fold would widen
+    the two-read window `sdk._bind_record_tenant`'s docstring already names — from
+    one call frame to the queue's lag. Passing the pair through to the callable
+    would close it, and is not done here because it changes the ``project``
+    protocol every door and every double implements.
+    """
     record: Mapping[str, Any]
     seq: int | None
     tenant: tuple[str, str] | None
@@ -261,7 +280,7 @@ class ProjectionWorker:
         with self._cond:
             if self._stopping or len(self._pending) >= self.max_queue:
                 self._inline_fallbacks += 1
-                declined = True
+                declined = "worker_stopping" if self._stopping else "queue_full"
             else:
                 self._pending.append(item)
                 self._submitted += 1
@@ -271,7 +290,7 @@ class ProjectionWorker:
                 oldest = self._oldest_age_locked()
                 self._cond.notify()
         if declined:
-            _publish_inline_fallback("queue_full")
+            _publish_inline_fallback(declined)
             return False
         _publish_queue_state(queued, positions, oldest)
         return True
@@ -310,7 +329,14 @@ class ProjectionWorker:
                 remaining = (IDLE_WAIT_SECONDS if deadline is None
                              else deadline - time.monotonic())
                 if remaining <= 0:
-                    return not self._pending
+                    # ⛔ NOT `not self._pending` (#14222 review P1-2). An empty
+                    # deque is exactly the state a WEDGED fold leaves behind — it
+                    # popped its item and is inside `project` — so the old
+                    # expression answered "drained" for the one case a call that
+                    # waits for the fold exists to report. A timeout is a "not
+                    # drained" verdict; the success predicate above is the only
+                    # honest one.
+                    return False
                 self._cond.wait(min(IDLE_WAIT_SECONDS, remaining))
 
     # ── lifecycle ──────────────────────────────────────────────────────────
@@ -328,20 +354,46 @@ class ProjectionWorker:
             self._stopping = True
             thread = self._thread
             self._cond.notify_all()
+        joined = True
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout)
+            # ⛔ A TIMED-OUT JOIN LEAVES THE CONSUMER ALIVE (#14222 review P2-2).
+            # Clearing `_thread` anyway let the next `submit`'s `_ensure_started`
+            # start a SECOND consumer on the same deque — the exact shape the
+            # module docstring calls a correctness hazard (two folds for one
+            # tenant can land out of order, and the record's mutations are
+            # absolute per row). Keeping `_thread` set makes `_ensure_started` a
+            # no-op instead; submits then DECLINE and fold inline, which is the
+            # honest answer for a loop that is still wedged.
+            joined = not thread.is_alive()
+        if not joined:
+            return
         with self._cond:
             self._thread = None
             self._pid = None
 
     def _ensure_started(self) -> None:
+        # ⛔ THE FORK RESET COMES FIRST, AND BEFORE THE LOCK IS TAKEN
+        # (#14222 review P2-3). A forked child inherits the parent's Thread
+        # object, its QUEUE, its IN-FLIGHT item and its Condition — and a
+        # Condition inherited while the parent's consumer held it is a lock with
+        # no owner in the child, which would block `submit` (the WRITE path)
+        # forever. The three facts are replaced here: a fresh Condition, an
+        # emptied queue (those items belong to the parent, who still holds them)
+        # and no in-flight item (the child can never clear the parent's, so
+        # leaving it would report one permanently pending position and a
+        # monotonically growing lag).
+        if self._pid is not None and self._pid != os.getpid():
+            self._cond = threading.Condition()
+            self._pending = collections.deque()
+            self._inflight = None
+            self._thread = None
+            self._pid = os.getpid()
+            self._stopping = False
         with self._cond:
             if self._thread is not None and self._thread.is_alive() \
                     and self._pid == os.getpid():
                 return
-            # A forked child inherits a dead Thread object and a queue that
-            # belongs to the parent; resetting both is what keeps a fork from
-            # silently projecting nothing.
             self._thread = None
             self._pid = os.getpid()
             self._stopping = False
@@ -364,7 +416,6 @@ class ProjectionWorker:
                     return
                 item = self._pending.popleft()
                 self._inflight = item
-                queued = self._depth_locked()
                 self._cond.notify_all()
             # ⛔ THE FOLD RUNS WITH NO LOCK HELD. That single fact is what makes
             # `stats()` / `submit()` — and therefore any reader that asks the
@@ -383,16 +434,24 @@ class ProjectionWorker:
                     "`tools/record_runner.py apply` heals it idempotently "
                     "(#14185)",
                     type(exc).__name__, exc, item.seq)
+            # ⛔ ALL THREE GAUGES ARE READ HERE, AFTER `_inflight` IS CLEARED, and
+            # never from a value captured at POP time (#14222 review P1-1). The
+            # pop-time depth counts the item that is about to be folded, so
+            # publishing it after the fold reports "1 owed" for a DRAINED queue
+            # and "1 owed" for a backlog of 100 — an alert on `depth > 0` would
+            # fire forever on a caught-up record and stay quiet through a real
+            # one, while `stats()` said the opposite.
             with self._cond:
                 self._inflight = None
                 if failed:
                     self._failures += 1
                 else:
                     self._projected += 1
+                depth = self._depth_locked()
                 pending = self._pending_positions_locked()
                 oldest = self._oldest_age_locked()
                 self._cond.notify_all()
-            _publish_queue_state(queued, pending, oldest)
+            _publish_queue_state(depth, pending, oldest)
             if failed:
                 _publish_failure("projection_raised")
 
@@ -476,8 +535,23 @@ def submit(*, record: Mapping[str, Any], seq: int | None,
     """
     if not armed():
         return False
+    # ⛔ THE QUEUED ITEM IS A SNAPSHOT, NOT A REFERENCE (#14222 review P2-4).
+    # Before this loop existed the record fold and the cache fold both read the
+    # caller's dict while the caller was still inside the write; now the record
+    # fold reads it AFTER the caller resumed, and the SDK's envelope SHARES its
+    # nested values with the caller (`event["point"] = clean`, `event.update(
+    # extra)`). An in-place mutation of a nested value between the ack and the
+    # fold would then fold the record from different content than the cache saw,
+    # with nothing able to detect the divergence. `write_live_record` writes the
+    # same dict it is handed, so the copy must be DEEP — a shallow `dict()` keeps
+    # every nested object shared. A copy that cannot be made falls back to the
+    # reference rather than failing a write whose line has already committed.
+    try:
+        snapshot = copy.deepcopy(record)
+    except Exception:  # noqa: BLE001 — never fail a committed write over a copy
+        snapshot = record
     return worker().submit(PendingProjection(
-        record=record, seq=seq, tenant=tenant,
+        record=snapshot, seq=seq, tenant=tenant,
         journal_skipped=journal_skipped, project=project,
         enqueued_at=time.monotonic()))
 

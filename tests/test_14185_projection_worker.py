@@ -28,7 +28,7 @@ import types
 
 import pytest
 
-from tortoise import live_write, monitoring, projection_worker
+from tortoise import live_write, monitoring, projection_worker, record_writer
 
 
 #: The tenant every DEFERRAL-EXPECTING write carries BY VALUE. It is not
@@ -38,6 +38,11 @@ from tortoise import live_write, monitoring, projection_worker
 #: write that does not carry its tenant — see
 #: `test_a_write_without_a_carried_tenant_is_never_deferred`.
 _TENANT = ("org-14185", "graph-14185")
+
+#: A record DSN that is never CONNECTED to — `record_dsn()` validates its shape
+#: only, and every projector in this file is a double. Present because deferral
+#: requires the record to be armed as well as the loop (#14222 review P1-3).
+_RECORD_DSN = "postgresql://user:pass@localhost:5432/tortoise_record_test"
 
 
 # ── doubles ────────────────────────────────────────────────────────────────
@@ -93,6 +98,12 @@ def armed(monkeypatch):
     it, which is what makes the bound below take effect.
     """
     monkeypatch.setenv(projection_worker.ENV_WORKER, "1")
+    # ⛔ BOTH SWITCHES. `TORTOISE_PROJECTION_WORKER` arms the LOOP; the record is
+    # armed by its own DSN, and `live_write` refuses to defer a write the record
+    # was never going to take (#14222 review P1-3). The DSN is never connected
+    # to here — every projector in this file is a double — it is only what
+    # `record_dsn()` validates.
+    monkeypatch.setenv(record_writer.RECORD_DSN_ENV, _RECORD_DSN)
     monkeypatch.delenv(projection_worker.ENV_QUEUE_MAX, raising=False)
     projection_worker.shutdown(drain=False)
     yield projection_worker
@@ -210,6 +221,37 @@ def test_the_lag_is_measured_in_positions_and_in_time(armed):
     assert settled.failures == 0
 
 
+def test_the_depth_gauge_is_read_AFTER_the_fold_not_at_pop(armed):
+    """⛔ #14222 review P1-1: a stale depth is a gate that cannot do its job.
+
+    The pop-time depth counts the item that is about to be folded, so publishing
+    it after the fold reports "1 owed" for a DRAINED queue and "1 owed" for a
+    backlog of 100 — an alert on `depth > 0` fires forever on a caught-up record
+    and stays quiet through a real one, while `stats()` says the opposite. Both
+    readings below are taken from the exported GAUGE, not from `stats()`, because
+    `stats()` was already correct when the gauge was not.
+    """
+    slow = _SlowProjector()
+    log = _Log()
+    for _ in range(4):
+        live_write.write({"type": "PointAdded"}, log=log, project=slow,
+                         tenant=_TENANT)
+    assert slow.in_flight.wait(5)
+
+    mid = monitoring.projection_worker_gauges()
+    assert mid["queue_depth"] == 4, (
+        "the mid-backlog gauge must count the in-flight item AND the queued ones")
+    assert mid["queue_depth"] == projection_worker.stats().queue_depth
+
+    slow.gate.set()
+    assert projection_worker.wait_for_drain(10) is True
+    settled = monitoring.projection_worker_gauges()
+    assert settled["queue_depth"] == 0, (
+        "a drained queue owes nothing — a stale pop-time depth would say 1 here")
+    assert settled["pending_positions"] == 0
+    assert settled["queue_depth"] == projection_worker.stats().queue_depth
+
+
 def test_the_metrics_surface_carries_the_lag(armed):
     """`metrics()` names the lag — an operator reads it without the module."""
     metrics = monitoring.metrics()
@@ -270,6 +312,96 @@ def test_a_stalled_projection_does_not_slow_a_read(armed):
 
     slow.gate.set()
     assert projection_worker.wait_for_drain(10) is True
+
+
+def test_a_drain_wait_reports_UNDRAINED_when_the_fold_is_wedged(armed):
+    """⛔ #14222 review P1-2: an empty deque is what a WEDGED fold leaves behind.
+
+    The loop pops its item and then blocks inside `project`, so `not pending` is
+    TRUE for exactly the state a drain wait exists to report. Answering "drained"
+    there calls a wedged projection finished — and every
+    `assert wait_for_drain(N) is True` in this file means "the fold has finished".
+    """
+    slow = _SlowProjector()
+    live_write.write({"type": "PointAdded"}, log=_Log(), project=slow,
+                     tenant=_TENANT)
+    assert slow.in_flight.wait(5), "the loop never picked the item up"
+
+    assert projection_worker.wait_for_drain(0.3) is False, (
+        "the queue is empty because the fold is IN FLIGHT — that is not drained")
+    assert not slow.finished.is_set()
+
+    slow.gate.set()
+    assert projection_worker.wait_for_drain(10) is True
+
+
+def test_a_wedged_stop_does_not_let_a_SECOND_consumer_start(armed):
+    """⛔ #14222 review P2-2: two consumers is a correctness hazard, not a delay.
+
+    `stop()` used to clear its thread even when the join TIMED OUT, so the next
+    `submit`'s `_ensure_started` saw "no thread" and started a second consumer on
+    the same deque — two folds for one tenant can land out of order, and the
+    record's mutations are absolute per row. Keeping the thread set makes
+    `_ensure_started` a no-op instead, and a submit then DECLINES (folding inline,
+    which is always safe) with its own reason.
+    """
+    slow = _SlowProjector()
+    live_write.write({"type": "A"}, log=_Log(), project=slow, tenant=_TENANT)
+    assert slow.in_flight.wait(5)
+
+    worker = projection_worker.worker()
+    worker.stop(drain=False, timeout=0.05)
+    assert slow.in_flight.is_set() and not slow.finished.is_set()
+
+    inline_calls = []
+
+    def inline_project(event, seq, *, journal_skipped=False):
+        inline_calls.append(seq)
+        return types.SimpleNamespace(applied=True, refusal=None,
+                                     outcome="applied")
+
+    stopping_before = monitoring.projection_inline_fallback_counts().get(
+        "worker_stopping", 0)
+    write = live_write.write({"type": "B"}, log=_Log(), project=inline_project,
+                             tenant=_TENANT)
+    assert write.deferred is False, "a wedged loop must decline, not queue"
+    assert inline_calls == [1]
+
+    live = [t for t in threading.enumerate()
+            if t.name == "tortoise-projection-worker"]
+    assert len(live) <= 1, f"a second consumer started: {live!r}"
+    assert (monitoring.projection_inline_fallback_counts().get(
+        "worker_stopping", 0) - stopping_before) == 1
+
+    slow.gate.set()
+    projection_worker.shutdown(drain=True, timeout=10)
+
+
+def test_the_queued_record_is_a_SNAPSHOT_of_what_was_written(armed):
+    """⛔ #14222 review P2-4: the fold now reads the dict AFTER the caller resumed.
+
+    Inline, the record fold and the cache fold both read the caller's dict while
+    the caller was still inside the write. Deferred, the record fold reads it
+    later — and the SDK's envelope shares its NESTED values with the caller, so an
+    in-place mutation between the ack and the fold would fold the record from
+    content the cache never saw, undetectably. A deep copy at the queue boundary
+    is what makes the item the write's own content.
+    """
+    slow = _SlowProjector()
+    event = {"type": "PointAdded", "point": {"id": "p-1", "content": "original"}}
+    write = live_write.write(event, log=_Log(), project=slow, tenant=_TENANT)
+    assert write.deferred is True
+
+    # The caller mutates its own nested value AFTER the ack — the shape the
+    # envelope's sharing makes reachable.
+    event["point"]["content"] = "mutated after the ack"
+
+    slow.gate.set()
+    assert projection_worker.wait_for_drain(10) is True
+    folded = slow.calls[0][0]
+    assert folded["point"]["content"] == "original", (
+        "the fold read the caller's live dict instead of the write's content")
+    assert event["point"]["content"] == "mutated after the ack"
 
 
 def test_the_write_path_stays_live_while_the_fold_is_wedged(armed):
@@ -372,6 +504,33 @@ def test_a_write_without_a_carried_tenant_is_never_deferred(armed):
     assert projection_worker.stats().submitted == 0
 
 
+def test_a_deferred_write_requires_the_RECORD_to_be_armed_too(armed, monkeypatch):
+    """⛔ TWO SWITCHES, and the second one is not decoration (#14222 review P1-3).
+
+    `TORTOISE_PROJECTION_WORKER` arms the LOOP; the record is armed by its own
+    DSN. With the loop on and the record off, `write_live_record` answers "nothing
+    was armed" — so a deferred write could only report either `armed=False` (a lie
+    about a queued write) or `armed=True, unprojected=1` (a loss claim for a write
+    nothing was ever going to take, which
+    `tools/claim_dense_leg_13732.py` counts as an unprojected position). Asking
+    the record's own arming keeps that deployment byte-identical instead: it folds
+    inline and reports `armed=False, unprojected=0`, exactly as before this loop.
+    """
+    monkeypatch.delenv(record_writer.RECORD_DSN_ENV, raising=False)
+    called = []
+    write = live_write.write(
+        {"type": "PointAdded"}, log=_Log(), tenant=_TENANT,
+        project=lambda e, s, journal_skipped=False: (
+            called.append(s),
+            types.SimpleNamespace(applied=True, refusal=None,
+                                  outcome="applied"))[1])
+
+    assert write.deferred is False, "the record was not armed — nothing to defer to"
+    assert called == [1], "the fold must run inline"
+    assert write.unprojected == 0, "an unarmed record owes no position"
+    assert projection_worker.stats().submitted == 0
+
+
 def test_a_scratch_log_is_never_deferred(armed):
     """#9231: a scratch buffer is declined by the seam, so queueing it is pointless."""
     write = live_write.write({"type": "PointAdded"}, log=_Log(durable=False),
@@ -418,6 +577,7 @@ def test_the_queue_bound_falls_back_to_inline_and_counts_it(armed, monkeypatch):
     assert projection_worker.stats().queue_depth == 2
 
     inline_calls = []
+    before = monitoring.projection_inline_fallback_counts().get("queue_full", 0)
 
     def inline_project(event, seq, *, journal_skipped=False):
         inline_calls.append(seq)
@@ -428,7 +588,11 @@ def test_the_queue_bound_falls_back_to_inline_and_counts_it(armed, monkeypatch):
                              tenant=_TENANT)
     assert third.deferred is False, "the bound must fall back to inline"
     assert inline_calls == [3], "the fallback must actually FOLD, not drop"
-    assert monitoring.projection_inline_fallback_counts() == {"queue_full": 1}
+    # ⛔ A DELTA: these families are process-global and never reset (a total that
+    # can reset cannot be alerted on), so an absolute assertion here would be
+    # measuring every earlier test in the file.
+    assert (monitoring.projection_inline_fallback_counts().get("queue_full", 0)
+            - before) == 1
 
     slow.gate.set()
     assert projection_worker.wait_for_drain(10) is True
@@ -449,6 +613,8 @@ def test_a_failing_deferred_fold_is_counted_and_the_loop_survives(armed):
     two channels disagree).
     """
     attempts = []
+    before = monitoring.projection_worker_failure_counts().get(
+        "projection_raised", 0)
 
     def project(event, seq, *, journal_skipped=False):
         attempts.append(seq)
@@ -466,7 +632,8 @@ def test_a_failing_deferred_fold_is_counted_and_the_loop_survives(armed):
     assert attempts == [1, 2], "the loop stopped after the failure"
     assert stats.failures == 1
     assert stats.projected == 1
-    assert monitoring.projection_worker_failure_counts() == {"projection_raised": 1}
+    assert (monitoring.projection_worker_failure_counts().get(
+        "projection_raised", 0) - before) == 1
 
 
 def test_the_fold_runs_in_journal_order(armed):
