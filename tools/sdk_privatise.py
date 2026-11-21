@@ -924,7 +924,42 @@ SWEEP_NAMES = 66
 #: `Graph` is never the SDK), so no shape was absorbed and no defect is hidden — the direction the
 #: pin exists to catch is a NEW shape, and there is none. `--check` exits 0 on this tree after the
 #: re-pin, with `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11843, "6aed5368ffa10513")
+#:
+#: ⛔ RE-PINNED FOR A −6 THAT **IS** THIS BRANCH'S — `eeed8c2ea8` (`tests/test_read_ledger.py`,
+#: "the read-ledger pins drove three doors #14129 retired") replaced its last calls to the RETIRED
+#: doors with the live ones, and those calls were themselves residue rows (an untyped receiver on an
+#: ordinary-word method is exactly the shape this pin counts, whatever the receiver is called).
+#: THE −6 IS MEASURED, AND IT IS THE PR'S OWN, not `main`'s drift carried forward:
+#: `git diff origin/main HEAD` over the WHOLE PR touches exactly six lines of that shape —
+#: `-inst.query()` ×3, `-inst.paginated_query()`, `-inst.query_points_by_tag()`, `-inst.get_point()`
+#: (counted: `git diff origin/main HEAD -U0 | grep -E '^[+-]' | grep -cE
+#: '\.(query|update|delete|paginated_query|query_points_by_tag|get_point)\('` → **6**, and every
+#: one of them is a REMOVAL in `tests/test_read_ledger.py`), and the observed residue total falls by
+#: exactly those six, `11843 → 11837`. No other file in the PR adds or removes a row. So the delta
+#: is not attributable to `main` and cannot be left to a later main re-pin: this is the direction
+#: the pin's contract requires be DELIBERATE ("re-pin in a commit that says why"), and the
+#: direction is the harmless (downward) one — fewer references to retired doors, no new shape.
+#: `11837` is NOT `main`'s `11843`: this branch removes six rows `main` still has.
+#: `--check` exits 0 on this tree after the re-pin, with
+#: `typed references still pointing at a public name: 0`.
+#:
+#: ⛔ RE-PINNED AGAIN, AND THIS TIME THE −3→+3 IS ATTRIBUTED BY MEASUREMENT TO ONE COMMIT THAT IS
+#: NOT THIS MERGE. `--repin` on THIS merged tree prints `(11840, "b7eb08ff3acdcce4")`, and the same
+#: pair is what `8af1ee3f87b` PRINTS ON ITS OWN TREE — measured in a detached worktree at that
+#: commit — while `8af1ee3f87b` still carries the `11837` pin the commit before it cut. So `--check`
+#: was already red on the branch's own head before this lane merged anything: the pin is stale by
+#: three, and the staleness is not this merge's. The +3 is attributed to EXACTLY ONE COMMIT, not
+#: inferred from the arithmetic: `--repin` in a detached worktree at `d2a5fae54f0` (the tree that cut
+#: the `11837` pin, and where that pin was CORRECT) → `(11837, "52e9a205697f528f")`; at
+#: `8af1ee3f87b` → `(11840, "b7eb08ff3acdcce4")`. Only `8af1ee3f87b` lies between, and its own
+#: message says what it did — *"take main's read-ledger rewrite"* — which restores three ordinary
+#: receiver rows the −6 removal above had dropped, and re-pinned nothing. That is the dependency to
+#: read here: the −6 was this branch's own (recorded above) and three of the six came BACK when the
+#: branch adopted `main`'s rewrite of the same file. `11840` is the measurement of the tree that must
+#: be green, and it equals that head's own measurement rather than a figure carried from a side —
+#: `--check` exits 0 on this tree after the re-pin, with
+#: `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11840, "b7eb08ff3acdcce4")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
