@@ -1441,18 +1441,24 @@ def test_measure_e6_reports_an_unloadable_registry_as_a_named_gap(tmp_path, monk
     assert broken["declared"] == 0 and broken["defects"] == [], broken
     # ⛔ AND IT PUBLISHES NO COUNT FOR A COLUMN NO CENSUS WAS READ FOR (#14060 round 20, P3,
     # measured): this path returns BEFORE any census exists, so `written` must be the all-`None`
-    # marker, not the four zeros `measure_e6` initialises. Unpinned until now, and that is measured
-    # rather than asserted by a count: with THIS line removed, the mutant leaves the case green —
-    # none of its other assertions reads `written` — so the only red it caused was POSITIONAL
-    # (one line deleted above the three probe cites that `tools/capstone_verdict_check.py` types
-    # shifts all of them, redding `test_the_probes_cross_file_cites_resolve_to_the_symbols_they
-    # _name`), which is no witness of the cells at all. That is exactly why the pin below exists,
-    # and no count is quoted here: a count would re-stale the moment another row moves a line —
-    # the drift this file's own cites are pinned against. The cause is structural: this case never
-    # read the cells and both
-    # renderers key off `written_source`, never off the dict. The wrong-shape arm pins the two
-    # OTHER refusal paths (non-object census, population guard); the loader fault is this one,
-    # and no other arm patches `_pack_census_module` to raise.
+    # marker, not the four zeros `measure_e6` initialises. The pin below is what holds that, and
+    # its non-vacuity is TWO measured mutants — distinguished here because an earlier cut of this
+    # comment named one red for the other (#14060 round 21, P3, both measured by the reviewer and
+    # re-measured here):
+    #   * delete THIS assertion -> the case stays GREEN (nothing else in it reads `written`), and
+    #     the only red is POSITIONAL: the deleted line sits above this file's own
+    #     `enumerate(ext, 1)` self-scan line, which `RECONCILE-A1-A2-A5.md` cites in parentheses,
+    #     so `test_the_reconcile_cites_resolve_where_the_record_says_they_do` reds;
+    #   * delete the probe's `measurement["written"] = _E6_WRITTEN_UNKNOWN` -> THIS case reds on
+    #     the pin below, and (positionally) `test_the_probes_cross_file_cites_resolve_to_the
+    #     _symbols_they_name`, because one probe line above the cites
+    #     `tools/capstone_verdict_check.py` types shifts them.
+    # Neither red is a witness of the cells, which is exactly why the pin exists; no count of them
+    # is quoted here, because a typed count re-stales the moment another row moves a line — the
+    # drift this file's own cites are pinned against. The cause is structural: this case never
+    # read the cells and both renderers key off `written_source`, never off the dict. The
+    # wrong-shape arm pins the two OTHER refusal paths (non-object census, population guard); the
+    # loader fault is this one, and no other arm patches `_pack_census_module` to raise.
     assert all(value is None for value in broken["written"].values()), broken["written"]
     row = measure.build_e6_row(broken, bars=BARS)
     assert row["verdict"] == "BLOCKED", row
@@ -1512,6 +1518,29 @@ def test_e6_reports_an_unmeasurable_written_cell_as_unmeasured_never_zero(tmp_pa
     assert e6["written"]["unmeasured"] == 1, e6["written"]
     assert sum(e6["written"].values()) == e6["declared"], e6["written"]
     assert e6["unbound_and_unexplained"] == 0, e6["unbound_and_unexplained"]
+
+
+def test_a_pathologically_nested_artifact_is_a_named_gap_not_a_traceback(tmp_path):
+    """A census artifact whose NESTING DEPTH the input chooses must not raise (#14060 round 21).
+
+    `_e6_write_cells` promises the beside column degrades to `unmeasured` for an artifact it
+    cannot read, and `measure_e6` calls it AFTER the run has paid its cost — so a raise here is
+    the crash-after-a-paid-run class this PR closes, one input over. Measured before this arm:
+    valid JSON nested 20 000 deep raised `RecursionError: maximum recursion depth exceeded while
+    decoding a JSON array` out of the reader, because the parse sat in an `except (OSError,
+    json.JSONDecodeError)` while the row loop BELOW it already carried the blanket catch — i.e.
+    the one shape whose depth the artifact itself chooses was outside the invariant stated in the
+    comment above that loop.
+    """
+    deep = tmp_path / "census.json"
+    depth = 100_000
+    deep.write_text("[" * depth + "]" * depth, encoding="utf-8")
+    cells, source = measure._e6_write_cells(str(deep))
+    assert cells == {}, cells
+    assert "UNMEASURED" in source.upper(), source
+    # ⛔ THE TYPE IS THE ARM: the fault is NAMED, not merely swallowed, so a future change that
+    # degrades this payload for a DIFFERENT reason (a shape guard firing first, say) is visible.
+    assert "RecursionError" in source, source
 
 
 def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main(tmp_path,
@@ -7776,7 +7805,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # `grep -n 'max_nodes = org.get("max_points")'` -> `:15219` (inside it), and `:15257` is
         # the blank line immediately before `return OrgInfoResponse(` at `:15258`.
         ("04-plan.md", "**point budget - a POINTER, not a snapshot**", (
-            ("15454", "point_count = await asyncio.to_thread("),
+            ("15557", "point_count = await asyncio.to_thread("),
         ), "hosted_api"),
         # ⛔ `:1186` IS NOT PINNED BY A ROW *ALONE*, and the reason is measured rather than
         # stylistic: it is stated TWICE on ONE doc line ("is STAMP-bound (`:1186` is the
@@ -8015,7 +8044,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
 
     # ⛔ `04-plan.md` I7's `org_info` RANGE (#12462 review cycle 3). The sentence cited
     # `hosted_api.py:15328-15405` at `09f5c99afd`, `:15346-15423` at #13844's head,
-    # `:15441-15518` at the #13844 re-cut, and `:15454-15531` at this head — every cut
+    # `:15441-15518` at the #13844 re-cut, and `:15557-15634` at this head — every cut
     # re-derived by CONTENT with both ends OPENED. The END of that range is a BLANK line,
     # so the row pins it structurally: the stated last line must still be the blank line
     # immediately before `return OrgInfoResponse(`.
@@ -18206,7 +18235,7 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # `sdk.py:29121` — so the ROW agrees with `main` here. That says nothing about membership:
     # the file IS in this diff at this head, and NOT because of that row — `git diff --numstat
     # origin/main...HEAD -- …/04-plan.md` prints `1 1`, the I7 row's `hosted_api.py` range, moved
-    # by this branch's own 108 inserted lines (`:15346-15423` → `:15454-15531`). An earlier cut
+    # by this branch's own 108 inserted lines (`:15346-15423` → `:15557-15634`). An earlier cut
     # of this block stated the opposite in both halves (once "NOT in this diff at all", once "IS
     # in the diff, this branch's re-point [of the sdk.py row]"), which is the head-bound-
     # membership class this arm has been wrong in both directions on — which is why the arm
