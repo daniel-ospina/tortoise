@@ -394,6 +394,17 @@ _BLOCKED_TAIL = (
 #: anything the committee has been given been archived` — still reports rather than
 #: routes. That is strictly narrower than the class this replaces and is held by the
 #: two pins above, so a later simplification that re-widens the lookahead reds them.
+#: ⛔ AND THE SECOND CLAUSE'S VERB IS FOLLOWED BY `been`, NOT BY A CAPTURED VERB LIST
+#: (round-9 review, P2 follow-up). Bounding the class to `has|have|had been` closed the
+#: bare hijack and left the MODAL PASSIVE one open: measured on that head,
+#: `have any users noticed the vendor will have been deprecated` and
+#: `have any customers heard the tier could have been retired` both ROUTED to the whole
+#: ended population and dropped the caller's own predicate (`noticed`, `heard`). The
+#: window needs the literal `been`, so `been` is what the lookahead must require: any
+#: finite verb — bare, modal, perfect, negated — followed by `(been)` is the second
+#: clause's own passive, and the closed verb list was only ever a proxy for it. The
+#: class is pinned in `NOT_SELECTED` + `NOTICE_ONLY` (`… the vendor will have been
+#: deprecated`), so re-narrowing it to the bare auxiliaries reds a row.
 _EXISTENCE_HEAD = (
     r"\b(?:has|have|had)\s+(?:any|anything|someone|something|everything|anyone)\b"
 )
@@ -401,7 +412,9 @@ _EXISTENCE_GUARD = (
     r"(?![^?]{0,60}?\b(?:because|since|when|while|after|before|now|if|unless|given|"
     r"as|where|so|but|although|though|until)\b)"
     r"(?![^?]{0,60}?\b(?:the|a|an|its|his|her|their|our|your|my|these|those|this|"
-    r"that)\s+[a-z0-9][a-z0-9'’._/-]*\s+(?:has|have|had)\s+been\b)"
+    r"that)\s+[a-z0-9][a-z0-9'’._/-]*\s+"
+    r"(?:has|have|had|is|are|was|were|will|would|can|could|did|does|do|may|might|"
+    r"must|should)\s+(?:not\s+)?(?:have\s+)?been\b)"
 )
 _EXISTENCE_WINDOW = rf"[^?]{{0,60}}?\bbeen\s+(?:{_ENDING_WORDS})\b"
 _EXISTENCE_PREFIX = _EXISTENCE_HEAD + _EXISTENCE_GUARD + _EXISTENCE_WINDOW
@@ -695,8 +708,7 @@ and could not apply — its reply is the row list and it takes no sink — so an
 MCP caller who needs that report must use the hosted `GET /v1/search` route,
 whose response body carries `state_question` (`{routed: false, population,
 reason, cue, hint}`), which is the only CUSTOMER-facing channel: no PUBLIC SDK
-method
-exposes it either — the same payload rides the PRIVATE
+method exposes it either — the same payload rides the PRIVATE
 `TortoiseSDK._tortoise_fts_query(..., read_status_out=...)` sink (under
 `read_status_out["state_question"]`), so an integration that calls the SDK
 directly must name that private method deliberately. The difference it makes
