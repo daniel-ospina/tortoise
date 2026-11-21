@@ -247,10 +247,12 @@ class TestTheListingDoorTeachesTheSameWay:
             # actually answer, so this pins the truthful remedy rather than the
             # convenient one. ⛔ The listing door's OLD spelling
             # (`tortoise_list_graphs`) is retired forward into that section
-            # (#11609 lane P7): a tool-grant MCP client does not receive it on
-            # `tools/list`, so a remedy naming it would send the builder to a call
-            # that answers "unknown tool" — the same overstatement this comment's
-            # own history is about, one rename later.
+            # (#11609 lane P7): a tool-grant MCP client is handed `tools/list`, and
+            # the old name is absent from it — the handler still answers a caller
+            # that sends the name (FastMCP keeps the #3883 shim registered), so the
+            # defect is DISCOVERY, not a broken call: a remedy naming it hands the
+            # builder a door they cannot see. Same overstatement this comment's own
+            # history is about, one rename later.
             assert ORG_ENDPOINT in detail["message"], detail
             assert "/v1/team/keys" in detail["message"], detail
             assert "tortoise_graph_overview(section='graphs')" in detail["message"], detail
