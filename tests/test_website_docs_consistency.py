@@ -1879,8 +1879,10 @@ def _visible_text(markup: str) -> str:
     The answer therefore comes from `extract_visible_text`, the render-fidelity
     seam the rest of this PR already uses: suppression (raw text, inert
     `<template>`, `<noscript>` under scripting) and the inherited render flag
-    (`hidden`, unrendered element types, a closed `<details>`) decide what exists to
-    be read. The two punctuation fixes below stay here because they are about
+    (`hidden`, unrendered element types) decide what exists to be read. A closed
+    `<details>`/`<dialog>` deliberately does NOT suppress its subtree here — the loud
+    rule at `_text_is_painted` counts it, because dropping rendered summary text was a
+    fail-open in three consecutive review rounds. The two punctuation fixes below stay here because they are about
     PRESENTATION of the compared string, not about the tree: stripping an inline
     `<strong>`/`<a>` leaves a space before the following `.` or `,`, which is not
     what is on the page.
@@ -2557,13 +2559,17 @@ def test_the_select_scope_closes_on_input_and_a_nested_select_and_nothing_else()
         "dialog", "dir", "div", "dl", "dt", "fieldset", "figcaption", "figure",
         "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header",
         "hgroup", "hr", "li", "listing", "main", "menu", "nav", "ol", "p",
-        "pre", "section", "summary", "table", "ul", "xmp",
+        "plaintext", "pre", "section", "summary", "table", "ul", "xmp",
     }, (
         "`_P_CLOSERS` changed: each member's start tag CLOSES an open `<p>` in a "
         "browser, and closing it decides which ancestors the summary and any painted "
         "text inherit from. `li`/`dd`/`dt` belong (their own spec step closes a `<p>`); "
-        "`td` does not (outside a table it inserts nothing). Do not widen or narrow "
-        "this by guess — drive the shape in Chrome first")
+        "`plaintext` belongs too, and it is the ROUND-10 addition: its own spec step "
+        "closes a `<p>`, and Chrome agrees — `<p>one<plaintext>two<p>three` dumps as "
+        "`<p>one</p><plaintext>two<p>three</plaintext>`, i.e. the `<p>` closed and "
+        "everything after is plaintext's text. `td` does not (outside a table it "
+        "inserts nothing). Do not widen or narrow this by guess — drive the shape in "
+        "Chrome first")
     # ── PRESENT: `<input>` pops the scope, so what follows is outside the select ──
     assert extract_anchor_hrefs(
         '<select><input><a href="/blog">Blog</a></select>'
@@ -3663,8 +3669,8 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
         )
         with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
             _assert_storage_section_reviewed(nested_claim)
-    # …and the closed BODY stays dropped one element deeper too, or "admit everything
-    # under a `<details>`" would pass the rows above.
+    # …and the closed BODY is COUNTED one element deeper too: the loud rule is about the
+    # disclosure, not about depth, so no wrapper inside it is a hiding place.
     nested_body = section.replace(
         "</h2>",
         "</h2><details><summary>Tap to read more.</summary><div><span>FalkorDB "
@@ -3677,9 +3683,9 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
         "inside the pinned section is a reviewed copy change, not a hiding place"
     )
 
-    # …and the two refusals that must SURVIVE the wider carve-out, or "painted" would
-    # mean "everything under a `<summary>`": a `hidden` element INSIDE the summary,
-    # and a `hidden` ANCESTOR above the `<details>`, both hide the text.
+    # …and only ONE of the two `hidden` positions still hides text: a `hidden` ANCESTOR
+    # above the `<details>`. A `hidden` INSIDE it is counted (asserted below), because
+    # the first unrendered ancestor is the disclosure.
     # ⛔ AND THE HONEST COST OF THE ONE RULE (#14073 review round 9): a `hidden`
     # subtree INSIDE a disclosure is COUNTED, because the first unrendered ancestor is
     # the `<details>` and this seam stops modelling which of its descendants a browser
@@ -3876,6 +3882,78 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
             f"it is (`<{shape}>` here): modelling which part of a closed disclosure a "
             f"browser paints is what produced three rounds of fail-open"
         )
+    # ⛔ P0, ROUND 10 — an INCOMPLETE `_P_CLOSERS` IS A FAIL-OPEN, NOT A NICETY
+    # (#14073 review round 10, measured). `_close_p_scope` pops the `<p>` and
+    # everything inside it, so a p-closer missing from the set leaves an
+    # `_UNRENDERED` element on the stack and the loud rule then drops painted copy.
+    # Measured before the fix: `<p><audio><li>CLAIM</li></audio></p>` — Chrome's tree is
+    # `<p><audio></audio></p><li>CLAIM</li>` at body level, 194 painted px, and this
+    # scan returned `''`. Driven as the full 6×4 grid so a member cannot be dropped
+    # from the set unnoticed.
+    for unrendered in ("audio", "video", "canvas", "datalist", "meter", "progress"):
+        for closer in ("li", "dd", "dt", "plaintext"):
+            closed_p = section.replace(
+                "</h2>",
+                f"</h2><p><{unrendered}><{closer}>FalkorDB permanently deletes it"
+                f"</{closer}></{unrendered}></p>",
+                1,
+            )
+            assert closed_p != section
+            assert "falkor" in _banned_vocabulary(closed_p), (
+                f"`<{closer}>` closes the open `<p>` in button scope, which pops the "
+                f"`<{unrendered}>` above it, so a browser paints the claim at body "
+                f"level; the scan must read it"
+            )
+            # `<plaintext>` also swallows the REST of the document as raw text, so the
+            # golden refuses through the destination pin (the section's link is gone)
+            # rather than the wording pin — still a refusal, and the vocabulary
+            # assertion above is the one that measures the fail-open.
+            with pytest.raises(
+                AssertionError,
+                match=None if closer == "plaintext" else "no longer matches the reviewed wording",
+            ):
+                _assert_storage_section_reviewed(closed_p)
+
+    # ⛔ P0, ROUND 10 — FOSTER PARENTING: a browser moves text OUT of a table, so the
+    # table is not its ancestry at all. Measured: `<table><audio><table>CLAIM</table>
+    # </audio></table>` paints at body level (Chrome's tree is `<audio></audio><table>
+    # </table>CLAIM<table></table>`, 194 painted px) while this stack saw it under
+    # `audio` and dropped it. The "in cell"/"in caption" modes are where text stays in
+    # the table, so those keep dropping it — asserted as the negatives right after.
+    for unrendered in ("audio", "video", "canvas", "datalist", "meter", "progress", "object"):
+        fostered = section.replace(
+            "</h2>",
+            f"</h2><table><{unrendered}><table>FalkorDB permanently deletes it"
+            f"</table></{unrendered}></table>",
+            1,
+        )
+        assert fostered != section
+        assert "falkor" in _banned_vocabulary(fostered), (
+            f"a non-whitespace text node in the `in table` mode is foster parented in "
+            f"front of the table, so a `<{unrendered}>` between them is discarded and "
+            f"the claim is painted at the table's parent level"
+        )
+        with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
+            _assert_storage_section_reviewed(fostered)
+
+    # …and the truncation can only REMOVE ancestors, so it never manufactures a drop:
+    # a `hidden` ancestor of the TABLE still hides the foster-parented text, and text
+    # in the "in cell" mode is never moved out of the table at all.
+    for label, markup in (
+        ("hidden table ancestor",
+         "<div hidden><table><audio><table>FalkorDB permanently deletes it</table>"
+         "</audio></table></div>"),
+        ("in cell", "<table><tr><td><audio>FalkorDB permanently deletes it"
+                    "</audio></td></tr></table>"),
+    ):
+        kept_dark = section.replace("</h2>", "</h2>" + markup, 1)
+        assert kept_dark != section
+        assert "falkor" not in _banned_vocabulary(kept_dark), (
+            f"{label}: foster-parented text lands before the TABLE, so an unrendered "
+            f"ancestor of the table still hides it — and a cell never foster parents "
+            f"at all"
+        )
+
     # …and the ONE thing that still hides it: an unrendered ancestor that is NOT the
     # disclosure itself, which is the residual class this module declares.
     #    NOTE `<p hidden>` is deliberately NOT here (#14073 review round 9): a

@@ -329,24 +329,12 @@ class _AnchorHrefParser(HTMLParser):
     #: everything opened inside it. `<summary>` is on this list, which is what puts the
     #: `<summary>` where a browser puts it and keeps this stack from carrying a `<p>`'s
     #: descendants past the point the browser closed them (#14073 review round 9).
-    #:
-    #: ⛔ `li`, `dd` and `dt` belong here and were missing at first (#14073 review
-    #: round 9, P2, measured). They are NOT in the block-start list — they carry their
-    #: OWN rule with the same step, *"If the stack of open elements has a `p` element in
-    #: button scope, then close a `p` element"*. Chrome: `<p>one<li>two` leaves 0
-    #: element children in the `<p>` with `nextElementSibling` `LI` (`DD`/`DT` likewise),
-    #: so the `<p>` is closed. `<td>` is the control that shows the rule is not "any
-    #: token": outside a table it inserts no element and the `<p>` stays open
-    #: (`nextElementSibling` is null) — which is why it is deliberately absent.
-    #: second, so no painted text is dropped, and `<summary>` (a member) pops that `<p>`
-    #: before any painted summary is judged. It was still wrong: this set's docstring
-    #: claims to be the spec's, and an unpinned set is how the `_SELECT_POP` gap happened.
     _P_CLOSERS = frozenset({
         "address", "article", "aside", "blockquote", "center", "dd", "details",
         "dialog", "dir", "div", "dl", "dt", "fieldset", "figcaption", "figure",
         "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header",
         "hgroup", "hr", "li", "listing", "main", "menu", "nav", "ol", "p",
-        "pre", "section", "summary", "table", "ul", "xmp",
+        "plaintext", "pre", "section", "summary", "table", "ul", "xmp",
     })
     #: The "button scope" boundaries for that test (spec: the scope element list —
     #: applet, caption, html, table, td, th, marquee, object, template — plus
@@ -941,8 +929,9 @@ class _AnchorHrefParser(HTMLParser):
         round 9, P1, measured). The stack keeps a phrasing element opened INSIDE the
         `<p>`, so in `<details><p>Tap to read more<span><summary>CLAIM</summary>` the
         `<span>` sat between the `<details>` and the `<summary>`. The painted-summary
-        carve-out looked past only `_SUMMARY_TRANSPARENT` members, the `<span>` is not
-        one, so the walk stopped on it and inherited `renders=False` — while Chromium
+        carve-out that was then still in place looked past only elements a browser
+        never keeps, the `<span>` is not one, so the walk stopped on it and inherited
+        `renders=False` — while Chromium
         pops the `<p>` and the `<span>` together and makes the `<summary>` a DIRECT
         child of the `<details>` (measured: `summary.parentElement` is `DETAILS`, rect
         1264×18, `innerText` contains the claim). `extract_visible_text` returned `''`
@@ -1212,25 +1201,24 @@ class _AnchorHrefParser(HTMLParser):
         #
         # ⛔ EXCEPT A `<summary>` WHOSE PARENT IS THE CLOSED `<details>`: a closed
         # `<details>` DOES render its first `<summary>`, so refusing the whole
-        # subtree is right for the BOUNDARY question (longer slice = loud) and
-        # WRONG for the TEXT question (dropped summary text = a claim the wording
-        # golden cannot see). Measured end-to-end before this exception:
-        # `<details><summary>FalkorDB permanently deletes…</summary>Tap to read
-        # more.</details>` inserted into `#storage` left the allowlist, the
-        # destinations, the vocabulary scan and the wording golden ALL green while
-        # Chromium painted the summary (#14073 review round 6, P1).
+        # subtree is right for the BOUNDARY question (longer slice = loud) and WRONG
+        # for the TEXT question (dropped summary text = a claim the wording golden
+        # cannot see). Measured end-to-end before that: `<details><summary>FalkorDB
+        # permanently deletes…</summary>Tap to read more.</details>` inserted into
+        # `#storage` left the allowlist, the destinations, the vocabulary scan and the
+        # wording golden ALL green while Chromium painted the summary (round 6, P1).
         #
-        # Only the SUMMARY is admitted, and only when its immediate parent is the
-        # `<details>`; the closed BODY stays dropped, which is what the browser
-        # does too. A SECOND summary is admitted as well (browsers show the first):
-        # that over-counts text a reader may not see, i.e. the LOUD direction, and
-        # modelling "first only" needs a per-`<details>` counter in the stack for a
-        # distinction no page here makes.
+        # ⛔ THE TEXT SEAM NO LONGER CARVES THE DISCLOSURE OUT AT ALL. Four rounds of
+        # exception lists ("only the summary", "only a direct child", "only past
+        # `_SUMMARY_TRANSPARENT` members") each shipped a new fail-open, so
+        # `_text_is_painted` now COUNTS the whole disclosure family and this flag is
+        # inherited for the BOUNDARY question only. The over-counted copy a reader does
+        # not see is the declared COST; see `_text_is_painted` for the decision and
+        # `_RENDERS_WITH_ATTR` for why these two questions must not share an answer.
         if self._open_elements and not self._open_elements[-1][2]:
-            # Inherited, so `<div hidden><section><h2>` hides the heading without
-            # `_unmet_by_reader` having to walk the stack to the `hidden` div. The TEXT
-            # seam deliberately does NOT inherit a closed `<details>`/`<dialog>`'s flag
-            # this way — see `_text_is_painted`.
+            # Inherited (the sentence above says why). The TEXT seam deliberately does
+            # NOT inherit a closed `<details>`/`<dialog>`'s flag this way — see
+            # `_text_is_painted`.
             renders = False
         self._open_elements.append((tag, opened_container, renders))
 
@@ -1426,12 +1414,45 @@ class _AnchorHrefParser(HTMLParser):
         * any OTHER unrendered ancestor (`hidden`, `_UNRENDERED`, `_FALLBACK_RENDERS`)
           still drops the text, and those are the residuals the module declares.
         """
-        for tag, _container, renders in self._open_elements:
+        for tag, _container, renders in self._foster_truncated_ancestry():
             if renders:
                 continue
             # The first unrendered ancestor decides, and this is that ancestor.
             return tag in self._RENDERS_WITH_ATTR
         return True
+
+    def _foster_truncated_ancestry(self):
+        """The ancestry that actually holds this text, FOSTER PARENTING included.
+
+        ⛔ A BROWSER MOVES TEXT OUT OF A TABLE, THIS STACK DOES NOT (#14073 review
+        round 10, P0, measured). In the "in table" insertion mode a non-whitespace
+        character token is FOSTER PARENTED: it is inserted immediately BEFORE the
+        `<table>` in the tree, so its real ancestry is the table's PARENT, and every
+        element between them is discarded. `<table><audio><table>CLAIM</table></audio>
+        </table>` therefore paints `CLAIM` at body level (Chrome's tree:
+        `<audio></audio><table></table>CLAIM<table></table>`, 194 painted px) while this
+        stack sees it under `audio` (`_UNRENDERED`) and dropped it — a 7×7 grid of
+        `_UNRENDERED` inside `table>…>table` reproduced it, `object` the only exception.
+
+        Approximating the insertion modes is unnecessary: truncating the ancestry at the
+        innermost open `<table>` is LOUD, because it can only REMOVE ancestors, so it
+        turns a drop into a count and never the reverse. The modes that end foster
+        parenting — "in cell" (`td`/`th`) and "in caption" (`caption`) — are the ones
+        where text stays inside the table, so those stop the truncation.
+        """
+        frames = self._open_elements
+        for index, (tag, _container, _renders) in enumerate(frames):
+            if tag != "table":
+                continue
+            # OUTERMOST first, not innermost: a `<table>` start tag in the "in table"
+            # mode CLOSES the table already open, so `<table><audio><table>CLAIM`
+            # discards the `audio` and leaves one table at body level (measured). A
+            # nested table inside a CELL is skipped by the check below, which is what
+            # keeps `<td><audio><table>` a genuine drop.
+            if any(frames[k][0] in ("td", "th", "caption") for k in range(index + 1, len(frames))):
+                continue
+            return frames[:index]
+        return frames
 
     def parse_comment(self, i: int, report: bool = True) -> int:
         """End an empty comment where the spec does (review finding, #3962).
