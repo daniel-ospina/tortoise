@@ -90,9 +90,11 @@ does not create the second process either — the app runs ONE machine on a
 SINGLE-ATTACH volume (`fly.toml`: `[[mounts]] source = "tortoise_api_data"`, with
 its own lifecycle note "the volume is single-attach"), so a replacement machine
 cannot mount the volume the old process still holds and the old process exits
-FIRST. Fly does not promise the overlap either: its config reference says
-`rolling` "does not generally guarantee overlap" and reserves the alongside-boot
-for `bluegreen` (`fly.toml` sets `strategy = "rolling"`). The residual therefore
+FIRST. Fly does not promise the overlap either: its config reference describes
+`rolling` as replacing the Machines one by one ("each running Machine is taken
+down and replaced") and puts the alongside-boot in `bluegreen`, which it also
+says "cannot be used for Machines with attached volumes" (`fly.toml` sets
+`strategy = "rolling"`). The residual therefore
 becomes reachable when a second process is ADMITTED (`TORTOISE_MULTI_WORKER=1`)
 or the 2-machine topology lands — which `fly.toml` records as costed and BLOCKED
 on runbook §6 — not because deploys are frequent. Its cost is bounded in every

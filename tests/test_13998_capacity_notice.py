@@ -1600,8 +1600,8 @@ def test_the_overlap_guard_grades_each_CLAUSE_not_each_line():
         # without negating it", which invites a reword to satisfy the regex.
         "# there is no overlap between the old and the new process.\n",
         "# the overlap is not reachable in ordinary operation.\n",
-        "# Fly does not promise the overlap either: `rolling` \"does not "
-        "generally guarantee overlap\".\n",
+        "# Fly does not promise the overlap either: `bluegreen` cannot be "
+        "used for Machines with attached volumes.\n",
         "# the volume is single-attach, so a replacement cannot overlap the old "
         "process; the old process exits first.\n",
         "# the topology is non-overlap: one machine, one single-attach volume.\n",
@@ -1619,9 +1619,10 @@ def test_the_residuals_reachability_is_pinned_to_what_fly_toml_documents():
     deployed app is ONE machine mounting a SINGLE-ATTACH volume, so a rolling
     replacement cannot bring a second process up while the first still holds that
     volume — the old process must release it first. Fly does not promise the
-    overlap either: its config reference says `rolling` "does not generally
-    guarantee overlap" and reserves the alongside-boot for `bluegreen` (this app
-    sets `strategy = "rolling"`).
+    overlap either: its config reference replaces the Machines one by one under
+    `rolling` and puts the alongside-boot in `bluegreen`, which it also says
+    cannot be used for Machines with attached volumes (this app sets
+    `strategy = "rolling"`).
 
     Cycles 2 and 3 shipped the opposite claim into the module docstring AND into
     the migration header, which is append-only once applied — so the artifact that
@@ -2269,3 +2270,40 @@ def test_the_ladder_import_guard_resolves_per_call_site():
                           f"one proves nothing: {checked}")
     assert len(problems) == 1, problems
     assert " b uses _ORG_ADDITIVE_0015_TIER " in problems[0], problems
+
+
+def test_no_artifact_quotes_the_config_reference_for_what_it_does_not_say():
+    """⛔ #14038 review (P2): the module docstring quoted Fly's config reference
+    as saying that a `rolling` replacement does not guarantee overlap. The page
+    contains no such sentence — it contains no occurrence of the word
+    "guarantee" at all:
+
+        curl -sL https://fly.io/docs/reference/configuration/ | grep -c guarantee
+        -> 0            (page measured 2026-11-21, 1,010,774 bytes)
+
+    (The fabricated phrasing is deliberately NOT reproduced verbatim in this
+    file, so this file cannot satisfy its own guard by quoting it: the needle is
+    assembled from two pieces and this docstring stays clear of the join.)
+
+    What the page does say is ``rolling``: *"One by one, each running Machine is
+    taken down and replaced by a new release Machine."*, and the alongside-boot
+    belongs to ``bluegreen``, of which it says *"cannot be used for Machines with
+    attached volumes."*
+
+    ⛔ THIS ROW GRADES THE NAMED INSTANCE, NOT THE CLASS. A quotation the cited
+    source does not contain cannot be graded offline — the source is a web page
+    — so the general class is read in review. What this row does is make THAT
+    quotation un-shippable in the two artifacts that carried it (the module
+    docstring and this file's docstring), and assert the measured replacement is
+    present so a fix cannot be reverted into a removal.
+    """
+    needle = "generally " + "guarantee overlap"  # assembled: see the docstring
+    module_src = (ROOT / "tortoise" / "capacity_notice.py").read_text(encoding="utf-8")
+    self_src = pathlib.Path(__file__).read_text(encoding="utf-8")
+    assert needle not in module_src, (
+        "the module docstring quotes a phrase Fly's config reference does not "
+        "contain — quote what the page says, or do not quote it")
+    assert needle not in self_src, (
+        "this file repeats that fabricated quotation")
+    assert "cannot be used for Machines with attached volumes" in module_src, (
+        "the measured replacement wording must be what the docstring carries")
