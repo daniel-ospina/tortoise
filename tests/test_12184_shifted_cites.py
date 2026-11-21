@@ -348,6 +348,18 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # moves (345 as-written stays 345); NON-VACUOUS: `+1` reds the content arm at both.
     (_AUDIT, 'sdk.py:16046-16050', _SDK, 16046, '**JSONL event log (#548):** written when *point* is provided'),
     (_AUDIT, 'sdk.py:3777', _SDK, 3777, 'sdk._emit_event("PointRetracted", _deleted_point_payload(tid))'),
+    # --- #14087 review round 1, finding 1 (F1) — the address that review CAUGHT, now GUARDED. The
+    # correction itself landed at `79a574e07a4e` (`:58265` -> `:58272`); the review's other half —
+    # "add the token to `_TOKEN_OCCURRENCES` so the next sweep cannot move it silently" — did not, so the
+    # fix left behind a number a digit sweep could still move with nothing red, which is the same gap
+    # that let the wrong one ship. `:58272` is `rows = proj.g.query(`, the statement `:58210` was at
+    # `d4a8dddc4e` (+62, the boundary in force at that address); `:58265` is a `#8290` docstring COMMENT.
+    # It is a BARE span in the header's enumeration of the nine non-comparable addresses, which is why
+    # nothing graded it — `_SPELLING` needs `.py:NNNN`, so pinning the bare token adds NO pair to the
+    # published denominator (the general bare-span table is #14089's, not this row's). NON-VACUOUS:
+    # restore the pre-fix `:58265` and the token arm reds (`is gone`); keep the token and move the pin's
+    # line off `58272` and the CONTENT arm reds.
+    (_AUDIT, "`:58272`", _SDK, 58272, "rows = proj.g.query("),
 )
 
 #: The `main`-set group the `#13124` review found OUTSIDE the header's `main` enumeration: (token the
@@ -530,6 +542,11 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     # `grep -o -F 'sdk.py:15958-15962' <doc> | wc -l` -> 1, `... 'sdk.py:3777' ...` -> 1.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:16046-16050'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:3777'): 1,
+    # #14087 review round 1, F1: the header's BARE `:58272` reader cite, pinned so a re-point cannot
+    # hide behind its `:58272-58296` / `:58274` family (those are one-token keys of their own, in
+    # `_REDEFINED_13854`, and none of them sees a bare span). Measured:
+    # `grep -o -F '`:58272`' <the document> | wc -l` -> 1.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:58272`'): 1,
 }
 
 
@@ -1782,7 +1799,10 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # control carried `:15750` where the assembly is `:15805`. Nothing graded it — the row's positive
     # cite `sdk.py:15842` IS pinned, which is what made the pair look covered — so the control rotted
     # through a re-derivation that fixed the address beside it.
-    assert len(_PINS) == 83
+    # 83 -> 84 at the SAME review's finding 1 (F1): the `:58272` correction `79a574e07a4e` made was
+    # itself unguarded — the review asked for the pin and only the address landed. Same shape, same
+    # reason: a bare span with no pin is coverage this file only APPEARED to have.
+    assert len(_PINS) == 84
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
