@@ -1493,7 +1493,7 @@ def test_an_explicit_non_positive_window_is_refused_loudly(
 
 
 def test_a_non_numeric_window_argument_is_refused_not_silently_dropped(
-    stream: Path, caplog: pytest.LogCaptureFixture
+    stream: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A stated bound the call cannot read warns — it does not vanish.
 
@@ -1503,6 +1503,7 @@ def test_a_non_numeric_window_argument_is_refused_not_silently_dropped(
     """
     import logging
 
+    monkeypatch.delenv(usage_signal.USAGE_WINDOW_DAYS_ENV, raising=False)
     usage_signal._warned.clear()
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
