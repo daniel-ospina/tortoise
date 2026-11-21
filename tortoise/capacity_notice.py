@@ -66,10 +66,19 @@ CONCURRENT passes can both read `mark=None`, both pass the re-read, and deliver 
 the wrong order — "at 100 %" then "at 80 %". The pre-send re-read (:func:`notify_account`)
 narrows that to one round trip; it does not close it, and closing it would need a
 pre-send reservation (a stamp-first protocol with a compensating unset), which is
-recorded on the PR rather than improvised here. Reachable only with N>1 workers,
-which `worker_topology.assert_multi_worker_admissible` refuses BY DEFAULT (it
-warns instead when `TORTOISE_MULTI_WORKER=1` is acknowledged), and with the gauge
-moving ≥20 pp between two near-simultaneous reads. The stamp itself is a
+NOT taken here — this is a STATED, ACCEPTED RESIDUAL rather than a shelved one.
+The LEDGER stays monotone in every case; only the INBOX can show the two notices
+in the wrong order, and it needs two live processes reading the same account
+within one round trip plus a gauge that moved ≥20 pp between those reads.
+⛔ Two live processes are NOT exotic here: `deploy-hosted.yml` replaces the
+machine on every `tortoise/**` push to `main` (median gap 0.19 h over the 30 days
+to 2026-11-20), and a rolling replacement overlaps an old and a new process, each
+of which runs a boot pass. `worker_topology.assert_multi_worker_admissible`
+refuses N>1 replicas BY DEFAULT (it warns instead when `TORTOISE_MULTI_WORKER=1`
+is acknowledged), but that gate covers replicas on ONE machine — it does not
+cover the overlap across a replacement — so treat this residual as reachable in
+normal operation. Its cost is bounded: two notices in the wrong order, never a
+lost or duplicated record. The stamp itself is a
 compare-and-swap on the value this pass read (:func:`claim_notice`), so two
 processes cannot interleave into a LOWER mark, and the provider Idempotency-Key
 (`capacity-notice:{org_id}:{pct}`) collapses the cross-process replay that
@@ -278,15 +287,31 @@ NOTICE_INTERVAL_DEFAULT_S = 6 * 60 * 60
 #: budget-exhausted INVITE/OTP is dropped with no retry — while a capacity notice
 #: that is skipped is simply retried on the next pass.
 #:
-#: ⛔ THE NUMBER IS A DAILY ONE, DIVIDED BY THE DAY'S PASSES (#14038 review, P2).
-#: A per-pass figure nobody multiplied out is the trap this constant used to be: 25
-#: at a pass every 6 h is FIVE passes a day (one at boot plus four scheduled), i.e.
-#: 125 notices against a 100/day budget — the ramp would take the whole counter and
-#: the INVITE/OTP drop it is supposed to prevent would follow. A quarter of the
-#: 100/day budget is 25, so at 6 h this cap is 25 // 5 = 5, and the day's notices
-#: stay inside the quarter the guard promises. ``NOTICE_MAX_SENDS_ENV`` is still an
-#: absolute override for a deployment that deliberately shortens the interval or
-#: raises the send budget — recompute the quotient if you do either.
+#: ⛔ THE NUMBER IS PRICED AGAINST ONE PROCESS'S BUDGET, NOT A DAY'S (#14038
+#: review, P1). An earlier form of this note derived it per DAY — "25 at a pass
+#: every 6 h is FIVE passes a day (one at boot plus four scheduled), so
+#: 25 // 5 = 5" — and that premise is FALSE on the topology this module actually
+#: runs on. The sweep is armed with a BOOT RUNG
+#: (``_capacity_notice_sweep_loop``, whose docstring carries the measurement), and
+#: `deploy-hosted.yml` replaces the machine on every `tortoise/**` push to `main`
+#: (over the 30 days to 2026-11-20 the MEDIAN gap was **0.19 h**, with a longest
+#: run of 90 consecutive gaps under 6 h), so a day holds roughly one boot pass PER
+#: DEPLOY rather than one. The send budget is per-process in the same way
+#: (``email_notify``: "The counter is per-process (N replicas × cap) … Counters
+#: reset on process restart"), so no daily quotient across passes is a number
+#: this tree can compute — and stating one was the defect: it claimed a daily
+#: bound that nothing enforced.
+#:
+#: What this constant DOES bound, and all it claims: ONE process's ONE pass may
+#: spend at most this many sends — 5 % of that process's 100/day budget — so a
+#: burst at boot can never take the budget a concurrent invite or OTP needs. The
+#: fleet-wide daily aggregate is restarts × this cap, and it stays FINITE because
+#: the ledger is once-per-threshold-per-account-ever: a repeated boot pass finds
+#: an account already at its top threshold and short-circuits before the gauge is
+#: read (``notify_account``), so the ramp is a one-off per account rather than a
+#: daily charge. ``NOTICE_MAX_SENDS_ENV`` is an absolute override; if you shorten
+#: the interval or raise the send budget, re-price against ONE process's budget —
+#: never against a pass count you did not measure.
 NOTICE_MAX_SENDS_PER_PASS_DEFAULT = 5
 NOTICE_MAX_SENDS_ENV = "TORTOISE_CAPACITY_NOTICE_MAX_SENDS"
 
@@ -791,7 +816,9 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
     # a send is irreversible. This narrows the cross-process window to one round
     # trip; it does not close it — closing it needs a pre-send reservation (a
     # stamp-first protocol with a compensating unset), which is a design decision
-    # rather than a tidy-up, and it is recorded on the PR rather than improvised.
+    # rather than a tidy-up, and it is NOT improvised here: it is a stated
+    # residual, and the module docstring carries its reachability — which includes
+    # the old/new process overlap of a rolling replacement, not only N>1 replicas.
     try:
         from .supabase_control import org_storage_notice_pct
 
@@ -856,8 +883,8 @@ async def sweep_pass(*, cp=None, send=None, enumerate_orgs=None,
     silent-partial-pass this docstring forbids (#14038 review, P2).
 
     There IS a per-pass SEND cap (``max_sends`` / ``TORTOISE_CAPACITY_NOTICE_MAX_SENDS``,
-    default 5 — the 100/day budget's quarter divided by the day's five passes,
-    derived at ``NOTICE_MAX_SENDS_PER_PASS_DEFAULT``) and it cannot have that defect: it walks the WHOLE enumeration and
+    default 5, derived and re-priced at ``NOTICE_MAX_SENDS_PER_PASS_DEFAULT``) and it
+    cannot have that defect: it walks the WHOLE enumeration and
     stops SENDING, and a send that did not happen leaves its account's mark unset,
     so the next pass starts with a SMALLER unstamped population and the fleet
     ramps. The difference is per-pass PROCESSING (a stuck prefix) against
