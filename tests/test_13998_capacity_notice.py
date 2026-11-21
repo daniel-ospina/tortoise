@@ -1564,6 +1564,84 @@ def test_send_notice_email_refunds_the_slot_on_failure(monkeypatch):
     assert email_notify._send_counts_day == 0
 
 
+def _production_send(monkeypatch, *, stale: str | None = None) -> dict:
+    """One real `notify_account` pass through the REAL sender (`send=None`).
+
+    Only the provider POST is stubbed: the subject here is the LOG an operator
+    reads, not delivery, so a fake `send` would bypass the lines under test.
+    """
+    email_notify._send_counts_day = 0
+    email_notify._send_counts_month = 0
+    email_notify._send_counts_day_period = ""
+    email_notify._send_counts_month_period = ""
+    email_notify._skip_logged.clear()
+    monkeypatch.setenv("RESEND_API_KEY", "re_test_key")
+
+    class _Resp:
+        def raise_for_status(self): pass
+
+        def json(self): return {"id": "msg_log"}
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+
+        async def __aenter__(self): return self
+
+        async def __aexit__(self, *a): return False
+
+        async def post(self, url, **kwargs): return _Resp()
+
+    monkeypatch.setattr(email_notify.httpx, "AsyncClient", _Client)
+    address = stale or "dana@acme.example"
+    cp = _fake_cp(email=address)
+    with patch("tortoise.quota.resolve_org_limits", lambda org_id: _limits(102)), \
+         patch("tortoise.allowance_gate.read_dimension",
+               lambda dimension, org_id: _Reading(90.0)):
+        return _pass(cp=cp, enumerate_orgs=lambda limit=None: [
+            _org_row(email=address)])
+
+
+def test_the_send_log_names_the_team_and_never_the_mailbox(caplog, monkeypatch):
+    """The success line identifies the ACCOUNT and not the ADDRESS.
+
+    ⛔ BOTH HALVES ARE LOAD-BEARING, and neither was pinned before this row: the
+    address came OUT of the log (a log is durable; the rung logs name the mailbox
+    CLASS, never the value), and the team went IN, because once the address was
+    gone the label was the only attribution a successful send had left — measured
+    before the fix, the line read `capacity notice 80% email accepted by provider
+    (msg msg_1)`, which names no account at all (#14038 review).
+    """
+    caplog.set_level(logging.INFO, logger="tortoise.email_notify")
+    out = _production_send(monkeypatch)
+    accepted = [ln for ln in caplog.text.splitlines()
+                if "accepted by provider" in ln]
+    assert out["statuses"]["sent"] == 1
+    assert accepted, f"the success line is missing: {caplog.text!r}"
+    assert f"team {ORG_ID}" in accepted[0], (
+        f"the success line names no account: {accepted[0]!r}")
+    assert "dana@acme.example" not in accepted[0], (
+        f"the success line prints the recipient address: {accepted[0]!r}")
+
+
+def test_the_skip_arm_logs_no_mailbox_either(caplog, monkeypatch):
+    """The third arm of the same posture: budget-exhausted must not leak either.
+
+    The accept and fail arms were stripped of the address first, and this one was
+    left behind — it is reachable (any day the shared budget is spent), so the
+    rule is either true on all three arms or it is not a rule (#14038 review).
+    """
+    caplog.set_level(logging.WARNING, logger="tortoise.email_notify")
+    monkeypatch.setattr(email_notify, "reserve_send_slot", lambda: "day-cap")
+    out = _production_send(monkeypatch)
+    skipped = [ln for ln in caplog.text.splitlines() if "SKIPPED" in ln]
+    assert out["statuses"]["skipped"] == 1
+    assert skipped, f"the skip line is missing: {caplog.text!r}"
+    assert f"team {ORG_ID}" in skipped[0], (
+        f"the skip line names no account: {skipped[0]!r}")
+    assert "dana@acme.example" not in skipped[0], (
+        f"the skip line prints the recipient address: {skipped[0]!r}")
+
+
 def test_greeting_reuses_the_onboarding_heuristic():
     """One heuristic for every email from this product (#2406)."""
     assert email_notify.recipient_first_name(None, "dana@acme.example",

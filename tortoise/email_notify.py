@@ -672,9 +672,13 @@ async def send_notice_email(to: str, subject: str, html_body: str,
         return {"status": "skipped", "reason": "channel-unconfigured"}
     reason = reserve_send_slot()
     if reason is not None:
+        # ⛔ NO RECIPIENT ADDRESS IN THIS LINE EITHER: it is the third arm of the
+        # same posture (accept, fail, skip), and the first two were already
+        # stripped of it — the mailbox CLASS is named by the notice's rung logs,
+        # which say "which rung", never "which mailbox" (#14038 review, P2).
         logger.warning(
-            "email notify: %s email for %s SKIPPED — send budget exhausted (%s)",
-            label, to, reason)
+            "email notify: %s SKIPPED — send budget exhausted (%s)",
+            label, reason)
         return {"status": "skipped", "reason": reason}
     return await _send_rendered(
         to, subject, html_body, text_body, idempotency_key=idempotency_key,
