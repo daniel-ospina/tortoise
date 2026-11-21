@@ -1677,15 +1677,20 @@ def test_every_pinned_cite_lands_on_the_content_the_document_quotes() -> None:
 _TOKEN_SPAN = re.compile(r":(\d+)(?:-(\d+))?")
 
 
-def _token_span(token: str) -> tuple[int, int] | None:
-    """(first, last) line the *token* names, or `None` when it names no address."""
-    numbers = [
-        int(found)
+def _token_spans(token: str) -> list[tuple[int, int]]:
+    """EVERY address the *token* names, as `(first, last)` spans — empty when it names none.
+
+    One span per address match, never the hull of a token's numbers: a token naming two
+    unrelated addresses (`:58315`/`:58317`) names two lines, NOT the line between them. Taking
+    `min..max` over every number turned such a token into a range, so the arm accepted the `58316`
+    the token never mentions — the exact false PASS this arm exists to refuse, one indirection
+    further out. Measured on the shipped tree: **0 of 96** rows carries more than one address, so
+    no row's verdict moves; only the door the next row could have walked through is closed.
+    """
+    return [
+        (int(match.group(1)), int(match.group(2) or match.group(1)))
         for match in _TOKEN_SPAN.finditer(token)
-        for found in match.groups()
-        if found
     ]
-    return (min(numbers), max(numbers)) if numbers else None
 
 
 def _rows_outside_their_token(rows) -> list[str]:
@@ -1699,11 +1704,24 @@ def _rows_outside_their_token(rows) -> list[str]:
         token, target_rel, line = (
             (row[1], row[2], row[3]) if len(row) == 5 else (row[0], row[1], row[2])
         )
-        span = _token_span(token)
-        if span is None or span[0] <= line <= span[1]:
+        spans = _token_spans(token)
+        if not spans:
+            # A row whose token names NO address cannot be checked by this arm, so passing it
+            # silently would be the arm vouching for a claim it never read (fail-open).
+            problems.append(
+                f"{target_rel}: the row pins `{token}`, which names NO line address, so this "
+                f"arm cannot check the line it GRADES ({line}) — an unverifiable row passes by "
+                "being unreadable, which is a fail-open in a gate. Give the token the address "
+                "the fragment sits on."
+            )
             continue
+        if any(first <= line <= last for first, last in spans):
+            continue
+        named = " / ".join(
+            f"{first}" if first == last else f"{first}..{last}" for first, last in spans
+        )
         problems.append(
-            f"{target_rel}: the row pins `{token}`, which names {span[0]}..{span[1]}, but it "
+            f"{target_rel}: the row pins `{token}`, which names {named}, but it "
             f"GRADES line {line} — a graded line outside its own token is a DEFENDER: the "
             "content arm opens the line the fragment lives on while the token arm only asks "
             "whether the string occurs anywhere in the document, so a document that names a "
@@ -1727,7 +1745,9 @@ def test_every_pinned_row_grades_a_line_inside_the_address_its_token_names() -> 
 
     A RANGE is anchored on the line inside it that carries the fragment (the file's stated
     convention), so the arm accepts any line in `START..END`; a single-value token must grade that
-    value exactly.
+    value exactly, and a token naming SEVERAL addresses accepts only a line one of them names —
+    never the hull between them, and never nothing at all (the two fail-open doors the controls
+    below re-open).
 
     Non-vacuity is the negative control below, which re-introduces the shipped shape.
     """
@@ -1747,6 +1767,41 @@ def test_the_token_span_arm_reds_on_a_row_that_grades_another_line() -> None:
     # A range token is accepted on any line INSIDE the range it names (the anchor convention).
     inside = (_AUDIT, "`:7195-7198`", _SE, 7198, "MATCH path = (seed)-[:IMPL|NAND*1..{max_hops}]-(n:Point)")
     assert not _rows_outside_their_token((inside,)), "a line inside the named range must pass"
+
+
+def test_a_token_naming_two_addresses_does_not_vouch_for_the_hull_between_them() -> None:
+    """Negative control — the fail-open `min..max` left in this arm, re-opened here.
+
+    On the PRE-FIX code `_token_span` returned `(min(numbers), max(numbers))` over EVERY number a
+    token carries, so a token naming two unrelated addresses became a range spanning the gap: the
+    arm accepted the `58316` neither address names. That is the same false PASS this arm exists to
+    refuse — a row asserting an address the document does not carry — so it is refused here rather
+    than recorded as a residual. Measured on the shipped tree: 0 of 96 rows carries more than one
+    address, so no row's verdict moves.
+    """
+    between = (_AUDIT, "`:58315`/`:58317`", _SDK, 58316, "rows = proj.g.query(")
+    assert _rows_outside_their_token((between,)), (
+        "a token naming :58315 and :58317 must NOT vouch for the line between them"
+    )
+    # …and each address it DOES name is still accepted, so the tightening rejects only the hull.
+    for named in (58315, 58317):
+        row = (between[0], between[1], between[2], named, between[4])
+        assert not _rows_outside_their_token((row,)), (
+            f"{named} is an address the token names, so it must pass"
+        )
+
+
+def test_a_row_whose_token_names_no_address_is_reported_not_skipped() -> None:
+    """Negative control — an unreadable row must not pass by being unreadable.
+
+    On the PRE-FIX code `_token_span` returned `None` for a token with no digits and the loop
+    `continue`d, so such a row was silently exempt from the arm — the gate vouching for a claim it
+    never read. Measured on the shipped tree: 0 of 96 rows has a token with no address.
+    """
+    unaddressed = (_AUDIT, "`_file_human_approval`", _SDK, 37547, "``:Document`` node).")
+    assert _rows_outside_their_token((unaddressed,)), (
+        "a row whose token names no address must be REPORTED, not skipped"
+    )
 
 
 def test_the_resolve_content_arm_is_unchanged_by_the_token_arm() -> None:
