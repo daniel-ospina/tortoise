@@ -20,6 +20,7 @@ import ast
 import asyncio
 import functools
 import json
+import logging
 import pathlib
 import re
 import threading
@@ -1064,6 +1065,43 @@ class TestDriftAndStaleness:
                 cp=cp, send=send, enumerate_orgs=lambda: [_org_row()]))
         assert out["statuses"].get("notice-mark-unavailable") == 1
         assert send.calls == []
+
+    def test_a_failed_pre_send_re_read_is_recorded_and_the_send_still_goes(
+            self, caplog):
+        """⛔ The re-read is the only thing that narrows the cross-process window,
+        and a failure used to be SILENT (#14038 fix lane).
+
+        The `except` assigned the stale value and emitted nothing, so the send
+        went out at the WIDER window while the comment above it said the window
+        was narrowed to one round trip — a reader (and an operator reading the
+        logs) could not tell the two apart. This is the same class as the
+        `no-reading` line the pass logs when the gauge cannot be read, and the
+        fix is a record, not a refusal: the send PROCEEDS on the value this pass
+        already gated on, which is exactly the CAS guard the stamp uses, so the
+        LEDGER stays monotone either way.
+
+        Measured non-vacuous at the pre-fix head: with the `logger.warning`
+        removed this row fails on its log assertion (no record of the failure)
+        and the two status assertions still pass — i.e. it grades the RECORD, not
+        the send.
+        """
+        cp = _fake_cp()                       # mark unset; the read would work
+        send = _Sender()
+        account = cn.Account(org_id=ORG_ID, email="dana@acme.example",
+                             name="Acme", notice_pct=None)
+        with patch.object(sc, "org_storage_notice_pct",
+                          side_effect=RuntimeError("control plane 503")), \
+                caplog.at_level(logging.WARNING,
+                                logger="tortoise.capacity_notice"):
+            out = asyncio.run(cn.notify_account(
+                ORG_ID, cp=cp, account=account, send=send,
+                limits=_limits(102), reading=_Reading(90.0)))
+        assert out["status"] == "sent", out
+        assert len(send.calls) == 1
+        lines = [r.getMessage() for r in caplog.records]
+        assert any("pre-send mark re-read" in line and ORG_ID in line
+                   for line in lines), lines
+        assert any("NOT narrowed" in line for line in lines), lines
 
     def test_the_mark_is_re_read_immediately_before_sending(self):
         """A concurrent stamp between the gauge read and the send must suppress

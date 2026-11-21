@@ -889,7 +889,21 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
         from .supabase_control import org_storage_notice_pct
 
         fresh = await asyncio.to_thread(org_storage_notice_pct, cp, org_id)
-    except Exception:
+    except Exception as e:
+        # ⛔ A SILENT FALLBACK HERE WOULD BE THE DEFECT (#14038 fix lane): this
+        # re-read is the ONLY thing that narrows the cross-process window to one
+        # round trip, and the paragraph above states, in the present tense, that
+        # it did. Assigning the stale value with no record leaves a reader unable
+        # to tell "narrowed" from "could not read, proceeded anyway" — the same
+        # class as the `no-reading` line this module logs when the gauge cannot
+        # be read. The send PROCEEDS because the value this pass already gated on
+        # is the CAS guard (`claim_notice(..., previous=fresh)`), so the LEDGER
+        # stays monotone either way; what the failure costs is the narrowing.
+        logger.warning(
+            "capacity notice: the pre-send mark re-read for team %s failed (%s) "
+            "— proceeding on the value read earlier in this pass, so this "
+            "send's cross-process window is NOT narrowed",
+            org_id, type(e).__name__)
         fresh = account.notice_pct
     if fresh is not None and notice.threshold <= fresh:
         return {"status": "already-notified", "org_id": org_id,
