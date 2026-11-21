@@ -57,6 +57,7 @@ from tests._html_links import (  # noqa: E402
     extract_element_attributes,
     extract_element_ids,
     extract_heading_positions,
+    extract_mode_dependent_regions,
     is_blog_entry,
 )
 from tools.ci_selection import load_manifest, select  # noqa: E402
@@ -1409,8 +1410,36 @@ def _fragment_this_page_advertises(href: str, document: Path) -> str | None:
     target = href.strip(" \t\n\r\f\v")
     if not target:
         return None
-    parsed = urlparse(target)
+    try:
+        parsed = urlparse(target)
+    except ValueError:
+        # A bracketed host the stdlib cannot parse (`//[::1`, `//[]`) must REFUSE, not
+        # raise: this function's contract is "the heading id, or None", and a
+        # `ValueError` out of `_docs_section` is an ERROR naming no cause. The guard
+        # covers every parse below too — the sibling `try`s are the same rule, applied
+        # where a different spelling reaches a different parser (#14073 review, the
+        # `//[::1` spelling still raised after the first fix).
+        return None
     if not parsed.fragment:
+        return None
+    # ⛔ A BACKSLASH BEFORE THE FRAGMENT IS REFUSED, NOT INTERPRETED. In a special URL
+    # a browser treats `\` as `/` — it TERMINATES the authority and delimits the path
+    # — so `https://evil.example\@premiselabs.co/tortoise/docs#x` has HOST
+    # `evil.example` to a browser while every Python parser reads `premiselabs.co`
+    # (as userinfo). The two disagree about what the URL IS, so there is no honest
+    # translation: refusing keeps the slice long (the loud direction), and accepting
+    # let a foreign host advertise a heading on this page (#14073 review, measured
+    # end-to-end with the pinned `storage-limits` shape).
+    if "\\" in target.split("#", 1)[0]:
+        return None
+    # ⛔ AND A `;` IN THE PATH IS REFUSED BEFORE RESOLUTION, because `urljoin` itself
+    # loses a trailing `;` (it round-trips through `urlparse`, whose `.params` is not
+    # re-emitted when empty): `/tortoise/docs;` was joined to `/tortoise/docs` and read
+    # as this page, though the middleware 404s `/docs;` exactly as it 404s `/docs;x`
+    # (`PRODUCT_PAGES` holds bare names). A `;` in the QUERY is untouched — it does not
+    # change which document is requested — so the test is on the PATH (#14073 review,
+    # measured end-to-end with the pinned `storage-limits` shape).
+    if ";" in urlsplit(target).path:
         return None
     canonical = _canonical_page_url(document)
     page_origin = _browser_origin(canonical)
@@ -1421,13 +1450,22 @@ def _fragment_this_page_advertises(href: str, document: Path) -> str | None:
         # …with the href's OWN scheme, so `http://host:80/…` is its own default port
         # rather than compared against https's (an `https://` probe would read :80 as
         # non-default and refuse a spelling the browser accepts — #14073 review).
-        probe_scheme = (urlparse(target).scheme or "https").lower()
+        probe_scheme = (parsed.scheme or "https").lower()
         if _browser_origin(f"{probe_scheme}://{authority}") != page_origin:
             return None
-    resolved = urlparse(urljoin(canonical, target))
-    if _browser_origin(resolved._replace(fragment="").geturl()) != page_origin:
+    try:
+        resolved_url = urljoin(canonical, target)
+    except ValueError:
         return None
-    document_url = resolved._replace(fragment="").geturl()
+    # ⛔ THE FRAGMENT IS CUT TEXTUALLY. Rebuilding the resolved URL through
+    # `urlparse(...)._replace(fragment="").geturl()` DROPS a trailing `;` — it lands
+    # in `.params` and is not re-emitted — so `/tortoise/docs;` reached
+    # `_document_for_loc` as `/tortoise/docs` and a URL the middleware 404s read as
+    # this page: the same `;params` defect as `;x`, one spelling over (#14073 review,
+    # measured; `_document_for_loc` refuses `docs;` when asked directly).
+    document_url = resolved_url.split("#", 1)[0]
+    if _browser_origin(document_url) != page_origin:
+        return None
     if _document_for_loc(document_url) != document:
         return None
     return unquote(parsed.fragment)
@@ -1527,12 +1565,23 @@ def _attributes_outside_allowlist(markup: str) -> list[str]:
     lesson for the sibling surface: quoting, entity decoding, comments and
     script/style blocks are the parser's job, not a pattern's. This reads the
     repo's one render-fidelity parser (`tests/_html_links.py`).
+
+    ⛔ AND A `<noscript>` REGION IS REFUSED, NOT CLEARED. It is the one suppressed
+    region whose answer flips with the SCRIPTING MODE — text with JS on, HTML
+    content with JS off (MDN, quoted on `_AnchorHrefParser._MODE_DEPENDENT`) — so
+    the parser cannot say whether a reader meets a claim inside it, and "no
+    attribute found" there is the fail-open half of a real answer. Reporting the
+    region as an offending entry is the strong form: the page reds until a human
+    decides, instead of a `title` reaching a no-JS reader while this guard reports
+    clean (#14073 review).
     """
     allowed = {"id", "class", "href"}
     return sorted({
         f"<{tag} {name}>"
         for tag, name, _line in extract_element_attributes(markup)
         if name not in allowed
+    } | {
+        f"<{tag}>" for tag, _line in extract_mode_dependent_regions(markup)
     })
 
 
@@ -2283,7 +2332,22 @@ _FOREIGN_TOC_SPELLINGS = (
     # literal where `urlparse` cannot parse it, and an uncaught `ValueError` out of
     # `_docs_section` is an ERROR naming no cause. Measured: `None` before the
     # authority probe existed, then `ValueError("Invalid IPv6 URL")` (#14073 review).
+    # ⛔ BOTH SPELLINGS, because the first fix only guarded the probe: the `//[::1`
+    # form is parsed BEFORE the probe and still raised — the class the review named is
+    # only closed when every parser the function touches is guarded (#14073 review).
     ("an invalid IPv6 authority", ' href="///[::1#quickstart"'),
+    ("an invalid IPv6 authority, no slash run", ' href="//[::1#quickstart"'),
+    ("an empty IPv6 authority", ' href="//[]#quickstart"'),
+    # ⛔ THE BACKSLASH SMUGGLE. In a special URL a browser treats `\\` as `/`, so it
+    # TERMINATES the authority: `https://evil.example\@premiselabs.co/...` has host
+    # `evil.example` to a browser and host `premiselabs.co` to every Python parser.
+    # Accepting it let a foreign host advertise a heading on this page — measured
+    # end-to-end with the pinned `storage-limits` shape, all three pins green.
+    ("a backslash authority smuggle", ' href="https://evil.example\\@premiselabs.co/tortoise/docs#quickstart"'),
+    # ⛔ EMPTY PATH PARAMETERS, which `urljoin` erases on its own (`urlparse`'s
+    # `.params` is dropped when empty), so the `;x` row above did not cover it: the
+    # middleware 404s `/docs;` exactly as it 404s `/docs;x`.
+    ("empty path parameters", ' href="/tortoise/docs;#quickstart"'),
     # ⛔ THE SEPARATE PAGES PROJECT. `app.premiselabs.co` serves no docs at all, and
     # `_document_for_loc` is host-blind below the site root, so a path-only rule
     # accepted it (`https://app.premiselabs.co/docs#quickstart` → this document).
@@ -2685,6 +2749,44 @@ def test_the_storage_attribute_allowlist_catches_every_legal_spelling() -> None:
             f"string no browser renders, and the allowlist's "
             f"'the section carries' claim stops being true of its own answer"
         )
+
+
+    # ── the one suppressed region whose answer depends on the MODE ───────────
+    # MDN, `<noscript>`: children are HTML content with scripting OFF and TEXT
+    # with it on. The parser suppresses it for the scripting-enabled tree (right
+    # for the anchor question), so a `title` inside it is invisible to
+    # `extract_element_attributes` — and yet a no-JS reader, and a screen reader in
+    # that mode, meets it. Measured before the gate: the wrapper turned
+    # `['<h3 title>']` into `[]` while every other pin stayed green, so the allowlist
+    # — the only thing between the claim and the reader — reported clean (#14073
+    # review). The region must therefore be REFUSED, not cleared.
+    wrapped = section.replace(
+        opening,
+        f'<noscript><h3 id="storage-record" title="{marker}">x</h3></noscript>'
+        + opening,
+        1,
+    )
+    assert wrapped != section, "could not wrap the storage heading in <noscript>"
+    assert marker not in _visible_text(wrapped), (
+        "the <noscript>-wrapped claim became VISIBLE text, so this control is "
+        "measuring the golden rather than the allowlist's treatment of the region"
+    )
+    assert _attributes_outside_allowlist(wrapped) == ["<noscript>"], (
+        "a `<noscript>` region in the storage section is cleared rather than "
+        "refused: with scripting disabled its children are ordinary markup, so a "
+        "`title` there reaches a reader while the allowlist reports clean"
+    )
+    # …and the wrapper is what changes the answer: the same region inside an inert
+    # `<template>` renders in NO mode, so it stays cleared (the row above). Without
+    # this control the refusal could have been implemented as "any `<noscript` in
+    # the text", which would red a page for a string no browser parses.
+    assert extract_mode_dependent_regions(
+        f'<template><noscript><h3 title="{marker}"></h3></noscript></template>'
+    ) == [], (
+        "a `<noscript>` inside an inert `<template>` is template content and "
+        "renders in neither mode, so refusing it reds a correct page for markup "
+        "no reader meets"
+    )
 
 
 def test_faq_toc_anchors_all_resolve() -> None:
@@ -3729,7 +3831,7 @@ def test_the_parsers_recordings_forget_a_document_a_frameset_replaced() -> None:
     # THE RATCHET, first: every public list on the parser is declared as either a
     # document recording or a diagnostic. A recording added later without a line in
     # `_RECORDINGS` reds HERE, which is what makes the rows below cover it — the
-    # enumeration of five helpers below cannot see a sixth.
+    # enumeration of six helpers below cannot see a seventh.
     declared = set(_AnchorHrefParser._RECORDINGS) | set(_AnchorHrefParser._DIAGNOSTICS)
     public_lists = {
         name
@@ -3748,12 +3850,21 @@ def test_the_parsers_recordings_forget_a_document_a_frameset_replaced() -> None:
     assert extract_element_attributes(toc) == [("div", "class", 1), ("a", "href", 1)]
     assert extract_heading_positions('<h2 id="h">H</h2>') == [("h", 0)]
     assert extract_anchors_within(toc, tag="div", class_token="toc") == [["#a"]]
+    assert extract_mode_dependent_regions("<noscript><p>x</p></noscript>") == [
+        ("noscript", 1)
+    ]
     # The row: with an honored `<frameset>` after the same markup, nothing is left.
     for label, got in (
         ("hrefs", extract_anchor_hrefs('<a href="/blog">x</a><frameset>')),
         ("ids", extract_element_ids('<div id="d"></div><frameset>')),
         ("attrs", extract_element_attributes(f"{toc}<frameset>")),
         ("headings", extract_heading_positions('<h2 id="h">H</h2><frameset>')),
+        (
+            "mode_dependent",
+            extract_mode_dependent_regions(
+                "<noscript><p>x</p></noscript><frameset>"
+            ),
+        ),
         (
             "containers",
             extract_anchors_within(f"{toc}<frameset>", tag="div", class_token="toc"),
