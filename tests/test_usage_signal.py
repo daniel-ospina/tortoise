@@ -84,8 +84,21 @@ named test goes RED):
   ``test_no_graph_dependency_pins_the_package_root_EXPORT_form`` RED on
   ``from tortoise import __init__ as i`` + ``i.FalkorDB`` — measured, 1 failed /
   100 passed, every other row green. ``tortoise.__init__`` IS the package and
-  ``_imports_of`` folds it onto the UNBANNED root, so this was the one spelling of
-  the package root no leg saw, in the ban and in the direction scan alike.
+  ``_imports_of`` folds it onto the UNBANNED root, so this was a spelling of
+  the package root no leg saw, in the ban and in the direction scan alike — and
+  so is its RELATIVE form (``from . import __init__``), which a clause reading
+  only ``node.level == 0`` still missed: drop the ``node.level == 1`` arm too →
+  RED on the relative pins, measured 1 failed / 100 passed.
+* **Let the scan stop calling the pinned loop** (restore the pre-fix two-leg body
+  inside ``_modules_reaching_a_store``, leaving ``_scan_modules`` intact) →
+  ``test_the_scan_actually_calls_the_pinned_loop`` RED — measured, 1 failed /
+  101 passed with the pin present. Feeding ``_scan_modules`` directly did NOT
+  cover this edge, which is the same unpinned-wiring class one indirection out.
+* **Read the wrong string into the ban's subject** (``source = "# clean\n"``, or
+  another tree module's file) → ``test_no_graph_dependency`` RED — measured, 1
+  failed / 100 passed each; the ban compares what it audits against a fresh read
+  of ``usage_signal.__file__``, so an empty, cached or misdirected read cannot
+  certify a file nobody looked at.
 * **Exempt a banned module from the probe into a BAN exemption** (add a non-banned
   name to ``_PROBE_EXEMPT``, or a real importer to ``_COVERAGE_EXEMPT``) →
   ``test_the_no_graph_guard_covers_every_module_that_reaches_a_store`` RED —
@@ -901,13 +914,21 @@ def _package_root_attributes(source: str) -> set[str]:
 
     ⛔ AND `from tortoise import __init__ as i` IS THE PACKAGE ROOT, not a
     submodule: `tortoise.__init__` IS the package, so a name bound from it is
-    bound to the package. It was the one spelling of the root that neither bound
-    loop saw — `ast.ImportFrom` was not read here at all, and `_imports_of`
-    FOLDS it onto the unbanned `tortoise` — so `i.FalkorDB` reached the guarded
-    client with every leg green (measured: once the submodule is loaded,
-    `import tortoise.__init__` sets the attribute on the parent, and
+    bound to the package. `ast.ImportFrom` was not read here at all, and
+    `_imports_of` FOLDS it onto the unbanned `tortoise` — so `i.FalkorDB` reached
+    the guarded client with every leg green (measured: once the submodule is
+    loaded, `import tortoise.__init__` sets the attribute on the parent, and
     `from tortoise import __init__ as i` then binds the PACKAGE, returning
     `tortoise.__init__._build_guarded_falkordb.<locals>.FalkorDB`).
+
+    ⛔ AND THE RELATIVE SPELLING IS THE SAME REACH. `from . import __init__`
+    resolves to this package exactly as the absolute form does (measured:
+    `exec('from . import __init__ as z; z.FalkorDB', __package__="tortoise")`
+    returns the guarded class), and the ban's own scope note names `from . import
+    x` as a resolved spelling — so a clause that read only `node.level == 0`
+    closed the absolute form and left the relative one live in BOTH legs. Both
+    forms are bound here; no tree file uses either, so the over-report costs
+    nothing (the leg still flags no file in the tree).
     """
     tree = ast.parse(source)
     nodes = list(ast.walk(tree))
@@ -917,10 +938,9 @@ def _package_root_attributes(source: str) -> set[str]:
             for alias in node.names:
                 if alias.name == "tortoise" or alias.name.startswith("tortoise."):
                     bound.add(alias.asname or "tortoise")
-        elif (
-            isinstance(node, ast.ImportFrom)
-            and node.level == 0
-            and node.module == "tortoise"
+        elif isinstance(node, ast.ImportFrom) and (
+            (node.level == 0 and node.module == "tortoise")
+            or (node.level == 1 and node.module is None)  # `from . import __init__`
         ):
             for alias in node.names:
                 if alias.name == "__init__":
@@ -1136,9 +1156,10 @@ def test_no_graph_dependency() -> None:
         "and an empty or misdirected read makes every assertion below vacuous")
     # ⛔ AND ITS PROVENANCE, not just its non-emptiness. The assert above closes the
     # EMPTY read only: `source = "# clean\n"` or a read of another tree module's
-    # file left every row green (measured: 101 passed each), because 208 of the
-    # 305 modules `_offending` finds clean. So the ban compares the string it
-    # audits against a fresh read of the file it claims to audit.
+    # file left every row green (measured: 101 passed each), because most of the
+    # 305 modules `_offending` finds clean — so a misdirected read certifies a file
+    # nobody audited. So the ban compares the string it audits against a fresh read
+    # of the file it claims to audit.
     assert source == Path(usage_signal.__file__).read_text(encoding="utf-8"), (
         "the ban must examine THIS module's CURRENT source: a cached constant or a "
         "misdirected read certifies a file the ban never looked at")
@@ -1422,6 +1443,24 @@ def test_no_graph_dependency_pins_the_package_root_EXPORT_form() -> None:
         "`from tortoise import __init__ as i` binds the PACKAGE root, so "
         "`i.FalkorDB` is the attribute spelling of the guarded client"
     )
+    # ⛔ AND THE RELATIVE FORM OF THE SAME SPELLING. `from . import __init__`
+    # resolves to THIS package exactly as the absolute form does — measured in the
+    # repo venv: `exec('from . import __init__ as z; z.FalkorDB',
+    # __package__="tortoise")` returns the guarded class — and the ban's own scope
+    # note lists `from . import x` among the spellings it resolves. A clause that
+    # read only `node.level == 0` closed the absolute form and left this one live in
+    # BOTH legs (`_offending` -> set(), `_module_reaches_a_store` -> False).
+    assert _offending(
+        "from . import __init__ as z\nc = z.FalkorDB\n"
+    ) == {"tortoise.FalkorDB"}, (
+        "the RELATIVE spelling binds the package root as well — the same reach as "
+        "`from tortoise import __init__`, one dot over")
+    assert _offending("from . import __init__\nc = __init__.FalkorDB\n") == {
+        "tortoise.FalkorDB"
+    }, "the unaliased relative form binds the package under `__init__`"
+    assert _module_reaches_a_store("from . import __init__ as z\nc = z.FalkorDB\n"), (
+        "the direction scan runs the SAME leg, so it must see the relative "
+        "spelling too — otherwise it certifies a ban it cannot see")
     assert _module_reaches_a_store(
         "import tortoise.__init__\nfrom tortoise import __init__ as i\nc = i.sdk\n"
     ), (
@@ -1707,6 +1746,29 @@ def test_the_direction_scan_agrees_with_the_ban_on_the_FOLDED_spelling() -> None
         "a module whose only reach is the `.__init__` spelling"
     )
     assert _offending(source) == {"tortoise.FalkorDB"}
+
+
+def test_the_scan_actually_calls_the_pinned_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """⛔ THE EDGE BETWEEN THE SCAN AND ITS LOOP IS A CLAIM, SO IT IS PINNED.
+
+    Feeding `_scan_modules` a synthetic module pins the LOOP, not the wiring: the
+    scan could go back to an inline two-leg body with `_scan_modules` left correct
+    and fully exercised, and every row stayed green (measured: 101 passed) — with
+    the attribute leg silently gone from the scan. That is the THIRD time this
+    class appeared in this file (predicate, then loop, now the call site), so the
+    edge is pinned directly: patch the loop with a sentinel and assert the scan
+    returns it. A scan that computes its own loop cannot.
+    """
+    sentinel = frozenset({"sentinel.from.a.patched.loop"})
+    monkeypatch.setattr(sys.modules[__name__], "_scan_modules", lambda sources: sentinel)
+    _modules_reaching_a_store.cache_clear()
+    try:
+        assert _modules_reaching_a_store() == sentinel, (
+            "`_modules_reaching_a_store` does not route through `_scan_modules`, "
+            "so the pinned loop can be bypassed and the scan silently narrowed"
+        )
+    finally:
+        _modules_reaching_a_store.cache_clear()
 
 
 def test_the_no_graph_guard_covers_every_module_that_reaches_a_store() -> None:
