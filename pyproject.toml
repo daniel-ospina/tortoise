@@ -43,7 +43,19 @@ dependencies = [
     # FLOOR only: dependency hygiene, NOT the fix for #3459. Durable owner
     # decision (2026-09-13). Full rationale: PR #3476.
     "redis>=7.1,<8",
-    "pyyaml>=6.0",
+    # CEILING, and it is not taste: PyYAML 6.0.4 regressed merge-key precedence
+    # (upstream yaml/pyyaml#953, open — the DoS fix in #937 dedupes merged pairs
+    # by the KEY VALUE's identity, so a merged mapping's own override is dropped;
+    # single-character keys only survived by CPython string interning). Measured
+    # here at 6.0.4: `mid: {<<: *b, x: 2}` merged by `top: {<<: *m, y: 3}`
+    # resolves to `{'x': 1, 'y': 3}` — the ANCHOR's stale pair — where
+    # `yaml.safe_load` at 6.0.3 gives `{'x': 2, 'y': 3}`. That value is
+    # `config/ci-surfaces.yml`'s own override winning over its anchor, so a
+    # silently-wrong parse mis-sizes every shard. LIFT this ceiling when a
+    # release after the upstream fix is out, and re-measure — never because the
+    # resolver offered a newer wheel (`tests/test_ci_selection.py` reds if the
+    # bound is dropped while the parser still disagrees with 6.0.3).
+    "pyyaml>=6.0,<6.0.4",
     "fastmcp==3.4.6",
     "prometheus-client>=0.16",
     "posthog>=3.0",
