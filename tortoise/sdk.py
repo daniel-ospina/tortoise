@@ -175,6 +175,11 @@ from .read_stages import (
     STAGE_RETRIEVAL,
 )
 from .read_stages import mark as _mark_read_stage
+# #14186: the ONE embedder seam. Imported as a module (not as names) because the
+# seam is a live configuration — `resolve_backing()` is re-read per call, and a
+# `from .embed_seam import BACKING_INPROCESS` would freeze the comparison at
+# import time and make a mid-process backing switch invisible here.
+from . import embed_seam as _embed_seam
 from .raw_state import (  # #3998: the absent-raw state
     WRITABLE_RAW_STATES,
     raw_entry,
@@ -46845,7 +46850,30 @@ class TortoiseSDK:
         # encoder bug or a shape error is not the flag's contract.
         query_vec = None
         _vec_reason: str | None = None
-        if strategies.get("vector") and query and query.strip():
+        # ── #14186: WHICH BACKING ENCODES THIS QUERY ────────────────────────
+        # The acquire ladder below is a bound on a LOCAL model LOAD (`#13528`):
+        # it waits at most `READ_EMBED_BUDGET_S`, then declines so the read's
+        # dense leg is declared rather than parked. With a worker or external
+        # backing there is no local load to bound and no local model to acquire
+        # — running the ladder anyway would (a) load a 432 MB model this process
+        # no longer uses and (b) DECLINE the read on a budget for a model that
+        # was never going to be consulted, which is a false degradation. So the
+        # seam is asked directly on that path, through the SAME decline
+        # vocabulary (`encode_failed`), and the stage timeline still attributes a
+        # breach inside it to `embed_encode` — the step that is actually slow.
+        _seam_backing = _embed_seam.resolve_backing()
+        _seam_remote = _seam_backing != _embed_seam.BACKING_INPROCESS
+        if strategies.get("vector") and query and query.strip() and _seam_remote:
+            _mark_read_stage(STAGE_EMBED_ENCODE)
+            try:
+                query_vec = _embed_seam.encode_query(_dense_query)
+                if query_vec is None:
+                    # The backing answered "encoder unavailable" — the same
+                    # designed absence the local ladder records.
+                    _vec_reason = "encoder_unavailable"
+            except Exception:  # noqa: BLE001, RUF100
+                _vec_reason = "encode_failed"
+        elif strategies.get("vector") and query and query.strip():
             from .embeddings import READ_EMBED_BUDGET_S, EmbeddingModel
             from .exceptions import EmbedderUnavailableError
             # #10893: stage marks for the wait-bound breach. `mark` is a NO-OP
@@ -46920,7 +46948,14 @@ class TortoiseSDK:
             elif model is not None:
                 _mark_read_stage(STAGE_EMBED_ENCODE)
                 try:
-                    query_vec = model.encode([_dense_query])[0].tolist()
+                    # #14186: the encode routes through the seam. For the
+                    # in-process backing this is the pre-#14186 call exactly
+                    # (`EmbeddingModel.get()` + `ensure_embed_threads()` +
+                    # `model.encode([text])`), now with the query coalesced
+                    # behind the backing's bounded window.
+                    query_vec = _embed_seam.encode_query(_dense_query)
+                    if query_vec is None:
+                        _vec_reason = "encode_failed"
                 except Exception:  # noqa: BLE001, RUF100
                     _vec_reason = "encode_failed"
         if _vec_reason is not None and status_trace is not None:
@@ -49484,11 +49519,20 @@ class TortoiseSDK:
             raise  # #5275: REQUIRED — fail loud, never a silent fallback
         except Exception:  # noqa: BLE001, RUF100
             model = None
-        if model is None:
+        # ⛔ #14186: with a worker or external backing there is no local encoder
+        # to acquire, so `model is None` is not a stand-down — the seam carries
+        # its own. Only the in-process backing reads this as "no dense leg".
+        if model is None and \
+                _embed_seam.resolve_backing() == _embed_seam.BACKING_INPROCESS:
             return None
         try:
-            # THE bounded extra embed: one composed string, one vector.
-            expanded_vec = model.encode([composed])[0].tolist()
+            # THE bounded extra embed: one composed string, one vector. Routed
+            # through the seam's coalescer so it can ride the SAME batch as the
+            # primary query embed above rather than paying a second round trip
+            # (#14186).
+            expanded_vec = _embed_seam.encode_query(composed)
+            if expanded_vec is None:
+                return None
         except Exception:  # noqa: BLE001, RUF100
             _logger.warning(
                 "C2 dense expansion encode failed — keeping the original "

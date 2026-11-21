@@ -1,0 +1,1177 @@
+"""#14186 — ONE embedder seam: in-process | worker | external, plus bounded
+micro-batching of query embeds.
+
+WHY THIS EXISTS. The query's embedding runs *inside* the request, on the same
+shared cores that serve everything else, and it costs 2-4 s there (measured;
+``embed_encode`` is 2,078-4,003 ms inside a live search). Every comparable puts
+that step behind a worker, a purpose-built index, or an API
+(``docs/architecture/SCALING-ROADMAP.md`` §1 on branch
+``plan-private-beta-scale``). The two gaps are **the same change**: to move the
+encode out of the request you need a seam, and the seam is where batching
+belongs — a batch is worthless without a queue, and a queue without a bound
+trades tail latency for throughput.
+
+THREE PROPERTIES THIS MODULE GUARANTEES, and the constraint each one serves.
+
+1. **ONE interface, THREE backings, chosen by config** — ``TORTOISE_EMBED_BACKING``
+   ∈ :data:`BACKINGS`. Every caller asks the seam; the backing decides *where*
+   the work runs. Switching backings is an environment change and nothing else
+   — no call site moves, no code changes, no redeploy of a different branch.
+   ⛔ The seam deliberately does **not** pick a vendor: the external backing
+   speaks a documented, vendor-neutral JSON contract (see
+   :class:`ExternalBacking`), so an operator can point it at any provider and
+   reverse the choice by unsetting one variable.
+
+2. **Micro-batching with a HARD maximum wait.** Concurrent query embeds are
+   coalesced into one encode, and the collection window is bounded from the
+   FIRST arrival — it is never extended by a later arrival. That is the
+   whole point: *"batching improves efficiency but can worsen tail latency"*,
+   and the bound is what stops a busy collector from turning a 40 ms wait into
+   an unbounded one. A batch also fires early when it reaches
+   :data:`DEFAULT_MAX_BATCH`. Both bounds are observable
+   (:func:`seam_status`) and neither is a suggestion.
+
+3. **p50/p95 per backing, exported.** An operator who moved the backing has no
+   way to tell whether it helped without a distribution, and a mean over a
+   bimodal latency profile answers the wrong question. See :func:`seam_status`,
+   published on ``GET /health`` under ``embed_seam``.
+
+WHAT IT DELIBERATELY DOES NOT DO.
+
+* ⛔ **It does not change the intra-op thread pin** (#10296, #14186's
+  contradiction test (c)). The coalescer runs encodes on ONE long-lived
+  collector thread, and every backing calls ``ensure_embed_threads()`` on the
+  thread that runs the forward pass — which is exactly the per-thread re-assert
+  #10296 landed, not a new pin. The pin's number is untouched; moving the
+  forward pass to a dedicated thread is a scheduling change whose effect must be
+  MEASURED before any number moves.
+* ⛔ **It does not derive or drop a record-truth vector** (#5004). The seam is a
+  *router*: it returns the backing's vectors or None, and every existing
+  decline/count path above it (``encode_for_row``'s bounded gate, the
+  ``#13224`` write budget, ``embed_metering``) keeps owning those decisions.
+  A backing that fails raises or returns None and the callers degrade exactly as
+  they do today.
+* ⛔ **It does not fall back silently.** A worker that will not start, or an
+  external endpoint that times out, is a DECLINE with a named reason
+  (:func:`last_decline`) — never a quiet second encode in-process. A silent
+  fallback is how "we moved the embedder off the request path" becomes untrue
+  while every dashboard says ok (the ``#7795`` class).
+* ⛔ **No MCP/SDK surface change.** Nothing here adds a tool or a public SDK
+  method; ``seam_status`` is a module function read by ``/health``.
+
+DEFAULT POSTURE AND ROLLBACK. Both are stated per backing in
+:data:`DEFAULT_MAX_WAIT_MS_FOR_BACKING` and in :func:`resolve_backing`:
+
+* ``inprocess`` (the default) — the collection window is **0 ms**. A warm
+  encode is 25-43 ms (#13224's measurement), so a 20 ms wait would be a
+  *comparable* addition to the very latency it is meant to hide; delaying every
+  query to batch it is a bad trade at that scale. With a 0 ms window the
+  collector still coalesces **opportunistically**: whatever is already queued
+  when the collector finishes the previous batch rides the next one, so a
+  loaded process batches without an uncontended query ever waiting. This is
+  continuous batching with no admission cost.
+* ``worker`` / ``external`` — the window is :data:`DEFAULT_MAX_WAIT_MS` (20 ms),
+  because there the marginal request cost is dominated by a round trip and
+  20 ms is noise beside it.
+* **Rollback is one variable.** ``TORTOISE_EMBED_BACKING=inprocess`` (or
+  unsetting it — the default) returns the process to the pre-#14186 path on the
+  next encode: same encode call, same thread pin, same decline semantics. The
+  seam is on the path either way; nothing has to be reverted in code, and no
+  state is left behind that a restart would need.
+"""
+from __future__ import annotations
+
+import collections
+import json
+import logging
+import math
+import os
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from collections.abc import Sequence
+from typing import Any, Protocol
+
+_logger = logging.getLogger(__name__)
+
+# ── the closed vocabulary ─────────────────────────────────────────────────────
+
+#: The in-process embedder — :class:`tortoise.embeddings.EmbeddingModel`. The
+#: DEFAULT, and the behaviour every process had before #14186.
+BACKING_INPROCESS = "inprocess"
+#: A local worker PROCESS (:mod:`tortoise.embed_worker`) spoken to over a UNIX
+#: socket. Same encoder, out of the serving process's address space and off its
+#: GIL — the step that makes the API tier disposable (Track S1).
+BACKING_WORKER = "worker"
+#: A remote HTTP endpoint with a documented, vendor-neutral JSON contract.
+BACKING_EXTERNAL = "external"
+
+#: The closed set. An unknown value is REFUSED at resolve time with a warning,
+#: never coerced — a typo'd backing that silently ran in-process would read as
+#: "the migration is done" while nothing moved (the fail-open class
+#: ``MEMORY.md`` records).
+BACKINGS: tuple[str, ...] = (BACKING_INPROCESS, BACKING_WORKER, BACKING_EXTERNAL)
+
+# ── configuration (all read per call, never frozen at import) ────────────────
+#
+# Per call, deliberately: a test, an operator's `fly ssh` shell, or a lane's
+# bulk job can retarget the seam without a process restart, and a lever that
+# only reaches the code at import time is not the lever this module documents
+# (the #10296 lesson, one layer up).
+
+ENV_BACKING = "TORTOISE_EMBED_BACKING"
+ENV_MAX_WAIT_MS = "TORTOISE_EMBED_MAX_WAIT_MS"
+ENV_MAX_BATCH = "TORTOISE_EMBED_MAX_BATCH"
+ENV_TIMEOUT_S = "TORTOISE_EMBED_QUERY_TIMEOUT_S"
+#: Where the worker listens. Default: a per-process path under the temp dir.
+ENV_WORKER_SOCKET = "TORTOISE_EMBED_WORKER_SOCKET"
+#: The interpreter the worker is spawned with. Default: the parent's own
+#: ``sys.executable``, so the worker imports the SAME tortoise and the same
+#: extras — a worker on a different interpreter is a different encoder, and
+#: that divergence would present as "the vectors changed after we moved the
+#: embedder" with no reason in it.
+ENV_WORKER_PYTHON = "TORTOISE_EMBED_WORKER_PYTHON"
+ENV_EXTERNAL_URL = "TORTOISE_EMBED_EXTERNAL_URL"
+ENV_EXTERNAL_TOKEN = "TORTOISE_EMBED_EXTERNAL_TOKEN"
+ENV_EXTERNAL_MODEL = "TORTOISE_EMBED_EXTERNAL_MODEL"
+
+#: The interactive-traffic collection window (ms) for the backings where a round
+#: trip dominates. SCALING-ROADMAP §1 quotes "small micro-batches for interactive
+#: traffic … a hard maximum batch wait"; the issue's own example bound is
+#: "<= 50 ms". 20 ms is inside it and is a small fraction of the 2-4 s encode it
+#: batches — the point of the number is that the tail it adds is BOUNDED and
+#: visible, not that it is zero.
+DEFAULT_MAX_WAIT_MS = 20.0
+
+#: The per-backing window. See the module docstring's "DEFAULT POSTURE".
+DEFAULT_MAX_WAIT_MS_FOR_BACKING: dict[str, float] = {
+    # ⛔ 0 is not "batching disabled" — it is "do not DELAY for a batch". The
+    # collector still drains whatever arrived while the previous encode ran, so
+    # a loaded process coalesces and an idle one never waits. A 20 ms window
+    # here would be a comparable addition to the 25-43 ms warm encode it hides.
+    BACKING_INPROCESS: 0.0,
+    BACKING_WORKER: DEFAULT_MAX_WAIT_MS,
+    BACKING_EXTERNAL: DEFAULT_MAX_WAIT_MS,
+}
+
+#: The largest batch a single encode call will carry. Matches the encoder's own
+#: historical ``batch_size`` default (32) and the 32-in-11.6 s measurement the
+#: issue quotes (0.36 s/item). A larger batch raises per-item tail latency
+#: without improving the per-item cost, so this is a ceiling, not a target.
+DEFAULT_MAX_BATCH = 32
+
+#: How long a query embed may take ONCE THE BATCH HAS FIRED. Bounds the worker
+#: and external backings, which can otherwise hang on a dead socket or a stalled
+#: provider; the in-process backing keeps today's unbounded behaviour because a
+#: forward pass it cannot interrupt anyway would only turn into "we abandoned a
+#: vector that was about to arrive" (#5004's class).
+DEFAULT_TIMEOUT_S = 30.0
+
+#: How many observations each latency reservoir keeps. Enough for a useful p95
+#: (a p95 over fewer than ~100 samples is an interpolation, not a measurement)
+#: and small enough that the memory is a rounding error against a 432 MB model.
+LATENCY_WINDOW = 512
+
+
+# ── small total helpers ──────────────────────────────────────────────────────
+
+
+def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
+    """Read a float lever, refusing an unusable value with a warning.
+
+    TOTAL: an unparseable value falls back to ``default`` and says so. Silently
+    coercing ``"20ms"`` to 0 would disable the very bound this module exists to
+    enforce, and the operator would have no way to see that.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        value = -1.0
+    if not (value >= minimum) or value != value:  # NaN is not >= anything
+        _logger.warning(
+            "%s=%r is not a number >= %s — using the default %s",
+            name, raw, minimum, default)
+        return default
+    return value
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    """Integer twin of :func:`_env_float` — same total, same refusal."""
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        value = 0
+    if value < minimum:
+        _logger.warning(
+            "%s=%r is not an integer >= %s — using the default %s",
+            name, raw, minimum, default)
+        return default
+    return value
+
+
+def resolve_backing() -> str:
+    """The active backing name, from ``TORTOISE_EMBED_BACKING``.
+
+    Unset ⇒ :data:`BACKING_INPROCESS` (the pre-#14186 path). An unknown value is
+    REFUSED and the default applies, with a WARNING naming it: a typo must not
+    be able to present as "the seam is deployed" while the encode is still in the
+    request.
+    """
+    raw = os.environ.get(ENV_BACKING)
+    if raw is None or not raw.strip():
+        return BACKING_INPROCESS
+    value = raw.strip().lower()
+    if value not in BACKINGS:
+        _logger.warning(
+            "%s=%r is not one of %s — refusing it and running %s (#14186)",
+            ENV_BACKING, raw, "/".join(BACKINGS), BACKING_INPROCESS)
+        return BACKING_INPROCESS
+    return value
+
+
+def resolve_max_wait_ms(backing: str | None = None) -> float:
+    """The collection window in ms — the operator's lever, else the backing default."""
+    name = backing if backing is not None else resolve_backing()
+    default = DEFAULT_MAX_WAIT_MS_FOR_BACKING.get(name, DEFAULT_MAX_WAIT_MS)
+    return _env_float(ENV_MAX_WAIT_MS, default, minimum=0.0)
+
+
+def resolve_max_batch() -> int:
+    """The ceiling on one encode's batch length."""
+    return _env_int(ENV_MAX_BATCH, DEFAULT_MAX_BATCH, minimum=1)
+
+
+def resolve_timeout_s() -> float:
+    """The bound on one fired request's round trip (worker / external)."""
+    return _env_float(ENV_TIMEOUT_S, DEFAULT_TIMEOUT_S, minimum=0.1)
+
+
+# ── vector normalisation ─────────────────────────────────────────────────────
+
+
+def vector_to_list(vector: Any) -> list[float]:
+    """One vector as plain Python floats.
+
+    ONE definition, because it is reached from two directions and the failure
+    mode is silent: ``compute_embeddings`` used to spell ``vec.tolist()`` and
+    would raise ``AttributeError`` on a plain list — inside a ``try`` whose
+    handler returns ``[None] * n`` (a whole batch of successfully computed
+    vectors discarded, the ``#4280`` shape). Accepting both shapes is strictly
+    safer than requiring the one the encoder currently happens to return.
+    """
+    tolist = getattr(vector, "tolist", None)
+    if tolist is not None:
+        return list(tolist())
+    return [float(x) for x in vector]
+
+
+# ── the backing protocol ─────────────────────────────────────────────────────
+
+
+class EmbeddingBacking(Protocol):
+    """What a backing must provide. Three methods, no hidden lifecycle.
+
+    ``encode`` returns one vector per input text IN INPUT ORDER, raises on
+    failure (or returns ``None`` where the encoder is unavailable — the
+    documented ``EmbeddingModel.get()`` contract), and never returns a SHORT
+    list: the callers index the result per input, and a short batch would raise
+    ``IndexError`` inside a write loop (the ``encode_batch_for_store`` guard).
+
+    A backing is constructed with no arguments and resolved lazily, so selecting
+    one costs nothing at import and a bad configuration is a DECLINE at first
+    use rather than an import-time crash.
+    """
+
+    name: str
+
+    def encode(self, texts: Sequence[str], *,
+               timeout_s: float | None = None) -> list[list[float]] | None: ...
+
+    def close(self) -> None: ...
+
+    def describe(self) -> dict: ...
+
+
+class InProcessBacking:
+    """The default: :class:`tortoise.embeddings.EmbeddingModel`, in this process.
+
+    ⛔ THE ENCODE CALL IS DELIBERATELY UNCHANGED. It is ``model.encode(list)``
+    with no kwargs, exactly what ``compute_embeddings`` and the read path call
+    today, because this backing's entire job is to be the pre-#14186 behaviour
+    behind a new interface. A nice-looking extra kwarg here would raise
+    ``TypeError`` inside every in-repo double that declares a narrower
+    signature, and that ``TypeError`` is swallowed by the write paths' blanket
+    handlers into "no vector stored" — the same fail-open in a new place (see
+    ``compute_embeddings``'s own note about its narrow ``(texts, max_tokens)``
+    shape).
+    """
+
+    name = BACKING_INPROCESS
+
+    def _resolved(self) -> Any:
+        # Imported lazily: `embeddings` imports this module, so a module-level
+        # import here is the cycle. The local import costs a dict lookup after
+        # the first call.
+        #
+        # ⛔ THE MODEL IS RE-RESOLVED ON EVERY CALL, never cached on this object.
+        # `EmbeddingModel.get()` can legitimately return a DIFFERENT instance
+        # later (``_reset()``, a transient load failure clearing ``_instance``,
+        # a test that swaps the loader), and a cached handle would then keep
+        # encoding with a model the process has already discarded — the "which
+        # embedder produced this vector" question #1349 opened. `get()` is a
+        # few attribute reads on the warm path, so the cache would buy nothing
+        # and risk exactly that.
+        from .embeddings import EmbeddingModel
+
+        return EmbeddingModel.get()
+
+    def encode(self, texts: Sequence[str], *,
+               timeout_s: float | None = None) -> list[list[float]] | None:
+        model = self._resolved()
+        if model is None:
+            return None
+        from .embeddings import ensure_embed_threads
+
+        # ⛔ #10296: the pin is re-asserted on the thread that RUNS the forward
+        # pass. Under this seam that thread is the coalescer's collector, not
+        # the request's — which is precisely why the re-assert has to be here,
+        # at the encode, and not at the call site. The pin's NUMBER is not
+        # touched.
+        ensure_embed_threads()
+        vecs = model.encode(list(texts))
+        if vecs is None:
+            return None
+        rows = [vector_to_list(row) for row in vecs]
+        if len(rows) != len(texts):
+            raise ValueError(
+                f"backing {self.name!r} returned {len(rows)} row(s) for "
+                f"{len(texts)} text(s)")
+        return rows
+
+    def close(self) -> None:
+        return None
+
+    def describe(self) -> dict:
+        return {"backing": self.name, "encoder": "EmbeddingModel (in-process)"}
+
+
+class _LineJSONClient:
+    """A newline-delimited JSON request/response client over a stream socket.
+
+    The wire is deliberately trivial — one JSON object per line, no framing
+    library, no pickle — because (a) a length-prefixed binary protocol on a
+    local socket buys nothing at these sizes and (b) ``json`` is the one
+    serialiser both this module and any future non-Python worker already speak.
+    A socket is opened per request under a mute x, since the seam's collector
+    thread is the only client and a persistent connection would only add a
+    half-open failure mode to reason about.
+    """
+
+    def __init__(self, address: str) -> None:
+        self._address = address
+
+    def open_stream(self, timeout_s: float) -> socket.socket:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(timeout_s)
+        sock.connect(self._address)
+        return sock
+
+    def request(self, payload: dict, *, timeout_s: float) -> dict:
+        with self.open_stream(timeout_s) as sock:
+            sock.sendall(
+                (json.dumps(payload) + "\n").encode("utf-8"))
+            buffer = b""
+            while b"\n" not in buffer:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    raise ConnectionError(
+                        "worker closed the connection before answering")
+                buffer += chunk
+                if len(buffer) > 64 * 1024 * 1024:
+                    raise ConnectionError(
+                        "worker answer exceeded 64 MiB without a newline")
+        line, _, _rest = buffer.partition(b"\n")
+        return json.loads(line.decode("utf-8"))
+
+
+class WorkerBacking:
+    """A local worker PROCESS (:mod:`tortoise.embed_worker`) over a UNIX socket.
+
+    WHY A PROCESS AND NOT A THREAD. The forward pass releases the GIL only
+    inside torch, and the cold import alone is 156.5 s (#13674); a worker
+    process keeps both off the serving process's address space, which is the
+    prerequisite for "servers are disposable caches" (SCALING-ROADMAP §2.5,
+    Track S1).
+
+    ⛔ IT NEVER FALLS BACK TO IN-PROCESS. A worker that will not start, or that
+    dies mid-request, is a DECLINE recorded by :func:`last_decline` and surfaced
+    by :func:`seam_status` — the caller degrades exactly as it does for a broken
+    in-process embedder (no vector, the leg declared). Quietly encoding locally
+    would hide the migration's failure and put the 2-4 s back inside the
+    request, which is the entire thing #14186 exists to remove.
+
+    The child is spawned WITH the parent's interpreter by default and dies with
+    the parent: it reads stdin and exits when that pipe closes, so an OOM-killed
+    parent or a SIGKILLed lane cannot leave an orphaned 432 MB worker behind.
+    """
+
+    name = BACKING_WORKER
+
+    def __init__(self) -> None:
+        self._proc: subprocess.Popen | None = None
+        self._address: str | None = None
+        self._lock = threading.Lock()
+
+    def socket_path(self) -> str:
+        path = os.environ.get(ENV_WORKER_SOCKET)
+        if path and path.strip():
+            return path.strip()
+        return os.path.join(
+            os.environ.get("TMPDIR", "/tmp") or "/tmp",
+            f"tortoise-embed-worker-{os.getpid()}.sock")
+
+    def _ensure_started(self, timeout_s: float) -> str:
+        with self._lock:
+            if self._proc is not None and self._proc.poll() is None:
+                assert self._address is not None
+                return self._address
+            address = self.socket_path()
+            with _swallow_oserror():
+                os.unlink(address)
+            python = (os.environ.get(ENV_WORKER_PYTHON) or sys.executable)
+            # ⛔ `-m tortoise.embed_worker` with the parent's interpreter, so the
+            # worker imports the SAME tortoise and the same extras. stdin is a
+            # pipe the child watches: our death closes it, the child exits.
+            proc = subprocess.Popen(
+                [python, "-m", "tortoise.embed_worker", "--socket", address],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+            )
+            deadline = time.monotonic() + max(timeout_s, 1.0)
+            while time.monotonic() < deadline:
+                if proc.poll() is not None:
+                    raise RuntimeError(
+                        f"embed worker exited during start-up (code "
+                        f"{proc.returncode}) — see its stderr")
+                if os.path.exists(address):
+                    self._proc, self._address = proc, address
+                    _logger.info(
+                        "embed seam: worker started (pid %s, socket %s) — "
+                        "query embeds now run outside this process (#14186)",
+                        proc.pid, address)
+                    return address
+                time.sleep(0.02)
+            proc.kill()
+            raise TimeoutError(
+                f"embed worker did not create {address} within {timeout_s}s")
+
+    def encode(self, texts: Sequence[str], *,
+               timeout_s: float | None = None) -> list[list[float]]:
+        budget = resolve_timeout_s() if timeout_s is None else timeout_s
+        address = self._ensure_started(budget)
+        answer = _LineJSONClient(address).request(
+            {"texts": list(texts)}, timeout_s=budget)
+        error = answer.get("error")
+        if error:
+            raise RuntimeError(f"embed worker: {error}")
+        rows = [[float(x) for x in row] for row in answer.get("vectors") or ()]
+        if len(rows) != len(texts):
+            raise ValueError(
+                f"embed worker returned {len(rows)} row(s) for "
+                f"{len(texts)} text(s)")
+        return rows
+
+    def close(self) -> None:
+        with self._lock:
+            proc, address = self._proc, self._address
+            self._proc = self._address = None
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            if address:
+                with _swallow_oserror():
+                    os.unlink(address)
+
+    def describe(self) -> dict:
+        alive = self._proc is not None and self._proc.poll() is None
+        return {
+            "backing": self.name,
+            "worker_pid": None if self._proc is None else self._proc.pid,
+            "worker_alive": alive,
+            "socket": self.socket_path(),
+        }
+
+
+class ExternalBacking:
+    """A remote HTTP endpoint, spoken to with a VENDOR-NEUTRAL contract.
+
+    ⛔ NO VENDOR IS BAKED IN (the issue's contradiction test (d)). The seam
+    posts a documented shape and accepts any of the three answer shapes every
+    embedding provider already publishes, so pointing it at a different provider
+    is a URL change. That is what makes the choice reversible, and reversibility
+    is the reason this backing is allowed to exist at all before a spend gate
+    approves one.
+
+    REQUEST::
+
+        POST <TORTOISE_EMBED_EXTERNAL_URL>
+        Authorization: Bearer <TORTOISE_EMBED_EXTERNAL_TOKEN>   (omitted when unset)
+        {"model": "<TORTOISE_EMBED_EXTERNAL_MODEL, or the pinned local id>",
+         "texts": ["…", "…"]}
+
+    ANSWER — any one of, in this order of preference::
+
+        {"vectors":   [[float, …], …]}
+        {"embeddings":[[float, …], …]}
+        {"data":      [{"embedding": [float, …]}, …]}     # the OpenAI shape
+
+    The three are accepted rather than one because refusing two of them would
+    force an adapter service in front of a provider that already answers
+    correctly — a vendor choice made by omission.
+
+    ⛔ The WIDTH is not checked here. ``encode_for_store``'s ``_degrade_to_width``
+    is the ONE place a store's width constraint is applied (#4280), and a
+    second check here would either duplicate it or disagree with it.
+    """
+
+    name = BACKING_EXTERNAL
+
+    def url(self) -> str:
+        return (os.environ.get(ENV_EXTERNAL_URL) or "").strip()
+
+    def encode(self, texts: Sequence[str], *,
+               timeout_s: float | None = None) -> list[list[float]]:
+        url = self.url()
+        if not url:
+            raise RuntimeError(
+                f"{ENV_EXTERNAL_URL} is unset — the external embedding backing "
+                f"has nowhere to send work (#14186)")
+        budget = resolve_timeout_s() if timeout_s is None else timeout_s
+        model = (os.environ.get(ENV_EXTERNAL_MODEL) or "").strip()
+        if not model:
+            from .embeddings import EMBEDDING_MODEL
+
+            model = EMBEDDING_MODEL
+        body = json.dumps({"model": model, "texts": list(texts)}).encode("utf-8")
+        headers = {"content-type": "application/json"}
+        token = (os.environ.get(ENV_EXTERNAL_TOKEN) or "").strip()
+        if token:
+            headers["authorization"] = f"Bearer {token}"
+        request = urllib.request.Request(
+            url, data=body, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=budget) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")[:400]
+            raise RuntimeError(
+                f"external embedding endpoint answered HTTP {exc.code}: "
+                f"{detail}") from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(
+                f"external embedding endpoint unreachable: {exc.reason}") from exc
+        rows = _external_rows(payload)
+        if len(rows) != len(texts):
+            raise ValueError(
+                f"external embedding endpoint returned {len(rows)} row(s) for "
+                f"{len(texts)} text(s)")
+        return rows
+
+    def close(self) -> None:
+        return None
+
+    def describe(self) -> dict:
+        return {
+            "backing": self.name,
+            "url": self.url() or None,
+            "model": (os.environ.get(ENV_EXTERNAL_MODEL) or None),
+        }
+
+
+def _external_rows(payload: Any) -> list[list[float]]:
+    """Pick the vector table out of an external answer (:class:`ExternalBacking`).
+
+    Three accepted shapes, one normalisation. An answer that carries none of
+    them raises with the keys it DID carry — a validator that says "bad shape"
+    and nothing else is how a provider migration turns into a silent
+    ``encode_failed`` degrade on every read.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"external embedding answer is a {type(payload).__name__}, not an "
+            f"object")
+    for key in ("vectors", "embeddings"):
+        table = payload.get(key)
+        if isinstance(table, list):
+            return [[float(x) for x in row] for row in table]
+    data = payload.get("data")
+    if isinstance(data, list):
+        try:
+            return [[float(x) for x in item["embedding"]] for item in data]
+        except (KeyError, TypeError) as exc:
+            raise ValueError(
+                f"external embedding answer's `data` is not the OpenAI shape "
+                f"(every item needs an `embedding` list): {exc}") from exc
+    raise ValueError(
+        "external embedding answer carries none of vectors/embeddings/data "
+        f"(keys: {sorted(payload)})")
+
+
+class _swallow_oserror:
+    """Ignore ``OSError`` around a best-effort unlink (a missing path is fine)."""
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return exc_type is not None and issubclass(exc_type, OSError)
+
+
+# ── the coalescer ────────────────────────────────────────────────────────────
+
+
+class _Ticket:
+    """One queued query embed: its text, its result, and the event that fires it."""
+
+    __slots__ = ("done", "error", "future", "submitted_at", "text", "vectors")
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.submitted_at = time.monotonic()
+        self.done = threading.Event()
+        self.vectors: list[list[float]] | None = None
+        self.error: BaseException | None = None
+        #: How long this ticket waited before its batch fired (ms). Measured,
+        #: not inferred: it is the number that shows whether the bound is being
+        #: respected, and the p95 of it is what the operator watches.
+        self.future = 0.0
+
+
+class _Latency:
+    """A bounded reservoir with ``p50``/``p95`` — one per measured quantity.
+
+    ⛔ A MEAN IS NOT A READING HERE. Encode latency is bimodal (a warm encode is
+    25-43 ms, a cold one seconds), so the mean lands in the valley between two
+    populations and describes neither. The two percentiles are what the issue
+    asks for and what an operator can act on.
+    """
+
+    __slots__ = ("_lock", "_samples", "_total")
+
+    def __init__(self, window: int = LATENCY_WINDOW) -> None:
+        self._lock = threading.Lock()
+        self._samples: collections.deque[float] = collections.deque(maxlen=window)
+        #: Every observation ever, so "how many encodes has this process done"
+        #: is answerable even after the reservoir has rolled over.
+        self._total = 0
+
+    def note(self, value: float) -> None:
+        with self._lock:
+            self._samples.append(value)
+            self._total += 1
+
+    def reset(self) -> None:
+        with self._lock:
+            self._samples.clear()
+            self._total = 0
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            samples = sorted(self._samples)
+            total = self._total
+        view: dict[str, Any] = {"n": total, "window": len(samples)}
+        if samples:
+            view["p50"] = round(_percentile(samples, 0.50), 2)
+            view["p95"] = round(_percentile(samples, 0.95), 2)
+            view["max"] = round(samples[-1], 2)
+        else:
+            # None, never 0: "no observation" and "cost nothing" are different
+            # claims, and a dashboard that cannot tell them apart reads an
+            # unwarmed process as an infinitely fast one.
+            view["p50"] = view["p95"] = view["max"] = None
+        return view
+
+
+def _percentile(sorted_samples: list[float], quantile: float) -> float:
+    """Nearest-rank percentile over an already-sorted, non-empty list.
+
+    Nearest-rank rather than linear interpolation on purpose: every published
+    value is then a latency the process ACTUALLY OBSERVED, which is what makes
+    "p95 = 1.9 s" auditable against a log line. An interpolated percentile can
+    name a number nothing ever measured.
+
+    The formula is the textbook one — the ``ceil(q * n)``-th smallest, 1-indexed
+    — rather than ``round(q * (n - 1))``, which is the interpolating variant's
+    index and gives p50 = the upper of the two middles on an even sample. One
+    definition, so a reading quoted from ``/health`` matches one computed from
+    the same numbers by hand.
+    """
+    index = math.ceil(quantile * len(sorted_samples)) - 1
+    return sorted_samples[min(max(index, 0), len(sorted_samples) - 1)]
+
+
+class _Collector:
+    """The bounded collection window: one queue, one thread, one hard deadline.
+
+    THE BOUND, PRECISELY. The window opens when the FIRST ticket of a batch is
+    dequeued and closes ``max_wait_ms`` later — OR earlier, when the batch
+    reaches ``max_batch``. A ticket that arrives at 19.9 ms of a 20 ms window is
+    served by the batch that fires at 20 ms; a ticket that arrives at 20.1 ms
+    joins the NEXT batch, which opens a FRESH window of its own. The deadline is
+    therefore never extended by an arrival, which is the property the batching
+    literature demands and the one an "wait until the queue is empty or N ms
+    since the LAST arrival" design loses.
+
+    WHY A THREAD AND NOT ``asyncio``. The seam is called from synchronous code
+    on the read lane (``CONTROL_PLANE_READ_WORKERS`` daemon workers) and from
+    the write folds, which run on their own threads. A dedicated blocking
+    collector serves all of them with one implementation, and the encode must
+    run on a thread whose intra-op pin we can re-assert (#10296) — an
+    ``asyncio`` task would run the forward pass on whichever loop thread
+    happened to be scheduled, so the pin would become a guess.
+
+    ⛔ ONE FORWARD PASS AT A TIME. The collector is a single thread and the
+    backing is called from it, so encodes are serialised. That is deliberate: N
+    concurrent encodes on shared cores are what produced the 2-4 s measurement,
+    and serialising them behind a batching queue is the scheduling change the
+    issue asks for. It also gives the pin one place to be asserted.
+    """
+
+    def __init__(self, backing_factory) -> None:
+        self._backing_factory = backing_factory
+        self._lock = threading.Lock()
+        self._queue: collections.deque[_Ticket] = collections.deque()
+        self._wakeup = threading.Condition(self._lock)
+        self._thread: threading.Thread | None = None
+        self._stop = False
+        #: Per-backing counters. Reset by :func:`reset_seam`.
+        self.submissions = 0
+        self.batches = 0
+        self.coalesced = 0
+        self.declines = 0
+        self.wait_ms = _Latency()
+        self.encode_ms = _Latency()
+        self.batch_size = _Latency()
+
+    # ── submission (any thread) ─────────────────────────────────────────
+
+    def submit(self, text: str, *, timeout_s: float) -> list[list[float]] | None:
+        """Queue one query embed and block until its batch has answered."""
+        ticket = _Ticket(text)
+        with self._wakeup:
+            self._queue.append(ticket)
+            self.submissions += 1
+            self._ensure_thread_unlocked()
+            self._wakeup.notify()
+        # ⛔ The wait is bounded by the collection window PLUS one encode's own
+        # bound. A ticket whose batch has not fired by then is a DECLINE, not an
+        # indefinite park: a wedged collector must not be able to hang a read
+        # lane worker, which is the #13528 shape this seam sits under.
+        fired_by = resolve_max_wait_ms() / 1000.0 + timeout_s + 1.0
+        if not ticket.done.wait(fired_by):
+            # Drop it so the collector does not encode a text nobody is waiting
+            # for (the caller has already declined).
+            with self._lock, _swallow_value_error():
+                self._queue.remove(ticket)
+            raise TimeoutError(
+                f"embed seam: no batch fired for this query within "
+                f"{fired_by:.2f}s"
+                + (f" (last decline: {last_decline()})" if last_decline() else ""))
+        if ticket.error is not None:
+            raise ticket.error
+        return ticket.vectors
+
+    # ── the collector thread ────────────────────────────────────────────
+
+    def _ensure_thread_unlocked(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop = False
+        self._thread = threading.Thread(
+            target=self._run, name="embed-seam-collector", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            batch = self._collect()
+            if batch is None:
+                return
+            self._fire(batch)
+
+    def _collect(self) -> list[_Ticket] | None:
+        """Take the next batch, honouring the hard window. ``None`` ⇒ stop."""
+        with self._wakeup:
+            while not self._queue and not self._stop:
+                self._wakeup.wait()
+            if self._stop and not self._queue:
+                return None
+            batch = [self._queue.popleft()]
+        window_s = resolve_max_wait_ms() / 1000.0
+        limit = resolve_max_batch()
+        if window_s > 0.0:
+            # The deadline is anchored to the batch's FIRST ticket, not to the
+            # last arrival — that is the hard bound. `time.monotonic` is the
+            # clock the budgets in this tree already use (#10893's rule).
+            deadline = batch[0].submitted_at + window_s
+            while len(batch) < limit:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    break
+                with self._lock:
+                    if not self._queue:
+                        # Nothing to take yet, but the window is still open:
+                        # sleep on the condition, never on a poll, so an
+                        # arrival wakes us immediately and a spurious wakeup
+                        # costs one loop iteration.
+                        self._wakeup.wait(min(remaining, 0.005))
+                        continue
+                    while self._queue and len(batch) < limit:
+                        batch.append(self._queue.popleft())
+        else:
+            # Window of 0: take whatever ALREADY arrived while the previous
+            # encode ran, then fire. Opportunistic coalescing with no added
+            # latency — see DEFAULT_MAX_WAIT_MS_FOR_BACKING.
+            with self._lock:
+                while self._queue and len(batch) < limit:
+                    batch.append(self._queue.popleft())
+        return batch
+
+    def _fire(self, batch: list[_Ticket]) -> None:
+        """Encode ``batch`` in ONE call and hand each ticket its row."""
+        fired_at = time.monotonic()
+        for ticket in batch:
+            ticket.future = (fired_at - ticket.submitted_at) * 1000.0
+            self.wait_ms.note(ticket.future)
+        self.batches += 1
+        self.batch_size.note(float(len(batch)))
+        self.coalesced += len(batch) - 1
+        started = time.monotonic()
+        try:
+            backing = self._backing_factory()
+            rows = backing.encode([t.text for t in batch],
+                                  timeout_s=resolve_timeout_s())
+            if rows is not None and len(rows) != len(batch):
+                raise ValueError(
+                    f"backing returned {len(rows)} row(s) for {len(batch)} "
+                    f"text(s)")
+            error: BaseException | None = None
+        except BaseException as exc:
+            rows = None
+            error = exc
+            self.declines += 1
+            _note_decline(exc)
+        self.encode_ms.note((time.monotonic() - started) * 1000.0)
+        for index, ticket in enumerate(batch):
+            if error is None and rows is not None:
+                ticket.vectors = [rows[index]]
+            else:
+                ticket.error = error
+            ticket.done.set()
+
+    def stop(self) -> None:
+        with self._wakeup:
+            self._stop = True
+            self._wakeup.notify_all()
+        thread = self._thread
+        if thread is not None and thread.is_alive() and \
+                thread is not threading.current_thread():
+            thread.join(timeout=5.0)
+
+    def close(self) -> None:
+        self.stop()
+
+    def snapshot(self) -> dict:
+        return {
+            "submissions": self.submissions,
+            "batches": self.batches,
+            "coalesced": self.coalesced,
+            "declines": self.declines,
+            # ⛔ The MEDIAN batch, not a mean: batch size is the count of
+            # whoever happened to be queued, so a mean is dominated by the
+            # rare large batch and answers no question an operator asks.
+            "median_batch": (
+                self.batch_size.snapshot().get("p50") if self.batches else None),
+            "wait_ms": self.wait_ms.snapshot(),
+            "encode_ms": self.encode_ms.snapshot(),
+            "batch_size": self.batch_size.snapshot(),
+        }
+
+
+class _swallow_value_error:
+    """Ignore ``ValueError`` around a best-effort ``deque.remove``."""
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return exc_type is not None and issubclass(exc_type, ValueError)
+
+
+# ── the seam's process-wide state ────────────────────────────────────────────
+
+_lock = threading.Lock()
+#: The instantiated backing, keyed by name, so a config change retires the old
+#: one (its worker is closed) rather than leaving two alive.
+_backing: EmbeddingBacking | None = None
+_backing_name: str | None = None
+_collector: _Collector | None = None
+#: A test-installed backing. Never set by production code; :func:`reset_seam`
+#: clears it. Declared here (rather than in the tests) because the seam must be
+#: injectable WITHOUT env manipulation — a test that had to set an env var to
+#: exercise a backing would be testing the resolver, not the seam.
+_injected: EmbeddingBacking | None = None
+#: The most recent decline, so an operator can read WHY without a log search.
+_last_decline: str | None = None
+_last_decline_at: float | None = None
+
+
+def _note_decline(exc: BaseException) -> None:
+    """Record the reason the last backing call failed. TOTAL."""
+    global _last_decline, _last_decline_at
+    _last_decline = f"{type(exc).__name__}: {exc}"[:400]
+    _last_decline_at = time.monotonic()
+
+
+def last_decline() -> str | None:
+    """The last backing failure, or ``None``. Read by :func:`seam_status`."""
+    return _last_decline
+
+
+def _construct(name: str) -> EmbeddingBacking:
+    if name == BACKING_WORKER:
+        return WorkerBacking()
+    if name == BACKING_EXTERNAL:
+        return ExternalBacking()
+    return InProcessBacking()
+
+
+def active_backing() -> EmbeddingBacking:
+    """The backing this process is using, constructing it on first use."""
+    global _backing, _backing_name, _collector
+    with _lock:
+        name = resolve_backing()
+        if _injected is not None:
+            return _injected
+        if _backing is not None and _backing_name == name:
+            return _backing
+        if _backing is not None:
+            # The lever moved: retire the old backing (a worker process is
+            # closed, not leaked) rather than leaving two encoders resident.
+            previous, _backing = _backing, None
+            with _swallow_base_exception():
+                previous.close()
+        if _collector is not None:
+            _collector.stop()
+            _collector = None
+        _backing = _construct(name)
+        _backing_name = name
+        _logger.info(
+            "embed seam: backing resolved to %r (wait %sms, batch %s) "
+            "(#14186)", name, resolve_max_wait_ms(name), resolve_max_batch())
+        return _backing
+
+
+def install_backing(backing: EmbeddingBacking | None) -> None:
+    """Install a backing for tests (``None`` restores the configured one).
+
+    ⛔ Tests use this instead of env vars so they exercise the SEAM — the
+    coalescer, the bound, the percentile bookkeeping — rather than re-testing
+    :func:`resolve_backing`, which has its own rows.
+    """
+    global _injected, _collector
+    with _lock:
+        _injected = backing
+        if _collector is not None:
+            _collector.stop()
+            _collector = None
+
+
+class _swallow_base_exception:
+    """Ignore any failure raised while CLOSING a retired backing.
+
+    Closing is best-effort by design: a worker that has already died raises
+    from ``terminate``/``wait``, and a configuration change must not fail
+    because the thing it is replacing is already broken.
+    """
+
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return exc_type is not None
+
+
+def _collector_for(backing: EmbeddingBacking) -> _Collector:
+    """The one collector for this process (rebuilt when the backing changes)."""
+    global _collector
+    with _lock:
+        if _collector is None:
+            _collector = _Collector(lambda: active_backing())
+        return _collector
+
+
+# ── the public entry points ──────────────────────────────────────────────────
+
+
+def encode_query(text: str) -> list[float] | None:
+    """Encode ONE query text through the seam, coalesced behind a bounded window.
+
+    This is the entry point for the *query* embed — the 2-4 s step that runs
+    inside the request today. Concurrent callers are collected into a single
+    encode by :class:`_Collector`, whose window is bounded from the first
+    arrival (see that class and :data:`DEFAULT_MAX_WAIT_MS_FOR_BACKING`).
+
+    Returns the vector, or ``None`` when the backing reports the encoder is
+    unavailable — the same ``None`` every caller already handles. A backing
+    FAILURE raises, so the caller's existing ``except Exception`` records its
+    own ``encode_failed``/decline term rather than this module inventing a
+    second vocabulary for the same event.
+
+    ⛔ WHY THE COALESCER IS IN FRONT OF THE IN-PROCESS BACKING TOO. With a 0 ms
+    window the in-process path adds no wait and yields whatever coalescing the
+    load already provides: while the collector encodes batch N, arrivals
+    accumulate and become batch N+1. That is continuous batching with no
+    admission cost, and it is why the default posture does not regress the
+    uncontended query.
+    """
+    collector = _collector_for(active_backing())
+    rows = collector.submit(text, timeout_s=resolve_timeout_s())
+    if rows is None:
+        return None
+    return rows[0]
+
+
+def encode_texts(texts: Sequence[str], *,
+                 timeout_s: float | None = None) -> list[list[float]] | None:
+    """Encode a batch DIRECTLY — no coalescing, no added wait.
+
+    The entry point for work that is ALREADY batched (the store/write funnel,
+    the turn window, a backfill). Routing a batch through the collector would
+    add a window to a call that has nothing left to coalesce, so the batch
+    bypasses the queue entirely and the backing is called on the caller's
+    thread. Returns ``None`` when the encoder is unavailable; raises on a
+    backing failure, so the caller keeps its own decline bookkeeping.
+    """
+    backing = active_backing()
+    budget = resolve_timeout_s() if timeout_s is None else timeout_s
+    try:
+        return backing.encode(list(texts), timeout_s=budget)
+    except BaseException as exc:
+        _note_decline(exc)
+        raise
+
+
+def seam_status() -> dict:
+    """The seam's declared state and its per-backing distributions.
+
+    Shape (stable — ``/health`` publishes it verbatim under ``embed_seam``)::
+
+        {"backing": "inprocess" | "worker" | "external",
+         "max_wait_ms": 0.0, "max_batch": 32, "timeout_s": 30.0,
+         "last_decline": "<Type: message>" | null,
+         "last_decline_age_s": 1.2 | null,
+         "injected": false,
+         "backing_state": {...},        # the backing's own describe()
+         "latency": {"submissions":…, "batches":…, "coalesced":…,
+                     "declines":…, "median_batch":…,
+                     "wait_ms": {"n","window","p50","p95","max"},
+                     "encode_ms": {...}, "batch_size": {...}},
+         "backings": {                  # EVERY backing, selected or not
+             "inprocess": {"max_wait_ms": 0.0, "selected": true},
+             "worker":    {"max_wait_ms": 20.0, "selected": false},
+             "external":  {"max_wait_ms": 20.0, "selected": false}}}
+
+    ⛔ ``backings`` lists ALL THREE whatever is selected. The issue's indicator
+    is "p50/p95 exported **per backing**", and a table that only appears once you
+    have already switched cannot answer "would the other one be better".
+    A backing that has never run reports ``null`` percentiles, never 0.
+
+    Never raises: it is read from a health handler, and a diagnostics surface
+    that can 5xx is worse than a missing key.
+    """
+    try:
+        name = resolve_backing()
+        backing = _backing
+        per_backing: dict[str, dict] = {}
+        for candidate in BACKINGS:
+            entry: dict[str, Any] = {
+                "max_wait_ms": resolve_max_wait_ms(candidate),
+                "selected": candidate == name,
+            }
+            if candidate == name and _collector is not None:
+                entry["latency"] = _collector.snapshot()
+            else:
+                # Not run in this process: an honest "no observation", never a
+                # zero that reads as "instant".
+                entry["latency"] = None
+            per_backing[candidate] = entry
+        view: dict[str, Any] = {
+            "backing": name,
+            "max_wait_ms": resolve_max_wait_ms(name),
+            "max_batch": resolve_max_batch(),
+            "timeout_s": resolve_timeout_s(),
+            "last_decline": _last_decline,
+            "last_decline_age_s": (
+                None if _last_decline_at is None
+                else round(time.monotonic() - _last_decline_at, 3)),
+            "injected": _injected is not None,
+            "backing_state": (
+                _injected.describe() if _injected is not None
+                else (backing.describe() if backing is not None else None)),
+            "latency": (
+                _collector.snapshot() if _collector is not None else {
+                    "submissions": 0, "batches": 0, "coalesced": 0,
+                    "declines": 0, "median_batch": None,
+                    "wait_ms": _Latency().snapshot(),
+                    "encode_ms": _Latency().snapshot(),
+                    "batch_size": _Latency().snapshot(),
+                }),
+            "backings": per_backing,
+        }
+        return view
+    except Exception as exc:
+        return {
+            "backing": None, "max_wait_ms": None, "max_batch": None,
+            "timeout_s": None, "last_decline": None, "last_decline_age_s": None,
+            "injected": False, "backing_state": None, "latency": None,
+            "backings": None,
+            "error": f"{type(exc).__name__}: {exc}"[:200],
+        }
+
+
+def reset_seam() -> None:
+    """Tear down everything this module holds — the ONE test/reset hook.
+
+    Stops the collector, closes the configured backing (a worker process is
+    terminated, not orphaned), clears the injected one and the decline latch.
+    Called from ``conftest`` where it matters and by the seam's own rows.
+    """
+    global _backing, _backing_name, _collector, _injected
+    global _last_decline, _last_decline_at
+    with _lock:
+        collector, _collector = _collector, None
+        backing, _backing = _backing, None
+        _backing_name = None
+        _injected = None
+        _last_decline = None
+        _last_decline_at = None
+    if collector is not None:
+        collector.stop()
+    if backing is not None:
+        with _swallow_base_exception():
+            backing.close()

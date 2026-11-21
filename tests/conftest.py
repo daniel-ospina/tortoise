@@ -990,6 +990,35 @@ def _fresh_default_row_mint_window():
     _DEFAULT_ROW_MINT_RETRY.clear()
 
 
+@pytest.fixture(autouse=True)
+def _isolated_embed_seam(monkeypatch):
+    """#14186: every test starts on the in-process embedder seam.
+
+    The seam is PROCESS state (a resolved backing, its collector thread, an
+    optional worker subprocess) plus seven env levers, so without a reset a test
+    that installs a fake backing or points at a worker would leave the next test
+    — and the whole read/write path it exercises — encoding somewhere else. Same
+    rationale as ``_fresh_commit_ingest_budget`` above: reset the state, do not
+    change the defaults.
+
+    ⛔ It also CLEARS the levers, and that half is load-bearing: a leaked
+    ``TORTOISE_EMBED_BACKING=worker`` makes every later test's ``compute_embeddings``
+    skip the local-model availability check and try to spawn a process, which
+    would present as a scatter of unrelated failures rather than one.
+    """
+    from tortoise import embed_seam
+
+    for name in (embed_seam.ENV_BACKING, embed_seam.ENV_MAX_WAIT_MS,
+                 embed_seam.ENV_MAX_BATCH, embed_seam.ENV_TIMEOUT_S,
+                 embed_seam.ENV_WORKER_SOCKET, embed_seam.ENV_WORKER_PYTHON,
+                 embed_seam.ENV_EXTERNAL_URL, embed_seam.ENV_EXTERNAL_TOKEN,
+                 embed_seam.ENV_EXTERNAL_MODEL):
+        monkeypatch.delenv(name, raising=False)
+    embed_seam.reset_seam()
+    yield
+    embed_seam.reset_seam()
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _fresh_capture_spool():
     """#3963: start every pytest SESSION with a fresh capture spool.
