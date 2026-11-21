@@ -76,9 +76,11 @@ The **serving** row is exactly one statement, so a re-home re-points one read an
 * `…::test_the_census_covers_the_labels_schema_as_well_as_its_readers` — the three DDL rows exist and are
   `maintenance`; an earlier cut of this census omitted them, which is how a re-home ships a store with no
   indexes.
-* `…::test_no_reader_of_the_change_feed_needs_a_graph_capability` — **no** row may mention a graph
-  capability in its `needs`/`why`. A future reader that genuinely needs one reds the census instead of
-  being filed as `maintenance`.
+* `…::test_no_reader_of_the_change_feed_needs_a_graph_capability` — **no** row may need a graph
+  capability, in its `needs`/`why` prose **or in its own Cypher**. A future reader that genuinely needs
+  one reds the census instead of being filed as `maintenance`; the Cypher arm is what makes that true,
+  because a capability lives in the query rather than in the sentence describing it — and the pin keeps
+  the prose-only case as an executed control, so a predicate that stops reading snippets reddens.
 * `…::test_the_census_has_exactly_one_row_producing_reader` — a second producing reader changes the shape
   of the re-home, so the count is pinned.
 
@@ -143,6 +145,16 @@ process-wide, so a tenant graph cannot be attributed per label (`graphevent_home
 its own output rather than quoting a number it cannot attribute). The payload is uniform, where real
 payloads vary; the slope was measured at two payload widths precisely so a reader can see it is not
 payload-independent.
+
+⚠️ **The quoted 190 B slope is the LOWEST estimate its own committed JSON supports, and that is
+stated rather than smoothed.** The 88 B run is flat — 553.0 / 553.6 / 554.8 B/node at 20k / 40k / 60k,
+so its marginal 557.4 is uncontroversial. The 190 B run is **not monotone**: 653.1 / 679.7 / 652.2
+B/node over the schema cost, so the 20k→40k interval is 706.3 B/node and the quoted last interval
+597.2 — the smaller of the two. The fixed cost §2 blames cannot account for the 55 B/node gap between
+that quoted marginal and the 60k level: `schema_bytes` is 114,608 B, **1.9 B/node** at 60k. Read at the
+60k *level* instead, the projection is **≈ 47 MB** rather than 43.3 MB — about 9 % higher.
+**The verdict does not turn on which is quoted** — both sit near half a solo tenant's budget — so the
+range is given and the repeat is follow-up on `#13094` rather than resolved by re-arguing the outlier.
 
 ---
 
