@@ -1036,7 +1036,11 @@ class _AnchorHrefParser(HTMLParser):
         `_unmet_by_reader`, which also refuses an `_UNRENDERED` ancestor
         (`<datalist>`, and the fallback-content elements: their children are never
         rendered by a supporting browser), a `hidden` attribute on this element or
-        an ancestor, and `<details>`/`<dialog>` before an `open` arrives. Each was
+        an ancestor, and `<details>`/`<dialog>` before an `open` arrives. It also
+        refuses a heading with a `<table>` open above it — for the opposite reason:
+        such a heading IS met, but the browser may move content ACROSS it (foster
+        parenting), so its raw offset is not a slice boundary a reader's position
+        matches (`_unmet_by_reader`'s fourth bullet). Each was
         measured recording a `<h2 id="quickstart">` that then bounded the slice,
         leaving the claim under it outside all three pins (#14073 review) — the
         failure mode this docstring's first paragraph describes, reached without
@@ -1066,7 +1070,7 @@ class _AnchorHrefParser(HTMLParser):
         an anchor parked there are the same escape (an advertised boundary, or an
         advertised entry, that the pins cannot verify).
 
-        Three reasons, all of them "the pins cannot see what the reader also cannot
+        Four reasons, all of them "the pins cannot see what the reader also cannot
         see" — refusing is what keeps the slice LONG, i.e. the loud direction:
 
         * an open `_UNBOUNDABLE_ANCESTORS` ancestor — an open `<select>` (the
@@ -1082,7 +1086,21 @@ class _AnchorHrefParser(HTMLParser):
           arrives (`_RENDERS_WITH_ATTR`, carried on the stack as the inherited
           third field). A closed `<details>`'s `<summary>` is caught by this too:
           it IS rendered, so that is a deliberate over-refusal in the loud
-          direction, stated at `_RENDERS_WITH_ATTR`.
+          direction, stated at `_RENDERS_WITH_ATTR`;
+        * a `<table>` open above this element — NOT because no reader meets it, but
+          because the reader meets it SOMEWHERE ELSE. In the "in table" insertion
+          mode a character token or a non-table start tag is FOSTER PARENTED:
+          inserted immediately BEFORE the `<table>`, so content authored AFTER this
+          element can render BEFORE it. The recorded position is a RAW source
+          offset (`getpos()`), which is a valid slice boundary only while source
+          order IS tree order — and inside a table it is not. Refused rather than
+          modelled: the cost is a longer slice, which is the loud direction, while
+          the alternative is a bound that cuts the section at a source offset the
+          reader's position does not match. Measured at the `#storage` boundary
+          with `<table><tr><td><h2 id="quickstart">…</td></tr>CLAIM</table>`: the
+          claim painted at y=4648 and `#quickstart` at 4762 — the claim inside
+          `#storage` — while the slice excluded it and the golden, the vocabulary
+          pin and the destination pin were all green (#14073 review).
 
         ⛔ THIS IS THE BOUNDARY QUESTION, and it is deliberately WIDER than the
         LINK question `extract_anchor_hrefs` asks: `_collect` applies this rule only
@@ -1104,6 +1122,11 @@ class _AnchorHrefParser(HTMLParser):
             open_tag in self._UNBOUNDABLE_ANCESTORS
             for open_tag, _, _ in self._open_elements
         ):
+            return True
+        # NOT "no reader meets it" — the reader meets it somewhere else. A table
+        # above reorders the tree against the source (foster parenting), so a raw
+        # `getpos()` offset cannot be trusted as a boundary. See the docstring.
+        if any(open_tag == "table" for open_tag, _, _ in self._open_elements):
             return True
         if any(open_tag in self._UNRENDERED for open_tag, _, _ in self._open_elements):
             return True

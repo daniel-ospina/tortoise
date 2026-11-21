@@ -3545,6 +3545,85 @@ def test_a_base_element_moves_what_the_section_advertises() -> None:
         "is resolving TOC entries against the page URL instead of the document "
         "base URL, so every fragment-only link is read as same-page"
     )
+
+
+def test_a_table_open_across_the_bound_refuses_rather_than_cutting_the_source() -> None:
+    """A heading a browser may move content ACROSS cannot bound the slice.
+
+    The bound is a RAW SOURCE range (`html[start:offset]`) and each heading is
+    recorded at its raw `getpos()` (`tests/_html_links.py`), which is a valid
+    boundary only while source order IS tree order. Inside a `<table>` it is not:
+    in the "in table" insertion mode a claim is FOSTER PARENTED — inserted
+    immediately BEFORE the `<table>` — so copy authored AFTER the bounding heading
+    renders BEFORE it, i.e. inside the section, while the slice excludes it and
+    every storage pin stays green.
+
+    Measured on this box's Chrome against the mutant built below: the claim painted
+    at `y=4648`, `#storage` at 3433 and `#quickstart` at 4762, with the nearest
+    preceding heading `storage-what-you-can-do` (inside the section), and
+    `body.innerText` containing the claim. The allowlist was `[]`, the destinations
+    `['mailto:hello@premiselabs.co']`, the vocabulary `[]` and the golden equal to
+    the fixture — all three pins green over a claim a reader meets in the section.
+
+    ⛔ BOTH DIRECTIONS, as everywhere in this module. A table OPEN across the bound
+    must refuse (the slice runs long, the loud direction), and a table that opens
+    AND CLOSES inside the section must still bound exactly — otherwise "refuse any
+    page with a table" would pass, and that is the false red this module's
+    docstrings keep warning about.
+    """
+    page = DOCS.read_text(encoding="utf-8")
+    heading = re.search(r'<h2 id="quickstart"[^>]*>.*?</h2>', page, re.S)
+    assert heading is not None, (
+        "website/docs.html has no `<h2 id=\"quickstart\">` — this test's whole "
+        "premise (that heading bounds the section) needs re-deriving"
+    )
+    claim = (
+        "<p>FalkorDB holds only a slice of what you save, and once you are above "
+        "the allowance for your tier the least-used items are permanently "
+        "deleted after thirty days.</p>"
+    )
+    # The advertised heading moved INSIDE a cell, the claim after the cell and
+    # still inside the open table: source order puts the claim after the heading,
+    # the browser puts it before the table — i.e. inside `#storage`.
+    mutant = (
+        page[: heading.start()]
+        + "<table><tr><td>"
+        + heading.group(0)
+        + "</td></tr>"
+        + claim
+        + "</table>"
+        + page[heading.end() :]
+    )
+    # Without the inversion this mutant proves nothing, so assert it first.
+    assert mutant.index(claim) > mutant.index('id="quickstart"'), (
+        "the mutant no longer places the claim AFTER the bounding heading in the "
+        "source, so it does not reproduce the foster-parenting inversion this "
+        "pin exists for"
+    )
+
+    section = _docs_section(page=mutant)
+    assert "permanently deleted" in section, (
+        "the section bound cut the source at a heading a browser may foster-parent "
+        "content across. The claim sits AFTER that heading in the source and is "
+        "therefore outside the slice, while a browser inserts it BEFORE the table "
+        "— inside `#storage` — so the wording, vocabulary and destination pins all "
+        "read a section the reader does not see. A heading with an open `<table>` "
+        "above it must not bound (`_unmet_by_reader`), which keeps the slice long "
+        "and reds the golden on the claim instead of hiding it."
+    )
+    with pytest.raises(AssertionError):
+        _assert_storage_section_reviewed(section)
+
+    # ⛔ AND THE FALSE-RED DIRECTION: a table that opens AND closes strictly inside
+    # the section moves no content across the bound, so the bound must not refuse.
+    table = "<table><tr><td>Reviewed</td></tr></table>"
+    closed = page.replace('<h3 id="storage-record">', table + '<h3 id="storage-record">', 1)
+    assert closed != page, "the control could not inject a table into the section"
+    assert len(_docs_section(page=closed)) == len(_docs_section()) + len(table), (
+        "a `<table>` that opens and closes inside the section moved the bound: the "
+        "refusal must fire only for a table OPEN at the bounding heading, not for "
+        "any page that contains a table"
+    )
     # A `<base>` a browser never parses must NOT move the base.
     assert extract_first_base_href(
         page.replace("<head>", '<head><template><base href="https://evil.example/">'
