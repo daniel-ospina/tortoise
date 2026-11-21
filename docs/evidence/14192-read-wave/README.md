@@ -12,7 +12,13 @@ answer the two halves of the issue's *Done when*: **a measured p50/p95 delta** a
 > drifted before:** the bullet pair under "What the first measurement found"
 > quotes the FIRST measurement's `159 ms` / `231 ms` / `167 ms`. Those are **not**
 > cells of either JSON — they are kept because this file's history records them,
-> and they are marked there as such. Nothing else here is outside the JSONs.
+> and they are marked there as such. ⚠️ **No other PERFORMANCE figure here is
+> outside the JSONs.** The corpus row's `5000` operator edges is a harness input,
+> and the `26,463` / `14,732` character counts are **git** artifacts, not JSON
+> cells — they are the Q2-crit statement's length before and after
+> `7d276aa07a`, readable with
+> `git show 5c9cfe5407:tortoise/search_engine.py` vs `git show 7d276aa07a:…`,
+> and they are named here rather than left to look like artifact cells.
 
 ## What was measured, and on what
 
