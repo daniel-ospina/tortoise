@@ -1416,11 +1416,21 @@ def evict(
                     f"({reach} = batch {resolved.batch_size} x "
                     f"2^(max_passes-1 {resolved.max_passes - 1})); re-running will not "
                     f"converge — "
+                    # ⛔ THE REMEDY IS CHOSEN BY WHICH HOLD-BACK FILLED THE HEAD, because
+                    # they need OPPOSITE advice: a PINNED node is released by `unpin` or a
+                    # bigger budget, while a node whose pin predicate RAISED is released by
+                    # neither — this file says so two arms below ("unpinning or raising the
+                    # budget cannot clear this, because these nodes were never shown to be
+                    # pinned"). Offering `unpin` for the second is the instruction that
+                    # cannot be followed, again.
                     + (
                         "unpin some of them, or raise TORTOISE_PIN_MAX_NODES while "
                         "keeping it smaller than the window"
                         if len(held_pinned) >= reach
-                        or len(held_pinned_unanswerable) >= reach
+                        else "repair the pin set (its declaration, or the graph behind "
+                             "it) and re-run — unpinning and raising the budget cannot "
+                             "clear it, because these nodes were never shown to be pinned"
+                        if len(held_pinned_unanswerable) >= reach
                         else "raise the batch or the pass budget, or widen the proven "
                              "population"
                     )

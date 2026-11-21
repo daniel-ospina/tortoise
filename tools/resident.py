@@ -76,6 +76,9 @@ from typing import Any
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tortoise import resident_pin
+from tortoise.cache_projection import KEY_PROPERTY
+
 EXIT_OK = 0
 EXIT_USAGE = 1
 EXIT_REFUSED = 3
@@ -110,6 +113,39 @@ def _emit(body: dict[str, Any], out: Path | None) -> None:
               f"report follows on stdout and the exit code is unchanged",
               file=sys.stderr)
         print(text)
+
+
+def _contract_key_prop(label: str, key_prop: str | None) -> str:
+    """The label's CONTRACT key property, or a USAGE refusal.
+
+    ⛔ ONE RESOLVER FOR EVERY VERB THAT KEYS THE GRAPH. `outside_view.read` already
+    resolved the label's contract key (`cache_projection.KEY_PROPERTY`) and REFUSED an
+    explicit non-contract property — but `pin` kept a hardcoded `or "id"`, while the
+    `--key-prop` help (shared by both subparsers) promises the contract default AND the
+    refusal. MEASURED on a `:Source` population the record keys by `url`:
+    `pin(g, ["https://a.example/x"], label="Source")` came back
+    `REFUSED code=unknown-node — "1 key(s) are not in the fast layer at all …"`, i.e. it
+    told the operator the KEY is missing when it was the PROPERTY that was wrong — a
+    remedy that cannot clear the state. On a graph that happened to carry `id`, the
+    declaration was written and reported `written: true` into a key space nothing reads,
+    so `pin` and `outside` disagreed about the same flag.
+    """
+    default = KEY_PROPERTY.get(label)
+    if key_prop is None:
+        if not default:
+            raise resident_pin.PinConfigError(
+                f"no contract key property is declared for {label!r} "
+                f"(cache_projection.KEY_PROPERTY): name one with --key-prop"
+            )
+        return default
+    if default and key_prop != default:
+        raise resident_pin.PinConfigError(
+            f"key property {key_prop!r} is not the contract key for {label} "
+            f"({default!r}) — the graph is read by this property and the record's "
+            f"node_key is compared against it, so any other property measures a "
+            f"different population"
+        )
+    return key_prop
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -270,9 +306,13 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.verb == "pin":
             try:
+                # ⛔ THE LABEL DECIDES THE KEY PROPERTY, for `pin` as much as for
+                # `outside` — a declaration written into a key space nobody reads is the
+                # silent half of the same defect (see `_contract_key_prop`).
                 result = resident_pin.pin(
                     graph, args.key,
-                    label=args.label or "Point", key_prop=args.key_prop or "id",
+                    label=args.label or "Point",
+                    key_prop=_contract_key_prop(args.label or "Point", args.key_prop),
                     budget=budget,
                 )
             except resident_pin.PinRefused as exc:

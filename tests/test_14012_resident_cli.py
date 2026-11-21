@@ -434,7 +434,14 @@ def test_pin_with_a_non_bare_label_is_a_refusal_not_a_traceback(wired, capsys):
     out = json.loads(capsys.readouterr().out)
     assert out["verdict"] == "REFUSED"
     assert out["code"] == "config"
-    assert "bare Cypher identifier" in out["reason"]
+    # ⛔ The refusal moved EARLIER, and it is more accurate: `pin` now resolves the
+    # label's contract key property first, so an unknown label is refused for THAT (there
+    # is no `KEY_PROPERTY` entry to check it against) rather than for its spelling. Both
+    # are `REFUSED`/`config`; what must hold is that the label is named and nothing was
+    # written.
+    assert "Bad Label" in out["reason"] or "bare Cypher identifier" in out["reason"], (
+        out["reason"]
+    )
     assert PINS_META_KEY not in wired.meta, "a refused pin wrote a declaration"
     assert wired.mutations == []
 
@@ -761,6 +768,37 @@ def test_an_unwritable_out_keeps_the_verdict_and_the_exit_code(
     payload = json.loads(captured.out)
     assert payload["verdict"] == "OK"
     assert "could not write" in captured.err
+
+
+def test_pin_resolves_the_labels_CONTRACT_key_not_id(wired, capsys):
+    """The `--key-prop` help promises the contract key AND a refusal; `pin` did neither.
+
+    ⛔ MEASURED on a `:Source` population the record keys by `url`: `pin --label Source`
+    defaulted to `id`, found nothing under it, and refused with code `unknown-node` —
+    "1 key(s) are not in the fast layer at all" — a remedy (check indexing, re-ingest)
+    that cannot clear the state, because the KEY was there and the PROPERTY was wrong.
+    The silent half is worse: on a graph that happened to carry `id`, the declaration was
+    written and reported `written: true` into a key space nobody reads, so `pin` and
+    `outside` disagreed about the same flag.
+    """
+    wired.nodes = {"https://a.example/x": []}
+    code = resident.main(["pin", *BASE, "--key", "https://a.example/x",
+                          "--label", "Source", "--window-nodes", "1000"])
+    assert code == resident.EXIT_OK, (
+        "pin refused a key that IS in the fast layer, because it looked under `id` "
+        "instead of the label's contract key `url`"
+    )
+    assert wired.meta[PINS_META_KEY]["key_prop"] == "url"
+
+    # And an EXPLICIT non-contract property is refused, matching the help text.
+    capsys.readouterr()
+    code = resident.main(["pin", *BASE, "--key", "https://a.example/x",
+                          "--label", "Source", "--key-prop", "id",
+                          "--window-nodes", "1000"])
+    assert code == resident.EXIT_REFUSED
+    out = json.loads(capsys.readouterr().out)
+    assert out["code"] == "config"
+    assert "url" in out["reason"]
 
 
 def test_unpin_needs_no_budget_even_when_the_cap_cannot_be_checked(
