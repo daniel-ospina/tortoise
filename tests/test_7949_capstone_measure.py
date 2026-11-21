@@ -1745,12 +1745,27 @@ def test_the_e6_surface_breadth_is_stated_once_and_every_loop_reads_it():
     literal inline reds here instead of surviving as a comment nobody can falsify.
     """
     text = (_REPO / "docs/evidence/7949-capstone/probes/capstone_measure.py").read_text()
-    assert text.count('("relations", "hierarchies")') == 1, (
-        "the E6 surface breadth must be stated ONCE, in `E6_SURFACES` — a second inline "
-        "literal is how the beside column kept a breadth the tuple no longer had")
+    # ⛔ THE SPELLING, not the one exact byte sequence (#14060 review round 11, P3): the
+    # original count matched `("relations", "hierarchies")` only, so the population guard this
+    # same PR added — `("relations", "hierarchies", "declared")` — restated the breadth where
+    # the comment says it cannot be, and survived the pin. Any bracketed pair of the two names,
+    # in either quote style and with any spacing, is the shape an inline breadth takes.
+    spellings = re.findall(r'[(\[]\s*["\']relations["\']\s*,\s*["\']hierarchies["\']', text)
+    assert len(spellings) == 1, (
+        f"the E6 surface breadth must be stated ONCE, in `E6_SURFACES` — found {len(spellings)} "
+        "spellings of the pair; a second inline literal is how the beside column kept a breadth "
+        "the tuple no longer had")
     assert text.count("for surface in E6_SURFACES:") == 2, (
-        "the population loop and the beside column must both READ the tuple — the claim "
-        "`_e6_census_rows`' docstring makes")
+        "the population enumeration and the beside column must both READ the tuple — the claim "
+        "the `E6_SURFACES` comment and `_e6_census_rows`' docstring make")
+    # ⚠️ STATED RESIDUAL, because the round-11 review measured the gap between this pin and the
+    # comment it guards: a breadth spelled as TWO separate arguments (`loop("relations",
+    # "hierarchies")` on two lines, or a set built by name) evades both counts. What catches a
+    # NARROWED tuple is not this case but the population guards in `measure_e6`: the census
+    # declares the rows of both surfaces, so dropping one leaves `declared != len(rows)` and the
+    # row refuses — measured on the mutant (`E6_SURFACES = ("relations",)` reds
+    # `test_a_synthetic_hierarchies_defect_runs_through_the_runs_own_defect_scan` and the
+    # population arm). This case holds the LITERAL to one, which is the edit the comment invites.
 
 
 def test_build_rows_refuses_an_e6_mapping_missing_a_required_key():
@@ -16480,12 +16495,12 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     #: It then moved 20 -> 19 when `_e6_write_cells` was made to read `E6_SURFACES` instead of
     #: restating the tuple inline (`#11695` review F4d/Finding 2), which is the second half of
     #: the body's "stated once" claim: the record's block and this map are re-derived together.
-    #: And 19 -> 22 for the population guard's own SPLIT check (`population.relations +
-    #: population.hierarchies == population.declared`), which names the surface in the code and
-    #: in the comment that says why — a mention the bundle now genuinely carries, counted here
-    #: rather than avoided by writing the check in a shape the reader has to decode.
+    #: The population guard's SPLIT check reads `E6_SURFACES` rather than spelling the two
+    #: surface names (round 11), so it adds NO mention here — the count stays 19, which is also
+    #: why the record's own total stays 52. Re-measured when the guard changed shape; a typed
+    #: number that the code moved would be the defect this map exists to catch.
     assert per_file == {"PRE-REGISTRATION.md": 24, "preregistration.json": 9,
-                        "probes/capstone_measure.py": 22}, (
+                        "probes/capstone_measure.py": 19}, (
         f"the bundle's hasPart/hierarchies mentions are {per_file} — the record's §5 "
         "self-matching note states them per file; re-derive the note (and this map) "
         "rather than deleting the qualifier, or it reads as 'no output' when it is not")

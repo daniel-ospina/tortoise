@@ -4121,11 +4121,14 @@ E6_CENSUS = "docs/evidence/11083/pack-relation-census.json"
 PACKS_DIR = "packs"
 
 #: The TWO surfaces a declared connection is written on, and the ONLY place that breadth is
-#: stated (#11695 review F4d). The population loop, the defect scan's enumeration AND the
-#: beside column's cell loader all iterate this tuple, so a later edit cannot narrow one of
-#: them to `relations[]` without moving it — which is §10.21's point, that the census's
-#: `verdicts` aggregate "covers `relations[]` only; the metric spans the ROWS of both
-#: surfaces". ⛔ THAT SENTENCE IS QUOTED FROM §10.21, and the wording matters: an earlier cut
+#: stated as a LIST (#11695 review F4d; restated in round 11, because this line claimed more
+#: than the code did). TWO loops read it — `_e6_census_rows`, which serves BOTH the population
+#: count and the defect scan's enumeration, and `_e6_write_cells`, the beside column's artifact
+#: loader — and the population SPLIT check sums over it, so a surface added to the tuple is
+#: counted, scanned, loaded AND checked against the census's own arithmetic. A later edit
+#: therefore cannot narrow one of them to `relations[]` without moving this line, which is
+#: §10.21's point: the census's `verdicts` aggregate "covers `relations[]` only; the metric
+#: spans the ROWS of both surfaces". ⛔ THAT SENTENCE IS QUOTED FROM §10.21, and the wording matters: an earlier cut
 #: of this comment put quotation marks around a PARAPHRASE of it that no document contains —
 #: an invented quote inside a bundle whose pins enforce that a cite carries the sentence it
 #: quotes (#11695 review round 3, P3). The wording above is the section's own; this note names
@@ -4442,19 +4445,26 @@ def measure_e6(*, packs_dir: Path | str | None = None,
     # ISOLATED, 31 == 27 + 4 and 31 rows. A census that disagrees with itself is REFUSED by name
     # rather than scored over a subject it did not enumerate, which is the promise
     # `measure_e6`'s own docstring makes.
-    counts = {key: population.get(key) for key in ("relations", "hierarchies", "declared")}
+    # ⛔ THE SPLIT IS SUMMED OVER `E6_SURFACES`, not over a second spelling of the pair
+    # (#14060 review round 11, P3: this guard as first written spelled the two surface names
+    # and `declared` as one inline key list, making the `E6_SURFACES` comment's "ONLY place
+    # that breadth is stated" false in the same PR that added the comment — the pin counted
+    # the exact two-name literal, so it could not see the longer spelling).
+    counts = {surface: population.get(surface) for surface in E6_SURFACES}
+    declared = population.get("declared")
     error = None
     if not all(isinstance(value, int) and not isinstance(value, bool)
-               for value in counts.values()):
-        error = (f"the census carries no usable `population` block (missing or non-integer: "
-                 f"{', '.join(f'{key}={value!r}' for key, value in counts.items())}); the "
-                 f"registered denominator is not measured here, so E6 is UNMEASURED")
-    elif counts["relations"] + counts["hierarchies"] != counts["declared"]:
-        error = (f"the census's population does not add up: relations "
-                 f"{counts['relations']} + hierarchies {counts['hierarchies']} != declared "
-                 f"{counts['declared']}")
-    elif counts["declared"] != len(rows):
-        error = (f"the census declares {counts['declared']} row(s) but {len(rows)} could be "
+               for value in (*counts.values(), declared)):
+        error = ("the census carries no usable `population` block (missing or non-integer: "
+                 + ", ".join(f"{key}={value!r}" for key, value in
+                             (*counts.items(), ("declared", declared)))
+                 + "); the registered denominator is not measured here, so E6 is UNMEASURED")
+    elif sum(counts.values()) != declared:
+        error = ("the census's population does not add up: "
+                 + " + ".join(f"{surface} {count}" for surface, count in counts.items())
+                 + f" != declared {declared}")
+    elif declared != len(rows):
+        error = (f"the census declares {declared} row(s) but {len(rows)} could be "
                  f"enumerated; a population that is not every declared row across the "
                  f"installed packs is REFUSED rather than scored")
     if error:
@@ -4462,7 +4472,6 @@ def measure_e6(*, packs_dir: Path | str | None = None,
         measurement["written_source"] = (
             "not read — the census could not be enumerated")
         return measurement
-    declared = counts["declared"]
     pnia = census_tool.RELATION_PREDICATE_NOT_IN_ALLOWLIST
     # An isolated pack's rows are NOT in `packs`, so they are not in `declared` either — see
     # this function's docstring. Carried rather than dropped, and the row refuses on it.
