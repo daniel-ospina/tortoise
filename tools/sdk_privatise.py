@@ -908,19 +908,33 @@ SWEEP_NAMES = 66
 #: never its evidence. `--check` exits 0 on this tree:
 #: `typed references still pointing at a public name: 0`.
 #:
-#: RE-CUT UP on `main` AFTER the `#13094` census merge (`f9f480a55a`), and THIS is the pin:
-#: `--repin` printed `(11843, "6aed5368ffa10513")` on this tree. ⛔ THE +8 IS ATTRIBUTED BY A
-#: ROW-BY-ROW DIFF, not by arithmetic: `--report --base 28ca66878d… --top 5000` was run in a
-#: detached worktree at `2c0d66e2ec` AND on this tree, both row sets sorted and diffed, and
-#: EXACTLY TWO rows differ — `g.query` 1492 → 1499 (+7) and `proj.g.query` 3642 → 3643 (+1).
-#: All eight are the census work's MEASUREMENT probes, not product call sites: the four
-#: `g.query(…)` in `docs/evidence/13094-graphevent/measure_graphevent_residency.py`, the three
-#: in `tools/graphevent_home.py` (the census rows/pages through a plain `select_graph` handle —
-#: the ordinary-word receiver this counter exists to REPORT, and not a typed SDK site), and the
-#: single `proj.g.query(…)` in `tests/test_13094_graphevent_home.py`. `11835 + 8 = 11843` is a
-#: CROSS-CHECK of the measurement, never its evidence. The bump was MISSED by the census PR,
-#: which is why `--check` was red on `main` after it merged; `--check` exits 0 on this tree:
-#: `typed references still pointing at a public name: 0`.
+#: ⛔ RE-PINNED FROM `main`'s DRIFT, not by a change on this branch: `f9f480a55ab3` (#14164, the
+#: #13094 change-feed reader census + measured residency) added untyped `Graph` receivers and
+#: re-pinned nothing, so `--check` reds on `origin/main` `69908d006b3d` itself — measured with
+#: `--repin` in a detached worktree at that commit: `(11843, "6aed5368ffa10513")`, the SAME pair
+#: this branch's tree prints, which is why it is the branch that is red rather than the change
+#: (its diff is `docs/infra-runbook.md` + `tests/test_fly_secret_drift.py` and adds no row).
+#: THE +8 IS ATTRIBUTED BY MEASUREMENT, NOT ARITHMETIC: `--repin` was run in one detached worktree
+#: at `2c0d66e2ec07` (the previous pin's commit) → `(11835, "891187f5a4636487")`, at
+#: `dc92b0eecc15` → the same, and at `f9f480a55ab3` → `(11843, "6aed5368ffa10513")`, so exactly
+#: ONE commit moved it; and `--report --base 28ca66878d… --top 5000` was run at the pre-move commit
+#: AND at `f9f480a55ab3`, both row sets sorted and diffed — EXACTLY TWO rows differ,
+#: `g.query` 1492 → 1499 and `proj.g.query` 3642 → 3643, with the row SHAPE set unchanged on both
+#: sides (858 rows). Both are FalkorDB `Graph` receivers, which is this sweep's documented edge (a
+#: `Graph` is never the SDK), so no shape was absorbed and no defect is hidden — the direction the
+#: pin exists to catch is a NEW shape, and there is none. `--check` exits 0 on this tree after the
+#: re-pin, with `typed references still pointing at a public name: 0`.
+#:
+#: Those TWO ROWS ARE NAMED BY CALL SITE (the diff above gives the counts, this gives the sites
+#: that contribute them, read from the AST rather than by grep): the four `g.query(…)` in
+#: `docs/evidence/13094-graphevent/measure_graphevent_residency.py`, the three in
+#: `tools/graphevent_home.py` (the census rows/pages through a plain `select_graph` handle — the
+#: ordinary-word receiver this counter exists to REPORT, never a typed SDK site), and the single
+#: `proj.g.query(…)` in `tests/test_13094_graphevent_home.py` — 4 + 3 = +7 for `g.query`, and +1
+#: for `proj.g.query`. `11835 + 8 = 11843` is a CROSS-CHECK of that, never its evidence. The bump
+#: was MISSED by the census PR itself, which is why `--check` reds on `main` after it merged and
+#: why the red is `main`'s rather than this change's. `--check` exits 0 on THIS tree with `typed
+#: references still pointing at a public name: 0`.
 SWEEP_RESIDUE = (11843, "6aed5368ffa10513")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
