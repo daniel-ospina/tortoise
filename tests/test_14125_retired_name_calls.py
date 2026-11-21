@@ -802,6 +802,44 @@ def _touches_own_code(block: ast.AST, own_names: set[str]) -> bool:
     )
 
 
+#: Calls that reach the capability seam on a client the block did not import
+#: itself — `proj.g.query(…)` on a PARAMETER, `FalkorProjection.from_uri(…)`.
+#: Named from the class-2 statement ("…reaches an own-code capability seam
+#: (`_get_proj`, `.g.query`, `TortoiseSDK`, `FalkorProjection.from_uri`, an
+#: own-code import)"), not from a flag — the seam is the API a rename breaks, so it
+#: does not go stale when a module re-spells its flag.
+_CAPABILITY_CALLS = frozenset({"from_uri", "_get_proj", "query", "graph_overview"})
+_CAPABILITY_NAMES = frozenset({"TortoiseSDK", "FalkorProjection"})
+
+
+def _reaches_capability_seam(block: ast.AST) -> bool:
+    """Whether the block CALLS the capability seam, however the client arrived.
+
+    `_imports_own_code` and `_touches_own_code` both need the own-code name to be
+    reachable from the block, so a probe that takes the client as a PARAMETER —
+    `def _probe_set_order(proj)` … `proj.g.query(…)` — satisfied neither and was
+    graded by NOTHING, even though `.g.query` is one of the seams class 2 names by
+    hand. That probe's sentinel becomes a SKIP whose reason names no door, so the
+    whole live proof skipped green over a renamed seam (`tests/
+    test_8870_version_anchor_write_order.py`, measured).
+
+    The three own-code gates are ORed, never replaced: a moved module, a moved
+    door on an imported client, and a moved method on a passed-in client are the
+    same programming error, and each one is invisible to the other two tests.
+    Measured blast radius of adding it at this head: exactly TWO blocks tree-wide,
+    both genuine skip-deciding probes (the other one already carries its arm).
+    """
+    for node in ast.walk(block):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr in _CAPABILITY_CALLS:
+            return True
+        if isinstance(func, ast.Name) and func.id in _CAPABILITY_NAMES:
+            return True
+    return False
+
+
 def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     """The `try` blocks that DECIDE availability — two shapes in this tree.
 
@@ -829,7 +867,9 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     # that asymmetry was the hole.
     for stmt in _control_flow_tries(tree.body):
         if _assigns_availability(stmt) and (
-            _imports_own_code(stmt) or _touches_own_code(stmt, module_own)
+            _imports_own_code(stmt)
+            or _touches_own_code(stmt, module_own)
+            or _reaches_capability_seam(stmt)
         ):
             # The own-code gate applies to THIS branch too. Without it the rule
             # redded `TORCH_AVAILABLE = False / try: import torch …`, i.e. a probe
@@ -840,6 +880,7 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
         elif (_bound_names(stmt) & skip_referenced) and (
             _imports_own_code(stmt)
             or _touches_own_code(stmt, _own_imported_names(tree.body))
+            or _reaches_capability_seam(stmt)
         ):
             # A module-body probe whose flag is spelled something other than
             # `*AVAILABLE` — `LIVE`, `_FTS_ESCAPE_LIVE`, `_FALKORDB_UP` — is NOT an
@@ -856,7 +897,11 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
             roots.extend(
                 block
                 for block in _control_flow_tries(stmt.body)
-                if _imports_own_code(block) or _touches_own_code(block, own_names)
+                if (
+                    _imports_own_code(block)
+                    or _touches_own_code(block, own_names)
+                    or _reaches_capability_seam(block)
+                )
             )
         elif (
             isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -875,7 +920,11 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
             roots.extend(
                 block
                 for block in _control_flow_tries(stmt.body)
-                if _imports_own_code(block) or _touches_own_code(block, own_names)
+                if (
+                    _imports_own_code(block)
+                    or _touches_own_code(block, own_names)
+                    or _reaches_capability_seam(block)
+                )
             )
     return roots
 
@@ -1575,6 +1624,34 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     assert hoisted == (), (
         "the hoisted-own-import shape must not be graded — its only import in "
         f"the `try` is the optional extra: {hoisted}"
+    )
+
+    # 3c. A helper that takes the CLIENT as a PARAMETER reaches the seam through
+    #     `proj.g.query(…)`, and neither own-code test can see it: nothing is
+    #     imported in the block and no own-code name is reachable from it. Its
+    #     sentinel becomes a SKIP, so the swallow skips the proof green over a
+    #     renamed seam (measured: `tests/test_8870_version_anchor_write_order.py`,
+    #     where `SET_ORDER_UNMEASURED` -> `ORDER_UNMEASURED_SKIP_REASON`).
+    passed_client = roots(
+        """
+        def _probe(proj) -> str:
+            try:
+                proj.g.query("RETURN 1")
+            except Exception:
+                return "unmeasured"
+            return "measured"
+
+        def _skip_reason(semantics):
+            return None if semantics == "measured" else "unmeasured"
+
+        _reason = _skip_reason(_probe(None))
+        if _reason is not None:
+            pytest.skip(_reason)
+        """
+    )
+    assert passed_client == ((3, (), True, False, True),), (
+        "a probe reaching the seam on a PARAMETER client is a ROOT even with no "
+        f"own-code import or name in the block: {passed_client}"
     )
 
     # 4c. SHAPE (b): a MODULE-BODY flag read by a skip condition, whatever it is

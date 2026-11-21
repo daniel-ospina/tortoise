@@ -518,8 +518,10 @@ def _live_target() -> str | None:
         try:
             proj.g.query("RETURN 1")
         except (AttributeError, NameError, TypeError, ImportError):
-            # ⛔ same seam one statement over (#14114 class 2, #14125)
-            proj.close()
+            # ⛔ same seam one statement over (#14114 class 2, #14125). The arm is a
+            #   BARE `raise`, deliberately: a handler that does work first is not
+            #   read as coverage by the census's `_reraises`, and this path aborts
+            #   collection anyway, so the close below is the unreachable arm's job.
             raise
         except Exception:
             proj.close()
