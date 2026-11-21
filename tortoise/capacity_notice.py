@@ -69,7 +69,12 @@ pre-send reservation (a stamp-first protocol with a compensating unset), which i
 NOT taken here — this is a STATED, ACCEPTED RESIDUAL rather than a shelved one.
 The LEDGER stays monotone in every case; only the INBOX can show the two notices
 in the wrong order, and it needs two live processes reading the same account
-within one round trip plus a gauge that moved ≥20 pp between those reads.
+within one round trip plus a gauge that CROSSED A THRESHOLD BOUNDARY between
+those two reads. ⛔ The condition is a BOUNDARY CROSSING, not a large move: the
+percentage is floored and every value in `[80,100)` maps to the 80 % tier, so
+99.0 % → 100.1 % (about 1 pp) flips the tier from 80 to 100 and is enough to
+deliver "at 100 %" then "at 80 %". An earlier cut of this sentence said
+"≥20 pp", which understated the reachability by roughly an order of magnitude.
 ⛔ REACHABILITY, WITHOUT INVENTING A TOPOLOGY (#14038 review cycle 3, P2 — the
 sentence this replaces was REASONED, and `fly.toml` refutes it). Two live
 processes are what this needs, and the ordinary path excludes it twice over:
@@ -333,10 +338,12 @@ NOTICE_INTERVAL_DEFAULT_S = 6 * 60 * 60
 #: restarts still leaving the periodic passes to spend. ⛔ An earlier cut wrote
 #: "restarts × this cap", which is wrong in both directions (0 restarts ≠ 0
 #: sends; 9 passes ≠ 1 cap). It stays FINITE regardless because the ledger is
-#: once-per-threshold-per-account-ever: a repeated pass finds an account already
-#: at its top threshold and short-circuits before the gauge is read
-#: (``notify_account``), so the ramp is a one-off per account rather than a daily
-#: charge. ``NOTICE_MAX_SENDS_ENV`` is an absolute override;
+#: once-per-threshold-per-account-ever: an account already marked at the TOP
+#: threshold (100 %) short-circuits before the gauge is read (`notify_account`'s
+#: fast path is `notice_pct >= max(THRESHOLDS)`), and one marked 80 % falls
+#: through to `evaluate` but still returns `already-notified` because
+#: `notice.threshold <= account.notice_pct` — so no threshold is left to send and
+#: the ramp is a one-off per account rather than a daily charge. ``NOTICE_MAX_SENDS_ENV`` is an absolute override;
 #: if you shorten the interval or raise the send budget, re-price against ONE
 #: process's budget — never against a pass count you did not measure.
 NOTICE_MAX_SENDS_PER_PASS_DEFAULT = 5

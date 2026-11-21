@@ -34,8 +34,13 @@
 -- window needs a pre-send reservation (a stamp-first protocol with a compensating
 -- unset), which is NOT taken here — a known, ACCEPTED residual rather than a
 -- property this column gives you. It needs two live processes reading the same
--- account within one round trip, plus a gauge that moved >=20 pp between those
--- reads — i.e. N>1 replicas (TORTOISE_MULTI_WORKER=1) or the 2-machine topology.
+-- account within one round trip, plus a gauge that CROSSED A THRESHOLD BOUNDARY
+-- between those two reads — a BOUNDARY CROSSING, not a large move: the
+-- percentage is floored and every value in [80,100) maps to the 80 % tier, so
+-- 99.0 % -> 100.1 % (about 1 pp) is enough. An earlier cut said ">=20 pp", which
+-- understated the reachability by roughly an order of magnitude. The second
+-- process itself must be ADMITTED (TORTOISE_MULTI_WORKER=1 acknowledged, or the
+-- 2-machine topology).
 -- A deploy does NOT create that second process: the app runs ONE machine on a
 -- SINGLE-ATTACH volume (`fly.toml` `[[mounts]] source = "tortoise_api_data"`), so
 -- a replacement cannot mount the volume the old process still holds and the old

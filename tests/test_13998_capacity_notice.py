@@ -1485,7 +1485,13 @@ _OVERLAP_NEGATED = re.compile(
     r"\b(?:cannot|can ?not|does not|do not|nor|never|no|not(?!\s+only))\b",
     re.IGNORECASE)
 _OVERLAP_CLAUSE_SPLIT = re.compile(
-    r"(?<=[.;:!?])\s+|\s+(?:and|but|yet|so)\s+", re.IGNORECASE)
+    # ⛔ COMMAS, PARENTHESES AND DASHES ARE CLAUSE BOUNDARIES (#14038 review
+    # cycle 7). Without them a line laundered the claim through punctuation the
+    # cycle-6 splitter did not know: "a replacement cannot mount the held volume
+    # — a rolling replacement overlaps an old and a new process" stayed ONE
+    # "clause", so the unrelated `cannot` licensed the claim and the row passed
+    # GREEN. Splitting more finely can only make the scan stricter.
+    r"(?<=[.;:!?])\s+|\s+(?:and|but|yet|so)\s+|[,()\u2014\u2013]", re.IGNORECASE)
 
 
 def _affirmative_overlap_claims(text: str) -> list[tuple[int, str]]:
@@ -1547,6 +1553,24 @@ def test_the_overlap_guard_grades_each_CLAUSE_not_each_line():
         "'not only' was read as a negation and licensed an affirmative OVERLAP "
         f"claim — it is an ADDITIVE: {not_only_trap!r}")
 
+    # ⛔ PUNCTUATION IS A CLAUSE BOUNDARY (#14038 review cycle 7). The cycle-6
+    # splitter knew only `[.;:!?]` and `and/but/yet/so`, so a comma, a dash or a
+    # parenthesis kept a laundered claim in the SAME "clause" as an unrelated
+    # `cannot` and the row passed GREEN. Each of these is the exact sentence the
+    # review has removed six times, re-punctuated.
+    for laundered in (
+        "# a replacement cannot mount the held volume, a rolling replacement "
+        "overlaps an old and a new process.\n",
+        "# a replacement cannot mount the held volume \u2014 a rolling replacement "
+        "overlaps an old and a new process.\n",
+        "# a replacement cannot mount the held volume (in practice a rolling "
+        "replacement overlaps an old and a new process).\n",
+    ):
+        assert _affirmative_overlap_claims(laundered), (
+            "a claim laundered past the scan by punctuation — the splitter is "
+            "missing a clause boundary, so an unrelated negation elsewhere on the "
+            f"line licensed it: {laundered!r}")
+
     for honest in (
         "# a rolling replacement cannot overlap an old and a new process.\n",
         # The two TRUE spellings an earlier negation set false-REDded: the failure
@@ -1587,7 +1611,10 @@ def test_the_residuals_reachability_is_pinned_to_what_fly_toml_documents():
     but at LINE granularity. Cycle 6 closed the last way round it: the grading is
     per CLAUSE, because a single line could carry both the negation and the claim
     (see `test_the_overlap_guard_grades_each_CLAUSE_not_each_line`, which pins the
-    guard's own discriminating power).
+    guard's own discriminating power). Cycle 7 widened the SPLITTER itself: a
+    comma, a dash or a parenthesis kept a laundered claim in the same "clause" as
+    an unrelated `cannot`, so all three passed GREEN until punctuation became a
+    boundary. Each widening is pinned by that same row.
 
     ⛔ WHAT THIS ROW DOES **NOT** GRADE, stated so the self-description cannot
     overstate its coverage the way the previous two did: it catches any CLAUSE
