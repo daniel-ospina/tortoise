@@ -360,7 +360,13 @@ def _checked_window(days: float, raw: str, origin: str) -> float | None:
         # bounding memory. Prune-everything at `0` would be a different reading
         # (`pruned_before` would have to be "now"), so this refuses instead.
         _warn_once(
-            "window",
+            # ⛔ A SEPARATE KEY FROM THE TYPO ARM ABOVE (#14011 review, non-blocking
+            # observation 2). Both used `"window"`, so `_warn_once`'s
+            # once-per-process contract ate the second cause: an operator who
+            # mistyped the value, fixed it to `0`, never saw the newer warning —
+            # and the suppressed message carried the newer `raw`. The non-finite
+            # arm below is separate for the same reason.
+            "window-nonpositive",
             "usage signal: %s=%r is not a positive day count — the roll-up is "
             "running UNBOUNDED (every entry kept); fix the value to bound it",
             origin,
@@ -1035,7 +1041,7 @@ class UsageReading:
             "served_total": self.served_total,
             "pruned": self.pruned,
             "pruned_before": self.pruned_before,
-        "pruned_undated": self.pruned_undated,
+            "pruned_undated": self.pruned_undated,
             "capped": self.capped,
             "lines_read": self.lines_read,
             "lines_skipped": self.lines_skipped,
