@@ -103,8 +103,8 @@ stamp itself is a
 compare-and-swap on the value this pass read (:func:`claim_notice`), so two
 processes cannot interleave into a LOWER mark, and the provider Idempotency-Key
 (`capacity-notice:{org_id}:{pct}`) collapses the cross-process replay that
-survives a crash between send and stamp — **inside that key's retention window
-only**. Resend dedupes a repeated key against "the last **24 hours**"
+survives a crash between send and stamp — inside that key's 24 h retention
+window only. Resend dedupes a repeated key against "the last **24 hours**"
 (`resend.com/docs/dashboard/emails/idempotency-keys`), so a replay that arrives
 later than that sends a SECOND copy and then stamps. ⛔ The bound is stated
 rather than implied because nothing in this code expires a key: the window is
@@ -622,7 +622,8 @@ def claim_notice(cp, org_id: str, threshold: int,
     ⛔ SEND-THEN-STAMP, like the #2406 onboarding marker: the stamp follows a
     provider ACCEPT, so a failed send leaves the mark alone (retryable) and the
     provider Idempotency-Key collapses the duplicate a crash between the two
-    produces. ⛔ THAT COLLAPSE IS BOUNDED BY THE PROVIDER, NOT HERE: Resend keeps
+    produces — inside the key's 24 h retention window only. ⛔ THAT COLLAPSE IS
+    BOUNDED BY THE PROVIDER, NOT HERE: Resend keeps
     a key for "the last 24 hours"
     (`resend.com/docs/dashboard/emails/idempotency-keys`), so a crash-replay that
     arrives after the window sends a second copy and then stamps. Nothing in this
@@ -950,8 +951,8 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
         # than overclaiming.
         logger.warning(
             "capacity notice: sent to team %s at %s%% but the mark moved "
-            "concurrently (replaying this threshold is collapsed by the "
-            "provider key; a DIFFERENT threshold's notice is not)",
+            "concurrently (replaying this threshold inside the provider key's "
+            "24 h window is collapsed; a DIFFERENT threshold's notice is not)",
             org_id, notice.threshold)
     return {"status": "sent", "org_id": org_id, "threshold": notice.threshold,
             "message_id": (result or {}).get("message_id")}

@@ -2616,7 +2616,7 @@ def set_org_storage_notice_pct(cp, org_id: str, pct: int,
     ⛔ SEND-THEN-STAMP (the #2406 posture, mirrored): the caller stamps only
     after the provider ACCEPTS, so a failed send stays retryable. The crash
     window between accept and stamp is covered by the provider Idempotency-Key
-    ``capacity-notice:{org_id}:{pct}``.
+    ``capacity-notice:{org_id}:{pct}``, inside its 24 h window and not beyond it.
 
     ⛔ MONOTONE: a stamp may never LOWER the mark. The guard already makes that
     unreachable (a lower threshold only reaches here when it is above the value

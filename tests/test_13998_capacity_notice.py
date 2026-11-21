@@ -1554,81 +1554,101 @@ def _source_block(path: pathlib.Path, start_marker: str,
 
 # --- the Idempotency-Key's bound: the PROVIDER's window, not ours ----------
 # #14038 review (P2, tree) found FOUR passages stating that the provider
-# Idempotency-Key "collapses" the crash-window duplicate without its bound. A
-# fresh-context review of the FIRST cut of this fix found FOUR MORE in the same
-# files, worded differently ("dedupes only the SAME threshold", "collapsed the
-# duplicate send ... outcome is still exactly-once") — the first cut's detector
-# demanded the literal phrase "idempotency key" beside the stem "collaps" and
-# went GREEN on all four: a false PASS of the exact defect it exists to catch.
+# Idempotency-Key "collapses" the crash-window duplicate without its bound. TWO
+# fresh-context reviews of successive cuts of this fix then defeated the detector
+# itself, three times over, and each defeat is pinned below:
+#   * cut 1 matched the literal phrase "idempotency key" beside the stem
+#     "collaps" — GREEN on four reworded sites ("dedupes only the SAME
+#     threshold", "collapsed the duplicate send ... outcome is still
+#     exactly-once");
+#   * cut 2 read only docstrings and comment lines, so the runtime STRING an
+#     operator reads in the log ("replaying this threshold is collapsed by the
+#     provider key") was outside it entirely;
+#   * cut 2 also searched the verb only AFTER the subject (a passive "is covered
+#     by the provider Idempotency-Key" read as clean) and allowed the bound in
+#     the NEXT sentence, where any unrelated "runs every 24 h" cleared a claim.
 # Resend's page is the bound: "Resend checks whether an email with the same
 # idempotency key has already been sent in the last 24 hours", so a replay older
 # than that window sends AGAIN.
-#
-# GRANULARITY, stated because it is what the first cut got wrong: a CLAIM is a
-# sentence whose IDEMPOTENCY SUBJECT is followed by a collapse/dedupe verb, and
-# the bound may sit in that sentence or the next one (the sources put it one
-# sentence later — "…collapses the duplicate. Resend dedupes against the last
-# 24 hours"). Requiring a DURATION is deliberate: the vague "inside its window"
-# is what the review called unbounded, so no word that merely sounds like a
-# bound is accepted.
-_SUBJECT = re.compile(r"(?:idempotency[-\s]?key|provider\s+key)", re.IGNORECASE)
-_COLLAPSE = re.compile(r"collaps|dedup", re.IGNORECASE)
-#: A DURATION, never a durationless "window".
+_SUBJECT = re.compile(r"idempotency[-\s]?key|provider\s+key", re.IGNORECASE)
+#: The verbs that claim the key REMOVES a duplicate. Voice and order do not
+#: matter: both operands are searched over the whole sentence, because a passive
+#: construction puts the verb first and a rewrite can pick any of these.
+_COLLAPSE = re.compile(
+    r"collaps|dedup|suppress|exactly[-\s]once|single\s+delivery|only\s+once",
+    re.IGNORECASE)
+#: A DURATION, never a durationless "window" — "inside its window" is the wording
+#: the original finding rejected. `<=24h` counts: `hosted_api` already writes the
+#: onboarding key's bound that way.
 _RETENTION_BOUND = re.compile(
-    r"last\s+\**24\s*hours?\**"      # Resend's own wording
-    r"|\b24\s?-?h(?:ours?)?\b"        # the short form these comments use
+    r"\**24\s*hours?\**"           # Resend's own wording
+    r"|\b24\s?-?h(?:ours?)?\b"     # the short form these comments use
     r"|24[- ]hour",
     re.IGNORECASE)
 
 
-def _prose(text: str) -> str:
-    """Docstring bodies plus comment lines — never source code.
+def _prose_units(text: str) -> list[str]:
+    """Every unit of human-readable text in `text`; source code excluded.
 
-    A sentence scan over raw source grades code as prose (an `await` between two
-    prose clauses, a dict literal ending in `.`), and stripping only the comment
-    markers would leave the code lines in. Reading triple-quoted bodies and
-    `#`/`--` lines is the whole of what a claim can live in.
+    `ast` answers this directly for a Python file — a docstring IS a string
+    constant, and so is the log message a reader sees — while comment lines are
+    what `ast` discards and a line filter keeps. The `.sql` file does not parse,
+    which is fine: its claims live in `--` lines. A text with neither (the
+    guard's own samples, handed in as bare sentences) is returned as-is, so those
+    are graded rather than read as an empty file.
     """
-    bodies = "\n".join(text.split('"""')[1::2])
-    comments = "\n".join(
-        line for line in text.splitlines()
-        if line.lstrip().startswith(("#", "--")))
-    if not bodies.strip() and not comments.strip():
-        # Already prose: the guard's own discrimination samples are handed in as
-        # bare sentences, and reading them as a source file would find nothing
-        # and grade them VACUOUSLY clean.
-        return text
-    return re.sub(r"^\s*(#:?|--)\s?", "", bodies + "\n" + comments,
-                  flags=re.MULTILINE)
+    units: list[str] = []
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        tree = None
+    if tree is not None:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                units.append(node.value)
+    block: list[str] = []
+    for line in text.splitlines():
+        if line.lstrip().startswith(("#", "--")):
+            block.append(re.sub(r"^\s*(#:?|--)\s?", "", line))
+        elif block:
+            units.append("\n".join(block))
+            block = []
+    if block:
+        units.append("\n".join(block))
+    return units or [text]
 
 
 def _sentences(text: str) -> list[str]:
-    return re.split(r"(?<=[.!?])\s+", " ".join(_prose(text).split()))
+    sentences: list[str] = []
+    for unit in _prose_units(text):
+        sentences.extend(re.split(r"(?<=[.!?])\s+", " ".join(unit.split())))
+    return sentences
 
 
 def _idempotency_claims(text: str) -> tuple[list[str], list[str]]:
-    """(every collapse/dedupe claim, the ones that name no retention window)."""
-    sentences = _sentences(text)
+    """(every claim that the key removes a duplicate, the unbounded ones).
+
+    The bound must be in the SAME sentence as the claim. A one-sentence lookahead
+    was tried and removed: it let an unrelated "the sweep runs every 24 h" clear a
+    claim that named no window at all.
+    """
     claims: list[str] = []
     unbounded: list[str] = []
-    for index, sentence in enumerate(sentences):
-        subject = _SUBJECT.search(sentence)
-        if not subject or not _COLLAPSE.search(sentence[subject.start():]):
+    for sentence in _sentences(text):
+        if not (_SUBJECT.search(sentence) and _COLLAPSE.search(sentence)):
             continue
         claims.append(sentence)
-        lookahead = sentence
-        if index + 1 < len(sentences):
-            lookahead = f"{sentence} {sentences[index + 1]}"
-        if not _RETENTION_BOUND.search(lookahead):
+        if not _RETENTION_BOUND.search(sentence):
             unbounded.append(sentence)
     return claims, unbounded
 
 
 #: Every file that carries the claim. `capacity_notice` is where the notices
-#: send; `supabase_control` is where every marker it stamps lives (the #2406
-#: onboarding key is the same claim one marker over); `hosted_api` stamps that
-#: marker on the send path and asserted "still exactly-once"; the migration
-#: header is append-only once applied — the artifact that can never be corrected.
+#: send (and where the operator-facing log line lives); `supabase_control` is
+#: where every marker it stamps lives (the #2406 onboarding key is the same claim
+#: one marker over); `hosted_api` stamps that marker on the send path and asserted
+#: "still exactly-once"; the migration header is append-only once applied — the
+#: artifact that can never be corrected later.
 _IDEMPOTENCY_ARTIFACTS = (
     "tortoise/capacity_notice.py",
     "tortoise/supabase_control.py",
@@ -1647,9 +1667,16 @@ def test_every_idempotency_key_claim_names_the_providers_retention_window():
     describes ("an unledgered pass re-sends the one-shot notice every interval
     forever") and the path a process down past the window reaches too.
 
-    This row grades the CLAIM rather than one literal string, so a reworded
-    over-claim is still caught; `test_the_idempotency_bound_guard_grades_a_bound_and_an_unbounded_claim`
-    pins the detector's discriminating power on the PRE-FIX wording.
+    This row grades the CLAIM, not a literal string, and it grades the file — not
+    a selected region — so a new claim in a docstring, a `#:` block, a `--`
+    header or a runtime log message is in scope. ⛔ WHAT IT DOES NOT GRADE, said
+    so the row cannot overstate itself: a claim that never names the key at all
+    ("deduplication makes the send safe") is outside the subject match, and a
+    `24 h` that is real but belongs to something else in the same sentence would
+    satisfy the bound. Both are why the four artifacts' prose is also read in
+    review; this row makes the enumerated wordings un-shippable, which is what it
+    can promise. `test_the_idempotency_bound_guard_grades_a_bound_and_an_unbounded_claim`
+    pins the detector's discriminating power on every wording a review defeated.
     """
     graded = 0
     for rel in _IDEMPOTENCY_ARTIFACTS:
@@ -1658,52 +1685,63 @@ def test_every_idempotency_key_claim_names_the_providers_retention_window():
         graded += len(claims)
         assert not unbounded, (
             f"{rel}: {len(unbounded)} sentence(s) claim the provider "
-            "Idempotency-Key collapses or dedupes a send WITHOUT naming a "
-            "retention window. Resend keeps a key for the last 24 hours, so a "
-            "replay after that window sends again and the bare claim is "
-            "false:\n  " + "\n  ".join(s[:300] for s in unbounded))
-    assert graded >= 14, (
+            "Idempotency-Key collapses, dedupes or otherwise removes a duplicate "
+            "WITHOUT naming a retention window in the same sentence. Resend keeps "
+            "a key for the last 24 hours, so a replay after that window sends "
+            "again and the bare claim is false:\n  "
+            + "\n  ".join(s[:300] for s in unbounded))
+    assert graded >= 17, (
         f"only {graded} sentence(s) were graded — this row is vacuous if the "
-        "claim's homes stop being found. Fourteen are what the detector reads "
-        "across the four files at this head; a reworded claim that drops below "
-        "that floor means the scan lost a site, not that the site was fixed")
+        "claim's homes stop being found. Seventeen are what the detector reads "
+        "across the four files at this head; dropping below that floor means the "
+        "scan lost a site, not that the site was fixed")
 
 
 def test_the_idempotency_bound_guard_grades_a_bound_and_an_unbounded_claim():
-    """The detector's own discriminating power, pinned.
+    """The detector's own discriminating power, pinned on what BEAT earlier cuts.
 
-    A guard nobody has seen refuse is a guard that may be matching nothing. The
-    unbounded samples are the PRE-FIX wordings, verbatim.
+    A guard nobody has seen refuse is a guard that may be matching nothing — and
+    this one has been defeated twice, so every defeat is a case here. The
+    unbounded samples are wordings that were live on this branch or that a
+    reviewer used to defeat a previous cut.
     """
-    # unbounded: the two wordings the first cut of this guard WENT GREEN ON
-    for pre_fix in (
-        "the provider Idempotency-Key `capacity-notice:{org_id}:{pct}` "
-        "collapses the one duplicate a crash between the provider accept and "
-        "the stamp can produce.",
+    unbounded_samples = (
+        # the pre-fix wording of the migration header
+        "The provider Idempotency-Key `capacity-notice:{org_id}:{pct}` collapses "
+        "the one duplicate a crash between the provider accept and the stamp can "
+        "produce.",
+        # the pre-fix wording of the key's own dedupe note
         "the Idempotency-Key below dedupes only the SAME threshold; closing the "
         "order window needs a pre-send reservation.",
-        "the provider Idempotency-Key collapsed the duplicate send; outcome is "
-        "still exactly-once.",
-    ):
-        claims, unbounded = _idempotency_claims(pre_fix)
+        # the runtime log STRING that cut 2 never read
+        "replaying this threshold is collapsed by the provider key",
+        # PASSIVE voice — the verb precedes the subject
+        "a duplicate send is collapsed by the provider Idempotency-Key",
+        # no "collapse" anywhere in the sentence
+        "the provider key suppresses the duplicate send",
+        "the provider key guarantees a single delivery per threshold",
+        # a durationless "window" — the wording the original finding rejected
+        "the provider Idempotency-Key collapses the duplicate inside its window",
+        # an unrelated 24 h in the NEXT sentence must not clear the claim
+        "the provider Idempotency-Key collapses the duplicate. The sweep runs "
+        "every 24 h.",
+    )
+    for sample in unbounded_samples:
+        claims, unbounded = _idempotency_claims(sample)
         assert claims and unbounded, (
-            f"the guard read a pre-fix over-claim as bounded: {pre_fix!r}")
-    # bounded: a duration in the sentence, and one in the next sentence
-    for bounded in (
+            f"the guard read an over-claim as bounded: {sample!r}")
+    for sample in (
         "the provider Idempotency-Key collapses the duplicate within its 24 h "
         "window.",
-        "the provider key only collapses a replay of the SAME threshold. Resend "
-        "keeps that key for the last 24 hours.",
+        "the crash window is covered by the provider Idempotency-Key, inside "
+        "its 24 h window.",
+        "the provider Idempotency-Key onboarding:{org_id} collapses "
+        "cross-process replays <=24h.",
+        "Resend keeps that key for the last 24 hours.",
     ):
-        _claims, unbounded = _idempotency_claims(bounded)
+        _claims, unbounded = _idempotency_claims(sample)
         assert not unbounded, (
-            f"a bounded sentence was graded unbounded: {bounded!r}")
-    # and a durationless "window" is NOT a bound — the review's own wording
-    _claims, unbounded = _idempotency_claims(
-        "the provider Idempotency-Key collapses the duplicate inside its window.")
-    assert unbounded, (
-        "a durationless 'inside its window' was accepted as a bound; that is "
-        "the wording #14038 asked to have replaced")
+            f"a bounded sentence was graded unbounded: {sample!r}")
 
 
 def test_the_module_docstring_names_the_post_rename_table():
