@@ -8586,7 +8586,23 @@ def test_the_document_roots_a_browser_ignores_insert_nothing() -> None:
         "element's subtree is hidden"
     )
     assert extract_visible_text("<p>ONE<span><html hidden></span><p>TWO") == "ONE TWO", (
-        "`span` is the top element here, and it is inline — the whole kept"
+        "`span` is the top element here, so only the span is hidden and both paragraphs "
+        "still paint — but this row alone cannot distinguish WHICH frame is marked (its "
+        "span is empty and the `<p>` is popped by the next one); the two rows below are "
+        "the discriminating pair"
+    )
+    # ⛔ THE FRAME CHOICE AND THE ATTRIBUTE ITSELF, both pinned (#14073 review round 26, P1):
+    # no earlier row distinguished WHICH open frame the attribute lands on, or that `hidden`
+    # is what triggers it — so marking the bottom frame, marking every frame, or ignoring the
+    # attribute all stayed GREEN while each one drops painted copy.
+    assert extract_visible_text("<div><span><html hidden>CLAIM</span>MORE</div>") == "MORE", (
+        "the attribute lands on the TOP element (the `span`) — not on the `div` around it, "
+        "and not on every open element: a browser hides `CLAIM` and paints `MORE`, so "
+        "hiding the whole `div` (or the bottom frame) drops painted copy"
+    )
+    assert extract_visible_text("<div><span><html>CLAIM</span>MORE</div>") == "CLAIM MORE", (
+        "an `html` token WITHOUT `hidden` changes nothing even with an open element — the "
+        "attribute is the whole trigger"
     )
     assert extract_visible_text("<p>ONE<select><html></select><p>TWO") == "ONE TWO", (
         "control: the same `html` token WITHOUT `hidden` changes nothing"
