@@ -19,10 +19,14 @@ to close.
 
 The parser below is also the ONE place this repo asks "what does a browser
 actually put in the document tree?", so the duplicate-`id` guard reads it too
-(``extract_element_ids``, #4118) and the docs page's attribute allowlist reads it
+(``extract_element_ids``, #4118), the docs page's attribute allowlist reads it
 for attribute NAMES (``extract_element_attributes``, #14073 — a claim parked in a
 `title`/`aria-*` is invisible to a visible-text golden, and a source pattern
-misses the spellings HTML permits). It used to keep an `HTMLParser` subclass of its
+misses the spellings HTML permits), and the docs page's section bound reads it
+for the headings and for WHICH anchors sit inside its TOC block
+(``extract_heading_positions``/``extract_anchors_within``, #14073 review — "inside
+that element" is an ancestry, and a raw-source read both missed the spellings
+HTML permits and counted blocks a reader never meets). It used to keep an `HTMLParser` subclass of its
 own, which inherited the stdlib tokenizer's divergences from a browser in BOTH
 directions — it missed `<svg><style><div id="dup"></div></style></svg>` (raw text
 to the stdlib, markup to a browser: a SILENT miss) and counted `<template>`
@@ -54,6 +58,32 @@ _BLOG_HOSTS = frozenset({"premiselabs.co", "tortoise.premiselabs.co"})
 
 # `<script` opening a nested script element, in the script-data escaped states.
 _SCRIPT_IN_SCRIPT = re.compile(r"<script[\s/>]", re.IGNORECASE)
+
+#: The ASCII whitespace a `class` attribute's tokens are split on — the
+#: space-separated-tokens microsyntax, which is where HTML defines a class VALUE
+#: (`\t`, `\n`, `\f`, `\r` and space, and nothing else).
+#: `str.split()` is NOT used: it also splits on `\v`, which HTML does not, and a
+#: `class="toc\vwide"` mysteriously counting as `toc` would let a non-container
+#: contribute to the very index the container recording exists to make exact.
+_CLASS_WHITESPACE = re.compile(r"[ \t\n\f\r]+")
+
+
+def _class_tokens(attrs: list[tuple[str, str | None]]) -> set[str]:
+    """The tokens of an element's `class` attribute — FIRST one, as a browser keeps.
+
+    A token match and not a substring: `class="toc wide"` carries the token `toc`
+    and must count as the TOC block, while `class="tocnote"` must not. Both
+    spellings are legal HTML and both are rendered, which is why the check lives
+    here rather than in a `<div class="toc">` string match (#14073 review).
+    """
+    for name, value in attrs:
+        if name == "class":
+            return {
+                token
+                for token in _CLASS_WHITESPACE.split(value or "")
+                if token
+            }
+    return set()
 
 
 class _AnchorHrefParser(HTMLParser):
@@ -168,8 +198,41 @@ class _AnchorHrefParser(HTMLParser):
     })
     # `<font>` breaks out only when it carries one of its presentational attrs.
     _BREAKOUT_FONT_ATTRS = frozenset({"color", "face", "size"})
+    # Elements that never hold content, so no end tag is coming for them. The
+    # open-element stack below must not push one: a `<br>` left on the stack would
+    # make the NEXT `</div>` a mismatch and the container it belongs to would never
+    # close.
+    _VOID = frozenset({
+        "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+        "meta", "param", "source", "track", "wbr",
+    })
+    # Tags a browser closes WITHOUT an end tag (spec 13.2.6.3's implied end tags,
+    # plus the table sections): `<li>a<li>b` is two elements, so an EXTENT built on
+    # end tags alone would run from the first `<li>` past the second. The container
+    # helper refuses these rather than guessing (see `extract_anchors_within`).
+    _IMPLICITLY_CLOSED = frozenset({
+        "caption", "colgroup", "dd", "dt", "li", "optgroup", "option", "p",
+        "rb", "rp", "rt", "rtc", "tbody", "td", "tfoot", "th", "thead", "tr",
+    })
+    #: Every recording of a DOCUMENT TREE, by attribute name. `_clear_recordings`
+    #: iterates this tuple, and
+    #: `test_the_parsers_recordings_forget_a_document_a_frameset_replaced` asserts it
+    #: covers every public list-valued attribute on the parser — so a recording added
+    #: later fails THAT test until it is declared here, instead of silently keeping
+    #: entries from a tree a browser has thrown away.
+    _RECORDINGS = ("hrefs", "ids", "attrs", "headings", "containers")
+    #: Diagnostic ratchets, NOT document recordings: they describe what the PARSE met
+    #: (`foreign_tags` is the declared-limits watchdog), so an honored `<frameset>`
+    #: does not clear them — they are evidence about the read, not about the tree.
+    _DIAGNOSTICS = ("foreign_tags", "foreign_unmatched_endtags", "foreign_root_mismatch")
 
-    def __init__(self) -> None:
+    def __init__(self, *, container: tuple[str, str] | None = None) -> None:
+        """`container` = `(tag, class token)` to collect each one's anchors for.
+
+        Off by default because the question is only asked by the docs page's
+        section bound (`extract_anchors_within`, #14073 review); the blog and id
+        guards ask questions an ancestry does not answer.
+        """
         super().__init__(convert_charrefs=True)
         # `<noscript>` is raw text only with scripting ENABLED — the browser
         # default, and the only mode this guard's question is asked in. The stdlib
@@ -193,6 +256,19 @@ class _AnchorHrefParser(HTMLParser):
         # the raw SOURCE at a heading; `extract_heading_positions` turns the line
         # and column into an offset.
         self.headings: list[tuple[str | None, int, int]] = []
+        # The container whose anchors the caller asked for, and the two recordings
+        # that answer it: `containers` holds one href list per MATCHING CONTAINER
+        # the tree has, in document order, and `_open_containers` holds the ones
+        # still open (a stack, because an anchor belongs to every container around
+        # it). See `extract_anchors_within` for why an href list alone cannot
+        # answer "which anchors are inside this element".
+        self._container = container
+        self.containers: list[list[str]] = []
+        self._open_containers: list[list[str]] = []
+        # Rendered open elements, as `(tag, opened a container)`, in document
+        # order — the ancestry the container recording and the `in select` rule
+        # below both read. See `_open_extent` for what it does NOT model.
+        self._open_elements: list[tuple[str, bool]] = []
         # Open elements currently suppressing collection. A stack, not a counter,
         # so nested `<template><script>…</script></template>` unwinds correctly.
         self._suppress: list[str] = []
@@ -333,6 +409,25 @@ class _AnchorHrefParser(HTMLParser):
         NON-inert — the opposite of the HTML rule, and #3962's Chromium-verified
         finding.
 
+        ⛔ REFUSED, AND DELIBERATELY ON THE CONSERVATIVE SIDE OF A SPEC CHANGE. The
+        classic token-parsing rules had an "in select" insertion mode that dropped
+        every other start tag, so `<select><h2 id="quickstart">Q</h2></select>` put
+        NO heading in the tree — and counting one bounded the slice at a heading no
+        reader meets, measured with the claim after it outside the golden, the
+        vocabulary pin and the allowlist at once (#14073 review). The current living
+        standard no longer lists that mode at all (its insertion-mode sequence goes
+        from "in cell" to "in template"), and under the replacing model a `<h2>`
+        inside a `<select>` may well be created — so "a browser has no heading here"
+        is browser-dependent, not settled. Both answers cannot be had, and only one
+        of them is safe: BOUNDING at a heading the pins cannot see is the fail-open
+        direction (the claim under it leaves every pin), while refusing to bound
+        leaves the slice long and the extra text pinned. So a `<h2>` with an open
+        `<select>` ANCESTOR is not recorded — ancestry, so `<optgroup><option>`
+        inside it is covered too. The cost is declared: a rendered heading inside a
+        select does not end the slice, and the tokens the classic mode used to POP
+        the select for (`input`/`keygen`/`textarea`, after which a heading would be
+        outside it again) are not modelled either — same direction, same reason.
+
         The id is kept rather than the whole tag because the caller asking this
         question is "which heading does the section end at", which is a question
         about identity; the position is kept because it is the only way to cut the
@@ -340,11 +435,32 @@ class _AnchorHrefParser(HTMLParser):
         """
         if tag != "h2" or self._suppress or self.wedged_reason or self._foreign:
             return
+        if self._in_select():
+            return
         heading_id = next((value for name, value in attrs if name == "id"), None)
         self.headings.append((heading_id, *self.getpos()))
 
+    def _in_select(self) -> bool:
+        """True when an open `<select>` ancestor makes this start tag one to refuse.
+
+        The one test both `_record_heading` and `_collect` ask, kept in one place so
+        the two cannot answer differently: a claim parked in a heading inside a
+        `<select>` and an anchor parked there are the same escape (an advertised
+        boundary / an advertised entry the pins cannot verify), and both are refused
+        for the reason `_record_heading` states at length — the conservative side of
+        a spec change, where the alternative direction is fail-open.
+        """
+        return any(open_tag == "select" for open_tag, _ in self._open_elements)
+
     def _collect(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag != "a" or self._suppress or self.wedged_reason:
+            return
+        if self._in_select():
+            # An `<a>` inside a `<select>` is not a link a reader can follow, and it
+            # is not an entry the TOC's index may be built from — the same escape as
+            # a heading there, one recording over (measured: an anchor inside a
+            # `<select>` in the TOC still advertised `#storage-limits` and bounded
+            # the section, all pins green; #14073 review). See `_in_select`.
             return
         for name, value in attrs:
             if name == "href":
@@ -354,6 +470,11 @@ class _AnchorHrefParser(HTMLParser):
                 # not the tokenizer's rule.
                 if value:
                     self.hrefs.append(value)
+                    # ...and into EVERY container the anchor sits inside, which is
+                    # the question an href alone cannot answer: "the TOC block's
+                    # entries" is an ancestry, not a string match.
+                    for inside_container in self._open_containers:
+                        inside_container.append(value)
                 break
 
     def _breaks_out(self, tag: str, attrs: list[tuple[str, str | None]]) -> bool:
@@ -418,13 +539,114 @@ class _AnchorHrefParser(HTMLParser):
             # already collected is gone from the document — keeping them would report
             # a link no visitor can click. Clearing at the source matters because the
             # E2E layer asks `blog_entry_hrefs` and never looks at `wedged_reason`
-            # (review finding, #3962, Chromium-verified).
-            self.hrefs.clear()
-            # The same clear for the ids: this is one document tree, and the
-            # honored `<frameset>` replaced all of it.
-            self.ids.clear()
+            # (review finding, #3962, Chromium-verified). One method rather than a
+            # clear per recording: see `_clear_recordings` (#14073 review).
+            self._clear_recordings()
             return True
         return False
+
+    def _clear_recordings(self) -> None:
+        """Forget every recording, because one document tree has been replaced.
+
+        An honored `<frameset>` REPLACES the body, so a recording kept from before
+        it describes a tree a browser has thrown away. This is a METHOD over a
+        DECLARED TUPLE (`_RECORDINGS`) rather than a clear per recording because the
+        invariant is "every recording describes the one tree": `attrs` and
+        `headings` were added beside `hrefs`/`ids` and missed the clear, so
+        `extract_element_attributes('<div title="x"></div><frameset>')` still
+        reported an attribute from a document that no longer exists — the exact
+        invariant `ids`' own clear was introduced for, with two exceptions its
+        docstrings claimed did not exist (#14073 review).
+
+        ⛔ AND THE RATCHET IS A TEST, not this comment: a recording added later is
+        invisible to a tuple nobody updated, so
+        `test_the_parsers_recordings_forget_a_document_a_frameset_replaced` asserts
+        `_RECORDINGS` + `_DIAGNOSTICS` is EVERY public list on the parser — a sixth
+        recording reds there until it is declared, and declaring it here is what
+        makes the clear apply. The diagnostics are deliberately not cleared: they
+        record what the PARSE met, not what the tree holds.
+        """
+        for name in self._RECORDINGS:
+            getattr(self, name).clear()
+        self._open_containers.clear()
+        self._open_elements.clear()
+
+    def _open_extent(
+        self, tag: str, attrs: list[tuple[str, str | None]], suppressed: bool,
+    ) -> None:
+        """Push a rendered element onto the open-element stack the ancestry reads.
+
+        Only elements a browser puts in the tree are pushed: a start tag inside an
+        inert/raw region is not markup (the tokenizer is in raw-text mode or the
+        content is template content), and foreign content is not descended into
+        here at all — the foreign ROOT is not pushed either, so `</svg>` matches
+        nothing and is ignored, which is what a browser does with an end tag that
+        matches no open element.
+
+        ⛔ NOT MODELLED: the HTML parser's IMPLICIT-CLOSE rules (a `<p>`, `<li>` or
+        table section closed by the NEXT tag rather than by an end tag). What that
+        costs depends on the tag, and the direction is NOT the same both ways —
+        which is why `extract_anchors_within` REFUSES a container tag that has an
+        implicit-close rule instead of documenting a direction for it:
+
+        * for an ordinary container (`<div>`, `<section>`, `<nav>`), a leftover
+          element on this stack is harmless: `_close_extent` searches the WHOLE
+          stack for the container's tag and pops everything above it, so the
+          container still closes at its own `</div>`;
+        * for a container whose tag a SIBLING closes (an `<li>`, `<p>`, `<td>`…),
+          the extent runs past the sibling — a LARGER advertised set, i.e. a
+          SHORTER slice, i.e. the fail-OPEN direction. Refusing the tag is the only
+          honest answer; a comment claiming the safe direction was measured wrong
+          (#14073 review).
+
+        A container that MIS-NESTS across a raw-text region is not modelled either:
+        an end tag written inside an inert region matches the outer element here,
+        where a browser closes within the template's fragment — that one closes the
+        container EARLY (fewer advertised entries, longer slice, the loud
+        direction). ⛔ The seam's page-level ratchet does NOT cover this one (it
+        keys on `wedged_reason`/foreign state, and this divergence sets neither —
+        measured), so the honest statement is: no covered page carries it today,
+        and if one did the slice would run long and the golden would red loudly.
+        """
+        if suppressed or self._suppress or self.wedged_reason or self._foreign:
+            return
+        if tag in self._VOID:
+            return
+        opened_container = False
+        if self._container is not None:
+            wanted_tag, wanted_class = self._container
+            if tag == wanted_tag and wanted_class in _class_tokens(attrs):
+                # The SAME list object goes into `containers` (document order) and
+                # onto the open stack (`_open_containers`), so anchors appended
+                # while it is open land in the recording without a second walk.
+                inside: list[str] = []
+                self.containers.append(inside)
+                self._open_containers.append(inside)
+                opened_container = True
+        self._open_elements.append((tag, opened_container))
+
+    def _close_extent(self, tag: str) -> None:
+        """Pop `tag` and everything opened after it, as a browser's end tag does.
+
+        An end tag naming no open element is IGNORED (a browser's "any other end
+        tag" does nothing when the stack holds no matching element), which is what
+        makes the un-pushed foreign root and the un-pushed inert region terminals
+        harmless: their end tags match nothing here.
+
+        The cascade is the browser's: an end tag pops every open element above its
+        match too, so this closes the containers it passes. That is why the stack
+        holds `(tag, opened a container)` rather than a bare depth.
+        """
+        if self.wedged_reason:
+            return
+        for index in range(len(self._open_elements) - 1, -1, -1):
+            if self._open_elements[index][0] != tag:
+                continue
+            for _open_tag, opened_container in self._open_elements[index:]:
+                if opened_container and self._open_containers:
+                    self._open_containers.pop()
+            del self._open_elements[index:]
+            return
 
     def set_cdata_mode(self, elem: str, *args: object, **kwargs: object) -> None:
         """Keep the HTML rules' raw-text tokenizer state out of foreign content.
@@ -447,11 +669,15 @@ class _AnchorHrefParser(HTMLParser):
         # its CONTENT does not (see `_record_id`, `_record_attributes`).
         self._record_id(attrs)
         self._record_attributes(tag, attrs)
-        if not self._open(tag, attrs):
+        suppressed = self._open(tag, attrs)
+        if not suppressed:
             self._collect(tag, attrs)
         # After `_open`, so a heading written inside a suppressed region is not
         # recorded (see `_record_heading`).
         self._record_heading(tag, attrs)
+        # Last, so this tag's own ancestry (what `_record_heading` and `_collect`
+        # read) is its PARENTS': a `<div class="toc">` is not inside itself.
+        self._open_extent(tag, attrs, suppressed)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         # In FOREIGN content the self-closing flag IS honored, so `<svg/>`/`<math/>`
@@ -529,6 +755,10 @@ class _AnchorHrefParser(HTMLParser):
         return super().parse_comment(i, report)
 
     def handle_endtag(self, tag: str) -> None:
+        # First, and before the foreign early-returns: an end tag closes whatever
+        # open element it names, and the ancestry the container recording reads has
+        # to see that even where the model resolves the foreign context differently.
+        self._close_extent(tag)
         if tag in ("br", "p") and self._foreign:
             # Spec 13.2.6.5: `</br>`/`</p>` in foreign content pop it and are
             # reprocessed by the HTML rules (which close nothing here). Any OTHER
@@ -697,6 +927,50 @@ def extract_heading_positions(html: str) -> list[tuple[str | None, int]]:
         (heading_id, line_starts[line - 1] + column)
         for heading_id, line, column in parser.headings
     ]
+
+
+def extract_anchors_within(
+    html: str, *, tag: str, class_token: str,
+) -> list[list[str]]:
+    """Hrefs of the anchors inside each rendered ``<tag class="… class_token …">``.
+
+    One list per matching container, in document order (an empty list for a
+    container with no anchors, so the COUNT is the tree's answer to "how many
+    such containers does this page have"). The docs page's section bound asks
+    this to build its index — the set of headings the TOC advertises — because
+    that index was the last raw-source read in the bound and a decoy
+    ``<div class="toc">`` in a comment therefore REPLACED the real advertised
+    set, letting an un-advertised heading bound the slice and everything under it
+    leave all three pins green (#14073 review, measured).
+
+    ⛔ "INSIDE" IS AN ANCESTRY, which an href list cannot express: the same
+    question read as a regex over the document text cannot tell an anchor in the
+    TOC from one in the footer, cannot tell whether the TOC is even in the tree,
+    and misses the spellings HTML permits — ``href='#x'``, ``href=#x`` and
+    ``class="toc wide"`` are all legal and all rendered, and each one either
+    reddened the golden (the slice ran past the section) or fired the bound's own
+    "no TOC block" assertion (#14073 review, all three measured).
+
+    Limits, all inherited from the parser and declared rather than guessed. An
+    IMPLICIT-CLOSE tag is REFUSED outright (`_IMPLICITLY_CLOSED`): for a container
+    whose tag a sibling closes (`<li>`, `<p>`, `<td>`…) an extent built on end tags
+    alone runs past the sibling, which is a LARGER advertised set and therefore a
+    SHORTER slice — the fail-open direction — so the honest answer is to refuse the
+    tag rather than to state a direction for it and hope. A container inside an
+    inert region is not in the tree at all, which is the point.
+    """
+    if tag in _AnchorHrefParser._IMPLICITLY_CLOSED:
+        raise ValueError(
+            f"`{tag}` is closed by a browser WITHOUT an end tag, so an extent built "
+            f"on end tags alone would run past its next sibling — a larger "
+            f"advertised set and a SHORTER slice. Ask a container tag whose end tag "
+            f"is the only thing that closes it (div/section/nav/ul/…), or model the "
+            f"implicit close first."
+        )
+    parser = _AnchorHrefParser(container=(tag, class_token))
+    parser.feed(html)
+    parser.close()
+    return parser.containers
 
 
 def extract_element_ids(html: str) -> list[tuple[str, int]]:

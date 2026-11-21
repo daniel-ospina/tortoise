@@ -53,6 +53,7 @@ from tests._html_links import (  # noqa: E402
     _AnchorHrefParser,
     blog_entry_hrefs,
     extract_anchor_hrefs,
+    extract_anchors_within,
     extract_element_attributes,
     extract_element_ids,
     extract_heading_positions,
@@ -1209,6 +1210,32 @@ def _docs_section(anchor: str = "storage", *, page: str | None = None) -> str:
     helper and names no cause — the opposite of what a guard owes a reader whose
     edit moved the section (#14066 review round 1).
 
+    ⛔ AND SO IS THE INDEX — `extract_anchors_within` reads the TOC block and its
+    entries out of the same parsed tree, because the RAW-SOURCE index was the last
+    fail-open in this bound: a `<div class="toc">` in a comment or an inert
+    `<template>` was matched as the TOC, so a decoy block REPLACED the advertised
+    set and an un-advertised heading could bound the slice again — measured with
+    `<!-- <div class="toc"><a href="#storage-limits">…` above the real TOC plus a
+    `FalkorDB`/`allowance`/`tier`/"permanently deleted" paragraph at the boundary:
+    the golden, the vocabulary pin and the allowlist all green while the claim
+    rendered (#14073 review). The false red went with it — `href='#quickstart'`,
+    `href=#quickstart` and `class="toc wide"` are legal, rendered spellings that
+    ran the slice past the section or fired this bound's own "no TOC block"
+    assertion. Exactly one rendered TOC block is required (asserted below): two is
+    an index ambiguity, and the second could advertise a heading the reviewed one
+    does not.
+
+    ⚠️ THE DECLARED RESIDUAL, stated rather than left to be derived: a heading that
+    IS advertised — `<h2 id="storage-limits">` plus a TOC entry for it — cuts the
+    slice there, and everything under it leaves all three pins. That is the design
+    (see the bound rule above: a heading a reader can reach through the TOC had to
+    be added deliberately), and it is pinned as a live behaviour by
+    `test_the_storage_slice_bound_catches_the_heading_it_exists_for`, so it cannot
+    be mistaken for an accident. What it is NOT is a guarantee that the extra
+    heading was reviewed against the plain-language rule: nothing here requires
+    `#storage` to be a single level-2 heading, so a reviewer of a PR that adds one
+    is the only thing between an advertised sub-heading and an unreviewed claim.
+
     `page` exists for the mutation controls below, which drive a MUTANT page
     through this real bound rather than through a reimplementation of it.
     """
@@ -1221,13 +1248,6 @@ def _docs_section(anchor: str = "storage", *, page: str | None = None) -> str:
         f"`/tortoise/docs#{anchor}`, so moving or renaming this section silently "
         f"breaks the notices' link text."
     )
-    toc = re.search(r'<div class="toc">(.*?)</div>', html, re.S)
-    assert toc is not None, (
-        "website/docs.html has no `<div class=\"toc\">` block. The slice is "
-        "bounded by the headings the TOC advertises, so without that block "
-        "nothing bounds it: the slice becomes the rest of the page and the pins "
-        "stop meaning anything."
-    )
     # ⛔ THE INDEX IS THE TOC BLOCK, not every `href="#…"` in the document. Read
     # off the whole page, one inline cross-reference anywhere (a "see also", a
     # footer jump) promotes a heading to a slice boundary without a deliberate
@@ -1235,7 +1255,36 @@ def _docs_section(anchor: str = "storage", *, page: str | None = None) -> str:
     # carrying `FalkorDB`/`allowance`/`tier`/"permanently deleted" escaped every
     # pin once one `<a href="#storage-limits">` existed elsewhere (#14066 review
     # round 4).
-    advertised = set(re.findall(r'href="#([^"]+)"', toc.group(1)))
+    #
+    # ⛔ AND THE BLOCK IS READ OUT OF THE PARSED TREE TOO — the last raw-source read
+    # in this bound, and it failed open the same way the heading bound did. A
+    # `<div class="toc">` parked in a comment or an inert `<template>` was matched
+    # as the TOC, so a decoy block REPLACED the advertised set: with
+    # `<!-- <div class="toc"><a href="#storage-limits">…` above the real TOC and an
+    # un-advertised `<h2 id="storage-limits">` plus a
+    # `FalkorDB`/`allowance`/`tier`/"permanently deleted" paragraph at the section
+    # boundary, all three pins stayed green while the claim rendered (#14073
+    # review, measured). The other direction reddened the golden on a correct
+    # page: `href='#quickstart'`, `href=#quickstart` and `class="toc wide"` are all
+    # legal, all rendered, and the first two ran the slice past the section while
+    # the third fired the "no TOC block" assertion below.
+    #
+    # EXACTLY ONE rendered TOC block, asserted rather than assumed: with two, which
+    # one is the index is an ambiguity a reader cannot resolve from the copy, and a
+    # second block could advertise a heading the reviewed one does not — a
+    # boundary the reviewed page never made a decision about.
+    tocs = extract_anchors_within(html, tag="div", class_token="toc")
+    assert len(tocs) == 1, (
+        f"website/docs.html has {len(tocs)} `<div class=\"toc\">` block(s) in the "
+        f"document tree; the slice is bounded by the headings the TOC "
+        f"advertises, so it needs exactly one. With none, nothing bounds the "
+        f"slice and it becomes the rest of the page; with two, which block is the "
+        f"index is undecidable, and the second could advertise a heading the "
+        f"reviewed one does not."
+    )
+    advertised = {
+        href[1:] for href in tocs[0] if href.startswith("#") and len(href) > 1
+    }
     for heading_id, offset in headings:
         if offset <= start:
             continue  # the section's OWN opening tag
@@ -1410,6 +1459,12 @@ def _slice_bound_by_raw_headings(page: str) -> str:
     matched. Exists so the negative control below can show what the parsed bound
     buys instead of asserting a property both bounds already have (#14073
     review).
+
+    ⛔ The TOC regex below is part of what this reproduces: the pre-fix bound read
+    its INDEX off the raw document too, so a decoy `<div class="toc">` in a
+    comment replaced the advertised set and a rendered heading could then bound the
+    slice. Keeping the regex here is what lets a control measure THAT defect; it is
+    not an implementation (#14073 review).
     """
     start = _h2_offset(page, "storage")
     if start < 0:
@@ -1747,6 +1802,106 @@ def test_the_storage_slice_bound_catches_the_heading_it_exists_for() -> None:
             "control no longer demonstrates the false red it pins"
         )
 
+    # ── the INDEX is read out of the PARSED tree, not off the raw source ─────
+    # The last raw-source read in the bound. A decoy TOC in a place a reader never
+    # meets replaces the advertised set, so an un-advertised heading bounds the
+    # slice again and its text leaves all three pins (#14073 review). The control
+    # below reproduces the decoy AND the escape, so neither half can rot silently.
+    decoy_toc = '<!-- <div class="toc"><a href="#storage-limits">Limits</a></div> -->\n'
+    for label, decoy in (
+        ("comment", decoy_toc),
+        ("inert template",
+         '<template><div class="toc"><a href="#storage-limits">Limits</a></div></template>\n'),
+    ):
+        decoyed = page[:boundary] + limits + page[boundary:]
+        decoyed = decoyed.replace('<div class="toc">', decoy + '<div class="toc">', 1)
+        assert decoyed != page, f"could not insert the decoy TOC ({label})"
+
+        # THE PREMISE: the raw-source index reads the decoy, so `storage-limits`
+        # becomes advertised and the rendered heading after it bounds the slice.
+        escaped = _slice_bound_by_raw_headings(decoyed)
+        assert " ".join(_visible_text(escaped).split()) == reviewed, (
+            f"the raw-source index no longer reads the decoy TOC in a {label}, so "
+            "this control no longer demonstrates the fail-open it pins"
+        )
+        assert not _banned_vocabulary(escaped), (
+            f"the vocabulary pin sees the claim the {label} decoy hides, so it is "
+            "not the raw-source index this control measures"
+        )
+
+        caught = _docs_section(page=decoyed)
+        assert {"allowance", "falkor", "tier"} <= set(_banned_vocabulary(caught)), (
+            f"a `<div class=\"toc\">` inside a {label} REPLACED the advertised "
+            "set: an un-advertised heading now bounds the #storage slice and the "
+            "claim under it leaves the golden, the vocabulary pin and the "
+            "attribute allowlist at once"
+        )
+        assert " ".join(_visible_text(caught).split()) != reviewed, (
+            f"the golden is blind to the claim hidden by the {label} decoy TOC"
+        )
+
+    # The same read in the FALSE-RED direction: all three spellings below are
+    # legal HTML and all three render, so the index must read the same set from
+    # them. Measured against the pre-fix raw index, which ran the slice past the
+    # section (`href='…'`, `href=…`) or fired the "no TOC block" assertion
+    # (`class="toc wide"`) — a red blamed on the storage copy.
+    for label, old, new in (
+        ("single-quoted href", 'href="#quickstart"', "href='#quickstart'"),
+        ("unquoted href", 'href="#quickstart"', "href=#quickstart"),
+        ("extra class token", '<div class="toc">', '<div class="toc wide">'),
+    ):
+        respelled = page.replace(old, new, 1)
+        assert respelled != page, f"website/docs.html has no {old!r} to respell ({label})"
+        assert " ".join(
+            _visible_text(_docs_section(page=respelled)).split()
+        ) == reviewed, (
+            f"respelling the TOC as {label} moved the slice, so the golden reds on "
+            "an edit that does not touch the storage copy: the index is still "
+            "being read off the raw source"
+        )
+    # The raw index provably misses the two href spellings, so the asserts above
+    # are not passing for a reason that holds under both implementations.
+    for old, new in (
+        ('href="#quickstart"', "href='#quickstart'"),
+        ('href="#quickstart"', "href=#quickstart"),
+    ):
+        assert " ".join(
+            _visible_text(_slice_bound_by_raw_headings(page.replace(old, new, 1))).split()
+        ) != reviewed, (
+            f"the raw-source index now reads {new!r}, so this control no longer "
+            "demonstrates the false red the parsed index removes"
+        )
+    assert re.search(r'<div class="toc">', page.replace('<div class="toc">', '<div class="toc wide">', 1)) is None, (
+        "a token added to the TOC's class is still matched by the literal "
+        "`<div class=\"toc\">` pattern, so this control pins nothing"
+    )
+
+    # ── the DECLARED residual: an ADVERTISED heading still cuts the slice ────
+    # Pinned as a live behaviour rather than left to be derived, so a reader meets
+    # it here instead of finding it in production. A TOC entry is a deliberate
+    # authorship decision, and the cost of one is a heading whose text nobody had
+    # to hold to the plain-language rule — see `_docs_section`'s docstring.
+    advertised = page[:boundary] + limits + page[boundary:]
+    advertised = advertised.replace(
+        '<a href="#quickstart">',
+        '<a href="#storage-limits">Limits</a> <a href="#quickstart">',
+        1,
+    )
+    assert 'href="#storage-limits"' in advertised, (
+        "could not add the TOC entry that makes the residual reachable"
+    )
+    assert " ".join(
+        _visible_text(_docs_section(page=advertised)).split()
+    ) == reviewed, (
+        "an ADVERTISED sub-heading no longer cuts the #storage slice, which means "
+        "the declared residual in `_docs_section`'s docstring is stale — re-derive "
+        "it before trusting this bound's scope"
+    )
+    assert _banned_vocabulary(_docs_section(page=advertised)) == [], (
+        "the pins now see past an advertised sub-heading, so the residual the "
+        "docstring declares has been closed and that paragraph must be rewritten"
+    )
+
 
 def test_the_storage_section_bound_cuts_at_a_RENDERED_heading_only() -> None:
     """NEGATIVE CONTROL — a heading no browser renders must not end the slice.
@@ -1762,6 +1917,30 @@ def test_the_storage_section_bound_cuts_at_a_RENDERED_heading_only() -> None:
     Both directions are asserted: the parsed bound now keeps the paragraph inside
     the slice, AND the raw-source bound provably escaped it — otherwise this
     control would pass against the defect it exists to pin.
+
+    ⛔ ONE INSERTION MODE IS MODELLED AND THE REST ARE NOT, so this test's name
+    claims no more than that. A `<h2>` with an open `<select>` ancestor is not
+    recorded: the classic rules' "in select" mode dropped every other start tag,
+    while the current standard no longer lists that mode (its sequence goes from
+    "in cell" to "in template") and a `<h2>` inside a `<select>` may now be
+    created — so the browser answer is not settled. Only one of the two answers is
+    safe, and it is the one modelled: BOUNDING at a heading the pins cannot see is
+    fail-open (the claim under it leaves every pin, measured — it bounded the slice
+    and all three pins stayed green; #14073 review), while refusing to bound leaves
+    the slice long and the extra text pinned. The declared cost: a genuinely
+    rendered heading inside a select does not end the slice, and the tokens the old
+    mode popped the select for (`input`/`keygen`/`textarea`) are not modelled
+    either — same direction, same reason.
+
+    ⛔ AND THE IMPLICIT-CLOSE RULES ARE NOT MODELLED, in the SAFE direction only
+    because the container helper refuses the tags they affect: for an ordinary
+    container a leftover `<p>` is harmless (`_close_extent` searches the whole stack
+    for the container's tag), and for a tag a sibling closes (`<li>`, `<p>`, `<td>`…)
+    the extent would run PAST the sibling — a larger advertised set, a shorter
+    slice — so `extract_anchors_within` raises on those instead. What is left is a
+    container that mis-nests across a raw-text region, which closes EARLY (fewer
+    advertised entries, longer slice — the loud direction, and no covered page
+    carries one today; the seam's page-level ratchet does NOT cover this one).
     """
     page = _read(DOCS)
     section = _docs_section()
@@ -1775,6 +1954,12 @@ def test_the_storage_section_bound_cuts_at_a_RENDERED_heading_only() -> None:
         ("comment", '<!-- <h2 id="quickstart">Quickstart</h2> -->'),
         ("inert template", '<template><h2 id="quickstart">Quickstart</h2></template>'),
         ("script body", '<script>var s = \'<h2 id="quickstart">Quickstart</h2>\';</script>'),
+        # `in select` — parsed as markup by every tokenizer, and NOT bounded: the
+        # classic mode dropped the start tag, the current standard may create it,
+        # and the refusal below is the conservative side of that (it keeps the
+        # claim INSIDE the slice instead of betting the other way). Reachable with
+        # ordinary authoring, and it is why modelling this case was part of the fix.
+        ("select", '<select><h2 id="quickstart">Quickstart</h2></select>'),
     ):
         mutant = page[:boundary] + inert + "\n" + claim + page[boundary:]
         assert mutant != page, f"could not insert the {label} case"
@@ -1825,6 +2010,38 @@ def test_the_storage_section_bound_cuts_at_a_RENDERED_heading_only() -> None:
     assert {"allowance", "falkor", "tier"} <= set(_banned_vocabulary(quoting_slice)), (
         "the vocabulary pin does not see the text under a heading that merely "
         "quotes an advertised id"
+    )
+
+    # ── the `in select` rule, measured at the parser (the shape above is the
+    # consequence) ──────────────────────────────────────────────────────────
+    # Asserted directly so the model itself cannot be removed silently: inside a
+    # `<select>` — including under an `<option>`/`<optgroup>` — a `<h2>` is NOT
+    # BOUNDED, and outside one the same tag is. ⛔ "Not bounded" and not "not
+    # created": the classic mode dropped the start tag, the current standard no
+    # longer lists that mode and may well create the element, so the browser answer
+    # is not settled — and the refusal is the conservative side of it (bounding at
+    # a heading the pins cannot see is the fail-open one). Only the reasoning is
+    # pinned here; a comment claiming fidelity instead would invite someone to
+    # delete the guard as redundant.
+    assert extract_heading_positions('<select><h2 id="qs">Q</h2></select>') == [], (
+        "a `<h2>` inside a `<select>` is BOUNDED as a heading: the classic `in "
+        "select` mode dropped it and the current standard may create it, so "
+        "neither answer is settled — but bounding at it is the fail-open one, so "
+        "this refuses to"
+    )
+    assert extract_heading_positions(
+        '<select><optgroup><option><h2 id="qs">Q</h2></option></optgroup></select>'
+    ) == [], (
+        "a `<h2>` nested under `<optgroup><option>` inside a `<select>` is "
+        "bounded as a heading: ancestry, not the immediate parent, is the rule"
+    )
+    assert extract_heading_positions(
+        '<select><h2 id="qs">Q</h2></select><h2 id="after">A</h2>'
+    ) == [
+        ("after", len('<select><h2 id="qs">Q</h2></select>')),
+    ], (
+        "the `in select` rule leaked past the closing `</select>`: a heading "
+        "after the select is a real heading and must be recorded"
     )
 
 
@@ -2790,6 +3007,159 @@ def test_rendered_hrefs_ignores_non_rendered_markup() -> None:
     assert {
         "textarea", "title", "xmp", "iframe", "noembed", "noframes", "plaintext",
     } <= _AnchorHrefParser._RAW
+
+
+def test_extract_anchors_within_reads_the_parsed_tree() -> None:
+    """The container recording answers "inside", which an href list cannot.
+
+    This is the input the docs page's section bound builds its index from, and
+    its whole value is that the answer comes from the TREE: a container that is
+    not rendered contributes nothing, and a rendered one contributes its anchors
+    whatever spelling the markup uses. Both directions are pinned, and the
+    inert-region rows assert the raw `<div class="toc">` pattern's answer too, so
+    they measure the fail-open rather than a property both reads share (#14073
+    review).
+    """
+    toc = '<div class="toc"><a href="#a">A</a><a href="/faq">F</a></div>'
+    assert extract_anchors_within(toc, tag="div", class_token="toc") == [
+        ["#a", "/faq"],
+    ]
+    # An anchor inside a NESTED element is still inside the container, and one
+    # after the container closes is not — an "inside" that a naive
+    # "until the first `</div>`" read would get wrong.
+    nested = (
+        '<div class="toc"><div class="row"><a href="#a">A</a></div></div>'
+        '<a href="#after">B</a>'
+    )
+    assert extract_anchors_within(nested, tag="div", class_token="toc") == [["#a"]]
+    # A CLASS TOKEN, not a substring, and one of several tokens.
+    assert extract_anchors_within(
+        '<div class="toc wide"><a href="#a">A</a></div>', tag="div", class_token="toc"
+    ) == [["#a"]]
+    assert extract_anchors_within(
+        '<div class="tocnote"><a href="#a">A</a></div>', tag="div", class_token="toc"
+    ) == []
+    # The href spellings HTML permits, all three of which a `href="#…"` pattern
+    # misses: single-quoted, unquoted, and spaces around `=`.
+    for label, href in (
+        ("single-quoted", "href='#a'"),
+        ("unquoted", "href=#a"),
+        ("spaces around =", "href = '#a'"),
+    ):
+        assert extract_anchors_within(
+            f"<div class='toc'><a {href}>A</a></div>", tag="div", class_token="toc"
+        ) == [["#a"]], f"the container recording misses the {label} href"
+    # A container the tree does not have — the decoy that replaced the advertised
+    # set when the index was a raw-source read. The regex answer is asserted
+    # alongside so the row cannot pass because both reads are blind.
+    for label, decoy in (
+        ("comment", '<!-- <div class="toc"><a href="#a">A</a></div> -->'),
+        ("inert template", '<template><div class="toc"><a href="#a">A</a></div></template>'),
+        ("script body", '<script>var s = \'<div class="toc"><a href="#a">A</a></div>\';</script>'),
+    ):
+        assert re.search(r'<div class="toc">', decoy) is not None, (
+            f"the {label} row carries no raw `<div class=\"toc\">`, so it cannot "
+            f"demonstrate the raw-source read it pins"
+        )
+        assert extract_anchors_within(decoy, tag="div", class_token="toc") == [], (
+            f"a `<div class=\"toc\">` inside a {label} is reported as a container "
+            f"in the document tree, so a decoy can replace the real advertised set"
+        )
+    # One list per container, in document order, and an EMPTY list for a container
+    # with no anchors: the COUNT is the tree's answer to "how many TOC blocks".
+    assert extract_anchors_within(
+        '<div class="toc"><a href="#a">A</a></div><div class="toc"></div>',
+        tag="div", class_token="toc",
+    ) == [["#a"], []]
+
+
+    # ── an `<a>` inside a `<select>` is not an ENTRY either ────────────────────
+    # The same escape one recording over: an anchor the browser drops was still
+    # read as a TOC entry, so it advertised a heading that then bounded the slice
+    # (measured against the pre-fix read, #14073 review). Asserted at the helper, so
+    # the rule cannot be removed from one recording and kept in the other.
+    inside_select = '<div class="toc"><select><a href="#x">x</a></select><a href="#y">y</a></div>'
+    assert extract_anchors_within(inside_select, tag="div", class_token="toc") == [
+        ["#y"],
+    ], (
+        "an `<a>` inside a `<select>` is read as a TOC entry, so it can advertise a "
+        "heading and bound the section at a heading the pins do not verify"
+    )
+    # ...and the same read must stay EXACT for the surface the bound actually uses:
+    # an anchor inside a select is not a link at all, so the href set and the
+    # container recording agree about it.
+    assert extract_anchor_hrefs(inside_select) == ["#y"], (
+        "the rendered-link set still counts an `<a>` inside a `<select>`"
+    )
+
+    # ── a container tag a browser can close WITHOUT an end tag is REFUSED ──────
+    # For `<li>`/`<p>`/`<td>` an extent built on end tags alone runs past the next
+    # sibling, which is a LARGER advertised set and a SHORTER slice — the fail-open
+    # direction. Loud refusal, not a documented guess (#14073 review).
+    for implicitly_closed in ("li", "p", "td", "option"):
+        with pytest.raises(ValueError, match="WITHOUT an end tag"):
+            extract_anchors_within(
+                f'<{implicitly_closed} class="toc"><a href="#a">A</a></{implicitly_closed}>',
+                tag=implicitly_closed,
+                class_token="toc",
+            )
+    # The control: an ordinary container is accepted, so the refusal above is about
+    # the tag and not about the helper failing everything.
+    assert extract_anchors_within(
+        '<div class="toc"><a href="#a">A</a></div>', tag="div", class_token="toc"
+    ) == [["#a"]]
+
+
+def test_the_parsers_recordings_forget_a_document_a_frameset_replaced() -> None:
+    """An honored `<frameset>` replaces the tree, so EVERY recording is cleared.
+
+    `hrefs` and `ids` were cleared; `attrs` and `headings` — added later, for the
+    docs page's allowlist and section bound — were not, so the parser answered
+    from a document a browser had thrown away (#14073 review). The fix is one
+    `_clear_recordings()`, and this test drives each recording through a
+    `<frameset>` so a recording added later without a line there fails here
+    instead of drifting: the controls below assert the same inputs DO record
+    without the frameset, which is what makes each row non-vacuous.
+    """
+    toc = '<div class="toc"><a href="#a">A</a></div>'
+    # THE RATCHET, first: every public list on the parser is declared as either a
+    # document recording or a diagnostic. A recording added later without a line in
+    # `_RECORDINGS` reds HERE, which is what makes the rows below cover it — the
+    # enumeration of five helpers below cannot see a sixth.
+    declared = set(_AnchorHrefParser._RECORDINGS) | set(_AnchorHrefParser._DIAGNOSTICS)
+    public_lists = {
+        name
+        for name, value in vars(_AnchorHrefParser(container=("div", "toc"))).items()
+        if isinstance(value, list) and not name.startswith("_")
+    }
+    assert public_lists == declared, (
+        f"the parser has public list(s) {sorted(public_lists - declared)} that are "
+        f"neither a declared recording nor a declared diagnostic; an unclassified "
+        f"one is a recording nobody clears when an honored `<frameset>` replaces "
+        f"the document tree"
+    )
+    # The control: every recording answers on a page with no frameset.
+    assert extract_anchor_hrefs('<a href="/blog">x</a>') == ["/blog"]
+    assert extract_element_ids('<div id="d"></div>') == [("d", 1)]
+    assert extract_element_attributes(toc) == [("div", "class", 1), ("a", "href", 1)]
+    assert extract_heading_positions('<h2 id="h">H</h2>') == [("h", 0)]
+    assert extract_anchors_within(toc, tag="div", class_token="toc") == [["#a"]]
+    # The row: with an honored `<frameset>` after the same markup, nothing is left.
+    for label, got in (
+        ("hrefs", extract_anchor_hrefs('<a href="/blog">x</a><frameset>')),
+        ("ids", extract_element_ids('<div id="d"></div><frameset>')),
+        ("attrs", extract_element_attributes(f"{toc}<frameset>")),
+        ("headings", extract_heading_positions('<h2 id="h">H</h2><frameset>')),
+        (
+            "containers",
+            extract_anchors_within(f"{toc}<frameset>", tag="div", class_token="toc"),
+        ),
+    ):
+        assert got == [], (
+            f"`{label}` still reports entries from a document an honored "
+            f"`<frameset>` replaced, so the parser answers from a tree a browser "
+            f"no longer has"
+        )
 
 
 def test_product_hero_offers_the_blog() -> None:
