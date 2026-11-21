@@ -894,8 +894,11 @@ SWEEP_NAMES = 66
 #: `991bb3436f`) and `(11838, "de5664dc98549d56")` (`main` at `e022fc935b`) — BOTH stated with the
 #: commit they belong to, because `(11844, "70d6cfdcd8b769e4")` is `origin/main` `e0accb8fe6`'s OWN
 #: tree, a DIFFERENT commit, and an earlier cut of this paragraph attributed it to this merge
-#: (#14038 review, P3). The row composition is read off `--report --base 28ca66878d… --top 5000`, not
-#: inferred: `proj.g.query` 3642 and `g.query` 1492 are this PR's own rows, unchanged by the merge, and
+#: (#14038 review, P3). The row composition is read off `--report --base 28ca66878d… --top 5000` AT
+#: THIS HEAD, not inferred — and not as a property of the rev named above: an earlier cut dropped the
+#: head scope entirely, so the figures below read as `74fdd9e922`'s own, and a reader re-deriving them
+#: at that rev gets a different reading for two of the three rows. `proj.g.query` 3642 and `g.query` 1492
+#: are this PR's own rows, unchanged by the merge, and
 #: `seen.update` is **101** — `main`'s −1, which is `tests/test_13337_cache_graph_declaration.py`
 #: accumulating by APPEND rather than `update` (#14108), a file this branch's DIFF does not touch.
 #: ⛔ NO ARITHMETIC ON THE PARENTS IS OFFERED AS EVIDENCE: the merge tree's pair is what `--repin`
@@ -938,7 +941,12 @@ SWEEP_NAMES = 66
 #: is a cross-check of the measurement, never its evidence. The digest is the field that proves the
 #: tree: it differs from BOTH sides' digests, as a third tree's must.)
 #: `--check` exits 0 on the merged tree with `typed references still pointing at a public name: 0`.
-#: ── RE-CUT AT THE SIXTH MERGE TREE (`#13998` × `main` `e0accb8fe6`) ─────────────────────────
+#: ── RE-CUT AT THE SIXTH MERGE TREE (`#13998` × `main` `ba0eab1d86`, folded at `eec86df4c23f`)
+#: ⛔ The `main` sha named here is the one this tree FOLDED, not the `e0accb8fe6` that appears in the
+#: blocks above: `e0accb8fe6` is `origin/main`'s own tree at `4ae073f96e`, which prints (11845,
+#: '1797f10f33f3441c'), while the fold of `ba0eab1d86` — `eec86df4c23f`, and its `4688df03b365`
+#: follow-up — is the tree that prints the pair below (#14038 review, P3: an earlier cut of this
+#: header named `e0accb8fe6` and then typed a pair that tree does not carry).
 #: ⛔ BOTH SIDES' RECORDS ARE KEPT VERBATIM ABOVE — every block is true of the tree it names, and a
 #: reader re-deriving this pin needs the whole chain. There is exactly ONE assignment after them, and
 #: it is MEASURED on this merged tree with `--repin`, never computed from either parent's pair: the
