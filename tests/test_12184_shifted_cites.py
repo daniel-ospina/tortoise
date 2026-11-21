@@ -338,7 +338,12 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # unpinned, and the header's default resolves them to the PIN — where `sdk.py:16077` is unrelated
     # prose and `sdk.py:3801` is an EMPTY LINE. Both are one-token spellings already, so no figure
     # moves (345 as-written stays 345); NON-VACUOUS: `+1` reds the content arm at both.
-    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "sdk.py:16077-16081", "tortoise/sdk.py", 16077, "**JSONL event log (#548):** written when *point* is provided"),
+    # ⛔ #14087 review: the span's END was one short — `:16081` is the paragraph's PENULTIMATE line and
+    # `:16082` (the line reading "turns list is that same requirement for the record-held lane.") is its
+    # last, with `:16083` blank. A span token pins only its START, so the short end was invisible to `_PINS`;
+    # `test_the_jsonl_contract_span_ends_on_its_paragraphs_last_line` derives the end from the source
+    # and grades it.
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "sdk.py:16077-16082", "tortoise/sdk.py", 16077, "**JSONL event log (#548):** written when *point* is provided"),
     (_AUDIT, 'sdk.py:3801', _SDK, 3801, 'sdk._emit_event("PointRetracted", _deleted_point_payload(tid))'),
 )
 
@@ -518,8 +523,8 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'session_source_prose_migration.py:277-279'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:1292-1300`'): 2,
     # #14043 review (finding 1): one site each in §6.3. Measured on this document:
-    # `grep -o -F 'sdk.py:16077-16081' <doc> | wc -l` -> 1, `... 'sdk.py:3801' ...` -> 1.
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:16077-16081'): 1,
+    # `grep -o -F 'sdk.py:16077-16082' <doc> | wc -l` -> 1, `... 'sdk.py:3801' ...` -> 1.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:16077-16082'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:3801'): 1,
 }
 
@@ -1673,6 +1678,52 @@ def test_every_pinned_cite_lands_on_the_content_the_document_quotes() -> None:
     assert not errors, "\n".join(errors)
 
 
+_JSONL_DOC = "docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md"
+#: The first line of `_emit_event`'s JSONL half — the paragraph §6.3 item 1 quotes.
+_JSONL_QUOTE = "**JSONL event log (#548):** written when *point* is provided"
+
+
+def _cited_span_ends(doc_text: str, start: int) -> list[int]:
+    """Every END a `sdk.py:START-END` span opening at *start* states in *doc_text*."""
+    return [
+        int(match.group(1))
+        for match in re.finditer(rf"sdk\.py:{start}-(\d+)", doc_text)
+    ]
+
+
+def test_the_jsonl_contract_span_ends_on_its_paragraphs_last_line() -> None:
+    """A span cite must END on the last line of the paragraph it quotes, not one short.
+
+    #14087: §6.3 item 1 cited `sdk.py:16077-16081` while the contract's paragraph runs through
+    `:16082`, with `:16083` blank. A `_PINS` row pins a span's START only, so the short END was
+    green in every other test in this file — measured on a throwaway copy, moving the END back one
+    line left the whole suite passing. Derived, not hardcoded: the START is the line carrying the
+    quoted fragment, the END is the last line before the paragraph's blank terminator.
+    """
+    lines = (REPO / "tortoise/sdk.py").read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(lines, 1) if _JSONL_QUOTE in line)
+    end = start
+    while end < len(lines) and lines[end].strip():  # `lines[end]` is the line AFTER `end`
+        end += 1
+    assert end > start, (
+        f"`sdk.py:{start}` is a one-line paragraph, so this arm would grade nothing — re-point "
+        "`_JSONL_QUOTE` at the contract it is meant to cover."
+    )
+    doc_text = (REPO / _JSONL_DOC).read_text(encoding="utf-8")
+    cited = _cited_span_ends(doc_text, start)
+    assert cited == [end], (
+        f"§6.3 cites `sdk.py:{start}-{cited[0] if cited else '???'}` but that paragraph's last line is "
+        f"`:{end}` — a span "
+        "must end on it, not one short (`_PINS` pins the START, so the short END is green everywhere "
+        "else in this file)"
+    )
+    for mutant in (end - 1, end + 1):  # NON-VACUOUS: one short and one long both red
+        tampered = doc_text.replace(f"sdk.py:{start}-{end}", f"sdk.py:{start}-{mutant}")
+        assert _cited_span_ends(tampered, start) != [end], (
+            f"a span end moved to `:{mutant}` still passed this arm"
+        )
+
+
 #: The numeric span a cite token names: `:START` or `:START-END`.
 _TOKEN_SPAN = re.compile(r":(\d+)(?:-(\d+))?")
 
@@ -1916,9 +1967,11 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # whose new address is unpinned "moves the defect rather than closing it" (that re-cut's own
     # re-review). MEASURED, not inferred: the count of `_PINS` rows at each of these heads is
     # 72 (ecb137107e) -> 77 (298d3328db, the five above) -> 80 (0a53ad23d8).
-    # 80 -> 82 at the #14043 review (finding 1, this cycle): §6.3's `sdk.py:16077-16081` and
+    # 80 -> 82 at the #14043 review (finding 1, this cycle): §6.3's `sdk.py:16077-16082` and
     # `sdk.py:3801` were in neither list and unpinned, and the pin default opens on prose and on an
-    # empty line respectively.
+    # empty line respectively. (The span landed as `:16077-16081` in #13994, which re-derived this
+    # document on top of its own `:Point` join; the END stayed one short until #14087 re-derived it
+    # here. One ROW, one token — the row count did not move.)
     assert len(_PINS) == 82
 
 
