@@ -1476,10 +1476,21 @@ def _is_header_child(node: ast.AST, child: ast.AST) -> bool:
     #: A TYPE PARAMETER's `bound` / `default_value` evaluates in the ENCLOSING scope too
     #: (PEP 695): `class C[T: torch.query(…)]: torch = …` defines fine, so that call
     #: resolved the MODULE import, not the class body — yet it was charged with the
-    #: generic's own bindings. `_header_expressions` excludes these fields for a different
-    #: reason (a `:=` in a bound is a COMPILE-TIME SyntaxError, so it can bind nothing),
-    #: and inheriting that exclusion into the REACH direction graded a legitimate probe:
-    #: measured `()` → `((3, (), True, False, True),)` (review of this PR, P3).
+    #: generic's own bindings. Measured on this interpreter rather than inferred from the
+    #: prose: for `class C[T: torch]: torch = "CLASS-BODY-torch"` over a module-level
+    #: `torch`, `C.__type_params__[0].__bound__` IS the enclosing `torch`, not the class
+    #: body's — the bound never sees the body it is part of.
+    #: `_header_expressions` excludes these fields for a different reason (a `:=` in a
+    #: bound is a COMPILE-TIME SyntaxError, so it can bind nothing), and inheriting that
+    #: exclusion into the REACH direction graded a legitimate probe (review of this PR,
+    #: P3). The witness is the `"a type-parameter bound"` row of `4j-tervicesimus`: `()`
+    #: at this head, and graded the moment this test is removed (revert it on a copy and
+    #: the row comes back as exactly one entry — the probe's own `try`). ⛔ The row's LINE
+    #: NUMERAL is deliberately not restated here: the first element of a row is the PROBE
+    #: `try`'s line, so it moves with the template and the live value is already in the
+    #: assertion message — a numeral written into a growing file is stale by construction,
+    #: which is the defect this file has now falsified five times (see the
+    #: block-granularity note, `4j-vicesimus-bis`).
     #: The ascent reaches the definition with the TYPE-PARAMETER node as the child, not
     #: the bound expression itself, so the test is on that node's identity.
     if any(parameter is child for parameter in getattr(node, "type_params", ()) or ()):
