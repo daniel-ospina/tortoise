@@ -1048,11 +1048,16 @@ SWEEP_NAMES = 66
 #: two branches off the same head, and a merge of two measured trees is a THIRD tree — the case all
 #: the blocks above say must be re-measured rather than inherited. ⛔ NEITHER 11844 (round 1's tree)
 #: NOR 11847 (round 2's tree, already merged with `main` `2c0d66e2ec`) is carried.
-#: ⛔ THE +1 IS ATTRIBUTED IN THE BLOCK DIRECTLY ABOVE (round 1's `_NoCount` fake in
-#: `tests/test_14012_outside_view.py`) and THE +4 IN THE BLOCK DIRECTLY BELOW (`main`'s two row
-#: moves); both were measured against their own pre-merge head, so the merged figure is the sum of
-#: two MEASURED deltas, and `11843 + 1 + 4 = 11848` is a CROSS-CHECK of the `--repin` run, never its
-#: evidence. `--check` exits 0 on this tree with
+#: ⛔ THE ARITHMETIC IS `11843 + 1 + 4 = 11848`, AND EACH TERM IS NAMED RATHER THAN POINTED AT — the
+#: positional form ("the block directly above/below") has already been read the wrong way round
+#: here, and a pointer is the one thing this run forbids for itself. The **+4** is `main`'s two row
+#: moves (`ha_mod._make_sdk(namespace='registry')._.query` 10 → 13 and `captured.update` 30 → 31),
+#: attributed in the block ABOVE, which ends `11843 + 4 = 11847`. The **+1** is round 1's `_NoCount`
+#: fake in `tests/test_14012_outside_view.py`, attributed in the round-1 re-cut block above at
+#: `(11844, "066890c3a3b0837a")`. ⛔ IT IS NOT the +1 in the block BELOW: that one is the rounds 3-4
+#: re-cut's own `super().query` 71 → 72 and belongs to `(11857, "28611b0c960d0070")`. Both terms were
+#: measured against their own pre-merge head, so the merged figure is the sum of two MEASURED deltas
+#: and `11843 + 1 + 4 = 11848` is a CROSS-CHECK of the `--repin` run, never its evidence. `--check` exits 0 on this tree with
 #: `typed references still pointing at a public name: 0`.
 #: ⛔ MERGED `origin/main` (`69908d006b`) INTO THIS BRANCH, one merge after the block above — and
 #: the pin is RE-MEASURED on THIS tree with `--repin`, never carried: `(11856, "e9249c5490bc38d7")`.
@@ -1133,7 +1138,7 @@ SWEEP_NAMES = 66
 #: this branch actually resolved: `git diff --numstat origin/main HEAD` is FIFTEEN files and
 #: `tools/graphevent_home.py` alone is 215/47 — executable, and the two readings do NOT agree (11860
 #: against 11857). ⛔ A REASON REFUTED BY ITS OWN NUMBERS IS WORSE THAN NO REASON, and it is the
-#: shape this run exists to police: the +3 attribution two blocks below is the evidence, and a
+#: shape this run exists to police: the +3 attribution in the block below is the evidence, and a
 #: reader who took the deleted sentence would have concluded the pin must NOT have moved.
 #: ⛔ NEITHER SIDE'S FIGURE IS INHERITED BY ARITHMETIC: this branch's own tree `1b0db04894` measured
 #: `(11840, "b7eb08ff3acdcce4")` (the block above), and the `#14012` block above independently
