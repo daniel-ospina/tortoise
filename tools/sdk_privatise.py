@@ -382,7 +382,10 @@ SWEEP_NAMES = 66
 #: written out in full, and reads as broken in the form this block normally prints it in. The rule
 #: therefore stands on what IS measured — no branch and no `main` reaches such a commit, so it sits
 #: outside every BRANCH history a reader browses (it IS inside `refs/pull/14108/head`'s, which is this
-#: paragraph's own point four lines above) — and not on a `gc` sweep that never happens: which is why
+#: paragraph's own point, stated earlier in it — ⛔ NOT "four lines above", as an earlier draft of
+#: this clause said: that offset does not reproduce, and an offset is the same RELATIVE-REFERENCE
+#: class this block fixes below by naming the tree instead, since it rots as the prose above grows)
+#: — and not on a `gc` sweep that never happens: which is why
 #: this note points at the ISSUE NUMBER, and reserves the sha for the one place where the ADDRESS is
 #: the claim (the `#14068` attribution below, where it is written out and its limits stated).
 #: ⛔ The −6 is verified as an ATTRIBUTION and not as a direction: the residue row sets were
