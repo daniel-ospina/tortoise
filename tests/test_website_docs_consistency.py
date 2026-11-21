@@ -7651,6 +7651,36 @@ def test_the_script_data_wedge_states_its_own_rule() -> None:
         "a `-->` must return the tokenizer to plain data: that is the round-12 fix, "
         "and without it the wedge fires on a document a browser reads normally"
     )
+    # ── A CHUNK THAT ENDS AT THE TOKEN IS DECIDED, NOT UNDECIDED ─────────────
+    # ⛔ THE TWO BOUNDARY CASES DO NOT SHARE AN ANSWER (#14073 review round 16, P2,
+    # measured). `handle_data` is fed a chunk `HTMLParser`'s CDATA mode cut at the
+    # `</script` it matched, so the next character after a chunk ending in `<script` is
+    # `<` — outside §13.2.5.27's delimiter set — so the state is ESCAPED and the element
+    # closes there. Guessing `double` wedged a document every browser paints (and the
+    # parent commit read it right, so this was a regression):
+    assert _script_data_state("<!--<script") == "escaped", (
+        "a chunk ending exactly at `<script` was reported double-escaped: the next "
+        "character is the `<` of the `</script` the chunker cut at, §13.2.5.27 "
+        "reconsumes in the ESCAPED state, and calling it double wedges legal markup "
+        "(#14073 review round 16, P2)"
+    )
+    assert _script_data_state("<!--<script</script") == "escaped", (
+        "the mirror case inside one chunk: `<script` followed by `<` stays escaped, so "
+        "that `</script` closes the element"
+    )
+    assert "CLAIM" in extract_visible_text(
+        "<script><!--<script</script><p>CLAIM</p>"
+    ), (
+        "legal markup was refused: Chrome closes the script at that `</script` and "
+        "paints CLAIM, so the wording golden must see it too — a false refusal here "
+        "is the over-block direction, and it hid a painted claim from every pin"
+    )
+    assert extract_anchor_hrefs(
+        '<script><!--<script</script><a href="/blog">x</a>'
+    ) == ["/blog"], (
+        "the same false refusal dropped a link a browser exposes, in the silent form: "
+        "the anchor was reported absent rather than raising"
+    )
     # ── what must NOT wedge: three shapes a browser paints (each measured) ──
     for markup in (
         "<script><!--<script>--></script><p>SEE THIS</p>",

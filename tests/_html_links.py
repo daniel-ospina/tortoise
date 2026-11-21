@@ -68,15 +68,31 @@ def _script_data_state(data: str) -> str:
     * escaped (`<!--` seen): `</script` also CLOSES it;
     * double escaped (`<script` seen while escaped): `</script` does NOT close it.
 
-    So a chunk that ends `double` — or ends exactly AT a `<script`/`</script` whose
-    delimiter is in the next chunk, which the same rule decides — is the one where the
-    parse here and a browser can disagree about whether the element closed, and the
-    disagreement cannot be resolved from this chunk at all: from double-escaped a
-    `</script` only returns the tokenizer to ESCAPED, so the element closes at the
-    SECOND such token and the bytes between the two are script text a browser does not
-    paint. `handle_data` therefore WEDGES (stops answering) rather than guessing. The
-    cost of that refusal is a CLASS of legal documents, declared there — never a
-    fail-open.
+    So a chunk that ends `double` is the one where the parse here and a browser can
+    disagree about whether the element closed, and the disagreement cannot be resolved
+    from this chunk at all: from double-escaped a `</script` only returns the tokenizer
+    to ESCAPED, so the element closes at the SECOND such token and the bytes between the
+    two are script text a browser does not paint. `handle_data` therefore WEDGES (stops
+    answering) rather than guessing. The cost of that refusal is a CLASS of legal
+    documents, declared there — never a fail-open.
+
+    ⛔ A CHUNK THAT ENDS EXACTLY AT A `<script`/`</script` TOKEN IS *NOT* UNDECIDED, and
+    treating it as undecided was a false refusal (#14073 review round 16, P2, measured).
+    The two boundary cases do NOT share an answer, though they share a rule:
+
+    * ending at `<script` — `handle_data` is fed a chunk that `HTMLParser`'s CDATA mode
+      cut at the `</script` it matched, so the next character is `<`. §13.2.5.27 (script
+      data double escape start) sends anything outside tab/LF/FF/space, `/` and `>` back
+      to *script data escaped state* — so the state at the chunk end is ESCAPED, the
+      element closes at that `</script`, and the document must be read normally.
+    * ending at `</script` — the next character is `<` again, and §13.2.5.31 (script data
+      double escape end) also says *"Anything else: reconsume in the script data double
+      escaped state"*, so the state stays DOUBLE.
+
+    Guessing `double` for the first case wedged a document a browser paints:
+    `<script><!--<script</script><p>CLAIM</p>` was refused while Chrome closes the script
+    and paints `CLAIM` (measured; the parent commit read it correctly, so this was a
+    regression).
     """
     state = "data"
     i, n = 0, len(data)
@@ -92,10 +108,15 @@ def _script_data_state(data: str) -> str:
             elif data[i:i + 7].lower() == "<script":
                 nxt = i + 7
                 if nxt >= n:
-                    # UNDECIDED: the delimiter, if any, is in the NEXT chunk. Staying
-                    # double makes `handle_data` wedge, which is the loud side; the
-                    # alternative reads the rest of a script body as markup.
-                    state = "double"
+                    # THE DELIMITER IS THE NEXT CHUNK'S FIRST BYTE, AND IT IS KNOWN.
+                    # `handle_data` is fed a chunk `HTMLParser`'s CDATA mode cut at the
+                    # `</script` it matched, so the next character here is `<` — which
+                    # is not in the ` \t\n\f/>` delimiter set, so §13.2.5.27 reconsumes
+                    # in SCRIPT DATA ESCAPED and the state stays `escaped`. Guessing
+                    # `double` here wedged `<script><!--<script</script><p>CLAIM</p>`,
+                    # a document a browser paints (#14073 review round 16, P2). The
+                    # mirror case in the `double` arm keeps `double` — same rule,
+                    # different answer, see the docstring.
                     i = n
                 elif data[nxt] in " \t\n\f/>":
                     state, i = "double", nxt
