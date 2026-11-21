@@ -85,7 +85,7 @@ divided into every node and reported as if it recurred.
 **Projected onto the shape that matters** — 72,488 nodes, 42 % of the largest legacy graph's 118,755
 (`#13083` §1):
 
-```
+```text
 72,488 × 597.2 B = 43.3 MB        (190 B payload, the tenant-average shape)
 72,488 × 557.4 B = 40.4 MB        (88 B payload, the floor of the two)
 ```
