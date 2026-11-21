@@ -4235,29 +4235,39 @@ def _e6_write_cells(census_path: str) -> tuple[dict, str]:
         return {}, (f"{census_path} carries "
                     f"{'no' if blocks is None else 'a ' + type(blocks).__name__} `packs` "
                     f"object; its `written` cells are UNMEASURED")
-    for pack, block in blocks.items():
-        if not isinstance(block, dict):
-            faults.append(f"pack {pack!r} is a {type(block).__name__}")
-            continue
-        for surface in E6_SURFACES:
-            # ⛔ THE CONTAINER, not only the rows inside it: a truncated artifact's
-            # `"relations": 42` made `for row in 42` raise `TypeError: 'int' object is not
-            # iterable` — the THIRD shape of the same class (#14060 review round 5, measured:
-            # `{"packs": {"dev": {"relations": 42}}}` and `{"hierarchies": true}`).
-            here = block.get(surface)
-            if not isinstance(here, list):
-                faults.append(f"{pack}.{surface} is a {type(here).__name__}, not a list")
+    # ⛔ ONE CATCH FOR THE WHOLE SHAPE CLASS, not a guard per shape (#14060 review round 6).
+    # Five rounds each found ONE MORE shape that escaped — a non-object artifact, a non-object
+    # `packs`, a non-list surface (`for row in 42`), a non-dict row, and finally a ROW whose id
+    # is a collection (`{"predicate": ["a","b"]}` -> `TypeError: unhashable type: 'list'` when
+    # `_e6_key` puts it in a dict key). Enumerating shapes against arbitrary JSON is an unbounded
+    # surface, and every miss CRASHES `main` after a run has paid its cost — so the invariant is
+    # stated once, structurally: this reader never raises. The per-shape guards below still run,
+    # because naming WHICH part is malformed is worth more than a bare exception name; this catch
+    # is what makes an unanticipated shape degrade instead of killing the run.
+    try:
+        for pack, block in blocks.items():
+            if not isinstance(block, dict):
+                faults.append(f"pack {pack!r} is a {type(block).__name__}")
                 continue
-            for row in here:
-                if not isinstance(row, dict):
+            for surface in E6_SURFACES:
+                here = block.get(surface)
+                if not isinstance(here, list):
+                    faults.append(f"{pack}.{surface} is a {type(here).__name__}, not a list")
                     continue
-                cells[_e6_key(pack, surface, row)] = row
+                for row in here:
+                    if not isinstance(row, dict):
+                        faults.append(f"{pack}.{surface} carries a {type(row).__name__} row")
+                        continue
+                    cells[_e6_key(pack, surface, row)] = row
+    except Exception as exc:  # the invariant, not a swallow: it is REPORTED in `source`
+        return {}, (f"{census_path} could not be read ({type(exc).__name__}: {exc}); "
+                    f"its `written` cells are UNMEASURED")
     if faults:
-        # ⛔ THE FAULT IS NAMED, never folded into a normal-read `source`: a silent skip is the
-        # half of this defect that leaves every affected row reading `unmeasured` while the
-        # beside column claims it was read (#14060 review round 5, the arm found it twice).
+        # ⛔ WORDED TO WHAT THE CODE DOES (#14060 review round 6, P3): the cells this reader
+        # COULD read are returned beside the fault, so the source may not claim every cell is
+        # unmeasured — it names the ones it could not read.
         return cells, (f"{census_path} is MALFORMED ({'; '.join(faults)}); "
-                       f"its `written` cells are UNMEASURED")
+                       f"the cells it could not read are UNMEASURED")
     generated = artifact.get("generated_by") or "an unstated command"
     return cells, f"{census_path} (generated_by: {generated})"
 
@@ -4285,8 +4295,9 @@ def _e6_census_rows(census: dict) -> list[tuple[str, str, dict]]:
         if not isinstance(block, dict):
             continue
         for surface in E6_SURFACES:
-            # The same container guard as `_e6_write_cells`: the census arrives from the tool,
-            # but a malformed one must degrade rather than raise inside a paid run.
+            # The same container guard as `_e6_write_cells`, and it is PINNED there by the
+            # arm's census case: the census arrives from the tool, but a malformed one must
+            # degrade rather than raise inside a paid run.
             here = block.get(surface)
             if not isinstance(here, list):
                 continue

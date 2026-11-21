@@ -1476,7 +1476,9 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
                          ("{}", "no packs at all"),
                          ("{\"packs\": null}", "null packs"),
                          ("{\"packs\": {\"dev\": {\"relations\": 42}}}", "non-LIST surface"),
-                         ("{\"packs\": {\"dev\": {\"hierarchies\": true}}}", "bool surface")):
+                         ("{\"packs\": {\"dev\": {\"hierarchies\": true}}}", "bool surface"),
+                         ('{"packs": {"dev": {"relations": [{"predicate": ["a", "b"]}]}}}',
+                          "unhashable row id")):
         bad = tmp_path / "census.json"
         bad.write_text(payload)
         cells, source = measure._e6_write_cells(str(bad))
@@ -1489,6 +1491,16 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
     assert e6["error"] is None, e6["error"]
     assert e6["written"]["unmeasured"] == e6["declared"], e6["written"]
     assert set(e6["written"]) == {"direct", "mediated", "none", "unmeasured"}, e6["written"]
+    # …and the SIBLING container guard, which no input from the current producer can reach
+    # (`build_census` builds both sections from lists): pinned here so that its removal is not
+    # invisible — measured, reverting it reds nothing without this case (#14060 review round 6).
+    malformed = {"packs": {"dev": {"relations": 42, "hierarchies": [{"predicate": "p",
+                                                                        "from_kind": "a",
+                                                                        "to_kind": "b"}]}}}
+    rows = measure._e6_census_rows(malformed)
+    assert rows == [("dev", "hierarchies", {"predicate": "p", "from_kind": "a",
+                                            "to_kind": "b"})], (
+        f"a malformed surface contributes NO rows and must not raise: {rows!r}")
 
 
 def test_a_synthetic_hierarchies_defect_runs_through_the_runs_own_defect_scan():
@@ -16327,7 +16339,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     #: restating the tuple inline (`#11695` review F4d/Finding 2), which is the second half of
     #: the body's "stated once" claim: the record's block and this map are re-derived together.
     assert per_file == {"PRE-REGISTRATION.md": 24, "preregistration.json": 9,
-                        "probes/capstone_measure.py": 20}, (
+                        "probes/capstone_measure.py": 19}, (
         f"the bundle's hasPart/hierarchies mentions are {per_file} — the record's §5 "
         "self-matching note states them per file; re-derive the note (and this map) "
         "rather than deleting the qualifier, or it reads as 'no output' when it is not")
