@@ -136,6 +136,19 @@ CAPABILITY_CONTROLS = (
     ("path procedure",
      "MATCH (e:GraphEvent) CALL apoc.path.expand(e, 'TOUCHED>', 'Point', 1, 2)",
      "cypher:apoc."),
+    # ⛔ THE HOP-COUNT ARMS DO DECIDE, on spellings a real reader carries
+    # (`#14183` round-7 review, P2). The earlier cut declared `*1..`, `*..` and
+    # `shortestpath` undecidable on the grounds that "every real spelling also
+    # carries an earlier arm" — measured FALSE for a TYPED bounded hop (it carries
+    # no `-[*`), an open-ended hop, and the shortestPath PROCEDURE (a `CALL`, so
+    # nothing precedes it). Three arms were shipping with their identity graded by
+    # nothing, which is the defect this table exists to end.
+    ("typed bounded var-length", "MATCH (a:GraphEvent)-[:IMPL*1..5]->(b)",
+     "cypher:*1.."),
+    ("open-ended var-length", "MATCH p=(a)-[:NEXT*..3]->(b)", "cypher:*.."),
+    ("shortest path procedure",
+     "CALL algo.shortestPath.stream(null, null, {relationshipQuery: 'IMPL'})",
+     "cypher:shortestpath"),
     ("graph algorithm", "CALL algo.pageRank(null, null) YIELD nodeId, score",
      "cypher:call algo"),
     ("fulltext procedure",
@@ -148,20 +161,24 @@ CAPABILITY_CONTROLS = (
 
 #: Arms that can never be the DECIDING token, because every real spelling of them
 #: also carries an EARLIER arm in `GRAPH_CAPABILITY_CYPHER` and the tool takes the
-#: first match: `-[r:NEXT*]->` also carries `-[`; `-[*1..2]->` also carries
-#: `-[*`; `-[r]->` also carries `-[`; `<-[:T]-` also carries `-[`; and a
-#: `size((…))` pattern or `shortestPath(…)` needs a relationship inside it, so
-#: `-[` or `--` decides first. They are real arms — a snippet carrying only that
-#: substring is still refused — they simply cannot be pinned by a snippet a real
-#: reader would carry. Declared here so the completeness pin can tell "not pinned
-#: yet" (a defect) from "cannot be pinned" (a property of first-match ordering).
+#: first match: `-[r]->` also carries `-[`, `<-[:T]-` also carries `-[`, and a
+#: `size((…))` adjacency aggregate needs a relationship inside it, so `-[` or `--`
+#: decides first. They are real arms — a snippet carrying only that substring is
+#: still refused — they simply cannot be pinned by a snippet a real reader would
+#: carry. Declared here so the completeness pin can tell "not pinned yet" (a
+#: defect) from "cannot be pinned" (a property of first-match ordering).
+#:
+#: ⛔ THIS SET IS A CLAIM ABOUT ORDERING, SO IT IS SMALL ON PURPOSE, and every
+#: member was checked by construction rather than by intuition: `*1..`, `*..` and
+#: `shortestpath` were ON this list until a review measured that a typed bounded
+#: hop, an open-ended hop and the shortestPath procedure each decide their own arm
+#: (`#14183` round-7, P2). A token that CAN be pinned belongs in
+#: `CAPABILITY_CONTROLS`; the disjointness assert below makes a row that decides a
+#: declared arm red instead of silently leaving the declaration stale.
 ARMS_NO_SNIPPET_CAN_DECIDE = {
-    "*1..",          # always written inside `-[*1..2]`, which `-[*` catches first
-    "*..",           # same
     "]->",           # always preceded by `-[`
     "<-",            # always written `<-[:T]-`, which carries `-[`
     "size((",        # a pattern aggregate needs a relationship → `-[` or `--`
-    "shortestpath",  # same
     # Every real spelling of these is a `CALL`: the operator spells the procedure
     # with its `call ` prefix, and the `call db.idx.*` arm is ordered before the
     # bare name, so the bare arm only ever decides in a fragment that quotes the
@@ -310,6 +327,7 @@ def test_no_reader_of_the_change_feed_needs_a_graph_capability():
             f"(got {caught!r}) — a capability reader filed as `maintenance` "
             "passes this pin, and the census can go false with every pin green")
 
+
 def test_every_capability_arm_is_pinned_or_declared_unreachable():
     """No arm of the guard may be unpinnable by ACCIDENT.
 
@@ -342,6 +360,16 @@ def test_every_capability_arm_is_pinned_or_declared_unreachable():
     stale = ARMS_NO_SNIPPET_CAN_DECIDE - arms
     assert not stale, (
         f"ARMS_NO_SNIPPET_CAN_DECIDE names arms the tool does not have: {sorted(stale)}")
+    # ⛔ THE SPLIT MUST BE A PARTITION (#14183 round-7, P3). Without this, a row
+    # that DOES decide a declared-undecidable arm reds nothing: the declaration
+    # just becomes a stale excuse, and `*1..` / `*..` / `shortestpath` sat in here
+    # for a round while their own control rows would have pinned them. A token is
+    # EITHER pinned by a row OR declared undecidable, never both.
+    both = pinned & ARMS_NO_SNIPPET_CAN_DECIDE
+    assert not both, (
+        "these arms are BOTH pinned by a control row and declared undecidable — "
+        f"the row proves the declaration false: {sorted(both)}. Drop the "
+        "declaration (and the docstring reason that justified it)")
 
 
 def test_the_census_has_exactly_one_row_producing_reader():
