@@ -1077,7 +1077,6 @@ SWEEP_NAMES = 66
 #: identical digest is an identical residue SET, which says `main`'s `69908d006b..72c104bcbb` commits
 #: (the `reap-redislite-orphans` rewrite, the platform-gated node-id list, the `.env`/runbook edits)
 #: add and remove NO untyped-receiver row. `--check` exits 0 on this tree.
-SWEEP_RESIDUE = (11852, '52e4a15116d6f32b')
 #:
 #: ⛔ RE-PINNED FROM `main`'s DRIFT, not by a change on this branch: `f9f480a55ab3` (#14164, the
 #: #13094 change-feed reader census + measured residency) added untyped `Graph` receivers and
@@ -1238,7 +1237,6 @@ SWEEP_RESIDUE = (11852, '52e4a15116d6f32b')
 #: rows, attributed row by row in that block, not this branch's. `11840 → 11857` is a CROSS-CHECK of
 #: two independent readings, never the derivation of this pin.
 #: `--check` exits 0 on this tree with `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11857, "ed40203dbbf32b87")
 #:
 #: ⛔ MERGED `origin/main` `e74cf1d13d` (`#14161` + `#14208`) — a SEVENTH tree, so the pair is
 #: `--repin`'s output on THIS tree and NEITHER side's figure is carried: the 11857 in the block above
