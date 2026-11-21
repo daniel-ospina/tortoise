@@ -1435,26 +1435,23 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # "FULLTEXT"),` line, and the occurrence count goes 0 -> 1 across it. That
     # answer does not depend on how deep the clone is.
     #
-    # ⚠️ WHY THIS NOTE NO LONGER TELLS A "SHALLOW BOUNDARY" STORY: depth is an
-    # ENVIRONMENT fact, not a fact about `main`, so a note that asserts one is
-    # only ever true in the clone it was measured in. An UNGRAFTED clone
-    # (`git rev-parse --is-shallow-repository` -> false, no `.git/shallow`)
-    # resolves `git log -S'("Point", "quote", "FULLTEXT")' origin/main -- <path>`
-    # to `d06c001ff9` on the first try, while a `fetch-depth: 1` CI checkout has a
-    # grafted boundary with no parents and cannot walk back past it. ⛔ Do NOT pin
-    # either reading as a fact about the READER's clone: an earlier cut of this
-    # paragraph said "this box: false, no `.git/shallow`", and the clone this note
-    # now lives in answers `true` with two boundary commits in `.git/shallow` —
-    # the same defect one turn further in. Run the two commands; do not trust a
-    # parenthetical. Two earlier
-    # cuts of this note each measured ONE of those and stated it as universal:
-    # one named `c2c6d38425` (#13967) as "the boundary" — measured, that commit
-    # edits ONLY `tests/test_bridge_table.py` (+31/-10) — and the other forbade
-    # the pickaxe that works. Neither is repeated here.
-    # ⛔ What WAS wrong in both: they read a failed/mistaken search as a tooling
-    # limit and then invented a commit to explain it. #13322 (`5f6ed5ae6a`) does
-    # not touch this file at all. Name the commit that carries the `+` line, and
-    # check it — not the story about why a search came up empty.
+    # ⚠️ VERIFY THIS AGAINST THE COMMIT, NOT BY A HISTORY WALK. `d06c001ff9`
+    # carries the `+` line and the occurrence count goes 0 -> 1 across it, so
+    # `git show d06c001ff9 -- tortoise/projection/__init__.py` answers in EVERY
+    # clone, whatever its depth. `git log -S` does not: a history walk sees only
+    # the commits the clone actually holds, so a depth-limited checkout can stop
+    # before the origin. Depth is therefore an ENVIRONMENT fact and THIS NOTE
+    # STATES NONE — do not add a reading of `git rev-parse --is-shallow-repository`
+    # here, about this box or any other; run it yourself if you care, and expect
+    # the answer to differ between a full clone and a `fetch-depth: 1` checkout.
+    # ⛔ Three earlier cuts of this note each got this wrong, and the shape of the
+    # error was the same every time: a mistaken search was read as a tooling
+    # limit, and then a commit or a clone property was invented to explain it.
+    # One credited #13322 (`5f6ed5ae6a`), which does not touch this file at all;
+    # one named `c2c6d38425` (#13967) as "the boundary" — measured, it edits ONLY
+    # `tests/test_bridge_table.py` (+31/-10); and two pinned a particular clone's
+    # depth reading as though it were a fact about `main`. Name the commit that
+    # carries the `+` line, check it, and stop there.
     ("tortoise/projection/__init__.py", 21042, '("Object", "name", "FULLTEXT")',
      "`tortoise/projection/__init__.py:21042`"),
     ("tortoise/projection/__init__.py", 21485, "def _create_fulltext_index(",
