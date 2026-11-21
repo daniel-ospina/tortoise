@@ -302,6 +302,19 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
     #   and the advertising floor with it: 35 - 3 = **32** — the three
     #   `GRAPH_ARGUMENT_EXCLUDED` names in this view are unchanged by P6, so the exclusion
     #   term does not move.
+    #
+    #   ⛔ #11609 lane P7 (the tail batch) moves the POPULATION but NOT this floor, and
+    #   the two terms are separate events rather than a coincidence to reuse: P7 retired
+    #   five `http_policy=True` doors (`create_edge`, `create_operator`, `events_poll`,
+    #   `delete`, `list_graphs`) and registered four `http_policy=True` targets
+    #   (`poll_events`, `delete_knowledge`, `get_historical_knowledge`,
+    #   `link_entities`), so the population moves 35 - 5 + 4 = **34** (measured here).
+    #   The ADVERTISING view stays 34 - **2** = 32 because one of the three excluded
+    #   names in it was `tortoise_list_graphs` ITSELF: it left the population with the
+    #   door, so it no longer needs an exclusion and the exclusion term moves 3 -> 2.
+    #   That is why the floor below is still exactly 32 while the population floor
+    #   moved to 34 — carrying 35 - 3 = 32 over unchanged would have left the right
+    #   number behind the wrong mechanism.
     assert len(advertising) >= 32, (
         f"the advertising population collapsed to {len(advertising)} tool(s) — expected "
         "at least 32 (35 HTTP-filtered live tools minus the 3 excluded names in that "
@@ -325,7 +338,14 @@ def test_every_advertising_tool_keeps_graph_optional_and_a_string():
     # reason as the one above: an
     # equality would move with a collapsed
     # registry and pass over it.
-    assert len(http_population) >= 35, (
+    # #11609 lane P7 (this tail batch) both RETIRES and REGISTERS, which no earlier wave
+    # did: 35 - 5 retired `http_policy=True` doors + 4 registered `http_policy=True`
+    # targets = **34**, measured from the registry at this head and NOT inferred from the
+    # retired/live census (a door that was stdio-only would leave this population
+    # untouched while still moving that census). A floor, for the same reason as the one
+    # above: an equality would move with a collapsed
+    # registry and pass over it.
+    assert len(http_population) >= 34, (
         f"the registry's http_policy population collapsed to {len(http_population)}")
     for name in advertising:
         schema = advertised[name]
