@@ -1004,36 +1004,51 @@ def _global_scope_bindings(tree: ast.Module) -> set[str]:
     the statement refer to the bindings of those names in the top-level namespace … The
     `global` statement has the same scope as a name binding operation in the same
     block."* So `global torch; torch = _make_client()` inside ANY function rebinds the
-    MODULE-level name and can therefore reach a module-level probe — while
-    `_module_scope_bindings` never descends a function body and `_enclosing_bindings`
-    only holds the probe's own chain, so NO walk saw it. Measured: exempt, and the block
-    dropped out of the population entirely, so `UNARMED == ()` read green over it
-    (review of #14160, P2).
+    MODULE-level name and reaches a module-level probe — while `_module_scope_bindings`
+    never descends a function body and `_enclosing_bindings` holds only the call's own
+    chain, so no other walk sees it (review of #14160, P2).
 
-    A DECLARATION alone is not a binding, and it is only a binding in the block that
-    CARRIES it: `global torch` in one function plus `torch = 1` as a LOCAL of an
-    unrelated one must not count, or a genuine third-party probe is graded (review of
-    #14160, P2 — every scope is walked with its own binding set, so the two are never
-    intersected across scopes). Witnessed both ways in `4j-undecies`.
+    ⛔ THREE GRANULARITIES, AND ONLY THE LAST IS RIGHT. (1) A TREE-WIDE `declared & bound`
+    let an inert `global torch` borrow ANY binding of that name anywhere — another
+    function's loop target, an `except … as`, a plain LOCAL that never touches module
+    scope. False red. (2) A scope-keyed walk fixed that but charged the declaring function
+    with COMPREHENSION and CLASS-BODY bindings, which live in their own scopes (false red
+    again), while missing the families that DO bind in the declaring block — a nested
+    `def`/`class` NAME and a header walrus, which are `str` fields and annotations rather
+    than `ast.Name` stores. Fail-open. (3) So the pair is resolved PER FUNCTION, through
+    the walks that already know one scope's own bindings: `_global_declarations` (the
+    `global` names declared in that function's own scope, never a nested one's) ∩
+    `_function_local_bindings` (that function's own bindings — comprehension targets and
+    nested bodies excluded, a nested `def`'s NAME and header expressions included). A
+    nested function's `global` is its own declaration and gets its own turn.
     """
-    declared: dict[int, set[str]] = {}
-    bound: dict[int, set[str]] = {}
-    stack: list[tuple[ast.AST, ast.AST]] = [(tree, tree)]
-    while stack:
-        node, scope = stack.pop()
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            # the NAME binds in the ENCLOSING block; the body is another block
-            _collect_binding(node, bound.setdefault(id(scope), set()))
-            scope = node
-        elif isinstance(node, ast.Lambda):
-            scope = node
-        if isinstance(node, ast.Global):
-            declared.setdefault(id(scope), set()).update(node.names)
-        _collect_binding(node, bound.setdefault(id(scope), set()))
-        stack.extend((child, scope) for child in ast.iter_child_nodes(node))
     out: set[str] = set()
-    for key, names in declared.items():
-        out |= names & bound.get(key, set())
+    for func in ast.walk(tree):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        declared = _global_declarations(func)
+        if declared:
+            out |= declared & _function_local_bindings(func)
+    return out
+
+
+def _global_declarations(func: ast.AST) -> set[str]:
+    """`global` names declared in THIS function's own scope — not a nested def's.
+
+    A nested function's `global` is that function's own declaration and is resolved on its
+    own turn; folding it in here would let an inert `global x` in one scope borrow a
+    binding from another, which is the false red `_global_scope_bindings` avoids.
+    """
+    out: set[str] = set()
+    stack: list[ast.AST] = list(getattr(func, "body", []))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.Global):
+            out.update(node.names)
+            continue
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        stack.extend(ast.iter_child_nodes(node))
     return out
 
 
@@ -1194,6 +1209,18 @@ def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
             out |= _function_scope_bindings(node)
             crossed_callable = True
+        elif isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            # ⛔ A COMPREHENSION SCOPE REACHES A CALL INSIDE IT. Its iteration targets bind
+            # in the comprehension and nowhere else — which is why
+            # `_module_scope_bindings` and `_function_local_bindings` both refuse them,
+            # right for a call AFTER the comprehension and WRONG for a call inside one. So
+            # `[torch.query(…) for torch in clients]` kept the exemption over OUR client
+            # while main's scope-blind sweep graded it: a fail-open regression against
+            # `origin/main` (review of #14160, cycle 4).
+            for generator in node.generators:
+                out |= {
+                    sub.id for sub in ast.walk(generator.target) if isinstance(sub, ast.Name)
+                }
         elif isinstance(node, ast.ClassDef):
             # ⛔ A GENERIC CLASS'S TYPE PARAMETER REACHES ITS METHODS. PEP 695: a class type
             # parameter "is valid within the class body and inner scopes contained
@@ -1294,11 +1321,10 @@ def _header_expressions(node: ast.AST) -> list[ast.AST]:
             out.append(returns)
     out.extend(getattr(node, "bases", ()) or ())
     out.extend(keyword.value for keyword in getattr(node, "keywords", ()) or ())
-    for param in getattr(node, "type_params", ()) or ():
-        for attr in ("bound", "default_value"):
-            value = getattr(param, attr, None)
-            if value is not None:
-                out.append(value)
+    # NOT a type parameter's bound / default_value: a named expression there is a
+    # COMPILE-TIME SyntaxError ("named expression cannot be used within a TypeVar bound"),
+    # so no module that imports can hold one — `ast.parse` accepting it would only let a
+    # grader measure a shape that cannot exist (review of #14160, cycle 4).
     return out
 
 
@@ -1590,10 +1616,10 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     #: third-party verb (`_third_party_receivers`). A capability ATTRIBUTE called on one
     #: of them is that package's verb, not our seam — see `_reaches_capability_seam`.
     #: Bindings inside a FUNCTION are NOT folded in here; they reach a probe only from
-    #: its own ancestor chain, so they are computed per probe by `_shadowed` below.
+    #: its own ancestor chain, so they are computed per CALL by `_enclosing_bindings`.
     third_party = _third_party_receivers(tree)
 
-    #: Every parent edge, once, so `_shadowed` can resolve a probe's enclosing FUNCTION
+    #: Every parent edge, once, so `_enclosing_bindings` can resolve a call's enclosing
     #: scopes. Reach is per PROBE: one module-wide set of shadowed names cannot express
     #: "rebound inside `_b` but not inside `_a`", and folding them together graded `_a`'s
     #: legitimate third-party probe as a ROOT — the `4k-`/`4l-` false red (review P2).
