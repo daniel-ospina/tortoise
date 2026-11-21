@@ -862,6 +862,15 @@ class _AnchorHrefParser(HTMLParser):
         # ignores and a bare counter mis-resolved by leaving foreign content.
         self._foreign_roots: list[str] = []
         self._body_seen = False
+        # ⛔ `html`/`body` ARE NEVER PUSHED (`_open_extent` — a browser inserts no element for
+        # those tokens), so a `hidden` on one of them cannot ride the stack's inherited
+        # `renders` flag. It still HIDES THE WHOLE DOCUMENT (a global attribute; the UA
+        # stylesheet's `[hidden] { display: none }` applies to the body too — measured in
+        # Chrome: `<body hidden>` and `<html hidden>` both paint a 0x0 box), so the flag is
+        # carried here instead, and read by BOTH the text question (`_text_is_painted`) and
+        # the boundary question (`_unmet_by_reader`). Without it, skipping the push silently
+        # converted a hidden root into a visible one (#14073 review round 22, P2).
+        self._root_renders = True
         self.foreign_tags: list[str] = []
         self.foreign_unmatched_endtags: list[str] = []
         self.foreign_root_mismatch: list[str] = []
@@ -1210,6 +1219,10 @@ class _AnchorHrefParser(HTMLParser):
         if any(open_tag in self._UNRENDERED for open_tag, _, _ in self._open_elements):
             return True
         if any(not renders for _, _, renders in self._open_elements):
+            return True
+        # A `hidden` on `html`/`body` hides everything below it, and those tokens are
+        # not on the stack to carry it (see `_root_renders`).
+        if not self._root_renders:
             return True
         return any(name == "hidden" for name, _value in attrs)
 
@@ -2010,6 +2023,10 @@ class _AnchorHrefParser(HTMLParser):
             getattr(self, name).clear()
         self._open_containers.clear()
         self._open_elements.clear()
+        # A replaced document has a FRESH root: a `hidden` on the body the frameset
+        # discarded must not keep hiding the one that replaced it (`_root_renders` is
+        # the flag `html`/`body` carry instead of being pushed).
+        self._root_renders = True
 
     def _open_extent(
         self, tag: str, attrs: list[tuple[str, str | None]], suppressed: bool,
@@ -2100,6 +2117,16 @@ class _AnchorHrefParser(HTMLParser):
         # disable that. `_open` has already run by now, so skipping only the PUSH keeps
         # the frameset arm intact.
         if tag in ("html", "body"):
+            # ⛔ THE `hidden` FLAG STILL HAS TO LAND SOMEWHERE. No element is inserted, so
+            # the inherited `renders` flag cannot carry it — and before `_root_renders`
+            # existed this early return turned `<body hidden><p>CLAIM` INTO VISIBLE TEXT
+            # (`'CLAIM'`, where the parent commit answered `''`) and put a `<h2>` under a
+            # hidden body back into the heading index. A browser paints nothing there
+            # (0x0 box, measured), so the boundary AND the text question both have to read
+            # it, which is what `_unmet_by_reader` / `_text_is_painted` now do (#14073
+            # review round 22, P2).
+            if any(name == "hidden" for name, _value in attrs):
+                self._root_renders = False
             return
         opened_container = False
         if self._container is not None:
@@ -2623,6 +2650,8 @@ class _AnchorHrefParser(HTMLParser):
         * any OTHER unrendered ancestor (`hidden`, `_UNRENDERED`, `_FALLBACK_RENDERS`)
           still drops the text, and those are the residuals the module declares.
         """
+        if not self._root_renders:
+            return False
         frames = self._foster_truncated_ancestry()
         # A painted LABEL repaints its whole text content, so nothing BETWEEN the select
         # and the option can be the thing that decides — see `_LABEL_RENDERS` and
@@ -3005,6 +3034,15 @@ def extract_anchors_within(
     all green (measured, #14073 review). An element a browser never closed is not
     an extent, so this refuses rather than guesses.
     """
+    if tag in ("html", "body"):
+        raise ValueError(
+            f"`{tag}` inserts NO element — a browser merges the token's attributes "
+            f"into the root/body it already has (spec 13.2.6.4.7), which is why the "
+            f"parser does not push it either, so it can never be an extent and the "
+            f"answer would be a silent ZERO containers rather than the page's real "
+            f"one. Ask the container INSIDE the body (div/section/nav/ul/…), which is "
+            f"what the docs page's TOC block is."
+        )
     if tag in _AnchorHrefParser._IMPLICITLY_CLOSED:
         raise ValueError(
             f"`{tag}` is closed by a browser WITHOUT an end tag — by implied end "

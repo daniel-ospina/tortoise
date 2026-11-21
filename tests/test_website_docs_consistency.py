@@ -8443,6 +8443,57 @@ def test_the_document_roots_a_browser_ignores_insert_nothing() -> None:
         "`html` reached `_open_elements`: this is the phantom that stops end tags a "
         "browser honours, and every row above depends on it staying off the stack"
     )
+    # ── SKIPPING THE PUSH MUST NOT SKIP THE `hidden` FLAG (#14073 round 22, P2) ──
+    # ⛔ THE ROOT TAGS CARRY A `hidden` THAT HAS TO LAND SOMEWHERE. `html`/`body` are in
+    # neither `_UNRENDERED` nor `_RENDERS_WITH_ATTR`, so the stack's inherited `renders`
+    # flag was the ONLY thing that could carry it — and once the push was skipped, a
+    # hidden root silently became a visible one: the MEASURED regression was
+    # `extract_visible_text('<body hidden><p>CLAIM')` → `'CLAIM'` on the fixed tree where
+    # the parent commit answered `''`, plus a hidden body's `<h2>` back in the heading
+    # index. A browser paints NOTHING there (`hidden` is global and the UA stylesheet's
+    # `[hidden] { display: none }` applies to the body: measured in Chrome, both
+    # `<body hidden>` and `<html hidden>` give a 0x0 box, 0 painted px). The flag lives in
+    # `_root_renders` and BOTH questions read it.
+    for hidden_root in ("<body hidden><p>CLAIM", "<html hidden><p>CLAIM"):
+        assert extract_visible_text(hidden_root) == "", (
+            f"{hidden_root!r}: a `hidden` root is not painted at all, so its text must "
+            "not reach the wording golden — skipping the PUSH must not skip the flag"
+        )
+    assert extract_visible_text("<body><p>CLAIM") == "CLAIM", (
+        "control: the SAME shape without `hidden` still reaches the golden, so the two "
+        "rows above are about the attribute and not about refusing the root"
+    )
+    assert extract_heading_positions('<body hidden><h2 id="h">H</h2>') == [], (
+        "a `<h2>` under a hidden body was recorded: it would then BOUND the section at "
+        "a heading no reader meets — the over-advertised boundary direction"
+    )
+    assert extract_heading_positions('<body><h2 id="h">H</h2>') == [("h", 6)], (
+        "control: the same heading without the hidden root is still recorded"
+    )
+    assert extract_anchor_hrefs('<body hidden><a href="/blog">x</a>') == ["/blog"], (
+        "the LINK question must stay NARROW: a banner the page's own script can reveal "
+        "is still a link a visitor can click (see `_in_select`'s note), so the root's "
+        "`hidden` must not remove it from the rendered-link set"
+    )
+    for never_an_extent in ("body", "html"):
+        try:
+            extract_anchors_within(
+                f'<{never_an_extent} class="b"><div class="toc"><a href="#x">x</a></div>',
+                tag=never_an_extent,
+                class_token="b",
+            )
+        except ValueError as exc:
+            assert "inserts NO element" in str(exc), (
+                f"`{never_an_extent}` was refused, but not for the reason that makes it "
+                f"un-extentable: {exc}"
+            )
+        else:  # pragma: no cover - the assertion below is the failure message
+            raise AssertionError(
+                f"`{never_an_extent}` was accepted as a container tag and returned a "
+                "silent ZERO containers: the tag inserts no element, so it can never be "
+                "an extent, and every other un-extentable tag REFUSES instead of "
+                "answering zero"
+            )
 
 
 def test_the_script_data_wedge_states_its_own_rule() -> None:
