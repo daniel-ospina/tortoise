@@ -163,8 +163,14 @@ class TestTheRiskAxis:
         #   retired doors stay SERVED as shims and keep their tier, so a retirement MOVES a
         #   row between these two halves and leaves the TOTAL unchanged — which is why the
         #   total cannot notice a stale split, and this line has to state both halves).
-        assert len(reading) == 54, sorted(reading)
-        assert len(served()) == 108, sorted(e.name for e in served())
+        # #11609 lane P7: the served census is 112 (39 live + 73 shims), and the READING
+        # half 56 — `tortoise_poll_events` replaces `tortoise_events_poll` one-for-one and
+        # `tortoise_get_historical_knowledge` adds one read, while `tortoise_link_entities`
+        # (write) and `tortoise_delete_knowledge` (destructive) join the writing half. The
+        # RETIRED declarations keep their tiers, so a retirement moves a row between the
+        # halves and leaves the total unchanged — except that P7 ADDS four rows: 108 + 4 = 112.
+        assert len(reading) == 56, sorted(reading)
+        assert len(served()) == 112, sorted(e.name for e in served())
 
     def test_the_destructive_set_is_pinned_by_name(self):
         """`destructive` means "removes or overwrites user-authored state".
@@ -193,7 +199,11 @@ class TestTheRiskAxis:
         # same re-ingest before mining it.
         destructive = {e.name for e in served() if e.risk == "destructive"}
         assert destructive == {
-            # the delete family — their own descriptions say "cannot be undone"
+            # the delete family — their own descriptions say "cannot be undone".
+            # #11609 lane P7: the KEPT entry now carries the approved target's own spelling
+            # (`tortoise_delete_knowledge`, row 18); `tortoise_delete` is its forward entry
+            # and keeps its tier, because a retired door stays SERVED.
+            "tortoise_delete_knowledge",
             "tortoise_delete", "tortoise_delete_point", "tortoise_delete_entity",
             # removal from default retrieval
             "tortoise_retract_point",
@@ -288,6 +298,11 @@ class TestTheRiskAxis:
             # container and the only one of those five that is ADDITIVE (the other four
             # re-ingest a corpus and sit in the destructive pin above).
             "tortoise_register_source",
+            # #11609 lane P7 (row 19): `link_entities` is ADDITIVE in the same sense —
+            # it writes the edge/operator the caller names and rewrites no row the call
+            # did not name. Its two absorbed doors (`create_edge`, `create_operator`)
+            # keep their tiers as SERVED shims, so both spellings are in this census.
+            "tortoise_link_entities",
         }, sorted(writes)
 
     def test_the_maintenance_tier_is_exactly_the_ruling(self):
@@ -511,7 +526,12 @@ class TestHintsCannotDrift:
         # `mine_knowledge_from_directory` (destructive) — and the seven doors it retires are
         # NOT subtracted, because a retired door stays SERVED and keeps its tier. Measured:
         # destructive 28 -> 32, write 17 -> 18, admin 4. 32 + 18 + 4 = 54.
-        assert len(expected) == 54, sorted(expected)  # census, hard-coded
+        # 54 -> 56 (#11609 lane P7): `tortoise_link_entities` (write) and
+        # `tortoise_delete_knowledge` (destructive, the kept entry under the target
+        # spelling, beside the retired `tortoise_delete` shim). `tortoise_poll_events`
+        # replaces `tortoise_events_poll` one-for-one and `get_historical_knowledge` is a
+        # read, so neither moves this census.
+        assert len(expected) == 56, sorted(expected)  # census, hard-coded
 
 
 class TestTheMitigationWriteIsNeverAdvertisedAsRepeatable:
@@ -784,7 +804,9 @@ class TestReadTierCannotHideAnOutOfBoundaryWrite:
         import tool_surface_capabilities as tsc
 
         declared = set(tsc.RETENTION_CARVEOUTS)
-        assert declared == {"tortoise_events_poll"}, sorted(declared)
+        # #11609 lane P7: the LIVE door is the approved target spelling, and its RETIRED
+        # declaration is served too (#3883) — one carve-out per SERVED name.
+        assert declared == {"tortoise_poll_events", "tortoise_events_poll"}, sorted(declared)
         assert tsc.write_classification_violations(tsc.served_registry()) == []
 
     def test_an_undeclared_read_tool_reaching_one_fails(self, monkeypatch):

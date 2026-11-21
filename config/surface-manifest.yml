@@ -241,6 +241,7 @@
 manifest_version: 1
 issue: 3863
 cut_at_commit: 2c0d66e2ec07d673b17e31b76dc24fbdd57f8e14
+cut_at_commit: 1b0db0489408e1e817688f83cef0d7c1ee33be5d
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -1014,7 +1015,7 @@ response_fields:
     and its embedded fallback both set the key (#4889)
   unchanged_when_off: yes — not flag-gated; the key is ABSENT whenever a subject resolved or the graph can carry
     one, so those responses stay byte-identical and simply omit this key; no other key is affected either way
-- response: tortoise_events_poll
+- response: tortoise_poll_events
   field: changes
   emitted_when: TORTOISE_CHANGE_FEED is truthy (1/true/yes/on; unset or 0 means off) — the SAME `:GraphEvent` page
     the response's `events` key carries, folded into per-claim semantic deltas with before/after (tortoise/change_feed.py
@@ -1041,9 +1042,9 @@ response_fields:
   field: changes
   emitted_when: the same field on the SDK/assembly half — `TortoiseSDK.poll_events` is the ONE assembly site (tortoise/sdk.py)
     that the MCP tool above and the hosted events endpoint both relay, so the switch and the shape are identical
-    on all three surfaces. See the `tortoise_events_poll` row above for the full contract
+    on all three surfaces. See the `tortoise_poll_events` row above for the full contract
   unchanged_when_off: the `changes` key is ABSENT and the reply's SHAPE is unchanged — `events` and `next_cursor`
-    only, NOT byte-identical (the hard-delete `deleted` marker, see below). The same two qualifications as the `tortoise_events_poll`
+    only, NOT byte-identical (the hard-delete `deleted` marker, see below). The same two qualifications as the `tortoise_poll_events`
     row above apply, for the same reason — the WRITE side (the `PointRevised` store half, and the hard-delete `deleted`
     marker) is not scoped to the reader
 - response: tortoise_create_point
@@ -1127,19 +1128,19 @@ approval_principal: daniel-ospina
 approval_pr: '4120'
 approval_date: '2026-09-18'
 counts:
-  tools: 40
+  tools: 39
   sdk_public_methods: 39
-  retired: 68
+  retired: 73
   keyword_distribution:
-    fetch: 9
-    create: 8
+    fetch: 10
+    create: 6
     update: 5
     delete: 2
-    list: 4
+    list: 3
     find: 2
     trace: 1
     check: 5
-    link: 2
+    link: 3
     operate: 2
 high_water_counts:
   tools: 48
@@ -1180,6 +1181,11 @@ retired:
   sdk_method: _create_document
   http_policy: true
   approval: null
+- name: tortoise_create_edge
+  use_instead: tortoise_link_entities(relation=<predicate>, from_id=..., to_id=...)
+  sdk_method: _create_edge
+  http_policy: true
+  approval: null
 - name: tortoise_create_event
   use_instead: 'tortoise_create_entity(type="event", name=..., props={"eventKind": ...})'
   sdk_method: _create_event
@@ -1188,6 +1194,11 @@ retired:
 - name: tortoise_create_object
   use_instead: 'tortoise_create_entity(type="object", name=..., props={"objectKind": ...})'
   sdk_method: _create_object
+  http_policy: true
+  approval: null
+- name: tortoise_create_operator
+  use_instead: tortoise_link_entities(relation=<op_type>, from_id=..., target_ids=..., direction=..., semantics=...)
+  sdk_method: _create_operator
   http_policy: true
   approval: null
 - name: tortoise_create_point
@@ -1206,13 +1217,18 @@ retired:
   sdk_method: _create_subject
   http_policy: true
   approval: null
+- name: tortoise_delete
+  use_instead: tortoise_delete_knowledge(id, dry_run=True) for the preview, then tortoise_delete_knowledge(id, confirmation=<token>)
+  sdk_method: _delete
+  http_policy: true
+  approval: null
 - name: tortoise_delete_entity
-  use_instead: tortoise_delete(id, dry_run=True) for the preview, then tortoise_delete(id, confirmation=<token>)
+  use_instead: tortoise_delete_knowledge(id, dry_run=True) for the preview, then tortoise_delete_knowledge(id, confirmation=<token>)
   sdk_method: _delete_entity__svc
   http_policy: true
   approval: null
 - name: tortoise_delete_point
-  use_instead: tortoise_delete(id, dry_run=True) for the preview, then tortoise_delete(id, confirmation=<token>)
+  use_instead: tortoise_delete_knowledge(id, dry_run=True) for the preview, then tortoise_delete_knowledge(id, confirmation=<token>)
   sdk_method: _delete_point_wrapped
   http_policy: true
   approval: null
@@ -1235,6 +1251,11 @@ retired:
 - name: tortoise_entity_profile
   use_instead: tortoise_explore_connections(node_id, hops=...)
   sdk_method: null
+  http_policy: true
+  approval: null
+- name: tortoise_events_poll
+  use_instead: tortoise_poll_events(after=..., types=..., limit=...)
+  sdk_method: poll_events
   http_policy: true
   approval: null
 - name: tortoise_file_decision
@@ -1330,6 +1351,11 @@ retired:
 - name: tortoise_list_dedup_candidates
   use_instead: tortoise_review_link_candidates(kind="dedup", candidate_type=...)
   sdk_method: null
+  http_policy: true
+  approval: null
+- name: tortoise_list_graphs
+  use_instead: tortoise_graph_overview(section="graphs")
+  sdk_method: _list_graphs
   http_policy: true
   approval: null
 - name: tortoise_list_pointkinds
@@ -1550,6 +1576,35 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
+- name: tortoise_get_historical_knowledge
+  served_from: tortoise/mcp_server.py:4a28275833c22810
+  served_attributes: 68ac5380bf83d5d1
+  family: memory
+  family_rank: 1
+  served: http
+  sdk_method: get_historical_knowledge
+  group_source: mapped
+  keyword: fetch
+  keyword_rank: 1
+  cluster: null
+  canonical: null
+  job: 'Point-in-time read: what was true at `at_date`. Walks the CORRECTS chain from `point_id` (a current or superseded
+    Point) to the point whose [validFrom, validTo] window covers the date. EVERY reply carries `status` (found |
+    ambiguous | absent) and `found`; branch on `status`, never on `found` alone — `ambiguous` carries `found: true`
+    with two or more `candidates` and NO `valid_point`. A `found` reply carries `valid_point` plus `current` (the
+    chain head) and `chain`.'
+  dependency: declares TortoiseSDK.get_historical_knowledge (resolves)
+  lifecycle: active
+  used_by: never called, tooling, docs
+  recommendation: keep
+  basis: observed
+  reason: not called over MCP, but used by tooling — removing it would break that
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: agent-reachable
+  cluster_canonical: null
 - name: tortoise_search
   served_from: tortoise/mcp_server.py:6bcf8b42aada92a1
   served_attributes: a54ebe88150f0091
@@ -1724,8 +1779,8 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_delete
-  served_from: tortoise/mcp_server.py:0d854254e4fae7ef
+- name: tortoise_delete_knowledge
+  served_from: tortoise/mcp_server.py:9c51e3c301883933
   served_attributes: c5e5c4bda5ed08ed
   family: memory
   family_rank: 1
@@ -1734,8 +1789,8 @@ rows:
   group_source: mapped
   keyword: delete
   keyword_rank: 4
-  cluster: delete
-  canonical: true
+  cluster: null
+  canonical: null
   job: 'Delete one item by id — a Point, a relation (operators are Points), a Source, an Object, a Subject, or an
     Event. DESTRUCTIVE and PERMANENT: cannot be undone. The FIRST call changes nothing: it previews which node resolves
     and every edge that would go with it, and returns a confirmation token. Call again with confirmation=<token>
@@ -1751,7 +1806,7 @@ rows:
   exemption: false
   approval: null
   class: agent-reachable
-  cluster_canonical: tortoise_delete
+  cluster_canonical: null
 - name: tortoise_supersede_knowledge
   served_from: tortoise/mcp_server.py:b1b735e7c515c9cd
   served_attributes: 3b483f3ddfc755b7
@@ -1934,60 +1989,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: tortoise_create_entity
-- name: tortoise_create_edge
-  served_from: tortoise/mcp_server.py:08e75951d0dbe463
-  served_attributes: 674a7d628b644657
-  family: graph
-  family_rank: 2
-  served: http
-  sdk_method: _create_edge
-  group_source: mapped
-  keyword: create
-  keyword_rank: 2
-  cluster: null
-  canonical: null
-  job: 'Create a typed structural edge between two entities. Relation: performs, produces, uses, memberOf, ownedBy,
-    managedBy, about*, related, dependsOn, etc. Operator-less per the reification rule (v3.5 §8) — lazy promotion
-    via operator_action when mitigation is needed. Returns {edge, created, nudges}.'
-  dependency: declares TortoiseSDK._create_edge (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
-- name: tortoise_create_operator
-  served_from: tortoise/mcp_server.py:3ca6830bf6fac3ff
-  served_attributes: 9c8df3f7f40e3d00
-  family: graph
-  family_rank: 2
-  served: http
-  sdk_method: _create_operator
-  group_source: mapped
-  keyword: create
-  keyword_rank: 2
-  cluster: null
-  canonical: null
-  job: 'Create an operator connecting Points. op_type: IMPL, NAND, coherence, composedOf, decomposesInto, contains,
-    wraps. semantics: the Layer-2 meaning (addresses, supports, refutes, mutuallyExclusive, hasPart, related, …)
-    — it resolves the direction.'
-  dependency: declares TortoiseSDK._create_operator (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
 - name: tortoise_ingest
   served_from: tortoise/mcp_server.py:3aadd7ddcfec8334
   served_attributes: c0ea3c28d0df1685
@@ -2046,6 +2047,36 @@ rows:
     once it has been withdrawn (retracted/superseded/outdated/archived) a re-assertion mints a NEW mitigation Point
     and returns its id — so a refused retry does NOT converge by repeating the call.'
   dependency: 'handler-served: no declared SDK link'
+  lifecycle: active
+  used_by: never called, tooling, docs
+  recommendation: keep
+  basis: observed
+  reason: not called over MCP, but used by tooling — removing it would break that
+  recommended_family: null
+  proposed: false
+  exemption: false
+  approval: null
+  class: agent-reachable
+  cluster_canonical: null
+- name: tortoise_link_entities
+  served_from: tortoise/mcp_server.py:a8451f8648b07546
+  served_attributes: dfc0f40718e48217
+  family: graph
+  family_rank: 2
+  served: http
+  sdk_method: link_entities
+  group_source: mapped
+  keyword: link
+  keyword_rank: 9
+  cluster: null
+  canonical: null
+  job: 'Connect two nodes — the relation decides HOW. One linking verb for five writers: `wasDerivedFrom` → the
+    derivation writer; `IMPL`/`NAND` without operator=true → a bare direct edge; `supports`/`refutes`/`mutuallySupportive`/`mutuallyExclusive`
+    or operator=true → a carrying operator Point; `references` + entity_label → the provenance writer (the only
+    arm with the sourceVersion anchor); anything else → a plain typed edge. A LIST of targets is the part/whole
+    fan-out — ONE operator over N targets — where `semantics` (the Layer-2 meaning that resolves direction) applies.
+    A keyword the chosen arm cannot record is refused, never dropped.'
+  dependency: declares TortoiseSDK.link_entities (resolves)
   lifecycle: active
   used_by: never called, tooling, docs
   recommendation: keep
@@ -2250,31 +2281,6 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_list_graphs
-  served_from: tortoise/mcp_server.py:0a73c63d060a661d
-  served_attributes: 06490fe8c983ed26
-  family: sessions
-  family_rank: 4
-  served: http
-  sdk_method: _list_graphs
-  group_source: mapped
-  keyword: list
-  keyword_rank: 5
-  cluster: null
-  canonical: null
-  job: List all graph names in the database. Useful for namespace discovery.
-  dependency: declares TortoiseSDK._list_graphs (resolves)
-  lifecycle: active
-  used_by: never called, tooling, docs
-  recommendation: keep
-  basis: observed
-  reason: not called over MCP, but used by tooling — removing it would break that
-  recommended_family: null
-  proposed: false
-  exemption: false
-  approval: null
-  class: agent-reachable
-  cluster_canonical: null
 - name: tortoise_list_namespaces
   served_from: tortoise/mcp_server.py:13e3adca797bc8eb
   served_attributes: d1d847feeecfe0de
@@ -2335,7 +2341,7 @@ rows:
   approval: null
   class: agent-reachable
   cluster_canonical: null
-- name: tortoise_events_poll
+- name: tortoise_poll_events
   served_from: tortoise/mcp_server.py:29e2a7af30242b7f
   served_attributes: 324350c5a3a0d9bf
   family: sessions
@@ -2992,16 +2998,16 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.get_historical_knowledge.
-  dependency: 'reached by no registered MCP tool; caller categories: other-tooling'
+  dependency: 'reached by 1 registered tool(s): tortoise_get_historical_knowledge'
   lifecycle: active
   used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: other-tooling'
+  recommendation: keep
+  reason: reached by 1 registered tool(s)
   recommended_family: null
   proposed: false
   exemption: false
   approval: null
-  class: internal
+  class: agent-reachable
 - name: sdk:get_organisation_account
   method: get_organisation_account
   approved: true
@@ -3084,16 +3090,16 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.link_entities.
-  dependency: 'reached by no registered MCP tool; caller categories: engine, other-tooling'
+  dependency: 'reached by 1 registered tool(s): tortoise_link_entities'
   lifecycle: active
   used_by: tooling, docs
-  recommendation: review
-  reason: 'no MCP tool binds it; callers: engine, other-tooling'
+  recommendation: keep
+  reason: reached by 1 registered tool(s)
   recommended_family: null
   proposed: false
   exemption: false
   approval: null
-  class: internal
+  class: agent-reachable
 - name: sdk:list_keys
   method: list_keys
   approved: true
@@ -3268,11 +3274,11 @@ rows:
   cluster: null
   canonical: null
   job: Public SDK method TortoiseSDK.poll_events.
-  dependency: 'reached by 1 registered tool(s): tortoise_events_poll'
+  dependency: 'reached by 1 registered tool(s) and 1 retired name(s): tortoise_events_poll (retired), tortoise_poll_events'
   lifecycle: active
   used_by: tooling, docs
   recommendation: keep
-  reason: reached by 1 registered tool(s)
+  reason: reached by 1 registered tool(s) and 1 retired name(s)
   recommended_family: null
   proposed: false
   exemption: false

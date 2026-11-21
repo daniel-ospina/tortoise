@@ -28962,8 +28962,11 @@ async def get_current_user_graph_listing(request: Request) -> dict:
     false — `GET /v1/team/keys` returns each key's `graph_id`
     (`list_api_keys`, via `_require_keys_manage`, which passes the account's
     legacy full-access key or any key holding `keys:manage`), and the MCP tool
-    `tortoise_list_graphs` answers an HTTP MCP caller with the calling org's own
-    graph names (`mcp_server.tortoise_list_graphs`, #9340). What does NOT exist
+    `tortoise_graph_overview(section="graphs")` answers an HTTP MCP caller with the
+    calling org's own graph names (it dispatches to the `list_graphs` body, #9340;
+    the `tortoise_list_graphs` spelling was retired forward into that section by
+    #11609 lane P7, so it is shim-only and a tool-grant client cannot call it).
+    What does NOT exist
     is a key-driven **REST** graph listing — this endpoint's own shape — which
     is a much narrower fact. A refusal that overstates the gap sends a builder
     to rebuild graphs they could have enumerated.
@@ -28975,8 +28978,9 @@ async def get_current_user_graph_listing(request: Request) -> dict:
             "session, so an API key cannot call it. The graph ids are still "
             "reachable with a key: GET /v1/team/keys returns each key's "
             "graph_id (it needs the account's full-access key, or a key "
-            "holding keys:manage), and the MCP tool tortoise_list_graphs "
-            "lists the calling account's graph names. Keep the graph id from "
+            "holding keys:manage), and the MCP tool "
+            "tortoise_graph_overview(section='graphs') lists the calling "
+            "account's graph names. Keep the graph id from "
             f"the provisioning 201 ({_PROVISION_ENDPOINT}) as well — that "
             "call returns it together with the graph's key, which is revealed "
             "once and never again.")

@@ -1021,9 +1021,12 @@ def _claim_wait_bound_count() -> bool:
 #:
 #:   * NOT_SENT — no dispatch was started, so nothing was sent at all.
 #:   * PREVIEW  — the call declared itself a preview (``dry_run=True`` — explicit
-#:                or the handler's documented default — or ``tortoise_delete``
-#:                with no ``confirmation``) and wrote nothing, so a repeat is
-#:                safe REGARDLESS of idempotency.
+#:                or the handler's documented default — or a
+#:                ``_confirmation_tool_names()`` door called with no
+#:                ``confirmation``; the ADVERTISED one is
+#:                ``tortoise_delete_knowledge``, and naming only its retired
+#:                spelling here is what let the guard miss the live door) and
+#:                wrote nothing, so a repeat is safe REGARDLESS of idempotency.
 #:   * SAFE     — the registry declared the operation idempotent AND this call's
 #:                arguments did not switch that off.
 #:
@@ -1107,8 +1110,10 @@ _WAIT_BOUND_RETRY_RULE_NOT_SENT = (
 #: it: "may have committed" is false for it, and "do NOT repeat it" forbids the
 #: one safe action — which is the action that matters most for a preview of a
 #: destructive operation. Two shapes are previews: ``dry_run=True`` on a tool
-#: that declares the parameter, and ``tortoise_delete`` with no ``confirmation``
-#: (its two-call design — the first call only mints the token).
+#: that declares the parameter, and a ``_confirmation_tool_names()`` door (the
+#: ADVERTISED one is ``tortoise_delete_knowledge``; the derivation is
+#: signature-based precisely so a rename cannot move this arm off the door) with
+#: no ``confirmation`` (its two-call design — the first call only mints the token).
 _WAIT_BOUND_RETRY_RULE_PREVIEW = (
     "this call was a PREVIEW and wrote nothing, so repeating it is safe — no "
     "reconciliation is needed"
@@ -1346,6 +1351,48 @@ def _coerces_to_true(value) -> bool:
     return False
 
 
+#: Names whose handler declares `confirmation`, computed once. See
+#: `_confirmation_tool_names` for why this is DERIVED and not a literal.
+_CONFIRMATION_TOOLS: frozenset[str] | None = None
+
+
+def _confirmation_tool_names() -> frozenset[str]:
+    """Names whose handler declares `confirmation` — the preview-then-confirm doors.
+
+    ⛔ READ FROM THE SIGNATURE, NEVER FROM A NAME LITERAL (#11609 P7 review, P1).
+    This population was previously spelled as one literal, `tortoise_delete`, and
+    the P7 batch RETIRED that name forward into `tortoise_delete_knowledge`. The
+    guard therefore fell through for the ADVERTISED door: a wait-bound breach on
+    its preview call (`tortoise_delete_knowledge(id=…)`, no `confirmation`, which
+    persists nothing) was answered `committed: "unknown"` + "this call is NOT
+    safe to repeat — do NOT re-send it", which is false about the surface's most
+    destructive write AND forbids the one call the delete cannot proceed without.
+
+    A rename cannot move a signature, and one protocol covers every member:
+    the call WITHOUT `confirmation` previews and writes nothing, the call WITH it
+    performs the write. Membership is read across BOTH registries for the reason
+    `_dry_run_tool_names` gives — a retired name is not advertised but still
+    answers through the #3883 shim and still runs this very handler.
+    """
+    global _CONFIRMATION_TOOLS
+    if _CONFIRMATION_TOOLS is None:
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+
+        names = set()
+        for entry in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY):
+            fn = globals().get(entry.name)
+            if fn is None:
+                continue
+            try:
+                params = inspect.signature(fn).parameters
+            except (TypeError, ValueError):  # pragma: no cover - non-callable
+                continue
+            if "confirmation" in params:
+                names.add(entry.name)
+        _CONFIRMATION_TOOLS = frozenset(names)
+    return _CONFIRMATION_TOOLS
+
+
 def _arguments_say_preview(name: str, arguments) -> bool:
     """Whether this call declares itself a preview, so it writes nothing.
 
@@ -1381,15 +1428,22 @@ def _arguments_say_preview(name: str, arguments) -> bool:
             return True
         if "dry_run" not in arguments and _declared_dry_run_default(name) is True:
             return True
-    # `tortoise_delete` is a TWO-CALL tool whose FIRST call is also a preview,
-    # and it is the surface's most destructive tool, so getting this wrong is the
-    # worst place to get it wrong: with no `confirmation`, its own contract says
-    # "CHANGES NOTHING: it reports … and returns a short-lived confirmation
-    # token bound to this id" (`_preview_delete`; the token is signed, it
-    # persists nothing). Reading only `dry_run` reported that call as a possible
-    # mutation and told the caller NOT to re-send it — which is the one call the
-    # delete cannot proceed without.
-    if name == "tortoise_delete":
+    # A preview-then-confirm door's FIRST call is also a preview, and it is the
+    # surface's most destructive family, so getting this wrong is the worst place
+    # to get it wrong: with no `confirmation`, its own contract says "CHANGES
+    # NOTHING: it reports … and returns a short-lived confirmation token bound to
+    # this id" (`_preview_delete`; the token is signed, it persists nothing).
+    # Reading only `dry_run` reported that call as a possible mutation and told the
+    # caller NOT to re-send it — which is the one call the delete cannot proceed
+    # without.
+    #
+    # ⛔ THE POPULATION IS DERIVED (`_confirmation_tool_names`, signature-read
+    # across both registries), because this arm used to name `tortoise_delete` as a
+    # LITERAL and the P7 batch retired that name into `tortoise_delete_knowledge`:
+    # the live door then fell through to `False` and the falsehood came back for the
+    # advertised spelling while the pin — itself written against the retired name —
+    # stayed green. A rename cannot move a signature; a literal cannot survive one.
+    if name in _confirmation_tool_names():
         return arguments.get("confirmation") is None
     return False
 
@@ -1470,9 +1524,11 @@ def _wait_bound_refusal_result(name: str | None = None,
       ``"none"`` when nothing can have been committed. ``"none"`` has THREE
       producers, all knowable at this call site: ``dispatched=False`` (no
       dispatch was ever started), ``dry_run`` on a tool that declares it (the
-      explicit true or the handler's own default), and ``tortoise_delete`` with
-      no ``confirmation`` (its two-call design: the first call only mints the
-      token). There is deliberately NO "this call only reads" producer: an
+      explicit true or the handler's own default), and a
+      ``_confirmation_tool_names()`` door with no ``confirmation`` (the
+      ADVERTISED one is ``tortoise_delete_knowledge``; its two-call design: the
+      first call only mints the token). There is deliberately NO "this call only
+      reads" producer: an
       argument that looks read-only cannot be trusted to be one — see
       ``_arguments_say_preview``'s neighbourhood and #10849's review, where
       ``tortoise_manage_sources(action="list")`` turned out to materialise
@@ -3475,6 +3531,16 @@ _QUOTA_GATED: frozenset[str] = frozenset({
     "tortoise_index_sources_from_directory",   # replaces tortoise_index_files
     "tortoise_mine_knowledge_from_session",    # replaces tortoise_checkpoint
     "tortoise_mine_knowledge_from_directory",  # replaces tortoise_mine_conversations
+    # #11609 lane P7: the container that ABSORBED `tortoise_create_edge` and
+    # `tortoise_create_operator` — both still named above, because this inventory is
+    # what the #329 completeness gate cross-checks and a retired name is still a
+    # served writer shape. Its OPERATOR arm wraps `_quota_gated(sdk._create_operator, …)`
+    # and its relation-decided arm wraps `_quota_gated(sdk.link_entities, …)`; the
+    # second wrapper is not decoration — `sdk.link_entities` reaches the same
+    # node/edge writers and is NOT gated inside the SDK, so without it the door would
+    # hand any HTTP caller un-metered edge creation and this membership row would be a
+    # false claim.
+    "tortoise_link_entities",
 })
 
 
@@ -6220,7 +6286,7 @@ def tortoise_retract_point(id: str, dry_run: bool = False) -> dict:
     return _safe(_quota_gated(_get_org_sdk()._retract_point, "points"), id)
 
 
-def tortoise_events_poll(after: str | None = None, types: Any = None,
+def tortoise_poll_events(after: str | None = None, types: Any = None,
                          limit: int = 100) -> dict:
     """Poll graph/claim events after an opaque cursor (at-least-once).
 
@@ -6245,6 +6311,18 @@ def tortoise_events_poll(after: str | None = None, types: Any = None,
             types = [types]
     return _safe(_get_org_sdk().poll_events, after=after, types=types, limit=limit)
 
+
+def tortoise_events_poll(after: str | None = None, types: Any = None,
+                         limit: int = 100) -> dict:
+    """RETIRED name, still served through the #3883 shim (#11609 lane P7).
+
+    The approved target row 8 is `poll_events`, and this door's whole body is
+    `tortoise_poll_events` — so the retirement loses no capability and the shim
+    answers byte-identically. Kept as a module-level function because
+    `build_retired_tools`/`FastMCPAdapter` resolve a handler by `globals()[name]`
+    (#2210): a retired name with no function would be advertised and not served.
+    """
+    return tortoise_poll_events(after=after, types=types, limit=limit)
 
 
 # ── Navigation (#6962, #6963, #6964) ─────────────────────────────
@@ -7040,10 +7118,17 @@ def tortoise_update(id: str, props: Any = None) -> dict:
                  id, **(props or {}))
 
 
-def tortoise_delete(id: str, dry_run: bool = False,
-                    confirmation: str | None = None) -> dict:
+def tortoise_delete_knowledge(id: str, dry_run: bool = False,
+                              confirmation: str | None = None) -> dict:
     """Delete one item by id — a Point, a relation (operators are Points), a Source,
     an Object, a Subject, or an Event. DESTRUCTIVE and PERMANENT: cannot be undone.
+
+    ⛔ THIS IS THE APPROVED TARGET ROW 18 (`delete_knowledge`), executed by the
+    #9660 ruling's shape: ONE delete entry for every kind, behind
+    preview-then-confirm, rather than a family of per-kind doors. #11609 lane P7
+    moved the entry onto the target's own spelling; `tortoise_delete` retires
+    forward into it and its handler forwards here, so the two names answer
+    identically.
 
     Preview, then confirm (#9660, owner ruling 2026-10-25). The FIRST call —
     ``dry_run=True``, or simply no ``confirmation`` — CHANGES NOTHING: it reports
@@ -7093,6 +7178,20 @@ def tortoise_delete(id: str, dry_run: bool = False,
     if isinstance(result, _SafeError):
         return result
     return {"deleted": bool(result), "id": id}
+
+
+def tortoise_delete(id: str, dry_run: bool = False,
+                    confirmation: str | None = None) -> dict:
+    """RETIRED name, still served through the #3883 shim (#11609 lane P7).
+
+    The kept delete entry took the approved target's spelling
+    (`tortoise_delete_knowledge`); this name forwards to it so a caller of the old
+    spelling keeps the SAME preview-then-confirm protocol — not a second, weaker
+    delete path. Module-level because the shim resolves handlers by
+    `globals()[name]` (#2210).
+    """
+    return tortoise_delete_knowledge(
+        id, dry_run=dry_run, confirmation=confirmation)
 
 
 def tortoise_operator_action(action: str, id: str, reason: str | None = None,
@@ -7622,6 +7721,27 @@ def tortoise_get_entity(id: str | None = None, type: str | None = None,
         return tortoise_get(id, type=type, limit=limit)
     return _safe(_get_org_sdk().get_entity, id)
 
+
+def tortoise_get_historical_knowledge(point_id: str, at_date: str) -> dict:
+    """Point-in-time read: what was true at `at_date` (#11609 lane P7, target row 5).
+
+    Walks the CORRECTS chain from `point_id` — a current OR a superseded Point —
+    to the point whose ``[validFrom, validTo]`` window covers ``at_date``. Every
+    supersede/invalidate written by this SDK stamps contiguous windows
+    (``old.validTo == successor.validFrom``), so the walk answers "what was true
+    then" exactly. The three-state answer is the contract: ``status`` is
+    ``found`` | ``ambiguous`` | ``absent`` and **the caller must branch on
+    ``status``, never on ``found`` alone** — ``ambiguous`` carries ``found: true``
+    with two or more ``candidates`` and NO ``valid_point``, so reading ``found``
+    as "one claim was true" would silently pick nothing from two.
+
+    The body is the SDK method and nothing else: no door existed for this and no
+    shaping is added here, because the SDK's own docstring is the contract for
+    the reply (including the inclusive-at-both-ends coverage rule that makes a
+    shared chain boundary report ``ambiguous`` — an OPEN decision, ONTOLOGY §4.7).
+    """
+    return _safe(_get_org_sdk().get_historical_knowledge, point_id, at_date)
+
 def tortoise_update_entity(id: str, props: Any = None) -> dict:
     """Update any entity's properties."""
     props = _parse(props)
@@ -7641,8 +7761,193 @@ def tortoise_delete_entity(id: str, dry_run: bool = False) -> dict | bool:
         return _safe(_preview_delete_entity, _get_org_sdk(), id)
     return _safe(_get_org_sdk()._delete_entity__svc, id)
 
+def tortoise_link_entities(relation: str, from_id: str, to_id: Any = None, *,
+                           target_ids: Any = None,
+                           operator: Any = None,
+                           direction: str | None = None,
+                           semantics: str | None = None,
+                           confidence: float | None = None,
+                           weight: float | None = None,
+                           label: str | None = None,
+                           batch_id: str | None = None,
+                           entity_label: str | None = None,
+                           source_kind: str | None = None,
+                           promote_source: bool = True) -> dict:
+    """Connect two nodes — **the relation decides how** (#11609 lane P7, row 19).
+
+    ONE linking verb absorbing `tortoise_create_edge` and `tortoise_create_operator`
+    (both retire FORWARD into it). `relation` alone picks the writer:
+
+    * `wasDerivedFrom` → the derivation writer (the ontology owns the direction);
+    * `IMPL`/`NAND` without `operator=True` → a bare direct edge (ONTOLOGY §5.3/v3.5 §8);
+    * `supports`/`refutes`/`mutuallySupportive`/`mutuallyExclusive`, or
+      `operator=True` → a carrying operator Point (an operator exists **iff**
+      there is a mitigation, or the edge is Point↔Point support/contradict);
+    * `references` + `entity_label` → the provenance writer, the only arm whose
+      edge carries the `sourceVersion` anchor;
+    * anything else → a plain typed structural edge.
+
+    ⛔ A keyword the chosen arm cannot record is REFUSED, never dropped (the SDK's
+    own rule; a dropped keyword returns success for a write that stored a subset).
+
+    TWO SHAPES OF THE TARGET, and they select DIFFERENT writers on purpose:
+    a SCALAR target follows the RELATION (the surface's own contract), while a
+    LIST of targets — under either spelling, `target_ids` (the retired operator
+    door's own argument) or `to_id`; the registered description advertises the
+    list form on `to_id` too — selects the OPERATOR arm at any target count,
+    INCLUDING one. It is the SHAPE that selects, never the count: a list of one
+    is the same fan-out as a list of N. The list form is the part/whole
+    fan-out: ONE operator over N targets, the shape
+    `tortoise_create_operator` had and a per-target loop would NOT reproduce.
+    Both operator spellings dispatch to the same `_create_operator` writer the
+    door used, and `semantics` (the Layer-2 meaning that resolves the direction)
+    is accepted on that arm alone. `operator=true` selects the same arm.
+
+    ⛔ THE MEANING NEVER BECOMES THE `op_type`. A relation that is a Layer-2
+    MEANING (`supports`, `refutes`, `mutuallySupportive`, `mutuallyExclusive`,
+    `hasPart`, `dependsOn`, `addresses`, `causes`, `produces`) is mapped through
+    `pack_registry.SEMANTICS_MECHANISMS` to the mechanism that goes in `op_type`,
+    and the meaning travels in `semantics` — the SDK's own construction. Passing
+    the meaning as `op_type` is refused by `create_operator` on every call (its
+    allow-list is `IMPL`/`NAND`/`coherence` + the part/whole types), so this arm
+    would advertise relations it could never write.
+
+    `direction` is EP-propagation direction (`bidirectional` default,
+    `unidirectional` for a directed attack). `operator` is the ONE explicit
+    override, because IMPL/NAND is the only relation with two legitimate
+    storages; `None` means "decide from the relation".
+    """
+    parsed_to = _parse(target_ids if target_ids is not None else to_id)
+    if parsed_to is None:
+        return _SafeError({"error": (
+            "link_entities requires a target: pass `to_id` (or the operator door's "
+            "own `target_ids`)"), "code": ERR_INVALID})
+    targets = parsed_to if isinstance(parsed_to, list) else [parsed_to]
+    if not targets:
+        return _SafeError({"error": "link_entities: target list is empty",
+                           "code": ERR_INVALID})
+    op_flag = _parse(operator)
+    if isinstance(op_flag, str):
+        op_flag = {"true": True, "false": False}.get(op_flag.lower(), op_flag)
+    if op_flag not in (None, True, False):
+        return _SafeError({"error": f"operator must be true/false/omitted, got {operator!r}",
+                           "code": ERR_INVALID})
+    sdk = _get_org_sdk()
+
+    # ── The OPERATOR arm: one operator over 1..N targets ───────────────────
+    # ⛔ THE SHAPE OF THE TARGET SELECTS THIS WRITER — a LIST, whichever argument carried
+    # it (`target_ids=` at any count, or a list passed as `to_id`) — plus an explicit
+    # `operator=true`. It is NEVER the COUNT. Measured failure this rule prevents
+    # (capstone V2, #11609 lane P7): `tortoise_link_entities("NAND", a, [b])` with ONE
+    # target fell through to the singular arm, where IMPL/NAND without `operator=True` is
+    # the operator-LESS direct edge — so a caller migrating from the operator door got a
+    # plain edge, a different write with the same arguments and no error (the #8447 shape).
+    # ⛔ THE FIRST FIX CLOSED ONLY HALF OF IT: `len(targets) > 1` left the POSITIONAL list
+    # spelling deciding by arity, so `link_entities("NAND", a, [b])` still took the
+    # singular arm while `("NAND", a, [b, c])` took the operator arm — the same expression
+    # shape writing two different things by count alone, which is exactly what the
+    # retired door's positional signature (`create_operator(op_type, source_id,
+    # target_ids)`) hands a mechanically-renamed caller. The shape is the discriminator
+    # (cardinality is DECLARED in every comparable contract — proto3 `repeated`, AIP-158's
+    # repeated field — because a count-based rule makes the write a function of the data).
+    # A SCALAR `to_id` still follows the relation, which is `link_entities`'s own contract.
+    operator_arm = (
+        op_flag is True or target_ids is not None or isinstance(parsed_to, list))
+    if operator_arm:
+        if op_flag is False:
+            return _SafeError({"error": (
+                "link_entities: the operator arm (a LIST of targets, or `operator=true`) "
+                "always writes a carrying operator — `operator=false` has no meaning "
+                "there. Pass a SCALAR `to_id=` with no `operator` for a relation-decided "
+                "write."),
+                "code": ERR_INVALID})
+        stray = [name for name, value in (
+            ("confidence", confidence), ("weight", weight),
+            ("batch_id", batch_id), ("entity_label", entity_label),
+            ("source_kind", source_kind)) if value is not None]
+        if stray:
+            return _SafeError({"error": (
+                f"link_entities: the operator arm writes through create_operator, "
+                f"which records no {', '.join(stray)} — refusing rather than "
+                "returning success for a write that dropped them"),
+                "code": ERR_INVALID})
+        from tortoise.quota import MAX_OPERATOR_TARGETS
+        if len(targets) > MAX_OPERATOR_TARGETS:
+            return _SafeError({"error": (
+                f"link_entities: {len(targets)} targets exceed the operator fan-out "
+                f"cap ({MAX_OPERATOR_TARGETS})"), "code": ERR_QUOTA})
+        # ⛔ THE MEANING NAMES THE EDGE; `SEMANTICS_MECHANISMS` FIXES THE MECHANISM
+        # (#11609 P7 review, P1). `_create_operator`'s FIRST positional argument is the
+        # MECHANISM (`op_type`) and its allow-list is CLOSED
+        # (`IMPL`/`NAND`/`coherence`/`composedOf`/`decomposesInto`/`contains`/`wraps`), so
+        # passing the RELATION there refuses every relation this arm advertises:
+        # `supports`, `refutes`, `mutuallySupportive`, `mutuallyExclusive` and `hasPart`
+        # are MEANINGS (ONTOLOGY §8 Layer 2), not mechanisms, and `_create_operator`
+        # answers them with `ValueError` — a write that never worked on the arm whose own
+        # docstring advertises them. The SDK's `link_entities` arm already spells this
+        # correctly (`_EPISTEMIC_RELATION_MEANINGS` -> `SEMANTICS_MECHANISMS[meaning]` as
+        # `op_type`, the meaning as `semantics=`); the door reproduces that construction
+        # here, so the two spellings of one write cannot disagree about where the meaning
+        # goes. A MECHANISM name (`IMPL`, `NAND`, `coherence`) or a part/whole type is not
+        # in the map and passes through unchanged, which is what keeps the retired door's
+        # own positional signature working.
+        from tortoise.pack_registry import SEMANTICS_MECHANISMS
+        _meaning_by_fold = {k.lower(): k for k in SEMANTICS_MECHANISMS}
+        door_meaning = (_meaning_by_fold.get(relation.lower())
+                        if isinstance(relation, str) else None)
+        if door_meaning is None:
+            op_type = relation
+        else:
+            if semantics is not None and semantics != door_meaning:
+                return _SafeError({"error": (
+                    f"link_entities: relation {relation!r} IS the meaning "
+                    f"{door_meaning!r}, so `semantics={semantics!r}` would state a "
+                    "second, conflicting one — one keyword, one meaning. Pass the "
+                    "MECHANISM (`IMPL`/`NAND`) as `relation` if you need to name the "
+                    "meaning separately."),
+                    "code": ERR_INVALID})
+            op_type, semantics = SEMANTICS_MECHANISMS[door_meaning], door_meaning
+        return _safe(
+            _quota_gated(sdk._create_operator, "points", abuse_weight=1),
+            op_type, from_id, targets, label=label,
+            direction=direction or "bidirectional",
+            promote_source=promote_source, semantics=semantics)
+
+    # ── The single-target arm: the SDK's own dispatch ──────────────────────
+    # ⛔ QUOTA-GATED LIKE THE OPERATOR ARM ABOVE (#11609 P7 review, P1). The door
+    # this absorbs, `tortoise_create_edge`, metered its writer
+    # (`_quota_gated(_get_org_sdk()._create_edge, "points")`); routing the same
+    # write through the SDK's public `link_entities` without the wrapper made the
+    # ONE unmetered edge-write path on the surface, and the #329 inventory alone
+    # would not have caught it — the scan sees the `.create_operator` call this arm
+    # does not make.
+    if semantics is not None:
+        return _SafeError({"error": (
+            "link_entities: `semantics` is the OPERATOR arm's meaning argument (pass a "
+            "LIST of targets — `target_ids=` or a list as `to_id` — or `operator=true`). "
+            "On the relation-decided arm the "
+            "RELATION itself is the meaning (e.g. relation='supports'), so it has no "
+            "slot here — name the meaning as the relation instead of dropping it."),
+            "code": ERR_INVALID})
+    return _safe(_quota_gated(sdk.link_entities, "points"),
+                 relation, from_id, targets[0],
+                 operator=op_flag, direction=direction, confidence=confidence,
+                 weight=weight, label=label, batch_id=batch_id,
+                 entity_label=entity_label, source_kind=source_kind,
+                 promote_source=promote_source)
+
+
 def tortoise_create_edge(source_id: str, target_id: str, predicate: str) -> dict:
     """Create a typed structural edge between two entities (reification rule).
+
+    RETIRED name (#11609 lane P7) — still served through the #3883 shim. Unlike the
+    other retired names in this batch it does NOT forward: its body calls
+    `TortoiseSDK._create_edge` directly (the parenthetical below already named that
+    writer). The EQUIVALENT call through the live verb is
+    `tortoise_link_entities(relation=<predicate>, from_id=..., to_id=...)`, which the
+    SDK routes to the plain-edge writer (`create_edge` → `_create_edge`) for every
+    relation that is neither `wasDerivedFrom`, an epistemic relation needing a
+    carrying operator, nor `references` + `entity_label`.
 
     Relation (predicate): performs, produces, uses, memberOf, ownedBy, managedBy,
     about*, related, dependsOn, etc. Operator-less by default — lazy promotion
@@ -7768,12 +8073,16 @@ _OVERVIEW_SECTIONS = (
 #: (#12951 fresh-context review, ISSUE 4: nothing compared the two, and the comments
 #: on both sides claimed the SDK tuple drove this tuple).
 #:
-#:   graphs — `tortoise_list_graphs` is a LIVE door whose destination in
-#:       `docs/product/bridge-table.md` Part A is `tenancy:list_memory_graphs`, NOT
-#:       this container. It is a section HERE because `tortoise_overview(section=
-#:       "graphs")` retires forward through this door, and because the read carries
-#:       the #9340 HTTP tenant filter — a transport concern applied on top of
-#:       `list_graphs`, so an SDK section would not be able to answer it.
+#:   graphs — `tortoise_list_graphs` is the door this section ABSORBS: #11609 lane P7
+#:       retired it forward into `tortoise_graph_overview(section="graphs")`
+#:       (`tool_registry.py`'s `RETIRED_TOOL_REGISTRY`; its bridge-table Part A
+#:       destination is `graph_overview`, `docs/product/bridge-table.md` row 61).
+#:       ⛔ This note used to argue the opposite — that the door was LIVE with a
+#:       destination of `tenancy:list_memory_graphs`, which is not in that file at
+#:       all — so it justified a section by the very fact the batch inverted. What
+#:       is true is narrower and why the section lives HERE rather than on the SDK:
+#:       the read is `list_graphs` plus the #9340 HTTP tenant filter, a transport
+#:       concern an SDK section could not answer.
 #:   health — this IS one of the container's approved sections
 #:       (`docs/product/canonical-mcp-tools.md`'s `tortoise_health` pointer is
 #:       `tortoise_graph_overview(section="health")`), but it has no SDK read to
@@ -11383,8 +11692,17 @@ def _preview_delete_entity(sdk, id: str) -> dict:
 
 
 def _preview_delete(sdk, id: str) -> dict:
-    """Preview `tortoise_delete` — resolve the label first, exactly as
-    `TortoiseSDK.delete` does, then preview the branch it would take.
+    """Preview `tortoise_delete_knowledge` — resolve the label first, exactly as the
+    writer does (`TortoiseSDK._delete`, the method the live door binds), then preview
+    the branch it would take.
+
+    ⛔ THE RECEIPT NAMES THE LIVE DOOR (#11609 P7 review, P2). It used to hard-code
+    `tortoise_delete` — the spelling this batch RETIRED forward into
+    `tortoise_delete_knowledge` — so a caller of the ADVERTISED door got back a
+    receipt whose `tool` field was the retired name, i.e. precisely the value such a
+    caller would naturally re-call, and the old name is absent from `tools/list`.
+    Both spellings still reach this preview (the retired shim forwards to the live
+    handler), so a receipt naming the advertisement is honest for either caller.
 
     #4649: the resolution is the SAME OR-set as the writer's — `by_url=True`
     included. Without it a url-keyed `:Source` (no `id`, minted by
@@ -11398,7 +11716,7 @@ def _preview_delete(sdk, id: str) -> dict:
         id, by_id=True, by_eventId=True, by_url=True)
     if not resolved:
         return _preview_result(
-            "tortoise_delete", "delete",
+            "tortoise_delete_knowledge", "delete",
             found=False,
             target={"id": id, "label": None},
             nodes_removed=0,
@@ -11409,7 +11727,7 @@ def _preview_delete(sdk, id: str) -> dict:
     label = resolved[0]["label"]
     out = (_preview_delete_point(sdk, id) if label == "Point"
            else _preview_delete_entity(sdk, id))
-    out["tool"] = "tortoise_delete"
+    out["tool"] = "tortoise_delete_knowledge"
     out["target"] = {"id": id, "label": label}
     return out
 
