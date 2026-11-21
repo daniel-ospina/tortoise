@@ -269,6 +269,15 @@ SESSION_PROPERTIES: tuple[str, ...] = (
     # ── extraction-attempt outcome ──
     "capture_ok",
     "capture_extractor",
+    # ── the in-flight extraction phase (#14232) ──
+    # Persisted `queued` at accept and `extracting` once a worker enters the
+    # model call, then CLEARED by the same statement that records `capture_ok`.
+    # They are the only two properties on the Session that describe work in
+    # progress rather than an outcome, which is why the read path publishes them
+    # as a qualifier beside the 3-member extraction status (`#3520`'s pattern) and
+    # omits them — absent, never `null` — on a terminal row.
+    "capture_extraction_phase",
+    "capture_extraction_phase_at",
     # ── entity-link counters ──
     "entity_links_attempted",
     "entity_links_created",
@@ -331,11 +340,12 @@ SESSION_WRITERS: tuple[SessionWriter, ...] = (
             "rather than dead code."),
     ),
     SessionWriter(
-        key="tortoise/hosted_api.py::_capture_session_impl",
+        key="tortoise/hosted_api.py::_report_capture",
         kind="capture-aux",
-        lane="hosted capture",
+        lane="hosted capture (the post-extraction half, #14232)",
         properties=frozenset({
             "capture_ok", "capture_extractor",
+            "capture_extraction_phase", "capture_extraction_phase_at",
         }),
         note=(
             "The hosted capture's OUTCOME record. `capture_ok` here is "
@@ -347,7 +357,31 @@ SESSION_WRITERS: tuple[SessionWriter, ...] = (
             "into the `_link_off_loop` closure so it stops running on the "
             "event loop, and the row below names the site that writes them "
             "now (the predicate attributes by enclosing function, so a row "
-            "kept here would be `declared_only`)."),
+            "kept here would be `declared_only`). "
+            "⛔ #14232 split the tail: the function is `_report_capture` now "
+            "(`_capture_session_impl` no longer sets any Session property, and "
+            "the MERGE+turns it still emits are the shared primitive's). This "
+            "row also owns the phase CLEAR: a terminal row must not carry a "
+            "phase, so the SAME `SET` that writes `capture_ok` writes the phase "
+            "to null — one terminal path, no third sentinel."),
+    ),
+    SessionWriter(
+        key="tortoise/hosted_api.py::_write_capture_phase",
+        kind="capture-aux",
+        lane="hosted capture (in-flight phase, #14232), off the event loop",
+        properties=frozenset({
+            "capture_extraction_phase", "capture_extraction_phase_at",
+        }),
+        note=(
+            "#14232: the transient phase a DEFERRED capture carries while its "
+            "extraction runs — `queued` at accept, `extracting` once a worker "
+            "enters the model call. Deliberately a SEPARATE statement from the "
+            "outcome row: `capture_ok` is terminal and the phase is not, so "
+            "folding them would make a session mid-extraction carry an outcome "
+            "it has not reached. Best-effort by construction (a phase write may "
+            "never fail a capture whose record already landed), which is why it "
+            "is reachable only from `_mark_capture_extraction_phase`'s "
+            "`try/except` on the capture pool."),
     ),
     SessionWriter(
         key="tortoise/hosted_api.py::_link_off_loop",
@@ -633,6 +667,17 @@ SESSION_CLIENTS: tuple[SessionClient, ...] = (
              "through an INJECTED post callable (the `tortoise/__main__.py` "
              "transport), so it is a client of that client. `capture_lane="
              "'store_sync'` is its distinguishing mark.",
+    ),
+    SessionClient(
+        path="tools/acceptance_14232_drain.py",
+        transport="http",
+        lane="acceptance (#14232)",
+        marker='"/v1/sessions"',
+        note="The acceptance drain posts the spooled corpus through the REAL "
+             "endpoint (and reads `GET /v1/sessions/{id}` until each session is "
+             "terminal) to grade the ack/split. It is a test-driving client, not "
+             "a recorder: it never mints `capture_lane` on the session it "
+             "creates, because the server derives that.",
     ),
     SessionClient(
         path="tortoise/mcp_server.py",
