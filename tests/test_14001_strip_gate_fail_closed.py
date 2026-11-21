@@ -1486,7 +1486,10 @@ def _folding(
     ⛔ THE CONTROL'S *USE* OF THESE HELPERS IS PINNED TOO (`#14099`, review of `5de131e6`). The
     helpers above are measured by `test_the_environment_refusal_is_carried_not_re_synthesised`;
     whether the CONTROL still BINDS them is measured by `test_the_control_binds_the_shared_helpers`
-    — a spy on both names, which this control reaches 13 / 212 times (measured). Without that spy,
+    — a spy on both names, which this control reaches **15 / 232** times (measured at `89528b12`).
+    ⛔ RE-MEASURE when an arm is added: BOTH counts move with the number of folds the control makes,
+    not with the environment, so a later arm silently falsifies this sentence (it said 13 / 212
+    when the arm that closed the last P2 landed). Without that spy,
     giving the control its own local pre-F1 fake left the whole file GREEN (95 passed, measured).
     ⛔ The paragraph here previously said a test COULD NOT catch that revert, calling it a
     reviewer's catch. That was false — a spy catches it — and the false version discouraged
@@ -1957,15 +1960,18 @@ def test_the_control_binds_the_shared_helpers(monkeypatch):
     `partial` is built, which is exactly why the patch has to be installed BEFORE the control is
     called (and why a `partial` argument can never be a late-binding global).
 
-    ⛔ AND A BARE COUNTER IS NOT ENOUGH FOR `_env_source` (`#14099`, re-measured at this head).
-    `_folding`'s inner `fake` ALSO calls the module-level `_env_source` — measured: of 212 calls,
-    **192 come from `fake`** and only 20 from the control's own `served(...)` (the `missing` arm's
-    `lambda`). Replacing the control's `served` with a BEHAVIOURALLY IDENTICAL local copy
-    therefore leaves the counter at 192 and a bare `> 0` assertion GREEN — measured at this head:
+    ⛔ AND A BARE COUNTER IS NOT ENOUGH FOR `_env_source` (`#14099`, re-measured at `89528b12`).
+    `_folding`'s inner `fake` ALSO calls the module-level `_env_source` — measured: of **232**
+    calls, **212 come from `fake`** and only 20 from the control's own `served(...)` (the `missing`
+    arm's `lambda`). Replacing the control's `served` with a BEHAVIOURALLY IDENTICAL local copy
+    therefore leaves the counter at 212 and a bare `> 0` assertion GREEN — measured at that head:
     **96 passed, nothing red**, while the docstring this paragraph replaces claimed that revert
     was caught. So every call is attributed to its IMMEDIATE CALLER and the control's own binding
-    must appear: `_folding` by the control's name (13 calls, all of them), `_env_source` by a
+    must appear: `_folding` by the control's name (**15** calls, all of them), `_env_source` by a
     caller that is NOT the fake's transitive fallback.
+    ⛔ BOTH FIGURES ARE RE-MEASURED, NEVER TRANSCRIBED: they scale with the arm count (each fold
+    walks `24 − len(declared ∩ register)` keys), so an arm added later falsifies them silently —
+    exactly how the previous `13 / 212` and its `192` went stale.
     """
     callers: dict[str, set[object]] = {"_folding": set(), "_env_source": set()}
     real_folding, real_env_source = _folding, _env_source
