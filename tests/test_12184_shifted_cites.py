@@ -354,7 +354,9 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # moves (345 as-written stays 345); NON-VACUOUS: `+1` reds the content arm at both.
     (_AUDIT, 'sdk.py:16046-16051', _SDK, 16046, '**JSONL event log (#548):** written when *point* is provided'),
     (_AUDIT, 'sdk.py:3777', _SDK, 3777, 'sdk._emit_event("PointRetracted", _deleted_point_payload(tid))'),
-    # --- #14087 fix lane's OWN sweep at `7f57eb2a46` — ⛔ NOT a reviewer finding, and the difference
+    # --- #14087 fix lane's OWN sweep at `515f3e6d23` (the on-branch copy of the patch the lane first
+    # landed as the now-superseded `7f57eb2a46`; same `git patch-id --stable`, 5eebb7f027312e49) —
+    # ⛔ NOT a reviewer finding, and the difference
     # is the point: both reviews graded this address by its DELTA (`:15991-95` -> `:16046-50`, +55 on
     # both ends), which stays consistent while the SPAN itself is wrong, so neither could see it. TWO
     # defects on the one address, both measured at this head:
@@ -380,7 +382,14 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # the pin's line is also moved, the content arm.
     (_AUDIT, '`:58274`', _SDK, 58274, '"s.turn_count, s.actor_user_id, s.harness, "'),
     # --- #14087 review round 1, finding 1 (F1) — the address that review CAUGHT, now GUARDED. The
-    # correction itself landed at `e8bacc656c` (`:58265` -> `:58272`); the review's other half —
+    # correction itself was the `:58265` -> `:58272` PAIR, cited as an address pair and not by the sha the
+    # original comment named: `e8bacc656c` is a superseded pre-rebase copy of THIS branch's own
+    # `d7d205351e` (identical `git patch-id --stable`, ac9864384136fa27), held only by local
+    # `backup/14087-*` and `fix/14087-review-followups*` refs — none of them on `origin` — so it is
+    # unresolvable from a clone of this branch, which is the rule at `tools/sdk_privatise.py:369-371`.
+    # `d7d205351e` IS an ancestor of this head and would also be reproducible; the pair is preferred
+    # because it names the CORRECTION itself rather than a replay of it, and it is verifiable at any
+    # head whose `sdk.py` reaches `:58274`. The review's other half —
     # "add the token to `_TOKEN_OCCURRENCES` so the next sweep cannot move it silently" — did not, so the
     # fix left behind a number a digit sweep could still move with nothing red, which is the same gap
     # that let the wrong one ship. `:58272` is `rows = proj.g.query(`, the statement `:58210` was at
@@ -1837,8 +1846,10 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # control carried `:15750` where the assembly is `:15805`. Nothing graded it — the row's positive
     # cite `sdk.py:15842` IS pinned, which is what made the pair look covered — so the control rotted
     # through a re-derivation that fixed the address beside it.
-    # 83 -> 84 at the SAME review's finding 1 (F1): the `:58272` correction `e8bacc656c` made was
-    # itself unguarded — the review asked for the pin and only the address landed. Same shape, same
+    # 83 -> 84 at the SAME review's finding 1 (F1): the `:58272` correction (the `:58265` -> `:58272`
+    # pair, named as a pair rather than by the superseded pre-rebase sha `e8bacc656c` — the same
+    # correction is on this branch as `d7d205351e`; see F1's row above) was itself
+    # unguarded — the review asked for the pin and only the address landed. Same shape, same
     # reason: a bare span with no pin is coverage this file only APPEARED to have.
     # 84 -> 85 at the fix lane's own sweep: the header's BARE `:16046-16051` spelling of the JSONL
     # contract — the same bare-span gap F1 closed for `:58272`, on a range whose END was also one short
