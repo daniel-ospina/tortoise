@@ -877,8 +877,10 @@ def _re_derived_drift(text: str, repo: Path = REPO) -> tuple[int, ...] | None:
         if pin is None:
             # cannot produce the pin's copy, on any of three causes: the rev is unresolvable; the
             # rev's TREE cannot be read (treeless clone, missing tree object); or the path IS in the
-            # tree but its blob will not render. All are facts about THIS CHECKOUT, which is why
-            # they skip rather than count a pair that was never read.
+            # tree but its blob will not render. All are facts about THIS CHECKOUT, so this returns
+            # `None` rather than COUNT a pair that was never read — and the caller then grades the
+            # history-free identity instead of skipping (there is no `pytest.skip(` in this file: it
+            # would assert NOTHING in the only place the rail reads it, `#13802`).
             return None
         head_file = repo / path
         if not head_file.is_file():
@@ -949,7 +951,10 @@ def test_the_drift_numerator_is_re_derived_from_the_pin_blob_not_carried() -> No
     NON-VACUOUS, measured at this head BOTH ways: (a) restoring the pre-fix `159`/`150`/`222` while
     keeping the corrected denominator reds THIS test; (b) mutating `all 218 comparable ones` to `222`
     fails the history-free identity with "the halves do not add up to the whole", and (c) in a real
-    `--depth 1` clone of this head the arm RUNS (no skip) and passes on that identity.
+    `--depth 1` clone of this head the arm RUNS (no skip) and passes on that identity; (d) mutating the
+    SPLIT's own denominator (`146 of the 218 comparable` → `146 of the 300 comparable`) reds the
+    self-consistency arm in that same history-free shape — measured GREEN before that arm existed,
+    because the with-history comparison which also catches it cannot run in a `fetch-depth: 1` checkout.
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     body = _unbolded(text)
@@ -976,6 +981,21 @@ def test_the_drift_numerator_is_re_derived_from_the_pin_blob_not_carried() -> No
     # index is off by one from `one` onward (`nine` → 10). Measured: the first cut used `.index()` and
     # red on a CORRECT header.
     incomparable = _as_int(incomparable_word)
+    # (0) SELF-CONSISTENCY, and this is the arm the CI shape needs most: the comparable DENOMINATOR is
+    # published in more than one sentence — the split's `N of the M comparable` and the `all M
+    # comparable ones` that feeds the identity below — and ONE figure spelled twice is exactly the
+    # shape the shipped defect took (`222 + 9 = 231` beside a 227-pair population). ⛔ MEASURED, on a
+    # shallow checkout (`_DRIFT_PIN` unresolvable, i.e. exactly what `actions/checkout`'s default
+    # `fetch-depth: 1` produces): with the split's denominator mutated `218` → `300` this test stayed
+    # GREEN — the only arm that compared the spellings is the WITH-HISTORY one below, which cannot run
+    # there. So the half that runs in CI asserted a numerator agreement over a denominator it never read.
+    assert int(split.group(2)) == int(comparable_said.group(1)) == int(drifted_said.group(2)), (
+        "the header publishes its comparable denominator more than once — "
+        f"{split.group(2)} in the split sentence, {comparable_said.group(1)} in `all … comparable ones` "
+        f"and {drifted_said.group(2)} in the `N of the M comparable` this arm grades — and they are ONE "
+        "figure. Re-measure it by content and update EVERY spelling; if these three name different "
+        "sentences, re-point the patterns above rather than widening this arm."
+    )
     # (1) HISTORY-FREE — the arm the CI shape gets. The halves must add up to the whole.
     assert int(comparable_said.group(1)) + incomparable == pairs, (
         f"the header publishes {comparable_said.group(1)} comparable + {incomparable} non-comparable "
