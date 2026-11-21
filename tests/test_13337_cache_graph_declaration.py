@@ -266,6 +266,10 @@ def test_the_control_plane_read_uses_the_SAME_filters_the_ownership_check_does()
     # leaves every equality above green; this line is what goes RED.
     assert ownership["filters"] == [("id", "eq", "g_1"),
                                     ("org_id", "eq", "orgA")]
+    # …and the TABLE half of the same claim ("the same table") needs its own
+    # anchor for the same reason: `"graphs"` → `"graph"` in BOTH readers leaves
+    # the equality above green, so only a literal catches that joint edit.
+    assert ownership["table"] == "graphs"
     # `select` is deliberately NOT pinned equal: the ownership read also fetches
     # `id` (it needs the row's identity), the declaration needs only the name.
     assert "namespace" in declaration["select"]
