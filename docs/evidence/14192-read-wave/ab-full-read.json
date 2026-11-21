@@ -1,0 +1,3731 @@
+{
+  "baseline": {
+    "arm": "ab-full-read",
+    "git_sha": "0667b5358950",
+    "db_uri": "docker://:@127.0.0.1:16446/tortoise_test_matrix",
+    "points": 2000,
+    "corpus_seed": 42,
+    "queries": 24,
+    "stage_table": {
+      "pre_handler": {
+        "n": 24,
+        "p50": 0.1,
+        "p95": 0.1,
+        "max": 0.1,
+        "mean": 0.1
+      },
+      "embed_get": {
+        "n": 24,
+        "p50": 0.5,
+        "p95": 0.6,
+        "max": 0.8,
+        "mean": 0.529
+      },
+      "embed_encode": {
+        "n": 24,
+        "p50": 0.0,
+        "p95": 0.0,
+        "max": 0.0,
+        "mean": 0.0
+      },
+      "retrieval": {
+        "n": 24,
+        "p50": 157.1,
+        "p95": 193.1,
+        "max": 202.9,
+        "mean": 159.658
+      },
+      "fusion": {
+        "n": 24,
+        "p50": 0.0,
+        "p95": 0.0,
+        "max": 0.0,
+        "mean": 0.0
+      },
+      "ep_annotation": {
+        "n": 24,
+        "p50": 4.5,
+        "p95": 5.7,
+        "max": 6.7,
+        "mean": 4.608
+      },
+      "ordering": {
+        "n": 24,
+        "p50": 0.2,
+        "p95": 0.3,
+        "max": 0.3,
+        "mean": 0.167
+      },
+      "response": {
+        "n": 24,
+        "p50": 0.0,
+        "p95": 0.0,
+        "max": 0.0,
+        "mean": 0.0
+      }
+    },
+    "member_table": {
+      "leg_fts": {
+        "n": 24,
+        "p50": 5.591,
+        "p95": 7.052,
+        "max": 7.36,
+        "mean": 5.629
+      },
+      "leg_vector": {
+        "n": 24,
+        "p50": 0.0,
+        "p95": 0.0,
+        "max": 0.0,
+        "mean": 0.0
+      },
+      "leg_structural": {
+        "n": 24,
+        "p50": 0.031,
+        "p95": 0.051,
+        "max": 0.052,
+        "mean": 0.032
+      },
+      "legs_wave": {
+        "n": 24,
+        "p50": 6.246,
+        "p95": 7.907,
+        "max": 8.141,
+        "mean": 6.247
+      },
+      "fusion": {
+        "n": 24,
+        "p50": 0.0,
+        "p95": 0.0,
+        "max": 0.0,
+        "mean": 0.0
+      },
+      "post_ep_annotate": {
+        "n": 24,
+        "p50": 4.52,
+        "p95": 5.722,
+        "max": 6.718,
+        "mean": 4.595
+      },
+      "post_relationships": {
+        "n": 24,
+        "p50": 143.048,
+        "p95": 179.501,
+        "max": 189.987,
+        "mean": 146.433
+      },
+      "post_epistemic": {
+        "n": 24,
+        "p50": 3.368,
+        "p95": 4.387,
+        "max": 4.99,
+        "mean": 3.392
+      }
+    },
+    "legs_declared": {
+      "vector:load_in_flight": 24,
+      "fts:ok": 24,
+      "structural:empty_results": 24,
+      "valid_time:no-prefer-latest-intent": 24
+    },
+    "per_query": [
+      {
+        "qid": "q001",
+        "query": "zero-cost onboarding for new teams",
+        "total_ms": 156.32,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.5,
+          "retrieval": 151.8,
+          "ep_annotation": 3.7,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.03703916445374489,
+          "leg_fts": 5.055175628513098,
+          "legs_wave": 5.651063751429319,
+          "post_ep_annotate": 3.7182001397013664,
+          "post_relationships": 139.40579583868384,
+          "post_epistemic": 3.5856012254953384
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0000619",
+          "p-0000148",
+          "p-0001954",
+          "p-0001917",
+          "p-0001858",
+          "p-0001792",
+          "p-0001790",
+          "p-0001450",
+          "p-0001414",
+          "p-0001365"
+        ]
+      },
+      {
+        "qid": "q002",
+        "query": "pricing tiers for enterprise plans",
+        "total_ms": 176.786,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.5,
+          "retrieval": 171.2,
+          "ep_annotation": 4.6,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.03427406772971153,
+          "leg_fts": 5.650200881063938,
+          "legs_wave": 6.2906090170145035,
+          "post_ep_annotate": 4.606274887919426,
+          "post_relationships": 158.38474594056606,
+          "post_epistemic": 2.7634198777377605
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001603",
+          "p-0001903",
+          "p-0001856",
+          "p-0001745",
+          "p-0001657",
+          "p-0001294",
+          "p-0000989",
+          "p-0000938",
+          "p-0000823",
+          "p-0000778"
+        ]
+      },
+      {
+        "qid": "q003",
+        "query": "memory retention across sessions",
+        "total_ms": 198.234,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.5,
+          "retrieval": 193.1,
+          "ep_annotation": 4.1,
+          "ordering": 0.3
+        },
+        "members": {
+          "leg_structural": 0.0516967847943306,
+          "leg_fts": 4.843669943511486,
+          "legs_wave": 5.431542173027992,
+          "post_ep_annotate": 4.053228069096804,
+          "post_relationships": 179.50050998479128,
+          "post_epistemic": 4.387294873595238
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001935",
+          "p-0001862",
+          "p-0001776",
+          "p-0001691",
+          "p-0001439",
+          "p-0001318",
+          "p-0001273",
+          "p-0000873",
+          "p-0000305",
+          "p-0000207"
+        ]
+      },
+      {
+        "qid": "q004",
+        "query": "graph traversal operators and edges",
+        "total_ms": 161.912,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.6,
+          "retrieval": 154.1,
+          "ep_annotation": 6.7,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.049413181841373444,
+          "leg_fts": 5.496737081557512,
+          "legs_wave": 6.295632105320692,
+          "post_ep_annotate": 6.718414835631847,
+          "post_relationships": 140.2210700325668,
+          "post_epistemic": 3.240944817662239
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001983",
+          "p-0001228",
+          "p-0001073",
+          "p-0001492",
+          "p-0001043",
+          "p-0000496",
+          "p-0000001",
+          "p-0000206",
+          "p-0001822",
+          "p-0001779"
+        ]
+      },
+      {
+        "qid": "q005",
+        "query": "embedding dimension and vector index",
+        "total_ms": 192.214,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.5,
+          "retrieval": 186.8,
+          "ep_annotation": 4.5,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.03158021718263626,
+          "leg_fts": 5.792219191789627,
+          "legs_wave": 6.373037584125996,
+          "post_ep_annotate": 4.490558989346027,
+          "post_relationships": 173.36053075268865,
+          "post_epistemic": 3.5761138424277306
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001935",
+          "p-0001740",
+          "p-0000404",
+          "p-0000260",
+          "p-0001672",
+          "p-0001661",
+          "p-0001486",
+          "p-0001220",
+          "p-0000695",
+          "p-0000231"
+        ]
+      },
+      {
+        "qid": "q006",
+        "query": "belief propagation posterior update",
+        "total_ms": 157.186,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.6,
+          "retrieval": 151.3,
+          "ep_annotation": 4.9,
+          "ordering": 0.1
+        },
+        "members": {
+          "leg_structural": 0.024402979761362076,
+          "leg_fts": 5.667024292051792,
+          "legs_wave": 6.245729047805071,
+          "post_ep_annotate": 4.896178841590881,
+          "post_relationships": 138.82851228117943,
+          "post_epistemic": 2.659495919942856
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0000783",
+          "p-0001453",
+          "p-0000721",
+          "p-0000767",
+          "p-0001933",
+          "p-0001915",
+          "p-0001838",
+          "p-0001589",
+          "p-0001359",
+          "p-0001223"
+        ]
+      },
+      {
+        "qid": "q007",
+        "query": "full text search over point content",
+        "total_ms": 183.587,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.5,
+          "retrieval": 178.9,
+          "ep_annotation": 3.8,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.025948043912649155,
+          "leg_fts": 5.591030232608318,
+          "legs_wave": 6.073684897273779,
+          "post_ep_annotate": 3.7485980428755283,
+          "post_relationships": 166.03702120482922,
+          "post_epistemic": 3.417267929762602
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001675",
+          "p-0001596",
+          "p-0001519",
+          "p-0001511",
+          "p-0001478",
+          "p-0001307",
+          "p-0001163",
+          "p-0000976",
+          "p-0000893",
+          "p-0001680"
+        ]
+      },
+      {
+        "qid": "q008",
+        "query": "semantic similarity between claims",
+        "total_ms": 129.402,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.5,
+          "retrieval": 124.2,
+          "ep_annotation": 4.3,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.030908267945051193,
+          "leg_fts": 5.162053741514683,
+          "legs_wave": 5.7665761560201645,
+          "post_ep_annotate": 4.249711986631155,
+          "post_relationships": 111.19518196210265,
+          "post_epistemic": 3.513908013701439
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001354",
+          "p-0001312",
+          "p-0001092",
+          "p-0000895",
+          "p-0000726",
+          "p-0000706",
+          "p-0000337",
+          "p-0001954",
+          "p-0001950",
+          "p-0001913"
+        ]
+      },
+      {
+        "qid": "q009",
+        "query": "hybrid ranking fusion strategy",
+        "total_ms": 167.912,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.4,
+          "retrieval": 162.2,
+          "ep_annotation": 5.0,
+          "ordering": 0.1
+        },
+        "members": {
+          "leg_structural": 0.025989022105932236,
+          "leg_fts": 5.450398661196232,
+          "legs_wave": 6.032501347362995,
+          "post_ep_annotate": 4.929902032017708,
+          "post_relationships": 149.8838420957327,
+          "post_epistemic": 2.806290052831173
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001346",
+          "p-0001032",
+          "p-0000165",
+          "p-0001785",
+          "p-0001433",
+          "p-0001237",
+          "p-0001170",
+          "p-0001098",
+          "p-0000722",
+          "p-0000638"
+        ]
+      },
+      {
+        "qid": "q010",
+        "query": "degraded fallback when database fails",
+        "total_ms": 174.606,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.5,
+          "retrieval": 167.9,
+          "ep_annotation": 5.7,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.026850029826164246,
+          "leg_fts": 4.9254619516432285,
+          "legs_wave": 5.4865749552845955,
+          "post_ep_annotate": 5.72182796895504,
+          "post_relationships": 155.22602200508118,
+          "post_epistemic": 3.2214391976594925
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001455",
+          "p-0001935",
+          "p-0001883",
+          "p-0000823",
+          "p-0000719",
+          "p-0001892",
+          "p-0001712",
+          "p-0001462",
+          "p-0001323",
+          "p-0001304"
+        ]
+      },
+      {
+        "qid": "q011",
+        "query": "circuit breaker latency protection",
+        "total_ms": 144.161,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.4,
+          "retrieval": 139.1,
+          "ep_annotation": 4.3,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.020167790353298187,
+          "leg_fts": 4.598892293870449,
+          "legs_wave": 5.054099950939417,
+          "post_ep_annotate": 4.2611281387507915,
+          "post_relationships": 126.9136480987072,
+          "post_epistemic": 3.4549757838249207
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001504",
+          "p-0001609",
+          "p-0000850",
+          "p-0000921",
+          "p-0000638",
+          "p-0000197",
+          "p-0000069",
+          "p-0001673",
+          "p-0001526",
+          "p-0001450"
+        ]
+      },
+      {
+        "qid": "q012",
+        "query": "epistemic annotation confidence evidence",
+        "total_ms": 152.745,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.5,
+          "retrieval": 147.2,
+          "ep_annotation": 4.8,
+          "ordering": 0.1
+        },
+        "members": {
+          "leg_structural": 0.01821434125304222,
+          "leg_fts": 5.311466287821531,
+          "legs_wave": 5.791887640953064,
+          "post_ep_annotate": 4.765011835843325,
+          "post_relationships": 134.80882719159126,
+          "post_epistemic": 3.156146965920925
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001683",
+          "p-0001438",
+          "p-0001057",
+          "p-0001960",
+          "p-0001742",
+          "p-0001280",
+          "p-0001238",
+          "p-0000688",
+          "p-0000588",
+          "p-0000640"
+        ]
+      },
+      {
+        "qid": "q013",
+        "query": "operator relationships between concepts",
+        "total_ms": 161.766,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.5,
+          "retrieval": 156.2,
+          "ep_annotation": 4.7,
+          "ordering": 0.1
+        },
+        "members": {
+          "leg_structural": 0.01760292798280716,
+          "leg_fts": 5.7410732842981815,
+          "legs_wave": 6.266504991799593,
+          "post_ep_annotate": 4.7011361457407475,
+          "post_relationships": 143.04841216653585,
+          "post_epistemic": 3.2566748559474945
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001502",
+          "p-0001945",
+          "p-0000983",
+          "p-0001958",
+          "p-0001793",
+          "p-0001615",
+          "p-0001587",
+          "p-0001577",
+          "p-0001344",
+          "p-0001233"
+        ]
+      },
+      {
+        "qid": "q014",
+        "query": "agent memory graph storage",
+        "total_ms": 179.629,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.4,
+          "retrieval": 173.6,
+          "ep_annotation": 5.2,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.022181309759616852,
+          "leg_fts": 5.015491973608732,
+          "legs_wave": 5.618933122605085,
+          "post_ep_annotate": 5.214718170464039,
+          "post_relationships": 160.76798411086202,
+          "post_epistemic": 3.6825849674642086
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001061",
+          "p-0001685",
+          "p-0001659",
+          "p-0001363",
+          "p-0001262",
+          "p-0001149",
+          "p-0000557",
+          "p-0000171",
+          "p-0000017",
+          "p-0001953"
+        ]
+      },
+      {
+        "qid": "q015",
+        "query": "cross entity retrieval source events",
+        "total_ms": 139.87,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.6,
+          "retrieval": 134.1,
+          "ep_annotation": 4.8,
+          "ordering": 0.1
+        },
+        "members": {
+          "leg_structural": 0.023523811250925064,
+          "leg_fts": 6.300950888544321,
+          "legs_wave": 7.018628995865583,
+          "post_ep_annotate": 4.830565769225359,
+          "post_relationships": 120.572529733181,
+          "post_epistemic": 3.0051441863179207
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001888",
+          "p-0001883",
+          "p-0000857",
+          "p-0000617",
+          "p-0000556",
+          "p-0000493",
+          "p-0000442",
+          "p-0000203",
+          "p-0000132",
+          "p-0001796"
+        ]
+      },
+      {
+        "qid": "q016",
+        "query": "contested claims variance threshold",
+        "total_ms": 174.619,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.6,
+          "retrieval": 169.3,
+          "ep_annotation": 4.4,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.03525521606206894,
+          "leg_fts": 5.132770631462336,
+          "legs_wave": 5.662915762513876,
+          "post_ep_annotate": 4.335507284849882,
+          "post_relationships": 156.55692666769028,
+          "post_epistemic": 3.2242238521575928
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001528",
+          "p-0000767",
+          "p-0000234",
+          "p-0001809",
+          "p-0001015",
+          "p-0000461",
+          "p-0001950",
+          "p-0001944",
+          "p-0001913",
+          "p-0001598"
+        ]
+      },
+      {
+        "qid": "q017",
+        "query": "structured query over operator kind",
+        "total_ms": 159.651,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.5,
+          "retrieval": 154.7,
+          "ep_annotation": 4.1,
+          "ordering": 0.1
+        },
+        "members": {
+          "leg_structural": 0.05084369331598282,
+          "leg_fts": 5.674868822097778,
+          "legs_wave": 6.351146847009659,
+          "post_ep_annotate": 4.087633918970823,
+          "post_relationships": 141.63580629974604,
+          "post_epistemic": 3.4934901632368565
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001819",
+          "p-0001671",
+          "p-0001565",
+          "p-0001477",
+          "p-0000906",
+          "p-0000795",
+          "p-0000522",
+          "p-0000502",
+          "p-0000419",
+          "p-0001842"
+        ]
+      },
+      {
+        "qid": "q018",
+        "query": "recall completeness full scan mode",
+        "total_ms": 162.305,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.5,
+          "retrieval": 157.1,
+          "ep_annotation": 4.4,
+          "ordering": 0.1
+        },
+        "members": {
+          "leg_structural": 0.038587022572755814,
+          "leg_fts": 7.360499352216721,
+          "legs_wave": 8.141051977872849,
+          "post_ep_annotate": 4.355384968221188,
+          "post_relationships": 142.56423991173506,
+          "post_epistemic": 3.1929099932312965
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0000671",
+          "p-0001579",
+          "p-0001434",
+          "p-0000746",
+          "p-0000380",
+          "p-0001875",
+          "p-0001652",
+          "p-0001573",
+          "p-0001511",
+          "p-0001334"
+        ]
+      },
+      {
+        "qid": "q019",
+        "query": "threshold filter score floor",
+        "total_ms": 135.051,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.6,
+          "retrieval": 129.7,
+          "ep_annotation": 4.4,
+          "ordering": 0.1
+        },
+        "members": {
+          "leg_structural": 0.02450542524456978,
+          "leg_fts": 4.854151047766209,
+          "legs_wave": 5.424309056252241,
+          "post_ep_annotate": 4.392283968627453,
+          "post_relationships": 117.48237209394574,
+          "post_epistemic": 3.367680124938488
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001986",
+          "p-0001811",
+          "p-0001154",
+          "p-0000605",
+          "p-0000356",
+          "p-0000090",
+          "p-0001869",
+          "p-0001868",
+          "p-0001773",
+          "p-0001766"
+        ]
+      },
+      {
+        "qid": "q020",
+        "query": "kind filter before truncation",
+        "total_ms": 152.203,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.6,
+          "retrieval": 147.0,
+          "ep_annotation": 4.0,
+          "ordering": 0.3
+        },
+        "members": {
+          "leg_structural": 0.05022389814257622,
+          "leg_fts": 6.851594895124435,
+          "legs_wave": 7.665643934160471,
+          "post_ep_annotate": 3.980513196438551,
+          "post_relationships": 130.78444311395288,
+          "post_epistemic": 4.989934153854847
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001971",
+          "p-0001616",
+          "p-0001418",
+          "p-0000328",
+          "p-0000679",
+          "p-0000538",
+          "p-0000524",
+          "p-0001965",
+          "p-0001964",
+          "p-0001912"
+        ]
+      },
+      {
+        "qid": "q021",
+        "query": "batch endpoint annotation efficiency",
+        "total_ms": 171.127,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.8,
+          "retrieval": 165.4,
+          "ep_annotation": 4.5,
+          "ordering": 0.1
+        },
+        "members": {
+          "leg_structural": 0.0400063581764698,
+          "leg_fts": 6.563795730471611,
+          "legs_wave": 7.233369164168835,
+          "post_ep_annotate": 4.519681911915541,
+          "post_relationships": 150.91819688677788,
+          "post_epistemic": 3.439667634665966
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001625",
+          "p-0001130",
+          "p-0001968",
+          "p-0001887",
+          "p-0001877",
+          "p-0001217",
+          "p-0001189",
+          "p-0001134",
+          "p-0001112",
+          "p-0001065"
+        ]
+      },
+      {
+        "qid": "q022",
+        "query": "relationship filter traversal predicate",
+        "total_ms": 207.892,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.6,
+          "retrieval": 202.9,
+          "ep_annotation": 4.0,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.040667131543159485,
+          "leg_fts": 5.104199051856995,
+          "legs_wave": 5.672234110534191,
+          "post_ep_annotate": 4.011600278317928,
+          "post_relationships": 189.9872086942196,
+          "post_epistemic": 3.6776643246412277
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001855",
+          "p-0001536",
+          "p-0001440",
+          "p-0001436",
+          "p-0001236",
+          "p-0000659",
+          "p-0000128",
+          "p-0000121",
+          "p-0000046",
+          "p-0000777"
+        ]
+      },
+      {
+        "qid": "q023",
+        "query": "retracted points excluded results",
+        "total_ms": 160.699,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.6,
+          "retrieval": 154.4,
+          "ep_annotation": 5.1,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.03037741407752037,
+          "leg_fts": 7.051825989037752,
+          "legs_wave": 7.907230872660875,
+          "post_ep_annotate": 5.106926430016756,
+          "post_relationships": 139.6111510694027,
+          "post_epistemic": 3.2004588283598423
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0000964",
+          "p-0000154",
+          "p-0001550",
+          "p-0001176",
+          "p-0001000",
+          "p-0000692",
+          "p-0000626",
+          "p-0000360",
+          "p-0000344",
+          "p-0000282"
+        ]
+      },
+      {
+        "qid": "q024",
+        "query": "operator point is operator flag",
+        "total_ms": 164.934,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.4,
+          "retrieval": 159.6,
+          "ep_annotation": 4.6,
+          "ordering": 0.1
+        },
+        "members": {
+          "leg_structural": 0.025426968932151794,
+          "leg_fts": 5.900080315768719,
+          "legs_wave": 6.470862776041031,
+          "post_ep_annotate": 4.576090723276138,
+          "post_relationships": 146.70366141945124,
+          "post_epistemic": 3.098888788372278
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001503",
+          "p-0001842",
+          "p-0001780",
+          "p-0001510",
+          "p-0000338",
+          "p-0000214",
+          "p-0000022",
+          "p-0001518",
+          "p-0001403",
+          "p-0001602"
+        ]
+      }
+    ]
+  },
+  "after": {
+    "arm": "ab-full-read",
+    "git_sha": "0667b5358950",
+    "db_uri": "docker://:@127.0.0.1:16446/tortoise_test_matrix",
+    "points": 2000,
+    "corpus_seed": 42,
+    "queries": 24,
+    "stage_table": {
+      "pre_handler": {
+        "n": 24,
+        "p50": 0.1,
+        "p95": 0.1,
+        "max": 0.1,
+        "mean": 0.1
+      },
+      "embed_get": {
+        "n": 24,
+        "p50": 0.5,
+        "p95": 0.6,
+        "max": 0.6,
+        "mean": 0.458
+      },
+      "embed_encode": {
+        "n": 24,
+        "p50": 0.0,
+        "p95": 0.0,
+        "max": 0.0,
+        "mean": 0.0
+      },
+      "retrieval": {
+        "n": 24,
+        "p50": 113.7,
+        "p95": 147.1,
+        "max": 158.6,
+        "mean": 115.587
+      },
+      "fusion": {
+        "n": 24,
+        "p50": 0.0,
+        "p95": 0.0,
+        "max": 0.0,
+        "mean": 0.0
+      },
+      "ep_annotation": {
+        "n": 24,
+        "p50": 4.6,
+        "p95": 7.5,
+        "max": 7.5,
+        "mean": 5.087
+      },
+      "ordering": {
+        "n": 24,
+        "p50": 0.2,
+        "p95": 0.3,
+        "max": 0.3,
+        "mean": 0.192
+      },
+      "response": {
+        "n": 24,
+        "p50": 0.0,
+        "p95": 0.0,
+        "max": 0.0,
+        "mean": 0.0
+      }
+    },
+    "member_table": {
+      "leg_fts": {
+        "n": 24,
+        "p50": 5.777,
+        "p95": 7.333,
+        "max": 8.21,
+        "mean": 5.78
+      },
+      "leg_vector": {
+        "n": 24,
+        "p50": 0.0,
+        "p95": 0.0,
+        "max": 0.0,
+        "mean": 0.0
+      },
+      "leg_structural": {
+        "n": 24,
+        "p50": 0.032,
+        "p95": 0.044,
+        "max": 0.048,
+        "mean": 0.031
+      },
+      "legs_wave": {
+        "n": 24,
+        "p50": 6.29,
+        "p95": 8.004,
+        "max": 8.966,
+        "mean": 6.385
+      },
+      "fusion": {
+        "n": 24,
+        "p50": 0.0,
+        "p95": 0.0,
+        "max": 0.0,
+        "mean": 0.0
+      },
+      "post_ep_annotate": {
+        "n": 24,
+        "p50": 4.61,
+        "p95": 7.493,
+        "max": 7.519,
+        "mean": 5.079
+      },
+      "post_relationships": {
+        "n": 24,
+        "p50": 101.185,
+        "p95": 128.02,
+        "max": 143.561,
+        "mean": 101.267
+      },
+      "post_epistemic": {
+        "n": 24,
+        "p50": 3.616,
+        "p95": 5.504,
+        "max": 5.871,
+        "mean": 3.885
+      }
+    },
+    "legs_declared": {
+      "vector:load_in_flight": 24,
+      "fts:ok": 24,
+      "structural:empty_results": 24,
+      "valid_time:no-prefer-latest-intent": 24
+    },
+    "per_query": [
+      {
+        "qid": "q001",
+        "query": "zero-cost onboarding for new teams",
+        "total_ms": 103.103,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.3,
+          "retrieval": 97.6,
+          "ep_annotation": 4.8,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.02425583079457283,
+          "leg_fts": 4.164597950875759,
+          "legs_wave": 4.645105917006731,
+          "post_ep_annotate": 4.7694300301373005,
+          "post_relationships": 86.32436906918883,
+          "post_epistemic": 3.1039100140333176
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0000619",
+          "p-0000148",
+          "p-0001954",
+          "p-0001917",
+          "p-0001858",
+          "p-0001792",
+          "p-0001790",
+          "p-0001450",
+          "p-0001414",
+          "p-0001365"
+        ]
+      },
+      {
+        "qid": "q002",
+        "query": "pricing tiers for enterprise plans",
+        "total_ms": 130.19,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.4,
+          "retrieval": 125.0,
+          "ep_annotation": 4.4,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.03875186666846275,
+          "leg_fts": 5.4611936211586,
+          "legs_wave": 6.046751979738474,
+          "post_ep_annotate": 4.4151172041893005,
+          "post_relationships": 111.78327305242419,
+          "post_epistemic": 3.61630879342556
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001603",
+          "p-0001903",
+          "p-0001856",
+          "p-0001745",
+          "p-0001657",
+          "p-0001294",
+          "p-0000989",
+          "p-0000938",
+          "p-0000823",
+          "p-0000778"
+        ]
+      },
+      {
+        "qid": "q003",
+        "query": "memory retention across sessions",
+        "total_ms": 108.276,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.4,
+          "retrieval": 103.0,
+          "ep_annotation": 4.4,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.026479363441467285,
+          "leg_fts": 5.022905766963959,
+          "legs_wave": 5.642388015985489,
+          "post_ep_annotate": 4.427238833159208,
+          "post_relationships": 90.4147569090128,
+          "post_epistemic": 3.2394640147686005
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001935",
+          "p-0001862",
+          "p-0001776",
+          "p-0001691",
+          "p-0001439",
+          "p-0001318",
+          "p-0001273",
+          "p-0000873",
+          "p-0000305",
+          "p-0000207"
+        ]
+      },
+      {
+        "qid": "q004",
+        "query": "graph traversal operators and edges",
+        "total_ms": 102.379,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.5,
+          "retrieval": 97.6,
+          "ep_annotation": 3.9,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.03540702164173126,
+          "leg_fts": 5.440229084342718,
+          "legs_wave": 6.061943713575602,
+          "post_ep_annotate": 3.8528433069586754,
+          "post_relationships": 84.56105226650834,
+          "post_epistemic": 3.5894890315830708
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001983",
+          "p-0001228",
+          "p-0001073",
+          "p-0001492",
+          "p-0001043",
+          "p-0000496",
+          "p-0000001",
+          "p-0000206",
+          "p-0001822",
+          "p-0001779"
+        ]
+      },
+      {
+        "qid": "q005",
+        "query": "embedding dimension and vector index",
+        "total_ms": 106.588,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.4,
+          "retrieval": 102.1,
+          "ep_annotation": 3.7,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.02382509410381317,
+          "leg_fts": 4.785692319273949,
+          "legs_wave": 5.2793677896261215,
+          "post_ep_annotate": 3.7058070302009583,
+          "post_relationships": 90.45325685292482,
+          "post_epistemic": 3.1094690784811974
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001935",
+          "p-0001740",
+          "p-0000404",
+          "p-0000260",
+          "p-0001672",
+          "p-0001661",
+          "p-0001486",
+          "p-0001220",
+          "p-0000695",
+          "p-0000231"
+        ]
+      },
+      {
+        "qid": "q006",
+        "query": "belief propagation posterior update",
+        "total_ms": 104.457,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.3,
+          "retrieval": 99.4,
+          "ep_annotation": 4.2,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.03971392288804054,
+          "leg_fts": 4.699491895735264,
+          "legs_wave": 5.385916214436293,
+          "post_ep_annotate": 4.216825123876333,
+          "post_relationships": 85.72428114712238,
+          "post_epistemic": 3.800668753683567
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0000783",
+          "p-0001453",
+          "p-0000721",
+          "p-0000767",
+          "p-0001933",
+          "p-0001915",
+          "p-0001838",
+          "p-0001589",
+          "p-0001359",
+          "p-0001223"
+        ]
+      },
+      {
+        "qid": "q007",
+        "query": "full text search over point content",
+        "total_ms": 123.263,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.5,
+          "retrieval": 117.2,
+          "ep_annotation": 4.9,
+          "ordering": 0.3
+        },
+        "members": {
+          "leg_structural": 0.023603904992341995,
+          "leg_fts": 5.978909786790609,
+          "legs_wave": 6.594222970306873,
+          "post_ep_annotate": 4.844341892749071,
+          "post_relationships": 101.64591390639544,
+          "post_epistemic": 4.753882996737957
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001675",
+          "p-0001596",
+          "p-0001519",
+          "p-0001511",
+          "p-0001478",
+          "p-0001307",
+          "p-0001163",
+          "p-0000976",
+          "p-0000893",
+          "p-0001680"
+        ]
+      },
+      {
+        "qid": "q008",
+        "query": "semantic similarity between claims",
+        "total_ms": 109.904,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.6,
+          "retrieval": 103.1,
+          "ep_annotation": 5.8,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.037490855902433395,
+          "leg_fts": 7.333387620747089,
+          "legs_wave": 8.00380203872919,
+          "post_ep_annotate": 5.7864501141011715,
+          "post_relationships": 86.02429926395416,
+          "post_epistemic": 3.7288102321326733
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001354",
+          "p-0001312",
+          "p-0001092",
+          "p-0000895",
+          "p-0000726",
+          "p-0000706",
+          "p-0000337",
+          "p-0001954",
+          "p-0001950",
+          "p-0001913"
+        ]
+      },
+      {
+        "qid": "q009",
+        "query": "hybrid ranking fusion strategy",
+        "total_ms": 115.704,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.4,
+          "retrieval": 110.6,
+          "ep_annotation": 4.3,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.04799896851181984,
+          "leg_fts": 5.0519113428890705,
+          "legs_wave": 5.615206900984049,
+          "post_ep_annotate": 4.322593100368977,
+          "post_relationships": 98.10442989692092,
+          "post_epistemic": 3.6088163033127785
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001346",
+          "p-0001032",
+          "p-0000165",
+          "p-0001785",
+          "p-0001433",
+          "p-0001237",
+          "p-0001170",
+          "p-0001098",
+          "p-0000722",
+          "p-0000638"
+        ]
+      },
+      {
+        "qid": "q010",
+        "query": "degraded fallback when database fails",
+        "total_ms": 125.447,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.5,
+          "retrieval": 119.3,
+          "ep_annotation": 5.3,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.03498466685414314,
+          "leg_fts": 5.947982892394066,
+          "legs_wave": 6.488553714007139,
+          "post_ep_annotate": 5.2551040425896645,
+          "post_relationships": 101.82893509045243,
+          "post_epistemic": 5.503839813172817
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001455",
+          "p-0001935",
+          "p-0001883",
+          "p-0000823",
+          "p-0000719",
+          "p-0001892",
+          "p-0001712",
+          "p-0001462",
+          "p-0001323",
+          "p-0001304"
+        ]
+      },
+      {
+        "qid": "q011",
+        "query": "circuit breaker latency protection",
+        "total_ms": 111.407,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.6,
+          "retrieval": 106.2,
+          "ep_annotation": 4.2,
+          "ordering": 0.1
+        },
+        "members": {
+          "leg_structural": 0.021168962121009827,
+          "leg_fts": 5.940539296716452,
+          "legs_wave": 6.50027533993125,
+          "post_ep_annotate": 4.179565701633692,
+          "post_relationships": 92.5597227178514,
+          "post_epistemic": 3.7456220015883446
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001504",
+          "p-0001609",
+          "p-0000850",
+          "p-0000921",
+          "p-0000638",
+          "p-0000197",
+          "p-0000069",
+          "p-0001673",
+          "p-0001526",
+          "p-0001450"
+        ]
+      },
+      {
+        "qid": "q012",
+        "query": "epistemic annotation confidence evidence",
+        "total_ms": 109.316,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.6,
+          "retrieval": 104.8,
+          "ep_annotation": 3.6,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.04447298124432564,
+          "leg_fts": 5.6026228703558445,
+          "legs_wave": 6.141253747045994,
+          "post_ep_annotate": 3.5897488705813885,
+          "post_relationships": 92.1592079102993,
+          "post_epistemic": 3.4659476950764656
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001683",
+          "p-0001438",
+          "p-0001057",
+          "p-0001960",
+          "p-0001742",
+          "p-0001280",
+          "p-0001238",
+          "p-0000688",
+          "p-0000588",
+          "p-0000640"
+        ]
+      },
+      {
+        "qid": "q013",
+        "query": "operator relationships between concepts",
+        "total_ms": 115.484,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.4,
+          "retrieval": 107.8,
+          "ep_annotation": 6.9,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.01912517473101616,
+          "leg_fts": 6.503882817924023,
+          "legs_wave": 7.030770182609558,
+          "post_ep_annotate": 6.861022207885981,
+          "post_relationships": 92.45299035683274,
+          "post_epistemic": 3.6113793030381203
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001502",
+          "p-0001945",
+          "p-0000983",
+          "p-0001958",
+          "p-0001793",
+          "p-0001615",
+          "p-0001587",
+          "p-0001577",
+          "p-0001344",
+          "p-0001233"
+        ]
+      },
+      {
+        "qid": "q014",
+        "query": "agent memory graph storage",
+        "total_ms": 118.826,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.4,
+          "retrieval": 113.7,
+          "ep_annotation": 4.3,
+          "ordering": 0.1
+        },
+        "members": {
+          "leg_structural": 0.03395369276404381,
+          "leg_fts": 5.569140892475843,
+          "legs_wave": 6.171158980578184,
+          "post_ep_annotate": 4.255747888237238,
+          "post_relationships": 101.18462517857552,
+          "post_epistemic": 2.9499209485948086
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001061",
+          "p-0001685",
+          "p-0001659",
+          "p-0001363",
+          "p-0001262",
+          "p-0001149",
+          "p-0000557",
+          "p-0000171",
+          "p-0000017",
+          "p-0001953"
+        ]
+      },
+      {
+        "qid": "q015",
+        "query": "cross entity retrieval source events",
+        "total_ms": 123.759,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.4,
+          "retrieval": 118.4,
+          "ep_annotation": 4.6,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.024795997887849808,
+          "leg_fts": 6.647520698606968,
+          "legs_wave": 7.230464369058609,
+          "post_ep_annotate": 4.610081668943167,
+          "post_relationships": 104.06293394044042,
+          "post_epistemic": 3.804581705480814
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001888",
+          "p-0001883",
+          "p-0000857",
+          "p-0000617",
+          "p-0000556",
+          "p-0000493",
+          "p-0000442",
+          "p-0000203",
+          "p-0000132",
+          "p-0001796"
+        ]
+      },
+      {
+        "qid": "q016",
+        "query": "contested claims variance threshold",
+        "total_ms": 165.122,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.4,
+          "retrieval": 158.6,
+          "ep_annotation": 5.6,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.033664051443338394,
+          "leg_fts": 5.5612060241401196,
+          "legs_wave": 6.290081888437271,
+          "post_ep_annotate": 5.584079306572676,
+          "post_relationships": 143.56101118028164,
+          "post_epistemic": 4.30158618837595
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001528",
+          "p-0000767",
+          "p-0000234",
+          "p-0001809",
+          "p-0001015",
+          "p-0000461",
+          "p-0001950",
+          "p-0001944",
+          "p-0001913",
+          "p-0001598"
+        ]
+      },
+      {
+        "qid": "q017",
+        "query": "structured query over operator kind",
+        "total_ms": 155.714,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.6,
+          "retrieval": 147.1,
+          "ep_annotation": 7.5,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.02970593050122261,
+          "leg_fts": 8.209540043026209,
+          "legs_wave": 8.96596210077405,
+          "post_ep_annotate": 7.492939941585064,
+          "post_relationships": 128.0199931934476,
+          "post_epistemic": 4.975658841431141
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001819",
+          "p-0001671",
+          "p-0001565",
+          "p-0001477",
+          "p-0000906",
+          "p-0000795",
+          "p-0000522",
+          "p-0000502",
+          "p-0000419",
+          "p-0001842"
+        ]
+      },
+      {
+        "qid": "q018",
+        "query": "recall completeness full scan mode",
+        "total_ms": 141.512,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.5,
+          "retrieval": 133.1,
+          "ep_annotation": 7.4,
+          "ordering": 0.1
+        },
+        "members": {
+          "leg_structural": 0.029374845325946808,
+          "leg_fts": 7.273805793374777,
+          "legs_wave": 7.919659838080406,
+          "post_ep_annotate": 7.414001040160656,
+          "post_relationships": 117.38679790869355,
+          "post_epistemic": 3.1395619735121727
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0000671",
+          "p-0001579",
+          "p-0001434",
+          "p-0000746",
+          "p-0000380",
+          "p-0001875",
+          "p-0001652",
+          "p-0001573",
+          "p-0001511",
+          "p-0001334"
+        ]
+      },
+      {
+        "qid": "q019",
+        "query": "threshold filter score floor",
+        "total_ms": 101.949,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.3,
+          "retrieval": 97.2,
+          "ep_annotation": 3.8,
+          "ordering": 0.3
+        },
+        "members": {
+          "leg_structural": 0.03314204514026642,
+          "leg_fts": 5.776827689260244,
+          "legs_wave": 6.242993753403425,
+          "post_ep_annotate": 3.8006450049579144,
+          "post_relationships": 84.13635333999991,
+          "post_epistemic": 3.509859088808298
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001986",
+          "p-0001811",
+          "p-0001154",
+          "p-0000605",
+          "p-0000356",
+          "p-0000090",
+          "p-0001869",
+          "p-0001868",
+          "p-0001773",
+          "p-0001766"
+        ]
+      },
+      {
+        "qid": "q020",
+        "query": "kind filter before truncation",
+        "total_ms": 131.31,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.5,
+          "retrieval": 123.6,
+          "ep_annotation": 6.6,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.032040756195783615,
+          "leg_fts": 5.944194737821817,
+          "legs_wave": 6.7087640054523945,
+          "post_ep_annotate": 6.619761697947979,
+          "post_relationships": 106.29501799121499,
+          "post_epistemic": 5.25375921279192
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001971",
+          "p-0001616",
+          "p-0001418",
+          "p-0000328",
+          "p-0000679",
+          "p-0000538",
+          "p-0000524",
+          "p-0001965",
+          "p-0001964",
+          "p-0001912"
+        ]
+      },
+      {
+        "qid": "q021",
+        "query": "batch endpoint annotation efficiency",
+        "total_ms": 138.286,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.5,
+          "retrieval": 129.6,
+          "ep_annotation": 7.5,
+          "ordering": 0.3
+        },
+        "members": {
+          "leg_structural": 0.02379482612013817,
+          "leg_fts": 5.068912170827389,
+          "legs_wave": 5.693150218576193,
+          "post_ep_annotate": 7.518779020756483,
+          "post_relationships": 112.62711603194475,
+          "post_epistemic": 5.871468223631382
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001625",
+          "p-0001130",
+          "p-0001968",
+          "p-0001887",
+          "p-0001877",
+          "p-0001217",
+          "p-0001189",
+          "p-0001134",
+          "p-0001112",
+          "p-0001065"
+        ]
+      },
+      {
+        "qid": "q022",
+        "query": "relationship filter traversal predicate",
+        "total_ms": 129.199,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.5,
+          "retrieval": 122.1,
+          "ep_annotation": 6.0,
+          "ordering": 0.2
+        },
+        "members": {
+          "leg_structural": 0.03532692790031433,
+          "leg_fts": 6.1771501787006855,
+          "legs_wave": 6.93647563457489,
+          "post_ep_annotate": 5.9799328446388245,
+          "post_relationships": 106.72103380784392,
+          "post_epistemic": 4.05150605365634
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001855",
+          "p-0001536",
+          "p-0001440",
+          "p-0001436",
+          "p-0001236",
+          "p-0000659",
+          "p-0000128",
+          "p-0000121",
+          "p-0000046",
+          "p-0000777"
+        ]
+      },
+      {
+        "qid": "q023",
+        "query": "retracted points excluded results",
+        "total_ms": 117.154,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.5,
+          "retrieval": 112.1,
+          "ep_annotation": 4.1,
+          "ordering": 0.1
+        },
+        "members": {
+          "leg_structural": 0.028133392333984375,
+          "leg_fts": 4.734006244689226,
+          "legs_wave": 5.342497956007719,
+          "post_ep_annotate": 4.068767186254263,
+          "post_relationships": 100.56057339534163,
+          "post_epistemic": 3.0062468722462654
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0000964",
+          "p-0000154",
+          "p-0001550",
+          "p-0001176",
+          "p-0001000",
+          "p-0000692",
+          "p-0000626",
+          "p-0000360",
+          "p-0000344",
+          "p-0000282"
+        ]
+      },
+      {
+        "qid": "q024",
+        "query": "operator point is operator flag",
+        "total_ms": 130.054,
+        "stages": {
+          "pre_handler": 0.1,
+          "embed_get": 0.5,
+          "retrieval": 124.9,
+          "ep_annotation": 4.3,
+          "ordering": 0.1
+        },
+        "members": {
+          "leg_structural": 0.021029729396104813,
+          "leg_fts": 5.825862288475037,
+          "legs_wave": 6.3120829872787,
+          "post_ep_annotate": 4.326540976762772,
+          "post_relationships": 111.82386800646782,
+          "post_epistemic": 3.499699756503105
+        },
+        "member_calls": {
+          "leg_structural": 1,
+          "leg_fts": 1,
+          "legs_wave": 1,
+          "post_ep_annotate": 1,
+          "post_relationships": 1,
+          "post_epistemic": 1
+        },
+        "legs": [
+          {
+            "leg": "vector",
+            "ran": false,
+            "degraded": true,
+            "reason": "load_in_flight",
+            "count": 0
+          },
+          {
+            "leg": "fts",
+            "ran": true,
+            "degraded": false,
+            "reason": "ok",
+            "count": 120
+          },
+          {
+            "leg": "structural",
+            "ran": true,
+            "degraded": false,
+            "reason": "empty_results",
+            "count": 0
+          },
+          {
+            "leg": "valid_time",
+            "ran": true,
+            "degraded": false,
+            "reason": "no-prefer-latest-intent",
+            "count": 0
+          }
+        ],
+        "order": [
+          "p-0001503",
+          "p-0001842",
+          "p-0001780",
+          "p-0001510",
+          "p-0000338",
+          "p-0000214",
+          "p-0000022",
+          "p-0001518",
+          "p-0001403",
+          "p-0001602"
+        ]
+      }
+    ]
+  },
+  "verdict": {
+    "comparable": true,
+    "baseline_total": {
+      "n": 24,
+      "p50": 162.305,
+      "p95": 198.234,
+      "max": 207.892,
+      "mean": 165.2
+    },
+    "after_total": {
+      "n": 24,
+      "p50": 118.826,
+      "p95": 155.714,
+      "max": 165.122,
+      "mean": 121.6
+    },
+    "total_delta_p50_ms": -43.479,
+    "total_delta_p95_ms": -42.52,
+    "stage_delta": {
+      "pre_handler": {
+        "baseline_p50": 0.1,
+        "after_p50": 0.1,
+        "delta_ms": 0.0
+      },
+      "embed_get": {
+        "baseline_p50": 0.5,
+        "after_p50": 0.5,
+        "delta_ms": 0.0
+      },
+      "embed_encode": {
+        "baseline_p50": 0.0,
+        "after_p50": 0.0,
+        "delta_ms": 0.0
+      },
+      "retrieval": {
+        "baseline_p50": 157.1,
+        "after_p50": 113.7,
+        "delta_ms": -43.4
+      },
+      "fusion": {
+        "baseline_p50": 0.0,
+        "after_p50": 0.0,
+        "delta_ms": 0.0
+      },
+      "ep_annotation": {
+        "baseline_p50": 4.5,
+        "after_p50": 4.6,
+        "delta_ms": 0.1
+      },
+      "ordering": {
+        "baseline_p50": 0.2,
+        "after_p50": 0.2,
+        "delta_ms": 0.0
+      },
+      "response": {
+        "baseline_p50": 0.0,
+        "after_p50": 0.0,
+        "delta_ms": 0.0
+      }
+    },
+    "member_delta": {
+      "leg_fts": {
+        "baseline_p50": 5.591,
+        "after_p50": 5.777,
+        "delta_ms": 0.186
+      },
+      "leg_vector": {
+        "baseline_p50": 0.0,
+        "after_p50": 0.0,
+        "delta_ms": 0.0
+      },
+      "leg_structural": {
+        "baseline_p50": 0.031,
+        "after_p50": 0.032,
+        "delta_ms": 0.001
+      },
+      "legs_wave": {
+        "baseline_p50": 6.246,
+        "after_p50": 6.29,
+        "delta_ms": 0.044
+      },
+      "fusion": {
+        "baseline_p50": 0.0,
+        "after_p50": 0.0,
+        "delta_ms": 0.0
+      },
+      "post_ep_annotate": {
+        "baseline_p50": 4.52,
+        "after_p50": 4.61,
+        "delta_ms": 0.09
+      },
+      "post_relationships": {
+        "baseline_p50": 143.048,
+        "after_p50": 101.185,
+        "delta_ms": -41.863
+      },
+      "post_epistemic": {
+        "baseline_p50": 3.368,
+        "after_p50": 3.616,
+        "delta_ms": 0.248
+      }
+    },
+    "rank_identical": true,
+    "rank_divergent_queries": []
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "arm": "ab-relationships-from-e74cf1d13d",
+  "git_sha": "0667b5358950",
+  "ids": 12,
+  "rounds": 9,
+  "entries": 193,
+  "identical": true,
+  "old_decoration_error": "",
+  "new_decoration_error": "",
+  "old_ms": {
+    "n": 9,
+    "p50": 191.245,
+    "p95": 273.047,
+    "max": 273.047,
+    "mean": 205.888
+  },
+  "new_ms": {
+    "n": 9,
+    "p50": 117.525,
+    "p95": 502.551,
+    "max": 502.551,
+    "mean": 179.568
+  },
+  "delta_p50_ms": -73.72
+}
