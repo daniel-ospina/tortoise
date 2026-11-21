@@ -381,12 +381,13 @@ SWEEP_NAMES = 66
 #: the commit, measured. So the fragility is narrower than "unreproducible": the address works only
 #: written out in full, and reads as broken in the form this block normally prints it in. The rule
 #: therefore stands on what IS measured — no REMOTE branch and no `main` reaches such a commit (a
-#: leftover LOCAL branch may still contain it; the remote ref itself is gone), so it sits
+#: leftover LOCAL branch may still contain it; the remote BRANCH that carried it is gone, which is
+#: exactly what `git branch -r --contains` reads as empty), so it sits
 #: outside every branch history the repo PUBLISHES (it IS inside `refs/pull/14108/head`'s, which is this
 #: paragraph's own point, stated earlier in it — ⛔ NOT "four lines above", as an earlier draft of
 #: this clause said: that offset does not reproduce, and an offset is the same RELATIVE-REFERENCE
 #: class this block fixes below by naming the tree instead, since it rots as the prose above grows)
-#: — and not on a `gc` sweep that never happens: which is why
+#: — and the rule does not rest on a `gc` sweep that never happens: which is why
 #: this note points at the ISSUE NUMBER, and reserves the sha for the one place where the ADDRESS is
 #: the claim (the `#14068` attribution below, where it is written out and its limits stated)).
 #: ⛔ The −6 is verified as an ATTRIBUTION and not as a direction: the residue row sets were
@@ -527,9 +528,10 @@ SWEEP_NAMES = 66
 #: ⛔ THE "GATE IS RED HERE" NARRATION IS SCOPED, NOT PRESENT-TENSE. That paragraph described
 #: `ad79129cb5`, where the pin read 11825 while that tree derived 11833 — `--check` red. It is NOT
 #: the state of `main` at `2fe01fc775e`, which pins `(11839, "0a7e60fa05aa31b9")` — exactly what
-#: `--repin` derives there, so `--check` exits 0 on that tree and on this head. `main` has since
-#: moved and re-cut to `(11838, "de5664dc98549d56")` on `1b82cc7063`'s tree (`1b82cc7063` made that
-#: re-cut; `e022fc935b`, `origin/main` when this was written, carries it) — so the 11839 above is a
+#: `--repin` derives there, so `--check` exits 0 on that tree and on this head. `main`'s tree at
+#: `e022fc935b` (the `origin/main` this was written against) re-cut to `(11838, "de5664dc98549d56")`
+#: on `1b82cc7063`'s tree, which made that re-cut — and `main`'s pin has moved again since, so the
+#: pair is stated against the rev and never as `main`'s head. The 11839 above is a
 #: figure for the revision it names, never a stale claim about `main`'s head. ⛔ It names the TREE and
 #: not "the pair THIS head pins", which is what it said before a merge re-cut this head to
 #: `(11844, "70d6cfdcd8b769e4")` and left the sentence asserting a pair this head does not carry —

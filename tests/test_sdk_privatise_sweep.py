@@ -229,7 +229,7 @@ RESIDUE_ABBREV = "83e94826a8a"          # the literal the block prints and calls
 RESIDUE_DELETING_COMMIT = "aee14c5ceb"  # measured: the interval commit that drops `seen.update`
 RESIDUE_INTERVAL_END = "d5ecef0d72"     # measured: that commit's parent, the last carrier
 RESIDUE_PR_HEAD = "d523c9be8c"          # `refs/pull/14108/head`
-RESIDUE_REWRITE_PARENT = "2fe01fc775e"  # the capture rewrite `#14068` re-cut
+RESIDUE_REWRITE_PARENT = "2fe01fc775e"  # the capture rewrite's parent (`#14068`'s squash)
 
 
 def _residue_block() -> str:
@@ -296,18 +296,23 @@ def test_the_abbreviation_length_claim_reproduces():
     it describes, which is the defect the block names in its own words.
     """
     block = _residue_block()
-    claim = re.search(r"(\d+)-character ABBREVIATION", block)
-    assert claim, "non-vacuity: the block states the abbreviation's length"
-    # ⛔ GRADED AGAINST THE CONSTANT **AND** THE WINDOW (review, round 6): grading only the
-    # nearest backticked token let a decoy literal of a different length satisfy a WRONG figure
-    # (`the `83e94826a8abc` 13-character ABBREVIATION` went green). The abbreviation this claim
-    # is about is the one the block prints, so it must be the literal in the window, and the
-    # printed count must equal its length.
-    window = block[max(0, claim.start() - 200):claim.start()]
-    assert RESIDUE_ABBREV in window, "non-vacuity: the claim stands beside the literal"
-    assert int(claim.group(1)) == len(RESIDUE_ABBREV), (
-        f"the block says {claim.group(1)} characters; `{RESIDUE_ABBREV}` is "
-        f"{len(RESIDUE_ABBREV)}")
+    # ⛔ GRADED ON EVERY OCCURRENCE, NOT THE FIRST (review, round 9): `re.search` graded one match,
+    # so a second, FALSE figure appended anywhere in the block left this arm green — the same
+    # one-occurrence blindness the negative arms below already avoid by using `finditer`.
+    claims = list(re.finditer(r"(\d+)-character ABBREVIATION", block))
+    assert claims, "non-vacuity: the block states the abbreviation's length"
+    for claim in claims:
+        # ⛔ GRADED AGAINST THE CONSTANT **AND** THE WINDOW (review, round 6): grading only the
+        # nearest backticked token let a decoy literal of a different length satisfy a WRONG figure
+        # (`the `83e94826a8abc` 13-character ABBREVIATION` went green). The abbreviation this claim
+        # is about is the one the block prints, so it must be the literal in the window, and the
+        # printed count must equal its length.
+        window = block[max(0, claim.start() - 200):claim.start()]
+        assert RESIDUE_ABBREV in window, (
+            f"non-vacuity: the claim at offset {claim.start()} stands beside the literal")
+        assert int(claim.group(1)) == len(RESIDUE_ABBREV), (
+            f"the block says {claim.group(1)} characters; `{RESIDUE_ABBREV}` is "
+            f"{len(RESIDUE_ABBREV)}")
 
 
 def test_the_seen_update_deletion_is_attributed_to_the_commit_that_made_it():
@@ -417,21 +422,24 @@ def test_the_history_clause_is_only_quoted_as_falsified():
         "premise: no remote BRANCH contains it — which is the only part of the block's "
         "narrow claim that is about branches",)
     block = _residue_block()
-    clampse = re.search(r"outside every[^.]{0,80}history", block)
-    assert clampse, "non-vacuity: the block still says where such a commit sits"
-    # ⛔ TWO HONEST SHAPES, AND NO THIRD (review, rounds 5-7). Either the clause itself carries a
-    # MEASURED qualifier (`BRANCH`), or it is a QUOTED earlier draft and the narrow fact that
-    # replaced it sits beside it. Keyed on the CLAUSE AS WRITTEN, not on one exact phrase: an
-    # earlier version looked up the exact phrase, so swapping the qualifier for an unmeasured one
-    # (`outside every TAG history …`) made the phrase absent, which it read as "quoted", and the
-    # nearby narrow sentence carried it — an unmeasured claim went green.
-    if not re.search(r"BRANCH|branch", clampse.group(0)):
-        assert _quoted(block, clampse.start()), (
-            "unquoted clause with no measured qualifier: the commit sits outside every BRANCH "
-            "history and not on `main` — `refs/pull/14108/head` IS a history a reader browses")
-        near = block[max(0, clampse.start() - 400):clampse.end() + 400]
-        assert re.search(r"no (?:remote )?branch", near, re.IGNORECASE), (
-            "a quoted earlier draft is acceptable only BESIDE the narrow fact that replaced it")
+    # ⛔ EVERY OCCURRENCE IS GRADED (review, round 9): a single `re.search` let the exact false
+    # clause be appended a second time while the first, honest one was the only thing graded.
+    clauses = list(re.finditer(r"outside every[^.]{0,80}history", block))
+    assert clauses, "non-vacuity: the block still says where such a commit sits"
+    for clampse in clauses:
+        # ⛔ TWO HONEST SHAPES, AND NO THIRD (review, rounds 5-7). Either the clause itself carries a
+        # MEASURED qualifier (`BRANCH`), or it is a QUOTED earlier draft and the narrow fact that
+        # replaced it sits beside it. Keyed on the CLAUSE AS WRITTEN, not on one exact phrase: an
+        # earlier version looked up the exact phrase, so swapping the qualifier for an unmeasured one
+        # (`outside every TAG history …`) made the phrase absent, which it read as "quoted", and the
+        # nearby narrow sentence carried it — an unmeasured claim went green.
+        if not re.search(r"BRANCH|branch", clampse.group(0)):
+            assert _quoted(block, clampse.start()), (
+                "unquoted clause with no measured qualifier: the commit sits outside every BRANCH "
+                "history and not on `main` — `refs/pull/14108/head` IS a history a reader browses")
+            near = block[max(0, clampse.start() - 400):clampse.end() + 400]
+            assert re.search(r"no (?:remote )?branch", near, re.IGNORECASE), (
+                "a quoted earlier draft is acceptable only BESIDE the narrow fact that replaced it")
 
 
 def test_the_reindent_reference_points_at_the_bullet_that_counts_it():
