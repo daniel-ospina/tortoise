@@ -212,10 +212,22 @@ def test_the_registry_description_states_the_protocol():
     deleted by default with no confirmation at all — the promise was in prose
     and absent from the behaviour.
     """
-    from tortoise.tool_registry import TOOL_REGISTRY
+    from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
 
-    entry = next(t for t in TOOL_REGISTRY if t.name == "tortoise_delete")
+    # #11609 lane P7: the KEPT delete entry now carries the approved target's own
+    # spelling (`tortoise_delete_knowledge`, row 18) and `tortoise_delete` is the
+    # forward entry beside it. The protocol is a property of the LIVE door — the one
+    # `tools/list` advertises — so that is what this pins; the retired declaration is
+    # checked for the pointer that names it, so a caller of the old name is routed to
+    # the same protocol rather than to a bare delete.
+    entry = next(t for t in TOOL_REGISTRY
+                 if t.name == "tortoise_delete_knowledge")
     assert entry.risk == "destructive"
     assert "confirmation=<token>" in entry.description
     assert "The FIRST call changes nothing" in entry.description
     assert "cannot be undone" in entry.description.lower()
+
+    retired = next(t for t in RETIRED_TOOL_REGISTRY if t.name == "tortoise_delete")
+    assert "tortoise_delete_knowledge(id, dry_run=True)" in (
+        retired.retired_use_instead or ""), (
+        "the retired name must point at the preview call, not at a bare delete")

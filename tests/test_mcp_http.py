@@ -2077,11 +2077,24 @@ class TestQuotaEnforcement:
         assert "limit reached" not in text, f"unexpected quota error: {text}"
 
     def test_list_graphs_scoped_to_team(self, quota_client):
-        """HTTP list_graphs returns only the calling team's own graph."""
+        """HTTP graph listing returns only the calling team's own graph.
+
+        ⛔ THE LIVE DOOR IS `tortoise_graph_overview(section="graphs")`, not the
+        spelling this test used to call. `tortoise_list_graphs` was retired
+        forward when #11609 lane P7 absorbed it (#3883 shim answers only on
+        `get_tool`), and a retired name is absent from `tools/list`, so an HTTP
+        `tools/call` for it is an "unknown tool" refusal — this leg reds with
+        `no graphs returned at all` rather than measuring tenant scoping. The
+        BEHAVIOUR under test did not move: `graph_overview`'s `graphs` section
+        dispatches to the same handler body (`_overview_section`), and
+        `_row_section_envelope` ships the rows as the same compact JSON list in
+        `content` that this leg parses.
+        """
         tc, *_ = quota_client
         r, body = _mcp_post(tc, {  # noqa: RUF059
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-            "params": {"name": "tortoise_list_graphs", "arguments": {}},
+            "params": {"name": "tortoise_graph_overview",
+                       "arguments": {"section": "graphs"}},
         })
         result = body.get("result", {})
         text = "".join(c.get("text", "") for c in result.get("content", []))
