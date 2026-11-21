@@ -926,16 +926,18 @@ def _third_party_receivers(tree: ast.Module) -> set[str]:
     ⛔ "RE-BOUND" IS PYTHON'S OWN LIST OF BINDING CONSTRUCTS (Language Reference §4.2.1),
     NOT A SUBSET OF IT: the ``ast.Name`` Store contexts (assignment, walrus, ``for``,
     ``with … as``, and ``type X = …``), the ``ast.Name`` **Del** context (``del name``,
-    which §4.2.1 counts as bound), FORMAL PARAMETERS of a function that HOLDS a probe,
-    ``def`` / ``class`` names, ``except`` / ``except*`` ``as`` targets, and the
-    structural-pattern captures ``MatchAs`` / ``MatchStar`` / ``MatchMapping.rest`` —
-    collected by ``_module_scope_bindings`` / ``_probe_scope_bindings``, and by
-    ``_rebinds_within`` for the block itself. Only the Store/Del contexts are
-    ``ast.Name``; the rest are ``ast.arg`` or plain ``str`` fields, so a walk that read
-    only ``ast.Name`` missed every other family. Of §4.2.1's list, two families are
-    collected by NOTHING on purpose — a comprehension's iteration target and a type
-    parameter list — because each binds in its OWN scope and so cannot shadow the name
-    the probe reads (see ``_collect_binding``).
+    which §4.2.1 counts as bound), FORMAL PARAMETERS and TYPE PARAMETERS of a function
+    that HOLDS a probe, ``def`` / ``class`` names, ``except`` / ``except*`` ``as``
+    targets, and the structural-pattern captures ``MatchAs`` / ``MatchStar`` /
+    ``MatchMapping.rest``. Only the Store/Del contexts are ``ast.Name``; the rest are
+    ``ast.arg`` or plain ``str`` fields, so a walk that read only ``ast.Name`` missed
+    every other family.
+
+    ⛔ TWO OF THEM BIND IN THEIR OWN SCOPE, so WHICH WALK collects them is decided by
+    scope, not node kind: a comprehension's iteration target binds in the comprehension
+    and a type parameter binds in the generic's own body — both are unreachable from a
+    flat module-wide walk, and a "complete the list of node kinds" fix still gets them
+    wrong (see ``_collect_binding``, ``_module_scope_bindings``, ``_type_param_names``).
 
     ⛔ AND THE SCOPE IS AS LOAD-BEARING AS THE LIST (review P2): a binding only cancels
     the exemption when it can REACH the probe. Subtracting every binding construct
@@ -951,16 +953,25 @@ def _third_party_receivers(tree: ast.Module) -> set[str]:
     capture families with ``ast.walk(tree)`` exempted nothing less than the scope-blind
     version did for Store targets — an ``except Exception as torch:`` in an UNRELATED
     helper cancelled the exemption for a legitimate module-level ``torch.query(…)``
-    probe, the same false red. Every family is now collected by the scoped walks
-    (``_module_scope_bindings`` for module scope, ``_function_local_bindings`` for a
-    function that HOLDS a probe) plus ``_rebinds_within`` for the block itself, so the
-    direction claim is uniform: a term can only be subtracted where it can reach the
-    probe.
+    probe, the same false red. Every family is now collected by a SCOPED walk plus
+    ``_rebinds_within`` for the block itself, so the direction claim is uniform: a term
+    can only be subtracted where it can reach the probe. The scopes are the module
+    (``_module_scope_bindings``) and, per probe, the FUNCTION chain that lexically
+    encloses it (``_enclosing_bindings`` → ``_function_scope_bindings``: parameters,
+    type parameters and locals, up the closure). Per probe, not per module, because one
+    module-wide set holds a neighbouring function's locals too and was measured to red
+    its legitimate third-party probe (review of #14160, P2).
     """
     bound = _non_own_imported_names(tree.body)
     if not bound:
         return set()
-    return bound - _probe_scope_bindings(tree)
+    #: MODULE scope only. A binding inside a FUNCTION cannot be expressed here — it
+    #: reaches a probe in that function and, through the closure chain, in any nested
+    #: one, and NOWHERE else — so it is subtracted per PROBE by `_enclosing_bindings`
+    #: at each `_reaches_capability_seam` call site. Returning one module-wide set that
+    #: had already folded every probe-holding function's locals in was measured to red a
+    #: legitimate third-party probe in a neighbouring function (review of #14160, P2).
+    return bound - _module_scope_bindings(tree)
 
 
 def _module_scope_bindings(tree: ast.Module) -> set[str]:
@@ -969,6 +980,14 @@ def _module_scope_bindings(tree: ast.Module) -> set[str]:
     `if`/`for`/`while`/`try`/`with` at module level stay module scope and ARE
     descended; a `def`/`class` NAME binds here while its BODY is another scope, and a
     `lambda` body is another scope entirely.
+
+    ⛔ THE HEADER OF A `def`/`class` EVALUATES HERE, so it is walked before the body is
+    left behind: a decorator, a base, a class keyword and a function DEFAULT all evaluate
+    in the ENCLOSING scope, and one carrying a walrus binds its target there —
+    `@_reg(torch := _make_client())` rebinds the module's `torch`. Not descending was the
+    same silent drop the body skip avoids (review of #14160, P2). `_function_local_bindings`
+    already did this for a nested def and class; the module half did not, and that
+    asymmetry was the hole.
     """
     out: set[str] = set()
     stack: list[ast.AST] = list(tree.body)
@@ -976,15 +995,26 @@ def _module_scope_bindings(tree: ast.Module) -> set[str]:
         node = stack.pop()
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             out.add(node.name)  # the name binds HERE; the body is a different scope
+            stack.extend(node.decorator_list)
+            if isinstance(node, ast.ClassDef):
+                stack.extend(node.bases)
+                stack.extend(keyword.value for keyword in node.keywords)
+            else:
+                stack.extend(node.args.defaults)
+                stack.extend(d for d in node.args.kw_defaults if d is not None)
             continue
         if isinstance(node, ast.Lambda):
             continue
         if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
-            # A comprehension has its OWN scope in Python 3, so its targets do NOT
-            # bind in the enclosing one: `_ = [torch for torch in range(3)]` leaves an
-            # outer `torch` intact (verified). Descending it here made that line cancel
-            # the exemption for a module-level `torch.query` probe — a false red
-            # (review of #14160, P1).
+            # A comprehension has its OWN scope in Python 3, so its ITERATION TARGETS do
+            # not bind in the enclosing one: `_ = [torch for torch in range(3)]` leaves
+            # an outer `torch` intact (verified). Descending it here made that line
+            # cancel the exemption for a module-level `torch.query` probe — a false red
+            # (review of #14160, P1). A WALRUS inside it is the exception PEP 572 names:
+            # `:=` binds in the CONTAINING scope, so `_ = [(torch := c) for _ in r]`
+            # DOES rebind. Taking the targets and not the walrus was a silent drop
+            # (review P2).
+            out |= _walrus_targets(node)
             continue
         _collect_binding(node, out)
         stack.extend(ast.iter_child_nodes(node))
@@ -1008,16 +1038,14 @@ def _collect_binding(node: ast.AST, out: set[str]) -> None:
     reach the import — the silent drop this narrowing exists to forbid, one context
     flag over (measured: ``()`` exempt before, graded after).
 
-    ⛔ TWO FURTHER §4.2.1 FAMILIES ARE DELIBERATELY NOT COLLECTED, because they bind in
-    their OWN scope and so cannot shadow the name a probe reads: a COMPREHENSION's
-    iteration target (Python 3 gives a comprehension its own scope — see
-    ``_module_scope_bindings``) and a TYPE PARAMETER LIST (``def f[T](…)``,
-    ``class C[T]``, ``type X[T] = …``; PEP 695 puts ``T`` in an ANNOTATION scope).
-    Verified on 3.12: with a module-level ``T`` shadowed by a generic's ``[T]``, the
-    function BODY and the class BODY both still read the module ``T`` — the type
-    parameter is not visible there — so a ``[torch]`` on some helper cannot rebind an
-    imported ``torch`` for a probe's ``.query``. Witnessed as a control in
-    `4j-quinquies` so a later lane cannot "complete the list" into a false red.
+    ⛔ TWO §4.2.1 FAMILIES ARE NOT COLLECTED BY THIS HELPER, and neither is an
+    omission: where they bind is decided by SCOPE, so each is collected by the walk that
+    owns that scope. A COMPREHENSION's iteration target binds in the comprehension's own
+    scope (``_module_scope_bindings``); a TYPE PARAMETER LIST — ``def f[T](…)``,
+    ``class C[T]``, ``type X[T] = …`` — binds in the GENERIC's scope and IS visible in
+    its body (``f.__code__.co_freevars == ('T',)``, measured on 3.12.3), so it is
+    collected per function by ``_type_param_names``. A flat node-kind walk cannot
+    express either, which is why "complete the list of node kinds" is the wrong fix.
     """
     if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
         out.add(node.id)
@@ -1034,12 +1062,10 @@ def _collect_binding(node: ast.AST, out: set[str]) -> None:
 def _is_probe_container(try_node: ast.Try) -> bool:
     """Whether a handler-bearing `try` is a CANDIDATE probe (the shapes the census grades).
 
-    Used to decide which functions' bindings can reach a probe. This must NOT be
-    "contains a call": an unrelated `try: int('x') / except ValueError: pass` in a helper
-    then made that helper's import-named PARAMETER cancel the exemption for a legitimate
-    module-level probe — the same false red from the other side (review of #14160, P1).
-    The test is the census's own subject matter: the block decides availability, imports
-    own code, or calls a capability door by name/attribute.
+    Retained as the NAMED definition of "a probe", which the self-test uses to assert the
+    set of blocks it pins is the set the census grades. (Reach is no longer decided by
+    "does this function hold a probe": `_enclosing_bindings` resolves it from the block's
+    own ancestor chain, which is exact where "holds a probe" was an approximation.)
     """
     if not try_node.handlers:
         return False
@@ -1056,45 +1082,62 @@ def _is_probe_container(try_node: ast.Try) -> bool:
     return False
 
 
-def _probe_scope_bindings(tree: ast.Module) -> set[str]:
-    """Bindings that can actually REACH a probe: module scope, plus — for a function that
-    HOLDS a probe — its parameters and its locals.
+def _type_param_names(node: ast.AST) -> set[str]:
+    """Names a PEP 695 TYPE PARAMETER LIST binds — `def f[T](…)`, `class C[T]`, `type X[T]`.
 
-    ⛔ THE SCOPE IS THE POINT (three findings of the #14160 reviews, two of them mine).
-    Subtracting every binding construct ANYWHERE made an unrelated `def _helper(torch)`
-    parameter (or a `for torch in …` in some other function) cancel the exemption for a
-    legitimate module-level third-party probe, turning it into a graded ROOT — a false
-    red of exactly the class the `4k-`/`4l-` guards exist to prevent. Measured on the
-    scope-blind version `((6, (), True, False, True),)`; here `()`.
-    But scoping it to PARAMETERS ALONE under-corrected: a probe-holding function's LOCAL
-    bound before the block (`torch = _make_client()`) was subtracted by neither this nor
-    `_rebinds_within`, so the exemption survived over OUR client. A local of the function
-    that holds the probe can always reach the block, so this now subtracts the whole
-    function's locals — and ONLY for a function that actually holds a probe, because
-    gating on "any handler-bearing try" over-corrected in the other direction (an
-    unrelated `try: int('x')` made an import-named parameter cancel the exemption).
-    The function's OWN locals are what this adds, never a NESTED function's or class's
-    (see ``_function_local_bindings``): a local of an inner `def` cannot shadow the name
-    the outer function's probe reads, so descending into it is the same false red one
-    level in.
+    ⛔ THE BODY CAN SEE THEM, AND THAT WAS MEASURED, NOT ASSUMED. An earlier version of
+    this block EXCLUDED the family from the walks on the belief that a type parameter
+    lives only in an annotation scope and so cannot shadow an import. False on 3.12.3:
+    with `T = 'module-T'` at module level, `def f[T](x): return T` returns a `TypeVar`,
+    and `f.__code__.co_freevars == ('T',)` with `co_names == ()` — the body reads the
+    TYPE PARAMETER as a free variable of the annotation scope, and a generic class body
+    does the same. (The probe that produced the false belief PRINTED the return value,
+    whose repr is the type parameter's own name `T`, so the TypeVar looked like the
+    module's string.) So a `def _probe[torch](…)` body calling `torch.query(…)` is NOT
+    calling the import, and the exemption must not survive it.
+
+    Scoping: a type parameter reaches the generic's own body and its nested functions'
+    (via the closure chain) — exactly the scope `_function_scope_bindings` describes —
+    and nothing outside it, which is why this is collected per function and never into
+    the module-wide set.
     """
-    out = _module_scope_bindings(tree)
-    resolvers = _resolver_functions(tree)
-    skip_gated = _skip_gating_functions(tree)
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        holds_probe = node.name in resolvers or node.name in skip_gated
-        if not holds_probe:
-            holds_probe = any(
-                isinstance(sub, ast.Try) and _is_probe_container(sub) for sub in ast.walk(node)
-            )
-        if not holds_probe:
-            continue
-        args = node.args
+    out: set[str] = set()
+    for param in getattr(node, "type_params", ()) or ():
+        name = getattr(param, "name", None)
+        if isinstance(name, str):
+            out.add(name)
+    return out
+
+
+def _function_scope_bindings(fn: ast.AST) -> set[str]:
+    """Every name ONE function scope binds: its parameters, type parameters and locals.
+
+    This is the unit of REACH. A probe inside `fn` (or inside a function nested in `fn`,
+    through the closure) cannot trust a name this set holds, so the third-party
+    exemption is cancelled for it there — and ONLY there.
+    """
+    out = _type_param_names(fn)
+    args = getattr(fn, "args", None)
+    if args is not None:
         out |= {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
         out |= {a.arg for a in (args.vararg, args.kwarg) if a is not None}
-        out |= _function_local_bindings(node)
+    out |= _function_local_bindings(fn)
+    return out
+
+
+def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]:
+    """Bindings in every FUNCTION scope that lexically encloses `block` — the closure chain.
+
+    A local of an OUTER function reaches a probe in a nested one, so the chain is the
+    reach, not the innermost `def` alone. Module scope is not here: it is subtracted
+    once, module-wide, by `_third_party_receivers`.
+    """
+    out: set[str] = set()
+    node = parents.get(id(block))
+    while node is not None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            out |= _function_scope_bindings(node)
+        node = parents.get(id(node))
     return out
 
 
@@ -1107,6 +1150,11 @@ def _function_local_bindings(func: ast.AST) -> set[str]:
     reads, so descending into it cancels the exemption for a legitimate third-party
     probe — the same false red the module-scope walk avoids, one level in. Measured on
     the descending version `((6, (), True, False, True),)`; here `()`.
+
+    ⛔ A WALRUS INSIDE A COMPREHENSION IS THE EXCEPTION (PEP 572): `:=` in a
+    comprehension binds in the CONTAINING scope, so `_ = [(torch := c) for _ in r]`
+    DOES rebind this function's `torch` while the iteration target `_` does not. Skipping
+    the comprehension wholesale missed the walrus — a silent drop (review of #14160, P2).
     """
     out: set[str] = set()
     stack: list[ast.AST] = list(getattr(func, "body", []))
@@ -1128,10 +1176,26 @@ def _function_local_bindings(func: ast.AST) -> set[str]:
         if isinstance(node, ast.Lambda):
             continue
         if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            out |= _walrus_targets(node)
             continue
         _collect_binding(node, out)
         stack.extend(ast.iter_child_nodes(node))
     return out
+
+
+def _walrus_targets(node: ast.AST) -> set[str]:
+    """The names `:=` binds OUTSIDE a comprehension — its own scope's targets excluded.
+
+    PEP 572: an assignment expression inside a comprehension binds its target in the
+    CONTAINING scope (that is the whole point of the walrus there), while the
+    comprehension's `for` targets bind in the comprehension's own scope. So this walks
+    the comprehension for `NamedExpr` targets ONLY, and adds nothing else.
+    """
+    return {
+        sub.target.id
+        for sub in ast.walk(node)
+        if isinstance(sub, ast.NamedExpr) and isinstance(sub.target, ast.Name)
+    }
 
 
 def _rebinds_within(block: ast.AST, name: str) -> bool:
@@ -1191,7 +1255,7 @@ _CAPABILITY_NAMES = frozenset({"TortoiseSDK", "FalkorProjection"})
 
 
 def _reaches_capability_seam(
-    block: ast.AST, third_party: frozenset[str] | set[str]
+    block: ast.AST, third_party: frozenset[str] | set[str], shadowed: set[str]
 ) -> bool:
     """Whether the block CALLS the capability seam, however the client arrived.
 
@@ -1234,6 +1298,13 @@ def _reaches_capability_seam(
     every call site passes it today, so a fifth one that forgot would have silently
     re-opened the `some_optional_dep.query` false red with nothing red on any test. A
     missing argument now fails loudly at the call site instead (review P2).
+
+    ⛔ `shadowed` IS THE PROBE'S OWN REACH, AND IT IS ALSO REQUIRED. `third_party` is
+    module-scope only, so the bindings that can reach a probe from its ENCLOSING
+    FUNCTIONS — parameters, type parameters, locals, up the closure chain — arrive here
+    per probe (`_enclosing_bindings`). Folding them into one module-wide set was
+    measured to grade a legitimate third-party probe in a NEIGHBOURING function as a
+    ROOT — the `4k-`/`4l-` false red, one granularity up (review of #14160, P2).
     """
     for node in ast.walk(block):
         if not isinstance(node, ast.Call):
@@ -1242,9 +1313,12 @@ def _reaches_capability_seam(
         if isinstance(func, ast.Attribute) and func.attr in _CAPABILITY_CALLS:
             root = _receiver_root_name(func.value)
             # Exempt only when the name still denotes the import WHERE THE PROBE RUNS:
-            # the module-level set excludes module-scope re-bindings and probe-holding
-            # functions' parameters, and `_rebinds_within` covers the block's own body.
-            if root in third_party and not _rebinds_within(block, root):
+            # module scope is already subtracted in `third_party`, `shadowed` carries
+            # the enclosing function scopes, and `_rebinds_within` covers the block's
+            # own body.
+            if root in third_party and root not in shadowed and not _rebinds_within(
+                block, root
+            ):
                 continue
             return True
         if isinstance(func, ast.Name) and func.id in _CAPABILITY_NAMES:
@@ -1395,12 +1469,26 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     skip_referenced = _skip_condition_names(tree)
     module_own = _own_imported_names(tree.body)
     #: Names this module imported from a NON-own package (`import torch`, `import
-    #: some_optional_dep`), MINUS any re-bound anywhere in the module: a name that no
-    #: longer denotes the import where a probe uses it is not evidence that the
-    #: `.query` is a third-party verb (`_third_party_receivers`). A capability
-    #: ATTRIBUTE called on one of them is that package's verb, not our seam — see
-    #: `_reaches_capability_seam`.
+    #: some_optional_dep`), MINUS any re-bound at MODULE scope: a name that no longer
+    #: denotes the import where a probe uses it is not evidence that the `.query` is a
+    #: third-party verb (`_third_party_receivers`). A capability ATTRIBUTE called on one
+    #: of them is that package's verb, not our seam — see `_reaches_capability_seam`.
+    #: Bindings inside a FUNCTION are NOT folded in here; they reach a probe only from
+    #: its own ancestor chain, so they are computed per probe by `_shadowed` below.
     third_party = _third_party_receivers(tree)
+
+    #: Every parent edge, once, so `_shadowed` can resolve a probe's enclosing FUNCTION
+    #: scopes. Reach is per PROBE: one module-wide set of shadowed names cannot express
+    #: "rebound inside `_b` but not inside `_a`", and folding them together graded `_a`'s
+    #: legitimate third-party probe as a ROOT — the `4k-`/`4l-` false red (review P2).
+    _parents: dict[int, ast.AST] = {}
+    for _parent in ast.walk(tree):
+        for _child in ast.iter_child_nodes(_parent):
+            _parents[id(_child)] = _parent
+
+    def _shadowed(node: ast.AST) -> set[str]:
+        """Every name the FUNCTION scopes enclosing `node` bind — its own reach."""
+        return _enclosing_bindings(node, _parents)
     # MODULE-LEVEL control flow, not just `tree.body`. `tests/test_assembly_pure.py:2615`
     # puts its probe inside `if _DOCKER_URI:`, so a walk over the direct children
     # returned NO row for that file while `_skip_condition_names(tree)` already held
@@ -1412,7 +1500,7 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
         if _assigns_availability(stmt) and (
             _imports_own_code(stmt)
             or _touches_own_code(stmt, module_own)
-            or _reaches_capability_seam(stmt, third_party)
+            or _reaches_capability_seam(stmt, third_party, _shadowed(stmt))
         ):
             # The own-code gate applies to THIS branch too. Without it the rule
             # redded `TORCH_AVAILABLE = False / try: import torch …`, i.e. a probe
@@ -1433,7 +1521,7 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
         elif (_bound_names(stmt) & skip_referenced) and (
             _imports_own_code(stmt)
             or _touches_own_code(stmt, module_own)
-            or _reaches_capability_seam(stmt, third_party)
+            or _reaches_capability_seam(stmt, third_party, _shadowed(stmt))
         ):
             # A module-body probe whose flag is spelled something other than
             # `*AVAILABLE` — `LIVE`, `_FTS_ESCAPE_LIVE`, `_FALKORDB_UP` — is NOT an
@@ -1466,7 +1554,7 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
                     # `tests/test_8870_version_anchor_write_order.py:138`), and
                     # leaving it ungated graded a third-party client's `.query` as
                     # this repository's seam (review of 90a0e9e8b20c, findings 1+3).
-                    or _reaches_capability_seam(block, third_party)
+                    or _reaches_capability_seam(block, third_party, _shadowed(block))
                 )
             )
         elif (
@@ -1492,7 +1580,7 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
                     # Same arm, same narrowing as the resolver branch above: the
                     # passed-in client stays graded, a third-party client's
                     # generic `.query` does not (review of 90a0e9e8b20c, 1+3).
-                    or _reaches_capability_seam(block, third_party)
+                    or _reaches_capability_seam(block, third_party, _shadowed(block))
                 )
             )
     # ── ANY OTHER function whose probe feeds its own SKIP decision (review P1) ──
@@ -1532,7 +1620,7 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
             if (
                 _imports_own_code(block)
                 or _touches_own_code(block, own_names)
-                or _reaches_capability_seam(block, third_party)
+                or _reaches_capability_seam(block, third_party, _shadowed(block))
             ):
                 graded.add(id(block))
                 roots.append(block)
@@ -2806,7 +2894,7 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             f"silent drop 4j-ter pins, one construct family over: {_rebound_row}"
         )
 
-    # 4j-quinquies. THE SCOPING IS ITSELF WITNESSED. `_probe_scope_bindings` exists so a
+    # 4j-quinquies. THE SCOPING IS ITSELF WITNESSED. `_enclosing_bindings` exists so a
     #     binding that cannot REACH the probe does not cancel the exemption — and a
     #     REVERTED (scope-blind) implementation left all eight tests green, i.e. the fix
     #     for an unwitnessed rule was itself unwitnessed (review of #14160, P1). These are
@@ -2837,12 +2925,15 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             "        pass"
         ),
         "an unrelated loop target": "def _helper():\n    for torch in range(3):\n        pass",
-        # a comprehension has its OWN scope in Python 3, so its target does not bind here
+        # a comprehension has its OWN scope in Python 3, so its TARGET does not bind here
         "a module-level comprehension target": "_ = [torch for torch in range(3)]",
-        # …and so does a TYPE PARAMETER LIST (PEP 695 annotation scope): a `[torch]` on a
-        # generic binds nothing the function BODY or the module can see (verified on
-        # 3.12 — the body still reads the module `torch`), so it cancels nothing here.
-        "a type parameter list": (
+        # ⛔ A TYPE PARAMETER BINDS IN THE GENERIC'S SCOPE — it reaches that function's
+        # BODY (and its nested defs'), and nothing else. `f.__code__.co_freevars ==
+        # ('T',)` on 3.12.3: an earlier row here claimed the body does NOT see it and
+        # made this a control; that was FALSE, and the positive witness is `4j-decies`
+        # below. This row is the scope half: an unrelated generic's `[torch]` cannot
+        # reach a MODULE-level probe, so it cancels nothing here.
+        "a type parameter list on an unrelated generic": (
             "def _generic[torch](x):\n"
             "    return torch"
         ),
@@ -2855,6 +2946,20 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             "    except Exception as torch:\n"
             "        pass"
         ),
+        # ⛔ REACH IS PER PROBE, NOT PER MODULE (review of #14160, P2). A local of
+        # `_other` reaches `_other`'s probe and no further, so it must not cancel the
+        # exemption for THIS module-level probe. Folding every probe-holding function's
+        # locals into one module-wide set did exactly that — a false red of the same
+        # class, one granularity up.
+        "a local of ANOTHER probe-holding function": (
+            "def _other():\n"
+            "    torch = _make_client()\n"
+            "    try:\n"
+            "        torch.query('SELECT 1')\n"
+            "        return True\n"
+            "    except Exception:\n"
+            "        return False"
+        ),
     }.items():
         _scope_row = roots(_scope_control_prelude + _unrelated + "\n\n" + _scope_control_guard)
         assert _scope_row == (), (
@@ -2863,10 +2968,64 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             f"guard as a ROOT, which is the false red 4k-/4l- forbid: {_scope_row}"
         )
 
+    # 4j-octies (cont.) — the module-scope binding families that WALRUS writes into the
+    #     ENCLOSING scope. PEP 572 is explicit that `:=` in a comprehension binds in the
+    #     containing scope, and a decorator / base / keyword / default expression is
+    #     evaluated in the containing scope, so each of these rebinds the module's `torch`
+    #     and must cancel the exemption. Every one of them was missed: the comprehension
+    #     was skipped wholesale (correct for its TARGETS, wrong for its walrus), and the
+    #     module-scope walk `continue`d at `def`/`class` without descending the headers
+    #     (`_function_local_bindings` already did, which is why only the module half was a
+    #     drop). One row per spelling, so a partial fix reds only the family it missed.
+    for _family, _walrus in {
+        "comprehension": "_ = [(torch := _make_client()) for _ in range(1)]",
+        "decorator": "@_reg(torch := _make_client())\ndef _f():\n    pass",
+        "class base": "class C(torch := _make_client()):\n    pass",
+        "def default": "def _h(x=(torch := _make_client())):\n    return x",
+    }.items():
+        _walrus_row = roots(
+            _scope_control_prelude + _walrus + "\n\n" + _scope_control_guard
+        )
+        assert _walrus_row != (), (
+            f"a walrus in a module-level {_family} binds in the CONTAINING scope, so it "
+            "rebinds the non-own import and the probe must be graded — leaving it exempt "
+            f"is a silent drop (review of #14160, P2): {_walrus_row}"
+        )
+
+    # 4j-decies. THE OTHER DIRECTION FOR TYPE PARAMETERS: a generic that HOLDS the probe
+    #     DOES shadow the import inside its own body, so its probe must be graded. This is
+    #     the row that reds if `_type_param_names` is dropped — and the row whose absence
+    #     let a FALSE claim survive a review cycle: a previous version declared the family
+    #     "deliberately excluded because the body cannot see it", which `f.__code__
+    #     .co_freevars == ('T',)` disproves on 3.12.3. The mechanism of the error is worth
+    #     keeping: the probe PRINTED the TypeVar, whose repr is its own name, so the
+    #     shadowed read looked exactly like the module-level string.
+    _generic_holding_the_probe = textwrap.dedent(
+        """
+        import torch
+
+        def _probe[torch]():
+            try:
+                torch.query("SELECT 1")
+                return True
+            except Exception:
+                return False
+
+        TORCH_AVAILABLE = _probe()
+        """
+    )
+    _generic_row = roots(_generic_holding_the_probe)
+    assert _generic_row == ((5, (), True, False, True),), (
+        "a TYPE PARAMETER naming the non-own import shadows it inside the generic's own "
+        "body (co_freevars, measured), so this probe must be graded — the exemption here "
+        f"is a silent drop of the class this file exists to catch: {_generic_row}"
+    )
+
     # 4j-sexies. The OTHER direction: a LOCAL of the function that HOLDS the probe CAN
-    #     reach it, so it must be graded. `_probe_scope_bindings` under-corrected here —
-    #     the local was subtracted by neither the scope set nor `_rebinds_within`, so the
-    #     exemption survived over OUR client (review of #14160, P1-2).
+    #     reach it, so it must be graded. `_function_scope_bindings` supplies it from the
+    #     probe's own ancestor chain; before that, a local bound before the block was
+    #     subtracted by neither the module set nor `_rebinds_within`, so the exemption
+    #     survived over OUR client (review of #14160, P1-2).
     _local_shadowing_the_import = textwrap.dedent(
         """
         import torch
@@ -2890,9 +3049,10 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
 
     # 4j-septies. The line between 4j-sexies and 4j-quinquies: a local of a NESTED
     #     function cannot reach the outer function's probe, so it must NOT cancel the
-    #     exemption. `_probe_scope_bindings` claimed non-descent and implemented
-    #     `ast.walk`, which descended — the same false red as the unrelated helper, one
-    #     level in (review of #14160 on the over-correction).
+    #     exemption. `_function_local_bindings` claims non-descent and implements it; the
+    #     version before it walked the whole function with `ast.walk`, which descended —
+    #     the same false red as the unrelated helper, one level in (review of #14160 on the
+    #     over-correction).
     _nested_scope_control = textwrap.dedent(
         """
         import torch
@@ -2933,7 +3093,7 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     from annotations and stand-ins, so it cannot see `PROJ = _make_proj()`, and
     #     gating the helper branches on it breaks the pinned passed-in-client rule
     #     (`tests/test_8870_version_anchor_write_order.py:138`). Instead the arm is back
-    #     in every branch and NARROWED: `_reaches_capability_seam(block, third_party)`
+    #     in every branch and NARROWED: `_reaches_capability_seam(block, third_party, _shadowed(block))`
     #     skips an ATTRIBUTE call only when the receiver's ROOT name is bound by a
     #     NON-own import AND is not re-bound anywhere in the module
     #     (`_third_party_receivers`) — the `some_optional_dep.query` false red — and
