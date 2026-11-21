@@ -10460,6 +10460,14 @@ ROWED_BY_THIS_FOLD = (
     # `tests/test_uri_requiring_selection.py::test_declared_list_matches_the_observation`,
     # which re-derives the set from a real URI-less collection.
     "test_evictor_invalidates_fallback_snapshot_13123.py",
+    # #10893 (second cycle) — the `pre_handler` decomposition's two falsifier files, ADDED by
+    # this fold. The surface rows for both landed in `10aa68693c` and the `durations:` rows did
+    # NOT, which is the residual half of the cycle-2 review's F1: `--integrity` is a 0.90 RATIO
+    # check and stayed green over both absences. Listed here for the reason every row above
+    # states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a file nobody listed has no
+    # `durations:` row and nothing reds (#14086 cycle-3 review, F1).
+    "test_10893_capture_off_loop.py",
+    "test_10893_pre_handler_parts.py",
 )
 
 
