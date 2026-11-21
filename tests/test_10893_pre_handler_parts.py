@@ -139,6 +139,41 @@ def test_the_DERIVED_stage_cannot_be_marked(monkeypatch):
         "no part covers — the parts no longer sum to the total")
 
 
+def test_the_UNMARKED_state_cannot_be_marked(monkeypatch):
+    """``unmarked`` means "no read stage was recorded" — a mark must not fake it.
+
+    ⛔ THE MIRROR OF THE ROW ABOVE (#14086 round-2 review, F4). ``unmarked`` is
+    also in ``STAGES``, and its own docstring defines it as *"no read stage was
+    recorded before the bound expired"* — a state ``snapshot()`` publishes and a
+    reader draws a conclusion from. On an ARMED timeline a ``mark("unmarked")``
+    passes the closed-vocabulary guard, takes the ``else`` branch, closes the
+    open stage and leaves ``_stage == "unmarked"`` — so a breached caller's body
+    reports "no read stage was recorded" for a request whose stages WERE
+    measured. That is the unsupported-inference shape this whole change exists to
+    remove (#10893), reachable by a typo.
+
+    Non-vacuity: dropping ``STAGE_UNMARKED`` from ``_NOT_MARKABLE`` reds this row
+    and only it — ``current()`` then reads ``unmarked`` where ``embed_get`` was
+    the stage actually entered.
+    """
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(rs.time, "monotonic", lambda: clock["t"])
+
+    stages = begin(started_at=1000.0)
+    clock["t"] += 0.01
+    stages.mark(STAGE_EMBED_GET)
+    clock["t"] += 0.01
+    stages.mark(rs.STAGE_UNMARKED)
+
+    assert stages.current() == STAGE_EMBED_GET, (
+        "`unmarked` is not a stage a read path enters — marking it reported "
+        "'no read stage was recorded' for a request that measured one")
+    # The harm surface is the PUBLISHED view, not just the accessor: `stages_ms`
+    # carries closed stages only (`embed_get` is still open), while `stage` is
+    # what a breach row hands an operator as the cause.
+    assert stages.snapshot()["stage"] == STAGE_EMBED_GET
+
+
 def test_a_request_with_no_notes_still_decomposes():
     """The remainder is published, under its own honest name."""
     stages = begin()

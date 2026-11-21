@@ -145,6 +145,30 @@ STAGES: tuple[str, ...] = (
 #: inbound stage name (the analytics prop round-trip).
 STAGE_SET = frozenset(STAGES)
 
+#: The names in :data:`STAGES` that a caller may never MARK — they are DERIVED
+#: states this object computes, not stages a read path enters.
+#:
+#: ⛔ WHY THIS IS A GUARD AND NOT A CONVENTION (#14086 review F5 / round-2 F4).
+#: ``mark()``'s closed-vocabulary check accepts anything in :data:`STAGE_SET`, and
+#: both of these are in it because readers group on them and ``spent()`` /
+#: ``snapshot()`` publish them. But marking either produces a state the rest of
+#: the module says is impossible:
+#:
+#: * ``pre_handler`` — a first ``mark("pre_handler")`` arms and banks the
+#:   interval correctly, but leaves ``_stage == "pre_handler"``, so the NEXT mark
+#:   takes ``mark()``'s ``else`` branch and banks a SECOND ``pre_handler``
+#:   interval that no part covers: ``sum(parts) < pre_handler`` while
+#:   ``snapshot()`` publishes both as if they reconciled.
+#: * ``unmarked`` — its own docstring defines it as "no read stage was recorded",
+#:   and ``snapshot()`` publishes it as such; on an ARMED timeline a
+#:   ``mark("unmarked")`` closes the open stage and makes ``current()`` report
+#:   "unmarked" for a request whose stages were measured, so a breached caller's
+#:   body would state an unsupported inference.
+#:
+#: Refusing here is one frozenset membership test on a path that already does
+#: one, and it costs nothing: nothing in the tree marks either name (measured:
+#: every ``_mark_read_stage`` call site uses a real stage).
+_NOT_MARKABLE = frozenset({STAGE_UNMARKED, STAGE_PRE_HANDLER})
 #: The decomposition of ``pre_handler`` — a SECOND closed vocabulary, disjoint
 #: from :data:`STAGES` on purpose.
 #:
@@ -261,7 +285,7 @@ class ReadStages:
             # a stage no reader groups on. Refuse quietly — this is an instrument
             # on the read path and must never raise into a request.
             return
-        if stage == STAGE_PRE_HANDLER:
+        if stage in _NOT_MARKABLE:
             # ⛔ `pre_handler` is DERIVED, never marked: it is the interval from
             # arrival to the first mark, closed by the arming branch below. It is
             # in `STAGES` (readers group on it, and `spent()` and the breach row
