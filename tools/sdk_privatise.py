@@ -405,15 +405,26 @@ SWEEP_NAMES = 66
 #: `1956b3431f` (the `#14058` re-cut) → this tree, the `.py` diff carries EIGHT added receiver rows
 #: and ONE removed receiver line that is the SAME statement re-indented (it is re-added, so nothing
 #: was deleted) — `git diff … -- '*.py' | grep -E '^[+-]' | grep -E '\.(query|update|delete)\b'`.
-#: SEVEN of the eight are `graph.query`, all inside the file `ad79129cb5` (`#14067`, "invalidate the
-#: degraded snapshot on the eviction path") ADDS,
-#: `tests/test_evictor_invalidates_fallback_snapshot_13123.py`; the eighth is `client.delete`, in
-#: `tortoise/cache_evictor.py`, from that same commit. Added rows (8) == net delta (11833 − 11825),
-#: which is the cross-check that NO row was silently absorbed in the other direction.
-#: ⛔ NO NEW SHAPE APPEARED — the one thing a re-cut must never absorb silently. Both spellings are
-#: already pinned shapes on this tree: `graph.query` is a pinned row (274 here), and `client.delete`
-#: occurs 46 times across the tracked tree
-#: (`git grep -hoE '\bclient\.(query|update|delete)\b' -- '*.py' | sort | uniq -c`). So the
+#: The per-FILE split below is the tool's OWN classification (`py_files()` → `edits_for()` →
+#: `residue`, run on `1956b3431f`'s tree and on this one and diffed), NOT a grep of `.query`/`.update`
+#: in the diff: a text grep counts occurrences and cannot say which RECEIVER the sweep put in which
+#: row, so a first draft of this block mis-attributed two of them (kept here as the reason for the
+#: method, not as a claim). Measured, and both files are ADDED by `ad79129cb5` (`#14067`, "invalidate
+#: the degraded snapshot on the eviction path"):
+#:
+#:   * `tests/test_evictor_invalidates_fallback_snapshot_13123.py` — +6 `graph.query`, +1 `client.delete`
+#:   * `tests/test_cache_eviction_evictor_pins.py` — +1 `super().query`
+#:
+#: ⛔ NOT `tortoise/cache_evictor.py`: its rows are BYTE-IDENTICAL on the two trees (`graph.query` 2,
+#: `settled.update` 1), so none of the +8 came from the product module that commit edited. Added rows
+#: (8) == net delta (11833 − 11825), which is the cross-check that NO row was silently absorbed in the
+#: other direction.
+#: ⛔ NO NEW SHAPE APPEARED — the one thing a re-cut must never absorb silently. All three spellings
+#: are already pinned rows on this tree: `graph.query` (274 residue rows), `client.delete` (43
+#: residue rows — 48 text occurrences tree-wide,
+#: `git grep -hoE '\bclient\.(query|update|delete)\b' -- '*.py' | sort | uniq -c`, so five of them
+#: are typed receivers and were never residue) and `super().query` (68, already carried by
+#: `tests/test_supabase_control.py` and `tortoise/cypher_guard.py`). So the
 #: condition this gate exists to catch — "a reference shape that was not there when this sweep was
 #: verified is now on the tree" — is NOT triggered; only counts on shapes already declared moved.
 #: The SDK population itself did not move (`typed references still pointing at a public name: 0`),
