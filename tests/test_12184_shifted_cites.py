@@ -354,8 +354,8 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # moves (345 as-written stays 345); NON-VACUOUS: `+1` reds the content arm at both.
     (_AUDIT, 'sdk.py:16046-16051', _SDK, 16046, '**JSONL event log (#548):** written when *point* is provided'),
     (_AUDIT, 'sdk.py:3777', _SDK, 3777, 'sdk._emit_event("PointRetracted", _deleted_point_payload(tid))'),
-    # --- #14087 fix lane's OWN sweep at `515f3e6d23` (the on-branch copy of the patch the lane first
-    # landed as the now-superseded `7f57eb2a46`; same `git patch-id --stable`, 5eebb7f027312e49) —
+    # --- #14087 fix lane's OWN sweep at `515f3e6d23` (the on-branch copy of the patch this lane first
+    # landed pre-rebase; `git patch-id --stable` 5eebb7f027312e49) —
     # ⛔ NOT a reviewer finding, and the difference
     # is the point: both reviews graded this address by its DELTA (`:15991-95` -> `:16046-50`, +55 on
     # both ends), which stays consistent while the SPAN itself is wrong, so neither could see it. TWO
@@ -388,8 +388,11 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # `backup/14087-*` and `fix/14087-review-followups*` refs — none of them on `origin` — so it is
     # unresolvable from a clone of this branch, which is the rule at `tools/sdk_privatise.py:369-371`.
     # `d7d205351e` IS an ancestor of this head and would also be reproducible; the pair is preferred
-    # because it names the CORRECTION itself rather than a replay of it, and it is verifiable at any
-    # head whose `sdk.py` reaches `:58274`. The review's other half —
+    # because it names the CORRECTION itself rather than a replay of it, and both addresses open at
+    # THIS head (`:58265` the `#8290` docstring comment, `:58272` the `rows = proj.g.query(` statement) —
+    # stated as what is measured here rather than as a head-invariant, since `d4a8dddc4e` carries
+    # `sdk.py` at 62,659 lines and its `:58272` is unrelated prose (the statement is `:58210` there,
+    # +62). The review's other half —
     # "add the token to `_TOKEN_OCCURRENCES` so the next sweep cannot move it silently" — did not, so the
     # fix left behind a number a digit sweep could still move with nothing red, which is the same gap
     # that let the wrong one ship. `:58272` is `rows = proj.g.query(`, the statement `:58210` was at
@@ -1164,10 +1167,12 @@ def test_the_published_denominator_is_the_count_of_this_file() -> None:
     recorded history: it reproduces `314 → 217` at `43028d178b` and `320 → 216` at `295c26ebc8`, the two
     editions the paragraph at the end of this header re-measures — including the drifter numerators.
 
-    NON-VACUOUS, measured on the pre-fix document (`git show 2b8df75c0e^:<the file>`, the edition whose
-    header publishes `326 → 214 → 112`): this shipped scheme measures `326` spellings / `215` pairs /
-    `111` collisions there, so `214`/`112` disagrees in both figures and this test reds on the tree it was
-    written for. The `216`/`110` pair is a DIFFERENT edition's measurement, not a refuted one: this scheme
+    NON-VACUOUS, measured on the pre-fix document — the edition whose header publishes `326 → 214 → 112`
+    (resolvable as `2b8df75c0e^:<the file>` only while that abandoned-lane object survives: it is not on
+    `main` and no `origin` ref holds it, so the edition is identified here by its own figures): this
+    shipped scheme measures `326` spellings / `215` pairs / `111` collisions there, so `214`/`112`
+    disagrees in both figures and this test reds on the tree it was written for. The `216`/`110` pair is a
+    DIFFERENT edition's measurement, not a refuted one: this scheme
     returns `326`/`216`/`110` at `549bad0c77` and `b64290529b` (both publishing `326 → 214 → 112`), while
     the edition named above returns `326`/`215`/`111`. Each figure is measured with `_resolved_pairs` over
     the committed blob, not carried forward from the edition it names. The revision this replaces denied
