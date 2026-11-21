@@ -268,10 +268,13 @@ class _AnchorHrefParser(HTMLParser):
       HTML tree-construction algorithm is a parser, not a test helper — and it is
       kept honest two ways: the parser records every tag it saw ``foreign_tags``
       inside foreign content and the reason it stopped in ``wedged_reason``, and a
-      test fails if a covered page reaches any of these constructs or wedges at
-      all. Constructs that would otherwise fail OPEN (the script-data escaped
-      states, ``<frameset>``) are detected rather than guessed at. Tracked in
-      #3970.
+      test fails if a covered page reaches one of the FOREIGN constructs or wedges
+      at all. ⛔ THE CLONING LEG IS NOT RATCHETED — it sets no counter of its own,
+      so nothing in the suite can fire on it; that clause is scoped to the foreign
+      constructs deliberately, and #14200 is open precisely because the cloning leg
+      has no detector. Constructs that would otherwise fail OPEN (the script-data
+      escaped states, ``<frameset>``) are detected rather than guessed at. Tracked
+      in #3970.
 
       ⛔ THE CLONING LEG IS THE ONE STILL GUESSED AT (#14073 review, P2). AAA's
       "create an element for the token" step copies the formatting element, so a

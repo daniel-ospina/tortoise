@@ -350,7 +350,7 @@ def test_an_operator_is_recorded_as_a_point():
 def hooked_sdk(ledger, monkeypatch):
     """An SDK whose store is a stub, with the ledger flag ON.
 
-    The three structural read paths are ordinary SDK methods over
+    The structural read paths are ordinary SDK methods over
     `proj.g.query(...).result_set`, so a stub projection is enough to prove the
     HOOK fires — which is the part that rots silently if a path is refactored.
     """
@@ -378,11 +378,21 @@ def hooked_sdk(ledger, monkeypatch):
     return inst, _Graph
 
 
-def test_the_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
+def test_the_list_and_tag_row_paths_feed_the_ledger(hooked_sdk):
     """A hook that is not exercised is a hook that will be lost in a refactor.
 
-    ⛔ THIS PINS THE CALLER-FACING ROW PATHS THAT EXIST, and its name says so. It
-    used to pin three of them (`query()`, `paginated_query()`,
+    ⛔ THIS PINS THE TWO CALLER-FACING ROW PATHS #14129 LEFT LIVE — the list arm
+    and the tag arm — and its name says WHICH TWO, because the caller-facing set is
+    LARGER than this file: `_ledger_record` is called from twelve sites in
+    `tortoise/sdk.py`, and the reads §17.4.6 names — `recall_state`, `recall_gaps`,
+    `issue_insight`, `search_sessions`, `suggest_entry_points`, `get_events`,
+    `session_continuity`, plus the funnel's inline `search_knowledge()` record,
+    among others — are not driven here. A title claiming "the
+    caller-facing row paths" would claim that complete set; this one does not — the
+    earlier rename dropped the word "three" and so claimed MORE than the name it
+    replaced (#14073 review, P3).
+
+    Before #14129 the test pinned three doors (`query()`, `paginated_query()`,
     `query_points_by_tag()`), and **#14129 retired all three** under #4282 phase 2
     — the owner's ruling (#3836 (c)) is that a retired name FAILS and names its
     replacement rather than resolving, so those calls raised `AttributeError` and
