@@ -814,7 +814,7 @@ def _imports_of(source: str) -> set[str]:
                     # probe-exempt AND already in `sys.modules`). Measured: a
                     # module-level `from tortoise import *` in the real
                     # `usage_signal.py` bound `embedded_lifecycle` — the module that
-                    # owns the embedded store — with all 98 rows green. Emitting every
+                    # owns the embedded store — with every row green. Emitting every
                     # reachable name under that prefix is a SUPERSET (a star import
                     # may bind fewer), which is this helper's stated contract and
                     # fails CLOSED.
@@ -827,7 +827,25 @@ def _imports_of(source: str) -> set[str]:
                         }
             elif node.level:
                 # `from . import x` — resolve each alias under the package.
-                found |= {f"tortoise.{alias.name}" for alias in node.names}
+                found |= {
+                    f"tortoise.{alias.name}"
+                    for alias in node.names
+                    if alias.name != "*"
+                }
+                # ⛔ THE RELATIVE STAR IS THE SAME HOLE ONE SPELLING OVER, and it
+                # cannot be reached by the absolute branch above because that one is
+                # nested under `node.level == 0`. `from . import *` binds the
+                # package's public names in a fresh interpreter (measured: 11 names,
+                # `embedded_lifecycle` among them, which owns the embedded store),
+                # while the literal `tortoise.*` alias matches no root, the scan sees
+                # no store root, and the probe cannot see `embedded_lifecycle`. Fixed
+                # the same way, and for the same reason: a superset, failing CLOSED.
+                if any(alias.name == "*" for alias in node.names):
+                    found |= {
+                        name
+                        for name in _REACHABLE_FROM_ROOT
+                        if name.startswith("tortoise.")
+                    }
     return found
 
 
@@ -912,6 +930,23 @@ def _getattr_reaching_a_store(
     """
     found: set[str] = set()
     for node in nodes:
+        # ⛔ `tortoise.__getattr__("FalkorDB")` — the PEP-562 hook itself, called
+        # directly with a literal name. Same reasoning as `getattr` above: the name
+        # is a string constant in the source, and `tortoise.__getattr__` really is a
+        # module attribute that returns the guarded client (`__init__.py:373`).
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "__getattr__"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in bound
+            and len(node.args) >= 1
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        ):
+            name = f"tortoise.{node.args[0].value}"
+            if name in _REACHABLE_FROM_ROOT:
+                found.add(name)
         if not (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
@@ -1147,7 +1182,7 @@ def test_no_graph_dependency_pins_the_package_root_EXPORT_form() -> None:
     # rebinding inside a nested block is visited AFTER a module-level statement
     # that consumes it — one pass sees `b = a` before it knows `a` is the package
     # root and records nothing. Pinned because replacing `while changed:` with a
-    # single pass left the suite fully green (measured: 98 passed) while the
+    # single pass left the suite fully green (measured) while the
     # shipped code catches the real spelling below.
     assert _offending(
         "import tortoise\nif True:\n    a = tortoise\nb = a\nc = b.FalkorDB\n"
@@ -1192,6 +1227,20 @@ def test_no_graph_dependency_pins_the_package_root_EXPORT_form() -> None:
     assert _offending("from tortoise import *\nh = embedded_lifecycle\n") >= {
         "tortoise.embedded_lifecycle",
         "tortoise.sdk",
+    }
+    # ⛔ AND THE RELATIVE STAR, which the absolute branch cannot reach (it is nested
+    # under `level == 0`). `from . import *` binds the package's public names in a
+    # fresh interpreter, `embedded_lifecycle` among them.
+    assert _offending("from . import *\nh = embedded_lifecycle\n") >= {
+        "tortoise.embedded_lifecycle",
+        "tortoise.sdk",
+    }
+    # ⛔ AND THE PEP-562 HOOK CALLED DIRECTLY with a literal name.
+    assert _offending('import tortoise\nc = tortoise.__getattr__("FalkorDB")\n') == {
+        "tortoise.FalkorDB"
+    }
+    assert _offending('import tortoise\nc = tortoise.__getattr__("sdk")\n') == {
+        "tortoise.sdk"
     }
     # …and the harmless spellings stay clean, so the ban is not a blanket. Bare
     # `import tortoise` and an unrelated attribute must not redden, and neither
