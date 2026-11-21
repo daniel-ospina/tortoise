@@ -64,10 +64,12 @@ import pytest
 RECORD_DB_ENV = "TEST_RECORD_DB_URI"
 
 #: The tools this file drives, in order: verify, file the first memory, then read
-#: it back by id — plus the two listing tools the capstone's step 3 exercises.
+#: it back by id — plus the listing the capstone's step 3 exercises (the listing
+#: PAIR became one live door, `tortoise_graph_overview(section="graphs")`, when
+#: `tortoise_list_graphs` retired forward — see the note under the tuple).
 #: The served ChatGPT first job names only the first two (verify, then file), so
 #: this tuple is a SUPERSET of that job rather than a transcription of it; the
-#: read-back and the listing pair come from the capstone's own journey.
+#: read-back and the listing come from the capstone's own journey.
 #: `tortoise_health` is deliberately NOT here — it is retired (#3883), so it is
 #: absent from `tools/list` and a connector's tool grant cannot contain it. The
 #: served skill already says so (`tortoise/onboarding/SKILL.md`, the
@@ -77,8 +79,15 @@ RECORD_DB_ENV = "TEST_RECORD_DB_URI"
 #: `tortoise_create_entity(type="point", …)`, so on this head it is served only by
 #: the shim on `get_tool` — the exact state `tortoise_health` was already in when
 #: this tuple was first written, and the reason it is absent from the same line.
+#: ⛔ THE SAME RULE REACHED THE LISTING STEP (#11609 lane P7). `tortoise_list_graphs`
+#: was retired forward into `tortoise_graph_overview(section="graphs")`, so it is
+#: shim-only on this head and a connector's `tools/list` does not carry it — keeping
+#: it here had this tuple assert a tool its own reader cannot call, which is the
+#: red that dispatched the lane. `tortoise_graph_overview` was ALREADY the first
+#: entry and is the live arm that answers the listing, so the step is covered by
+#: the same name rather than lost with the door.
 JOURNEY_TOOLS = ("tortoise_graph_overview", "tortoise_create_entity",
-                 "tortoise_query", "tortoise_list_graphs", "tortoise_get_entity")
+                 "tortoise_query", "tortoise_get_entity")
 
 
 # ── the transport, mounted the way production mounts it ────────────────────
