@@ -1264,11 +1264,15 @@ SWEEP_RESIDUE = (11857, "ed40203dbbf32b87")
 #: them `tortoise/hosted_api.py` or `tortoise/sdk.py`) — and `--repin` on the MERGED tree prints
 #: **(11866, '74d2e8bbd0314d5a')**, the SAME pair this line already carried. That is a measurement,
 #: not a carry: the digest is over the whole `row -> count` multiset, so an identical digest is an
-#: identical residue SET, and it says `main`'s `e74cf1d13d..9f83a63bfa` — a census attribution, a
-#: competition profile pair, a docs address and two test/tool pins — adds and removes NO untyped
-#: receiver row. `--check` exits 0 on this tree with `typed references still pointing at a public
-#: name: 0`. ⛔ So this merge re-pins NOTHING, deliberately: the pin is not "refreshed" to show that
-#: a merge happened, and no numeral above is re-cut to match a tree that did not move it.
+#: identical residue SET, and it says `main`'s `e74cf1d13d..9f83a63bfa` adds and removes NO untyped
+#: receiver row. ⛔ DO NOT READ THAT INTERVAL AS TOUCHING ONLY DOCS — it is NOT the quiet range the
+#: first draft of this note described (`#14209` review, P3): `9f83a63bfa` alone rewrote
+#: `tests/_html_links.py` (+2,789/−28) and `tests/test_website_docs_consistency.py` (+5,003/−116),
+#: which is exactly the size of test change a residue delta would come from — the NULL is the
+#: MEASURED result of `--repin` over that churn, not an inference from a small diff. `--check` exits
+#: 0 on this tree with `typed references still pointing at a public name: 0`. ⛔ So this merge
+#: re-pins NOTHING, deliberately: the pin is not "refreshed" to show that a merge happened, and no
+#: numeral above is re-cut to match a tree that did not move it.
 SWEEP_RESIDUE = (11866, "74d2e8bbd0314d5a")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
