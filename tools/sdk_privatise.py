@@ -513,7 +513,18 @@ SWEEP_NAMES = 66
 #: measurement of THIS tree, and a forecast is never a substitute for measuring — here the branch's own
 #: forecast was RIGHT about the row set and WRONG about the total, because a third merge moved it.
 #: `--check` on this tree: `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11839, "0a7e60fa05aa31b9")
+#:
+#: ⛔ RE-CUT on the REBASED tree (`#14087` rebased onto `main` `e022fc935b`):
+#: (11839, "0a7e60fa05aa31b9") → (11838, "de5664dc98549d56"). Two commits landed on `main` after
+#: `2fe01fc775` (`1b82cc7063` = `#14108`, `e022fc935b` = `#14100`), and `#14108` re-cut the residue
+#: itself: its `_capture` helper in `tests/test_13337_cache_graph_declaration.py` recorded calls
+#: through `seen.update(…)` and now APPENDS them, and `update` is a SWEPT NAME, so that rewrite
+#: REMOVED one residue row (`seen.update` 102 → 101 — `main`'s own attribution, re-read here). The
+#: pair above is `--repin`'s output ON THIS TREE, never arithmetic on the last pin: the pre-rebase
+#: head derived 11839 and this one derives 11838, the whole difference being `main`'s row — this
+#: branch contributes ZERO receiver rows of its own. `--check` on this tree: `typed references still
+#: pointing at a public name: 0`, `untyped receivers left alone (deliberate, reported): 11838`, exit 0.
+SWEEP_RESIDUE = (11838, "de5664dc98549d56")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
