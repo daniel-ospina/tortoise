@@ -305,11 +305,16 @@ SWEEP_NAMES = 66
 #:
 #: The SDK population itself did not move (`typed references still pointing at a public name: 0`),
 #: which is what makes this safe to take: no typed call site is being legitimised by the re-cut. What
-#: made it URGENT is that the pin is graded only on PULL REQUESTS — `main`'s `d4a8dddc4e` carries 12
-#: check-runs and none of them is `surface-guard` — so main drifted 1 row off the pin and every open
-#: PR then graded main's row as its own: #14045 measured `observed: (11822, …)` against the 11821 pin
-#: on a tree that itself derived 11821, while `main` at `38086c1bc5` derived 11822. A stale pin on
-#: main is a red gate on every PR that touches nothing in this population (#14062).
+#: made it URGENT is that the pin is graded only on PULL REQUESTS, so `main` sat one row off the
+#: pin with nothing grading it and every open PR then graded main's row as its own: #14045 measured
+#: `observed: (11822, …)` against the 11821 pin on a tree that itself derived 11821, while `main` at
+#: `38086c1bc5` derived 11822. A stale pin on main is a red gate on every PR that touches nothing in
+#: this population (#14062). ⛔ NO CHECK-RUN COUNT IS QUOTED FOR THAT COMMIT ANY MORE: this block
+#: used to cite `d4a8dddc4e` as carrying 12 check-runs, none of them `surface-guard`, and re-running
+#: the job since has made that FALSE — the commit now reports 72 check-runs and `surface-guard` is
+#: one of them (`completed`, `failure`). Check-run counts accumulate and never reset, so a count in
+#: this block re-stales against a re-run; the durable fact is the RULE (the pin is graded on pull
+#: requests only), not the measurement of one commit on one day.
 #: Measured with `--repin` on THIS tree, never by arithmetic on the last pin.
 #:
 #: RE-CUT DOWN (11831, "1aef9c61f81faf39") → (11825, "539914480e400722") by the `#14001` lane,
@@ -321,9 +326,9 @@ SWEEP_NAMES = 66
 #: a re-cut stated as "11829 → 11825, delta −6" is arithmetically FALSE (11829 − 6 is 11823, and
 #: 11823 is the pair this lane first pasted before it measured). Both `main` pairs here are
 #: `--repin` output, not arithmetic on the pin: `11831, "1aef9c61f81faf39"` is what `main`'s own
-#: tree derives and `11825, "539914480e400722"` is what THIS tree derives. The drift is the one
-#: `#14062` documents and it recurs here: the pin is graded on PULL REQUESTS only, `main` merged
-#: `#14065` with nothing grading it, and `--check` is therefore RED on `main` today.
+#: tree derives and `11825, "539914480e400722"` is what THIS tree derives. The recurrence is the one
+#: `#14062` documents: the pin is graded on PULL REQUESTS only, `main` merged `#14065` with nothing
+#: grading it, and `--check` is therefore RED on `main` today.
 #: The delta from `main`'s tree is −6 and it is a REMOVAL, not an absorption: SIX of the
 #: eight rows the `#14062` block above declared are the `poisoned.update` shape, and this lane
 #: deleted the shape rather than declaring it. The binding-poison arms in
@@ -347,21 +352,21 @@ SWEEP_NAMES = 66
 #: `origin/main`'s own tree and on this one), and `poisoned.update` 6 → 0 is the ONLY row that
 #: differs. Nothing else moved in either direction.
 #: TWO absorbed rows are `main`'s, not this lane's, and they are named here because a re-pin that
-#: only states the count is what this block forbids. The two rows are `found.update` 10 → 12, both
-#: in `tests/test_usage_signal.py`, added by `ac57b2d38a` (`#14065`) — a concurrent merge that
-#: LANDED BEFORE THE RE-CUT, not after it. ⛔ THE RE-CUT WAS ALREADY STALE WHEN IT LANDED, and the
-#: order is the point: `8610ed965c` is a single-parent squash commit whose parent IS `ac57b2d38a`,
-#: so the +2 was in the tree of the very commit that pinned 11829. Measured, not inferred —
-#: `--check` at `8610ed965c`: `observed: (11831, "1aef9c61f81faf39")` against `pinned: (11829,
-#: "f0301da129c0c584")`, exit 1. `main` did not drift AFTER the re-cut; the re-cut pasted the pair
-#: `d4a8dddc4e`'s tree printed (11829) onto a tree that had already moved, so `main` has been 2 rows
-#: off its own pin from the moment the pin landed, and `f392bb67d5` still measures the same
-#: 11831/`1aef9c61f81faf39` today (the four commits between the two moved no row — the pair is
-#: identical at both ends). `--check` is therefore RED on `main` right now (the same recurrence
-#: `#14062` documents: the pin is graded on PULL REQUESTS only, so a re-cut measured on one tree can
-#: land against a tree that moved under it, and every open PR is then graded against a stale
-#: number). Both sites sit on a plain `set` (`found: set[str] = set()`) fed by a generator
-#: expression, so neither is a typed reference to a swept name
+#: only states the count is what this block forbids. ⛔ IT DID NOT DRIFT AFTERWARDS, and the
+#: difference is not cosmetic: `#14065` (`ac57b2d38a`, the +2 on `found.update`) is an ANCESTOR of
+#: the re-cut commit, so it sits between the 11821 pin and this tree — NOT "after" the 11829 one.
+#: `8610ed965c` is a single-parent squash commit whose parent IS `ac57b2d38a`, so the +2 was already
+#: beneath the re-cut and its own tree derives 11831. Measured, not inferred — `--check` at
+#: `8610ed965c`: `observed: (11831, "1aef9c61f81faf39")` against
+#: `pinned: (11829, "f0301da129c0c584")`, exit 1. The 11829 pin was therefore STALE ON ARRIVAL, not
+#: stale from a later drift: "it drifted afterwards" would imply a window in which the pin was
+#: correct, and no such window existed. The re-cut pasted the pair `d4a8dddc4e`'s tree printed
+#: (11829) onto a tree that had already moved, so `main` has been 2 rows off its own pin from the
+#: moment the pin landed, and `f392bb67d5` still measures the same 11831/`1aef9c61f81faf39` today
+#: (the four commits between the two moved no row — the pair is identical at both ends). Both rows
+#: are `found.update` 10 → 12, both in `tests/test_usage_signal.py`; both sites sit on a plain `set`
+#: (`found: set[str] = set()`) fed by a generator expression, so neither is a typed reference to a
+#: swept name
 #: (`typed references still pointing at a public name: 0` on this tree).
 #: 11831 − 6 = 11825, and that arithmetic is a CROSS-CHECK of the measurement, not the evidence for
 #: it: what was pasted into the pin is the pair `--repin` printed on THIS tree.
