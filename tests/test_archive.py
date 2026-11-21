@@ -1453,6 +1453,11 @@ def test_a_module_body_replaced_by_UNPARSEABLE_text_is_a_removal(tree: Path) -> 
     assert any(
         p.startswith("tortoise.victim: MODULE BODY REMOVED") for p in problems
     ), f"unparseable is not content — the code left: {problems}"
+    hit = next(p for p in problems if p.startswith("tortoise.victim: MODULE BODY REMOVED"))
+    assert "no longer parses" in hit, (
+        "the verdict is right but the stated fact must not send the operator looking for an "
+        f"EMPTIED file: {hit}"
+    )
 
 
 def test_emptying_a_module_in_place_is_a_removal(tree: Path) -> None:
@@ -1935,6 +1940,45 @@ def test_a_reanchor_to_an_ANCESTOR_commit_is_a_ROLLBACK(tree: Path) -> None:
     assert any("REWRITTEN" in p for p in problems), (
         "a re-anchor to an ANCESTOR of the recorded anchor is a ROLLBACK, not a refresh — the "
         f"record would name an earlier revision than the one it already trusted: {problems}"
+    )
+
+
+def test_a_reanchor_accepts_sources_in_ANOTHER_order(tree: Path) -> None:
+    """`sources` is compared as a MULTISET, because a committed row carries a different order.
+
+    The writer derives `sources` in block order, but `archive/MANIFEST.json`'s `tortoise_analyze`
+    row lists `[mcp_server.py, tool_registry.py]` over blocks in the opposite order — so an
+    order-sensitive comparison refused the ONE legitimate re-anchor for that row, with a remedy
+    ("restore the recorded field(s)") that `verify-anchors` reds: a false block with no route, for
+    1 of 111 rows (round-9 review). Order carries no claim; every block tuple is still bound to
+    its own path by the per-row comparison.
+    Mutation: compare `entry["sources"]` to the derived list with order-sensitive `!=` -> RED.
+    """
+    (tree / "tortoise" / "tool_registry.py").write_text(
+        'TOOL = ToolDefinition(name="old_tool", description="x")\n', encoding="utf-8"
+    )
+    (tree / "tortoise" / "mcp_server.py").write_text(
+        "def old_tool():\n    return 1\n", encoding="utf-8"
+    )
+    _commit(tree, "tortoise/tool_registry.py", "tortoise/mcp_server.py")
+    entry = arch.archive_symbol(arch.MCP_TOOL, "old_tool", "batch-a", "r", root=tree)
+    _commit(tree, ".")
+    assert len(entry["blocks"]) >= 2, "the fixture needs a MULTI-block row to reorder"
+    (tree / "tortoise" / "note.py").write_text("Z = 5\n", encoding="utf-8")
+    _commit(tree, "tortoise/note.py")
+    newer = arch._git(tree, "rev-parse", "HEAD")[1].strip()
+    reversed_sources = list(reversed([str(row["path"]) for row in entry["blocks"]]))
+    assert reversed_sources != [str(row["path"]) for row in entry["blocks"]]
+    arch.save_manifest(
+        {"entries": [dict(entry, archived_at=newer, sources=reversed_sources)]},
+        tree / "archive" / "MANIFEST.json",
+    )
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert not [p for p in problems if "REWRITTEN" in p], (
+        "a faithful re-anchor whose `sources` merely lists the same paths in another order is "
+        f"not a rewrite — and the remedy for calling it one cannot be carried out: {problems}"
     )
 
 

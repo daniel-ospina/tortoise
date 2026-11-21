@@ -263,8 +263,11 @@ needs no special handling for a restore, because all three legitimate shapes are
 - **a restore** — the row and its frozen file go (steps 3-4 below) and the SYMBOL is live again
   **with the recorded body**: in `TOOL_REGISTRY`, on `TortoiseSDK`, or importable from `tortoise/`,
   and re-extracting it yields the block the row recorded. A live NAME alone is not enough — a stub
-  dropped at the dotted path is not the code coming back, so a restore that also CHANGES the code
-  keeps its row and takes the waiver below. The code is back in the product, so nothing the archive
+  dropped at the dotted path is not the code coming back. ⚠ A restore that also CHANGES the code
+  has no green state in the PR that lands it: the row cannot stay (the direction above reds a live
+  symbol) and the drop cannot be credited (the body is not the recorded one), so the route is to
+  restore the block VERBATIM here and change the code afterwards, when the row is gone from the
+  merge base. The code is back in the product, so nothing the archive
   promised is missing — and the row CANNOT stay, because the other direction reds an archived
   symbol that is live again. The frozen bytes remain readable in git history at the deletion
   commit (`git log -- archive/<kind>s/…`). This is why the arm is safe in CI: the CI job runs it

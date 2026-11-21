@@ -1212,13 +1212,17 @@ def _live_body_is_the_recorded_one(root: Path, entry: dict, carrier: str) -> boo
     while nothing came back (round-7 review, measured on a 30-function module: frozen file
     deleted, row dropped, `X = 1  # nothing of the module` written at the path → every arm
     green). This asks the writer's own extractor what the symbol WOULD freeze from the live
-    file and compares its sha256 to the row — a verbatim restore is green, and a
-    restore-and-modify leaves the row as the record and takes the `--allow-archive-shrink`
-    route, which is what that route is for.
+    file and compares its sha256 to the row — a verbatim restore is green. A restore that also
+    CHANGES the code is not green in either direction: the row cannot stay (direction one reds a
+    live symbol) and the drop cannot be credited (the body is not the recorded one), so the route
+    is to restore the block VERBATIM in the PR that lands and change the code after, when the row
+    is gone from the merge base.
 
-    `None` (cannot tell) stays on the permissive side ON PURPOSE: an unreadable live file, or a
-    block the extractor cannot key, is not evidence of a loss, and this arm's job is to report
-    losses.
+    `None` is returned in exactly two shapes, both of which mean "this row recorded nothing to
+    compare against" (no `blocks`, or `blocks` is not a list of dicts) — that can only come from
+    the BASE row, which a PR cannot author. An unreadable live file and a block the extractor
+    cannot key both return `False`: the code the row recorded is not in the tree, which is the
+    question this function exists to answer.
     """
     rows = entry.get("blocks")
     if not isinstance(rows, list) or not rows:
@@ -1306,8 +1310,15 @@ def _reanchor_is_verified(
         str(row.get("node")) for row in recorded
     ):
         return False  # same blocks, same keys — a re-anchor does not swap the evidence
-    if entry.get("sources") != [row.get("path") for row in recorded]:
-        return False  # the writer's own derivation, so a `sources` edit cannot ride along
+    # ⛔ AS A MULTISET. The writer derives `sources` in block order, but the committed manifest
+    # already carries one row whose order differs from its blocks
+    # (`tortoise_analyze`: sources `[mcp_server.py, tool_registry.py]` over blocks in the
+    # opposite order), so an ORDER-SENSITIVE comparison refused the one legitimate re-anchor for
+    # that row with a remedy ("restore the recorded field(s)") that `verify-anchors` reds — a
+    # false block with no route, for 1 of 111 rows (round-9 review). Order carries no claim
+    # here: the block tuples are bound to their paths by the per-row comparison below.
+    if sorted(entry.get("sources") or []) != sorted(str(row.get("path")) for row in recorded):
+        return False  # a `sources` edit cannot ride along on a re-anchor
     # ⛔ EVERY OTHER CLAIM FIELD IS FIXED. A re-anchor moves the anchor and re-hashes bodies;
     # `archived_from` is a CLAIM_FIELD bound to nothing else on this path (`_anchor_violations`
     # reads the block rows' `path`, and `file_violations` only makes the FILE's metadata agree
@@ -1473,14 +1484,22 @@ def shrink_violations(
         if key in waivers:
             used.add(key)
             continue
-        how = (
-            f"replaced by a `.pyi` STUB (`{head_carrier}`), which holds no runtime statements"
-            if stubbed
-            else (
-                f"`{head_carrier}` carries none (empty, whitespace, comments or a bare "
-                "docstring)"
-            )
-        )
+        if stubbed:
+            how = f"replaced by a `.pyi` STUB (`{head_carrier}`), which holds no runtime statements"
+        else:
+            head_body_text = _file_text(root, head_carrier) or ""
+            try:
+                ast.parse(head_body_text)
+            except SyntaxError:
+                how = (
+                    f"`{head_carrier}` no longer parses — text that is not Python holds no "
+                    "statements a caller can reach"
+                )
+            else:
+                how = (
+                    f"`{head_carrier}` carries none (empty, whitespace, comments or a bare "
+                    "docstring)"
+                )
         out.append(
             f"{module}: MODULE BODY REMOVED — {base_label} carries statements in "
             f"`{base_carrier}` and this tree's module file {how}. The NAME survived, "
@@ -1523,10 +1542,12 @@ def shrink_violations(
                 "manifest row indexes — orphan`); what no other arm sees is dropping the row AND "
                 "the file together, because every other arm here iterates the rows it FINDS "
                 "(#12291). "
-                "REMEDY: restore the entry — or, if the code came back to the PRODUCT too, "
-                "delete its frozen file in the same commit (that is the restore procedure in "
-                "archive/README.md, and this arm treats a live symbol as a restore, so no "
-                "waiver is needed). If the drop is neither, state it: "
+                "REMEDY: restore the entry — or, if the code came back to the PRODUCT "
+                "BYTE-FOR-BYTE, delete its frozen file in the same commit (that is the restore "
+                "procedure in archive/README.md, and this arm credits a live symbol whose BODY "
+                "matches the record, so no waiver is needed). A restore that also CHANGES the "
+                "code has no green state here: putting the block back VERBATIM in this PR and "
+                "changing the code afterwards is the route. If the drop is neither, state it: "
                 f"`--allow-archive-shrink {kind}:{symbol} --allow-archive-shrink-reason <why>`. "
                 "A waiver is a local-shell record: CI passes none, deliberately."
             )
