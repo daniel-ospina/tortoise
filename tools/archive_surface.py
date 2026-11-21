@@ -1598,10 +1598,28 @@ def shrink_violations(
             # says_so_without_claiming_the_base_lacks_it` reds). The three answers are distinct
             # facts and each states its own: the ROW is here, the LIVE module is here, neither.
             if key in base_entries:
-                why = (
-                    f"{base_label} records `{symbol}` ({kind}) and this tree still carries it, "
-                    "so nothing was removed for it to waive"
-                )
+                # ⛔ THE ROW AND THE LIVE MODULE ARE TWO FACTS (review F1 of the P8b landing).
+                # An ARCHIVED module is a row at the base and a module on NEITHER side — the
+                # ordinary case for `archive/`, not an edge case — so "the base records it"
+                # does NOT imply "this tree still carries it". Asking only the row printed
+                # "this tree still carries it, so nothing was removed" over a module the base
+                # had already frozen and this tree does not carry at all: the verdict (the
+                # waiver waives nothing) was right and the stated fact was false, which is the
+                # class this loop exists to remove, on the one branch still unasked. Measured
+                # on the committed row (`module:tortoise.archived.search_legacy`): a waiver
+                # for it claimed the tree carries a module present in neither tree.
+                # So ask the live BODY, exactly as the branch below does.
+                if _path_carries_a_module_body(root, head_paths_by_module.get(symbol)):
+                    why = (
+                        f"{base_label} records `{symbol}` ({kind}) and this tree still carries "
+                        "it, so nothing was removed for it to waive"
+                    )
+                else:
+                    why = (
+                        f"{base_label} already records `{symbol}` ({kind}) and this tree does "
+                        "not carry it — the removal IS recorded by that `module` entry, so the "
+                        "waiver waives nothing"
+                    )
             elif symbol in base_modules:
                 # ⛔ ASK THE HEAD SIDE, and ask it about the BODY (review P2 of PR #14039). Set
                 # membership is a PATH set, so it was `True` in BOTH shapes that DID remove a

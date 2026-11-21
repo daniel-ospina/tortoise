@@ -2505,8 +2505,15 @@ def test_a_waiver_for_a_row_that_never_LEFT_says_so_without_claiming_the_base_la
 ) -> None:
     """Round 3 F1's sibling: the verdict was right, the stated fact was false.
 
-    The base RECORDS the row and this tree still carries it, so "does not record `x` at all"
-    would send the operator looking for a removal that never happened.
+    The base RECORDS the row, so "does not record `x` at all" would send the operator looking
+    for a removal that never happened. That is what this row pins.
+
+    ⛔ AND `_archive_module` WRITES THE ROW, THE FROZEN FILE AND NO LIVE MODULE, so this shape
+    is an ARCHIVED module — a row at the base and a module on NEITHER side, the ordinary case
+    for `archive/`. The old assertion here demanded "still carries it" over a module this tree
+    does not carry at all, i.e. the test PINNED the falsity instead of catching it (review F1 of
+    the P8b landing). It now asserts the true pair: the base already records the removal, and
+    this tree does not carry the module.
 
     ⛔ This is the ROW branch. The branch that answers from the package tree instead has its own
     fixture below, because the two are distinct facts and a single fixture can only exercise one
@@ -2521,8 +2528,34 @@ def test_a_waiver_for_a_row_that_never_LEFT_says_so_without_claiming_the_base_la
     )
     waived = [p for p in problems if "waives nothing" in p]
     assert waived, problems
-    assert "still carries it" in waived[0], waived[0]
+    assert "still carries it" not in waived[0], waived[0]
+    assert "already records" in waived[0], waived[0]
+    assert "does not carry it" in waived[0], waived[0]
     assert "does not record" not in waived[0], waived[0]
+
+
+def test_a_MODULE_waiver_for_a_RECORDED_row_over_a_LIVE_module_still_says_the_tree_carries_it(
+    tree: Path,
+) -> None:
+    """The OTHER half of the row branch's split (review F1 of the P8b landing).
+
+    The base records the `module` row AND the module is still live here, so nothing left and
+    "this tree still carries it" is the TRUE answer. Without this row the branch could be
+    "fixed" into always printing the archived wording and only the sibling above would run,
+    which is the shape that turns a fact into a constant. Discriminating: hardcoding the
+    "already records / does not carry" text reds here.
+    """
+    (tree / "tortoise" / "gone.py").write_text("Z = 1\n", encoding="utf-8")
+    _archive_module(tree, "tortoise.gone")
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD", allowed=["module:tortoise.gone"]
+    )
+    waived = [p for p in problems if "waives nothing" in p]
+    assert waived, problems
+    assert "still carries it" in waived[0], waived[0]
+    assert "does not carry it" not in waived[0], waived[0]
 
 
 def test_a_waiver_for_a_LIVE_module_the_base_never_recorded_says_so(

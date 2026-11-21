@@ -4432,9 +4432,14 @@ jobs:
         # cannot answer proves nothing). `--base-ref` with no value means "the default branch",
         # so the step needs no `github.base_ref` interpolation and cannot break on a push run;
         # an unresolvable ref is a REFUSAL (exit 2), never a quiet pass. It is OFF unless given,
-        # which keeps a bare `check` at its documented shallow-clone meaning: this step is the
-        # tool's only CI caller and it always passes the flag, so no depth-1 checkout reaches an
-        # unresolvable ref through CI (round-11 review corrected the older `test`-job claim).
+        # which keeps a bare `check` at its documented shallow-clone meaning. (Round-11 review
+        # corrected an older claim that the ordinary `check` ran in the depth-1 `test` job — it
+        # ran in no job at all. ⛔ And "this is the tool's only CI caller" was false too: the
+        # provenance step ABOVE runs the same tool in this same job, on this same full-history
+        # clone (`grep -n surface_manifest .github/workflows/python-ci.yml` → :4274 strict, and
+        # this :4445). Both are here rather than in a depth-1 job on purpose, so no depth-1
+        # checkout reaches an unresolvable ref through CI — but a future reader must not add a
+        # third caller under the belief that there is only one already.)
         #
         # ⚠️ ACCEPTED RESIDUAL, the same one the two steps above name: this runs the CHECKOUT'S
         # OWN `tools/surface_manifest.py`, so a PR that neuters the arm in the same commit that
