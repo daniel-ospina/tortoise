@@ -45713,6 +45713,10 @@ class TortoiseSDK:
         # B6 (#3892): the read-path status sink — one of the four recorded terms
         # (tortoise.read_status). Caller-owned and opt-in, exactly like
         # ``leg_trace``; default None = not computed, byte-identical behavior.
+        # #14033: this sink ALSO carries ``state_question`` when a state cue was
+        # recognised and not applied (see ``_state_route_out`` below); the key is
+        # cleared before each call decides, so a reused sink cannot carry a stale
+        # notice forward, and it is ABSENT whenever no ending cue was recognised.
         read_status_out: dict | None = None,
         recency_field: str | None = None,
         recency_boost: float = 0.0,
@@ -45748,6 +45752,20 @@ class TortoiseSDK:
         # read-status term. Default None = not computed, so every existing
         # caller is byte-identical (and pays nothing).
         _truncation_out: dict | None = None,
+        # #14033: PRIVATE — the MISSED STATE-CUE notice's caller-owned sink, the
+        # third of the same family. When a state question is recognised and NOT
+        # routed (an appended qualifier, an attributive ending word) or cannot be
+        # (a family with no lifecycle), the relevance read it kept is otherwise
+        # indistinguishable from the factual claim "nothing has ended" — so the
+        # notice rides here, and the hosted ``/v1/search`` route publishes it on
+        # its response body. A caller that passes ``read_status_out`` receives the
+        # same payload under ``state_question`` (the read-status sink is where a
+        # caller already asks "did this read answer, and if not, why"). Default
+        # None = not computed; ⛔ the row set is untouched either way, and a query
+        # in which NO ending cue is recognised produces no payload — that, not
+        # "every content query", is what is byte-identical (a content query that
+        # names an ending, `which features are deprecated in v3`, DOES carry one).
+        _state_route_out: dict | None = None,
     ) -> list[dict]:
         """Hybrid search with RRF fusion + EP annotation.
 
@@ -45856,6 +45874,34 @@ class TortoiseSDK:
         arm to answer a `point`-scoped question with Objects would hand a caller a
         family it did not ask for, which is a different (and larger) surface
         decision than making the question reach its answer.
+
+        ── #14033: a state question that does NOT route says so ─────────────
+        The cue table is a set of ANCHORED question shapes, and the anchoring is
+        what keeps a content question out of a population (`which features are
+        deprecated in v3`, `do we archive customer emails` and `which claims were
+        retracted by legal` are relevance reads). The cost of that precision is a
+        real state question that keeps the relevance read too — and its empty or
+        unrelated answer was indistinguishable from the honest fact "nothing has
+        ended". So the recogniser ALSO reports the cue it saw and could not
+        apply: `_state_route_out` (or `read_status_out["state_question"]`)
+        receives `{routed: False, population, reason, cue, hint}` when (a) a
+        strong cue matched no shape — an appended qualifier, an attributive
+        ending word — or (b) a shape fired on a family with no lifecycle. `cue`
+        names the words, `hint` is `state_intent.MISSED_ROUTE_HINT`. ⛔ It is a
+        REPORT, never a route: the rows are exactly the relevance rows the caller
+        would have received without it, so no content question is re-answered and
+        no qualifier is dropped. Absent sink or absent cue → no payload at all,
+        so a caller that has not opted in is byte-identical; a query in which no
+        ending cue is recognised produces nothing even WITH a sink, which is what
+        keeps an ordinary content read's reply unchanged.
+        The cue set itself was widened in the same change to the phrasings a
+        customer actually uses — `what has ended recently` (a RECENCY adverb,
+        which names no boundary the population would have to apply), `is the
+        onboarding flow retired?` (a yes/no question whose own subject it is) and
+        `list what we retired` (an imperative over a free relative clause, i.e. a
+        request for a SET). What did NOT widen is the rule that got the hijack
+        out: every cue is still a PREDICATE anchored to its grammatical role,
+        never "an ending word near a wh-word".
 
         pool_size: EXACT per-strategy retrieval depth override (benchmark/tests).
         Precedence: pool_size > TORTOISE_POOL_FLOOR env > the baked floor
@@ -46135,7 +46181,8 @@ class TortoiseSDK:
         # row here — refusing it would refuse a caller for asking for what they
         # are getting. ``limit``, ``entity_type`` and ``kind`` scope and bound the
         # read and stay served; the sink/plumbing keywords (``leg_trace``,
-        # ``read_status_out``, ``_truncation_out``, ``_elevated_timeout_ms``) are
+        # ``read_status_out``, ``_truncation_out``, ``_state_route_out``,
+        # ``_elevated_timeout_ms``) are
         # how the caller receives or times the answer, not what it contains.
         def _retrieval_knobs() -> list[str]:
             """The retrieval keywords THIS call supplied — the ONE closed list.
@@ -46224,9 +46271,19 @@ class TortoiseSDK:
         # pinned `NOT_SELECTED` table rather than this comment.
         _scope_from_question: str | None = None
         _commitment_scope = False
+        # #14033: the notice for a state cue that was SEEN and not applied. Set
+        # only inside the plain-question guard below, so a caller who supplied a
+        # retrieval knob (and therefore asked for a relevance read in so many
+        # words) is never told their question looked like something else.
+        _state_notice: dict | None = None
         if (query is not None and not ended_scope and not include_terminal
                 and not [k for k in _retrieval_knobs() if k != "query"]):
-            from .state_intent import COMMITMENTS, ENDED, detect_state_question
+            from .state_intent import (
+                COMMITMENTS,
+                ENDED,
+                detect_state_question,
+                missed_route_payload,
+            )
 
             _state_q = detect_state_question(query)
             if _state_q.population == ENDED:
@@ -46239,16 +46296,50 @@ class TortoiseSDK:
                 if entity_type in _ENDED_FAMILIES:
                     ended_scope = True
                     _scope_from_question = query
+                else:
+                    # ⛔ A SHAPE FIRED AND THE POPULATION DOES NOT EXIST HERE, which
+                    # is the second way a state question ends up answered by the
+                    # relevance read — and the same silence #14033 is about. The
+                    # refusal is right (``ended.py`` REFUSES a family with no
+                    # lifecycle rather than answering it empty); saying so is what
+                    # was missing.
+                    _state_notice = missed_route_payload(_state_q, reason="family")
             elif _state_q.population == COMMITMENTS:
                 # The commitment kinds are OBJECT kinds (ONTOLOGY §5), and the
                 # arm below intersects them with the caller's own `kind` — so a
                 # `point`-scoped commitment question keeps the text read that
                 # already answers it (the capstone's Q1 point half returns the
                 # live pricing/uptime claims), and never receives Objects it did
-                # not ask for.
+                # not ask for. That is not a missed cue — the population is still
+                # served to the call that can receive it — so no notice here.
                 if entity_type == "object":
                     _commitment_scope = True
                     _scope_from_question = query
+            else:
+                # #14033: a state cue the cue table could not apply. The question
+                # keeps the relevance read above, and the caller is told so —
+                # because an empty or unrelated relevance reply to a state
+                # question is otherwise indistinguishable from an honest "nothing
+                # has ended", which is the worst of the three outcomes.
+                _state_notice = missed_route_payload(_state_q)
+
+        # ⛔ THE NOTICE IS CLEARED BEFORE IT IS DECIDED, because a sink is
+        # CALLER-OWNED and may be REUSED — the same hygiene `truncation.
+        # mark_truncation` performs on the sibling sink (#8447 round 3). Without
+        # this, a `state_question` left by an EARLIER call would ride a later
+        # clean read and claim a cue that was never seen.
+        if _state_route_out is not None:
+            _state_route_out.clear()
+        if read_status_out is not None:
+            read_status_out.pop("state_question", None)
+        if _state_notice is not None:
+            # Carried on the sinks the CALLER owns, never on a row: a row field
+            # would put a routing message into the data (#14033's "do not add a
+            # visibility field"), and a log line would only reach a developer.
+            if _state_route_out is not None:
+                _state_route_out.update(_state_notice)
+            if read_status_out is not None:
+                read_status_out["state_question"] = dict(_state_notice)
 
         if ended_scope:
             _refused_ended = _retrieval_knobs()

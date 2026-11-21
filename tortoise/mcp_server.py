@@ -5600,16 +5600,50 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
     was.
 
     ⛔ AND THE BOUNDARY IS THE WHOLE QUESTION, inclusive of what it must give up:
-    the sentence is matched as a SHAPE, so an ending question with a trailing
-    adverb or an added constraint keeps the relevance read instead of routing —
-    `what has ended recently`, `have any claims been retracted in Q3` and
-    `which claims were retracted by legal` are all RELEVANCE reads. That is
-    deliberate, not an oversight: the population read cannot apply a narrowing,
-    so routing would serve the whole ended set as if the caller's `in Q3` had
-    been honoured. If you want the population, ask the question in its
-    unqualified form (`what ended`, `have any claims been retracted`); if you want
-    the narrowing applied, keep the qualified wording and this is the relevance
-    read you asked for.
+    the sentence is matched as a SHAPE, so an ending question carrying a
+    QUALIFIER the population cannot apply keeps the relevance read instead of
+    routing — `have any claims been retracted in Q3` and `which claims were
+    retracted by legal` are RELEVANCE reads. That is deliberate, not an
+    oversight: the population read cannot apply a narrowing, so routing would
+    serve the whole ended set as if the caller's `in Q3` had been honoured. If you
+    want the population, ask the question in its unqualified form (`what ended`,
+    `have any claims been retracted`); if you want the narrowing applied, keep the
+    qualified wording and this is the relevance read you asked for.
+
+    ⛔ WHICH PHRASINGS ROUTE, SO YOU CAN PREDICT IT (#14033). The cue is the
+    question's own PREDICATE, anchored to its grammatical role — never an ending
+    word that happens to sit near a wh-word — so the boundary is readable off the
+    wording. Of the phrasings this read is asked about:
+
+      ROUTES — answered from the ended population, each row with how it ended:
+        `has anything we relied on been withdrawn`   (has/have + quantifier + been)
+        `what ended`                                 (the whole question is the ending)
+        `what has ended recently`                    (a RECENCY adverb only: it names
+                                                      no window the read must apply,
+                                                      and every row carries `endedAt`)
+        `is the onboarding flow retired?`            (yes/no, subject = the record)
+        `list what we retired`                       (imperative over `what we …`,
+                                                      i.e. a request for a SET)
+      DOES NOT ROUTE — an ordinary relevance search, byte for byte:
+        `which of our withdrawn claims affected pricing`
+                                                     (the ending word MODIFIES
+                                                      `claims`; the question's own
+                                                      predicate is `affected
+                                                      pricing`, which the
+                                                      population cannot answer)
+
+    ⛔ SO A STATE QUESTION THAT DOES NOT ROUTE BEHAVES EXACTLY LIKE A NORMAL
+    SEARCH. There is no second attempt and no fallback: you get the rows the words
+    match, which may be empty or unrelated, and an EMPTY answer here is NOT
+    evidence that nothing has ended. This tool takes NO argument that forces the
+    ended read — the SHAPE is the only way in, so the way to be explicit is to ask
+    a form from the ROUTES list above. ⛔ THIS TOOL CANNOT REPORT the cue it saw
+    and could not apply — its reply is the row list and it takes no sink — so an
+    MCP caller who needs that report must use the hosted `GET /v1/search` route,
+    whose body carries `state_question` (`{routed: false, cue, reason, hint}`), or
+    the SDK, whose read-status sink carries the same payload; the difference it
+    makes there is that "the route declined my state question" stops looking like
+    "the graph says nothing has ended".
 
     Point results annotated with EP breakdown. confidence_mean is THE point's
     confidence (belief mean α/(α+β): persisted posterior when EP has run,
