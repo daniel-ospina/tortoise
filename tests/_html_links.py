@@ -1107,9 +1107,28 @@ def extract_anchors_within(
     honest answer is to refuse the tag rather than to state a direction for it and
     hope. The refusal message says which tags ARE safe instead of implying every
     accepted tag is. A container inside an inert region is not in the tree at all,
-    which is the point. Both the anchors collected and the container boundaries
-    follow `_unmet_by_reader`: an anchor no reader meets is not an entry, and its
-    own `hidden` attribute counts for that as much as a `<select>` ancestor does.
+    which is the point.
+
+    ⛔ THE ENTRIES follow `_unmet_by_reader`; a CONTAINER is counted by the tree, not
+    by the reader — the two are deliberately different answers, and this paragraph
+    used to say both followed the rule. `extract_anchors_within(
+    '<div class="toc" hidden><a href="#x">x</a></div>')` returns `[[]]`: the block
+    IS in the tree, so it is counted, and only its entry is dropped. That direction
+    is the loud one — a phantom container makes the caller's count larger, never
+    smaller, so a decoy block reddens "exactly one TOC block" instead of replacing
+    the real index (#14073 review, measured).
+
+    ⛔ AND A CONTAINER THAT NEVER CLOSES IS REFUSED, for the same reason an
+    IMPLICIT-CLOSE tag is: its extent is not the element, it is the REST OF THE
+    DOCUMENT, so the entries it collects are every anchor on the page. Through the
+    docs page's bound that is indistinguishable from a correctly-closed TOC whose
+    index happens to be long, and it readmits the whole-page `href` index round 4
+    removed: an `<div class="toc-group">` left open inside the TOC makes the TOC's
+    own `</div>` close the INNER element, so the block stays open to EOF, every
+    anchor on the page becomes an entry, a new un-advertised `<h2>` plus a claim at
+    the section boundary leaves the golden, the vocabulary pin and the allowlist
+    all green (measured, #14073 review). An element a browser never closed is not
+    an extent, so this refuses rather than guesses.
     """
     if tag in _AnchorHrefParser._IMPLICITLY_CLOSED:
         raise ValueError(
@@ -1123,6 +1142,16 @@ def extract_anchors_within(
     parser = _AnchorHrefParser(container=(tag, class_token))
     parser.feed(html)
     parser.close()
+    if parser._open_containers:
+        raise ValueError(
+            f"a `<{tag} class=\"…{class_token}…\">` block is still OPEN at the end of "
+            f"the document, so its extent is not the element — it is the rest of the "
+            f"page, and its entries are every anchor on it. That is the whole-page "
+            f"index this helper exists to replace, and from the outside it is "
+            f"indistinguishable from a correctly-closed block with a long index. An "
+            f"element a browser never closed is not an extent: close the block, or "
+            f"ask a question that does not need one."
+        )
     return parser.containers
 
 

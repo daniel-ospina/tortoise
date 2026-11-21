@@ -36,7 +36,7 @@ import re
 import sys
 from html import unescape as html_unescape
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 from xml.etree import ElementTree
 
 import pytest
@@ -1390,6 +1390,11 @@ def _fragment_this_page_advertises(href: str, document: Path) -> str | None:
     (`tortoise.premiselabs.co`) or a foreign scheme is therefore not advertised: the
     slice runs long and the golden says so, which is the direction a guard wants to
     be wrong in.
+
+    ⛔ AND THE FRAGMENT IS PERCENT-DECODED, because that is what a browser matches
+    against an element's `id`: `#quick%73tart` navigates to `#quickstart`, and
+    comparing the raw fragment dropped an entry that DOES reach the heading — the
+    same false red. `unquote` leaves `+` alone, so this is not query-string decoding.
     """
     target = href.strip(" \t\n\r\f\v")
     if not target:
@@ -1408,7 +1413,9 @@ def _fragment_this_page_advertises(href: str, document: Path) -> str | None:
     if _browser_origin(resolved._replace(fragment="").geturl()) != page_origin:
         return None
     document_url = resolved._replace(fragment="").geturl()
-    return parsed.fragment if _document_for_loc(document_url) == document else None
+    if _document_for_loc(document_url) != document:
+        return None
+    return unquote(parsed.fragment)
 
 
 #: An `<h2 …>` opening tag, its attribute text captured whole.
@@ -2231,6 +2238,10 @@ _SAME_PAGE_TOC_SPELLINGS = (
     ("explicit default port", ' href="https://premiselabs.co:443/tortoise/docs#quickstart"'),
     ("uppercase scheme and host", ' href="HTTPS://PREMISELABS.CO/tortoise/docs#quickstart"'),
     ("userinfo", ' href="https://someone@premiselabs.co/tortoise/docs#quickstart"'),
+    # ⛔ A PERCENT-ENCODED FRAGMENT is what a browser DECODES before matching an
+    # element's id, so this entry does reach `#quickstart`; comparing the raw
+    # fragment dropped it (the same false-red family).
+    ("a percent-encoded fragment", ' href="#quick%73tart"'),
 )
 
 #: Entries that do NOT name a heading on THIS page — a browser leaves this document, or
@@ -2263,6 +2274,12 @@ _FOREIGN_TOC_SPELLINGS = (
     ("four leading slashes", ' href="////docs#quickstart"'),
     ("empty-authority scheme", ' href="https:///docs#quickstart"'),
     ("empty-authority scheme, path", ' href="https:///tortoise/docs#quickstart"'),
+    # ⛔ A NON-DEFAULT PORT IS NOT THIS DOCUMENT'S ORIGIN, and neither is a port the
+    # URL parser cannot even read. Both stay unadvertised (the loud direction), and the
+    # unreadable one is ANSWERED rather than raised: an exception out of this predicate
+    # would surface as an ERROR in the bound and name no cause (#14073 review).
+    ("a non-default port", ' href="https://premiselabs.co:8443/tortoise/docs#quickstart"'),
+    ("an unreadable port", ' href="https://premiselabs.co:99999999/tortoise/docs#quickstart"'),
 )
 
 
@@ -3625,6 +3642,45 @@ def test_extract_anchors_within_reads_the_parsed_tree() -> None:
     assert extract_anchors_within(
         '<div class="toc"><a href="#a">A</a></div>', tag="div", class_token="toc"
     ) == [["#a"]]
+
+
+def test_a_container_that_never_closes_is_refused_not_extended_to_the_page() -> None:
+    """An unclosed block's extent is the REST OF THE PAGE, so it is refused.
+
+    The measured escape: an element left open INSIDE the TOC makes the TOC's own
+    `</div>` close that inner element, so the block stays open to EOF and every
+    anchor on the page becomes an advertised entry — reviving the whole-page `href`
+    index round 4 removed. Through `_docs_section` that is indistinguishable from a
+    correctly-closed block with a long index, so a new un-advertised `<h2>` plus a
+    claim at the section boundary left the golden, the vocabulary pin and the
+    allowlist all green (#14073 review, measured).
+
+    An element a browser never closed is not an extent, so the helper refuses
+    instead of guessing — the same answer it already gives for a tag a sibling
+    closes. The positive control is the same markup with the inner element closed,
+    which must still measure exactly the block.
+    """
+    with pytest.raises(ValueError, match="still OPEN at the end of"):
+        extract_anchors_within(
+            '<div class="toc"><div class="toc-group"><a href="#a">A</a></div>',
+            tag="div",
+            class_token="toc",
+        )
+    # The same shape, closed: the escape and the control differ in ONE end tag, so
+    # this measures the unclosed rule and not something else about the markup.
+    assert extract_anchors_within(
+        '<div class="toc"><div class="toc-group"></div><a href="#a">A</a></div>',
+        tag="div",
+        class_token="toc",
+    ) == [["#a"]], (
+        "the closed form of the unclosed case does not measure the block, so the "
+        "refusal above is not about the missing end tag"
+    )
+    # A block left open at EOF is refused too — the escape needs no inner element.
+    with pytest.raises(ValueError, match="still OPEN at the end of"):
+        extract_anchors_within(
+            '<div class="toc"><a href="#a">A</a>', tag="div", class_token="toc"
+        )
 
 
 def test_the_parsers_recordings_forget_a_document_a_frameset_replaced() -> None:
