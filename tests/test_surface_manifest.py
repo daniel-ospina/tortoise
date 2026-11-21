@@ -29,6 +29,25 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "config" / "surface-manifest.yml"
+
+#: The per-test budget the three long-re-grade rows below declare for themselves.
+#:
+#: `pyproject.toml`'s `[tool.pytest.ini_options] timeout = 300` is what an unmarked item
+#: inherits, and its own comment states the invariant those markers exist to keep: "Every other
+#: file's TOTAL is <=235s, so no unmarked item can reach 300s … A leg that needs a longer single
+#: item must SAY so — `@pytest.mark.timeout(N)` on the test."  These rows break that premise
+#: because the shrink arm re-grades the WHOLE archive: `removal_records()` re-reads and
+#: re-parses every frozen file (~55 s per row, `:8236`), and the three below additionally walk
+#: the manifest twice — measured on an idle box at this head: 124.8 s, 115.2 s, 102.3 s.  One of
+#: them was therefore 42% of the repo-wide budget, and it has already red the suite: a
+#: `pytest tests/test_archive.py tests/test_surface_manifest.py` run (409 tests) failed with ONLY
+#: `test_a_REMOVED_SDK_departure_still_needs_its_FREEZE_on_the_shrink_arm` red, and the
+#: identical command re-run 24 minutes later gave `409 passed, 1 skipped` with that same row at
+#: 124.8 s — pytest-timeout armed on it is reproducible (`-o timeout=100` reds it with
+#: `Failed: Timeout (>100.0s) from pytest-timeout`, inside `archive_surface.expected_block`),
+#: and the elapsed time is the only quantity in these rows that varies with box load.  So the
+#: ceiling is declared rather than left to a 2.4x margin: 600 s is 4.8x the measured cost.
+_LONG_GRADE_TIMEOUT = 600
 RENDERED = ROOT / "docs" / "product" / "mcp-sdk-surface.md"
 CANONICAL = ROOT / "docs" / "product" / "canonical-mcp-tools.md"
 SURFACE_ORDER = ROOT / "config" / "surface-order.yml"
@@ -6002,6 +6021,7 @@ def test_cut_REFUSES_a_dropped_tool_with_no_record(monkeypatch, tmp_path, derive
     )
 
 
+@pytest.mark.timeout(_LONG_GRADE_TIMEOUT)
 def test_a_dropped_tool_still_in_RETIRED_USE_INSTEAD_is_REFUSED_like_check(
     monkeypatch, tmp_path, derived_baseline, capsys
 ):
@@ -8129,6 +8149,7 @@ def test_a_waiver_on_the_wrong_surface_is_still_reported(monkeypatch):
     )
 
 
+@pytest.mark.timeout(_LONG_GRADE_TIMEOUT)
 def test_a_recorded_SDK_rename_is_green_on_the_shrink_arm():
     """Review F1 of PR #14039: a RENAME is the one shape that needs no freeze, and the
     enforcing path had no way to say so.
@@ -8161,6 +8182,7 @@ def test_a_recorded_SDK_rename_is_green_on_the_shrink_arm():
     )
 
 
+@pytest.mark.timeout(_LONG_GRADE_TIMEOUT)
 def test_a_REMOVED_SDK_departure_still_needs_its_FREEZE_on_the_shrink_arm():
     """The other direction: the rename route must not blanket-accept the DEPARTURE map.
 
