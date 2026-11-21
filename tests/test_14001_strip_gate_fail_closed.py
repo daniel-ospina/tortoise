@@ -2069,7 +2069,12 @@ def test_the_control_binds_the_shared_helpers(monkeypatch):
     bare flag was satisfied transitively — measured, reverting BOTH of the control's `served(...)`
     sites to a byte-faithful local copy left the whole item GREEN (`1 passed`), because the
     `folding` sites alone lit `used["env_source"]`. Only a call whose immediate caller is one of
-    the control's code objects (itself or one of its lambdas) counts.
+    the control's code objects counts (`co_consts`-recursive: the body, its lambdas, its nested
+    defs and genexprs — a nested FORWARDER that really calls the helper is a legitimate use).
+    ⛔ AND NOT THE CONTROL'S OWN BODY for `_env_source` (`#14099`, review of `710565ab14`): the
+    live fallback calls arrive from an INSTALLED FAKE only, so an in-body `_env_source(...)` line
+    is a DEAD decoy — measured, reverting both `served(...)` sites AND adding one such line was
+    GREEN before this clause.
     ⛔ NOT a `return`: returning the wiring from a test function makes pytest warn
     (`PytestReturnNotNoneWarning`), and a module-level side channel would outlive the test.
 
@@ -2080,6 +2085,9 @@ def test_the_control_binds_the_shared_helpers(monkeypatch):
     a whitelist of the control's own code objects) also admits the inline fake it is meant to
     refuse — the class this arm closes is the FULL revert, and a single-arm bypass still has to be
     argued in review rather than certified silent.
+    ⛔ AND THE `folding` HALF CANNOT BE NARROWED THE WAY `_env_source` WAS: its legitimate calls
+    come from the control's BODY, so "not the body" would red every real run; the `_env_source`
+    clause exists only because that half's live calls always arrive from a fake.
     """
     real_folding, real_env_source = _folding, _env_source
     control_code = test_the_over_refusal_population_is_itself_pinned.__code__
@@ -2090,7 +2098,8 @@ def test_the_control_binds_the_shared_helpers(monkeypatch):
             if isinstance(const, types.CodeType):
                 yield from _nested_codes(const)
 
-    #: The control itself plus its lambdas — the only frames whose calls count as the control's OWN.
+    #: The control itself plus its lambdas, nested defs and genexprs — the only frames whose calls
+    #: count as the control's OWN use.
     control_codes = frozenset(_nested_codes(control_code))
 
     # A BOOLEAN, deliberately: it cannot go stale the way the counts did (every arm moves a count,
@@ -2103,7 +2112,13 @@ def test_the_control_binds_the_shared_helpers(monkeypatch):
         return real_folding(*args, **kwargs)
 
     def spy_env_source(*args, **kwargs):
-        if sys._getframe(1).f_code in control_codes:
+        caller_code = sys._getframe(1).f_code
+        # ⛔ AND NOT THE CONTROL'S OWN BODY (`#14099`, review of `710565ab14`). This half's LIVE
+        # calls always arrive from an installed FAKE (a nested code object), never from the body,
+        # so an in-body `_env_source(...)` line is a DEAD decoy: measured, the full `served`
+        # revert plus one such line was GREEN. The `folding` spy deliberately has no such clause —
+        # ITS legitimate calls come from the body.
+        if caller_code in control_codes and caller_code is not control_code:
             used["env_source"] = True
         return real_env_source(*args, **kwargs)
 
