@@ -16431,12 +16431,14 @@ class TortoiseSDK:
             write_sink.append(write)
         # ⛔ THE PER-CALL COMMIT SIGNAL, FOR THE ARM THIS CALL ACTUALLY TOOK
         # (#14002 review cycle 7, blocking). The append arm is untouched: a line
-        # was committed to the journal, which is the truth store, so every
-        # pre-existing gate (`_create_point`'s `WriteNotLandedError`,
-        # `_update_point`'s, the evidence fold's, and
-        # `hosted_api._report_narrative_home`'s `journalled`) keeps meaning what
-        # it always meant. `write is None` is not reachable through
-        # `live_write.write` and is answered as LANDED on purpose: a chokepoint
+        # was appended to the journal, so every pre-existing gate
+        # (`_create_point`'s `WriteNotLandedError`, `_update_point`'s, the
+        # evidence fold's, and `hosted_api._report_narrative_home`'s
+        # `journalled`) keeps meaning what it always meant — those gates read
+        # the APPEND, and this comment makes no durability claim of its own
+        # (authority: `docs/durability-posture.md`). `write is None` is not
+        # reachable through `live_write.write` and is answered as LANDED on
+        # purpose: a chokepoint
         # that ever reported nothing must not be able to turn every write into a
         # "not landed" refusal.
         if write is None or write.appended:
