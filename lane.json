@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kprfix-prd-daniel-ospina-tortoise-14060-1795247337-p1036174-5644a924",
+  "_sha": "2684b0dc40ac3972f1aee962dbf356ba0f125709",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/prd-daniel-ospina-tortoise-14060.log"
+    },
+    {
+      "kind": "branch",
+      "value": "fix/11695-e6-review-arms"
+    },
+    {
+      "kind": "sha",
+      "value": "c224498ecce41d17a68b6146b054d2076fb0486d"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/prd-14060"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 25413,
+  "ended_at": 1795272750,
+  "exit_code": 0,
+  "heartbeat_at": 1795272750,
+  "host": "cmux",
+  "issue": null,
+  "kind": "prfix",
+  "lane_id": "cmux.kprfix-prd-daniel-ospina-tortoise-14060-1795247337-p1036174-5644a924",
+  "lease_until": 1795309350,
+  "pid": 1036174,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795247337,
+  "state": "DONE",
+  "tag": "prd-daniel-ospina-tortoise-14060",
+  "worktree": "/home/cmux/tortoise/.worktrees/prd-14060"
+}
