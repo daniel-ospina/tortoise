@@ -519,9 +519,11 @@ def _live_target() -> str | None:
             proj.g.query("RETURN 1")
         except (AttributeError, NameError, TypeError, ImportError):
             # ⛔ same seam one statement over (#14114 class 2, #14125). The arm is a
-            #   BARE `raise`, deliberately: a handler that does work first is not
-            #   read as coverage by the census's `_reraises`, and this path aborts
-            #   collection anyway, so the close below is the unreachable arm's job.
+            #   BARE `raise`, deliberately: the census reads the LAST statement, so a
+            #   handler that does work and STOPS there is not coverage — and this path
+            #   aborts collection anyway, so the close below is the unreachable arm's
+            #   job. (Cleanup-then-`raise` WOULD count; it is only "ends in work, not
+            #   a `raise`" that does not.)
             raise
         except Exception:
             proj.close()

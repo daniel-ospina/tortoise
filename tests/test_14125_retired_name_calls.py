@@ -1910,6 +1910,36 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         f"graded — the import is above the guard, not inside it: {module_scope_door}"
     )
 
+    # 4h. The SAME rule on the OTHER helper branch (skip-gated, not resolver): a
+    #     `skipif`-called helper that calls an own-code name imported at module
+    #     scope. The resolver witness above cannot stand in for this one — at the
+    #     head that added the module set, the resolver branch gained ZERO rows while
+    #     BOTH new roots landed here (`tests/test_cross_lens.py:400`,
+    #     `tests/test_wipe_server.py:32`), so reverting only this branch was a
+    #     silent drop with all eight tests green (review of 0cc63c8de4da, P1).
+    module_scope_door_skipif = roots(
+        """
+        import pytest
+        from tests._live_utils import docker_uri
+
+        def _live():
+            try:
+                docker_uri("tortoise_test_x")
+                return True
+            except Exception:
+                return False
+
+        @pytest.mark.skipif(not _live(), reason="live")
+        def test_live():
+            pass
+        """
+    )
+    assert module_scope_door_skipif == ((6, (), True, False, True),), (
+        "a SKIPIF-called helper reading a module-scope own-code name must be "
+        f"graded too, or its branch's half of the rule is unwitnessed: "
+        f"{module_scope_door_skipif}"
+    )
+
     # 5. The real tree must carry all four shapes, or every assertion above is a
     #    statement about a sample rather than about the code it is meant to guard.
     graded = {row[0] for row in _probe_report()}
