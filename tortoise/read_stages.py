@@ -323,9 +323,17 @@ class ReadStages:
         Empty until the read path has started: before that the interval is
         still OPEN, and publishing a partial sum under a total it does not equal
         is the same false attribution :data:`PRE_HANDLER_PARTS` exists to
-        prevent. Same filter rule as :meth:`spent_ms` (filtered on the UNROUNDED
-        value, not on the rounded one): a part that measured a true ``0.0`` is
-        ABSENT, while one that only ROUNDS to ``0.0`` is published as ``0.0``.
+        prevent.
+
+        Same filter rule as :meth:`spent_ms`, and the SAME conclusion:
+        ``round(0.04, 1)`` is ``0.0``, so the filter asks whether the part
+        accrued ANY time rather than whether that time survived rounding — a
+        sub-0.1 ms part IS published as ``0.0``, and that is deliberate. It is
+        the honest reading here for the same reason it is in ``spent_ms``: the
+        records this table serves are >= 10 s breaches, where a part that rounds
+        to ``0.0`` really did cost effectively nothing. (Filtering the ROUNDED
+        value instead would hide a part that measured non-zero, which is the
+        opposite error.)
         """
         with self._lock:
             if not self._armed:
