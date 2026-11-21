@@ -1484,8 +1484,9 @@ def _folding(
 
     ⛔ THE CONTROL'S *USE* OF THESE HELPERS IS PINNED TOO (`#14099`, review of `5de131e6`). The
     helpers above are measured by `test_the_environment_refusal_is_carried_not_re_synthesised`;
-    whether the CONTROL still BINDS them is measured by `test_the_control_binds_the_shared_helpers`,
-    which asserts the IDENTITY of the two `partial`s the control builds — ⛔ NOT a call count.
+    whether the CONTROL still BINDS and CALLS them is measured by
+    `test_the_control_binds_the_shared_helpers`, which asserts the IDENTITY of the two `partial`s
+    the control builds AND that the spies were reached — ⛔ NOT a call count.
     Counts were the previous design and they went stale TWICE (`13 / 212`, then `15 / 232`, each
     true when measured), because every arm added to the control moves them. Without that arm,
     giving the control its own local pre-F1 fake left the whole file GREEN (95 passed, measured).
@@ -1966,20 +1967,38 @@ def test_the_control_binds_the_shared_helpers(monkeypatch):
     spied name inside the control (measured: a local `served` copy plus one
     `_env_source(outsider_module, …)` line, the very assertion arm (3) above carries, left the arm
     GREEN). The counts themselves also went stale TWICE (`13 / 212`, then `15 / 232`, each true
-    when measured), because every arm added to the control moves them — and a fold's walk has TWO
-    denominators (`24 - len(declared ∩ register)` = 14 for the declared module, `24 - <that
-    module's keys>` = 20 for an outsider), so neither figure can be derived from a formula.
+    when measured), because every arm added to the control moves them — and the control's two
+    folds walk DIFFERENT denominators (`24 - len(declared ∩ register)` = 14 for the declared
+    module, `24 - <that module's keys>` = 20 for the `tortoise.api` outsider it happens to pick —
+    every other outsider walks its own key count, 22 for `tortoise.consistency`, 23 for
+    `tortoise.hosted_backup`), so neither figure can be derived from a formula.
     So this arm reads the CONTROL'S OWN FRAME and asserts that the two `partial`s it built there
-    have the SPY as their `.func`. ⛔ NOT a `return`: returning the wiring from a test function
-    makes pytest warn (`PytestReturnNotNoneWarning`), and a module-level side channel would
-    outlive the test. An identity cannot be supplied by an extra call, a rename, or a local copy.
+    have the SPY as their `.func` — AND that the spies were actually CALLED (`#14099`, review of
+    `2c7b5a54ca`, P2). Those are two different properties and identity alone was satisfiable
+    without either: bindings left in place as DEAD CODE beside renamed pre-F1 copies at every
+    call site satisfied every identity assertion (measured — the full F2 revert, 96 passed).
+    ⛔ NOT a `return`: returning the wiring from a test function makes pytest warn
+    (`PytestReturnNotNoneWarning`), and a module-level side channel would outlive the test.
+
+    ⛔ DECLARED RESIDUAL — ONE ARM THAT INSTALLS ITS OWN INLINE PRE-F1 FAKE is NOT covered here
+    (measured at `2c7b5a54ca`: the control's bindings stay live and used by the other arms, so
+    both the identity and the use-flag are satisfied, 96 passed). Covering it needs per-arm
+    identity, and every cheap instrument for that (a fake tag propagated through each
+    `monkeypatch.setattr`, or a whitelist of the control's own code objects) also admits the
+    inline fake it is meant to refuse — the class this arm closes is the FULL revert, and a
+    single-arm bypass still has to be argued in review rather than certified silent.
     """
     real_folding, real_env_source = _folding, _env_source
+    # A BOOLEAN, deliberately: it cannot go stale the way the counts did (every arm moves a count,
+    # nothing moves "was the shared helper reached at all").
+    used = {"folding": False, "env_source": False}
 
     def spy_folding(*args, **kwargs):
+        used["folding"] = True
         return real_folding(*args, **kwargs)
 
     def spy_env_source(*args, **kwargs):
+        used["env_source"] = True
         return real_env_source(*args, **kwargs)
 
     monkeypatch.setattr(sys.modules[__name__], "_folding", spy_folding)
@@ -1989,9 +2008,14 @@ def test_the_control_binds_the_shared_helpers(monkeypatch):
     bound: dict[str, object] = {}
 
     def tracer(frame, event, arg):
-        if frame.f_code is control_code:
-            bound["folding"] = frame.f_locals.get("folding")
-            bound["served"] = frame.f_locals.get("served")
+        # ⛔ TRACE THE CONTROL ONLY, and return `None` for every other frame (`#14099`, review of
+        # `2c7b5a54ca`, P3). Returning `tracer` unconditionally made the interpreter call it for
+        # EVERY frame in the process: measured, this item went 95 s -> 133-150 s against the
+        # suite's 300 s per-item cap, for a capture that only ever reads one frame.
+        if frame.f_code is not control_code:
+            return None
+        bound["folding"] = frame.f_locals.get("folding")
+        bound["served"] = frame.f_locals.get("served")
         return tracer
 
     previous_trace = sys.gettrace()
@@ -2000,6 +2024,14 @@ def test_the_control_binds_the_shared_helpers(monkeypatch):
         test_the_over_refusal_population_is_itself_pinned(monkeypatch)
     finally:
         sys.settrace(previous_trace)
+
+    # ⛔ BOUND IS NOT USED. Without this, the FULL F2 revert passes: keeping the two `partial`s as
+    # dead code while every call site uses a renamed local copy satisfies the identity assertions
+    # below (measured at `2c7b5a54ca`: 96 passed).
+    assert used["folding"] and used["env_source"], (
+        "the control BUILDS partials over the shared helpers but never CALLS one of them, so the "
+        "dependencies are decorative and a local re-implementation is doing the work: "
+        f"used={used}")
 
     # ⛔ `.func` IS THE WHOLE PIN. The control builds `partial(_folding, …)` / `partial(_env_source,
     # …)` in its own body, so if it still delegates, the object it bound has the SPY as target.
