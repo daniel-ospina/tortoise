@@ -104,14 +104,16 @@ produced the `96 of 218` this header carried before the `#13124` review**, which
 naming "a file that does not exist at `ccb49741b2ec`" when in fact all 31 files exist there** and which
 was itself measured false; a range cite counts once, by its **start** line), which dedupes the **345** as-written spellings to 234 — **111**
 collisions — each pair compared as `git show <head>:<path> | sed -n '<N>p'` against the pin, text for
-text; **all 224 comparable ones resolve at BOTH heads** — every written path resolves to a module that
-exists at `ccb49741b2ec` — and **the ten that are NOT comparable are this branch's own**, each named at the address this
-document writes for it: `sdk.py:57951`, `:58099` (the `entity_type="event"` FTS call), `:58315`/`:58317` (the session-detail
+text; **all 223 comparable ones resolve at BOTH heads** — every written path resolves to a module that
+exists at `ccb49741b2ec` — and **the eleven that are NOT comparable are addresses written at a head past the pin's EOF** — ten of
+them this branch's own, the eleventh moved past the pin by `main`'s `#14169` and re-pointed here — each
+named at the address this document writes for it: `sdk.py:57951`, `:58099` (the `entity_type="event"` FTS call), `:58315`/`:58317` (the session-detail
 read's `proj.g.query(` call and its column list), `sdk.py:58966` (the `:Source` traversal), `:61999`/`:62019` (the `:Meta` read and
-its `_config_reset_state` delegate), `search_engine.py`'s `:7196`/`:7198`, and `hosted_api.py`'s `:50935` (the `s.actor_user_id = $uid`
+its `_config_reset_state` delegate), `search_engine.py`'s `:7196`/`:7198`, `mcp_server.py`'s `:11590` (the `:Tag` traversal §2.5's row
+quotes — the ONE of the eleven that `main` moved, not this branch), and `hosted_api.py`'s `:50935` (the `s.actor_user_id = $uid`
 condition) — every one of their written lines sits past the pin's copy of its file
-(`git show ccb49741b2ec:tortoise/sdk.py | wc -l` -> `56415`; `…/search_engine.py` -> `7071`; `…/hosted_api.py` -> `49851`), and all ten
-were re-derived at a head that has since grown. So the drift is **131 of the 224 comparable, plus seven of those ten pairs** (the
+(`git show ccb49741b2ec:tortoise/sdk.py | wc -l` -> `56415`; `…/search_engine.py` -> `7071`; `…/mcp_server.py` -> `11466`; `…/hosted_api.py` -> `49851`), so all eleven
+were re-derived at a head the pin predates. So the drift is **130 of the 223 comparable, plus eight of those eleven pairs** (the
 three that do not exist at `main` either are `sdk.py`'s `:61999`/`:62019` and `hosted_api.py`'s `:50935`), and
 the ratio below counts them rather than pretending it compares them. ⛔ **That is a fact about the drift, not a licence to
 re-derive from a symbol.**
@@ -232,9 +234,11 @@ way, because each of the five already carries its pair from §2.5. A bare siblin
 agrees: `_REDEFINED_13854` pins each of these four by content at ONE occurrence of the
 §2.5 token, so a second one-token spelling would red it. Each was
 opened at this head, and ⛔ **none of them
-opens at the pin**: at `ccb49741b2ec` all five of those numbers
-read an unrelated statement (`git show ccb49741b2ec:tortoise/sdk.py | sed -n '31551p;31533p;24513p;24857p'`,
-and `…:tortoise/mcp_server.py | sed -n '11281p'`), so the head these five belong to is this one, and a
+opens at the pin**: at `ccb49741b2ec` the four `sdk.py` numbers
+read an unrelated statement (`git show ccb49741b2ec:tortoise/sdk.py | sed -n '31551p;31533p;24513p;24857p'`),
+and the fifth has **no line there at all** — `git show ccb49741b2ec:tortoise/mcp_server.py | wc -l` -> `11466`, so
+`:11590` is past the pin's EOF and the address that list carried at the pin was `:11281`, which reads an unrelated
+statement (`git show ccb49741b2ec:tortoise/mcp_server.py | sed -n '11281p'`) — so the head these five belong to is this one, and a
 reader sent to the pin would have found a different line at every one of them — which is why they are
 enumerated here rather than left to the paragraph's own say-so. ⚠️ **And nine MORE addresses this revision writes at THIS head were in neither list — this PR's own review found them — so they are enumerated here now**: `live.py`: `:667` (the `EPISTEMIC_LABELS` tuple the EP walk is swept per label from; the pin's `:667` is a docstring line), `sdk.py`: `:15787` (the `MATCH (m:GraphEventMeta) RETURN m.first_seq` watermark arm; the pin's `:15787` is a comment), `hosted_backup.py`: `:844` (the `max(m.last_seq), max(m.first_seq)` read, the pin's line being an `if not rows` guard) and `:916` (the `MERGE (m:GraphEventMeta) SET …` restore writer, the pin's line being a bare `)`), and — from §2.6, whose row this revision re-pointed to this head — `hosted_backup.py:892` (the `max(e.seq), min(e.seq)` aggregate; the pin's `:892` is `max_seq, min_seq = (rows[0] if rows else (None, None))`), `hosted_backup.py:1333` and `hosted_backup.py:1534` (the two whole-graph export scans, the pin's `:1316` being `dropped_vectors += 1` and its `:1517` a blank line). and §6.3's `sdk.py`: `:15958-15962` (the `_emit_event` docstring's JSONL contract — the pin's `:15958` is unrelated prose) and `:3777` (the turn hard delete that emits `PointRetracted`; the pin's `:3777` is an empty line). All nine are pinned by content in `tests/test_12184_shifted_cites.py`, which is what stops them becoming the next unguarded promise. ⛔ **One class this revision writes is NOT head-relative, and is pinned anyway — do not read the sentence above as covering it.** The five addresses in this revision's new §2.2 `:Source` reader row and in row 13 — `session_source_prose_migration.py`: `:218-223` (the `_SOURCE_ROWS` census read `find_session_sources_carrying_prose` issues), `:1263-1268` (the `_HITS_ROWS` read — keyed on the urls the FTS leg RETURNED, so it is the follow-up to `run_fts_query` and not the FTS read itself), `:274-281` (the `_REPAIR_PAIR` block, a `SET` that READS the node) with its inner `:277-279` (the `AND coalesce(s.summary,'')=$old_sum … SET s.summary=$sum` pair row 13 quotes), and `:1292-1300` (`_CONTROL_LEXICON_ROWS`, the prefix predicate over exactly this episodic population) — **all open at the pin `ccb49741b2ec` exactly as they open here**, because `tortoise/session_source_prose_migration.py` is the SAME FILE at both heads (`git rev-parse ccb49741b2ec:tortoise/session_source_prose_migration.py HEAD:tortoise/session_source_prose_migration.py` → one blob, `77c86b24e5`). They need **no head declaration**: what was missing is the GUARD, not the head. They are named here once, only so a reader is not left to the default on a cite this revision wrote, and each is pinned by content in `tests/test_12184_shifted_cites.py` — because a cite that resolves at the pin is still UNPINNED, and the next merge that inserts into that file moves all five with nothing red. ⛔ **A `file:line` in NEITHER list has an UNDECLARED head: the pin
 `ccb49741b2ec` is where the census USUALLY wrote it, not where it provably IS.** Open it there first, but
