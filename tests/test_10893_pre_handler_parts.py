@@ -97,6 +97,48 @@ def test_the_parts_sum_to_pre_handler_exactly(monkeypatch):
     assert sum(parts.values()) == pytest.approx(spent["pre_handler"], abs=0.2)
 
 
+def test_the_DERIVED_stage_cannot_be_marked(monkeypatch):
+    """``pre_handler`` is derived, never marked — the sum survives someone typing it.
+
+    ⛔ THE INVARIANT WAS BREAKABLE THROUGH THE PUBLIC VOCABULARY (#14086 review
+    F5). ``pre_handler`` IS in ``STAGES`` — readers group on it and both
+    ``spent()`` and the breach row publish it — so ``mark()``'s closed-vocabulary
+    guard ACCEPTED the name. A first ``mark("pre_handler")`` arms and banks the
+    interval correctly, but it then leaves ``_stage == "pre_handler"``, so the
+    NEXT mark takes ``mark()``'s ``else`` branch and adds a SECOND interval to
+    ``_spent["pre_handler"]`` that no part covers: ``sum(parts) <
+    pre_handler`` while ``snapshot()`` publishes both as if they reconciled.
+    That is precisely the drift this file's item 1 exists to prevent, reached
+    without touching the accumulation.
+
+    Nothing called it (measured: no ``mark("pre_handler")`` call site in the
+    tree), which is why the row drives the mark ITSELF instead of waiting for a
+    caller: the claim is "by construction", and a construction that depends on
+    nobody typing a name is not one.
+
+    Non-vacuity: deleting the ``STAGE_PRE_HANDLER`` refusal in ``mark()`` reds
+    this row and only this row — ``sum(parts)`` then reads 10250 against a
+    ``pre_handler`` of 10750.
+    """
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(rs.time, "monotonic", lambda: clock["t"])
+
+    stages = begin(started_at=990.0)
+    clock["t"] += 0.25
+    stages.note("dispatch")
+    # The shape the vocabulary accepts and the decomposition cannot survive.
+    stages.mark(rs.STAGE_PRE_HANDLER)
+    clock["t"] += 0.5
+    stages.mark(STAGE_EMBED_GET)
+
+    spent = stages.spent_ms()
+    parts = stages.parts_ms()
+    assert parts, "the read start must still publish a decomposition"
+    assert sum(parts.values()) == pytest.approx(spent["pre_handler"], abs=0.2), (
+        "marking the DERIVED stage opened a second `pre_handler` interval that "
+        "no part covers — the parts no longer sum to the total")
+
+
 def test_a_request_with_no_notes_still_decomposes():
     """The remainder is published, under its own honest name."""
     stages = begin()

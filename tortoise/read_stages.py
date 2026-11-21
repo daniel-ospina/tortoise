@@ -259,6 +259,21 @@ class ReadStages:
             # a stage no reader groups on. Refuse quietly — this is an instrument
             # on the read path and must never raise into a request.
             return
+        if stage == STAGE_PRE_HANDLER:
+            # ⛔ `pre_handler` is DERIVED, never marked: it is the interval from
+            # arrival to the first mark, closed by the arming branch below. It is
+            # in `STAGES` (readers group on it, and `spent()` and the breach row
+            # publish it), so the guard above ACCEPTS the name — and marking it
+            # would break the one invariant this decomposition rests on. A first
+            # `mark("pre_handler")` arms and banks the interval correctly, but it
+            # then leaves `_stage == "pre_handler"`, so the NEXT mark takes the
+            # `else` branch and adds a SECOND interval to `_spent["pre_handler"]`
+            # that no part covers: `sum(parts) < pre_handler` while `snapshot()`
+            # publishes both as if they reconciled. Nothing calls it today, which
+            # is exactly why it is worth one line — the "parts sum by
+            # construction" claim should not depend on nobody ever typing it
+            # (#14086 review F5).
+            return
         now = time.monotonic()
         with self._lock:
             if stage == self._stage:
