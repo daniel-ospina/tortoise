@@ -1585,11 +1585,15 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
     # itself unpinned: reverting it to `key.startswith(...)` left this file green because no
     # `tortoise.sdk_v2` key exists in the register today). A synthetic key makes the rule
     # measurable — a module that merely STARTS with the declared name must not inherit it.
+    # ⛔ THE CAUSE IS A REAL, EXEMPT-WORTHY SHAPE (`#14099` cycle-5 F1): with a cause the origin gate
+    # REFUSES (`ImportError("part of the declared name")`, naming no module), the arm would pass
+    # under the prefix mutant too, because the exemption would be denied for the wrong reason.
     neighbour = f"{declared_module}_v2::_emit"
     monkeypatch.setattr(register, "EMBED_WRITER_CLASSES", frozenset({neighbour}))
     monkeypatch.setattr(
         strip, "_module_source",
-        folding(neighbour.partition("::")[0], ImportError("part of the declared name")))
+        folding(neighbour.partition("::")[0], ModuleNotFoundError(
+            "No module named 'prometheus_client'", name="prometheus_client")))
     assert _writer_register_population()["stray"] == [neighbour], (
         "a module that merely starts with the declared name inherited its exemption")
 
