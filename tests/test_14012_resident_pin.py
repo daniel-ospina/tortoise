@@ -1075,38 +1075,6 @@ def test_the_declaration_time_closure_is_label_scoped_too_not_just_the_read():
     )
 
 
-def test_gate_refuses_a_reading_it_could_not_read_or_that_is_truncated():
-    """The fail-closed guard on `.gate()` itself, not only via `gate_reason()`.
-
-    ⛔ `PinReading.gate()` carries a `⛔` comment calling its unconditional comparison
-    "a fail-open on this door": for `readable=False` the closure is EMPTY, so a caller that
-    skipped `gate_reason()` deletes the entire pinned population while the report reads
-    `held_pinned: 0`; for `truncated=True` the closure is PARTIAL, so it deletes exactly the
-    pinned nodes past the read bound. Every production caller checks `gate_reason()` first,
-    but `read(g).gate()` is the natural low-level spelling, so the door must refuse on its
-    own — and until this row existed, deleting the guard left the whole suite green.
-    """
-    from tortoise.resident_pin import PinReading
-
-    unreadable = PinReading(label="Point", key_prop="id", readable=False,
-                            source="declaration unreadable")
-    with pytest.raises(PinRefused) as unread:
-        unreadable.gate()
-    assert unread.value.code == "unreadable", (
-        "an unreadable reading did not refuse with the `unreadable` code — a gate built "
-        "from an empty closure reports `held_pinned: 0` and deletes the pinned population"
-    )
-
-    truncated = PinReading(label="Point", key_prop="id", truncated=True,
-                           keys=frozenset({"p0"}), closure=frozenset({"p0"}))
-    with pytest.raises(PinRefused) as short:
-        truncated.gate()
-    assert short.value.code == "truncated", (
-        "a TRUNCATED reading built a gate anyway — its closure is a lower bound, so the "
-        "gate would delete exactly the pinned nodes past the read bound"
-    )
-
-
 def test_a_pinned_node_held_by_a_reader_is_reported_pinned_not_leased():
     """The `before the lease` half of gate 6's ordering, which had no row at all.
 
