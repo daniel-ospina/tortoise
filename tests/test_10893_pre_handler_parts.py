@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import ast
 import os
+import threading
 from pathlib import Path
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
@@ -576,3 +577,73 @@ def test_the_log_suffix_carries_the_decomposition():
     assert log_suffix({}) == ""
     assert "pre_handler_parts" not in log_suffix(
         {"stage": "retrieval", "stages_ms": {"retrieval": 10.0}})
+
+
+# ── 4b. one published view is ONE observation ───────────────────────────────
+
+class _CountingLock:
+    """A ``threading.Lock`` that records how many times it was ACQUIRED.
+
+    A lock is the instrument here, not a clock: the defect is "three readings
+    taken at three different instants", so the count of acquisitions is the
+    observable that separates the fixed construction from the broken one
+    without a race the test would have to win.
+    """
+
+    def __init__(self) -> None:
+        self._inner = threading.Lock()
+        self.acquired = 0
+
+    def __enter__(self):
+        self.acquired += 1
+        return self._inner.__enter__()
+
+    def __exit__(self, *exc):
+        return self._inner.__exit__(*exc)
+
+
+def test_snapshot_is_one_lock_acquisition_and_one_consistent_observation(monkeypatch):
+    """``snapshot()`` must not publish a decomposition the total does not contain.
+
+    ⛔ THE DEFECT (#14086 review, P2). ``snapshot()`` composed ``current()``,
+    ``spent_ms()`` and ``parts_ms()`` — three accessors, each taking ``_lock``
+    separately. A ``mark()`` landing between the second and the third call
+    published ``pre_handler_parts`` under a ``stages_ms`` that did not contain
+    ``pre_handler``: a decomposition with no total, and the exact drift this
+    file's item 1 ("the sum, by construction") exists to prevent — reached
+    without touching the accumulation. The ``note()``/``mark()`` cursor is shared
+    by design, so the window is not hypothetical: it opens on the first mark of
+    every read the timeline observes.
+
+    Non-vacuity: composing the three accessors again (the pre-fix body) makes
+    the first assertion read 3 acquisitions instead of 1, and the containment
+    assertion can then publish parts whose total is absent.
+    """
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(rs.time, "monotonic", lambda: clock["t"])
+
+    stages = begin(started_at=990.0)
+    clock["t"] += 0.25
+    stages.note("dispatch")
+    clock["t"] += 0.5
+    stages.mark(STAGE_EMBED_GET)   # closes `pre_handler`, banks the remainder
+    clock["t"] += 0.25
+    stages.mark(rs.STAGE_RETRIEVAL)
+
+    stages._lock = _CountingLock()
+    before = stages._lock.acquired
+    view = stages.snapshot()
+
+    assert stages._lock.acquired - before == 1, (
+        "snapshot() took the lock "
+        f"{stages._lock.acquired - before} times — the three readings of one "
+        "timeline were not one observation (#14086 review, P2)")
+    # …and the published view is internally consistent: every part belongs to a
+    # total the same view publishes.
+    assert view["pre_handler_parts"], "the decomposition must still be published"
+    assert "pre_handler" in view["stages_ms"], (
+        "published `pre_handler_parts` with no `pre_handler` total — the "
+        "decomposition has nothing to add up to")
+    assert (sum(view["pre_handler_parts"].values())
+            == pytest.approx(view["stages_ms"]["pre_handler"], abs=0.2)), (
+        "the parts do not sum to the total they were published beside")

@@ -233,6 +233,23 @@ PRE_HANDLER_PARTS: tuple[str, ...] = (
 PRE_HANDLER_PART_SET = frozenset(PRE_HANDLER_PARTS)
 
 
+def _published(values: dict[str, float]) -> dict[str, float]:
+    """Round a reading for publication, omitting entries that accrued no time.
+
+    ONE definition, because both of its rules are load-bearing and they were
+    previously spelled twice (``spent_ms`` and ``parts_ms``) — the drift risk
+    this module's "one accumulation" rule exists to remove:
+
+    * ROUND to 0.1 ms for the wire, and
+    * FILTER ON THE UNROUNDED VALUE. ``round(0.04, 1)`` is ``0.0``, so filtering
+      the rounded number would hide an entry that measured non-zero, which is
+      the opposite error from publishing a phantom zero. An entry that accrued
+      SOME time and still rounds to ``0.0`` is published as ``0.0``: on the
+      >= 10 s records this table serves, that really did cost nothing.
+    """
+    return {name: round(ms, 1) for name, ms in values.items() if ms > 0.0}
+
+
 class ReadStages:
     """The stage timeline of ONE read request, shared by reference.
 
@@ -380,7 +397,7 @@ class ReadStages:
             if not self._armed:
                 return {}
             parts = dict(self._parts)
-        return {name: round(ms, 1) for name, ms in parts.items() if ms > 0.0}
+        return _published(parts)
 
     # ── reading (the transport seam, at the deadline) ───────────────────────
 
@@ -415,7 +432,7 @@ class ReadStages:
         """
         with self._lock:
             spent = dict(self._spent)
-        return {name: round(ms, 1) for name, ms in spent.items() if ms > 0.0}
+        return _published(spent)
 
     def snapshot(self) -> dict:
         """``{"stage": …, "stages_ms": {…}}`` — the TELEMETRY publication shape.
@@ -423,9 +440,21 @@ class ReadStages:
         One construction site, so the analytics props and the log line cannot
         drift into two shapes. ⛔ This is NOT the shape that goes on the wire —
         see :meth:`wire_snapshot` for why the refusal body is stricter.
+
+        ⛔ ONE LOCK ACQUISITION, not three (#14086 review, P2). Composing
+        :meth:`current` + :meth:`spent_ms` + :meth:`parts_ms` took ``_lock`` once
+        per accessor, so a ``mark()`` landing between the second and the third
+        call published ``pre_handler_parts`` under a ``stages_ms`` that did not
+        contain ``pre_handler`` — a decomposition with no total, built from
+        three readings of one timeline that were never one observation. The
+        three readings below are taken under a SINGLE acquisition; the
+        accessors keep their own for callers that want one reading only.
         """
-        view = {"stage": self.current(), "stages_ms": self.spent_ms()}
-        parts = self.parts_ms()
+        with self._lock:
+            stage = self._stage
+            spent = _published(self._spent)
+            parts = _published(self._parts) if self._armed else {}
+        view = {"stage": stage, "stages_ms": spent}
         if parts:
             # #10893 second cycle: the decomposition rides the SAME snapshot, so
             # the analytics row and the breach log line carry one shape. ABSENT
