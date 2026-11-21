@@ -341,9 +341,12 @@ SELECTED = [
     # closes this class changes these rows deliberately, not by accident.
     ("is the export customers requested archived", "ended", "is_copula"),
     # ── …and the class the withdrawn anchor had silently broken (round-21 review, P1) ──
-    # `-ed`-ending HEAD NOUNS and DEGREE WORDS inside the subject all routed at HEAD~1 and
-    # returned `signal is None` after round 20. Both are pinned here so the next widening
-    # reds instead of costing them quietly.
+    # `-ed`-ending HEAD NOUNS and DEGREE WORDS inside the subject all routed at
+    # `e84612d43f` (the revision BEFORE round 20) and returned `population=None,
+    # signal=None` after round 20. Both are pinned here so the next widening reds instead
+    # of costing them quietly. ⛔ THE BASELINE IS `e84612d43f`, NOT HEAD~1 — HEAD~1 IS round
+    # 20, the commit that refuses them (round-22 review, P3); a baseline a reader cannot
+    # reproduce reads as a fix that changed nothing.
     ("is the feed archived", "ended", "is_copula"),
     ("is the seed archived", "ended", "is_copula"),
     ("is the migration seed archived", "ended", "is_copula"),
@@ -353,6 +356,17 @@ SELECTED = [
     ("is our most recent plan retired", "ended", "is_copula"),
     ("is the data all archived", "ended", "is_copula"),
     ("is our report all archived", "ended", "is_copula"),
+    # ── and the DEGREE/NEGATION-adverb tail (round-22 review, P2) ────────────────
+    # A determiner-vocabulary word followed by `no longer` / `any longer` / `all but` /
+    # `most recent` is still ONE noun phrase, not a second NP. Without position rule (c)
+    # these were SILENT while the semantically identical `is the export not archived`
+    # ROUTED — an internally inconsistent pair with no notice on the refused half.
+    ("is the export no longer archived", "ended", "is_copula"),
+    ("is our plan no longer retired", "ended", "is_copula"),
+    ("is the report any longer archived", "ended", "is_copula"),
+    ("is the invoice no longer cancelled", "ended", "is_copula"),
+    ("is the export all but archived", "ended", "is_copula"),
+    ("is the export most recent archived", "ended", "is_copula"),
 ]
 
 
