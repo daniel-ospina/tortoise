@@ -1001,9 +1001,55 @@ SWEEP_NAMES = 66
 #: `:141`, `:147`, `:154`). The count was right and the attribution in that finding was incomplete —
 #: recorded, not adopted, and still not promoted into a row decomposition this pin does not claim.
 #: `--check` on this tree: exit 0, `typed references still pointing at a public name: 0`.
+#:
+#: ⛔ MERGED `origin/main` at `ba0eab1d86` — measured on THAT merge tree with `--repin`, never
+#: combined from the two sides' figures: it printed `(11837, "59e8f90d787a0cf8")`. `--report --base 28ca66878d… --top 5000` reads "UNTYPED receivers NOT swept
+#: (the visible edge): 11837", `proj.g.query` 3642 and `g.query` 1492 — this branch's OWN rows,
+#: carried unchanged through the merge — and NO `create_subject` residue row anywhere (the rename
+#: map still lists `create_subject → _create_subject`, which is the map, not a residue), so the 11
+#: rows `main`'s seed-surface door rename removed are the whole delta from this branch's pre-merge
+#: 11848. `11848 − 11 = 11837` reconciles the two; it is a CROSS-CHECK of the measurements, never
+#: the evidence for the pin.
+#:
+#: ⛔ MERGED `origin/main` AGAIN, at `05d218fcaf` (the base had moved past `ba0eab1d86`): THIS is
+#: the pin, and it is `--repin`'s output on THIS tree — `(11835, "891187f5a4636487")` — never the
+#: previous merge's 11837 carried forward. ⛔ THE −2 IS ATTRIBUTED BY A ROW-BY-ROW DIFF, not by
+#: arithmetic: `--report --base 28ca66878d… --top 5000` was run in a detached worktree at the
+#: pre-merge head `b18b89e7` AND on this tree, both row sets sorted and diffed, and EXACTLY ONE row
+#: differs — `create_point (unexpected span)` **2 → 0**. That row is `main`'s own between
+#: `ba0eab1d86` and `05d218fcaf` — **#14129**, which re-pointed exactly those two arm-2 controls
+#: (`tools/measure_13436_write_costs.py`, `sdk.create_point(` → `sdk._create_point(`) — not this
+#: branch's: this branch adds no row here and removes none. No other row differs, so no shape
+#: was absorbed in the other direction. `11837 − 2 = 11835` is a CROSS-CHECK of that measurement,
+#: never its evidence. `--check` exits 0 on this tree:
+#: `typed references still pointing at a public name: 0`.
+#:
+#: ⛔ RE-PINNED FROM `main`'s DRIFT, not by a change on this branch: `f9f480a55ab3` (#14164, the
+#: #13094 change-feed reader census + measured residency) added untyped `Graph` receivers and
+#: re-pinned nothing, so `--check` reds on `origin/main` `69908d006b3d` itself — measured with
+#: `--repin` in a detached worktree at that commit: `(11843, "6aed5368ffa10513")`, the SAME pair
+#: this branch's tree prints, which is why it is the branch that is red rather than the change
+#: (its diff is `docs/infra-runbook.md` + `tests/test_fly_secret_drift.py` and adds no row).
+#: THE +8 IS ATTRIBUTED BY MEASUREMENT, NOT ARITHMETIC: `--repin` was run in one detached worktree
+#: at `2c0d66e2ec07` (the previous pin's commit) → `(11835, "891187f5a4636487")`, at
+#: `dc92b0eecc15` → the same, and at `f9f480a55ab3` → `(11843, "6aed5368ffa10513")`, so exactly
+#: ONE commit moved it; and `--report --base 28ca66878d… --top 5000` was run at the pre-move commit
+#: AND at `f9f480a55ab3`, both row sets sorted and diffed — EXACTLY TWO rows differ,
+#: `g.query` 1492 → 1499 and `proj.g.query` 3642 → 3643, with the row SHAPE set unchanged on both
+#: sides (858 rows). Both are FalkorDB `Graph` receivers, which is this sweep's documented edge (a
+#: `Graph` is never the SDK), so no shape was absorbed and no defect is hidden — the direction the
+#: pin exists to catch is a NEW shape, and there is none. `--check` exits 0 on this tree after the
+#: re-pin, with `typed references still pointing at a public name: 0`.
+#: ── RE-CUT AT THE TENTH MERGE TREE (`#13998` × `main` `72c104bcbb`) ───────────────
+#: ⛔ BOTH SIDES' RECORDS ARE KEPT VERBATIM ABOVE — every block is true of the tree it names, and a
+#: reader re-deriving this pin needs the whole chain. Neither side's figure is combined into this
+#: one: the pair below is `--repin`'s output on THIS merged tree, and nothing else.
+#: It prints **(11852, '52e4a15116d6f32b')** — the SAME pair as the ninth merge tree, and that is a
+#: measurement rather than a carry: the digest is over the whole `row -> count` multiset, so an
+#: identical digest is an identical residue SET, which says `main`'s `69908d006b..72c104bcbb` commits
+#: (the `reap-redislite-orphans` rewrite, the platform-gated node-id list, the `.env`/runbook edits)
+#: add and remove NO untyped-receiver row. `--check` exits 0 on this tree.
 SWEEP_RESIDUE = (11852, '52e4a15116d6f32b')
-
-
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

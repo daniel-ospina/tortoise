@@ -259,7 +259,10 @@ def _residue_block() -> str:
     sentence claiming it was not typed. A published number that nothing re-derives is the defect class
     this repo has spent a dozen commits closing; the answer here is to publish none. What makes the arms
     fail is not a length literal but THREE PHRASE ANCHORS pinned at three different depths in the run,
-    so a truncation anywhere above the pin reds one of them.
+    so a truncation anywhere above the pin reds one of them. ⛔ AND THE HAZARD IS MEASURED, NOT
+    HYPOTHETICAL (`main`, #14188): `#14086` left ONE BLANK LINE inside the run and it silently shrank
+    to a fraction of itself until the #14188 repair — which is exactly why the extent is graded by
+    anchors and by the reflow arm below, and why no figure is published to rot.
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
     and the residue section's prose is contiguous all the way up to its opening sentence — so
