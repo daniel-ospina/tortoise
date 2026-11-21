@@ -52,7 +52,7 @@ look harmless. The day a CLEAN parity census exists for the graph being swept, t
 populates and this executor becomes reachable without a second decision — record readiness
 is not the trigger, and this header said it was until #11709 corrected it.
 
-⛔ FIVE INDEPENDENT GATES, and each one alone refuses
+⛔ SIX INDEPENDENT GATES, and each one alone refuses
 -----------------------------------------------------
 1. **The census** — the verdict must be in the allow-list ``{"PLAN", "CLEAN"}``.
    ⛔ An ALLOW-LIST, not "not refused": ``refused`` is True only for
@@ -86,6 +86,15 @@ is not the trigger, and this header said it was until #11709 corrected it.
    re-checks the binding at the last hop instead of trusting the caller to have kept
    the assessment and the handle together. A handle that names no graph, or a
    different one, is a REFUSAL.
+6. **The pin** (#14012) — a candidate the caller's ``pinned`` predicate reports as
+   resident is NEVER deleted, whatever the selector offered. Like the record probe
+   this is a SEAM, not a policy: what is pinned belongs to the user's declaration
+   (``tortoise/resident_pin.py``), and this module only asks. ⛔ It is checked BEFORE
+   the lease and BEFORE the record probe, because a pin is the one answer the score
+   may not overrule, and a node reported as "pinned" must not be reported as held for
+   a reader or for an unservable record instead. A predicate that RAISES holds the
+   node back: *could not ask* and *not pinned* are opposite findings, and the safe
+   direction is the one that does not delete.
 
 DRY RUN IS THE DEFAULT. ``dry_run=True`` returns the plan — which nodes, in which
 order, and which were held back and why — and emits **no** mutating statement. It
@@ -410,6 +419,20 @@ class EvictionReport:
     deleted: tuple[Candidate, ...] = ()
     skipped_record_cannot_serve: tuple[Candidate, ...] = ()
     skipped_leased: tuple[Candidate, ...] = ()
+    #: #14012 — nodes held back because the caller's ``pinned`` predicate reported them
+    #: resident. Its own list, not folded into either neighbours: a pinned node is held
+    #: by the USER's declaration, and reporting it as "the record cannot serve it" or
+    #: "a reader holds it" would send the next operator to widen a population or drain a
+    #: lease — neither of which is the answer (unpin it, or raise the pin budget).
+    skipped_pinned: tuple[Candidate, ...] = ()
+    #: #14012 — nodes held back because the PIN PREDICATE COULD NOT ANSWER (it raised),
+    #: which is a different fact from "the user pinned this" and gets a different
+    #: remedy. ⛔ Folding the two into ``skipped_pinned`` told an operator to "unpin some
+    #: of them, or raise TORTOISE_PIN_MAX_NODES" for nodes that were never established as
+    #: pinned — an instruction that cannot clear the state, i.e. the report asserting a
+    #: fact it does not have. The delete DECISION is unchanged (both hold the node back);
+    #: only what the report claims is split.
+    skipped_pin_unanswerable: tuple[Candidate, ...] = ()
     #: ``None`` — not ``0`` — where nothing was measured. A monitor that reads a
     #: missing measurement as a healthy zero is the defect this seam exists to close.
     nodes_before: int | None = None
@@ -470,6 +493,8 @@ class EvictionReport:
             "byte_ceiling_still_exceeded": over_byte_ceiling,
             "held_record_cannot_serve": len(self.skipped_record_cannot_serve),
             "held_leased": len(self.skipped_leased),
+            "held_pinned": len(self.skipped_pinned),
+            "held_pin_unanswerable": len(self.skipped_pin_unanswerable),
             "delete_unverified": self.delete_unverified,
             # ⛔ `None` = NOT APPLICABLE, `False` = NEEDED AND FAILED. Collapsing the
             # two would let a failed invalidation read as a clean pass.
@@ -491,6 +516,10 @@ class EvictionReport:
                 c.as_dict() for c in self.skipped_record_cannot_serve
             ],
             "skipped_leased": [c.as_dict() for c in self.skipped_leased],
+            "skipped_pinned": [c.as_dict() for c in self.skipped_pinned],
+            "skipped_pin_unanswerable": [
+                c.as_dict() for c in self.skipped_pin_unanswerable
+            ],
         }
 
 
@@ -705,6 +734,7 @@ def evict(
     record_probe: RecordProbe,
     key_prop: str = "id",
     leases: ReadLeases | None = None,
+    pinned: Callable[[Candidate], bool] | None = None,
     dry_run: bool = True,
     policy: EvictionPolicy | None = None,
 ) -> EvictionReport:
@@ -722,6 +752,14 @@ def evict(
 
     *key_prop* is the node property holding ``Candidate.key`` (``id`` for ``:Point``).
     It is interpolated into the DELETE, so it is validated as a Cypher identifier.
+
+    *pinned* (#14012) is ``Candidate -> bool``: is this node inside the user's
+    *keep this resident* declaration (its 1-hop closure included)? Checked FIRST, so a
+    pinned node is never deleted whatever the score said. ``None`` means the caller has
+    no pin set — which is a different statement from an empty one, and this module does
+    not choose it: reading the declaration, refusing an over-budget set and building the
+    gate are ``tortoise/resident_pin.py``'s, and a sweeper that must not proceed without
+    one refuses at its own door.
     """
     # ⛔ THE LICENCE IS A MAP, NOT A SET. The census's `nodes` count is the SIZED proof
     # ("this many nodes of this population are record-served"); discarding it would let
@@ -896,6 +934,11 @@ def evict(
     deleted: list[Candidate] = []
     held_record: list[Candidate] = []
     held_leased: list[Candidate] = []
+    #: #14012 — the user's declaration, held back before anything else looks at the node.
+    held_pinned: list[Candidate] = []
+    #: Held back by a predicate that RAISED — held, but not established as pinned.
+    held_pinned_unanswerable: list[Candidate] = []
+    held_pinned_ids: set[int] = set()
     #: Ids already decided, so a later pass does not re-offer them. ⛔ Not a `seen`
     #: filter that also swallows HELD-BACK nodes: a node the record cannot serve sits
     #: at the HEAD of a coldest-first ordering forever, so a selector window of exactly
@@ -961,7 +1004,8 @@ def evict(
             after_nodes,
             max(
                 window * 2,
-                budget + len(settled) + len(held_record_ids) + len(held_leased_ids),
+                budget + len(settled) + len(held_record_ids) + len(held_leased_ids)
+                + len(held_pinned_ids),
             ),
         )
         try:
@@ -973,7 +1017,7 @@ def evict(
             )
             break
 
-        held_before = (len(held_record_ids), len(held_leased_ids))
+        held_before = (len(held_record_ids), len(held_leased_ids), len(held_pinned_ids))
         # ⛔ A selection is a CLAIM this module verifies before believing it.
         local: list[Candidate] = []
         local_ids: set[int] = set()
@@ -995,6 +1039,31 @@ def evict(
                     f"sweeping {population!r} — a mixed selection may not be swept"
                 )
                 break
+            # ⛔ GATE 6 — the PIN (#14012). Asked FIRST, because the score may not
+            # overrule the user's own declaration: a pinned node is not "cold", it is
+            # exempt. ⛔ The polarity is `bool(...)`, deliberately NOT gate 3's `is True`:
+            # there, anything but an explicit True HOLDS the node, so a truthy non-bool
+            # is safe; here the same spelling would DELETE it (`1`, `"pinned"`,
+            # `numpy.True_` are all truthy and none is `True`). For a pin the safe
+            # direction is the opposite one — anything truthy, or an unanswerable
+            # question, holds the node back.
+            if pinned is not None:
+                answered = True
+                try:
+                    is_pinned = bool(pinned(candidate))
+                except Exception:
+                    # ⛔ COULD NOT ASK IS NOT "PINNED". Both hold the node back — that is
+                    # the safe direction and it does not change — but they are different
+                    # facts with different remedies, so they are reported apart:
+                    # `unpin`/raise-the-budget cannot clear a predicate that raised.
+                    is_pinned = True
+                    answered = False
+                if is_pinned:
+                    if candidate.node_id not in held_pinned_ids:
+                        held_pinned_ids.add(candidate.node_id)
+                        seen_ids = held_pinned if answered else held_pinned_unanswerable
+                        seen_ids.append(candidate)
+                    continue
             if candidate.node_id in leases.held():
                 held_leased_ids.add(candidate.node_id)
                 held_leased.append(candidate)
@@ -1031,6 +1100,23 @@ def evict(
                 held_record[:] = [
                     c for c in held_record if c.node_id != candidate.node_id
                 ]
+            # ⛔ AND THE SAME PRUNE FOR THE PIN, which had none: `held_pinned_ids` only
+            # prevented a duplicate APPEND, it was never consulted when the node was
+            # taken — so a node whose pin predicate RAISED once (a store blip) and
+            # answered False on the retry reached `local` and was DELETED while staying
+            # in `skipped_pin_unanswerable`. `deleted` then intersected
+            # `skipped_pin_unanswerable`, which is precisely the "stale held entry" the
+            # record-probe list above clears for its own, and the pin's invariant is the
+            # stronger one ("a pinned node is never deleted").
+            if candidate.node_id in held_pinned_ids:
+                held_pinned_ids.discard(candidate.node_id)
+                held_pinned[:] = [
+                    c for c in held_pinned if c.node_id != candidate.node_id
+                ]
+                held_pinned_unanswerable[:] = [
+                    c for c in held_pinned_unanswerable
+                    if c.node_id != candidate.node_id
+                ]
             local.append(candidate)
             local_ids.add(candidate.node_id)
 
@@ -1043,7 +1129,8 @@ def evict(
             # cold set whose head is unservable starves at the first window and the
             # cache stays over budget forever, while the reason claims the population
             # "did not hold enough evictable nodes" — which is false.
-            held_grew = (len(held_record_ids), len(held_leased_ids)) != held_before
+            held_grew = (len(held_record_ids), len(held_leased_ids),
+                         len(held_pinned_ids)) != held_before
             if window >= after_nodes or not held_grew:
                 # ⛔ WHICH hold-back stopped this pass is REPORTED, not assumed. An
                 # all-LEASED window is not an exhausted population: the nodes are there
@@ -1053,10 +1140,20 @@ def evict(
                 # in no population query. When BOTH hold-backs are present the RECORD is
                 # the binding one (those nodes can never be taken), so it keeps
                 # "population".
-                stop_reason = (
-                    "leased" if (held_leased_ids and not held_record_ids)
-                    else "population"
-                )
+                # ⛔ #14012 ADDS A THIRD HOLD-BACK and it needs its own word for the same
+                # reason: a window made entirely of PINNED nodes is not an exhausted
+                # population either — the answer is "unpin, or raise the pin budget",
+                # and neither is reachable from a message about widening a selector.
+                if held_record_ids:
+                    stop_reason = "population"
+                elif held_leased_ids:
+                    stop_reason = "leased"
+                elif held_pinned_unanswerable:
+                    stop_reason = "pin-unanswerable"
+                elif held_pinned_ids:
+                    stop_reason = "pinned"
+                else:
+                    stop_reason = "population"
                 break
             # The window grew but this pass found nothing new to take: keep widening.
             continue
@@ -1070,24 +1167,63 @@ def evict(
         # ⛔ GATE 4's second half — a lease taken DURING the probe must still win. The
         # plan-time check is not enough: a read can start between planning and the
         # statement, which is exactly the window a lease exists to close.
+        #
+        # ⛔ AND GATE 6 GETS THE SAME SECOND HALF, FOR THE SAME WINDOW. The header's promise
+        # ("a pinned node is NEVER deleted, whatever the selector offered") is the STRONGER
+        # one, so it cannot be the weaker one that goes un-re-asked: a `pin` declaration
+        # written between planning and the DELETE used to let those nodes be deleted AND
+        # reported in `deleted`, so the report could not even show that it happened. The
+        # polarity is gate 6's own — anything truthy holds, and a predicate that RAISES
+        # holds too (unanswerable is not "unpinned"), reported apart because the remedies
+        # differ.
         holds = leases.held()
         final: list[Candidate] = []
+        late_pinned = 0
+        late_pinned_unanswerable = 0
         for candidate in local:
             if candidate.node_id in holds:
                 if candidate.node_id not in held_leased_ids:
                     held_leased_ids.add(candidate.node_id)
                     held_leased.append(candidate)
                 continue
+            if pinned is not None:
+                answered = True
+                try:
+                    is_pinned = bool(pinned(candidate))
+                except Exception:
+                    is_pinned = True
+                    answered = False
+                if is_pinned:
+                    if candidate.node_id not in held_pinned_ids:
+                        held_pinned_ids.add(candidate.node_id)
+                        seen_ids = held_pinned if answered else held_pinned_unanswerable
+                        seen_ids.append(candidate)
+                    if answered:
+                        late_pinned += 1
+                    else:
+                        late_pinned_unanswerable += 1
+                    continue
             final.append(candidate)
 
         if not final:
             # ⛔ NOT "population". Every node this pass was about to take is held by a
-            # READER (skipped_leased), so blaming the population sends the next reader
-            # to research an exhausted selector that is not the problem — the same
-            # misattribution class `stop_reason` exists to separate ("satisfied" |
-            # "population" | "licence" | "pass_budget"), and worse here because the
-            # answer is "a reader is holding these", which no population query reveals.
-            stop_reason = "leased"
+            # READER (skipped_leased) or by a pin declared mid-sweep (skipped_pinned), so
+            # blaming the population sends the next reader to research an exhausted
+            # selector that is not the problem — the same misattribution class
+            # `stop_reason` exists to separate ("satisfied" | "population" | "licence" |
+            # "pass_budget"), and worse here because the answer is "something is holding
+            # these", which no population query reveals. The pin arms come first because
+            # the pin is the control a reader can clear themselves (`unpin`), whereas a
+            # lease is a reader that was live at statement time.
+            # `pinned` is the only other way a candidate leaves this loop, so an empty
+            # `final` is exhausted by the two pin arms and the lease arm below — the
+            # fallback is a construction, not an assumption about what happened.
+            if late_pinned_unanswerable:
+                stop_reason = "pin-unanswerable"
+            elif late_pinned:
+                stop_reason = "pinned"
+            else:
+                stop_reason = "leased"
             break
         # ⛔ `snapshot_out` IS HOW THE ABORT PATH LEARNS WHAT THE INVALIDATION DID. On a
         # raise the tuple below never arrives, so without this channel the report would
@@ -1216,6 +1352,8 @@ def evict(
             deleted=tuple(deleted),
             skipped_record_cannot_serve=tuple(held_record),
             skipped_leased=tuple(held_leased),
+            skipped_pinned=tuple(held_pinned),
+            skipped_pin_unanswerable=tuple(held_pinned_unanswerable),
             nodes_before=before_nodes,
             # ⛔ UNMEASURED is None, never the pre-delete reading. Reporting
             # `nodes_after=before_nodes` beside `deleted=4` is a fabricated metric: a
@@ -1260,6 +1398,19 @@ def evict(
                 f"{len(held_leased)} node(s) are held by an in-flight READ, so the "
                 f"population is not exhausted"
             )
+        elif stop_reason == "pin-unanswerable":
+            cause = (
+                f"the pin predicate could not answer for "
+                f"{len(held_pinned_unanswerable)} node(s) "
+                f"(`skipped_pin_unanswerable`), so they were held — nothing is "
+                f"established about them; repair the pin set and re-run"
+            )
+        elif stop_reason == "pinned":
+            cause = (
+                f"{len(held_pinned)} node(s) are PINNED (`skipped_pinned`) — the "
+                f"selector is offering nodes the user declared resident, so the "
+                f"population is not exhausted; unpin some of them or raise the pin budget"
+            )
         else:
             cause = "this pass budget could plan no more"
         reason += f"; TRUNCATED — {short} more node(s) over the budget: {cause}"
@@ -1286,15 +1437,42 @@ def evict(
             # so a held-back head at or beyond that bound is never passed — telling the
             # operator to re-run would send them into a loop that cannot converge.
             reach = resolved.batch_size * (2 ** (resolved.max_passes - 1))
-            if len(held_record) >= reach or len(held_leased) >= reach:
+            # ⛔ THE PIN IS A THIRD HOLD-BACK and it was missing here, so an all-pinned
+            # head was told "re-run to continue" — an instruction that examines the same
+            # nodes and stops in the same place, forever, while the only working reply
+            # ("unpin, or raise the pin budget") lives in the `pinned` arm this path
+            # never reaches. Reproduced: 6 pinned nodes, batch 1 x 3 passes (reach 4),
+            # `held_pinned=4`, `deleted=0`, reason "re-run to continue".
+            if (len(held_record) >= reach or len(held_leased) >= reach
+                    or len(held_pinned) >= reach
+                    or len(held_pinned_unanswerable) >= reach):
                 reason += (
                     f"; still {over_after} node(s) over the budget — the held-back head "
-                    f"({len(held_record)} unservable, {len(held_leased)} leased) has "
+                    f"({len(held_record)} unservable, {len(held_leased)} leased, "
+                    f"{len(held_pinned)} pinned, "
+                    f"{len(held_pinned_unanswerable)} pin-unanswerable) has "
                     f"reached the widest prefix ONE call can examine "
                     f"({reach} = batch {resolved.batch_size} x "
                     f"2^(max_passes-1 {resolved.max_passes - 1})); re-running will not "
-                    f"converge — raise the batch or the pass budget, or widen the "
-                    f"proven population"
+                    f"converge — "
+                    # ⛔ THE REMEDY IS CHOSEN BY WHICH HOLD-BACK FILLED THE HEAD, because
+                    # they need OPPOSITE advice: a PINNED node is released by `unpin` or a
+                    # bigger budget, while a node whose pin predicate RAISED is released by
+                    # neither — this file says so two arms below ("unpinning or raising the
+                    # budget cannot clear this, because these nodes were never shown to be
+                    # pinned"). Offering `unpin` for the second is the instruction that
+                    # cannot be followed, again.
+                    + (
+                        "unpin some of them, or raise TORTOISE_PIN_MAX_NODES while "
+                        "keeping it smaller than the window"
+                        if len(held_pinned) >= reach
+                        else "repair the pin set (its declaration, or the graph behind "
+                             "it) and re-run — unpinning and raising the budget cannot "
+                             "clear it, because these nodes were never shown to be pinned"
+                        if len(held_pinned_unanswerable) >= reach
+                        else "raise the batch or the pass budget, or widen the proven "
+                             "population"
+                    )
                 )
             else:
                 reason += (
@@ -1313,6 +1491,22 @@ def evict(
                 f"; still {over_after} node(s) over the budget — {len(held_leased)} "
                 f"node(s) are held by an in-flight READ (`skipped_leased`), so the "
                 f"population is not exhausted; re-run when those reads finish"
+            )
+        elif stop_reason == "pin-unanswerable":
+            reason += (
+                f"; still {over_after} node(s) over the budget — the pin predicate "
+                f"could not answer for {len(held_pinned_unanswerable)} node(s) "
+                f"(`skipped_pin_unanswerable`, #14012), so they were HELD rather than "
+                f"taken: nothing is established about them. Repair the pin set (its "
+                f"declaration or the graph) and re-run; unpinning or raising the budget "
+                f"cannot clear this, because these nodes were never shown to be pinned"
+            )
+        elif stop_reason == "pinned":
+            reason += (
+                f"; still {over_after} node(s) over the budget — {len(held_pinned)} "
+                f"node(s) are PINNED (`skipped_pinned`, #14012), so the population is "
+                f"not exhausted: unpin some of them, or raise "
+                f"TORTOISE_PIN_MAX_NODES while keeping it smaller than the window"
             )
         else:
             reason += (
@@ -1338,6 +1532,8 @@ def evict(
         deleted=tuple(deleted),
         skipped_record_cannot_serve=tuple(held_record),
         skipped_leased=tuple(held_leased),
+        skipped_pinned=tuple(held_pinned),
+        skipped_pin_unanswerable=tuple(held_pinned_unanswerable),
         nodes_before=before_nodes,
         nodes_after=after_nodes,
         bytes_before=before_bytes,

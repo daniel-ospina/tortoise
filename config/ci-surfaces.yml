@@ -9650,6 +9650,26 @@ surfaces:
   # NOT what either row is for. Hermetic on the fast lane: an embedded
   # `tmp_path` store per test, no docker, no network, no model call.
   - test_13036_capstone_v2.py
+  # #14012: the two controls the capacity notices promise — "keep this resident" (a
+  # BOUNDED pin: cap, degree ceiling, closure unit) and "see what's outside" (the
+  # view derived from the projection's own state). Three files, one `core` row each,
+  # and every one is HERMETIC on purpose: the pin gate and the outside view are
+  # DECISION logic (does the cap refuse, does the gate hold a pinned node back, does
+  # an unreadable declaration stop a sweep), and `ci_selection` subtracts
+  # `uri_requiring` files from the tier-2 PR lane — so a live-only suite would let a
+  # change to the pin gate merge with NO pin test executed, the silent-green class
+  # this repo treats as a defect. `test_14012_resident_pin.py` drives the real
+  # `evict()` against a fake graph that EXECUTES the delete (a survivor is a fact about
+  # state, not about a plan); `test_14012_outside_view.py` runs the real executor and
+  # then requires the view's count/date-range/topics to equal the eviction's own
+  # `deleted` tuple; `test_14012_resident_cli.py` pins that a pin set the budget will
+  # not honour stops the sweep BEFORE `evict` is called, and that a refused `pin`
+  # writes nothing. `tortoise/cache_evictor.py` and `tools/cache_evict.py` are `core`
+  # sources, so a diff that touches the gate selects this surface — the rows are what
+  # make the gate's own change graded.
+  - test_14012_resident_pin.py
+  - test_14012_outside_view.py
+  - test_14012_resident_cli.py
   ep:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #11855: the ranker half of the unreadable-operand pins. `GraphRanker` and
@@ -15303,6 +15323,22 @@ durations:
   test_window_quality_m2.py: 2.0  # new in #12186 M2. The #3400/#4348 trap applies: a file a PR ADDS cannot carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so this is the flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above is what puts the file in `fast_pool()`, and `--integrity` stays green either way, so only this row records the weight. ⛔ No local timing and no case count are quoted on purpose — `tools/ci_timing.py --refresh-durations` replaces this from the first push-to-main junit sweep that includes the file. What the weight covers is assertion-bound and small: two JSON parses of a committed artifact, a markdown-table walk over two tables, and pure-arithmetic cases over the metric helpers (no graph is opened, so the ~25-minute measurement is NOT what runs here — the pins read what that run WROTE).
   test_miss_rate_m5.py: 2.0  # new in #14015 M5. The #3400/#4348 trap applies: a file a PR ADDS cannot carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so this is the flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` + `tier1` registrations above put the file in `fast_pool()`, and `--integrity` stays green either way (the coverage check is a 0.90 RATIO with headroom), so only this row records the weight. `tools/ci_timing.py --refresh-durations` replaces it from the first push-to-main junit sweep that includes the file. What the weight covers is assertion-bound and small: the module's pure functions driven directly (the curve and its INVARIANT 5 refusal, the ordering, the sampler, the term normaliser, the INVARIANT 1 guards), three JSON reads of `product/pricing.json`, two `ast.parse` calls and the committed evidence bundle when it exists — no graph is opened, so the ~25-minute measurement is NOT what runs here. The bundle `docs/evidence/14015-m5-miss-rate/measurement.json` IS committed and every artifact-backed case runs: the declared-absence guard and its tripwire were removed in the commit that committed the bundle, and `test_the_committed_bundle_makes_the_artifact_backed_pins_run` holds the removal, so a withdrawn bundle reds rather than putting the pins back to sleep (#14162 F2). The `durations` row's cost also includes the RECORD pin — every table cell of the README recomputed from the artifact at the row and column it is printed under, plus membership and placement checks on its prose figures (#14162 F1–F4). ⛔ No local timing and no case count are quoted on purpose — a figure beside a weight re-stales against the run it came from.
   test_cli_setup.py: 0.1
+  # #14012. The #3400/#4348 trap applies: a file a PR ADDS cannot carry a CI junit
+  # reading yet (the refresher samples push-to-main runs only), so these are the flat
+  # `DEFAULT_FAST_WEIGHT` and NOT local readings, which this map forbids as a
+  # SHARD-LAYOUT input (#2818/#3419/#4348). The rows must EXIST, not merely default
+  # ("a default is not a reading"): the `core` registrations above are what put the
+  # files in `fast_pool()`, and `--integrity` stays green either way, so only these
+  # rows record the weight. What each covers, all of it decision logic over fakes — no
+  # graph, no docker, no Postgres, no network, no model call: the pin budget's
+  # derivation and its two refusals, the closure read, gate 6 in the executor
+  # (including a raising predicate and a window made entirely of pinned nodes), and
+  # the CLI's arg/exit-code arms incl. the sweep refusing before `evict` is reached.
+  # All three are also named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`, because
+  # that ENTRY-RULE pin iterates an EXPLICIT tuple and cannot see a file nobody listed.
+  test_14012_resident_pin.py: 2.0
+  test_14012_outside_view.py: 2.0
+  test_14012_resident_cli.py: 2.0
   test_journal_segments.py: 0.3
   test_journal_segments_falsifier.py: 0.2
   test_name_entropy_12294.py: 0.1

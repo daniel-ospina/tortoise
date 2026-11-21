@@ -272,24 +272,29 @@ later**: main's `test_embed_decision_step_11086.py` and that branch's
 packs the worst shard at **840.2 s** (either parent alone packed 840.0 s), `ceil(840.2/60 x 2)`
 rounds up to **29 m**, and the arm-2 SUM became **60.64 m, x 1.5 = 90.96 m against the 90 m cap**
 — RED where both parents pass. `fast_shards: 11` packs the same map to 782.0 s → 27 m, i.e. the
-58.6 m / 2.0 m headroom THAT re-cut recorded (the 2026-11-16 sweep has since moved the emitted term
-to 24 m — `#12926` registered its own fast suite (`tests/test_embed_switch_gate_12926.py`) with a
+58.6 m / 2.0 m headroom THAT re-cut recorded (the 2026-11-16 sweep had moved the emitted term
+to 24 m at THAT head — `#12926` registered its own fast suite (`tests/test_embed_switch_gate_12926.py`) with a
 10 m weight, which re-packs the worst shard across the minute boundary, the same mechanism as the
-`#11576` re-cut two sentences above — and this branch's own registration packs into that same fast
-pool without moving it further: this re-cut's union of the two sides' duration rows (main's
-`test_embed_decision_step_11086.py` and this branch's `test_12943_cache_leg.py`) still emits **24 m**,
-measured: `--emit-push-matrix` on the merged manifest reads 24 m, and it read 23 m on the pre-`#12926`
-base this branch first merged (`2c67c0cf99`). ⛔ **The `#14015` M5 merge then took it to 25 m**, the same
-pool mechanism for the third time: `test_miss_rate_m5.py` packs in at the 2.0 s `DEFAULT_FAST_WEIGHT` and
-takes the worst shard past the boundary `ceil(720.1/60 x 2)` rounds up on — and at THIS head the verb
-reads 25 m again, re-measured rather than carried: `--emit-push-matrix` packs six shards (a, b, c, d, i, k)
-at **720.2 s** and the other five (e, f, g, h, j) at 720.1 s, `ceil(720.2/60 x 2)` = 25 m, the 0.1 s over
-`#14015`'s own emission being this branch's `tests/test_13998_capacity_notice.py` at the flat 2.0 s default.
-That tenth of a second is the whole margin on this boundary — two intermediate folds of this branch emitted
-24 m before main re-packed the same pool to 720.0 s — so the term the row above states, and the three
-figures after it, are this head's emission re-cut by hand from `--emit-push-matrix`, not a re-derivation.
-The three hand-added figures move to 56.6 m / 85.0 m /
-5.0 m (the row above), which is the 1-decimal restatement of the terms' own total, 56.64 m, that
+`#11576` re-cut two sentences above — and #13337's own registration packed into that same fast pool
+without moving it further: that re-cut's union of the two sides' duration rows (main's
+`test_embed_decision_step_11086.py` and that branch's `test_12943_cache_leg.py`) emitted **24 m**,
+measured: `--emit-push-matrix` on the merged manifest read 24 m, and it read 23 m on the pre-`#12926`
+base that branch first merged (`2c67c0cf99`). ⛔ **`#14012` then moved it to 25 m, the same
+mechanism one minute further** — and it is measured by SUBTRACTION, not inferred: with its three
+`core` suites in the pool (`tests/test_14012_outside_view.py`, `tests/test_14012_resident_pin.py`,
+`tests/test_14012_resident_cli.py`) `--emit-push-matrix` reads **25 m** at `est_seconds` 720.4;
+with those three `core` entries removed it reads **24 m** at 719.8, which is exactly what
+`origin/main` `69908d006b` emits (719.8). ⛔ THE FIX IS NOT TO LOWER A WEIGHT: the three enter at
+the pool's own default (`DEFAULT_FAST_WEIGHT = 2.0`, `tools/ci_selection.py:105`), identical to
+their `durations:` rows, so removing or shrinking those rows changes nothing (measured: dropping
+all three `durations:` rows still emits 720.4) — what moves it is three more files in the pack,
++6 s over 11 shards, which crosses the minute boundary once the ×2 headroom is applied. ⛔ **And
+`#13998`'s registration lands in the SAME pool without a further re-pack**: `tests/test_13998_capacity_notice.py`
+enters at the flat 2.0 s default, and the merged head emits six shards at **720.7 s** and five at
+720.6 s — `ceil(720.7/60 x 2)` is still **25 m**, the emitted term, not a hand count. The three
+hand-added figures are re-added from the
+emitted 25 m: 56.6 m / 85.0 m / 5.0 m (the row above), which is the 1-decimal restatement of the
+terms' own total, 56.64 m, that
 `config/ci-surfaces.yml` already records for this same quantity — ⛔ NOT the sum of the four ROUNDED
 terms, which reads 56.7 m: the startup term is 7.27 m (182 s + 254 s, where 254 s is ALREADY the 266 s window net of the
 embedder's 12 s — subtracting that 12 s a second time gives 7.07 m, which is how this figure was
