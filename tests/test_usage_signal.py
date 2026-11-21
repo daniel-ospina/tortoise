@@ -684,14 +684,26 @@ _FORBIDDEN_GRAPH_ROOTS = (
     "tortoise.tortoise_client",
 )
 
-#: The package roots that ARE a store client, as the direction test below has to
-#: recognise them. Kept beside the set it derives from so the two cannot drift.
-#: ⛔ THREE, NOT TWO: `redislite` is the root the tree actually reaches the client
-#: through (`tortoise/__init__.py`: `from redislite.falkordb_client import
-#: FalkorDB`), and a predicate that scans only `falkordb`/`redis` cannot see its own
-#: package root — the same "only some of the roots" defect this test exists to
-#: stop, one root over.
-_STORE_CLIENT_ROOTS = ("falkordb", "redis", "redislite")
+#: ⛔ THE PACKAGE ROOT'S ATTRIBUTE FORM IS A STORE SPELLING THE SET CANNOT NAME.
+#: `from tortoise import FalkorDB` is resolved by `_imports_of` to
+#: `{tortoise, tortoise.FalkorDB}`, and neither name is a MODULE in the set above —
+#: so a function-body import of it passed every leg: the AST ban (no match), the
+#: subprocess probe (the import never executes at module scope, so `sys.modules`
+#: stays clean) and the direction scan (no new module is created). It is a real
+#: spelling: `tortoise/__init__.py` is a PEP-562 `__getattr__` that exports the
+#: guarded redislite `FalkorDB` and `Tortoise` (→ `tortoise.sdk`), and its own
+#: docstring names "code importing `tortoise.FalkorDB`" as the bypass surface.
+#: A SEPARATE set, not entries in `_FORBIDDEN_GRAPH_ROOTS`
+#:: `test_the_no_graph_guard_names_modules_that_EXIST` resolves every dotted entry
+#: as a module path and would report these as missing.
+_FORBIDDEN_CLIENT_EXPORTS = frozenset({"tortoise.FalkorDB", "tortoise.Tortoise"})
+
+#: The package roots that ARE a store client, DERIVED from the set above — the
+#: comment here used to claim the two "cannot drift" while nothing compared them,
+#: and they had already drifted twice (`falkordb` alone, then `+redis`, then a
+#: hand-added `redislite`). Deriving fails CLOSED: a dotless non-store entry would
+#: over-report into `uncovered` rather than go unseen.
+_STORE_CLIENT_ROOTS = tuple(r for r in _FORBIDDEN_GRAPH_ROOTS if "." not in r)
 
 
 def _imports_of(source: str) -> set[str]:
@@ -738,6 +750,19 @@ def _imports_of(source: str) -> set[str]:
     return found
 
 
+def _offending(source: str) -> set[str]:
+    """Every name in `source` that reaches a store client — modules AND exports."""
+    imported = _imports_of(source)
+    return {
+        name
+        for name in imported
+        if any(
+            name == root or name.startswith(root + ".")
+            for root in _FORBIDDEN_GRAPH_ROOTS
+        )
+    } | (imported & _FORBIDDEN_CLIENT_EXPORTS)
+
+
 def test_no_graph_dependency() -> None:
     """The signal must not be able to reach a graph client, even by accident.
 
@@ -753,13 +778,7 @@ def test_no_graph_dependency() -> None:
     what a future reader consults to decide the guard is sufficient.
     """
     source = Path(usage_signal.__file__).read_text(encoding="utf-8")
-    imported = _imports_of(source)
-    offending = {
-        name
-        for name in imported
-        for root in _FORBIDDEN_GRAPH_ROOTS
-        if name == root or name.startswith(root + ".")
-    }
+    offending = _offending(source)
     assert not offending, (
         f"usage_signal imports a graph client: {sorted(offending)} — a residency "
         f"signal may never write to the store it is bounding"
@@ -814,6 +833,61 @@ def test_the_no_graph_guard_catches_relative_imports() -> None:
         "tortoise",
         "tortoise.sdk",
     }
+
+
+@pytest.mark.parametrize(
+    "root", [r for r in _FORBIDDEN_GRAPH_ROOTS if "." not in r]
+)
+def test_every_store_ROOT_in_the_ban_is_pinned(root: str) -> None:
+    """⛔ A BAN ENTRY THAT NOTHING EXERCISES CAN BE DELETED SILENTLY.
+
+    The direction tests pin `_STORE_CLIENT_ROOTS` (the SCAN) and the set's tree
+    modules; nothing pinned the dotless roots in the SET, so deleting `"redislite"`
+    from it left the file green — the ban half of the same fix, unpinned, and the
+    same was true of `falkordb` and `redis`. Parametrized OVER THE SET, so a fourth
+    root added later is pinned by construction rather than by remembering to add a
+    case.
+    """
+    assert _offending(f"import {root}\n") == {root}
+    assert _offending(f"from {root}.client import Something\n") == {
+        f"{root}.client",
+        f"{root}.client.Something",
+    }
+
+
+def test_the_ban_covers_all_three_roots_the_tree_actually_uses() -> None:
+    """⛔ A FLOOR, not a mirror — the parametrization above cannot pin a REMOVAL.
+
+    Parametrizing over `_FORBIDDEN_GRAPH_ROOTS` pins each entry's BEHAVIOUR, but
+    deleting an entry also deletes its case, so the suite stays green (measured:
+    dropping `"redislite"` left 2 passed). The three roots below are the ones the
+    tree is MEASURED to import a client from — `tortoise/__init__.py`
+    (`redislite.falkordb_client`), `hosted_backup`/`acl_graph_users`/
+    `tortoise_client`/`retry`/`ep`/`hosted_api` (`redis`), `projection` (`falkordb`)
+    — so this asserts a floor independent of the set it guards: a fourth root must
+    be added deliberately, and this test is where that decision gets recorded.
+    """
+    assert set(_STORE_CLIENT_ROOTS) >= {"falkordb", "redis", "redislite"}
+
+
+def test_no_graph_dependency_pins_the_package_root_EXPORT_form() -> None:
+    """⛔ `from tortoise import FalkorDB` is a store spelling no module entry names.
+
+    `_imports_of` resolves it to `{tortoise, tortoise.FalkorDB}`, and the package
+    root is exempt from the ban (banning it bans the module itself), so before
+    `_FORBIDDEN_CLIENT_EXPORTS` this passed every leg — including from inside a
+    function body, where the subprocess probe cannot see it either because the
+    import never runs at module scope. `tortoise/__init__.py` is a PEP-562
+    `__getattr__` exporting the guarded redislite client, and names this form as
+    the bypass surface in its own docstring.
+    """
+    assert _offending("from tortoise import FalkorDB\n") == {"tortoise.FalkorDB"}
+    assert _offending("from tortoise import Tortoise\n") == {"tortoise.Tortoise"}
+    assert _offending("def f():\n    from tortoise import FalkorDB\n") == {
+        "tortoise.FalkorDB"
+    }
+    # …and the harmless spellings stay clean, so the ban is not a blanket.
+    assert _offending("from tortoise import usage_signal\n") == set()
 
 
 def test_the_no_graph_guard_names_modules_that_EXIST() -> None:
