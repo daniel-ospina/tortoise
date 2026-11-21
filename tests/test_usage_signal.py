@@ -1450,11 +1450,11 @@ def test_no_graph_dependency() -> None:
         was **102 passed** on a head carrying the injected-witness rows ALONE, and left
         the probe blind to `tortoise.acl_graph_users` and `tortoise.hosted_backup` — the
         measurement the verdict row below states, on the same shape. A PLAIN
-        six-literal keep-list was never green once this row and the per-root imports
-        below existed: measured at `b18e33f4c0` — the first head carrying BOTH — it is
-        **1 failed / 101**, and the
-        failure is at the injected-everything row rather than at a negative. Both red
-        here.
+        six-literal keep-list is **1 failed / 101** here, red at the
+        injected-everything row rather than at a negative — and at `647ca930ce`,
+        which carries the injected rows and NOT the per-root imports below, it is
+        **1 failed / 101** as well, so neither side of that line has it green. Both
+        red here.
         What remains is only PREDICTION of this test's inputs, the same residual as
         above, and a narrowed child now reds BY ITSELF instead of merely being
         undetectable.
