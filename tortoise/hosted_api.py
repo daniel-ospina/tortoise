@@ -40778,7 +40778,12 @@ class _OrgSeedSurface:
     def query(self, cypher, **params):
         return self._sdk._get_proj().query(cypher, **params)
 
-    def create_subject(self, name, subjectKind=None, **props):
+    def create_subject_anchor(self, name, subjectKind=None, **props):
+        # ⛔ The door is NOT spelled ``create_subject``: that is a RETIRED SDK
+        # method name (#12901, ``tortoise/sdk_retired.py``), and the census that
+        # refuses one is receiver-blind, so the collision reds a correct call it
+        # cannot exempt (the receiver is ``seed._write_anchor``'s parameter —
+        # see the twin's note in ``onboarding/selfhost.py``).
         # #9572: ``None`` = not supplied, forwarded as absent — a fabricated
         # ``"other"`` default here would re-open the clobber the SDK doors had.
         # A BLANK kind is "not supplied" too (review P2): ``named_kind``.
