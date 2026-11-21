@@ -845,7 +845,11 @@ def _seed_door_behaviour_problems(cls: type, name: str = "create_subject",
 
       1. the door does not RAISE — the seed's own `surface.<name>(...)` call must work;
       2. it makes EXACTLY ONE `<delegated>` call — a door that delegates nowhere, or
-         more than once, is not the passthrough;
+         more than once, is not the passthrough. ⛔ This is the ONE requirement an
+         adjacent refusal cannot stand in for: a body that delegates zero times also
+         returns the wrong object, and one that raises is caught by (1), so without its
+         own arms this branch decides NO verdict (`96cee6ba9cc` review finding 1).
+         `test_the_pin_requires_EXACTLY_ONE_delegation` is that arm;
       3. it RETURNS what `<delegated>` returned, by identity — a door that throws the
          subject away gives its caller nothing.
 
@@ -890,6 +894,20 @@ def _door_problems(cls: type, name: str = "create_subject",
     if problems:
         return problems
     return _seed_door_behaviour_problems(cls, name, delegated)
+
+
+def _exec_door_class(body: str) -> type:
+    """A REAL class whose `create_subject` body is `body` — measured, not read.
+
+    `exec` rather than a file on disk so a fixture is measured exactly as the
+    production surfaces are: no source span to re-anchor when a door is reformatted,
+    and no text a reader has to trust. The probe sentinel is the fixture namespace's only
+    global, so a body can return it without reaching into this module.
+    """
+    namespace: dict[str, object] = {"_DOOR_PROBE_SENTINEL": _DOOR_PROBE_SENTINEL}
+    exec(compile(f"class C:\n    def create_subject(self, name):\n{body}",
+                 "<door-behaviour-fixture>", "exec"), namespace)
+    return namespace["C"]  # type: ignore[return-value]
 
 
 def test_the_two_seed_surfaces_publish_a_create_subject_door_that_delegates_privately():
@@ -992,11 +1010,7 @@ def test_the_delegation_pin_refuses_a_DISCARDED_NESTED_or_UNREACHABLE_delegation
     prove a passthrough is still accepted, so a predicate that refuses everything
     cannot pass this test.
     """
-    def door_class(body: str) -> type:
-        namespace: dict[str, object] = {}
-        exec(compile(f"class C:\n    def create_subject(self, name):\n{body}",
-                     "<door-behaviour-fixture>", "exec"), namespace)
-        return namespace["C"]  # type: ignore[return-value]
+    door_class = _exec_door_class     # one construction, shared with the exactly-one arm
 
     control = door_class("        return self._sdk._create_subject(name)\n")
     assert _door_problems(control) == [], (
@@ -1038,6 +1052,65 @@ def test_the_delegation_pin_refuses_a_DISCARDED_NESTED_or_UNREACHABLE_delegation
             "not a passthrough while its source still reads like one — the pin MUST "
             "refuse it. A GREEN here means the verdict came from reading the source "
             "instead of running the door")
+
+
+#: Door bodies whose ONLY fault is the NUMBER of delegations: each RETURNS the right
+#: object and does not raise, so the identity and RAISED refusals both pass them and only
+#: the "EXACTLY ONE" requirement can refuse them. MEASURED at `96cee6ba9cc` by replacing
+#: `if len(recorder.calls) != 1:` with `if False:` — all 15 other rows stayed GREEN, so
+#: before these arms the requirement was advertised in the docstring and pinned nowhere.
+_NON_EXACTLY_ONE_DELEGATION = {
+    # Delegates NOWHERE and hands its caller the right object anyway: a door returning a
+    # cached or literal subject is not the passthrough the exemption claims.
+    "zero-calls": (
+        "        return _DOOR_PROBE_SENTINEL\n"),
+    # THE DOUBLE-WRITE: a create-or-retry door writes the seed subject TWICE and returns
+    # the second. The caller sees a correct subject while the graph holds two, so this is
+    # a real bypass of the exemption rather than a cosmetic shape.
+    "two-calls": (
+        "        first = self._sdk._create_subject(name)\n"
+        "        second = self._sdk._create_subject(name)\n"
+        "        return second\n"),
+}
+
+
+def test_the_pin_requires_EXACTLY_ONE_delegation():
+    """The pin's SECOND requirement has its own arms — measured, not advertised.
+
+    `_seed_door_behaviour_problems` states three requirements, and every other arm in
+    this file is refused by the first (`RAISED`) or the third (`did not RETURN`): the
+    unreachable bodies delegate zero times AND return something else, the discarded body
+    returns something else, and the nested body raises first. So the "EXACTLY ONE"
+    branch decided no verdict at all — MEASURED at `96cee6ba9cc` by replacing
+    `if len(recorder.calls) != 1:` with `if False:`: all 15 rows stayed GREEN.
+
+    Each arm therefore proves BOTH that the fixture is one only that branch can refuse
+    (it returns the recorded sentinel, so the identity refusal passes; it does not raise)
+    AND that the pin refuses it. The assertion names the branch's own message fragment,
+    so deleting the branch reds HERE with the requirement named, instead of being
+    absorbed by an adjacent refusal.
+    """
+    expected_calls = {"zero-calls": 0, "two-calls": 2}
+    for label, body in sorted(_NON_EXACTLY_ONE_DELEGATION.items()):
+        fixture = _exec_door_class(body)
+
+        recorder = _RecordingDoorSdk()
+        surface = object.__new__(fixture)
+        surface._sdk = recorder
+        returned = fixture.__dict__["create_subject"](surface, "pin-probe-subject")
+        assert returned is _DOOR_PROBE_SENTINEL, (
+            f"the `{label}` fixture must RETURN the sentinel, or the identity refusal "
+            "would be what fires and this arm would pin nothing")
+        assert len(recorder.calls) == expected_calls[label], (
+            f"the `{label}` fixture must make {expected_calls[label]} `_create_subject` "
+            "call(s) — that IS the property this arm exists to pin")
+
+        problems = _door_problems(fixture)
+        assert problems and "not exactly 1" in problems[0], (
+            f"the `{label}` door delegates the wrong NUMBER of times while returning "
+            "the right object, so only the 'exactly one' refusal can stop it. A GREEN "
+            "here means that branch decides nothing (MEASURED at 96cee6ba9cc: deleting "
+            "it left all 15 other rows green)", problems)
 
 
 #: A delegating `def create_subject` in the class body, followed by a class-body form
