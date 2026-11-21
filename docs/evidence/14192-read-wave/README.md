@@ -4,12 +4,13 @@ Two artifacts, both from `tools/read_wave_latency.py` (added by this issue). The
 answer the two halves of the issue's *Done when*: **a measured p50/p95 delta** and
 **a rank-identity verdict**.
 
-> Every number in the two tables below is copied from the two JSONs in this
+> Every number in the **three** tables below is copied from the two JSONs in this
 > directory, not from an earlier run. If a number is not in a JSON here, it is
 > not claimed here.
 >
 > ⛔ **The one deliberate exception, because silence about it is how this file
-> drifted before:** the bullet pair under "What the first measurement found"
+> drifted before:** the bullet pair under "Result — `ab-full-read.json`" (NOT
+> under "What the first measurement found", whose bullets are artifact cells)
 > quotes the FIRST measurement's `159 ms` / `231 ms` / `167 ms`. Those are **not**
 > cells of either JSON — they are kept because this file's history records them,
 > and they are marked there as such. ⚠️ **No other PERFORMANCE figure here is
@@ -29,17 +30,27 @@ answer the two halves of the issue's *Done when*: **a measured p50/p95 delta** a
 | queries | the first 24 of `benchmarks/query_mix.json`, identical in both arms |
 | read | `TortoiseSDK._tortoise_fts_query` — what `/v1/search` and the MCP `tortoise_search` call |
 | arms | pre-change `get_relationships_bounded` out of `e74cf1d13d` vs the working tree, in one process — ⚠️ **the two artifacts interleave differently and the difference matters for drift**: `ab-relationships` alternates old/new **per round** (9 rounds), while `ab-full-read` runs **two sequential 24-query blocks** (baseline first, then after), so a load spike lands entirely inside one arm there |
-| code measured | the working tree at the time of measurement — ⛔ **the recorded `git_sha` does not resolve, so this row cannot be checked as written**; see the provenance note below |
+| code measured | the working tree at the time of measurement — ⛔ **the recorded `git_sha` names a commit reachable from no ref**, so this row cannot be checked from a fresh clone; see the provenance note below |
 
-⛔ **PROVENANCE: BOTH ARTIFACTS RECORD A `git_sha` THAT DOES NOT EXIST IN THIS
-REPOSITORY.** They carry `git_sha: 0667b5358950`, and `git cat-file -t
-0667b5358950` answers `fatal: Not a valid object name` — checked in this clone
-and in the hub checkout, which share one object DB. So `git diff 0667b5358950
-1c07761e69` cannot be computed at all, and the claim an earlier cut of this table
-made with it ("`tortoise/`, `tests/` and `tools/` are byte-identical to the merged
-head") is **unverifiable and withdrawn**. The sha is what the harness recorded
-(`_git_sha()` is the measuring checkout's `HEAD`); it is a commit a later amend or
-rebase discarded. It is left in the JSONs rather than rewritten, because an
+⛔ **PROVENANCE: BOTH ARTIFACTS RECORD A `git_sha` THAT NO REF REACHES.** They
+carry `git_sha: 0667b5358950`, and `git for-each-ref --contains 0667b5358950`
+returns **no refs** — it is a commit a later amend or rebase discarded, which is
+the harness recording the measuring checkout's `HEAD` (`_git_sha()`). ⚠️ **What
+that does and does not mean, stated narrowly because an earlier cut of this
+paragraph over-claimed it:** the object still resolves in a clone that has
+fetched the discarded branch (`git cat-file -t` answers `commit` there), so "it
+does not exist" is too strong — but a FRESH clone and CI cannot resolve it, which
+is what makes the row uncheckable as written. It is left in the JSONs rather
+than rewritten, because an artifact edited to look resolvable is worse than one
+that says what it is.
+
+The claim an earlier cut of this table made with the sha — "`tortoise/`, `tests/`
+and `tools/` are byte-identical to the merged head" — is **withdrawn**, and not
+because the diff was uncomputable: `git diff 0667b5358950 1c07761e69 -- tortoise
+tests tools` is EMPTY, so those trees are identical to `1c07761e69`; but
+`1c07761e69` is **not the merged head**. Against the merged head (`94d75667dc`)
+the same paths differ in 46 files. So the sha pins the measured code only relative
+to a discard-point ancestor, which is not a statement anyone should rely on.
 artifact edited to look resolvable is worse than one that says what it is.
 
 What IS verifiable from the artifacts, and is what the claims below rest on: both
@@ -123,10 +134,15 @@ edit changes one it must change the other.**
 both artifacts, and **two later commits then changed the code they measure
 without regenerating them**: `7d276aa07a` removed the duplicated predicate from
 the Q2-crit query (26,463 chars → 14,732, `$contested_threshold` twice → once),
-and `6ec51de9ec` added the `_InlineMember` inline fallback. So the after-arm
-over-states this head's cost, in the direction that flatters the change, and
-`ab-relationships`' `new` p50 prices a query that no longer exists. Re-measure
-before quoting any after-arm figure as the head's.
+and `6ec51de9ec` added the `_InlineMember` inline fallback. ⚠️ **WHICH WAY THAT
+BIASES THE NUMBER IS NOT ASSERTED HERE, and an earlier cut of this paragraph got
+it backwards:** the after-arm is priced on code that (for the crit query) was
+HEAVIER than this head's, which makes the reported win too SMALL rather than too
+large — while the later inline fallback could push the net the other way. With
+two commits of opposite sign the direction is not derivable from the char count
+alone, so the operative statement is the direction-free one: **the after-arm
+prices code this head no longer runs.** Re-measure before quoting any after-arm
+figure as the head's.
 
 ⚠️ **Run-to-run variance is real and is not hidden.** Successive whole-read A/Bs
 on this box measured `−68.6`, `−48.4` and `−43.5 ms` p50 for the same change
