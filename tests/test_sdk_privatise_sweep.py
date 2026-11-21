@@ -1003,8 +1003,20 @@ _PR_REF_AS_TREE = re.compile(
 #: A relative pin address: "the pair THIS head pins" / "this commit's `origin/main`" — a claim
 #: that is true only for the tree it was written on, in a block that has already been re-cut under
 #: it twice (PR body §4, review round 13, P2).
+#:
+#: ⛔ KEYED ON THE SHAPE, NOT ON ONE PHRASE (review, round 17, P3). Clause 1 was the whole of the
+#: round-13 arm and it matched the LITERAL `THIS head`, so the same defect spelled `THIS COMMIT
+#: pins` / `this tree pins` / `the head pins` stayed GREEN — narrower than the "SHAPE, NOT PHRASE"
+#: contract this arm's own docstring claims. An address a rebase falsifies is a POINTER defect, so
+#: what is charged is a relative head **as the subject of a pin verb** (clause 2): the verb is what
+#: makes it a BINDING rather than a measurement, and that distinction is load-bearing — the block
+#: legitimately says the pair was `--repin`-printed or measured `on THIS tree`, which is honest and
+#: must not red. Which is also why clause 1 keeps `head` and does NOT widen to `tree`: `THIS tree`
+#: is an honest measurement qualifier, and widening it there false-blocked
+#: "the pin is the pair `--repin` printed on THIS tree".
 _RELATIVE_PIN_ADDRESS = re.compile(
-    r"(?i)\b(?:pair|pin)\b[^.\"]{0,40}\bTHIS\s+head\b"
+    r"(?i)\b(?:pair|pin)\b[^.\"]{0,40}\b(?:THIS|this)\s+head\b"
+    r"|\b(?:THIS|this|the)\s+(?:current\s+)?(?:head|commit|tree|revision|rev)\s+pins?\b"
     r"|\bthis\s+commit'?s\s+`?origin/main`?")
 
 #: The rewrite's PARENT claim: `83e94826a8a` is the pre-rebase DRAFT of the commit that landed as
@@ -1038,6 +1050,29 @@ def _parent_claims(flow: str) -> list[str]:
 #: The `#14058` note's ORIGINAL, refuted reason for citing a pre-rebase commit by issue number.
 _PREFIX_REASON_RE = re.compile(
     r"(?i)reachable from no ref|disappears on the next\s*`?gc`?|unreproducible address")
+
+
+def _install_pre_fix(flow: str, anchor: str, replacement: str, sentence: str) -> str:
+    """Install a PRE-FIX wording into the block WITHOUT asserting on the honest prose.
+
+    ⛔ WHY THIS EXISTS (review, round 17, P3). The round-13 arms proved non-vacuity with
+    `assert <anchor> in flow, "anchor for the mutation is gone"`, so an HONEST rewording
+    elsewhere in the block red the arm while the claim it guards was untouched — measured:
+    replacing `and `83e94826a8a` over` with the equally-true `and against `83e94826a8a`` failed
+    `test_the_14068_attribution_names_its_tree_by_sha_never_by_the_pr_ref`. That is the
+    false-block shape this file rejects for the abbreviation and pointer arms, and an arm that
+    reds on honest prose trains the next lane to edit the GUARD instead of the claim.
+
+    So the anchor is BEST-EFFORT: the restoration is made IN PLACE where the wording still
+    matches, and where it does not the pre-fix SENTENCE is INSTALLED beside it. Either way the
+    mutant carries the defect, so the detector is still seen to fire.
+
+    ⛔ DELETION is the other route out of a negative-only arm, and it is not opened here: every
+    caller runs its DIRECTION-1 asserts BEFORE the mutation, so the honest facts (the sha in the
+    diff clause, the pair against its rev, the parent) must be present for the arm to reach this
+    point at all.
+    """
+    return flow.replace(anchor, replacement) if anchor in flow else f"{flow} {sentence}"
 
 
 def test_the_14058_notes_reason_is_the_measured_one_never_the_refuted_one():
@@ -1099,10 +1134,12 @@ def test_the_14068_attribution_names_its_tree_by_sha_never_by_the_pr_ref():
     assert not _pr_ref_as_tree_violations(flow), (
         "`#14108` resolves to `refs/pull/14108/head`, a ref that TRACKS a branch head — it cannot "
         f"address a tree: {_pr_ref_as_tree_violations(flow)[0]!r}. Name the tree by its sha.")
-    # ⛔ THE MUTATION, ON THE REAL BLOCK: restore the citation the finding is about.
+    # ⛔ THE MUTATION, ON THE REAL BLOCK: restore the citation the finding is about. The anchor is
+    # BEST-EFFORT (review, round 17, P3) — an honest rewording must not red this arm.
     pre_fix = f"and `{RESIDUE_ABBREV}` over"
-    assert pre_fix in flow, f"anchor for the mutation is gone — revisit this arm: {pre_fix!r}"
-    mutant = flow.replace(pre_fix, "and the `#14108` PRE-MERGE tree over")
+    mutant = _install_pre_fix(
+        flow, pre_fix, "and the `#14108` PRE-MERGE tree over",
+        f"the move is measured on the `#14108` PRE-MERGE tree and `{RESIDUE_ABBREV}` over it")
     assert _pr_ref_as_tree_violations(mutant), (
         "the PRE-FIX citation must be refused — restoring `the `#14108` PRE-MERGE tree` left "
         "every arm green before this one existed")
@@ -1126,17 +1163,28 @@ def test_the_recut_pair_is_bound_to_its_rev_never_to_a_relative_head():
     assert not _relative_pin_addresses(flow), (
         "a pin pair / `origin/main` bound to a RELATIVE head must be scoped to the rev it names: "
         f"{_relative_pin_addresses(flow)[0]!r}")
-    # ⛔ THE MUTATIONS, ON THE REAL BLOCK — each half, restored.
+    # ⛔ THE MUTATIONS, ON THE REAL BLOCK — each half, restored. The anchors are BEST-EFFORT
+    # (review, round 17, P3), so an honest rewording of the surrounding prose cannot red the arm.
     scoped = f"re-cut to `{RESIDUE_PAIR}` on `{RESIDUE_PAIR_REV}`'s tree"
-    assert scoped in flow, f"anchor for the mutation is gone — revisit this arm: {scoped!r}"
-    assert _relative_pin_addresses(flow.replace(
-        scoped, f"re-cut to the pair THIS head pins, `{RESIDUE_PAIR}`")), (
+    assert _relative_pin_addresses(_install_pre_fix(
+        flow, scoped, f"re-cut to the pair THIS head pins, `{RESIDUE_PAIR}`",
+        f"re-cut to the pair THIS head pins, `{RESIDUE_PAIR}`, on `{RESIDUE_PAIR_REV}`'s tree")), (
         "`the pair THIS head pins` must be refused: this head pins (11844, …)")
     when_written = "(the `origin/main` this was written against)"
-    assert when_written in flow, "anchor for the mutation is gone — revisit this arm"
-    assert _relative_pin_addresses(flow.replace(when_written, "").replace(
-        "`main`'s tree at `e022fc935b` ", "this commit's `origin/main` ")), (
+    if when_written in flow and "`main`'s tree at `e022fc935b` " in flow:
+        relative = flow.replace(when_written, "").replace(
+            "`main`'s tree at `e022fc935b` ", "this commit's `origin/main` ")
+    else:
+        relative = f"{flow} this commit's `origin/main`"
+    assert _relative_pin_addresses(relative), (
         "`this commit's `origin/main`` must be refused: a rebase falsifies it")
+    # ⛔ THE SPELLING THE ROUND-13 ARM MISSED (review, round 17, P3). Measured before this fix:
+    # appending this clause left this arm GREEN, because clause 1 keyed on the literal `THIS head`
+    # only. Same defect, different noun — so the arm must key on the SHAPE.
+    assert _relative_pin_addresses(
+        f"{flow} and the pair THIS COMMIT pins, `{RESIDUE_ABBREV}` over"), (
+        "a relative pin spelled `THIS COMMIT pins` is the same defect as `THIS head pins` — the "
+        "arm must refuse the SHAPE, not one spelling of it")
 
 
 def test_the_capture_rewrites_parent_is_the_rev_the_block_names():
@@ -1155,10 +1203,10 @@ def test_the_capture_rewrites_parent_is_the_rev_the_block_names():
         "the pre-rebase DRAFT (`83e94826a8a`) is not the rewrite's parent — `2fe01fc775e` is: "
         f"{_parent_claims(flow)[0]!r}")
     parent_anchor = "on the capture rewrite's own PARENT,"
-    assert parent_anchor in flow, "anchor for the mutation is gone — revisit this arm"
-    assert _parent_claims(flow.replace(
-        parent_anchor,
-        "on this commit's PRE-REWRITE tree (`83e94826a8a`), which is the PARENT,")), (
+    assert _parent_claims(_install_pre_fix(
+        flow, parent_anchor,
+        "on this commit's PRE-REWRITE tree (`83e94826a8a`), which is the PARENT,",
+        f"this sentence names this commit's PRE-REWRITE tree (`{RESIDUE_ABBREV}`) as the parent")), (
         "the PRE-FIX wording must be refused: the draft is not the parent, and `this commit's` "
         "is a relative address in a block that has been re-cut under it")
 
@@ -1195,6 +1243,94 @@ def test_the_relative_address_arms_accept_honest_rewordings():
     ]
     for text in refuted:
         assert not _relative_pin_addresses(text), text
+
+
+def test_the_relative_pin_arm_keys_on_the_shape_not_on_one_phrase():
+    """Review round 17 (P3): the round-13 arm matched the literal `THIS head` only.
+
+    So the SAME relative-pin defect spelled `THIS COMMIT pins` / `this tree pins` / `the head
+    pins` stayed GREEN — narrower than the "SHAPE, NOT PHRASE" contract the arm's own docstring
+    claims. Measured before the fix: appending "and the pair THIS COMMIT pins, `83e94826a8a`
+    over" left `test_the_recut_pair_is_bound_to_its_rev_never_to_a_relative_head` passing.
+
+    Non-vacuity is in the REFUSED list: each entry is a relative head as the SUBJECT of a pin
+    verb, i.e. the defect itself, differing only in spelling. The HONEST list is the other half —
+    the block legitimately records that the pair was printed or measured `on THIS tree`, and the
+    fix must not turn that measurement into a false block.
+    """
+    refused = [
+        f're-cut to the pair THIS head pins, `{RESIDUE_PAIR}`',
+        f'and the pair THIS COMMIT pins, `{RESIDUE_ABBREV}` over',
+        f'this tree pins `{RESIDUE_PAIR}`',
+        "the head pins the pair, so the figure cannot drift",
+        "re-cut to the pair THIS revision pins",
+        "this commit's `origin/main`",
+    ]
+    for text in refused:
+        assert _relative_pin_addresses(text), (
+            "a relative head used as the SUBJECT of a pin verb is the defect the round-13 arm "
+            f"missed in this spelling: {text!r}")
+    honest = [
+        "`--repin` on THIS tree prints the same pair the first merge derived",
+        "the pasted pair is `--repin`'s output measured on THIS tree, never arithmetic",
+        "the pin is the pair `--repin` printed on THIS tree",
+        "only THIS pin is this tree's",
+        f'`{RESIDUE_PAIR}` is what THIS tree derives',
+        "a pair this head does not carry",
+        f"on `{RESIDUE_PAIR_REV}`'s tree, which derives it",
+    ]
+    for text in honest:
+        assert not _relative_pin_addresses(text), (
+            "an honest MEASUREMENT on a relative tree is not a relative BINDING — widening the "
+            f"arm must not red it: {text!r} -> {_relative_pin_addresses(text)!r}")
+
+
+def test_the_mutation_anchors_do_not_red_an_honest_rewording(monkeypatch):
+    """Review round 17 (P3): the three arms above anchored their mutation with
+    `assert <anchor> in flow, "anchor for the mutation is gone"`, so an HONEST rewording
+    elsewhere in the block red them — the false-block shape this file rejects for the
+    abbreviation and pointer arms.
+
+    Measured pre-fix: replacing `and `83e94826a8a` over` with the equally-true
+    `and `83e94826a8a` across` failed
+    `test_the_14068_attribution_names_its_tree_by_sha_never_by_the_pr_ref` with
+    "anchor for the mutation is gone".
+
+    The block below is the real one with three honest rewordings applied — one for each of the
+    three anchors — and every DIRECTION-1 assert still holds (`over` → `across` keeps "`git diff`
+    between `A` and `B`", which editing the `and` would not), so all three arms must stay GREEN.
+    On the pre-fix code this test fails at the first one.
+    """
+    pristine = re.sub(r"\n#:\s?", " ", _residue_block())
+    honest_block = (
+        pristine
+        .replace(f"and `{RESIDUE_ABBREV}` over", f"and `{RESIDUE_ABBREV}` across")
+        .replace(f"re-cut to `{RESIDUE_PAIR}` on `{RESIDUE_PAIR_REV}`'s tree",
+                 f"re-cut to `{RESIDUE_PAIR}` on `{RESIDUE_PAIR_REV}`'s own tree")
+        .replace("on the capture rewrite's own PARENT,",
+                 "on the capture rewrite's OWN PARENT,")
+    )
+    assert honest_block != pristine, "the rewordings did not apply — this arm would be vacuous"
+    # ⛔ Every pre-fix anchor must be GONE, or the arm would prove nothing about the anchors.
+    # (arm2's anchor spans a `#:` line break in the RAW block, which is why the rewording is
+    # applied to the normalised flow — the same text the arms themselves search.)
+    for gone in (f"and `{RESIDUE_ABBREV}` over",
+                 f"re-cut to `{RESIDUE_PAIR}` on `{RESIDUE_PAIR_REV}`'s tree",
+                 "on the capture rewrite's own PARENT,"):
+        assert gone not in honest_block, f"anchor not reworded: {gone!r}"
+    monkeypatch.setattr(sys.modules[__name__], "_residue_block", lambda: honest_block)
+    # Each arm re-reads `_residue_block()` and must not fail on a drifted anchor.
+    test_the_14068_attribution_names_its_tree_by_sha_never_by_the_pr_ref()
+    test_the_recut_pair_is_bound_to_its_rev_never_to_a_relative_head()
+    test_the_capture_rewrites_parent_is_the_rev_the_block_names()
+    # ⛔ And the arms still BITE on the reworded block: the installer must install the defect
+    # where the anchor is gone, not silently skip the mutation.
+    flow = re.sub(r"\n#:\s?", " ", honest_block)
+    assert _pr_ref_as_tree_violations(_install_pre_fix(
+        flow, f"and `{RESIDUE_ABBREV}` over", "x",
+        f"the move is on the `#14108` PRE-MERGE tree and `{RESIDUE_ABBREV}` over it")), (
+        "the fallback path must still install a REFUTABLE defect, or the arm goes vacuous "
+        "the moment its anchor is reworded")
 
 
 def test_every_addressed_rev_names_a_fetchable_refspec():
