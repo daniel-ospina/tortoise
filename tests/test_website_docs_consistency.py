@@ -3387,6 +3387,52 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
     )
     assert " ".join(_visible_text(body_only).split()) == reviewed
 
+    # 3b. …and the SAME claim one INLINE ELEMENT DEEPER inside that summary, which the
+    #    direct-child version of the carve-out could not see (#14073 review round 7,
+    #    P1, measured): the painted slot is the whole `<summary>` SUBTREE, so a claim
+    #    inside a `<span>`/`<b>`/`<em>` there is painted too, and the first version of
+    #    `_text_is_painted` asked whether the CURRENT element was the summary — true
+    #    only while the text was the summary's direct child. Measured before the fix:
+    #    the allowlist, the destination pin, the vocabulary scan and the wording golden
+    #    were ALL green while Chromium painted the span. Driven for three wrappers, so
+    #    the row tests the depth-independence rather than one tag.
+    for wrapper in ("span", "b", "em"):
+        nested_claim = section.replace(
+            "</h2>",
+            "</h2><details><summary><" + wrapper + ">FalkorDB permanently deletes your "
+            "least-used items after thirty days</" + wrapper + "></summary>Tap to "
+            "read more.</details>",
+            1,
+        )
+        assert nested_claim != section, f"the `<{wrapper}>`-in-summary control could not inject"
+        assert _attributes_outside_allowlist(nested_claim) == [], (
+            f"premise: a bare `<{wrapper}>` adds no attribute, so the allowlist cannot "
+            f"be what catches this"
+        )
+        assert sorted(set(extract_anchor_hrefs(nested_claim))) == list(
+            _REVIEWED_SECTION_HREFS
+        ), f"premise: the `<{wrapper}>` adds no href, so the destination pin cannot catch this"
+        assert "falkor" in _banned_vocabulary(nested_claim), (
+            f"the `<summary>` slot is painted as a SUBTREE, so a claim inside a "
+            f"`<{wrapper}>` there reaches the reader; the visible-text scan must see "
+            f"its words, and the direct-child carve-out did not"
+        )
+        with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
+            _assert_storage_section_reviewed(nested_claim)
+    # …and the closed BODY stays dropped one element deeper too, or "admit everything
+    # under a `<details>`" would pass the rows above.
+    nested_body = section.replace(
+        "</h2>",
+        "</h2><details><summary>Tap to read more.</summary><div><span>FalkorDB "
+        "permanently deletes everything</span></div></details>",
+        1,
+    )
+    assert nested_body != section
+    assert "falkor" not in _banned_vocabulary(nested_body), (
+        "the closed BODY of a `<details>` is not painted at any depth, so its words "
+        "must not reach the visible-text scan"
+    )
+
     # 4. …and the OTHER over-drop, which the loud rows above cannot see: a raw-text
     #    element whose content a reader DOES meet must be counted. `_RAW` is
     #    suppressed for the TOKENIZER's sake, so "suppressed" is not "unreadable" —
