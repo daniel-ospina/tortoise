@@ -1410,13 +1410,28 @@ def _modules_reaching_a_store() -> frozenset[str]:
         parts = [part for part in rel.parts if part != "__init__"]
         module = "tortoise" + ("." + ".".join(parts) if parts else "")
         imported = _imports_of(path.read_text(encoding="utf-8"))
-        if any(
-            name == root or name.startswith(root + ".")
-            for name in imported
-            for root in _STORE_CLIENT_ROOTS
-        ) or (imported & _FORBIDDEN_CLIENT_EXPORTS):
+        if _reaches_a_store_client(imported):
             found.add(module)
     return frozenset(found)
+
+
+def _reaches_a_store_client(imported: set[str]) -> bool:
+    """Does this import set reach a store client, by ROOT or by EXPORT name?
+
+    ⛔ EXTRACTED SO THE EXPORT HALF CAN BE PINNED AT ALL. Inside the scan it was
+    inert against TREE DATA: the only module naming an export
+    (`tortoise/projection/__init__.py` → `tortoise.FalkorDB`) also imports
+    `falkordb` directly, so `found` is byte-identical with and without the export
+    clause — reverting it left the whole file green (measured: 100 passed). A leg
+    that no observable input exercises is a leg that can be deleted silently, which
+    is this PR's whole subject; the synthetic pins below are the observable input.
+    """
+    by_root = any(
+        name == root or name.startswith(root + ".")
+        for name in imported
+        for root in _STORE_CLIENT_ROOTS
+    )
+    return by_root or bool(imported & _FORBIDDEN_CLIENT_EXPORTS)
 
 
 def test_the_store_reach_scan_sees_the_REDIS_spelling_too() -> None:
@@ -1446,6 +1461,18 @@ def test_the_store_reach_scan_sees_the_REDIS_spelling_too() -> None:
             f"reachability guard is narrower than the roots it declares: "
             f"found={sorted(found)!r}"
         )
+    # ⛔ AND THE EXPORT HALF OF THE PREDICATE, synthetically. No module in the tree
+    # reaches a store ONLY through an export spelling, so tree data could never hold
+    # this branch — reverting it left the whole file green (measured: 100 passed).
+    # These inputs are the only ones that can.
+    assert _reaches_a_store_client({"tortoise.FalkorDB"})
+    assert _reaches_a_store_client(
+        _imports_of("def f():\n    from tortoise import FalkorDB\n")
+    )
+    # …and the tree-relative form stays OUT of this predicate, as documented.
+    assert not _reaches_a_store_client(
+        _imports_of("from .projection import FalkorProjection\n")
+    )
 
 
 def test_the_no_graph_guard_covers_every_module_that_reaches_a_store() -> None:
