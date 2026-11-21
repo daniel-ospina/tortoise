@@ -333,7 +333,41 @@ def test_a_threshold_edited_in_the_record_moves_the_bar():
 def test_a_floor_edited_in_the_record_moves_the_floor():
     record = _prereg()
     record["denominator_floors"]["e1_objects"] = 7
-    assert measure.parse_bars(record)["floors"]["e1_objects"] == 7
+    # ⛔ The SAME lever over E6's floor, which is the sixth row's false-PASS guard (a
+    # below-floor population is REFUSED, never scored). It was parsed and never proven
+    # READ, so a `"e6_declared_rows": 30` literal in `parse_bars` stayed GREEN: the record's
+    # value is 30 at this head, so the frozen bar arm and every E6 fixture agree with the
+    # hardcode. ⛔ RESTORED (#14060 review, the `#14049` tail): the merge that brought the
+    # predecessor lane in dropped this half, and the literal then survived the whole file.
+    record["denominator_floors"]["e6_declared_rows"] = 12
+    floors = measure.parse_bars(record)["floors"]
+    assert floors["e1_objects"] == 7
+    assert floors["e6_declared_rows"] == 12, floors["e6_declared_rows"]
+
+
+def test_e6_consumes_the_floor_and_the_bar_it_parsed():
+    """⛔ PARSED is not READ — `e6_outcome` may hardcode both and satisfy every other arm.
+
+    #14060 review (the `#14049` tail), measured at this head: `floor =
+    bars["floors"]["e6_declared_rows"]` -> `30` and `limit = bars["E6"]["unbound_max"]`
+    -> `0` EACH left the file green (measured: 78 passed, one inherited cite red), because
+    the E6 bar/floor arms assert on `parse_bars` and every fixture hands `BARS`, whose values
+    equal those literals. The value is proven READ here by moving it and requiring the
+    OUTCOME to move with it, on a population the frozen value scores differently — the only
+    shape a hardcode cannot pass.
+
+    Non-vacuity: a `floor = 30` literal returns PASS for the first case (it must REFUSE) and
+    a `limit = 0` literal returns FAIL for the third (it must PASS).
+    """
+    moved_floor = {**BARS, "floors": {**BARS["floors"], "e6_declared_rows": 60}}
+    assert measure.e6_outcome(declared=45, unbound=0, bars=moved_floor)["outcome"] == (
+        "REFUSED")
+    # …and the FROZEN floor scores the same population, so the refusal above is the READ
+    # value's and not the population's.
+    assert measure.e6_outcome(declared=45, unbound=0, bars=BARS)["outcome"] == "PASS"
+    moved_bar = {**BARS, "E6": {"unbound_max": 1}}
+    assert measure.e6_outcome(declared=45, unbound=1, bars=moved_bar)["outcome"] == "PASS"
+    assert measure.e6_outcome(declared=45, unbound=1, bars=BARS)["outcome"] == "FAIL"
 
 
 def test_a_threshold_that_cannot_be_parsed_refuses_rather_than_defaulting():
