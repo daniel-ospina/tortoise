@@ -1761,6 +1761,15 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
         assert e6["error"], (why, e6)
         assert refusal in str(e6["error"]), (why, e6["error"])
         assert e6["declared"] == 0, (why, e6["declared"])
+        # ⛔ AND THE NARRATION NAMES THE FAULT THAT FIRED (#14060 review, P3, measured):
+        # `written_source` said "the census could not be enumerated" on a path that runs only
+        # AFTER `rows = _e6_census_rows(census)` — TRUE for the three fixtures whose `packs`
+        # enumerates nothing, FALSE for the two that enumerate a row and disagree with the
+        # declared population, which is the branch the message belongs to. The same narration
+        # class as the pack-registry message `row["note"]` is pinned for below.
+        assert "could not be enumerated" not in str(e6["written_source"]), (
+            why, e6["written_source"])
+        assert "population" in str(e6["written_source"]), (why, e6["written_source"])
         # ⛔ AND THE REFUSED COLUMN CARRIES WHAT WAS ESTABLISHED, not four zeros (#14060
         # review rounds 16 and 22, P3, measured): the cells stayed at the initialised all-zero
         # dict, so a refusal carrying ONE enumerable row published `unmeasured=0` — every row
@@ -17248,6 +17257,21 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         assert any(arm in line for line in span), (
             f"the record's `sdk.py:{mint_start}-{mint_end}` does not span the {arm} "
             "arm it claims to cover")
+    # ⛔ AND A QUOTE IN THE HISTORICAL BLOCK IS *VERBATIM* (#14060 review, P3, measured): the
+    # amendment quotes `sdk.py:22385`'s comment as `wrote ''`, dropping the source's backticks —
+    # an invented quotation, the class round 22 fixed in `E6_SURFACES`, in a bundle whose pins
+    # exist to refuse exactly that. The NUMBER above it is historical on purpose (stamped by
+    # head, never re-pointed), so this arm pins the SENTENCE and not the line: a merge that
+    # moves 22385 leaves it green, a re-worded or de-backticked quote reds it.
+    _merged_head_quote = "# re-capture kept the display column live and the replay wrote `''`"
+    assert _merged_head_quote in "\n".join(sdk), (
+        f"the quoted sentence must exist in tortoise/sdk.py verbatim — a quote that dropped the "
+        f"source's backticks is an invented quotation (looked for {_merged_head_quote!r})")
+    assert _merged_head_quote in text, (
+        f"the record must quote `sdk.py:22385` verbatim, backticks included ({_merged_head_quote!r})")
+    assert "the replay wrote ''" not in text, (
+        "the record's de-backticked spelling of the 22385 quote is back — it is not the source's "
+        "text, so it is a quotation this bundle must not carry")
 
     # A5: the census query the "cannot observe the edge" gap rests on. All THREE
     # lines of the cited range are pinned, because the claim is the RANGE: the

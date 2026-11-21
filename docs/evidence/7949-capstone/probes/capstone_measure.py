@@ -4483,7 +4483,8 @@ def measure_e6(*, packs_dir: Path | str | None = None,
     if error:
         measurement["error"] = error
         measurement["written_source"] = (
-            E6_NOT_READ_PREFIX + "the census could not be enumerated")
+            E6_NOT_READ_PREFIX + "the census's population block was REFUSED, so no row was "
+            "keyed beside it")
         # ⛔ A REFUSED ROW PUBLISHES NO COUNT FOR A COLUMN IT DID NOT READ (#14060 review round
         # 16, P3, measured): `written` stayed at the all-zero dict initialised above, so a
         # refused census carrying ONE enumerable row wrote `unmeasured=0` — every row measured —
@@ -4497,7 +4498,12 @@ def measure_e6(*, packs_dir: Path | str | None = None,
         # refusal's aggregate and nothing else: the rows were enumerated above the guard, so
         # `unmeasured` is their count, and the three write columns are `None` — the absence of a
         # reading, never a zero, which is the rule `_E6_WRITTEN_UNKNOWN` states and this path now
-        # follows.
+        # follows. ⛔ AND THE CAUSE IT NAMES IS THIS GUARD'S OWN FAULT (#14060 review, P3,
+        # measured): the branch runs only AFTER `rows = _e6_census_rows(census)`, so the old
+        # message — "the census could not be enumerated" — was FALSE on every fixture that does
+        # enumerate a row (the `declared != len(rows)` shapes), i.e. the same narration class the
+        # pack-registry message was fixed for one branch up. All three conditions here are faults
+        # in the census's OWN population block, which is what the message now says.
         measurement["written"] = {"direct": None, "mediated": None, "none": None,
                                   "unmeasured": len(rows)}
         return measurement

@@ -227,7 +227,7 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    ⛔ THESE FIGURES ARE HISTORICAL, NOT LIVE, and they went stale the moment `origin/main` advanced
    under them: the merge of `#13971` (`e0accb8fe6`) inserted 43 lines into `tortoise/sdk.py`, 31 of
    them above this writer (the live cite above is `sdk.py:22471`), so at the merged head
-   `22440` is `sourceKind="agentSession",`, `22385` is `# re-capture kept the display column live and the replay wrote ''`, and the
+   `22440` is `sourceKind="agentSession",`, `22385` is ``# re-capture kept the display column live and the replay wrote `''` ``, and the
    mint opens at `21189` (`21189-21213`, same `-A 24` window). They are stamped by head and NOT
    re-pointed, because re-pointing a past-tense sentence to a new number is the false claim this
    note exists to catch; the LIVE figures are the prose cite above, which was re-derived on the
@@ -817,7 +817,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — �
                                                           # — 3 — and tests/test_7949_capstone_measure.py
                                                           # — 4 — SOURCE-TEXT scans and one prose comment, not
                                                           # consumers: one is the `extractor_v2.py` scan
-                                                          # (`:16566`) that derives the doc's cite, two are the
+                                                          # (`:16575`) that derives the doc's cite, two are the
                                                           # ⛔ NEITHER side of this merge's conflict printed this
                                                           # number: HEAD said `:15100`, `origin/main` said
                                                           # `:15096`, and BOTH were stale on the merged tree
@@ -827,7 +827,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — �
                                                           # whatever the head you merge derives. ⛔ **The two figures this
                                                           # note once typed (`:15228`, then `:15391`) are both refuted by
                                                           # later commits on this branch (#13802 review, P2)**: no line number
-                                                          # is typed HERE for that figure; the `:16566` cite earlier in this block IS the
+                                                          # is typed HERE for that figure; the `:16575` cite earlier in this block IS the
                                                           # derived value the guard reads at this head — named by the value, never by its
                                                           # DISTANCE from this comment, which is the same rotted-positional class this file
                                                           # exists to catch (#13802 review, P2: this said "six lines up", measured 10).
