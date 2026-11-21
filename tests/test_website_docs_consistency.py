@@ -2352,18 +2352,22 @@ def test_the_storage_section_bound_cuts_at_a_RENDERED_heading_only() -> None:
         ("hidden subtree", '<div hidden><h2 id="quickstart">Quickstart</h2></div>'),
         ("hidden heading", '<h2 hidden id="quickstart">Quickstart</h2>'),
         ("closed details", '<details><h2 id="quickstart">Quickstart</h2></details>'),
-        # ⛔ A BARE `<option>`/`<optgroup>` — no `<select>` above it, so the `in
-        # select` rule does not apply and the element-type rule did not name it: the
-        # heading has a 0x0 rect and paints 0 px in this box's Chrome (measured), so
-        # it was a decoy that BOUND the slice while Chromium painted the claim under
-        # it. The optgroup is here because the refusal is ancestry, not the immediate
-        # parent — a fix that special-cased the direct parent would pass the first row
-        # and fail this one (#14073 review round 8).
+        # ⛔ A BARE `<option>` — no `<select>` above it, so the `in select` rule does
+        # not apply and the element-type rule did not name it: the heading has a 0x0
+        # rect and paints 0 px in this box's Chrome (measured), so it was a decoy that
+        # BOUND the slice while Chromium painted the claim under it. The group row
+        # below is here because the refusal is ancestry, not the immediate parent — a
+        # fix that special-cased the direct parent would pass the first row and fail
+        # it (#14073 review round 8).
         ("bare option", '<option><h2 id="quickstart">Quickstart</h2></option>'),
         (
             "optgroup over a bare option",
             '<optgroup><option><h2 id="quickstart">Quickstart</h2></option></optgroup>',
         ),
+        # ⛔ A RUBY PARENTHESIS IS THE OTHER `display: none` MEMBER (UA stylesheet), and
+        # BOTH questions agree about it: nothing inside a `<rp>` paints, so a heading
+        # there bounded the slice while no reader met it (#14073 review round 9).
+        ("ruby parenthesis", '<rp><h2 id="quickstart">Quickstart</h2></rp>'),
     ):
         mutant = page[:boundary] + inert + "\n" + claim + page[boundary:]
         assert mutant != page, f"could not insert the {label} case"
@@ -2805,6 +2809,7 @@ def test_the_reader_met_rule_refuses_every_declared_unrendered_class() -> None:
     # declaration plus a behavioural check per tag.
     unrendered = {
         "audio", "canvas", "datalist", "meter", "object", "progress", "video",
+        "rp",
     }
     assert not unrendered - set(_AnchorHrefParser._UNRENDERED), (
         f"`_UNRENDERED` no longer declares "
@@ -2837,14 +2842,20 @@ def test_the_reader_met_rule_refuses_every_declared_unrendered_class() -> None:
         # The cost is a heading in a real summary does not bound: the slice runs
         # long and the extra text stays pinned.
         ("summary of a closed details", '<details><summary><h2 id="qs">Q</h2></summary></details>'),
-        # ⛔ `<option>`/`<optgroup>` ARE NOT AN ELEMENT-TYPE MEMBER OF `_UNRENDERED`,
-        # and this row is why the rule they need is `_UNBOUNDABLE_ANCESTORS` instead:
-        # their CHILD HEADINGS are unrendered (0x0 rect, 0 painted px — measured),
-        # but their own DIRECT TEXT paints, so the refusal must stay on the BOUNDARY
-        # question. A heading inside a bare `<option>` bounded the #storage slice with
-        # the claim under it outside every pin (#14073 review round 8, measured).
+        # ⛔ `<option>` IS NOT AN ELEMENT-TYPE MEMBER OF `_UNRENDERED`, and this row is
+        # why the rule it needs is `_UNBOUNDABLE_ANCESTORS` instead: its CHILD
+        # HEADING is unrendered (0x0 rect, 0 painted px — measured), but its own
+        # DIRECT TEXT paints, so the refusal must stay on the BOUNDARY question. A
+        # heading inside a bare `<option>` bounded the #storage slice with the claim
+        # under it outside every pin (#14073 review round 8, measured).
         ("bare option", '<option><h2 id="qs">Q</h2></option>'),
-        ("bare optgroup", '<optgroup><h2 id="qs">Q</h2></optgroup>'),
+        # ⛔ `<rp>` IS THE OPPOSITE CASE and belongs in `_UNRENDERED`: a ruby
+        # parenthesis is `display: none` (HTML Standard rendering; CSS Ruby's sample UA
+        # stylesheet) and NOTHING inside it paints — the heading's rect is 0x0 and its
+        # own text paints 0 px. Recorded before this row existed: a `<rp>` decoy BOUND
+        # the slice (#14073 review round 9).
+        ("ruby parenthesis", '<rp><h2 id="qs">Q</h2></rp>'),
+        # the option refusal is ANCESTRY, so the group around it is covered too
         (
             "optgroup over a bare option",
             '<optgroup><option><h2 id="qs">Q</h2></option></optgroup>',
@@ -2854,20 +2865,30 @@ def test_the_reader_met_rule_refuses_every_declared_unrendered_class() -> None:
             f"a `<h2>` is recorded although no reader meets it ({label}): bounding "
             f"at it leaves the text under it outside every pin"
         )
-    # ── and the three unboundable ancestors stay BOUNDARY-ONLY ────────────────
+    # ── and the unboundable ancestors stay BOUNDARY-ONLY ──────────────────
     # ⛔ THE REFUSAL MUST NOT MOVE INTO `_UNRENDERED`. That set feeds the TEXT
-    # question too, and these elements' own DIRECT TEXT is rendered: measured on
-    # this box's Chrome, `<option>TAIL</option>` paints 244 px and
+    # question too, and `<option>`'s own DIRECT TEXT is rendered: measured on this
+    # box's Chrome, `<option>TAIL</option>` paints 244 px and
     # `<option><h2>HELLO</h2>TAIL</option>` paints 613 px (TAIL — the heading is
     # 0x0). A future edit that "simplifies" the rule into `_UNRENDERED` would DROP
     # painted copy from the visible-text golden, which is the fail-open direction
     # this file has already paid for three times (`<summary>`, `<object>`).
-    assert not {"select", "option", "optgroup"} & set(
-        _AnchorHrefParser._UNRENDERED
-    ), (
+    assert not {"select", "option"} & set(_AnchorHrefParser._UNRENDERED), (
         "an unboundable ancestor was added to `_UNRENDERED`: that set also drives "
         "`extract_visible_text`, so the element's own rendered DIRECT text would be "
         "dropped and a claim written there would leave every pin green"
+    )
+    # …and the mirror: `<rp>` IS in it, because nothing inside it paints at all, so
+    # its own text must drop too (0 painted px measured).
+    assert "rp" in _AnchorHrefParser._UNRENDERED, (
+        "`rp` left `_UNRENDERED`: a `<rp>` is `display: none` in the UA stylesheet, "
+        "so a heading inside it is recorded again and BOUNDS the slice with the "
+        "claim under it outside every pin"
+    )
+    assert extract_visible_text("<p>a</p><rp>PAREN</rp>").split() == ["a"], (
+        "a `<rp>`'s own text is counted: nothing in a ruby parenthesis is painted, "
+        "so counting it is only the false-red direction — but the reason `rp` is in "
+        "`_UNRENDERED` rather than in the boundary set is that BOTH questions agree"
     )
     for label, markup, expected in (
         ("option direct text", "<option>TAIL</option>", "TAIL"),
@@ -2889,6 +2910,11 @@ def test_the_reader_met_rule_refuses_every_declared_unrendered_class() -> None:
         # the refusal ends with the ancestor: a heading AFTER the option closes still
         # bounds, so `_UNBOUNDABLE_ANCESTORS` is ancestry and not a page-wide switch
         ("after a closed option", '<option>x</option><h2 id="qs">Q</h2>', "qs"),
+        # ⛔ AND A BARE `<optgroup>` IS A POSITIVE CONTROL, not a refusal: it DOES
+        # render its child heading (measured — 812x38 rect, 668 painted px), which is
+        # why it is not in `_UNBOUNDABLE_ANCESTORS`. An earlier revision refused it on
+        # a sentence the measurement falsifies (#14073 review round 9).
+        ("bare optgroup", '<optgroup><h2 id="qs">Q</h2></optgroup>', "qs"),
     ):
         assert [
             heading_id

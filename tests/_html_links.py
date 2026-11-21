@@ -361,7 +361,8 @@ class _AnchorHrefParser(HTMLParser):
     _RAW_RENDERS = frozenset({"textarea", "xmp", "plaintext"})
     #: Elements whose CHILD CONTENT a browser does not RENDER UNCONDITIONALLY, by
     #: ELEMENT TYPE — the second half of "does a reader meet this heading/link",
-    #: after raw text, inert `<template>` content and the `in select` rule.
+    #: after raw text, inert `<template>` content, the `in select` rule and
+    #: `_UNBOUNDABLE_ANCESTORS`.
     #: `<datalist>` is `display: none` in the UA stylesheet, so its children are
     #: never rendered; the rest put their children in the FALLBACK slot, which a
     #: supporting browser renders only when the element itself cannot be used (no
@@ -376,8 +377,22 @@ class _AnchorHrefParser(HTMLParser):
     # attribute allowlist at once — the same fail-open `_record_heading` closes for
     # `<template>`/`<script>`/`<select>`, reachable without touching the TOC at all
     # (`<datalist id="x"><h2 id="quickstart">…` bound the slice; #14073 review).
+    #
+    # ⛔ `<rp>` IS THE SECOND `display: none` MEMBER, and it is HERE rather than in
+    # `_UNBOUNDABLE_ANCESTORS` because BOTH questions agree about it — unlike
+    # `<option>`, whose own text paints, NOTHING inside a ruby parenthesis is painted.
+    # Its reason is NORMATIVE, not a browser quirk: the HTML Standard's rendering
+    # section lists `rp` with the hidden elements, and CSS Ruby's sample UA stylesheet
+    # carries `rp { display: none; }` (the parenthesis exists for engines with NO ruby
+    # support). MEASURED on this box's Chrome as well: `<rp><h2>HELLO</h2></rp>` → the
+    # `<rp>` computes `display: none`, the heading's rect 0x0, 0 painted px; and
+    # `<rp>PAREN</rp>` → 0 painted px, so its own text is dropped too. Before it was
+    # listed, `extract_heading_positions('<rp><h2 id="qs">Q</h2></rp>')` returned the
+    # heading, so a `<rp>` decoy BOUND the slice with the claim under it outside every
+    # pin (#14073 review round 9, reproduced end-to-end through `_docs_section`).
     _UNRENDERED = frozenset({
         "datalist", "canvas", "video", "audio", "object", "meter", "progress",
+        "rp",
     })
     #: ⛔ THIS SET ANSWERS TWO QUESTIONS, and ONE member answers them differently
     #: (#14073 review round 6, then round 7):
@@ -469,25 +484,32 @@ class _AnchorHrefParser(HTMLParser):
     #:
     #: * `<select>` — the conservative side of a spec change, stated at length on
     #:   `_record_heading`; ancestry, so `<optgroup><option>` under it is covered.
-    #: * `<option>`/`<optgroup>` — no insertion mode involved and nothing unsettled:
-    #:   a `<h2>` inside ONE of them is simply not rendered, and the rule that missed
-    #:   it (`_unmet_by_reader` asked about `<select>`, `_UNRENDERED`, `hidden` and
-    #:   `<details>`) let the heading bound the slice. MEASURED, not inferred — this
-    #:   box's `/usr/bin/google-chrome` driven by Playwright, non-white pixels on a
-    #:   white viewport, plus the element's own rect: `<option><h2>HELLO</h2></option>`
-    #:   → 0 px, rect 0x0; `<optgroup><option><h2>HELLO</h2></option></optgroup>` → 0
-    #:   px; and `<option><h2>HELLO</h2>TAIL</option>` → 613 px, the heading still
-    #:   0x0 (TAIL is what paints). So the refusal is BOUNDARY-ONLY on purpose:
-    #:   `<option>TAIL</option>` → 244 px, so the option's own text IS rendered and
-    #:   adding `option` to `_UNRENDERED` would DROP painted copy — the text-question
-    #:   fail-open this file keeps paying for.
+    #: * `<option>` — no insertion mode involved and nothing unsettled: a `<h2>`
+    #:   inside a `<option>` is simply not rendered (`<option><h2>HELLO</h2></option>`
+    #:   → rect 0x0, 0 painted px, with or without a `<select>` above it), and the rule
+    #:   that missed it (`_unmet_by_reader` asked about `<select>`, `_UNRENDERED`,
+    #:   `hidden` and `<details>`) let the heading bound the slice. The refusal is
+    #:   BOUNDARY-ONLY on purpose — `<option>TAIL</option>` paints 244 px, so the
+    #:   option's own text IS rendered and adding `option` to `_UNRENDERED` would DROP
+    #:   painted copy, the text-question fail-open this file keeps paying for.
     #:
-    #: The end-to-end escape this closes, measured through `_docs_section` on a page
+    #: ⛔ `<optgroup>` IS NOT A MEMBER, and an earlier revision of this comment claimed
+    #: it was by saying a heading inside "one of them" is not rendered. MEASURED FALSE
+    #: for a BARE `<optgroup>`: `<optgroup><h2>HELLO</h2></optgroup>` gives the heading
+    #: an 812x38 rect and 668 painted px (32 480 dark px on a `docs.html` copy with the
+    #: real stylesheet). Only `<optgroup><option><h2>…` is 0x0 — and `option` already
+    #: covers that, as does the `<select>` ancestor rule for the spelling a real page
+    #: uses. Refusing `optgroup` therefore refused a heading a reader DOES meet: the
+    #: loud direction (a wrongly long slice), and the honest fix is to drop the member
+    #: rather than keep an over-refusal resting on a false sentence (#14073 review
+    #: round 9, measured).
+    #:
+    #: The end-to-end escape this set closes, measured through `_docs_section` on a page
     #: copy: a TOC entry for `#storage-limits` plus
     #: `<option><h2 id="storage-limits">Limits</h2>FalkorDB … the allowance … tier…`
     #: put the claim outside the slice with the golden, the vocabulary pin, the
     #: destinations pin and the attribute allowlist ALL green.
-    _UNBOUNDABLE_ANCESTORS = frozenset({"select", "option", "optgroup"})
+    _UNBOUNDABLE_ANCESTORS = frozenset({"select", "option"})
     #: Every recording of a DOCUMENT TREE, by attribute name. `_clear_recordings`
     #: iterates this tuple, and
     #: `test_the_parsers_recordings_forget_a_document_a_frameset_replaced` asserts it
@@ -762,16 +784,24 @@ class _AnchorHrefParser(HTMLParser):
         inside it is covered too. The cost is declared: a rendered heading inside a
         select does not end the slice.
 
-        ⛔ AND `<option>`/`<optgroup>` REFUSE FOR A MEASURED REASON, not a spec
-        question — `<select>` is the only member here whose answer is unsettled.
-        A `<h2>` inside a BARE `<option>` (no select above it) had a 0x0 rect and
-        painted 0 px in this box's Chrome, while the option's own direct text
-        painted 244 px — so leaving `option` out let a decoy heading no reader meets
-        bound the slice, with the claim under it outside the golden, the vocabulary
-        pin, the destinations pin and the attribute allowlist at once (measured on a
-        page copy, #14073 review round 8). All three members live in
-        `_UNBOUNDABLE_ANCESTORS`, and that set is the BOUNDARY question ONLY: the
-        option's text is rendered, so it stays in the TEXT recording.
+        ⛔ AND `<option>` REFUSES FOR A MEASURED REASON, not a spec question —
+        `<select>` is the only member here whose answer is unsettled. A `<h2>` inside
+        a BARE `<option>` (no select above it) had a 0x0 rect and painted 0 px in this
+        box's Chrome, while the option's own direct text painted 244 px — so leaving
+        `option` out let a decoy heading no reader meets bound the slice, with the
+        claim under it outside the golden, the vocabulary pin, the destinations pin
+        and the attribute allowlist at once (measured on a page copy, #14073 review
+        round 8). Both members live in `_UNBOUNDABLE_ANCESTORS`, and that set is the
+        BOUNDARY question ONLY: the option's text is rendered, so it stays in the
+        TEXT recording.
+
+        ⛔ AND `<optgroup>` WAS IN THAT SET FOR ONE ROUND AND CAME OUT — a bare
+        `<optgroup>` DOES render its child heading (measured: 812x38 rect, 668 painted
+        px; only `<optgroup><option><h2>` is 0x0, and `option` covers that), so
+        refusing it refused a heading a reader meets. An over-refusal is the loud
+        direction and therefore safe, but it rested on a sentence this measurement
+        falsifies, and an unmeasured member in a measured set is how the next reader is
+        misled (#14073 review round 9).
 
         ⛔ AND "INSIDE A SELECT" IS THE SPEC'S QUESTION, NOT THIS STACK'S. The
         tokens that close the scope in the LIVING standard are `<input>` and a
@@ -823,9 +853,9 @@ class _AnchorHrefParser(HTMLParser):
 
         * an open `_UNBOUNDABLE_ANCESTORS` ancestor — an open `<select>` (the
           conservative side of a spec change, for the reason `_record_heading` states
-          at length), and `<option>`/`<optgroup>`, whose child headings are MEASURED
-          unrendered (0x0 rect, 0 painted px) while their own direct text paints — so
-          they are refused HERE and deliberately not in `_UNRENDERED`;
+          at length), and `<option>`, whose child headings are MEASURED unrendered
+          (0x0 rect, 0 painted px) while its own direct text paints — so it is refused
+          HERE and deliberately not in `_UNRENDERED`;
         * an open `_UNRENDERED` ancestor — `<datalist>` and the conditional-fallback
           elements put their children somewhere a supporting browser does not
           render;
