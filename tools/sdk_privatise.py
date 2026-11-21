@@ -373,11 +373,11 @@ SWEEP_NAMES = 66
 #: gave a false one: it said a pre-rebase commit "is reachable from no ref and disappears on the
 #: next `gc`", and that commit (`83e94826a8a`) is an ANCESTOR of a ref, `refs/pull/14108/head`, which
 #: `git gc` does not prune. What IS measured of it: on no remote BRANCH (`git branch -r --contains
-#: 83e94826a8a` → empty; #14108's own branch, `f84afe7b4c`, does not contain it) and not on `main`
-#: (`git merge-base --is-ancestor` → NO), and not fetchable BY ITS SHA at all — `git fetch origin
-#: 83e94826a8a` from a bare clone answers `couldn't find remote ref`; only `git fetch origin
-#: refs/pull/14108/head` resolves it. So a sha here would address a ref that MOVES rather than a
-#: tree: exactly the unreproducible address this block forbids elsewhere).
+#: 83e94826a8a` → empty) and not on `main` (`git merge-base --is-ancestor` → NO), and not fetchable
+#: BY ITS SHA at all — `git fetch origin 83e94826a8a` from a bare clone answers `couldn't find
+#: remote ref`; only `git fetch origin refs/pull/14108/head` resolves it. So a sha here would address
+#: a ref that MOVES rather than a tree: exactly the unreproducible address this block forbids
+#: elsewhere).
 #: ⛔ The −6 is verified as an ATTRIBUTION and not as a direction: the residue row sets were
 #: MEASURED on both trees and diffed row by row (`py_files()` → `edits_for()` → `residue` on
 #: `origin/main`'s own tree and on this one), and `poisoned.update` 6 → 0 is the ONLY row that
