@@ -646,8 +646,8 @@ read resolves the node **through the edge** — `sdk.py:31551`
 `mcp_server.py:11590` (`MATCH (t:Tag) OPTIONAL MATCH (t)<-[:TAGGED]-(q)`), and
 `sdk.py:24857` (`MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t`, the orphan GC) — all five
 addresses opened at this head and re-checked in this pass (#13879 review, P2): the `mcp_server.py`
-one was stale at main's head, at `:11280` → `:11281` (`#13991`), and this branch's own `sdk.py`
-insertions then moved the four `sdk.py` addresses by `+31` — each re-derived by the fragment it
+one was stale at main's head, at `:11280` → `:11281` (`#13991`), and main's own `sdk.py`
+insertions (`e0accb8fe6`, `#13994`) then moved the four `sdk.py` addresses by `+31` — each re-derived by the fragment it
 quotes (`grep -nF`), never by applying that delta — while the `mcp_server.py` one stayed where
 `#13991` left it only down to `#14169`: `b4da1f5c01` then moved it a further `+309`, so the address
 `#13991` corrected is now HISTORY and the line quoted above is the one this head carries — the
