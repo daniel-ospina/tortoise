@@ -1796,7 +1796,7 @@ def test_no_graph_dependency() -> None:
     # `tortoise.hosted_backup` reds the `_all_roots` row ABOVE; adding a banned root
     # to the subject's answer reds the `leaked == {"falkordb"}` row ABOVE; and a probe
     # that answers EVERY banned root reds that same `<root>.<sub>` row, not the
-    # `== set()` equality below. A row that
+    # `== set()` equality ABOVE. A row that
     # names the wrong one is what lets a load-bearing row be deleted on a false premise.
 
 
