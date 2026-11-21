@@ -501,11 +501,19 @@ def _covered(handlers: list[ast.ExceptHandler]) -> set[str]:
 
 
 def _reraises(handler: ast.ExceptHandler) -> bool:
-    """Whether the handler body is exactly one bare `raise` (a re-raise)."""
-    return (
-        len(handler.body) == 1
-        and isinstance(handler.body[0], ast.Raise)
-        and handler.body[0].exc is None
+    """Whether the handler ENDS by re-raising (nothing is dropped).
+
+    The last statement is what decides it, so the correct cleanup shape —
+    `except (AttributeError, …): _proj.close(); raise` — counts. This PR ships
+    that exact shape (`tests/test_9226_dump_paging_v6.py:517`), and a coverage
+    rule demanding "exactly one bare `raise`" would have redded it the moment the
+    block became a root (review of `ee5457f`, P3).
+
+    A trailing bare `raise` keeps the anti-`except ImportError: return False`
+    property: the clause is only coverage if it actually propagates.
+    """
+    return bool(handler.body) and (
+        isinstance(handler.body[-1], ast.Raise) and handler.body[-1].exc is None
     )
 
 
@@ -1012,6 +1020,23 @@ def _probe_blocks_from_source(
 _UNGRADABLE: list[str] = []
 
 
+#: Text markers that keep a file from being dropped UNPARSED. It must be a
+#: SUPERSET of every verb the two skip-guard sets accept (`skip`, `skipif`,
+#: `xfail`, `importorskip`) plus the flag spellings: a marker list narrower than
+#: the guard sets is a SILENT DROP — the walk would grade the block if it ever saw
+#: it, and the file is discarded before parsing and recorded as nothing (review of
+#: `ee5457f`, P2: `if URI is None: pytest.xfail(…)` was that hole). The self-test
+#: pins the superset, so the two lists cannot drift apart again.
+_PREFILTER_MARKERS = (
+    "AVAILABLE",
+    "skipif",
+    "skip(",
+    "pytest.skip",
+    "xfail",
+    "importorskip",
+)
+
+
 @functools.lru_cache(maxsize=1)
 def _probe_report() -> tuple[tuple[str, int, tuple[str, ...], bool, bool, bool], ...]:
     out: list[tuple[str, int, tuple[str, ...], bool, bool, bool]] = []
@@ -1033,10 +1058,7 @@ def _probe_report() -> tuple[tuple[str, int, tuple[str, ...], bool, bool, bool],
         # or a `skipif` at all — that omission is why
         # `tests/test_9226_dump_paging_v6.py` was never parsed (review of
         # 76abdca, P2).
-        if not any(
-            marker in src
-            for marker in ("AVAILABLE", "skipif", "skip(", "pytest.skip", "importorskip")
-        ):
+        if not any(marker in src for marker in _PREFILTER_MARKERS):
             continue
         try:
             rows = _probe_blocks_from_source(src)
@@ -1285,6 +1307,17 @@ def test_the_import_seam_census_sees_the_shapes_it_grades():
         f"`except BaseException:` must read as a BROAD, swallowing arm: {base_exc}"
     )
 
+    # ⛔ The prefilter must be a SUPERSET of the verbs the guard sets accept, or a
+    # file the walk WOULD grade is dropped before parsing and recorded as nothing
+    # — the "a silent drop is a fail" class, which nothing else here can see
+    # (review of `ee5457f`, P2: a sentinel whose skip is `pytest.xfail` was that
+    # hole). Both lists live in this file, so the pin is a set comparison.
+    for verb in ("skip", "skipif", "xfail", "importorskip"):
+        assert any(verb in marker for marker in _PREFILTER_MARKERS), (
+            f"the prefilter lost `{verb}` — a file whose only skip verb is that one "
+            "is dropped UNPARSED and recorded as nothing: a silent drop"
+        )
+
     # An OPTIONAL third-party import is out of scope: it must not be redded,
     # because for an optional extra a skip is the correct outcome.
     optional = rows(
@@ -1302,6 +1335,31 @@ def test_the_import_seam_census_sees_the_shapes_it_grades():
         "a probe whose ONLY import is an optional third-party extra is not graded "
         "at all — for an optional capability a SKIP is the correct outcome, and "
         f"demanding an arm there would turn a skip into a collection error: {optional}"
+    )
+
+    # A CLEANUP-THEN-RAISE arm is coverage: it ends by re-raising, so nothing is
+    # dropped. `tests/test_9226_dump_paging_v6.py:517` ships exactly this shape;
+    # a coverage rule demanding "exactly one bare `raise`" would red it the
+    # moment the block became a root (review of `ee5457f`, P3).
+    cleanup_raise = rows(
+        """
+        FALKORDB_AVAILABLE = False
+        try:
+            from tortoise.sdk import TortoiseSDK
+            TortoiseSDK()
+            FALKORDB_AVAILABLE = True
+        except (AttributeError, NameError, TypeError, ImportError):
+            clean()
+            raise
+        except Exception:
+            FALKORDB_AVAILABLE = False
+        """
+    )
+    assert cleanup_raise == (
+        (3, ("AttributeError", "ImportError", "NameError", "TypeError"), True, True, True),
+    ), (
+        "an arm that cleans up and THEN re-raises covers the programming errors — "
+        f"nothing is dropped: {cleanup_raise}"
     )
 
     # A probe guard that is NOT a direct child of its helper — inside a `for`
