@@ -2029,9 +2029,10 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     three could be blanked with the population unchanged.
     #
     #     The FIRST-CONTACT arms below are `_touches_own_code`, so the IMPORT half of
-    #     the same two module-body filters needs its own row (4i-bis), and the shape
-    #     the removed capability OR used to admit needs a stated residual (4m) — both
-    #     added by the review of 90a0e9e8b20c (P2).
+    #     the same two module-body filters needs its own row (4i-bis), and the shape the
+    #     removed capability OR used to admit is RESTORED by rule rather than pinned as a
+    #     gap (4m states the closure; 4k+ is its positive witness) — all three from the
+    #     review of 90a0e9e8b20c (P2).
     #
     # 4i — the module-body `*AVAILABLE` branch's OWN-CODE contact: a module-scope
     #      own import is the only seam, and the flag is an availability flag, so
@@ -2162,42 +2163,27 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         f"can be deleted with every other row green: {module_body_own_import_unused}"
     )
 
-    # 4m. DECLARED RESIDUAL (review of 90a0e9e8b20c, P2) — the module-body branches no
-    #     longer OR `_reaches_capability_seam`, and that removal costs one shape that IS
-    #     the own-code seam: a guard whose client is built at MODULE scope
-    #     (`PROJ = _make_proj()`) and then queried. `PROJ` is not an import, so
-    #     `_touches_own_code` cannot see it and no arm admits the block. Measured on
-    #     this tree: `_assigns_availability` True, `_imports_own_code` False,
-    #     `_touches_own_code` False, `_reaches_capability_seam` TRUE — so it WAS a root
-    #     before 90a0e9e8b20c, and `_probe_blocks_from_source` now returns `()`. The
-    #     tree carries NO such block today (the census's own population is what makes
-    #     this survivable), and that is the whole reason this is a pin rather than a
-    #     silent narrowing.
+    # 4m. THE GAP THIS SLOT PINNED AS ACCEPTED IS CLOSED BY RULE (review of
+    #     90a0e9e8b20c, P2), so the `()` pin that stood here is DELETED — its own text
+    #     instructed exactly that if the coverage was restored. A module-body guard
+    #     whose client is built at MODULE scope (`PROJ = _make_proj()`) and then queried
+    #     reaches no import and no module-level own name, so after the capability OR was
+    #     removed NO admission rule saw it: a swallowed rename there reads as "storage
+    #     unavailable" again, the class-2 false PASS this file exists to catch (measured
+    #     at the parent: `_assigns_availability` True, `_imports_own_code` False,
+    #     `_touches_own_code` False, `_reaches_capability_seam` True — a root before
+    #     `90a0e9e8b20c`, `()` after).
     #
-    #     The precise repair — keep the arm and restrict its ATTRIBUTE form to a
-    #     receiver the repo's own typing accepts (`privatise.receiver_is_sdk`,
-    #     tools/sdk_privatise.py) — is not attempted here: gating the HELPER branches
-    #     that way breaks the pinned passed-in-client rule
-    #     (`tests/test_8870_version_anchor_write_order.py:138`), and a test-only file
-    #     is the wrong place to change the receiver typing's contract.
-    module_scope_client_is_ungraded = roots(
-        """
-        PROJ = _make_proj()
-
-        FALKORDB_AVAILABLE = False
-        try:
-            PROJ.g.query("RETURN 1")
-            FALKORDB_AVAILABLE = True
-        except Exception:
-            FALKORDB_AVAILABLE = False
-        """
-    )
-    assert module_scope_client_is_ungraded == (), (
-        "PIN OF A KNOWN GAP, not a rule: a module-body guard whose client is built at "
-        "module scope is no longer graded (review of 90a0e9e8b20c, P2). If this reds "
-        "because the coverage was RESTORED, delete this pin and update the census — do "
-        f"not narrow the arm: {module_scope_client_is_ungraded}"
-    )
+    #     The repair is the one `privatise.receiver_is_sdk` could NOT make: it answers
+    #     from annotations and stand-ins, so it cannot see `PROJ = _make_proj()`, and
+    #     gating the helper branches on it breaks the pinned passed-in-client rule
+    #     (`tests/test_8870_version_anchor_write_order.py:138`). Instead the arm is back
+    #     in every branch and NARROWED: `_reaches_capability_seam(block, third_party)`
+    #     skips an ATTRIBUTE call only when the receiver's ROOT name is bound by a
+    #     NON-own import (`_non_own_imported_names`) — the `some_optional_dep.query`
+    #     false red — and grades everything else. `4k+` below is the POSITIVE witness
+    #     for this exact document; deleting the arm again reds it, which is the
+    #     guarantee the `()` pin could never give.
 
     # 4k-/4l-. `_reaches_capability_seam` matches the GENERIC attribute `query`, so it
     #     must never admit a third-party-only probe: at the module body, nor in either
@@ -2266,27 +2252,6 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "a module-body guard whose client was BUILT above the `try` must still be "
         "graded — `PROJ` is neither an import nor a module-level own name, so only "
         f"the capability arm can admit it: {module_body_client_bound_above}"
-    )
-
-    # 4k++. `_imports_own_code`'s isolating witness (review of 90a0e9e8b20c, finding 2):
-    #     rows 4i/4j are admitted by `_touches_own_code` — they CALL the own import —
-    #     so blanking the import arm was silent. Here the own import sits INSIDE the
-    #     `try` and its bound name is never USED, so no `Name` node matches and only
-    #     `_imports_own_code` can admit the block.
-    module_body_own_import_unused = roots(
-        """
-        FALKORDB_AVAILABLE = False
-        try:
-            from tests._live_utils import docker_uri
-            FALKORDB_AVAILABLE = True
-        except Exception:
-            FALKORDB_AVAILABLE = False
-        """
-    )
-    assert module_body_own_import_unused == ((3, (), True, True, True),), (
-        "an own import INSIDE the guard whose name is never used must still be "
-        "graded — the import arm is the only one that can see it: "
-        f"{module_body_own_import_unused}"
     )
 
     # 5. The real tree must carry all four shapes, or every assertion above is a
