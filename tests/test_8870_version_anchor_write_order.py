@@ -141,6 +141,13 @@ def _probe_set_order(proj) -> str:
             rows = proj.g.query(_ORDER_PROBE_STATEMENT).result_set
         finally:
             proj.g.query(f"MATCH (n:{_ORDER_PROBE_LABEL}) DELETE n")
+    except (AttributeError, NameError, TypeError, ImportError):
+        # ⛔ A moved/renamed `.g`/`.query` is a PROGRAMMING error, not "unmeasured":
+        #   `SET_ORDER_UNMEASURED` becomes `ORDER_UNMEASURED_SKIP_REASON`, i.e. the
+        #   whole live proof SKIPS with a reason that names no door (#14114 class 2,
+        #   #14125). A genuinely unreachable engine raises `ConnectionError`
+        #   (`RedisError`, NOT `OSError`) and still takes the broad arm below.
+        raise
     except Exception:
         # A failed probe is UNMEASURED, never a verdict — and never an error out
         # of the gate that would read as "the thing under test failed".
