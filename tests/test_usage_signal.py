@@ -88,9 +88,11 @@ named test goes RED):
   ``test_no_graph_dependency_pins_the_package_root_EXPORT_form`` RED on
   ``from tortoise import __init__ as i`` + ``i.FalkorDB`` — measured at head
   ``88e771ab``, same 102 collected: 1 failed / 101 passed, every other row green.
-  ``tortoise.__init__`` IS the package and ``_imports_of`` folds it onto the
-  UNBANNED root, so this was the one spelling of the package root no leg saw, in
-  the ban and in the direction scan alike.
+  ``_imports_of`` folds ``tortoise.__init__`` onto the UNBANNED root, so this was
+  the one spelling of the package root no leg saw, in the ban and in the direction
+  scan alike. ⚠️ The LEG is a fail-closed over-report, not a live reach: at runtime
+  `from tortoise import __init__` binds a `method-wrapper`, not the module (§
+  `_package_root_attributes`).
 * **Bind only the ABSOLUTE ``from tortoise import __init__`` and leave the
   relative spelling out** (drop the ``relative_root`` arm of the ``ast.ImportFrom``
   branch in ``_package_root_attributes``) →
@@ -100,7 +102,9 @@ named test goes RED):
   ``module=None, level=1``, so there is no module STRING to compare and an
   absolute-only branch cannot see it;
   ``_imports_of`` folds ``tortoise.__init__`` onto the unbanned package root, so
-  the ban AND the direction scan were both green on a live reach.
+  the ban AND the direction scan were both green on this spelling. ⚠️ Over-report
+  at runtime, same as the row above: the bound name is a `method-wrapper` unless
+  `tortoise.__init__` was imported first.
 * **Read the relative arm as ``level == 1`` only** (narrow ``relative_root``, so
   ``from .. import __init__`` falls out) →
   ``test_no_graph_dependency_pins_the_package_root_EXPORT_form`` RED on the
@@ -939,23 +943,28 @@ def _package_root_attributes(source: str) -> set[str]:
     asks which names are BOUND to the package root. One owner per question, and
     deleting this leg reddens the export pin rather than nothing.
 
-    ⛔ AND `from tortoise import __init__ as i` IS THE PACKAGE ROOT, not a
-    submodule: the name it binds is the module that owns `FalkorDB`, so a read on
-    that name is the attribute spelling of the guarded client. It was the one
-    spelling of the root that neither bound loop saw — `ast.ImportFrom` was not
-    read here at all, and `_imports_of` FOLDS it onto the unbanned `tortoise` — so
-    `i.FalkorDB` reached the guarded client with every leg green (measured:
-    `from tortoise import __init__ as i` resolves to `<module 'tortoise.__init__'>`
-    and `i.FalkorDB` returns
-    `tortoise.__init__._build_guarded_falkordb.<locals>.FalkorDB`).
+    ⛔ AND `from tortoise import __init__ as i` IS A SPELLING OF THE PACKAGE ROOT,
+    and the leg reports it — but it is a FAIL-CLOSED OVER-REPORT, not a live reach.
+    At runtime the ordinary binding is `tortoise.__init__` the MODULE's own
+    `__init__` — `<method-wrapper '__init__' of module object …>` — and `i.FalkorDB`
+    raises `AttributeError`; the module object only appears after an explicit
+    `import tortoise.__init__`, and even then it is a DISTINCT module from the
+    package (`sys.modules['tortoise.__init__'] is tortoise` → `False`). Measured on
+    this tree at `e022fc935b`. The leg exists anyway because the name was the one
+    package-root spelling `_imports_of` FOLDS onto the unbanned `tortoise` and no
+    other loop read `ast.ImportFrom` at all, so a caller writing this form would
+    have reached the guarded client with every leg green. Reporting a name that
+    cannot be the client is recoverable; staying silent on a spelling of the root
+    is not — the same asymmetry this function's first paragraph sanctions.
 
-    ⛔ AND THE RELATIVE SPELLING IS THE SAME BINDING, and the more natural one
-    inside this package. `ast` records `from . import __init__` as
-    `ImportFrom(module=None, level=1)` — there is no module STRING to compare, so
-    an absolute-only branch can never see it and the spelling sat in the hole the
-    absolute fix had just closed one word over: measured, the relative form binds
-    `<module 'tortoise.__init__'>` and `i.FalkorDB` is the same guarded client,
-    while this leg, `_offending` and `_module_reaches_a_store` were ALL green.
+    ⛔ AND THE RELATIVE SPELLING IS THE SAME BINDING IN THE AST, and the more
+    natural one to write inside this package. `ast` records `from . import
+    __init__` as `ImportFrom(module=None, level=1)` — there is no module STRING to
+    compare, so an absolute-only branch can never see it, and the spelling sat in
+    the hole the absolute fix had just closed one word over: this leg, `_offending`
+    and `_module_reaches_a_store` were ALL silent on it. ⚠️ Same runtime caveat as
+    the absolute form above — the bound name is a `method-wrapper`, so this is
+    another over-report, not a reach that was observed.
     ⚠️ OVER-REPORTS for a nested module, where `from . import __init__` names
     `tortoise.<sub>.__init__` and `from .. import __init__` names the root: the
     source string carries no package depth, so the two cannot be told apart here.
@@ -1231,12 +1240,32 @@ def test_no_graph_dependency() -> None:
     # that reaches the client. `test_the_no_graph_guard_names_modules_that_EXIST`
     # and `…_covers_every_module_that_reaches_a_store` hold the set in both
     # directions; this leg inherits whatever they certify.
+    # ⛔ AND THE DERIVATION HAS ONE OWNER, PINNED. A derivation written inline in the
+    # subprocess string can be NARROWED and every row stays green, because the
+    # positive control below witnesses the `redis` root and a narrowing keeps it:
+    # measured at `e022fc935b`, `forbidden={('falkordb', 'redis')!r}` (the very
+    # hardcoded pair this comment says it replaced) and
+    # `forbidden={tuple(_STORE_CLIENT_ROOTS)!r}` (dotless roots only) both left the
+    # file at 102 passed, while a transitive pull of `tortoise.session_indexer` came
+    # back empty under the dotless-only list — the module is pulled in and the leg
+    # certifies nothing. So the helper is the one owner and the assert reads IT: an
+    # assert against a fresh re-derivation would pin nothing, because the same
+    # narrowing would move both sides.
+    def _probe_forbidden() -> tuple[str, ...]:
+        """The probe's name list: every banned root the probe can witness."""
+        return tuple(r for r in _FORBIDDEN_GRAPH_ROOTS if r not in _PROBE_EXEMPT)
+
+    assert set(_probe_forbidden()) == set(_FORBIDDEN_GRAPH_ROOTS) - set(_PROBE_EXEMPT), (
+        f"the probe's derived list is {sorted(_probe_forbidden())} — it must be the "
+        "ban set minus the probe exemptions, or the transitive leg certifies "
+        "coverage it does not deliver")
+
     def _probe(import_stmt: str) -> str:
         """Run the sys.modules walk in a CLEAN interpreter over one import."""
         src = (
             "import sys;"
             f"{import_stmt};"
-            f"forbidden={tuple(r for r in _FORBIDDEN_GRAPH_ROOTS if r not in _PROBE_EXEMPT)!r};"
+            f"forbidden={list(_probe_forbidden())!r};"
             "bad=[n for n in sys.modules if any(n == r or n.startswith(r + '.') "
             "for r in forbidden)];"
             "print(','.join(sorted(bad)))"
@@ -1484,13 +1513,17 @@ def test_no_graph_dependency_pins_the_package_root_EXPORT_form() -> None:
     ) == {"tortoise.FalkorDB"}, (
         "the `.__getattr__` receiver must be folded through `_dotted_base` like "
         "every other name this module derives")
-    # ⛔ AND THE `from tortoise import __init__` SPELLING, which binds the PACKAGE
-    # under a fresh name (`tortoise.__init__` IS the package). It was the one
-    # spelling of the root outside the bound loop's view: `_imports_of` folds it to
-    # the unbanned `tortoise`, no banned root matched, and a function-body read is
-    # invisible to the probe. Measured reach, not a theoretical one — after
-    # `import tortoise.__init__` the parent's attribute IS the module, so the read
-    # returns the guarded client.
+    # ⛔ AND THE `from tortoise import __init__` SPELLING, which names the PACKAGE
+    # ROOT. It was the one spelling of the root outside the bound loop's view:
+    # `_imports_of` folds it to the unbanned `tortoise` and no banned root matched.
+    # ⚠️ This is a FAIL-CLOSED OVER-REPORT, not a measured reach: on a module object
+    # `__init__` IS the `method-wrapper` `module.__init__`, so `i.FalkorDB` raises
+    # `AttributeError`; the module object only appears after an explicit
+    # `import tortoise.__init__`, and even then it is a distinct module from the
+    # package (`sys.modules['tortoise.__init__'] is tortoise` → `False`). Measured
+    # on this tree at `e022fc935b`. The leg reports it anyway because a caller who
+    # writes this name intends the package root, and silence on a spelling is the
+    # unrecoverable direction.
     # ⛔ THE BINDING IS BY NAME, NOT BY LOAD ORDER — and this row is the one that
     # actually witnesses the `ast.ImportFrom` branch. An earlier cut asserted
     # `_offending("import tortoise.__init__\nfrom tortoise import __init__ as i\n")
@@ -1504,14 +1537,14 @@ def test_no_graph_dependency_pins_the_package_root_EXPORT_form() -> None:
         "from tortoise import __init__\nc = __init__.FalkorDB\n"
     ) == {"tortoise.FalkorDB"}, (
         "the binding is name-based: a read on the `__init__` name bound from the "
-        "package root is the guarded client whether or not the submodule was "
-        "imported first")
+        "package root is reported whether or not the submodule was imported first — "
+        "an over-report by design, not a claim that the name is the module")
     # ⛔ AND THE RELATIVE SPELLING, which is the one a module INSIDE this package
     # writes and which `ast` records with NO module string (module=None, level=1)
-    # — so the absolute-only branch could never see it. Measured as a LIVE reach:
-    # `from . import __init__ as i` binds `<module 'tortoise.__init__'>` and
-    # `i.FalkorDB` IS the guarded client, while this leg, `_offending` and
-    # `_module_reaches_a_store` were all green.
+    # — so the absolute-only branch could never see it. Same fail-closed over-report
+    # as the absolute form above (the bound name is a `method-wrapper`): the leg
+    # exists because this spelling, the ban and the direction scan were ALL silent
+    # on it together.
     assert _offending(
         "from . import __init__ as i\nc = i.FalkorDB\n"
     ) == {"tortoise.FalkorDB"}, (
@@ -1535,17 +1568,18 @@ def test_no_graph_dependency_pins_the_package_root_EXPORT_form() -> None:
         "a ban it cannot see"
     )
     # ⛔ AND ONE DOT FURTHER: `from .. import __init__`, written in a module ONE
-    # package deep, names the ROOT (`tortoise.__init__`), so the arm must read
+    # package deep, is the root spelling one level down — so the arm must read
     # `level >= 1` rather than `level == 1`. Narrowing it to `== 1` kept every row
     # green (measured: 101 passed) while this spelling stopped being seen — the
     # same unpinned-leg class as the rest of this file. It over-reports for a
     # module at the top level, where `from .. import __init__` is past the root and
-    # raises instead: fail-closed, per this function's first paragraph.
+    # raises instead: fail-closed, per this function's first paragraph. Same runtime
+    # caveat as the forms above — the bound name is a `method-wrapper`.
     assert _offending(
         "from .. import __init__ as i\nc = i.FalkorDB\n"
     ) == {"tortoise.FalkorDB"}, (
-        "`from .. import __init__` in a module one package deep names the ROOT, so "
-        "a `level == 1` arm lets `i.FalkorDB` through every leg")
+        "`from .. import __init__` in a module one package deep is the root "
+        "spelling, so a `level == 1` arm lets `i.FalkorDB` through every leg")
     assert _module_reaches_a_store("from .. import __init__ as i\nc = i.sdk\n"), (
         "the direction scan runs the same leg, so the one-dot-further spelling "
         "must be visible there too")
