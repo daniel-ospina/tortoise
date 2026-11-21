@@ -517,6 +517,16 @@ def _reraises(handler: ast.ExceptHandler) -> bool:
     A trailing bare `raise` keeps the anti-`except ImportError: return False`
     property: the clause is only coverage if it actually propagates.
     """
+    if not handler.body:
+        return False
+    _last = handler.body[-1]
+    if isinstance(_last, ast.Raise) and _last.exc is not None:
+        # `raise exc` re-raises THE SAME object, so nothing is dropped and the clause is
+        # coverage — `_reraises_its_own` has always read it that way, and a lane following
+        # this gate's own repair instruction ("insert the re-raise arm") in that idiomatic
+        # spelling was redded for having fixed it (review of #14160, cycle 6, P2-6).
+        _caught = _handler_names(handler) | ({handler.name} if handler.name else set())
+        return isinstance(_last.exc, ast.Name) and _last.exc.id in _caught
     return bool(handler.body) and (
         isinstance(handler.body[-1], ast.Raise) and handler.body[-1].exc is None
     )
@@ -1265,9 +1275,23 @@ def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]
     #: there — and that is decided by WHERE the call sits inside the comprehension, which
     #: only this path knows.
     seen: set[int] = {id(block)}
+    previous = block
     node = parents.get(id(block))
     while node is not None:
         seen.add(id(node))
+        if isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ) and _is_header_child(node, previous):
+            # ⛔ A CALL IN THE HEADER IS NOT IN THE DEFINITION'S SCOPE. Decorators, bases,
+            # keywords, defaults and annotations all evaluate in the ENCLOSING scope — the
+            # same direction `_header_expressions` implements for the WALRUS — so charging
+            # a header call with the definition's OWN bindings is a false red: measured,
+            # `try: def _inner(x=torch.query(…)): torch = _make_client()` and
+            # `try: class C(torch.query(…)): torch = _make_client()` were both graded over
+            # a legitimate probe. The node is skipped and the ascent continues outward.
+            previous = node
+            node = parents.get(id(node))
+            continue
         #: A `lambda` is a function scope too: its parameters are invisible to every
         #: other walk (they are `ast.arg`, and the module walk skips a lambda body by
         #: construction), so a call inside one must see them here or the exemption
@@ -1306,6 +1330,14 @@ def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]
             # set here suppresses ONLY the class-body contribution below, never a function
             # scope's (final review of #14160, P2).
             crossed_comprehension = True
+        elif isinstance(node, getattr(ast, "TypeAlias", ())):
+            # ⛔ `type Y[torch] = torch.query(…)` — THE TYPE PARAMETER IS BOUND IN THE VALUE.
+            # Measured on 3.12.3: with `torch` a module-level import, the alias's
+            # `__value__` raises `AttributeError: 'typing.TypeVar' object has no attribute
+            # 'query'`, so the receiver resolved to the TypeVar and not the import. The
+            # docstring named this spelling while only the def/class halves were collected,
+            # so the alias form was a fail-open hole (review of #14160, cycle 6, P2-4).
+            out |= _type_param_names(node)
         elif isinstance(node, ast.ClassDef):
             # ⛔ A GENERIC CLASS'S TYPE PARAMETER REACHES ITS METHODS. PEP 695: a class type
             # parameter "is valid within the class body and inner scopes contained
@@ -1321,6 +1353,7 @@ def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]
                 # which is exactly the descent `_function_local_bindings` implements.
                 out |= _function_local_bindings(node)
             crossed_callable = True
+        previous = node
         node = parents.get(id(node))
     return out
 
@@ -1411,6 +1444,23 @@ def _header_expressions(node: ast.AST) -> list[ast.AST]:
     # so no module that imports can hold one — `ast.parse` accepting it would only let a
     # grader measure a shape that cannot exist (review of #14160, cycle 4).
     return out
+
+
+def _is_header_child(node: ast.AST, child: ast.AST) -> bool:
+    """Whether `child` sits in `node`'s HEADER rather than its body.
+
+    A header expression evaluates in the ENCLOSING scope, so a call there is not resolved
+    by the definition's own bindings — the two directions of one §4.2.1/§4.2.4 rule.
+    """
+    #: A default's expression reaches the `def` through an `ast.arguments` node and a
+    #: class keyword through an `ast.keyword`, so the direct-child identity test alone
+    #: misses the two largest families — measured, the default-header case stayed graded
+    #: through a `previous` that was the `arguments` node.
+    if isinstance(child, (ast.arguments, ast.keyword, ast.arg)):
+        return True
+    if any(expression is child for expression in getattr(node, "decorator_list", ()) or ()):
+        return True
+    return any(expression is child for expression in _header_expressions(node))
 
 
 def _walrus_targets(node: ast.AST) -> set[str]:
@@ -1520,7 +1570,7 @@ def _reaches_capability_seam(
     re-opened the `some_optional_dep.query` false red with nothing red on any test. A
     missing argument now fails loudly at the call site instead (review P2).
 
-    ⛔ `shadowed` IS THE PROBE'S OWN REACH, AND IT IS ALSO REQUIRED. `third_party` is
+    ⛔ `parents` IS HOW THE CALL'S OWN REACH IS RESOLVED, AND IT IS REQUIRED. `third_party` is
     module-scope only, so the bindings that can reach a probe from its ENCLOSING
     FUNCTIONS — parameters, type parameters, locals, up the closure chain — arrive here
     per probe (`_enclosing_bindings`). Folding them into one module-wide set was
@@ -1943,7 +1993,9 @@ _UNGRADABLE: list[str] = []
 
 #: Text markers that keep a file from being dropped UNPARSED. It must be a
 #: SUPERSET of every verb the two skip-guard sets accept (`skip`, `skipif`,
-#: `xfail`, `importorskip`) plus the flag spellings: a marker list narrower than
+#: `xfail`) plus `importorskip` — which the guard sets do NOT model (no helper
+#: of ours is called, so no row can be built from it) but which still keeps a
+#: file from being dropped unparsed — plus the flag spellings: a marker list narrower than
 #: the guard sets is a SILENT DROP — the walk would grade the block if it ever saw
 #: it, and the file is discarded before parsing and recorded as nothing (review of
 #: `ee5457f`, P2: `if URI is None: pytest.xfail(…)` was that hole). The self-test
@@ -3541,6 +3593,36 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             "        return False\n"
             "TORCH_AVAILABLE = _probe(None)\n"
         ),
+        "a positional-only parameter of the probe-holding function": (
+            "import torch\n"
+            "def _probe(torch, /):\n"
+            "    try:\n"
+            '        torch.query("SELECT 1")\n'
+            "        return True\n"
+            "    except Exception:\n"
+            "        return False\n"
+            "TORCH_AVAILABLE = _probe(None)\n"
+        ),
+        "a keyword-only parameter of the probe-holding function": (
+            "import torch\n"
+            "def _probe(*, torch):\n"
+            "    try:\n"
+            '        torch.query("SELECT 1")\n'
+            "        return True\n"
+            "    except Exception:\n"
+            "        return False\n"
+            "TORCH_AVAILABLE = _probe(torch=None)\n"
+        ),
+        "a kwarg parameter of the probe-holding function": (
+            "import torch\n"
+            "def _probe(**torch):\n"
+            "    try:\n"
+            '        torch.query("SELECT 1")\n'
+            "        return True\n"
+            "    except Exception:\n"
+            "        return False\n"
+            "TORCH_AVAILABLE = _probe()\n"
+        ),
         "a vararg parameter of the probe-holding function": (
             "import torch\n"
             "def _probe(*torch):\n"
@@ -4144,6 +4226,168 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             f"a call in the comprehension's {_label} DOES run on the bound target, so it "
             f"must be graded — the control for the outermost-iterable row: {_inside_row}"
         )
+
+    # 4j-tervicesimus. A CALL IN THE HEADER IS NOT IN THE DEFINITION'S SCOPE. Every header
+    #     expression — decorator, base, keyword, default, annotation — evaluates BEFORE the
+    #     new scope exists (§4.2.1), which the walrus direction already pins
+    #     (`_header_expressions`); the REACH direction charged the header call with the
+    #     definition's own bindings, so a legitimate probe was graded. Measured on the two
+    #     spellings a reviewer found: `try: def _inner(x=torch.query(…)): torch =
+    #     _make_client()` and the same with a class BASE both read GRADED at the parent head
+    #     (review of #14160, cycle 6, P2-5). One row per header family, because a partial fix
+    #     must red exactly the family it missed, plus the body control that stays graded.
+    _header_reach_probe = (
+        "import torch\n"
+        "try:\n"
+        "    {header}\n"
+        "    TORCH_AVAILABLE = True\n"
+        "except Exception:\n"
+        "    TORCH_AVAILABLE = False\n"
+    )
+    for _label, _header in {
+        "a default": 'def _inner(x=torch.query("SELECT 1")):\n        torch = _make()',
+        "an annotation": 'def _inner(x: torch.query("SELECT 1")):\n        torch = _make()',
+        "a decorator": '@torch.query("SELECT 1")\n    def _inner():\n        torch = _make()',
+        "a class base": 'class _Inner(torch.query("SELECT 1")):\n        torch = _make()',
+        "a class keyword": (
+            'class _Inner(metaclass=torch.query("SELECT 1")):\n        torch = _make()'
+        ),
+    }.items():
+        _header_row = roots(_header_reach_probe.format(header=_header))
+        assert _header_row == (), (
+            f"a {_label} evaluates in the ENCLOSING scope, so the call there still runs on "
+            f"the import and the probe must stay EXEMPT: {_header_row}"
+        )
+    _body_after_header = roots(
+        _header_reach_probe.format(
+            header=(
+                "def _inner(x=_unused()):\n"
+                "        torch = _make()\n"
+                '        torch.query("SELECT 1")'
+            )
+        )
+    )
+    assert len(_body_after_header) == 1, (
+        "the control: a call in the BODY is resolved by the definition's own bindings, so "
+        "it must stay graded — a header rule that skipped the body too is a silent drop: "
+        f"{_body_after_header}"
+    )
+
+    # 4j-quadrovicesimus. `type Y[torch] = torch.query(…)` — THE TYPE PARAMETER IS BOUND IN
+    #     THE ALIAS VALUE. Measured on 3.12.3: `__value__` raises `AttributeError:
+    #     'typing.TypeVar' object has no attribute 'query'`, i.e. the receiver resolved to
+    #     the TypeVar and not the module import. The docstring named `type X[T]` as a covered
+    #     spelling while nothing passed an `ast.TypeAlias` to `_type_param_names`, so the
+    #     alias form was a fail-open hole and the block was not even admitted (review of
+    #     #14160, cycle 6, P2-4).
+    _type_alias_probe = roots(
+        textwrap.dedent(
+            """
+            import torch
+
+            TORCH_AVAILABLE = False
+            try:
+                type _Y[torch] = torch.query("SELECT 1")
+                TORCH_AVAILABLE = True
+            except Exception:
+                TORCH_AVAILABLE = False
+            """
+        )
+    )
+    assert len(_type_alias_probe) == 1, (
+        "a `type` alias's type parameter is in scope for its VALUE, so the call there runs "
+        f"on the TypeVar and must be graded: {_type_alias_probe}"
+    )
+
+    # 4j-quinvicesimus. `raise exc` IS COVERAGE. `_reraises` read only a BARE `raise`, while
+    #     `_reraises_its_own` has always treated `raise exc` as propagating the same object —
+    #     so a lane following this gate's own repair instruction ("insert the re-raise arm")
+    #     in that idiomatic spelling was redded for having fixed it (review of #14160, cycle
+    #     6, P2-6). The handler is parsed directly, because the coverage rule is a predicate
+    #     over the handler and a fixture block would test the admission machinery instead.
+    for _label, _statement, _want in (
+        ("raise exc", "raise exc", True),
+        ("raise an unrelated name", "raise _other", False),
+        ("swallow", "_probe = None", False),
+        ("bare raise", "raise", True),
+        ("raise from exc", "raise RuntimeError() from exc", False),
+    ):
+        _handler = next(
+            node
+            for node in ast.walk(
+                ast.parse(
+                    "try:\n    _probe = _make()\n"
+                    f"except (AttributeError, NameError) as exc:\n    {_statement}\n"
+                    "except Exception:\n    _probe = None\n"
+                )
+            )
+            if isinstance(node, ast.ExceptHandler)
+        )
+        assert _reraises(_handler) is _want, (
+            f"`{_statement}` in a narrow arm must be coverage={_want} ({_label}) — a "
+            "`raise exc` re-raises the caught object and drops nothing"
+        )
+
+    # 4j-sesvicesimus. A NESTED CLASS BODY IS A SEPARATE SCOPE, in BOTH directions. The
+    #     `crossed_callable` flag's CLASS half was unpinned: the two METHOD controls pass via
+    #     the `FunctionDef` branch's flag, so deleting the assignment at the end of the class
+    #     branch left the file green (review of #14160, cycle 6, P2-2). Measured flip:
+    #     `class Outer: torch = object(); class Inner: rows = torch.query(…)` → head `()`,
+    #     mutant graded. §4.2.2: a class block's names do not extend to a nested class body.
+    _nested_class_body = roots(
+        textwrap.dedent(
+            """
+            import torch
+
+            TORCH_AVAILABLE = False
+            try:
+                class _Outer:
+                    torch = object()
+
+                    class _Inner:
+                        _rows = torch.query("SELECT 1")
+                TORCH_AVAILABLE = True
+            except Exception:
+                TORCH_AVAILABLE = False
+            """
+        )
+    )
+    assert _nested_class_body == (), (
+        "an OUTER class body's binding cannot reach an INNER class body, so the call there "
+        f"still runs on the import and must stay EXEMPT: {_nested_class_body}"
+    )
+
+    # 4j-septenvicesimus. A NESTED SCOPE'S `global` IS ITS OWN DECLARATION, and `_global_
+    #     declarations`' skip of nested blocks was deletable green (review of #14160, cycle 6,
+    #     P2-3). Without the skip an INERT `global torch` inside a nested class borrows the
+    #     ENCLOSING function's local `torch`, and a legitimate probe at module scope is graded
+    #     — the false red the docstring names. Measured flip: head `()`, mutant graded.
+    _nested_scope_global = roots(
+        textwrap.dedent(
+            """
+            import torch
+
+            def _outer():
+                torch = _make_client()
+
+                class _Inner:
+                    global torch
+
+                return _Inner
+
+            TORCH_AVAILABLE = False
+            try:
+                _e = torch.query("SELECT 1")
+                TORCH_AVAILABLE = True
+            except Exception:
+                TORCH_AVAILABLE = False
+            """
+        )
+    )
+    assert _nested_scope_global == (), (
+        "an inert `global torch` in a NESTED class must not borrow the enclosing function's "
+        f"local of that name — the module import still reaches the probe: {_nested_scope_global}"
+    )
 
     # 4j-duovicesimus. A MODULE-LEVEL BARE ANNOTATION BINDS NOTHING. `torch: object` only
     #     records an annotation — it is not a binding operation, so an earlier
