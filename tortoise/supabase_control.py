@@ -910,8 +910,11 @@ def _orgs_row_fail_soft(cp, org_id: str, *, select: list[str],
     """Orgs row with fail-soft additive columns (#1096).
 
     Primary query selects base+additive (one round-trip). When it raises —
-    a missing additive column → PostgREST HTTP 400 (PGRST204 per the
-    error reference; the error-blind seam discards the body) — retry
+    a missing additive column → PostgREST HTTP 400, whose body carries EITHER
+    ``PGRST204`` (a column missing from its schema cache) OR PostgreSQL's own
+    ``42703``; the reference documents both shapes and the error-blind seam
+    discards the body, so which one a given read sees is deliberately NOT
+    claimed — retry
     progressively dropping the additive TIERS (newest migration first:
     tier[0] dropped first), padding the dropped tier's fields to safe
     defaults. Tiered so a schema missing only the NEWEST additive
@@ -2562,10 +2565,15 @@ def org_storage_notice_pct(cp, org_id: str) -> int | None:
 
     ⛔ A row whose COLUMN is missing (one migration behind) does NOT read as
     ``None`` — it RAISES. ``cp.query`` raises ``RuntimeError`` on any status
-    ≥ 300, and PostgREST answers an unknown column in ``select`` with HTTP 400:
-    Postgres' ``42703`` when the column reaches SQL, or ``PGRST204`` when it came
-    through a ``columns=`` parameter — THIS reader sends ``select=`` with no
-    ``columns=``, so ``42703`` is the shape it would see. That is
+    ≥ 300, and PostgREST answers an unknown column with HTTP 400 carrying one of
+    TWO documented body shapes: ``PGRST204`` ("the column specified in the
+    ``columns`` query parameter is not found") or PostgreSQL's own ``42703``
+    forwarded as a 400. WHICH one a ``select=`` rejection carries is neither
+    stated by the reference for ``select=`` nor observable here — this seam
+    renders only the status and discards the body — so it is not claimed, and an
+    earlier cut of this line concluded that ``42703`` "is the shape it would
+    see" (#14038 fix lane, after the review's R2: an unmeasured vendor
+    attribution, the same class the review found in the sentence it replaced). That is
     deliberate, not an oversight: the mark is the LEDGER, and an unreadable
     ledger must FAIL CLOSED (the caller reports ``notice-mark-unavailable``)
     rather than read as “never notified”, which would re-send the one-shot

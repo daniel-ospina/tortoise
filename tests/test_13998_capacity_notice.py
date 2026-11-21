@@ -929,6 +929,55 @@ class TestDriftAndStaleness:
                 f"alone: {text}")
         assert cn._rejected_the_projection(caught.value) is True
 
+    def test_the_body_code_behind_the_drift_400_is_not_a_claim_this_code_makes(
+            self):
+        """⛔ The justification names BOTH vendor shapes and picks NEITHER.
+
+        Three blocks describe the SAME read shape — a `select=` of an absent
+        column — and an earlier cut had them disagree: the
+        `_SCHEMA_REJECTION_MARKERS` block presented `42703` as what a rejected
+        `select=` produces and `PGRST204` as belonging to a `columns=`
+        parameter; `org_storage_notice_pct` drew the conclusion out loud
+        (*"so ``42703`` is the shape it would see"*); and
+        `_orgs_row_fail_soft` said the opposite — `PGRST204` — for that same
+        read. Neither code is a claim this code can make: the
+        PostgREST reference pins `PGRST204` to the **`columns=` parameter**,
+        `42703` is PostgreSQL's own code forwarded under PostgREST's catch-all
+        400, and `query_with_total` DISCARDS the body, so neither reaches this
+        seam (the test above asserts exactly that). So this pins the DOCTRINE,
+        not a wording: every block must name both documented shapes, and none
+        may bind one of them to what this reader sees.
+        """
+        docstrings = {
+            "capacity_notice._SCHEMA_REJECTION_MARKERS": _source_block(
+                pathlib.Path(cn.__file__),
+                "What a REJECTED PROJECTION looks like",
+                "_SCHEMA_REJECTION_MARKERS = ("),
+            "supabase_control.org_storage_notice_pct": (
+                sc.org_storage_notice_pct.__doc__ or ""),
+            "supabase_control._orgs_row_fail_soft": (
+                sc._orgs_row_fail_soft.__doc__ or ""),
+        }
+        for where, block in docstrings.items():
+            low = block.lower()
+            for code in ("pgrst204", "42703"):
+                assert code in low, (
+                    f"{where} no longer names {code!r}. PostgREST documents BOTH "
+                    f"shapes behind HTTP 400 — `PGRST204` for a column missing "
+                    f"from its schema cache and PostgreSQL's own `42703` "
+                    f"forwarded as a 400 — so dropping one leaves "
+                    f"`_SCHEMA_REJECTION_MARKERS` justified by half its "
+                    f"evidence: {block}")
+            picked = re.search(
+                r"[`\"']*(pgrst204|42703)[`\"']*\s*(?:is|as)\s+the\s+shape", low)
+            assert picked is None, (
+                f"{where} binds {picked.group(1)!r} to the shape this reader "
+                f"sees. `SupabaseControlPlane.query` renders only the STATUS "
+                f"and discards the body, so which code a rejected `select=` "
+                f"carries is UNOBSERVABLE here and the vendor reference does "
+                f"not pin it for `select=` (it documents `PGRST204` for "
+                f"`columns=`): {block}")
+
     @pytest.mark.parametrize("status", [401, 403, 404, 409, 422, 500, 502, 503])
     def test_a_non_400_status_from_the_real_seam_never_licenses_the_degrade(
             self, status):
@@ -1448,6 +1497,21 @@ def _ddl_only(sql: str) -> str:
     text would red on the prose that prevents the bug.
     """
     return "\n".join(line.split("--", 1)[0] for line in sql.splitlines())
+
+
+def _source_block(path: pathlib.Path, start_marker: str,
+                  end_marker: str) -> str:
+    """The source text from `start_marker` up to the next `end_marker`.
+
+    A docstring pin has to read the text a reviewer reads. `inspect.getsource`
+    cannot reach a `#:` comment block that justifies a CONSTANT, which is where
+    `_SCHEMA_REJECTION_MARKERS`' evidence lives, so the file is sliced instead.
+    A missing marker raises `ValueError` rather than returning `''` — an empty
+    slice would make every assertion below vacuous.
+    """
+    text = path.read_text()
+    start = text.index(start_marker)
+    return text[start:text.index(end_marker, start)]
 
 
 def test_the_module_docstring_names_the_post_rename_table():

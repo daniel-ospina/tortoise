@@ -667,11 +667,20 @@ _ACCOUNT_DRIFT_SOFT = ("suspended_at",)
 #: after a timeout or a 5xx would read a suspended org as un-suspended, mail it
 #: and burn its once-ever stamp (the stamp is not retryable).
 #:
-#: PostgREST answers an unknown column in `select` with **HTTP 400**: Postgres'
-#: `42703` (`column organizations.suspended_at does not exist`) when the column
-#: reaches SQL, or `PGRST204` when it came through a `columns=` parameter
-#: (Supabase's PostgREST error-code reference). `SupabaseControlPlane.query`
-#: renders only the STATUS and discards the body, so a bare `HTTP 400` from this
+#: PostgREST answers an unknown column with **HTTP 400**, and its reference
+#: documents TWO body shapes behind that status: `PGRST204` ("the column
+#: specified in the `columns` query parameter is not found") and PostgreSQL's own
+#: `42703` (`column organizations.suspended_at does not exist`), which PostgREST
+#: forwards as a 400 because `undefined_column` falls in its catch-all
+#: PostgreSQL row. ⛔ WHICH ONE A GIVEN `select=` REJECTION CARRIES IS NOT A
+#: CLAIM THIS CODE CAN MAKE, and an earlier cut made it anyway: it concluded that
+#: `42703` "is the shape it would see" while `_orgs_row_fail_soft` states
+#: `PGRST204` for the same read. The reference pins `PGRST204` to the `columns=`
+#: PARAMETER, not to `select=`, and `SupabaseControlPlane.query` renders only the
+#: STATUS while discarding the body — so neither code is text this seam can ever
+#: emit, and neither may be attributed to it (#14038 fix lane, same class as
+#: the review's R2). The marker
+#: list therefore accepts the STATUS and BOTH shapes. A bare `HTTP 400` from this
 #: one-row, `id`-filtered GET is the drift shape — a PATCH/POST body rejection or
 #: a bad filter cannot produce one here, and if a 400 has any other cause the
 #: retry 400s too and the ORIGINAL error is re-raised. A transport failure or a
