@@ -1774,13 +1774,20 @@ def test_a_carried_forward_figure_is_reported() -> None:
             {2: _drifters + two_span_uncounted + 1},
             "the alternative basis's numerator is overstated past what its added pairs can contribute — the "
             "direction a stale figure takes when a denominator moves under it. ⛔ DERIVED from the band's "
-            "own edge (`primary + extra_pairs`), not a fixed `+7`: the `+7` literal's HEADROOM above that "
-            "edge is `extra_pairs - (alt - primary)`, a property of the document — MEASURED over every "
-            "edition this branch has carried it was 6 or 7 (`extra_pairs` 1..4 against a gap of 1..4) — so "
-            "the literal goes legal only once the document's uncounted two-code-span count clears that "
-            "gap, which is 10 added pairs at this head (7 + a gap of 3), NOT 7. At that point the band is "
-            "correctly silent and the band's RULE-2 assertion below would red blaming a band that is "
-            "present and right (#14038 review, P3). "
+            "own edge (`primary + extra_pairs`), not a fixed `+7`. ⛔ The headroom above that edge is "
+            "`extra_pairs - (alt - primary)`, and it is MEASURED, not assumed: over every edition this "
+            "branch has carried it was 6 or 7 (`extra_pairs` 1..4 against a gap of 1 or 3), so the literal "
+            "never went legal here. "
+            "⛔ TWO counts must not be confused: 3 UNCOUNTED added pairs here (the `_TWO_SPAN_NEW` arm's "
+            "numeral, `**three**`), and 5 two-code-span pairs IN TOTAL (`**five**`) — that `5` is "
+            "`3 uncounted + 2 already counted`, so it is NOT the headroom and must not be read as one. "
+            "That misreading is how this comment first claimed the branch 'had already carried 5'; the "
+            "uncounted count has never left 3..4 on this branch (5 exists only on `feat/13971-point-strip`). "
+            "A fixed `+offset` goes legal when `extra_pairs - (alt_drifters - drifters) >= offset`, which is "
+            "`extra_pairs >= 10` at this head, NOT `>= 7`: at extra_pairs=8 the band is `155..163` and the "
+            "`+7` value 165 is still outside it, and at 9 it is `155..164` against 165 — both measured — "
+            "and only at 10 does the band reach 165 and fall silent, leaving the band's RULE-2 assertion "
+            "to red blaming a band that is present and right (#14038 review, P3). "
             "`two_span_uncounted` is graded equal to `extra_pairs` by the `_TWO_SPAN_NEW` arm, so this "
             "anchor is always exactly one above the upper edge",
         ),
@@ -1888,7 +1895,7 @@ def test_a_carried_forward_figure_is_reported() -> None:
             # ⛔ RULE 2 FOR THE BAND, and it was needed the moment the mention leg landed: the two rows
             # that mutate the alternative numerator (`+extra_pairs+1`, and `_drifters - 1`) red TWICE, and
             # the only observation the table makes is `!= []`. MEASURED at the PRE-FIX head
-            # `9decb729185f` — before the assertion below existed — with the band arm deleted (`:1542`
+            # `9decb729185f` — before the assertion below existed — with the band arm deleted (its `if`
             # -> `if False:`) the control stayed GREEN, while the same edit at the pre-leg
             # `d37d356e2ffd` reds it: the mention leg had taken over the entire red those two rows
             # produced, so the band was proven by nothing, and reverting it to the one-sided lower bound
