@@ -1310,6 +1310,29 @@ def test_no_graph_dependency() -> None:
             if any(name == root or name.startswith(root + ".") for root in forbidden)
         }
 
+    def _probe_modules(import_stmt: str) -> list[str]:
+        """The child's RAW report: every name in `sys.modules` after `import_stmt`.
+
+        The child is the ONLY place this program is built, and it matches NOTHING —
+        `_probe` hands what it printed to `_matching`. This helper is separate only so
+        the third-root failure message can tell "the child never reported the name"
+        apart from "the child reported it and the matcher dropped it", instead of
+        naming one cause for all of them.
+        """
+        src = (
+            "import sys;"
+            f"{import_stmt};"
+            "print(chr(31).join(sorted(sys.modules)))"
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", src],
+            capture_output=True,
+            text=True,
+            cwd=str(Path(__file__).resolve().parent.parent),
+            check=True,
+        ).stdout.rstrip("\n")
+        return [name for name in out.split(chr(31)) if name]
+
     def _probe(import_stmt: str) -> set[str]:
         """The banned roots present in `sys.modules` after `import_stmt`, in a CLEAN
         interpreter.
@@ -1351,8 +1374,10 @@ def test_no_graph_dependency() -> None:
         The last two are the tell: a record of what a matcher did is not the
         matcher, and an in-child assert can only ever check the record. So there is
         no child matcher and no record any more. The child prints `sys.modules`; the
-        one matcher is in this file, in the code these tests exist to audit, where a
-        change to it is a change to the subject rather than a change to the evidence.
+        one matcher is in this file, in the DETECTOR — not in the module under audit.
+        This test's subject is `usage_signal.py`'s source (see its provenance
+        assertions above); the matcher is the EVIDENCE, so a change to it is a change
+        to the evidence, which is exactly why the residual below has to exist.
 
         `\x1f` (unit separator) joins the module names because it cannot occur in a
         module name, and the read below is `rstrip("\n")`, NOT `strip()`: Python
@@ -1379,14 +1404,29 @@ def test_no_graph_dependency() -> None:
         expectations. That is a rewrite of the SUBJECT, not a narrowing of it, and it
         is the structural reason this arrangement is worth preferring to a two-hop
         one where a narrowed child and a fabricated record could BOTH be green.
-        ⚠️ AND ONE NARROWING SURVIVES THAT IS NOT A REWRITE, stated because it is
-        the same class this row was added to close, one hop further out: the name
-        stream is still parsed in the PARENT (`modules = [… if name]`) before the
-        matcher sees it, so suppressing one name THERE drops a root with every row
-        green — measured at `904a9429`, `… if name and name != 'tortoise.projection'`
-        is **102 passed**. It cannot be closed from this side: some code must read the
-        child's output, and an assert that reads the same output cannot tell a
-        suppressed name from an absent one.
+        ⛔ AND THE NAME STREAM IS STILL AN OPEN AXIS, one hop outside the matcher — in
+        two places, and they are the same class: what the child EMITS, and what the
+        parent PARSES before the matcher sees it.
+          * THE CHILD'S PRINT. The per-root witnesses above grade `_matching`
+            DIRECTLY, so they say nothing about what the child printed. Measured at
+            this head: a child narrowed to the roots the named controls use —
+            `sorted(n for n in sys.modules if n in ('redis','tortoise.ep',
+            'tortoise.session_indexer'))` — is **102 passed**, with `_matching` and
+            `_probe_forbidden()` both untouched, and the probe is then blind to the
+            rest of the ban set (`_probe("import tortoise.projection")` is `set()`,
+            while the honest child reports `tortoise.cypher_guard`,
+            `tortoise.projection`, …).
+          * THE PARENT'S PARSE. `[name for name in out.split(chr(31)) if name]` reads
+            the child's output before the matcher sees it, so suppressing one name
+            THERE drops a root with every row green — measured at `904a9429`,
+            `… if name and name != 'tortoise.projection'` is **102 passed**.
+        Neither can be closed from this side: some code must read the child's output,
+        and an assert that reads the same output cannot tell a suppressed name from an
+        absent one. So a narrowed child is green BY ITSELF — it no longer needs a
+        fabricated record beside it, and "a narrowed child and a fabricated record
+        could BOTH be green" understates it. The child mutants that DO red (a
+        constant, the direct import only, a truncated `sys.modules`) all red for other
+        reasons — none of them keeps the named roots.
         """
         # ⚠️ THE PREFIX CLAUSE `or n.startswith(r + '.')` IS DEFENSIVE, AND IT IS
         # NOW PINNED — this comment used to say "DELIBERATELY UNPINNED … deleting it
@@ -1408,20 +1448,7 @@ def test_no_graph_dependency() -> None:
         # NARROWED silently; this clause cannot be narrowed into a hole — it is
         # exercised in one direction by the per-root row and in the other by the
         # `_matching(['redis_probe', …]) == set()` boundary assert.
-        src = (
-            "import sys;"
-            f"{import_stmt};"
-            "print(chr(31).join(sorted(sys.modules)))"
-        )
-        out = subprocess.run(
-            [sys.executable, "-c", src],
-            capture_output=True,
-            text=True,
-            cwd=str(Path(__file__).resolve().parent.parent),
-            check=True,
-        ).stdout.rstrip("\n")
-        modules = [name for name in out.split(chr(31)) if name]
-        return _matching(modules)
+        return _matching(_probe_modules(import_stmt))
 
     # ⛔ AND THIS LEG NEEDS POSITIVE CONTROLS, not only the negative assertion.
     # Everything above asserts the probe finds NOTHING, so every way of breaking the
@@ -1466,16 +1493,18 @@ def test_no_graph_dependency() -> None:
     _direct = _probe("import tortoise.session_indexer")
     assert "tortoise.session_indexer" in _direct, (
         "the probe must report a banned root it was told to import: `import "
-        "tortoise.session_indexer` puts it in sys.modules, so "
-        f"{sorted(_direct)!r} means the matcher was restricted past the two roots "
-        "the older controls named (#14118 item 1). ⛔ THERE IS A SECOND CAUSE: if "
-        "this root is not in `_probe_forbidden()` at all then it was dropped from "
-        "`_FORBIDDEN_GRAPH_ROOTS`, the matcher is innocent, and the row that names "
-        "the real cause is "
-        "`test_the_no_graph_guard_covers_every_module_that_reaches_a_store`. Ask "
-        "`_probe_forbidden()` before hunting the matcher — "
-        f"'tortoise.session_indexer' in _probe_forbidden() = "
-        f"{'tortoise.session_indexer' in _probe_forbidden()}")
+        "tortoise.session_indexer` puts it in sys.modules, yet "
+        f"{sorted(_direct)!r} is empty of it. Measure before fixing — THREE causes, "
+        "and the two values below tell them apart: "
+        f"CHILD reported it = {'tortoise.session_indexer' in _probe_modules('import tortoise.session_indexer')}; "
+        f"in _probe_forbidden() = {'tortoise.session_indexer' in _probe_forbidden()}. "
+        "CHILD=False → the child's printed set is narrowed (a green mutant on its "
+        "own — see the residual above); CHILD=True and in _probe_forbidden()=True → "
+        "`_matching`, or the list it is handed, dropped it; "
+        "in _probe_forbidden()=False → the root was removed from "
+        "`_FORBIDDEN_GRAPH_ROOTS`, the matcher is innocent, and "
+        "`test_the_no_graph_guard_covers_every_module_that_reaches_a_store` names "
+        "that cause (#14118 item 1)")
     # ⛔ AND EVERY ROOT IS WITNESSED AGAINST BOTH CLAUSES, so what the matcher must
     # keep is the DERIVATION, not a list of names a narrowing can satisfy. The
     # matcher is in this file now, so it can be run over a one-name input directly:
