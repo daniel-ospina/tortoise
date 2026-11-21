@@ -580,15 +580,19 @@ DEFEATED_RESOLVER_ROWS = (
     # CERTIFIES the writer, and the own-scope dynamic-namespace arm then poisons the scope's `global`
     # declarations (`poisoned |= _scope_declarations`). ⛔ AT THIS HEAD THE MENTION RULE IS WHAT
     # REFUSES THIS ROW, not that arm (`#14001`, measured by the review of this branch and
-    # re-measured here): `globals` is named, so `_namespace_mentioned` short-circuits the scope to
-    # `{name: None …}` and the own-scope arms are never read. Disarming the arm alone therefore
-    # reds NOTHING — measured, 93 passed — which is why the blanket `poisoned |=
-    # _scope_declarations` beside the mention was deleted as inert (a mutant removing it reds no
-    # row either). The arm is a FALLBACK, and its own discriminating power is only measurable with
-    # the mention RETURN disabled (`return {name: None for name in assigned}` → `pass`). THE
-    # MEASURED RECIPE, at 56 rows in the table below and 93 tests in this file:
-    #   mention return → `pass`:                       19 failed, 74 passed
-    #   … plus this arm → `pass`:                      22 failed, 71 passed
+    # WITH DISARMING IT IS THE MENTION RULE THAT REFUSES THIS ROW (`#14001`, measured by the review
+    # of this branch and RE-MEASURED at this head). `globals` is named, so `_namespace_mentioned`
+    # short-circuits the scope to `{name: None …}` and the own-scope arms are never read. Disarming
+    # the arm alone therefore reds NOTHING — measured, 96 passed (the file collected 93 when this
+    # recipe was first written; the three tests this branch added all pass under either mutation,
+    # so the FAILED counts are unchanged and only the denominators move). Disabling the arm is therefore inert, and the
+    # blanket `poisoned |= _scope_declarations` beside the mention was deleted as inert (a mutant
+    # removing it reds no row either). The arm is a FALLBACK, and its own discriminating power is
+    # only measurable with the mention RETURN disabled (`return {name: None for name in assigned}`
+    # → `pass`). THE MEASURED RECIPE, at 56 rows in the table below and 96 tests in this file,
+    # re-measured here rather than transcribed:
+    #   mention return → `pass`:                       19 failed, 77 passed
+    #   … plus this arm → `pass`:                      22 failed, 74 passed
     #   ⇒ this arm's OWN contribution is exactly THREE rows — `globals-subscript-rebinding`,
     #     `globals-annassign-own-scope`, `globals-annassign-inside-tuple-target`.
     #   … plus the `_dynamic_namespace_mutation` arm → `pass` instead: 21 failed ⇒ that arm's own
@@ -1947,15 +1951,15 @@ def test_the_control_binds_the_shared_helpers(monkeypatch):
     must appear: `_folding` by the control's name (13 calls, all of them), `_env_source` by a
     caller that is NOT the fake's transitive fallback.
     """
-    callers: dict[str, set[str]] = {"_folding": set(), "_env_source": set()}
+    callers: dict[str, set[object]] = {"_folding": set(), "_env_source": set()}
     real_folding, real_env_source = _folding, _env_source
 
     def spy_folding(*args, **kwargs):
-        callers["_folding"].add(sys._getframe(1).f_code.co_name)
+        callers["_folding"].add(sys._getframe(1).f_code)
         return real_folding(*args, **kwargs)
 
     def spy_env_source(*args, **kwargs):
-        callers["_env_source"].add(sys._getframe(1).f_code.co_name)
+        callers["_env_source"].add(sys._getframe(1).f_code)
         return real_env_source(*args, **kwargs)
 
     monkeypatch.setattr(sys.modules[__name__], "_folding", spy_folding)
@@ -1963,19 +1967,25 @@ def test_the_control_binds_the_shared_helpers(monkeypatch):
 
     test_the_over_refusal_population_is_itself_pinned(monkeypatch)
 
-    control = "test_the_over_refusal_population_is_itself_pinned"
-    assert control in callers["_folding"], (
+    control_code = test_the_over_refusal_population_is_itself_pinned.__code__
+    assert control_code in callers["_folding"], (
         "the control stopped binding the module-level `_folding`, so a pre-F1 fake can be rebuilt "
         f"locally with every helper still correct — that revert is otherwise invisible: "
-        f"{callers['_folding']}")
-    # ⛔ `- {"fake"}` IS THE WHOLE POINT. `fake` is `_folding`'s inner fallback, and it calls
-    # `_env_source` whether or not the CONTROL binds it, so a local copy of `served` leaves this
-    # caller set at exactly `{"fake"}` (measured). Only a NON-`fake` caller proves the control's
-    # own binding survived.
-    assert callers["_env_source"] - {"fake"}, (
+        f"{sorted(c.co_name for c in callers['_folding'])}")
+    # ⛔ THE TRANSITIVE CALL IS EXCLUDED BY CODE OBJECT, NEVER BY NAME (`#14099` review, P2).
+    # `_folding`'s inner fallback calls `_env_source` whether or not the CONTROL binds it, so its
+    # calls have to be subtracted. Subtracting the NAME (`- {"fake"}`) left the arm one no-op
+    # rename from vacuous again: renaming that nested `fake` made the SAME local-copy revert read
+    # green (measured — `2 passed`), because nothing pins a nested function's name. The code
+    # object cannot be renamed, and a same-named LOCAL function has a different one, so this both
+    # survives a refactor and still catches the revert. `__probe__` is never folded for real; the
+    # builder's shape takes (module_name, cause, sources, refusals).
+    transitive_code = _folding("__probe__", RuntimeError(), {}, {}).__code__
+    assert callers["_env_source"] - {transitive_code}, (
         "the control stopped binding the module-level `_env_source`: every call came from "
         "`_folding`'s own fallback, so a behaviourally identical LOCAL copy of `served` would "
-        f"leave this arm green — measured: 96 passed: {callers['_env_source']}")
+        "leave this arm green — measured: 96 passed: "
+        f"{sorted(c.co_name for c in callers['_env_source'])}")
 
 
 #: ⛔ RESIDUAL — A NAME the mention rule cannot READ (`#14001`, measured by the cycle-4 review).
