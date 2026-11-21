@@ -376,12 +376,13 @@ SWEEP_NAMES = 66
 #: 83e94826a8a` → empty) and not on `main` (`git merge-base --is-ancestor` → NO). ⛔ "NOT FETCHABLE
 #: BY ITS SHA AT ALL" WAS ITSELF FALSIFIED (raised by review), and by the very command it cited —
 #: which is why it is corrected rather than carried: `git fetch origin 83e94826a8a` fails on the
-#: 13-character ABBREVIATION, NOT on the sha. git cannot `want` an abbreviation, and a FULL
+#: 11-character ABBREVIATION, NOT on the sha. git cannot `want` an abbreviation, and a FULL
 #: 40-character sha IS served — `git fetch --depth=1 <url> <full sha>` in an EMPTY BARE repo returns
 #: the commit, measured. So the fragility is narrower than "unreproducible": the address works only
 #: written out in full, and reads as broken in the form this block normally prints it in. The rule
 #: therefore stands on what IS measured — no branch and no `main` reaches such a commit, so it sits
-#: outside every history a reader browses — and not on a `gc` sweep that never happens: which is why
+#: outside every BRANCH history a reader browses (it IS inside `refs/pull/14108/head`'s, which is this
+#: paragraph's own point four lines above) — and not on a `gc` sweep that never happens: which is why
 #: this note points at the ISSUE NUMBER, and reserves the sha for the one place where the ADDRESS is
 #: the claim (the `#14068` attribution below, where it is written out and its limits stated).
 #: ⛔ The −6 is verified as an ATTRIBUTION and not as a direction: the residue row sets were
@@ -438,16 +439,21 @@ SWEEP_NAMES = 66
 #: already pinned rows on this tree, and their counts were re-read at THIS head rather than quoted
 #: from `ad79129cb5`. ⛔ The move past the 274 measured there is `#14068`'s (`2fe01fc775e`), NOT this
 #: lane's: `git diff` between `2fe01fc775e` and `83e94826a8a` over `'*.py'` carries no added receiver
-#: row at all (its only non-comment `+`/`-` receiver line is the re-indented `seen.update` above,
-#: already counted). ⛔ THAT TREE IS NAMED BY SHA, because the issue number cannot name it: `#14108`
+#: row at all (its only non-comment `+`/`-` receiver line is the `seen.update` re-indent — the row
+#: this block already counts above, `seen.update` 1 in the `+2` against
+#: `tests/test_13337_cache_graph_declaration.py`). ⛔ THAT TREE IS NAMED BY SHA, because the issue
+#: number cannot name it: `#14108`
 #: resolves to a ref that tracks the branch's CURRENT head, `d523c9be8c`, and `83e94826a8a` is the
 #: OLDEST of the EIGHT commits between `2fe01fc775e` and it (`git log --oneline
-#: 2fe01fc775e..d523c9be8c`). On that head this sentence does not drift, it INVERTS: `d523c9be8c`
+#: 2fe01fc775e..d523c9be8c`). On that head this sentence does not drift, it INVERTS: `aee14c5ceb`
 #: DELETES the `seen.update` line and puts `calls.append(…)` in that position (`git diff
-#: 2fe01fc775e d523c9be8c -- '*.py'`; the added `⛔ EVERY call is recorded…` comment sits LATER in
+#: d5ecef0d72 aee14c5ceb -- '*.py'`; the added `⛔ EVERY call is recorded…` comment sits LATER in
 #: the same helper, not where the line was — an earlier draft of this clause said "leaves a comment
-#: where it was", and the position holds code, raised by review), so "re-indented, already counted"
-#: is true ONLY on `83e94826a8a`. The sha IS resolvable: `git fetch origin refs/pull/14108/head`
+#: where it was", and the position holds code, raised by review), and `d523c9be8c`, the LAST of the
+#: eight, inherits that deletion. So "re-indented, already counted" holds for the SIX commits from
+#: `83e94826a8a` to `d5ecef0d72`, and stops at `aee14c5ceb`: asserting it of `83e94826a8a` alone is
+#: too narrow, and asserting it of `d523c9be8c` is false. The sha IS resolvable: `git fetch origin
+#: refs/pull/14108/head`
 #: measured from a bare clone, and a FULL 40-character sha is served directly while the abbreviation
 #: is not — see the note above on `#14058` for which form reproduces and which does not. Its own pin
 #: is `(11839, "0a7e60fa05aa31b9")`, the same pair as the parent `2fe01fc775e`, so it carries no
