@@ -1323,10 +1323,20 @@ def _is_absent_third_party_distribution(cause: BaseException | None) -> bool:
     partially installed `prometheus_client` read as repo-side while `.name` said otherwise.
     `.name` settles every real shape; the message is read only for its origin TOKEN.
 
-    Both signals fail CLOSED: an origin that is neither named nor recognisably third-party is not
-    the environment, so it keeps the skip out. That last clause is PINNED — a cause carrying no
-    origin at all must classify `stray` — because reverting it was measured green until the arm
-    in `test_the_over_refusal_population_is_itself_pinned` existed.
+    Both signals fail CLOSED on the one shape that carries NO origin at all: a cause with neither
+    a `.name` nor a `from '<module>'` token is not the environment, so it keeps the skip out. That
+    clause is PINNED — reverting it was measured green until the arm in
+    `test_the_over_refusal_population_is_itself_pinned` existed.
+
+    ⛔ RESIDUAL — THIS IS NOT A POSITIVE "RECOGNISABLY THIRD-PARTY" TEST (`#14099` review, P2). The
+    code rejects the REPO (a `.name` of `tortoise` or under it) and accepts EVERY other origin, so
+    a break naming a module that is neither in `tortoise` nor a real dependency is excused too —
+    `.name == 'tools.helper'` reads as the environment. ⛔ NOT CLOSED, DELIBERATELY: the obvious
+    closure (require `ModuleNotFoundError`) would re-break the PARTIALLY INSTALLED dependency the
+    exemption exists for, since that is an `ImportError` WITH `.name` set — the same environmental
+    fact, and the F1 finding this branch fixed. So the state is PINNED as a residual instead, by
+    the last arm of `test_the_over_refusal_population_is_itself_pinned`, which reds if the gate
+    ever tightens so the docstring above it goes stale.
     """
     if not isinstance(cause, ImportError):
         return False
@@ -1384,7 +1394,15 @@ def _writer_register_population() -> dict[str, list[str]]:
             population["missing"].append(key)   # a renamed writer, not an environment fact
             continue
         population["examined"].append(key)
-        if any(strip._is_dynamic_namespace_reference(node) for node in ast.walk(bodies[symbol][0])):
+        # ⛔ EVERY DEFINITION IS A WRITER, NOT JUST THE FIRST (`#14099` review, P2).
+        # `_function_bodies` returns a LIST "so a shadowed redefinition is not lost", and the
+        # shipped gate evaluates ALL of them (`tools/strip_graph_entity_vectors.py`: "EVERY
+        # definition must ask, not just one: a shadowed first definition is a writer too").
+        # Grading `bodies[symbol][0]` therefore reported `offenders == []` — pin GREEN — while the
+        # gate refused a writer whose SECOND definition mentions `globals`; that blind spot was
+        # measured, and it is exactly the over-refusal cost this pin exists to surface.
+        if any(strip._is_dynamic_namespace_reference(node)
+               for definition in bodies[symbol] for node in ast.walk(definition)):
             population["offenders"].append(key)
     return population
 
@@ -1745,6 +1763,48 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
                                     name="prometheus_client")))
     assert _writer_register_population()["stray"] == [neighbour], (
         "a module that merely starts with the declared name inherited its exemption")
+
+    # ⛔ EVERY DEFINITION IS A WRITER, NOT JUST THE FIRST (`#14099` review, P2). `_function_bodies`
+    # returns a LIST "so a shadowed redefinition is not lost", and the shipped gate evaluates ALL
+    # of them — "EVERY definition must ask, not just one: a shadowed first definition is a writer
+    # too" (`tools/strip_graph_entity_vectors.py`). Grading `bodies[symbol][0]` reported
+    # `offenders == []` — this pin GREEN — while the gate REFUSED the writer, i.e. the exact
+    # over-refusal cost the pin exists to surface went unreported. Measured: only the SECOND
+    # definition touches `globals()`, `examined` 1 and `offenders` empty before the fix.
+    shadowed_symbol = outsider.partition("::")[2]
+    shadowed_source = (
+        f"def {shadowed_symbol}(props, ev):\n"
+        "    return None\n"
+        f"def {shadowed_symbol}(props, ev):\n"
+        "    return globals()['k']\n")
+    monkeypatch.setattr(register, "EMBED_WRITER_CLASSES", frozenset({outsider}))
+    monkeypatch.setattr(
+        strip, "_module_source",
+        lambda name: shadowed_source if name == module else served(name))
+    assert outsider in _writer_register_population()["offenders"], (
+        f"`{outsider}` mentions a dynamic namespace in a SHADOWED definition and the pin did not "
+        "report it — the gate refuses that writer, so the population this pin certifies is "
+        "missing an over-refusal")
+    # ⛔ RESTORE THE FULL REGISTER before the residual arm below: the `frozenset({outsider})`
+    # above is scoped to THIS arm, and a residual arm that silently ran against a one-key
+    # population would assert nothing about the declaration it names.
+    monkeypatch.undo()
+
+    # ⛔ THE ORIGIN GATE'S RESIDUAL, PINNED AS A RESIDUAL (`#14099` review, P2). The gate is "NOT
+    # the repo", never "recognisably third-party", so an origin outside the `tortoise` package is
+    # taken as the environment. Closing it by requiring `ModuleNotFoundError` would re-break the
+    # PARTIALLY INSTALLED dependency the exemption exists for (an `ImportError` WITH `.name` set is
+    # that same environmental fact — F1), so the state is recorded here instead of silently
+    # trusted: if the gate ever TIGHTENS, this arm reds and the docstring's residual goes stale.
+    monkeypatch.setattr(
+        strip, "_module_source",
+        folding(declared_module, ImportError(
+            "cannot import name 'helper' from 'tools.helper'", name="tools.helper")))
+    resid = _writer_register_population()
+    assert declared in resid["unreadable"], (
+        "the documented residual moved: an origin OUTSIDE the `tortoise` package is still taken "
+        "as the environment (see `_is_absent_third_party_distribution`'s RESIDUAL). If this now "
+        f"reads `stray`, the gate got STRICTER and that docstring is stale: {resid['stray']}")
 
 
 def test_the_environment_refusal_is_carried_not_re_synthesised(monkeypatch):
