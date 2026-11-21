@@ -832,7 +832,12 @@ def test_retired_rows_lead_to_their_replacement_destination() -> None:
     # `tortoise_delete` — the entry the owner's #9660 ruling KEEPS — so again two more rows
     # gain a `use_instead` and no container row arrives: 66 + 2 = 68, the count
     # `counts.retired` and Part B's own header state at THIS head.
-    assert len(retired) == 68, f"expected 68 retired rows, got {len(retired)}"
+    # 68 -> 73: #11609 lane P7 registered the four approved target names that had no
+    # entry and retired FIVE doors forward in the same change (`create_edge`,
+    # `create_operator`, `events_poll`, `delete`, `list_graphs`), so five more rows gain
+    # a `use_instead` and four container rows arrive: 68 + 5 = 73 retired, and the
+    # registry total moves 108 -> 112.
+    assert len(retired) == 73, f"expected 73 retired rows, got {len(retired)}"
     for r in retired:
         assert r["use_instead"] in DESTINATION, (
             f"{r['name']} names a replacement the destination map does not know: "

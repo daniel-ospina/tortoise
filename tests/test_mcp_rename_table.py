@@ -240,14 +240,34 @@ RETIRED_LITERAL: dict[str, str] = {
         'mode="issue_insight")'
     ),
     "tortoise_session_context": 'tortoise_check_confidence(session=True)',
+    # #11609 lane P7: the KEPT delete entry took the approved target's own spelling
+    # (`tortoise_delete_knowledge`, row 18), so both absorbed doors re-point ONE hop to it,
+    # and `tortoise_delete` itself becomes a forward entry with the same protocol.
     "tortoise_delete_point": (
-        'tortoise_delete(id, dry_run=True) for the preview, then '
-        'tortoise_delete(id, confirmation=<token>)'
+        'tortoise_delete_knowledge(id, dry_run=True) for the preview, then '
+        'tortoise_delete_knowledge(id, confirmation=<token>)'
     ),
     "tortoise_delete_entity": (
-        'tortoise_delete(id, dry_run=True) for the preview, then '
-        'tortoise_delete(id, confirmation=<token>)'
+        'tortoise_delete_knowledge(id, dry_run=True) for the preview, then '
+        'tortoise_delete_knowledge(id, confirmation=<token>)'
     ),
+    "tortoise_delete": (
+        'tortoise_delete_knowledge(id, dry_run=True) for the preview, then '
+        'tortoise_delete_knowledge(id, confirmation=<token>)'
+    ),
+    # …and the four doors whose recorded reason was "the destination is not live", retired
+    # in the SAME change that registered it (`tortoise_link_entities` row 19,
+    # `tortoise_poll_events` row 8). The pointers name the arguments their doors took, so a
+    # migrating caller keeps the whole call.
+    "tortoise_events_poll": 'tortoise_poll_events(after=..., types=..., limit=...)',
+    "tortoise_create_edge": (
+        'tortoise_link_entities(relation=<predicate>, from_id=..., to_id=...)'
+    ),
+    "tortoise_create_operator": (
+        'tortoise_link_entities(relation=<op_type>, from_id=..., target_ids=..., '
+        'direction=..., semantics=...)'
+    ),
+    "tortoise_list_graphs": 'tortoise_graph_overview(section="graphs")',
 }
 
 # The names whose 0.1 destination differs from the destination of their redirect.
@@ -673,8 +693,13 @@ def test_b1_states_plainly_that_there_are_no_disagreements() -> None:
     # `check_confidence` already had, and the DELETE pair into `tortoise_delete`, the entry
     # the owner's #9660 ruling KEEPS and widens. 64 + 2 + 2 = 68, which is exactly
     # `counts.retired` in `config/surface-manifest.yml` at this merge.
-    assert len(RETIRED_LITERAL) == 68, (
-        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 68"
+    # 68 -> 73 at #11609 lane P7, the wave that registered the four approved target names
+    # and retired five doors FORWARD in the same change (`create_edge`, `create_operator`,
+    # `events_poll`, `delete`, `list_graphs`): four container rows ARRIVE and five doors
+    # join this map, which is the first wave since lane C to do both. 68 + 5 = 73, matching
+    # `counts.retired` in `config/surface-manifest.yml` at this head.
+    assert len(RETIRED_LITERAL) == 73, (
+        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 73"
     )
 
 
