@@ -302,16 +302,23 @@ NOTICE_INTERVAL_DEFAULT_S = 6 * 60 * 60
 #: this tree can compute — and stating one was the defect: it claimed a daily
 #: bound that nothing enforced.
 #:
-#: What this constant DOES bound, and all it claims: ONE process's ONE pass may
-#: spend at most this many sends — 5 % of that process's 100/day budget — so a
-#: burst at boot can never take the budget a concurrent invite or OTP needs. The
-#: fleet-wide daily aggregate is restarts × this cap, and it stays FINITE because
-#: the ledger is once-per-threshold-per-account-ever: a repeated boot pass finds
-#: an account already at its top threshold and short-circuits before the gauge is
-#: read (``notify_account``), so the ramp is a one-off per account rather than a
-#: daily charge. ``NOTICE_MAX_SENDS_ENV`` is an absolute override; if you shorten
-#: the interval or raise the send budget, re-price against ONE process's budget —
-#: never against a pass count you did not measure.
+#: What this constant DOES bound, and all it claims: ONE process's ONE pass
+#: spends at most this many sends, so a pass can never consume more than 5 of
+#: that process's 100/day budget — 5 % — leaving at least 95 for every other
+#: send. ⛔ IT IS A SHARE, NOT A RESERVATION, and the difference is the whole
+#: honest claim: `reserve_send_slot` is a first-come check-then-reserve with no
+#: priority (``email_notify`` skips WHICHEVER path's send arrives once the
+#: counter is at cap), so a boot pass that finds only five slots left still takes
+#: them, and a concurrent invite or OTP is still dropped. The guard lowers this
+#: notice's exposure from "whatever remains" to "at most 5 of 100"; it does not
+#: ring-fence anyone else's mail, and it must not be read as doing so.
+#: The fleet-wide daily aggregate is restarts × this cap, and it stays FINITE
+#: because the ledger is once-per-threshold-per-account-ever: a repeated boot
+#: pass finds an account already at its top threshold and short-circuits before
+#: the gauge is read (``notify_account``), so the ramp is a one-off per account
+#: rather than a daily charge. ``NOTICE_MAX_SENDS_ENV`` is an absolute override;
+#: if you shorten the interval or raise the send budget, re-price against ONE
+#: process's budget — never against a pass count you did not measure.
 NOTICE_MAX_SENDS_PER_PASS_DEFAULT = 5
 NOTICE_MAX_SENDS_ENV = "TORTOISE_CAPACITY_NOTICE_MAX_SENDS"
 

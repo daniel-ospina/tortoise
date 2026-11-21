@@ -31,8 +31,16 @@
 -- retryable), so two CONCURRENT passes can both read NULL, both pass the pre-send
 -- re-read, and deliver 100 % then 80 %. The re-read narrows that to one round trip
 -- and the Idempotency-Key below dedupes only the SAME threshold; closing the order
--- window needs a pre-send reservation, which is a design decision recorded on the
--- PR, not a property this column gives you (#14038 review cycle 2).
+-- window needs a pre-send reservation (a stamp-first protocol with a compensating
+-- unset), which is NOT taken here — a known, ACCEPTED residual rather than a
+-- property this column gives you. It needs two live processes reading the same
+-- account within one round trip, plus a gauge that moved >=20 pp between those
+-- reads, and a rolling replacement overlaps an old and a new process at every
+-- deploy, so treat it as reachable in normal operation. The cost is bounded: the
+-- LEDGER stays monotone in every case and only the INBOX can show the two notices
+-- in the wrong order — never a lost or duplicated record (#14038 review cycle 3).
+-- ⛔ This header is corrected BEFORE this migration merges on purpose: migrations
+-- are append-only once applied, so a pointer left here could never be fixed later.
 --
 -- The stamp is a compare-and-swap on the value the caller READ
 -- (`set_org_storage_notice_pct`, rowcount-gated: `WHERE id AND
