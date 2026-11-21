@@ -563,8 +563,14 @@ async def _run_off_loop_fail_open(fn, /, *args, executor=None, **kwargs):
             _CAPTURE_EXECUTOR if executor is None else executor,
             fn, *args, **kwargs)
     except Exception:
+        # ⛔ The ONE ``except`` covers BOTH a dispatch failure (``_submit_off_loop``
+        # raising on a shut-down / broken pool) AND the offloaded leg itself
+        # raising, and it cannot tell them apart — so the message must not claim
+        # the narrower cause. Same wording class as the five
+        # ``extraction_warnings`` this serves (#14086 review, P3).
         _logger.exception(
-            "capture off-loop dispatch failed (fail-open): %s", fn)
+            "capture off-loop leg did not complete (dispatch failed or it "
+            "raised; fail-open): %s", fn)
         return _DISPATCH_FAILED
 
 
@@ -21860,9 +21866,24 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # graph, a per-graph key would mint and could COMPLETE the org's onboarding
         # — the cross-graph leak that guard exists to prevent — and `first_capture`
         # would be an org-level fact derived per graph (#14086 review round 3, P2).
-        # `None` means "not an org-level capture": nothing below runs and
-        # `first_capture` stays False, honestly (we do not track an org funnel fact
-        # for a per-graph key).
+        # `None` means "not an org-level capture": the org-level block below does
+        # not run and `first_capture` stays False.
+        #
+        # ⛔ WHAT THAT COSTS, DECLARED RATHER THAN IMPLIED (#14086 review, P2).
+        # `first_capture` is NOT only a funnel fact — it is the **trigger** for the
+        # in-conversation disclosure announcement, and the `capture-disclosed` step
+        # is that disclosure's durable signal (`tortoise/capture_disclosure.py`;
+        # `tortoise/onboarding/SKILL.md` §8 calls the flag "the only trigger"). So
+        # a graph-scoped credential now writes NO `capture-disclosed` step and
+        # never sets `first_capture` — the disclosure line does not fire for it,
+        # where on `main` it fired once per capture graph. That is a USER-FACING
+        # change and it is NOT settled here: neither target graph is legitimate
+        # (org-level state in the customer's custom graph is the cross-graph write
+        # this guard exists to prevent; the org default graph is what a per-graph
+        # key must never touch), so giving the disclosure a per-graph home is a
+        # decision, not a patch. **#14131 owns it** — filed with both options and
+        # the acceptance bar; this block is the in-code record so the merge does
+        # not land the behaviour silently.
         #
         # Constructed HERE, ON the loop: `_make_sdk` must not resolve a store path
         # in a pooled worker (#7500). Only the cold `_get_proj()` attach stays in
@@ -39350,12 +39371,19 @@ def _maybe_apply_completion(org_id: str, *, sdk=None) -> bool:
     only for an ORG-WIDE credential — a graph-bound one is skipped by design).
     On the MCP capture lane nothing publishes it (``mcp_auth`` may not import
     this module, and ``mcp_server`` calls ``_capture_session_impl`` directly),
-    and for a GRAPH-BOUND credential in either lane, ``_org_default_namespace``
+    and for an ORG-WIDE credential on either lane, ``_org_default_namespace``
     does one primary-key control-plane read of ``organizations.graph_name``.
     That read is PRE-EXISTING (``main`` resolved it on the loop too, through
-    ``_org_proj`` inside the inline gate) — this change neither adds nor removes
+    ``_org_proj`` inside the inline gate) and this change neither adds nor moves
     it — but it means the SDK construction must stay on whatever thread the lane
     already runs it on, and must never move into the capture-pool worker.
+    ⛔ FOR A GRAPH-BOUND CREDENTIAL THIS FUNCTION IS NO LONGER CALLED AT ALL: the
+    capture route now skips the whole org-level block for such a key, so it never
+    constructs ``_org_sdk`` and never performs that ``organizations.graph_name``
+    read. The paragraph above is therefore about the ORG-WIDE path only — an
+    earlier draft of it asserted the read happened "in either lane" for a
+    graph-bound credential, which stopped being true when that guard landed
+    (#14086 review, P2; the user-facing half of the same guard is #14131).
 
     Left as ``None`` the historical behaviour is unchanged for every other
     caller."""
@@ -51308,7 +51336,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 200 tracked files (745 distinct
+# ABSOLUTE line number from 200 tracked files (744 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

@@ -670,61 +670,29 @@ SWEEP_NAMES = 66
 #: The row is a plain `dict` accumulator in a test, not a typed reference to a swept name, so the
 #: SDK population is untouched (`typed references still pointing at a public name: 0`).
 #:
-#: MERGED `origin/main` (`e022fc935b2d`, #14100/#14108) — both sides' histories above are kept, and the
-#: pin is RE-MEASURED on THIS tree with `--repin`, never combined arithmetically: it prints
-#: `(11844, "70d6cfdcd8b769e4")` and `--check` exits 0 with `typed references still pointing at a
-#: public name: 0`. The row composition is read off `--report --base 28ca66878d… --top 5000` AT THIS
-#: HEAD, not inferred: `proj.g.query` 3642 and `g.query` 1492 are this PR's own rows, unchanged by the
-#: merge, and `seen.update` is **101** — `main`'s −1, which is `tests/test_13337_cache_graph_declaration.py`
-#: accumulating by APPEND rather than `update` (#14108), a file this branch does not touch. That the
-#: figure lands at 11845 − 1 = 11844 is a CROSS-CHECK of the measurement, not the evidence for it.
+#: ⛔ THE PIN CHAIN, CORRECTED — each figure is true of the tree it NAMES. An earlier draft of
+#: this block attributed `(11844, "70d6cfdcd8b769e4")` to THIS branch's merge of `e022fc935b2d`,
+#: and that is wrong. Measured, three different trees, three different pins:
+#:   * `main` at `e022fc935b`                        → (11838, "de5664dc98549d56")
+#:   * THIS branch merged #14100/#14108 (`0d2dafed1d`) → (11839, "7159a040b69431a9")
+#:   * `main` today, `e0accb8fe6`                     → (11844, "70d6cfdcd8b769e4"), `--check` exits 0
+#: 11844 is `main`'s OWN pin, re-cut by a DIFFERENT lane's merge of the same `main` commit
+#: (`8ed8d86291`, `feat/13971-point-strip`) — it is not this branch's measurement, and the
+#: `11845 − 1 = 11844` "cross-check" that used to sit here was reconciling two unrelated trees.
+#: That the two merge trees differ at all is this PR's own `seen.update` 102 → 101 (the `_capture`
+#: helper now APPENDS instead of `update`ing, #14108), which is a row the #13971 lane does not carry.
 #:
-#: ⛔ THE BLOCK ABOVE IS `main`'s MEASUREMENT ON ITS OWN TREE; the one below is THIS
-#: branch's on an earlier one. Neither is dropped: each is true of the tree it was
-#: measured on. Neither is the answer for THIS tree — the pin below is `--repin` on
-#: it, and the cross-check against both is arithmetic, never the evidence.
-#: ⛔ THIS LANE IS NOT THE CAUSE OF THE +8. Its whole diff is figure literals: stripping every digit
-#: run from each `-`/`+` pair leaves the pair identical, so it cannot move a receiver population. The
-#: reason the gate is red here is the recurrence `#14062` and `#14058` both document, now a THIRD
-#: time: the pin is graded on PULL REQUESTS only, so `main` merges with nothing grading it — and
-#: `main`'s own tree today derives 11833 against its own 11825 pin, i.e. `--check` is RED on `main`.
-#: The real fix for the recurrence is grading the pin on `main`; carrying the re-cut is what unblocks
-#: a PR that touches nothing in this population, which is the same remedy the two blocks above took.
-#: ⛔ #14086 RE-PIN — measured with the tool's own verbs, NOT arithmetic on the block above; the
-#: number reproduces at both `65cf27c01b` and `fb6e7a65e8`. The pin above (11833) is **1 row**
-#: above what THIS tree derives, because it was taken on a different tree:
-#:     origin/main (df0525a7a9)   derives 11831   (so main is itself 2 rows off its 11833 pin)
-#:     this head                  derives 11832   (+1 over main, the PR's own row)
-#: The +1 is attributed by a row-by-row dump of both residue sets, not by count — exactly one row
-#: differs: `captured.update` 30 → 31, from `tests/test_10893_pre_handler_parts.py:279`,
-#: `lambda org, ev, props: captured.update(props=dict(props))` — a plain `dict.update` inside a
-#: monkeypatched analytics capture, NOT an SDK reference, and already a pinned shape (no new shape
-#: appears). So the count is DECLARED, not rewritten, and the SDK population did not move
-#: (`typed references still pointing at a public name: 0`), so no typed call site is legitimised.
-#: Derivation: `uv run python tools/sdk_privatise.py --repin` -> (11832, '0ac463c1ce605ae9').
-#: RE-CUT AGAIN at the FIFTH merge tree (#14086 × `main` `e022fc935b2`): the two parents pinned
-#: DIFFERENT pairs — this branch `(11840, "48b02e6ecc8a3689")`, `main` `(11838, "de5664dc98549d56")` —
-#: so neither side is the answer and the merge is a RE-MEASUREMENT. `--repin` on this tree prints the
-#: pair below; it is not `main`'s + 1 by arithmetic, and the row sets were not assumed additive. The
-#: two parents' blocks above both stay: each is true of the tree it was measured on, and the only
-#: thing that survives a merge is a figure taken on the merged tree.
-#: MEASURED ON THAT MERGE TREE `e022fc935b` (⚠️ that is NOT the tree below — a LATER rebase onto
-#: `main` `e0accb8fe6` re-measured again, see the last block): `--repin` there printed
-#: `SWEEP_RESIDUE = (11839, '7159a040b69431a9')`. The COUNT is `main`'s 11838 plus this PR's single
-#: declared row (`captured.update` in `tests/test_10893_pre_handler_parts.py`, untouched by `main`,
-#: so the +1 is structural rather than assumed). The DIGEST is new against BOTH parents because the
-#: ROW SET differs by exactly that one row — `residue_digest` hashes each row's NAME with its COUNT
-#: and carries no file identity, so a row that survives with an unchanged count contributes an
-#: identical line and cannot move the digest. Measured, not inferred: decrementing ONLY
-#: `captured.update` to 30 reproduces `main`'s committed pin `de5664dc98549d56` (11838) exactly.
-#: ⛔ THE ROW-BY-ROW DELTA IS NOW DERIVED, in BOTH directions:
-#: `--report --base 28ca66878d7c --top 5000` was run in a worktree at EACH parent, its rows sorted,
-#: and diffed against this tree's. Against the branch parent `7658139ea8` the ONLY differing row is
-#: `seen.update` 102 → 101 (that is `main`'s `#14108` capture rewrite — the arm the block above names),
-#: and against the `main` parent `e022fc935b` the ONLY differing row is `captured.update` 30 → 31
-#: (this PR's own analytics-capture stub: a plain `dict.update`, so a DECLARED residue row and no
-#: typed reference to a swept name is legitimised). 11838 + 1 = 11839 and 11840 − 1 = 11839 are
-#: CROSS-CHECKS of those two measurements, never the evidence for either.
+#: ⛔ AND THE "+8 IS FIGURE LITERALS" PARAGRAPH IS GONE, DELIBERATELY. This file's own block above
+#: records that claim as FALSE — *"it said 'its whole diff is figure literals: stripping every digit
+#: run from each `-`/`+` pair leaves the pair identical', and that is FALSE at this head: this PR
+#: also rewrites `tests/test_13337_cache_graph_declaration.py`… so the digit-stripped `-`/`+`
+#: multisets differ"*. Its present-tense tail was false too: "`main`'s own tree today derives 11833
+#: against its own 11825 pin, i.e. `--check` is RED on `main`" — `origin/main` pins 11844 and
+#: `--check` exits 0 there. A rebase splice had orphaned that paragraph's opening clause (the text
+#: began mid-sentence at "run from each `-`/`+` pair…"), and an earlier attempt to repair it by
+#: restoring the missing clause RE-ASSERTED the refuted universal. Deleting the paragraph is the
+#: repair; restoring it is not. The #14062/#14058 recurrence it was about is real, and is argued in
+#: the blocks above without the false premise.
 #:
 #: RE-MEASURED ON THE REBASED TREE (#14086 rebased onto `main` `e0accb8fe6`, then the review-round-3
 #: commit `41672df4f9` landed on top): `--repin` on THIS tree prints the pair below. ⛔ NEITHER block
@@ -735,12 +703,18 @@ SWEEP_NAMES = 66
 #: --top 5000` was run in a worktree at `origin/main` (`e0accb8fe6`) AND on this tree, both row sets
 #: sorted and diffed: EXACTLY TWO rows differ, and both are DECLARED rather than legitimised —
 #:   * `captured.update` **30 → 31** — this PR's own analytics-capture stub in
-#:     `tests/test_10893_pre_handler_parts.py`
-#:     (`lambda org, ev, props: captured.update(props=dict(props))`), a plain `dict.update`;
-#:   * `ha_mod._make_sdk(namespace='registry')._.query` **10 → 11** — the same file's review-round-3
-#:     pin `test_a_graph_bound_capture_skips_the_org_level_checkpoint_entirely` (`41672df4f9`), which
-#:     drives a real `graph_id` credential through `POST /v1/sessions` and reads the org default-graph
-#:     SDK through a test double to prove it is never resolved.
+#:     `tests/test_10893_pre_handler_parts.py` (the `lambda org, ev, props:
+#:     captured.update(props=dict(props))` arm of its analytics-capture monkeypatch), a plain
+#:     `dict.update`. ⛔ Cited by TEXT, not by line: this file's own rule above forbids a typed
+#:     line number, because the reproducer goes stale the moment the file moves (`#14030` review).
+#:   * `ha_mod._make_sdk(namespace='registry')._.query` **10 → 11** — the review-round-3 pin
+#:     `test_a_graph_bound_capture_skips_the_org_level_checkpoint_entirely` (`41672df4f9`), which
+#:     lives in `tests/test_capture_loop_responsiveness.py` (⛔ NOT in the file named above, and
+#:     `_make_sdk` appears nowhere in that one). The added occurrence is the test's FIXTURE: it
+#:     seeds the `Graph` row the ownership probe requires, through the REGISTRY control plane
+#:     (`ha_mod._make_sdk(namespace="registry")._get_registry().query(…)`) — not the org
+#:     default-graph SDK. That SDK's non-resolution is proved by a monkeypatched `_org_sdk`
+#:     RECORDER, which is a different line.
 #: Neither is a typed reference to a swept name, so no typed call site is legitimised. The DIGEST
 #: moves with the row set (`residue_digest` hashes each row's NAME with its COUNT), which is why it
 #: cannot be carried from a tree whose row set is not this one. 11844 + 2 = 11846 is a CROSS-CHECK of
