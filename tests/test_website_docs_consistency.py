@@ -8369,6 +8369,82 @@ def test_the_table_structure_tokens_a_browser_ignores_insert_nothing() -> None:
     )
 
 
+def test_the_document_roots_a_browser_ignores_insert_nothing() -> None:
+    """`<html>`/`<body>` insert no element, and pushing them was a P0 in BOTH directions.
+
+    ⛔ THE `_open_extent` CONTRACT WAS FALSE FOR THE TWO TAGS EVERY PAGE CARRIES (#14073
+    review, P0, measured). Its docstring says "only elements a browser puts in the tree
+    are pushed"; in "in body" a start tag whose name is `html`/`body` is a **parse
+    error that inserts nothing** (spec 13.2.6.4.7 — a browser merges the attributes
+    into the pre-inserted root/body). This parser does not pre-insert those roots, so
+    the token became a PHANTOM at the CURRENT depth instead of at the bottom — and
+    `html` is a `_P_SCOPE_BOUNDARY` member (hence `_SCOPE_BOUNDARY`), so the phantom
+    was a scope boundary ABOVE live content and stopped end tags a browser honours.
+
+    The two directions are DIFFERENT FAILURES and both are pinned here:
+
+    * the DROP direction (a claim the page must not make, invisible to the golden) —
+      `</audio>` could not close the `audio`, an `_UNRENDERED` ancestor stayed open
+      across the text and `_text_is_painted()` returned False;
+    * the BOUND direction (an over-advertised TOC, i.e. a SHORTER slice) — a browser
+      closes `div.toc` at its own `</div>` and leaves the anchor OUTSIDE it.
+
+    Each row is asserted against the shape WITHOUT the root tag where one exists, so a
+    fix that simply refused every tag would red here instead of passing.
+    """
+    # ── the DROP direction: the claim a browser paints must reach the golden ──
+    assert extract_visible_text("<audio><html></audio>CLAIM</html></audio>") == "CLAIM", (
+        "a phantom `<html>` became a scope boundary, so `</audio>` could not close the "
+        "`audio`: the `_UNRENDERED` ancestor stayed open across the claim and the "
+        "wording golden never saw text a browser paints. End-to-end through "
+        "`_assert_storage_section_reviewed` this left the allowlist, the destinations, "
+        "the vocabulary scan and the golden ALL green with a contradicting paragraph "
+        "inside `#storage` — the exact class the pin exists to refuse"
+    )
+    assert extract_visible_text("<body><p>CLAIM") == "CLAIM", (
+        "`<body>` is not pushed any more, and this is the row that keeps the frame "
+        "intact on the ordinary path every real page takes: the text under the body "
+        "root must still reach the golden"
+    )
+    # ── the BOUND direction: the advertised set must not be the larger one ──
+    assert extract_anchors_within(
+        '<div class="toc"><html></div><a href="#x">x</a></html></div>',
+        tag="div",
+        class_token="toc",
+    ) == [[]], (
+        "a phantom `<html>` kept `div.toc` open past its own `</div>`: a browser "
+        "closes the container there and leaves the anchor OUTSIDE it, so reporting "
+        "the anchor ADVERTISES a heading that is not in the TOC — a larger advertised "
+        "set, a shorter slice, and every `#storage` pin green over the contradiction"
+    )
+    assert extract_anchors_within(
+        '<div class="toc"><a href="#what">w</a></div>', tag="div", class_token="toc"
+    ) == [["#what"]], (
+        "control: the same container WITHOUT the root tag still reports its own "
+        "anchors, so the refusal above is about the phantom and not about refusing "
+        "the container"
+    )
+    # ── and the root tags stay OUT of `_ignored_token` on purpose ──
+    # ⛔ ROUTING THEM THROUGH `_ignored_token` WOULD BE THE OBVIOUS FIX AND IT IS WRONG:
+    # `_open()`'s `body` branch is what sets `_body_seen`, which the frameset rule
+    # reads, and `handle_starttag` consults `_ignored_token` BEFORE `_open` — so the
+    # suppression would silently disable the frameset arm. `_open` runs first, and only
+    # the PUSH is skipped.
+    probe = _AnchorHrefParser()
+    probe.feed("<body>")
+    assert probe._body_seen is True, (
+        "`<body>` no longer sets `_body_seen`: the frameset rule ("
+        "`tag == 'frameset' and not self._body_seen`) would then ignore frameset "
+        "anchors on a page that HAS a body"
+    )
+    root_probe = _AnchorHrefParser()
+    root_probe.feed("<html><body><a href='/blog'>x</a>")
+    assert "html" not in [open_tag for open_tag, _, _ in root_probe._open_elements], (
+        "`html` reached `_open_elements`: this is the phantom that stops end tags a "
+        "browser honours, and every row above depends on it staying off the stack"
+    )
+
+
 def test_the_script_data_wedge_states_its_own_rule() -> None:
     """The wedge fires when THIS chunk ends double-escaped — and the module says so.
 
