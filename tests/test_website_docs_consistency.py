@@ -2948,6 +2948,62 @@ def test_the_storage_section_destinations_are_pinned_not_just_their_names() -> N
             _assert_storage_section_reviewed(mutant)
 
 
+def test_every_storage_pin_reds_on_its_own_violation() -> None:
+    """Each of the three pins fires on ITS OWN rule, driven through the aggregate.
+
+    ⛔ ONE DRIVEN PIN IS NOT A DRIVEN AGGREGATE. `_assert_storage_section_reviewed`
+    holds three pins and its docstring promises "remove the pin and the control
+    fails" — but only the destination pin had a control that CALLS it, so the
+    allowlist and the wording-golden asserts could each be deleted with the suite
+    fully green (measured, #14073 review round 3). The allowlist has a test that
+    calls `_attributes_outside_allowlist` DIRECTLY, so it cannot see the
+    aggregate's assert disappear; the two tests that read
+    `STORAGE_SECTION_GOLDEN` elsewhere use it only as a comparator on mutant
+    pages, so nothing enforced `page == fixture`.
+
+    Each mutant below violates exactly ONE rule — asserted, so a mutation that
+    trips a different pin cannot be read as covering this one.
+    """
+    section = _docs_section()
+
+    # 1. The attribute allowlist: a legal spelling of a forbidden NAME. The value
+    #    is inert text, so neither the wording nor the destinations move.
+    attributed = section.replace(
+        '<h3 id="storage-record">', '<h3 id="storage-record" title="x">', 1
+    )
+    assert attributed != section, "the allowlist control could not add an attribute"
+    assert _visible_text(attributed) == _visible_text(section)
+    assert sorted(set(extract_anchor_hrefs(attributed))) == list(
+        _REVIEWED_SECTION_HREFS
+    )
+    with pytest.raises(AssertionError, match="beyond"):
+        _assert_storage_section_reviewed(attributed)
+
+    # 2. The destinations: a retargeted href. Names and visible text unchanged.
+    retargeted = section.replace(
+        f'href="{_REVIEWED_SECTION_HREFS[0]}"',
+        'href="mailto:legal@evil.example"',
+        1,
+    )
+    assert retargeted != section, "the destination control could not retarget"
+    assert _attributes_outside_allowlist(retargeted) == []
+    assert _visible_text(retargeted) == _visible_text(section)
+    with pytest.raises(AssertionError, match="links to"):
+        _assert_storage_section_reviewed(retargeted)
+
+    # 3. The reviewed wording: one sentence added, nothing else touched.
+    reworded = section.replace(
+        "</p>", " Search may lose older items.</p>", 1
+    )
+    assert reworded != section, "the wording control could not add a sentence"
+    assert _attributes_outside_allowlist(reworded) == []
+    assert sorted(set(extract_anchor_hrefs(reworded))) == list(
+        _REVIEWED_SECTION_HREFS
+    )
+    with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
+        _assert_storage_section_reviewed(reworded)
+
+
 def test_a_base_element_moves_what_the_section_advertises() -> None:
     """A `<base href>` changes which document a fragment-only link lands on.
 
