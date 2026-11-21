@@ -285,6 +285,16 @@ def _tortoise_emulated_locally() -> bool:
         with urllib.request.urlopen(req, timeout=10) as resp:
             body = resp.read().decode("utf-8", "ignore")
         return PRODUCT_ROOT_MARKER in body
+    except (AttributeError, NameError, TypeError, ImportError):
+        # ⛔ A moved or renamed seam — `PRODUCT_ROOT_MARKER` renamed, a module
+        #   moved — is a PROGRAMMING error, not "emulation unavailable": the
+        #   caller reads `False` as "defer to T8" and the family SKIPS green
+        #   (#14114 class 2, #14125). The census does not grade this helper
+        #   (its imports are stdlib, not own code), so the arm is here because
+        #   the property holds, not because a gate demanded it. A genuinely
+        #   absent `git` raises `FileNotFoundError` (an `OSError`) and still
+        #   falls through to the defer arm.
+        raise
     except Exception:
         return False
 

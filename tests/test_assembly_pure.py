@@ -2619,6 +2619,14 @@ if _DOCKER_URI:
         _p._get_proj().g.query("RETURN 1")
         _p.close()
         _FALKORDB_UP = True
+    except (AttributeError, NameError, TypeError, ImportError):
+        # ⛔ A moved/renamed own-code seam (`tortoise.sdk`, `_get_proj`) is a
+        #   PROGRAMMING error, not "docker lane unavailable": `_FALKORDB_UP` is
+        #   read by `_docker_only`, so the 19 docker legs would SKIP green over a
+        #   broken tree (#14114 class 2, #14125). An unreachable server raises
+        #   `ConnectionError` (a `RedisError`, NOT an `OSError`) and still
+        #   reaches the broad arm below.
+        raise
     except Exception:
         _FALKORDB_UP = False
 
