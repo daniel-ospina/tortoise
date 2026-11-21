@@ -315,21 +315,22 @@ SWEEP_NAMES = 66
 #: RE-CUT DOWN (11831, "1aef9c61f81faf39") → (11825, "539914480e400722") by the `#14001` lane,
 #: measured on `origin/main` `f392bb67d5`'s own tree. ⛔ THE SOURCE OF THIS RE-CUT IS `main`'S
 #: **TREE**, NOT ITS **PIN**, and the two disagree: `main`'s pin reads 11829 (the `#14062` re-cut,
-#: MEASURED on `d4a8dddc4e`'s tree and COMMITTED at `8610ed965c` — `git show
-#: d4a8dddc4e:tools/sdk_privatise.py` still reads 11821, so the rev that CARRIES 11829 is the merge,
-#: not the base) but `main`'s tree at `f392bb67d5` measures 11831, so a re-cut stated as
-#: "11829 → 11825, delta −6" is arithmetically FALSE (11829 − 6 is 11823, and 11823 is the pair this
-#: lane first pasted before it measured). Both `main` pairs here are `--repin` output, not
-#: arithmetic on the pin: `11831, "1aef9c61f81faf39"` is what `main`'s own tree derives and
-#: `11825, "539914480e400722"` is what THIS tree derives. The drift is the one `#14062` documents and
-#: it recurs here: the pin is graded on PULL REQUESTS only, `main` merged `#14065` with nothing
-#: grading it, and `--check` is therefore RED on `main` today.
+#: MEASURED on `d4a8dddc4e`'s tree and COMMITTED at the squash commit `8610ed965c` — `git show
+#: d4a8dddc4e:tools/sdk_privatise.py` still reads 11821, so the rev that CARRIES 11829 is the commit
+#: whose subject ends `(#14064)`, not the base) but `main`'s tree at `f392bb67d5` measures 11831, so
+#: a re-cut stated as "11829 → 11825, delta −6" is arithmetically FALSE (11829 − 6 is 11823, and
+#: 11823 is the pair this lane first pasted before it measured). Both `main` pairs here are
+#: `--repin` output, not arithmetic on the pin: `11831, "1aef9c61f81faf39"` is what `main`'s own
+#: tree derives and `11825, "539914480e400722"` is what THIS tree derives. The drift is the one
+#: `#14062` documents and it recurs here: the pin is graded on PULL REQUESTS only, `main` merged
+#: `#14065` with nothing grading it, and `--check` is therefore RED on `main` today.
 #: The delta from `main`'s tree is −6 and it is a REMOVAL, not an absorption: SIX of the
 #: eight rows the `#14062` block above declared are the `poisoned.update` shape, and this lane
 #: deleted the shape rather than declaring it. The binding-poison arms in
 #: `tools/strip_graph_entity_vectors.py` called `poisoned.update(…)`, which this sweep cannot type
 #: on an ordinary-word receiver. FIVE of them are now `poisoned |= …` — the same store, no row — and
-#: one of those five keeps a `set(...)` conversion (`poisoned |= set(sub.names)`):
+#: one of those five needs a `set(...)` wrap of its own right-hand side
+#: (`poisoned |= set(sub.names)`):
 #: `ast.Global.names` / `ast.Nonlocal.names` are `list[str]` and `set |= list` is a `TypeError`
 #: (`set.__ior__` takes a set, unlike `.update`, which takes any iterable), measured — the
 #: `nonlocal-rebinding` row fails on exactly that. The SIXTH arm was DELETED, not converted: a
@@ -346,14 +347,21 @@ SWEEP_NAMES = 66
 #: `origin/main`'s own tree and on this one), and `poisoned.update` 6 → 0 is the ONLY row that
 #: differs. Nothing else moved in either direction.
 #: TWO absorbed rows are `main`'s, not this lane's, and they are named here because a re-pin that
-#: only states the count is what this block forbids. `main`'s re-cut measured 11829 on
-#: `d4a8dddc4e`'s tree and was COMMITTED at `8610ed965c`, then DRIFTED a further +2 before
-#: `f392bb67d5` — so `main`'s own tree measures 11831 against its own
-#: 11829 pin, and `--check` is RED on `main` right now (the same recurrence `#14062` documents: the
-#: pin is graded on PULL REQUESTS only, so `main` drifts and every open PR is then graded against a
-#: stale number). The two rows are `found.update` 10 → 12, both in `tests/test_usage_signal.py`,
-#: added by `ac57b2d38a` (`#14065`) — a concurrent merge between this pin and this tree. Both sit on
-#: a plain `set` fed by a generator expression, so neither is a typed reference to a swept name
+#: only states the count is what this block forbids. The two rows are `found.update` 10 → 12, both
+#: in `tests/test_usage_signal.py`, added by `ac57b2d38a` (`#14065`) — a concurrent merge that
+#: LANDED BEFORE THE RE-CUT, not after it. ⛔ THE RE-CUT WAS ALREADY STALE WHEN IT LANDED, and the
+#: order is the point: `8610ed965c` is a single-parent squash commit whose parent IS `ac57b2d38a`,
+#: so the +2 was in the tree of the very commit that pinned 11829. Measured, not inferred —
+#: `--check` at `8610ed965c`: `observed: (11831, "1aef9c61f81faf39")` against `pinned: (11829,
+#: "f0301da129c0c584")`, exit 1. `main` did not drift AFTER the re-cut; the re-cut pasted the pair
+#: `d4a8dddc4e`'s tree printed (11829) onto a tree that had already moved, so `main` has been 2 rows
+#: off its own pin from the moment the pin landed, and `f392bb67d5` still measures the same
+#: 11831/`1aef9c61f81faf39` today (the four commits between the two moved no row — the pair is
+#: identical at both ends). `--check` is therefore RED on `main` right now (the same recurrence
+#: `#14062` documents: the pin is graded on PULL REQUESTS only, so a re-cut measured on one tree can
+#: land against a tree that moved under it, and every open PR is then graded against a stale
+#: number). Both sites sit on a plain `set` (`found: set[str] = set()`) fed by a generator
+#: expression, so neither is a typed reference to a swept name
 #: (`typed references still pointing at a public name: 0` on this tree).
 #: 11831 − 6 = 11825, and that arithmetic is a CROSS-CHECK of the measurement, not the evidence for
 #: it: what was pasted into the pin is the pair `--repin` printed on THIS tree.
