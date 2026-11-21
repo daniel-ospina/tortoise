@@ -1488,16 +1488,25 @@ def _stub_waiver_why(prefix: str, base_carrier: str, head_carrier: str) -> str:
 
     `base_paths_by_module` PREFERS the runtime carrier (the sorted builder skips a `.pyi` once a
     non-`.pyi` is stored), so a `.pyi` there is positive proof the base carried nothing else.
+
+    ⛔ SPLIT ON THE ASSERTION THE TEXT MAKES (review F1 of round 22). The polarity is "does the
+    base carry a RUNTIME source" — `endswith(".py")` — NOT "is the carrier a stub". An EMPTY
+    carrier (the base holds no file for this module at all, the strongest proof there was nothing
+    to remove) does not end with `.pyi`, so keying on `.pyi` sent it to the had-runtime arm and
+    re-emitted both removed falsities: "it is not a record", and "restore the source from a commit
+    that still holds it" over a repo where `git log --all -- <path>.py` is empty. Fail toward the
+    no-runtime text, and describe an absent carrier as such rather than printing `() `.
     """
 
-    if not base_carrier.endswith(".pyi"):
+    if base_carrier.endswith(".py"):
         return (
             f"{prefix} — but the `module` entry you also passed FROZE ONLY A STUB, so it is not "
             "a record: restore the source from a commit that still holds it, archive it, and "
             "delete it again"
         )
+    where = f"only as a stub (`{base_carrier}`)" if base_carrier else "on neither side"
     return (
-        f"{prefix} — only as a stub (`{base_carrier}`): the base held no `.py` for this module "
+        f"{prefix} — {where}: the base held no `.py` for this module "
         f"and this tree carries {head_carrier or 'no module file'}, so there was no runtime "
         "source to record. The `module` entry you also passed is the writer's own output for a "
         "stub-only module (a stub-only module's only code IS the stub), and nothing was removed "

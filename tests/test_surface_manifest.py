@@ -8487,7 +8487,7 @@ def test_the_green_line_count_is_the_one_the_run_actually_produced(
     * the SHRINK arm has one path with nothing to compare: the base ref carries no baseline
       at all (`shrink_report`'s `graded=False`).
 
-    So the four reachable totals are 13/14/15, and every property that produced no verdict is
+    So the four reachable CASES produce three totals, 13/14/15, and every property that produced no verdict is
     NAMED on the line rather than dropped. Pinned as a pure function: the totals stay cheap to
     assert, which is why the arithmetic lives in one testable seam instead of in `cmd_check`.
 
