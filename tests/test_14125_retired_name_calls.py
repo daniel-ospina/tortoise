@@ -1090,14 +1090,12 @@ def _module_scope_bindings(tree: ast.Module) -> set[str]:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             out.add(node.name)  # the name binds HERE; the body is a different scope
             stack.extend(node.decorator_list)
-            if isinstance(node, ast.ClassDef):
-                stack.extend(node.bases)
-                stack.extend(keyword.value for keyword in node.keywords)
-            else:
-                stack.extend(node.args.defaults)
-                stack.extend(d for d in node.args.kw_defaults if d is not None)
+            stack.extend(_header_expressions(node))
             continue
         if isinstance(node, ast.Lambda):
+            # the BODY is another scope; the DEFAULT expressions evaluate HERE
+            stack.extend(node.args.defaults)
+            stack.extend(d for d in node.args.kw_defaults if d is not None)
             continue
         if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
             # A comprehension has its OWN scope in Python 3, so its ITERATION TARGETS do
@@ -1153,27 +1151,6 @@ def _collect_binding(node: ast.AST, out: set[str]) -> None:
         out.add(node.rest)
 
 
-def _is_probe_container(try_node: ast.Try) -> bool:
-    """Whether a handler-bearing `try` is a CANDIDATE probe (the shapes the census grades).
-
-    Retained as the NAMED definition of "a probe", which the self-test uses to assert the
-    set of blocks it pins is the set the census grades. (Reach is no longer decided by
-    "does this function hold a probe": `_enclosing_bindings` resolves it from the block's
-    own ancestor chain, which is exact where "holds a probe" was an approximation.)
-    """
-    if not try_node.handlers:
-        return False
-    if _assigns_availability(try_node) or _imports_own_code(try_node):
-        return True
-    for node in ast.walk(try_node):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if isinstance(func, ast.Attribute) and func.attr in _CAPABILITY_CALLS:
-            return True
-        if isinstance(func, ast.Name) and func.id in _CAPABILITY_NAMES:
-            return True
-    return False
 
 
 def _type_param_names(node: ast.AST) -> set[str]:
@@ -1231,6 +1208,18 @@ def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]
     while node is not None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             out |= _function_scope_bindings(node)
+        elif isinstance(node, ast.ClassDef):
+            # ⛔ A GENERIC CLASS'S TYPE PARAMETER REACHES ITS METHODS. PEP 695: a class type
+            # parameter "is valid within the class body and inner scopes contained
+            # therein" — measured on 3.12.3, `class C[T]: def m(self): return T` gives
+            # `C.m.__code__.co_freevars == ('T',)`. `_type_param_names` was reachable only
+            # through `_function_scope_bindings`, so a `ClassDef` never entered the shadow
+            # set and `class C[torch]: def probe(self): torch.query(…)` kept the
+            # exemption — the silent drop, one node kind over (review of #14160, P1).
+            # ONLY the type parameters are added: §4.2.2 says a class block's names "do
+            # not extend to the code blocks of methods", so `class C: torch = …` must keep
+            # leaving a method's probe exempt — there are two control rows for that.
+            out |= _type_param_names(node)
         node = parents.get(id(node))
     return out
 
@@ -1256,24 +1245,56 @@ def _function_local_bindings(func: ast.AST) -> set[str]:
         node = stack.pop()
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             out.add(node.name)  # the name binds HERE; the body is a different scope
-            if isinstance(node, ast.ClassDef):
-                # decorators, bases and keywords evaluate in THIS scope
-                stack.extend(node.decorator_list)
-                stack.extend(node.bases)
-                stack.extend(keyword.value for keyword in node.keywords)
-            else:
-                # decorators and defaults evaluate in THIS scope too
-                stack.extend(node.decorator_list)
-                stack.extend(node.args.defaults)
-                stack.extend(d for d in node.args.kw_defaults if d is not None)
+            # decorators, bases, keywords, defaults AND ANNOTATIONS evaluate in THIS scope
+            stack.extend(node.decorator_list)
+            stack.extend(_header_expressions(node))
             continue
         if isinstance(node, ast.Lambda):
+            # the BODY is another scope; the DEFAULTS evaluate in this one
+            stack.extend(node.args.defaults)
+            stack.extend(d for d in node.args.kw_defaults if d is not None)
             continue
         if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
             out |= _walrus_targets(node)
             continue
         _collect_binding(node, out)
         stack.extend(ast.iter_child_nodes(node))
+    return out
+
+
+def _header_expressions(node: ast.AST) -> list[ast.AST]:
+    """The expressions in a `def`/`class` HEADER, which evaluate in the ENCLOSING scope.
+
+    A decorator, a base, a class keyword, a default and an ANNOTATION all run before the
+    new scope exists, so a walrus in any of them binds in the scope that ENCLOSES the
+    definition. A header carrying no `:=` contributes nothing, which matters in the other
+    direction too: a header with no walrus must NOT cancel the exemption (control row).
+
+    ANNOTATIONS are the family only a careful reading of §4.2.1 finds: they are part of
+    the header and evaluate eagerly in the enclosing scope (§4.2.4's lazy evaluation is a
+    later, version-specific exception, not the rule), so `def _h(x: (torch := object()))`
+    rebinds the module's `torch` — measured: `exec("def h(x: (W := 5)): pass")` leaves
+    module `W == 5` (review of #14160, P2). A CLASS-BODY annotation is deliberately not
+    collected: a class body is its own scope, not the enclosing one.
+    """
+    out: list[ast.AST] = []
+    args = getattr(node, "args", None)
+    if args is not None:
+        for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg):
+            if arg is not None and arg.annotation is not None:
+                out.append(arg.annotation)
+        out.extend(args.defaults)
+        out.extend(d for d in args.kw_defaults if d is not None)
+        returns = getattr(node, "returns", None)
+        if returns is not None:
+            out.append(returns)
+    out.extend(getattr(node, "bases", ()) or ())
+    out.extend(keyword.value for keyword in getattr(node, "keywords", ()) or ())
+    for param in getattr(node, "type_params", ()) or ():
+        for attr in ("bound", "default_value"):
+            value = getattr(param, attr, None)
+            if value is not None:
+                out.append(value)
     return out
 
 
@@ -2993,9 +3014,11 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     )
     for _label, _unrelated in {
         "a parameter of an unrelated helper": "def _helper(torch):\n    return torch",
-        # the review's own witness for `_is_probe_container`: a helper that DOES hold a
-        # handler-bearing `try` used to contribute ALL its parameters, so an import-named
-        # one cancelled the exemption below. `try: int(x)` decides nothing about a probe.
+        # a helper that DOES hold a handler-bearing `try` used to contribute ALL its
+        # parameters, so an import-named one cancelled the exemption below. `try: int(x)`
+        # decides nothing about a probe — and `_enclosing_bindings` cannot make this
+        # mistake, because it resolves the probe's own ancestor chain instead of asking
+        # "does this function look like it holds a probe".
         "a parameter of an unrelated helper that holds a try": (
             "def _helper(torch, x):\n"
             "    try:\n"
@@ -3060,7 +3083,13 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "comprehension": "_ = [(torch := _make_client()) for _ in range(1)]",
         "decorator": "@_reg(torch := _make_client())\ndef _f():\n    pass",
         "class base": "class C(torch := _make_client()):\n    pass",
+        "class keyword": "class C(metaclass=(torch := _make_client())):\n    pass",
         "def default": "def _h(x=(torch := _make_client())):\n    return x",
+        "def kw default": "def _h(*, x=(torch := _make_client())):\n    return x",
+        # an ANNOTATION is part of the header, evaluated eagerly in the enclosing scope
+        "def annotation": "def _h(x: (torch := object())):\n    return x",
+        # a lambda BODY is another scope; its DEFAULTS evaluate in the enclosing one
+        "lambda default": "_f = lambda x=(torch := _make_client()): x",
     }.items():
         _walrus_row = roots(
             _scope_control_prelude + _walrus + "\n\n" + _scope_control_guard
@@ -3154,6 +3183,89 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "still denotes the import and the guard must stay exempt — counting the bare "
         f"declaration grades a legitimate third-party probe: {_bare_global_control}"
     )
+
+    # 4j-quattuordecies. THE CLOSURE ASCENT — the mechanism "reach is per probe" rests on
+    #     — gets its own witness. `_enclosing_bindings` walks the WHOLE ancestor chain, not
+    #     just the innermost `def`, because an outer function's local genuinely reaches a
+    #     probe in a nested one (closure). Nothing pinned that before: breaking the ascent
+    #     to innermost-only left the entire self-test green (measured, review of #14160,
+    #     P2), while `_function_scope_bindings`' own docstring calls itself "the unit of
+    #     REACH" — the invitation to make exactly that simplification. The 5th admission
+    #     rule's shape (a probe deciding its own skip) is used because a method/closure
+    #     probe that decides nothing is not a row at all.
+    _outer_local_reaches_nested_probe = textwrap.dedent(
+        """
+        import pytest
+        import torch
+
+        def _outer():
+            torch = _make_client()
+            def _inner():
+                try:
+                    _e = torch.query("SELECT 1")
+                except Exception:
+                    _e = None
+                if _e is None:
+                    pytest.skip("engine has no capability")
+                return _e
+            return _inner()
+
+        TORCH_AVAILABLE = _outer()
+        """
+    )
+    _ascent_row = roots(_outer_local_reaches_nested_probe)
+    assert _ascent_row == ((8, (), True, False, True),), (
+        "an OUTER function's local reaches a probe in a NESTED function through the "
+        "closure, so it rebinds the non-own import there and the probe must be graded — "
+        f"innermost-def-only reach is a silent drop: {_ascent_row}"
+    )
+
+    # 4j-quindecies. THE SAME RULE FOR A GENERIC CLASS, a different node kind that the
+    #     function-only walk missed: `class C[torch]` never entered the shadow set, so its
+    #     method's `torch.query(…)` kept the exemption — the `4j-decies` silent drop, one
+    #     node kind over (review of #14160, P1). PEP 695: a class type parameter "is valid
+    #     within the class body and inner scopes contained therein"; measured
+    #     `C.m.__code__.co_freevars == ('T',)`.
+    #     ⛔ THE TWO CONTROLS ARE THE OTHER HALF, and they are why the fix adds ONLY type
+    #     parameters: a CLASS-BODY assignment does not reach a method (§4.2.2 — the class
+    #     block's names "do not extend to the code blocks of methods"), so collecting it
+    #     would grade a legitimate probe.
+    _admitted_method_probe = textwrap.dedent(
+        """
+        import pytest
+        import torch
+
+        class C{generic}:
+            {class_body}def probe(self):
+                try:
+                    _e = torch.query("SELECT 1")
+                except Exception:
+                    _e = None
+                if _e is None:
+                    pytest.skip("engine has no capability")
+
+        def _run():
+            C().probe()
+        """
+    )
+    _generic_class_row = roots(
+        _admitted_method_probe.format(generic="[torch]", class_body="")
+    )
+    assert _generic_class_row == ((7, (), True, False, True),), (
+        "a GENERIC CLASS's type parameter reaches its methods' bodies, so a probe calling "
+        "`.query` on that name is not calling the import and must be graded — exempting "
+        f"it is the 4j-decies silent drop, one node kind over: {_generic_class_row}"
+    )
+    for _label, _class_body in (
+        ("a plain class", ""),
+        ("a class-body assignment", "torch = _make_client()\n    "),
+    ):
+        _class_control = roots(_admitted_method_probe.format(generic="", class_body=_class_body))
+        assert _class_control == (), (
+            f"{_label} does not rebind the module's import for a method's probe (§4.2.2: a "
+            "class block's names do not extend to the code blocks of methods), so the "
+            f"exemption must survive — grading it is the 4k-/4l- false red: {_class_control}"
+        )
 
     # 4j-duodecies. A FORMAL PARAMETER inside the probe BLOCK is a binding only
     #     `_rebinds_within` can see (`ast.arg` is not an `ast.Name`, and the module walk
