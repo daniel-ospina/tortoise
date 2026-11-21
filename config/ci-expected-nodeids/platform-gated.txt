@@ -35,7 +35,7 @@ tests/test_fork_safety_3845.py::test_without_the_fix_the_same_race_hangs_a_child
 # pattern to follow: pin the id in the TEST, not in this snapshot.
 #
 # The boundary is exact and mechanical, so check it rather than eyeballing
-# "long": in pytest 9.2.0 an AUTO id uses the value verbatim while
+# "long": in pytest 9.2.0 an AUTO id uses the value (ASCII-escaped) while
 # `len(val) <= 100` and above that falls back to `{argname}{idx}`
 # (`_pytest/python.py`, ini `parametrize_long_str_id_strategy`, default
 # `short`). `REDIS_BIN` here is 101 characters — ONE over — which is why exactly
