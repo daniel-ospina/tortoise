@@ -15079,8 +15079,12 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     ``state_question`` — ``{routed: false, population, reason, cue, hint}`` — so
     the relevance reply is distinguishable from an honest "nothing has ended".
     ``reason`` is ``shape`` (the question carries a qualifier or an attributive
-    ending word the population cannot apply) or ``family`` (a shape fired on a
-    family with no lifecycle). The field is emitted ONLY when a state cue was
+    ending word the population cannot apply). ⛔ ``family`` CANNOT OCCUR ON THIS
+    ROUTE: it means a shape fired on a family with no lifecycle, which needs the
+    caller to NAME a family — this route takes no ``entity_type``, so the recogniser
+    always sees the SDK's ``point`` default and ``point`` HAS a lifecycle. The
+    ``state_question`` manifest row states the same limit; the private SDK sink is
+    where ``family`` is reachable. The field is emitted ONLY when a state cue was
     recognised — so a search in which no ending cue appears is byte-identical,
     including every content query that never mentions an ending.
     """

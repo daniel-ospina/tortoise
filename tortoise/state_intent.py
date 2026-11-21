@@ -330,7 +330,9 @@ _TAIL_END = r"\s*[?.!]*$"
 #: state question that did not fire from a genuine empty answer).
 #: ⛔ IT IS A LIST, NOT A PREDICATE ("every word that is not a noun" needs a POS
 #: tagger), and the limit is stated rather than discovered: a qualifier outside it
-#: (`as yet`, `most recently`) stays silent. The members are the ones a customer
+#: (`most recently`, `only after the audit`) stays silent — measured, and both stand
+#: outside the list because their FIRST word is not a member (`as yet` does not: `as`
+#: is one, so it is REPORTED). The members are the ones a customer
 #: actually appends to an ending question — prepositions that introduce a narrowing,
 #: conjunctions, determiners, and the boundary-free time adverbs.
 _BLOCKED_TAIL = (
@@ -502,8 +504,10 @@ _WHICH_PREFIX = (
 #: participle is the question's own predicate again, which is the whole claim. The
 #: recall given up is stated rather than discovered: a subject with a modifier
 #: clause inside it (`is the onboarding flow, as agreed in March, retired`) keeps the
-#: relevance read, and so does a subject longer than four words — the latter REPORTS
-#: itself through `_COPULA_LONG_SUBJECT` below rather than going silent.
+#: relevance read, and so does a subject longer than four words. On the
+#: `is|are|was|were` branch the latter REPORTS itself through `_COPULA_LONG_SUBJECT`
+#: below rather than going silent; on the `has|have|had … been` branch it is still
+#: SILENT, which is the limit the notice-scope paragraph above already states.
 #: ⛔ A SUBJECT WORD MAY CARRY DIGITS (`v3`, `SOC2`, `2024`, `Q4`), and that is a
 #: measured fix rather than a detail: the first subject class was `[a-z]…`, which
 #: cannot spell `v3`, so `is the v3 export deprecated?` was BOTH unrouted and

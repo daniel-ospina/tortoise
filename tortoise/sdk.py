@@ -45715,8 +45715,9 @@ class TortoiseSDK:
         # ``leg_trace``; default None = not computed, byte-identical behavior.
         # #14033: this sink ALSO carries ``state_question`` when a state cue was
         # recognised and not applied (see ``_state_route_out`` below); the key is
-        # cleared before each call decides, so a reused sink cannot carry a stale
-        # notice forward, and it is ABSENT whenever no ending cue was recognised.
+        # cleared AFTER the decision and before it is written, so a reused sink
+        # cannot carry a stale notice forward, and it is ABSENT whenever no ending
+        # cue was recognised.
         read_status_out: dict | None = None,
         recency_field: str | None = None,
         recency_boost: float = 0.0,

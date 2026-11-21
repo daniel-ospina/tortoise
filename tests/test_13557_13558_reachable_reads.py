@@ -760,6 +760,53 @@ def test_a_strong_cue_that_does_not_fire_reports_itself_and_never_routes():
                              reason="invented")
 
 
+def test_the_two_silences_the_comments_name_are_measured_not_hoped():
+    r"""The recall the guards give up is STATED — so the stated examples must hold.
+
+    Two comments in ``state_intent`` each justify a narrowing by naming what it is
+    silent about (#14033 review round 10, P3, both measured):
+
+    * an over-long subject REPORTS itself through ``_COPULA_LONG_SUBJECT`` on the
+      ``is|are|was|were`` branch and is SILENT on the ``has|have|had … been``
+      branch — the earlier wording promised the report for both, which the
+      notice-scope paragraph contradicted;
+    * a qualifier outside ``_BLOCKED_TAIL`` stays silent, and the examples named
+      are genuinely outside it (``most recently``, ``only after the audit`` — a
+      qualifier whose FIRST word is a member, like ``as yet`` via ``as``, is
+      REPORTED, so naming it would invert the claim).
+
+    A narrowing that silently loses recall it does not admit is the defect this
+    module exists to remove, so the claim is pinned against the detector rather
+    than trusted.
+    """
+    from tortoise.state_intent import detect_state_question
+
+    long_subject = "the onboarding flow for enterprise partners"
+    copula = detect_state_question(f"is {long_subject} retired")
+    assert copula.population is None and copula.signal == "is_copula_long_subject", (
+        f"the copula twin no longer reports itself: {copula!r} — the comment's "
+        "'it REPORTS rather than going silent' would then be false")
+    perfect = detect_state_question(f"has {long_subject} been retired")
+    assert perfect.population is None and perfect.signal is None, (
+        f"the over-long PERFECT subject now reports {perfect.signal!r} — if this is "
+        "a widening, say so in the notice-scope paragraph and in the is_copula "
+        "comment, which state that this branch stays silent")
+
+    for silent in ("what ended most recently",
+                   "which claims were retracted only after the audit"):
+        got = detect_state_question(silent)
+        assert got.population is None and got.signal is None, (
+            f"{silent!r} is named as SILENT in `_BLOCKED_TAIL`'s note but reports "
+            f"{got.signal!r} — `most recently` / `only after …` are the examples "
+            "that stand outside the closed list")
+    for reported in ("what ended as yet", "which claims were retracted as yet"):
+        got = detect_state_question(reported)
+        assert got.population is None and got.signal is not None, (
+            f"{reported!r} is a refused constraint and must be REPORTED (its first "
+            "word `as` is a `_BLOCKED_TAIL` member) — if the list lost it, the "
+            "comment's '`as yet` is outside the list' example becomes true again")
+
+
 def test_a_missed_cue_names_words_it_saw_whole():
     r"""The notice's `cue` ends on a WORD boundary (#14033 review, P3).
 
@@ -1899,6 +1946,22 @@ def test_the_hosted_search_body_carries_the_missed_cue(monkeypatch):
     assert "state_question" not in body2, (
         f"a content search gained {sorted(set(body2))} — the notice may only "
         f"appear where a state cue was recognised")
+
+    # ⛔ AND ``family`` IS NOT REACHABLE ON THIS ROUTE (#14033 review round 10, P3).
+    # The body's own docstring listed it beside ``shape`` while the manifest row this
+    # same change adds says it cannot occur — the route takes no ``entity_type``, so the
+    # recogniser always sees the SDK's ``point`` default and ``point`` HAS a lifecycle.
+    # Pinned on both halves the claim rests on: the signature (no ``entity_type``) and
+    # the docstring (does not offer ``family`` as a possible value).
+    _params = inspect.signature(hosted.search).parameters
+    assert "entity_type" not in _params, (
+        "`hosted.search` now takes `entity_type`, so `reason: family` MAY be reachable "
+        "here — the docstring, the manifest row and its rendered doc all say it cannot "
+        "(#14033 review, P3)")
+    assert "or ``family``" not in (hosted.search.__doc__ or ""), (
+        "the hosted body's docstring offers `reason: family` again, which this route "
+        "cannot produce — a caller would branch on a value that never arrives "
+        "(#14033 review, P3)")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
