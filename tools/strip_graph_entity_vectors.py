@@ -202,7 +202,7 @@ confidence:
    "embedding": embedding}`) or an unreadable mapping (`props.update(_gated_labels_of(…))`).
    Making it precise needs value flow (which local holds the placeholder on the stop path),
    which is a change of its own — and an inert enforcer that refuses every real writer is the
-   worse error of the two.
+   worse error of the two. PINNED by `test_the_fallthrough_residual_is_PINNED_as_a_known_fail_open`.
 3. **A MAPPING THE ARM BUILDS AND HANDS ON** (`params = {**props, k: vec}; _write(params)`,
    `_write({**props, k: vec} if f else props)`, or a rebuild behind `.copy()`). The store lands
    in the mapping the write channel
@@ -257,9 +257,9 @@ confidence:
    The legal spellings of the mention are pinned as the `globals-*` / `namespace-*` rows in
    `DEFEATED_RESOLVER_ROWS`: a `Name`, an `Attribute`, an import `alias`, a string-keyed
    `__dict__`/`__builtins__` subscript, in any binding form, any scope depth.
-   ⛔ THE BOUNDARY, stated as a scope and not a completeness claim. Two entries, and each says
-   which pin covers it:
-     * residual 1 — `exec(code)` (no namespace argument);
+   ⛔ THE BOUNDARY, stated as a scope and not a completeness claim. Two entries; each names its pin,
+   or says plainly that it has none:
+     * residual 1 — `exec(code)` (no namespace argument). UNPINNED: nothing reds if it closes.
      * residual 5 — a name the scanner cannot READ. COMPOSED at runtime
        (`builtins.__dict__["glob"+"als"]`) and reached by frame introspection
        (`sys._getframe(0).f_globals`) are both PINNED, as the two rows of
