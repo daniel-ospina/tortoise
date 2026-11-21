@@ -674,6 +674,26 @@ def _git_head() -> str | None:
         return None
 
 
+def _git_head_committed_at() -> int | None:
+    """`%ct` of the same commit `_git_head()` names — the RUN's own timestamp.
+
+    ⛔ Emitted so the run side of the provenance is PRODUCED, never hand-typed: a
+    re-cut may move the anchor (`git_head`) to a later commit, and the pin that
+    proves the run predates `generated_at` must not rest on a number somebody
+    edited into the JSON. `None` when the head or git is unavailable, exactly as
+    `_git_head()` does.
+    """
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["git", "show", "-s", "--format=%ct", "HEAD"],
+            capture_output=True, text=True, timeout=10, check=False,
+        ).stdout.strip()
+        return int(out) if out else None
+    except Exception:
+        return None
+
+
 def _sha256_file(path: Path) -> str:
     """sha256 of a file's bytes — provenance that binds a figure to its producer."""
     import hashlib
@@ -1332,6 +1352,8 @@ def run(args: argparse.Namespace) -> int:
         "labels": result,
         "uniform_query_control": uniform_control,
         "provenance": {
+            #: The run side is computed ONCE here so the two digests and the run head
+            #: cannot disagree with each other by construction.
             #: ⛔ A DRIFT CHECK, NOT PRODUCTION EVIDENCE. sha256 of this
             #: instrument's bytes AS COMMITTED, and it is pinned by
             #: `tests/test_miss_rate_m5.py::test_the_artifacts_tool_sha_matches_the_committed_instrument`
@@ -1346,6 +1368,17 @@ def run(args: argparse.Namespace) -> int:
             #: sleeping. It cannot attest that a run produced these numbers — only
             #: a re-run can — and the record says so in those words.
             "tool_sha256": _sha256_file(Path(__file__).resolve()),
+            #: The RUN side, emitted here rather than maintained by hand. On a fresh
+            #: run these equal `git_head` / `tool_sha256` / that commit's `%ct`; a
+            #: HAND RE-CUT of the committed bundle (an edit to `tools/` that cannot
+            #: move a number) keeps them pointing at the commit whose bytes actually
+            #: ran and moves only the anchor. `tests/test_miss_rate_m5.py`:
+            #: `test_the_run_head_is_a_commit_that_could_have_produced_this_artifact`
+            #: asserts the run predates `generated_at` USING THESE, with no git at
+            #: all, because CI checks out at depth 1 and a git-gated pin skips there.
+            "run_git_head": _git_head(),
+            "run_tool_sha256": _sha256_file(Path(__file__).resolve()),
+            "run_committed_at": _git_head_committed_at(),
         },
         "cleanup": {
             "graphs_created": len(graphs),
