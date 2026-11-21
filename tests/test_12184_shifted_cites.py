@@ -847,8 +847,9 @@ def _pin_blob_lines(path: str, rev: str = _DRIFT_PIN) -> list[str] | None:
     ⛔ MEMOISED per `(path, rev)` — the caller walks one entry per cited LINE, so without this the
     same module is re-rendered once per cite (measured at 227 `git show` calls over 53 distinct
     paths, the slowest arm in this file at 12.56 s; 53 calls after). ⚠️ That is a PERFORMANCE note,
-    not a graded behaviour: the sole call site never varies `rev`, so NO mutation of this decorator
-    can change a result and nothing here asserts it — deleting it only makes the suite ~7 s slower.
+    not a graded behaviour: the GRADED call sites (`_re_derived_drift`'s two loops) never vary `rev`
+    — only the tree-probe test passes one, and nothing asserts the memo — so NO mutation of this
+    decorator can change a graded result. Deleting it only makes the suite ~7 s slower.
     Stated so the next reader does not read the memo as covered (#14038 review, rule 3).
     """
     if not _rev_is_readable(rev):
@@ -961,8 +962,8 @@ def test_the_drift_numerator_is_re_derived_from_the_pin_blob_not_carried() -> No
 
     NON-VACUOUS, measured at this head BOTH ways: (a) restoring the pre-fix `159`/`150`/`222` while
     keeping the corrected denominator reds THIS test; (b) mutating `all 218 comparable ones` to `222`
-    reds the SELF-CONSISTENCY arm — measured message *"… publishes its comparable denominator more than
-    once"* — while the mutation that reaches the history-free IDENTITY is the pair denominator
+    reds the SELF-CONSISTENCY arm (the `split.group(2) == comparable_said.group(1)` assert) — while the
+    mutation that reaches the history-free IDENTITY is the pair denominator
     (`227 pairs` → `231`), which fails it with "the halves do not add up to the whole"; and (c) in a
     real `--depth 1` clone of this head the arm RUNS (no skip — `-rs` reports none) and passes on that
     identity; (d) mutating the SPLIT's own denominator (`146 of the 218 comparable` → `146 of the 300
