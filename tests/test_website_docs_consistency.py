@@ -56,6 +56,7 @@ from tests._html_links import (  # noqa: E402
     extract_anchors_within,
     extract_element_attributes,
     extract_element_ids,
+    extract_first_base_href,
     extract_heading_positions,
     extract_mode_dependent_regions,
     is_blog_entry,
@@ -1301,7 +1302,9 @@ def _docs_section(anchor: str = "storage", *, page: str | None = None) -> str:
     advertised = {
         fragment
         for href in tocs[0]
-        if (fragment := _fragment_this_page_advertises(href, DOCS)) is not None
+        if (fragment := _fragment_this_page_advertises(
+            href, DOCS, base=_document_base_url(html, DOCS),
+        )) is not None
     }
     for heading_id, offset in headings:
         if offset <= start:
@@ -1366,8 +1369,40 @@ def _whatwg_authority(target: str) -> str | None:
     return found.group(1) if found else None
 
 
-def _fragment_this_page_advertises(href: str, document: Path) -> str | None:
+def _document_base_url(markup: str, document: Path) -> str:
+    """The BASE URL that relative and fragment-only links resolve against.
+
+    The canonical page URL unless the document declares a `<base href>`, in which
+    case the browser resolves that against the canonical URL and every later href
+    resolves against the result (#14073 review, P2). The two are the same string
+    on a page with no `<base>`, which is every page today — so this changes no
+    current answer, and it removes the case where the predicate contract ("the
+    heading id EXACTLY when a browser navigating that href lands on this page")
+    was unsatisfiable rather than merely wrong.
+
+    ⛔ A BASE THAT CANNOT BE PARSED IS LEFT TO THE PREDICATE, not raised here. An
+    unparsable `<base href>` effect on resolution is for `urljoin` to give, and
+    the predicate already turns its `ValueError` into a refusal; raising here
+    would turn a refused link into an ERROR naming no cause.
+    """
+    canonical = _canonical_page_url(document)
+    declared = extract_first_base_href(markup)
+    if declared is None:
+        return canonical
+    try:
+        return urljoin(canonical, declared.strip(" \t\n\r\f\v"))
+    except ValueError:  # a bracketed host the stdlib cannot parse
+        return canonical
+
+
+def _fragment_this_page_advertises(
+    href: str, document: Path, *, base: str | None = None,
+) -> str | None:
     """The heading id `href` advertises ON `document`, or `None`.
+
+    `base` is the BASE URL the document links resolve against (`_document_base_url`)
+    — the caller passes it because only the caller has the markup. Omitted, it is
+    the canonical page URL, which is what a page with no `<base href>` does.
 
     See `_docs_section` for why a literal `href.startswith("#")` is the wrong test.
     Three questions, in this order:
@@ -1376,12 +1411,20 @@ def _fragment_this_page_advertises(href: str, document: Path) -> str | None:
        href value, so `" #quickstart"` and a value wrapped in newlines are the
        same URL as `"#quickstart"`. `urlparse` gives the fragment after that
        stripping, which is the tokenizer's work, not a pattern's.
-    2. WHICH URL — resolved with `urljoin` against the page's OWN canonical URL
-       (`_canonical_page_url`), so a RELATIVE href is rooted where a browser roots
-       it. Rooting it at `/` instead accepted `tortoise/docs#quickstart`, which a
+    2. WHICH URL — resolved with `urljoin` against the page's BASE URL (`base`,
+       from `_document_base_url`), so a RELATIVE href is rooted where a browser
+       roots it. Rooting it at `/` instead accepted `tortoise/docs#quickstart`, which a
        browser resolves to `/tortoise/tortoise/docs` — a 404 — and REJECTED
        `../docs#quickstart`, which is `/docs` and serves this page (the loud
        direction, but wrong; #14073 review, measured both).
+
+       ⛔ THE BASE IS NOT THE PAGE URL WHENEVER A `<base href>` IS PRESENT, and
+       that is the one place the two answers differ: with `<base href="/">` the
+       fragment-only `#quickstart` leaves this page entirely, and with a foreign
+       base it leaves the site — so resolving against the page URL advertised a
+       landing no browser makes (#14073 review, P2). It is RESOLVED here rather
+       than refused, because `urljoin` then produces the URL the browser really
+       navigates to, and the origin/document checks below judge it on its merits.
     3. WHICH DOCUMENT — must be the same-origin canonical URL (`_canonical_page_url`)
        AND resolve to this file through the module's route map
        (`_document_for_loc`), so `/docs` (the retired alias), `/tortoise/docs`,
@@ -1449,6 +1492,7 @@ def _fragment_this_page_advertises(href: str, document: Path) -> str | None:
     if ";" in urlsplit(target).path:
         return None
     canonical = _canonical_page_url(document)
+    resolution_base = canonical if base is None else base
     page_origin = _browser_origin(canonical)
     # ⛔ THE AUTHORITY THE BROWSER SEES, before `urljoin` has its say: for a
     # two-or-more-slash spelling the two resolvers disagree (see `_whatwg_authority`).
@@ -1461,7 +1505,7 @@ def _fragment_this_page_advertises(href: str, document: Path) -> str | None:
         if _browser_origin(f"{probe_scheme}://{authority}") != page_origin:
             return None
     try:
-        resolved_url = urljoin(canonical, target)
+        resolved_url = urljoin(resolution_base, target)
     except ValueError:
         return None
     # ⛔ THE FRAGMENT IS CUT TEXTUALLY. Rebuilding the resolved URL through
@@ -1544,16 +1588,13 @@ def _banned_vocabulary(markup: str) -> list[str]:
     version of this pin scanned (#14073 review). Bare markup text matches words
     inside tag names and attribute values too, and none of those reach the
     reader: `class="hot-cache"` and `href="#tier"` used to redden the pin for
-    strings no browser renders. What the narrowing does NOT cost is coverage of a
-    claim a reader does meet, because the only attributes that reach a reader
-    (`title`, `aria-*`, `alt`) are not allowed on this section at all —
-    `_attributes_outside_allowlist` refuses every attribute beyond `id`, `class`
-    and `href`, by NAME, whatever its value. So the two pins cannot disagree:
-    either the attribute is allowed and carries no reader-facing text, or it is
-    caught outright. If a fourth attribute is ever admitted
-    (`test_the_storage_section_says_exactly_what_was_reviewed` requires comparing
-    raw markup against a raw fixture instead), the pin that admits it must also
-    re-widen this scan.
+    strings no browser renders. What the narrowing must NOT be read as is "the
+    attributes are covered elsewhere": `_attributes_outside_allowlist` refuses
+    every attribute beyond `id`, `class` and `href` BY NAME, which leaves `href`
+    VALUES — a destination a reader acts on — judged by nothing here, so the
+    section's destinations are pinned separately by
+    `_REVIEWED_SECTION_HREFS`. Widening the allowlist later means re-widening
+    this scan in the same change.
     """
     folded = re.sub(r"[^a-z0-9]+", " ", _visible_text(markup).lower())
     return sorted(word for word in _BANNED_VOCABULARY if word in folded)
@@ -1765,6 +1806,14 @@ def test_the_storage_section_uses_no_internal_vocabulary() -> None:
 #:     PY
 STORAGE_SECTION_GOLDEN = REPO_ROOT / "tests" / "fixtures" / "14013_storage_section.txt"
 
+#: Every `href` the reviewed #storage section carries, sorted. Pinned as a literal
+#: set because the attribute allowlist admits `href` BY NAME and the wording golden
+#: compares TEXT only — so without this, the section's one outbound claim can be
+#: retargeted with every other storage pin green (#14073 review, P2, measured).
+#: A deliberate change here is a change to where a reader is sent: review it as a
+#: claim change, the same way the wording fixture is reviewed.
+_REVIEWED_SECTION_HREFS = ("mailto:hello@premiselabs.co",)
+
 
 def _visible_text(markup: str) -> str:
     """What a reader sees: tags to spaces, entities decoded, whitespace folded.
@@ -1807,6 +1856,17 @@ def test_the_storage_section_says_exactly_what_was_reviewed() -> None:
     nothing else, so the strong form is what is enforced; the day a fourth is
     genuinely wanted, compare RAW markup against a raw fixture instead.
 
+    ⛔ THE ALLOWLIST IS NOT ENOUGH ON ITS OWN, AND `href` IS WHY. An allowlist
+    judges an attribute BY NAME, so the one attribute it admits whose VALUE a
+    reader acts on is the one it cannot judge. An anchor's destination is
+    reader-facing — hover shows it, clicking follows it — and `_visible_text`
+    compares text only, so `<a href="mailto:legal@evil.example">hello@premiselabs.co</a>`
+    satisfied the allowlist, the wording golden AND the vocabulary scan at once
+    while retargeting the section's only outbound claim. The destinations are
+    therefore pinned as a literal set below, which is the narrow form of the
+    raw-markup comparison this docstring already names as the general fix
+    (#14073 review, P2; measured on all three pins simultaneously).
+
     ⛔ THE TAG SET IS PARSED, not matched in the raw source. A source pattern is
     wrong in both directions: it reads an attribute name written in a comment as a
     reader-facing one, and it MISSES the spellings HTML permits but a tidy writer
@@ -1820,6 +1880,18 @@ def test_the_storage_section_says_exactly_what_was_reviewed() -> None:
         f"the #storage section carries attribute(s) {present} beyond "
         f"<id>, <class>, <href>. The golden compares VISIBLE text, so a "
         f"reader-facing claim in an attribute would never be reviewed against it."
+    )
+    # ⛔ THE DESTINATIONS TOO, because the allowlist above judges a name and this
+    # is the admitted attribute whose VALUE a reader meets. See this docstring's
+    # "THE ALLOWLIST IS NOT ENOUGH ON ITS OWN" paragraph.
+    destinations = sorted(set(extract_anchor_hrefs(markup)))
+    assert destinations == list(_REVIEWED_SECTION_HREFS), (
+        f"the #storage section links to {destinations}, not the reviewed "
+        f"{list(_REVIEWED_SECTION_HREFS)}. The wording golden compares TEXT "
+        f"only, so a retargeted href leaves every other storage pin green. This "
+        f"is the section's only outbound claim: change it deliberately, with the "
+        f"wording change reviewed, rather than pasting the new value in to make "
+        f"this green."
     )
     got = _visible_text(markup)
     want = " ".join(STORAGE_SECTION_GOLDEN.read_text(encoding="utf-8").split())
@@ -2797,6 +2869,121 @@ def test_the_storage_attribute_allowlist_catches_every_legal_spelling() -> None:
         "a `<noscript>` inside an inert `<template>` is template content and "
         "renders in neither mode, so refusing it reds a correct page for markup "
         "no reader meets"
+    )
+
+
+def test_the_storage_section_destinations_are_pinned_not_just_their_names() -> None:
+    """A retargeted `href` reds, though the allowlist, golden and scan all pass.
+
+    `_REVIEWED_SECTION_HREFS` exists because the attribute allowlist admits `href`
+    BY NAME and every other storage pin reads visible TEXT — so the section's one
+    outbound claim had a value no pin looked at (#14073 review, P2). Without the
+    literal pin, all three of the following stay green on a page that sends the
+    reader somewhere else entirely.
+
+    ⛔ THE PREMISE IS ASSERTED, not assumed: each mutant below is checked to be
+    INVISIBLE to the other three pins, so this test cannot quietly start measuring
+    the wording golden instead of the destination pin.
+    """
+    section = _docs_section()
+    reviewed = section
+    assert sorted(set(extract_anchor_hrefs(reviewed))) == list(
+        _REVIEWED_SECTION_HREFS
+    ), "the reviewed section's own destinations drift from the pinned set"
+    original = _REVIEWED_SECTION_HREFS[0]
+    assert original in section, f"{original!r} is not in the #storage section"
+
+    for label, replacement in (
+        ("a foreign mailbox", "mailto:legal@evil.example"),
+        ("a foreign host", "https://evil.example/storage"),
+        ("a dead fragment", "#storage-limits-not-a-heading"),
+    ):
+        mutant = section.replace(f'href="{original}"', f'href="{replacement}"', 1)
+        assert mutant != section, f"could not retarget the href for {label}"
+
+        # The premise: the other three pins cannot see this.
+        assert _attributes_outside_allowlist(mutant) == [], (
+            f"{label}: the allowlist caught it, so this control is not measuring "
+            f"the destination pin"
+        )
+        assert _visible_text(mutant) == _visible_text(section), (
+            f"{label}: the destination became visible text, so the wording "
+            f"golden sees it and this control is not measuring the pin"
+        )
+        assert _banned_vocabulary(mutant) == [], (
+            f"{label}: the vocabulary scan caught it, so this control is not "
+            f"measuring the destination pin"
+        )
+
+        # …and the pin that does look at the value names it.
+        assert sorted(set(extract_anchor_hrefs(mutant))) != list(
+            _REVIEWED_SECTION_HREFS
+        ), f"{label}: the destination pin did not notice the retarget"
+
+
+def test_a_base_element_moves_what_the_section_advertises() -> None:
+    """A `<base href>` changes which document a fragment-only link lands on.
+
+    A browser resolves an anchor against the document's BASE URL, which the first
+    `<base href>` overrides — including for fragment-only links. `_docs_section`
+    used to answer the same-page question against the page's own URL only, so with
+    any `<base>` present every TOC entry silently navigated elsewhere while the
+    guard reported the heading as advertised (#14073 review, P2, measured with an
+    injected `<base href="/">`: nothing reddened).
+
+    ⛔ BOTH DIRECTIONS. A base that leaves this page must REMOVE the advertised
+    heading, and a base that IS this page must keep it — otherwise "refuse
+    everything" would pass, and a guard that refuses correct pages is the false
+    red this module's docstrings keep warning about.
+    """
+    canonical = _canonical_page_url(DOCS)
+    fragment_only = "#storage"
+    assert _fragment_this_page_advertises(fragment_only, DOCS) == "storage", (
+        "the control itself is broken: `#storage` must advertise on this page "
+        "when no `<base>` is present"
+    )
+
+    # A base that leaves the page: `#storage` now navigates to the site root.
+    assert _fragment_this_page_advertises(
+        fragment_only, DOCS, base=urljoin(canonical, "/")
+    ) is None, (
+        "a `<base href=\"/\">` sends `#storage` to the site root, so the section "
+        "must NOT be read as advertising that heading — the guard saw only the "
+        "fragment and called a page-crossing link same-page"
+    )
+    # A base on a foreign host leaves the SITE, which is the fail-open direction.
+    assert _fragment_this_page_advertises(
+        fragment_only, DOCS, base="https://evil.example/"
+    ) is None, (
+        "a foreign `<base>` moves every fragment-only link off the site, so "
+        "advertising a heading for it is the fail-open direction this predicate "
+        "exists to close"
+    )
+    # A base that IS this page changes nothing — the loud direction must not fire.
+    assert _fragment_this_page_advertises(
+        fragment_only, DOCS, base=canonical
+    ) == "storage", (
+        "a `<base href>` naming this page's own URL is what an honest page would "
+        "carry, so refusing it would be a false red"
+    )
+
+    # …and the document-level seam reads the first rendered `<base href>`.
+    page = DOCS.read_text(encoding="utf-8")
+    assert extract_first_base_href(page) is None, (
+        "website/docs.html declares a `<base href>` — the base seam is now load "
+        "bearing and this test's premise needs re-deriving"
+    )
+    assert _document_base_url(page, DOCS) == canonical
+    marked = page.replace("<head>", '<head><base href="/">', 1)
+    assert marked != page, "website/docs.html has no `<head>` to inject a base into"
+    assert _document_base_url(marked, DOCS) == urljoin(canonical, "/")
+    # A `<base>` a browser never parses must NOT move the base.
+    assert extract_first_base_href(
+        page.replace("<head>", '<head><template><base href="https://evil.example/">'
+                     "</template>", 1)
+    ) is None, (
+        "a `<base>` inside an inert `<template>` is not one a browser applies, so "
+        "honouring it would move the base to a page no reader navigates from"
     )
 
 

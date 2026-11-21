@@ -321,6 +321,14 @@ class _AnchorHrefParser(HTMLParser):
         # SCRIPTING MODE — see `_MODE_DEPENDENT`. The attribute allowlist's input:
         # it must refuse such a region instead of clearing it (#14073 review).
         self.mode_dependent: list[tuple[str, int]] = []
+        # The `href` value of the FIRST `<base>` the browser parses, or None. The
+        # document's BASE URL is not its own URL once a `<base href>` is present,
+        # and every relative/fragment-only link resolves against it — so a
+        # same-page question answered against the canonical URL alone is a
+        # question a browser answers differently (#14073 review, P2). Recorded in
+        # `_record_base` under the same suppression rule as every other answer:
+        # a `<base>` inside `<template>`/`<script>` is not one the browser applies.
+        self.base_href: str | None = None
         # `(id, line, column)` of every `<h2>` a browser would put in the document
         # tree, in document order — the docs page's section bound's input (#14073
         # review). A POSITION and not the tag text, because the bound has to cut
@@ -421,6 +429,38 @@ class _AnchorHrefParser(HTMLParser):
                 # are not a collision any script can observe.
                 if value:
                     self.ids.append((value, self.getpos()[0]))
+                return
+
+    def _record_base(
+        self, tag: str, attrs: list[tuple[str, str | None]],
+    ) -> None:
+        """The FIRST `<base href>` a browser applies, or leave it None.
+
+        Only a `<base>` that is actually parsed can move the base URL, so this
+        runs on the same path as `_collect` — a `<base>` inside a suppressed
+        region (`<template>`, a comment, a `<script>` body) never reaches here and
+        must not move the base.
+
+        Only the FIRST one counts: a later `<base href>` is ignored by the
+        tokenizer/URL rules the page is read with, so honouring it would compute a
+        base no browser uses — a fail-open on the same-page question this module
+        answers.
+
+        ⛔ THE GUARD IS `self._suppress`, NOT THE CALLER'S `suppressed` FLAG. That
+        flag answers "does this element's CONTENT suppress" (true for `<script>`
+        itself), while the question here is "is this element INSIDE a region the
+        browser never renders" — a `<base>` inside an inert `<template>` reports
+        `suppressed=False` at its own start tag and would still move the base.
+        Same rule, and same reasoning, as `_collect` (measured: the template case
+        silently relocated the base).
+        """
+        if tag != "base" or self.base_href is not None:
+            return
+        if self._suppress or self.wedged_reason:
+            return
+        for name, value in attrs:
+            if name == "href":
+                self.base_href = value or ""
                 return
 
     def _record_attributes(
@@ -836,6 +876,7 @@ class _AnchorHrefParser(HTMLParser):
         suppressed = self._open(tag, attrs)
         if not suppressed:
             self._collect(tag, attrs)
+            self._record_base(tag, attrs)
         # After `_open`, so a heading written inside a suppressed region is not
         # recorded (see `_record_heading`).
         self._record_heading(tag, attrs)
@@ -1223,3 +1264,27 @@ def extract_element_ids(html: str) -> list[tuple[str, int]]:
     parser.feed(html)
     parser.close()
     return parser.ids
+
+
+def extract_first_base_href(html: str) -> str | None:
+    """The `href` of the first `<base>` `html` puts in the document tree, or None.
+
+    The document's BASE URL, which is what every relative and fragment-only link
+    resolves against. Absent a `<base href>`, a browser resolves against the
+    document's own URL — so a caller that assumes the document URL is the base is
+    right until the day the page grows a `<base>`, and silently wrong after
+    (#14073 review, P2: the same-page predicate had no way to see one).
+
+    Parsed, never pattern-matched, for the reason the rest of this module is: a
+    `<base href>` written inside a comment, a `<script>` body or an inert
+    `<template>` is not one a browser applies, and the raw source cannot tell the
+    difference. Only the FIRST one counts — a later `<base href>` is ignored.
+
+    Returns the attribute's value VERBATIM (empty string for `<base href>` with no
+    value); resolving it is the caller's job, because only the caller knows the
+    document URL it is resolving against.
+    """
+    parser = _AnchorHrefParser()
+    parser.feed(html)
+    parser.close()
+    return parser.base_href
