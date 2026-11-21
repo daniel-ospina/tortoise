@@ -1788,12 +1788,32 @@ def test_the_storage_section_uses_no_internal_vocabulary() -> None:
     (#14073 review). Widening the allowlist later means re-widening this scan in
     the same change.
     """
-    caught = _banned_vocabulary(_docs_section())
-    for word, why in _BANNED_VOCABULARY.items():
-        assert word not in caught, (
-            f"the #storage section contains {word!r}: {why}. Keep it in the "
-            f"same voice as the capacity notices (#13998/#14013)."
-        )
+    # ⛔ THE HELPER, NOT A COPY OF IT. This pin used to re-implement the fold
+    # inline while `_banned_vocabulary`'s docstring promised the caller's
+    # controls were "normalised the way the pin normalises" — so the helper could
+    # be reverted to the raw-markup scan the docstring says was fixed and the
+    # whole suite stayed green while every slice-bound control measured the
+    # reverted behaviour (measured, #14073 review round 4). One implementation.
+    found = _banned_vocabulary(_docs_section())
+    assert not found, (
+        f"the #storage section contains {found!r}: "
+        + "; ".join(_BANNED_VOCABULARY[word] for word in found)
+        + ". Keep it in the same voice as the capacity notices (#13998/#14013)."
+    )
+    # ⛔ AND THE NARROWING ITSELF IS PINNED, in the FALSE-RED direction. Tag and
+    # attribute text left the scan because a reader meets no claim there — so a
+    # banned word sitting in a `class` or an `href` VALUE must NOT red. Without
+    # this row, “the fold reads visible text only” is asserted by nothing, and the
+    # helper is free to revert to folding raw markup (measured, same review).
+    assert _banned_vocabulary('<span class="hot-cache">ok</span>') == [], (
+        "a banned word in a `class` value is not text a reader meets, so folding "
+        "the raw markup is the false-red half this pin was narrowed to remove"
+    )
+    assert _banned_vocabulary('<a href="#tier">ok</a>') == [], (
+        "an `href` VALUE is a destination, not reader-facing text: a banned word "
+        "there must not red the vocabulary pin (it is judged by "
+        "`_REVIEWED_SECTION_HREFS` instead)"
+    )
 
 
 #: The reviewed wording of `#storage`, as a reader sees it.
@@ -3021,6 +3041,37 @@ def test_every_storage_pin_reds_on_its_own_violation() -> None:
         _assert_storage_section_reviewed(reworded)
 
 
+def test_a_second_toc_block_refuses_rather_than_picking_one() -> None:
+    """The "exactly one rendered TOC block" refusal is DRIVEN, not just asserted.
+
+    `_docs_section` says the single-TOC rule is "asserted rather than assumed"
+    because with two blocks which one is the index is undecidable, and the second
+    could advertise a heading the reviewed one does not. Neutralising that assert
+    left the suite green (measured, #14073 review round 4): the control suite
+    covered a TOC inside a comment and inside an inert `<template>`, but not a
+    second RENDERED block — the one spelling the refusal exists for.
+
+    ⛔ WHAT THIS DRIVES IS THE REFUSAL, and only the refusal — the module-level
+    docstring on `_docs_section` explains the damage a second block does (an
+    un-advertised heading bounds the slice, carrying copy past every storage pin).
+    That explanation is prose, not a pin, and this test does not assert it: a
+    claim asserted by nothing is the defect this file keeps finding.
+    """
+    page = DOCS.read_text(encoding="utf-8")
+    marker = '<div class="toc">'
+    assert marker in page, "website/docs.html has no `<div class=\"toc\">`"
+    # A second RENDERED block, ahead of the real one, advertising a heading the
+    # reviewed TOC does not.
+    two_tocs = page.replace(
+        marker,
+        '<div class="toc"><a href="#storage-limits">Also</a></div>' + marker,
+        1,
+    )
+    assert two_tocs != page
+    with pytest.raises(AssertionError, match="toc"):
+        _docs_section(page=two_tocs)
+
+
 def test_a_base_element_moves_what_the_section_advertises() -> None:
     """A `<base href>` changes which document a fragment-only link lands on.
 
@@ -3097,30 +3148,23 @@ def test_a_base_element_moves_what_the_section_advertises() -> None:
         "honouring it would move the base to a page no reader navigates from"
     )
 
-    # ⛔ THE FIRST ONE WINS (#14073 review round 5, P2). The predicate takes the
-    # FIRST `<base href>` a browser parses, because a later one is ignored —
-    # keeping the LAST instead would resolve every TOC entry against a base no
-    # browser uses, which is a fail-open on the same-page question this test
-    # exists to close. Measured: reverting `_record_base` to keep the last base
-    # left the whole suite green, because every other row injects exactly ONE.
-    two_bases = page.replace(
-        "<head>",
-        '<head><base href="https://evil.example/"><base href="/">',
-        1,
-    )
-    assert two_bases != page
-    assert extract_first_base_href(two_bases) == "https://evil.example/", (
-        "with two `<base href>` elements a browser applies the FIRST and ignores "
-        "the second; taking the last means the bound resolves links against a "
-        "base no reader navigates from"
-    )
-    # …and BOTH directions: the second base must not be read when the first IS the
-    # page, or "take the first" could be satisfied by "take whichever is foreign".
+    # ⛔ AND THE FIRST ONE WINS. A later `<base href>` is ignored, so honouring it
+    # would compute a base no browser uses — a fail-open on this very question.
+    # Unpinned until round 4: deleting `or self.base_href is not None` left the
+    # whole suite green (measured, #14073 review).
     assert extract_first_base_href(
-        page.replace("<head>", '<head><base href="/"><base href="https://evil.example/">', 1)
-    ) == "/", (
-        "the first `<base>` is authoritative even when a LATER one is foreign; "
-        "preferring the foreign one would red a page a browser renders fine"
+        '<head><base href="/first"><base href="https://evil.example/">'
+    ) == "/first", (
+        "only the FIRST `<base href>` a browser parses can move the base; "
+        "returning a later one computes a URL no browser navigates from"
+    )
+    # …and the bound follows the first base, not the last.
+    two_bases = page.replace(
+        "<head>", '<head><base href="/"><base href="https://evil.example/">', 1
+    )
+    assert _docs_section(page=two_bases) != _docs_section(), (
+        "a second `<base href>` overrode the first: the bound must take the base "
+        "the browser takes, which is the first one"
     )
 
 
@@ -3228,38 +3272,32 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
     )
 
 
-def test_the_toc_block_count_is_pinned_in_both_directions() -> None:
-    """Zero TOC blocks and two TOC blocks must each red, not just "at least one".
+def test_no_toc_block_refuses_rather_than_running_to_the_end() -> None:
+    """ZERO rendered TOC blocks must red, not just "not two".
 
-    `_docs_section` requires EXACTLY ONE rendered `<div class="toc">`: with none
-    nothing bounds the slice and it becomes the rest of the page; with two, which
-    block is the index is undecidable and the second could advertise a heading the
-    reviewed one does not. That assertion was the ONE guard in the bound that no
-    control drove — weakening `len(tocs) == 1` to `>= 1` left the whole suite green
-    (#14073 review round 5, P2, measured), so a decoy block above the real TOC
-    would silently become the index.
+    `_docs_section` requires EXACTLY ONE rendered `<div class="toc">`, and the
+    two-block direction is driven by
+    `test_a_second_toc_block_refuses_rather_than_picking_one`. The NONE direction
+    is the other half of the same refusal and nothing drove it: with no TOC block
+    the slice has nothing bounding its start, so it degrades into the rest of the
+    page — every later section's copy would then be compared against the storage
+    golden, and a claim anywhere below would have to match it. This is the
+    direction a refactor that quietly drops the block (a `class` rename, a
+    template-wrapped TOC) reaches, and it fails OPEN in the sense that matters
+    here: the pin stops describing a section and starts describing the page.
     """
     page = DOCS.read_text(encoding="utf-8")
 
-    # PREMISE: the real page has exactly one, and the bound resolves.
+    # PREMISE: the real page has exactly one, and the bound resolves at all.
     assert len(extract_anchors_within(page, tag="div", class_token="toc")) == 1
     assert _docs_section(page=page) == _docs_section()
 
-    # A second RENDERED block above the real one: the index is now ambiguous.
-    first_toc = page.index('<div class="toc"')
-    decoy = '<div class="toc"><a href="#storage-limits">Limits</a></div>'
-    two = page[:first_toc] + decoy + page[first_toc:]
-    assert len(extract_anchors_within(two, tag="div", class_token="toc")) == 2
-    with pytest.raises(AssertionError, match="block\\(s\\) in the document tree"):
-        _docs_section(page=two)
-
-    # …and NONE: nothing bounds the slice, so it would run to the end of the page.
+    # …and with NONE the bound must refuse rather than run to the end of the page.
     stripped = page.replace('class="toc"', 'class="toc-removed"')
     assert stripped != page
     assert extract_anchors_within(stripped, tag="div", class_token="toc") == []
-    with pytest.raises(AssertionError, match="block\\(s\\) in the document tree"):
+    with pytest.raises(AssertionError, match="toc"):
         _docs_section(page=stripped)
-
 
 
 def test_faq_toc_anchors_all_resolve() -> None:
