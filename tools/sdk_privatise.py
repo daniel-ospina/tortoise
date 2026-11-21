@@ -401,19 +401,29 @@ SWEEP_NAMES = 66
 #: 11825, nor 11833 — the pin below is what `--repin` printed.)
 #: RE-CUT UP (11825, "539914480e400722") → (11833, "addee5ad564bd9bc") by the `#13874` lane. The
 #: pasted pair is `--repin`'s output measured on THIS tree, never arithmetic on the last pin.
-#: The +8 is ONE merge's rows, attributed by measurement and not by count: over the whole range
-#: `1956b3431f` (the `#14058` re-cut) → this tree, the `.py` diff carries EIGHT added receiver rows
-#: and ONE removed receiver line that is the SAME statement re-indented (it is re-added, so nothing
-#: was deleted) — `git diff … -- '*.py' | grep -E '^[+-]' | grep -E '\.(query|update|delete)\b'`.
-#: SEVEN of the eight are `graph.query`, all inside the file `ad79129cb5` (`#14067`, "invalidate the
-#: degraded snapshot on the eviction path") ADDS,
-#: `tests/test_evictor_invalidates_fallback_snapshot_13123.py`; the eighth is `client.delete`, in
-#: `tortoise/cache_evictor.py`, from that same commit. Added rows (8) == net delta (11833 − 11825),
-#: which is the cross-check that NO row was silently absorbed in the other direction.
-#: ⛔ NO NEW SHAPE APPEARED — the one thing a re-cut must never absorb silently. Both spellings are
-#: already pinned shapes on this tree: `graph.query` is a pinned row (274 here), and `client.delete`
-#: occurs 46 times across the tracked tree
-#: (`git grep -hoE '\bclient\.(query|update|delete)\b' -- '*.py' | sort | uniq -c`). So the
+#: EIGHT added receiver rows in THREE shapes, attributed by measurement and not by count: over the
+#: whole range `1956b3431f` (the `#14058` re-cut) → `ad79129cb5`, the `.py` diff carries EIGHT added
+#: receiver rows and ONE removed receiver line that is the SAME statement re-indented (it is
+#: re-added, so nothing was deleted) —
+#: `git diff … -- '*.py' | grep -E '^[+-]' | grep -E '\.(query|update|delete)\b'`. The row counts
+#: were read with `--report --base 28ca66878d… --top 5000` on both trees, not inferred from the diff:
+#:   * `graph.query` 268 → 274 (**+6**), every one of them inside the file `ad79129cb5` (`#14067`,
+#:     "invalidate the degraded snapshot on the eviction path") ADDS,
+#:     `tests/test_evictor_invalidates_fallback_snapshot_13123.py`;
+#:   * `client.delete` 42 → 43 (**+1**), in that SAME test file — ⛔ NOT in
+#:     `tortoise/cache_evictor.py`, which is where the re-indented `graph.query` line lives;
+#:   * `super().query` 67 → 68 (**+1**), in `tests/test_cache_eviction_evictor_pins.py`.
+#: 6 + 1 + 1 == 8 == net delta (11833 − 11825), which is the cross-check that NO row was silently
+#: absorbed in the other direction. ⛔ An earlier draft said "seven of the eight are `graph.query`"
+#: and named only two shapes; the measurement above falsifies that (six, not seven) and the third
+#: shape was missing entirely — corrected here rather than left as a reader's inheritance (review).
+#: ⛔ NO NEW SHAPE APPEARED — the one thing a re-cut must never absorb silently. All three shapes are
+#: already pinned rows on this tree, and their counts were re-read at THIS head rather than quoted
+#: from `ad79129cb5` (this PR's own rows move `graph.query` on past the 274 measured there):
+#: `graph.query` is **276** here, `super().query` **68**, `client.delete` **43**. A raw whole-tree
+#: grep of the three shapes (`git grep -hoE '\bclient\.(query|update|delete)\b' -- '*.py'`) reports
+#: `client.delete` **48** — it counts occurrences, not the pinned residue ROW — and earlier prose
+#: quoting "46" matched neither figure. So the
 #: condition this gate exists to catch — "a reference shape that was not there when this sweep was
 #: verified is now on the tree" — is NOT triggered; only counts on shapes already declared moved.
 #: The SDK population itself did not move (`typed references still pointing at a public name: 0`),

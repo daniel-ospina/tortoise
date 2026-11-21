@@ -205,30 +205,50 @@ def test_the_control_plane_read_uses_the_SAME_filters_the_ownership_check_does()
     that the declaration asks the same table with the same two filters, so a
     namespace can never be resolved for a ``(id, org)`` pair the ownership check
     would refuse.
+
+    ⛔ THE EXPECTATION IS CAPTURED FROM THE OWNERSHIP READ, NEVER TYPED HERE.
+    This row asserted the literal ``[("id","eq","g_1"),("org_id","eq","orgA")]``
+    and a hardcoded pair cannot detect the drift it is named for: move the
+    ownership read's filters or its table and this row stayed GREEN while the two
+    readers diverged — the exact failure the docstring above claims to prevent
+    (raised by review). So both readers are EXECUTED against one spy and their
+    calls compared, which is an equivalence rather than a transcription.
     """
     from tortoise import supabase_control
 
-    seen = {}
+    def _capture(call):
+        seen = {}
 
-    class _CP:
-        def query(self, table, select=None, filters=None):
-            seen.update(table=table, select=select, filters=filters)
-            return [{"id": "g_1", "namespace": "org_orgA"}]
+        class _CP:
+            def query(self, table, select=None, filters=None):
+                seen.update(table=table, select=select, filters=filters)
+                return [{"id": "g_1", "namespace": "org_orgA"}]
+
+        original = supabase_control.is_supabase_enabled
+        original_cp = supabase_control.get_control_plane
+        try:
+            supabase_control.is_supabase_enabled = lambda: True
+            supabase_control.get_control_plane = _CP
+            call()
+        finally:
+            supabase_control.is_supabase_enabled = original
+            supabase_control.get_control_plane = original_cp
+        assert seen, "the reader made NO control-plane call — this row would be vacuous"
+        return seen
 
     import tortoise.cache_graph as cg
+    from tortoise.hosted_api import _assert_graph_owned
 
-    original = supabase_control.is_supabase_enabled
-    original_cp = supabase_control.get_control_plane
-    try:
-        supabase_control.is_supabase_enabled = lambda: True
-        supabase_control.get_control_plane = _CP
-        assert cg.namespace_from_control_plane("orgA", "g_1") == "org_orgA"
-    finally:
-        supabase_control.is_supabase_enabled = original
-        supabase_control.get_control_plane = original_cp
+    ownership = _capture(
+        lambda: _assert_graph_owned({"org_id": "orgA"}, "g_1", "org_orgA")
+    )
+    declaration = _capture(lambda: cg.namespace_from_control_plane("orgA", "g_1"))
 
-    assert seen["table"] == "graphs"
-    assert seen["filters"] == [("id", "eq", "g_1"), ("org_id", "eq", "orgA")]
+    assert declaration["table"] == ownership["table"]
+    assert declaration["filters"] == ownership["filters"]
+    # `select` is deliberately NOT pinned equal: the ownership read also fetches
+    # `id` (it needs the row's identity), the declaration needs only the name.
+    assert "namespace" in declaration["select"]
 
 
 def _reconcile_args(cache_graph=None) -> argparse.Namespace:
