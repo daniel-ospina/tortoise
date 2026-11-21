@@ -160,7 +160,7 @@ import functools
 import json
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -929,10 +929,14 @@ def _imports_of(source: str) -> set[str]:
                 # cannot be reached by the absolute branch above because that one is
                 # nested under `node.module is not None` — `from . import *` parses
                 # as `ImportFrom(module=None, level=1)`, so it is the MISSING MODULE
-                # STRING that routes it here, not the level (this arm used to carry
-                # a `node.level == 0` gate as well; it is gone, and naming it as the
-                # reason would protect this arm from deletion on a false premise —
-                # the same class #14118 item 2 is about). `from . import *` binds the
+                # STRING that routes it here, not the level. (Precision about which
+                # gate was removed, because a comment that names the wrong one
+                # protects this arm from deletion on a false premise — the class
+                # #14118 item 2 is about: THIS arm never carried a level gate. The
+                # `node.level == 0` gate that #14120 removed lived in the ABSOLUTE
+                # branch's star sub-arm, `if node.level == 0 and any(a.name == "*" …)`
+                # at `e022fc935b:876`, and #14120 folded it into the shared arm above.)
+                # `from . import *` binds the
                 # package's public names in a fresh interpreter (measured: 11 names,
                 # `embedded_lifecycle` among them, which owns the embedded store),
                 # while the literal `tortoise.*` alias matches no root, the scan sees
@@ -1290,94 +1294,184 @@ def test_no_graph_dependency() -> None:
         "ban set minus the probe exemptions, or the transitive leg certifies "
         "coverage it does not deliver")
 
-    def _probe(import_stmt: str) -> tuple[str, tuple[str, ...]]:
-        """Run the sys.modules walk in a CLEAN interpreter over one import.
+    def _matching(modules: Iterable[str]) -> set[str]:
+        """The ONE matcher: every module name that IS a banned root or is under one.
 
-        Returns `(modules the walk FOUND, the name list it WALKED WITH)`.
-
-        ⛔ THE PROGRAM IS BUILT HERE, interpolating `_probe_forbidden()` directly,
-        and there is deliberately NO separate emitter function. An earlier cut put
-        the program in a `_probe_source()` helper and pinned it with
-        `repr(list(_probe_forbidden())) in _probe_source(...)` — a TEXT check on the
-        EMITTER, which grades the string one shortcut away from the string that
-        runs. The class of defect is "the probe's effective list can be narrowed",
-        and an executor building its own narrowed program is exactly that narrowing
-        with a green emitter. Measured on that cut: re-inlining
-        `forbidden=['falkordb', 'redis']` in `_probe` left the whole file at
-        **102 passed** and `_probe_source` as dead code. ONE BODY means there is no
-        edge between building the program and running it, so there is no edge that
-        can be left unpinned.
-
-        ⛔ AND THE PROGRAM PRINTS THE LIST THE MATCHER ACTUALLY ITERATED — not the
-        list it was HANDED. Those are different facts, and an earlier cut printed
-        `sorted(forbidden)` (the handed-in list) and asserted it against
-        `_probe_forbidden()`: that pinned derivation -> program and left the last hop
-        open. Measured on that cut at `1a6aae2fbb`: replacing the matcher's iterable
-        with a subset keeping the two witnessed roots —
-        `for r in [x for x in forbidden if x in ('redis', 'tortoise.ep')]` — left the
-        whole file at **102 passed**, and the narrowing was a LIVE MISS, not a
-        theoretical one: on that program `import tortoise.session_indexer` returned
-        `tortoise.embedded_lifecycle,tortoise.session_indexer` with the full matcher
-        and `''` with the narrowed one. The two controls below are exactly the two
-        entries such a narrowing must keep, so nothing else could see it. (The
-        `for r in forbidden[:2]` row in this PR's own table reds only because
-        `tortoise.ep` falls outside that slice — an accident of list order, not
-        coverage of the class.)
-
-        So the walk RECORDS ITS OWN ITERABLE: `walked.append(r)` sits INSIDE the
-        matcher loop, and the record printed is that list. Narrowing the iterable
-        anywhere — the declaration, the argv payload, the loop header — changes
-        `walked`, and the assertion below holds it to `_probe_forbidden()`. There is
-        no second iteration that could disagree with the one that does the work.
-
-        `\x1f` (unit separator) is the record separator because it cannot occur in a
-        module name — and the read below is `rstrip("\n")`, NOT `strip()`: Python
-        counts `\x1f` as whitespace (`'\x1f'.isspace()` is `True`, bidi class S), so
-        a blanket `strip()` eats the separator exactly when the found-list is EMPTY —
-        the clean-import case — and hands the walked list back as the found list
-        (measured: it made the `leaked == ""` row report all fifteen roots as
-        leaked).
-
-        ⚠️ WHAT THIS STILL CANNOT WITNESS, stated rather than implied: a rewrite that
-        narrows the loop AND fabricates `walked` independently of it — measured, the
-        mutant `walked=list(forbidden)` (recorded outside the loop) beside a narrowed
-        loop header is **102 passed**. That is evidenced forgery rather than a
-        narrowing that leaves the record derived from the loop: the record is the
-        evidence, and a rewrite that writes the evidence instead of observing it is
-        outside what any in-program assert can distinguish. Every narrowing that
-        leaves `walked` produced BY the loop it is pinning reds.
+        ⛔ IT LIVES HERE, IN THE AUDITED FILE, and `_probe` calls it on what the
+        child printed. That is what makes the predicate assertable at all (below):
+        a matcher inside the child could only be graded through a RECORD of what it
+        did, and every record-based cut on this PR was a round away from a green
+        narrowing.
         """
-        # ⚠️ THE PREFIX CLAUSE `or n.startswith(r + '.')` IS DEFENSIVE ONLY, AND
-        # DELIBERATELY UNPINNED — stated so it does not read as a live lever.
-        # Measured: deleting it leaves the whole file at 102 passed. It cannot be the
-        # sole witness of a reach in this probe, because CPython inserts a parent
-        # module whenever a submodule is imported, so any `X.Y` the walk observes
-        # implies `X` is in `sys.modules` too and the `n == r` half already matched.
-        # It is kept rather than deleted as cheap fail-closed insurance for a name
-        # injected into `sys.modules` behind the importer's back, which no import
-        # statement this probe accepts can produce. The file's "no unpinned lever"
-        # doctrine targets levers that can be NARROWED silently; this clause is
-        # inert, so it cannot be narrowed into a hole.
+        forbidden = _probe_forbidden()
+        return {
+            name
+            for name in modules
+            if any(name == root or name.startswith(root + ".") for root in forbidden)
+        }
+
+    def _probe_modules(import_stmt: str, *injected: str) -> list[str]:
+        """The child's RAW report: every name in `sys.modules` after `import_stmt`.
+
+        The child is the ONLY place this program is built, and it matches NOTHING —
+        `_probe` hands what it printed to `_matching`. This helper is separate only so
+        the third-root failure message can tell "the child never reported the name"
+        apart from "the child reported it and the matcher dropped it", instead of
+        naming one cause for all of them.
+        """
         src = (
             "import sys;"
             f"{import_stmt};"
-            f"forbidden={list(_probe_forbidden())!r};"
-            "walked=[];bad=[]\n"
-            "for r in forbidden:\n"
-            "    walked.append(r)\n"
-            "    bad.extend(n for n in sys.modules "
-            "if n == r or n.startswith(r + '.'))\n"
-            "print(','.join(sorted(set(bad))) + chr(31) + ','.join(walked))"
+            # the ONLY way to make the name stream carry a name it could not otherwise
+            # produce: supplied from outside, so the stream can be witnessed at EVERY
+            # root without importing fifteen store clients
+            "sys.modules.update({n: None for n in sys.argv[1:]});"
+            "print(chr(31).join(sorted(sys.modules)))"
         )
         out = subprocess.run(
-            [sys.executable, "-c", src],
+            [sys.executable, "-c", src, *injected],
             capture_output=True,
             text=True,
             cwd=str(Path(__file__).resolve().parent.parent),
             check=True,
         ).stdout.rstrip("\n")
-        found, _, walked = out.partition(chr(31))
-        return found, tuple(name for name in walked.split(",") if name)
+        return [name for name in out.split(chr(31)) if name]
+
+    def _probe(import_stmt: str, *injected: str) -> set[str]:
+        """The banned roots present in `sys.modules` after `import_stmt`, in a CLEAN
+        interpreter.
+
+        ⛔ THE CHILD OBSERVES; THE PARENT DECIDES. The subprocess runs the import and
+        prints `sys.modules`; every comparison against `_probe_forbidden()` happens
+        here. Earlier cuts interpolated the list INTO the child program and had the
+        child match, then emitted a RECORD of what it matched. The shapes those cuts
+        left GREEN are listed ONCE, below, so this docstring does not grow two
+        accounts of the same history. One hop has one place to look:
+        the child's only job is to say what is in `sys.modules`, and a change to
+        what it says reds (measured: printing a constant, printing only the direct
+        import, and truncating `sys.modules` are each **1 failed / 101**).
+
+        ⛔ THE DERIVATION STILL HAS ONE OWNER HERE, `_probe_forbidden()`, pinned by
+        the assert above — so the DERIVATION cannot be narrowed without reddening a
+        row (measured: dotless-only and the hardcoded pair are each 1 failed / 101).
+        Its USE is pinned too, by a DIFFERENT row: the per-root loop below drives
+        `_matching([root])` for every root in the derivation, so filtering the list
+        `_matching` hands the comprehension — down to the three named controls, or by
+        dropping a single root — is **1 failed / 101**, not a narrowing. The one
+        filter no row SAW was on `_matching`'s RETURNED set inside `_probe` (**102
+        passed** when that paragraph was written), and it is closed now too: the
+        submodule row below supplies `<root>.<sub>` through `_probe` and requires it
+        back, so a returned-set filter narrowed to the exact derivation members is
+        **1 failed / 101** (measured at this head). That filter drops no banned ROOT
+        either way, because CPython always registers the parent module — the submodule
+        clause can never be the sole witness (see the prefix-clause note below).
+        Separately, ADDING a name to
+        `_PROBE_EXEMPT` leaves the derivation row above green, because it moves both
+        sides of that equality together — which is why narrowing `_PROBE_EXEMPT` is
+        pinned by `test_the_no_graph_guard_covers_every_module_that_reaches_a_store`
+        and by the `_PROBE_EXEMPT == (…)` row, not by this one.
+
+        ⛔ THE CHILD DOES NOT MATCH ANYTHING — the matching happens HERE, IN THE
+        PARENT, against `_probe_forbidden()`. This is the structural fix for six
+        rounds of findings, and the reason is worth stating exactly: every earlier
+        cut put a MATCHER in the child and a RECORD of that matcher in the program's
+        output, so each round closed one axis of that two-hop arrangement and left
+        the next one open. Measured along the way, each **102 passed** while the
+        guard certified a live miss (`import tortoise.projection` / `tortoise.sdk` /
+        `tortoise.session_indexer` coming back empty):
+          * a narrowed PROGRAM — the emitter building a child that matches a filtered
+            list (`_probe_source()`);
+          * a narrowed ITERABLE in the loop header / the interpolated list;
+          * a narrowed PREDICATE — `and r in ('redis', 'tortoise.ep')`, and
+            `and r != 'tortoise.projection'`, which excludes ONE non-control root
+            and is therefore invisible to any control that only names the roots it
+            keeps;
+          * a `continue` after `walked.append(r)`, which records the visit and
+            skips the match;
+          * a `walked` list written outside the loop instead of observed by it.
+        The last two are the tell: a record of what a matcher did is not the
+        matcher, and an in-child assert can only ever check the record. So there is
+        no child matcher and no record any more. The child prints `sys.modules`; the
+        one matcher is in this file, in the DETECTOR — not in the module under audit.
+        This test's subject is `usage_signal.py`'s source (see its provenance
+        assertions above); the matcher is the EVIDENCE, so a change to it is a change
+        to the evidence, which is exactly why the residual below has to exist.
+
+        `\x1f` (unit separator) joins the module names because it cannot occur in a
+        module name, and the read below is `rstrip("\n")`, NOT `strip()`: Python
+        counts `\x1f` as whitespace (`'\x1f'.isspace()` is `True`, bidi class S), so
+        a blanket `strip()` removes separator bytes at the ENDS of the output — the
+        case that bites when a leading or trailing name is empty. ⚠️ At THIS head
+        that trap is latent, not live: measured, `strip()` leaves the file at **102
+        passed**, because every emitted name is non-empty and the separators are all
+        interior. It was a live bug on the previous, record-based layout, where
+        `strip()` made the `from tortoise import usage_signal` row report all fifteen
+        roots as leaked. `rstrip("\n")` is kept because it is exactly what the
+        output format needs, without claiming a failure this code no longer has.
+
+        ⚠️ WHAT THIS STILL CANNOT WITNESS, stated instead of implied. The matcher is
+        now IN THIS FILE, so it is asserted DIRECTLY: `_matching` is run over a
+        one-name input for EVERY root in `_probe_forbidden()` — once as the exact
+        name, once as `<root>.probe_child` — so a matcher restricted to any subset of
+        the derivation (including `('redis','tortoise.ep',
+        'tortoise.session_indexer')`, which measured **102 passed** at
+        `9bc39f9dd4` and is **1 failed / 101** here) reds on every root it dropped.
+        What remains outside any assert is a matcher that SPECIAL-CASES its input
+        shape — behaving differently for the single names the assertions pass than
+        for a real `sys.modules` listing — or one that predicts this test's own
+        expectations. That is a rewrite of the SUBJECT, not a narrowing of it, and it
+        is the structural reason this arrangement is worth preferring to a two-hop
+        one where a narrowed child and a fabricated record could BOTH be green.
+        ⛔ AND THE NAME STREAM IS WITNESSED AT EVERY ROOT TOO — `_probe` is run once
+        with EVERY root supplied to the child, and the result must be the whole
+        derivation. That closes both places the earlier version of this paragraph
+        called unclosable, and each is measured RED now:
+          * THE CHILD'S PRINT. A child narrowed to the roots the named controls use —
+            `sorted(n for n in sys.modules if n in ('redis','tortoise.ep',
+            'tortoise.session_indexer'))` — was **102 passed** before this row and is
+            **1 failed / 101** after it, because the injected roots never reach the
+            output.
+          * THE PARENT'S PARSE. Suppressing one name in
+            `[name for name in out.split(chr(31)) if name]` was **102 passed** and is
+            **1 failed / 101** after it, on the suppressed root.
+        The old objection — "an assert that reads the same output cannot tell a
+        suppressed name from an absent one" — is true of an assert over an IMPORT, and
+        false of an assert over an input the test supplies: the injected roots are
+        known to be present, so their absence from the result is a defect either way.
+        ⛔ AND THE WITNESS INPUTS ARE NOT THE ONLY EVIDENCE: every root is also
+        IMPORTED for real, one subprocess each, with nothing injected, and the probe
+        must report the module that import put in `sys.modules`. That row is what
+        closes the keep-list class for good — a filter keyed on `set(injected)` (empty
+        there) or on any fixed list of roots has to carry the WHOLE derivation, i.e.
+        the whole ban set, which is no narrowing at all. Measured on the previous head:
+        a six-literal keep-list (the three named controls plus `tortoise.cypher_guard`,
+        `tortoise.projection`, `tortoise.retry`) was **102 passed** and left the probe
+        blind to `tortoise.acl_graph_users` and `tortoise.hosted_backup`; it reds here.
+        What remains is only PREDICTION of this test's inputs, the same residual as
+        above, and a narrowed child now reds BY ITSELF instead of merely being
+        undetectable.
+        """
+        # ⚠️ THE PREFIX CLAUSE `or n.startswith(r + '.')` IS DEFENSIVE, AND IT IS
+        # NOW PINNED — this comment used to say "DELIBERATELY UNPINNED … deleting it
+        # leaves the whole file at 102 passed", and the per-root submodule row added
+        # below this docstring made that FALSE: measured at `904a9429` (the commit
+        # that added the row), deleting the clause is **1 failed / 101 passed**, the
+        # failure at exactly that row. That is the #14118 item 2 class one turn on —
+        # a comment naming the wrong reason is what lets a load-bearing line be
+        # deleted on a false premise — so the clause is described by what it is now:
+        # pinned, for EVERY root, by `_matching([_root + '.probe_child'])`.
+        #
+        # Why it is still worth keeping rather than deleting, on its own merits: it
+        # cannot be the SOLE witness of a reach in this probe, because CPython inserts
+        # a parent module whenever a submodule is imported, so any `X.Y` the walk
+        # observes implies `X` is in `sys.modules` too and the `n == r` half already
+        # matched. It is fail-closed insurance for a name injected into `sys.modules`
+        # behind the importer's back, which no import statement this probe accepts can
+        # produce. The file's "no unpinned lever" doctrine targets levers that can be
+        # NARROWED silently; this clause cannot be narrowed into a hole — it is
+        # exercised in one direction by the per-root row and in the other by the
+        # `_matching(['redis_probe', …]) == set()` boundary assert.
+        return _matching(_probe_modules(import_stmt, *injected))
 
     # ⛔ AND THIS LEG NEEDS POSITIVE CONTROLS, not only the negative assertion.
     # Everything above asserts the probe finds NOTHING, so every way of breaking the
@@ -1386,39 +1480,197 @@ def test_no_graph_dependency() -> None:
     # at 101 passed (measured). A detector that cannot be shown to detect is not a
     # detector — the same defect as the substring scan one level up.
     #
-    # ⛔ AND THEY GRADE THE PROBE'S OUTPUT, NOT ITS SOURCE, because a text pin cannot
-    # see a narrowing written AROUND the text it looks for — `forbidden=[r for r in
-    # <the pinned list> if '.' not in r]` contains the pinned repr verbatim and
-    # silences every dotted root. What must be witnessed is the iterable the
-    # MATCHER ITSELF walked (the program records it inside the loop), so the
-    # controls below name roots that the narrowed candidates DROP — one DOTLESS and
-    # one DOTTED — and each is matched as an EXACT comma-separated entry, never a
-    # substring (`"redis" in "redislite.falkordb_client"` is True, the class this
-    # file removes everywhere else).
-    _found, _walked = _probe("import tortoise.ep")
-    _observed = _found.split(",")
-    assert set(_walked) == set(_probe_forbidden()), (
-        f"the matcher walked {sorted(_walked)} but the derivation is "
-        f"{sorted(_probe_forbidden())} — a narrowing BETWEEN them (a filter around "
-        "the interpolation, a narrowed ITERABLE in the loop header) leaves every "
-        "named control green while the leg certifies coverage it does not "
-        "deliver (#14118 item 1). Measured green before this row: dropping "
-        "`tortoise.sdk`, or `tortoise.projection`, from the interpolated list; and "
-        "`for r in [x for x in forbidden if x in ('redis', 'tortoise.ep')]`, which "
-        "kept both controls and reported a real `session_indexer` pull as empty")
-    assert "redis" in _observed, (
+    # ⛔ AND THEY GRADE WHAT THE PROBE FINDS, NOT THE TEXT OF ITS PROGRAM, because a
+    # text pin cannot see a narrowing written AROUND the text it looks for. That was
+    # measured on the DELETED in-child design — `forbidden=[r for r in <the pinned
+    # list> if '.' not in r]` contains the pinned repr verbatim and silences every
+    # dotted root — and the class outlives that shape: at THIS head there is no
+    # interpolated list left to pin, and the two lenient places are the child's PRINT
+    # and the PARENT'S PARSE, named in the residual above and witnessed at every root
+    # below. So the controls below name roots that a narrowed candidate would DROP —
+    # one DOTLESS and TWO DOTTED.
+    # ⛔ THE CONTROLS BELOW ARE BEHAVIOURAL ON PURPOSE, and they are the assertion
+    # surface for the PRODUCTION path (`_probe`) now that the matcher lives in this
+    # file. The `_probe_forbidden()` pin above holds the LIST; these hold what the
+    # matcher actually FINDS on a real import, named as three distinct roots so that
+    # a restricted matcher has to keep all three to stay green:
+    #   `redis`                 — DOTLESS, the original store-client witness;
+    #   `tortoise.ep`           — DOTTED, so a dotless-only list/matcher reds;
+    #   `tortoise.session_indexer` — a THIRD root, and the reason this row exists:
+    #     with only two, a predicate guard keeps exactly those two and every row
+    #     stays green (measured at `ebb479dc60`: `and r in ('redis','tortoise.ep')`
+    #     → **102 passed** while `import tortoise.session_indexer` came back empty).
+    #     A root the narrowing would DROP is the only thing that can witness it.
+    # ⚠️ WHAT THESE THREE PINS IS THOSE THREE ROOTS' REACH, not the predicate — at the
+    # head they were added to they were nearly the whole assertion surface, and "keep
+    # the named controls" really was green. The per-root loop over `_probe_forbidden()`
+    # below is what pins the WHOLE predicate now; these rows are what pins it through
+    # the production path rather than the matcher in isolation.
+    # Each is matched against a SET of names, never a substring
+    # (`"redis" in "redislite.falkordb_client"` is True, the class this file removes
+    # everywhere else).
+    _ep = _probe("import tortoise.ep")
+    assert "redis" in _ep, (
         "the transitive probe cannot detect a store client at all: importing "
         "tortoise.ep must put a `redis` module in sys.modules, so an empty answer "
         "here means the probe (not the tree) is broken")
-    assert "tortoise.ep" in _observed, (
-        "the probe's effective list must carry the DOTTED roots, not only the "
-        "dotless store-client roots: `import tortoise.ep` puts `tortoise.ep` in "
-        "sys.modules, so its absence means the list was narrowed somewhere between "
-        "the derivation and the walk — helper, program or matcher — and the "
-        "transitive leg certifies coverage it does not deliver (#14118 item 1)")
-    leaked, _ = _probe("from tortoise import usage_signal")
-    assert leaked == "", (
-        f"importing usage_signal pulled a graph client into sys.modules: {leaked}")
+    assert "tortoise.ep" in _ep, (
+        "the probe must reach the DOTTED roots, not only the dotless store-client "
+        "roots: `import tortoise.ep` puts `tortoise.ep` in sys.modules, so its "
+        "absence means the matcher was restricted to the dotless roots and the "
+        "leg certifies coverage it does not deliver (#14118 item 1)")
+    _direct = _probe("import tortoise.session_indexer")
+    assert "tortoise.session_indexer" in _direct, (
+        "the probe must report a banned root it was told to import: `import "
+        "tortoise.session_indexer` puts it in sys.modules, yet "
+        f"{sorted(_direct)!r} is empty of it. Measure before fixing — THREE causes, "
+        "and the two values below tell them apart: "
+        f"CHILD reported it = {'tortoise.session_indexer' in _probe_modules('import tortoise.session_indexer')}; "
+        f"in _probe_forbidden() = {'tortoise.session_indexer' in _probe_forbidden()}. "
+        "CHILD=False → the child's printed set is narrowed (a green mutant on its "
+        "own — see the residual above); CHILD=True and in _probe_forbidden()=True → "
+        "`_matching`, or the list it is handed, dropped it; "
+        "in _probe_forbidden()=False → the root is not in the probe's list, which is "
+        "EITHER removed from `_FORBIDDEN_GRAPH_ROOTS` OR added to `_PROBE_EXEMPT` "
+        "(that set is the ban set MINUS the exemptions), and "
+        "`test_the_no_graph_guard_covers_every_module_that_reaches_a_store` plus the "
+        "`_PROBE_EXEMPT == (…)` row together name which one. The matcher is innocent "
+        "either way (#14118 item 1)")
+    # ⛔ AND EVERY ROOT IS WITNESSED AGAINST BOTH CLAUSES, so what the matcher must
+    # keep is the DERIVATION, not a list of names a narrowing can satisfy. The
+    # matcher is in this file now, so it can be run over a one-name input directly:
+    # the exact clause per root, then the submodule clause per root. A narrowing to
+    # any subset — by iterable, by predicate, by a `continue` after a recording
+    # append, or by "keep the named controls" — reds on the roots it drops. Measured
+    # at `9bc39f9dd4`: that last shape was **102 passed**; here it is **1 failed /
+    # 101**, and so is every other subset.
+    for _root in _probe_forbidden():
+        assert _matching([_root]) == {_root}, (
+            f"the matcher does not report {_root!r}, which IS a banned root in "
+            "`_probe_forbidden()` and is present in the input — a matcher narrowed to "
+            "some subset of the derivation reds here, on each root it dropped "
+            "(#14118 item 1)")
+        assert _matching([_root + ".probe_child"]) == {_root + ".probe_child"}, (
+            f"the matcher does not report {_root + '.probe_child'!r}, a submodule of "
+            f"the banned root {_root!r} — the submodule clause "
+            "(`n.startswith(r + '.')`) is load-bearing for a name injected behind "
+            "the importer's back, and this row pins it for EVERY root, not for the "
+            "one or two a named control happens to use")
+    # AND the clause's BOUNDARY, both directions: a name that merely CONTAINS a root
+    # is not under it, and an empty input finds nothing. Without this, `startswith`
+    # could be widened to a substring test and every row above would stay green.
+    # ⛔ AND THE NAME STREAM IS WITNESSED AT EVERY ROOT, not only the matcher in
+    # isolation. Pinning `_matching` alone left the production path open one hop
+    # later: measured on the previous head, narrowing the child's print to the three
+    # named controls was **102 passed** with `import tortoise.projection` coming back
+    # empty, and suppressing one name in the parent's parse was **102 passed** too.
+    # Both are red below: the injected roots are KNOWN to be present, so their absence
+    # from the result is a defect rather than an ambiguity.
+    _all_roots = _probe("pass", *_probe_forbidden())
+    assert _all_roots == set(_probe_forbidden()), (
+        f"with every root supplied to the child, the probe reported "
+        f"{sorted(_all_roots)} — it must report the WHOLE derivation. A missing root "
+        "means the name stream was narrowed after `sys.modules` (the child's print), or "
+        "on the way into `_matching` (the parent's parse), or inside the matcher; each "
+        "is a live miss for that root and none of them is visible to a row that "
+        "imports a real module (#14118 item 1)")
+    # ⛔ AND THE SUBMODULE FORM SURVIVES THE RETURN TRIP TOO — the row that closes
+    # the last un-witnessed narrowing: a filter on `_matching`'s RETURNED set inside
+    # `_probe` that keeps only exact derivation members and discards `<root>.<sub>`
+    # forms. Every other production row supplies an EXACT root, so that filter was
+    # **102 passed**, and the docstring above used to disclose it as the one filter no
+    # row could see. Supplying the submodule form instead makes it visible: the name
+    # comes from outside the child, so its absence from the result is a defect rather
+    # than an ambiguity — the same argument the `_all_roots` row makes for exact names.
+    _sub_name = _probe_forbidden()[0] + ".probe_child"
+    _sub = _probe("pass", _sub_name)
+    assert _sub_name in _sub, (
+        f"the probe must report `<root>.<sub>` forms, not only exact derivation "
+        f"members: got {sorted(_sub)!r} for an injected {_sub_name!r}. A returned-set "
+        "filter narrowed to `_probe_forbidden()` inside `_probe` drops exactly this "
+        "name while every exact-root row above stays green (#14118 item 1)")
+    # ⛔ AND EVERY ROOT IS IMPORTED FOR REAL, one at a time, with NOTHING injected —
+    # the row that cannot be satisfied by a keep-list. The expected name is the module
+    # the import statement ITSELF put in `sys.modules`, so a filter keyed on
+    # `set(injected)` (empty here) or on any fixed list of controls must include the
+    # WHOLE derivation to stay green. Measured on the previous head: a keep-list of six
+    # literals — the three named controls plus the three roots the old `projection` row
+    # named — left the probe blind to `tortoise.acl_graph_users` and
+    # `tortoise.hosted_backup` and was still **102 passed**. It reds wherever the
+    # witness reaches — matcher, child print, parent parse — and the production verdict
+    # below is graded across a clean and a leaking import in ONE comparison, so a
+    # filter there reds the leaking half instead of silencing the clean one.
+    for _root in _probe_forbidden():
+        assert _root in _probe(f"import {_root}"), (
+            f"`import {_root}` puts `{_root}` in `sys.modules`, so the probe must "
+            "report it. Nothing is injected for this row, so no keep-list can be keyed "
+            "on the witness inputs, and a filter that names only some roots drops this "
+            "one (#14118 item 1)")
+    assert _matching(["redis_probe", "tortoise_ep", "notfalkordb"]) == set(), (
+        "the matcher must not treat a name that merely CONTAINS a banned root as "
+        "being under it — `redis_probe` is not `redis.*`, and matching it would make "
+        "the leg fail closed on unrelated modules")
+    assert _matching([]) == set(), "the matcher must find nothing in an empty input"
+    # ⛔ AND THE SUBJECT'S OWN ROW CARRIES A WITNESS, because it is the ONE row whose
+    # import is `usage_signal` itself, and it was the one row with NO positive control:
+    # a bare `== set()` cannot tell "nothing leaked" from "the matcher answered empty"
+    # for this run. Measured before this change — a matcher that returns `set()`
+    # whenever `tortoise.usage_signal` is in its input left the WHOLE FILE at **102
+    # passed**, so the leg was silently blind to exactly the leak it exists to detect
+    # (a store client reached indirectly, which the AST ban cannot see). Injecting a
+    # KNOWN banned root into the SAME run converts that negative into a witnessed one:
+    # `falkordb` is in `_FORBIDDEN_GRAPH_ROOTS` and not in `_PROBE_EXEMPT`, so it is
+    # supplied from outside and must come back — an empty answer is a defect either way.
+    # Measured at this head: this run yields exactly `{'falkordb'}`, and the mutant that
+    # was 102 passed above is 1 failed / 101 with it in place.
+    leaked = _probe("from tortoise import usage_signal", "falkordb")
+    assert leaked == {"falkordb"}, (
+        "importing usage_signal must pull NO banned root other than the injected "
+        f"witness: got {sorted(leaked)}, expected ['falkordb']. A MISSING witness means "
+        "the matcher is not observing this run at all (it answers empty for the "
+        "subject's own import, which is the leak this leg exists to detect), and an "
+        "EXTRA name is that leak (#14118 item 1)")
+
+    # ⛔ AND THE VERDICT IS ALSO GRADED ACROSS TWO IMPORTS THROUGH `_probe` ITSELF, so a
+    # filter placed INSIDE the production path is graded here too, because the injected witness
+    # above answers "is this run OBSERVED", not "would a REAL leak be SEEN". Measured on
+    # the head before either row: a filter keeping only `set(injected) | <six literals>`
+    # left the PROBE's verdict green for the subject run — and the probe is the only leg
+    # that sees the class this row must cover. That class is NOT a module-level import of
+    # a banned root: the AST ban catches those (measured with this file's own
+    # `_offending`: adding `import tortoise.hosted_backup` to the subject source reports
+    # `{'tortoise.hosted_backup'}`, and the row at :1253 reds). It is the TRANSITIVE
+    # reach — a banned client pulled in through a legitimately imported module — and,
+    # beyond that, a module-scope `__import__(...)`, which the ban is documented to miss.
+    # Measured for the transitive shape: a helper imported by `usage_signal` that does
+    # `import redis` at module scope is `_offending(...) == set()` while the probe
+    # reports the reach, and `__import__("tortoise.hosted_backup")` appended to a copy of
+    # the subject reds this row as `got ['falkordb', 'tortoise.hosted_backup']`. The
+    # leaking import carries no injected names, so an injected-keyed filter empties THIS
+    # row instead of hiding it.
+    _cases = {
+        "from tortoise import usage_signal": set(),
+        "import tortoise.hosted_backup": {"tortoise.hosted_backup"},
+    }
+    # AND the leaking case must STAY: deleting it would quietly turn the control off, and
+    # a removal is invisible to the comparison below.
+    assert _cases.get("import tortoise.hosted_backup") == {"tortoise.hosted_backup"}, (
+        "the table must carry the known-leaking import as its positive control — without "
+        "it the comparison below is satisfied by an empty expectation in both rows, "
+        "which is the exact shape this row exists to prevent")
+    _observed_cases = {stmt: _probe(stmt) for stmt in _cases}
+    assert {"tortoise", "tortoise.usage_signal"} <= set(
+        _probe_modules("from tortoise import usage_signal")
+    ), (
+        "the production import did not even report itself — an emptied stream makes the "
+        "table below vacuous")
+    assert _observed_cases == _cases, (
+        f"the probe disagrees with its own expectations: {_observed_cases}. "
+        f"`import tortoise.hosted_backup` MUST come back as {{'tortoise.hosted_backup'}} "
+        f"— if that half is wrong the detector is broken, not the tree — and "
+        f"`from tortoise import usage_signal` must come back empty. A filter or slice on "
+        f"this expression reds the leaking half instead of silencing the clean one "
+        f"(#14118 item 1)")
 
 
 def test_the_no_graph_guard_catches_relative_imports() -> None:
