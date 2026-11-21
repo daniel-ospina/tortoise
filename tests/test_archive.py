@@ -40,7 +40,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # ── fixtures ────────────────────────────────────────────────────────────────────
 
 def _surface(
-    tools=(), methods=(), forward=(), sdk_retired=(), modules=(), modules_with_body=None
+    tools=(), methods=(), forward=(), sdk_retired=(), modules=(), modules_with_a_body=None
 ) -> dict:
     surface = {
         "tools": set(tools),
@@ -49,8 +49,8 @@ def _surface(
         "sdk_retired": set(sdk_retired),
         "modules": set(modules),
     }
-    if modules_with_body is not None:
-        surface["modules_with_body"] = set(modules_with_body)
+    if modules_with_a_body is not None:
+        surface["modules_with_a_body"] = set(modules_with_a_body)
     return surface
 
 
@@ -1748,7 +1748,14 @@ def test_a_module_left_behind_as_an_EMPTY_file_is_not_a_return(tree: Path) -> No
     _commit(tree, "tortoise/splitmod.py")
     entry = dict(_entry(arch.MODULE, "tortoise.splitmod"), blocks=[], sources=[])
 
-    surface = _surface(modules={"tortoise/splitmod.py"}, modules_with_body=set())
+    # The body-carrier set production would build for THIS tree: `_modules_with_a_body` filters
+    # only a scaffolding `__init__.py`, so a plain empty `.py` is still a CARRIER. Omitting the
+    # name here (an empty set, or the misspelt key that made this argument inert until review 10)
+    # short-circuits on the carriers guard ABOVE and the test could then no longer pin the on-disk
+    # content check its docstring names.
+    surface = _surface(
+        modules={"tortoise/splitmod.py"}, modules_with_a_body={"tortoise.splitmod"}
+    )
     assert arch.live_return(entry, surface, tree) is None, (
         "an emptied leftover file is not the module coming back"
     )
@@ -2161,7 +2168,13 @@ def test_a_tombstone_field_added_to_an_entry_is_not_a_rewrite(tree: Path) -> Non
 
 
 def test_a_recorded_archive_shrink_is_green(tree: Path) -> None:
-    """The documented restore path: the row leaves, and the reason is on the record."""
+    """A DROPPED row is green when the drop's REASON is on the record (the waiver route).
+
+    ⛔ NOT the restore path: a restore needs no waiver at all, because the symbol is live again and
+    `live_return` credits it (`test_a_row_dropped_for_a_RESTORED_module_is_green`, the README's
+    step-3 procedure). This one is `--allow-archive-shrink-reason <why>` — a drop that is neither a
+    restore nor a mistake — so the row pins the waiver route, not the restore route.
+    """
     _archive_module(tree, "tortoise.gone")
     _commit(tree, ".")
     arch.save_manifest({"entries": []}, tree / "archive" / "MANIFEST.json")
@@ -2520,16 +2533,12 @@ def _surface_with_bodies(tree: Path) -> dict:
     path-set rule and cannot prove this one.
     """
     paths = arch._package_modules(tree)
-    return {
-        "tools": set(),
-        "methods": set(),
-        "forward": set(),
-        "sdk_retired": set(),
-        "modules": paths,
-        "modules_with_a_body": arch._modules_with_a_body(
+    return _surface(
+        modules=paths,
+        modules_with_a_body=arch._modules_with_a_body(
             paths, lambda path: arch._file_text(tree, path)
         ),
-    }
+    )
 
 
 def test_a_module_split_into_a_package_can_be_archived(tree: Path) -> None:
