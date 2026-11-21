@@ -1468,6 +1468,88 @@ def test_the_module_docstring_names_the_post_rename_table():
         "say `organizations`")
 
 
+# --- the overlap-claim scan -------------------------------------------------
+# Clause granularity, not line granularity (#14038 review cycle 6). A line can
+# carry an unrelated negation AND the refuted claim — "a replacement cannot mount
+# the held volume, yet a rolling replacement overlaps an old and a new process" —
+# so an OR-across-the-line let the sentence three review cycles removed pass
+# green. Every CLAUSE that mentions an overlap must negate it.
+_OVERLAP_WORD = re.compile(r"(?<!non-)\boverlap", re.IGNORECASE)
+_OVERLAP_NEGATED = re.compile(
+    # `no` / `not` are negations too: "there is no overlap" and "the overlap is not
+    # reachable" are TRUE statements here, and an earlier set of six verbs
+    # false-REDded both — telling an author their truthful sentence "claim[s] an
+    # OVERLAP without negating it", which invites a reword to satisfy the regex.
+    # `not` is excluded when it opens "not only", which is an ADDITIVE and can sit
+    # beside a real claim ("… not only N>1 replicas").
+    r"\b(?:cannot|can ?not|does not|do not|nor|never|no|not(?!\s+only))\b",
+    re.IGNORECASE)
+_OVERLAP_CLAUSE_SPLIT = re.compile(
+    r"(?<=[.;:!?])\s+|\s+(?:and|but|yet|so)\s+", re.IGNORECASE)
+
+
+def _affirmative_overlap_claims(text: str) -> list[tuple[int, str]]:
+    """Every ``(line, clause)`` that mentions an overlap WITHOUT negating it.
+
+    Grading a CLAUSE rather than a line is the whole point: on this topology
+    every true statement about overlap is a negative one, so a clause that NAMES
+    an overlap and carries no negation is the refuted claim — regardless of what
+    the rest of the line says. (A paraphrase that never names it is out of scope;
+    see the caller's docstring.)
+    """
+    claimed: list[tuple[int, str]] = []
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if not _OVERLAP_WORD.search(line):
+            continue
+        for clause in _OVERLAP_CLAUSE_SPLIT.split(line):
+            clause = clause.strip()
+            if not clause or not _OVERLAP_WORD.search(clause):
+                continue
+            if _OVERLAP_NEGATED.search(clause):
+                continue
+            claimed.append((lineno, clause))
+    return claimed
+
+
+def test_the_overlap_guard_grades_each_CLAUSE_not_each_line():
+    """The guard's own discriminating power, pinned (#14038 review cycle 6).
+
+    Cycle 4 defeated the exact-string match with a PARAPHRASE, so cycle 5 made
+    the rule semantic — but at LINE granularity, an OR over the whole line: "the
+    line names an overlap AND the line also contains a negation". Measured on the
+    cycle-5 guard, this shape passed GREEN:
+
+        # a replacement cannot mount the held volume, yet a rolling replacement
+        # overlaps an old and a new process in ordinary operation.
+
+    which is precisely the "reachable in normal operation" claim the review
+    removed three times. This row is what makes the clause-level rule testable
+    instead of a claim in a commit message: a regression to line granularity
+    reds here, and the honest spellings below stay green so the row cannot be
+    satisfied by reddening prose.
+    """
+    refuted_on_one_line = (
+        "# a replacement cannot mount the held volume, yet a rolling replacement "
+        "overlaps an old and a new process in ordinary operation.\n")
+    assert _affirmative_overlap_claims(refuted_on_one_line), (
+        "one line carrying an unrelated negation ('a replacement cannot mount the "
+        "held volume') let an affirmative OVERLAP claim through — the scan is "
+        "grading LINES again instead of clauses: "
+        f"{refuted_on_one_line!r}")
+
+    for honest in (
+        "# a rolling replacement cannot overlap an old and a new process.\n",
+        "# Fly does not promise the overlap either: `rolling` \"does not "
+        "generally guarantee overlap\".\n",
+        "# the volume is single-attach, so a replacement cannot overlap the old "
+        "process; the old process exits first.\n",
+        "# the topology is non-overlap: one machine, one single-attach volume.\n",
+    ):
+        assert not _affirmative_overlap_claims(honest), (
+            f"an honest negation was graded as a claim: {honest!r} -> "
+            f"{_affirmative_overlap_claims(honest)!r}")
+
+
 def test_the_residuals_reachability_is_pinned_to_what_fly_toml_documents():
     """⛔ #14038 review cycle 3 (P2): "reachable in normal operation" was an
     INFERENCE about the platform, and `fly.toml` refutes it.
@@ -1487,9 +1569,18 @@ def test_the_residuals_reachability_is_pinned_to_what_fly_toml_documents():
     Cycle 4 shipped a PARAPHRASE ("the old/new process overlap of a rolling
     replacement") that the previous exact-string check could not see, so a
     surviving copy passed it green. The rule is now semantic: any line mentioning
-    an OVERLAP must be NEGATING it ("does not", "cannot", "never"), because on
-    this topology every true statement about overlap is a negative one. An
-    affirmative claim fails this row whatever its wording.
+    Cycle 6 closed the last way round it: the rule is per CLAUSE, because a
+    single line could carry both the negation and the claim (see
+    `test_the_overlap_guard_grades_each_CLAUSE_not_each_line`, which pins the
+    guard's own discriminating power).
+
+    ⛔ WHAT THIS ROW DOES **NOT** GRADE, stated so the self-description cannot
+    overstate its coverage the way the previous two did: it catches any CLAUSE
+    that NAMES an overlap without negating it. A paraphrase that avoids the word
+    entirely — "the old and the new process run side by side" — is OUT OF SCOPE,
+    because no word list bounds the ways to say it. That residue is why the two
+    artifacts' prose is read in review, not merely gated; this row makes the
+    named form un-shippable, not paraphrase-proof.
     """
     fly = (ROOT / "fly.toml").read_text(encoding="utf-8")
     mounts = fly.split("[[mounts]]")[1:]
@@ -1499,21 +1590,15 @@ def test_the_residuals_reachability_is_pinned_to_what_fly_toml_documents():
         "`capacity_notice`'s residual paragraph and in the "
         "20261120000001_storage_notice_pct.sql header rests on exactly ONE "
         "single-attach volume — re-derive both before changing the topology")
-    claimed = []
+    claimed: list[str] = []
     for path in (
         ROOT / "tortoise" / "capacity_notice.py",
         MIGRATIONS / "20261120000001_storage_notice_pct.sql",
     ):
-        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if not re.search(r"overlap", line, re.IGNORECASE):
-                continue
-            # Every TRUE statement about overlap on this topology is negative; an
-            # affirmative one is the refuted claim, whatever its wording.
-            if re.search(r"\b(cannot|can ?not|does not|do not|nor|never)\b",
-                         line, re.IGNORECASE):
-                continue
+        for lineno, clause in _affirmative_overlap_claims(
+                path.read_text(encoding="utf-8")):
             claimed.append(
-                f"{path.relative_to(ROOT).as_posix()}:{lineno}: {line.strip()}")
+                f"{path.relative_to(ROOT).as_posix()}:{lineno}: {clause}")
     assert not claimed, (
         "these artifacts claim an OVERLAP without negating it, which fly.toml's "
         "single-attach volume makes impossible (a replacement cannot mount the "
