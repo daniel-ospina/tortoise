@@ -3697,6 +3697,23 @@ def test_a_bound_DEFAULT_key_keeps_the_org_level_checkpoint(client, monkeypatch)
     monkeypatch.setattr(ha_mod._os, "write_completed_step",
                         _recording_write_step)
 
+    # ⛔ THE CONSTRUCTION KEEPS `_org_sdk`'s SHAPE FOR AN UNMOVED DEFAULT. The
+    # resolved default is `None` here (no control plane in tests), so
+    # `_org_sdk_from_name` must be handed `None` and take its historical arm —
+    # `_make_sdk(namespace=org_id)`, byte-for-byte what `main` built for this
+    # class and what `_org_sdk`'s docstring promises. Handing it a never-`None`
+    # graph name instead switches every unmoved default-bound credential to
+    # `_make_sdk(graph_name=…)`, which re-keys `_make_sdk`'s keepalive anchor
+    # (#1475) and drops the SDK's `namespace=`.
+    sdk_builds: list[tuple[str, str | None]] = []
+    real_from_name = ha_mod._org_sdk_from_name
+
+    def _recording_from_name(org_id, moved):
+        sdk_builds.append((org_id, moved))
+        return real_from_name(org_id, moved)
+
+    monkeypatch.setattr(ha_mod, "_org_sdk_from_name", _recording_from_name)
+
     previous = app.dependency_overrides.get(get_current_org)
     app.dependency_overrides[get_current_org] = lambda: dict(
         TEST_TEAM, graph_id=_LEGACY_DEFAULT_GID, graph_namespace="org_team-001")
@@ -3726,6 +3743,17 @@ def test_a_bound_DEFAULT_key_keeps_the_org_level_checkpoint(client, monkeypatch)
         "a key bound to the DEFAULT graph reported first_capture=False — the "
         "org's first capture is the org's, whatever credential shape carried it; "
         f"got {resp.json().get('first_capture')!r}")
+    assert (TEST_ORG_ID, None) in sdk_builds, (
+        "the bound-DEFAULT checkpoint did not resolve the org default through "
+        "`_org_sdk_from_name(org_id, _org_default_namespace(org_id))` — the ONE "
+        f"seam `_org_sdk` uses; builds: {sdk_builds!r}")
+    assert all(moved is None for _org, moved in sdk_builds), (
+        "this org's default never MOVED, but the checkpoint SDK was constructed "
+        "from a resolved graph NAME — that switches `_make_sdk` from "
+        "`namespace=` to `graph_name=`, re-keying its keepalive anchor (#1475) "
+        "and dropping the SDK's `namespace=`, where `_org_sdk` promises "
+        "byte-for-byte `_make_sdk(namespace=org_id)` for an unpromoted org; "
+        f"builds: {sdk_builds!r}")
 
 
 def test_the_graph_bound_default_resolve_rides_the_worker_not_the_loop(client, monkeypatch):

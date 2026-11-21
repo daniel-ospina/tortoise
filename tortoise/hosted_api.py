@@ -21896,12 +21896,38 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         if not org.get("graph_id"):
             completion_sdk = _org_sdk(org["org_id"])
         else:
-            default_graph = (await _run_off_loop(
+            # ⛔ ONE read, and the CONSTRUCTION keeps `_org_sdk`'s own shape
+            # (`_org_sdk` = `_org_sdk_from_name(org_id, _org_default_namespace(
+            # org_id))`). A `None` here means "the default never moved", and
+            # `_org_sdk_from_name` then opens `namespace=org_id` — byte-for-byte
+            # what `main` built for this class. Folding the historical name in
+            # with `or _graph_name_for_namespace(...)` instead hands a
+            # never-`None` name to `_org_sdk_from_name`, which switches every
+            # UNMOVED default-bound credential from `_make_sdk(namespace=…)` to
+            # `_make_sdk(graph_name=…)`. That is not cosmetic: `_make_sdk` keys
+            # its keepalive anchor on exactly that choice
+            # (`key = graph_name if graph_name is not None else namespace or ""`,
+            # the #1475 "anchor pins a stray server" class) and the SDK loses
+            # `namespace=`, contradicting `_org_sdk`'s stated "byte-for-byte
+            # what `_make_sdk(namespace=org_id)` returns" contract for an
+            # organization that has not promoted (#14086 review, the
+            # SDK-call-form half of the round-4 fix).
+            #
+            # ⛔ AND THE READ RIDES THE CAPTURE POOL, not the loop (see the
+            # paragraph above): only the NAME resolution is off-loaded — the
+            # CONSTRUCTION below stays on the loop (#7500). An unresolved
+            # binding skips both, so no read is paid for a request that will
+            # 403 in `_data_sdk` anyway.
+            bound_graph = _data_graph_name(org)
+            default_ns = (await _run_off_loop(
                 _CAPTURE_EXECUTOR, _org_default_namespace, org["org_id"])
-                or _graph_name_for_namespace(org["org_id"]))
-            completion_sdk = (_org_sdk_from_name(org["org_id"], default_graph)
-                              if _data_graph_name(org) == default_graph
-                              else None)
+                if bound_graph is not None else None)
+            completion_sdk = (
+                _org_sdk_from_name(org["org_id"], default_ns)
+                if bound_graph is not None
+                and bound_graph == (default_ns or _graph_name_for_namespace(
+                    org["org_id"]))
+                else None)
         def _first_capture_checkpoint():
             """The capture-disclosed checkpoint — synchronous graph work, OFF the loop.
 
