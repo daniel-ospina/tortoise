@@ -36,8 +36,13 @@ also replays the journal):
 
 The handler's post-write tail (`link_session_entities`, `_session_alive`,
 `_update_onboarding_state`, `_sweep_orphaned_writes`, the capture-disclosed
-checkpoint) was off-loaded in the SAME cycle, by the commit before this one —
-that is why the residual below is a single leg and not six.
+checkpoint) was off-loaded in the SAME cycle, by the commit before this one.
+⛔ NO COUNT IS STATED HERE. An earlier cut said "that is why the residual below is
+a single leg and not six", which was a count over a three-entry table that this
+file elsewhere refuses to state — and the table itself says the opposite in a
+different way (the stamp is TWO legs, and the wrapper is 36 call sites). The
+observed set moves with the path, so a number here re-stales against the run it
+came from (#14086 round-2 review, R2-3).
 
 WHY THE CENSUS TEST EXISTS AS WELL AS THE INVARIANT ONE
 ------------------------------------------------------
@@ -144,28 +149,36 @@ _ON_LOOP_RESIDUAL: dict[str, str] = {
     # the measurement (#14086 review, P2). Neither leg is listed separately —
     # this entry is the declaration for the stamp, and both legs are the same
     # owned work.
-    # ⛔ NOT a same-cycle off-load: `_stamp_capture_provenance` is JOURNAL-FIRST
-    # (#9350) — one `PointRevised` per minted id, then the stamp inside its own
-    # `_live_write_scope` lane — so moving it to another thread changes which
-    # thread OWNS that lane, which is a behaviour change, not a move of WHERE the
-    # same callable runs. It needs its own measurement (#14104).
+    # ⛔ THE PREMISE THIS PARAGRAPH USED TO STATE IS WITHDRAWN, SO IT IS GONE.
+    # It read: "`_stamp_capture_provenance` is JOURNAL-FIRST (#9350) … so moving
+    # it to another thread changes which thread OWNS that lane, which is a
+    # behaviour change, not a move of WHERE the same callable runs. It needs its
+    # own measurement (#14104)." That reasoning is false and #14104's closing
+    # comment withdraws it in full: the lane identity is a `ContextVar`
+    # (`_CACHE_WRITE_AUTHORIZED`), opened inside the stamp's OWN body, and
+    # `_run_off_loop` confines contextvars by design (`_submit_off_loop` →
+    # `confine_context`, deliberately not a bare `run_in_executor`) — so
+    # relocating these changes WHERE they run and nothing else. Keeping both
+    # paragraphs in one comment block asserted P and ¬P about the same move, which
+    # is why the refuted one is replaced rather than annotated (#14086 round-2
+    # review, R2-2).
     # ⚠️ This entry is keyed on a GENERIC retry wrapper — measured 36 call sites
     # in `tortoise/sdk.py` (34 besides the two provenance stamps; the only other
     # references in `tortoise/` are prose, in `exceptions.py` and `retry.py`), so
     # it exempts any FUTURE on-loop use of it at any cost, and the size of that
     # exemption is the number that sizes the residual. An earlier cut of this
     # comment said "~9 other call sites", understating it ~4× (#14086 review,
-    # P2). #14104 is CLOSED
-    # (NOT_PLANNED, 2026-11-21) and its closing comment WITHDRAWS the reason it
-    # recorded for leaving the stamps where they are: the write scope is a
-    # `ContextVar` and `_run_off_loop` confines context, so relocating them
-    # changes WHERE they run and nothing else. ⛔ So this entry is NOT a permanent
-    # exemption — it is the declaration that these two legs still run here, and
-    # the owner whose work removes them is the stamp off-load (#9350's
-    # journal-first ordering is what the move must preserve), not #14104.
-    "_graph_write_with_retry": "the capture's two provenance stamps — removal is the off-load "
-    "of `_stamp_capture_provenance` / `_capture_stamp_targets` (#14104's own closing "
-    "comment withdraws the reason it was left)",
+    # P2).
+    # ⛔ ITS OWNER IS AN OPEN ISSUE: #14112 off-loads the four stamp sites
+    # (`hosted_api.py` :21182 / :21209 / :21248 / :21283, still inline on this
+    # head) as ONE closure and then DELETES this entry — deleting it is what
+    # closes the generic-wrapper hole above. ⛔ An earlier cut pointed at #14104,
+    # which is CLOSED (NOT_PLANNED); an entry whose owner cannot act is a
+    # permanent unowned exemption, the one thing this table exists to prevent, and
+    # this file's contract says every entry NAMES the issue that owns removing it
+    # (#14086 round-2 review, R2-1).
+    "_graph_write_with_retry": "#14112 (the capture's four provenance stamp sites, currently "
+    "inline at `hosted_api.py` :21182 / :21209 / :21248 / :21283)",
     # NOT observed on the measured path (the checkpoint that reached it is now
     # off-loaded). Listed because the census drives ONE branch of this handler
     # and the completion gate is reached from others; an entry here is a
