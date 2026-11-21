@@ -1586,6 +1586,34 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
     assert rows == [("dev", "hierarchies", {"predicate": "p", "from_kind": "a",
                                             "to_kind": "b"})], (
         f"a malformed surface contributes NO rows and must not raise: {rows!r}")
+    # ⛔ THE TWO GUARDS ONE LEVEL DOWN IN THE SAME FUNCTION, which the case above cannot reach
+    # (#14060 review round 18, P3 — the per-shape class one input over, exactly as rounds 16/17
+    # found it one function over in `_e6_write_cells`). The `malformed` fixture above supplies a
+    # malformed SURFACE beside a good one; a malformed PACK BLOCK and a malformed ROW were never
+    # driven through `_e6_census_rows`, so `if not isinstance(block, dict): continue` and
+    # `if isinstance(row, dict):` were held up by nothing. Measured before this case: deleting the
+    # block guard left the E6 selection green (20 passed, 423 deselected), because the only
+    # `{"dev": 5}` input in this file goes through `_e6_write_cells`, not this reader; and
+    # deleting the row guard raises NOTHING (a non-dict row is simply appended), so only an
+    # assertion on the ROWS can see it. Both deletions put back the crash-after-a-paid-run class
+    # this PR closes: `measure_e6` calls this reader OUTSIDE its `try`.
+    beside = {"packs": {"dev": 5,
+                        "ok": {"relations": [{"predicate": "p", "from_kind": "a",
+                                              "to_kind": "b"}],
+                               "hierarchies": []}}}
+    rows = measure._e6_census_rows(beside)
+    assert rows == [("ok", "relations", {"predicate": "p", "from_kind": "a",
+                                         "to_kind": "b"})], (
+        f"a non-object PACK BLOCK contributes no rows, must not raise, and must not take its "
+        f"neighbour's rows with it: {rows!r}")
+    mixed_rows = {"packs": {"dev": {"relations": [5, {"predicate": "p", "from_kind": "a",
+                                                     "to_kind": "b"}],
+                                    "hierarchies": []}}}
+    rows = measure._e6_census_rows(mixed_rows)
+    assert rows == [("dev", "relations", {"predicate": "p", "from_kind": "a",
+                                          "to_kind": "b"})], (
+        f"a non-object ROW contributes no row and must not raise — a non-dict row still counts "
+        f"toward `declared` and then dies in `e6_row_reasons`: {rows!r}")
     # …and the two levels ABOVE the surface one, which are the same class one input over: the
     # `packs` block and — in `measure_e6` itself — the `population` read. Measured, each raised
     # OUTSIDE the `try` and killed a run that had already paid its cost:
@@ -1601,6 +1629,7 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
                             ({"packs": "x"}, "non-object packs"),
                             ({"packs": [1, 2]}, "list packs"),
                             ({"population": [1]}, "list population"),
+                            ({"packs": {"dev": 5}}, "non-object pack block"),
                             ({"packs": {"dev": {"relations": 42}}}, "non-list surface")):
         class _Census:
             RELATION_WRITABLE = real.RELATION_WRITABLE
