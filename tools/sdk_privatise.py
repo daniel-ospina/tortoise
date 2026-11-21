@@ -908,7 +908,25 @@ SWEEP_NAMES = 66
 #: was absorbed in the other direction. `11837 − 2 = 11835` is a CROSS-CHECK of that measurement,
 #: never its evidence. `--check` exits 0 on this tree:
 #: `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11835, "891187f5a4636487")
+#:
+#: ⛔ MERGED `origin/main` at `69908d006b` (seven commits past `05d218fcaf`) — THIS is the pin, and it
+#: is `--repin`'s output on THIS merge tree: `(11843, "6aed5368ffa10513")`, never the previous
+#: merge's 11835 carried forward. ⛔ ALL EIGHT ADDED ROWS ARE `main`'s AND THIS BRANCH ADDS NONE, and
+#: that is a measurement, not a claim of innocence: the merged tree's residue row multiset
+#: (`--report --base 28ca66878d… --top 5000`, 858 rows, sorted) is line-for-line IDENTICAL to the one
+#: `origin/main` `69908d006b`'s OWN tree derives with the same walk — diffed, zero differing rows — and
+#: the eight are named by diffing `2c0d66e2ec` (the tree that cut the previous pin) against
+#: `origin/main`: `g.query` **1492 → 1499** (+7) and `proj.g.query` **3642 → 3643** (+1). Both landed
+#: on `main` in `f9f480a55a` (#14164, the change feed's reader census) and `dc92b0eecc` (#14166),
+#: neither of which this branch authored. This branch's own `.py` diff over `05d218fcaf..HEAD`
+#: carries ZERO `.query`/`.update`/`.delete` receiver rows at all, so no row here is this PR's.
+#: ⛔ `main` did not re-cut its own pin when it landed those two commits, so `--check` is RED on
+#: `main` by eight (measured: `origin/main` `69908d006b` in a detached worktree derives 11843 against
+#: its own 11835 pin). That drift is `main`'s to fix; this pin takes the MEASUREMENT of the merged
+#: tree — which equals `main`'s own measurement — rather than `main`'s stale pin, so none of it is
+#: attributed to this PR. `--check` exits 0 on this tree:
+#: `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11843, "6aed5368ffa10513")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
