@@ -1160,7 +1160,6 @@ def test_the_door_pin_refuses_a_MASKED_rebound_or_absent_door():
 
     The control arm is a plain door, so a predicate that refuses everything cannot pass.
     """
-    import functools
 
     def build(source: str) -> type:
         namespace: dict[str, object] = {}
