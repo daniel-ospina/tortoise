@@ -992,7 +992,16 @@ SWEEP_NAMES = 66
 #: the statements it does not answer. An ordinary-word receiver on an object no typing can
 #: decide, which is what this counter reports; `typed references still pointing at a public
 #: name` stays **0**, so no SDK-typed site is legitimised.
-SWEEP_RESIDUE = (11857, "28611b0c960d0070")
+#:
+#: RE-CUT → (11859, "a32f1e6cc360070c") by the merge of the concurrent lane's round-6 fixes into
+#: this lane's round-5 ones. The +2 is ATTRIBUTED by the tool's own row diff (`--report --base
+#: 28ca66878d7c --top 5000` on both trees, sorted and diffed): EXACTLY ONE row differs —
+#: `super().query` 72 → 74, two more fakes delegating to their parent in
+#: `tests/test_14012_resident_cli.py` / `tests/test_14012_resident_pin.py` from the two sides'
+#: tests. An ordinary-word receiver on an object no typing can decide, which is what this counter
+#: reports; `typed references still pointing at a public name` stays **0**, so no SDK-typed site is
+#: legitimised.
+SWEEP_RESIDUE = (11859, "a32f1e6cc360070c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
