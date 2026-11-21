@@ -795,8 +795,10 @@ def read_account(cp, org_id: str) -> Account | None:
             raise first from None
         logger.warning(
             "capacity notice: the orgs read for %s rejected %s (schema older "
-            "than 0015) — retried without %s and treating the account as not "
-            "suspended; the ledger/base columns are still required (%s)",
+            "than 0012/0015) — retried without %s, so the account reads as NOT "
+            "suspended AND the recipient chain loses its billing-contact rung "
+            "(it falls to the owner's GoTrue address); the ledger/base columns "
+            "are still required (%s)",
             org_id, list(_ACCOUNT_DRIFT_SOFT), list(_ACCOUNT_DRIFT_SOFT),
             type(first).__name__)
     if not rows:
@@ -902,11 +904,31 @@ def _notice_recipient(account: Account, cp) -> str | None:
     the provider ACCEPTS — an "unsendable" mark would be a SECOND ledger, i.e. a
     schema change and a decision for #13998's owner rather than for a fix lane.
     """
-    for candidate in (account.email, account.customer_email):
-        if candidate and str(candidate).strip():
-            return str(candidate).strip()
+    own = account.email
+    if own and str(own).strip():
+        return str(own).strip()
+    billing = account.customer_email
+    if billing and str(billing).strip():
+        # ⛔ A FALLBACK IS A DELIVERY DECISION, so it is RECORDED — by RUNG, never
+        # by address (a log is not the place to copy a customer's address). The
+        # account's own column was empty, so this notice reaches a different
+        # mailbox than the account recorded; whoever reads a bounce, or asks "who
+        # was actually told", cannot recover that from the send path alone.
+        logger.info(
+            "capacity notice: team %s carries no organizations.email — the "
+            "notice resolves on the SECOND rung of the recipient chain "
+            "(organizations.customer_email, the Stripe billing contact)",
+            account.org_id)
+        return str(billing).strip()
     resolved = _owner_email(account.org_id, cp)
-    return resolved.strip() if resolved and resolved.strip() else None
+    if resolved and resolved.strip():
+        logger.info(
+            "capacity notice: team %s carries no organizations.email and no "
+            "customer_email — the notice resolves on the THIRD rung of the "
+            "recipient chain (the active owner's GoTrue address)",
+            account.org_id)
+        return resolved.strip()
+    return None
 
 
 async def notify_account(org_id: str, *, cp=None, account: Account | None = None,

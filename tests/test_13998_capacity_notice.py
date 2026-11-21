@@ -816,6 +816,28 @@ class TestDriftAndStaleness:
             "the retry must never drop the ledger column — that is the "
             "fail-closed half of the split")
 
+    def test_the_drift_warning_names_both_degradations(self, caplog):
+        """⛔ THE DEGRADE HAS TWO CONSEQUENCES, and the line named one.
+
+        The retry drops every `_ACCOUNT_DRIFT_SOFT` column, so an account read on
+        a schema behind 0012/0015 is BOTH "not suspended" AND without the
+        billing-contact rung of the recipient chain. The line claimed only the
+        suspension half, so an operator reading it could not tell that the notice
+        may have gone — or may go — to a different mailbox than the account
+        recorded. The column LIST was `%s`-formatted from the tuple and stayed
+        right; the prose did not.
+
+        Non-vacuous: the pre-fix line contains no "billing-contact rung" text at
+        all (only the column names), so this row reds on the wording it grades.
+        """
+        cp = _ColumnBlindCP(missing="customer_email")
+        with caplog.at_level(logging.WARNING, logger="tortoise.capacity_notice"):
+            cn.read_account(cp, ORG_ID)
+        lines = [r.getMessage() for r in caplog.records]
+        assert any(
+            "billing-contact rung" in line and "not suspended" in line.lower()
+            for line in lines), lines
+
     def test_a_missing_ledger_column_still_refuses_to_read_unset(self):
         """The other half: dropping the soft column does not rescue a missing
         ledger — it re-raises, so the account reports `notice-mark-unavailable`
@@ -2882,6 +2904,48 @@ def test_the_recipient_chain_falls_to_the_owner_go_true_address():
         got = cn._notice_recipient(
             _account(email=None, customer_email=None), object())
     assert got == "owner@acme.example"
+
+
+def test_a_role_fallback_names_its_rung_and_never_the_address(caplog):
+    """⛔ A FALLBACK IS A DELIVERY DECISION, SO IT IS ON THE RECORD.
+
+    When the account's own `organizations.email` is empty the notice is mailed to
+    a DIFFERENT mailbox — the mirrored Stripe billing contact, or the owner's
+    GoTrue address. Recording only the `sent` counter leaves an operator unable to
+    answer "which address was told?" after a bounce, and a silent role fallback is
+    the one part of the chain nobody can audit post hoc. The record names the RUNG
+    and not the address: the value is customer PII and the log is durable.
+
+    Non-vacuous: before this record existed the chain emitted nothing at all on a
+    rung-2 resolve, so the first assertion had no line to read.
+    """
+    with patch("tortoise.supabase_control.owner_email",
+               side_effect=AssertionError("rung 3 must not be paid for")), \
+            caplog.at_level(logging.INFO, logger="tortoise.capacity_notice"):
+        got = cn._notice_recipient(
+            _account(email=None, customer_email="billing@acme.example"),
+            object())
+    assert got == "billing@acme.example"
+    lines = [r.getMessage() for r in caplog.records]
+    assert any("SECOND rung" in line and ORG_ID in line for line in lines), lines
+    assert not any("billing@acme.example" in line for line in lines), (
+        "the rung is recorded, the ADDRESS is not — a log is durable and the "
+        f"value is customer PII; lines={lines}")
+
+
+def test_the_owner_rung_fallback_is_recorded_too(caplog):
+    """The THIRD rung is the widest fallback: the notice is now addressed off the
+    account's own row entirely, so it is the one that most needs a record.
+    """
+    with patch("tortoise.supabase_control.owner_email",
+               lambda cp, org_id: "owner@acme.example"), \
+            caplog.at_level(logging.INFO, logger="tortoise.capacity_notice"):
+        got = cn._notice_recipient(
+            _account(email=None, customer_email=None), object())
+    assert got == "owner@acme.example"
+    lines = [r.getMessage() for r in caplog.records]
+    assert any("THIRD rung" in line and ORG_ID in line for line in lines), lines
+    assert not any("owner@acme.example" in line for line in lines), lines
 
 
 def test_the_recipient_chain_survives_a_raising_owner_lookup():
