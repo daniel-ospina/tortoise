@@ -94,8 +94,54 @@ def _derived_mirror_required(entity_type: str) -> bool:
     fold from crashing if the record's arming module cannot be imported, which is
     a WRITE-path fault and must never take a write down.
 
-    ⛔ AND THIS GUARDS THE **DERIVED** ENTITY VECTORS ONLY. A `:Point`'s vector is
-    RECORD TRUTH (`#5004`) and is never derived, so nothing here may touch it.
+    ⛔ AND THIS GUARDS THE **DERIVED** ENTITY VECTORS, PLUS THE `:Point` MIRROR AT THE TWO
+    WRITERS WHERE THAT COPY IS REDUNDANT (#13971). A `:Point`'s vector IS record truth
+    (`#5004`), and the test that decides which writers ask is **"is this copy the redundant
+    one?"**: `sdk::_update_entity` and `hosted_backup.restore_graph` both stop when
+    coverage measures true, because the graph property is unread (`#13330` retired the
+    in-graph `:Point` index) and re-writing it would undo a strip (`#13610` option 2's
+    "write it back on the next call" race).
+
+    ⚠️ AND WHY THE LABEL AGGREGATE IS STILL THE TEST FOR THESE TWO, WHEN IT IS EXACTLY THE
+    TEST THAT IS WRONG FOR THE TWO THAT DO NOT ASK (#13971 review, P2) — the answer is
+    per-door, not a blanket claim that the record holds the row:
+
+      * `sdk::_update_entity` is a caller-prop write on the ENTITY path (not a capture
+        lane), the record leg answers for that row, and it sets the property with
+        `SET n += $p` — so an EXISTING graph vector survives a pop untouched.
+      * `hosted_backup.restore_graph` targets a graph whose record is the same graph: that
+        is the premise of a DR restore, and it refuses a non-empty target.
+
+    ⛔ WHAT THE AGGREGATE DOES NOT BOUND IS A GRAPH-ONLY `:Point` ID ON THE RESTORE DOOR.
+    That shape is `CREATE (n:{labels}) SET n = $p` into a required-empty graph, so a popped
+    vector has no stored value behind it: once BOTH halves (`point`, and the `operator`
+    conjunct) answer stop, an id the record has no row for loses its only copy, and `#5004`
+    forbids re-encoding it. Today the aggregate answers KEEP (≈37,099 record point vectors
+    against 37,158 in the graph, measured 2026-11-19), and the `operator` half is held back
+    STRUCTURALLY, not by luck: `record_vectors >= graph_vectors` is unreachable while any
+    plain point carries an embedding (its graph denominator is the whole `:Point` label and
+    its record numerator is the operator subset), pinned by
+    `test_13610_graph_vector_copy.py::test_the_operator_denominator_is_the_whole_Point_label_so_the_gate_can_never_verify`.
+    So `:Point`'s cut-over is an OPERATOR act — or a later, kind-aware denominator — not a
+    backfill that will eventually measure true. The correct fix is a PER-ID ask (does the
+    record hold THIS row), which is `#13971`'s remaining work,
+    recorded there with the measured shape; the gate stays where it is until it lands,
+    because the restore is the one writer whose mistake cannot be repaired afterwards.
+
+    ⛔ TWO `:Point` DECLARED WRITERS DELIBERATELY DO NOT ASK (#13971 review, P1), and the
+    reason is the same test read honestly: on their lanes the copy is NOT redundant.
+    `sdk::_write_capture_turns` writes the graph batch on exactly the lanes where the record
+    cannot hold the turn (no journal, no tenant, an open connect breaker, or a record write
+    that REFUSED it), and `projection::_rebuild_all_replay` restores a snapshot vector only
+    for ids the journal wrote none for — gating either on the label aggregate put those
+    vectors in NEITHER store. `tools/strip_graph_entity_vectors.py` names both in its
+    census arm, so its plan refuses `:Point` rather than stripping into them — on the
+    coverage verdict today, on those two writers once coverage verifies.
+
+    ⛔ AND THE JOURNAL FOLD IS A THIRD THAT DOES NOT ASK, outside that declared population:
+    `_upsert_point_props` is the journal's own record truth — its vector is what makes
+    `derived == replay(journal)` hold, and `MIRROR_RETIRED_LABELS` must not contain `point`
+    so that fold keeps writing the dense leg a named fallback.
 
     ⛔ IT IS ALSO THE ASK FOR THE WRITERS OUTSIDE THIS MODULE (#13626), and that is
     why it is imported rather than re-spelled: `sdk::_update_entity`,
@@ -2976,6 +3022,19 @@ class _EntityHandlers:
         # an old journal still replays and still yields vectors.
         # #331 (review r4): only embed real content — an empty string
         # produced a junk vector in the HNSW index.
+        # ⛔ AND THIS ARM DELIBERATELY DOES **NOT** ASK THE MIRROR GATE (#13971). A
+        # `:Point`'s vector is JOURNAL RECORD TRUTH (`#5004`): this fold is what makes
+        # `derived == replay(journal)` hold, and dropping the restore breaks it the moment
+        # the record is the only copy. Two shipped pins state the decision —
+        # `record_vector.MIRROR_RETIRED_LABELS` must NOT contain `point`
+        # (`test_13610_graph_vector_copy.py::
+        # test_a_verified_label_whose_fold_still_writes_the_graph_keeps_the_fallback`), and
+        # that set must equal the labels the folds stop writing. The consequence is stated
+        # rather than hidden: a `rebuild_all` re-materialises the journal's vectors, so
+        # `tools.strip_graph_entity_vectors.py` must be re-run after a rebuild. Two OTHER
+        # `:Point` writers also keep their copy on lanes where it is the sole carrier — the
+        # capture turn write, the pass-1b snapshot restore in `projection::_rebuild_all_replay`
+        # (`#13971` review P1) — while the SDK door and `restore_graph` DO ask.
         elif not op and p.get("content"):
         # #5008: through the EMBED gate — an identifier-only text earns no vector.
             try:
