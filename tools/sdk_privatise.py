@@ -701,8 +701,26 @@ SWEEP_NAMES = 66
 #: appears). So the count is DECLARED, not rewritten, and the SDK population did not move
 #: (`typed references still pointing at a public name: 0`), so no typed call site is legitimised.
 #: Derivation: `uv run python tools/sdk_privatise.py --repin` -> (11832, '0ac463c1ce605ae9').
+#: RE-CUT AGAIN at the FIFTH merge tree (#14086 × `main` `e022fc935b2`): the two parents pinned
+#: DIFFERENT pairs — this branch `(11840, "48b02e6ecc8a3689")`, `main` `(11838, "de5664dc98549d56")` —
+#: so neither side is the answer and the merge is a RE-MEASUREMENT. `--repin` on this tree prints the
+#: pair below; it is not `main`'s + 1 by arithmetic, and the row sets were not assumed additive. The
+#: two parents' blocks above both stay: each is true of the tree it was measured on, and the only
+#: thing that survives a merge is a figure taken on the merged tree.
+#: MEASURED HERE: `.venv/bin/python tools/sdk_privatise.py --repin` on this merged tree printed
+#: `SWEEP_RESIDUE = (11839, '7159a040b69431a9')`. The COUNT is `main`'s 11838 plus this PR's single
+#: declared row (`captured.update` in `tests/test_10893_pre_handler_parts.py`, untouched by `main`,
+#: so the +1 is structural rather than assumed). The DIGEST is new against BOTH parents, which is
+#: the point of re-measuring: `main`'s `#14108` respelled `tests/test_usage_signal.py`, so rows that
+#: survive it no longer hash the same. ⛔ THE ROW-BY-ROW DELTA IS NOW DERIVED, in BOTH directions:
+#: `--report --base 28ca66878d7c --top 5000` was run in a worktree at EACH parent, its rows sorted,
+#: and diffed against this tree's. Against the branch parent `7658139ea8` the ONLY differing row is
+#: `seen.update` 102 → 101 (that is `main`'s `#14108` capture rewrite — the arm the block above names),
+#: and against the `main` parent `e022fc935b` the ONLY differing row is `captured.update` 30 → 31
+#: (this PR's own analytics-capture stub: a plain `dict.update`, so a DECLARED residue row and no
+#: typed reference to a swept name is legitimised). 11838 + 1 = 11839 and 11840 − 1 = 11839 are
+#: CROSS-CHECKS of those two measurements, never the evidence for either.
 SWEEP_RESIDUE = (11845, "3d845b4a39da2ac8")
-
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
