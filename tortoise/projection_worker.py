@@ -355,11 +355,23 @@ class ProjectionWorker:
         self._publish_seq = 0
         self._published_seq = 0
         #: ⛔ THE SNAPSHOT NUMBERS ARE PROCESS-LOCAL, SO THEY CARRY AN EPOCH
-        #: (#14222 review cycle 5, P2-1). The reset zeroes the sequence and stamps
+        #: (#14222 review cycles 5 and 6). The reset zeroes the sequence and stamps
         #: its own snapshot, which makes the reset's number the SMALLEST — so a
         #: snapshot captured before the reset compared as NEWER and undid the reset
         #: by restoring the other process's gauges. Bumping the epoch on a reset
-        #: makes every pre-reset number unmatchable instead.
+        #: makes a pre-reset number unmatchable.
+        #:
+        #: ⚠️ THE GUARANTEE IS EXACT UNDER THE ``fork()`` INVARIANT AND ONLY THERE:
+        #: a forking child has ONE thread, so nothing can be mid-publish when the
+        #: reset runs. A publisher ALREADY INSIDE `_publish` when the epoch bumps
+        #: holds a lock object the reset has replaced, so no lock excludes it — its
+        #: value can land after the reset's and the reset's own snapshot is then
+        #: dropped as older, leaving the gauges at the pre-reset values until the
+        #: next queue transition (transient, self-correcting, and unreachable
+        #: without a fork that duplicates threads). Making it airtight would need
+        #: the reset to take `_publish_lock` — which is exactly what it must NOT do
+        #: (that lock may be held by a thread that does not exist here). The
+        #: invariant is stated rather than engineered around.
         self._publish_epoch = 0
         self._pending: collections.deque[PendingProjection] = collections.deque()
         #: The item the loop is folding RIGHT NOW. It is counted as pending lag on
