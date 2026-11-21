@@ -795,7 +795,7 @@ def _path_in_tree(rev: str, path: str) -> bool | None:
 
 
 def _rev_is_readable(rev: str = _DRIFT_PIN) -> bool:
-    """Can this checkout resolve *rev* at all? — the two "cannot run" conditions, one of two.
+    """Can this checkout resolve the COMMIT *rev*? — the first of the three "cannot run" conditions.
 
     ⛔ SEPARATED FROM `_pin_blob_lines` ON PURPOSE. `git show <rev>:<path>` exits 128 for TWO
     different facts: this checkout cannot produce the object (no history in a `fetch-depth: 1`
@@ -828,10 +828,13 @@ def _pin_blob_lines(path: str, rev: str = _DRIFT_PIN) -> list[str] | None:
       * the lines — *path* is in *rev*'s tree and renders;
       * `[]` — *path* is genuinely ABSENT from that tree (an artifact fact, graded by the caller as
         not-comparable, never skipped);
-      * `None` — the CANNOT-RUN class, on either of two causes: *rev* itself is unresolvable, or the
-        path is in the tree but its blob will not render (a failed lazy fetch in a partial clone, a
-        corrupt object). Both are facts about this CHECKOUT, so the arm skips rather than counting a
-        pair it could not read.
+      * `None` — the CANNOT-RUN class, on ANY of THREE causes: *rev* itself is unresolvable; *rev*'s
+        TREE cannot be read (`_path_in_tree` returns `None` — a treeless `filter=tree:0` clone whose
+        lazy fetch failed, a missing tree object, an unreadable rev); or the path IS in the tree but
+        its blob will not render (a blobless clone's failed lazy fetch, a corrupt object). All three
+        are facts about this CHECKOUT, so the arm skips rather than counting a pair it could not
+        read. ⛔ THREE, not two: the tree arm is the one the tri-state exists for, and dropping it
+        leaves its `None` no slot — so the fall-through is "absent", which is the #14038 bug again.
 
     ⛔ MEMOISED per `(path, rev)` — the caller walks one entry per cited LINE, so without this the
     same module is re-rendered once per cite (measured at 227 `git show` calls over 53 distinct
@@ -868,9 +871,10 @@ def _re_derived_drift(text: str, repo: Path = REPO) -> tuple[int, int, int, int]
     for path, line in pairs:
         pin = _pin_blob_lines(path)
         if pin is None:
-            # cannot produce the pin's copy — the rev is unresolvable, or the path IS in its tree but
-        # the blob will not render (a failed lazy fetch, a corrupt object). Both are facts about
-        # THIS CHECKOUT, which is why they skip rather than count a pair that was never read.
+            # cannot produce the pin's copy, on any of three causes: the rev is unresolvable; the
+            # rev's TREE cannot be read (treeless clone, missing tree object); or the path IS in the
+            # tree but its blob will not render. All are facts about THIS CHECKOUT, which is why
+            # they skip rather than count a pair that was never read.
             return None
         head_file = repo / path
         if not head_file.is_file():
