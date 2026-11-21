@@ -1170,13 +1170,25 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
     # ⛔ NORMALISED FIRST: the served string is line-wrapped, and the phrase this pins
     # spans a wrap (`... THAT CHANGES THE\nREAD SILENCES ...`), so a raw `in doc` would
     # report a false failure on the very wording it is checking (measured).
+    # ⛔ AND THE PIN IS THE WHOLE CLAIM, INCLUDING ITS POLARITY (#14033 round-13 DELTA
+    # review, P2). A presence pin on the qualifier alone ("THAT CHANGES THE READ" +
+    # "NON-DEFAULT") was measured BLIND to a negation: `AND NO RETRIEVAL ARGUMENT THAT
+    # CHANGES THE …` left the whole file green (164 passed), i.e. a served sentence
+    # saying the guard does NOT silence the report shipped. The regex below requires
+    # the affirmative claim end to end — the qualifier, its verb and its object — so a
+    # negation, a dropped "SILENCES THE REPORT", or a swap to "ANY" all red.
     _doc_flat = " ".join(doc.split())
-    assert "THAT CHANGES THE READ" in _doc_flat and "NON-DEFAULT" in _doc_flat, (
-        "the SERVED description is back to claiming that ANY retrieval argument "
-        "silences the cue report, which is false at a default-equal value "
-        "(`threshold=0`, `min_confidence=0`, `order_by=\"relevance\"` do not silence "
-        "it) — the boundary is described more broadly than the guard implements it "
-        "(#14033 round-13 review, P3)")
+    assert _re.search(
+        r"AND A RETRIEVAL ARGUMENT THAT CHANGES THE READ SILENCES THE REPORT",
+        _doc_flat), (
+        "the SERVED description no longer states the affirmative claim \"a retrieval "
+        "argument that CHANGES THE READ SILENCES THE REPORT\" — a negation, an \"ANY "
+        "ARGUMENT\" wording or a dropped consequence all describe the guard "
+        "differently from how it behaves (default-equal values do NOT silence it; "
+        "non-default ones do) — #14033 round-13 review P3, delta review P2")
+    assert "NON-DEFAULT" in _doc_flat, (
+        "the SERVED description dropped the NON-DEFAULT qualifier, so it reads as if "
+        "an explicit default value is a filter (#14033 round-13 review, P3)")
     assert "is not a filter and does not silence it" in _doc_flat, (
         "the SERVED description dropped the NEUTRAL-VALUE carve-out: a caller who "
         "passed `threshold=0` explicitly is then told they silenced a report that in "
@@ -2069,9 +2081,16 @@ def test_a_retrieval_knob_suppresses_the_notice_too(sdk):
     # "THAT CHANGES THE READ" silences the report and that a default-equal value is
     # "not a filter and does not silence it" — this is the arm that makes that true.
     # `_retrieval_knobs()` classifies by VALUE (`threshold not in (0.0, 0)`), so a
-    # caller who passes the default explicitly is still served the report; the mutant
-    # that would break it is `("threshold", threshold is not None)`, which makes this
-    # arm red while every non-default arm above stays green.
+    # caller who passes the default explicitly is still served the report.
+    # ⛔ WHAT REDS IT, MEASURED RATHER THAN ASSUMED (#14033 round-13 delta review, P3):
+    # `("threshold", threshold is not None)` reds this TEST, but at the PLAIN arm above
+    # (`assert plain.get("reason") == "shape"`), not here — that arm passes the default
+    # `0.0` too, so a value-based variant that treats an explicit `0.0` as a knob also
+    # treats the default as one, and the plain arm fails first. Isolating THIS arm
+    # needs a sentinel default in the signature (`threshold: float | None = None`, knob
+    # `is not None`) — a signature change this PR does not make. The assertion is still
+    # the one that would catch a "default-equal values are filters" reading in the
+    # served text; it is simply not the first arm to red under that mutant.
     neutral: dict = {}
     sdk._tortoise_fts_query("which claims were retracted by legal",
                             entity_type="point", limit=5, threshold=0.0,
