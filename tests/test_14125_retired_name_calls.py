@@ -1469,7 +1469,16 @@ def _is_header_child(node: ast.AST, child: ast.AST) -> bool:
     #: class keyword through an `ast.keyword`, so the direct-child identity test alone
     #: misses the two largest families — measured, the default-header case stayed graded
     #: through a `previous` that was the `arguments` node.
-    if isinstance(child, (ast.arguments, ast.keyword, ast.arg)):
+    #: ⛔ AND NO `ast.arg` TERM. `ast.arg` used to sit in this tuple as a third member and
+    #: it can never fire: an `ast.arg`'s only parent is `ast.arguments`, which is not a
+    #: `def`/`class`/`lambda`, and this function is called for those three node kinds only
+    #: — so it cannot receive an `ast.arg` as `child`. Measured, not inferred: an
+    #: instrumented copy that logged every `ast.arg` arrival ran the ENTIRE graded corpus
+    #: (this file's rows plus the 58-file probe census) with ZERO hits. A term that can
+    #: never fire is not coverage, it is a CLAIM of coverage — the same defect this file
+    #: filed against `_is_probe_container`, whose docstring said the self-test used it.
+    #: Removing it changes no row, and that is exactly the point: no row could ever pin it.
+    if isinstance(child, (ast.arguments, ast.keyword)):
         return True
     if any(expression is child for expression in getattr(node, "decorator_list", ()) or ()):
         return True
