@@ -4137,8 +4137,9 @@ E6_SURFACES = ("relations", "hierarchies")
 
 #: The ONE spelling of "this column was never read", so the two renderers and the three refusal
 #: paths cannot drift apart (#14060 review round 16, P3: the beside column published
-#: `unmeasured=0` beside a source saying this). A `written_source` that starts with this prefix
-#: means the four cells carry no reading, and the renderers say so instead of printing zeros.
+#: `unmeasured=0` beside a source saying this). It means NO cell was read into any row — a cell may
+#: carry a refusal's aggregate (`unmeasured = len(rows)`, the rows the guard refused), never a
+#: reading — so both renderers print no figure for them, and the log cannot contradict its own source.
 E6_NOT_READ_PREFIX = "not read — "
 
 #: What `written` holds when NO census was read at all: unknown, which is not zero. Zero is a
