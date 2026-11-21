@@ -2302,12 +2302,12 @@ def test_the_storage_section_bound_cuts_at_a_RENDERED_heading_only() -> None:
     ⛔ AND THE ONE TOKEN THAT DOES CLOSE THE SCOPE IS MODELLED — `<input>`, the
     living standard's "in body" rule (`_SELECT_POP`). This paragraph used to say
     the classic mode's `input`/`keygen`/`textarea` were all unmodelled; that was
-    wrong twice over: `<input>` is modelled now, and `keygen`/`textarea` have no
-    select-scope step in the living standard, so modelling them would be the
-    FAIL-OPEN direction — a `<select><textarea>` decoy pops the select, advertises
-    its anchor and bounds the slice early, which is the escape #14073 exists to
-    close. Both readings are pinned in
-    `test_the_select_scope_closes_on_the_tokens_a_browser_closes_it_on`.
+    wrong twice over: `<input>` and a nested `<select>` are modelled now, and
+    `keygen`/`textarea` have no select-scope step in the living standard, so
+    modelling them would be the FAIL-OPEN direction — a `<select><textarea>` decoy
+    pops the select, advertises its anchor and bounds the slice early, which is the
+    escape #14073 exists to close. Both readings are pinned in
+    `test_the_select_scope_closes_on_input_and_a_nested_select_and_nothing_else`.
 
     ⛔ AND THE IMPLICIT-CLOSE RULES ARE NOT MODELLED, in the SAFE direction only
     because the container helper refuses the tags they affect: for an ordinary
@@ -2483,7 +2483,7 @@ def test_the_storage_section_bound_cuts_at_a_RENDERED_heading_only() -> None:
     )
 
 
-def test_the_select_scope_closes_on_input_and_on_nothing_else() -> None:
+def test_the_select_scope_closes_on_input_and_a_nested_select_and_nothing_else() -> None:
     """Only `<input>` pops an open `<select>` — and the other two tokens MUST NOT.
 
     The living standard has no "in select" insertion mode (`grep -c 'in select'
@@ -2526,6 +2526,34 @@ def test_the_select_scope_closes_on_input_and_on_nothing_else() -> None:
         "a `<h2>` after `<input>` in a select was treated as a heading no reader "
         "meets: the select is already popped in the browser, so this is a rendered "
         "heading and must bound the slice"
+    )
+    # ── PRESENT: a NESTED `<select>` pops the outer one and is IGNORED whole ──
+    # Spec: *"Parse error. Ignore the token. Repeatedly pop the current node off
+    # the stack of open elements until a select element has been popped."* So the
+    # outer select closes, the inner one never exists, and an anchor after it is a
+    # rendered sibling link. Measured in Chromium:
+    # `<select id=o><select id=i><a href="/blog">` -> one select (`o`), anchor a
+    # sibling `<a>` in the body. Without the IGNORE half the anchor would still be
+    # suppressed by an element the browser discarded.
+    assert extract_anchor_hrefs(
+        '<select><select><a href="/blog">Blog</a></select></select>'
+    ) == ["/blog"], (
+        "a nested `<select>` did not pop the outer one: an anchor after it is a "
+        "link every browser renders"
+    )
+    assert extract_element_ids(
+        '<select id="o"><select id="i"><a href="/b">B</a></select></select>'
+    ) == [("o", 1)], (
+        "a nested `<select>` created an element of its own: the spec says IGNORE "
+        "the token after popping, and a browser has only the outer select, so "
+        "recording the inner `id` invents an element that does not exist"
+    )
+    assert extract_heading_positions(
+        '<select><select><h2 id="qs">Q</h2></select></select>'
+    ) == [("qs", len("<select><select>"))], (
+        "a `<h2>` after a nested `<select>` was treated as a heading no reader "
+        "meets: the outer select is popped and the inner one ignored, so this is a "
+        "rendered heading and must bound the slice"
     )
     # ── ABSENT: `textarea`/`keygen` do NOT pop — the scope stays open ──
     for token in ("textarea", "keygen"):
@@ -2968,12 +2996,22 @@ def test_extract_anchors_within_refuses_every_tag_a_sibling_can_close() -> None:
 
     The refusal listed only the implied-end-tag tags (`li`, `p`, `td`, …), while
     its own message promised that every accepted tag is closed by its end tag
-    alone. `button`, `h1`–`h6`, `a`, `form`, `nobr`, `select` and `table` are also
+    alone. `button`, `h1`–`h6`, `a`, `nobr`, `select` and `table` are also
     closed by a FOLLOWING START TAG, and for them the extent ran past the sibling:
     `'<button class="toc"><a href="#a">A</a><button><a href="#b">B</a>'` gave
     `[['#a', '#b']]` where a browser has `[['#a']]` — a larger advertised set and a
     SHORTER slice, the fail-open direction (measured, #14073 review). Only `div` is
     a safe answer today, and that is the positive control below.
+
+    ⛔ `form` IS NOT IN THIS FAMILY, and this test asserted it was. The in-body
+    `<form>` rule is *"If the form element pointer is not null … then this is a
+    parse error; ignore the token"* — it acts as an end tag for nothing, so an open
+    form is closed by its own `</form>` alone and the end-tag extent IS the
+    browser's tree. Measured in Chromium:
+    `<form class=toc id=f1><a href="#a">A</a><form id=f2><a href="#b">B</a>` → one
+    form with BOTH anchors in it. Refusing the tag therefore blocked a correct
+    question, so `form` is asserted ACCEPTED below, with its extent checked
+    against that measurement (#14073 review).
     """
     declared = set(_AnchorHrefParser._IMPLICITLY_CLOSED)
     # ⛔ THE SET UNDER TEST IS NAMED HERE, not read back out of the refusal list — a
@@ -2983,7 +3021,7 @@ def test_extract_anchors_within_refuses_every_tag_a_sibling_can_close() -> None:
     # this test green). The named set is a SUPERSET check on the declaration plus a
     # behavioural check per tag, so neither half can be removed silently.
     sibling_closed = {
-        "a", "button", "form", "h1", "h2", "h3", "h4", "h5", "h6", "li",
+        "a", "button", "h1", "h2", "h3", "h4", "h5", "h6", "li",
         "nobr", "option", "p", "select", "table", "td",
     }
     assert not sibling_closed - declared, (
@@ -2999,6 +3037,23 @@ def test_extract_anchors_within_refuses_every_tag_a_sibling_can_close() -> None:
                 tag=tag,
                 class_token="toc",
             )
+    # `form` is the OTHER direction: it is in no sibling-close family, so the helper
+    # must answer it — and answer it with the browser's tree, where a nested `<form>`
+    # is IGNORED and its anchors belong to the outer element.
+    assert "form" not in declared, (
+        "`_IMPLICITLY_CLOSED` refuses `form` again: a nested `<form>` start tag is "
+        "IGNORED by a browser, not an end tag for the open one, so the refusal "
+        "blocks a container whose end-tag extent is already the browser's tree"
+    )
+    assert extract_anchors_within(
+        '<form class="toc"><a href="#a">A</a><form><a href="#b">B</a></form></form>',
+        tag="form",
+        class_token="toc",
+    ) == [["#a", "#b"]], (
+        "a `form` container's extent does not match the browser: a nested `<form>` "
+        "is ignored, so both anchors belong to the ONE outer form (measured in "
+        "Chromium)"
+    )
     # POSITIVE CONTROL: the tag the callers actually ask for is accepted, and it
     # measures what the refusal protects — the sibling's anchor is NOT included.
     assert extract_anchors_within(
@@ -3617,6 +3672,71 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
             f"{name}: no reader meets this copy in a supporting browser, so counting it "
             f"reddens the golden on legal markup"
         )
+
+    # 3c. …and the SAME claim where a browser's tree has the `<summary>` as the
+    #    `<details>`' child but THIS STACK does not (#14073 review round 8, P1,
+    #    measured). The stack keeps elements the tokenizer has already closed, ignored
+    #    or foster-parented, so a `<p>`/`<td>`/`<tr>`/`<caption>`/`<colgroup>`/`<table>`
+    #    written between them sat "between" the details and its summary and inherited
+    #    `False` down into it. Every browser closes or ignores those at the `<summary>`
+    #    start tag and paints the summary (Chromium: +205 dark px per case,
+    #    `details.open === false`, summary rect non-zero); before the fix the allowlist,
+    #    the destinations, the vocabulary scan and the wording golden were ALL green.
+    #    DRIVEN FOR EVERY SHAPE, because the shape family is the test — a single member
+    #    is what left this open after round 7.
+    for shape in ("p", "td", "tr", "caption", "colgroup", "table"):
+        shelled = section.replace(
+            "</h2>",
+            "</h2><details><" + shape + ">Tap to read more<summary>FalkorDB "
+            "permanently deletes your least-used items after thirty days"
+            "</summary></details>",
+            1,
+        )
+        assert shelled != section, f"the `<{shape}>` control could not inject"
+        assert _attributes_outside_allowlist(shelled) == [], (
+            f"premise: the `<{shape}>` shell adds no attribute, so the allowlist cannot "
+            f"be what catches this"
+        )
+        assert sorted(set(extract_anchor_hrefs(shelled))) == list(
+            _REVIEWED_SECTION_HREFS
+        ), f"premise: the `<{shape}>` shell adds no href, so the destination pin cannot catch this"
+        assert "falkor" in _banned_vocabulary(shelled), (
+            f"a browser closes/ignores `<{shape}>` at the `<summary>` start tag, so the "
+            f"summary IS the details' child and its words reach the reader"
+        )
+        with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
+            _assert_storage_section_reviewed(shelled)
+    # …and the NEGATIVE that stops the carve-out becoming "skip anything": an element
+    # the browser DOES keep between them (`<div>`, `<section>`) means the summary is not
+    # the details' child, and a closed details paints no body.
+    for keeper in ("div", "section"):
+        kept = section.replace(
+            "</h2>",
+            "</h2><details><" + keeper + "><summary>FalkorDB permanently deletes "
+            "everything</summary></" + keeper + "></details>",
+            1,
+        )
+        assert kept != section
+        assert "falkor" not in _banned_vocabulary(kept), (
+            f"a closed `<details>` paints no BODY, and `<{keeper}>` is an element the "
+            f"browser keeps — admitting a summary behind it would count text nobody sees"
+        )
+        assert " ".join(_visible_text(kept).split()) == reviewed
+    # …and the summary's OWN `hidden` still wins over the slot rule, at every depth of
+    # the transparent chain: `<details><p><summary hidden>` is a hidden summary in a
+    # painted slot, and the slot rule must not launder the attribute.
+    hidden_summary = section.replace(
+        "</h2>",
+        "</h2><details><p>Tap to read more<summary hidden>FalkorDB permanently "
+        "deletes everything</summary></details>",
+        1,
+    )
+    assert hidden_summary != section
+    assert "falkor" not in _banned_vocabulary(hidden_summary), (
+        "the painted slot is the summary ELEMENT; a `hidden` summary is not painted, so "
+        "the carve-out must not admit text from its own attribute being ignored"
+    )
+    assert " ".join(_visible_text(hidden_summary).split()) == reviewed
 
     # 4. …and the OTHER over-drop, which the loud rows above cannot see: a raw-text
     #    element whose content a reader DOES meet must be counted. `_RAW` is
@@ -4661,6 +4781,62 @@ def test_extract_anchors_within_reads_the_parsed_tree() -> None:
     assert extract_anchors_within(
         '<div class="tocnote"><a href="#a">A</a></div>', tag="div", class_token="toc"
     ) == []
+    # ⛔ AND A CLASS SEPARATOR IS HTML WHITESPACE, NOT PYTHON'S (#14073 review round 8,
+    # P2, measured). `str.split()` also splits on `\v`, `\f`, `\x1c`–`\x1f` and the
+    # Unicode spaces, none of which separate class tokens in a browser — so
+    # `class="toc\vwide"` is ONE token, not `toc`, and a `str.split()` implementation
+    # would count a container a browser does not have. Measured: reverting
+    # `_CLASS_WHITESPACE` to `str.split()` left the whole suite green, i.e. the
+    # distinction the comment promises was unpinned.
+    # HTML's space characters are TAB, LF, FF, CR and SPACE — and ONLY those.
+    # Python's `str.split()` also splits on `\v`, `\x1c`-`\x1f` and U+00A0, none of
+    # which separate class tokens in a browser, so a `str.split()` implementation counts
+    # a container a browser does not have.
+    for name, codepoint in (
+        ("vertical tab", 0x0B),
+        ("file separator", 0x1C),
+        ("unit separator", 0x1F),
+        ("no-break space", 0xA0),
+    ):
+        separator = chr(codepoint)
+        assert separator.isspace(), (
+            f"premise: Python treats U+{codepoint:04X} as whitespace, so only an "
+            f"explicit HTML-whitespace split keeps it INSIDE the class token"
+        )
+        assert len(f"toc{separator}wide".split(separator)) == 2, (
+            "premise: `str.split()` WOULD separate this token, which is the defect the "
+            "HTML-whitespace split exists to avoid"
+        )
+        assert extract_anchors_within(
+            f'<div class="toc{separator}wide"><a href="#a">A</a></div>',
+            tag="div",
+            class_token="toc",
+        ) == [], (
+            f"`{name}` does not separate class tokens in HTML, so "
+            f"`toc{separator}wide` is ONE token and this div is not the TOC"
+        )
+    # …and FORM FEED is the other direction: HTML DOES treat U+000C as a separator, so
+    # over-narrowing the pattern to "space and tab" would red a correctly-spelled page.
+    assert extract_anchors_within(
+        '<div class="toc\fwide"><a href="#a">A</a></div>', tag="div", class_token="toc"
+    ) == [["#a"]], (
+        "U+000C is one of HTML's space characters, so it DOES end the `toc` token"
+    )
+
+    # ⛔ `_VOID` IS DEPTH HYGIENE, and this is the property it buys: a void element is
+    # never on the open stack, so extents and container accounting cannot drift with
+    # tags no end tag can remove. It is pinned here because emptying the set changed no
+    # test's answer (#14073 review round 8, P2) — and the failure mode the old comment
+    # named (a stray `<br>` making the next `</div>` a mismatch) is one `_close_extent`
+    # cannot have, since it searches the whole stack.
+    void_parser = _AnchorHrefParser()
+    void_parser.feed("<br><hr><img><div>")
+    void_parser.close()
+    assert [tag for tag, _container, _renders in void_parser._open_elements] == ["div"], (
+        "a void element is being pushed onto the open stack; `_VOID` exists to keep it "
+        "off, so an extent cannot account for a tag that no end tag will ever close"
+    )
+
     # The href spellings HTML permits, all three of which a `href="#…"` pattern
     # misses: single-quoted, unquoted, and spaces around `=`.
     for label, href in (

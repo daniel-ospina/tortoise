@@ -217,9 +217,14 @@ class _AnchorHrefParser(HTMLParser):
     # `<font>` breaks out only when it carries one of its presentational attrs.
     _BREAKOUT_FONT_ATTRS = frozenset({"color", "face", "size"})
     # Elements that never hold content, so no end tag is coming for them. The
-    # open-element stack below must not push one: a `<br>` left on the stack would
-    # make the NEXT `</div>` a mismatch and the container it belongs to would never
-    # close.
+    # open-element stack below must not push one — DEPTH HYGIENE, not a closure
+    # failure: `_close_extent` searches the WHOLE stack for the tag it closes, so a
+    # leftover `<br>` above a `<div>` is popped with it and the container still closes.
+    # This comment used to claim the opposite (that a stray `<br>` would make the next
+    # `</div>` a mismatch and the container would never close), which the code cannot
+    # do; measured: emptying this set changed no test's answer (#14073 review round 8,
+    # P2). What the set still buys is a stack that holds only elements an end tag can
+    # remove, so extent and container accounting cannot drift with void tags in it.
     _VOID = frozenset({
         "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
         "meta", "param", "source", "track", "wbr",
@@ -240,7 +245,7 @@ class _AnchorHrefParser(HTMLParser):
     #: left the slice long for no reason. Both readings are correct once the stack
     #: is.
     #:
-    #: ⛔ AND IT IS ONE TOKEN, NOT THREE — THE "in select" MODE IS GONE. This rule
+    #: ⛔ AND IT IS TWO TOKENS, NOT THREE — THE "in select" MODE IS GONE. This rule
     #: used to name `input`/`keygen`/`textarea`, copying the CLASSIC mode's token
     #: list; the living standard no longer has that insertion mode at all (its
     #: sequence runs "in cell" → "in template", and `grep -c 'in select'
@@ -249,10 +254,19 @@ class _AnchorHrefParser(HTMLParser):
     #:
     #:   `<input>` — *"If the stack of open elements has a select element in scope:
     #:   Parse error. Repeatedly pop the current node off the stack of open
-    #:   elements until a select element has been popped."*
+    #:   elements until a select element has been popped."* → POPS, inserted after.
+    #:   `<select>` — *"Otherwise, if the stack of open elements has a select element
+    #:   in scope: Parse error. **Ignore the token.** Repeatedly pop the current node
+    #:   off the stack of open elements until a select element has been popped."*
+    #:   → POPS **and is IGNORED**, so no element is created for it (see
+    #:   `_SELECT_POP_IGNORED`; measured in Chromium, a nested `<select id=i>` leaves
+    #:   only the outer element behind).
     #:   `<textarea>` — *"Insert an HTML element for the token … Switch the
     #:   tokenizer to the RCDATA state"* — NO select-scope step, so it does not pop.
-    #:   `keygen` — no start-tag rule at all; it is not in the living standard.
+    #:   `keygen` — IS in the standard (it sits in *"area, br, embed, img, keygen,
+    #:   wbr"*), and that rule has NO select-scope step either, so it does not pop.
+    #:   ⛔ An earlier revision of this comment claimed keygen has "no start-tag rule
+    #:   at all; it is not in the living standard" — that was false.
     #:
     #: ⛔ THE STALE PAIR IS NOT HARMLESS — IT IS THE FAIL-OPEN DIRECTION. Aimed at
     #: the storage pins (#14073 review, reproduced): a `<select><textarea>` decoy
@@ -266,28 +280,63 @@ class _AnchorHrefParser(HTMLParser):
     #: It is NOT the same test as `<select>` being an `_IMPLICITLY_CLOSED` element:
     #: that governs whether an EXTENT runs past a sibling, this governs whether the
     #: select is still open at all.
-    _SELECT_POP = frozenset({"input"})
+    _SELECT_POP = frozenset({"input", "select"})
+    #: The subset of `_SELECT_POP` the spec says to IGNORE after popping, so no
+    #: element is created for the token (and nothing after it is suppressed by one).
+    #: Only `<select>` (its rule says *"Ignore the token"*); `<input>` is instead
+    #: inserted in its new context (*"Reconstruct the active formatting elements …
+    #: Insert an HTML element for the token"*).
+    _SELECT_POP_IGNORED = frozenset({"select"})
     # Tags a browser closes WITHOUT an end tag — spec 13.2.6.3's implied end tags,
     # the table sections, and the tags a SIBLING START TAG closes (`<button>`,
-    # `<h1>`–`<h6>`, `<a>`, `<form>`, `<nobr>`, `<select>`, `<table>`; 13.2.6.4's
-    # "in body" rules act as an end tag for the open one). `<li>a<li>b` is two
-    # elements, so an EXTENT built on end tags alone would run from the first
-    # `<li>` past the second. The container helper refuses these rather than
-    # guessing (see `extract_anchors_within`).
+    # `<h1>`–`<h6>`, `<a>`, `<nobr>`, `<select>`, `<table>`; 13.2.6.4's "in body"
+    # rules act as an end tag for the open one). `<li>a<li>b` is two elements, so an
+    # EXTENT built on end tags alone would run from the first `<li>` past the
+    # second. The container helper refuses these rather than guessing (see
+    # `extract_anchors_within`).
     #
     # ⛔ BOTH FAMILIES BELONG HERE, and the second was missing: the refusal used to
     # list only the implied-end-tag tags, so `extract_anchors_within(tag="button")`
-    # (and `h2`, `a`, `form`, `nobr`) returned an extent that ran PAST the sibling —
+    # (and `h2`, `a`, `nobr`) returned an extent that ran PAST the sibling —
     # `'<button class="toc"><a href="#a">A</a><button><a href="#b">B</a>'` gave
     # `[['#a', '#b']]` where a browser has `[['#a']]` — a larger advertised set and a
     # SHORTER slice, the fail-open direction, while the helper's own message
     # promised the opposite (#14073 review).
+    #
+    # ⛔ `form` IS NOT ONE OF THEM, and listing it here was a false premise that
+    # REFUSED a legitimate caller. The in-body `<form>` rule is *"If the form
+    # element pointer is not null … then this is a parse error; ignore the token"*
+    # — it acts as an end tag for nothing; an open form is closed by its OWN
+    # `</form>` and by nothing else. Measured in Chromium
+    # (`<form class=toc id=f1><a href="#a">A</a><form id=f2><a href="#b">B</a>` →
+    # one form, both anchors inside it), so the end-tag extent this helper builds
+    # for `form` IS the browser's tree. The refusal made
+    # `extract_anchors_within(tag="form")` raise on a correct question (#14073
+    # review). ⚠️ Residual, left unmodelled and in the SAFE direction: a NESTED
+    # `<form>` start tag is IGNORED by a browser (the same form-pointer rule), while
+    # this parser pushes it — which can only make an extent SHORTER, i.e. the
+    # advertised set smaller and the slice longer, never the fail-open way.
     _IMPLICITLY_CLOSED = frozenset({
-        "a", "button", "caption", "colgroup", "dd", "dt", "form", "h1", "h2",
+        "a", "button", "caption", "colgroup", "dd", "dt", "h1", "h2",
         "h3", "h4", "h5", "h6", "li", "nobr", "optgroup", "option", "p",
         "rb", "rp", "rt", "rtc", "select", "table", "tbody", "td", "tfoot",
         "th", "thead", "tr",
     })
+    #: Elements a browser NEVER KEEPS between a closed `<details>` and its `<summary>`,
+    #: so the text recording looks past them when it asks whether a `<summary>` is the
+    #: details' child (#14073 review round 8, P1, measured). It IS `_IMPLICITLY_CLOSED`:
+    #: the tags the tokenizer closes on its own or ignores outside a table (`<p>`,
+    #: `<td>`, `<tr>`, `<caption>`, `<colgroup>`, …) — and `table` is already a member,
+    #: which is what covers a `<summary>` written INSIDE a table (the browser
+    #: FOSTER-PARENTS it out in front of the table, so it is the `<details>`' child
+    #: again). Kept as its own name so the two questions can diverge without one edit
+    #: silently changing both.
+    #:
+    #: ⛔ THIS SET SAYS "THE BROWSER HAS NO ELEMENT HERE", NOT "SKIP ANYTHING". A `<div>`
+    #: or `<section>` is NOT in it: the browser keeps those, so a `<summary>` behind one
+    #: is not the details' child and nothing under it is painted. That negative is what
+    #: stops the carve-out admitting a whole closed body.
+    _SUMMARY_TRANSPARENT = _IMPLICITLY_CLOSED
     #: The `_RAW` members whose CONTENT a reader DOES meet, so the visible-text
     #: recording must not drop it with the rest of the raw-text family.
     #:
@@ -639,7 +688,9 @@ class _AnchorHrefParser(HTMLParser):
 
         ⛔ `<noscript>` IS THE ONE REGION THIS CANNOT ANSWER, AND THE CALLER MUST
         REFUSE IT — not clear it. `<noscript>` is suppressed because
-        `self.scripting` is True (line 180), so an attribute on an element INSIDE
+        `self.scripting` is True (the attribute, not a line number — this reference used
+        to name one and went stale when the file grew; #14073 review round 8, P2), so an
+        attribute on an element INSIDE
         it is not recorded: a browser with JS does not render it, and a `title`
         there reaches only a reader with JS DISABLED — where the children ARE
         parsed as markup (MDN, quoted on `_MODE_DEPENDENT`). The two questions
@@ -706,15 +757,16 @@ class _AnchorHrefParser(HTMLParser):
         `_UNBOUNDABLE_ANCESTORS`, and that set is the BOUNDARY question ONLY: the
         option's text is rendered, so it stays in the TEXT recording.
 
-        ⛔ AND "INSIDE A SELECT" IS THE SPEC'S QUESTION, NOT THIS STACK'S. The token
-        that closes the scope in the LIVING standard is `<input>` alone — see
-        `_SELECT_POP` for the citation and for the two tokens that were copied from
-        the removed classic mode and had to be taken back out. It was declared as
-        an unmodelled residual in the previous revision, which is what let a `<h2>`
-        after a `<select><input>` be treated as one no reader meets (#14073
-        review); the direction was safe there (the slice stayed long) but the
-        reading was still wrong, and the same wrong reading dropped a real anchor
-        from the rendered-link set, which is the LOUD direction.
+        ⛔ AND "INSIDE A SELECT" IS THE SPEC'S QUESTION, NOT THIS STACK'S. The
+        tokens that close the scope in the LIVING standard are `<input>` and a
+        nested `<select>` — see `_SELECT_POP` for the citations, and for the two
+        tokens that were copied from the removed classic mode and had to be taken
+        back out. It was declared as an unmodelled residual in the previous
+        revision, which is what let a `<h2>` after a `<select><input>` be treated as
+        one no reader meets (#14073 review); the direction was safe there (the
+        slice stayed long) but the reading was still wrong, and the same wrong
+        reading dropped a real anchor from the rendered-link set, which is the LOUD
+        direction.
 
         ⛔ AND "NO READER MEETS IT" IS WIDER THAN INSERTION MODES — the rule is
         `_unmet_by_reader`, which also refuses an `_UNRENDERED` ancestor
@@ -811,27 +863,35 @@ class _AnchorHrefParser(HTMLParser):
         """
         return any(open_tag == "select" for open_tag, _, _ in self._open_elements)
 
-    def _close_select_scope(self, tag: str) -> None:
-        """Pop an open `<select>` when `tag` is one a browser pops it for.
+    def _close_select_scope(self, tag: str) -> bool:
+        """Pop an open `<select>` for a token that pops it; `True` when IGNORED.
 
-        Spec "in body", `<input>` — see `_SELECT_POP` for the citation and the
-        measured divergence it closes. Called FIRST in `handle_starttag`, before
-        this tag's own state lands, so the pop reads the PRE-tag ancestry.
+        Spec "in body", the `input` and `select` start-tag rules — see
+        `_SELECT_POP` for the citations and the measured divergence this closes.
+        Called FIRST in `handle_starttag`, before this tag's own state lands, so the
+        pop reads the PRE-tag ancestry — the ancestry the browser's own step reads.
+
+        Returns True only for a token the spec says to IGNORE after popping (a
+        NESTED `<select>`): the caller must then create no element for it, or the
+        inner select the browser discarded would be pushed here and every anchor
+        after it would stay suppressed by an element that does not exist.
 
         The same three guards the rest of the ancestry reads use: a token inside a
         suppressed region is template content or raw text, whose end tags and
         start tags a browser processes against that region's own stack (the reason
         a stray `</select>` written in a `<template>` does not pop this one), and
-        foreign content is not "in select" at all.
+        foreign content has no select scope to pop.
         """
         if tag not in self._SELECT_POP:
-            return
+            return False
         if self._suppress or self.wedged_reason or self._foreign:
-            return
+            return False
         if any(open_tag == "select" for open_tag, _, _ in self._open_elements):
             # `select` and everything opened inside it, which is the spec's "pop
             # until a select element has been popped".
             self._close_extent("select")
+            return tag in self._SELECT_POP_IGNORED
+        return False
 
     def _collect(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag != "a" or self._suppress or self.wedged_reason:
@@ -1068,7 +1128,7 @@ class _AnchorHrefParser(HTMLParser):
         if (
             self._open_elements
             and not self._open_elements[-1][2]
-            and not (tag == "summary" and self._open_elements[-1][0] == "details")
+            and not self._is_painted_summary_slot(tag)
         ):
             renders = False
         self._open_elements.append((tag, opened_container, renders))
@@ -1114,9 +1174,10 @@ class _AnchorHrefParser(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         # FIRST, and before `_open`/`_collect`/`_record_heading`, so the pop reads
-        # the PRE-tag ancestry the browser's own step reads. See
-        # `_close_select_scope`.
-        self._close_select_scope(tag)
+        # the PRE-tag ancestry the browser's own step reads. A nested `<select>` is
+        # IGNORED whole: no element, no id, no extent (see `_SELECT_POP_IGNORED`).
+        if self._close_select_scope(tag):
+            return
         # Before `_open`, because this tag's own id/attributes count even where
         # its CONTENT does not (see `_record_id`, `_record_attributes`).
         self._record_id(attrs)
@@ -1224,6 +1285,37 @@ class _AnchorHrefParser(HTMLParser):
         ):
             self.text.append(data)
 
+    def _is_painted_summary_slot(self, tag: str) -> bool:
+        """Is `tag` the `<summary>` a closed `<details>` is PAINTING?
+
+        A closed `<details>` hides its BODY and paints its summary slot, so the
+        inheritance that makes its children `renders=False` must not reach that one
+        element — otherwise the text recording drops a claim a reader meets (measured:
+        `<details><summary>FalkorDB permanently deletes…</summary></details>` in
+        `#storage` left the allowlist, the destinations, the vocabulary scan and the
+        wording golden all green while Chromium painted the summary).
+
+        ⛔ "THE SLOT" IS NOT "THE NEXT STACK ENTRY" (#14073 review round 8, P1,
+        measured). The stack keeps elements the tokenizer has already closed, ignored or
+        foster-parented, so in `<details><p>Tap to read more<summary>CLAIM</summary>` the
+        `<p>` sits between the two and inherited `False` down into the summary — while
+        every browser closes the `<p>` at the `<summary>` start tag and paints the
+        summary at 812×54 px. So the walk looks PAST `_SUMMARY_TRANSPARENT`: the
+        elements a browser never keeps in that position. It does NOT look past anything
+        else, so `<details><div><summary>…` stays dark (the browser keeps the `div`, the
+        summary is not the details' child, and a closed details paints no body).
+
+        Its own attributes still win: the caller applies this on top of the
+        OWN-attribute decision, so `<details><p><summary hidden>…` stays unpainted.
+        """
+        if tag != "summary":
+            return False
+        stack = self._open_elements
+        index = len(stack) - 1
+        while index >= 0 and stack[index][0] in self._SUMMARY_TRANSPARENT:
+            index -= 1
+        return index >= 0 and stack[index][0] == "details" and not stack[index][2]
+
     def _text_is_painted(self) -> bool:
         """Is the text just read inside a subtree a browser PAINTS?
 
@@ -1253,19 +1345,31 @@ class _AnchorHrefParser(HTMLParser):
         the span. Skipping the FLAG (rather than matching the current tag) makes depth
         irrelevant, which is the property the browser's rendering has.
         """
-        for index, (tag, _container, renders) in enumerate(self._open_elements):
-            if renders:
+        stack = self._open_elements
+        # Elements the browser does NOT have on this path, so their inherited `False`
+        # must not block: the closed `<details>` whose summary slot is painted, and the
+        # elements it never keeps between itself and that summary.
+        transparent: set[int] = set()
+        for index, (tag, _container, renders) in enumerate(stack):
+            if renders or tag != "details":
                 continue
-            # A closed `<details>` hides its BODY, not its `<summary>` slot. The
-            # summary is the element OPENED DIRECTLY INSIDE it, so its presence at
-            # `index + 1` is what makes this flag describe a hidden body rather than
-            # a hidden subtree. Everything above keeps its own inherited flags, so a
-            # `hidden` ancestor above the pair still answers False.
+            moved_past = index + 1
+            while moved_past < len(stack) and stack[moved_past][0] in self._SUMMARY_TRANSPARENT:
+                moved_past += 1
             if (
-                tag == "details"
-                and index + 1 < len(self._open_elements)
-                and self._open_elements[index + 1][0] == "summary"
+                moved_past < len(stack)
+                and stack[moved_past][0] == "summary"
+                # Belt-and-braces with the loop below, which checks the summary's own
+                # flag anyway: measured, removing THIS condition alone changes no
+                # answer (#14073 review round 8). It stays because it states the rule
+                # at the point the carve-out is decided, so a later change to the loop
+                # cannot silently admit a `hidden` summary.
+                and stack[moved_past][2]
             ):
+                transparent.add(index)
+                transparent.update(range(index + 1, moved_past))
+        for index, (_tag, _container, renders) in enumerate(stack):
+            if renders or index in transparent:
                 continue
             return False
         return True
