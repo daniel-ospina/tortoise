@@ -224,6 +224,26 @@ class _AnchorHrefParser(HTMLParser):
         "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
         "meta", "param", "source", "track", "wbr",
     })
+    #: Start tags that POP out of an open `<select>` — spec 13.2.6.4, "in select"
+    #: insertion mode: *"If the stack of open elements does not have a select
+    #: element in select scope, ignore the token. Otherwise, pop elements from the
+    #: stack of open elements until a select element has been popped from the
+    #: stack. Reprocess the token."*
+    #:
+    #: ⛔ WITHOUT THIS, "is a `<select>` open?" IS NOT THE BROWSER'S QUESTION, and
+    #: the two answers diverge in the LOUD direction. Measured (#14073 review):
+    #: `<select><input><a href="/blog">Blog</a></select>` — every browser pops the
+    #: select at `<input>`, so the anchor is a real link, while this parser kept
+    #: the select open and reported NO link where `origin/main` reported
+    #: `['/blog']`. The misreading is not confined to the link set: a `<h2>` after
+    #: one of these tokens is a heading a reader meets, so refusing to bound on it
+    #: left the slice long for no reason. Both readings are correct once the stack
+    #: is.
+    #:
+    #: The three are the spec's own list and it is NOT the same test as `<select>`
+    #: being an `_IMPLICIT_CLOSE` element: that governs whether an EXTENT runs past
+    #: a sibling, this governs whether the select is still open at all.
+    _SELECT_POP = frozenset({"input", "keygen", "textarea"})
     # Tags a browser closes WITHOUT an end tag — spec 13.2.6.3's implied end tags,
     # the table sections, and the tags a SIBLING START TAG closes (`<button>`,
     # `<h1>`–`<h6>`, `<a>`, `<form>`, `<nobr>`, `<select>`, `<table>`; 13.2.6.4's
@@ -564,9 +584,16 @@ class _AnchorHrefParser(HTMLParser):
         leaves the slice long and the extra text pinned. So a `<h2>` with an open
         `<select>` ANCESTOR is not recorded — ancestry, so `<optgroup><option>`
         inside it is covered too. The cost is declared: a rendered heading inside a
-        select does not end the slice, and the tokens the classic mode used to POP
-        the select for (`input`/`keygen`/`textarea`, after which a heading would be
-        outside it again) are not modelled either — same direction, same reason.
+        select does not end the slice.
+
+        ⛔ AND "INSIDE A SELECT" IS THE SPEC'S QUESTION, NOT THIS STACK'S. The four
+        tokens that close the scope (`input`/`keygen`/`textarea` here, plus
+        `</select>`) are modelled — see `_SELECT_POP`. They were declared as an
+        unmodelled residual in the previous revision, which is what let a `<h2>`
+        after a `<select><input>` be treated as one no reader meets (#14073
+        review); the direction was safe there (the slice stayed long) but the
+        reading was still wrong, and the same wrong reading dropped a real anchor
+        from the rendered-link set, which is the LOUD direction.
 
         ⛔ AND "NO READER MEETS IT" IS WIDER THAN INSERTION MODES — the rule is
         `_unmet_by_reader`, which also refuses an `_UNRENDERED` ancestor
@@ -645,8 +672,11 @@ class _AnchorHrefParser(HTMLParser):
         """True when an open `<select>` ancestor makes this start tag no link at all.
 
         The LINK question's own test, and the one `_collect` still asks about
-        `self.hrefs` — an `<a>` inside a `<select>` is not an element a reader can
-        follow, in any browser, under any cascade. The BOUNDARY question is wider
+        `self.hrefs` — an `<a>` inside an OPEN `<select>` is not an element a
+        reader can follow, in any browser, under any cascade. ⛔ "Open" is the
+        load-bearing word: `_SELECT_POP` closes the scope on the tokens a browser
+        closes it on, so this answers the browser's question and not merely this
+        stack's. The BOUNDARY question is wider
         and lives in `_unmet_by_reader`; an anchor that fails only the wider test
         (inside a `hidden` banner, say) is still a link the page's own script can
         reveal, so it stays in the rendered-link set and is dropped from the
@@ -654,15 +684,41 @@ class _AnchorHrefParser(HTMLParser):
         """
         return any(open_tag == "select" for open_tag, _, _ in self._open_elements)
 
+    def _close_select_scope(self, tag: str) -> None:
+        """Pop an open `<select>` when `tag` is one a browser pops it for.
+
+        Spec 13.2.6.4 "in select" — see `_SELECT_POP` for the rule and the measured
+        divergence it closes. Called FIRST in `handle_starttag`, before this tag's
+        own suppression entry lands: `<textarea>` is raw text (it appends to
+        `_suppress`), so asking afterwards would read the select as still open and
+        leave every following anchor and heading misclassified.
+
+        The same three guards the rest of the ancestry reads use: a token inside a
+        suppressed region is template content or raw text, whose end tags and
+        start tags a browser processes against that region's own stack (the reason
+        a stray `</select>` written in a `<template>` does not pop this one), and
+        foreign content is not "in select" at all.
+        """
+        if tag not in self._SELECT_POP:
+            return
+        if self._suppress or self.wedged_reason or self._foreign:
+            return
+        if any(open_tag == "select" for open_tag, _, _ in self._open_elements):
+            # `select` and everything opened inside it, which is the spec's "pop
+            # until a select element has been popped".
+            self._close_extent("select")
+
     def _collect(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag != "a" or self._suppress or self.wedged_reason:
             return
         if self._in_select():
-            # An `<a>` inside a `<select>` is not a link a reader can follow, and it
-            # is not an entry the TOC's index may be built from — the same escape as
-            # a heading there, one recording over (measured: an anchor inside a
-            # `<select>` in the TOC still advertised `#storage-limits` and bounded
-            # the section, all pins green; #14073 review).
+            # An `<a>` inside an OPEN `<select>` is not a link a reader can follow,
+            # and it is not an entry the TOC's index may be built from — the same
+            # escape as a heading there, one recording over (measured: an anchor
+            # inside a `<select>` in the TOC still advertised `#storage-limits` and
+            # bounded the section, all pins green; #14073 review). What makes
+            # "open" true is `_SELECT_POP` popping the scope, so an anchor after a
+            # `<select><input>` is correctly a link again.
             return
         # The BOUNDARY answer, which is wider than "is this a link": an anchor no
         # reader meets must not advertise a heading, but it is still a link for the
@@ -893,6 +949,11 @@ class _AnchorHrefParser(HTMLParser):
         super().set_cdata_mode(elem, *args, **kwargs)  # type: ignore[arg-type]
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        # FIRST, and before `_open`: `input`/`keygen`/`textarea` pop an open
+        # `<select>` in the browser, and `_open` is what makes `<textarea>` a
+        # suppressed region — so this must read the PRE-tag ancestry. See
+        # `_close_select_scope`.
+        self._close_select_scope(tag)
         # Before `_open`, because this tag's own id/attributes count even where
         # its CONTENT does not (see `_record_id`, `_record_attributes`).
         self._record_id(attrs)

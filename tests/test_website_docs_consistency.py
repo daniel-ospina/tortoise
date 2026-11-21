@@ -2446,6 +2446,70 @@ def test_the_storage_section_bound_cuts_at_a_RENDERED_heading_only() -> None:
     )
 
 
+def test_the_select_scope_closes_on_the_tokens_a_browser_closes_it_on() -> None:
+    """`input`/`keygen`/`textarea` POP an open `<select>` (spec 13.2.6.4, `in select`).
+
+    The parser used to carry a `<select>` on its stack until a `</select>`, which is
+    not what a browser does: the `in select` insertion mode says *"pop elements
+    from the stack of open elements until a select element has been popped …
+    Reprocess the token"* for those three start tags. So the parser answered "is a
+    select open?" where the browser answers "is a select STILL open?", and the
+    divergence was in the LOUD direction, not the safe one (#14073 review).
+
+    Measured before the fix, on `<select><input><a href="/blog">Blog</a></select>`:
+    `origin/main` reported `['/blog']`, this branch reported `[]` — a link every
+    browser renders, reported absent to `_offers_blog_entry` and to the E2E legal-
+    pages consumer. The same stale scope also refused to bound a `<h2>` after one
+    of these tokens, which is a heading a READER MEETS (the safe direction, but
+    still the wrong reading).
+
+    A NEGATIVE CONTROL rides along: the pop must NOT happen for a token written
+    inside an inert `<template>`, because a browser processes that token against
+    the template's own fragment stack — which never holds the outer select. Without
+    the control, a fix that popped on any occurrence of the three tags would pass
+    every positive assertion here and quietly break the `<template>` rule the
+    neighbouring test pins.
+    """
+    for token in ("input", "keygen", "textarea"):
+        closing = "" if token == "input" else f"</{token}>"
+        assert extract_anchor_hrefs(
+            f'<select><{token}>{closing}<a href="/blog">Blog</a></select>'
+        ) == ["/blog"], (
+            f"`<{token}>` did not pop the open `<select>`: an anchor after it is a "
+            "link every browser renders, and dropping it blinds the blog guard to "
+            "a link a visitor can click"
+        )
+        # The BOUNDARY direction: the same pop makes a following heading one a
+        # reader meets, so it must bound again.
+        assert extract_heading_positions(
+            f'<select><{token}>{closing}<h2 id="qs">Q</h2></select>'
+        ) == [("qs", len(f"<select><{token}>{closing}"))], (
+            f"a `<h2>` after `<{token}>` in a select was treated as a heading no "
+            "reader meets: the select is already popped in the browser, so this is "
+            "a rendered heading and must bound the slice"
+        )
+    # …and the `_in_select` rule is otherwise UNCHANGED — an anchor with the select
+    # genuinely open is still no link, which is what the neighbouring test pins.
+    assert extract_anchor_hrefs(
+        '<select><a href="#x">x</a></select><a href="#y">y</a>'
+    ) == ["#y"], (
+        "the select-pop rule widened the link set for a genuinely open select"
+    )
+    # THE NEGATIVE CONTROL: inside `_INERT`, `_suppress` is non-empty and the token
+    # is template content, so the outer select must survive it.
+    for token in ("input", "keygen", "textarea"):
+        closing = "" if token == "input" else f"</{token}>"
+        assert extract_anchor_hrefs(
+            f'<select><template><{token}>{closing}</template>'
+            '<a href="#x">x</a></select>'
+        ) == [], (
+            f"a `<{token}>` written inside an inert `<template>` popped the outer "
+            "`<select>`: a browser processes it against the template's own "
+            "fragment stack, which never holds that select, so the anchor after it "
+            "is still one no reader meets"
+        )
+
+
 #: Spellings that name THIS page and carry a fragment, and are therefore
 #: advertisements of a heading on it. All are legal HTML, all rendered by a browser.
 _SAME_PAGE_TOC_SPELLINGS = (
