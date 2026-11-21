@@ -1590,6 +1590,12 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
     module did the same. Both are the "a pin reports green while it measures less" failure, so
     each bucket is driven here directly, one cause at a time, through a loader that refuses ONE
     module and serves the rest.
+
+    ⛔ ALL FOUR BUCKETS NOW HAVE A PIN-LEVEL FALSIFIER: `stray`, `missing`, `offenders` and
+    `examined` (`#14099` fixer lane, measured at `ac825bc0` — `examined` was the last one with
+    none, and deleting its assertion left the whole file green, **96 passed**). A bucket that is
+    REPORTED but never asserted here is a bucket a later edit can delete silently, which is how
+    the `offenders` (P2) and `missing` (P3) gaps were both found.
     """
     from tortoise import embed_writer_register as register
 
@@ -1811,6 +1817,36 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
     assert outsider in offenders_msg and "mentions a dynamic namespace" in offenders_msg, (
         "the pin does not red — or reds without naming the key — for a declared writer that "
         f"mentions a dynamic namespace, so the rule's cost is unreported: {red_offenders.value}")
+
+    # ⛔ …AND THE FOURTH BUCKET, `examined` — THE ONE THAT HAD NO FALSIFIER AT ALL (`#14099`
+    # fixer lane, measured at `ac825bc0`). The three arms above cover a population that SHRANK;
+    # this one covers a population that VANISHED. Measured on a copy of this file with
+    # `assert population["examined"], (…)` replaced by `pass`: the whole file stayed GREEN
+    # (**96 passed**), so the only assertion standing between a zero-key walk and a green
+    # over-refusal claim could be deleted with nothing red to say so. An EMPTY population
+    # satisfies `stray == []`, `missing == []` and `offenders == []` trivially, which makes this
+    # the bucket where a silent shrink reads as a silent PASS rather than a silent skip — the
+    # exact failure class this file exists to kill, inside the assertion that exists to catch it.
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            sys.modules[__name__],
+            "_writer_register_population",
+            lambda: {
+                "examined": [],
+                "unreadable": [],
+                "stray": [],
+                "missing": [],
+                "offenders": [],
+            },
+        )
+        with pytest.raises(AssertionError) as red_examined:
+            test_no_declared_entity_writer_mentions_a_dynamic_namespace()
+    # …graded on the PIN's own message, for the reason spelled out at the `missing` arm above.
+    examined_msg = _pin_message(red_examined.value)
+    assert "NO writer could be read" in examined_msg, (
+        "the pin does not red — or reds without saying so — for an EMPTY population, so a walk "
+        "that measured nothing would report the over-refusal cost as zero and certify the "
+        f"blanket rule as free: {red_examined.value}")
 
     # ⛔ THE PIN ITSELF MUST RED (`#14099` F2). The arms above prove the WALK classifies; they do
     # NOT prove the PIN reports. Measured: deleting the pin's `assert stray == []` left this whole
@@ -2060,32 +2096,26 @@ def test_the_control_binds_the_shared_helpers(monkeypatch):
     every other outsider walks its own key count, 22 for `tortoise.consistency`, 23 for
     `tortoise.hosted_backup`), so neither figure can be derived from a formula.
     So this arm reads the CONTROL'S OWN FRAME and asserts that the two `partial`s it built there
-    have the SPY as their `.func` — AND that the control's OWN CALL SITES reached them (`#14099`,
-    reviews of `2c7b5a54ca` and `0c4e706e61`). Those are two different properties, and identity
-    alone was satisfiable without either: bindings left in place as DEAD CODE beside renamed
-    pre-F1 copies at every call site satisfied every identity assertion (measured — the full F2
-    revert, 96 passed). ⛔ THE USE-FLAG IS SCOPED TO THE CONTROL'S OWN FRAMES, not to "the spy was
-    called at all": `_folding`'s inner `fake` looks `_env_source` up in the module globals, so a
-    bare flag was satisfied transitively — measured, reverting BOTH of the control's `served(...)`
-    sites to a byte-faithful local copy left the whole item GREEN (`1 passed`), because the
-    `folding` sites alone lit `used["env_source"]`. Only a call whose immediate caller is one of
-    the control's code objects counts (`co_consts`-recursive: the body, its lambdas, its nested
-    defs and genexprs — a nested FORWARDER that really calls the helper is a legitimate use) —
-    ⛔ EXCEPT for `_env_source`, where the body is excluded and so is any call that ORIGINATED
-    inside the control: see the two `⛔ AND …` clauses below.
-    ⛔ AND NOT THE CONTROL'S OWN BODY for `_env_source` (`#14099`, review of `710565ab14`): the
-    live fallback calls arrive from an INSTALLED FAKE only, so an in-body `_env_source(...)` line
-    is a DEAD decoy — measured, reverting both `served(...)` sites AND adding one such line was
-    GREEN before this clause.
-    ⛔ AND THE CALL MUST ARRIVE FROM **OUTSIDE** THE CONTROL (`#14099`, measured at `ac825bc0`):
-    "a control code object and not the body" is decoyable one level in — a single
-    `(lambda: served(module))()` line, or a nested `def`, re-armed the flag with BOTH `served(...)`
-    sites reverted (both measured GREEN). Scoping to the code object is therefore only half the
-    property; the other half is that a REAL `served` call arrives from the control's installed
-    fake, i.e. its GRANDCALLER is the walker in `strip`, never the control. So a counted call is
-    one whose immediate caller is a control code object other than the body AND whose grandcaller
-    is not in the control at all — which no nesting inside the control can satisfy, and which the
-    honest tree does (measured: the only such grandcallers are `_writer_register_population`).
+    have the SPY as their `.func` — AND that the control's OWN USE reached them (`#14099`, reviews
+    of `2c7b5a54ca` through `ac825bc012`). Those are two different properties, and identity alone
+    was satisfiable without either: bindings left in place as DEAD CODE beside renamed pre-F1
+    copies at every call site satisfied every identity assertion (measured — the full F2 revert,
+    96 passed).
+    ⛔ THE USE HALF IS MEASURED BY INVOCATION WHERE IT CAN BE (`folding`: the fake the builder
+    RETURNED must be CALLED, so an inert decoy builds one nobody calls and dies), and by
+    CODE-OBJECT EXCLUSION where it cannot (`_env_source`: exclude `_folding`'s inner fake, count
+    everything else, so a module-level forwarder is a legitimate use rather than a false red).
+    Both halves were previously keyed on a WHITELIST of the control's code objects; that was
+    measured to admit decoys (a nested `def` or lambda is inside the whitelist) AND to false-red
+    the module-level forwarder the F2 fix itself introduced.
+    ⛔ MEASURED ALTERNATIVE, REJECTED — record it so it is not re-derived (`#14099`): a whitelist
+    clause CAN be strengthened to close the nested decoy — require the caller to be a control code
+    object other than the body AND its GRANDCALLER to be outside the control (a real `served` call
+    arrives from the installed fake, called by the walker). Measured on the `ac825bc0` tree: honest
+    PASS, plain revert RED, and the lambda / nested-`def` / two-deep-lambda decoys all RED (each
+    was GREEN without that clause). It is not adopted because it is the same frame keying, so it
+    inherits the module-level-forwarder false red above — an instrument that reds a correct
+    refactor buys less than one that declares its one decoy hole.
     ⛔ NOT a `return`: returning the wiring from a test function makes pytest warn
     (`PytestReturnNotNoneWarning`), and a module-level side channel would outlive the test.
 
@@ -2103,47 +2133,40 @@ def test_the_control_binds_the_shared_helpers(monkeypatch):
     real_folding, real_env_source = _folding, _env_source
     control_code = test_the_over_refusal_population_is_itself_pinned.__code__
 
-    def _nested_codes(code):
-        yield code
-        for const in code.co_consts:
-            if isinstance(const, types.CodeType):
-                yield from _nested_codes(const)
+    #: `_folding`'s inner fallback — the ONE transitive caller of `_env_source` that must not count
+    #: as the control's own use. Derived from the builder, never typed (`#14099`).
+    transitive_code = real_folding("__probe__", RuntimeError(), {}, {}).__code__
 
-    #: The control itself plus its lambdas, nested defs and genexprs — the only frames whose calls
-    #: count as the control's OWN use.
-    control_codes = frozenset(_nested_codes(control_code))
-
-    # A BOOLEAN, deliberately: it cannot go stale the way the counts did (every arm moves a count,
-    # nothing moves "did the control's own call sites reach the shared helper").
+    # A BOOLEAN, deliberately: it cannot go stale the way the counts did.
     used = {"folding": False, "env_source": False}
 
-    def spy_folding(*args, **kwargs):
-        if sys._getframe(1).f_code in control_codes:
+    def spy_folding(module_name, cause, sources, refusals):
+        inner = real_folding(module_name, cause, sources, refusals)
+
+        def installed_fake(name):
+            # ⛔ INVOCATION, NOT CONSTRUCTION (`#14099`, review of `ac825bc012`). The flag is set when
+            # the fake the builder RETURNED is CALLED — the only thing an installed loader ever
+            # does. An inert decoy `_folding(…)` call whose result is discarded builds a fake that
+            # is never called, so it cannot re-arm this half. Measured: all sixteen `folding(…)`
+            # sites reverted to a local builder PLUS one inert in-body decoy → GREEN under the
+            # caller-keyed version, RED here.
             used["folding"] = True
-        return real_folding(*args, **kwargs)
+            return inner(name)
+
+        return installed_fake
 
     def spy_env_source(*args, **kwargs):
-        caller_code = sys._getframe(1).f_code
-        # ⛔ AND NOT THE CONTROL'S OWN BODY (`#14099`, review of `710565ab14`). This half's LIVE
-        # calls always arrive from an installed FAKE (a nested code object), never from the body,
-        # so an in-body `_env_source(...)` line is a DEAD decoy: measured, the full `served`
-        # revert plus one such line was GREEN. The `folding` spy deliberately has no such clause —
-        # ITS legitimate calls come from the body.
-        # ⛔ AND THE GRANDCALLER MUST BE OUTSIDE THE CONTROL (`#14099`, measured at `ac825bc0`):
-        # excluding only the body left the same one-line decoy one level in — a nested lambda or
-        # def calling `served(...)` IS a control code object, so both a `(lambda: served(module))()`
-        # line and a nested `def` re-armed the flag with BOTH `served(...)` sites reverted
-        # (measured: GREEN both times). A real fallback call has `_writer_register_population` as
-        # its grandcaller, so requiring that frame to be OUTSIDE the control re-arms nothing.
-        try:
-            grandcaller_code = sys._getframe(2).f_code
-        except ValueError:  # the caller was a top-level frame; nothing above it
-            grandcaller_code = None
-        if (
-            caller_code in control_codes
-            and caller_code is not control_code
-            and grandcaller_code not in control_codes
-        ):
+        # ⛔ THE TRANSITIVE PATH IS EXCLUDED BY CODE OBJECT, and NOTHING ELSE IS (`#14099`, reviews
+        # of `0c4e706e61`–`ac825bc012`). `_folding`'s inner fake resolves `_env_source` through the
+        # module globals, so ITS calls must not count; every other caller — the control's body, its
+        # lambdas, a nested def, a MODULE-LEVEL forwarder that really delegates — is a real use.
+        # ⛔ DECLARED RESIDUAL: because this half cannot tell an inert decoy call from a real site
+        # (both are the same spy called from a legitimate frame), ONE discarded `_env_source(…)`
+        # line inside the control re-arms this flag. Measured GREEN that way. Closing it needs
+        # per-call-site identity, which no cheap instrument has — a frame whitelist both admits
+        # decoys (measured, nested `def` and lambda) and false-reds the module-level forwarder the
+        # F2 fix itself introduced. The plain revert is what this half closes, and it does.
+        if sys._getframe(1).f_code is not transitive_code:
             used["env_source"] = True
         return real_env_source(*args, **kwargs)
 
