@@ -404,19 +404,24 @@ def test_the_row_paths_record_the_served_page_and_never_an_internal_read(hooked_
     A path that returns Point rows to a CALLER records exactly ONE read event per
     key it SERVES — no fewer (a missed record inflates the never-read mass, which
     flatters the split) and no more (a double record overstates how many reads a
-    key gets, which is the same class of wrong as a lost one). An INTERNAL
-    accessor (``_get_point`` here, and ``_query`` in the population-scan test
-    below) records NOTHING: a written-but-never-read node that an internal check
-    has touched must stay at zero, or `f` biases HIGH. A reader who applies the
-    caller rule to the internal pin gets the #7983 direction exactly backwards.
+    key gets, which is the same class of wrong as a lost one). An accessor that IS
+    the product read keeps that rule on its DEFAULT and is switched off only for a
+    population scan (`_query`: its default is pinned in the population-scan test
+    below, because `TortoiseClient`'s structural reads reach it without the flag).
+    An accessor that is only ever an INTERNAL check records NOTHING at all
+    (`_get_point` here): a written-but-never-read node that a write path touched
+    must stay at zero, or `f` biases HIGH. Applying one rule to the other's path
+    is the #7983 direction error, in whichever direction it is made.
 
-    ⛔ ONE HOOK IN THIS FAMILY NOW HAS NO IN-TREE CALLER, and that is recorded
-    rather than papered over: `_query_points_by_tag`'s own recording branch
-    (`_record_reads=True`, sdk.py) is passed `False` by its only in-tree caller
-    (`search_knowledge(mode="tag")`), and the MCP tag tool aliases to
-    `tortoise_query`, so the public door that used to reach it is retired. It is
-    therefore NOT pinned here — a pin on a branch nothing can reach proves
-    nothing — and no assertion below depends on it.
+    ⛔ ONE HOOK IN THIS FAMILY HAS NO PRODUCT CALLER ON ITS RECORDING ARM, and
+    that is recorded rather than papered over: `_query_points_by_tag` takes
+    `_record_reads`, and BOTH of its in-tree product callers pass `False`
+    (`search_knowledge(mode="tag")` in sdk.py, and `tortoise_query`'s tag arm in
+    mcp_server.py) — the caller that used to take the default, the retired public
+    `query_points_by_tag()`, is gone. The branch is still REACHABLE (tests/test_sdk.py
+    calls the accessor on the default 24 times), so this is not dead code; it is a
+    hook with no PRODUCT witness, and a pin here would witness a path no product
+    read takes. It is therefore not pinned, and no assertion below depends on it.
     """
     inst, graph = hooked_sdk
     # The keys must exist as STOCK first, or every read is (correctly) reported
