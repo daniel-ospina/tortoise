@@ -761,8 +761,17 @@ def test_the_verbs_never_shadow_the_DSNs_ROLE_with_a_connect_kwarg(monkeypatch):
 
     No database is contacted: ``psycopg2.connect`` is replaced, and both DSN
     forms are covered because a deployment may use either.
+
+    ⛔ The replacement is a STUB MODULE in ``sys.modules``, not an
+    ``import psycopg2`` + ``setattr`` — the same seam every other store-free row
+    in this file uses (`_stub_psycopg2`). ``psycopg2-binary`` is declared in the
+    `postgres` extra ONLY; neither the `test` extra nor the `dev` group installs
+    it, so a real import makes this pin ERROR (not skip) on every leg that does
+    not provision a record — measured on a `uv sync --extra embeddings --extra
+    parity` worktree: `ModuleNotFoundError: No module named 'psycopg2'`. The
+    module is imported INSIDE `_connect_record`, so the stub intercepts it.
     """
-    import psycopg2
+    import types
 
     captured: list = []
 
@@ -770,7 +779,9 @@ def test_the_verbs_never_shadow_the_DSNs_ROLE_with_a_connect_kwarg(monkeypatch):
         captured.append((dsn, kw))
         return object()
 
-    monkeypatch.setattr(psycopg2, "connect", fake_connect)
+    stub = types.ModuleType("psycopg2")
+    stub.connect = fake_connect
+    monkeypatch.setitem(sys.modules, "psycopg2", stub)
 
     uri = ("postgresql://record:record@127.0.0.1:5432/record"
            "?options=-c%20role%3Dtortoise_record_app")
