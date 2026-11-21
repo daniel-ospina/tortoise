@@ -6483,3 +6483,216 @@ class TestTheMitigationLedger:
         # …and the run that env produces is green, i.e. the seam is not just named
         # but honoured by the subprocess.
         assert _run(_secrets_file(_ALL_DECLARED, "hermetic-ledger-secrets.json")).returncode == 0
+
+
+# ── #13665/#14156: the DECLARED machine shape, pinned ───────────────────────
+# The bug this closes is "fly.toml says 2 cores, the machine runs 4": `fly
+# scale vm` is a MANUAL operation, so a versioned `cpus = 2` reverted every
+# hand-resize on the next deploy, and nothing reddened for a whole measurement
+# window. `fly.toml`'s shape is declarative, but "declarative" is exactly what a
+# silent revert is invisible in — so the shape becomes the thing a diff must
+# move deliberately.
+
+
+def _real_fly_toml() -> dict:
+    import tomllib
+
+    return tomllib.loads(REAL_FLY_TOML.read_text(encoding="utf-8"))
+
+
+def _services_region(text: str) -> str:
+    """Everything before the `[[vm]]` TABLE (it also holds `[build]`, `[checks]`).
+
+    Split on the table's OWN LINE, not on the bare token: the COST note mentions
+    `` `[[vm]]` `` inline, so a bare-token split cuts inside that comment and
+    keeps the label only by paragraph ordering (re-ordering the note would
+    false-RED a correct file). Shared by the pin and its non-vacuity probe.
+
+    SELF-CHECKING, because a failed split is not "fails toward red": if the
+    `[[vm]]` line ever gains trailing content (`[[vm]]  # shape`) the pattern
+    matches nothing, `re.split` returns ONE part, and this would hand back the
+    WHOLE file — from which a later priced row (most plausibly the `[[vm]]`
+    cost derivation) could satisfy the pin and green it while the note still
+    prices a shape the block does not declare. So a missing split raises.
+    """
+    parts = re.split(r"(?m)^\[\[vm\]\]\s*$", text)
+    assert len(parts) > 1, (
+        "fly.toml has no bare `[[vm]]` line to split on: the `[[services]]` region "
+        "would widen to the whole file and this pin could read a price row from "
+        "below the table — re-derive the split rather than letting it widen"
+    )
+    return parts[0]
+
+
+def _priced_shapes(services_region: str) -> set[int]:
+    """Core counts the note PRICES — a PRICE ROW, not a mention.
+
+    A shape counts only when it is written as a priced row —
+    ``shared-cpu-Nx:NNNNMB =`` — whose figure (`$`) follows the ``=`` on the
+    same line, or opens the next one. That is this file's COST-note shape
+    (shape and ``=`` on one line, money on the next).
+
+    Why the row form matters: counting any `shared-cpu-Nx` mention with a figure
+    nearby let prose like "the block declares `shared-cpu-4x:4096MB`
+    (~$26.76/mo)" enter the priced set, and the pin went GREEN while the note
+    still priced 2 cores. A mention is not a price; a bare ``=`` with no figure
+    behind it is not one either.
+    """
+    lines = services_region.splitlines()
+    priced: set[int] = set()
+    for i, line in enumerate(lines):
+        row = re.search(r"shared-cpu-(\d+)x:\s*\d+\s*MB\s*=", line)
+        if row is None:
+            continue
+        next_line = lines[i + 1] if i + 1 < len(lines) else ""
+        priced_here = "$" in line[row.end():] or re.match(r"\s*#?\s*\$", next_line)
+        if priced_here:
+            priced.add(int(row.group(1)))
+    return priced
+
+
+def test_vm_block_declares_the_four_core_shape():
+    """A revert of `cpus` to 2 — the #13665 regression — must redden this."""
+    vm = _real_fly_toml()["vm"]
+    assert isinstance(vm, list) and len(vm) == 1, (
+        "fly.toml must declare exactly one [[vm]] block: a second process group "
+        "left at the old size is the same declared-vs-live drift, one table over"
+    )
+    shape = vm[0]
+    assert shape["cpu_kind"] == "shared", (
+        "the measured 4-core shape is `shared`; `cpu_kind` is part of the "
+        "declared shape, so changing it changes what a deploy provisions"
+    )
+    assert shape["cpus"] == 4, (
+        "the box runs 4 cores (#13665, measured); a versioned 2 is the revert "
+        "that made the hand-resize not survive a deploy"
+    )
+    assert shape["memory_mb"] == 4096, (
+        "memory_mb is pinned separately: the file's history is OOM "
+        "crash-loops at 2 GB (#545), so a reduction is a real regression"
+    )
+
+
+def test_a_cost_note_pricing_a_shape_the_vm_block_does_not_declare_says_so():
+    """The F2 class (#14156 review): one cost claim, not two.
+
+    After the 2→4 resize the `[[services]]` COST note still priced the 2-core
+    machine, so a reader took a stale figure as current. Either the note prices
+    the declared shape, or it says out loud that it is the pre-#13665 snapshot.
+    """
+    text = REAL_FLY_TOML.read_text(encoding="utf-8")
+    declared_cpus = _real_fly_toml()["vm"][0]["cpus"]
+    services_region = _services_region(text)
+
+    # A PRICE, not a MENTION: `priced` comes from lines that carry a figure, so
+    # the pin does not disarm the moment the note names the shape it declares
+    # (e.g. writing "declares `shared-cpu-4x`").
+    priced = _priced_shapes(services_region)
+    assert priced, (
+        "the [[services]] COST note names no `shared-cpu-Nx` shape any more, so "
+        "this pin can no longer see what it prices — re-derive it against the "
+        "note's new spelling rather than deleting it"
+    )
+    if priced != {declared_cpus}:
+        assert "pre-#13665" in services_region.lower(), (
+            f"the [[services]] COST note prices {sorted(priced)} cores while "
+            f"[[vm]] declares {declared_cpus}, and never labels itself as the "
+            "pre-#13665 historical shape — a reader acts on the stale figure "
+            "(#14156 review F2)"
+        )
+
+
+# ── Non-vacuity, ENCODED (the pins above are hand-measured otherwise) ───────
+# `20f8459795` established the pins and MEASURED that each reds on the pre-fix
+# content. A measurement at authoring time is not a guard: if a later refactor
+# softens either assertion, nothing reds and the pin reads green forever — the
+# inert-enforcer class. These probes mutate the real file and require the pin to
+# raise, so the discrimination is itself a test.
+#
+# Each `pytest.raises` is MATCHED against the pin's own message, not bare
+# `AssertionError`: a bare catch stays green if some *other* assertion in the
+# pin starts failing (e.g. `assert priced`), so the probe would then prove a
+# different assertion than the one it names. The patterns below are substrings
+# of the pin's failure text and of nothing the probe itself asserts — the probe's
+# own staleness guards live OUTSIDE the `raises` block and fail loudly.
+
+
+def test_the_shape_pin_reds_when_cpus_reverts(monkeypatch):
+    """The #13665 regression, reproduced: `cpus = 4` → `cpus = 2` must redden."""
+    text = REAL_FLY_TOML.read_text(encoding="utf-8")
+    reverted = text.replace("  cpus = 4\n", "  cpus = 2\n", 1)
+    assert reverted != text, (
+        "fly.toml has no `  cpus = 4` line to revert — the probe is stale, so "
+        "it is proving nothing about the pin"
+    )
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "REAL_FLY_TOML",
+        _fixture("fly-cpus-reverted.toml", reverted),
+    )
+    with pytest.raises(AssertionError, match="the box runs 4 cores"):
+        test_vm_block_declares_the_four_core_shape()
+
+
+def test_the_cost_note_pin_reds_when_the_historical_label_is_stripped(monkeypatch):
+    """The F2 class reproduced: the COST note prices 2 cores, unlabelled.
+
+    Only the `[[services]]` region is mutated (the `[[vm]]` table is kept
+    verbatim), which is the reviewed head's own shape minus the label the fix
+    added — exactly the state a reader acted on before #14156.
+    """
+    text = REAL_FLY_TOML.read_text(encoding="utf-8")
+    services_region = _services_region(text)
+    stripped = re.sub(r"(?i)pre-#13665", "historical", services_region)
+    assert stripped != services_region, (
+        "the `[[services]]` region carries no pre-#13665 label to strip — the "
+        "probe is stale, so it is proving nothing about the pin"
+    )
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "REAL_FLY_TOML",
+        _fixture(
+            "fly-cost-note-unlabelled.toml",
+            stripped + text[len(services_region):],
+        ),
+    )
+    with pytest.raises(AssertionError, match="never labels itself"):
+        test_a_cost_note_pricing_a_shape_the_vm_block_does_not_declare_says_so()
+
+
+def test_the_cost_note_pin_reds_when_two_shapes_are_priced_unlabelled(monkeypatch):
+    """The round-10 PREDICATE, guarded: one stale claim BESIDE one current one.
+
+    `if priced != {declared_cpus}` is the assertion with no other mutant: revert
+    it to the older `if declared_cpus not in priced:` and both probes above
+    still pass, because the declared shape is then PRESENT in the priced set and
+    the label leg is never evaluated. That state — a stale `shared-cpu-2x` price
+    row left standing next to a genuine `shared-cpu-4x` row, unlabelled — is the
+    one #14156 review F2 is about, so it is reproduced here rather than read.
+
+    Non-vacuity of the mutation itself is asserted first: the two-claims input
+    must really parse as {2, 4}, or the probe would be proving the label leg
+    again under a different name.
+    """
+    text = REAL_FLY_TOML.read_text(encoding="utf-8")
+    services_region = _services_region(text)
+    stripped = re.sub(r"(?i)pre-#13665", "historical", services_region)
+    assert stripped != services_region, (
+        "the `[[services]]` region carries no pre-#13665 label to strip — the "
+        "probe is stale, so it is proving nothing about the pin"
+    )
+    two_claims = stripped + (
+        "  #   shared-cpu-4x:4096MB =\n"
+        "  #   $25.30/mo running (a second, current claim beside the stale one)\n"
+    )
+    assert _priced_shapes(two_claims) == {2, 4}, (
+        "the mutation did not produce the two-claims state — `_priced_shapes` "
+        "must see BOTH shapes, or this probe is not exercising the predicate"
+    )
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "REAL_FLY_TOML",
+        _fixture("fly-cost-note-two-claims.toml", two_claims + text[len(services_region):]),
+    )
+    with pytest.raises(AssertionError, match="never labels itself"):
+        test_a_cost_note_pricing_a_shape_the_vm_block_does_not_declare_says_so()

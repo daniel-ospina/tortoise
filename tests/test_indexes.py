@@ -1423,6 +1423,13 @@ def test_legacy_single_field_point_index_is_upgraded_with_flat_data(graph_factor
             g.query(f"CALL {proc}('Point')")
             dropped = True
             break
+        # #14125 class 2 (review of `cd75ec7144`, P1): a PROGRAMMING error here is
+        # not "this engine has no drop procedure" — swallowing it turns a moved
+        # door into a SKIP whose reason names an engine limitation that does not
+        # exist. A genuine refusal arrives as `redis.exceptions.ResponseError` (a
+        # RedisError, NOT a TypeError), so the broad arm stays.
+        except (AttributeError, NameError, TypeError):
+            raise
         except Exception:
             continue
     if not dropped:
