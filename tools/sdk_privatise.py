@@ -399,7 +399,6 @@ SWEEP_NAMES = 66
 #: blocks cite above: measured, never arithmetic on the last pin. (11839 − 6 = 11833 would have been
 #: the arithmetic guess from this tree's own HEAD block; the merged tree derives neither 11839, nor
 #: 11825, nor 11833 — the pin below is what `--repin` printed.)
-SWEEP_RESIDUE = (11841, "05a67e3380c806b1")
 #: RE-CUT UP (11825, "539914480e400722") → (11833, "addee5ad564bd9bc") by the `#13874` lane. The
 #: pasted pair is `--repin`'s output measured on THIS tree, never arithmetic on the last pin.
 #: The +8 is ONE merge's rows, attributed by measurement and not by count: over the whole range
@@ -426,7 +425,6 @@ SWEEP_RESIDUE = (11841, "05a67e3380c806b1")
 #: `main`'s own tree today derives 11833 against its own 11825 pin, i.e. `--check` is RED on `main`.
 #: The real fix for the recurrence is grading the pin on `main`; carrying the re-cut is what unblocks
 #: a PR that touches nothing in this population, which is the same remedy the two blocks above took.
-SWEEP_RESIDUE = (11833, "addee5ad564bd9bc")
 #: RE-CUT AGAIN at the SECOND merge tree (#14068 × `main` `8ad6ac46f0`), for the same reason the
 #: note above states: `main` moved three more commits AFTER the first merge (`628765ff3c`,
 #: `1f654d16b5`, `8ad6ac46f0` — cite-census re-statements touching `tools/hosted_api_cite_census.py`,
