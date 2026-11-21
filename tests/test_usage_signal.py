@@ -1358,11 +1358,14 @@ def test_no_graph_dependency() -> None:
         `_matching([root])` for every root in the derivation, so filtering the list
         `_matching` hands the comprehension — down to the three named controls, or by
         dropping a single root — is **1 failed / 101**, not a narrowing. The one
-        filter no row sees is on `_matching`'s RETURNED set inside `_probe` (**102
-        passed**), and it drops no banned ROOT: it keeps exact members of
-        `_probe_forbidden()` and discards `<root>.<sub>` forms, while CPython always
-        registers the parent module — so the submodule clause can never be the sole
-        witness (see the prefix-clause note below). Separately, ADDING a name to
+        filter no row SAW was on `_matching`'s RETURNED set inside `_probe` (**102
+        passed** when that paragraph was written), and it is closed now too: the
+        submodule row below supplies `<root>.<sub>` through `_probe` and requires it
+        back, so a returned-set filter narrowed to the exact derivation members is
+        **1 failed / 101** (measured at this head). That filter drops no banned ROOT
+        either way, because CPython always registers the parent module — the submodule
+        clause can never be the sole witness (see the prefix-clause note below).
+        Separately, ADDING a name to
         `_PROBE_EXEMPT` leaves the derivation row above green, because it moves both
         sides of that equality together — which is why narrowing `_PROBE_EXEMPT` is
         pinned by `test_the_no_graph_guard_covers_every_module_that_reaches_a_store`
@@ -1478,10 +1481,14 @@ def test_no_graph_dependency() -> None:
     # detector — the same defect as the substring scan one level up.
     #
     # ⛔ AND THEY GRADE WHAT THE PROBE FINDS, NOT THE TEXT OF ITS PROGRAM, because a
-    # text pin cannot see a narrowing written AROUND the text it looks for —
-    # `forbidden=[r for r in <the pinned list> if '.' not in r]` contains the pinned
-    # repr verbatim and silences every dotted root. So the controls below name roots
-    # that a narrowed candidate would DROP — one DOTLESS and TWO DOTTED.
+    # text pin cannot see a narrowing written AROUND the text it looks for. That was
+    # measured on the DELETED in-child design — `forbidden=[r for r in <the pinned
+    # list> if '.' not in r]` contains the pinned repr verbatim and silences every
+    # dotted root — and the class outlives that shape: at THIS head there is no
+    # interpolated list left to pin, and the two lenient places are the child's PRINT
+    # and the PARENT'S PARSE, named in the residual above and witnessed at every root
+    # below. So the controls below name roots that a narrowed candidate would DROP —
+    # one DOTLESS and TWO DOTTED.
     # ⛔ THE CONTROLS BELOW ARE BEHAVIOURAL ON PURPOSE, and they are the assertion
     # surface for the PRODUCTION path (`_probe`) now that the matcher lives in this
     # file. The `_probe_forbidden()` pin above holds the LIST; these hold what the
@@ -1567,6 +1574,21 @@ def test_no_graph_dependency() -> None:
         "on the way into `_matching` (the parent's parse), or inside the matcher; each "
         "is a live miss for that root and none of them is visible to a row that "
         "imports a real module (#14118 item 1)")
+    # ⛔ AND THE SUBMODULE FORM SURVIVES THE RETURN TRIP TOO — the row that closes
+    # the last un-witnessed narrowing: a filter on `_matching`'s RETURNED set inside
+    # `_probe` that keeps only exact derivation members and discards `<root>.<sub>`
+    # forms. Every other production row supplies an EXACT root, so that filter was
+    # **102 passed**, and the docstring above used to disclose it as the one filter no
+    # row could see. Supplying the submodule form instead makes it visible: the name
+    # comes from outside the child, so its absence from the result is a defect rather
+    # than an ambiguity — the same argument the `_all_roots` row makes for exact names.
+    _sub_name = _probe_forbidden()[0] + ".probe_child"
+    _sub = _probe("pass", _sub_name)
+    assert _sub_name in _sub, (
+        f"the probe must report `<root>.<sub>` forms, not only exact derivation "
+        f"members: got {sorted(_sub)!r} for an injected {_sub_name!r}. A returned-set "
+        "filter narrowed to `_probe_forbidden()` inside `_probe` drops exactly this "
+        "name while every exact-root row above stays green (#14118 item 1)")
     # ⛔ AND EVERY ROOT IS IMPORTED FOR REAL, one at a time, with NOTHING injected —
     # the row that cannot be satisfied by a keep-list. The expected name is the module
     # the import statement ITSELF put in `sys.modules`, so a filter keyed on
