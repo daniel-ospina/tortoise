@@ -295,7 +295,7 @@ five are *at risk* of drifting silently: no symbol will be there to re-find — 
 citation — so an insert above a cited site is undetectable from the row alone. The risk has already begun
 to bite: of the line-numbered cites in these five rows, **ten no longer name the same line at `main`**
 (re-measured at `main` `ae54df166d`, the head this header's own lists are written at, and RE-MEASURED again for this edition — the `111-of-217` this clause used to defer to has been retired) — row 15's `hosted_api.py:32965`, whose
-`MERGE (p:PackInstall …)` is at `:33583` there (`:34276` at this head — `33853 + 419` put it at `:34272`, the SAME band row 13's pair takes, NOT a second one, and `#14169` then moved it a further `+4` (`33853 + 423 = 34276`; one band plus one insert, not two deltas); re-derived by content at `main` `b4da1f5c01`), and **9 of row 18's 16** (that row's `hosted_api.py`, `sdk.py` and `pipeline.py` addresses moved; its seven `metering.py` / `cohort_cost.py` ones are unchanged) — while rows 10, 11 and 14 and row
+`MERGE (p:PackInstall …)` is at `:33583` there (`:34276` at this head — `33853 + 419` put it at `:34272`, the SAME band row 13's pair takes, NOT a second one, and `#14169` then moved it a further `+4` (`33853 + 423 = 34276`; one band plus `#14169`'s own two hunks above the site — `8` added / `4` deleted — not two bands); re-derived by content at `main` `b4da1f5c01`), and **9 of row 18's 16** (that row's `hosted_api.py`, `sdk.py` and `pipeline.py` addresses moved; its seven `metering.py` / `cohort_cost.py` ones are unchanged) — while rows 10, 11 and 14 and row
 15's `pack_manifest_store.py:467` still do. ⚠️ **The comparison this count is taken on is the PIN against `main`, never `main` against this head** — `git show ccb49741b2ec:tortoise/pipeline.py | sed -n '529p'` is `"k": pipe.pipeline_key, "kind": pipe.pipeline_key,`, while `ae54df166d` holds `"MATCH (p:Pipeline {pipelineKey:$k}) RETURN p.defaultStageId, "` on that line: it MOVED, which is what makes it the ninth of row 18's sixteen, even though `main` and this head agree on it.
 ⚠️ **Row 14 does NOT, and this clause is measured at `ae54df166d`, not at THIS head**: `63bc13edb44` — the +8 shift of `webhook_delivery.py` that §2.7 records — is not an ancestor of `ae54df166d` (`git merge-base --is-ancestor 63bc13edb44 ae54df166d` → 1), so at `ae54df166d` row 14's census address `:487` still opens on its quoted `CREATE`, while §2.7 re-derived it to `:495` for THIS head. Every other address this document carried into that file moved in the same pass, and §2.7's `:GraphEventMeta` row records the whole old→new mapping. (For rows 10, 11 and 14 the SHAPE's reader half is anchored — §2.7 names `_drop` and quotes the
 Cypher — but the row's own WRITE cite is not.) Re-derive each cite from the text
@@ -644,8 +644,10 @@ read resolves the node **through the edge** — `sdk.py:31551`
 addresses opened at this head and re-checked in this pass (#13879 review, P2): the `mcp_server.py`
 one was stale at main's head, at `:11280` → `:11281` (`#13991`), and this branch's own `sdk.py`
 insertions then moved the four `sdk.py` addresses by `+31` — each re-derived by the fragment it
-quotes (`grep -nF`), never by applying that delta — while the `mcp_server.py` one landed where
-`#13991` left it. ⚠️ **The correction did not arrive on `main` from this pass.** This pass
+quotes (`grep -nF`), never by applying that delta — while the `mcp_server.py` one stayed where
+`#13991` left it only down to `#14169`: `b4da1f5c01` then moved it a further `+309`, so the address
+`#13991` corrected is now HISTORY and the line quoted above is the one this head carries — the
+provenance below is that record, not a second cite. ⚠️ **The correction did not arrive on `main` from this pass.** This pass
 re-derived the address itself (commit `143b1fea07`, 12:26Z) on parent `1f7ae03e`, where this document
 still carried the stale address and not the corrected one; **#13992** (`8747965ad5`) put the same
 address on `main` at 16:14Z, 63 minutes before this pass merged, sweeping a second site — the header
