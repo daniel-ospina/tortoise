@@ -206,14 +206,48 @@ class _AnchorHrefParser(HTMLParser):
         "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
         "meta", "param", "source", "track", "wbr",
     })
-    # Tags a browser closes WITHOUT an end tag (spec 13.2.6.3's implied end tags,
-    # plus the table sections): `<li>a<li>b` is two elements, so an EXTENT built on
-    # end tags alone would run from the first `<li>` past the second. The container
-    # helper refuses these rather than guessing (see `extract_anchors_within`).
+    # Tags a browser closes WITHOUT an end tag — spec 13.2.6.3's implied end tags,
+    # the table sections, and the tags a SIBLING START TAG closes (`<button>`,
+    # `<h1>`–`<h6>`, `<a>`, `<form>`, `<nobr>`, `<select>`, `<table>`; 13.2.6.4's
+    # "in body" rules act as an end tag for the open one). `<li>a<li>b` is two
+    # elements, so an EXTENT built on end tags alone would run from the first
+    # `<li>` past the second. The container helper refuses these rather than
+    # guessing (see `extract_anchors_within`).
+    #
+    # ⛔ BOTH FAMILIES BELONG HERE, and the second was missing: the refusal used to
+    # list only the implied-end-tag tags, so `extract_anchors_within(tag="button")`
+    # (and `h2`, `a`, `form`, `nobr`) returned an extent that ran PAST the sibling —
+    # `'<button class="toc"><a href="#a">A</a><button><a href="#b">B</a>'` gave
+    # `[['#a', '#b']]` where a browser has `[['#a']]` — a larger advertised set and a
+    # SHORTER slice, the fail-open direction, while the helper's own message
+    # promised the opposite (#14073 review).
     _IMPLICITLY_CLOSED = frozenset({
-        "caption", "colgroup", "dd", "dt", "li", "optgroup", "option", "p",
-        "rb", "rp", "rt", "rtc", "tbody", "td", "tfoot", "th", "thead", "tr",
+        "a", "button", "caption", "colgroup", "dd", "dt", "form", "h1", "h2",
+        "h3", "h4", "h5", "h6", "li", "nobr", "optgroup", "option", "p",
+        "rb", "rp", "rt", "rtc", "select", "table", "tbody", "td", "tfoot",
+        "th", "thead", "tr",
     })
+    #: Elements whose CHILD CONTENT a browser does not render, by ELEMENT TYPE — the
+    #: second half of "does a reader meet this heading/link", after raw text, inert
+    #: `<template>` content and the `in select` rule. `<datalist>` is `display: none`
+    #: in the UA stylesheet, and the rest put their children in the FALLBACK slot,
+    #: which a browser that supports the element never renders. The guard's question
+    #: is asked in a supporting browser — the same convention as `<noscript>` being
+    #: raw text because `self.scripting` is True (see `_RAW`).
+    #
+    # ⛔ MEASURED, not inferred: a `<h2 id="quickstart">` inside any of these was
+    # recorded, so a claim under it left the golden, the vocabulary pin and the
+    # attribute allowlist at once — the same fail-open `_record_heading` closes for
+    # `<template>`/`<script>`/`<select>`, reachable without touching the TOC at all
+    # (`<datalist id="x"><h2 id="quickstart">…` bound the slice; #14073 review).
+    _UNRENDERED = frozenset({
+        "datalist", "canvas", "video", "audio", "object", "meter", "progress",
+    })
+    #: Elements whose content renders only WITH an attribute: `<details>` without
+    #: `open` shows its `<summary>` and nothing else, and `<dialog>` without `open`
+    #: is not in the rendering at all. Presence is what counts — an empty `open` is
+    #: the rendered spelling.
+    _RENDERS_WITH_ATTR = frozenset({"details", "dialog"})
     #: Every recording of a DOCUMENT TREE, by attribute name. `_clear_recordings`
     #: iterates this tuple, and
     #: `test_the_parsers_recordings_forget_a_document_a_frameset_replaced` asserts it
@@ -265,10 +299,13 @@ class _AnchorHrefParser(HTMLParser):
         self._container = container
         self.containers: list[list[str]] = []
         self._open_containers: list[list[str]] = []
-        # Rendered open elements, as `(tag, opened a container)`, in document
-        # order — the ancestry the container recording and the `in select` rule
-        # below both read. See `_open_extent` for what it does NOT model.
-        self._open_elements: list[tuple[str, bool]] = []
+        # Open elements, as `(tag, opened a container, renders)`, in document
+        # order — the ancestry the container recording, the `in select` rule and
+        # the "does a reader meet it" rule below all read. The third field is
+        # INHERITED from the ancestry (`<div hidden><div><h2>` hides the heading),
+        # so a subtree hidden by an attribute carries the answer without a second
+        # walk. See `_open_extent` for what it does NOT model.
+        self._open_elements: list[tuple[str, bool, bool]] = []
         # Open elements currently suppressing collection. A stack, not a counter,
         # so nested `<template><script>…</script></template>` unwinds correctly.
         self._suppress: list[str] = []
@@ -428,6 +465,20 @@ class _AnchorHrefParser(HTMLParser):
         the select for (`input`/`keygen`/`textarea`, after which a heading would be
         outside it again) are not modelled either — same direction, same reason.
 
+        ⛔ AND "NO READER MEETS IT" IS WIDER THAN INSERTION MODES — the rule is
+        `_unmet_by_reader`, which also refuses an `_UNRENDERED` ancestor
+        (`<datalist>`, and the fallback-content elements: their children are never
+        rendered by a supporting browser), a `hidden` attribute on this element or
+        an ancestor, and `<details>`/`<dialog>` before an `open` arrives. Each was
+        measured recording a `<h2 id="quickstart">` that then bounded the slice,
+        leaving the claim under it outside all three pins (#14073 review) — the
+        failure mode this docstring's first paragraph describes, reached without
+        touching the TOC. What is declared and NOT modelled is CSS: a heading
+        hidden by `style`, or by a stylesheet rule its `class` matches, is still
+        recorded and still bounds, because this parser reads markup and a cascade
+        is not markup. That residual is in the fail-open direction, and it is named
+        here instead of being left for the slide after next.
+
         The id is kept rather than the whole tag because the caller asking this
         question is "which heading does the section end at", which is a question
         about identity; the position is kept because it is the only way to cut the
@@ -435,32 +486,57 @@ class _AnchorHrefParser(HTMLParser):
         """
         if tag != "h2" or self._suppress or self.wedged_reason or self._foreign:
             return
-        if self._in_select():
+        if self._unmet_by_reader(attrs):
             return
         heading_id = next((value for name, value in attrs if name == "id"), None)
         self.headings.append((heading_id, *self.getpos()))
 
-    def _in_select(self) -> bool:
-        """True when an open `<select>` ancestor makes this start tag one to refuse.
+    def _unmet_by_reader(self, attrs: list[tuple[str, str | None]]) -> bool:
+        """True when no reader meets this start tag, so it must not bound or advertise.
 
-        The one test both `_record_heading` and `_collect` ask, kept in one place so
-        the two cannot answer differently: a claim parked in a heading inside a
-        `<select>` and an anchor parked there are the same escape (an advertised
-        boundary / an advertised entry the pins cannot verify), and both are refused
-        for the reason `_record_heading` states at length — the conservative side of
-        a spec change, where the alternative direction is fail-open.
+        The ONE test `_record_heading` and `_collect` ask, kept in one place so the
+        two cannot answer differently: a claim parked in a heading this refuses and
+        an anchor parked there are the same escape (an advertised boundary, or an
+        advertised entry, that the pins cannot verify).
+
+        Three reasons, all of them "the pins cannot see what the reader also cannot
+        see" — refusing is what keeps the slice LONG, i.e. the loud direction:
+
+        * an open `<select>` ANCESTOR — the conservative side of a spec change, for
+          the reason `_record_heading` states at length;
+        * an open `_UNRENDERED` ancestor — `<datalist>` and the fallback-content
+          elements put their children somewhere no supported browser renders;
+        * THIS element, or an open ancestor, declaring itself unrendered — the
+          `hidden` attribute, or `<details>`/`<dialog>` before an `open` attribute
+          arrives (`_RENDERS_WITH_ATTR`, carried on the stack as the inherited
+          third field).
+
+        ⛔ DECLARED RESIDUAL — CSS. A heading hidden by `style="display: none"`, by
+        a stylesheet rule its `class` matches, or by anything else the cascade
+        decides is still RECORDED, and therefore still BOUNDS: this parser reads
+        markup and cannot compute a cascade. The direction is the fail-open one, so
+        it is named rather than left implicit — the guard's own vocabulary and
+        attribute pins are what a CSS-hidden heading's copy faces, and a page that
+        hides copy with CSS is making a decision no markup-level guard can read.
         """
-        return any(open_tag == "select" for open_tag, _ in self._open_elements)
+        if any(open_tag == "select" for open_tag, _, _ in self._open_elements):
+            return True
+        if any(open_tag in self._UNRENDERED for open_tag, _, _ in self._open_elements):
+            return True
+        if any(not renders for _, _, renders in self._open_elements):
+            return True
+        return any(name == "hidden" for name, _value in attrs)
 
     def _collect(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag != "a" or self._suppress or self.wedged_reason:
             return
-        if self._in_select():
+        if self._unmet_by_reader(attrs):
             # An `<a>` inside a `<select>` is not a link a reader can follow, and it
             # is not an entry the TOC's index may be built from — the same escape as
             # a heading there, one recording over (measured: an anchor inside a
             # `<select>` in the TOC still advertised `#storage-limits` and bounded
-            # the section, all pins green; #14073 review). See `_in_select`.
+            # the section, all pins green; #14073 review). The same applies under
+            # `_UNRENDERED`/`hidden`, for the same reason. See `_unmet_by_reader`.
             return
         for name, value in attrs:
             if name == "href":
@@ -599,14 +675,21 @@ class _AnchorHrefParser(HTMLParser):
           honest answer; a comment claiming the safe direction was measured wrong
           (#14073 review).
 
-        A container that MIS-NESTS across a raw-text region is not modelled either:
-        an end tag written inside an inert region matches the outer element here,
-        where a browser closes within the template's fragment — that one closes the
-        container EARLY (fewer advertised entries, longer slice, the loud
-        direction). ⛔ The seam's page-level ratchet does NOT cover this one (it
-        keys on `wedged_reason`/foreign state, and this divergence sets neither —
-        measured), so the honest statement is: no covered page carries it today,
-        and if one did the slice would run long and the golden would red loudly.
+        An end tag written inside a suppressed region (raw text, `<template>`) does
+        NOT close an outer element here — `handle_endtag` skips `_close_extent`
+        while `_suppress` is non-empty, because a browser processes that end tag
+        against the template's own fragment stack, which never holds these
+        elements. That is the browser's answer for containers (the container stays
+        open and its extent MATCHES the tree) and it is what keeps the `in select`
+        refusal from being popped by a stray `</select>` written in a template
+        (#14073 review, both directions measured).
+
+        The third field is the inherited "a reader meets this element" flag that
+        `_unmet_by_reader` reads — the `hidden` attribute, `_UNRENDERED` element
+        types, and `_RENDERS_WITH_ATTR` elements before their attribute arrives.
+        It is INTERNAL to this stack: `ids` and `attrs` describe the document tree
+        and are recorded regardless (an element is in the DOM whether or not CSS
+        shows it), which is the distinction the class docstring draws.
         """
         if suppressed or self._suppress or self.wedged_reason or self._foreign:
             return
@@ -623,7 +706,17 @@ class _AnchorHrefParser(HTMLParser):
                 self.containers.append(inside)
                 self._open_containers.append(inside)
                 opened_container = True
-        self._open_elements.append((tag, opened_container))
+        names = {name for name, _value in attrs}
+        renders = not (
+            "hidden" in names
+            or tag in self._UNRENDERED
+            or (tag in self._RENDERS_WITH_ATTR and "open" not in names)
+        )
+        if self._open_elements and not self._open_elements[-1][2]:
+            # Inherited, so `<div hidden><section><h2>` hides the heading without
+            # `_unmet_by_reader` having to walk the stack to the `hidden` div.
+            renders = False
+        self._open_elements.append((tag, opened_container, renders))
 
     def _close_extent(self, tag: str) -> None:
         """Pop `tag` and everything opened after it, as a browser's end tag does.
@@ -642,7 +735,7 @@ class _AnchorHrefParser(HTMLParser):
         for index in range(len(self._open_elements) - 1, -1, -1):
             if self._open_elements[index][0] != tag:
                 continue
-            for _open_tag, opened_container in self._open_elements[index:]:
+            for _open_tag, opened_container, _renders in self._open_elements[index:]:
                 if opened_container and self._open_containers:
                     self._open_containers.pop()
             del self._open_elements[index:]
@@ -758,7 +851,19 @@ class _AnchorHrefParser(HTMLParser):
         # First, and before the foreign early-returns: an end tag closes whatever
         # open element it names, and the ancestry the container recording reads has
         # to see that even where the model resolves the foreign context differently.
-        self._close_extent(tag)
+        #
+        # ⛔ EXCEPT WHILE SUPPRESSED. Inside a raw-text element the end tag is text
+        # and never arrives; inside `<template>` it is processed against the
+        # template's OWN fragment stack, which never holds the outer elements. In
+        # both cases the browser leaves this document's open elements alone, and
+        # closing them here was a fail-open the `in select` refusal could not
+        # survive: `<select><template></select></template><h2 id="qs">` popped the
+        # outer `<select>`, so a heading the rule exists to refuse was recorded and
+        # bounded the slice (#14073 review, measured). Nothing is pushed onto the
+        # stack while suppressed (`_open_extent` returns early), so an end tag that
+        # arrives here has nothing legitimate to close.
+        if not self._suppress:
+            self._close_extent(tag)
         if tag in ("br", "p") and self._foreign:
             # Spec 13.2.6.5: `</br>`/`</p>` in foreign content pop it and are
             # reprocessed by the HTML rules (which close nothing here). Any OTHER
@@ -952,20 +1057,27 @@ def extract_anchors_within(
     "no TOC block" assertion (#14073 review, all three measured).
 
     Limits, all inherited from the parser and declared rather than guessed. An
-    IMPLICIT-CLOSE tag is REFUSED outright (`_IMPLICITLY_CLOSED`): for a container
-    whose tag a sibling closes (`<li>`, `<p>`, `<td>`…) an extent built on end tags
-    alone runs past the sibling, which is a LARGER advertised set and therefore a
-    SHORTER slice — the fail-open direction — so the honest answer is to refuse the
-    tag rather than to state a direction for it and hope. A container inside an
-    inert region is not in the tree at all, which is the point.
+    IMPLICIT-CLOSE tag is REFUSED outright (`_IMPLICITLY_CLOSED`, which covers BOTH
+    families: spec 13.2.6.3's implied end tags and the tags a sibling START TAG
+    closes — `<button>`, `<h1>`–`<h6>`, `<a>`, `<form>`, `<nobr>`, `<select>`,
+    `<table>`): for a container whose tag a sibling closes (`<li>`, `<p>`, `<td>`…)
+    an extent built on end tags alone runs past the sibling, which is a LARGER
+    advertised set and therefore a SHORTER slice — the fail-open direction — so the
+    honest answer is to refuse the tag rather than to state a direction for it and
+    hope. The refusal message says which tags ARE safe instead of implying every
+    accepted tag is. A container inside an inert region is not in the tree at all,
+    which is the point. Both the anchors collected and the container boundaries
+    follow `_unmet_by_reader`: an anchor no reader meets is not an entry, and its
+    own `hidden` attribute counts for that as much as a `<select>` ancestor does.
     """
     if tag in _AnchorHrefParser._IMPLICITLY_CLOSED:
         raise ValueError(
-            f"`{tag}` is closed by a browser WITHOUT an end tag, so an extent built "
-            f"on end tags alone would run past its next sibling — a larger "
-            f"advertised set and a SHORTER slice. Ask a container tag whose end tag "
-            f"is the only thing that closes it (div/section/nav/ul/…), or model the "
-            f"implicit close first."
+            f"`{tag}` is closed by a browser WITHOUT an end tag — by implied end "
+            f"tags, or by a following sibling start tag — so an extent built on end "
+            f"tags alone would run past its next sibling: a larger advertised set "
+            f"and a SHORTER slice. Ask a container tag whose end tag is the only "
+            f"thing that closes it (div/section/nav/ul/…), or model the implicit "
+            f"close first."
         )
     parser = _AnchorHrefParser(container=(tag, class_token))
     parser.feed(html)
