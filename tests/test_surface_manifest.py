@@ -992,12 +992,14 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
 #:   7 -> 6 on 2026-11-20 (#11609 lane P7): the row that left is `sdk:link_entities` — it was an
 #:   `sdk:` row carrying a caller list in both columns, and P7 REGISTERED it as an MCP tool
 #:   (`tortoise_link_entities`, the approved target row 19), so the `sdk:` row is gone and its
-#:   tool row does not carry the two-column caller evidence this comparison reads. Re-derived on
-#:   the merged manifest the same way: `_caller_lists(_manifest())` reads **6** here, and the arm
-#:   is `>=`, so 7 would have left a one-row allowance — the hole this floor forbids. The other
-#:   three registrations move nothing: `poll_events` and `delete_knowledge` replace rows that
-#:   already existed under other names, and `get_historical_knowledge` never had an `sdk:` row.
-COMPARABLE_CALLER_ROWS_FLOOR = 6
+#:   tool row does not carry the two-column caller evidence this comparison reads. ⛔ THE 6 WAS
+#:   NOT THE MEASURED COUNT and left a FOUR-row allowance: #11609 P7's review re-ran the same
+#:   instrument on the same manifest and `_caller_lists(_manifest())` reads **10**, not 6. The
+#:   arm is `>=`, so a floor one row below the measurement is one row of hole; a floor four below
+#:   is four. Corrected to the measurement on 2026-11-21 (same re-derivation: `uv run python -c`
+#:   over this file's own `_manifest()`/`_caller_lists()`), because "the bound is the measured
+#:   count, not one below it" is the doctrine this pin exists to enforce.
+COMPARABLE_CALLER_ROWS_FLOOR = 10
 
 
 def test_the_reason_dependency_cross_check_can_fail():

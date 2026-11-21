@@ -7730,6 +7730,15 @@ def tortoise_link_entities(relation: str, from_id: str, to_id: Any = None, *,
     door used, and `semantics` (the Layer-2 meaning that resolves the direction)
     is accepted on that arm alone. `operator=true` selects the same arm.
 
+    ⛔ THE MEANING NEVER BECOMES THE `op_type`. A relation that is a Layer-2
+    MEANING (`supports`, `refutes`, `mutuallySupportive`, `mutuallyExclusive`,
+    `hasPart`, `dependsOn`, `addresses`, `causes`, `produces`) is mapped through
+    `pack_registry.SEMANTICS_MECHANISMS` to the mechanism that goes in `op_type`,
+    and the meaning travels in `semantics` — the SDK's own construction. Passing
+    the meaning as `op_type` is refused by `create_operator` on every call (its
+    allow-list is `IMPL`/`NAND`/`coherence` + the part/whole types), so this arm
+    would advertise relations it could never write.
+
     `direction` is EP-propagation direction (`bidirectional` default,
     `unidirectional` for a directed attack). `operator` is the ONE explicit
     override, because IMPL/NAND is the only relation with two legitimate
@@ -7794,9 +7803,40 @@ def tortoise_link_entities(relation: str, from_id: str, to_id: Any = None, *,
             return _SafeError({"error": (
                 f"link_entities: {len(targets)} targets exceed the operator fan-out "
                 f"cap ({MAX_OPERATOR_TARGETS})"), "code": ERR_QUOTA})
+        # ⛔ THE MEANING NAMES THE EDGE; `SEMANTICS_MECHANISMS` FIXES THE MECHANISM
+        # (#11609 P7 review, P1). `_create_operator`'s FIRST positional argument is the
+        # MECHANISM (`op_type`) and its allow-list is CLOSED
+        # (`IMPL`/`NAND`/`coherence`/`composedOf`/`decomposesInto`/`contains`/`wraps`), so
+        # passing the RELATION there refuses every relation this arm advertises:
+        # `supports`, `refutes`, `mutuallySupportive`, `mutuallyExclusive` and `hasPart`
+        # are MEANINGS (ONTOLOGY §8 Layer 2), not mechanisms, and `_create_operator`
+        # answers them with `ValueError` — a write that never worked on the arm whose own
+        # docstring advertises them. The SDK's `link_entities` arm already spells this
+        # correctly (`_EPISTEMIC_RELATION_MEANINGS` -> `SEMANTICS_MECHANISMS[meaning]` as
+        # `op_type`, the meaning as `semantics=`); the door reproduces that construction
+        # here, so the two spellings of one write cannot disagree about where the meaning
+        # goes. A MECHANISM name (`IMPL`, `NAND`, `coherence`) or a part/whole type is not
+        # in the map and passes through unchanged, which is what keeps the retired door's
+        # own positional signature working.
+        from tortoise.pack_registry import SEMANTICS_MECHANISMS
+        _meaning_by_fold = {k.lower(): k for k in SEMANTICS_MECHANISMS}
+        door_meaning = (_meaning_by_fold.get(relation.lower())
+                        if isinstance(relation, str) else None)
+        if door_meaning is None:
+            op_type = relation
+        else:
+            if semantics is not None and semantics != door_meaning:
+                return _SafeError({"error": (
+                    f"link_entities: relation {relation!r} IS the meaning "
+                    f"{door_meaning!r}, so `semantics={semantics!r}` would state a "
+                    "second, conflicting one — one keyword, one meaning. Pass the "
+                    "MECHANISM (`IMPL`/`NAND`) as `relation` if you need to name the "
+                    "meaning separately."),
+                    "code": ERR_INVALID})
+            op_type, semantics = SEMANTICS_MECHANISMS[door_meaning], door_meaning
         return _safe(
             _quota_gated(sdk._create_operator, "points", abuse_weight=1),
-            relation, from_id, targets, label=label,
+            op_type, from_id, targets, label=label,
             direction=direction or "bidirectional",
             promote_source=promote_source, semantics=semantics)
 

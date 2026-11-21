@@ -152,11 +152,20 @@ class TestLinkEntitiesAnswersTheTwoDoorsItAbsorbs:
     def test_the_operator_door_s_spelling_of_the_target_is_accepted(self, served):
         """`target_ids` — the retired door's own argument name — is accepted, and it
         selects the OPERATOR arm (see the dedicated row below): the spelling carries the
-        door's semantics, so neither a JSON-string list nor a bare id is a TypeError."""
+        door's semantics, so neither a JSON-string list nor a bare id is a TypeError.
+
+        ⛔ `supports` is a MEANING, not a mechanism (#11609 P7 review, P1): the writer's
+        first argument is `op_type`, whose allow-list is `IMPL`/`NAND`/`coherence` +
+        the part/whole types, so the meaning goes in the mechanism slot of
+        `SEMANTICS_MECHANISMS` and the meaning itself rides in `semantics=`. This row
+        used to assert `("supports", …)` — it PINNED the defect, because a write through
+        the real `_create_operator` answers that with `ValueError` on every call.
+        """
         _sdk, calls = served("_create_operator", {"operator": 1})
         ms.tortoise_link_entities("supports", "a", target_ids='["b"]')
         assert len(calls) == 1, calls
-        assert calls[0][0] == ("supports", "a", ["b"]), calls[0]
+        assert calls[0][0] == ("IMPL", "a", ["b"]), calls[0]
+        assert calls[0][1]["semantics"] == "supports", calls[0]
 
     def test_the_plural_spelling_selects_the_operator_arm_even_for_ONE_target(self, served):
         """`target_ids=[x]` is the retired operator door's call — an OPERATOR, not a
@@ -220,13 +229,17 @@ class TestLinkEntitiesAnswersTheTwoDoorsItAbsorbs:
     def test_an_explicit_operator_true_selects_the_same_arm(self, served):
         _sdk, calls = served("_create_operator", {"operator": 1})
         ms.tortoise_link_entities("supports", "a", "b", operator=True)
-        assert len(calls) == 1 and calls[0][0] == ("supports", "a", ["b"]), calls
+        assert len(calls) == 1 and calls[0][0] == ("IMPL", "a", ["b"]), calls
+        assert calls[0][1]["semantics"] == "supports", calls
 
     def test_a_multi_target_call_is_ONE_operator_over_N_targets(self, served):
         """The part/whole fan-out `tortoise_create_operator` had, preserved exactly.
 
         A per-target loop would create N separate operators — a different graph, not a
         smaller one. So the assertion is on the writer: ONE call, carrying the LIST.
+
+        ⛔ `hasPart` is a MEANING (`SEMANTICS_MECHANISMS` -> `IMPL`), so the mechanism
+        travels as `op_type` and the meaning as `semantics=` (#11609 P7 review, P1).
         """
         _sdk, calls = served("_create_operator", {"operator": 1})
         ms.tortoise_link_entities(
@@ -235,8 +248,64 @@ class TestLinkEntitiesAnswersTheTwoDoorsItAbsorbs:
             f"a 2-target call produced {len(calls)} operator writes: {calls} — the "
             "fan-out must be ONE operator over N targets, as the retired door wrote it")
         args, kwargs = calls[0]
-        assert args == ("hasPart", "parent", ["c1", "c2"]), args
+        assert args == ("IMPL", "parent", ["c1", "c2"]), args
         assert kwargs["semantics"] == "hasPart", kwargs
+
+    @pytest.mark.parametrize("relation,mechanism", [
+        ("supports", "IMPL"),
+        ("mutuallySupportive", "IMPL"),
+        ("refutes", "NAND"),
+        ("mutuallyExclusive", "NAND"),
+        ("hasPart", "IMPL"),
+        ("dependsOn", "IMPL"),
+        ("addresses", "IMPL"),
+        ("causes", "IMPL"),
+        ("produces", "IMPL"),
+    ])
+    def test_a_MEANING_reaches_the_writer_as_its_MECHANISM(self, served, relation,
+                                                          mechanism):
+        """Every meaning this arm advertises resolves to an `op_type` the writer accepts.
+
+        ⛔ DISCRIMINATING BY CONSTRUCTION: the mutant is `relation` in the `op_type` slot
+        (the shipped defect, #11609 P7 review P1) and it reds EVERY row here, because the
+        expected value is the MECHANISM and the buggy write sends the MEANING. It would
+        also raise `ValueError` from the real `_create_operator`, whose allow-list is
+        `IMPL`/`NAND`/`coherence` + the part/whole types — which is why the defect was
+        invisible: the capstone only drove allow-listed NAND/IMPL relations.
+        """
+        _sdk, calls = served("_create_operator", {"operator": 1})
+        ms.tortoise_link_entities(relation, "a", ["b"])
+        assert len(calls) == 1, calls
+        args, kwargs = calls[0]
+        assert args == (mechanism, "a", ["b"]), (
+            f"relation {relation!r} reached the writer as op_type {args[0]!r}; the "
+            f"meaning belongs in `semantics` and the MECHANISM ({mechanism!r}) in "
+            "op_type — `_create_operator` refuses a meaning there on every call")
+        assert kwargs["semantics"] == relation, kwargs
+
+    def test_a_MECHANISM_spelling_passes_through_untouched(self, served):
+        """The retired door's positional signature still works: an `op_type` that IS a
+        mechanism carries no meaning, so `semantics` stays exactly what the caller sent.
+
+        This is the other half of the mapping's contract, pinned so it cannot over-reach
+        and rewrite a call that was already correct.
+        """
+        _sdk, calls = served("_create_operator", {"operator": 1})
+        ms.tortoise_link_entities("NAND", "a", ["b"])
+        assert len(calls) == 1, calls
+        args, kwargs = calls[0]
+        assert args == ("NAND", "a", ["b"]), args
+        assert kwargs["semantics"] is None, kwargs
+
+    def test_a_relation_that_is_itself_the_meaning_refuses_a_second_one(self, served):
+        """One keyword, one meaning: `relation='supports'` + `semantics='refutes'` is a
+        contradiction, not a request to pick one. It is refused BEFORE the writer, which
+        is the same rule the SDK states for every dropped keyword."""
+        _sdk, calls = served("_create_operator", {"operator": 1})
+        out = ms.tortoise_link_entities("supports", "a", ["b"], semantics="refutes")
+        assert isinstance(out, dict) and "error" in out, out
+        assert "semantics" in out["error"], out
+        assert calls == [], "a refused call must not reach the writer"
 
     def test_semantics_on_a_single_target_is_refused_not_dropped(self, served):
         """`link_entities` has no `semantics` slot on the single-target arm.

@@ -253,14 +253,19 @@ family_rank:
 # #11609 LANE P7 (the last mile): 40 -> 39, and this time FOUR counts move because this
 # wave both REGISTERS rows and RETIRES rows, which no earlier wave did:
 #   · `fetch` 9 -> 10  — `tortoise_get_historical_knowledge` ARRIVES (row 5).
-#   · `link` 2 -> 3    — `tortoise_link_entities` ARRIVES (row 19), while the two doors it
-#                        absorbs (`create_edge`, `create_operator`) also derived `link`, so
-#                        link 2 + 1 - 2 + 2 = 3: the container row plus the two doors whose
-#                        keyword it now carries.
+#   · `link` 2 -> 3    — `tortoise_link_entities` ARRIVES (row 19) and derives `link`, so the
+#                        `link` count moves 2 + 1 = 3 by that single row. ⛔ THE TWO DOORS IT
+#                        ABSORBS CONTRIBUTE NOTHING TO THIS KEYWORD and this note used to say
+#                        they did: `create_edge` and `create_operator` both resolve through
+#                        `derive_keyword` to `create` (their LEFTMOST table token is `create`;
+#                        `edge` and `operator` are never reached), so subtracting them from
+#                        `link` and adding them back was a double error — a wrong mechanism in
+#                        a right conclusion, which is the shape that gets copied. The keyword
+#                        they actually leave is accounted for in the `create` bullet below.
 #   · `list` 4 -> 3    — `tortoise_list_graphs` retires into `graph_overview(section="graphs")`.
-#   · `create` 8 -> 6  — a net effect of the same P7 batch: the two `create_*` doors leave
-#                        (their `create` keywords leave with them) and neither replacement
-#                        row derives `create` (`link_entities` derives `link`).
+#   · `create` 8 -> 6  — the same P7 batch's retirement half: the two `create_*` doors leave
+#                        and their `create` keywords leave with them (8 - 2 = 6), while neither
+#                        replacement row derives `create` — `link_entities` derives `link`.
 # `check`, `operate`, `update`, `find`, `delete` and `trace` are unmoved — `poll_events`
 # (`fetch`) replaces `events_poll` (`fetch`) one-for-one, and `delete_knowledge` replaces
 # the kept `delete` row one-for-one. Measured, not asserted: this is the check's own output
