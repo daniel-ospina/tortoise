@@ -1239,16 +1239,8 @@ def _docs_section(anchor: str = "storage", *, page: str | None = None) -> str:
 
 
 #: An `<h2 …>` opening tag, its attribute text captured whole. The slice bound
-#: reads the id out of that text instead of requiring `id` to be the tag's only
-#: attribute and its value unspaced.
+#: parses that text (see `_h2_id`); it never tries to match the tag itself.
 _H2 = re.compile(r"<h2\b([^>]*)>")
-
-#: `id` in an attribute list: quoted (either quote) or unquoted, whitespace
-#: allowed around `=`. WHATWG's HTML syntax permits all of it, and also permits
-#: digits and `_` in an attribute NAME — which is why nothing here matches the
-#: whole attribute list with a pattern.
-_ID = re.compile(r"""(?:^|\s)id\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""")
-
 
 #: The words the storage section may not use, and what the notices say instead.
 #: Shared with the mutation control so the two cannot disagree about the rule.
@@ -1263,17 +1255,25 @@ _BANNED_VOCABULARY = {
 
 
 def _h2_id(attribute_text: str) -> str | None:
-    """The `id` an `<h2 …>`'s attribute text carries, or `None`.
+    """The `id` a browser would see on `<h2 {attribute_text}>`, or `None`.
 
     `<h2 id="quickstart">`, `<h2 class="qs" id="quickstart">` and
-    `<h2 id = 'quickstart'>` are the same heading. A matcher that demanded the
+    `<h2 id = 'quickstart'>` are the same heading; a matcher that demanded the
     first spelling made the slice run to the end of the page the moment a later
-    heading grew an attribute (measured, #14073 review).
+    heading grew an attribute (#14073 review).
+
+    ⛔ PARSED, NEVER PATTERN-MATCHED — the same lesson as the attribute allowlist,
+    and this was the last place it was not applied. A pattern over the whole
+    attribute text also finds an `id=` written INSIDE another attribute's quoted
+    VALUE: `<h2 class='see id="quickstart"'>Limits</h2>` has NO id to a browser,
+    yet a pattern reads one and the slice ends at a heading that never bounded
+    anything — reproduced with a contradicting claim underneath it, all six pins
+    green (#14073 review round 6). Feeding the isolated tag to the repo's one
+    render-fidelity parser gives the id a browser would see, or none.
     """
-    match = _ID.search(attribute_text)
-    if match is None:
-        return None
-    return next(group for group in match.groups() if group is not None)
+    ids = [element_id for element_id, _line in
+           extract_element_ids(f"<h2 {attribute_text}></h2>")]
+    return ids[0] if ids else None
 
 
 def _h2_offset(html: str, anchor: str) -> int:
@@ -1609,6 +1609,31 @@ def test_the_storage_slice_bound_catches_the_heading_it_exists_for() -> None:
         "adding `class=` to the heading AFTER #storage moved the slice's end, so "
         "the golden now fails on an edit that does not touch the storage copy "
         "(#14073 review, non-blocking note)"
+    )
+
+    # ── a heading that only QUOTES an advertised id is not a boundary ────────
+    # `<h2 class='see id="quickstart"'>` has NO id to a browser. A pattern over
+    # the attribute text still reads one, ends the slice there, and a claim
+    # written under such a heading ships green — measured against every pin
+    # (#14073 review round 6). The id now comes from the parser, so this heading
+    # is an ordinary heading: it stays INSIDE the pinned slice.
+    quoting = page[:boundary] + (
+        "<h2 class='see id=\"quickstart\"'>Limits</h2>\n"
+        "<p>FalkorDB holds a slice of the record; above the allowance for your "
+        "tier, the least-used items are permanently deleted after thirty days.</p>\n"
+    ) + page[boundary:]
+    assert _h2_id(' class=\'see id="quickstart"\'') is None, (
+        "`_h2_id` reads an id out of another attribute's QUOTED VALUE, so a "
+        "heading that carries no id can still bound the slice"
+    )
+    quoting_slice = _docs_section(page=quoting)
+    assert " ".join(_visible_text(quoting_slice).split()) != reviewed, (
+        "a heading quoting an advertised id in a class value is still treated as "
+        "the slice boundary: the claim under it is never reviewed"
+    )
+    assert {"allowance", "falkor", "tier"} <= set(_banned_vocabulary(quoting_slice)), (
+        "the vocabulary pin does not see the text under a heading that merely "
+        "quotes an advertised id"
     )
 
 
