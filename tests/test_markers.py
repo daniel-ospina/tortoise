@@ -923,6 +923,13 @@ def test_no_redirect_stems_registry_exact():
         "test_ops_safety",
         "test_pre_migration_safety",
         "test_projection_lifecycle",
+        # #10502: the reaper's PINNED-platform pins. Two read `/proc/<pid>/comm`
+        # from a REAL child, so they carry a `sys.platform` skipif and the file is
+        # registered in `PLATFORM_GATED_TESTS`; a registered file must be run by
+        # the lane that owns `platform-gated.txt` (#4215), so it joins the
+        # carve-out. Registered in all three homes: ci-surfaces.yml:carve_out,
+        # TEST_NO_REDIRECT_STEMS, and here.
+        "test_reap_redislite_orphans",
         "test_reaper",
         "test_reaper_orphan",
         # #2814: authoritative-config durability across rebuild_all (embedded

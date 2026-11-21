@@ -366,10 +366,13 @@ def _split_one_arg_line(argv: list[str]) -> list[str]:
 def _read_proc_cmdline(pid: int) -> list[str] | None:
     """`argv` for `pid`, or None when `/proc/<pid>/cmdline` cannot be read.
 
-    None (unreadable) is deliberately distinct from `[]` (empty command line —
-    a zombie or a kernel thread): the first may be a process that vanished
-    mid-scan, the second is a process that HAS no argv to read a socket out of.
-    Both keep the process; only the second is a fact about the process itself.
+    None (unreadable) is distinct from `[]` (empty command line — a zombie or a
+    kernel thread) so the READER records which happened: the first may be a
+    process that vanished mid-scan, the second is a process that HAS no argv to
+    read a socket out of. ⛔ That distinction is in the return value only — every
+    consumer today takes the same `if not argv:` KEEP arm for both, so nothing
+    branches on it (PR #14182 review, note 2: the docstring is not a claim about
+    downstream behaviour).
     """
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as fh:
