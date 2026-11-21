@@ -261,7 +261,7 @@ kill_timeout = 30
 
 [[vm]]
   cpu_kind = "shared"
-  cpus = 2
+  cpus = 4
   memory_mb = 4096
   # memory_mb 512→2048→4096: torch + sentence-transformers + the 90MB model +
   # the app consistently OOM-crash-loops on 2GB cold boots (#545) — cold
@@ -269,6 +269,19 @@ kill_timeout = 30
   # which is the signature of a marginal-memory kill.
   # cpus bumped 1→2 so vector encoding doesn't starve the API thread during
   # cold starts and backfill. Estimated cost impact: +$1-3/mo (Fly shared-cpu-2x).
+  #
+  # #13665/#13722 — cpus bumped 2→4 (2026-11-21). This line is why the box runs
+  # what it runs: `fly scale vm` is a MANUAL operation, so a versioned `cpus = 2`
+  # reverted every hand-resize on the next deploy, and the machine was observed at
+  # 4 while this file said 2. MEASURED at 2 cores with 7 workloads in flight:
+  # `GET /v1/search` breached at 11.4 s (`stage=embed_encode`,
+  # `stages_ms={"pre_handler": 9360.7, "embed_get": 0.0}`) — the whole budget was
+  # spent in `pre_handler`, i.e. queued for a worker slot, before any handler ran.
+  # Code-level fixes were already deployed and exonerated (`embed_get` 7.9 s → 0,
+  # event loop no longer blocked, health probe no longer scans the graph).
+  # At 4 cores, same endpoints, same data: `/v1/search` 200 in 0.84–1.12 s and
+  # `/v1/context` 200 in 1.14–1.22 s with `degraded_reason` absent. Cost: +$2/mo
+  # at the published shared-CPU rate (~$2.19/core + $6/GB beyond the preset).
 
 [[mounts]]
   source = "tortoise_api_data"
