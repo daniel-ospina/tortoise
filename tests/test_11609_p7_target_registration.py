@@ -561,3 +561,93 @@ class TestBothLinkArmsAreQuotaGated:
             "the LIST arm reached the operator writer without the quota wrapper")
         assert getattr(seen[1], "__func__", seen[1]) is TortoiseSDK.link_entities, (
             "the SCALAR arm reached the SDK's edge dispatch without the quota wrapper")
+
+
+class TestTheRelationDecidedArmCountsItsPointCreates:
+    """R1 metering: the wrapper checks the cap, but the WEIGHT is a separate claim.
+
+    `_quota_gated(sdk.link_entities, "points")` records no `point_create` at all, and
+    the SCALAR arm can create a Point — `link_entities("supports", a, b)` reaches the
+    SDK's `create_operator` (the meaning's mechanism), and so does `operator=True` on
+    any relation. So the arm that shipped counted a plain edge correctly and lost the
+    operator half of its own dispatch. A flat `1` would be the opposite error: an
+    ordinary `performs` link would be billed as a Point create, tripping an abuse
+    signal on the most common call this door serves.
+
+    The rule must also not be a SECOND copy of the SDK's dispatch: it is read from the
+    SDK's own `_EPISTEMIC_RELATION_MEANINGS`, or the day a meaning is added the door
+    and the SDK disagree with nothing red.
+    """
+
+    @pytest.mark.parametrize("relation,expected", [
+        ("supports", 1),        # meaning -> SEMANTICS_MECHANISMS -> create_operator
+        ("refutes", 1),
+        ("mutuallySupportive", 1),
+        ("IMPL", 0),            # plain edge on this arm
+        ("performs", 0),
+        ("ownedBy", 0),
+        ("references", 0),
+    ])
+    def test_the_weight_follows_the_SDK_s_own_dispatch_table(self, relation, expected):
+        weight = ms._link_entities_scalar_abuse_weight(
+            {"edge": 1}, (relation, "a", "b"), {})
+        assert weight == expected, (
+            f"{relation!r} was weighted {weight}: an operator Point and a plain edge "
+            "cannot share a weight, or the abuse signal means nothing")
+
+    def test_an_explicit_operator_true_is_weighted(self):
+        assert ms._link_entities_scalar_abuse_weight(
+            {"": 1}, ("ownedBy", "a", "b"), {"operator": True}) == 1
+
+    def test_the_scalar_arm_PASSES_a_weight_to_the_wrapper(self):
+        """Wiring, not just the helper: the wrapper must RECEIVE the callable."""
+        import inspect
+
+        src = inspect.getsource(ms.tortoise_link_entities)
+        assert "abuse_weight=_link_entities_scalar_abuse_weight" in src, (
+            "the relation-decided arm is wrapped without an abuse_weight, so the "
+            "operator it can create is never recorded as a point_create")
+
+
+class TestThePreviewReceiptIsNotWiderThanTheDefect:
+    """The review's F5 premise, measured — and the half that is actually true.
+
+    The review reported that a caller of the ADVERTISED `tortoise_delete_knowledge`
+    "gets a receipt naming the retired door". Verifying it against primary source: the
+    preview's `tool` field said `tortoise_delete`, but `tortoise_delete_knowledge`
+    REBUILDS the reply through `_deletion.receipt(...)`, which has no `tool` key and
+    copies only `target`/`found`/`nodes_removed`/`edges_removed`/`nodes`/`edges` from
+    it. So the retired literal never reached a caller — it was a DEAD assignment.
+
+    Both halves are pinned here, because the fix is only honest if the second one stays
+    true: if a future consumer starts forwarding `preview["tool"]` into the receipt, the
+    receipt must be naming the LIVE door, not the retired spelling.
+    """
+
+    def _stub(self, monkeypatch, served):
+        sdk, calls = served("_delete", True)
+
+        class _Proj:
+            @staticmethod
+            def _resolve_entity(*_a, **_k):
+                return []
+
+        monkeypatch.setattr(sdk, "_get_proj", lambda: _Proj(), raising=False)
+        return sdk, calls
+
+    def test_the_preview_field_names_the_ADVERTISED_door(self, monkeypatch, served):
+        sdk, _calls = self._stub(monkeypatch, served)
+        preview = ms._preview_delete(sdk, "nope")
+        assert preview["tool"] == "tortoise_delete_knowledge", preview
+        assert preview["tool"] in {t.name for t in TOOL_REGISTRY}, (
+            "the preview names a door the surface does not advertise, so a caller "
+            "following it calls a tool it was never offered")
+
+    def test_the_caller_visible_receipt_names_no_retired_door(self, monkeypatch, served):
+        _sdk, calls = self._stub(monkeypatch, served)
+        receipt = ms.tortoise_delete_knowledge("nope")
+        assert calls == [], "the preview reached the writer"
+        named = [name for name in RETIRED_USE_INSTEAD if name in str(receipt)]
+        assert not named, (
+            f"the receipt a caller receives names the retired {named} — the value a "
+            "caller re-calls must be one `tools/list` advertises")

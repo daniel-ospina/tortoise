@@ -1058,3 +1058,58 @@ class TestProtectedDoorsStayLive:
             f"`tortoise_query` no longer accepts {missing}: it is protected as the PAGED "
             f"destination ({PROTECTED['tortoise_query']}) and both retired pointers name "
             "that paging — re-point them in the batch that removes it")
+
+
+class TestEveryReaderNamesTheLiveListingDoor:
+    """A retirement is not done while a READER still instructs the retired spelling.
+
+    #11609 lane P7 retired `tortoise_list_graphs` FORWARD into
+    `tortoise_graph_overview(section="graphs")`. The registry, the shim and the bridge
+    table all say so — but a doc is a reader too, and it is the reader a person ACTS on.
+    Measured at the reviewed head (P7 review, P2): the provisioning how-to still told the
+    reader to call the retired name in two places, one of them a troubleshooting row whose
+    entire purpose is to name the call that fixes the error.
+
+    ⛔ This is NOT a "grep the docs for every retired name" guard, and it must not become
+    one: `docs/product/bridge-table.md` deliberately lists all 73, and a global scan would
+    have to be taught the difference between a MIGRATION TABLE and an INSTRUCTION. It is
+    scoped to the documents whose every `tortoise_*` mention is a call, which is what makes
+    the assertion exact instead of aspirational.
+    """
+
+    #: Documents whose every `tortoise_*` mention is an instruction to CALL it.
+    CALL_INSTRUCTION_DOCS: ClassVar[tuple[str, ...]] = (
+        "docs/how-to/provision-a-graph-per-end-user.md",
+    )
+
+    @pytest.mark.parametrize("relpath", CALL_INSTRUCTION_DOCS)
+    def test_every_mention_says_the_name_is_retired(self, relpath):
+        """A retired name may be MENTIONED here — it may not be RECOMMENDED.
+
+        Asserting absence outright would be wrong, and this lane measured why: the
+        correct repair keeps a migration note (…"the door `tortoise_list_graphs`
+        retired forward into") so a reader who knows the old name learns where it
+        went. The property worth pinning is narrower and sharper — every mention is
+        labelled as a retirement in its own sentence. An INSTRUCTION ("call
+        `tortoise_list_graphs`, which answers …") has no such word, and that is
+        exactly the form the P7 review found twice in this file.
+        """
+        from pathlib import Path
+
+        doc = Path(__file__).resolve().parent.parent / relpath
+        text = doc.read_text(encoding="utf-8")
+        unlabelled = []
+        for name in sorted(RETIRED_USE_INSTEAD):
+            for match in re.finditer(rf"\b{re.escape(name)}\b", text):
+                window = text[max(0, match.start() - 140):match.end() + 140]
+                if "retire" not in window.lower():
+                    unlabelled.append((name, " ".join(window.split())))
+        assert not unlabelled, (
+            f"{relpath} names a retired door without saying it is retired, so the "
+            f"reader takes it as the call to make: {unlabelled}. The name is "
+            "shim-only on `get_tool` and absent from `tools/list`, so a tool-grant "
+            "client cannot follow it — name the live door and label the old one, or "
+            "drop the mention")
+        assert "tortoise_graph_overview" in text, (
+            f"{relpath} no longer names the live listing door at all — the repair for "
+            "this guard is a RE-POINT, never a deletion")
