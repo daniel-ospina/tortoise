@@ -373,11 +373,17 @@ SWEEP_NAMES = 66
 #: gave a false one: it said a pre-rebase commit "is reachable from no ref and disappears on the
 #: next `gc`", and that commit (`83e94826a8a`) is an ANCESTOR of a ref, `refs/pull/14108/head`, which
 #: `git gc` does not prune. What IS measured of it: on no remote BRANCH (`git branch -r --contains
-#: 83e94826a8a` → empty) and not on `main` (`git merge-base --is-ancestor` → NO), and not fetchable
-#: BY ITS SHA at all — `git fetch origin 83e94826a8a` from a bare clone answers `couldn't find
-#: remote ref`; only `git fetch origin refs/pull/14108/head` resolves it. So a sha here would address
-#: a ref that MOVES rather than a tree: exactly the unreproducible address this block forbids
-#: elsewhere).
+#: 83e94826a8a` → empty) and not on `main` (`git merge-base --is-ancestor` → NO). ⛔ "NOT FETCHABLE
+#: BY ITS SHA AT ALL" WAS ITSELF FALSIFIED (raised by review), and by the very command it cited —
+#: which is why it is corrected rather than carried: `git fetch origin 83e94826a8a` fails on the
+#: 13-character ABBREVIATION, NOT on the sha. git cannot `want` an abbreviation, and a FULL
+#: 40-character sha IS served — `git fetch --depth=1 <url> <full sha>` in an EMPTY BARE repo returns
+#: the commit, measured. So the fragility is narrower than "unreproducible": the address works only
+#: written out in full, and reads as broken in the form this block normally prints it in. The rule
+#: therefore stands on what IS measured — no branch and no `main` reaches such a commit, so it sits
+#: outside every history a reader browses — and not on a `gc` sweep that never happens: which is why
+#: this note points at the ISSUE NUMBER, and reserves the sha for the one place where the ADDRESS is
+#: the claim (the `#14068` attribution below, where it is written out and its limits stated).
 #: ⛔ The −6 is verified as an ATTRIBUTION and not as a direction: the residue row sets were
 #: MEASURED on both trees and diffed row by row (`py_files()` → `edits_for()` → `residue` on
 #: `origin/main`'s own tree and on this one), and `poisoned.update` 6 → 0 is the ONLY row that
@@ -437,13 +443,16 @@ SWEEP_NAMES = 66
 #: resolves to a ref that tracks the branch's CURRENT head, `d523c9be8c`, and `83e94826a8a` is the
 #: OLDEST of the EIGHT commits between `2fe01fc775e` and it (`git log --oneline
 #: 2fe01fc775e..d523c9be8c`). On that head this sentence does not drift, it INVERTS: `d523c9be8c`
-#: DELETES the `seen.update` line and leaves a comment where it was (`git diff 2fe01fc775e
-#: d523c9be8c -- '*.py'`), so "re-indented, already counted" is true ONLY on `83e94826a8a`. The sha is
-#: resolvable, and by the only path it has: `git fetch origin refs/pull/14108/head`, measured from a
-#: bare clone — NOT by sha, see the note above on `#14058`. Its own pin is `(11839,
-#: "0a7e60fa05aa31b9")`, the same pair as the parent `2fe01fc775e`, so it carries no residue
-#: measurement the parent lacks and nothing here rests on it except the ADDRESS, which is the point:
-#: an address that resolves to a different tree is the defect this block exists to catch.
+#: DELETES the `seen.update` line and puts `calls.append(…)` in that position (`git diff
+#: 2fe01fc775e d523c9be8c -- '*.py'`; the added `⛔ EVERY call is recorded…` comment sits LATER in
+#: the same helper, not where the line was — an earlier draft of this clause said "leaves a comment
+#: where it was", and the position holds code, raised by review), so "re-indented, already counted"
+#: is true ONLY on `83e94826a8a`. The sha IS resolvable: `git fetch origin refs/pull/14108/head`
+#: measured from a bare clone, and a FULL 40-character sha is served directly while the abbreviation
+#: is not — see the note above on `#14058` for which form reproduces and which does not. Its own pin
+#: is `(11839, "0a7e60fa05aa31b9")`, the same pair as the parent `2fe01fc775e`, so it carries no
+#: residue measurement the parent lacks and nothing here rests on it except the ADDRESS, which is
+#: the point: an address that resolves to a different tree is the defect this block exists to catch.
 #: So `graph.query` is **276** here, `super().query` **68**, `client.delete` **43** — read with
 #: `--report`, not with a grep. A raw whole-tree grep is NOT that reading: it counts OCCURRENCES,
 #: prose included, not the pinned residue ROW, and it counts this block's OWN prose about the
