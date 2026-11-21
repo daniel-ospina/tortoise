@@ -378,7 +378,7 @@ def hooked_sdk(ledger, monkeypatch):
     return inst, _Graph
 
 
-def test_the_three_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
+def test_the_three_hooked_row_paths_feed_the_ledger(hooked_sdk):
     """A hook that is not exercised is a hook that will be lost in a refactor.
 
     ⛔ THIS PINS THREE OF THE HOOKED SDK METHODS, and its name says so. The other
@@ -390,19 +390,35 @@ def test_the_three_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
     did not have, so the claim is narrowed to what the body drives rather than
     the guard being trusted on its title.
 
-    Each of `_query()`, `_paginated_query()` and `_query_points_by_tag()` returns
-    Point rows to a CALLER, so each must record exactly ONE read event per
-    returned key — no fewer (a missed record inflates the never-read mass, which
+    ⛔ WHICH of the three has a caller-facing recording path is NOT uniform at
+    this head, so the pin below is about each door's DEFAULT, not about three
+    live caller routes (asserting three would certify coverage this body does
+    not reach — the same error the former title made):
+
+    * `_paginated_query()` IS caller-facing: `list_knowledge(kind="claim")`
+      dispatches it with recording ON, so every row it returns is a caller read.
+    * `_query()` has NO caller-facing recording route after #13899 retired the
+      public spelling. All three production call sites pass
+      `_record_reads=False` (`issue_insight`, the FTS TF-IDF fallback and
+      `recall_gaps` — the #7983 capture carve-out), so the
+      `_ledger_record("Point", …)` at the end of `_query` is reachable only from
+      a test. The row still pins that DEFAULT, because it is what any future
+      caller-facing door inherits.
+    * `_query_points_by_tag()` is reached by `search_knowledge(mode="tag")` with
+      `_record_reads=False`, and that container records the page it SERVES
+      itself (the MCP tag tool does the same two steps) — so the door default is
+      not what the container drives either. Same pin, same reason.
+
+    Each must therefore record exactly ONE read event per returned key on its
+    default — no fewer (a missed record inflates the never-read mass, which
     flatters the split) and no more (a double record overstates how many reads a
     key gets, which is the same class of wrong as a lost one).
 
     ⛔ The PUBLIC spellings these hooks served (`query`, `paginated_query`,
     `get_point`, `query_points_by_tag`) were retired by #13899/#4282, so the
-    doors are driven directly. That is the path the public containers still
-    take, not a bypass of it: `list_knowledge(kind="claim")` dispatches
-    `_paginated_query`, and `search_knowledge(mode="tag")` reaches
-    `_query_points_by_tag`. Driving the retired names would only prove the
-    retirement hint still raises.
+    doors are driven directly; driving the retired names would only prove the
+    retirement hint still raises. `_get_point` is driven for the OPPOSITE
+    reason — it must record NOTHING, pinned below.
     """
     inst, graph = hooked_sdk
     # The keys must exist as STOCK first, or every read is (correctly) reported
@@ -749,9 +765,9 @@ def test_a_capped_file_still_says_so_when_one_tenant_is_folded(ledger, monkeypat
 def test_an_internal_population_scan_is_not_recorded_as_a_read(hooked_sdk):
     """`recall_gaps` / `issue_insight` / the FTS fallback scan the WHOLE stock.
 
-    They call `_query()` to do it (the door `query` retired into; the public
-    containers still reach it), so recording them would mark every Point read
-    after one `recall_gaps()` call — `f` → ~1, the exact contamination excluding
+    They call `_query(_record_reads=False)` to do it (the door `query` retired
+    into; no production caller reaches it with recording ON), so recording them
+    would mark every Point read after one `recall_gaps()` call — `f` → ~1, the exact contamination excluding
     `_get_point` prevented, and it would silently invalidate the one-directional
     "the gaps bias `f` LOW" caveat the docs rest on.
     """
@@ -768,7 +784,9 @@ def test_an_internal_population_scan_is_not_recorded_as_a_read(hooked_sdk):
     graph.rows = [{"id": "p1"}]
     inst._query()
     counts = {k[2]: row.read_count for k, row in fold().rows.items()}
-    assert counts == {"p1": 1, "p2": 0}, "the caller-facing default still records"
+    assert counts == {"p1": 1, "p2": 0}, (
+        "the door's DEFAULT still records — a caller omitting the flag must "
+        "still be counted")
 
 
 def test_the_mode_tightening_skips_a_directory(tmp_path, monkeypatch):

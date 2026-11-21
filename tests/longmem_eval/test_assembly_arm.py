@@ -63,8 +63,9 @@ _PROBE_GRAPH = f"{_URI}_probe"
 #: `FALKORDB_AVAILABLE = False`, so this suite SKIPPED locally and HARD-FAILED in
 #: CI (where `TORTOISE_TEST_EXPECT_URI=1` refuses the skip) with a message that
 #: named no door. Naming them here makes a future rename fail loudly instead.
-#: Keep in step with `_PROBE_WRITE_DOORS` in
-#: `tests/test_8057_probe_embedder_mask.py`.
+#: A point WRITE door here must also appear in `_PROBE_WRITE_DOORS`
+#: (`tests/test_8057_probe_embedder_mask.py`), the census that keeps these three
+#: probes declared; `_tortoise_fts_query` is a READ door and has no entry there.
 _PROBE_DOORS = ("create_entity", "_tortoise_fts_query")
 _probe = None
 try:
@@ -77,7 +78,10 @@ try:
             "the storage probe calls TortoiseSDK."
             + ", TortoiseSDK.".join(_missing)
             + " — a RENAMED/REMOVED door, not missing storage (#14114). "
-            "Update _PROBE_DOORS here and _PROBE_WRITE_DOORS in "
+            "Update _PROBE_DOORS in tests/test_assembly_sdk.py, "
+            "tests/test_assembly_fixtures.py and "
+            "tests/longmem_eval/test_assembly_arm.py; a point WRITE door is "
+            "also listed in _PROBE_WRITE_DOORS in "
             "tests/test_8057_probe_embedder_mask.py.")
     # #8057: the probe WRITES a point, and `create_point` derives an embedding
     # (`encode_for_store` -> `EmbeddingModel.get`). This runs at MODULE IMPORT,

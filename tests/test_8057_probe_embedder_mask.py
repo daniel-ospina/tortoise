@@ -107,6 +107,56 @@ _CHILD_SCRIPT = textwrap.dedent(
     '''
 )
 
+#: Import each declared probe in a FRESH interpreter with the doors in its
+#: `_PROBE_DOORS` DELETED from `TortoiseSDK` — the #13899 rename REPLAYED.
+#: One process for all three modules: the guard fires before the probe's own
+#: `try` can reach storage (the URI is assigned inside it), so this arm needs
+#: neither a live FalkorDB nor an embedder, and it pays one `tortoise.sdk`
+#: import instead of three. Each module's outcome is reported separately, so a
+#: probe that lost its guard is NAMED rather than hidden behind a sibling.
+_DOOR_DELETION_SCRIPT = textwrap.dedent(
+    '''
+    import importlib.util
+    import json
+    import os
+    import sys
+    import traceback
+
+    root, payload = sys.argv[1], sys.argv[2]
+    targets = json.loads(payload)
+    sys.path.insert(0, root)
+    os.environ["TORTOISE_EMBEDDER_WARMUP"] = "0"
+
+    from tortoise.sdk import TortoiseSDK
+
+    out = {}
+    gone = set()
+    for rel, doors in targets:
+        for door in doors:
+            if hasattr(TortoiseSDK, door):
+                delattr(TortoiseSDK, door)
+        gone.update(doors)
+        # Cumulative on purpose: the deletion is process-wide, so by the second
+        # module its doors are already gone. What must hold for EVERY module is
+        # that the doors IT asserts are absent when IT imports.
+        absent = sorted(d for d in gone if not hasattr(TortoiseSDK, d))
+        spec = importlib.util.spec_from_file_location(
+            "_probe_renamed_" + rel.replace("/", "_").replace(".py", ""),
+            os.path.join(root, rel))
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            out[rel] = {"raised": traceback.format_exc(), "available": None,
+                        "absent": absent}
+        else:
+            out[rel] = {"raised": None,
+                        "available": bool(module.FALKORDB_AVAILABLE),
+                        "absent": absent}
+    print(json.dumps(out))
+    '''
+)
+
 
 # ── the mask itself: both seams, restored exactly ─────────────────────────
 
@@ -175,6 +225,29 @@ def test_mask_embedder_restores_when_the_block_raises():
 
 
 # ── the census: no probe module can slip past the registry ───────────────
+
+
+def _declared_probe_doors(rel: str) -> tuple[str, ...]:
+    """The `_PROBE_DOORS` a probe module asserts, read WITHOUT importing it.
+
+    Parsed, not executed: importing the module here would run the probe in the
+    PARENT process, which is the one thing this file exists to keep out of an
+    import path.
+    """
+    import ast
+
+    for node in ast.parse((ROOT / rel).read_text()).body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(isinstance(t, ast.Name) and t.id == "_PROBE_DOORS"
+               for t in node.targets):
+            return tuple(ast.literal_eval(node.value))
+    raise AssertionError(
+        f"{rel} declares no module-level `_PROBE_DOORS`: the probe's doors must "
+        "be asserted BY NAME (#14114), or a renamed door is read as 'no "
+        "storage' by the broad `except Exception` again.")
+
+
 
 
 def _module_level_write_probe_lines(path: Path) -> list[int]:
@@ -274,3 +347,75 @@ def test_probe_import_never_reaches_the_embedder(rel, tmp_path):
         f"({marker.read_text().strip()!r}). On a cold lane that is the "
         "50-205s sentence-transformers/torch load paid at import (#8057); wrap "
         "the probe in `tests._live_utils.mask_embedder()`.")
+
+
+# ── the guard's own failure path: a renamed door must NAME itself ─────────
+
+
+def test_a_renamed_probe_door_names_itself_instead_of_skipping():
+    """THE guard's failure path, made a row instead of a measurement (#14114).
+
+    `_PROBE_DOORS` + the `(AttributeError, TypeError, NameError)` re-raise are
+    the right SHAPE — pytest narrows `importorskip` to the missing-dependency
+    class for exactly this reason, a skip being for an unavailable ENVIRONMENT
+    and not for a programming defect — but until this arm existed nothing in the
+    tree moved when either was removed: the failure path needs an SDK-surface
+    change, so `test_probe_import_never_reaches_the_embedder` stays green while
+    the guard that names a renamed door is deleted. That is the non-vacuity gap
+    (the commit's evidence was a manual measurement with no artifact).
+
+    Here the rename is REPLAYED: the doors are removed from `TortoiseSDK` in a
+    child interpreter and each probe must fail at IMPORT with its OWN message.
+
+    Two mutants redden here, which is why the assertions are on the guard's
+    MESSAGE and not merely on a non-zero exit:
+
+    * delete the `_missing` block → the import blows up at the call site on a
+      live lane, and is swallowed into `FALKORDB_AVAILABLE = False` on a
+      no-storage lane; the guard's message is absent in BOTH;
+    * revert the narrowed catch to `except Exception` → nothing raises at all.
+    """
+    targets = [[rel, list(_declared_probe_doors(rel))] for rel in PROBE_MODULES]
+    proc = subprocess.run(
+        [sys.executable, "-c", _DOOR_DELETION_SCRIPT, str(ROOT),
+         json.dumps(targets)],
+        capture_output=True, text=True, cwd=str(ROOT), timeout=600,
+        env={**os.environ},
+    )
+    assert proc.returncode == 0, (
+        "the door-deletion child failed — that is this harness, not a probe:\n"
+        f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}")
+
+    report = json.loads(proc.stdout.strip().splitlines()[-1])
+    for rel, doors in targets:
+        entry = report[rel]
+        assert set(doors) <= set(entry["absent"]), (
+            f"{rel}: {sorted(set(doors) - set(entry['absent']))} still present "
+            "on TortoiseSDK when the module imported, so the replay proves "
+            "nothing. Keep _PROBE_DOORS in step with the SDK surface.")
+        raised = entry["raised"]
+        assert raised is not None, (
+            f"{rel}: importing with {doors} REMOVED from TortoiseSDK did NOT "
+            "raise — that is the #14114 defect back. A renamed door read as "
+            f"'no storage' (FALKORDB_AVAILABLE={entry['available']}): a silent "
+            "skip locally and a hard CI fail naming no door.")
+        assert "RENAMED/REMOVED door, not missing storage (#14114)" in raised, (
+            f"{rel}: the import failed, but not with the guard's OWN message — "
+            "the `_missing` block is gone, so the renamed door is no longer "
+            f"named for whoever has to fix it:\n{raised}")
+        for door in doors:
+            assert door in raised, (
+                f"{rel}: the failure names no `{door}` — the message must say "
+                f"WHICH door moved:\n{raised}")
+        # …and it must say where to fix it: the census file AND all three probe
+        # modules, because `_PROBE_WRITE_DOORS` lists only the WRITE spelling
+        # and a reader sent there for a READ door is sent to a tuple that does
+        # not contain it.
+        assert "tests/test_8057_probe_embedder_mask.py" in raised, (
+            f"{rel}: the failure does not say where `_PROBE_WRITE_DOORS` "
+            f"lives:\n{raised}")
+        for other in PROBE_MODULES:
+            assert other in raised, (
+                f"{rel}: the failure does not name `{other}` — every one of "
+                "the three carries its own `_PROBE_DOORS`, and the reader is "
+                f"being told to fix exactly this one:\n{raised}")
