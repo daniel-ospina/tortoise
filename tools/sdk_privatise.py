@@ -381,7 +381,7 @@ SWEEP_NAMES = 66
 #: the commit, measured. So the fragility is narrower than "unreproducible": the address works only
 #: written out in full, and reads as broken in the form this block normally prints it in. The rule
 #: therefore stands on what IS measured — no REMOTE branch and no `main` reaches such a commit (a
-#: leftover LOCAL branch may still contain it; the remote ref was deleted on merge), so it sits
+#: leftover LOCAL branch may still contain it; the remote ref itself is gone), so it sits
 #: outside every branch history the repo PUBLISHES (it IS inside `refs/pull/14108/head`'s, which is this
 #: paragraph's own point, stated earlier in it — ⛔ NOT "four lines above", as an earlier draft of
 #: this clause said: that offset does not reproduce, and an offset is the same RELATIVE-REFERENCE
