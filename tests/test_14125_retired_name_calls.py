@@ -849,12 +849,28 @@ def _reaches_capability_seam(block: ast.AST) -> bool:
 
 
 def _probe_roots(tree: ast.Module) -> list[ast.Try]:
-    """The `try` blocks that DECIDE availability — two shapes in this tree.
+    """The `try` blocks that DECIDE availability — FOUR admission rules.
 
-      * a module-body `try` that assigns an availability flag;
-      * the probe `try` inside a module-level helper the flag is resolved by
+      * a module-body `try` that assigns an `*AVAILABLE` flag (own-code contact
+        required);
+      * a module-body `try` that binds a name the module's own `skipif`/`skip`
+        condition READS — `LIVE`, `_FTS_ESCAPE_LIVE`, `_LIVE_OK` are the same
+        decision as `FALKORDB_AVAILABLE` even though none ends in `AVAILABLE`;
+      * the probe `try` inside a module-level helper the flag is RESOLVED by
         (`FALKORDB_AVAILABLE = _falkordb_available()`), reached through the
-        control flow of that helper — the guard may sit inside a `for`.
+        helper's control flow — the guard may sit inside a `for`;
+      * the probe `try` inside a helper a SKIP decision calls — directly from a
+        `skipif`, or through a sentinel (`uri = _live_target()` … `if uri is None:
+        pytest.skip(…)`), where no flag exists at all.
+
+    The contract above is the code's, not an aspiration: a docstring that said
+    "two shapes" while the function admitted four told any lane auditing this
+    gate from its own contract that half its population was ungraded (review of
+    3ce7ffdd867, P2). Measured per-branch root counts at that head: 26 / 5 / 15 / 5.
+
+    Both module-body rules walk module-level CONTROL FLOW (`if`/`for`/`with`, and
+    through a handler-less `try/finally` — a pure wrapper, see
+    `_control_flow_tries`).
 
     Nested `try`s inside a probe body are not roots: a `try/_proj.close()/except
     Exception: pass` cleanup is not the availability decision. The import-seam
@@ -901,7 +917,12 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
             isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
             and stmt.name in resolvers
         ):
-            own_names = _own_imported_names(stmt.body)
+            # MODULE-level own imports belong in this set: `_touches_own_code`
+            # promises that a probe reading a door imported ABOVE the guard is
+            # still the seam, and reusing a module-scope import is the common
+            # spelling — grading only the helper's own imports left that shape
+            # ungraded with the census green (review of 3ce7ffdd867, P2).
+            own_names = _own_imported_names(stmt.body) | module_own
             roots.extend(
                 block
                 for block in _control_flow_tries(stmt.body)
@@ -924,7 +945,7 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
             # optional extra, and demanding a re-raise for it would turn a
             # legitimate skip into a collection error, contradicting the rule
             # that an absent capability skips.
-            own_names = _own_imported_names(stmt.body)
+            own_names = _own_imported_names(stmt.body) | module_own
             roots.extend(
                 block
                 for block in _control_flow_tries(stmt.body)
@@ -1852,6 +1873,30 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     assert wrapped_guard == ((6, (), True, True, True),), (
         "a guard under a handler-less `try/finally` is a pure WRAPPER, not a "
         f"cleanup: the probe inside it is still the decision: {wrapped_guard}"
+    )
+
+    # 4g. A helper that reuses a MODULE-LEVEL own import is still the seam: the
+    #     door is read through the guard, which is exactly what `_touches_own_code`
+    #     promises. Grading only the helper's OWN imports left this shape ungraded
+    #     with the census green, and `from tortoise.sdk import TortoiseSDK` at
+    #     module scope is the COMMON spelling (review of 3ce7ffdd867, P2).
+    module_scope_door = roots(
+        """
+        from tests._live_utils import docker_uri
+
+        def _probe():
+            try:
+                docker_uri("tortoise_test_x")
+                return True
+            except Exception:
+                return False
+
+        FALKORDB_AVAILABLE = _probe()
+        """
+    )
+    assert module_scope_door == ((5, (), True, False, True),), (
+        "a helper reading an own-code name imported at MODULE scope must be "
+        f"graded — the import is above the guard, not inside it: {module_scope_door}"
     )
 
     # 5. The real tree must carry all four shapes, or every assertion above is a
