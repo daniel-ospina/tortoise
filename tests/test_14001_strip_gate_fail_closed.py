@@ -1297,6 +1297,9 @@ def test_no_declared_entity_writer_mentions_a_dynamic_namespace():
     #: skip. EVERY other skip is silent shrinkage of the population the over-refusal claim rests
     #: on — and a shrunk population still satisfied a bare `examined > 0` (measured: 14 of 24),
     #: which is the whole reason this set is declared rather than inferred.
+    #: ⛔ AN EXACT MODULE, NOT A PREFIX (`#14099` review of `7c6ad128`). `startswith` would let a
+    #: future `tortoise.sdk_v2` inherit the exemption without anyone declaring it — the exemption is
+    #: a statement about ONE module, so it is matched on the module component alone.
     ENV_OPTIONAL_MODULES = ("tortoise.sdk",)
 
     offenders: list[str] = []
@@ -1327,7 +1330,7 @@ def test_no_declared_entity_writer_mentions_a_dynamic_namespace():
         examined.append(key)
         if any(strip._is_dynamic_namespace_reference(node) for node in ast.walk(bodies[symbol][0])):
             offenders.append(key)
-    stray = [k for k in unreadable if not k.startswith(ENV_OPTIONAL_MODULES)]
+    stray = [k for k in unreadable if k.partition("::")[0] not in ENV_OPTIONAL_MODULES]
     assert stray == [], (
         "a writer outside the declared environment-optional modules could not be read, so it "
         f"left this pin's population for a reason that is not the environment: {stray} "
