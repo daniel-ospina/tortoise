@@ -1,0 +1,195 @@
+{
+  "readers": [
+    {
+      "file": "tortoise/event_store.py",
+      "line": "992",
+      "reader": "read_after",
+      "snippets": [
+        "MATCH (e:GraphEvent) WHERE e.seq > $after",
+        "RETURN properties(e) ORDER BY e.seq ASC LIMIT $limit"
+      ],
+      "needs": "ordered range scan on seq, optional type filter, LIMIT + dedupe",
+      "class": "serving",
+      "why": "this is the ONLY read that produces feed rows: `poll_events`, webhook_delivery.dispatch_pending, why_snapshot and change_feed all page through it. SQL-shaped (an indexed range scan), not a graph capability."
+    },
+    {
+      "file": "tortoise/event_store.py",
+      "line": "801",
+      "reader": "append_event (dedupe pre-check)",
+      "snippets": [
+        "MATCH (e:GraphEvent {event_id:$id}) RETURN count(e)"
+      ],
+      "min_occurrences": 2,
+      "needs": "key existence on event_id",
+      "class": "maintenance",
+      "why": "a dedupe probe before the CREATE; a unique index answers it. The same statement is also `_event_row_exists` below, so this row requires BOTH occurrences."
+    },
+    {
+      "file": "tortoise/event_store.py",
+      "line": "816",
+      "reader": "append_event (the write)",
+      "snippets": [
+        "CREATE (e:GraphEvent {seq:$seq, ts:$ts, type:$type, ",
+        "event_id:$event_id, payload:$payload})"
+      ],
+      "needs": "an insert",
+      "class": "maintenance",
+      "why": "the store's only writer."
+    },
+    {
+      "file": "tortoise/event_store.py",
+      "line": "410",
+      "reader": "ensure_event_schema (event_id index)",
+      "snippets": [
+        "CREATE INDEX FOR (n:GraphEvent) ON (n.event_id)"
+      ],
+      "needs": "DDL: an exact-match index",
+      "class": "maintenance",
+      "why": "one of the three schema statements `ensure_event_schema` issues \u2014 the schema a re-home must recreate, which is why it is censused and not assumed."
+    },
+    {
+      "file": "tortoise/event_store.py",
+      "line": "415",
+      "reader": "ensure_event_schema (unique constraint)",
+      "snippets": [
+        "GRAPH.CONSTRAINT CREATE tortoise_ge_uid UNIQUE NODE GraphEvent",
+        "PROPERTIES 1 event_id"
+      ],
+      "needs": "DDL: a uniqueness constraint on event_id",
+      "class": "maintenance",
+      "why": "the belt behind the dedupe pre-check (the app-side probe is the suspenders). \u26a0\ufe0f Issued through `g.query()` inside a `try/except` that only logs, so on a server without the verb it is REFUSED and production runs without it."
+    },
+    {
+      "file": "tortoise/event_store.py",
+      "line": "421",
+      "reader": "ensure_event_schema (seq index)",
+      "snippets": [
+        "CREATE INDEX FOR (n:GraphEvent) ON (n.seq)"
+      ],
+      "needs": "DDL: a range index",
+      "class": "maintenance",
+      "why": "the index `read_after`'s ordered scan plans against."
+    },
+    {
+      "file": "tortoise/event_store.py",
+      "line": "879",
+      "reader": "_event_row_exists",
+      "snippets": [
+        "MATCH (e:GraphEvent {event_id:$id}) RETURN count(e)"
+      ],
+      "min_occurrences": 2,
+      "needs": "key existence",
+      "class": "maintenance",
+      "why": "#9208's loss discriminator: asks whether a failed append landed. Shares its statement text with the dedupe probe above, which is why the two rows both require TWO occurrences in the file."
+    },
+    {
+      "file": "tortoise/event_store.py",
+      "line": "1029",
+      "reader": "purge_expired",
+      "snippets": [
+        "MATCH (n:GraphEvent) WHERE n.ts < $cutoff",
+        "WITH n LIMIT 10000 DETACH DELETE n RETURN count(*)"
+      ],
+      "needs": "predicate delete",
+      "class": "maintenance",
+      "why": "retention by policy (#13084 owns the policy); SQL-shaped."
+    },
+    {
+      "file": "tortoise/event_store.py",
+      "line": "1043",
+      "reader": "purge_overflow (count)",
+      "snippets": [
+        "MATCH (n:GraphEvent) RETURN count(n)"
+      ],
+      "needs": "a whole-label count",
+      "class": "maintenance",
+      "why": "the overflow path's total, counted before it decides the excess."
+    },
+    {
+      "file": "tortoise/event_store.py",
+      "line": "1053",
+      "reader": "purge_overflow (delete)",
+      "snippets": [
+        "MATCH (n:GraphEvent) WITH n ORDER BY n.seq ASC LIMIT $overflow",
+        "DETACH DELETE n RETURN count(*)"
+      ],
+      "needs": "ordered, limited delete",
+      "class": "maintenance",
+      "why": "size-cap purge, same shape as `purge_expired`."
+    },
+    {
+      "file": "tortoise/event_store.py",
+      "line": "645",
+      "reader": "capture_watermark",
+      "snippets": [
+        "MATCH (e:GraphEvent) RETURN max(e.seq), min(e.seq)"
+      ],
+      "needs": "aggregate (max, min)",
+      "class": "maintenance",
+      "why": "the pre-wipe capture; aggregates only."
+    },
+    {
+      "file": "tortoise/event_store.py",
+      "line": "1104",
+      "reader": "_refresh_first_seq",
+      "snippets": [
+        "OPTIONAL MATCH (e:GraphEvent)"
+      ],
+      "needs": "aggregate (min) computed inside an RMW on :GraphEventMeta",
+      "class": "maintenance",
+      "why": "the purge floor; note the RMW itself is on the SIBLING label and is not this shape's reader (\u00a72.7 of the audit draws that line)."
+    },
+    {
+      "file": "tortoise/webhook_delivery.py",
+      "line": "1049",
+      "reader": "_head_seq fallback",
+      "snippets": [
+        "MATCH (e:GraphEvent) RETURN max(e.seq)"
+      ],
+      "needs": "aggregate (max)",
+      "class": "maintenance",
+      "why": "the fallback when `:GraphEventMeta` is absent; a fallback, not a capability \u2014 the same number is otherwise read off the meta node."
+    },
+    {
+      "file": "tortoise/hosted_backup.py",
+      "line": "892",
+      "reader": "backup footprint",
+      "snippets": [
+        "MATCH (e:GraphEvent) RETURN max(e.seq), min(e.seq)"
+      ],
+      "needs": "aggregate (max, min)",
+      "class": "maintenance",
+      "why": "reported beside the backup's other counts."
+    },
+    {
+      "file": "tortoise/hosted_backup.py",
+      "line": "1333",
+      "reader": "whole-graph export (dump side)",
+      "snippets": [
+        "MATCH (n) RETURN labels(n), properties(n)"
+      ],
+      "min_occurrences": 2,
+      "needs": "a full label-agnostic dump",
+      "class": "maintenance",
+      "why": "the export carries `:GraphEvent` rows because it carries everything; it names no label and needs no capability. \u26a0\ufe0f It is censused because a re-home must decide what the export does with the shape, not because it reads one."
+    },
+    {
+      "file": "tortoise/hosted_backup.py",
+      "line": "1534",
+      "reader": "whole-graph export (restore-side scan)",
+      "snippets": [
+        "MATCH (n) RETURN labels(n), properties(n)"
+      ],
+      "min_occurrences": 2,
+      "needs": "a full label-agnostic dump",
+      "class": "maintenance",
+      "why": "the second whole-graph scan: the same statement shape as the line above, in the restore path, so both rows require TWO occurrences."
+    }
+  ],
+  "counts": {
+    "serving": 1,
+    "maintenance": 15
+  },
+  "graph_capability_readers": [],
+  "verdict": "no reader needs a graph capability \u2014 every reader is a key lookup, an ordered range scan, an aggregate, a predicate delete, or the schema those three depend on"
+}

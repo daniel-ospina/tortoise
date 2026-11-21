@@ -1058,16 +1058,37 @@ step**, a step that exists in the onboarding vocabulary, so a render that writes
 or skips it changes the flow with nobody deciding that it should).
 
 **Resolution — the render CONSUMES nothing and WRITES nothing.** `capture-disclosed`
-has exactly ONE writer, the capture path
+has exactly ONE AUTOMATIC writer, the capture path
 (`tortoise/hosted_api.py::_capture_session_impl` →
-`write_completed_step(proj, org_id, "capture-disclosed", ...)`, first-write-wins,
-on the org's first 2xx capture; a 409 off-switch capture never writes it). The
+`write_completed_step(<the org's DEFAULT-graph projection>, org_id,
+"capture-disclosed", ...)`, first-write-wins, on the org's first 2xx capture; a 409
+off-switch capture never writes it). An **ORG-WIDE** agent credential (`graph_id`
+None) may also assert it EXPLICITLY at the checkpoint surface
+(`POST /v1/onboarding/state/checkpoint`; `capture-disclosed` is a member of
+`_CHECKPOINT_STEPS`, so `hosted_api.py::onboarding_checkpoint` writes it through
+`write_completed_step` on the org default graph). ⛔ TWO limits on that surface:
+it refuses **EVERY** graph-bound key — `_reject_graph_bound_org_surface` raises
+403 on any `graph_id`, INCLUDING one bound to the org default — and the step is
+first-write-wins, so asserting it BEFORE the org's first capture makes that
+capture report `first_capture: false` and the announcement never fires. Assert
+it after the announcement, never before. The render writes it in neither case.
+⛔ The handle is the **org DEFAULT graph**, never the capture's own `proj` —
+the step is an org-level surface, and
+`write_completed_step` mints the node, the step node and their edge in the graph
+it is handed. ⛔ And a **CUSTOM-graph-bound credential runs NEITHER half** (no
+`capture-disclosed` write, no completion gate): writing org-level state on behalf
+of a per-graph key is the cross-graph write `_reject_graph_bound_org_surface`
+answers 403 for on every sibling surface. A key bound to the DEFAULT graph is
+NOT that class — its graph *is* the org default, so the **CAPTURE PATH** keeps
+the checkpoint and the trigger for it (the checkpoint SURFACE above does not:
+it refuses every `graph_id`). The
 disclosure reads onboarding state and is otherwise pure, so:
 
 - rendering it twice renders the same text and leaves state identical;
 - it creates no COMPLETED_STEP edge, before or after the first capture;
 - it neither suppresses nor advances the once-per-org announcement — the
-  `first_capture` flag on the capture response remains the only trigger.
+  `first_capture` flag on the capture response remains the only trigger (a
+  CUSTOM-graph-bound credential never gets it: it is `False` there by design).
 
 The accounting is declared once, in code
 (`tortoise/capture_disclosure.py::step_accounting`) and asserted by
@@ -1095,7 +1116,10 @@ Contract notes:
   view/delete home directly. Do not "restore" the older wording.
 - **Checkpoint:** the announcement's completion writes the `capture-disclosed`
   NODE CHECKPOINT (`{"step":"capture-disclosed"}` via the checkpoint
-  surface) — it is never a card-counted step (the Setup guide renders it
+  surface — an ORG-WIDE agent credential only, that surface refuses any
+  `graph_id`, and only on/after the announcement: the step is
+  first-write-wins and `first_capture` is its `created`) — it is never a
+  card-counted step (the Setup guide renders it
   uncounted).
 - **Ownership:** W2 owns this copy; W6 owns the trigger placement +
   Settings view/delete. Hook-driven auto-capture has no in-conversation turn

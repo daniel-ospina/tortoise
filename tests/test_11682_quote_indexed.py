@@ -439,6 +439,11 @@ def test_a_pre_11682_two_field_index_is_upgraded_to_carry_the_quote(sdk) -> None
             g.query(f"CALL {proc}('Point')")
             dropped = True
             break
+        # #14125 class 2 (review of `cd75ec7144`, P1): a swallowed AttributeError /
+        # TypeError here would report "no drop procedure" for a MOVED DOOR. A real
+        # refusal is a `redis.exceptions.ResponseError`, which is not a TypeError.
+        except (AttributeError, NameError, TypeError):
+            raise
         except Exception:
             continue
     if not dropped:
@@ -652,6 +657,11 @@ def test_a_pre_existing_array_quote_is_flattened_by_the_sweep(sdk) -> None:
             g.query(f"CALL {proc}('Point')")
             dropped = True
             break
+        # #14125 class 2 (review of `cd75ec7144`, P1): a swallowed AttributeError /
+        # TypeError here would report "no drop procedure" for a MOVED DOOR. A real
+        # refusal is a `redis.exceptions.ResponseError`, which is not a TypeError.
+        except (AttributeError, NameError, TypeError):
+            raise
         except Exception:
             continue
     if not dropped:
