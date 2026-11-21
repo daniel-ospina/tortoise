@@ -3255,10 +3255,6 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             f"exemption must survive — grading it is the 4k-/4l- false red: {_class_control}"
         )
 
-    # 4j-duodecies. A FORMAL PARAMETER inside the probe BLOCK is a binding only
-    #     `_rebinds_within` can see (`ast.arg` is not an `ast.Name`, and the module walk
-    #     skips a `lambda` body by construction), so `(lambda torch: torch.query(…))(...)`
-    #     ran `.query` on OUR client and stayed exempt (review of #14160, P2).
     # 4j-duodecies. A FORMAL PARAMETER inside a `lambda` in the probe BLOCK is a binding
     #     only the CALL-NODE reach can see (`ast.arg` is not an `ast.Name`, and the module
     #     walk skips a `lambda` body by construction), so `(lambda torch:
@@ -3314,6 +3310,15 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "resolving reach from the BLOCK rather than from the CALL leaves the block "
         f"exempt over OUR client: {_rebind_nested_row}"
     )
+    # ⛔ THE CONTROL IS THE OTHER DIRECTION OF THE SAME RULE, and it is the one the
+    #     docstrings call a REGRESSION against `origin/main`: the nested `def` rebinds the
+    #     IMPORT NAME, and the call stays at BLOCK level, where that local CANNOT reach it
+    #     (§4.2.2 — a nested `def` is a different block). Block-granularity resolution
+    #     graded this legitimate third-party probe as a ROOT, i.e. turned a skip into a
+    #     collection error. Measured: green here, and the ONLY row that reds when the
+    #     `ast.walk(block)` subtraction (the deleted `_rebinds_within` mechanism) is put
+    #     back — which is why the fail-open row above cannot stand alone (review of
+    #     #14160, P2: without this the fix could be reverted with all eight tests green).
     _nested_def_control = roots(
         textwrap.dedent(
             """
@@ -3321,9 +3326,9 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
 
             FALKORDB_AVAILABLE = False
             try:
-                def _run(other):
-                    other = _make_client()
-                    return other
+                def _run():
+                    falkordb = _make_client()
+                    return falkordb
 
                 falkordb.g.query("RETURN 1")
                 FALKORDB_AVAILABLE = True
@@ -3333,9 +3338,10 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         )
     )
     assert _nested_def_control == (), (
-        "the CONTROL: the nested `def` rebinds a name that is NOT the import, so the "
-        "block stays exempt — without this the row above would also pass on code that "
-        f"had simply dropped the exemption: {_nested_def_control}"
+        "the CONTROL: a nested `def`'s LOCAL cannot reach a call at BLOCK level, so the "
+        "block must stay exempt — grading it is the 4k-/4l- false red, and it is the "
+        "direction that regressed against origin/main: "
+        f"{_nested_def_control}"
     )
 
     # 4j-sexies. The OTHER direction: a LOCAL of the function that HOLDS the probe CAN
