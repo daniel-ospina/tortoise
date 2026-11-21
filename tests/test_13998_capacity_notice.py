@@ -1819,17 +1819,26 @@ def test_the_idempotency_bound_guard_grades_a_bound_and_an_unbounded_claim():
         "window.",
         "the duplicate send a crash between accept and stamp can produce is "
         "covered by the provider Idempotency-Key, inside its 24 h window.",
-        "the provider Idempotency-Key onboarding:{org_id} collapses the "
-        "duplicate notice from cross-process replays <=24h.",
+        # the artifact's own wording, unedited — `≤24h` included. A previous cut
+        # of this fix reworded it to "the duplicate notice from cross-process
+        # replays", which appears in NO artifact, and in doing so dropped the
+        # only bounded sample that pinned the replay-only shape.
+        "the provider Idempotency-Key onboarding:{org_id} collapses "
+        "cross-process replays \u226424h.",
+        # SYNTHESISED, and it has to be: the real sentence beside it
+        # (`capacity_notice.py`) says "a key", which `_SUBJECT` does not match,
+        # so the artifact's wording cannot serve as a positive sample at all.
+        # This states the same bound in a sentence the guard reads.
         "Resend keeps the Idempotency-Key for the last 24 hours, so it "
         "collapses a replayed notice inside that window.",
     ):
         claims, unbounded = _idempotency_claims(sample)
         # ⛔ #14038 review (P3, tree): the previous cut asserted only
         # `not unbounded`, so a sample the detector did not read as a CLAIM
-        # satisfied it vacuously — three of these four did exactly that
-        # (measured: claims=0, unbounded=0). A bounded sample that is not a
-        # claim grades nothing, so both halves are asserted now.
+        # satisfied it vacuously — TWO of these four did exactly that (`claims=0,
+        # unbounded=0` for the "crash window … covered" and "Resend keeps that
+        # key" lines; measured at this head's parent). A bounded sample that is
+        # not a claim grades nothing, so both halves are asserted now.
         assert claims, (
             f"this sample is not read as a claim at all, so it grades no bound: "
             f"{sample!r}")
