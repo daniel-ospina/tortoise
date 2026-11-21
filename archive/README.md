@@ -258,7 +258,7 @@ restore path legitimately ends there; pass `--require-entries` when zero must be
 with the merge base's and reports a row that **left**, or one whose CLAIM was **rewritten** in
 place (`kind`, `symbol`, `file`, `archived_from`, `archived_at`, `sources`, `blocks` — appending a
 tombstone field is what an append-only record does, so it is not a rewrite). Passing `--base-ref`
-needs no special handling for a restore, because the two legitimate shapes are both green:
+needs no special handling for a restore, because all three legitimate shapes are green:
 
 - **a restore** — the row and its frozen file go (steps 3-4 below) and the SYMBOL is live again
   **with the recorded body**: in `TOOL_REGISTRY`, on `TortoiseSDK`, or importable from `tortoise/`,
