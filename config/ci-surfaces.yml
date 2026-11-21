@@ -12251,6 +12251,18 @@ carve_out:
 - test_projection_lifecycle.py
 - test_reaper.py
 - test_reaper_orphan.py
+# #10502: two of its pins read `/proc/<pid>/comm` and `/proc/<pid>/cmdline` from a
+# REAL child process, so they `skipif` off-Linux — a `sys.platform` gate, which
+# makes the file REGISTERED in `tests/test_markers.py::PLATFORM_GATED_TESTS`.
+# A registered file must be EXECUTED by the lane that owns
+# `config/ci-expected-nodeids/platform-gated.txt` — the URI-unset carve-out — or
+# the registry's runtime half observes nothing at all (#4215), the same hole
+# #4047 closed for the fork guards. The file needs no embedded daemon: it rides
+# here for the manifest, not for a DB, and it is hermetic (stdlib, one
+# `sys.executable` subprocess, no graph), so the URI-unset lane runs every test
+# in it. Mirrored in `tests/_embedded.TEST_NO_REDIRECT_STEMS` and DECLARED in
+# `test_no_redirect_stems_registry_exact` — the three-way mirror.
+- test_reap_redislite_orphans.py
 # #9189 (§17.2): the record↔cache observer's journal-backed arm is embedded-only
 # — `test_the_guarded_lanes_refuse_the_same_write_while_the_handle_takes_it`
 # binds a real journal to a fresh embedded projection (that arm does not exist
