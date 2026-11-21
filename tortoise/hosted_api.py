@@ -4617,8 +4617,8 @@ async def _capacity_notice_sweep_loop(interval: float,
     push to `main`, and over the 30 days to 2026-11-20 there were **619 runs =
     20.6/day** with a MEDIAN gap of **0.48 h** and a longest run of **83**
     consecutive gaps under 6 h (`gh run list --workflow deploy-hosted.yml`;
-    `main`'s `tortoise/**` commits over the same window, n=615, agree at
-    **20.5/day** on the SAME n/30 denominator as the 20.6 above (619/30 vs 615/30), 0.47 h, run 82) — so a sleep-first 6 h timer is reset long before
+    `main`'s `tortoise/**` commits over the same window, n=615, is **20.5/day** (the same n/30
+    denominator, so 619/30 vs 615/30 — agreeing in SHAPE, not at one rate), 0.47 h, run 82) — so a sleep-first 6 h timer is reset before
     it expires and the notice is delivered days late or never, while the boot log
     said "armed". ⛔ An earlier cut of this paragraph said "0.19 h … 90" and no
     population reproduces it; 0.19 h is nearer `main`'s ALL-COMMIT median
