@@ -416,10 +416,26 @@ SWEEP_NAMES = 66
 #: run from each `-`/`+` pair leaves the pair identical, so it cannot move a receiver population. The
 #: reason the gate is red here is the recurrence `#14062` and `#14058` both document, now a THIRD
 #: time: the pin is graded on PULL REQUESTS only, so `main` merges with nothing grading it — and
-#: `main`'s own tree today derives 11833 against its own 11825 pin, i.e. `--check` is RED on `main`.
+#: `main`'s own tree at `ad79129cb5` derived 11833 against its own 11825 pin, i.e. `--check` was RED on
+#: `main`.
 #: The real fix for the recurrence is grading the pin on `main`; carrying the re-cut is what unblocks
 #: a PR that touches nothing in this population, which is the same remedy the two blocks above took.
-SWEEP_RESIDUE = (11833, "addee5ad564bd9bc")
+#: ⛔ RE-CUT DOWN AGAIN (11833, "addee5ad564bd9bc") → (11831, "4f3afdad7fb13ad7"), and this one is a
+#: REMOVAL on a head that already merged without it: `#14071` (`df0525a7a90`, "the review remainder
+#: `#14065` merged without") retires the TWO `found.update` rows `#14065` had added. Measured on the two
+#: trees, row by row: `found.update` 12 → 10 and NOTHING else moves — 863 distinct rows on both, only
+#: that one row's count changed, and the total follows it (11833 − 2 = 11831). The shape is RETIRED, not
+#: relocated: `tortoise/usage_signal.py` (the module `#14071` adds for the import-walk) carries ZERO
+#: `found.update` rows at this head, so there is no replacement row to count.
+#: ⚠️ THIS IS THE PREDICTION AN EARLIER EDITION OF THIS BLOCK MADE, THEN MEASURED FALSE, THEN FOUND TRUE
+#: ONE MERGE LATER — recorded so the next re-cut does not re-litigate it. That edition said an as-then
+#: OPEN `#14071` would remove those two rows and that the set would fall; the same claim was tested at
+#: `1956b3431f..ad79129cb5` and was FALSE there, because `#14072` had only MOVED the rows
+#: (`:564`/`:572` → `:579`/`:587`) without retiring them. It became true at `df0525a7a90`. The lesson is
+#: the one this block already states, not a new one: a pin is a measurement of THIS tree — a forecast is
+#: worth recording, but it is never a substitute for measuring, and it is falsified or confirmed by the
+#: head, not by its own wording.
+SWEEP_RESIDUE = (11831, "4f3afdad7fb13ad7")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
