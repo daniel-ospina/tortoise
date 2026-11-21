@@ -1356,6 +1356,30 @@ def test_the_no_graph_guard_names_modules_that_EXIST() -> None:
     )
 
 
+def _reaches_a_store(imported: set[str]) -> bool:
+    """True when one module's PARSED imports reach a store client.
+
+    Split out of `_modules_reaching_a_store` so that EACH leg is pinnable on its
+    own. Inline, the export leg could be deleted (`or (imported &
+    _FORBIDDEN_CLIENT_EXPORTS)` → `or False`) with the whole file green — measured
+    at 29b2fee8f4: 100 passed — because no module in the tree imports the client
+    ONLY as `from tortoise import FalkorDB`, which is the case the leg exists for
+    and the case the previous commit's own docstring claimed to cover. That is the
+    same defect class this file already pins for the `ast.AnnAssign` branch.
+
+    The ROOTS leg matches by prefix so a submodule import (`falkordb.client`)
+    counts; the EXPORTS leg matches exactly, because an export is a name, not a
+    namespace. Passing the public SDK through here (`tortoise.sdk`, …) is
+    deliberately FALSE: those are ordinary ban-set entries, and a direction scan
+    that flagged every importer of the SDK would flag most of the package.
+    """
+    return any(
+        name == root or name.startswith(root + ".")
+        for name in imported
+        for root in _STORE_CLIENT_ROOTS
+    ) or bool(imported & _FORBIDDEN_CLIENT_EXPORTS)
+
+
 @functools.cache
 def _modules_reaching_a_store() -> frozenset[str]:
     """Every module in the tree that reaches a store CLIENT, by parsed imports.
@@ -1363,7 +1387,11 @@ def _modules_reaching_a_store() -> frozenset[str]:
     ⛔ PARSED, NOT GREPPED, AND BOTH FORMS OF REACH ARE SCANNED: the three
     store-client roots (`_STORE_CLIENT_ROOTS`) AND the two package-root exports
     that WRAP the client (`_FORBIDDEN_CLIENT_EXPORTS`), so a module whose only
-    reach is `from tortoise import FalkorDB` is found here too. The export half was
+    reach is `from tortoise import FalkorDB` is found here too. Both legs live in
+    `_reaches_a_store`, and the export leg is pinned ON THE PREDICATE
+    (`test_the_store_reach_scan_sees_the_EXPORT_spelling_too`): no module in the
+    tree is export-only, so `found` cannot witness it, and with the leg deleted the
+    file was otherwise green. The export half was
     missing, and it made this row's "a module cannot slip past" claim false for the
     one spelling the ban set was EXTENDED to catch: measured, a synthetic module
     whose only reach was `def f(): from tortoise import FalkorDB` was absent from
@@ -1385,16 +1413,17 @@ def _modules_reaching_a_store() -> frozenset[str]:
     FalkorProjection` written in ANOTHER tree module is one hop from the client, and
     the direction test's only input IS this scan — so no test reds on it. That is an
     out-of-scope residual, not a hand-off: this sentence used to say such a reach
-    "belongs to the direction test", which does not scan for it either. This read
-    `"from falkordb import" in source` — a substring test that saw only ONE of the
-    roots the set itself declares, so the modules that reach the store through
-    `redis` (`hosted_backup` constructs a real client over a derived pool,
-    `acl_graph_users`, `tortoise_client`, `retry`, `ep`, `hosted_api`,
-    `embedded_lifecycle`) were invisible and the coverage test reported protection
-    it did not deliver. A substring is wrong in the other direction too: `"import
-    redis" in source` matches PROSE — `tortoise/embedded_lifecycle.py` says
+    "belongs to the direction test", which does not scan for it either.
+
+    (Before that, the direction test read `"from falkordb import" in source` — a
+    substring test that saw only ONE of the roots the set itself declares, so the
+    modules that reach the store through `redis` (`hosted_backup` constructs a real
+    client over a derived pool, `acl_graph_users`, `tortoise_client`, `retry`, `ep`,
+    `hosted_api`, `embedded_lifecycle`) were invisible and the coverage test reported
+    protection it did not deliver. A substring is wrong in the other direction too:
+    `"import redis" in source` matches PROSE — `tortoise/embedded_lifecycle.py` says
     "`import tortoise` must not import redislite" in a comment, which contains the
-    substring `import redis`.
+    substring `import redis`.)
 
     Cached: the tree cannot change within a run, and re-parsing every file in the
     package on each call is seconds-scale — enough to blow the shard row this file
@@ -1410,11 +1439,7 @@ def _modules_reaching_a_store() -> frozenset[str]:
         parts = [part for part in rel.parts if part != "__init__"]
         module = "tortoise" + ("." + ".".join(parts) if parts else "")
         imported = _imports_of(path.read_text(encoding="utf-8"))
-        if any(
-            name == root or name.startswith(root + ".")
-            for name in imported
-            for root in _STORE_CLIENT_ROOTS
-        ) or (imported & _FORBIDDEN_CLIENT_EXPORTS):
+        if _reaches_a_store(imported):
             found.add(module)
     return frozenset(found)
 
@@ -1446,6 +1471,31 @@ def test_the_store_reach_scan_sees_the_REDIS_spelling_too() -> None:
             f"reachability guard is narrower than the roots it declares: "
             f"found={sorted(found)!r}"
         )
+
+
+def test_the_store_reach_scan_sees_the_EXPORT_spelling_too() -> None:
+    """⛔ The scan's EXPORT leg, pinned on its own — `found` cannot witness it.
+
+    `_modules_reaching_a_store()` matches the roots OR the package-root exports,
+    and the export leg's whole purpose is a module whose ONLY reach is
+    `from tortoise import FalkorDB`. No module in the tree is that shape — which is
+    exactly why the leg is invisible to every assertion above: with it deleted
+    (`or False`) the file was GREEN (measured at 29b2fee8f4: 100 passed), so the
+    docstring's "a module whose only reach is `from tortoise import FalkorDB` is
+    found here too" was a claim with no detector behind it.
+
+    Pinned on the predicate rather than on `found` because a synthetic module
+    cannot be planted in the package from a test, and planting a real one would
+    change what the guard sees. The SDK boundary is pinned too: it is the reason
+    the leg does NOT match `_FORBIDDEN_GRAPH_ROOTS` wholesale, and widening it back
+    would flag most of the package.
+    """
+    assert _reaches_a_store({"tortoise", "tortoise.FalkorDB"})
+    assert _reaches_a_store({"tortoise", "tortoise.Tortoise"})
+    assert _reaches_a_store({"redis"})
+    assert _reaches_a_store({"falkordb.client"})  # prefix, not exact-name
+    assert not _reaches_a_store({"tortoise"})
+    assert not _reaches_a_store({"tortoise.sdk", "tortoise.ep"})
 
 
 def test_the_no_graph_guard_covers_every_module_that_reaches_a_store() -> None:
