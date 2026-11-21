@@ -1429,18 +1429,27 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # ⛔ The block is that comment at `:17442` (first line of the 24-line run;
     # `:17439` is the code above it), NOT the `("Point", "quote",
     # "FULLTEXT")` entry: that entry was already there at `e0accb8fe6^:21014`,
-    # added by #11706 (`d06c001ff9`; its diff carries the `+` row — reachable from
-    # the backup refs, NOT from `main`'s SHALLOW history: `.git/shallow` names
-    # `e0accb8fe6` itself as the boundary, and a grafted boundary has NO parents,
-    # so `git show --stat e0accb8fe6` reports the whole file (23,899 lines) as
-    # ADDED by it). ⛔ An earlier cut of this note named `c2c6d38425` (#13967) as
-    # that boundary and 23,875 as its size; measured, `c2c6d38425` edits ONLY
-    # `tests/test_bridge_table.py` (+31/−10), so it is neither the boundary nor
-    # the commit that adds the file.
-    # ⛔ Do NOT verify it with `git log -S'("Point", "quote", "FULLTEXT")'` over this
-    # path: a shallow boundary has NO parents, so pickaxe stops AT THE BOUNDARY
-    # (`e0accb8fe6`) and never names the origin. An earlier draft credited #13322
-    # (`5f6ed5ae6a`), a later one #11706 via that `-S`; both name the wrong commit.
+    # added by #11706 (`d06c001ff9`; its diff carries the `+` row). Verify it by
+    # the COMMIT, not by a history walk: `git show d06c001ff9 -- \
+    # tortoise/projection/__init__.py` carries the `+        ("Point", "quote",
+    # "FULLTEXT"),` line, and the occurrence count goes 0 -> 1 across it. That
+    # answer does not depend on how deep the clone is.
+    #
+    # ⚠️ WHY THIS NOTE NO LONGER TELLS A "SHALLOW BOUNDARY" STORY: depth is an
+    # ENVIRONMENT fact, not a fact about `main`, so a note that asserts one is
+    # only ever true in the clone it was measured in. A full clone (this box:
+    # `git rev-parse --is-shallow-repository` -> false, no `.git/shallow`)
+    # resolves `git log -S'("Point", "quote", "FULLTEXT")' origin/main -- <path>`
+    # to `d06c001ff9` on the first try, while a `fetch-depth: 1` CI checkout has a
+    # grafted boundary with no parents and cannot walk back past it. Two earlier
+    # cuts of this note each measured ONE of those and stated it as universal:
+    # one named `c2c6d38425` (#13967) as "the boundary" — measured, that commit
+    # edits ONLY `tests/test_bridge_table.py` (+31/-10) — and the other forbade
+    # the pickaxe that works. Neither is repeated here.
+    # ⛔ What WAS wrong in both: they read a failed/mistaken search as a tooling
+    # limit and then invented a commit to explain it. #13322 (`5f6ed5ae6a`) does
+    # not touch this file at all. Name the commit that carries the `+` line, and
+    # check it — not the story about why a search came up empty.
     ("tortoise/projection/__init__.py", 21042, '("Object", "name", "FULLTEXT")',
      "`tortoise/projection/__init__.py:21042`"),
     ("tortoise/projection/__init__.py", 21485, "def _create_fulltext_index(",
