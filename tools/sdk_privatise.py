@@ -393,7 +393,19 @@ SWEEP_NAMES = 66
 #: `main`'s own tree today derives 11833 against its own 11825 pin, i.e. `--check` is RED on `main`.
 #: The real fix for the recurrence is grading the pin on `main`; carrying the re-cut is what unblocks
 #: a PR that touches nothing in this population, which is the same remedy the two blocks above took.
-SWEEP_RESIDUE = (11833, "addee5ad564bd9bc")
+#: ⛔ #14086 RE-PIN, measured on this head (`65cf27c01b`) — NOT arithmetic on the block above.
+#: The pin above (11833) is 2 rows above what THIS tree derives, because it was taken on a
+#: different tree; measured today with the tool's own verbs:
+#:     origin/main (df0525a7a9)   derives 11831   (so main is itself 2 rows off its 11833 pin)
+#:     this head                  derives 11832   (+1 over main, the PR's own row)
+#: The +1 is attributed by a row-by-row dump of both residue sets, not by count — exactly one row
+#: differs: `captured.update` 30 → 31, from `tests/test_10893_pre_handler_parts.py:279`,
+#: `lambda org, ev, props: captured.update(props=dict(props))` — a plain `dict.update` inside a
+#: monkeypatched analytics capture, NOT an SDK reference, and already a pinned shape (no new shape
+#: appears). So the count is DECLARED, not rewritten, and the SDK population did not move
+#: (`typed references still pointing at a public name: 0`), so no typed call site is legitimised.
+#: Derivation: `uv run python tools/sdk_privatise.py --repin` -> (11832, '0ac463c1ce605ae9').
+SWEEP_RESIDUE = (11832, "0ac463c1ce605ae9")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
