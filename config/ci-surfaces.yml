@@ -9655,6 +9655,16 @@ surfaces:
   # pays the fixture too. `pytest -q --durations=5` is the authority for the
   # split; re-derive there rather than trusting a transcription of one run.
   - test_14192_beta_variance_sum_bound.py
+  # #14192: the measurement harness's OWN verdict — the half of the issue's Done-when
+  # that the first cut could not fail. `core`, and the placement is MEASURED: the pins
+  # import nothing from `tortoise` at all, they load `tools/read_wave_latency.py` by path,
+  # and that tool takes the no-surface early return on a tool-only diff — so the `core`
+  # row alone would still leave them asleep on exactly that diff class. The
+  # `CORE_ALSO` entry in `tools/ci_selection.py` is the other half, and
+  # `test_a_tool_only_diff_selects_this_pin` in this file is what keeps both.
+  # Hermetic: source loading plus pure `dict` comparison — no DB, no graph, no docker, no
+  # network, no model call.
+  - test_14192_read_wave_tool.py
   ep:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #11855: the ranker half of the unreadable-operand pins. `GraphRanker` and
@@ -15338,6 +15348,13 @@ durations:
   # `--refresh-durations` replaces this row from junit once a push-to-main sweep
   # includes the file.
   test_14192_beta_variance_sum_bound.py: 2.0
+  # #14192 — a file this PR ADDS, so it can carry no CI junit reading yet
+  # (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only).
+  # `2.0` is the header's flat `DEFAULT_FAST_WEIGHT`: five cases that load one module by
+  # path and compare dicts. As above, NO WALL/SETUP/TEARDOWN FIGURE is quoted — the
+  # wall time `pytest -q` reports belongs to the shared session fixture; `--durations=5`
+  # is the authority and `--refresh-durations` replaces this row from junit.
+  test_14192_read_wave_tool.py: 2.0
   test_journal_segments.py: 0.3
   test_journal_segments_falsifier.py: 0.2
   test_name_entropy_12294.py: 0.1

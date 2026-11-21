@@ -114,3 +114,32 @@ def test_a_different_corpus_is_not_compared() -> None:
     verdict = tool.compare(after, base)
     assert verdict["comparable"] is False
     assert "corpus" in verdict["reason"] or "query set" in verdict["reason"]
+
+
+def test_a_tool_only_diff_selects_this_pin():
+    """`tools/` is in `NON_PYTHON_PREFIXES`, so a tool-only path is filtered out
+    BEFORE the "not matched -> core" fallback and `select()` takes the docs-only
+    early return. MEASURED before the `CORE_ALSO` entry at `5c9cfe540761`:
+
+        --changed-files tools/read_wave_latency.py --event pull_request
+            -> surfaces: [], full: false
+
+    i.e. this file was NOT selected, so the one diff able to re-introduce the
+    defect these pins exist for — recording every fused id as `None`, which is
+    how a verdict that can never go red shipped — merged with every pin unrun.
+    This pins the entry that closes it, in the file it protects.
+    """
+    from tools import ci_selection
+
+    manifest = ci_selection.load_manifest()
+    selection = ci_selection.select(
+        ["tools/read_wave_latency.py"], "pull_request", manifest
+    )
+    assert "core" in (selection.get("surfaces") or []), selection.get("surfaces")
+    files = selection.get("test_files")
+    if files == "ALL":
+        return
+    assert "test_14192_read_wave_tool.py" in files, (
+        "a diff to tools/read_wave_latency.py no longer selects its own pins — the "
+        "`CORE_ALSO` entry was dropped or the prefix behaviour changed"
+    )
