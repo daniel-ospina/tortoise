@@ -784,6 +784,26 @@ class _AnchorHrefParser(HTMLParser):
         # so a subtree hidden by an attribute carries the answer without a second
         # walk. See `_open_extent` for what it does NOT model.
         self._open_elements: list[tuple[str, bool, bool]] = []
+        # ⛔ A TABLE THE BROWSER STILL HAS OPEN, tracked at the TOKEN level because
+        # the element stack above is not faithful about it (#14073 review, P0,
+        # measured). `_close_nearest`/`_remove_nearest`/`_close_extent` walk the
+        # stack with no spec precondition, so four legal shapes DELETE a `<table>`
+        # the browser keeps open — and an open table is precisely what lets content
+        # be FOSTER PARENTED back across the section bound:
+        #   `<li><table><li><tr><td><h2 id="quickstart">`   (the `<li>` loop stops
+        #       at the first SPECIAL element, and `table` is special)
+        #   `<button><table><button><tr><td>…`             (gated on "in scope", and
+        #       `table` is a scope element)
+        #   `<a><table><a><tr><td>…`                       (AAA removes only the
+        #       formatting node, not the table above it)
+        #   `<div><table></div><tr><td>…`                  (a browser IGNORES an end
+        #       tag whose element is not in scope; `div` is not on that list)
+        # In all four the claim rendered inside `#storage` while the slice excluded
+        # it and all three pins were green. So this is set by the `table` START tag
+        # and cleared only by a matching `</table>`, and it is DELIBERATELY
+        # MONOTONE in the safe direction: it can only over-refuse, and over-refusal
+        # keeps the slice LONG — the loud direction this module takes everywhere.
+        self._table_open_unmatched = False
         # Open elements currently suppressing collection. A stack, not a counter,
         # so nested `<template><script>…</script></template>` unwinds correctly.
         self._suppress: list[str] = []
@@ -1127,6 +1147,13 @@ class _AnchorHrefParser(HTMLParser):
         # NOT "no reader meets it" — the reader meets it somewhere else. A table
         # above reorders the tree against the source (foster parenting), so a raw
         # `getpos()` offset cannot be trusted as a boundary. See the docstring.
+        #
+        # ⛔ BOTH TESTS, deliberately: the stack test catches a table it HOLDS, and
+        # `_table_open_unmatched` catches a table it LOST while the browser kept it
+        # (four measured shapes — see that attribute). Checking only the stack is
+        # what left the first version of this refusal bypassable.
+        if self._table_open_unmatched:
+            return True
         if any(open_tag == "table" for open_tag, _, _ in self._open_elements):
             return True
         if any(open_tag in self._UNRENDERED for open_tag, _, _ in self._open_elements):
@@ -1926,6 +1953,10 @@ class _AnchorHrefParser(HTMLParser):
             if self._breaks_out(tag, attrs):
                 self._foreign = 0
             return
+        if tag == "table" and not self._suppress and not self.wedged_reason and not self._foreign:
+            # Set BEFORE `_open`, and at the TOKEN level — see the attribute's own
+            # comment for the four measured shapes where the stack loses the table.
+            self._table_open_unmatched = True
         suppressed = self._open(tag, attrs)
         if not suppressed:
             self._collect(tag, attrs)
@@ -2243,6 +2274,11 @@ class _AnchorHrefParser(HTMLParser):
                 or tag in self._RAW
             ) and self._aaa_would_relocate_a_painted_block(tag):
                 self.wedged_reason = "adoption-agency-relocation"
+            # Cleared only by the table's OWN end tag, at the token level — see
+            # `_table_open_unmatched`. A `</table>` under suppression is text or
+            # template-local and closes nothing here, so it must not clear it.
+            if tag == "table":
+                self._table_open_unmatched = False
             self._close_extent(tag)
         if tag in ("br", "p") and self._foreign:
             # Spec 13.2.6.5: `</br>`/`</p>` in foreign content pop it and are

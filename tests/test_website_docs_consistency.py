@@ -3660,37 +3660,52 @@ def test_a_table_open_across_the_bound_refuses_rather_than_cutting_the_source() 
         "the allowance for your tier the least-used items are permanently "
         "deleted after thirty days.</p>"
     )
-    # The advertised heading moved INSIDE a cell, the claim after the cell and
-    # still inside the open table: source order puts the claim after the heading,
-    # the browser puts it before the table — i.e. inside `#storage`.
-    mutant = (
-        page[: heading.start()]
-        + "<table><tr><td>"
-        + heading.group(0)
-        + "</td></tr>"
-        + claim
-        + "</table>"
-        + page[heading.end() :]
-    )
-    # Without the inversion this mutant proves nothing, so assert it first.
-    assert mutant.index(claim) > mutant.index('id="quickstart"'), (
-        "the mutant no longer places the claim AFTER the bounding heading in the "
-        "source, so it does not reproduce the foster-parenting inversion this "
-        "pin exists for"
-    )
-
-    section = _docs_section(page=mutant)
-    assert "permanently deleted" in section, (
-        "the section bound cut the source at a heading a browser may foster-parent "
-        "content across. The claim sits AFTER that heading in the source and is "
-        "therefore outside the slice, while a browser inserts it BEFORE the table "
-        "— inside `#storage` — so the wording, vocabulary and destination pins all "
-        "read a section the reader does not see. A heading with an open `<table>` "
-        "above it must not bound (`_unmet_by_reader`), which keeps the slice long "
-        "and reds the golden on the claim instead of hiding it."
-    )
-    with pytest.raises(AssertionError):
-        _assert_storage_section_reviewed(section)
+    # ⛔ EVERY ROUTE, because the parser's STACK is not faithful about `table` and
+    # one route is green over the others (#14073 review, P0, measured): these four
+    # legal shapes each DELETE the `<table>` from `_open_elements` while a browser
+    # keeps it open, and an open table is exactly the precondition for foster
+    # parenting back across the bound. Checking the stack alone left all four
+    # bypassable, so `_unmet_by_reader` also consults `_table_open_unmatched`.
+    routes = {
+        # the `<li>` start-tag loop STOPS at the first SPECIAL element, `table`
+        "<li> stops at a special element": "<li><table><li>",
+        # the button rule is gated on "in scope", and `table` is a scope element
+        "<button> gated on table being in scope": "<button><table><button>",
+        # AAA removes only the formatting node, never the table above it
+        "<a> adoption agency keeps the table": "<a><table><a>",
+        # a browser IGNORES an end tag whose element is not in scope; `div` is not
+        "</div> is ignored while a table is open": "<div><table></div>",
+    }
+    for why, prefix in routes.items():
+        mutant = (
+            page[: heading.start()]
+            + prefix
+            + "<tr><td>"
+            + heading.group(0)
+            + "</td></tr>"
+            + claim
+            + "</table>"
+            + page[heading.end() :]
+        )
+        # Without the inversion this mutant proves nothing, so assert it first.
+        assert mutant.index(claim) > mutant.index('id="quickstart"'), (
+            "the mutant no longer places the claim AFTER the bounding heading in "
+            f"the source ({why}), so it does not reproduce the inversion"
+        )
+        section = _docs_section(page=mutant)
+        assert "permanently deleted" in section, (
+            "the section bound cut the source at a heading a browser may "
+            "foster-parent content across. The claim sits AFTER that heading in "
+            "the source and is therefore outside the slice, while a browser inserts "
+            "it BEFORE the table — inside `#storage` — so the wording, vocabulary "
+            "and destination pins all read a section the reader does not see. "
+            f"Route: {why}, which removes the `<table>` from the parser's stack "
+            "while the browser keeps it open. A heading with a table open above it "
+            "must not bound (`_unmet_by_reader`), which keeps the slice long and "
+            "reds the golden on the claim instead of hiding it."
+        )
+        with pytest.raises(AssertionError):
+            _assert_storage_section_reviewed(section)
 
     # ⛔ AND THE FALSE-RED DIRECTION: a table that opens AND closes strictly inside
     # the section moves no content across the bound, so the bound must not refuse.
