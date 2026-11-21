@@ -1043,9 +1043,19 @@ _PR_REF_AS_TREE = re.compile(
 #: must not red. Which is also why clause 1 keeps `head` and does NOT widen to `tree`: `THIS tree`
 #: is an honest measurement qualifier, and widening it there false-blocked
 #: "the pin is the pair `--repin` printed on THIS tree".
+#: ⛔ A POSSESSIVE RELATIVE TREE AS THE SUBJECT OF A PRINT VERB (PR #14209 review). The `#14164`
+#: paragraph said "the SAME pair this branch's tree prints". Clause 2 cannot see it — the noun
+#: sits behind `branch's`, and the verb is `prints` rather than `pins` — so that sentence graded
+#: nothing until a reader caught it, and `(11843, "6aed5368ffa10513")` read as current on a tree
+#: that prints `(11857, …)`. The pair-bound arm added with the same fix reads the pair out of the
+#: SHAPE, which needs a quoted pair in the sentence; this clause closes the shape itself.
+#: ⛔ PRESENT TENSE ON PURPOSE: `this branch's tree printed at `72c104bcbb`` is a MEASUREMENT with
+#: its rev named and must not red, while the unqualified present tense is the binding that the
+#: next re-pin falsifies — the same measurement-vs-binding line clause 1 already draws.
 _RELATIVE_PIN_ADDRESS = re.compile(
     r"(?i)\b(?:pair|pin)\b[^.\"]{0,40}\b(?:THIS|this)\s+head\b"
     r"|\b(?:THIS|this|the)\s+(?:current\s+)?(?:head|commit|tree|revision|rev)\s+pins?\b"
+    r"|\b(?:THIS|this)\s+(?:branch|commit|PR|pr)'?s\s+(?:tree|tip)\s+(?:pins?|prints?)\b"
     r"|\bthis\s+commit'?s\s+`?origin/main`?")
 
 #: The rewrite's PARENT claim: `83e94826a8a` is the pre-rebase DRAFT of the commit that landed as
@@ -1403,6 +1413,8 @@ def test_the_relative_pin_arm_keys_on_the_shape_not_on_one_phrase():
         "the head pins the pair, so the figure cannot drift",
         "re-cut to the pair THIS revision pins",
         "this commit's `origin/main`",
+        "the SAME pair this branch's tree prints",
+        "and this PR's tree pins the pair, so the figure cannot drift",
     ]
     for text in refused:
         assert _relative_pin_addresses(text), (
@@ -1416,6 +1428,8 @@ def test_the_relative_pin_arm_keys_on_the_shape_not_on_one_phrase():
         f'`{RESIDUE_PAIR}` is what THIS tree derives',
         "a pair this head does not carry",
         f"on `{RESIDUE_PAIR_REV}`'s tree, which derives it",
+        "the SAME pair this branch's tree carried at `72c104bcbb`",
+        "the same pair this PR's tree printed at `1b0db04894`",
     ]
     for text in honest:
         assert not _relative_pin_addresses(text), (
