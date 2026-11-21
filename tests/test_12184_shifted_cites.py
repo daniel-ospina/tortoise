@@ -367,6 +367,18 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # `d4a8dddc4e` — so the cited `:16050` / `:15995` truncated it MID-CLAUSE. The end was DELTA-moved
     # (+55) with its start rather than re-derived, which preserved the truncation across the insert.
     (_AUDIT, '`:16046-16051`', _SDK, 16046, '**JSONL event log (#548):** written when *point* is provided'),
+    # --- #14087 review round 4 (fresh context at `3f9698933b`) — the THIRD bare span on the header line
+    # F1 fixed. The header enumerates three reader cites BARE: `sdk.py:58923`, `:58272` and `:58274`.
+    # This PR pinned the first two and left `:58274` a number any digit sweep could move with NOTHING
+    # red — measured on a throwaway copy of the tree: `:58274` -> `:58299` in the document, pins
+    # untouched -> **24 passed**. `_REDEFINED_13854`'s `('sdk.py:58274', …)` row cannot see it either:
+    # that one grades the SPELLED token, and a bare `:58274` is not a substring match for it. So the
+    # gap F1 closed for `:58272` on the same line was open for its sibling, which is why this row is a
+    # PER-SITE pin and not a duplicate of the family. `sdk.py:58274` is
+    # `"s.turn_count, s.actor_user_id, s.harness, "`, the line after `:58272`'s `rows = proj.g.query(`.
+    # NON-VACUOUS: with this row PRESENT the mutation above reds the token arm (count 1 -> 0) and, when
+    # the pin's line is also moved, the content arm.
+    (_AUDIT, '`:58274`', _SDK, 58274, '"s.turn_count, s.actor_user_id, s.harness, "'),
     # --- #14087 review round 1, finding 1 (F1) — the address that review CAUGHT, now GUARDED. The
     # correction itself landed at `e8bacc656c` (`:58265` -> `:58272`); the review's other half —
     # "add the token to `_TOKEN_OCCURRENCES` so the next sweep cannot move it silently" — did not, so the
@@ -570,6 +582,9 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     # `_REDEFINED_13854`, and none of them sees a bare span). Measured:
     # `grep -o -F '`:58272`' <the document> | wc -l` -> 1.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:58272`'): 1,
+    # #14087 review round 4: the header's OTHER bare reader cite on the same line, one site.
+    # Measured: `grep -o -F '`:58274`' <the document> | wc -l` -> 1.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:58274`'): 1,
 }
 
 
@@ -1828,7 +1843,10 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # 84 -> 85 at the fix lane's own sweep: the header's BARE `:16046-16051` spelling of the JSONL
     # contract — the same bare-span gap F1 closed for `:58272`, on a range whose END was also one short
     # (16050 -> 16051, the paragraph's real last line at this head and at `d4a8dddc4e`).
-    assert len(_PINS) == 85
+    # 85 -> 86 at #14087 review round 4: the header's bare `:58274`, the third of the three reader
+    # cites on the line F1 fixed — pinned for `:58272`, left unguarded for its sibling (`:58274` ->
+    # `:58299` in the doc stayed green at 24 passed with this row absent).
+    assert len(_PINS) == 86
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
