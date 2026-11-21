@@ -359,8 +359,8 @@ def test_every_door_the_seed_calls_is_published_by_both_real_surfaces():
     import re
 
     from tortoise import hosted_api
-    from tortoise.onboarding import selfhost
     from tortoise.onboarding import seed as seed_module
+    from tortoise.onboarding import selfhost
 
     used = set(re.findall(r"\bsurface\.(\w+)",
                           inspect.getsource(seed_module)))
