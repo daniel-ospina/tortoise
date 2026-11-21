@@ -179,8 +179,8 @@ def _run(handle: Any, cypher: str, params: dict[str, Any] | None = None):
 def _name_key_space(name: str) -> tuple[str, dict]:
     """(WHERE clause, params) selecting EVERY holder of ``name`` — the writer's key space.
 
-    #12120 finding 3 (P2): ``create_subject`` — the write this module's collision
-    guard protects — resolves on the folded UNION (``name`` · ``canonical_name`` ·
+    #12120 finding 3 (P2): ``create_subject_anchor`` — the write this module's
+    collision guard protects — resolves on the folded UNION (``name`` · ``canonical_name`` ·
     ``aliases``, over the raw and the folded spelling). A guard that enumerates
     only the raw ``name`` can therefore classify a fold-colliding anchor "safe to
     create", and the write resolves onto the OTHER identity's node. The arms come
@@ -248,7 +248,7 @@ def find_subject_by_name(handle: Any, name: str) -> dict[str, Any] | None:
             props.append(dict(existing) if isinstance(existing, dict) else {})
     # ⛔ Collapse merged-away carriers BEFORE the 1-vs-2 decision (#12120): one
     # entity reached through two rows (a non-destructive merge) is ONE holder,
-    # which is the answer `create_subject` gives. Without it a re-seed of an org
+    # which is the answer `create_subject_anchor` gives. Without it a re-seed of an org
     # whose anchor was ever merged raised `SubjectCollision` for a name the write
     # resolves to a single node.
     holders = _collapse_merged_anchor_rows(handle, props)
@@ -284,7 +284,7 @@ def _collapse_merged_anchor_rows(handle: Any,
     (#12120 finding 3, completed here). ``apply_entity_merge`` is
     NON-destructive: the candidate stays live and keeps a folded key, so after a
     merge the name union legitimately returns TWO rows for ONE entity — and
-    ``create_subject`` collapses them (``_live_holders_same_entity``). Counting
+    ``create_subject_anchor`` collapses them (``_live_holders_same_entity``). Counting
     rows raised ``AmbiguousEntityName`` (→ ``SubjectCollision``) for a name the
     write resolves to a single node, so a re-seed of an org whose anchor was ever
     merged failed at a door that worked before the widening. Agreeing on the
