@@ -311,7 +311,30 @@ SWEEP_NAMES = 66
 #: on a tree that itself derived 11821, while `main` at `38086c1bc5` derived 11822. A stale pin on
 #: main is a red gate on every PR that touches nothing in this population (#14062).
 #: Measured with `--repin` on THIS tree, never by arithmetic on the last pin.
-SWEEP_RESIDUE = (11829, "f0301da129c0c584")
+#:
+#: RE-CUT UP (11829, "f0301da129c0c584") → (11839, "42d5bd85c6e2fd9d") on the #14068 tree, which is
+#: the MERGE tree `surface-guard` grades. Two things moved it, and the first one is the reason the
+#: pin it replaces was RED ON MAIN from the moment it merged, not a row this PR added:
+#:
+#:   * +2 — `main`'s own rows, off the #14064 pin by construction. That lane measured
+#:     `d4a8dddc4e` (11829, reproduced here) and the squash merged onto `ac57b2d38a`, which
+#:     already carried #14065's `tests/test_usage_signal.py`: +2 `found.update`. Nothing in this
+#:     PR touches that file; a re-cut on any PR would have had to carry it.
+#:   * +8 — this PR's rows, every one of them on a receiver that is NOT the SDK:
+#:     - `tortoise/cache_graph.py` — +1 `get_control_plane().query` (the Supabase control-plane
+#:       client, whose `.query` is the SQL door this change adds)
+#:     - `docs/evidence/12943-cache-leg/orgwide_two_graphs.py` — +4 (`sdk._get_registry().query` 2,
+#:       `graph.query` 1, `db.list_graphs` 1 — the FalkorDB door plus the registry spelling that is
+#:       already pinned 263 times on `main`)
+#:     - `tests/test_13337_cache_graph_declaration.py` — +2 (`graph.query` 1, `seen.update` 1)
+#:     - `tortoise/__main__.py` — +1 `payload.update` (a dict, beside the `payload.update` the file
+#:       already carries)
+#:
+#: `typed references still pointing at a public name: 0` on this tree, so no typed call site is
+#: legitimised by the re-cut: every row above is a receiver the sweep cannot type, which is exactly
+#: what this pin exists to declare. Measured with `--repin` on THIS tree, never by arithmetic on the
+#: last pin.
+SWEEP_RESIDUE = (11839, "42d5bd85c6e2fd9d")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
