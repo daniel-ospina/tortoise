@@ -2033,13 +2033,23 @@ class _AnchorHrefParser(HTMLParser):
             # renders its children and a foreign `<script>` holds markup, not text
             # (review finding, #3962, Chromium-verified).
             self.foreign_tags.append(tag)
-            if tag in self._RAW_TEXT_DIRECTIVES:
+            if tag in self._RAW_TEXT_DIRECTIVES and not self._suppress:
                 # ⛔ A FOREIGN `<style>` IS STILL A STYLESHEET, and SVG's applies
                 # DOCUMENT-WIDE — so a caller asking "is this markup statically
                 # reviewable?" must be told no. Recorded here rather than left to the
                 # HTML branch, which this early return never reaches (#14229 review).
-                # No gate here on `_suppress`: foreign content is not suppressed, and
-                # an inert `<template>` never reaches this branch at all.
+                # ⛔ AND THE `_suppress` GATE IS LOAD-BEARING: `<svg>`/`<math>` are
+                # opened even while an inert `<template>` is open (`_open` is called
+                # unconditionally for them), so this branch IS reached from template
+                # content — and template content renders in no mode (MDN `<template>`:
+                # "inert and not rendered"; HTML Standard §template: contents live in
+                # a separate `DocumentFragment`), so a directive there is not one a
+                # reader meets. Measured before the gate,
+                # `extract_raw_text_elements('<template><svg><style>p{}</style></svg></template>')`
+                # returned `[('style', 1)]` and the allowlist reddened a CORRECT page
+                # (#14229 review). A foreign `<style>`/`<script>` never pushes
+                # `_suppress` itself, so inside foreign content a non-empty stack means
+                # exactly "an HTML inert/raw-text region is open above us".
                 self.raw_text.append((tag, self.getpos()[0]))
             return False
         if tag == "body":
@@ -3129,7 +3139,8 @@ def extract_raw_text_elements(html: str) -> list[tuple[str, int]]:
     "every ``<style>``/``<script>``" and a review caught the gap (#14229 review):
     reported at any depth in HTML content and in FOREIGN content (``<svg>``/``<math>``,
     where a ``<style>`` is a real stylesheet that applies document-wide), and NOT
-    reported inside an inert ``<template>`` — template content renders in no mode, so
+    reported inside an inert ``<template>`` — in EITHER content mode, so
+    ``<template><svg><style>`` is cleared too: template content renders in no mode, so
     the inert rule already answers it — nor inside another raw-text or mode-dependent
     region, whose own guard refuses it first.
     """
