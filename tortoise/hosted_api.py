@@ -10561,11 +10561,13 @@ def _require_scope(org: dict, scope: str, surface: str) -> None:
 
     #10893 second cycle: it is also where the `dispatch` boundary of
     ``pre_handler`` is closed. A data handler runs on a task the transport seam
-    created, so everything between arrival and THIS line — the middleware
-    chain, the credential/org dependency stack, and any time the task sat
-    unscheduled behind another request's synchronous work — is the wait before
-    the handler could start. It is noted here rather than per-route because this
-    function's placement is already the contract above, so a new data route
+    created, so everything SINCE THAT TASK EXISTED and up to this line — the
+    credential/org dependency stack, plus any time the task sat unscheduled
+    behind another request's synchronous work — is the `dispatch` part. The
+    middleware chain is NOT in it: that belongs to the `middleware` part, which
+    the transport seam closes when the task is created (``PRE_HANDLER_PARTS`` in
+    ``tortoise/read_stages.py``). It is noted here rather than per-route because
+    this function's placement is already the contract above, so a new data route
     inherits the attribution instead of having to remember it.
     """
     from tortoise.read_stages import note as _note_stage
@@ -21656,8 +21658,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # ⛔ #10893 (second cycle): THE RECEIPT BLOCK IS SYNCHRONOUS GRAPH + REGISTRY
     # WORK, and it used to run INLINE on the single uvicorn worker. Two
     # `_session_alive` probes, one `_session_count_by_harness` count, and
-    # up to two `_update_onboarding_state` writes — which are a jsonb
-    # compare-and-set against the registry AND keyed graph MERGEs — all park the
+    # up to two `_update_onboarding_state` writes — the receipt key is an
+    # OPERATIONAL field, so it is a jsonb compare-and-set against the registry
+    # (or, in the selfhost lane, a `SET t.onboarding_state` on the registry Team
+    # node), with NO `OnboardingState` MERGE — all park the
     # event loop. That is the `#2988`/`#3498` class this file offloads at every
     # other leg of this handler (see the #4625 legs above), and it is the shape
     # that makes a CONCURRENT `/v1/search` accrue `pre_handler` seconds it never
@@ -21799,15 +21803,17 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         legacy_mirror = bool(
             _onboard_state.get("onboarding_complete"))
 
-        # ⛔ THE GATE READS THE ORG **DEFAULT** GRAPH — NOT THE CAPTURE'S. This
-        # is an org-level surface, kept on the default graph by the same rule its
-        # siblings state ("a graph-bound key writing it would be a cross-graph
-        # write" — `_reject_graph_bound_org_surface`). `proj` below is the
-        # CAPTURE graph, and for a graph-bound credential `_data_sdk`'s
-        # `if gid:` branch opens a CUSTOM one — so handing `proj` to the gate
-        # moves it off the default graph, where it finds no node, returns False,
-        # and onboarding completion silently stops firing for that org
-        # (#14086 review, P2).
+        # ⛔ BOTH HALVES OF THIS BLOCK READ AND WRITE THE ORG **DEFAULT** GRAPH —
+        # NOT THE CAPTURE'S. They are org-level surfaces, kept on the default
+        # graph by the same rule their siblings state ("a graph-bound key
+        # writing it would be a cross-graph write" —
+        # `_reject_graph_bound_org_surface`). `proj` below is the CAPTURE graph,
+        # and for a graph-bound credential `_data_sdk`'s `if gid:` branch opens a
+        # CUSTOM one. Handed `proj`, the gate finds no node and returns False
+        # (completion silently stops firing for that org), AND the step write
+        # files org-level onboarding state inside the customer's CUSTOM graph —
+        # invisible to every org-level reader, and `first_capture` fires once per
+        # GRAPH instead of once per org (#14086 review, P2, both halves).
         # Constructed HERE, ON the loop: `_make_sdk` must not resolve a store path
         # in a pooled worker (#7500). Only the cold `_get_proj()` attach stays in
         # the worker, via the handle handed to `_maybe_apply_completion`.
@@ -21822,8 +21828,18 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             worker, at the end of EVERY first capture. Same callable, same
             order, same non-fatal arm — only WHERE it runs changes.
             """
+            # ⛔ THE WRITE GOES TO THE SAME DEFAULT GRAPH AS THE GATE BELOW.
+            # `write_completed_step` mints the `OnboardingState` node, the
+            # `OnboardingStep` node and their `COMPLETED_STEP` edge IN THE GRAPH
+            # IT IS HANDED (`onboarding/state.py`), and this step is org-level
+            # like every other writer of it here — the checkpoint route reaches
+            # the same call through `_org_proj`, behind
+            # `_reject_graph_bound_org_surface`; the capture route has no such
+            # guard. The attach is resolved HERE, not on the loop: this closure
+            # runs on the capture pool, where the cold open belongs (#7500).
+            default_proj = completion_sdk._get_proj()
             created = bool(_os.write_completed_step(
-                proj, org["org_id"], "capture-disclosed",
+                default_proj, org["org_id"], "capture-disclosed",
                 status_from_mirror=legacy_mirror)["created"])
             # ⛔ The DEFAULT-graph HANDLE is handed in, not resolved here: this
             # closure runs on a POOLED worker, where `_make_sdk` must not
@@ -39265,8 +39281,21 @@ def _maybe_apply_completion(org_id: str, *, sdk=None) -> bool:
     thread's stale inherited stamp once the pool reuses it, so the job writes to a
     store the reader never looks at (``#7500``; measured as 3 reds under
     ``#4645``). So the caller — ON the loop — CONSTRUCTS the DEFAULT-graph SDK
-    (``_org_sdk``: no I/O, the auth seam has already published the namespace) and
-    hands the HANDLE in; the cold ``_get_proj()`` attach stays in the worker.
+    and hands the HANDLE in; the cold ``_get_proj()`` attach stays in the worker.
+
+    ⛔ ``_org_sdk`` IS NOT ALWAYS I/O-FREE, so that construction is free on a
+    REQUEST lane and NOT free everywhere. It is free only where the auth seam
+    published the namespace (``_publish_default_namespace``, which publishes
+    only for an ORG-WIDE credential — a graph-bound one is skipped by design).
+    On the MCP capture lane nothing publishes it (``mcp_auth`` may not import
+    this module, and ``mcp_server`` calls ``_capture_session_impl`` directly),
+    and for a GRAPH-BOUND credential in either lane, ``_org_default_namespace``
+    does one primary-key control-plane read of ``organizations.graph_name``.
+    That read is PRE-EXISTING (``main`` resolved it on the loop too, through
+    ``_org_proj`` inside the inline gate) — this change neither adds nor removes
+    it — but it means the SDK construction must stay on whatever thread the lane
+    already runs it on, and must never move into the capture-pool worker.
+
     Left as ``None`` the historical behaviour is unchanged for every other
     caller."""
     try:

@@ -3070,12 +3070,15 @@ def test_the_capture_post_write_tail_never_runs_on_the_event_loop(
 #:     realistic extraction, which is a fixture redesign this change does not carry.
 #:
 #: ⛔ AND NOT EVERY TAIL LEG CAN BE A NEEDLE AT ALL. The receipt write
-#: (`_update_onboarding_state`, the jsonb CAS + keyed MERGEs the handler's own
-#: comment calls out) keys on an OPERATIONAL field, so it routes to the jsonb
-#: compare-and-set and emits NO Cypher — the `MERGE (n:OnboardingState …)` needle
-#: beside it is satisfied by a DIFFERENT writer, which is why this table read
-#: green over an unwatched third leg (#14086 review, P2). No needle can be added
-#: for it: it is watched by a RECORDER instead
+#: (`_update_onboarding_state`) keys on an OPERATIONAL field, so it routes to
+#: `_write_jsonb_fields_cas` — a registry CAS (`_make_sdk(namespace="registry")`,
+#: or `write_operational_state` on the default graph for the selfhost org), or a
+#: Supabase jsonb PATCH. NONE of those is an `OnboardingState`/`OnboardingStep`
+#: MERGE, so the `MERGE (n:OnboardingState …)` needle beside it is satisfied by a
+#: DIFFERENT writer — which is why this table read green over an unwatched third
+#: leg (#14086 review, P2). Its statement is also LANE-DEPENDENT (registry Cypher
+#: vs a Supabase PATCH that emits none), so a needle would be inert on one lane;
+#: it is watched by a RECORDER instead
 #: (`test_the_receipt_write_runs_on_the_capture_pool`), on the seam's own
 #: calling thread. Same reason `_PRE_EXISTING_OFFLOAD_LEGS` is consulted by
 #: `_is_a_pre_existing_offload` rather than left as a declaration.
@@ -3481,10 +3484,20 @@ def test_the_capture_completion_gate_reads_the_org_DEFAULT_graph_not_the_capture
     apart. This row tells them apart by making the default-graph handle a
     SENTINEL that no other seam can produce.
 
-    Mutation check (must stay true): restoring ``_maybe_apply_completion(org_id,
-    proj=proj)`` in the closure reds BOTH assertions below — `_org_sdk` is never
-    asked for the org, and the gate's read is handed the capture's projection —
-    measured, and it is the reason this row exists.
+    ⛔ BOTH HALVES OF THE BLOCK, not just the gate. The same closure also WRITES
+    the ``capture-disclosed`` step, and ``write_completed_step`` mints its
+    ``OnboardingState`` node, ``OnboardingStep`` node and ``COMPLETED_STEP`` edge
+    in the graph it is handed — so the write was filing org-level onboarding
+    state through the CAPTURE graph while the gate read the default one. For a
+    graph-bound key that is a cross-graph write no org-level reader sees, and
+    ``first_capture`` fires once per GRAPH instead of once per org. The write's
+    handle is recorded below for exactly that reason (#14086 review, P2).
+
+    Mutation check (must stay true): restoring ``proj`` in EITHER half reds an
+    assertion here — ``proj`` is a real FalkorProjection, the sentinel is a bare
+    ``object()``. Measured for the write half (the half the previous version of
+    this row could not see): ``write_completed_step(proj, ...)`` -> the
+    capture-disclosed handle assertion reds while the READ assertions stay green.
     """
     import tortoise.hosted_api as ha_mod
 
@@ -3510,6 +3523,17 @@ def test_the_capture_completion_gate_reads_the_org_DEFAULT_graph_not_the_capture
 
     monkeypatch.setattr(ha_mod._os, "read_onboarding_node", _recording_read)
 
+    written: list[tuple[object, str]] = []
+
+    def _recording_write_step(graph, org_id, step_id, **kwargs):
+        written.append((graph, step_id))
+        # The sentinel is a bare ``object()``, so the real writer cannot run on
+        # it; the created-signal shape is all this row reads.
+        return {"created": True, "step_id": step_id}
+
+    monkeypatch.setattr(ha_mod._os, "write_completed_step",
+                        _recording_write_step)
+
     resp, _records, _writer = _measure_capture_graph_work(
         monkeypatch, 2, "completion-default-graph-14086")
     require_answered(
@@ -3533,6 +3557,18 @@ def test_the_capture_completion_gate_reads_the_org_DEFAULT_graph_not_the_capture
         "the default-graph projection's cold `_get_proj()` open ran on "
         f"{stub.proj_threads!r}, not the capture pool — `_make_sdk`'s store "
         "path must not be resolved on the event loop either (#7500)")
+
+    disclosed_handles = [graph for graph, step in written
+                         if step == "capture-disclosed"]
+    assert disclosed_handles == [stub.proj], (
+        "the capture-disclosed checkpoint wrote its `OnboardingState` node, "
+        "`OnboardingStep` node and `COMPLETED_STEP` edge through a projection "
+        "that is NOT the org's default graph — `write_completed_step` mints "
+        "them IN THE GRAPH IT IS HANDED, so for a graph-bound key this files "
+        "org-level onboarding state inside the customer's CUSTOM graph, where "
+        "no org-level reader looks and `first_capture` fires once per GRAPH "
+        "instead of once per org (#14086 review, P2); handles: "
+        f"{[id(g) for g in disclosed_handles]} vs default {id(stub.proj)}")
 
 
 def test_the_pre_existing_offload_exemption_is_actually_consumed():
@@ -3624,7 +3660,8 @@ def test_the_receipt_write_runs_on_the_capture_pool(client, monkeypatch):
     on_loop = [name for name in seen if not str(name).startswith(_CAPTURE_POOL_PREFIX)]
     assert not on_loop, (
         "the capture receipt write ran on "
-        f"{on_loop} — it is a jsonb CAS + keyed MERGEs and parks the single "
+        f"{on_loop} — it is a registry/jsonb CAS and parks the single "
         "uvicorn worker, which every concurrent `/v1/search` pays as "
-        "`pre_handler` (#10893). No statement needle can see this leg, which is "
-        "why it is recorded here")
+        "`pre_handler` (#10893). No needle in this table can see this leg (its "
+        "statement is lane-dependent, and it is never an `OnboardingState` "
+        "MERGE), which is why it is recorded here")
