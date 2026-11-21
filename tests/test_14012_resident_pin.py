@@ -1507,3 +1507,116 @@ def test_a_pass_budget_exhausted_AFTER_a_deleting_pass_keeps_its_own_reason():
     assert report.metric()["pass_budget_exhausted"] is True, (
         "the binding constraint was the pass budget, not the pin"
     )
+
+
+def test_a_saturated_window_that_is_still_UNASKED_does_not_end_the_sweep():
+    """`window >= after_nodes` is not "nothing left to ask" — the FIRST cut of this fix
+    shipped that reading and a fresh review measured it as #14161's defect, narrower.
+
+    ⛔ `window` grows MULTIPLICATIVELY, so it saturates at `after_nodes` long before the
+    plan has looked at the population: `local` is capped at `budget` = min(batch_size,
+    remaining_plan, licence_remaining), so every candidate ranked beyond that cap was
+    never asked — and the NEXT pass asks them, because the ones just held are skipped
+    (a lease is in `held_leased_ids`; a pin is re-asked and held at PLAN time, so it
+    never re-enters `local`).
+
+    Measured at this shape with `and len(local) >= len(offered)` DELETED from the arm
+    (everything else byte-identical): `deleted=15`, `passes=4`, `remaining=25` — the
+    identical run with the guard in place reaches the budget at `passes=8`,
+    `deleted=32`, `remaining=8`. So 6 of 10 passes and 17 evictions were lost to a window
+    that had merely finished GROWING, and the reason offered the operator a remedy that
+    clears 5 nodes out of 17.
+    """
+    from tortoise.cache_evictor import ReadLeases
+
+    leaked = {f"p{i:02d}" for i in range(15, 20)}      # readers start on these
+    g = _FakeGraph([f"p{i:02d}" for i in range(40)])
+    leases = ReadLeases()
+
+    def probe_and_start_a_reader(candidate: Candidate) -> bool:
+        # The record probe is the seam AFTER the plan-time lease gate, so these nodes are
+        # planned and then held at the LAST hop — the arm under test.
+        if candidate.key in leaked:
+            leases.acquire(candidate.node_id)
+        return True
+
+    report = evict(
+        _assessment(nodes=40), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=probe_and_start_a_reader,
+        leases=leases,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=8, batch_size=5, max_passes=10),
+    )
+
+    assert len(g.node_keys()) == 8, (
+        f"the sweep stopped with {len(g.node_keys())} node(s) resident against a budget of "
+        f"8 — the window had saturated at `after_nodes` while the plan was still capped at "
+        f"`batch_size`, so the candidates ranked beyond it were never asked. "
+        f"deleted={len(report.deleted)} passes={report.passes} reason={report.reason!r}"
+    )
+    assert report.passes > 5, (
+        "the sweep broke as soon as `window` reached the whole graph, which is the "
+        f"condition this row exists to separate from 'nothing left to ask'. "
+        f"passes={report.passes}"
+    )
+    assert "in-flight READ" in report.reason or report.verdict == "EVICTED", (
+        "the report neither reached the budget nor named the read that is holding the "
+        f"rest. reason={report.reason!r}"
+    )
+
+
+def test_a_later_RECORD_hold_does_not_report_an_EARLIER_pass_lease():
+    """The widen path must carry ITS OWN diagnosis, and must not turn a record hold into
+    an actionable one.
+
+    ⛔ `hold_reason` was set only by the LAST-HOP arm, so the `if not local:` widen path
+    left an earlier pass's value in place: pass 1 discovers a READER on `p0` (carried as
+    `"leased"`), pass 2 finds the rest of the window unservable by the RECORD, widens, and
+    the loop then runs out of passes. The report named the in-flight READ — a hold the
+    operator cannot clear (`re-run when those reads finish`), which is not what stopped the
+    next sweep: `skipped_record_cannot_serve` held `p1`/`p2` and was never mentioned.
+
+    ⛔ AND THE RECORD HOLD IS CARRIED AS *NOTHING*, deliberately: the carry-out exists to
+    replace `pass_budget` with an ACTIONABLE hold, and a record that cannot serve has no
+    such remedy — converting it into a stop reason would also hide the binding constraint
+    (`window` does not survive a call), which is the pass budget.
+    """
+    from tortoise.cache_evictor import ReadLeases
+
+    g = _FakeGraph([f"p{i}" for i in range(6)])
+    leases = ReadLeases()
+
+    def probe(candidate: Candidate) -> bool:
+        if candidate.key == "p0":
+            leases.acquire(candidate.node_id)   # a reader starts AFTER the plan-time gate
+            return True
+        return False                            # everything else: the record cannot serve it
+
+    report = evict(
+        _assessment(nodes=6), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=probe,
+        leases=leases,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=1, max_passes=2),
+    )
+
+    assert report.deleted == ()
+    assert {c.key for c in report.skipped_record_cannot_serve} == {"p1", "p2"}, (
+        "this row grades nothing unless the record hold is what the last pass met"
+    )
+    assert "in-flight READ" not in report.reason, (
+        "the reason carried an EARLIER pass's lease into a stop the RECORD caused — the "
+        "operator is told to wait for a read that is not what keeps these nodes resident, "
+        f"and `skipped_record_cannot_serve` is never mentioned. reason={report.reason!r}"
+    )
+    assert "unservable" in report.reason, (
+        "the reason did not name the unservable head at all: "
+        f"reason={report.reason!r}"
+    )
+    assert "re-running will not converge" in report.reason, (
+        "the stop was the pass budget, and `window` does not survive a call — telling the "
+        f"operator to re-run here is an instruction that cannot converge. "
+        f"reason={report.reason!r}"
+    )
