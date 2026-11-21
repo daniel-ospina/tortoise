@@ -9640,12 +9640,20 @@ surfaces:
   # the same `core`-fallback shape the `test_12894` rows above record, and a row on
   # any named surface would leave it asleep on precisely that diff class because a
   # named-surface match REPLACES the `core` fallback (#2938/#7951).
-  # Hermetic on the fast lane: pure arithmetic over a fixed grid — no DB, no graph,
-  # no docker, no network, no model call. Five cases; measured with
-  # `TORTOISE_TEST_CARVE_OUT=1` at 6.6 s WALL, of which 4.34 s is the session
-  # fixture's setup and 2.04 s its teardown — every test BODY is under 0.02 s
-  # (`pytest --durations=8`). It is the shared session fixture that costs, not
-  # this file: it pays the same 6.6 s on any file in the suite.
+  # Hermetic on the fast lane: SEVEN cases — five arithmetic sweeps over a fixed
+  # grid, plus the two pins that make them load-bearing (one drives the real
+  # `get_relationships_bounded` over a stub graph inside its `ThreadPoolExecutor`;
+  # the other reads the generated Q2-crit query text). No DB, no graph server, no
+  # docker, no network, no model call. ⛔ NO SECONDS FIGURE IS QUOTED HERE ON
+  # PURPOSE, and two earlier cuts of this comment did quote one (a single run's
+  # "6.7 s, of which 6.6 s was import/collection" — wrong about WHAT the time was;
+  # then a band of 5.6-6.9 s wall / 3.7-4.3 s setup / 1.5-2.0 s teardown — real
+  # readings fell outside it at BOTH ends). Both are WITHDRAWN, quoted only so the
+  # next lane does not re-derive them. What is stable across runs is the
+  # SHAPE: the wall time is the SHARED SESSION FIXTURE's setup and teardown, not
+  # this file — the largest TEST BODY is under 0.02 s — and any file in the suite
+  # pays the fixture too. `pytest -q --durations=5` is the authority for the
+  # split; re-derive there rather than trusting a transcription of one run.
   - test_14192_beta_variance_sum_bound.py
   ep:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
@@ -15321,11 +15329,14 @@ durations:
   # row must EXIST rather than merely default: the `core:` registration above is what
   # puts the file in `fast_pool()`, and `--integrity` stays green either way, so only
   # this row records the weight. `2.0` is the header's flat `DEFAULT_FAST_WEIGHT` and
-  # is the honest value here: measured with `TORTOISE_TEST_CARVE_OUT=1`, 5 cases in
-  # 6.6 s WALL of which 4.34 s is session-fixture setup and 2.04 s teardown, so the
-  # file's own cost is arithmetic over a fixed grid (19 x 19 x 2 + 7 extra pairs =
-  # 729) and every test body is under 0.02 s. `--refresh-durations` replaces this
-  # from junit once a push-to-main sweep includes the file.
+  # is the honest value here: the file's OWN cost is five arithmetic sweeps over a
+  # fixed grid (19 x 19 x 2 + 7 extra pairs = 729) plus two query-driving cases, and
+  # the largest test BODY measures under 0.02 s. ⛔ NO WALL/SETUP/TEARDOWN FIGURE
+  # IS QUOTED: those belong to the SHARED session fixture, not to this file, and the
+  # two cuts that quoted them were contradicted by real readings (see the dated
+  # correction above). `pytest -q --durations=5` is the authority for the split, and
+  # `--refresh-durations` replaces this row from junit once a push-to-main sweep
+  # includes the file.
   test_14192_beta_variance_sum_bound.py: 2.0
   test_journal_segments.py: 0.3
   test_journal_segments_falsifier.py: 0.2

@@ -53,8 +53,19 @@ is the stage that total is mostly made of. Re-derive with
 rather than trusting these cells.
 
 The two arms differ in exactly one function: `get_relationships_bounded`, which
-was **69 % of the read** (`post_relationships` 167 ms of a 231 ms search in the
-first measurement) because it issued six independent graph reads in a chain.
+issued six graph reads in a chain. Two different figures describe it and they
+are NOT interchangeable, so both are stated with what they measure:
+
+- **the WAVE was 69 % of the read** — 159 ms of a 231 ms search, in the first
+  measurement, and that is the figure `search_engine.py`'s own comment quotes
+  (`159 / 231 = 68.8 %`). The wave is the post-Q1a portion the re-schedule
+  covers, not the whole member.
+- **the MEMBER was 167 ms p50 of that same 231 ms search** (`167 / 231 =
+  72.3 %`) — and in the artifact above the `post_relationships` member falls
+  from 144.6 ms to 72.3 ms.
+
+An earlier cut attached 167 ms to the 69 % claim, which cannot both be true;
+neither number was wrong, only the pairing was.
 
 ## Result — `ab-relationships.json`
 
