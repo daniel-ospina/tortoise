@@ -1225,6 +1225,21 @@ def _docs_section(anchor: str = "storage", *, page: str | None = None) -> str:
     an index ambiguity, and the second could advertise a heading the reviewed one
     does not.
 
+    ⛔ AND WHICH ENTRY THE ONE BLOCK ADVERTISES IS A URL QUESTION, not a string
+    prefix — the same false-red family, two members further on. `href="#x"` was
+    matched literally, so an entry the URL parser strips to a fragment
+    (`href=" #quickstart"`, or a value wrapped in newlines — both legal, both
+    rendered) and an ABSOLUTE link to this same page (`/tortoise/docs#quickstart`,
+    `/docs#quickstart`, the full-URL form) were dropped from the advertised set.
+    The slice then ran PAST the section and the golden reddened on copy nobody
+    touched (#14073 review, measured). `_fragment_this_page_advertises` decides it
+    with the module's own route map, so the spellings are one question rather than
+    a list; a host outside `SITE_HOSTS` is never same-page, because accepting a
+    foreign host would GROW the advertised set — the fail-open direction. The
+    remaining declared residual: a TOC entry pointing at ANOTHER page's fragment is
+    not advertised here either, so if a reviewer ever moves an entry's target the
+    slice runs long and the golden reds loudly instead of silently shrinking.
+
     ⚠️ THE DECLARED RESIDUAL, stated rather than left to be derived: a heading that
     IS advertised — `<h2 id="storage-limits">` plus a TOC entry for it — cuts the
     slice there, and everything under it leaves all three pins. That is the design
@@ -1283,7 +1298,9 @@ def _docs_section(anchor: str = "storage", *, page: str | None = None) -> str:
         f"reviewed one does not."
     )
     advertised = {
-        href[1:] for href in tocs[0] if href.startswith("#") and len(href) > 1
+        fragment
+        for href in tocs[0]
+        if (fragment := _fragment_this_page_advertises(href, DOCS)) is not None
     }
     for heading_id, offset in headings:
         if offset <= start:
@@ -1291,6 +1308,58 @@ def _docs_section(anchor: str = "storage", *, page: str | None = None) -> str:
         if heading_id in advertised:
             return html[start:offset]
     return html[start:]
+
+
+#: Schemes an href may use and still be a same-page in-page link. A bare fragment
+#: has no scheme at all; `javascript:`/`mailto:`/`data:` never name a fragment on
+#: THIS document, so they are not advertisers.
+_THIS_PAGE_HREF_SCHEMES = ("", "http", "https")
+
+
+def _fragment_this_page_advertises(href: str, document: Path) -> str | None:
+    """The heading id `href` advertises ON `document`, or `None`.
+
+    See `_docs_section` for why a literal `href.startswith("#")` is the wrong test.
+    Two questions, in this order:
+
+    1. WHICH FRAGMENT — the URL parser strips leading/trailing C0-or-space from an
+       href value, so `" #quickstart"` and a value wrapped in newlines are the
+       same URL as `"#quickstart"`. `urlparse` gives the fragment after that
+       stripping and after entity decoding, which is the tokenizer's work, not a
+       pattern's.
+    2. WHICH DOCUMENT — decided by the module's own route map
+       (`_document_for_loc`), so `/docs` (the retired alias), `/tortoise/docs`,
+       `docs.html` and the full-URL form are ONE question instead of a second
+       list of spellings that rots at the next route change.
+
+    ⛔ A FOREIGN HOST IS NEVER SAME-PAGE. `//evil.example/docs#storage-limits`
+    resolves to this document's PATH, so a path-only rule would accept it and add
+    an entry to the advertised set — a larger set, a shorter slice, the fail-open
+    direction. A same-page absolute link must name a host this project serves.
+    """
+    target = href.strip(" \t\n\r\f\v")
+    if not target:
+        return None
+    parsed = urlparse(target)
+    if not parsed.fragment:
+        return None
+    if not (parsed.path or parsed.netloc or parsed.scheme):
+        return parsed.fragment  # a bare fragment: this page by definition
+    if parsed.scheme not in _THIS_PAGE_HREF_SCHEMES:
+        return None
+    if parsed.netloc:
+        if not parsed.scheme or parsed.hostname not in SITE_HOSTS:
+            return None
+        try:
+            if parsed.port not in (None, 80, 443):
+                return None
+        except ValueError:  # an unparsable port names no document here
+            return None
+        resolved = _document_for_loc(target)
+    else:
+        relative = target if target.startswith("/") else f"/{target}"
+        resolved = _document_for_loc(f"{MARKETING_ORIGIN}{relative}")
+    return parsed.fragment if resolved == document else None
 
 
 #: An `<h2 …>` opening tag, its attribute text captured whole.
@@ -1960,6 +2029,21 @@ def test_the_storage_section_bound_cuts_at_a_RENDERED_heading_only() -> None:
         # claim INSIDE the slice instead of betting the other way). Reachable with
         # ordinary authoring, and it is why modelling this case was part of the fix.
         ("select", '<select><h2 id="quickstart">Quickstart</h2></select>'),
+        # ⛔ ELEMENT TYPES A SUPPORTING BROWSER DOES NOT RENDER — the same fail-open
+        # one level out from insertion modes: the heading was IN the tree, so it was
+        # recorded and bounded the slice while the claim under it left every pin
+        # (#14073 review, measured). `<datalist>` is `display: none` in the UA
+        # stylesheet; the rest put their children in the fallback slot.
+        ("datalist", '<datalist id="opts"><h2 id="quickstart">Quickstart</h2></datalist>'),
+        ("canvas fallback", '<canvas><h2 id="quickstart">Quickstart</h2></canvas>'),
+        ("video fallback", '<video><h2 id="quickstart">Quickstart</h2></video>'),
+        # …and the ATTRIBUTE spelling of the same thing: `hidden` on an ancestor
+        # (or on the heading) removes the subtree from the rendering, with no CSS
+        # involved. `hidden` is not in the section allowlist, and it need not be:
+        # this wrapper lives OUTSIDE the slice, so nothing else would see it.
+        ("hidden subtree", '<div hidden><h2 id="quickstart">Quickstart</h2></div>'),
+        ("hidden heading", '<h2 hidden id="quickstart">Quickstart</h2>'),
+        ("closed details", '<details><h2 id="quickstart">Quickstart</h2></details>'),
     ):
         mutant = page[:boundary] + inert + "\n" + claim + page[boundary:]
         assert mutant != page, f"could not insert the {label} case"
@@ -2042,6 +2126,223 @@ def test_the_storage_section_bound_cuts_at_a_RENDERED_heading_only() -> None:
     ], (
         "the `in select` rule leaked past the closing `</select>`: a heading "
         "after the select is a real heading and must be recorded"
+    )
+    # ── and the refusal cannot be POPPED by an end tag in a template ─────────
+    # `</select>` written inside `<template>` is processed against the template's
+    # own fragment stack, which never holds the outer select — so a browser leaves
+    # that select open and the heading is still one no reader meets. Popping it here
+    # recorded the heading and bounded the slice: the safety rule above, off by one
+    # stray end tag (#14073 review, measured).
+    assert extract_heading_positions(
+        '<select><template></select></template><h2 id="qs">Q</h2></select>'
+    ) == [], (
+        "a `</select>` written inside `<template>` popped the outer select, so a "
+        "heading the `in select` rule refuses was recorded and bounded the slice"
+    )
+    # The same seam, one recording over, and BOTH of its directions: a `</a>`-style
+    # end tag written in a template must not close the outer TOC block (a browser
+    # processes it against the template's fragment stack), so the entry after the
+    # template is still an entry — and no entry is invented from one before it.
+    assert extract_anchors_within(
+        '<div class="toc"><select><template></select></template>'
+        '<a href="#x">x</a></select></div>',
+        tag="div",
+        class_token="toc",
+    ) == [[]], (
+        "an anchor inside a `<select>` whose `</select>` was written in a template "
+        "is advertised as a TOC entry: the refusal was popped by the stray end tag"
+    )
+    assert extract_anchors_within(
+        '<div class="toc"><template></div></template><a href="#x">x</a></div>',
+        tag="div",
+        class_token="toc",
+    ) == [["#x"]], (
+        "a `</div>` written inside `<template>` closed the outer TOC block: a "
+        "browser ignores it there, so the entry after the template is still inside "
+        "the block and must stay advertised"
+    )
+
+
+#: Spellings that name THIS page and carry a fragment, and are therefore
+#: advertisements of a heading on it. All are legal HTML, all rendered by a browser.
+_SAME_PAGE_TOC_SPELLINGS = (
+    ("leading space", ' href=" #quickstart"'),
+    ("wrapped in newlines", ' href="\n        #quickstart\n      "'),
+    ("absolute path", ' href="/tortoise/docs#quickstart"'),
+    ("retired alias path", ' href="/docs#quickstart"'),
+    ("relative file", ' href="docs.html#quickstart"'),
+    ("full URL", ' href="https://premiselabs.co/tortoise/docs#quickstart"'),
+)
+
+
+def test_the_advertised_set_is_a_url_question_not_a_string_prefix() -> None:
+    """An in-page TOC entry is a URL, not a literal `'#'`-prefixed string (#14073).
+
+    `advertised = {href[1:] for href in tocs[0] if href.startswith("#")}` dropped
+    two legal spellings of an entry that DOES navigate to a heading on this page: a
+    value the URL parser strips to a fragment (`href=" #quickstart"`, or a value
+    wrapped in newlines) and an absolute link to the same document
+    (`/tortoise/docs#quickstart`, `/docs#quickstart`, `docs.html#quickstart`, the
+    full-URL form). Each loss SHRANK the advertised set, so the slice ran past
+    `#quickstart` and the golden reddened on copy nobody touched — the same
+    false-red family as `href='#x'`/`href=#x`, whose prose claimed the class was
+    closed (measured, #14073 review).
+
+    Both directions are asserted here: every legal same-page spelling must BOUND at
+    `quickstart` exactly as the unmutated page does, and a link that does NOT name
+    this document must not bound there — a larger advertised set is a shorter
+    slice, the fail-open direction.
+    """
+    page = _read(DOCS)
+    entry = '<a href="#quickstart">Quickstart (5 minutes)</a>'
+    assert entry in page, (
+        "website/docs.html no longer carries the TOC entry this control mutates, so "
+        "it cannot measure the advertised-set rule"
+    )
+    reviewed_slice = _docs_section()
+    for label, replacement in _SAME_PAGE_TOC_SPELLINGS:
+        mutant = page.replace(entry, f"<a{replacement}>Quickstart (5 minutes)</a>", 1)
+        assert mutant != page, f"could not rewrite the TOC entry for the {label} case"
+        assert _docs_section(page=mutant) == reviewed_slice, (
+            f"a TOC entry spelled as an {label} stopped advertising `quickstart`, "
+            f"so the #storage slice ran past the section and the golden reddened "
+            f"on copy nobody touched"
+        )
+    for label, replacement in (
+        ("another page's fragment", ' href="/tortoise/faq#quickstart"'),
+        ("a foreign host", ' href="//evil.example/docs#quickstart"'),
+        ("a non-http scheme", ' href="mailto:team@premiselabs.co#quickstart"'),
+    ):
+        mutant = page.replace(entry, f"<a{replacement}>Quickstart (5 minutes)</a>", 1)
+        assert mutant != page, f"could not rewrite the TOC entry for the {label} case"
+        wider = _docs_section(page=mutant)
+        assert len(wider) > len(reviewed_slice), (
+            f"an entry pointing at {label} was accepted as an advertisement of a "
+            f"heading on THIS page, so the advertised set grew and the slice "
+            f"shrank — the fail-open direction"
+        )
+        assert " ".join(_visible_text(wider).split()) != " ".join(
+            _visible_text(reviewed_slice).split()
+        ), (
+            f"the {label} case did not move the slice at all, so it is not "
+            f"measuring the advertised-set rule"
+        )
+
+
+def test_the_reader_met_rule_refuses_every_declared_unrendered_class() -> None:
+    """A heading no supported browser renders must not bound or advertise (#14073).
+
+    The rule is `_unmet_by_reader`, and it must cover EVERY class it declares —
+    element types, the `hidden` attribute (own and inherited), and
+    `<details>`/`<dialog>` before an `open` arrives. One class left unmodelled is
+    enough to re-open the fail-open the negative control pins: a heading in the
+    tree that a reader never meets, bounding the slice so the claim under it leaves
+    the golden, the vocabulary pin and the allowlist at once (measured).
+
+    Each positive control is the same shape WITHOUT the invisibility, so a rule
+    that simply refused everything would red here instead of passing.
+    """
+    for element in sorted(_AnchorHrefParser._UNRENDERED):
+        assert [
+            heading_id
+            for heading_id, _ in extract_heading_positions(
+                f'<{element}><h2 id="qs">Q</h2></{element}>'
+            )
+        ] == [], (
+            f"a `<h2>` inside `<{element}>` is recorded as a heading: a supporting "
+            f"browser renders no child of it, so bounding there is the fail-open "
+            f"direction"
+        )
+    for label, markup in (
+        ("heading itself hidden", '<h2 hidden id="qs">Q</h2>'),
+        ("inherited from a div", '<div hidden><section><h2 id="qs">Q</h2></section></div>'),
+        ("inherited through a wrapper", '<div hidden><div class="x"><h2 id="qs">Q</h2></div></div>'),
+        ("details without open", '<details><h2 id="qs">Q</h2></details>'),
+        ("dialog without open", '<dialog><h2 id="qs">Q</h2></dialog>'),
+    ):
+        assert extract_heading_positions(markup) == [], (
+            f"a `<h2>` is recorded although no reader meets it ({label}): bounding "
+            f"at it leaves the text under it outside every pin"
+        )
+    # ── positive controls: the same headings where a reader DOES meet them ────
+    for label, markup, expected_id in (
+        ("bare heading", '<h2 id="qs">Q</h2>', "qs"),
+        ("inside a plain wrapper", '<div class="wrap"><h2 id="qs">Q</h2></div>', "qs"),
+        ("after the hidden subtree closes", '<div hidden></div><h2 id="qs">Q</h2>', "qs"),
+        ("open details", '<details open><h2 id="qs">Q</h2></details>', "qs"),
+        ("open dialog", '<dialog open><h2 id="qs">Q</h2></dialog>', "qs"),
+    ):
+        assert [
+            heading_id
+            for heading_id, _ in extract_heading_positions(markup)
+        ] == [expected_id], (
+            f"a rendered heading is NOT recorded ({label}): the rule refuses too "
+            f"much, and a heading outside the slice is copy no pin sees"
+        )
+    # ── and the same rule governs the advertised ENTRIES ─────────────────────
+    assert extract_anchors_within(
+        '<div class="toc"><datalist><a href="#x">x</a></datalist></div>',
+        tag="div",
+        class_token="toc",
+    ) == [[]], (
+        "an anchor inside `<datalist>` is advertised as a TOC entry: nothing there "
+        "is rendered, so the entry adds a boundary the pins cannot verify"
+    )
+    assert extract_anchors_within(
+        '<div class="toc"><a href="#x" hidden>x</a><a href="#y">y</a></div>',
+        tag="div",
+        class_token="toc",
+    ) == [["#y"]], (
+        "an anchor carrying `hidden` is advertised as a TOC entry, so its"
+        " boundary is one no reader can reach"
+    )
+
+
+def test_extract_anchors_within_refuses_every_tag_a_sibling_can_close() -> None:
+    """The extent helper refuses EVERY container a sibling start tag closes (#14073).
+
+    The refusal listed only the implied-end-tag tags (`li`, `p`, `td`, …), while
+    its own message promised that every accepted tag is closed by its end tag
+    alone. `button`, `h1`–`h6`, `a`, `form`, `nobr`, `select` and `table` are also
+    closed by a FOLLOWING START TAG, and for them the extent ran past the sibling:
+    `'<button class="toc"><a href="#a">A</a><button><a href="#b">B</a>'` gave
+    `[['#a', '#b']]` where a browser has `[['#a']]` — a larger advertised set and a
+    SHORTER slice, the fail-open direction (measured, #14073 review). Only `div` is
+    a safe answer today, and that is the positive control below.
+    """
+    declared = set(_AnchorHrefParser._IMPLICITLY_CLOSED)
+    # ⛔ THE SET UNDER TEST IS NAMED HERE, not read back out of the refusal list — a
+    # loop over `_IMPLICITLY_CLOSED` alone passes when a tag is DELETED from it,
+    # which is exactly the defect this test exists to pin (measured: narrowing the
+    # list back to the implied-end-tag family left the self-referential version of
+    # this test green). The named set is a SUPERSET check on the declaration plus a
+    # behavioural check per tag, so neither half can be removed silently.
+    sibling_closed = {
+        "a", "button", "form", "h1", "h2", "h3", "h4", "h5", "h6", "li",
+        "nobr", "option", "p", "select", "table", "td",
+    }
+    assert not sibling_closed - declared, (
+        f"`_IMPLICITLY_CLOSED` no longer declares "
+        f"{sorted(sibling_closed - declared)}: a container tag a sibling start tag "
+        f"closes is accepted again, and its extent runs past the sibling — a larger "
+        f"advertised set, a shorter slice, the fail-open direction"
+    )
+    for tag in sorted(sibling_closed):
+        with pytest.raises(ValueError, match="WITHOUT an end tag"):
+            extract_anchors_within(
+                f'<{tag} class="toc"><a href="#a">A</a>',
+                tag=tag,
+                class_token="toc",
+            )
+    # POSITIVE CONTROL: the tag the callers actually ask for is accepted, and it
+    # measures what the refusal protects — the sibling's anchor is NOT included.
+    assert extract_anchors_within(
+        '<div class="toc"><a href="#a">A</a></div><div class="toc"><a href="#b">B</a></div>',
+        tag="div",
+        class_token="toc",
+    ) == [["#a"], ["#b"]], (
+        "the accepted container tag does not bound its extent at its own end tag, "
+        "so `div` is not the safe answer the refusal message advertises"
     )
 
 
