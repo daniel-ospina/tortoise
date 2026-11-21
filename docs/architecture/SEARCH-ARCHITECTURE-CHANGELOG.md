@@ -415,8 +415,8 @@ what it returns.
 scope line are untouched — M5 measures the input to the tier and does not choose it, and the windows are read
 from `product/pricing.json` and asserted equal to it in `tests/test_miss_rate_m5.py`.
 
-**Neither label's curve has a knee.** `:Object` is near-log-linear — a constant 10.4–12.0 pp removed per
-DOUBLING of the window at every size — and `:Point` decays faster (from its peak **24.6 pp** at
+**Neither label's curve has a knee.** `:Object` is near-log-linear — a near-constant 10.4–12.0 pp removed per
+DOUBLING of the window **after the first** (whose `0.05→0.10` step removes 15.5 pp) — and `:Point` decays faster (from its peak **24.6 pp** at
 `0.15→0.30`, 24.2 pp at `0.20→0.40`, down to 5.6 pp at `0.50→1.00`) without reaching a 2 pp-per-doubling
 bar. So "good enough" has to be a DECLARED miss bar rather
 than a discovered knee, which is why the record publishes the covered-tenant size at five bars (1/2/5/10/20 %).

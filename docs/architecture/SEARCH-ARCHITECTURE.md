@@ -841,8 +841,9 @@ as a size rather than a rate because the owner's criterion (`#13989`) is *"an am
 the system works"* — a tenant size, not a percentage.
 
 ⛔ **Neither label's curve has a knee, and that is the finding rather than a gap in it.** Under "a
-doubling of the window removes < 2 pp", `:Object` gives a near-constant **10.4 – 12.0 pp per doubling at
-every size** (log-linear) and `:Point` decays faster — from its peak doubling (**24.6 pp** at
+doubling of the window removes < 2 pp", `:Object` gives a near-constant **10.4 – 12.0 pp per doubling
+after the first** (its first doubling, `0.05→0.10`, removes **15.5 pp**) (log-linear) and `:Point` decays
+faster — from its peak doubling (**24.6 pp** at
 `0.15→0.30`; **24.2 pp** at `0.20→0.40`) down to **5.6 pp** at `0.50→1.00` — without ever reaching the
 bar. So **"good enough" has to be a DECLARED bar, not a discovered knee** —
 which is why the record publishes the covered-tenant size at five bars (1/2/5/10/20 %) rather than one.

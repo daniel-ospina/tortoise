@@ -32,7 +32,8 @@ starts being nudged to pay more.
 
 ⛔ **There is no knee to find, and that is the finding rather than a gap in it.** Neither label's curve
 flattens under "a doubling removes < 2 pp": `:Object` gives a near-constant **10.4 – 12.0 pp per
-doubling at every size** (log-linear), and `:Point` decays faster — from its steepest doubling
+doubling after the first** (its first doubling, `0.05→0.10`, removes **15.5 pp** — §3 publishes the
+cell) (log-linear), and `:Point` decays faster — from its steepest doubling
 (**24.6 pp** at `0.15→0.30`) down to **5.6 pp** at `0.50→1.00` — without ever reaching the bar. **So
 "good enough" must be a declared bar, not a discovered knee** — which is why §5 publishes the answer
 at five bars instead of one.
