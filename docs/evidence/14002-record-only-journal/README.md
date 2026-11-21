@@ -163,8 +163,16 @@ cutover by the same window. The measured cost above is the alternative.
    `docs/architecture/STORAGE-ARCHITECTURE.md` §3 makes journal completeness a
    PRECONDITION of `derived = replay(journal)` (the gap is tracked as `#5089`).
    Once the file stops growing, a rebuild from it would produce a graph as of the
-   arming point and **silently drop every later record** — `rebuild_all` prints
-   `Done:` either way and its counts are the journal's own. So the operator door
+   point the append stopped — the box flag roll
+   (`TORTOISE_RECORD_ALLOCATE`), which is LATER than the per-graph `arm` — and
+   **silently drop every later record** — `rebuild_all` prints
+   `Done:` either way and its counts are the journal's own. ⚠️ The instant is the
+   FLAG ROLL, not `arm`: every graph is armed first and the flag is rolled
+   afterwards (`live_write.py:105-109`), and `record_owns_position` bails on
+   `record_live_allocate()` before it ever reads the row
+   (`record_writer.py:2852`), so the arm→roll window still appends and a
+   rebuild dated at `arm` understates the dropped span by that whole window. So
+   the operator door
    refuses when a RECORD DSN resolves (`__main__._journal_rebuild_refusal`) —
    keyed on the record's EXISTENCE, never on the writer's
    `TORTOISE_RECORD_ALLOCATE`, because an operator shell, a cron job and a
@@ -273,7 +281,8 @@ cutover by the same window. The measured cost above is the alternative.
    depends on the file.
    ⚠️ "NOTHING WRITES IT" IS A CLAIM ABOUT THE WRITE PATH, NOT ABOUT THE PATH:
    `tortoise restore` REPLACES the destination journal wholesale
-   (`backup.py:638`, "the journal always"), and `journal_segments.seal_active`
+   (`backup.py:625` — the comment; the copy itself is `:638` — "the journal
+   always"), and `journal_segments.seal_active`
    moves the active file aside and creates a fresh empty one. Both are operator
    verbs (seal has no production caller), so the frozen prefix holds absent
    operator action. ⚠️ And a restore onto an ARMED cut-over graph lands in a
@@ -283,7 +292,12 @@ cutover by the same window. The measured cost above is the alternative.
    `restore` does not rewind, still owns the ordinal. It is not unreported though:
    `tools/record_allocator_cli.py status --journal <path>` computes
    `position_divergence` from exactly that pair (a row-`active` cursor whose
-   enumeration is shorter than the counter) and names the same remedy. The
+   enumeration is shorter than the counter) and reports both readings side by
+   side — which IS the decision — but it names no remedy in any output mode
+   (`_cmd_status` returns readings; `_emit` prints them). The remedy for THIS
+   state is named only by the door's WARNING on the still-appending arm, which
+   the paragraph above says this state does not reach, so an operator reading
+   this page must be told the numbers, not sent looking for advice. The
    journal-behind case that the DOOR warns about is the still-appending arm, where
    it does not wedge: it loses a row per write, with one WARNING each, for
    `counter - floor` records.

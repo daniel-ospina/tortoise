@@ -1068,6 +1068,12 @@ def test_a_rebuild_is_refused_where_the_record_owns_the_ordinal(monkeypatch,
     # for exactly the people who run it.
     monkeypatch.delenv(rw.RECORD_ALLOCATE_ENV, raising=False)
     refusal = _journal_rebuild_refusal()
+    # ⚠️ THIS ASSERTION IS A WORDING PIN, NOT A DISCRIMINATOR (PR #14081 final
+    # review, P2 — recorded rather than deleted). The PRE-fix refusal already
+    # read "…it stops being appended to…", so reverting the message to `main`'s
+    # text PASSES this line; it reds only if the phrase is dropped from the new
+    # text. Do not delete the three assertions below this one as "redundant" —
+    # THEY are what makes the pre-fix string red.
     assert refusal is not None and "stops being appended to" in refusal, (
         "a deployment with a RECORD configured allowed a journal rebuild while "
         "the flag was absent — the arm an operator shell takes, where the "
@@ -1080,8 +1086,9 @@ def test_a_rebuild_is_refused_where_the_record_owns_the_ordinal(monkeypatch,
         "cut-over graph, so an operator sent looking for one finds nothing")
     # ⛔ AND THE INSTANT IT NAMES IS THE FLAG ROLL, NOT `arm` (PR #14081 review,
     # P2). `record_writer.record_owns_position` bails on `record_live_allocate()`
-    # BEFORE it reads the row (`record_writer.py:2849-2850`), and the documented
-    # cutover order arms every graph FIRST and rolls the box flag afterwards
+    # BEFORE it reads the row (`record_writer.py:2852`; the row read is `:2870`),
+    # and the documented cutover order arms every graph FIRST and rolls the box
+    # flag afterwards
     # (`live_write.py:105-109`) — so the arm→roll window is normal and the file
     # STILL GROWS in it. A refusal that dates the frozen prefix at the arming
     # point understates the loss by that whole window, on the one message an
@@ -1137,12 +1144,19 @@ def test_a_rebuild_is_refused_where_the_record_owns_the_ordinal(monkeypatch,
 #: The freeze POINT, in the prose that states it: the append stops at the BOX
 #: flag roll (with the row `active`), never at the per-graph `arm`. Each anchor
 #: locates the sentence IN ITS OWN FILE, and the window after it must name the
-#: switch and must not re-date the freeze at the cutover.
+#: switch and must not re-date the freeze at the cutover. ⛔ The EVIDENCE RECORD
+#: is one of the sites (PR #14081 review, P1): the last commit swept four `.py`
+#: surfaces and left `docs/evidence/14002-record-only-journal/README.md` §5 item
+#: 1 saying "a graph as of the arming point" — the same sentence, on the surface
+#: an operator reads to SIZE the loss, and the only one with no leg. A site list
+#: of code files cannot see a doc, which is exactly how it survived.
 _FREEZE_POINT_SITES = (
     ("tortoise/live_write.py", "the file is a FROZEN PREFIX"),
     ("tortoise/record_writer.py",
      "the file is a FROZEN PREFIX rather than an export"),
     ("tortoise/__main__.py", "the journal stops being appended to"),
+    ("docs/evidence/14002-record-only-journal/README.md",
+     "point the append stopped — the box flag roll"),
 )
 
 
@@ -1158,11 +1172,18 @@ def test_every_surface_that_names_the_freeze_point_names_the_flag_roll():
 
     The mutant is the shipped wording, not a phrase this PR invented: reverting
     any site to `it stops at the cutover instant` (or the refusal to `as of the
-    arming point`) reds this leg. `record_owns_position` bails on
-    `record_live_allocate()` before it reads the row (`record_writer.py:2849`),
+    arming point`, or the evidence record to `a graph as of the arming point`)
+    reds this leg. `record_owns_position` bails on `record_live_allocate()`
+    before it reads the row (`record_writer.py:2852`; the row read is `:2870`),
     and the documented order arms every graph first and rolls the flag
     afterwards (`live_write.py:105-109`), so the arm→roll window is normal and
     the file still grows in it.
+
+    ⚠️ One of these is a DOC site, so the probe is a 420-char window from the
+    anchor: it reds loudly, naming the file and the required re-point, on any
+    prose reflow that moves the switch out. That is the right failure mode for a
+    pin with no executable alternative — the alternative is the defect returning
+    silently.
     """
     root = Path(__file__).resolve().parent.parent
     switch = "TORTOISE_RECORD_ALLOCATE"
