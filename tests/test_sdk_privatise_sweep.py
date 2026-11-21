@@ -1292,11 +1292,29 @@ def test_the_rearm_refspec_creates_the_ref_it_promises(tmp_path):
 #
 # No `--repin` here: `--repin` is ~70 s per rev and re-derives a number, while the claim is
 # about what a REV CARRIES. `git show <rev>:tools/sdk_privatise.py` reads that rev's own
-# committed pin — deterministic, offline, and object-gated only in the honest sense (it SKIPS
-# where the rev is absent, and the skip names the refspec that would arm it).
+# committed pin — deterministic and offline.
+#
+# ⛔ TWO ARMS, BECAUSE ONE ARM COULD NOT RUN IN CI (review, round 16, P2). This used to be a
+# single arm that `git show`ed each rev behind `_requires(...)`, so it SKIPPED in every job that
+# runs this file — the sharded `test` job checks out at `fetch-depth: 1`, and the one depth-0 job
+# runs `--check`, not pytest. Measured: restoring the pre-fix pair left the suite UNCHANGED
+# (19 passed / 4 skipped), so the round-14 correction was gated by nothing in the merge path.
+# A guard a gating job cannot run is not a guard — the same class round 10 fixed for the two
+# prose arms. So the block is graded against `OWN_PINS`, an object-FREE map, and the map is
+# graded against each rev's committed pin by the premise arm that follows it.
 _OWN_PIN_CLAIM_RE = re.compile(
     r"Its own pin[\s#:]+is[\s#:]*`\((\d+),[\s#:]*[\"']([0-9a-f]{16})[\"']\)`")
 _BACKTICKED_REV_RE = re.compile(r"`([0-9a-f]{7,40})`")
+
+#: rev -> the `(rows, digest)` pair the block publishes AS that rev's own pin.
+#: ⛔ THE OBJECT-FREE HALF: a dict lookup needs no git object, so
+#: `test_a_revs_published_own_pin_is_the_pin_that_rev_commits` runs in every job. A rev the block
+#: publishes but THIS MAP lacks REDS — folding a new rev in is what keeps the map honest, rather
+#: than letting an ungraded sentence through. `test_the_own_pin_map_matches_each_revs_own_tree`
+#: re-derives every entry from the repository wherever the objects exist.
+OWN_PINS: dict[str, tuple[int, str]] = {
+    "d523c9be8c": (11838, "de5664dc98549d56"),
+}
 
 
 def _own_pin_claims(block: str) -> list[tuple[str, int, str]]:
@@ -1316,21 +1334,45 @@ def _own_pin_claims(block: str) -> list[tuple[str, int, str]]:
 
 
 def test_a_revs_published_own_pin_is_the_pin_that_rev_commits():
-    """A `(rows, digest)` published AS a rev's own pin must be that rev's committed pair."""
+    """A `(rows, digest)` published AS a rev's own pin must be that rev's committed pair.
+
+    ⛔ OBJECT-FREE, so it runs in every job (review, round 16, P2). It grades the block against
+    `OWN_PINS`; `test_the_own_pin_map_matches_each_revs_own_tree` grades that map against the
+    repository. The split is the whole point: the first arm is the guard the merge path
+    executes, the second is what stops the constant from drifting into a wrong pair.
+    """
     block = _residue_block()
     claims = _own_pin_claims(block)
     assert claims, (
         "non-vacuity: the block still publishes at least one rev's OWN pin — deleting the "
         "sentence is not the fix for a wrong pair")
-    _requires(*sorted({rev for rev, _, _ in claims}))
     for rev, rows, digest in claims:
-        own = re.search(r"^SWEEP_RESIDUE = \((\d+), \"([0-9a-f]{16})\"\)",
-                        _git("show", f"{rev}:tools/sdk_privatise.py"), re.MULTILINE)
-        assert own, f"`{rev}` carries no readable `SWEEP_RESIDUE`, so its claim cannot be graded"
-        assert (rows, digest) == (int(own.group(1)), own.group(2)), (
-            f"the block publishes `{rev}`'s own pin as ({rows}, {digest!r}); that rev commits "
-            f"({own.group(1)}, {own.group(2)!r}) — a rev published with ANOTHER tree's pair is the "
+        assert rev in OWN_PINS, (
+            f"the block publishes `{rev}`'s own pin, but `{rev}` is not in `OWN_PINS`, so "
+            "nothing grades it: record the pair that rev commits in the map (and let "
+            "`test_the_own_pin_map_matches_each_revs_own_tree` verify it against the tree)")
+        assert (rows, digest) == OWN_PINS[rev], (
+            f"the block publishes `{rev}`'s own pin as ({rows}, {digest!r}); `OWN_PINS` records "
+            f"{OWN_PINS[rev]!r} — a rev published with ANOTHER tree's pair is the "
             "`address that resolves to a different tree` defect this block exists to catch")
+
+
+def test_the_own_pin_map_matches_each_revs_own_tree():
+    """PREMISE: every `OWN_PINS` entry is what that rev actually commits.
+
+    Skips (with the re-arm refspec) where the revs are absent — it is the object-dependent half,
+    never the guard. If it reds, the constant above has gone stale and the object-free arm is
+    grading against a wrong pair.
+    """
+    _requires(*sorted(OWN_PINS))
+    for rev, (rows, digest) in sorted(OWN_PINS.items()):
+        own = re.search(r'^SWEEP_RESIDUE = \((\d+), "([0-9a-f]{16})"\)',
+                        _git("show", f"{rev}:tools/sdk_privatise.py"), re.MULTILINE)
+        assert own, f"`{rev}` carries no readable `SWEEP_RESIDUE`, so its entry cannot be graded"
+        assert (rows, digest) == (int(own.group(1)), own.group(2)), (
+            f"`OWN_PINS[{rev!r}]` records {(rows, digest)!r}; that rev commits "
+            f"({own.group(1)}, {own.group(2)!r}) — the map has gone stale, so the object-free "
+            "arm is grading against a wrong constant")
 
 
 def test_the_parent_pair_attribution_is_only_ever_quoted_as_falsified():
