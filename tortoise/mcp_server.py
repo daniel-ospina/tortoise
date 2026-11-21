@@ -5600,16 +5600,24 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
     was.
 
     ⛔ AND THE BOUNDARY IS THE WHOLE QUESTION, inclusive of what it must give up:
-    the sentence is matched as a SHAPE, so an ending question with a trailing
-    adverb or an added constraint keeps the relevance read instead of routing —
-    `what has ended recently`, `have any claims been retracted in Q3` and
-    `which claims were retracted by legal` are all RELEVANCE reads. That is
-    deliberate, not an oversight: the population read cannot apply a narrowing,
-    so routing would serve the whole ended set as if the caller's `in Q3` had
-    been honoured. If you want the population, ask the question in its
-    unqualified form (`what ended`, `have any claims been retracted`); if you want
-    the narrowing applied, keep the qualified wording and this is the relevance
-    read you asked for.
+    the sentence is matched as a SHAPE, so an ending question carrying a
+    QUALIFIER the population cannot apply keeps the relevance read instead of
+    routing — `have any claims been retracted in Q3` and `which claims were
+    retracted by legal` are RELEVANCE reads. That is deliberate, not an
+    oversight: the population read cannot apply a narrowing, so routing would
+    serve the whole ended set as if the caller's `in Q3` had been honoured. If you
+    want the population, ask the question in its unqualified form (`what ended`,
+    `have any claims been retracted`); if you want the narrowing applied, keep the
+    qualified wording and this is the relevance read you asked for.
+
+    ⛔ THE PREDICTABILITY CONTRACT — which phrasings route, which do not, and what a
+    non-routed state question means — IS NOT WRITTEN HERE (#14033). This docstring is
+    developer prose and FastMCP never serves it when the registry supplies an explicit
+    `description=`; the caller-facing text is `state_intent.ROUTING_NOTE`, served as
+    this tool's `ToolDefinition.description` in `tool_registry.TOOL_REGISTRY`. It lives
+    in ONE place on purpose: a second copy here would be the silent kind of drift —
+    prose that reads like the contract, reaches no caller, and lets a test that pins it
+    pass while the served text says something else.
 
     Point results annotated with EP breakdown. confidence_mean is THE point's
     confidence (belief mean α/(α+β): persisted posterior when EP has run,

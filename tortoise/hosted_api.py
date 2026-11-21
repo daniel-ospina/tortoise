@@ -15074,6 +15074,15 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     ``degraded`` — emitted even when ``TORTOISE_READ_STATUS`` is off, so a
     residency-only deployment is never served a bare empty. Unset/``0`` leaves
     this response byte-identical.
+
+    #14033: a STATE question the recogniser SAW and could not route carries
+    ``state_question`` — ``{routed: false, population, reason, cue, hint}`` — so
+    the relevance reply is distinguishable from an honest "nothing has ended".
+    ``reason`` is ``shape`` (the question carries a qualifier or an attributive
+    ending word the population cannot apply) or ``family`` (a shape fired on a
+    family with no lifecycle). The field is emitted ONLY when a state cue was
+    recognised — so a search in which no ending cue appears is byte-identical,
+    including every content query that never mentions an ending.
     """
     _require_scope(org, "graphs:read", "search")
     from tortoise.read_status import read_status_enabled as _read_status_enabled
@@ -15095,6 +15104,16 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     # not know to pass a flag still gets a silent subset). See
     # ``tortoise/truncation.py`` for the two fields and the three states.
     trunc_out: dict = {}
+    # #14033: the MISSED STATE-CUE notice. Always on, for the same reason the
+    # truncation marker is: it fires only for a query the recogniser SAW as a
+    # state question and could not apply, and it is the only thing that makes the
+    # relevance reply to such a question distinguishable from the factual claim
+    # "nothing has ended". ⛔ NOT "byte-identical for every content search": a
+    # content query that NAMES an ending — `which features are deprecated in v3` —
+    # DOES carry it, with `routed: false`, and must, because that reply would
+    # otherwise read as "nothing is deprecated" (the same wording the SDK's
+    # `_state_route_out` block and the read-level test use).
+    state_out: dict = {}
     # #3718 (construction half of #4660, second batch): the SDK is BUILT off the
     # loop, not just used off it. In embedded mode `_make_sdk` probes the
     # keepalive anchor (`_anchor_usable`) and may eagerly connect with the
@@ -15170,7 +15189,7 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
             results = await _read_offload(
                 lambda: sdk._tortoise_fts_query(
                     q, limit=limit, read_status_out=status_out,
-                    _truncation_out=trunc_out),
+                    _truncation_out=trunc_out, _state_route_out=state_out),
                 op="search")
         except HTTPException:
             # #10602 review P1: the read lane's capacity refusal is an
@@ -15207,6 +15226,11 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     # is unreachable by any follow-up call: exempted pagination (which reports
     # ``total``/``hasMore``) is a different surface, see ``truncation.py``.
     response.update(truncation_field(trunc_out))
+    # #14033: a state question that did NOT route is named on the response, so a
+    # caller can tell it from a genuine empty answer and ask again in a form that
+    # routes. Emitted only when the recogniser saw a cue it could not apply.
+    if state_out:
+        response["state_question"] = state_out
     if status_out is not None:
         # The SDK sets `status` on every return path; a missing term is a bug,
         # not a reason to emit null under a vocabulary of exactly four terms.

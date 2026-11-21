@@ -678,7 +678,24 @@ SWEEP_NAMES = 66
 #: merge, and `seen.update` is **101** — `main`'s −1, which is `tests/test_13337_cache_graph_declaration.py`
 #: accumulating by APPEND rather than `update` (#14108), a file this branch does not touch. That the
 #: figure lands at 11845 − 1 = 11844 is a CROSS-CHECK of the measurement, not the evidence for it.
-SWEEP_RESIDUE = (11844, "70d6cfdcd8b769e4")
+#: RE-PINNED UP (11844, "70d6cfdcd8b769e4") → (11847, "abf9d62099f45286") by `#14140`'s state-cue route.
+#: `main` `e0accb8f` carries the SAME `(11844, …)` pin and its surface-guard is GREEN, so the whole +3
+#: is this PR's own — and it is ROW-DIFFED, never arithmetic: the residue row multisets were derived on
+#: `e0accb8f`'s tree and on this head by the same walk (`rename_map(rev=SWEEP_BASE)`, then `edits_for`
+#: per file, the pairs then diffed). Exactly two rows move, both plain-dict sinks the sweep is right to
+#: refuse to type:
+#:   * `_state_route_out.update` — a NEW row, **2** references: `tortoise/sdk.py`
+#:     `_state_route_out.update(_state_notice)` and
+#:     `tests/test_13557_13558_reachable_reads.py` `_state_route_out.update(payload)`;
+#:   * `_truncation_out.update` **1 → 2** — `tests/test_13557_13558_reachable_reads.py`
+#:     `_truncation_out.update({"truncated": False})` in the same `_FakeSDK`.
+#: Both receivers are the `dict | None` callbacks `#8447`/`#14033` thread out so a CALLER sees a
+#: truncation or a state cue (`sdk.py`: `_state_route_out: dict | None = None`). Neither spelling says
+#: SDK and neither HOLDS the SDK surface, so no typed call site is legitimised — `typed references
+#: still pointing at a public name: 0`. The move is UPWARD because the tree gained two new sinks: that
+#: is the direction which has to be declared deliberately rather than absorbed silently. Adding an
+#: SDK-holding receiver still requires this same step, with its own reason.
+SWEEP_RESIDUE = (11847, "abf9d62099f45286")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —

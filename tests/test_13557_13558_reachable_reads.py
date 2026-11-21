@@ -50,6 +50,8 @@ convention, ``tests/_live_utils.py``).
 """
 from __future__ import annotations
 
+import asyncio
+import inspect
 import os
 import sys
 import uuid
@@ -226,6 +228,38 @@ SELECTED = [
     ("which of our endpoints is deprecated", "ended", "which_predicate"),
     ("what did we archive last quarter", "ended", "do_support"),
     ("did we retire the onboarding flow", "ended", "do_support"),
+    # ── #14033: the phrasings a customer actually uses, which this table used to
+    # name as RECALL LOSSES in the module docstring. Each one is still a
+    # PREDICATE anchored to its grammatical role — that rule is what the hijack
+    # fix bought and it is not what widened.
+    #
+    # A trailing RECENCY adverb, which names no window the population would have
+    # to apply: every returned row carries its own `endedAt`, so nothing is
+    # dropped (`in Q3`, `by legal`, `last quarter` still are, and now REPORT
+    # themselves — see `test_a_strong_cue_that_does_not_fire_reports_itself`).
+    ("what has ended recently", "ended", "wh_whole_question"),
+    ("what ended lately", "ended", "wh_whole_question"),
+    ("what has been withdrawn so far", "ended", "wh_whole_question"),
+    # A YES/NO question whose own SUBJECT is the record asked about: the copula
+    # opens the question and the participle ends it, so the subject cannot be a
+    # subordinate clause's (that is what refuses `what happens when an order is
+    # cancelled`) and the ending word cannot be attributive (that is what refuses
+    # `is the archived pricing document live`).
+    ("is the onboarding flow retired?", "ended", "is_copula"),
+    ("is the onboarding flow retired", "ended", "is_copula"),
+    # …and a subject word that carries DIGITS. The first subject class was `[a-z]…`,
+    # so `v3` / `SOC2` / `2024` were unrepresentable and this question was both
+    # unrouted and unreported (the module's own example of a version-qualified name).
+    ("is the v3 export deprecated?", "ended", "is_copula"),
+    ("is our onboarding flow already retired", "ended", "is_copula"),
+    ("has the partner call been cancelled", "ended", "is_copula"),
+    # An IMPERATIVE over a FREE RELATIVE CLAUSE — a request for a SET. ⛔ The
+    # discriminator against `show me the retired onboarding flow` (which stays a
+    # NOT_SELECTED row, because it asks for ONE record and its object is a noun
+    # phrase) is the clause, not the imperative frame.
+    ("list what we retired", "ended", "imperative_what"),
+    ("show me what we archived", "ended", "imperative_what"),
+    ("enumerate what we have cancelled", "ended", "imperative_what"),
 ]
 
 
@@ -286,6 +320,47 @@ NOT_SELECTED = [
     "which archived report has the Q3 numbers",
     "what is the archived pricing document",
     "what did we learn from the cancelled launch",
+    # ── the ACTIVE-VOICE class on the perfect branch (#14033 round-7 review, P1)
+    # `already` / `ever` in place of `been` is an ACTIVE third-party action, not a
+    # state of the record: each of these routed to the whole ended population,
+    # measured on the read (the ended row served, the live row not). The `existence`
+    # shape had the same hole one quantifier away — pinned too, because it is the
+    # same active-versus-passive discriminator.
+    "has the partner already cancelled",
+    "has legal already retracted",
+    "has the customer ever cancelled",
+    "have any customers ever cancelled",
+    # ── the YES/NO CO-PREDICATE class (#14033 round-6 review, P0) ──────────
+    # The `is_copula` shape's first cut reused `existence`'s free 60-character
+    # window for its SUBJECT, so an ending participle belonging to a SUBORDINATE
+    # clause routed — the round-3 class, left open because the question shape was
+    # `is …`. Every string below was measured ROUTING to the ended population, on
+    # the default SDK / MCP / hosted surfaces, before the subject was bounded to a
+    # contiguous noun phrase (optional determiner + ONE to FOUR words).
+    "is the export broken because the schema was deprecated",
+    "is the revenue down because the launch was cancelled",
+    "is it a problem that the endpoint is deprecated",
+    "is it true that our claims were archived",
+    "is the report accurate given the data was archived",
+    "is our pricing page up to date since the tier was retired",
+    "is the vendor still engaged now the contract is archived",
+    "is there any chance the release was cancelled",
+    # …and the recall the bounded subject gives up, stated rather than discovered:
+    # a modifier clause INSIDE the subject keeps the relevance read (the module
+    # docstring names this one as its example).
+    "is the onboarding flow, as agreed in March, retired",
+    # …a subject LONGER than the four-word bound: unrouted (the bound is where a
+    # clause can hide) and REPORTED — silence here was round-7's P1-B.
+    "is the onboarding flow for enterprise partners retired",
+    # …a `which` head noun carrying a MODIFIER: the stated recall loss, now reported.
+    "which customer claims were archived",
+    # …and boundary-free adverbs outside the admitted recency list: reported, never
+    # silent (`_RECENCY_TAIL` admits four spellings; `_BLOCKED_TAIL` reports the
+    # rest).
+    "what ended previously",
+    "which claims were retracted earlier",
+    "list what we retired previously",
+    "is the onboarding flow retired anymore",
     # ── the COPULA-IN-A-SUBORDINATE-CLAUSE class (round-3 review, measured) ─
     # A passive in a clause the caller tacked on is not the question. Each of
     # these was answered with the whole ended population by the cut that accepted
@@ -343,7 +418,16 @@ NOT_SELECTED = [
     "what ended, and what replaced it",
     # ── STATEMENTS, third-party actions, and boundaries stated in the module ─
     "did the customer cancel their order",
-    "what has ended recently",
+    # …`what has ended recently` USED TO SIT HERE as a stated recall loss and is
+    # now a SELECTED row (#14033): a recency adverb names no window, and the rows
+    # carry `endedAt`. The CONSTRAINT rows below still do not route — they report
+    # themselves instead (see `test_a_strong_cue_that_does_not_fire_reports_itself`).
+    "what has ended last quarter",
+    # …and the ATTRIBUTIVE use in the copula frame: the ending word modifies the
+    # subject noun and the question's predicate is the word after it, so it is a
+    # content lookup and neither routes nor reports a cue (`_BLOCKED_TAIL`).
+    "is the archived pricing document live",
+    "is our deprecated endpoint still served",
     "what commitments do we have",
     "",
     "   ",
@@ -397,16 +481,46 @@ NOT_SELECTED = [
     # `which archived report has the Q3 numbers` (already pinned above) can never
     # come back through the window it was fixed for.
     "which archived reports were retracted",
-    # …and the recall the adjacency guard gives up, stated rather than discovered:
-    # a MODIFIED head noun sits in the same slot as the subordinate clause's verb,
-    # so it keeps the relevance read. See the shape's docstring.
-    "which customer claims were archived",
     # …and the recall the start anchor gives up, stated rather than discovered:
     # an IMPERATIVE set request keeps the relevance read, because the measured
     # hijack `show me the retired onboarding flow` is the same imperative frame
     # asking for ONE record.
     "list our commitments",
     "show me all the commitments",
+]
+
+
+#: The pinned content rows that DO carry a missed-cue notice (#14033) — every one a
+#: state question the cue table refused, and each named with the reason. ⛔ The list
+#: is EXHAUSTIVE on purpose: `test_an_ordinary_query_keeps_the_relevance_read` asserts
+#: a notice here and NO notice anywhere else in ``NOT_SELECTED``, so an ending cue
+#: that starts firing on ordinary content (`which` as a signal, the first cut's
+#: `^which\s+[^?]{0,60}?<ENDING>`) reds instead of quietly annotating 16 content
+#: rows — which is what the round-6 review measured the first version doing.
+NOTICE_ONLY = [
+    # an appended CONSTRAINT the population cannot apply
+    "have any claims been retracted in Q3",
+    "have any of our bookings been cancelled by the venue",
+    "has anything we promised been withdrawn by legal",
+    "which claims were retracted by legal",
+    "which reports were superseded by the new one",
+    "which units are cancelled in the export",
+    "what has ended last quarter",
+    # a COMPOUND question: only the first clause is an ending
+    "what ended, and what replaced it",
+    # an ATTRIBUTIVE ending word in a `which` phrase — the fourth row of #14033's
+    # table is exactly this class, so the notice is the row's whole remedy
+    "which archived report has the Q3 numbers",
+    "which archived reports were retracted",
+    # a stated RECALL LOSS the shapes refuse, reported rather than silent: a modified
+    # `which` head noun, an over-long copula subject, and boundary-free adverbs the
+    # recency list does not route.
+    "which customer claims were archived",
+    "is the onboarding flow for enterprise partners retired",
+    "what ended previously",
+    "which claims were retracted earlier",
+    "list what we retired previously",
+    "is the onboarding flow retired anymore",
 ]
 
 
@@ -419,12 +533,404 @@ def test_an_ordinary_query_keeps_the_relevance_read(query):
         f"{query!r} was routed to the {got.population!r} population "
         f"(shape {got.shape!r}) — a detector that hijacks a content lookup "
         f"answers a question nobody asked")
+    # ⛔ AND `signal is None` UNLESS THE ROW IS PINNED IN `NOTICE_ONLY`. Without
+    # this half the whole notice mechanism could widen to arbitrary content: the
+    # first cut's `^which\s+[^?]{0,60}?<ENDING>` signal annotated 16 pinned content
+    # rows, and every test in this file stayed green.
+    if query in NOTICE_ONLY:
+        assert got.signal, (
+            f"{query!r} is pinned as a state question that DECLINES to route, so it "
+            f"must report the cue it saw — otherwise its relevance reply is "
+            f"indistinguishable from 'nothing has ended' (#14033)")
+    else:
+        assert got.signal is None, (
+            f"{query!r} carries the missed-cue notice {got.signal!r} — it names no "
+            f"ending state, so this is noise on an ordinary content query, and the "
+            f"notice's own contract is that it appears only where a state cue was "
+            f"recognised")
 
 
 def test_none_is_a_full_scan_not_a_question():
     from tortoise.state_intent import detect_state_question
 
     assert detect_state_question(None).population is None
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# #14033 — THE SIX PHRASINGS, the cue rule that widened, and the notice
+# ══════════════════════════════════════════════════════════════════════════════
+
+#: #14033's own table, measured on `origin/main` `e93f5df464`. The first five
+#: ROUTE after this change (the top two already did); the sixth does not, because
+#: its ending word modifies `claims` and the question's own predicate is
+#: `affected pricing`. The sixth is exactly the row the missed-cue notice exists
+#: for — it names a withdrawn record and the default currency filter hides it, so
+#: a plain relevance reply there is an answer that hides the thing asked about.
+THE_SIX = [
+    ("has anything we relied on been withdrawn", "ended", "existence"),
+    ("what ended", "ended", "wh_whole_question"),
+    ("what has ended recently", "ended", "wh_whole_question"),
+    ("is the onboarding flow retired?", "ended", "is_copula"),
+    ("list what we retired", "ended", "imperative_what"),
+    ("which of our withdrawn claims affected pricing", None, None),
+]
+
+
+@pytest.mark.parametrize(("query", "population", "shape"), THE_SIX)
+def test_the_six_phrasings_of_14033_route_or_decline_as_measured(query,
+                                                                population, shape):
+    """#14033's table, executable: five route, the attributive one does not.
+
+    ⛔ THE RULE THAT WIDENED AND THE RULE THAT DID NOT. Four new rows were added
+    to the cue table and every one of them is still a PREDICATE anchored to its
+    grammatical role — `is <record> <participle>?` (auxiliary opens, participle
+    ends), `list what we <participle>` (a free relative clause, i.e. a set
+    request), and `what <participle> recently` (the participle is the whole
+    predicate; a RECENCY adverb names no window). What did NOT widen is the
+    anchoring: the four content questions that must not route are pinned in
+    `NOT_SELECTED` and re-asserted on the READ below.
+    """
+    from tortoise.state_intent import detect_state_question
+
+    got = detect_state_question(query)
+    assert got.population == population, (
+        f"{query!r} selects {got.population!r}, not {population!r} — #14033")
+    assert got.shape == shape
+    # The sixth row is the one that DECLINES, and it must say so rather than be
+    # silent: a state cue was seen and no shape could apply it.
+    if population is None:
+        assert got.signal == "which_names_an_ending", (
+            "the attributive row declined WITHOUT reporting the cue it saw, so "
+            "its relevance reply is indistinguishable from 'nothing ended'")
+
+
+def test_a_strong_cue_that_does_not_fire_reports_itself_and_never_routes():
+    """The NOTICE's trigger: a cue the recogniser SAW and could not apply.
+
+    #14033's third ask. A state question that misses the cue table keeps the
+    relevance read (the population cannot apply the caller's narrowing), but it
+    must not be SILENT — an empty or unrelated relevance reply is otherwise
+    byte-identical to the factual claim "nothing has ended".
+
+    ⛔ `signal` IS A REPORT, NEVER A ROUTE, and that is the property this test
+    pins: every query below carries a cue and NONE of them selects a population.
+    Routing them would drop the qualifier (`in Q3`, `by legal`) or the caller's
+    own predicate (`affected pricing`) — the hijack three review rounds removed.
+    """
+    from tortoise.state_intent import (
+        MISSED_ROUTE_HINT,
+        detect_state_question,
+        missed_route_payload,
+    )
+
+    blocked = [
+        # an appended CONSTRAINT, on each shape that has a tail anchor
+        ("have any claims been retracted in Q3", "existence"),
+        ("has anything we promised been withdrawn by legal", "existence"),
+        ("which claims were retracted by legal", "which_predicate"),
+        ("is the onboarding flow retired by legal", "is_copula"),
+        ("list what we retired in Q3", "imperative_what"),
+        # …and the compound question the table has always refused
+        ("what ended, and what replaced it", "wh_whole_question"),
+        # …and a NAMED window: the recency adverbs the `wh_whole_question` shape
+        # admits name NO boundary, so one that does (`yesterday`, `since
+        # January`, `this month`) is still refused — and reported.
+        ("what ended yesterday", "wh_whole_question"),
+        ("what has been retired this month", "wh_whole_question"),
+        # ⛔ …and a recency adverb PLUS a qualifier, which the round-6 review measured
+        # as BOTH unrouted and unreported (the hand-written signal table dropped the
+        # recency tail). The description advertises `what has ended recently` as a
+        # route, so this is the exact string a caller would extend.
+        ("what has ended recently in Q3", "wh_whole_question"),
+        ("what ended recently by legal", "wh_whole_question"),
+        ("which claims were archived recently", "which_predicate"),
+        # …and a preposition the first function-word list omitted.
+        ("has anything been withdrawn about our commitments", "existence"),
+        # an ATTRIBUTIVE ending word inside a `which` question — #14033's row 6
+        ("which of our withdrawn claims affected pricing",
+         "which_names_an_ending"),
+    ]
+    for query, signal in blocked:
+        got = detect_state_question(query)
+        assert got.population is None, (
+            f"{query!r} was ROUTED to {got.population!r} (shape {got.shape!r}) — "
+            f"the notice must never become a route")
+        assert got.signal == signal, (query, got.signal)
+
+        payload = missed_route_payload(got)
+        assert payload is not None
+        assert payload["routed"] is False
+        assert payload["population"] == "ended"
+        assert payload["reason"] == "shape"
+        assert payload["cue"], "the notice must name the words it saw"
+        assert payload["hint"] == MISSED_ROUTE_HINT
+
+    # …and the notice is NOT emitted where there is nothing to report: an
+    # ordinary content query (the four that must not route, and a record lookup)
+    # produces no payload at all, so a content read's reply is unchanged.
+    for quiet in (
+        "have any customers cancelled this month",
+        "do we archive customer emails",
+        "launch event",
+        "the meeting was cancelled",
+        "is the archived pricing document live",
+        # …`ended up` is not an ending: the participle must END the question, and
+        # the word after it is neither punctuation nor a qualifier.
+        "what ended up happening",
+        # …and the YES/NO subordinate-clause class, which the first `is_copula`
+        # window routed (round-6 review, P0). Each is a content question and none
+        # of them now sees a state cue at all.
+        "is the export broken because the schema was deprecated",
+        "is it a problem that the endpoint is deprecated",
+        "is it true that our claims were archived",
+        "is there any chance the release was cancelled",
+    ):
+        got = detect_state_question(quiet)
+        assert got.population is None and got.signal is None, (quiet, got)
+        assert missed_route_payload(got) is None, (
+            f"{quiet!r} carries no state cue, so a notice on it would be noise on "
+            f"a content search")
+
+    # …and a routed question reports nothing, because it WAS applied.
+    for routed in ("what ended", "has anything been withdrawn"):
+        got = detect_state_question(routed)
+        assert got.population == "ended" and got.signal is None
+        assert missed_route_payload(got) is None
+    # …the other reason a cue can fail to be served is a family with no
+    # lifecycle, and it is a distinct value on the same payload.
+    from tortoise.state_intent import ENDED, StateQuestion
+
+    family = missed_route_payload(StateQuestion(ENDED, "existence", "what ended"),
+                                  reason="family")
+    assert family["reason"] == "family" and family["routed"] is False
+    with pytest.raises(ValueError):
+        missed_route_payload(StateQuestion(ENDED, "existence", "what ended"),
+                             reason="invented")
+
+
+def test_a_missed_cue_names_words_it_saw_whole():
+    r"""The notice's `cue` ends on a WORD boundary (#14033 review, P3).
+
+    `signal_cue` is copied verbatim into `missed_route_payload`'s `cue`, which a
+    caller reads in `read_status_out["state_question"]["cue"]` and in the hosted
+    body's `state_question.cue`. Its contract is *"``cue`` names the words it
+    saw"* — so a match ending inside the next word is a diagnostic that misnames
+    what it saw. `which_names_an_ending` was the one signal that carried its
+    trailing context INSIDE the match (`\s+[a-z]`), so `group(0)` stopped on the
+    first letter of the following noun. Every other signal ends on a `\b`.
+    """
+    from tortoise.state_intent import detect_state_question, missed_route_payload
+
+    # The rows the review measured through the module's own functions.
+    measured = {
+        "which of our withdrawn claims affected pricing": "which of our withdrawn",
+        "which archived report has the Q3 numbers": "which archived",
+        "which archived reports were retracted": "which archived",
+    }
+    for query, want in measured.items():
+        got = detect_state_question(query)
+        assert got.signal == "which_names_an_ending", (query, got.signal)
+        assert got.signal_cue == want, (query, got.signal_cue)
+
+    # …and the PROPERTY, over every query that reports a notice — not only these
+    # three, so a new notice row cannot reintroduce the truncation.
+    for query in sorted(set(NOTICE_ONLY) | set(measured) | set(NOT_SELECTED)):
+        got = detect_state_question(query)
+        if not got.signal:
+            continue
+        cue = missed_route_payload(got)["cue"]
+        assert cue, query
+        assert query.startswith(cue), (query, cue)
+        rest = query[len(cue):]
+        assert not rest or not (rest[0].isalnum() or rest[0] == "_"), (
+            f"the cue {cue!r} for {query!r} is truncated MID-WORD ({rest[0]!r}) — a "
+            f"diagnostic whose contract is 'cue names the words it saw' cannot "
+            f"stop inside one")
+
+
+def test_every_signal_is_its_shape_without_the_end_anchor():
+    """The anti-drift falsifier for the notice: ONE expression, two tails.
+
+    Each tail-anchored shape's signal is DERIVED from that shape — its own pattern
+    with :data:`state_intent._TAIL_END` swapped for
+    :data:`state_intent._BLOCKED_TAIL` — so a signal cannot describe a different
+    cue than the shape it is named after. This test asserts the IDENTITY at the
+    pattern level (not a handful of examples), because that is what the derivation
+    buys and what a hand-written second list silently loses: the round-6 review
+    measured the earlier hand-written table DROPPING the recency tail, so
+    `what has ended recently in Q3` was neither routed nor reported while the
+    description advertised `what has ended recently` as a route.
+    """
+    from tortoise import state_intent
+    from tortoise.state_intent import detect_state_question
+
+    shapes = dict(state_intent._ENDING_SHAPES)
+    signals = dict(state_intent._ENDING_SIGNALS)
+    tail_anchored = [n for n, p in state_intent._ENDING_SHAPES
+                     if state_intent._TAIL_END in p.pattern]
+    assert tail_anchored, "no shape carries the end anchor — this test proves nothing"
+    for name in tail_anchored:
+        want = shapes[name].pattern.replace(state_intent._TAIL_END,
+                                           state_intent._BLOCKED_TAIL)
+        assert signals[name].pattern == want, (
+            f"the {name!r} signal is no longer that shape's own expression with its "
+            f"tail swapped — a second, hand-written cue list is back:\n"
+            f"  shape : {shapes[name].pattern}\n  signal: {signals[name].pattern}")
+    # …and the rows that are NOT derived are named, so a new one cannot appear
+    # silently: `do_support` has no end anchor to swap (it routes with a trailing
+    # constraint, a pre-existing deliberate trade), and `which_names_an_ending` is
+    # the attributive row.
+    assert set(signals) - set(tail_anchored) == {
+        "which_names_an_ending", "which_modified_noun", "is_copula_long_subject"}
+
+    # The BEHAVIOUR the identity buys, driven through the detector: each shape's own
+    # routed example, given a qualifier, declines and REPORTS — including the
+    # recency form that the hand-written table lost.
+    for shape, query in {
+        "existence": "has anything we relied on been withdrawn",
+        "wh_whole_question": "what has ended recently",
+        "which_predicate": "which claims were archived",
+        "is_copula": "is the onboarding flow retired",
+        "imperative_what": "list what we retired",
+    }.items():
+        assert detect_state_question(query).shape == shape, query
+        blocked = detect_state_question(f"{query} in Q3")
+        assert blocked.population is None, (shape, query, blocked)
+        assert blocked.signal == shape, (
+            f"the {shape!r} shape's own example, given a qualifier, reported "
+            f"{blocked.signal!r} — that question is now BOTH unrouted and unreported")
+
+    # ⛔ `do_support` IS THE ONE SHAPE WITH NO TAIL ANCHOR, so it has no blocked
+    # state: a constraint after it is still served with the population. That is a
+    # PRE-EXISTING, deliberately pinned trade (`what did we archive last quarter`
+    # is a SELECTED row, and every returned row carries `endedAt`), recorded here
+    # so the asymmetry is a decision rather than a gap the next reader "fixes".
+    assert detect_state_question("what did we archive last quarter").shape == (
+        "do_support")
+    assert "do_support" not in signals
+
+
+def test_the_mcp_description_predicts_which_of_the_six_route():
+    """A caller reading ONLY the tool description can predict all six (#14033).
+
+    The defect #14033 names is that the user-facing surface said only "an ending
+    question reads the ended records", which invited exactly the failures its
+    table measures. So the description now carries the phrasings in two groups —
+    ROUTES and DOES NOT ROUTE — and this test reads those groups back out of the
+    description and checks each row against the recogniser. A description that
+    stops naming a phrasing, or files it under the wrong heading, reds here.
+
+    ⛔ IT READS THE **SERVED** STRING, NOT `tortoise_search.__doc__` (#14033
+    review, P1). `FastMCPAdapter.register_all` hands FastMCP
+    `ToolDefinition.description`, and an explicit `description=` OVERRIDES the
+    docstring (gofastmcp.com *Tools*: "when provided, FastMCP ignores the function
+    docstring for the tool description") — so a docstring copy is invisible to
+    every MCP caller. The first cut of this change put the block in the docstring
+    and pinned it here; the row then passed no matter what the served text said,
+    which is a false PASS over the exact deliverable the issue asks for. The
+    docstring no longer carries the block at all — one home, checked below.
+    """
+    from tortoise.mcp_server import mcp as _mcp
+    from tortoise.mcp_server import tortoise_search
+    from tortoise.state_intent import ROUTING_NOTE, detect_state_question
+    from tortoise.tool_registry import TOOL_REGISTRY
+
+    # The artifact an MCP caller actually receives: the registry row's description,
+    # which `FastMCPAdapter.register_all` passes to `FunctionTool.from_function(...)`.
+    doc = next(t for t in TOOL_REGISTRY if t.name == "tortoise_search").description
+    assert ROUTING_NOTE in doc, (
+        "the served tortoise_search description does not carry the routing block — "
+        "the recogniser owns it, the registry must serve it (#14033)")
+
+    # ⛔ AND THE HOP THAT SERVES IT IS PINNED TOO (#14033 review, P2). The registry row
+    # is only the INPUT: `register_all` passes `description=entry.description`, and with
+    # that argument dropped FastMCP derives the text from the DOCSTRING instead — the
+    # caller then receives a description with no routing block while the assertion above
+    # stays green, because the row it reads never changed. Measured on this head: the
+    # mutant `description=entry.description` → `description=None` serves 5190 chars with
+    # no `WHICH PHRASINGS ROUTE`, and every assertion in this test still passed. So the
+    # object FastMCP would hand a client is read directly.
+    served = asyncio.run(_mcp.get_tool("tortoise_search")).description
+    assert served and ROUTING_NOTE in served, (
+        "the tool FastMCP serves does not carry the routing block: the registry row has "
+        "it but the serving hop lost it (a `description=` that stopped being passed "
+        "falls back to the docstring, which is not served text — #14033 review, P2)")
+
+    # …and the docstring must NOT carry a second copy: prose there reaches no caller,
+    # so a re-added copy reads like the contract while the served text drifts from it.
+    assert "ROUTES — answered from the ended population" not in (
+        tortoise_search.__doc__ or ""), (
+        "the routing block is back in `tortoise_search.__doc__`, which FastMCP does "
+        "not serve when the registry supplies `description=` — one home only (#14033)")
+    routes_head = "ROUTES — answered from the ended population"
+    declines_head = "DOES NOT ROUTE — an ordinary relevance search"
+    boundary_head = "SO A STATE QUESTION THAT DOES NOT ROUTE"
+    for head in (routes_head, declines_head, boundary_head):
+        assert head in doc, (
+            f"the MCP description no longer carries {head!r} — a caller can no "
+            f"longer predict which phrasings route (#14033)")
+    routes = doc[doc.index(routes_head):doc.index(declines_head)]
+    declines = doc[doc.index(declines_head):doc.index(boundary_head)]
+
+    for query, population, _shape in THE_SIX:
+        routed = population is not None
+        # …the description files it under the right heading.
+        region = routes if routed else declines
+        assert query in region, (
+            f"{query!r} is filed under the WRONG heading in the MCP description "
+            f"(it {'does' if routed else 'does not'} route)")
+        # …and the heading agrees with what the recogniser actually does.
+        actually = detect_state_question(query).population is not None
+        assert actually is routed, (
+            f"the description says {query!r} "
+            f"{'routes' if routed else 'does not route'}, but the recogniser "
+            f"disagrees — the user-facing contract has drifted from the code")
+
+    # ⛔ AND EVERY QUESTION THE DECLINES BLOCK NAMES IS CHECKED, not only the six:
+    # a row filed as "an ordinary relevance search" while the recogniser routes it
+    # is the dangerous direction (the description would tell a caller to expect a
+    # relevance answer and hand them a population).
+    import re as _re
+
+    # ⛔ A SPAN THAT WRAPS ACROSS LINES IS PROSE, NOT A PHRASING (#14033 review, P2). The
+    # block's explanatory parenthetical — "the question's own predicate is `affected
+    # pricing`" — is backticked too, and a multi-line span is not a question: fed to the
+    # recogniser it answers `population is None` under EVERY mutant, so an iteration over
+    # it asserts nothing while the comment above claims every phrasing is checked. A real
+    # phrasing in this block is always on one line, so the newline IS the discriminator.
+    named = [
+        span
+        for span in _re.findall(r"`([^`]+)`", declines)
+        if " " in span and "\n" not in span
+    ]
+    assert named, "the DOES NOT ROUTE block names no phrasings — nothing is pinned"
+    for query in named:
+        assert detect_state_question(query).population is None, (
+            f"the MCP description files {query!r} under DOES NOT ROUTE, but it "
+            f"does route — the description contradicts the code")
+
+    # ⛔ AND THE CHANNEL IT NAMES MUST EXIST (#14033 review, P1b). The block used to
+    # promise "the SDK, whose read-status sink carries the same payload" — no PUBLIC
+    # SDK method accepts that sink, so the served text sent every agent after an
+    # entry point that does not exist. Pin the corrected claim both ways.
+    import tortoise.sdk as _sdk_mod
+
+    assert "read_status_out" in doc and "_tortoise_fts_query" in doc, (
+        "the served description must name the PRIVATE SDK entry point that carries "
+        "the notice, or it promises a channel a customer cannot reach")
+    assert "read_status_out" in inspect.signature(
+        _sdk_mod.TortoiseSDK._tortoise_fts_query).parameters, (
+        "the served description names `_tortoise_fts_query(read_status_out=…)` but "
+        "that sink is gone from the method — the description is now false")
+    public_with_sink = [
+        n for n, m in inspect.getmembers(_sdk_mod.TortoiseSDK, inspect.isfunction)
+        if not n.startswith("_")
+        and "read_status_out" in inspect.signature(m).parameters
+    ]
+    assert not public_with_sink, (
+        f"a public SDK method now accepts `read_status_out` ({public_with_sink}) — the "
+        f"served description says no PUBLIC method exposes the notice; update the text "
+        f"to name it rather than leaving the one channel that exists unadvertised")
 
 
 def test_the_partitive_is_not_the_discriminator():
@@ -855,19 +1361,50 @@ def test_an_ending_question_on_a_family_with_no_lifecycle_keeps_the_text_read(
 
     monkeypatch.setattr(ended_mod, "enumerate_ended", record)
 
+    # ⛔ #14033: the refusal is REPORTED, not silent — a shape fired and the
+    # population does not exist for this family, which is the second way a state
+    # question ends up answered by the relevance read. Deleting the notice leaves
+    # the rows unchanged, so a rows-only assertion cannot pin it (round-6 review,
+    # P2): the sentinel here is the sink.
+    notice: dict = {}
     sdk._tortoise_fts_query("has anything we relied on been withdrawn",
-                           entity_type="event", limit=5)
+                           entity_type="event", limit=5,
+                           _state_route_out=notice)
     assert reached == [], (
         "an Event-scoped ending question was served the ended population, which "
         "`ended.py` refuses to have — the guard keeping the route off a family "
         "with no lifecycle is gone")
+    assert notice.get("reason") == "family", (
+        f"the family refusal was not reported ({notice!r}) — the caller is told "
+        f"nothing, which is #14033's silence in the one place a shape DID fire")
+    assert notice["routed"] is False and notice["cue"]
+    # ⛔ the family arm gets its OWN hint: a shape DID apply, so "no state-question
+    # shape applied to it" would be false, and its remedy ("ask it as a whole
+    # question") is the string the caller already asked. The assertions are on those
+    # two claims, not on whether the word "event" appears.
+    from tortoise.state_intent import MISSED_ROUTE_FAMILY_HINT, MISSED_ROUTE_HINT
 
-    # POSITIVE CONTROL — the same question, on a family that HAS a lifecycle.
+    # ⛔ ONE assertion, because the two text probes this replaced could not fail
+    # independently (#14033 review, P3): `hint` is a module CONSTANT on both arms, so
+    # `"no state-question shape applied" not in …` and `"lifecycle" in …` only re-said
+    # what the identity below says, and a mutant that deletes the family arm reds the
+    # `reason == "family"` assertion above before either line is reached. The IDENTITY is
+    # the claim: a shape DID apply here, so this arm must not be handed the shape hint.
+    assert notice["hint"] == MISSED_ROUTE_FAMILY_HINT != MISSED_ROUTE_HINT, (
+        f"the family refusal was answered with the wrong hint ({notice['hint']!r}) — "
+        f"the shape arm's remedy tells a caller to re-ask a form they already used")
+
+    # POSITIVE CONTROL — the same question, on a family that HAS a lifecycle: the
+    # population IS reached, and there is no notice to report.
+    control: dict = {}
     sdk._tortoise_fts_query("has anything we relied on been withdrawn",
-                           entity_type="point", limit=5)
+                           entity_type="point", limit=5, _state_route_out=control)
     assert reached == ["point"], (
         "the control did not reach the population, so the assertion above proves "
         "nothing about the guard")
+    assert control == {}, (
+        f"a ROUTED question carried a notice ({sorted(control)}) — the notice must "
+        f"only appear where the population was not served")
 
 
 @_docker_only
@@ -975,6 +1512,272 @@ def test_a_policy_question_is_not_answered_with_the_ended_population(sdk):
     assert live["id"] in served, (
         "the policy question's own record was not served — the route either "
         "fired anyway or the relevance read it keeps did not answer")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# #14033 — the widened cues ON THE READ, both directions, and the notice
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+#: The ended world #14033's read-level tests are measured against: one live note,
+#: one retracted claim and one superseded decision, i.e. two endings of different
+#: kinds (a status word, and a status word plus a named successor).
+def _ended_world(sdk):
+    live = sdk._create_point(kind="statement", content="the venue is booked")
+    retracted = sdk._create_point(
+        kind="statement",
+        content="The beach club confirmed our 12 December booking.")
+    sdk._retract_point(retracted["id"])
+    old = sdk._create_point(kind="decision", content="the entry tier is 29")
+    new = sdk._create_point(kind="decision", content="the entry tier is 39")
+    sdk._supersede_point(old["id"], new["id"])
+    return {"live": live, "retracted": retracted, "old": old, "new": new}
+
+
+@_docker_only
+def test_the_three_unfired_phrasings_of_14033_reach_the_ended_read(sdk):
+    """#14033, acceptance 1 — on the READ, with how each record ended.
+
+    Measured on `origin/main` `e93f5df464`, all three of these were ORDINARY
+    searches: `what has ended recently` and `is the onboarding flow retired?` and
+    `list what we retired` returned nothing useful, and the reply was
+    indistinguishable from an honest "nothing has ended". Each now reaches the
+    ended population, so the ended records arrive WITH their status / successor /
+    `endedAt`, and the live record does not arrive at all.
+    """
+    world = _ended_world(sdk)
+
+    for question in ("what has ended recently",
+                     "is the onboarding flow retired?",
+                     "list what we retired"):
+        rows = sdk._tortoise_fts_query(question, entity_type="point", limit=50)
+        by_id = {r["id"]: r for r in rows}
+
+        assert world["retracted"]["id"] in by_id, (
+            f"{question!r} did not reach the ended population — #14033's defect "
+            f"is exactly this silence")
+        assert by_id[world["retracted"]["id"]]["status"] == "retracted"
+        assert by_id[world["retracted"]["id"]]["endedAt"], (
+            "the ending time must be served where the record carries one")
+
+        assert world["old"]["id"] in by_id
+        assert by_id[world["old"]["id"]]["status"] == "superseded"
+        assert by_id[world["old"]["id"]]["successorId"] == world["new"]["id"]
+
+        assert world["live"]["id"] not in by_id, (
+            f"{question!r} served a LIVE record — the ended population is the "
+            f"answer, not the corpus")
+
+
+@_docker_only
+def test_the_four_content_questions_of_14033_do_not_route_on_the_read(sdk):
+    """#14033, acceptance 2 — asserted on the READ, not on the helper.
+
+    The four questions the table pins as MUST-NOT-ROUTE. The falsifier is the
+    ended record: with the route fired, the ended population is served wholesale
+    and the ended record is necessarily in the reply; with the relevance read,
+    the shared currency predicate excludes it from the BASE retrieval, so it
+    cannot appear at all. Each question's own live record is also asserted served
+    where one exists, so "not routed" is not satisfied by an empty answer.
+
+    ⛔ `which features are deprecated in v3` and `which claims were retracted by
+    legal` DO carry a missed-cue notice (they name an ending state with a
+    qualifier the population cannot apply). A notice is not a route: the rows are
+    the relevance rows this test pins.
+    """
+    dead = sdk._create_point(
+        kind="statement",
+        content=("customers cancelled this month: an old claim we withdrew; "
+                 "v3 features deprecated; we archive customer emails; "
+                 "legal retracted the claims"))
+    sdk._retract_point(dead["id"])
+    live_archive = sdk._create_point(
+        kind="statement", content="we archive customer emails on request")
+    live_v3 = sdk._create_point(
+        kind="statement", content="v3 features deprecated: the legacy export")
+    live_cancel = sdk._create_point(
+        kind="statement", content="customers cancelled this month: 12 subscriptions")
+
+    content_questions = [
+        ("have any customers cancelled this month", live_cancel),
+        ("which features are deprecated in v3", live_v3),
+        ("do we archive customer emails", live_archive),
+        ("which claims were retracted by legal", None),
+    ]
+    for question, live in content_questions:
+        rows = sdk._tortoise_fts_query(question, entity_type="point", limit=50)
+        served = _ids(rows)
+        assert dead["id"] not in served, (
+            f"{question!r} was ROUTED to the ended population — the caller asked "
+            f"a content question and was handed the whole ended set (#13558's "
+            f"defect class, measured on four surfaces)")
+        if live is not None:
+            assert live["id"] in served, (
+                f"{question!r} did not route AND its own record was not served — "
+                f"the relevance read it keeps did not answer either")
+
+
+@_docker_only
+def test_a_missed_state_cue_is_distinguishable_from_an_honest_empty(sdk):
+    """#14033, acceptance 4 — the notice's WHOLE point, on the read.
+
+    Two replies that used to be identical: a state question the cue table could
+    not apply, and a state question answered honestly empty. The first now carries
+    a `state_question` notice naming the cue it saw; the second carries none, and
+    its empty is the factual claim it always was.
+
+    ⛔ The notice rides the caller-owned sinks and never a row: the rows are the
+    relevance rows the caller would have received anyway, so nothing about the
+    ANSWER changes — which is what keeps this from becoming the hijack.
+    """
+    world = _ended_world(sdk)
+
+    # (1) a state cue the table SAW and could not apply (an appended qualifier).
+    notice: dict = {}
+    status: dict = {}
+    rows = sdk._tortoise_fts_query("which claims were retracted by legal",
+                                   entity_type="point", limit=50,
+                                   _state_route_out=notice,
+                                   read_status_out=status)
+    assert notice, (
+        "a state question that did not route came back with NO notice — its "
+        "reply is indistinguishable from 'nothing has ended' (#14033)")
+    assert notice["routed"] is False
+    assert notice["reason"] == "shape"
+    assert "retracted" in notice["cue"]
+    assert notice["hint"]
+    # …the READ is the relevance read, unchanged: the ended record is not served.
+    assert world["retracted"]["id"] not in _ids(rows)
+    # …and the same payload reaches the caller who asked for the read status.
+    assert status["state_question"]["cue"] == notice["cue"]
+
+    # (2) the honest empty: a question that DOES route, read on a graph where
+    # nothing of the family has ended (a fresh namespace, so no record was
+    # retired there). Same empty reply, NO notice — the two are distinguishable,
+    # which is the whole acceptance.
+    from tortoise.sdk import TortoiseSDK
+
+    clean = TortoiseSDK(namespace=f"test13557_{uuid.uuid4().hex[:10]}")
+    quiet: dict = {}
+    quiet_status: dict = {}
+    rows = clean._tortoise_fts_query(
+        "has anything we relied on been withdrawn", entity_type="point", limit=50,
+        _state_route_out=quiet, read_status_out=quiet_status)
+    assert rows == [], (
+        "the routed question must answer honestly empty on a graph where nothing "
+        "has ended — a notice is not a substitute for an answer")
+    assert quiet == {}, (
+        f"an honestly empty ROUTED answer carried {sorted(quiet)} — the notice "
+        f"must not appear where the recogniser applied the question")
+    assert "state_question" not in quiet_status
+    assert quiet_status.get("status") == "empty", (
+        "the honest empty must say the store ANSWERED and found nothing, which is "
+        "the status the notice-less reply carries")
+    clean.close()
+
+    # (3) and a CONTENT query carries nothing at all, in either sink — INCLUDING
+    # a sink a previous call already wrote a notice into (a sink is caller-owned
+    # and may be reused, so a stale notice would claim a cue nobody saw).
+    plain_status: dict = {}
+    plain: dict = {}
+    sdk._tortoise_fts_query("launch event", entity_type="point", limit=5,
+                            _state_route_out=plain, read_status_out=plain_status)
+    assert plain == {} and "state_question" not in plain_status, (
+        "a content query's reply changed — the notice may only appear where a "
+        "state cue was seen")
+    reused_status = dict(status)          # carries this test's earlier notice
+    reused: dict = dict(notice)
+    sdk._tortoise_fts_query("launch event", entity_type="point", limit=5,
+                            _state_route_out=reused,
+                            read_status_out=reused_status)
+    assert reused == {}, (
+        f"a REUSED sink kept a stale notice {sorted(reused)} on a content read")
+    assert "state_question" not in reused_status, (
+        "a REUSED read-status sink kept a stale `state_question` on a content "
+        "read — the cleared-then-decided rule is what stops that")
+
+
+@_docker_only
+def test_a_retrieval_knob_suppresses_the_notice_too(sdk):
+    """A caller who supplied a knob asked for a relevance read — and is not second-guessed.
+
+    #14033 routes, and NOTICES, only for a PLAIN question. The knob guard is the
+    same closed list the ended arm refuses by, so a caller who typed
+    `min_confidence=`/`threshold=` has said what they want; telling them their
+    question looked like a state question would be the read arguing with its caller.
+
+    ⛔ Pinned on the SINK, not on the rows: with the guard intact the rows are the
+    relevance rows either way, so a rows-only assertion passes with the notice arm
+    deleted (round-6 review, P2-4).
+    """
+    sink: dict = {}
+    sdk._tortoise_fts_query("which claims were retracted by legal",
+                            entity_type="point", limit=5, threshold=0.01,
+                            _state_route_out=sink, read_status_out={})
+    assert sink == {}, (
+        f"a call that supplied `threshold` still carried the notice {sorted(sink)} — "
+        f"the customer's own retrieval request was overridden by a guess")
+
+    # …and the same question with NO knob does carry it, so the assertion above is
+    # not satisfied by a notice that never fires.
+    plain: dict = {}
+    sdk._tortoise_fts_query("which claims were retracted by legal",
+                            entity_type="point", limit=5, _state_route_out=plain)
+    assert plain.get("reason") == "shape", plain
+
+
+def test_the_hosted_search_body_carries_the_missed_cue(monkeypatch):
+    """#14033 on the HOSTED surface — the only place the notice reaches a caller.
+
+    ⛔ Hermetic, and pinned on the BODY. The SDK test above drives
+    `_tortoise_fts_query` directly, so deleting the hosted emission left every test
+    green while the one caller-facing surface went silent (round-6 review, P2-4).
+    """
+    import asyncio
+
+    import tortoise.hosted_api as hosted_api
+
+    payload = {"routed": False, "population": "ended", "reason": "shape",
+               "cue": "which claims were retracted", "hint": "hint"}
+
+    def _patch(monkeypatch, *, cue: bool):
+        class _FakeSDK:
+            def _get_proj(self):
+                return object()
+
+            def _tortoise_fts_query(self, q, limit=10, read_status_out=None,
+                                    _truncation_out=None, _state_route_out=None,
+                                    **_ignored):
+                if _truncation_out is not None:
+                    _truncation_out.update({"truncated": False})
+                if cue and _state_route_out is not None:
+                    _state_route_out.update(payload)
+                return [{"id": "p1", "content": "alpha", "pointKind": "statement"}]
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(hosted_api, "_data_sdk", lambda org: _FakeSDK())
+        monkeypatch.setattr(hosted_api, "_require_scope",
+                            lambda org, scope, name: None)
+        return hosted_api
+
+    hosted = _patch(monkeypatch, cue=True)
+    body = asyncio.run(hosted.search(q="which claims were retracted by legal",
+                                     limit=5, org={}))
+    assert body["state_question"] == payload, (
+        f"the hosted body carries {sorted(body)} — a state question that did not "
+        f"route is indistinguishable from an honest empty on the one surface an "
+        f"HTTP caller reads")
+    assert body["count"] == 1 and body["truncated"] is False
+    assert body["results"][0]["id"] == "p1"
+
+    # …and a read with NO state cue is byte-identical: no field, nothing new.
+    quiet = _patch(monkeypatch, cue=False)
+    body2 = asyncio.run(quiet.search(q="launch event", limit=5, org={}))
+    assert "state_question" not in body2, (
+        f"a content search gained {sorted(set(body2))} — the notice may only "
+        f"appear where a state cue was recognised")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
