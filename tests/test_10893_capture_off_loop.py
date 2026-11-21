@@ -132,8 +132,8 @@ _ON_LOOP_RESIDUAL: dict[str, str] = {
     # review, F2). State a magnitude once, or not at all.
     "_get_registry": "#4451 (metering registry read inside `record_write_ops`)",
     # The two provenance stamps in `_capture_session_impl`
-    # (`_stamp_capture_provenance` at `hosted_api.py` ~21182 and
-    # `_capture_stamp_targets` at ~21209) go through this ONE retry wrapper —
+    # (`_stamp_capture_provenance` at `hosted_api.py:21185` and
+    # `_capture_stamp_targets` at `:21212`) go through this ONE retry wrapper —
     # but the stamp is JOURNAL-FIRST, so it is TWO synchronous legs per stamp on
     # the loop and the census observes BOTH: this wrapper, and the journal
     # `_emit_event` that precedes it (`sdk.py:11559`). Measured on three
