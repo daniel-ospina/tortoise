@@ -324,6 +324,16 @@ def read(
     # expensive subquery could be forced on every call. `READ_COLUMNS` is the declared
     # surface; the schema is the authority it is checked against.
     _checked(topic_column, what="topic column")
+    # ⛔ `key_prop` IS THE THIRD INTERPOLATED IDENTIFIER, and it is validated HERE rather
+    # than only inside `resident_keys` — which sits behind the guard's `except Exception`.
+    # Validated only there, a bad `--key-prop` came back as `complete=False` with
+    # `ValueError: key property ...` inside the reason, i.e. exit 4 (UNMEASURED, "retry")
+    # for a mistake no retry can fix: the operator was told the MEASUREMENT failed when
+    # the FLAG is wrong. The other two identifiers already raise before the guard for
+    # exactly this reason; the third must not be the exception. `tools/resident.py`'s
+    # `except (ValueError, PinConfigError) -> parser.error` arm is what turns this into
+    # exit 1 (usage).
+    _checked(key_prop, what="key property")
     columns = _rp.table_columns().get(table)
     if columns is not None and topic_column not in columns:
         raise ValueError(

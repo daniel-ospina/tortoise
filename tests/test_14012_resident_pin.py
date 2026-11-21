@@ -446,6 +446,24 @@ def test_a_pin_predicate_that_raises_holds_the_node_back():
         "question about what the user pinned must hold the node back, never release it"
     )
     assert report.deleted == ()
+    # ⛔ AND THE REPORT MUST NOT CLAIM THEY ARE PINNED. The delete decision is the same
+    # either way, but "the user pinned these" and "we could not ask" have different
+    # remedies, and only one of them is reachable: folding the two into `skipped_pinned`
+    # told an operator to unpin nodes that were never established as pinned — advice that
+    # cannot clear the state, on the refusal an operator acts on.
+    assert report.skipped_pin_unanswerable, (
+        "the nodes held back by a RAISING predicate were not reported at all"
+    )
+    assert report.skipped_pinned == (), (
+        "a predicate that RAISED was reported as `skipped_pinned` — the report claims a "
+        "pin nobody established"
+    )
+    assert report.metric()["held_pin_unanswerable"] == len(
+        report.skipped_pin_unanswerable)
+    assert report.metric()["held_pinned"] == 0
+    # ⛔ And no message may offer `unpin` for nodes nobody established as pinned: that
+    # advice cannot clear this state, which is exactly what the split prevents.
+    assert "PINNED (`skipped_pinned`)" not in report.reason, report.reason
 
 
 def test_a_window_made_entirely_of_pinned_nodes_names_the_pin_as_the_reason():
@@ -642,6 +660,60 @@ def test_a_truncated_declaration_is_never_rewritten_by_pin_or_unpin():
         "a truncated read rewrote the declaration, silently dropping keys it could not "
         "see"
     )
+
+
+def test_the_read_bound_is_reachable_so_a_truncated_declaration_can_be_released(
+        monkeypatch):
+    """The escape the truncation refusal names must be EXECUTABLE, and it is the env var.
+
+    ⛔ Before this arm the bound was a module constant with no control, and BOTH
+    truncation refusals told the operator to "release keys first, or raise the read
+    bound" — while `unpin` refuses for the same truncation. So a declaration past the
+    bound could be neither extended nor released by any shipped tool, the sweep refused
+    forever, and the remedy named in the message could not be run: the "an instruction
+    that cannot be followed" class this module refuses elsewhere.
+    """
+    import tortoise.resident_pin as rp
+
+    g = _FakeGraph([f"k{i}" for i in range(6)])
+    budget = PinBudget(max_nodes=100)
+    pin(g, ["k0", "k1", "k2", "k3"], budget=budget)
+
+    # The default bound, narrowed through the lever, truncates and refuses — and names
+    # the lever.
+    monkeypatch.setenv(rp.KEY_LIMIT_ENV, "2")
+    with pytest.raises(PinRefused) as exc:
+        unpin(g, ["k0"], budget=budget)
+    assert exc.value.code == "truncated"
+    assert rp.KEY_LIMIT_ENV in str(exc.value), (
+        "the refusal must name the control that raises the bound, not just the bound"
+    )
+
+    # Raising it through the SAME lever is what makes the refusal executable.
+    monkeypatch.setenv(rp.KEY_LIMIT_ENV, "100")
+    unpin(g, ["k0"], budget=budget)
+    assert g.meta[PINS_META_KEY]["keys"] == ["k1", "k2", "k3"], (
+        "with the bound raised the release must run, and release only what was named"
+    )
+
+
+def test_a_malformed_read_bound_refuses_rather_than_falling_back(monkeypatch):
+    """A malformed bound must not silently fall back to the default.
+
+    An operator who set the variable and got a truncated read anyway would be told the
+    wrong cause, and the refusal they need (fix the value) would never appear.
+    """
+    import tortoise.resident_pin as rp
+
+    monkeypatch.setenv(rp.KEY_LIMIT_ENV, "not-a-number")
+    with pytest.raises(PinConfigError) as exc:
+        rp.key_limit()
+    assert "not an integer" in str(exc.value)
+
+    monkeypatch.setenv(rp.KEY_LIMIT_ENV, "0")
+    with pytest.raises(PinConfigError) as exc2:
+        rp.key_limit()
+    assert "below its floor" in str(exc2.value)
 
 
 def test_a_window_too_small_for_a_pin_names_that_rather_than_an_impossible_number():

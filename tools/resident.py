@@ -200,7 +200,15 @@ def main(argv: list[str] | None = None) -> int:
         )
     except resident_pin.PinConfigError as exc:
         if args.verb == "pin":
-            _emit({"verdict": "REFUSED", "reason": f"config refused: {exc}"}, args.out)
+            # ⛔ THE SAME ENVELOPE AS `_refused()`, not a second shape: this arm used to
+            # emit only `{verdict, reason}`, so a consumer keying on `code` (the exit-code
+            # vocabulary's own discriminator) got a KeyError on the one refusal an
+            # operator reaches for FIRST — a bad `--max-pins`/window pair. `_refused` is
+            # declared below because it closes over `budget`; the fields are restated
+            # here rather than reordering the module, and
+            # `test_a_declared_budget_without_a_resolvable_window_is_refused` grades them.
+            _emit({"verdict": "REFUSED", "graph": args.graph, "code": "config",
+                   "reason": f"config refused: {exc}", "budget": None}, args.out)
             return EXIT_REFUSED
         budget = None
         if args.verb == "show":

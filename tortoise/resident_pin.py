@@ -33,11 +33,18 @@ Two sentences, and every mechanism here exists for one of them:
 * **Not a per-user control.** The storage shape is per ACCOUNT (`#11758`): a pin set
   is graph-scoped, and a pin is not an escape from the account's allowance.
 * **Not survival.** §2.0: the record keeps everything and the graph is a derived hot
-  cache. A pin buys *speed*, never *retention* — and it is cache state, so a
-  `rebuild_from_record` re-materialises the graph without the pins and this module is
-  re-applied from the declaration it reads. The declaration lives in the graph's keyed
-  ``:Meta`` node (the ``config_reset`` / `residency.declare_residency` idiom), which is
-  operator metadata: no ``Point``, no edge, no EP weight.
+  cache. A pin buys *speed*, never *retention*. ⛔ AND IT DOES NOT SURVIVE A REBUILD:
+  the declaration lives in the graph's keyed ``:Meta`` node (the ``config_reset`` /
+  `residency.declare_residency` idiom), which is operator metadata — no ``Point``, no
+  edge, no EP weight — but ``rebuild_from_record``'s wipe is WHOLE-GRAPH
+  (``_wipe_all_nodes`` is ``MATCH (n) DETACH DELETE n``, `cache_projection.py`), so the
+  declaration is destroyed with everything else and there is nothing left for this
+  module to re-apply it from. An earlier draft of this paragraph said the pins were
+  "re-applied from the declaration it reads", which is false in the one case it
+  describes: an operator who read it would re-pin nothing and the next sweep would
+  legitimately evict the formerly-pinned closure, with no signal. The pins must be
+  re-declared after a rebuild; the record still holds every point, which is what the
+  "nothing is lost" promise is about.
 * **Not a score.** The pin does not re-rank anything; it is an exclusion the evictor
   applies *before* the score can take a node (§7's policy: an unconditional pin is a
   measured anti-pattern, so this is a small, capped, explicit set — never the ordering).
@@ -104,6 +111,40 @@ DEFAULT_MAX_DEGREE = 32
 #: bounded by construction, so this is a runaway guard, not a tuning knob — and hitting
 #: it is REPORTED (:attr:`PinReading.truncated`) rather than silently shortening the set.
 DEFAULT_KEY_LIMIT = 50_000
+
+#: The bound is REACHABLE. ⛔ It used to be a module constant with no control at all, and
+#: both refusals it can produce told the operator to "raise the read bound" — an
+#: instruction with no lever: past the bound a declaration could be neither EXTENDED
+#: (:func:`pin` refuses, because the rewrite would drop the keys past the bound) nor
+#: RELEASED (:func:`unpin` refuses for the same reason), so the sweep refused forever and
+#: the named escape could not be executed. That is the "an instruction that cannot be
+#: followed" class this module already refuses elsewhere (the 1-node window). The
+#: environment variable is the lever, and both messages name it.
+KEY_LIMIT_ENV = "TORTOISE_PIN_KEY_LIMIT"
+
+
+def key_limit() -> int:
+    """The most keys one closure read may pull — ``$TORTOISE_PIN_KEY_LIMIT`` or the default.
+
+    A malformed or non-positive value is a REFUSAL (``PinConfigError``), never a silent
+    fall back to the default: an operator who raised the bound and got a truncated read
+    anyway would be told the wrong cause.
+    """
+    raw = os.environ.get(KEY_LIMIT_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_KEY_LIMIT
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise PinConfigError(
+            f"{KEY_LIMIT_ENV}={raw!r} is not an integer key count"
+        ) from exc
+    if value < 1:
+        raise PinConfigError(
+            f"{KEY_LIMIT_ENV}={value} is below its floor of 1 — a bound of zero cannot "
+            f"read any key, which reports every declaration as unreadable"
+        )
+    return value
 
 #: The bare-identifier shape a label or key property must have before it is interpolated
 #: into Cypher. The census's own strict rule, restated for the same reason: `str.isidentifier`
@@ -264,6 +305,26 @@ class PinBudget:
                         f"{PIN_MAX_DEGREE_ENV}={raw_degree!r} is not an integer degree"
                     ) from exc
 
+        # ⛔ A BUDGET DECLARED WITHOUT A WINDOW CANNOT HONOUR THE ONE INVARIANT THAT
+        # MATTERS, so it is REFUSED rather than accepted unchecked. `__post_init__` only
+        # enforces `max_nodes < window` when a window is known, so an explicit
+        # `--max-pins` (or `TORTOISE_PIN_MAX_NODES`) with no `--window-nodes` and no
+        # `TORTOISE_CACHE_MAX_NODES` produced a budget equal to — or larger than — the
+        # window the SWEEP then derives for itself. MEASURED before this refusal:
+        # `resolve(max_nodes=10_000_000, window_nodes=None)` was ACCEPTED, `pin` wrote
+        # the declaration and reported `written: true` ("the control is on"), and every
+        # subsequent `tools/cache_evict.py` run re-derived `window // 10`, found the
+        # closure over budget and REFUSED — the unbounded-cache state #10976 exists to
+        # prevent, reached from a command that reported success. The window is the
+        # denominator of the cap, so a declaration that cannot name it cannot be capped.
+        if window is None:
+            raise PinConfigError(
+                f"a pin budget of {declared} node(s) was declared, but the residency "
+                f"window it must stay smaller than cannot be resolved: pass "
+                f"--window-nodes / set {EVICTION_MAX_NODES_ENV}. Without it the cap "
+                f"cannot be checked against the window the sweep will use, and a budget "
+                f"at or above it is 'no eviction' by another name"
+            )
         return cls(max_nodes=declared, max_degree=degree,
                    window_nodes=window, source=source)
 
@@ -342,16 +403,17 @@ class PinReading:
             if self.truncated:
                 return (
                     "the pin set's closure could not be read in full (the key read hit "
-                    f"its {DEFAULT_KEY_LIMIT}-key bound), so how much of the fast layer "
-                    "it claims is UNKNOWN — a sweep may not proceed on an unmeasured pin "
-                    "footprint"
+                    f"its {key_limit()}-key bound — raise it with {KEY_LIMIT_ENV}=<n>), "
+                    "so how much of the fast layer it claims is UNKNOWN — a sweep may "
+                    "not proceed on an unmeasured pin footprint"
                 )
             return None
         if self.truncated:
             return (
                 "the pin set's closure could not be read in full (the key read hit its "
-                f"{DEFAULT_KEY_LIMIT}-key bound), so how much of the fast layer it claims "
-                "is UNKNOWN — a sweep may not proceed on an unmeasured pin footprint"
+                f"{key_limit()}-key bound — raise it with {KEY_LIMIT_ENV}=<n>), so how "
+                "much of the fast layer it claims is UNKNOWN — a sweep may not proceed "
+                "on an unmeasured pin footprint"
             )
         if self.closure_size > self.budget.max_nodes:
             return (
@@ -484,8 +546,9 @@ def read(graph: Any, *, budget: PinBudget | None = None) -> PinReading:
         return PinReading(label=label, key_prop=key_prop, readable=False,
                           source=f"malformed:{exc}", budget=budget)
 
-    asked = sorted(keys)[: DEFAULT_KEY_LIMIT + 1]
-    truncated = len(keys) > DEFAULT_KEY_LIMIT
+    limit = key_limit()
+    asked = sorted(keys)[: limit + 1]
+    truncated = len(keys) > limit
     try:
         rows = _rows(
             graph,
@@ -545,7 +608,7 @@ def read(graph: Any, *, budget: PinBudget | None = None) -> PinReading:
         degrees=degrees,
         missing=missing,
         readable=True,
-        truncated=truncated or len(asked) > DEFAULT_KEY_LIMIT,
+        truncated=truncated or len(asked) > limit,
         source=f"meta:{PINS_META_KEY}",
         budget=budget,
     )
@@ -601,8 +664,9 @@ def pin(
         # loss of the user's declaration, from an operation that reports success.
         raise PinRefused(
             f"the existing pin declaration holds more keys than one read can see "
-            f"({DEFAULT_KEY_LIMIT}), so it cannot be extended without dropping the rest "
-            f"— release keys first, or raise the read bound",
+            f"({key_limit()}), so it cannot be extended without dropping the rest "
+            f"— raise the read bound with {KEY_LIMIT_ENV}=<n> (then release the keys "
+            f"you no longer need)",
             code="truncated",
         )
     if not current.readable:
@@ -788,8 +852,9 @@ def unpin(
     if current.truncated:
         raise PinRefused(
             f"the pin declaration holds more keys than one read can see "
-            f"({DEFAULT_KEY_LIMIT}), so releasing keys would rewrite it from a PARTIAL "
-            f"read and drop the rest",
+            f"({key_limit()}), so releasing keys would rewrite it from a PARTIAL "
+            f"read and drop the rest — raise the read bound with {KEY_LIMIT_ENV}=<n> "
+            f"so the whole declaration is visible before it is rewritten",
             code="truncated",
         )
     # ⛔ A caller that names a DIFFERENT population is refused, not quietly obeyed: with

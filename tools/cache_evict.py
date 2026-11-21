@@ -230,6 +230,13 @@ def main(argv: list[str] | None = None) -> int:
                         help=("the destructive token: must EQUAL --graph. Required "
                               "with --execute — it proves the OPERATOR authorized "
                               "this graph, not that a placeholder was left filled."))
+    parser.add_argument("--allow-unapplied-pin-set", action="store_true",
+                        help=("proceed when the pin declaration addresses ANOTHER key "
+                              "space than --key-prop. Off by default: a sweep whose key "
+                              "space differs from the declaration's may be deleting "
+                              "nodes a user declared resident, so that run is REFUSED. "
+                              "Pass this only when you have established the two key "
+                              "spaces hold different populations."))
     parser.add_argument("--out", type=Path, help="write the report here (default: stdout)")
 
     args = parser.parse_args(argv)
@@ -416,10 +423,33 @@ def main(argv: list[str] | None = None) -> int:
                 pin_note = (
                     f"the pin declaration addresses keys named by {pins.key_prop!r} "
                     f"({len(pins.keys)} key(s) on {pins.label!r}), but this sweep keys on "
-                    f"{args.key_prop!r} — the declaration was NOT applied to it, because "
-                    f"it holds nothing in this population's key space"
+                    f"{args.key_prop!r} — the declaration holds nothing in this "
+                    f"population's key space, so it was NOT applied"
                 )
-                print(f"#14012: {pin_note}", file=sys.stderr)
+                # ⛔ REFUSED BY DEFAULT, and the reason is that the mismatch is NOT
+                # provably harmless: it is a comparison on the PROPERTY NAME, so a sweep
+                # that keys the same nodes by a different property (`--key-prop
+                # point_id` against a declaration on `id`) would evict a pinned closure
+                # while the report read `held_pinned: 0` — the control silently
+                # protecting nothing, on the one run that deletes. The alternative
+                # (block every sweep of another population for as long as any pin
+                # exists) is real, so the way past is ONE explicit, auditable flag
+                # rather than a silent default: `--allow-unapplied-pin-set`.
+                if not args.allow_unapplied_pin_set:
+                    _emit({"verdict": "REFUSED",
+                           "reason": (f"{pin_note}. A sweep may not run over a "
+                                      f"population whose key space it cannot check the "
+                                      f"declaration against — pass "
+                                      f"--allow-unapplied-pin-set if you have "
+                                      f"established the two key spaces hold different "
+                                      f"populations"),
+                           "pins": {**pins.as_dict(), "applied": False,
+                                    "not_applied_reason": pin_note},
+                           "census": assessment.as_dict()},
+                          args.out)
+                    return CACHE_EVICTION_EXIT_REFUSED
+                print(f"#14012: {pin_note}; continuing because "
+                      f"--allow-unapplied-pin-set was passed", file=sys.stderr)
             else:
                 pinned_gate = pins.gate() if pins.keys else None
 

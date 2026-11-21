@@ -22925,6 +22925,33 @@ def test_cache_evict_runs_on_a_tools_only_change():
         "module-skips without TORTOISE_DB_URI")
 
 
+def test_resident_tool_runs_on_a_tools_only_change():
+    # #14012: `tools/resident.py` is the pin/outside-view OPERATOR VERB, and `tools/`
+    # is a flat NON_PYTHON_PREFIXES entry matching no SOURCE_PATTERNS row — so before
+    # the `CORE_ALSO` entry, a diff touching ONLY this file filtered to
+    # `changed == []` and took the docs-only early return. MEASURED with the entry
+    # absent: `select(["tools/resident.py"], "pull_request", load_manifest())` ->
+    # `surfaces: []`, 105 files, and NONE of the three `#14012` suites. That is the
+    # #1349/#3332/#3616 silent-drop class on the file that carries every refusal this
+    # control exists to make (the `REFUSED` envelope with the number named, the
+    # UNMEASURED-vs-OK split, "a refused pin wrote nothing"), so a later weakening
+    # there would have merged green by omission.
+    #
+    # Mutation check: removing the `tools/resident.py` entry from `CORE_ALSO` fails
+    # this arm (`surfaces` becomes `[]`).
+    for path in ("tools/resident.py", "tortoise/resident_pin.py",
+                 "tortoise/outside_view.py"):
+        r = _sel([path])
+        assert r["full"] is False, (path, r["full"])
+        assert r["surfaces"] == ["core"], (path, r["surfaces"])
+        # The three suites are HERMETIC (a statement-recording fake graph), so they are
+        # selected on the URI-less pool rather than subtracted by `uri_requiring`.
+        for suite in ("test_14012_resident_pin.py",
+                      "test_14012_outside_view.py",
+                      "test_14012_resident_cli.py"):
+            assert suite in r["test_files"], (path, suite)
+
+
 def test_entry_point_guard_census_runs_on_a_tools_only_change():
     # #11320: `tests/test_entry_point_python_guard.py` (registered
     # `core`) is the census that holds every GUARDED `tools/` entry point's #5128

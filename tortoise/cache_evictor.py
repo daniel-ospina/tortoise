@@ -425,6 +425,14 @@ class EvictionReport:
     #: "a reader holds it" would send the next operator to widen a population or drain a
     #: lease — neither of which is the answer (unpin it, or raise the pin budget).
     skipped_pinned: tuple[Candidate, ...] = ()
+    #: #14012 — nodes held back because the PIN PREDICATE COULD NOT ANSWER (it raised),
+    #: which is a different fact from "the user pinned this" and gets a different
+    #: remedy. ⛔ Folding the two into ``skipped_pinned`` told an operator to "unpin some
+    #: of them, or raise TORTOISE_PIN_MAX_NODES" for nodes that were never established as
+    #: pinned — an instruction that cannot clear the state, i.e. the report asserting a
+    #: fact it does not have. The delete DECISION is unchanged (both hold the node back);
+    #: only what the report claims is split.
+    skipped_pin_unanswerable: tuple[Candidate, ...] = ()
     #: ``None`` — not ``0`` — where nothing was measured. A monitor that reads a
     #: missing measurement as a healthy zero is the defect this seam exists to close.
     nodes_before: int | None = None
@@ -486,6 +494,7 @@ class EvictionReport:
             "held_record_cannot_serve": len(self.skipped_record_cannot_serve),
             "held_leased": len(self.skipped_leased),
             "held_pinned": len(self.skipped_pinned),
+            "held_pin_unanswerable": len(self.skipped_pin_unanswerable),
             "delete_unverified": self.delete_unverified,
             # ⛔ `None` = NOT APPLICABLE, `False` = NEEDED AND FAILED. Collapsing the
             # two would let a failed invalidation read as a clean pass.
@@ -508,6 +517,9 @@ class EvictionReport:
             ],
             "skipped_leased": [c.as_dict() for c in self.skipped_leased],
             "skipped_pinned": [c.as_dict() for c in self.skipped_pinned],
+            "skipped_pin_unanswerable": [
+                c.as_dict() for c in self.skipped_pin_unanswerable
+            ],
         }
 
 
@@ -924,6 +936,8 @@ def evict(
     held_leased: list[Candidate] = []
     #: #14012 — the user's declaration, held back before anything else looks at the node.
     held_pinned: list[Candidate] = []
+    #: Held back by a predicate that RAISED — held, but not established as pinned.
+    held_pinned_unanswerable: list[Candidate] = []
     held_pinned_ids: set[int] = set()
     #: Ids already decided, so a later pass does not re-offer them. ⛔ Not a `seen`
     #: filter that also swallows HELD-BACK nodes: a node the record cannot serve sits
@@ -1034,14 +1048,21 @@ def evict(
             # direction is the opposite one — anything truthy, or an unanswerable
             # question, holds the node back.
             if pinned is not None:
+                answered = True
                 try:
                     is_pinned = bool(pinned(candidate))
                 except Exception:
+                    # ⛔ COULD NOT ASK IS NOT "PINNED". Both hold the node back — that is
+                    # the safe direction and it does not change — but they are different
+                    # facts with different remedies, so they are reported apart:
+                    # `unpin`/raise-the-budget cannot clear a predicate that raised.
                     is_pinned = True
+                    answered = False
                 if is_pinned:
                     if candidate.node_id not in held_pinned_ids:
                         held_pinned_ids.add(candidate.node_id)
-                        held_pinned.append(candidate)
+                        seen_ids = held_pinned if answered else held_pinned_unanswerable
+                        seen_ids.append(candidate)
                     continue
             if candidate.node_id in leases.held():
                 held_leased_ids.add(candidate.node_id)
@@ -1110,6 +1131,8 @@ def evict(
                     stop_reason = "population"
                 elif held_leased_ids:
                     stop_reason = "leased"
+                elif held_pinned_unanswerable:
+                    stop_reason = "pin-unanswerable"
                 elif held_pinned_ids:
                     stop_reason = "pinned"
                 else:
@@ -1274,6 +1297,7 @@ def evict(
             skipped_record_cannot_serve=tuple(held_record),
             skipped_leased=tuple(held_leased),
             skipped_pinned=tuple(held_pinned),
+            skipped_pin_unanswerable=tuple(held_pinned_unanswerable),
             nodes_before=before_nodes,
             # ⛔ UNMEASURED is None, never the pre-delete reading. Reporting
             # `nodes_after=before_nodes` beside `deleted=4` is a fabricated metric: a
@@ -1317,6 +1341,13 @@ def evict(
             cause = (
                 f"{len(held_leased)} node(s) are held by an in-flight READ, so the "
                 f"population is not exhausted"
+            )
+        elif stop_reason == "pin-unanswerable":
+            cause = (
+                f"the pin predicate could not answer for "
+                f"{len(held_pinned_unanswerable)} node(s) "
+                f"(`skipped_pin_unanswerable`), so they were held — nothing is "
+                f"established about them; repair the pin set and re-run"
             )
         elif stop_reason == "pinned":
             cause = (
@@ -1378,6 +1409,15 @@ def evict(
                 f"node(s) are held by an in-flight READ (`skipped_leased`), so the "
                 f"population is not exhausted; re-run when those reads finish"
             )
+        elif stop_reason == "pin-unanswerable":
+            reason += (
+                f"; still {over_after} node(s) over the budget — the pin predicate "
+                f"could not answer for {len(held_pinned_unanswerable)} node(s) "
+                f"(`skipped_pin_unanswerable`, #14012), so they were HELD rather than "
+                f"taken: nothing is established about them. Repair the pin set (its "
+                f"declaration or the graph) and re-run; unpinning or raising the budget "
+                f"cannot clear this, because these nodes were never shown to be pinned"
+            )
         elif stop_reason == "pinned":
             reason += (
                 f"; still {over_after} node(s) over the budget — {len(held_pinned)} "
@@ -1410,6 +1450,7 @@ def evict(
         skipped_record_cannot_serve=tuple(held_record),
         skipped_leased=tuple(held_leased),
         skipped_pinned=tuple(held_pinned),
+        skipped_pin_unanswerable=tuple(held_pinned_unanswerable),
         nodes_before=before_nodes,
         nodes_after=after_nodes,
         bytes_before=before_bytes,

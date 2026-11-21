@@ -118,9 +118,36 @@ def test_pin_writes_the_declaration_and_reports_its_closure(wired, capsys):
     assert out["pin"]["set"]["closure_size"] == 2
 
 
+def test_a_declared_budget_without_a_resolvable_window_is_refused(wired, capsys,
+                                                               monkeypatch):
+    """A budget declared with no window cannot be capped, so it is never accepted.
+
+    `__post_init__` enforces `max_nodes < window` only when a window is known, so this
+    pair was ACCEPTED: `pin` wrote the declaration and reported `written: true`, and
+    every subsequent sweep re-derived its own `window // 10`, found the closure over
+    budget and refused. That is the unbounded-cache state #10976 exists to prevent,
+    reached from a command that reported success — and it is the asymmetric failure the
+    whole control is built to avoid (a pin may buy speed; it may not take the cache).
+    """
+    monkeypatch.delenv("TORTOISE_CACHE_MAX_NODES", raising=False)
+    code = resident.main(["pin", *BASE, "--key", "p0", "--max-pins", "10000000"])
+    assert code == resident.EXIT_REFUSED
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdict"] == "REFUSED"
+    assert out["code"] == "config"
+    assert "window" in out["reason"]
+    assert PINS_META_KEY not in wired.meta
+    assert wired.mutations == [], "a refused pin issued a mutating statement"
+
+
 def test_pin_over_the_budget_refuses_with_the_number_and_writes_nothing(
         wired, capsys):
-    code = resident.main(["pin", *BASE, "--key", "p0", "--max-pins", "1"])
+    # ⛔ The window is supplied because a DECLARED budget without one is its own
+    # refusal (see `test_a_declared_budget_without_a_resolvable_window_is_refused`):
+    # this arm is about the CLOSURE exceeding a budget the window can be checked
+    # against, so it must name both.
+    code = resident.main(["pin", *BASE, "--key", "p0", "--window-nodes", "1000",
+                          "--max-pins", "1"])
     assert code == resident.EXIT_REFUSED
     out = json.loads(capsys.readouterr().out)
     assert out["verdict"] == "REFUSED"
@@ -133,7 +160,7 @@ def test_pin_over_the_budget_refuses_with_the_number_and_writes_nothing(
 def test_show_reports_an_over_budget_set_as_a_refusal(wired, capsys):
     resident.main(["pin", *BASE, "--key", "p0", "--window-nodes", "1000"])
     capsys.readouterr()
-    code = resident.main(["show", *BASE, "--max-pins", "1"])
+    code = resident.main(["show", *BASE, "--window-nodes", "1000", "--max-pins", "1"])
     assert code == resident.EXIT_REFUSED
     out = json.loads(capsys.readouterr().out)
     assert "would then take over the fast layer" in out["reason"]
@@ -328,6 +355,25 @@ def test_outside_with_an_unvalidated_topic_column_is_a_usage_error(
     assert exc.value.code == resident.EXIT_USAGE
 
 
+def test_outside_with_a_non_bare_key_prop_is_a_usage_error_not_unmeasured(
+        wired, capsys, monkeypatch):
+    """A bad `--key-prop` is a FLAG mistake, so it is exit 1 — never exit 4 (UNMEASURED).
+
+    `key_prop` is the third identifier `read()` interpolates, and it used to be validated
+    only inside `resident_keys` — which sits behind the guard's `except Exception`. The
+    result was `complete=False` with the `ValueError` folded into the reason, i.e. exit 4,
+    whose documented meaning is "the measurement failed, retry": a scheduler was told to
+    retry a flag that can never become valid. The other two identifiers already raise
+    before the guard; this arm keeps the third from being the exception.
+    """
+    _fake_psycopg(monkeypatch, _Conn())
+    with pytest.raises(SystemExit) as exc:
+        resident.main(["outside", *BASE, "--dsn", "postgresql://x", "--org-id",
+                       "org_a", "--graph-id", "g_1", "--key-prop",
+                       "bad prop", "--window-nodes", "1000"])
+    assert exc.value.code == resident.EXIT_USAGE
+
+
 def test_pin_with_a_non_bare_label_is_a_refusal_not_a_traceback(wired, capsys):
     """A first pin on an EMPTY declaration reaches `bare_identifier` inside `pin`.
 
@@ -459,21 +505,47 @@ def test_a_pin_set_over_its_budget_stops_the_sweep_before_evict(sweep, capsys,
     assert "pinned closure is 2 node(s)" in out["reason"]
 
 
-def test_a_pin_set_for_another_key_space_is_reported_not_applied(sweep, capsys,
-                                                                tmp_path):
-    """A per-graph pin set addressing `Source.url` holds nothing in an `id` sweep.
+def test_a_pin_set_for_another_key_space_refuses_the_sweep(sweep, capsys, tmp_path):
+    """A pin declaration in ANOTHER key space REFUSES the sweep, rather than not applying.
 
-    ⛔ Neither of the two "obvious" answers is right, and both were tried: REFUSING
-    blocks every sweep of another population for as long as any pin exists (a set is
-    declared once, per graph), while APPLYING it compares keys that mean different
-    things. So the sweep proceeds with the declaration NOT applied — and says so on both
-    surfaces an operator reads, because a pin that silently stops protecting is the
-    failure this control exists to prevent.
+    ⛔ The mismatch is a comparison on the PROPERTY NAME, so it does not prove the two
+    key spaces hold different populations: a sweep that keys the SAME nodes by another
+    property (declaration on `id`, sweep with `--key-prop point_id`) would evict a pinned
+    closure while the report read `held_pinned: 0` — the control silently protecting
+    nothing, on the run that deletes. Reporting it beside the run left a pinned node
+    deletable, which is the failure this control exists to prevent.
+
+    The over-block the old behaviour avoided is real (a per-graph set is declared once,
+    so a blanket refusal would stop every sweep of every other population) — which is
+    why the way past is ONE explicit flag, not a silent default:
+    `--allow-unapplied-pin-set`.
     """
     graph, calls = sweep
     graph.meta[PINS_META_KEY] = {"label": "Source", "key_prop": "url",
                                  "keys": ["https://example.test"]}
     code = cache_evict.main(_sweep_argv(_report_file(tmp_path), "--max-nodes", "1000"))
+    assert code == cache_evict.CACHE_EVICTION_EXIT_REFUSED
+    assert calls == [], "a refused run reached `evict` and could have deleted"
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdict"] == "REFUSED"
+    assert "--allow-unapplied-pin-set" in out["reason"]
+    assert out["pins"]["applied"] is False
+
+
+def test_the_unapplied_pin_set_refusal_is_overridable_in_one_auditable_flag(
+        sweep, capsys, tmp_path):
+    """The other-population sweep stays reachable — deliberately, and visibly.
+
+    The refusal above is an over-block when the two key spaces really do hold different
+    populations, and that case is legitimate. It is answered by an explicit flag on the
+    command, so the decision is recorded in the run rather than made silently by a
+    default, and the stderr line says the protection was not applied.
+    """
+    graph, calls = sweep
+    graph.meta[PINS_META_KEY] = {"label": "Source", "key_prop": "url",
+                                 "keys": ["https://example.test"]}
+    code = cache_evict.main(_sweep_argv(_report_file(tmp_path), "--max-nodes", "1000",
+                                       "--allow-unapplied-pin-set"))
     assert code == 0
     assert len(calls) == 1 and calls[0]["pinned"] is None
     out = json.loads(capsys.readouterr().out)
