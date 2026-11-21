@@ -31,7 +31,31 @@ output is in the PR body):
 * **Let the ledger break the read path** — re-raise an append error →
   ``test_a_failed_append_never_raises_into_the_read_path`` RED.
 * **Stop recording reads from the funnel** — drop the call in
-  ``sdk.tortoise_fts_query`` → ``test_the_funnel_records_each_returned_key`` RED.
+  ``sdk._tortoise_fts_query`` → ``test_the_funnel_records_each_returned_key`` RED.
+  ⚠️ The header used to say ``sdk.tortoise_fts_query``: that name does not resolve
+  on the class (it is in ``REMOVED_SDK_METHODS``, and ``hasattr`` is False) — the
+  hook lives inside ``_tortoise_fts_query`` (sdk.py:45555).
+* **Record the tag POPULATION a door scanned instead of the page it served** — drop
+  the ``_record_reads=False`` at the ``search_knowledge(mode="tag")`` call site →
+  ``test_the_caller_facing_row_paths_feed_the_ledger`` RED (``p9`` is scanned and
+  never served, so counting it biases `f` HIGH — measured 1 failed / 66 passed).
+* **Record the tag scan BEFORE dropping tombstones** — move the ``_ledger_record``
+  above the ``include_retracted`` filter → the same test RED (`p10` is a retracted
+  row the caller is never served; measuring it as read biases `f` HIGH).
+* **Stop the tag accessor's own default arm recording** — delete the
+  ``if _record_reads:`` hook in ``_query_points_by_tag`` →
+  ``test_the_tag_accessor_default_arm_records_the_caller_arm`` RED.
+* **Count the internal accessor as a caller read** — hook ``_get_point`` → the
+  same test RED (a written-but-never-read node reads as read), which is why the write
+  paths may keep calling it.
+
+⚠️ **The three names this file used to drive are RETIRED** (``query``,
+``paginated_query``, ``query_points_by_tag`` — ``#4282``, no alias layer). The hooks
+outlived them on the accessors they reached (``_query``, ``_paginated_query``,
+``_query_points_by_tag``, ``_get_point``), and the bodies now drive the CALLER-FACING
+doors that dispatch there, so a door that skips its accessor fails a test instead of
+silently losing the hook (#14143 reddened this file precisely because the door names
+moved and the test kept the old ones).
 
 They run on the embedded carve-out (``TORTOISE_TEST_CARVE_OUT=1``) or a
 ``TORTOISE_DB_URI`` (``tests/conftest.py`` session gate).
@@ -378,50 +402,100 @@ def hooked_sdk(ledger, monkeypatch):
     return inst, _Graph
 
 
-def test_the_three_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
+def test_the_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
     """A hook that is not exercised is a hook that will be lost in a refactor.
 
-    ⛔ THIS PINS THREE OF THE HOOKED SDK METHODS, and its name says so. The other
-    SDK methods recorded in §17.4.6 are not exercised here, and neither are the
-    two NON-SDK hooks (the session-start read, and the MCP tag tool's served
+    ⛔ THE NAMES THIS BODY DRIVES ARE THE DOORS A CALLER ACTUALLY HAS. It used to
+    drive `query()`, `paginated_query()` and `query_points_by_tag()`, and all
+    three were RETIRED outright by `#4282` (`sdk_retired.py`: no alias layer, the
+    old names do not resolve) — which is what reddened this file on main. The
+    hooks outlived the names: they sit on the accessors those methods reached,
+    and the surviving public doors dispatch to them.
+
+    * `list_knowledge(kind="claim")` → `_paginated_query` → ONE read event per
+      returned key — no fewer (a missed record inflates the never-read mass,
+      which flatters the split) and no more (a double record overstates how many
+      reads a key gets, the same class of wrong as a lost one);
+    * `search_knowledge(mode="tag")` → `_query_points_by_tag(_record_reads=False)`
+      → ONE event for the page it SERVES, never the tag population it sliced it
+      from (#7983: recording the population biases `f` HIGH, the direction that
+      removes the split's saving) and never a TOMBSTONE it dropped before
+      serving (sdk.py:30904 filters `status != "retracted"` BEFORE the slice, so
+      a record placed above that filter counts a row the caller never receives);
+    * `_get_point` records NOTHING — it is the internal accessor the write paths
+      use, so counting it would mark a written-but-never-read node as read.
+      (Its public spelling `get_point` is gone too: it is `_get_point` on the
+      class, and `retirement_hint` does not answer for it — a bare rename, not a
+      retirement.)
+
+    The other hooked SDK paths in §17.4.6 are not exercised here, and neither are
+    the two NON-SDK hooks (the session-start read, and the MCP tag tool's served
     page): deleting any of those calls leaves this file green, no test drives
     them, and §17.4.6 names the set. The former name
     (`test_every_row_returning_read_path_feeds_the_ledger`) promised coverage it
     did not have, so the claim is narrowed to what the body drives rather than
     the guard being trusted on its title.
-
-    Each of `query()`, `paginated_query()` and `query_points_by_tag()` returns
-    Point rows to a CALLER, so each must record exactly ONE read event per
-    returned key — no fewer (a missed record inflates the never-read mass, which
-    flatters the split) and no more (a double record overstates how many reads a
-    key gets, which is the same class of wrong as a lost one).
     """
     inst, graph = hooked_sdk
     # The keys must exist as STOCK first, or every read is (correctly) reported
     # as `unregistered` and there is no row to count on.
-    for key in ("p1", "p2", "p3", "p7", "p8", "p9"):
+    for key in ("p1", "p2", "p7", "p8", "p9", "p10"):
         record_stock("Point", key, nbytes=100)
 
     graph.rows = [{"id": "p1"}, {"id": "p2"}]
-    got = inst.query()
-    assert [r["id"] for r in got] == ["p1", "p2"]
+    listed = inst.list_knowledge("claim")
+    assert [r["id"] for r in listed["results"]] == ["p1", "p2"]
 
-    graph.rows = [{"id": "p3"}]
-    assert inst.paginated_query()["results"] == [{"id": "p3"}]
+    # THE TAG SCAN CARRIES BOTH HAZARDS ON PURPOSE:
+    #   * `p9` is in the scan and NOT in the page — a door that records the
+    #     POPULATION it read, instead of the rows it hands back, shows up here
+    #     as `p9: 1`;
+    #   * `p10` is a TOMBSTONE, and it sits ahead of the page in the scan order
+    #     — a door that records before applying `include_retracted` shows up as
+    #     `p10: 1`, i.e. `f` counts a row the caller was never served.
+    graph.rows = [{"id": "p10", "status": "retracted"}, {"id": "p8"}, {"id": "p9"}]
+    assert inst.search_knowledge(mode="tag", tag="t", limit=1)["results"] == [
+        {"id": "p8"}
+    ]
 
     graph.rows = [{"id": "p7"}]
-    assert inst.get_point("p7") == {"id": "p7"}
-
-    graph.rows = [{"id": "p8"}, {"id": "p9"}]
-    inst.query_points_by_tag("t")
+    assert inst._get_point("p7") == {"id": "p7"}
 
     folded = fold()
     counts = {k[2]: row.read_count for k, row in folded.rows.items()}
-    # `p7` stays at ZERO: `get_point` is the internal accessor the write paths
+    # `p7` stays at ZERO: `_get_point` is the internal accessor the write paths
     # use, so it must record NOTHING — if it ever starts recording, a
-    # written-but-never-read node looks read and `f` is biased HIGH.
-    assert counts == {"p1": 1, "p2": 1, "p3": 1, "p7": 0, "p8": 1, "p9": 1}
+    # written-but-never-read node looks read and `f` is biased HIGH. `p9` stays
+    # at ZERO for the opposite reason — it was scanned but NOT served — and
+    # `p10` at ZERO because the tombstone is filtered out before the page is
+    # taken.
+    assert counts == {"p1": 1, "p2": 1, "p7": 0, "p8": 1, "p9": 0, "p10": 0}
     assert folded.unresolved_reads == 0
+
+
+def test_the_tag_accessor_default_arm_records_the_caller_arm(hooked_sdk):
+    """The accessor's OWN default still records — the flag is what protects `f`.
+
+    `_query_points_by_tag` declares ``_record_reads: bool = True`` and its
+    docstring says recording is right for the SDK caller and wrong for the
+    paginated caller that receives one page. ⚠️ No in-repo caller takes the
+    default today (`search_knowledge`'s tag arm is the only one, and it passes
+    ``_record_reads=False``), so this pins the ACCESSOR'S CONTRACT rather than a
+    live path — which is exactly the contract the docstring states, and the one
+    a future caller relies on when it decides it must pass the flag.
+    """
+    inst, graph = hooked_sdk
+    record_stock("Point", "p8", nbytes=100)
+    record_stock("Point", "p9", nbytes=100)
+
+    graph.rows = [{"id": "p8"}, {"id": "p9"}]
+    assert [r["id"] for r in inst._query_points_by_tag("t")] == ["p8", "p9"]
+    counts = {k[2]: row.read_count for k, row in fold().rows.items()}
+    assert counts == {"p8": 1, "p9": 1}, (
+        "the default arm records the population it RETURNS; only the paginated "
+        "caller suppresses it with the flag"
+    )
+
 
 
 def test_the_ledger_module_is_not_imported_when_the_flag_is_off():
@@ -741,25 +815,35 @@ def test_a_capped_file_still_says_so_when_one_tenant_is_folded(ledger, monkeypat
 def test_an_internal_population_scan_is_not_recorded_as_a_read(hooked_sdk):
     """`recall_gaps` / `issue_insight` / the FTS fallback scan the WHOLE stock.
 
-    They call `query()` to do it, so recording them would mark every Point read
-    after one `recall_gaps()` call — `f` → ~1, the exact contamination excluding
-    `get_point` prevented, and it would silently invalidate the one-directional
+    They fetch that pool from `_query(_record_reads=False)` — the accessor the
+    retired `query()` reached (#4282 removed the public name; the keyword
+    outlived it). Recording such a scan would mark every Point read after one
+    `recall_gaps()` call — `f` → ~1, the exact contamination excluding
+    `_get_point` prevented, and it would silently invalidate the one-directional
     "the gaps bias `f` LOW" caveat the docs rest on.
+
+    The flag is the whole protection: the accessor's DEFAULT records, which is
+    pinned by `test_the_tag_accessor_default_arm_records_the_caller_arm`, so the
+    only way this regresses is a caller dropping the keyword at its own call
+    site — and those are named and greppable (`sdk.py:45169`, `:47358`,
+    `:50681`). ⚠️ NOT the `_tortoise_fts_query(… _record_reads=False)` sites
+    (`:44893`, `:50199`, `:50216`, `:50655`, `:58101`): that is a different
+    accessor with its own pool-versus-served rule.
     """
     inst, graph = hooked_sdk
     record_stock("Point", "p1", nbytes=100)
     record_stock("Point", "p2", nbytes=100)
 
     graph.rows = [{"id": "p1"}, {"id": "p2"}]
-    assert [r["id"] for r in inst.query(_record_reads=False)] == ["p1", "p2"]
+    assert [r["id"] for r in inst._query(_record_reads=False)] == ["p1", "p2"]
     assert {row.read_count for row in fold().rows.values()} == {0}, (
         "an internal scan must record NOTHING"
     )
 
     graph.rows = [{"id": "p1"}]
-    inst.query()
+    inst._query()
     counts = {k[2]: row.read_count for k, row in fold().rows.items()}
-    assert counts == {"p1": 1, "p2": 0}, "the caller-facing default still records"
+    assert counts == {"p1": 1, "p2": 0}, "the default arm still records"
 
 
 def test_the_mode_tightening_skips_a_directory(tmp_path, monkeypatch):
