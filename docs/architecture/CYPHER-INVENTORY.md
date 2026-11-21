@@ -105,7 +105,7 @@ verb predicate   : re.compile(r"\b(?:MATCH|MERGE)\s*\(", re.IGNORECASE)
 = 1,586  occurrences on a line carrying a door CALL          [measured]
   − 0   of those, the AST did not record (residual)
 = 1,586  AST door calls
-= 1324  classified Cypher statements + 262 non-Cypher door calls
+= 1,324  classified Cypher statements + 262 non-Cypher door calls
 ```
 
 ⛔ **The predicates, stated exactly as `rg_totals` runs them — and where a shell `rg` diverges.**
@@ -943,6 +943,31 @@ this change is a query, so the migration metric §0 is about does not move.
 `ac57b2d38a`) added `tortoise/usage_signal.py` and did not re-cut this doc, so `--check` was already
 reporting `files_scanned: doc=302 tool=303` on `main` before this branch merged it. One re-cut carries
 both, which is why a paragraph for one change explains two files.
+
+**The cut this PR (#14012, `feat/14012-pin-and-outside-view`) makes — SIX statement sites in TWO
+new files, and it is the first cut in this document whose new `plain` READS are migration
+candidates.** Re-cut by RUNNING the tool on this tree, never by arithmetic on the markers.
+`tortoise/resident_pin.py` (the bounded pin, `SEARCH-ARCHITECTURE.md` §7) and
+`tortoise/outside_view.py` (what the fast layer does not hold) are product surface and each carries
+sites, so `files` 100→**102** and `files_scanned` 304→**306**; `sites` 1318→**1324** and
+`ast_door_calls` 1580→**1586** (= 1324 + 262, `non_cypher_door_calls` **262** unchanged — neither file
+opens a non-Cypher door). The six sites split three ways: **two `plain` READS** — the resident key
+list (`MATCH (n:{label}) RETURN n.{key_prop} AS key LIMIT {bound}`) and the resident count
+(`MATCH (n:{label}) RETURN count(n)`) — which is why `plain` 868→**872** (read 586→**588**),
+`candidates` 586→**588** and `partial` 318→**320** (both interpolate an identifier, the shape the
+`???` marker exists for); **two `plain` WRITES** — the one `:Meta` declaration (`MERGE … SET n +=
+$props`) and its removal (`MATCH (n:Meta {key:$key}) DETACH DELETE n`) — which keep `plain` write
+282→**284** and stay `graph-maintenance`, because a pin declaration IS graph state and `#13083`'s
+`record_only` shape is what will eventually move them; and **two `unresolved`** — the two
+`_rows(graph, statement, params)` helpers, whose statement is a parameter, landing in the documented
+over-report arm so `unresolved` 103→**105**. `adjacency` **293**, `ep` **32**, `ddl` **17**,
+`traversal` **3** and `fulltext` **2** are unchanged, because none of the six is an edge pattern,
+an epistemic scalar or a DDL statement. ⚠️ **The two new candidates are the migration metric moving
+for a FEATURE, not for a cleanup**: this PR adds reads that are SQL-shaped by construction (they
+count and list one tenant's cache keys), and the honest census counts them rather than exempting
+them. §1's `rg` reconciliation is re-measured at this tree (door **1,640 / 111** whole-text, verb
+**2,374 / 149**, bare **1,646 / 112**), and Appendix A is regenerated with `--markdown` at this head
+— the two new files' six rows are in it, so a reader can resolve every one.
 
 <!-- cypher-inventory:sites = 1324 -->
 <!-- cypher-inventory:files = 102 -->
