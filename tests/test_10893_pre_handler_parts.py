@@ -123,26 +123,50 @@ def test_the_remainder_is_read_lane_only_after_the_hand_off(monkeypatch):
     with_hand_off.mark(STAGE_EMBED_GET)
     assert set(with_hand_off.parts_ms()) == {"read_lane"}
 
+    # ⛔ THE REMAINDER INTERVAL MUST BE NON-ZERO, or this row is inert: the
+    # mutant it names (`"read_lane" if _last_part == "read_submit" else
+    # "other"` → `"read_lane"`) banks `read_lane = 0.0` on a zero-length
+    # interval and `parts_ms()`'s `ms > 0.0` filter hides it — the assertion
+    # then reads identically with the guard present and deleted (#14086 F3).
     without = begin(started_at=0.0)
     without.note("sdk_open")
+    clock["t"] += 1.0
     without.mark(STAGE_EMBED_GET)
     parts = without.parts_ms()
-    assert "read_lane" not in parts, (
+    assert set(parts) == {"sdk_open", "other"}, (
         "a route that never handed work to the read lane must not have its "
         "pre-handler time published as a read-lane wait")
+    assert parts["other"] == pytest.approx(1000.0, abs=1.0)
 
 
 # ── 4. additive-only ────────────────────────────────────────────────────────
 
 def test_an_unknown_part_is_refused_rather_than_published(monkeypatch):
+    """The closed vocabulary is load-bearing: one unknown key voids the PROP.
+
+    ⛔ THE CLOCK ADVANCES BEFORE THE GUARDED NOTE, or this row is inert
+    (#14086 F2): with the note landing at a zero-length interval, the guard
+    present and the guard deleted publish the identical `{"other": …}` (the
+    unknown part is filtered by `ms > 0.0`), so no mutant reds here. The
+    downstream cost of a leaked name is not cosmetic — the emit site
+    (`hosted_api._emit_wait_bound_breach`) drops the WHOLE
+    `read_pre_handler_parts` prop when one key is outside the vocabulary, so
+    one typo would silently void the entire decomposition.
+    """
     clock = {"t": 0.0}
     monkeypatch.setattr(rs.time, "monotonic", lambda: clock["t"])
     stages = begin(started_at=0.0)
-    stages.note("not_a_part")
+    clock["t"] += 0.5
+    stages.note("not_a_part")      # would bank 500.0 ms IF it were published
     clock["t"] += 0.5
     stages.mark(STAGE_EMBED_GET)
-    assert "not_a_part" not in stages.parts_ms()
-    assert len(stages.parts_ms()) == 1
+    parts = stages.parts_ms()
+    assert "not_a_part" not in parts, (
+        "an unknown part name published — the emit site would then drop the "
+        "whole decomposition for this request")
+    assert parts == {"other": 1000.0}, (
+        "the refused note must not move the parts cursor: the whole interval "
+        "belongs to the remainder")
 
 
 def test_the_part_vocabulary_is_a_closed_set_of_named_parts():
@@ -182,6 +206,89 @@ def test_the_wire_view_still_withholds_the_decomposition(monkeypatch):
     assert stages.parts_ms(), "the decomposition exists…"
     assert "pre_handler_parts" not in stages.wire_snapshot(), (
         "…and must never reach the refusal BODY")
+
+
+def test_the_snapshot_carries_the_decomposition_to_its_publication_site(monkeypatch):
+    """⛔ The ONE line that DELIVERS this change: `snapshot()`'s carrier.
+
+    Every other row here calls `parts_ms()` directly, the wire row asserts the
+    key's ABSENCE and the log row is fed a hand-built view — so deleting
+    `view["pre_handler_parts"] = parts` would publish the decomposition
+    NOWHERE (no analytics row, no breach log line) with the suite green
+    (#14086 F4). pinned end to end at the analytics row below.
+    """
+    clock = {"t": 0.0}
+    monkeypatch.setattr(rs.time, "monotonic", lambda: clock["t"])
+    stages = begin(started_at=0.0)
+    clock["t"] += 0.5
+    stages.note("dispatch")
+
+    # OPEN timeline: ABSENT rather than empty — the parts cannot sum to a total
+    # that has not closed yet, and an empty table reads as "measured, free".
+    assert "pre_handler_parts" not in stages.snapshot()
+
+    clock["t"] += 0.5
+    stages.mark(STAGE_EMBED_GET)
+    view = stages.snapshot()
+    assert view["pre_handler_parts"] == {"dispatch": 500.0, "other": 500.0}
+    assert view["pre_handler_parts"] == stages.parts_ms()
+    assert sum(view["pre_handler_parts"].values()) == pytest.approx(
+        view["stages_ms"]["pre_handler"], abs=0.2)
+
+
+def test_an_unmeasured_pre_handler_publishes_no_part_table_at_all(monkeypatch):
+    """ABSENT beats an empty table: "no boundary observed" ≠ "observed, free"."""
+    clock = {"t": 0.0}
+    monkeypatch.setattr(rs.time, "monotonic", lambda: clock["t"])
+    stages = begin(started_at=0.0)
+    stages.mark(STAGE_EMBED_GET)     # zero-length pre_handler: every part is 0.0
+    assert stages.parts_ms() == {}
+    with request_stages(stages):
+        view = stage_view()
+    assert view is not None and "pre_handler_parts" not in view
+    assert "pre_handler" not in view["stages_ms"]
+
+
+def test_the_breach_row_publishes_the_decomposition_and_voids_it_on_a_leak(monkeypatch):
+    """The prop NAME and the emit site's closed-vocabulary guard, end to end.
+
+    `snapshot()` is one hop from the analytics row: `_emit_wait_bound_breach`
+    re-validates every part name and drops the WHOLE prop when one is outside
+    the vocabulary, so the guard and the carrier have to be pinned together.
+    """
+    from tortoise import hosted_api as ha
+
+    captured: dict = {}
+    monkeypatch.setattr(ha, "_track_analytics_event",
+                        lambda org, ev, props: captured.update(props=dict(props)))
+    monkeypatch.setattr(
+        "tortoise.monitoring.control_plane_worker",
+        lambda _name: type("W", (), {"submit": staticmethod(
+            lambda fn: (fn(), _Done())[1])})())
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(rs.time, "monotonic", lambda: clock["t"])
+    stages = begin(started_at=0.0)
+    clock["t"] += 0.5
+    stages.note("dispatch")
+    clock["t"] += 0.5
+    stages.mark(STAGE_EMBED_GET)
+
+    ha._emit_wait_bound_breach("org", "/v1/search", "GET", 24000,
+                               stages=stages.snapshot())
+    assert captured["props"]["read_pre_handler_parts"] == {
+        "dispatch": 500.0, "other": 500.0}
+
+    captured.clear()
+    leaked = stages.snapshot()
+    leaked["pre_handler_parts"] = dict(leaked["pre_handler_parts"],
+                                       not_a_part=1.0)
+    ha._emit_wait_bound_breach("org", "/v1/search", "GET", 24000,
+                               stages=leaked)
+    assert "read_pre_handler_parts" not in captured["props"], (
+        "one unknown part must void the whole prop — the analytics lake is a "
+        "top-level-key filter, so a key no reader groups on must never be "
+        "published there")
 
 
 def test_an_unbound_note_is_a_noop_and_publishes_nothing():
@@ -238,6 +345,19 @@ def test_the_analytics_prop_is_allowlisted():
     """An unregistered prop is stripped in silence (#3821)."""
     from tortoise import hosted_api as ha
     assert "read_pre_handler_parts" in ha._ALLOWED_ANALYTICS_PROPS
+
+
+class _Done:
+    """Stand-in for the futures `_emit_wait_bound_breach` tracks."""
+
+    def add_done_callback(self, _cb):
+        return None
+
+    def cancelled(self):
+        return False
+
+    def exception(self):
+        return None
 
 
 def test_the_log_suffix_carries_the_decomposition():
