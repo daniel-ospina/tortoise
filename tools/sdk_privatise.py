@@ -588,7 +588,21 @@ SWEEP_NAMES = 66
 #: rather than taken from either side: the pin is graded on PULL REQUESTS only, so `main`'s
 #: own tree drifts under every merge it lands and neither side carries this tree's number.
 #: Rule unchanged: re-derive with `--repin` on YOUR tree, never by arithmetic on the last pin.
-SWEEP_RESIDUE = (11851, "f1ba9f2563209e40")
+#: RE-CUT AGAIN → (11845, "d86902194b3dbbbb") — a **SHRINK of 6**, and every row is named, because
+#: a shrink is not evidence on its own (see the -1 above). The three module-level availability probes
+#: (`tests/test_assembly_sdk.py`, `tests/test_assembly_fixtures.py`,
+#: `tests/longmem_eval/test_assembly_arm.py`) each carried exactly two untyped rows that #13899 left
+#: behind: `_probe.create_point("statement", …)` and `_probe.tortoise_fts_query(…)`. Both spellings
+#: were RETIRED by #13899 — the public `create_point` (→ `create_entity("point", …)`) and the
+#: `tortoise_fts_query` attribute (→ the internal `_tortoise_fts_query`) — so the probe raised
+#: `AttributeError`, its own `except Exception` swallowed it into `FALKORDB_AVAILABLE = False`, and the
+#: assembly suites went SILENT (skip locally, `refusing that (#1436)` ERROR in CI where
+#: `TORTOISE_TEST_EXPECT_URI=1`). That is the red `test (a)` reported on #13994's shard `a`, not a
+#: code defect in this PR. Re-pointed to the surviving doors, which removes 2 rows per file: measured
+#: `git grep -c 'create_point('` / `'tortoise_fts_query('` on the three files reads 2 each BEFORE and
+#: 0 each AFTER, and 11851 − 6 = 11845 is this tree's own `--repin` reading, not arithmetic on the
+#: last pin. `--check` exits 0 (`typed references still pointing at a public name: 0`).
+SWEEP_RESIDUE = (11845, "d86902194b3dbbbb")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
