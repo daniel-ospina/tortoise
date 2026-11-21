@@ -792,12 +792,22 @@ _COPULA_SUBJECT = (
     # question that is indistinguishable from "nothing has ended") reproduced on the
     # shape this PR ADDS. The pinned row that should have caught it pins only
     # `… retired by legal`, the `<prep> <bare noun>` spelling — the one shape the
-    # guard happened to let through. These are `_BLOCKED_TAIL`'s own prepositions, so
-    # a qualifier that table REPORTS can no longer be swallowed by a guard looking
-    # past the participle.
+    # guard happened to let through. So every PREPOSITION `_BLOCKED_TAIL` names is
+    # now excluded here, which is what makes a reported qualifier of that form
+    # reportable instead of swallowed by a guard looking past the participle.
+    # ⛔ EVERY PREPOSITION, AND NO MORE THAN THAT (round-2 review, P2, measured):
+    # `during`, `until`, `as` and `than` are `_BLOCKED_TAIL` members this list
+    # omitted, so `is the export archived during the migration` and `… until the
+    # merger` were STILL silent while the first draft of this comment claimed the
+    # class was closed — the same over-claim, one level down. They are in the list
+    # now. What is NOT covered is stated rather than implied: a CONJUNCTION or
+    # SUBORDINATOR member of `_BLOCKED_TAIL` (`because`, `since`, `when`, `if`,
+    # `and`, …) still silences this shape, because guard A refuses inside the
+    # subject and cannot tell a tail from a subject without bounding itself at the
+    # participle — measured to re-route the round-16 hijack.
     r"(?!(?:all|both|half|such|many|most|some|any|no|each|every|of|"
     r"in|on|at|by|for|from|with|to|about|over|against|regarding|concerning|"
-    r"towards|toward|per|"
+    r"towards|toward|per|during|until|as|than|"
     r"the|a|an|our|my|its|their|these|those|this|that|your|his|her)\b)"
     r"[a-z0-9][a-z0-9'’._/-]*\s+"
     r"(?:the|a|an|our|my|its|their|these|those|this|that|your|his|her|"

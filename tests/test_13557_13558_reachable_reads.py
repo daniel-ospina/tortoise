@@ -1002,12 +1002,20 @@ def test_a_strong_cue_that_does_not_fire_reports_itself_and_never_routes():
         # inside the subject, so `is the export archived by the vendor` came back
         # `signal=None` while `… by legal` (a BARE noun) was reported. A closed-list
         # qualifier that produces no notice is #14033's own defect on the shape this PR
-        # adds, so the guard now treats every preposition `_BLOCKED_TAIL` names the way it
-        # already treated `of` — one noun phrase, not two, and the cue is REPORTED.
+        # adds, so the guard now treats every PREPOSITION `_BLOCKED_TAIL` names the
+        # way it already treated `of` — one noun phrase, not two, and the cue is
+        # REPORTED. ⛔ `during|until|as|than` were missing from that list in the first
+        # draft (round-2 review, P2, measured), which is why the four rows below
+        # exist: each is a `_BLOCKED_TAIL` preposition that used to silence the shape.
+        # A CONJUNCTION/subordinator member still silences it — stated, not implied.
         ("is the export archived by the vendor", "is_copula"),
         ("is the billing service deprecated for the new plans", "is_copula"),
         ("is the Q3 export archived in the old sharepoint", "is_copula"),
         ("is the data archived on the old server", "is_copula"),
+        ("is the export archived during the migration", "is_copula"),
+        ("is the export archived until the merger", "is_copula"),
+        ("is the export archived as the old policy", "is_copula"),
+        ("is the export archived than the old sharepoint", "is_copula"),
         ("list what we retired in Q3", "imperative_what"),
         # …and the compound question the table has always refused
         ("what ended, and what replaced it", "wh_whole_question"),
