@@ -109,7 +109,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # the list into a guard.
     (_AUDIT, "`:2921`", _SDK, 2921, "MATCH (s:Session {id:$sid}) SET s.capture_redactions=$redactions"),
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`sdk.py:37883`", "tortoise/sdk.py", 37883, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
-    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`:37851`", "tortoise/sdk.py", 37906, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`:37906`", "tortoise/sdk.py", 37906, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
     # ⛔ The three rows below pin SITES the pair rows above cannot reach, because those rows carry
     # TABLE/ROW context on purpose (a bare `:37467` is satisfied by the header enumeration or by the
     # proximity paragraph, so the §2.5 rows could be re-pointed alone with nothing red). MEASURED, at
@@ -122,7 +122,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # must never disagree with the row.
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "| `tortoise/sdk.py:37906` |", "tortoise/sdk.py", 37906, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "the `-[r]->` walk (`sdk.py:37906`)", "tortoise/sdk.py", 37906, "MATCH (s:Subject {id:$sid})-[r]->(n)"),
-    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "they are `:37828` and", "tortoise/sdk.py", 37883, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "they are `:37883` and", "tortoise/sdk.py", 37883, "MATCH (s:Subject {id:$sid}) RETURN properties(s)"),
     # ⛔ The FTS leg's `entity_type="event"` cite, pinned at the site because the row's other numbers
     # (`:3062`, `:6984`) were pinned and this one was not. MEASURED: `sdk.py:57209` — the value the
     # `#13551` lane's previous pass re-derived on the PRE-merge tree — is NOT the statement at this
@@ -208,10 +208,10 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # form), which is the same one-site-vs-one-string gap the `:11281` header half and `:6989` were:
     # re-pointing any one of them to a stale number left every arm green. One ROW per SITE, pinned by
     # the fragment the header paragraph quotes for it.
-    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`:31496`", "tortoise/sdk.py", 31551, "MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag})"),
-    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`:31478`", "tortoise/sdk.py", 31533, "\"MATCH (t:Tag) \""),
-    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`:24458`", "tortoise/sdk.py", 24513, "MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) "),
-    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`:24802`", "tortoise/sdk.py", 24857, "MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t"),
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`:31551`", "tortoise/sdk.py", 31551, "MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag})"),
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`:31533`", "tortoise/sdk.py", 31533, "\"MATCH (t:Tag) \""),
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`:24513`", "tortoise/sdk.py", 24513, "MATCH (p:Point {id:$pid})-[:TAGGED]->(t:Tag) "),
+    ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "`:24857`", "tortoise/sdk.py", 24857, "MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t"),
     (_AUDIT, "`:6974-6990`", _PI, 6974, "_FULLTEXT_INDEX_LABEL_FIELDS"),
     (_AUDIT, "`:6984`", _PI, 6984, '("Event", ["subject", "name"])'),
     (_AUDIT, "`:6985`", _PI, 6985, '("Subject", ["name"])'),
@@ -236,7 +236,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # `:Document` one, which is how the +35-instead-of-+36 arithmetic was introduced and never caught).
     # Pinned by CONTENT on the line that carries `:Document`, so the next re-measure by that phrase reds.
     ("docs/architecture/SUBSTRATE-REBUILD-MAP.md", "tortoise/sdk.py:37547", "tortoise/sdk.py", 37547, "``:Document`` node)."),
-    ("docs/architecture/SUBSTRATE-REBUILD-MAP.md", "`:37534` in `_file_human_approval`", "tortoise/sdk.py", 37547, "``:Document`` node)."),
+    ("docs/architecture/SUBSTRATE-REBUILD-MAP.md", "`:37589` in `_file_human_approval`", "tortoise/sdk.py", 37589, "``:Document`` node)."),
     # --- docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md
     (_M3_BRIEF, "tortoise/search_engine.py:2945", _SE, 2945, "def run_fts_query"),
     (_M3_BRIEF, "search_engine.py:2787", _SE, 2787, "def recency_tie_clause"),
@@ -411,10 +411,13 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'cache_projection.py:2776'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2921`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:37883`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:37851`'): 2,
+    # 3, not 2: the whole-node walk's address is written BARE at three sites — the header's pair
+    # (`sdk.py:37883`/`:37906`), the proximity paragraph's "they are `:37883` and `:37906` now", and
+    # §2.5's distance paragraph ("23 lines below at `:37906`", re-derived from the stale `:37751`).
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:37906`'): 3,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '| `tortoise/sdk.py:37906` |'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'the `-[r]->` walk (`sdk.py:37906`)'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'they are `:37828` and'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'they are `:37883` and'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`sdk.py:58099` passes `"event"`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`audit.py:817`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2452`'): 2,
@@ -430,10 +433,10 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8206`'): 2,
     # The four bare `sdk.py` `:Tag` siblings the header paragraph enumerates, one occurrence each —
     # the §2.5 spellings are the one-token keys `sdk.py:31551` etc. and are a different key.
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:31496`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:31478`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:24458`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:24802`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:31551`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:31533`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:24513`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:24857`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6974-6990`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6984`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6985`'): 1,
@@ -452,7 +455,7 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/search_engine.py:3508'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:3506`'): 1,
     ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', 'tortoise/sdk.py:37547'): 1,
-    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:37534` in `_file_human_approval`'): 1,
+    ('docs/architecture/SUBSTRATE-REBUILD-MAP.md', '`:37589` in `_file_human_approval`'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:2945'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'search_engine.py:2787'): 1,
     ('docs/research/2026-11-13-12298-m3-fts-leg/research-brief.md', 'tortoise/search_engine.py:5074'): 1,
@@ -635,9 +638,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "134 of this document's 234",
+        "138 of this document's 234",
         "dedupes the **345** as-written spellings to 234 — **111**",
-        "345 written spellings → 234 pairs → 111 collisions → 134 drifters of the 234",
+        "345 written spellings → 234 pairs → 111 collisions → 138 drifters of the 234",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -1668,6 +1671,101 @@ def test_every_pinned_cite_lands_on_the_content_the_document_quotes() -> None:
     """Fails on the pre-fix tree: the m3 brief names `:4552` and §5 names `:3392`/`:3388`."""
     errors = _resolve(_PINS)
     assert not errors, "\n".join(errors)
+
+
+#: The numeric span a cite token names: `:START` or `:START-END`.
+_TOKEN_SPAN = re.compile(r":(\d+)(?:-(\d+))?")
+
+
+def _token_span(token: str) -> tuple[int, int] | None:
+    """(first, last) line the *token* names, or `None` when it names no address."""
+    numbers = [
+        int(found)
+        for match in _TOKEN_SPAN.finditer(token)
+        for found in match.groups()
+        if found
+    ]
+    return (min(numbers), max(numbers)) if numbers else None
+
+
+def _rows_outside_their_token(rows) -> list[str]:
+    """Rows whose graded line is NOT inside the address the row's OWN token names.
+
+    *rows* is either `_PINS`' 5-tuples or `_MAIN_SET_MISSED`' 4-tuples; only the token, the
+    target and the graded line are read.
+    """
+    problems: list[str] = []
+    for row in rows:
+        token, target_rel, line = (
+            (row[1], row[2], row[3]) if len(row) == 5 else (row[0], row[1], row[2])
+        )
+        span = _token_span(token)
+        if span is None or span[0] <= line <= span[1]:
+            continue
+        problems.append(
+            f"{target_rel}: the row pins `{token}`, which names {span[0]}..{span[1]}, but it "
+            f"GRADES line {line} — a graded line outside its own token is a DEFENDER: the "
+            "content arm opens the line the fragment lives on while the token arm only asks "
+            "whether the string occurs anywhere in the document, so a document that names a "
+            "stale address for that line stays green. Re-point the DOCUMENT to the address the "
+            "fragment actually sits on, then re-point this row to the same number."
+        )
+    return problems
+
+
+def test_every_pinned_row_grades_a_line_inside_the_address_its_token_names() -> None:
+    """The token IS the claim: a row that grades some other line defends a stale cite.
+
+    MEASURED, and shipped in the reviewed tree: two rows pinned a STALE address while grading the
+    CORRECT line — `("`:31496`", `sdk.py`, `31551`)` for the §2.5 `:Tag` header entry and
+    `("`:37534` in `_file_human_approval`", `sdk.py`, `37547`)` in the substrate map. Both arms were
+    green: `_resolve`'s content arm opened `31551` / `37547` (where the fragment is), and its token
+    arm only asks whether the token string occurs SOMEWHERE in the document (it did). So the
+    document could name an address 55 lines above the statement it describes — the `#13290` class this
+    file exists to stop — with nothing red, and the four `:31496`-family rows were in fact added BY a
+    review as coverage.
+
+    A RANGE is anchored on the line inside it that carries the fragment (the file's stated
+    convention), so the arm accepts any line in `START..END`; a single-value token must grade that
+    value exactly.
+
+    Non-vacuity is the negative control below, which re-introduces the shipped shape.
+    """
+    problems = _rows_outside_their_token(_PINS) + _rows_outside_their_token(_MAIN_SET_MISSED)
+    assert not problems, "\n".join(problems)
+
+
+def test_the_token_span_arm_reds_on_a_row_that_grades_another_line() -> None:
+    """Negative control — the SHIPPED pre-fix shape: stale token, correct line, green."""
+    stale = (_AUDIT, "`:31496`", _SDK, 31551, "MATCH (p:Point)-[:TAGGED]->(t:Tag {name:$tag})")
+    problems = _rows_outside_their_token((stale,))
+    assert problems, "a token naming `:31496` must not be allowed to grade line 31551"
+    assert "31496" in problems[0] and "31551" in problems[0], problems[0]
+    # The substrate-map row the same review found, in its shipped form.
+    shipped = (_SUBSTRATE, "`:37534` in `_file_human_approval`", _SDK, 37547, "``:Document`` node).")
+    assert _rows_outside_their_token((shipped,)), "the `:37534` row graded 37547 must red"
+    # A range token is accepted on any line INSIDE the range it names (the anchor convention).
+    inside = (_AUDIT, "`:7195-7198`", _SE, 7198, "MATCH path = (seed)-[:IMPL|NAND*1..{max_hops}]-(n:Point)")
+    assert not _rows_outside_their_token((inside,)), "a line inside the named range must pass"
+
+
+def test_the_resolve_content_arm_is_unchanged_by_the_token_arm() -> None:
+    """The two arms are independent: a row can be content-correct AND token-stale.
+
+    `_resolve` answers two questions — does the token still occur, and does the GRADED line carry the
+    fragment — and a row that pins one address while grading another satisfies BOTH (the token exists,
+    and the graded line does carry the fragment). That is what the shipped rows demonstrated, and why a
+    separate arm was needed instead of a stricter `_resolve`.
+    """
+    correct_line_wrong_token = (
+        _AUDIT, "`:58317`", _SDK, 58315, "rows = proj.g.query(",
+    )
+    assert _resolve((correct_line_wrong_token,)) == [], (
+        "the content arm must stay silent here — that silence is why the token arm exists"
+    )
+    assert _rows_outside_their_token((correct_line_wrong_token,)), (
+        "the token arm must red on the same row the content arm passes"
+    )
 
 
 def test_the_resolver_reds_on_a_double_applied_offset() -> None:

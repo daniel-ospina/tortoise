@@ -17326,23 +17326,25 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # halves were false: naming `:15346-15423` as this diff's pair was a CHIMERA of two
     # heads — `main` made that move, so both ends read identically at `origin/main` and
     # here.
-    # ⛔ RE-MEASURED at the `origin/main` `ef1d6f7561` merge (the `#13879` lane's second
-    # re-cut): `main`'s `#13854` (issue `#13826`) re-derived `04-plan.md`'s own row to
-    # `sdk.py:28935` while this PR waited, so the file is now NOT in this diff at all —
-    # `git diff --numstat origin/main...HEAD -- …/04-plan.md` prints NOTHING — and the
-    # `sdk.py:28718` -> `sdk.py:28935` move is MAIN's, not a re-point this branch makes.
-    # The pin below asserts the MEMBERSHIP is absent and binds both ends of that move,
-    # because a typed claim about a head-bound fact is the same defect class one layer up.
+    # ⛔ RE-MEASURED AT THIS HEAD (measured, never carried): `main`'s `#13854` (issue `#13826`,
+    # `ae26adf963`) re-derived `04-plan.md`'s own row from `sdk.py:28718` to `sdk.py:28935`
+    # while this PR waited, and THIS branch then re-pointed that row to `sdk.py:29121` — so the
+    # file IS in the diff (`git diff --numstat origin/main...HEAD -- …/04-plan.md` prints `1 1`,
+    # the row and nothing else), and the `:28935` -> `:29121` move is this branch's, applied ON
+    # TOP of MAIN's `:28718` -> `:28935`. An earlier cut of this block had the direction backwards
+    # ("the file is now NOT in this diff at all"), which the arm below contradicted.
     # ⛔ THE ROW READS THE ADDRESS; THE BASE'S VALUE IS PROVENANCE, NOT A PAIR THE ROW
-    # "CARRIES" (#13879 re-cut — MEASURED: `04-plan.md` contains `sdk.py:28935` and
-    # NOT `sdk.py:28718`). Both ends are still pinned so the row cannot drift back to
-    # the base's value, which is what a re-derivation-by-offset produces.
+    # "CARRIES". Both ends are still pinned so the row cannot drift back to the base's value,
+    # which is what a re-derivation-by-offset produces — and `sdk.py:28935` is NOT
+    # `declared = declared_relation_predicates()` at this head (`:29121` is), so a row that kept
+    # the base's value would name a line that does not carry the statement.
     for _provenance in ("its own row now reads `sdk.py:29121`", "the base read `sdk.py:28935`"):
         assert _provenance in text, (
             f"D5 no longer states {_provenance!r} about `04-plan.md`. The row carries "
-            "`sdk.py:28935` at this head and the base carried `sdk.py:28718` — pinning "
+            "`sdk.py:29121` at this head (`declared = declared_relation_predicates()`) and "
+            "`origin/main` carries `sdk.py:28935` — pinning "
             "both ends is what catches a re-derivation that keeps the base's value "
-            "(#13750 review, cycle 3; re-derived at the `ef1d6f7561` merge)")
+            "(#13750 review, cycle 3; re-measured at this head)")
     assert "is the pair `04-plan.md` carries at this head" not in text, (
         "D5 has gone back to claiming `04-plan.md` carries a re-point PAIR at this "
         "head, while its row reads ONE address and the file is not in this diff at all "
@@ -17351,7 +17353,7 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     assert "IS in this diff at this head" in text, (
         "D5 no longer states that `04-plan.md` IS in this diff. At this head it "
         "IS (`git diff --numstat origin/main...HEAD -- "
-        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` prints nothing), "
+        "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` prints `1 1`), "
         "and a row that implies otherwise names a membership the head does not have")
     # and the chimera is refused, not merely absent from the message above
     # ⛔ A REGEX, NOT A LITERAL (#13879 review, cycle 4 — MEASURED): the row writes its
@@ -17365,7 +17367,7 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         "`main` made that move — a pair whose two halves come from two different heads "
         "is the chimera D5 exists to forbid (#13879 review, cycle 3)")
     assert "sdk.py:29121" in text, (
-        "D5 no longer names `sdk.py:28935`, the value `04-plan.md`'s own row carries at "
+        "D5 no longer names `sdk.py:29121`, the value `04-plan.md`'s own row carries at "
         "this head (`grep -n 'declared_relation_predicates()' "
         "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md`). Re-derive the "
         "address; do not drop it")
