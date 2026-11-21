@@ -16432,18 +16432,13 @@ class TortoiseSDK:
         # ⛔ THE PER-CALL COMMIT SIGNAL, FOR THE ARM THIS CALL ACTUALLY TOOK
         # (#14002 review cycle 7, blocking). The append arm is untouched: a line
         # was appended to the journal, so every pre-existing gate
-        # (`_create_point`'s `WriteNotLandedError`, `_update_point`'s, the
-        # evidence fold's, and `hosted_api._report_narrative_home`'s
-        # `journalled`) keeps meaning what it always meant — those gates read the
-        # COMMIT SIGNAL, never a store's standing: the append here, and the
-        # RECORD's `applied` verdict on a cut-over graph (`_emit_event`'s return
-        # contract, which is why `_create_point`'s gate is unchanged and still
-        # fires there). This comment makes no durability claim of its own
-        # (authority: `docs/durability-posture.md`). `write is None` is not
-        # reachable through `live_write.write` and is answered as LANDED on
-        # purpose: a chokepoint
-        # that ever reported nothing must not be able to turn every write into a
-        # "not landed" refusal.
+        # (`_create_point`'s `WriteNotLandedError`, `_update_point`'s, the evidence
+        # fold's, and `hosted_api._report_narrative_home`'s `journalled`) keeps
+        # meaning what it always meant — they read the COMMIT SIGNAL: this append,
+        # or the RECORD's `applied` on a cut-over graph. No durability claim here
+        # (authority: `docs/durability-posture.md`). `write is None` is not reachable
+        # through `live_write.write` and is answered as LANDED on purpose: a chokepoint
+        # that ever reported nothing must not turn a write into a "not landed" refusal.
         if write is None or write.appended:
             return True
         # The record-only arm: no line exists, so the RECORD is the only store
