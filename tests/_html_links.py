@@ -180,6 +180,24 @@ class _AnchorHrefParser(HTMLParser):
     })
     # Parsed, but never rendered (HTML namespace only — see _FOREIGN).
     _INERT = frozenset({"template"})
+    #: The one suppression whose answer depends on the SCRIPTING MODE rather than
+    #: on the element's own rule, so a guard asking "could a reader meet this?"
+    #: cannot clear its content.
+    #:
+    #: `<noscript>` is suppressed because `self.scripting` is True — correct for the
+    #: anchor question (an anchor there is unreachable with JS on). But MDN,
+    #: `<noscript>`: *"If scripting is disabled the `<noscript>` element represents
+    #: its children as HTML content. If scripting is enabled, the `<noscript>`
+    #: element represents its children as text."* So with JS off — a real reader, and
+    #: a screen reader in that mode — the children are ordinary markup, and a
+    #: `title`/`aria-*` there is a claim the visible-text golden cannot see.
+    #:
+    #: Recorded so the ATTRIBUTE guard can refuse the region outright rather than
+    #: report it clean (#14073 review). A `<noscript>` nested inside an inert
+    #: `<template>` never renders in either mode and is deliberately NOT recorded:
+    #: the whole point of the inert rule is that template content is not markup a
+    #: reader meets, and refusing it there would red a correct page.
+    _MODE_DEPENDENT = frozenset({"noscript"})
     # Foreign-content roots: inside these, `_INERT` does not apply.
     _FOREIGN = frozenset({"svg", "math"})
     # HTML5's foreign-content BREAKOUT start tags (spec 13.2.6.5): inside
@@ -267,7 +285,9 @@ class _AnchorHrefParser(HTMLParser):
     #: covers every public list-valued attribute on the parser — so a recording added
     #: later fails THAT test until it is declared here, instead of silently keeping
     #: entries from a tree a browser has thrown away.
-    _RECORDINGS = ("hrefs", "ids", "attrs", "headings", "containers")
+    _RECORDINGS = (
+        "hrefs", "ids", "attrs", "headings", "containers", "mode_dependent",
+    )
     #: Diagnostic ratchets, NOT document recordings: they describe what the PARSE met
     #: (`foreign_tags` is the declared-limits watchdog), so an honored `<frameset>`
     #: does not clear them — they are evidence about the read, not about the tree.
@@ -297,6 +317,10 @@ class _AnchorHrefParser(HTMLParser):
         # `_record_attributes` for why this is the parser's answer and not a
         # source pattern's.
         self.attrs: list[tuple[str, str, int]] = []
+        # `(tag, line)` of every suppressed region whose rendering depends on the
+        # SCRIPTING MODE — see `_MODE_DEPENDENT`. The attribute allowlist's input:
+        # it must refuse such a region instead of clearing it (#14073 review).
+        self.mode_dependent: list[tuple[str, int]] = []
         # `(id, line, column)` of every `<h2>` a browser would put in the document
         # tree, in document order — the docs page's section bound's input (#14073
         # review). A POSITION and not the tag text, because the bound has to cut
@@ -420,15 +444,17 @@ class _AnchorHrefParser(HTMLParser):
         (#14073 review). The tag is kept alongside the name because an allowlist
         is per-element in practice and it costs nothing to keep.
 
-        ⛔ ONE DECLARED DIVERGENCE, and it is the right answer for the anchor
-        question, not this one: `<noscript>` is raw text because `self.scripting`
-        is True (line 180), so an attribute on an element INSIDE `<noscript>` is
-        not recorded. A browser with JS — the mode this repo's guards ask in —
-        does not render it either, so no claim reaches a reader; a browser with
-        JS DISABLED would render it, and a `title` there is a reader-facing claim
-        this allowlist cannot see. Not fixed here: the anchor contract needs the
-        no-JS-only anchor to stay invisible, and the two questions cannot both
-        have `<noscript>` their own way in one pass.
+        ⛔ `<noscript>` IS THE ONE REGION THIS CANNOT ANSWER, AND THE CALLER MUST
+        REFUSE IT — not clear it. `<noscript>` is suppressed because
+        `self.scripting` is True (line 180), so an attribute on an element INSIDE
+        it is not recorded: a browser with JS does not render it, and a `title`
+        there reaches only a reader with JS DISABLED — where the children ARE
+        parsed as markup (MDN, quoted on `_MODE_DEPENDENT`). The two questions
+        cannot both have `<noscript>` their own way in one pass (the anchor
+        contract needs the no-JS-only anchor to stay invisible), so the limit is
+        DECLARED here and GATED at the seam: `extract_mode_dependent_regions`
+        reports each region, and `_attributes_outside_allowlist` refuses it rather
+        than reporting the page clean (#14073 review).
         """
         if self._suppress or self.wedged_reason:
             return
@@ -628,6 +654,10 @@ class _AnchorHrefParser(HTMLParser):
                 self._body_seen = True
             return False
         if tag in self._RAW or tag in self._INERT:
+            if tag in self._MODE_DEPENDENT and not self._suppress:
+                # NOT inside another suppressed region: a `<noscript>` inside an
+                # inert `<template>` is template content and renders in no mode.
+                self.mode_dependent.append((tag, self.getpos()[0]))
             self._suppress.append(tag)
             return True
         if tag == "frameset" and not self._body_seen and not self._suppress:
@@ -1049,6 +1079,26 @@ def extract_element_attributes(html: str) -> list[tuple[str, str, int]]:
     parser.feed(html)
     parser.close()
     return parser.attrs
+
+
+def extract_mode_dependent_regions(html: str) -> list[tuple[str, int]]:
+    """``(tag, line)`` for every region whose rendering depends on the MODE.
+
+    Only `<noscript>` qualifies (see `_MODE_DEPENDENT`): its children are TEXT with
+    scripting on and HTML content with scripting off, so a guard that reads the
+    scripting-enabled tree cannot say whether a reader meets them. A caller whose
+    question is "could a reader meet this?" must therefore REFUSE such a region
+    instead of clearing it — the answer it would give ("unrendered") is only half
+    the truth, and it is the fail-open half (#14073 review).
+
+    An empty result is the only answer that clears the markup for that question.
+    A region nested inside an inert `<template>` is NOT reported: template content
+    renders in neither mode, so the inert rule already answers it.
+    """
+    parser = _AnchorHrefParser()
+    parser.feed(html)
+    parser.close()
+    return parser.mode_dependent
 
 
 def extract_heading_positions(html: str) -> list[tuple[str | None, int]]:
