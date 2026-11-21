@@ -2432,7 +2432,8 @@ def _measure_on_loop_graph_work(monkeypatch, turns: int, sid: str):
 
 
 def _measure_capture_graph_work(monkeypatch, turns: int, sid: str,
-                                conversation: list[dict] | None = None):
+                                conversation: list[dict] | None = None,
+                                session_gone: bool = False):
     """Like ``_measure_on_loop_graph_work``, but returns the per-thread
     ``(thread_name, cypher, duration)`` records so a caller can assert on
     WHICH statements the loop ran, not just how many (#4465).
@@ -2441,6 +2442,12 @@ def _measure_capture_graph_work(monkeypatch, turns: int, sid: str,
     a test of the entity-linking tail needs turns that actually CARRY a
     reference, and a test that silently ran a reference-free conversation would
     assert a property of code it never reached.
+
+    ``session_gone`` answers the receipt's session-alive probe with "gone"
+    (`_session_alive` False) without racing a real DELETE — the only way to
+    REACH the delete-race branch, and therefore the orphan sweep, from a
+    fixture (`#10893` cycle-4 review, P2 #2: every needle for that branch was
+    inert because the ordinary fixture never gets there).
     """
     import tortoise.hosted_api as ha_mod
     from tortoise import sdk as sdk_mod
@@ -2462,6 +2469,8 @@ def _measure_capture_graph_work(monkeypatch, turns: int, sid: str,
     def _timed_query(self, cypher, *args, **kwargs):
         started = time.perf_counter()
         try:
+            if session_gone and " ".join(cypher.split()) == _SESSION_ALIVE:
+                return _SessionAliveAnswered(False)
             return orig_query(self, cypher, *args, **kwargs)
         finally:
             records.append((threading.current_thread().name,
@@ -2818,6 +2827,18 @@ _PRE_EXISTING_OFFLOAD_LEGS = {
 #: a SUBSTRING (a false positive there is a loud test failure, not a silence).
 _SESSION_ALIVE = "MATCH (s:Session {id:$sid}) RETURN count(s)"
 
+
+class _SessionAliveAnswered:
+    """The `_session_alive` probe's own result, answered without a graph read.
+
+    `hosted_api._session_alive` reads `.result_set` and returns `count > 0`, so
+    `_SessionAliveAnswered(False)` is the delete-race answer — the branch that
+    runs `_sweep_orphaned_writes` — produced without racing a real DELETE.
+    """
+
+    def __init__(self, alive: bool):
+        self.result_set = [[1 if alive else 0]]
+
 #: The thread-name prefix `_run_off_loop(_CAPTURE_EXECUTOR, …)` gives its
 #: workers. The tail must be observed ON one of these, not merely off
 #: `MainThread`: the shared default executor (`asyncio_N`) is the #3060
@@ -2955,3 +2976,80 @@ _TAIL_MUST_BE_ISSUED = {
     k: v for k, v in _CAPTURE_TAIL_STATEMENTS.items()
     if k not in ("s.entity_links_attempted", "n.posterior_alpha, n.ep_alpha")
 }
+
+
+#: The delete-race sweep's own statements (`_sweep_orphaned_writes`,
+#: `hosted_api.py:21487`). ⛔ They are reachable ONLY when the receipt's
+#: session-alive pre-check answers "gone", which the ordinary tail fixture never
+#: produces — so a needle added for it without a fixture that reaches the branch
+#: is INERT in both directions (#10893 cycle-4 review, P2 #2: the mutant that
+#: inlines the sweep red nothing). This is the fixture and the needle together.
+_SWEEP_STATEMENTS = {
+    "MATCH (p:Point) WHERE p.id IN $ids DETACH DELETE p":
+        "the delete-race orphan sweep",
+}
+
+
+def test_the_delete_race_sweep_never_runs_on_the_event_loop(
+        client, monkeypatch):
+    """#10893 (second cycle): the orphan SWEEP is tail work, not loop work.
+
+    `test_the_capture_post_write_tail_never_runs_on_the_event_loop` cannot see
+    this leg: its Session is never deleted mid-capture, so the delete-race
+    branch never runs and a needle for the sweep would be satisfied by nothing.
+    Here the session-alive probe answers "gone", so the branch IS taken and the
+    statements are ISSUED — and the assertion is WHICH THREAD issued them.
+
+    Mutation check (must stay true): `await _run_off_loop(_CAPTURE_EXECUTOR,
+    _sweep_orphaned_writes)` -> `_sweep_orphaned_writes()` at
+    `hosted_api.py:21682`/`:21691` puts the sweep's statement back on
+    ``MainThread`` and fails the second assertion; deleting the sweep instead
+    fails the first.
+    """
+    resp, records, _writer = _measure_capture_graph_work(
+        monkeypatch, 40, "tail-off-loop-sweep-10893",
+        conversation=_ref_conversation(40), session_gone=True)
+
+    require_answered(
+        resp, what="POST /v1/sessions answered (delete-race tail run)")
+    assert resp.status_code == 200, resp.text[:300]
+
+    on_loop = [c for name, c, _d in records if name == "MainThread"]
+    all_cyphers = [c for _n, c, _d in records]
+
+    # ⛔ NON-VACUITY FIRST: "not on the loop" is satisfied by a branch that
+    # never ran, and that is exactly how the sweep read as covered before.
+    for needle, label in _SWEEP_STATEMENTS.items():
+        assert any(needle in c for c in all_cyphers), (
+            f"{label} was never issued — the delete-race branch was not "
+            f"reached, so this row proves nothing about it (expected a "
+            f"statement containing {needle!r}; DETACH statements seen: "
+            f"{[c[:90] for c in all_cyphers if 'DETACH' in c]})")
+
+    offenders = [
+        f"{label}: {c[:110]}"
+        for c in on_loop
+        for needle, label in _SWEEP_STATEMENTS.items()
+        if needle in c
+    ]
+    assert not offenders, (
+        "the capture's delete-race orphan sweep is back on the event loop — "
+        "one capture pays it and every concurrent `/v1/search` on the single "
+        "uvicorn worker accrues it as `pre_handler` (#10893):\n  "
+        + "\n  ".join(offenders))
+
+    # ⛔ And "off `MainThread`" is NECESSARY BUT NOT SUFFICIENT — the shared
+    # default executor's `asyncio_N` workers satisfy it, which is the #3060
+    # starvation the dedicated pool exists to prevent (the same reasoning the
+    # tail row above applies to its own statements).
+    mispooled = [
+        f"{label}: ran on {name!r}"
+        for name, c, _d in records
+        if not str(name).startswith(_CAPTURE_POOL_PREFIX)
+        for needle, label in _SWEEP_STATEMENTS.items()
+        if needle in c
+    ]
+    assert not mispooled, (
+        "the capture's delete-race orphan sweep ran off the event loop but NOT "
+        f"on the capture pool (expected a `{_CAPTURE_POOL_PREFIX}*` thread):\n  "
+        + "\n  ".join(mispooled))
