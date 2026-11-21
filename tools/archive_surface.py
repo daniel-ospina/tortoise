@@ -1875,7 +1875,8 @@ def shrink_violations(
                         # a record and there was no runtime source to lose. Telling that operator
                         # to hunt history for a file that never existed, AND that their correct row
                         # is "not a record", is false on both counts. `base_paths_by_module`
-                        # PREFERS the runtime carrier (:1584-1586), so a `.pyi` there is positive
+                        # PREFERS the runtime carrier (the sorted builder replaces a stored `.pyi`
+                        # as soon as any non-`.pyi` is seen), so a `.pyi` there is positive
                         # proof the base had nothing else. The split lives in ONE helper
                         # (`_stub_waiver_why`), shared with the `key in base_entries` copy, so the
                         # two can no longer drift apart — two rounds fixed one and left the other.
