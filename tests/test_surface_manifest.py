@@ -8013,7 +8013,14 @@ def test_the_shrink_arm_is_off_unless_a_base_ref_is_given(checker, tmp_path, mon
 
 
 def test_a_shrink_waiver_needs_a_reason_and_a_base_ref():
-    """Same pairing `archive_surface.py check` refuses, for the same two reasons."""
+    """Same pairing `archive_surface.py check` refuses, for the same two reasons.
+
+    ⛔ The first two cases pass NO `--base-ref`, so the adjacent `--allow-surface-shrink needs
+    --base-ref` guard catches them too and the PAIRING guard could be deleted with this row still
+    green (measured by the round-12 mutation pass). The last two cases pass a resolvable base ref,
+    so the base-ref guard is satisfied and the pairing guard is the only thing left that can
+    refuse — which is what makes the pairing itself load-bearing here.
+    """
     assert _run(
         "tools/surface_manifest.py", "check", "--allow-surface-shrink", "tool:x"
     ).returncode == 2
@@ -8025,6 +8032,31 @@ def test_a_shrink_waiver_needs_a_reason_and_a_base_ref():
         "--allow-surface-shrink-reason",
         "why not",
     ).returncode == 2
+    # A base ref IS given, so only the pairing guard can refuse: a waiver with no stated reason.
+    missing_reason = _run(
+        "tools/surface_manifest.py",
+        "check",
+        "--base-ref",
+        "HEAD",
+        "--allow-surface-shrink",
+        "tool:x",
+    )
+    assert missing_reason.returncode == 2, missing_reason.stdout + missing_reason.stderr
+    assert "go together" in (missing_reason.stdout + missing_reason.stderr), (
+        "refused for the wrong reason: the PAIRING guard is what must answer here, not the "
+        "needs--base-ref guard"
+    )
+    # ... and the mirror: a reason with no symbol waives nothing.
+    missing_symbol = _run(
+        "tools/surface_manifest.py",
+        "check",
+        "--base-ref",
+        "HEAD",
+        "--allow-surface-shrink-reason",
+        "why not",
+    )
+    assert missing_symbol.returncode == 2, missing_symbol.stdout + missing_symbol.stderr
+    assert "go together" in (missing_symbol.stdout + missing_symbol.stderr)
 
 
 def test_the_ci_job_runs_the_shrink_arm_on_a_base_ref() -> None:

@@ -1884,6 +1884,14 @@ def test_a_reanchor_to_a_commit_that_does_not_hold_the_body_is_still_reported(
 
     Without this, `_reanchor_is_verified` would accept any rewrite that merely names a commit
     this clone happens to hold — which is the forged-anchor shape #12291 exists to catch.
+
+    ⚠️ WHAT ACTUALLY ANSWERS THIS FIXTURE (measured, round-12 mutation pass): it anchors at an
+    ANCESTOR (`before`), so the ROLLBACK guard refuses before the body read is reached — deleting
+    the per-row `_anchor_violations` body read alone leaves this row GREEN. The row that
+    discriminates the BODY guard is
+    `test_a_reanchor_to_a_LATER_commit_that_CHANGED_the_body_is_still_reported`, which moves the
+    anchor FORWARD on the default branch and changes the body, so rollback and the
+    default-branch check both pass and only the body evidence can refuse.
     """
     (tree / "tortoise" / "gone.py").write_text("def secret():\n    return 1\n", encoding="utf-8")
     before = arch._git(tree, "rev-parse", "HEAD")[1].strip()
@@ -1902,6 +1910,45 @@ def test_a_reanchor_to_a_commit_that_does_not_hold_the_body_is_still_reported(
     )
 
 
+def test_a_reanchor_to_a_LATER_commit_that_CHANGED_the_body_is_still_reported(tree: Path) -> None:
+    """The BODY guard on its own — the existing row is not discriminating about it (round-12).
+
+    `test_a_reanchor_to_a_commit_that_does_not_hold_the_body_is_still_reported` anchors at an
+    ANCESTOR, so the ROLLBACK guard answers it as well. Measured in the round-12 mutation pass:
+    removing the per-row `_anchor_violations` body read alone left that row GREEN, and removing
+    the rollback check alone left it GREEN too — only all three together reddened it. So it never
+    discriminated the guard it names.
+
+    This fixture is built the other way round: the anchor MOVES FORWARD on the default branch and
+    simply does not hold the frozen body, so rollback and default-branch both pass and the body
+    evidence is the only guard left that can refuse.
+
+    Mutation: delete the per-row `_anchor_violations(...)` call -> RED here, and only here.
+    """
+    (tree / "tortoise" / "gone.py").write_text("def secret():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    entry = arch.archive_symbol(arch.MODULE, "tortoise.gone", "batch-a", "r", root=tree)
+    _commit(tree, ".")
+    # A LATER commit on the default branch edits the file: a descendant of the archived revision
+    # (so no rollback) and on the branch (so a valid citation) — but it no longer holds the body.
+    (tree / "tortoise" / "gone.py").write_text("def secret():\n    return 2\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    later = arch._git(tree, "rev-parse", "HEAD")[1].strip()
+    assert later != entry["archived_at"], (
+        "the fixture needs a FORWARD anchor, or the rollback guard answers instead of the body"
+    )
+    arch.save_manifest(
+        {"entries": [dict(entry, archived_at=later)]}, tree / "archive" / "MANIFEST.json"
+    )
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert any("REWRITTEN" in p and "archived_at" in p for p in problems), (
+        "a FORWARD anchor that does not hold the frozen body is not a re-anchor — the evidence "
+        f"is the BODY, not the direction of the sha: {problems}"
+    )
+
+
 def test_a_reanchor_cannot_DELETE_a_frozen_block(tree: Path) -> None:
     """The escape is a RE-ANCHOR, not a licence to shrink the evidence (round-6 review).
 
@@ -1912,8 +1959,13 @@ def test_a_reanchor_cannot_DELETE_a_frozen_block(tree: Path) -> None:
     RE-HASHES bodies; it does not delete them, so the base entry's block count and block keys
     are required to match.
     Mutation: drop the BASE-entry comparisons (block count / block keys / `sources`) -> RED
-    here. Each of the three catches this fixture on its own, so no single one is load-bearing —
-    defence in depth, and the test pins the PROPERTY rather than one comparison.
+    here. ⚠️ THE THREE ARE MUTUALLY SUBSUMING, and the round-12 mutation pass measured it:
+    deleting the block-COUNT comparison alone leaves this row GREEN, because the block-KEY
+    multiset then refuses the same fixture, and vice versa. Only removing all three (or the
+    `sources` check on the rewrite that edits `sources`) reds it. So this row pins the
+    PROPERTY, not one comparison — an attribution table cannot name a single load-bearing
+    mutant for it, and should not pretend to. A per-guard mutant is meaningful only for a guard
+    something else does not already answer.
     """
     entry = arch.archive_symbol(arch.MCP_TOOL, "tortoise_search", "batch-a", "r", root=tree)
     _commit(tree, ".")
