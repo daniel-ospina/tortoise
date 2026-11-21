@@ -1435,6 +1435,178 @@ def test_a_module_replaced_by_a_pyi_STUB_is_a_removal(tree: Path) -> None:
     assert ".pyi" in removed[0], f"the violation must name the stub it graded: {removed[0]}"
 
 
+def test_a_module_row_that_froze_the_STUB_is_not_a_record(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row whose frozen SOURCE was the stub records nothing (fresh-context review, P0).
+
+    `_module_source`'s `.pyi` fallback resolves the stub when the only file left is `x.pyi`, so
+    the writer freezes `def value() -> int: ...` as the SOURCE OF RECORD for a module whose body
+    this same run reports as removed — and the credit rule above (`if key in working:
+    continue`) then reads "the removal has its record" over a record holding no code. Every arm
+    green, the removed body in no file under `archive/`: the false PASS `archive/` exists to
+    prevent.
+
+    ⛔ This row drives the WRITER on purpose. The first version hand-built a row with
+    `file=".../tortoise.stubby.pyi"` and the guard keyed on that suffix — a shape `archive_rel`
+    cannot produce (every module row is rendered `.py`), so the guard was dead code on the
+    product's own path and this test could not see that. The row's `archived_from` DOES name
+    `tortoise/stubby.pyi` (and `file_violations` binds it to the frozen header), which is the
+    fact the guard now reads.
+
+    ⛔ `_init_carries_a_body` cannot be the test here even though it guards the sibling scaffold
+    shape: it is an AST question, and a stub IS statements. Arm 1b's own rule is that a `.pyi` is
+    never runtime code, so the credit rule asks THAT question instead.
+
+    THIS row is the stub-LEFT shape (`base ∩ head`, arm 1b — `stubbed`); the row below is the
+    deleted-stub shape (`base - head`, arm 1), because both credit sites can silence the same
+    false PASS and a guard at only one of them is a guard at neither.
+
+    Discriminating: removing the `stubbed and _row_froze_a_stub(...)` arm leaves this row with no
+    violation, and the negative control below (same base, same stub, a row that froze the REAL
+    body) stays green either way — measured, both directions.
+    """
+    (tree / "tortoise" / "stubby.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/stubby.py")
+    base = _head_sha(tree)
+    subprocess.run(["git", "rm", "-q", "tortoise/stubby.py"], cwd=tree, check=True)
+    (tree / "tortoise" / "stubby.pyi").write_text("def value() -> int: ...\n", encoding="utf-8")
+    _commit(tree, ".")
+
+    entry = arch.archive_symbol(arch.MODULE, "tortoise.stubby", "batch-a", "review", root=tree)
+    assert entry["archived_from"] == "tortoise/stubby.pyi", (
+        "the row must record WHICH source it froze — that is the fact the guard reads: " f"{entry}"
+    )
+    assert entry["file"].endswith(".py") and not entry["file"].endswith(".pyi"), (
+        "the writer renders a module row as `.py` whatever it froze from — which is exactly why "
+        f"the archived-path suffix cannot be the test: {entry['file']}"
+    )
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref=base)
+    froze = [p for p in problems if "THE RECORD FROZE A STUB" in p]
+    assert froze, f"a row that froze the stub must not credit the removal: {problems}"
+    assert "tortoise.stubby" in froze[0], froze[0]
+    assert "tortoise/stubby.pyi" in froze[0], f"the violation must name the stub source: {froze[0]}"
+
+    # …and the GATE, which is where the false PASS was measured.
+    monkeypatch.setattr(arch, "ROOT", tree)
+    monkeypatch.setattr(arch, "live_surface", lambda root=None: _surface())
+    monkeypatch.setattr(arch, "index_violations", lambda entries, root=None: [])
+    rc = arch.main(["archive_surface.py", "check", "--base-ref", base])
+    assert rc == 1, "the gate itself must red, not only the helper"
+
+
+def test_a_stub_row_credits_nothing_after_the_stub_is_deleted(
+    tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same false PASS one step later: the stub is deleted, as the writer's own output says.
+
+    `archive module tortoise.x` prints "now delete it from tortoise/x.pyi in this batch", so the
+    operator does — and the module is then in `base - head` (arm 1), NOT in `base ∩ head`
+    (arm 1b, where the P0 guard was first written). Measured on the pre-fix bytes through the
+    writer and the real CLI: `check --base-ref` answered
+
+        OK — archive consistent: 1 entries (… 1 modules). Shrink checked against …
+
+    with the removed body in NO file under `archive/`, and `shrink_violations` returned `[]`.
+    A guard placed only in arm 1b could not see that, which is why the rule lives in one helper
+    and both credit sites call it.
+
+    Discriminating: delete the arm-1 call site (`if runtime_carrier is not None and
+    _row_froze_a_stub(...)`) -> RED here, and the row above stays green.
+    """
+    (tree / "tortoise" / "stubby.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/stubby.py")
+    base = _head_sha(tree)
+    subprocess.run(["git", "rm", "-q", "tortoise/stubby.py"], cwd=tree, check=True)
+    (tree / "tortoise" / "stubby.pyi").write_text("def value() -> int: ...\n", encoding="utf-8")
+    _commit(tree, ".")
+    arch.archive_symbol(arch.MODULE, "tortoise.stubby", "batch-a", "review", root=tree)
+    _commit_drop(tree, "tortoise/stubby.pyi")  # the deletion the writer printed
+
+    assert not (tree / "tortoise" / "stubby.py").exists()
+    assert not (tree / "tortoise" / "stubby.pyi").exists()
+
+    problems = arch.shrink_violations(tree, base_ref=base)
+    froze = [p for p in problems if "THE RECORD FROZE A STUB" in p]
+    assert froze, f"the deleted-stub shape credits the same empty record: {problems}"
+    assert "no module file at all" in froze[0], froze[0]
+
+    monkeypatch.setattr(arch, "ROOT", tree)
+    monkeypatch.setattr(arch, "live_surface", lambda root=None: _surface())
+    monkeypatch.setattr(arch, "index_violations", lambda entries, root=None: [])
+    assert arch.main(["archive_surface.py", "check", "--base-ref", base]) == 1, (
+        "the measured false PASS was `check --base-ref` answering OK on this exact tree"
+    )
+
+
+def test_a_module_row_that_froze_the_REAL_body_is_still_credited(tree: Path) -> None:
+    """The negative control for both rows above, through the writer's restore-then-freeze route.
+
+    Same base, same stub left in the tree, same `stubbed` — only `archived_from` differs (the
+    real `.py` body, frozen BEFORE the file was deleted, which is `archive/README.md`'s documented
+    route). If the arm keyed on `stubbed` alone, or on the row merely existing, this legitimate
+    record would red and that route would stop working. Measured: collapsing the condition to
+    `if stubbed:` reds this row.
+    """
+    (tree / "tortoise" / "stubby.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/stubby.py")
+    base = _head_sha(tree)
+    entry = arch.archive_symbol(arch.MODULE, "tortoise.stubby", "batch-a", "review", root=tree)
+    assert entry["archived_from"] == "tortoise/stubby.py"
+    _commit(tree, ".")
+    _commit_drop(tree, "tortoise/stubby.py")
+    (tree / "tortoise" / "stubby.pyi").write_text("def value() -> int: ...\n", encoding="utf-8")
+    _commit(tree, "tortoise/stubby.pyi")
+
+    problems = arch.shrink_violations(tree, base_ref=base)
+    assert not [p for p in problems if "THE RECORD FROZE A STUB" in p], (
+        f"a row holding the real body is the legitimate record and must not red: {problems}"
+    )
+
+
+def test_a_module_waiver_does_not_claim_the_tree_carries_a_module_it_only_STUBBED(
+    tree: Path,
+) -> None:
+    """The waiver diagnostic must not disagree with arm 1b about a `.pyi` stub (review P2).
+
+    Base carries `tortoise/stubby.py` (+ a stub, so the anchor resolves); the tree keeps only the
+    stub; the `module` row freezes the REAL body, so arm 1b credits the row and the waiver this
+    run was given is left UNCONSUMED. The diagnostic then has to answer "does this tree still
+    carry the module?" — and it used to answer with `_path_carries_a_module_body`, which counts a
+    stub as a body, printing "this tree still carries it, so nothing was removed" over the very
+    removal the same run graded and credited.
+
+    Discriminating: reverting the diagnostic to `_path_carries_a_module_body` reds the
+    `still carries it` assertion below, because a `.pyi` stub answers `True` there.
+    """
+    (tree / "tortoise" / "stubby.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    (tree / "tortoise" / "stubby.pyi").write_text(
+        "def value() -> int: ...\n", encoding="utf-8"
+    )
+    _commit(tree, ".")
+    subprocess.run(["git", "rm", "-q", "tortoise/stubby.py"], cwd=tree, check=True)
+    entry = _entry(arch.MODULE, "tortoise.stubby")
+    entry["archived_from"] = "tortoise/stubby.py"
+    arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
+    frozen = tree / entry["file"]
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    frozen.write_text("def value():\n    return 1\n", encoding="utf-8")
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD~1", allowed=["module:tortoise.stubby"]
+    )
+    waived = [p for p in problems if "waives nothing" in p]
+    assert waived, f"the unconsumed waiver must still be reported: {problems}"
+    assert "still carries it" not in waived[0], (
+        "a `.pyi` stub is not the module's runtime body, and arm 1b already graded its removal "
+        f"in this same run: {waived[0]}"
+    )
+    assert "this tree does not" in waived[0], waived[0]
+
+
 def test_a_module_body_replaced_by_UNPARSEABLE_text_is_a_removal(tree: Path) -> None:
     """A body that no longer parses holds no statements a caller can reach (round-6 review).
 
@@ -1552,6 +1724,51 @@ def test_archiving_a_module_must_not_freeze_a_LEFTOVER_scaffold(tree: Path) -> N
     assert not list((tree / "archive").rglob("*.py")), (
         "the refusal must not leave a record behind: a row frozen from a scaffold is the false "
         "record this guard exists to prevent"
+    )
+
+
+def test_the_CLI_refuses_to_freeze_a_leftover_scaffold(
+    tree: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """The row above is API-level; the OPERATOR sees `main()`'s exit code and stderr.
+
+    The review asked for a CLI-level row, and the arm it pins is a different one: `main()`'s
+    `except ArchiveRefused -> print("REFUSED …", stderr); return 2`. That mapping is pinned
+    NOWHERE else for the `archive` verb, so a refusal that exited 0 would read as a successful
+    archive that wrote nothing — the fail-open direction, on the writer's only refusal path.
+
+    Mutation: `return 0` in `main()`'s `except ArchiveRefused` arm -> RED here (rc is 0 and the
+    operator reads success), while every API-level assertion above stays green.
+    """
+    (tree / "tortoise" / "x.py").write_text("def f39():\n    return 39\n", encoding="utf-8")
+    _commit(tree, "tortoise/x.py")
+    _commit_drop(tree, "tortoise/x.py")
+    (tree / "tortoise" / "x").mkdir()
+    (tree / "tortoise" / "x" / "__init__.py").write_text(
+        '"""Scaffolding."""\n', encoding="utf-8"
+    )
+    (tree / "tortoise" / "x" / "sub.py").write_text("Y = 1\n", encoding="utf-8")
+    _commit(tree, ".")
+    monkeypatch.setattr(arch, "ROOT", tree)
+
+    rc = arch.main(
+        ["archive_surface.py", "archive", "module", "tortoise.x", "--batch", "b1",
+         "--reason", "split"]
+    )
+    err = capsys.readouterr().err
+    assert rc == 2, f"a refusal must not read as a successful archive (exit {rc})"
+    assert "REFUSED" in err and "git checkout <base-sha> -- tortoise/x.py" in err, (
+        f"the refusal must name the route that clears the red it came from: {err}"
+    )
+    assert not (tree / "archive" / "modules").exists(), (
+        "and it must write nothing — a row frozen from a scaffold IS the false record"
+    )
+    assert any(
+        p.startswith("tortoise.x: MODULE") and "REMOVED" in p
+        for p in arch.shrink_violations(tree, base_ref="HEAD~2")
+    ), (
+        "and the removal stays a red (arm 1: the module left the product) — declining to write "
+        "the record must not read as having written it"
     )
 
 
