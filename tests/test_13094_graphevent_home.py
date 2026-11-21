@@ -306,6 +306,47 @@ def test_the_census_covers_the_labels_schema_as_well_as_its_readers():
         assert reader["class"] == "maintenance"
 
 
+def test_the_unique_constraint_row_names_the_layer_that_really_holds():
+    """Which dedupe is IN FORCE — and the store's own bytes must agree with the row.
+
+    ⛔ #14183 review round 10 (P3): the row opened “the belt behind the dedupe
+    pre-check (the app-side probe is the suspenders)” and, four clauses later, said
+    “the app-side probe is the belt that is actually there”. Both orders in ONE
+    string: a reader could take either, and only the second is measured (the store
+    admits a duplicated `(seq, event_id)` row with no constraint — this directory's
+    own `measurement-payload88.json` records the refusal).
+
+    ⛔ THE ARM IS THE SOURCE, not a wording count. The claim the row makes is that
+    `ensure_event_schema` sends the constraint through `g.query()`, which cannot
+    parse a module command, so the constraint never lands and the APP-SIDE pre-check
+    is the belt. That is checkable in the store's own text, so a lane that fixes
+    `#14212` by issuing it the module way reds HERE and must re-derive the row: the
+    census describes the store's shape, and must move when the shape moves. A drift
+    control — never a reason to leave the defect standing.
+    """
+    module = _tool()
+    row = next(r for r in module.READERS
+               if r["reader"] == "ensure_event_schema (unique constraint)")
+
+    source = (REPO_ROOT / "tortoise" / "event_store.py").read_text()
+    start = source.index("def ensure_event_schema(")
+    body = source[start:source.index("\ndef ", start + 1)]
+    assert "GRAPH.CONSTRAINT CREATE" in body, (
+        "the census row's snippet is no longer issued by ensure_event_schema — "
+        "re-derive the row rather than keeping a snippet nothing sends")
+    assert "g.query(" in body and "execute_command(" not in body, (
+        "ensure_event_schema now issues the constraint the MODULE way, so it CAN "
+        "land in production: the row's claim that it never does is stale — "
+        "re-derive the row and close #14212 instead of keeping the comment")
+
+    assert "the app-side dedupe pre-check" in row["why"] and "is the belt" in row["why"], (
+        f"the row must name the layer that actually holds: {row['why']!r}")
+    assert "the belt behind the dedupe pre-check" not in row["why"], (
+        "the row calls the CONSTRAINT “the belt behind the dedupe pre-check” while "
+        "also saying the probe is “the belt that is actually there” — the "
+        "self-contradiction #14183 round 10 measured; state one order, the measured one")
+
+
 def test_the_capability_vocabulary_has_one_owner():
     """The census pin's vocabulary must be the TOOL's, not a second copy.
 
