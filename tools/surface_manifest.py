@@ -3089,10 +3089,10 @@ def removal_report(
                 accounting.pop((symbol, cls), None)
             problems.append(RemovalProblem(
                 "ambiguous-waiver",
-                f"one `--allow-removal {symbol}` would waive {len(classes)} removals "
+                f"one `{flag} {symbol}` would waive {len(classes)} removals "
                 f"({', '.join(classes)}) — a named waiver is ONE symbol on ONE surface, and "
                 "collapsing them into one record understates what this cut removed. Name "
-                f"the surface: `--allow-removal tool:{symbol}` / `sdk:{symbol}`"
+                f"the surface: `{flag} tool:{symbol}` / `sdk:{symbol}`"
             ))
     return problems, accounting
 

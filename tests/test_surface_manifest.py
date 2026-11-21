@@ -7020,6 +7020,20 @@ def test_an_override_cannot_waive_TWO_surfaces_at_once():
     assert problems == [], problems
     assert sorted(accounting) == [("tortoise_x", "sdk"), ("tortoise_x", "tool")], accounting
 
+    # ⛔ AND THE REFUSAL NAMES THE CALLER'S OWN FLAG (#14039 review). `removal_report` is
+    # shared by `cut` (`--allow-removal`) and by this module's CI shrink arm (`check
+    # --base-ref`, whose override is `--allow-surface-shrink`, passed as `flag=`), so a
+    # message hardcoding `--allow-removal` prescribes a flag that command REJECTS: measured
+    # `check --base-ref --allow-removal same_name` → argparse rc=2 `unrecognized arguments`.
+    # Pinned on the shrink arm's spelling, and on the absence of the other one.
+    shrink_problems, _ = sm.removal_report(
+        prior, set(), records, allowed={"tortoise_x"}, flag="--allow-surface-shrink"
+    )
+    shrink_ambiguous = [p for p in shrink_problems if p.kind == "ambiguous-waiver"]
+    assert len(shrink_ambiguous) == 1, shrink_problems
+    assert "--allow-surface-shrink tortoise_x" in shrink_ambiguous[0], shrink_ambiguous[0]
+    assert "--allow-removal" not in shrink_ambiguous[0], shrink_ambiguous[0]
+
 
 def test_an_override_for_an_ALREADY_recorded_symbol_is_a_false_record():
     """An override for a symbol a REAL record already accounts for waives nothing — and

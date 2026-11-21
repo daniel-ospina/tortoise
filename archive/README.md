@@ -211,10 +211,11 @@ uv run python tools/test_lane.py run -- tests/test_archive.py -q
 #     even though this file is hermetic)
 
 # STRICTER, and proven in CI: every `archived_at` commit must be readable in this clone AND
-# hold its frozen block exactly. Plain `check` skips that arm when the object is absent (the
-# `test` job checks out at fetch-depth: 1, where an ancestor is missing by construction), so
-# `check` alone never proves an anchor. This verb is what the `surface-guard` job runs, on a
-# depth-0 clone — that is what makes the anchor a proof rather than a claim.
+# hold its frozen block exactly. Plain `check` skips that arm when the object is absent (an
+# ancestor is missing by construction on a shallow clone), so `check` alone never proves an
+# anchor. ⛔ NO CI JOB RUNS A BARE `check` — the only invocations in `.github/workflows/` are
+# this verb and `check --require-entries --base-ref`, both in the `surface-guard` job on a
+# depth-0 clone — which is what makes the anchor a proof rather than a claim.
 uv run python tools/archive_surface.py verify-anchors
 ```
 
