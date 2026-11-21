@@ -1192,6 +1192,14 @@ SWEEP_NAMES = 66
 #: for its tree and stale for this one — **whichever of the two lands second must re-measure with
 #: `--repin`**, never carry this line across. `--check` exits 0 on this tree:
 #: `typed references still pointing at a public name: 0`.
+#:
+#: ⛔ THE BASE FIGURE IS THE BASE **TREE's** MEASUREMENT, never the `SWEEP_RESIDUE` line committed
+#: on it. `origin/main` (`69908d006b`) still commits `(11835, "891187f5a4636487")` while its tree
+#: MEASURES `(11843, "6aed5368ffa10513")` — `--check` exits 1 there, and #14180 owns that re-pin.
+#: So `11843 + 3 = 11846` reads correctly only when 11843 comes from `--report` on that tree;
+#: a reader who takes the committed 11835 as the base concludes this pin is off by 8 and that a
+#: green `--check` is false. It is not: re-measured here, `--check` exits 0 and `--repin` prints
+#: `(11846, "af4be7eb196a5773")` (#14183 review round 5, finding 2 — falsified by measurement).
 SWEEP_RESIDUE = (11846, "af4be7eb196a5773")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —

@@ -83,6 +83,93 @@ MEASURE = (REPO_ROOT / "docs" / "evidence" / "13094-graphevent"
 GRAPH_CAPABILITIES = ("traversal", "adjacency", "fulltext", "vector", "ep walk",
                       "variable-length")
 
+#: The controls for the CYPHER arm, as a SPECIFICATION: `(label, snippet, the arm
+#: that MUST catch it)`. ⛔ The expected arm is a LITERAL, never recomputed from
+#: `GRAPH_CAPABILITY_CYPHER` — an expectation derived from the constant under
+#: test moves with the mutant, so deleting a token (or re-ordering the tuple)
+#: leaves every row green. That is the `agent-infra#3442` defect exactly: the
+#: oracle must not be derived from the system under test (`#14183` review,
+#: findings 1 and 4). With literals, a deleted token reds the rows that name it.
+CAPABILITY_CONTROLS = (
+    # variable-length — the only shape a `-[*`-only detector could see
+    ("variable-length", "MATCH (e:GraphEvent)-[*1..2]->(n) RETURN n",
+     "cypher:-[*"),
+    # FIXED-length adjacency — the audit's own definition of the capability, and
+    # the one shape a `-[*`-only detector cannot see
+    ("fixed-length adjacency",
+     "MATCH (e:GraphEvent)-[r:TOUCHED]->(p:Point) RETURN p", "cypher:-["),
+    # ⛔ THE SAME SHAPE, RE-SPACED — the pin for `_NO_WS`. The engine ACCEPTS
+    # `- [r:T] ->`, so while both sides were matched as contiguous substrings this
+    # returned `None`: a one-hop reader spaced like this was invisible to the
+    # guard (`#14183` review, non-blocking 6, measured). Strip the whitespace from
+    # either side of the tool's match and THIS row is the one that reds — the raw
+    # form carries neither `-[` nor `]->` nor `--`.
+    ("fixed-length adjacency, RE-SPACED",
+     "MATCH (e:GraphEvent) - [r:TOUCHED] -> (p:Point) RETURN p", "cypher:-["),
+    # The UNDIRECTED re-spaced spelling (round-4 review): its raw form likewise
+    # carries no arm at all, so it reds on the same mutant from the other side.
+    ("re-spaced undirected adjacency",
+     "MATCH (a) - [r:IMPL|NAND]- (b)", "cypher:-["),
+    # The DIRECTED re-spaced spelling pins the SECOND half: raw it is caught by
+    # `]->` alone, and on the stripped form by the earlier `-[` arm — so the
+    # literal expectation here fixes arm PRECEDENCE, not just detection.
+    ("re-spaced directed adjacency",
+     "MATCH (e:GraphEvent) - [r:T]-> (p)", "cypher:-["),
+    # the live EP / belief walk, verbatim from CAPABILITY-PLACEMENT-AUDIT.md
+    ("EP walk",
+     "MATCH (a:GraphEvent) WHERE a.id IN $ids WITH * MATCH (a)-[r:IMPL|NAND]-(b)",
+     "cypher:-["),
+    # a typed variable-length pattern (no `-[*` literal)
+    ("typed var-length", "MATCH (e:GraphEvent)-[r:NEXT*]->(n)", "cypher:*]"),
+    # edge-existence predicate, node-existence predicate, adjacency aggregate,
+    # and the audit's own undirected hop (`NOT (n)--()`)
+    ("edge existence",
+     "MATCH (e:GraphEvent) WHERE EXISTS { (e)-[:TOUCHED]->(:Point) } RETURN e",
+     "cypher:-["),
+    ("node existence", "MATCH (n:Point) WHERE EXISTS { (n:Point) } RETURN n",
+     "cypher:exists {"),
+    ("adjacency aggregate", "MATCH (e:GraphEvent) RETURN size((e)-->())",
+     "cypher:--"),
+    ("undirected hop", "MATCH (n:Point) WHERE NOT (n)--() RETURN n", "cypher:--"),
+    # procedures and algorithms. `apoc.` is the shape the census's own
+    # before/after table advertises, so it is the one that must not ship untested.
+    ("path procedure",
+     "MATCH (e:GraphEvent) CALL apoc.path.expand(e, 'TOUCHED>', 'Point', 1, 2)",
+     "cypher:apoc."),
+    ("graph algorithm", "CALL algo.pageRank(null, null) YIELD nodeId, score",
+     "cypher:call algo"),
+    ("fulltext procedure",
+     "CALL db.idx.fulltext.queryNodes('Point', $q) YIELD node",
+     "cypher:call db.idx.fulltext"),
+    ("vector procedure",
+     "CALL db.idx.vector.queryNodes('Point', 'emb', 10, $v) YIELD node",
+     "cypher:call db.idx.vector"),
+)
+
+#: Arms that can never be the DECIDING token, because every real spelling of them
+#: also carries an EARLIER arm in `GRAPH_CAPABILITY_CYPHER` and the tool takes the
+#: first match: `-[r:NEXT*]->` also carries `-[`; `-[*1..2]->` also carries
+#: `-[*`; `-[r]->` also carries `-[`; `<-[:T]-` also carries `-[`; and a
+#: `size((…))` pattern or `shortestPath(…)` needs a relationship inside it, so
+#: `-[` or `--` decides first. They are real arms — a snippet carrying only that
+#: substring is still refused — they simply cannot be pinned by a snippet a real
+#: reader would carry. Declared here so the completeness pin can tell "not pinned
+#: yet" (a defect) from "cannot be pinned" (a property of first-match ordering).
+ARMS_NO_SNIPPET_CAN_DECIDE = {
+    "*1..",          # always written inside `-[*1..2]`, which `-[*` catches first
+    "*..",           # same
+    "]->",           # always preceded by `-[`
+    "<-",            # always written `<-[:T]-`, which carries `-[`
+    "size((",        # a pattern aggregate needs a relationship → `-[` or `--`
+    "shortestpath",  # same
+    # Every real spelling of these is a `CALL`: the operator spells the procedure
+    # with its `call ` prefix, and the `call db.idx.*` arm is ordered before the
+    # bare name, so the bare arm only ever decides in a fragment that quotes the
+    # procedure name alone (which is not a snippet a reader carries).
+    "db.idx.fulltext",
+    "db.idx.vector",
+}
+
 
 def _tool():
     """The verb, imported by path (`tools/` is not a package)."""
@@ -205,40 +292,12 @@ def test_no_reader_of_the_change_feed_needs_a_graph_capability():
         + "\n  ".join(offenders))
 
     # The controls: the predicate must CATCH a capability that lives only in the
-    # snippet, under a class that claims none — and it must catch it through the
-    # CYPHER arm, asserting the arm identity rather than bare truthiness (a prose
-    # word that happened to be in the fixture would otherwise satisfy a
-    # `assert truthy` while the Cypher arm went untested).
-    for label, cypher in (
-        # variable-length
-        ("variable-length", "MATCH (e:GraphEvent)-[*1..2]->(n) RETURN n"),
-        # FIXED-length adjacency — the audit's own definition of the capability,
-        # and the one shape a `-[*`-only detector cannot see.
-        ("fixed-length adjacency",
-         "MATCH (e:GraphEvent)-[r:TOUCHED]->(p:Point) RETURN p"),
-        # the live EP / belief walk, verbatim from CAPABILITY-PLACEMENT-AUDIT.md
-        ("EP walk",
-         "MATCH (a:GraphEvent) WHERE a.id IN $ids WITH * MATCH (a)-[r:IMPL|NAND]-(b)"),
-        # a typed variable-length pattern (no `-[*` literal)
-        ("typed var-length", "MATCH (e:GraphEvent)-[r:NEXT*]->(n)"),
-        # an edge-existence predicate and an adjacency aggregate
-        ("edge existence",
-         "MATCH (e:GraphEvent) WHERE EXISTS { (e)-[:TOUCHED]->(:Point) } RETURN e"),
-        ("adjacency aggregate", "MATCH (e:GraphEvent) RETURN size((e)-->())"),
-        # ⛔ WHITESPACE IS NOT A BYPASS (#14183 round-4 review, P3). The engine
-        # accepts `- [r:IMPL|NAND]-`, and a contiguous-substring detector sees NO
-        # arm in this spelling at all: the raw form carries neither `-[` nor `--`
-        # nor `]->`. THIS is the row that reds when the strip is removed — every
-        # fixture above is contiguous, and the directed spelling below still
-        # matches `]->` raw.
-        ("re-spaced undirected adjacency",
-         "MATCH (a) - [r:IMPL|NAND]- (b)"),
-        # The DIRECTED re-spaced spelling pins the SECOND half: raw it is caught by
-        # `]->` alone, and on the stripped form by the earlier `-[` arm — so the
-        # expected arm here also fixes arm PRECEDENCE, not just detection.
-        ("re-spaced directed adjacency",
-         "MATCH (e:GraphEvent) - [r:T]-> (p)"),
-    ):
+    # snippet, under a class that claims none — and the arm asserted is the
+    # LITERAL from `CAPABILITY_CONTROLS`, not one recomputed from the tool's own
+    # tuple. A recomputed expectation is `X == X` whenever any arm matches (the
+    # same constant, the same iteration order), so it cannot see a deleted token
+    # (`#14183` review, findings 1 and 4).
+    for label, cypher, expected_arm in CAPABILITY_CONTROLS:
         smuggled = {
             "file": "tortoise/event_store.py", "line": 992, "reader": "walk_out",
             "needs": "walks outward from each event",
@@ -246,15 +305,43 @@ def test_no_reader_of_the_change_feed_needs_a_graph_capability():
             "snippets": (cypher,),
         }
         caught = module.graph_capability(smuggled)
-        # The expected arm is derived on the SAME whitespace-stripped form the
-        # predicate matches against, so the re-spaced row asserts an arm identity
-        # rather than a coincidence of spelling.
-        stripped = module._NO_WS.sub("", cypher.lower())
-        assert caught == f"cypher:{next(t for t in module.GRAPH_CAPABILITY_CYPHER
-                                        if module._NO_WS.sub('', t) in stripped)}", (
-            f"the {label} case is not caught by the CYPHER arm (got {caught!r}) — "
-            "a capability reader filed as `maintenance` passes this pin, and the "
-            "census can go false with every pin green")
+        assert caught == expected_arm, (
+            f"the {label} case must be caught by {expected_arm!r} "
+            f"(got {caught!r}) — a capability reader filed as `maintenance` "
+            "passes this pin, and the census can go false with every pin green")
+
+def test_every_capability_arm_is_pinned_or_declared_unreachable():
+    """No arm of the guard may be unpinnable by ACCIDENT.
+
+    A token in `GRAPH_CAPABILITY_CYPHER` with no control row is a claim about the
+    code that nothing grades: `apoc.` and `call algo` shipped with no fixture at
+    all while the census's own table advertised the `apoc.` shape as covered, and
+    the six rows that did exist could only falsify ONE of the nine added tokens
+    (`#14183` review, round 5 finding 4 — a recurrence of round 4's finding).
+
+    So this pin forces the choice: every arm is either pinned by a literal
+    expectation in `CAPABILITY_CONTROLS`, or DECLARED in
+    `ARMS_NO_SNIPPET_CAN_DECIDE` with the ordering fact that makes it
+    undecidable. Adding an arm to the tool therefore cannot ship untested without
+    this reddening — and the reverse direction catches a token deleted from the
+    tool while its control row stays behind, which would otherwise make the table
+    describe an arm that no longer exists.
+    """
+    module = _tool()
+    arms = set(module.GRAPH_CAPABILITY_CYPHER)
+    pinned = {arm.split("cypher:", 1)[1] for _, _, arm in CAPABILITY_CONTROLS}
+    assert not pinned - arms, (
+        "a control row pins an arm the tool no longer has — the table is "
+        f"describing a guard that changed: {sorted(pinned - arms)}")
+    unpinned = arms - pinned - ARMS_NO_SNIPPET_CAN_DECIDE
+    assert not unpinned, (
+        "these arms are neither pinned by a control row nor declared "
+        f"undecidable: {sorted(unpinned)} — add a row to `CAPABILITY_CONTROLS` "
+        "(with the LITERAL arm it must be caught by), or declare it in "
+        "`ARMS_NO_SNIPPET_CAN_DECIDE` with the earlier arm that always wins")
+    stale = ARMS_NO_SNIPPET_CAN_DECIDE - arms
+    assert not stale, (
+        f"ARMS_NO_SNIPPET_CAN_DECIDE names arms the tool does not have: {sorted(stale)}")
 
 
 def test_the_census_has_exactly_one_row_producing_reader():

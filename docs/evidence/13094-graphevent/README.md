@@ -131,9 +131,9 @@ allowance**, which is why this is the census's largest single item.
 
 ⚠️ **The share, and whose denominator it is.** The `#13094` dispatch brief states "72,488 nodes of
 118,755 — **42 %** of the store", and 42 % cannot be derived from those two numbers: 72,488 / 118,755 =
-**0.6104, i.e. 61 %**. Both figures are the BRIEF's, not the tree's — `118,755` appears nowhere in this
-repository — so the correction is arithmetic on the brief's own pair, and it is stated that way rather
-than dressed up as a measurement.
+**0.6104, i.e. 61 %**. Both figures are the BRIEF's, not the tree's, so the correction is arithmetic on
+the brief's own pair, and it is stated that way rather than dressed up as a measurement. The
+provenance of each number is below, once.
 
 ⛔ **And the tree's own recorded share is a DIFFERENT number from a different census, which is why none
 of this is quoted as "the" share.** `graph-scripts/business_map_13880/business_map.json` records
@@ -145,9 +145,10 @@ never divides by a node total — and 42 % is corrected to 61 % only as arithmet
 
 ⚠️ **Provenance of the two numbers in that ratio — they are not the same artifact.** `72,488` is
 committed and traceable: `#13880`'s 2026-11-19 label census, recorded in
-`graph-scripts/business_map_13880/`. **`118,755` is not in the repo at all** — its only source is the
-`#13094` dispatch brief itself, and the export label census the 72,488 comes from *states no
-denominator* (`business_map.json`: "only the second states a denominator"). So the 61 % is arithmetic
+`graph-scripts/business_map_13880/`. **`118,755` appears in no committed artifact other than this
+disclosure** — its only source is the `#13094` dispatch brief itself, and the export label census the
+72,488 comes from *states no denominator* (`business_map.json`: "only the second states a
+denominator"). So the 61 % is arithmetic
 over the brief's pair, stated because the brief's own percentage is wrong, **not** a figure reproducible
 from a committed artifact. Nothing downstream depends on it — the projection is 72,488 × the slope, not
 a share — so it is disclosed rather than leaned on.
@@ -318,7 +319,7 @@ Both suites are re-run after this PR's last push; counts are in `WORKTREE-REPORT
 | file | what it is |
 |---|---|
 | `tools/graphevent_home.py` | the census as data (`READERS`), the residency reader, and the **`superset` verb** that answers `#13094`'s blocking question on a real tenant — read-only by mechanism (§3.1), with exit `2` for "no verdict" |
-| `tests/test_13094_graphevent_home.py` | 31 pins: the census resolving (with `min_occurrences`), its DDL completeness, the capability vocabulary, the two producer refutations (executed, with a positive control), the `#4664` mechanism refusal (executed), the verdict's three deficit classes (missing type, missing row, mapped type), the empty-feed vacuity on BOTH sides, the paging cursor against duplicate and fractional `seq` (with two rows sharing `(seq, type, payload)` so the `event_id` half of the dedupe key is discriminating), the completeness counts (NULL `seq`, a short read), the graph-minting refusal at the reader, at `superset`, and at `residency`'s own totals read (including that the graph is refused BEFORE the journal is paged), which side the `no_verdict` message names, a capability-bearing reader making the derived census verdict say so (with a whitespace-re-spaced Fixed-length row so the `- [r]->` stripper is discriminating), the exit-code contract, the measurement script's refusal code, the committed census being the verb's own output (the drift pin), and this declared count matching the file's own |
+| `tests/test_13094_graphevent_home.py` | 32 pins: the census resolving (with `min_occurrences`), its DDL completeness, the capability vocabulary, the capability-arm control table as a SPECIFICATION (a LITERAL expected arm per shape — three RE-SPACED spellings so `_NO_WS` is discriminating, `apoc.` / `call algo` / both `db.idx.*` procedures each pinned by their own row — plus a completeness pin that every arm in the tool is either pinned or declared undecidable), the two producer refutations (executed, with a positive control), the `#4664` mechanism refusal (executed), the verdict's three deficit classes (missing type, missing row, mapped type), the empty-feed vacuity on BOTH sides, the paging cursor against duplicate and fractional `seq` (with two rows sharing `(seq, type, payload)` so the `event_id` half of the dedupe key is discriminating), the completeness counts (NULL `seq`, a short read), the graph-minting refusal at the reader, at `superset`, and at `residency`'s own totals read (including that the graph is refused BEFORE the journal is paged), which side the `no_verdict` message names, a capability-bearing reader making the derived census verdict say so, the exit-code contract, the measurement script's own refusal code, the committed census being the verb's own bytes (the drift pin), and this declared count matching the file's own |
 | `docs/evidence/13094-graphevent/measure_graphevent_residency.py` + 2 JSON outputs | the residency measurement above, reproducible; it refuses any graph name outside the `probe_13094` prefix with **exit 2** (`1` is reserved for a produced verdict, so a refusal must not share it) |
 | `docs/evidence/13094-graphevent/readers.json` | the census table, as the verb emits it |
 
