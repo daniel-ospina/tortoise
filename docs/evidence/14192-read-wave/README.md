@@ -54,7 +54,7 @@ executed and the declaration below is the BOX's, not the flag's. That is still a
 deterministic comparison (both arms, same declaration, same box), and it is
 stated here rather than credited to the flag. Both arms declare:
 
-```
+```text
 vector:load_in_flight · fts:ok · structural:empty_results · valid_time:no-prefer-latest-intent
 ```
 
