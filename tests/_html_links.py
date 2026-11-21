@@ -224,11 +224,11 @@ class _AnchorHrefParser(HTMLParser):
         "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
         "meta", "param", "source", "track", "wbr",
     })
-    #: Start tags that POP out of an open `<select>` — spec 13.2.6.4, "in select"
-    #: insertion mode: *"If the stack of open elements does not have a select
-    #: element in select scope, ignore the token. Otherwise, pop elements from the
-    #: stack of open elements until a select element has been popped from the
-    #: stack. Reprocess the token."*
+    #: Start tags that POP out of an open `<select>` — the living standard's "in
+    #: body" rule for `<input>`: *"If the stack of open elements has a select
+    #: element in scope: Parse error. Repeatedly pop the current node off the stack
+    #: of open elements until a select element has been popped."* The token is then
+    #: inserted in its new context, i.e. the select is closed before it.
     #:
     #: ⛔ WITHOUT THIS, "is a `<select>` open?" IS NOT THE BROWSER'S QUESTION, and
     #: the two answers diverge in the LOUD direction. Measured (#14073 review):
@@ -240,10 +240,33 @@ class _AnchorHrefParser(HTMLParser):
     #: left the slice long for no reason. Both readings are correct once the stack
     #: is.
     #:
-    #: The three are the spec's own list and it is NOT the same test as `<select>`
-    #: being an `_IMPLICIT_CLOSE` element: that governs whether an EXTENT runs past
-    #: a sibling, this governs whether the select is still open at all.
-    _SELECT_POP = frozenset({"input", "keygen", "textarea"})
+    #: ⛔ AND IT IS ONE TOKEN, NOT THREE — THE "in select" MODE IS GONE. This rule
+    #: used to name `input`/`keygen`/`textarea`, copying the CLASSIC mode's token
+    #: list; the living standard no longer has that insertion mode at all (its
+    #: sequence runs "in cell" → "in template", and `grep -c 'in select'
+    #: parsing.html` is 0 — the same removal this module's `_record_heading`
+    #: docstring already notes). What survives is a per-token rule in "in body":
+    #:
+    #:   `<input>` — *"If the stack of open elements has a select element in scope:
+    #:   Parse error. Repeatedly pop the current node off the stack of open
+    #:   elements until a select element has been popped."*
+    #:   `<textarea>` — *"Insert an HTML element for the token … Switch the
+    #:   tokenizer to the RCDATA state"* — NO select-scope step, so it does not pop.
+    #:   `keygen` — no start-tag rule at all; it is not in the living standard.
+    #:
+    #: ⛔ THE STALE PAIR IS NOT HARMLESS — IT IS THE FAIL-OPEN DIRECTION. Aimed at
+    #: the storage pins (#14073 review, reproduced): a `<select><textarea>` decoy
+    #: inside the TOC block plus an un-advertised `<h2 id="storage-limits">` after
+    #: it pops this parser's select, advertises the decoy's anchor and BOUNDS the
+    #: slice early, leaving a contradicting sentence outside every pin with the
+    #: golden and the vocabulary pin both green. With `textarea`/`keygen` not
+    #: popping, the anchor stays no-link and the heading stays one no reader meets,
+    #: which is what a browser does. So this set is measured, not copied.
+    #:
+    #: It is NOT the same test as `<select>` being an `_IMPLICITLY_CLOSED` element:
+    #: that governs whether an EXTENT runs past a sibling, this governs whether the
+    #: select is still open at all.
+    _SELECT_POP = frozenset({"input"})
     # Tags a browser closes WITHOUT an end tag — spec 13.2.6.3's implied end tags,
     # the table sections, and the tags a SIBLING START TAG closes (`<button>`,
     # `<h1>`–`<h6>`, `<a>`, `<form>`, `<nobr>`, `<select>`, `<table>`; 13.2.6.4's
@@ -636,10 +659,11 @@ class _AnchorHrefParser(HTMLParser):
         inside it is covered too. The cost is declared: a rendered heading inside a
         select does not end the slice.
 
-        ⛔ AND "INSIDE A SELECT" IS THE SPEC'S QUESTION, NOT THIS STACK'S. The four
-        tokens that close the scope (`input`/`keygen`/`textarea` here, plus
-        `</select>`) are modelled — see `_SELECT_POP`. They were declared as an
-        unmodelled residual in the previous revision, which is what let a `<h2>`
+        ⛔ AND "INSIDE A SELECT" IS THE SPEC'S QUESTION, NOT THIS STACK'S. The token
+        that closes the scope in the LIVING standard is `<input>` alone — see
+        `_SELECT_POP` for the citation and for the two tokens that were copied from
+        the removed classic mode and had to be taken back out. It was declared as
+        an unmodelled residual in the previous revision, which is what let a `<h2>`
         after a `<select><input>` be treated as one no reader meets (#14073
         review); the direction was safe there (the slice stayed long) but the
         reading was still wrong, and the same wrong reading dropped a real anchor
@@ -724,7 +748,7 @@ class _AnchorHrefParser(HTMLParser):
         The LINK question's own test, and the one `_collect` still asks about
         `self.hrefs` — an `<a>` inside an OPEN `<select>` is not an element a
         reader can follow, in any browser, under any cascade. ⛔ "Open" is the
-        load-bearing word: `_SELECT_POP` closes the scope on the tokens a browser
+        load-bearing word: `_SELECT_POP` closes the scope on the token a browser
         closes it on, so this answers the browser's question and not merely this
         stack's. The BOUNDARY question is wider
         and lives in `_unmet_by_reader`; an anchor that fails only the wider test
@@ -737,11 +761,9 @@ class _AnchorHrefParser(HTMLParser):
     def _close_select_scope(self, tag: str) -> None:
         """Pop an open `<select>` when `tag` is one a browser pops it for.
 
-        Spec 13.2.6.4 "in select" — see `_SELECT_POP` for the rule and the measured
-        divergence it closes. Called FIRST in `handle_starttag`, before this tag's
-        own suppression entry lands: `<textarea>` is raw text (it appends to
-        `_suppress`), so asking afterwards would read the select as still open and
-        leave every following anchor and heading misclassified.
+        Spec "in body", `<input>` — see `_SELECT_POP` for the citation and the
+        measured divergence it closes. Called FIRST in `handle_starttag`, before
+        this tag's own state lands, so the pop reads the PRE-tag ancestry.
 
         The same three guards the rest of the ancestry reads use: a token inside a
         suppressed region is template content or raw text, whose end tags and
@@ -1038,9 +1060,8 @@ class _AnchorHrefParser(HTMLParser):
         super().set_cdata_mode(elem, *args, **kwargs)  # type: ignore[arg-type]
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        # FIRST, and before `_open`: `input`/`keygen`/`textarea` pop an open
-        # `<select>` in the browser, and `_open` is what makes `<textarea>` a
-        # suppressed region — so this must read the PRE-tag ancestry. See
+        # FIRST, and before `_open`/`_collect`/`_record_heading`, so the pop reads
+        # the PRE-tag ancestry the browser's own step reads. See
         # `_close_select_scope`.
         self._close_select_scope(tag)
         # Before `_open`, because this tag's own id/attributes count even where
