@@ -373,8 +373,12 @@ SELECTED = [
     # `has the data all BEEN archived` puts `been` between the quantifier and the
     # participle, so rule (b) never reached it: 77/77 focused probes were SILENT while both
     # flat twins (`has all the data been archived`, `has the data been archived`) ROUTED and
-    # are pinned as routing. The lookahead now accepts `been` + the participle too — the
-    # same position one auxiliary later.
+    # are pinned as routing — and BOTH really are, round-24 review's P3: this comment
+    # promised two pins while only `has all the data been archived` had one, so the bare
+    # twin below is pinned HERE, as the row the `(?:been\s+)?` widening exists for.
+    # The lookahead now accepts `been` + the participle too — the same position one
+    # auxiliary later.
+    ("has the data been archived", "ended", "is_copula"),
     ("has the data all been archived", "ended", "is_copula"),
     ("has the reports both been archived", "ended", "is_copula"),
     ("have the claims each been withdrawn", "ended", "is_copula"),
