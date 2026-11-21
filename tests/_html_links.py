@@ -1797,12 +1797,50 @@ class _AnchorHrefParser(HTMLParser):
         reason makes well-formed `<canvas><div>fallback</div></canvas>` silent: the
         block is closed before the end tag, so the pattern never forms.
         """
-        for i, (name, _container, _renders) in enumerate(self._open_elements):
+        candidates: list[int] = []
+        for i, (name, _container, formatting_renders) in enumerate(self._open_elements):
             if name not in self._FORMATTING:
                 continue
+            # ⛔ THE FORMATTING ELEMENT ITSELF CAN BE THE UNRENDERED ANCESTOR (#14073 review
+            # round 24, P2, measured in Chrome). `hidden` rides the stack's INHERITED flag, not
+            # a tag, so `<a hidden><ul><a>CLAIM</ul></a>` had no "unrendered ancestor" below the
+            # formatting element to find: AAA relocated the `<ul>` out of the hidden `<a>`, a
+            # browser painted the claim, and this parser dropped it silently (`''`). When the
+            # formatting element is the hidden one, the block it lifts out is what becomes
+            # visible, so the same precondition applies — a SPECIAL element below it, i.e. the
+            # furthest block AAA needs before it relocates anything (`<a hidden><div>CLAIM</a>`
+            # really does move the div to body, so refusing there is right, not a false block).
+            if (
+                not formatting_renders
+                and name not in self._RENDERS_WITH_ATTR
+                and name not in self._FALLBACK_RENDERS
+            ):
+                candidates.append(i)
             for j in range(i + 1, len(self._open_elements)):
-                unrendered = self._open_elements[j][0]
-                if unrendered not in self._UNRENDERED and unrendered not in self._RAW:
+                unrendered, _c, unrendered_renders = self._open_elements[j]
+                qualifies = unrendered in self._UNRENDERED or unrendered in self._RAW
+                if not qualifies and not unrendered_renders:
+                    # ⛔ A `hidden` ANCESTOR IS NOT A TAG TEST EITHER (#14073 review round 24,
+                    # P2, measured in Chrome). The filter above reads the TAG, but `hidden`
+                    # rides the stack's INHERITED flag — the third field — which is how every
+                    # other consumer learns about it. So `<a><span hidden><ul><a>CLAIM` was
+                    # not an "unrendered ancestor" to this pattern: AAA relocated the `<ul>`
+                    # out of the hidden span, a browser painted the text, and this parser
+                    # dropped it silently (`''`). Same mechanism as the canvas rows above, a
+                    # different origin for the flag.
+                    #
+                    # ⛔ TWO EXCLUSIONS, because there the flag being False is EXPECTED and
+                    # the text is counted elsewhere: `_RENDERS_WITH_ATTR` (an unopened
+                    # `<details>` — `_text_is_painted` counts the disclosure family) and
+                    # `_FALLBACK_RENDERS` (a browser paints `<object>`'s fallback). Refusing
+                    # for either would be a FALSE BLOCK on markup the seam paints, which is
+                    # how a refusal rule gets deleted: measured, `<b><details><ul><b>CLAIM`
+                    # must keep extracting `'CLAIM'`.
+                    qualifies = (
+                        unrendered not in self._RENDERS_WITH_ATTR
+                        and unrendered not in self._FALLBACK_RENDERS
+                    )
+                if not qualifies:
                     continue
                 # ⛔ EXCEPT the members whose FALLBACK a browser paints
                 # (`_FALLBACK_RENDERS`). `_text_is_painted` already COUNTS their
@@ -1816,11 +1854,17 @@ class _AnchorHrefParser(HTMLParser):
                 # `_unmet_by_reader`, which is a TAG test and unaffected.
                 if unrendered in self._FALLBACK_RENDERS:
                     continue
-                if any(
-                    self._open_elements[k][0] in self._SPECIAL
-                    for k in range(j + 1, len(self._open_elements))
-                ):
-                    return True
+                candidates.append(j)
+        # AAA's own precondition: without a SPECIAL element below the unrendered ancestor
+        # there is no furthest block, nothing is relocated, and the text really is inside
+        # the unrendered subtree — dropping it is the correct answer there, so a refusal
+        # that fires would be a false block on mended markup.
+        for j in candidates:
+            if any(
+                self._open_elements[k][0] in self._SPECIAL
+                for k in range(j + 1, len(self._open_elements))
+            ):
+                return True
         return False
 
     def _pop_top(self) -> None:
@@ -2023,9 +2067,15 @@ class _AnchorHrefParser(HTMLParser):
             getattr(self, name).clear()
         self._open_containers.clear()
         self._open_elements.clear()
-        # A replaced document has a FRESH root: a `hidden` on the body the frameset
-        # discarded must not keep hiding the one that replaced it (`_root_renders` is
-        # the flag `html`/`body` carry instead of being pushed).
+        # A replaced document has a FRESH root, so the root's flag is reset with the
+        # recordings. ⛔ THIS IS BELT-AND-BRACES, NOT AN OBSERVED CASE (#14073 review round
+        # 24, P3, measured): the frameset arm in `_open` is gated on `not _body_seen`, and any
+        # `<body>` token sets that flag, so "a `hidden` on the body the frameset discarded"
+        # cannot arise; the only path here with the flag already False is
+        # `<html hidden><frameset>`, which WEDGES (`wedged_reason="frameset"`) so no
+        # recording is read either way. Deleting this line leaves the module at
+        # `112 passed, 1 skipped`. It stays as one invariant line (`_root_renders` describes
+        # the ONE tree, like every list above) rather than a claim that a test observes it.
         self._root_renders = True
 
     def _open_extent(

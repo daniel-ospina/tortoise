@@ -4647,6 +4647,47 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
             f"is reported as painted: AAA has no furthestBlock to relocate, so a "
             f"browser keeps the text inside the unrendered element"
         )
+    # ⛔ AND A `hidden` ANCESTOR IS NOT A TAG EITHER (#14073 review round 24, P2, measured
+    # in Chrome). Every row above keys the unrendered ancestor on its TAG; `hidden` instead
+    # rides the stack's INHERITED flag, so the pattern saw nothing to lift a block out of and
+    # the text was silently DROPPED while a browser painted it:
+    #
+    #   '<a hidden><ul><a>CLAIM</ul></a>'                     chrome: painted   module: ''
+    #   '<a><span hidden><ul><a>CLAIM</ul></a></span></a>'    chrome: painted   module: ''
+    #   '<nobr hidden><ul><nobr>CLAIM</ul></nobr>'            chrome: painted   module: ''
+    #   '<a><ul><a>CLAIM</ul></a>'  (control, no hidden)      chrome: painted   module: 'CLAIM'
+    #   '<a hidden><div>CLAIM</a>' (furthest block →  body)  chrome: painted   module: ''
+    #
+    # The hidden element may be the formatting element ITSELF (rows 1, 3, 5) or a wrapper
+    # below it (row 2), and both are refused now. AAA's own precondition still gates it —
+    # no SPECIAL element below means no furthest block, nothing relocates, and the text
+    # really is hidden (`<a hidden><ul>CLAIM</ul></a>` stays dropped) — so a refusal cannot
+    # fire on a shape where the claim never becomes visible.
+    for hidden_shape in (
+        "<a hidden><ul><a>FalkorDB permanently deletes it</ul></a>",
+        "<a><span hidden><ul><a>FalkorDB permanently deletes it</ul></a></span></a>",
+        "<nobr hidden><ul><nobr>FalkorDB permanently deletes it</ul></nobr>",
+        "<a hidden><div>FalkorDB permanently deletes it</a>",
+    ):
+        with pytest.raises(ValueError, match="adoption-agency-relocation"):
+            extract_visible_text(hidden_shape)
+    # controls: the SAME shapes without the `hidden` are painted (so the rows above are
+    # about the flag, not about refusing anything with a formatting element)…
+    assert "falkor" in _banned_vocabulary(
+        extract_visible_text("<a><ul><a>FalkorDB permanently deletes it</ul></a>")
+    )
+    # …and the two ancestors whose flag is EXPECTED to be False stay quiet, because their
+    # text is counted elsewhere: an unopened `<details>` (the disclosure family) and
+    # `<object>` (a browser paints its fallback). Refusing there would be a FALSE BLOCK,
+    # which is how a refusal rule gets deleted.
+    assert "falkor" in _banned_vocabulary(
+        extract_visible_text("<b><details><ul><b>FalkorDB permanently deletes it")
+    )
+    assert "falkor" in _banned_vocabulary(
+        extract_visible_text(
+            '<a><object><div>FalkorDB permanently deletes it</div></object></a>'
+        )
+    )
     # ⛔ AND AAA IS NOT AN END-TAG RULE (#14073 review round 15, P0, measured).
     # Spec 13.2.6.4.7 "in body" runs the adoption agency algorithm on two START
     # tags: an `<a>` while an `a` is in the active formatting list, and a `<nobr>`
