@@ -260,9 +260,10 @@ class _AnchorHrefParser(HTMLParser):
       ``set_cdata_mode`` below enforces.
 
       **Not modelled, deliberately:** the HTML integration points (``foreignObject``,
-      ``desc``, MathML's text integration points) and cross-namespace end-tag
-      resolution. A document that hides its only blog link inside one of those
-      constructs can be judged differently from the browser, in either direction.
+      ``desc``, MathML's text integration points), cross-namespace end-tag
+      resolution, and the adoption agency's element CLONING. A document that hides
+      its only blog link inside one of those constructs can be judged differently
+      from the browser, in either direction.
       That is declared out of scope for this guard — a faithful reproduction of the
       HTML tree-construction algorithm is a parser, not a test helper — and it is
       kept honest two ways: the parser records every tag it saw ``foreign_tags``
@@ -271,6 +272,23 @@ class _AnchorHrefParser(HTMLParser):
       all. Constructs that would otherwise fail OPEN (the script-data escaped
       states, ``<frameset>``) are detected rather than guessed at. Tracked in
       #3970.
+
+      ⛔ THE CLONING LEG IS THE ONE STILL GUESSED AT (#14073 review, P2). AAA's
+      "create an element for the token" step copies the formatting element, so a
+      browser ends up with a SECOND element carrying the same ``id`` (and, for
+      ``<a>``, the same ``href``) while this module reports one — a SILENT
+      under-report, and the direction the duplicate-`id` guard must not have.
+      `_aaa_would_relocate_a_painted_block` cannot catch it: its concern is painted
+      text discarded on arrival, so it requires an ``_UNRENDERED``/``_RAW`` member
+      between the formatting element and the special element, and the clone shape
+      (`[b, article]` = ``FORMATTING … SPECIAL``) has none. Measured against
+      html5lib on a seeded 4000-document fuzz: 67 under-report ids and **0
+      over-report** — one-sided, which is why it reads as silence rather than as a
+      loud disagreement (the exact rate depends on the generator; the DIRECTION is
+      the finding). `'<b id="dup">t<article></b>'` serialises in html5lib to
+      `<b id=dup>t</b><article><b id=dup></b></article>` — two `dup` elements — where
+      this module reports one. Pre-existing, not introduced by the change that
+      added this note. Tracked in #14200.
     * **Self-closing tags** — the rule differs by namespace, and getting it
       backwards corrupts state for the rest of the document. In the HTML
       namespace the ``/`` on a NON-void element is ignored, so ``<template/>`` and
@@ -2973,7 +2991,7 @@ def extract_anchors_within(
 
 
 def extract_element_ids(html: str) -> list[tuple[str, int]]:
-    """``(id, line)`` for every element ``html`` puts in the document tree (#4118).
+    """``(id, line)`` for every element ``html`` DECLARES an ``id`` on (#4118).
 
     The duplicate-`id` guard's input, and the second answer this module's
     render-fidelity seam gives (see ``_AnchorHrefParser``). Before #4118 that
@@ -2982,6 +3000,17 @@ def extract_element_ids(html: str) -> list[tuple[str, int]]:
     in foreign content (silent — the direction a duplicate-id guard must not
     have), and it counted `<template>` content a browser keeps inert. One parser
     removes the divergence class instead of declaring each instance of it.
+
+    ⛔ THE CONTRACT IS "DECLARES", NOT "PUTS IN THE TREE", and both directions are
+    now stated so neither is read as larger than the code (#14073 review, P3):
+
+    * OVER-reports a token a browser IGNORES — `handle_starttag` records the id
+      before `_ignored_token` returns, because what the page WRITES is the
+      document's while the ancestry has to be the tree's. `<div><colgroup id="x">`
+      reports `x`; a browser creates nothing. Deliberate, and a safe false red.
+      The old text here promised the opposite and contradicted that comment.
+    * UNDER-reports an id the adoption agency CLONES — see the class docstring's
+      "Not modelled, deliberately" block. Silent, and tracked in #14200.
 
     Empty ids are omitted (``getElementById("")`` matches nothing) and a repeated
     ``id`` attribute keeps the first, as a browser does.
