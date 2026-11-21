@@ -1331,3 +1331,55 @@ def test_running_out_of_passes_after_a_held_back_pass_names_the_pin_not_a_rerun(
     assert report.metric()["pass_budget_exhausted"] is False, (
         "the binding constraint was the pin, not the pass budget"
     )
+
+
+def test_a_window_held_back_by_a_late_reader_does_not_abandon_the_remaining_passes():
+    """The LEASE arm of the same rule, which the pin fix left ungraded.
+
+    ⛔ The `if not final:` arm asks TWO hold-backs — a pin declared mid-sweep and a reader
+    that started between planning and the statement. The sibling row above grades the pin
+    half; the lease half had the identical shape (`break`) and no row at all, so moving
+    only the pin arm back to a `break` would leave this suite green. A reader holding the
+    head of the cold set is the more common case of the two, so it is the one that must
+    not be able to cost the whole sweep.
+    """
+    from tortoise.cache_evictor import ReadLeases
+
+    g = _FakeGraph(["p0", "p1", "p2", "p3"])
+    leases = ReadLeases()
+
+    def record_probe_and_lease_starts(candidate: Candidate) -> bool:
+        # ⛔ The reader must start AFTER the plan-time lease gate and BEFORE the delete, or
+        # `p0` is held at plan time and the last hop is never reached. The record probe is
+        # exactly that seam: it runs at plan time, after the pin gate and the lease gate.
+        if candidate.key == "p0":
+            leases.acquire(candidate.node_id)
+        return True
+
+    report = evict(
+        _assessment(nodes=2), _FakeClient(), g,
+        population=POPULATION,
+        selector=_coldest, record_probe=record_probe_and_lease_starts,
+        leases=leases,
+        dry_run=False,
+        policy=EvictionPolicy(max_nodes=2, batch_size=1, max_passes=4),
+    )
+
+    assert "p0" in g.node_keys(), "the node a reader held was deleted"
+    assert len(report.deleted) == 2, (
+        "a window held back by a READER at the last hop ended the sweep — the remaining "
+        "passes never ran, so the cache stays over budget while the report blames the "
+        "population or the licence instead of the read that held one node"
+    )
+    assert report.metric()["passes"] > 1, (
+        "the sweep stopped on its first pass; the widening rule for a fully held-back "
+        "window is not applied to the lease arm"
+    )
+    assert {c.key for c in report.skipped_leased} == {"p0"}, (
+        "the held node is not reported as leased, so the operator cannot see which read "
+        "is what kept it"
+    )
+    assert report.skipped_pinned == (), (
+        "a lease-only hold-back was reported as a pin, sending the operator to `unpin` "
+        "a declaration that does not exist"
+    )
