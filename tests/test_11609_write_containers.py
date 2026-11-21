@@ -1089,8 +1089,20 @@ def test_the_pin_requires_EXACTLY_ONE_delegation():
     AND that the pin refuses it. The assertion names the branch's own message fragment,
     so deleting the branch reds HERE with the requirement named, instead of being
     absorbed by an adjacent refusal.
+
+    ⛔ EVERY arm of this test comes from `_NON_EXACTLY_ONE_DELEGATION`, so an emptied
+    table would leave the loop with nothing to iterate and the test GREEN — the same
+    "decides NO verdict" shape as the unexercised branch this test was added for, one
+    level up. pytest turns an empty parameter set into a SKIP, which is not a red either
+    (docs.pytest.org/how-to/parametrize.html, `empty_parameter_set_mark`), so the table
+    is guarded by name here, exactly as this file already does for the two tables above
+    (`test_the_census_exemption_is_path_and_receiver_scoped`: "vacuity is a red, not a
+    StopIteration"; `test_every_declared_non_sdk_receiver_is_a_real_one`).
     """
     expected_calls = {"zero-calls": 0, "two-calls": 2}
+    assert _NON_EXACTLY_ONE_DELEGATION, (
+        "no fixtures — every arm of this test comes from the table, so an empty one "
+        "would decide no verdict at all (vacuity is a red, not an empty loop)")
     for label, body in sorted(_NON_EXACTLY_ONE_DELEGATION.items()):
         fixture = _exec_door_class(body)
 
