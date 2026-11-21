@@ -1944,6 +1944,97 @@ class TestTheDeclinedWrite:
         )
 
 
+class TestTheDeferredWrite:
+    """#14185 — the FIFTH store answer: a QUEUED fold is not a LOST one.
+
+    With the projection worker armed, `live_write` acknowledges the write and
+    queues the record's fold, so the returned outcome is `applied=False` **and**
+    `unprojected=1` — truthfully, the record has not taken the line YET. The
+    branch that counts these apart (`elif getattr(outcome, "deferred", False)`) is
+    what keeps a healthy armed seed from reporting "N write(s) came back
+    unprojected" plus a repair command.
+
+    ⛔ WITHOUT THIS LEG THE BRANCH IS UNPROVEN (review cycle 7, ISSUE 3): delete
+    the `elif`, or drop `record_deferred` from `SeedReport.as_dict()`, and the
+    whole suite stayed green — while the exact defect the branch prevents (a
+    HEALTHY armed seed reporting a loss and offering a repair) came back
+    silently. The legs build a `SeedReport` directly; only this one reaches the
+    counting branch, and it does so through the REAL chokepoint.
+    """
+
+    def test_a_DEFERRED_write_is_COUNTED_apart_and_names_NO_repair(
+        self, tool_mod, monkeypatch, tmp_path
+    ):
+        from tortoise import projection_worker, record_writer
+
+        applied = types.SimpleNamespace(applied=True, refusal=None, outcome="applied")
+        log = _journal_double(monkeypatch)
+        monkeypatch.setattr(record_writer, "write_live_record", lambda record, **_kw: applied)
+        # ⛔ BOTH SWITCHES, exactly as `tests/test_14185_projection_worker.py::armed`
+        # does it: the LOOP is armed by its flag, and the RECORD by its own DSN
+        # (`#14222` P1-3 — the chokepoint refuses to defer a write the record was
+        # never going to take). The DSN is never connected to; it is only what
+        # `record_dsn()` validates.
+        monkeypatch.setenv(projection_worker.ENV_WORKER, "1")
+        monkeypatch.setenv(record_writer.RECORD_DSN_ENV, "postgresql://u:p@127.0.0.1:1/record")
+        projection_worker.shutdown(drain=False)
+        try:
+            seed = tool_mod._seed_population(
+                _FoldDouble(),
+                [{"id": "pt-12186000000", "content": "alpha"}],
+                journal_path=tmp_path / "j.jsonl",
+                # ⛔ THE TENANT IS CARRIED BY VALUE, and that is deferral gate 4:
+                # a `threading.Thread` does not inherit the caller's contextvars,
+                # so a write with no carried tenant would be resolved again on the
+                # worker (#9192's mis-scoping class) and `live_write` folds it
+                # inline instead. Without this pair the leg measures the inline arm,
+                # not the deferred one.
+                tenant=("org-1", "graph-1"),
+                encode_many=lambda texts: [[0.5] for _ in texts],
+            )
+        finally:
+            projection_worker.shutdown(drain=True, timeout=5)
+
+        payload = seed.as_dict()
+        assert seed.record_deferred == 1, payload
+        assert (seed.record_applied, seed.record_unprojected) == (0, 0), payload
+        assert payload["record_deferred"] == 1, payload
+        assert "fold" not in payload, payload.get("fold")
+        assert log.positions == [1], (
+            "the deferral gate requires a JOURNAL LINE (`not journal_skipped`), so "
+            "this leg only means anything if the append actually happened — it "
+            f"did not: {log.positions}")
+
+    def test_a_DEFERRED_report_names_NO_repair_and_no_loss(self, tool_mod):
+        """The report side of the same fact, pinned without a store.
+
+        `_fold_needed()` must be False for a deferred-only seed: there is nothing
+        to fold, because the queue was drained before the report was built. A
+        repair emitted here sends the operator after a fold that has already run —
+        the same "repair command that cannot work" class as a rejected-by-argparse
+        command or a decline with no durable line.
+        """
+        report = tool_mod.SeedReport(
+            journal="/tmp/j.jsonl",
+            org_id="org-1",
+            graph_id="graph-1",
+            written=2,
+            record_armed=True,
+            record_applied=0,
+            record_unprojected=0,
+            record_deferred=2,
+            positions_unproven=0,
+            folded=2,
+            first_seq=1,
+            last_seq=2,
+        )
+        assert report._fold_needed() is False, report.as_dict()
+        payload = report.as_dict()
+        assert payload["record_deferred"] == 2, payload
+        assert "fold" not in payload, payload.get("fold")
+        assert payload["record_unprojected"] == 0 and payload["record_applied"] == 0, payload
+
+
 class TestTheArmBlockage:
     """⛔ THE WRITE SEAM MUST AGREE WITH THE RUN ABOUT ARMING (#13839 finding 1).
 

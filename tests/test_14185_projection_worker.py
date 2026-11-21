@@ -973,10 +973,18 @@ def test_a_forked_worker_republishes_its_gauges(armed):
 
     worker = projection_worker.worker()
     worker._cond_pid = os.getpid() + 1_000_000     # pretend this was inherited
+    # ⛔ THE FOURTH COUNTER, and the one the reset used to forget (review cycle 7,
+    # ISSUE 2). It is the parent's attribution, not the child's work — the same
+    # "reporting another process's failures as ours" defect `_reset_for_fork_locked`
+    # exists for, on the field its own body omitted.
+    worker._inline_fallbacks = 7
 
     stats = projection_worker.stats()               # triggers the fork reset
     gauges = monitoring.projection_worker_gauges()
     assert stats.pending_positions == 0
+    assert stats.inline_fallbacks == 0, (
+        "a child reports its OWN inline fallbacks — an inherited count is another "
+        f"process's work claimed as its own: {stats.inline_fallbacks}")
     assert gauges["pending_positions"] == 0, (
         "a child must not export the parent's phantom backlog")
     assert gauges["queue_depth"] == stats.queue_depth

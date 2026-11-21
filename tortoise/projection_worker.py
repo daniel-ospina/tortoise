@@ -659,7 +659,11 @@ class ProjectionWorker:
         * the COUNTERS — inherited `submitted=3, projected=1` with an empty queue
           made `wait_for_drain` unsatisfiable (cycle 2, NEW-3), and reporting
           another process's failures as ours is the attribution defect cycle 4's
-          P2 named;
+          P2 named. ⛔ **ALL FOUR, and `inline_fallbacks` is the one this
+          paragraph used to leave out** (review cycle 7, ISSUE 2): it is the
+          fourth counter on :class:`ProjectionStats`, so a child that only
+          zeroed the other three reported the PARENT's inline fallbacks — the
+          same attribution defect, surviving on the one field the reset forgot;
         * **BOTH LOCKS.** ``_cond`` because a Condition inherited while the other
           process's consumer held it is a lock with no owner here; ``_publish_lock``
           for exactly the same reason, and it is the one that bit (cycle 4, P2-1) —
@@ -682,6 +686,7 @@ class ProjectionWorker:
         self._submitted = 0
         self._projected = 0
         self._failures = 0
+        self._inline_fallbacks = 0
         self._publish_seq = 0
         self._published_seq = 0
         self._publish_epoch += 1
