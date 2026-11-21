@@ -1482,6 +1482,29 @@ def shrink_violations(
             continue  # scaffolding on BOTH sides: a placeholder that stayed a placeholder
         key = (MODULE, module)
         if key in working:
+            frozen = str(working[key].get("file") or "")
+            if stubbed and frozen.endswith(".pyi"):
+                # ⛔ A ROW THAT FROZE THE STUB IS NOT A RECORD (fresh-context review of PR #14039,
+                # P0). `_module_source`'s `.pyi` fallback resolves the stub whenever the only
+                # file left is `x.pyi`, so the writer can freeze `def f1() -> int: ...` as the
+                # SOURCE OF RECORD for a module whose statements this same run reports as
+                # removed — and crediting the row on EXISTENCE then reads "the removal has its
+                # record" over a record holding no code. `_init_carries_a_body` cannot be reused
+                # as the test: it is an AST question and a stub IS statements (`def f1() -> int:
+                # ...`), while arm 1b's own rule above is that a `.pyi` stub is NEVER runtime
+                # code — the two arms of one tool disagreeing about the same file is the hole.
+                # The condition is exactly `stubbed` (a runtime carrier at the base, only a stub
+                # here) AND a frozen `.pyi`, so the legit stub-only module — whose BASE carrier
+                # was a `.pyi` too, making `stubbed` False — never reaches this branch.
+                out.append(
+                    f"{module}: THE RECORD FROZE A STUB — {base_label} carried the module's "
+                    f"statements in `{base_carrier}`, this tree carries only the `.pyi` stub "
+                    f"`{head_carrier}`, and the `module` row present records `{frozen}`, which "
+                    "is that stub. This run reports the module body removed and then credits a "
+                    "record that holds none of it, which is the false PASS `archive/` exists to "
+                    "prevent (#12402). "
+                    f"{MODULE_ROUTE}"
+                )
             continue  # an entry of the right kind names it: the removal has its record
         if key in waivers:
             used.add(key)
@@ -2050,7 +2073,7 @@ def _module_source(root: Path, symbol: str) -> list[tuple[str, str, str | None]]
     # file.
     #
     # The legitimate package shape is unaffected (the `tortoise/__init__.py` this fallback was
-    # built for carries 406 statements), and so is the `.pyi` fallback above/below (a stub-only
+    # built for carries 406 lines (12 top-level statements)), and so is the `.pyi` fallback above/below (a stub-only
     # module's only code IS the stub). The route this refusal names is the one
     # `archive/README.md` already gives: restore the source from the base, archive it, then
     # delete it again in the same batch.

@@ -1434,6 +1434,80 @@ def test_a_module_replaced_by_a_pyi_STUB_is_a_removal(tree: Path) -> None:
     assert ".pyi" in removed[0], f"the violation must name the stub it graded: {removed[0]}"
 
 
+def test_a_module_row_that_froze_the_STUB_is_not_a_record(tree: Path) -> None:
+    """A row whose FROZEN FILE is the stub records nothing (fresh-context review, P0).
+
+    `_module_source`'s `.pyi` fallback resolves the stub when the only file left is `x.pyi`, so
+    the writer could freeze `def value() -> int: ...` as the SOURCE OF RECORD for a module whose
+    body this same run reports as removed — and the credit rule above (`if key in working:
+    continue`) then read "the removal has its record" over a record holding no code. Every arm
+    green, the removed body in no file under `archive/`: the false PASS `archive/` exists to
+    prevent.
+
+    ⛔ `_init_carries_a_body` cannot be the test here even though it guards the sibling scaffold
+    shape: it is an AST question, and a stub IS statements. Arm 1b's own rule is that a `.pyi` is
+    never runtime code, so the credit rule asks THAT question instead.
+
+    Discriminating: removing the `stubbed and frozen.endswith(".pyi")` arm leaves this row with
+    no violation (the row silently credits), and the negative control below stays green either
+    way — so this row cannot pass on the arm being absent.
+    """
+    (tree / "tortoise" / "stubby.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/stubby.py")
+    subprocess.run(["git", "rm", "-q", "tortoise/stubby.py"], cwd=tree, check=True)
+    stub = "def value() -> int: ...\n"
+    (tree / "tortoise" / "stubby.pyi").write_text(stub, encoding="utf-8")
+    frozen = tree / "archive" / "modules" / "batch-a" / "tortoise.stubby.pyi"
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    frozen.write_text(stub, encoding="utf-8")
+    arch.save_manifest(
+        {
+            "entries": [
+                _entry(
+                    arch.MODULE,
+                    "tortoise.stubby",
+                    file="archive/modules/batch-a/tortoise.stubby.pyi",
+                )
+            ]
+        },
+        tree / "archive" / "MANIFEST.json",
+    )
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    froze = [p for p in problems if "THE RECORD FROZE A STUB" in p]
+    assert froze, f"a row that froze the stub must not credit the removal: {problems}"
+    assert "tortoise.stubby" in froze[0], froze[0]
+    assert ".pyi" in froze[0], f"the violation must name the stub it found: {froze[0]}"
+
+
+def test_a_module_row_that_froze_the_REAL_body_is_still_credited(tree: Path) -> None:
+    """The negative control for the row above, on the same shape.
+
+    Same base, same stub left in the tree, same `stubbed` — only the FROZEN FILE differs (the
+    real `.py` body instead of the stub), which is exactly the question the new arm asks. If the
+    arm keyed on `stubbed` alone, or on the row merely existing, this legitimate record would
+    red and `archive/README.md`'s own restore-and-freeze route would stop working.
+    """
+    (tree / "tortoise" / "stubby.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/stubby.py")
+    subprocess.run(["git", "rm", "-q", "tortoise/stubby.py"], cwd=tree, check=True)
+    (tree / "tortoise" / "stubby.pyi").write_text("def value() -> int: ...\n", encoding="utf-8")
+    arch.save_manifest(
+        {"entries": [_entry(arch.MODULE, "tortoise.stubby")]},
+        tree / "archive" / "MANIFEST.json",
+    )
+    frozen = tree / _entry(arch.MODULE, "tortoise.stubby")["file"]
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    frozen.write_text("def value():\n    return 1\n", encoding="utf-8")
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    assert not [p for p in problems if "THE RECORD FROZE A STUB" in p], (
+        f"a row holding the real body is the legitimate record and must not red: {problems}"
+    )
+
+
 def test_a_module_body_replaced_by_UNPARSEABLE_text_is_a_removal(tree: Path) -> None:
     """A body that no longer parses holds no statements a caller can reach (round-6 review).
 
