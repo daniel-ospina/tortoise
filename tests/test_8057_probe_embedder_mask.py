@@ -51,8 +51,14 @@ ROOT = Path(__file__).resolve().parent.parent
 #: The probe modules whose availability gate writes a point at import time.
 #: A registry, not a claim: `test_probe_census_matches_the_declared_set` reads
 #: the source and fails when this tuple and the code disagree in either
-#: direction, so a new module-level `create_point` probe cannot ride along
-#: unseen.
+#: direction — so a new module-level point-write probe that the census can SEE
+#: cannot ride along unseen.
+#: ⛔ The bound is what the census implements, not everything a probe could be
+#: (review P2): it scans `tests/**/test_*.py` (so a probe in a `conftest.py` or a
+#: non-test helper module is outside it), and it matches `ast.Attribute` CALLS
+#: whose name is in `_PROBE_WRITE_DOORS` (so an aliased door — `f = sdk.create_entity;
+#: f(…)` — is too). Stated, not hidden: the clause above used to claim a probe
+#: "cannot ride along unseen" without either bound named.
 PROBE_MODULES = (
     "tests/test_assembly_sdk.py",
     "tests/test_assembly_fixtures.py",
@@ -64,7 +70,12 @@ PROBE_MODULES = (
 #: as gone. `create_entity("point", …)` is the consolidated door (#888 W2) and
 #: RELAYS to `create_point` (#13899 retired the public spelling; the private
 #: `_create_point` remains) — both reach `encode_for_store`.
-_PROBE_WRITE_DOORS = ("create_point", "create_entity")
+#: ⛔ `_create_point` IS IN THE TUPLE (review P2). The comment above already said
+#: the private spelling remains, and it is by far the most common spelling a
+#: migrating lane reaches for (thousands of sites across the suite), so leaving
+#: it out meant a module-level `sdk._create_point(…)` probe was invisible to a
+#: census whose whole job is to notice exactly that.
+_PROBE_WRITE_DOORS = ("create_point", "create_entity", "_create_point")
 
 #: Import a probe module in a FRESH interpreter with both embedder seams
 #: replaced by doubles that RECORD the call and return None. A lane imports the

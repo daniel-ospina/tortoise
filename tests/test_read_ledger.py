@@ -397,13 +397,21 @@ def test_the_three_hooked_row_paths_feed_the_ledger(hooked_sdk):
 
     * `_paginated_query()` IS caller-facing: `list_knowledge(kind="claim")`
       dispatches it with recording ON, so every row it returns is a caller read.
-    * `_query()` has NO caller-facing recording route after #13899 retired the
-      public spelling. All three production call sites pass
-      `_record_reads=False` (`issue_insight`, the FTS TF-IDF fallback and
-      `recall_gaps` — the #7983 capture carve-out), so the
-      `_ledger_record("Point", …)` at the end of `_query` is reachable only from
-      a test. The row still pins that DEFAULT, because it is what any future
-      caller-facing door inherits.
+    * `_query()` IS caller-facing, and through a route #13899 did NOT retire:
+      `tortoise/tortoise_client.py`'s `query_prior_research` /
+      `query_existing_strategies` / `query_existing_visions` call
+      `_query(kind=…)` and take the door's DEFAULT (`_record_reads=True`), so
+      their reads are recorded — the `_ledger_record("Point", …)` at the end of
+      `_query` is live on a real caller path. The three SDK-internal population
+      scans (`issue_insight`, the FTS TF-IDF fallback and `recall_gaps` — the
+      #7983 capture carve-out) pass `_record_reads=False`. The row pins that
+      DEFAULT, which is what the caller-facing routes and any future door
+      inherit.
+      ⛔ An earlier draft of this bullet said `_query` had NO caller-facing
+      recording route after #13899. It does (above), and the error was the
+      dangerous direction: it invites deleting the `_ledger_record` call, which
+      would stop recording real `tortoise_client` reads and bias `f` HIGH — the
+      one direction this file's header forbids.
     * `_query_points_by_tag()` is reached by `search_knowledge(mode="tag")` with
       `_record_reads=False`, and that container records the page it SERVES
       itself (the MCP tag tool does the same two steps) — so the door default is
@@ -766,8 +774,10 @@ def test_an_internal_population_scan_is_not_recorded_as_a_read(hooked_sdk):
     """`recall_gaps` / `issue_insight` / the FTS fallback scan the WHOLE stock.
 
     They call `_query(_record_reads=False)` to do it (the door `query` retired
-    into; no production caller reaches it with recording ON), so recording them
-    would mark every Point read after one `recall_gaps()` call — `f` → ~1, the exact contamination excluding
+    into). `_query` IS caller-facing with recording ON elsewhere
+    (`tortoise_client`'s `query_prior_research` / `query_existing_strategies` /
+    `query_existing_visions` take the default), which is exactly why these
+    population scans have to opt OUT explicitly: recording them would mark every Point read after one `recall_gaps()` call — `f` → ~1, the exact contamination excluding
     `_get_point` prevented, and it would silently invalidate the one-directional
     "the gaps bias `f` LOW" caveat the docs rest on.
     """

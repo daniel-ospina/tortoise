@@ -1419,13 +1419,18 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # the brief's own number, so the two cannot drift apart.
     # ⛔ RE-DERIVED AGAIN (main-red, un-red lane): #13994 (`e0accb8fe6`) inserted
     # +24 net lines into `tortoise/projection/__init__.py` ABOVE all three rows —
-    # the `#11682` `("Point", "quote", "FULLTEXT")` entry and its comment — so the
-    # pin and §1 of the brief both had to move by +24 (21018→21042, 21461→21485,
-    # 21903→21927). Nothing about the mechanism moved: the SYMBOLS are identical,
-    # only the line numbers, which is exactly the drift this pin exists to make
-    # visible, and it is why the remedy is to re-derive the numbers rather than to
-    # relax the equality. The pin asserts the brief's own number, so the two cannot
-    # drift apart.
+    # a 24-line `#13971` SNAPSHOT-RESTORE comment block at `:17439` (it records
+    # why the restore is never vector-gated), so the pin and §1 of the brief both
+    # had to move by +24 (21018→21042, 21461→21485, 21903→21927). Nothing about
+    # the mechanism moved: the SYMBOLS are identical, only the line numbers, which
+    # is exactly the drift this pin exists to make visible, and it is why the
+    # remedy is to re-derive the numbers rather than to relax the equality. The
+    # pin asserts the brief's own number, so the two cannot drift apart.
+    # ⛔ The block is that comment at `:17439`, NOT the `("Point", "quote",
+    # "FULLTEXT")` entry: that entry was already there at `e0accb8fe6^:21014`,
+    # added by #13322 (`5f6ed5ae6a`). An earlier draft of this note attributed the
+    # +24 to it, which sends the next re-derivation looking for a change the named
+    # commit does not make.
     ("tortoise/projection/__init__.py", 21042, '("Object", "name", "FULLTEXT")',
      "`tortoise/projection/__init__.py:21042`"),
     ("tortoise/projection/__init__.py", 21485, "def _create_fulltext_index(",

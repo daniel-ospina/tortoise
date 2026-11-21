@@ -106,18 +106,32 @@ class TestDe2e7:
         # The retired doors still DRIVE their SDK methods, which is what makes each
         # container above the same answer rather than a new capability.
         #
-        # ⛔ THE PROPERTY IS "RESOLVES", NOT THE SPELLING (#14114). This pinned the
-        # PUBLIC names `promote_point` / `belief_timeline`, and #13899's final batch
-        # retired those from the SDK's public surface while KEEPING the doors
-        # internally — so the registry went to `_promote_point` / `_belief_timeline`
-        # (#13899, `tortoise/tool_registry.py`) and this pin kept asserting a door the
-        # retirement had removed. A stale spelling is not a cosmetic rot: the claim
-        # this line makes is that the retired shim still reaches a real SDK door, so
-        # the assertion is that the declared `sdk_method` RESOLVES AND IS CALLABLE on
-        # the SDK. A future rename keeps it green; a door that stops existing reds.
+        # ⛔ THE PROPERTY IS "RESOLVES TO THE DOOR IT NAMES", NOT THE SPELLING
+        # (#14114). This pinned the PUBLIC names `promote_point` / `belief_timeline`,
+        # and #13899's final batch retired those from the SDK's public surface while
+        # KEEPING the doors internally — so `tortoise/tool_registry.py` went to
+        # `_promote_point` / `_belief_timeline` and this pin kept asserting a door
+        # the retirement had removed.
+        #
+        # ⛔ AND A BARE `callable(getattr(…))` IS NOT THE PROPERTY EITHER (review
+        # P2). It would stay green if the shim were re-pointed at ANY existing
+        # callable (`list_knowledge`, say) — a retired door silently driving a
+        # DIFFERENT capability, which is exactly what "the same answer" forbids.
+        # Nothing else pins these two bindings: `tests/test_surface_manifest.py`
+        # compares `use_instead` only, `tests/test_retired_tools.py` only checks
+        # `hasattr`, and `tests/test_surface_resolution.py` covers `TOOL_REGISTRY`,
+        # not the retired one. So the door FAMILY is pinned here — the private
+        # spelling and its public twin both accepted, which is the rename tolerance
+        # #13899 needed — and the resolve check makes a door that stops existing
+        # red instead of passing.
         retired_by_name = {t.name: t for t in RETIRED_TOOL_REGISTRY}
-        for door in ("tortoise_promote_point", "tortoise_belief_timeline"):
+        for door, expected in (("tortoise_promote_point", "_promote_point"),
+                              ("tortoise_belief_timeline", "_belief_timeline")):
             method = retired_by_name[door].sdk_method
+            assert method in (expected, expected.removeprefix("_")), (
+                f"`{door}` declares sdk_method={method!r} — it must drive "
+                f"{expected!r} (or its public twin), or the retired shim answers a "
+                "different capability than the container that replaced it")
             assert callable(getattr(TortoiseSDK, method, None)), (
                 f"`{door}` declares sdk_method={method!r}, which does not resolve "
                 "on TortoiseSDK — the retired door would raise at call time "
