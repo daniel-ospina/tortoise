@@ -2070,11 +2070,22 @@ def test_the_control_binds_the_shared_helpers(monkeypatch):
     sites to a byte-faithful local copy left the whole item GREEN (`1 passed`), because the
     `folding` sites alone lit `used["env_source"]`. Only a call whose immediate caller is one of
     the control's code objects counts (`co_consts`-recursive: the body, its lambdas, its nested
-    defs and genexprs — a nested FORWARDER that really calls the helper is a legitimate use).
+    defs and genexprs — a nested FORWARDER that really calls the helper is a legitimate use) —
+    ⛔ EXCEPT for `_env_source`, where the body is excluded and so is any call that ORIGINATED
+    inside the control: see the two `⛔ AND …` clauses below.
     ⛔ AND NOT THE CONTROL'S OWN BODY for `_env_source` (`#14099`, review of `710565ab14`): the
     live fallback calls arrive from an INSTALLED FAKE only, so an in-body `_env_source(...)` line
     is a DEAD decoy — measured, reverting both `served(...)` sites AND adding one such line was
     GREEN before this clause.
+    ⛔ AND THE CALL MUST ARRIVE FROM **OUTSIDE** THE CONTROL (`#14099`, measured at `ac825bc0`):
+    "a control code object and not the body" is decoyable one level in — a single
+    `(lambda: served(module))()` line, or a nested `def`, re-armed the flag with BOTH `served(...)`
+    sites reverted (both measured GREEN). Scoping to the code object is therefore only half the
+    property; the other half is that a REAL `served` call arrives from the control's installed
+    fake, i.e. its GRANDCALLER is the walker in `strip`, never the control. So a counted call is
+    one whose immediate caller is a control code object other than the body AND whose grandcaller
+    is not in the control at all — which no nesting inside the control can satisfy, and which the
+    honest tree does (measured: the only such grandcallers are `_writer_register_population`).
     ⛔ NOT a `return`: returning the wiring from a test function makes pytest warn
     (`PytestReturnNotNoneWarning`), and a module-level side channel would outlive the test.
 
@@ -2118,7 +2129,21 @@ def test_the_control_binds_the_shared_helpers(monkeypatch):
         # so an in-body `_env_source(...)` line is a DEAD decoy: measured, the full `served`
         # revert plus one such line was GREEN. The `folding` spy deliberately has no such clause —
         # ITS legitimate calls come from the body.
-        if caller_code in control_codes and caller_code is not control_code:
+        # ⛔ AND THE GRANDCALLER MUST BE OUTSIDE THE CONTROL (`#14099`, measured at `ac825bc0`):
+        # excluding only the body left the same one-line decoy one level in — a nested lambda or
+        # def calling `served(...)` IS a control code object, so both a `(lambda: served(module))()`
+        # line and a nested `def` re-armed the flag with BOTH `served(...)` sites reverted
+        # (measured: GREEN both times). A real fallback call has `_writer_register_population` as
+        # its grandcaller, so requiring that frame to be OUTSIDE the control re-arms nothing.
+        try:
+            grandcaller_code = sys._getframe(2).f_code
+        except ValueError:  # the caller was a top-level frame; nothing above it
+            grandcaller_code = None
+        if (
+            caller_code in control_codes
+            and caller_code is not control_code
+            and grandcaller_code not in control_codes
+        ):
             used["env_source"] = True
         return real_env_source(*args, **kwargs)
 
