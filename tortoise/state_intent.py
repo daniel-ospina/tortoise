@@ -419,12 +419,37 @@ _BLOCKED_TAIL = (
 #: clause's own passive, and the closed verb list was only ever a proxy for it. The
 #: class is pinned in `NOT_SELECTED` + `NOTICE_ONLY` (`… the vendor will have been
 #: deprecated`), so re-narrowing it to the bare auxiliaries reds a row.
+#:
+#: ⛔ AND THE SUBORDINATOR LIST OMITTED THE COMPLEMENTIZERS (round-14 review, P1).
+#: `whether`, `once` and `whereas` introduce no relative clause on the head and were
+#: simply absent, so the class this guard exists for routed through the one spelling
+#: the list did not name:
+#:
+#:   `has anyone asked whether the old plan has been archived`
+#:   `has anyone said that our launch plan has been withdrawn`
+#:   `has anyone noted which endpoint has been deprecated`
+#:
+#: All three were answered with the WHOLE ended population and the caller's own
+#: predicate (`asked`, `said`, `noted`) silently dropped — the fail-open round 8
+#: closed for `since`/`because`, in the spelling the list did not carry. They are
+#: pinned in `NOT_SELECTED` + `NOTICE_ONLY` so this cannot re-open quietly.
+#:
+#: ⛔ THE RELATIVIZERS (`that|which|who|whom|whose`) ARE GUARDED, NOT LISTED, and the
+#: difference is measured rather than stylistic: a relative clause on the head IS the
+#: documented legitimate content of this window (`:176`), so
+#: `has anything that the board approved been superseded` must keep ROUTING. What
+#: makes the three rows above fail open is a WORD BEFORE the relativizer — the head
+#: clause's own verb (`asked`, `noted`) — so the lookahead requires it, and the
+#: quantifier's own relativizer, directly adjacent with no preceding word inside this
+#: span, still routes. That row is pinned in the routing table, so a blanket widening
+#: of this guard reds instead of quietly costing it.
 _EXISTENCE_HEAD = (
     r"\b(?:has|have|had)\s+(?:any|anything|someone|something|everything|anyone)\b"
 )
 _EXISTENCE_GUARD = (
     r"(?![^?]{0,60}?\b(?:because|since|when|while|after|before|now|if|unless|given|"
-    r"as|where|so|but|although|though|until)\b)"
+    r"as|where|so|but|although|though|until|whether|once|whereas)\b)"
+    r"(?![^?]{0,60}?\b[a-z0-9][a-z0-9'’._/-]*\s+(?:that|which|who|whom|whose)\b)"
     r"(?![^?]{0,60}?\b(?:the|a|an|its|his|her|their|our|your|my|these|those|this|"
     r"that)\s+[a-z0-9][a-z0-9'’._/-]*\s+"
     r"(?:has|have|had|is|are|was|were|will|would|can|could|did|does|do|may|might|"
@@ -516,9 +541,14 @@ _WHICH_PREFIX = (
 #: left open for yes/no questions.
 #:
 #: So the subject is bounded the way `which_predicate` bounds its head noun: an
-#: optional determiner plus ONE to FOUR contiguous lowercase words. A clause needs a
-#: SUBORDINATOR (`because`, `that`, `when`, `since`, `given`, `now`, `if`, …) and a
-#: second finite verb, and neither fits inside a four-word noun phrase — so the
+#: optional determiner plus ONE to FOUR contiguous lowercase words.
+#: ⛔ THE BOUND IS NOT SUFFICIENT ON ITS OWN, and the justification that said it was
+#: is the round-14 review's P3. It read "a clause needs a SUBORDINATOR (`because`,
+#: `that`, …) and a second finite verb, and neither fits inside a four-word noun
+#: phrase" — measured FALSE: `is the plan that the board archived` carries a
+#: subordinator inside the four-word bound and ROUTED, because `archived` reads as the
+#: relative clause's verb and the question has no predicate of its own. So the bound is
+#: paired with an explicit subordinator/relativizer lookahead INSIDE it, and then the
 #: participle is the question's own predicate again, which is the whole claim. The
 #: recall given up is stated rather than discovered: a subject with a modifier
 #: clause inside it (`is the onboarding flow, as agreed in March, retired`) keeps the
@@ -532,6 +562,17 @@ _WHICH_PREFIX = (
 #: unreported. The input is already lower-cased, so the old class bought
 #: case-insensitivity and nothing else.
 _COPULA_SUBJECT = (
+    # …the lookahead is the round-14 P3 guard: a SUBORDINATOR anywhere inside the
+    # bounded subject means the ending participle belongs to somebody else's clause,
+    # so the shape must not fire on it (`is the plan that the board archived`).
+    # ⛔ IT REQUIRES A PRECEDING WORD (`{1,5}`, not `{0,5}`), and that is a measured
+    # correction: `that` is ALSO the subject's own DETERMINER, so the first cut fired
+    # on `is that endpoint deprecated` and refused a legitimate state question. A
+    # subordinator cannot open a noun phrase, so a word before it is the
+    # discriminator — the same rule the `existence` relativizer guard states.
+    r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){1,5}"
+    r"(?:that|which|who|whom|whose|whether|because|since|when|while|if|unless|given|"
+    r"where|whereas|after|before|now)\b)"
     r"(?:(?:the|our|my|its|their|these|those|this|that|all|your)\s+)?"
     r"[a-z0-9][a-z0-9'’._/-]*(?:\s+[a-z0-9][a-z0-9'’._/-]*){0,3}"
 )

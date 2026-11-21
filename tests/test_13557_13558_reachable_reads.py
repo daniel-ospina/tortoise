@@ -183,6 +183,15 @@ SELECTED = [
     # …and the example the ``existence`` docstring gives, made executable so the
     # contract it states cannot drift from the words it cites (round-4 review P3).
     ("have any claims been retracted", "ended", "existence"),
+    # …and the RELATIVE CLAUSE on the head, which the round-14 relativizer guard must
+    # NOT refuse: `that` directly after the quantifier modifies it, so this is the
+    # window's DOCUMENTED legitimate content (`state_intent.py:176`) and the question
+    # really does ask about the ended population. Pinned HERE because the round-14 fix
+    # added a relativizer lookahead, and a blanket widening of it (adding
+    # `that|which|…` to the subordinator alternation instead of requiring a preceding
+    # word) costs this row — measured: widened that way the row returns
+    # `population=None, signal='existence_unguarded'`.
+    ("has anything that the board approved been superseded", "ended", "existence"),
     ("what ended", "ended", "wh_whole_question"),
     ("what ended?", "ended", "wh_whole_question"),
     ("what has been withdrawn", "ended", "wh_whole_question"),
@@ -494,6 +503,27 @@ NOT_SELECTED = [
     "have any claims been retracted in Q3",
     "have any of our bookings been cancelled by the venue",
     "has anything we promised been withdrawn by legal",
+    # ── the COMPLEMENTIZER class on `existence` (round-14 review, P1) ────────
+    # The subordinator list named `because`/`since`/`when`/… but not `whether`,
+    # `once`, `whereas`, and guarded the relativizers only via the asyndetic
+    # lookahead — so these three ROUTED to the whole ended population with the
+    # caller's own predicate (`asked`, `said`, `noted`) silently dropped. Measured
+    # at the pre-fix head: all three `population='ended', shape='existence'`. They are
+    # pinned in BOTH lists — NOT_SELECTED asserts the population stayed None, and
+    # NOTICE_ONLY (below) asserts the notice is emitted — because the cue is real
+    # (`has … been <ended>`) and only the clause guard refuses it, so the read must
+    # report rather than go silent.
+    "has anyone asked whether the old plan has been archived",
+    "has anyone said that our launch plan has been withdrawn",
+    "has anyone noted which endpoint has been deprecated",
+    # …and the `is_copula` twin of the same defect (round-14 review, P3): a
+    # subordinator INSIDE the four-word subject bound, which the stated justification
+    # claimed could not fit. The question's predicate is the relative clause's
+    # `archived`, not a state the caller asked about. It is pinned in NOT_SELECTED and
+    # NOT in NOTICE_ONLY on purpose: the copula signal row's own lookahead already
+    # refuses to report a subject that carries a subordinator (`_COPULA_LONG_SUBJECT`),
+    # so this row's remedy is the unchanged relevance read and nothing else.
+    "is the plan that the board archived",
     # …the same class on the `which` shape, which is the row the pre-fix detector
     # also served (round-3 review, P1: *"`which claims were retracted by legal`
     # → `by legal` dropped"*). It is pinned HERE because the user-facing MCP
@@ -582,6 +612,14 @@ NOTICE_ONLY = [
     "have any users noticed the vendor will have been deprecated",
     "is the SOC2 audit and its evidence package archived",
     "is the onboarding flow and its partner variants retired",
+    # …and the COMPLEMENTIZER spellings of the class above (round-14 review, P1).
+    # `whether`/`that`/`which` name the subordinate clause, the ending participle is
+    # that clause's, and the population cannot answer a question about `asked`/`said`/
+    # `noted` — so the cue is REPORTED and never routed, which keeps the precision
+    # contract while the caller still learns a cue was seen.
+    "has anyone asked whether the old plan has been archived",
+    "has anyone said that our launch plan has been withdrawn",
+    "has anyone noted which endpoint has been deprecated",
 ]
 
 
