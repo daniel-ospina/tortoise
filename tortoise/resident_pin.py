@@ -457,7 +457,26 @@ class PinReading:
         declaration can name and the identity the node survives a rebuild under. A
         candidate with no key cannot be matched, and is left to the evictor's own
         undeletable rule rather than guessed at here.
+
+        ⛔ AND IT REFUSES THE TWO STATES THAT MUST NOT DELETE. Returning the comparison
+        unconditionally was a fail-open on this door: for ``readable=False`` the closure is
+        empty, so the predicate answers "nothing is pinned" and a caller that skipped
+        :meth:`gate_reason` deletes the entire pinned population while the report reads
+        ``held_pinned: 0``; for ``truncated=True`` the closure is PARTIAL, so it deletes
+        exactly the pinned nodes past the read bound — the one thing this control promises
+        cannot happen. Every production caller checks ``gate_reason()`` first
+        (``tools/cache_evict.py`` does), but ``read(g).gate()`` is the natural low-level
+        spelling — this PR's own tests use it — so the door must not depend on the caller
+        remembering. The refusal is the module's own (``PinRefused``), so a caller that
+        catches it lands on the same code as :func:`pin`/:func:`unpin`.
         """
+        if not self.readable or self.truncated:
+            raise PinRefused(
+                self.gate_reason()
+                or ("the pin set could not be read in full, so a gate built from it "
+                    "would delete what it cannot see"),
+                code="unreadable" if not self.readable else "truncated",
+            )
         held = self.closure
         return lambda candidate: candidate.key is not None and candidate.key in held
 

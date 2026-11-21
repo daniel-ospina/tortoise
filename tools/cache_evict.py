@@ -484,8 +484,20 @@ def main(argv: list[str] | None = None) -> int:
         # ever emits it.
         "metric": report.metric(),
         "census": assessment.as_dict(),
-        "pins": {**pins.as_dict(), "applied": pinned_gate is not None,
-                 "not_applied_reason": pin_note},
+        # ⛔ `applied` IS `None` WHEN THERE IS NOTHING TO APPLY, not `False`. With no
+        # declaration `pinned_gate` stays `None` and the reason is empty, so `False` beside
+        # `""` was an alarm with no cause — on every clean sweep of an unpinned graph — and
+        # `False` is otherwise emitted only on the wrong-key-space path, where it always
+        # carries a sentence. A monitor keys on this field; it must distinguish "not
+        # applicable" from "needed and not applied", the same split `metric()` makes for
+        # `degraded_snapshot_invalidated`.
+        "pins": {
+            **pins.as_dict(),
+            "applied": (pinned_gate is not None) if pins.keys else None,
+            "not_applied_reason": pin_note or (
+                "" if pins.keys else "no pin declaration — nothing to apply"
+            ),
+        },
     }
     _emit(body, args.out)
 

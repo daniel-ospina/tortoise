@@ -361,6 +361,23 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.verb == "show":
             reading = resident_pin.read(graph, budget=budget)
+            # ⛔ `show` ACCEPTS `--label`/`--key-prop` (they are on the shared flag set)
+            # and used to IGNORE both, while their help promises the contract key and a
+            # refusal — so `show --key-prop bogus` exited 0 where the help says it
+            # refuses, and `show --label Source` on a `Point` declaration answered `OK`
+            # about a population the operator named and the verb never consulted: the
+            # same "answered about a population they never named" defect this PR fixed
+            # one verb over. A named pair that DISAGREES with the declaration is a usage
+            # error; naming none is fine.
+            for named, actual, what in (
+                    (args.label, reading.label, "--label"),
+                    (args.key_prop, reading.key_prop, "--key-prop")):
+                if named is not None and actual and named != actual:
+                    parser.error(
+                        f"{what} {named!r} names a different population than the "
+                        f"declaration's ({actual!r}) — `show` reports ONE declaration, so "
+                        f"name its own pair or none"
+                    )
             refusal = reading.gate_reason()
             # ⛔ `cap_checked` EXISTS BECAUSE THE VERDICT CANNOT CARRY THIS ON ITS OWN.
             # With no resolvable budget (a lowered-but-unreadable window, or a window too
