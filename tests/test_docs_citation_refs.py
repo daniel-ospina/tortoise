@@ -3561,14 +3561,20 @@ def _d5_flag_word(text: str) -> tuple[str, str] | None:
         # there, which makes `option[-1] in _ARG_TAKING_SHORT_FLAGS` unreachable-True: the
         # `(option, rest)` branch was dead. Measured, zero exceptions: instrumented over every
         # 1-3 character alphanumeric cluster, over 6,055,850 enumerated tokens, and over this
-        # repo's own docs corpus (950 reaches) the branch never fired, and
+        # repo's own docs corpus the branch never fired, and
         # `_d5_flag_word` / `_d5_blank_class_prescriptions` / `_d5_count_prescriptions` are
         # unchanged by its removal. The file's own rule bans a member nothing can reach, and the
         # one spelling the test was written for (`-e^[+-]$`) is read by the split one branch up.
         # ⛔ NO TOKEN TOTAL IS STATED: the reach count is always a multiple of the number of
         # clusters with no argument-taking character in `option[1:]`, so a total-and-hits pair is
         # arithmetic that can silently stop agreeing — which the previous cut of this comment
-        # demonstrated by getting it wrong (#14027, P3).
+        # demonstrated by getting it wrong (#14027, P3). ⛔ AND THE CORPUS SWEEP'S RESULT IS STATED
+        # WITHOUT A REACH COUNT, FOR THE SAME REASON (#14027 review of this head, P3 — MEASURED):
+        # the sweep needs a naive whitespace splitter while the reader's own `_d5_words` yields 0
+        # by construction, so repeated sweeps of the same corpus answered anywhere from 927 to 947
+        # depending on the tokeniser, and this line used to carry one such figure. What is
+        # reproducible is the claim it supported — the branch never fires — so that is what is
+        # stated.
         return None
     if option.startswith("--"):
         if rest.startswith("="):
