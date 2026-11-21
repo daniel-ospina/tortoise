@@ -940,6 +940,119 @@ def test_no_record_percentage_is_outside_the_artifact():
 _CROSS_RUN_FIGURES = {"0.4"}
 
 
+def _provenance_cells() -> dict[str, str]:
+    """The Provenance block's `key -> value` cells, in file order."""
+    lines = README.read_text().splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.strip() == "## Provenance")
+    out: dict[str, str] = {}
+    for ln in lines[start:]:
+        if ln.startswith("## ") and ln.strip() != "## Provenance":
+            break
+        if not ln.startswith("|") or "---" in ln:
+            continue
+        cells = [c.strip() for c in ln.strip("|").split("|")]
+        if len(cells) == 2 and cells[0]:
+            out[cells[0]] = cells[1]
+    return out
+
+
+def test_the_provenance_cells_are_the_artifacts():
+    """The Provenance block's counts, cell by cell (#14162 review F2).
+
+    The ten FIGURE tables are recomputed by the pin above; this block is keyed rather
+    than tabular, so it was the one table above §10 that nothing read — and its counts
+    are EXACTLY the ones this record says move between runs on a live corpus
+    (`definite` names 156,106 -> 156,148 observed; the artifact now holds 156,510).
+    Without this pin the next re-cut leaves a stale `156,510` beside an artifact that
+    does not hold it, with every other pin green — the drift class this PR closes.
+    """
+    art = _artifact()
+    c = art["corpus"]
+    cells = _provenance_cells()
+
+    def nums(key: str) -> list[str]:
+        # `\d[\d,]*` — a comma is only part of a number when a digit precedes it;
+        # the bare `,` separators in these sentences are not cells.
+        return re.findall(r"\d[\d,]*", cells[key])
+
+    # corpus: files / lines / parse errors, in the order the sentence states them.
+    assert nums("corpus") == [f"{c['corpus']['files']:,}", f"{c['corpus']['lines']:,}",
+                              f"{c['corpus']['parse_errors']:,}"], (
+        f"Provenance/corpus prints {nums('corpus')}, artifact holds "
+        f"{[c['corpus']['files'], c['corpus']['lines'], c['corpus']['parse_errors']]}")
+
+    # populations: the recorded funnel, then `:Object`'s node count.
+    b = c["point_build"]
+    funnel = [b["built"], b["requested"], b["too_short"], b["no_span"],
+              b["sanitised_out"], b["duplicate_span"]]
+    assert [int(n.replace(",", "")) for n in nums("populations")[:6]] == funnel, (
+        f"Provenance/populations prints {nums('populations')[:6]}, artifact funnel is {funnel}")
+    assert int(nums("populations")[6].replace(",", "")) == art["labels"]["object"]["nodes"], (
+        f"Provenance/populations states :Object {nums('populations')[6]}, "
+        f"artifact built {art['labels']['object']['nodes']}")
+
+    # harvest: the three names_harvested counts.
+    h = c["names_harvested"]
+    assert nums("harvest") == [f"{h['definite']:,}", f"{h['ident']:,}", f"{h['path']:,}"], (
+        f"Provenance/harvest prints {nums('harvest')}, artifact holds "
+        f"{[h['definite'], h['ident'], h['path']]}")
+
+    # windows: the SHIPPED values, which this instrument reads and never sets.
+    w = art["windows"]["mb"]
+    assert nums("windows") == [str(w["solo"]), str(w["pro"]), str(w["team"])], (
+        f"Provenance/windows prints {nums('windows')}, artifact read "
+        f"{[w['solo'], w['pro'], w['team']]}")
+
+
+def test_the_architecture_s_9_2_table_is_recomputed_from_the_artifact():
+    """§9.2's M5 table, cell by cell (#14162 review F3).
+
+    `SEARCH-ARCHITECTURE.md` §9.2 is the design input `#13989` sizes an allowance
+    from, and M2's sibling §9.1 is pinned cell by cell by
+    `tests/test_window_quality_m2.py`. M5's equivalent read only the README, so §9.2
+    could drift alone: mutating `20.9 % / 25.9 %` to `21.9 % / 26.9 %`, or
+    `≈149 / ≈184` to `≈159 / ≈194`, left every pin GREEN before this one existed.
+
+    The cells are recomputed with the SAME two functions the record used —
+    `coverage_for` (the window over the tenant size) and `_interp` (the curve at that
+    coverage) — so the pin holds the METHOD, not just the value.
+    """
+    from tools.miss_rate_m5 import _interp, coverage_for
+
+    art = _artifact()
+    text = ARCH.read_text()
+    header, rows = _table(text, "| tenant graph `S` |", after="§9.2")
+    assert header[1:] == ["solo (77 MB)", "pro (102 MB)", "team (615 MB)"], header
+
+    windows = [art["windows"]["mb"][k] for k in ("solo", "pro", "team")]
+    sizes = [150, 300, 600]
+    assert [row[0] for row in rows] == [
+        ["150 MB (§8's reference estimate)", "300 MB", "600 MB"][i] for i in range(3)]
+
+    for (_label, cells), size_mb in zip(rows, sizes, strict=True):
+        for window_mb, cell in zip(windows, cells, strict=True):
+            want = [_pct(_interp(art["labels"][k]["curve"],
+                                 coverage_for(window_mb, size_mb)))
+                    for k in ("object", "point")]
+            # `c.strip()` FIRST: the cells around `/` carry padding, and a trailing
+            # space would stop the `$`-anchored label strip from matching cell 1.
+            got = [re.sub(r"\s*`:\w+`\s*$", "", c.strip()).strip() for c in cell.split("/")]
+            assert got == want, (
+                f"§9.2/S={size_mb}/W={window_mb}: the doc prints {got}, the artifact gives "
+                f"{want} (`:Object` / `:Point`)")
+
+    # The covered-tenant sentence under the table, from the same artifact block.
+    per = {k: art["labels"][k]["largest_tenant_mb"]["per_window"]["0.10"]
+           for k in ("object", "point")}
+    for needle in (f"≈{_num(per['object']['solo'], 0)} MB", f"≈{_num(per['point']['solo'], 0)} MB",
+                   f"≈{_num(per['object']['team'] / 1000, 2)} GB",
+                   f"≈{_num(per['point']['team'] / 1000, 2)} GB"):
+        assert needle in text, (
+            f"§9.2 states no {needle!r}; the artifact's largest covered tenant is "
+            f"{per['object']['solo']}/{per['point']['solo']} MB solo and "
+            f"{per['object']['team']}/{per['point']['team']} MB team")
+
+
 def test_no_record_pp_figure_is_outside_the_artifact():
     """The `pp` half: doublings and policy deltas are the only two sources."""
     art = _artifact()

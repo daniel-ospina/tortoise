@@ -43,7 +43,7 @@ actually use (`F ≈ 0.5`), ordering residency by usage instead of at random rem
 criterion 1 is worth three times the tariff.
 
 - **Artifact:** [`measurement.json`](./measurement.json)
-- **Instrument:** `tools/miss_rate_m5.py` · **git head:** `5cc6bad05cf2` (the head the run
+- **Instrument:** `tools/miss_rate_m5.py` · **git head:** `3343599d9847` (the head the run
   was performed at; the artifact's `git_head`, pinned against this line and against the
   instrument's bytes at that commit)
 - **Corpus:** `~/.tortoise/session-events/*.jsonl` — 27 files, 738 lines
@@ -200,7 +200,7 @@ the "not nudged in week two" number, because it is a tenant **size**, not a rate
   (`:Object` 10.1 % → 20.9 % at 300 MB; `:Point` 5.2 % → 25.9 %), so a solo tenant past ~150 MB of
   graph is the shape that gets nudged.
 - **team (615 MB): ≈1.2 GB of tenant graph** — `:Object` 1193 MB, `:Point` 1471 MB. Team's window is
-  **4.1×** solo's and the covered tenant size scales with it.
+  **8.0×** solo's and the covered tenant size scales with it (615/77 = 7.99; 1193/149 = 7.99).
 - **The bar is the assumption, not the curve.** Under a stricter bar the same two labels give
   ≈83 MB / ≈108 MB (1 %) and at 20 % ≈284 MB / ≈255 MB. Because no label has a knee (§3), the bar
   **is** the decision, which is why every bar is published rather than one.
