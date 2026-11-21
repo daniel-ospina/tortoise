@@ -972,17 +972,41 @@ class _RecordingGraph:
         return self._inner.query(*args, **kwargs)
 
 
-def test_the_verb_refuses_without_a_cache_graph(monkeypatch, capsys):
+def test_a_DERIVED_cache_graph_is_never_silent(monkeypatch, capsys):
     """A derived cache-graph name is a COHERENT CACHE reported as divergent.
 
     The record's ``--graph`` is a ``graph_id`` scope COLUMN; the cache graph is
     named ``org_<org_id>`` or ``org_<org_id>_<graph_id>``. FalkorDB opens a
     graph on first touch, so the old ``--cache-graph`` default (``--graph``)
     silently read an EMPTY graph: every record key became ``missing_in_cache``
-    and a coherent cache exited ``3``. A refusal that names both conventions is
-    the fail-closed direction.
+    and a coherent cache exited ``3``.
+
+    ⚠️ **SUPERSEDED IN PART BY #13337, and this pin follows the successor rule
+    rather than the old one.** The refusal that used to answer this case existed
+    because DERIVING was the only alternative to guessing — and a derivation is
+    wrong about exactly one graph, an org's default at ``org_<org_id>``. A fact
+    exists now (``public.graphs.namespace``), so the flag is optional WHERE A
+    FACT ANSWERS. What must never come back is the SILENT derivation this test
+    was written against — and, per #13337's own ruling, a GRADED one either: on
+    this shape (no control plane) the verb still refuses, now naming the spelling
+    it would have used. So the assertion is unchanged in substance — both
+    conventions are named, the run says the coordinate would be assumed, and the
+    exit code is still no-verdict — while the message is the actionable one and
+    not the old blanket flag refusal.
     """
     from tortoise import __main__ as cli
+
+    # ⛔ PIN THE CONTROL PLANE OFF (review P3). The verb now asks
+    # `namespace_from_control_plane` unconditionally, and that gate is
+    # `SUPABASE_URL` + a service key in the AMBIENT environment
+    # (`supabase_control.py`). On a box configured for hosted work this row would
+    # read a LIVE control plane, take the fact arm if a `graphs` row existed for
+    # (acme, g1), and fail the DERIVED assertions — the exact "a row that inherits
+    # the BOX's ambient control plane" hazard `test_13337_cache_graph_declaration.py`
+    # names. Stated here rather than inherited.
+    from tortoise import supabase_control
+
+    monkeypatch.setattr(supabase_control, "is_supabase_enabled", lambda: False)
 
     fake = types.ModuleType("psycopg2")
     fake.connect = lambda dsn, **kw: _FakeConn()        # type: ignore[attr-defined]
@@ -993,8 +1017,13 @@ def test_the_verb_refuses_without_a_cache_graph(monkeypatch, capsys):
                    "--org", "acme", "--graph", "g1"])
     err = capsys.readouterr().err
 
-    assert rc == rr.EXIT_UNAVAILABLE, err
     assert "org_<org_id>" in err and "org_<org_id>_<graph_id>" in err, err
+    assert "DERIVED" in err, err
+    assert "org_acme_g1" in err, err
+    assert "--cache-graph is required" not in err, (
+        "the flag is optional now (#13337); the refusal that remains is for a "
+        f"coordinate nothing can answer, and here one was derived: {err}")
+    assert rc == rr.EXIT_UNAVAILABLE, err
     assert "UNKNOWN, not zero" in err, err
 
 
