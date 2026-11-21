@@ -4543,9 +4543,9 @@ def measure_e6(*, packs_dir: Path | str | None = None,
         # so the committed record rendered `unmeasured=<every row> from
         # docs/…/pack-relation-census.json (generated_by: …)` for a column that was never read
         # — the same lie the empty-`packs` arm above closes for an artifact it did not read,
-        # left in its twin. The word is what changes here, as there — and the `not read — `
-        # prefix with it, because the note splices this source into `… from {source}` (round 10:
-        # without it the record read `unmeasured=1 from the census's rows could not be keyed …`).
+        # left in its twin. ⛔ THE `not read — ` PREFIX IS STILL LOAD-BEARING, for a reason that
+        # changed in round 18: it is no longer a splice anchor — it is the RULE KEY both
+        # renderers test, so a path that set a source without it would print counts it never read.
         source = (E6_NOT_READ_PREFIX + "the census's rows could not be keyed beside the column (a row "
                   "field is a collection); its `written` cells are UNMEASURED")
     measurement["written"] = written
