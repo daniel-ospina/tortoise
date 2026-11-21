@@ -374,6 +374,21 @@ NOT_SELECTED = [
     "has legal already retracted",
     "has the customer ever cancelled",
     "have any customers ever cancelled",
+    # ── the PRONOUN SUBJECT on the asyndetic class (#14033 round-14 review, P2) ──
+    # The guard's subject slot was `<determiner> <noun>`, which a pronoun has neither
+    # of, so each of these ROUTED to the whole ended population and dropped the
+    # caller's own predicate (`reported`, `noticed`, `said`) — measured at
+    # `248713d6f4` on the default surfaces. The guard now has a pronoun alternative,
+    # so they are refused (and reported — see NOTICE_ONLY).
+    "have any users reported it has been deprecated",
+    "have any customers noticed they have been cancelled",
+    "have any users said it will have been deprecated",
+    # ── and the VERB-WITH-OBJECT class on the attributive `which` row ───────────
+    # The determiner lookahead is a CLOSED list that stopped at `the|a|an|this|…`, so
+    # `all|both|each|one|two|first|last` … still carried the notice this row exists to
+    # refuse. Measured at `248713d6f4`; the class is extended, so these are silent.
+    "which retired all the processes",
+    "which cancelled both deals",
     # ── the YES/NO CO-PREDICATE class (#14033 round-6 review, P0) ──────────
     # The `is_copula` shape's first cut reused `existence`'s free 60-character
     # window for its SUBJECT, so an ending participle belonging to a SUBORDINATE
@@ -580,6 +595,12 @@ NOTICE_ONLY = [
     "have any users reported the vendor has been deprecated",
     "have any customers said the feature has been deprecated",
     "have any users noticed the vendor will have been deprecated",
+    # …and the PRONOUN-SUBJECT twin of that class (#14033 round-14 review, P2): there the
+    # subject slot needs no noun, so the guard needs its own alternative — refused by the
+    # guard, reported through `existence_unguarded`, never routed.
+    "have any users reported it has been deprecated",
+    "have any customers noticed they have been cancelled",
+    "have any users said it will have been deprecated",
     "is the SOC2 audit and its evidence package archived",
     "is the onboarding flow and its partner variants retired",
 ]

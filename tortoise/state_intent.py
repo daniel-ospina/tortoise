@@ -432,6 +432,15 @@ _EXISTENCE_GUARD = (
     r"that)\s+[a-z0-9][a-z0-9'’._/-]*\s+"
     r"(?:has|have|had|is|are|was|were|will|would|can|could|did|does|do|may|might|"
     r"must|should)\s+(?:not\s+)?(?:have\s+)?been\b)"
+    # ⛔ AND A PRONOUN SUBJECT IS ITS OWN ALTERNATIVE (round-14 review, P2, measured):
+    # the slot above requires `<determiner> <noun>`, which a pronoun has NEITHER of, so
+    # `have any users reported it has been deprecated` was ROUTED to the whole ended
+    # population and the caller's own predicate (`reported`) was dropped — the exact
+    # hijack this guard exists to refuse, one subject class wide. The pronoun is the
+    # whole subject here, so it needs no noun after it.
+    r"(?![^?]{0,60}?\b(?:it|they|he|she|we|you)\s+"
+    r"(?:has|have|had|is|are|was|were|will|would|can|could|did|does|do|may|might|"
+    r"must|should)\s+(?:not\s+)?(?:have\s+)?been\b)"
 )
 _EXISTENCE_WINDOW = rf"[^?]{{0,60}}?\bbeen\s+(?:{_ENDING_WORDS})\b"
 _EXISTENCE_PREFIX = _EXISTENCE_HEAD + _EXISTENCE_GUARD + _EXISTENCE_WINDOW
@@ -676,8 +685,16 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
         rf"^which\s+(?:of\s+)?"
         rf"(?:(?:our|the|all|your|their|its|my|these|those)\s+)?"
         rf"(?:{_ENDING_WORDS})"
+        # ⛔ THE DETERMINER CLASS IS CLOSED, AND IT USED TO BE TOO SHORT (round-14
+        # review, P3, measured): `all|both|each|either|neither|another|other|such|one|
+        # two|three|first|last|next` were missing, so the verb-with-object class this
+        # lookahead exists to refuse still carried the notice on
+        # `which retired all the processes` / `which cancelled both deals`. The
+        # direction was the safe one (a notice, never a route), but the comment above
+        # said "never by a determiner" and the row did not hold it.
         rf"(?=\s+(?!(?:the|a|an|this|that|these|those|its|their|our|my|your|his|her|"
-        rf"any|some|every|no)\b)[a-z])")),
+        rf"any|some|every|no|all|both|each|either|neither|another|other|such|one|two|"
+        rf"three|first|last|next)\b)[a-z])")),
     # …and the unguarded `existence` expression: a state question that fails ONLY on
     # the clause guard above is reported, never silenced (silence is the defect).
     ("existence_unguarded", re.compile(_EXISTENCE_HEAD + _EXISTENCE_WINDOW)),
@@ -946,13 +963,18 @@ def detect_state_question(text: str | None) -> StateQuestion:
         if m:
             return StateQuestion(ENDED, shape, m.group(0))
     # ⛔ THE SIGNAL IS CHECKED BEFORE THE COMMITMENT SHAPES, and a commitment
-    # shape still WINS THE POPULATION: a question that is both an ending and a
-    # commitment question is answered by the ending (the precedence note in the
-    # docstring — `what are we committed to and has anything been withdrawn` is
-    # `committed_to` AND `existence`). A commitment question that merely CONTAINS
-    # an ending word in somebody else's clause (`what did the vendor say about our
-    # commitments`) matches no signal either — every signal is a shape's own
-    # expression, plus the attributive `which` row.
+    # shape still WINS THE POPULATION — and, when it does, the cue is DROPPED. That is
+    # a STATED LIMIT rather than a silent loss (#14033 round-14 review, P3, measured):
+    # `what are we committed to and which claims were retracted by legal` comes back as
+    # `committed_to` with ``signal=None`` and no payload, because a notice means "no
+    # population was served" and a commitment population WAS served — so the ending ask
+    # in the same sentence is not reported, and the caller who also wanted the ended set
+    # has to ask it as its own question. The alternative (carrying `signal` on the
+    # COMMITMENTS StateQuestion so the sink can say both) is a read-path change, not a
+    # wording one, and it is recorded here as the boundary of the absolute above. A
+    # commitment question that merely CONTAINS an ending word in somebody else's clause
+    # (`what did the vendor say about our commitments`) matches no signal either — every
+    # signal is a shape's own expression, plus the attributive `which` row.
     for signal, pattern in _ENDING_SIGNALS:
         m = pattern.search(t)
         if m:
