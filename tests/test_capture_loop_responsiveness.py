@@ -2786,10 +2786,6 @@ _CAPTURE_TAIL_STATEMENTS = {
     # the entity-linking pass — target resolution, per-turn, and its SET
     "ENDS WITH $suffix": "entity-link target resolution",
     "s.entity_links_attempted": "entity-link counters",
-    # the receipt probes and the bucket-aware compensation count
-    "count(s) AS n, s.capture_ok AS ok": "the capture probe",
-    # …and the delete-race re-check / bucket count
-    "s.capture_extractor AS extractor": "the capture probe",
     # the onboarding state writes (#2002 first-capture checkpoint + receipt)
     "MERGE (n:OnboardingState {org_id: $org_id})": "the onboarding state write",
     "MERGE (s:OnboardingStep {org_id: $org_id, step_id: $step_id})":
@@ -2800,9 +2796,45 @@ _CAPTURE_TAIL_STATEMENTS = {
     "SET s.capture_ok=$ok": "the capture_ok stamp",
 }
 
+#: Statements that LOOK like this tail and are not, named so their absence from
+#: the two sets below is deliberate rather than an oversight.
+#:
+#: Both spellings of the #4625 leg-62 probe (`_capture_session_probe_off_loop`,
+#: `hosted_api.py:13370-13371`) already ran off the loop through
+#: `asyncio.to_thread` BEFORE this change, and `sdk.capture_session`'s
+#: prior-capture read (`sdk.py:19426-19427`) is not on the hosted path at all.
+#: Pinning them as this PR's tail made two of its assertions INERT: the
+#: prohibition half can never fire (those statements cannot appear on
+#: ``MainThread``), and the presence half was satisfied by a pre-existing leg the
+#: moment ``POST /v1/sessions`` ran, whatever the tail did (cycle-3 review,
+#: finding 1).
+_PRE_EXISTING_OFFLOAD_LEGS = {
+    "count(s) AS n, s.capture_ok AS ok": "the #4625 leg-62 probe",
+    "s.capture_extractor AS extractor": "the #4625 leg-62 probe",
+}
+
 #: A session-alive probe is `MATCH (s:Session …) RETURN count(s)`; the exact
-#: spelling varies with the optional-return shape, so it is matched separately.
+#: spelling varies with the optional-return shape, so prohibition matches it as
+#: a SUBSTRING (a false positive there is a loud test failure, not a silence).
 _SESSION_ALIVE = "MATCH (s:Session {id:$sid}) RETURN count(s)"
+
+#: Statements the fixture must issue MORE THAN ONCE, matched by EXACT equality
+#: on the whitespace-normalised cypher.
+#:
+#: *Why exact, while prohibition is a substring:* the leg-62 probe's
+#: ``OPTIONAL MATCH (s:Session {id:$sid}) RETURN count(s) AS n, …`` CONTAINS
+#: ``_SESSION_ALIVE``, so a substring presence needle would again be satisfied by
+#: a leg this change never touched — the same inertness, one set over.
+#:
+#: *Why a count:* the receipt block probes the Session TWICE — the pre-check
+#: (write no receipt for a Session already deleted, the T1-P12 orphan guard) and
+#: the post-write re-check (compensate when the delete raced the PATCH). Both are
+#: fail-open arms, so DELETE one of them and the other still issues the statement:
+#: a "present at least once" needle cannot see the edit, and the mutant is exactly
+#: the "deleted, not offloaded" failure this test says it catches.
+_TAIL_MUST_BE_ISSUED_N_TIMES = {
+    _SESSION_ALIVE: ("the receipt's session-alive pre-check and re-check", 2),
+}
 
 
 def _ref_conversation(turns: int) -> list[dict]:
@@ -2861,6 +2893,15 @@ def test_the_capture_post_write_tail_never_runs_on_the_event_loop(
         assert any(needle in c for c in all_cyphers), (
             f"{label} was never issued — the tail was deleted, not offloaded "
             f"(expected a statement containing {needle!r})")
+
+    for needle, (label, want) in _TAIL_MUST_BE_ISSUED_N_TIMES.items():
+        issued = [c for c in all_cyphers if c == needle]
+        assert len(issued) >= want, (
+            f"{label} was issued {len(issued)} time(s), expected at least "
+            f"{want} — one of the two fail-open guards was DELETED, not "
+            f"offloaded (the #4625 leg-62 probe also mentions this statement, "
+            f"but as part of a longer query, so it cannot satisfy this): "
+            f"{[c[:100] for c in all_cyphers if needle in c]}")
 
 
 #: The tail statements THIS fixture is guaranteed to reach, so their ABSENCE is

@@ -45,8 +45,8 @@ import pytest
 
 from tortoise import read_stages as rs
 from tortoise.read_stages import (
-    PRE_HANDLER_PARTS,
     PRE_HANDLER_PART_SET,
+    PRE_HANDLER_PARTS,
     STAGE_EMBED_GET,
     begin,
     note,
@@ -61,11 +61,21 @@ _HOSTED = _REPO_ROOT / "tortoise" / "hosted_api.py"
 # ── 1. the sum ──────────────────────────────────────────────────────────────
 
 def test_the_parts_sum_to_pre_handler_exactly(monkeypatch):
-    """One accumulation, two views — never two clocks reconciled later."""
+    """One accumulation, two views — never two clocks reconciled later.
+
+    ⛔ THE ORIGINS ARE DELIBERATELY NON-DEGENERATE: the transport ARRIVAL
+    (``started_at``) is 10 s BEFORE the clock this request is constructed at.
+    In production ``begin(started_at=t0)`` is called with the arrival while the
+    object is built later (``hosted_api.py:6579``), so the interval the
+    ``middleware`` part is defined as — *arrival → the handler task created* —
+    is exactly that gap. Making the two origins the same instant (as this row
+    used to) leaves the sum invariant true under the mutant the invariant
+    exists to prevent: ``self._parts_t0 = now`` (``read_stages.py:241``).
+    """
     clock = {"t": 1000.0}
     monkeypatch.setattr(rs.time, "monotonic", lambda: clock["t"])
 
-    stages = begin(started_at=1000.0)
+    stages = begin(started_at=990.0)
     for part, advance in (("middleware", 0.010), ("dispatch", 0.250),
                           ("sdk_open", 0.500), ("read_submit", 0.002),
                           ("read_lane", 1.250)):
@@ -78,6 +88,12 @@ def test_the_parts_sum_to_pre_handler_exactly(monkeypatch):
     parts = stages.parts_ms()
     assert set(parts) == {"middleware", "dispatch", "sdk_open", "read_submit",
                           "read_lane"}
+    # The arrival → construction interval is the FIRST part's whole content, so
+    # a parts cursor started anywhere but at the arrival loses that 10 s. The
+    # part is published in MILLISECONDS (`_close_part_unlocked` scales seconds
+    # by 1000), so a 10 s gap is 10 000 ms and the middleware note adds 10.0 ms.
+    # This is the row that kills `self._parts_t0 = now`.
+    assert parts["middleware"] == pytest.approx(10_000.0 + 10.0, abs=0.2)
     assert sum(parts.values()) == pytest.approx(spent["pre_handler"], abs=0.2)
 
 
@@ -171,7 +187,7 @@ def test_an_unknown_part_is_refused_rather_than_published(monkeypatch):
 
 def test_the_part_vocabulary_is_a_closed_set_of_named_parts():
     assert PRE_HANDLER_PARTS
-    assert PRE_HANDLER_PART_SET == frozenset(PRE_HANDLER_PARTS)
+    assert frozenset(PRE_HANDLER_PARTS) == PRE_HANDLER_PART_SET
     assert len(PRE_HANDLER_PART_SET) == len(PRE_HANDLER_PARTS)
     # Disjoint from the STAGE vocabulary: a part is a slice of `pre_handler`,
     # and publishing one under a stage name would make the two tables
