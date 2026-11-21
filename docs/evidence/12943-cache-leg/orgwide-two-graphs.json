@@ -1,0 +1,74 @@
+{
+  "cache_on_derived_spelling": null,
+  "cache_on_fact_name": {
+    "Event": 1,
+    "Object": 1,
+    "Point": 0
+  },
+  "cache_target_the_sdk_opened": "org_org13337capac0cbd88",
+  "control_plane_stand_in": "_resolve_record_tenant patched; no Supabase on this box",
+  "credential": "org-wide (graph_id None)",
+  "declared": {
+    "detail": "public.graphs.namespace for g_13337capac0cbd88",
+    "name": "org_org13337capac0cbd88",
+    "source": "control_plane"
+  },
+  "derived_spelling": "org_org13337capac0cbd88_g_13337capac0cbd88",
+  "graph_id": "g_13337capac0cbd88",
+  "graphs_namespace_fact": "org_org13337capac0cbd88",
+  "issue": [
+    "#13337",
+    "#12943"
+  ],
+  "org": "org13337capac0cbd88",
+  "reconcile_on_derived_spelling": {
+    "cache_side": "cache",
+    "checked": 2,
+    "declaration_coverage": "complete",
+    "declaration_source": null,
+    "divergent": 2,
+    "divergent_keys": [
+      "Event:1a1fb106230-cbcc73d14bc0",
+      "Object:1a1fb105cf9-e419e9afa8cb"
+    ],
+    "extra_in_cache": 0,
+    "field_mismatches": 0,
+    "form_normalized": 0,
+    "graph_only": {},
+    "graph_only_total": 0,
+    "journal": null,
+    "missing_in_cache": 2,
+    "not_hot": 0,
+    "truth_side": "record",
+    "unprojected_journal": null,
+    "verdict": "divergent"
+  },
+  "reconcile_on_fact_name": {
+    "cache_side": "cache",
+    "checked": 2,
+    "declaration_coverage": "complete",
+    "declaration_source": null,
+    "divergent": 1,
+    "divergent_keys": [
+      "Event:1a1fb106230-cbcc73d14bc0"
+    ],
+    "extra_in_cache": 0,
+    "field_mismatches": 6,
+    "form_normalized": 0,
+    "graph_only": {},
+    "graph_only_total": 0,
+    "journal": null,
+    "missing_in_cache": 0,
+    "not_hot": 0,
+    "truth_side": "record",
+    "unprojected_journal": null,
+    "verdict": "divergent"
+  },
+  "record": {
+    "event": 1,
+    "object": 1,
+    "point": 0
+  },
+  "run": "ac0cbd88",
+  "shipped_reader_on_this_box": null
+}
