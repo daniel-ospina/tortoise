@@ -130,4 +130,4 @@ print("IDS", {"source": src, "subject_marta": marta, "subject_tobias": tobias,
               "object_vp_fin": vp_fin_role, "event_join": event,
               "point_join": p_join, "point_prior": p_prior,
               "point_reports": p_reports, "point_ceo": p_ceo})
-print("TAXONOMY", sdk.taxonomy())
+print("TAXONOMY", sdk.graph_overview("taxonomy"))

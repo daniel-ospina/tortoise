@@ -62,6 +62,10 @@ dependencies = [
     # UNBOUNDED resolve — before `uv sync --frozen`; the lock carries 6.0.3, so a box that
     # resolves through the lock never sees this. `!=` and not `<`: 6.0.5+ may restore the
     # nested-override semantics, and a ceiling would refuse the fix when it arrives.
+    # The upstream report is yaml/pyyaml#953 (OPEN, no fix release as of 2026-11-21): it names
+    # the mechanism this comment reads off the diff — the dedupe keys on `id(pair[0].value)`,
+    # the KEY VALUE, so single-character keys only escape by CPython string interning. Watch
+    # THAT issue, not a version number, for the release that restores the override.
     "pyyaml>=6.0,!=6.0.4",
     "fastmcp==3.4.6",
     "prometheus-client>=0.16",

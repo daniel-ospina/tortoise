@@ -780,6 +780,15 @@ def _probe(candidates):
             proj = FalkorProjection.from_uri(uri)
             proj.g.query("RETURN 1")
             return True, uri
+        # ⛔ A moved or renamed seam is a PROGRAMMING error, not "no server": it
+        #   must not read as "storage unavailable" (#14114 class 2, #14125).
+        #   Without this arm an `AttributeError`/`NameError` on the projection
+        #   seam fell through to the broad arm and the family SKIPPED green over
+        #   a broken tree. (`ImportError` is in the tuple for uniformity with the
+        #   rest of the census: this probe's import is ABOVE the `try`, so an
+        #   unimportable module already propagates.)
+        except (AttributeError, NameError, TypeError, ImportError):
+            raise
         except Exception:
             if uri == env_uri:
                 break
