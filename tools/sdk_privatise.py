@@ -1079,9 +1079,13 @@ SWEEP_NAMES = 66
 #: `typed references still pointing at a public name` stays **0**.
 #:
 #: ⛔ MERGED `origin/main` (`e74cf1d13d`, the `#14012` lane's "keep this resident" + "see what's
-#: outside") INTO THIS BRANCH — and THIS branch's own census contribution is ZERO ROWS, so the
-#: merged tree's pair is MEASURED on the RESOLVED tree and it coincides with `main`'s own: `--repin`
-#: here prints `(11857, "ed40203dbbf32b87")`, the SAME pair `main` pins at `e74cf1d13d`. ⛔ THE
+#: outside") INTO THIS BRANCH. ⛔ ITS "ZERO ROWS" PREMISE IS `main`'s OWN and NOT THIS BRANCH'S, and
+#: leaving it unscoped would make the log contradict itself nineteen lines below: on `main`'s tree the
+#: diff against this branch adds no executable line, but THIS branch's end-proof adds THREE untyped
+#: receivers (`g.query` ×2 in `tools/graphevent_home.py`, `super().query` ×1 in the test stub), which
+#: is why `--repin` on the tree this branch resolved prints `(11860, "267dce26b4191743")` and not the
+#: `(11857, "ed40203dbbf32b87")` that `main` pins at `e74cf1d13d`. Both readings are measurements of
+#: different trees; read the block at the END for the live pin. ⛔ THE
 #: COINCIDENCE IS NOT THE EVIDENCE — the evidence is that `--repin` run. What makes it expected
 #: rather than lucky is MEASURED too, not assumed: `git diff origin/main` on the resolved tree
 #: touches exactly TWO files, and every line it adds is either `#:`-prefixed prose or the single
@@ -1204,7 +1208,30 @@ SWEEP_NAMES = 66
 #: while `--check` was green: the base before it committed 11835 and measured 11843 — off by 8
 #: (#14183 review round 5, finding 2, falsified by measurement). The branch's figure stays its
 #: own `--repin` output, taken on the merged tree.
-SWEEP_RESIDUE = (11843, "4f84aaf8cf662bc5")
+#: ⛔ MERGED `origin/main` (`9f83a63bfab7`) INTO THIS BRANCH — a further tree, so the pair below is
+#: `--repin`'s output ON IT and neither side's line is inherited. Measured on `origin/main`
+#: `9f83a63bfab7` itself with `--repin`: `(11857, "ed40203dbbf32b87")`. Measured here:
+#: `(11860, "267dce26b4191743")`. ⛔ THE +3 IS THIS BRANCH'S, not `main`'s drift, and it is the
+#: change-feed walk's END-PROOF: two `g.query(…)` calls in `tools/graphevent_home.py` — the
+#: NULL-`seq` count and the total count that make "reached the end" distinguishable from "the read
+#: stopped early" — and the `super().query(…)` stub in `tests/test_13094_graphevent_home.py` that
+#: stands in for a FalkorDB connection. All three are the ordinary-word receivers this counter
+#: exists to REPORT, not typed SDK call sites. `11857 + 3 = 11860` is a CROSS-CHECK of the two
+#: measurements, never their evidence. `--check` exits 0 on this tree with
+#: `typed references still pointing at a public name: 0`.
+#: ⛔ THE BASE FIGURE IS THE BASE **TREE's** MEASUREMENT, never the `SWEEP_RESIDUE` line committed on
+#: it. `origin/main` at `e74cf1d13d` commits `(11835, "891187f5a4636487")` while its tree MEASURES a
+#: different pair — so a reader who takes the committed line as the base concludes a live pin is off
+#: by rows it is not off by, and that a green `--check` is false. It is not: re-measured on the tree
+#: `--check` is pointed at, the pair is the one that tree prints (#14183 review round 5, finding 2 —
+#: a pair CALLED FALSE while `--check` was green, falsified by measurement rather than argument).
+#: ⛔ AND THE GROUND RULE FOR EVERY BLOCK IN THIS RUN: all blocks above are KEPT, because each is a
+#: true measurement of the tree it NAMES — including the ones no tree on this branch prints any more,
+#: which is what a measurement log is for. A later merge re-measures the pin rather than deleting a
+#: previous reading; if a block conflicts with the live pin, the block is HISTORY and the last one is
+#: the PIN. (This paragraph itself was dropped by a merge resolution and is restored here on review,
+#: together with the round-5 record above, because neither is duplicate prose.)
+SWEEP_RESIDUE = (11860, "267dce26b4191743")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
