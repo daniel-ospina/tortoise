@@ -1346,6 +1346,48 @@ def _coerces_to_true(value) -> bool:
     return False
 
 
+#: Names whose handler declares `confirmation`, computed once. See
+#: `_confirmation_tool_names` for why this is DERIVED and not a literal.
+_CONFIRMATION_TOOLS: frozenset[str] | None = None
+
+
+def _confirmation_tool_names() -> frozenset[str]:
+    """Names whose handler declares `confirmation` — the preview-then-confirm doors.
+
+    ⛔ READ FROM THE SIGNATURE, NEVER FROM A NAME LITERAL (#11609 P7 review, P1).
+    This population was previously spelled as one literal, `tortoise_delete`, and
+    the P7 batch RETIRED that name forward into `tortoise_delete_knowledge`. The
+    guard therefore fell through for the ADVERTISED door: a wait-bound breach on
+    its preview call (`tortoise_delete_knowledge(id=…)`, no `confirmation`, which
+    persists nothing) was answered `committed: "unknown"` + "this call is NOT
+    safe to repeat — do NOT re-send it", which is false about the surface's most
+    destructive write AND forbids the one call the delete cannot proceed without.
+
+    A rename cannot move a signature, and one protocol covers every member:
+    the call WITHOUT `confirmation` previews and writes nothing, the call WITH it
+    performs the write. Membership is read across BOTH registries for the reason
+    `_dry_run_tool_names` gives — a retired name is not advertised but still
+    answers through the #3883 shim and still runs this very handler.
+    """
+    global _CONFIRMATION_TOOLS
+    if _CONFIRMATION_TOOLS is None:
+        from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
+
+        names = set()
+        for entry in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY):
+            fn = globals().get(entry.name)
+            if fn is None:
+                continue
+            try:
+                params = inspect.signature(fn).parameters
+            except (TypeError, ValueError):  # pragma: no cover - non-callable
+                continue
+            if "confirmation" in params:
+                names.add(entry.name)
+        _CONFIRMATION_TOOLS = frozenset(names)
+    return _CONFIRMATION_TOOLS
+
+
 def _arguments_say_preview(name: str, arguments) -> bool:
     """Whether this call declares itself a preview, so it writes nothing.
 
@@ -1381,15 +1423,22 @@ def _arguments_say_preview(name: str, arguments) -> bool:
             return True
         if "dry_run" not in arguments and _declared_dry_run_default(name) is True:
             return True
-    # `tortoise_delete` is a TWO-CALL tool whose FIRST call is also a preview,
-    # and it is the surface's most destructive tool, so getting this wrong is the
-    # worst place to get it wrong: with no `confirmation`, its own contract says
-    # "CHANGES NOTHING: it reports … and returns a short-lived confirmation
-    # token bound to this id" (`_preview_delete`; the token is signed, it
-    # persists nothing). Reading only `dry_run` reported that call as a possible
-    # mutation and told the caller NOT to re-send it — which is the one call the
-    # delete cannot proceed without.
-    if name == "tortoise_delete":
+    # A preview-then-confirm door's FIRST call is also a preview, and it is the
+    # surface's most destructive family, so getting this wrong is the worst place
+    # to get it wrong: with no `confirmation`, its own contract says "CHANGES
+    # NOTHING: it reports … and returns a short-lived confirmation token bound to
+    # this id" (`_preview_delete`; the token is signed, it persists nothing).
+    # Reading only `dry_run` reported that call as a possible mutation and told the
+    # caller NOT to re-send it — which is the one call the delete cannot proceed
+    # without.
+    #
+    # ⛔ THE POPULATION IS DERIVED (`_confirmation_tool_names`, signature-read
+    # across both registries), because this arm used to name `tortoise_delete` as a
+    # LITERAL and the P7 batch retired that name into `tortoise_delete_knowledge`:
+    # the live door then fell through to `False` and the falsehood came back for the
+    # advertised spelling while the pin — itself written against the retired name —
+    # stayed green. A rename cannot move a signature; a literal cannot survive one.
+    if name in _confirmation_tool_names():
         return arguments.get("confirmation") is None
     return False
 
@@ -7851,6 +7900,13 @@ def tortoise_link_entities(relation: str, from_id: str, to_id: Any = None, *,
             promote_source=promote_source, semantics=semantics)
 
     # ── The single-target arm: the SDK's own dispatch ──────────────────────
+    # ⛔ QUOTA-GATED LIKE THE OPERATOR ARM ABOVE (#11609 P7 review, P1). The door
+    # this absorbs, `tortoise_create_edge`, metered its writer
+    # (`_quota_gated(_get_org_sdk()._create_edge, "points")`); routing the same
+    # write through the SDK's public `link_entities` without the wrapper made the
+    # ONE unmetered edge-write path on the surface, and the #329 inventory alone
+    # would not have caught it — the scan sees the `.create_operator` call this arm
+    # does not make.
     if semantics is not None:
         return _SafeError({"error": (
             "link_entities: `semantics` is the OPERATOR arm's meaning argument (pass a "
@@ -8003,12 +8059,16 @@ _OVERVIEW_SECTIONS = (
 #: (#12951 fresh-context review, ISSUE 4: nothing compared the two, and the comments
 #: on both sides claimed the SDK tuple drove this tuple).
 #:
-#:   graphs — `tortoise_list_graphs` is a LIVE door whose destination in
-#:       `docs/product/bridge-table.md` Part A is `tenancy:list_memory_graphs`, NOT
-#:       this container. It is a section HERE because `tortoise_overview(section=
-#:       "graphs")` retires forward through this door, and because the read carries
-#:       the #9340 HTTP tenant filter — a transport concern applied on top of
-#:       `list_graphs`, so an SDK section would not be able to answer it.
+#:   graphs — `tortoise_list_graphs` is the door this section ABSORBS: #11609 lane P7
+#:       retired it forward into `tortoise_graph_overview(section="graphs")`
+#:       (`tool_registry.py`'s `RETIRED_TOOL_REGISTRY`; its bridge-table Part A
+#:       destination is `graph_overview`, `docs/product/bridge-table.md` row 61).
+#:       ⛔ This note used to argue the opposite — that the door was LIVE with a
+#:       destination of `tenancy:list_memory_graphs`, which is not in that file at
+#:       all — so it justified a section by the very fact the batch inverted. What
+#:       is true is narrower and why the section lives HERE rather than on the SDK:
+#:       the read is `list_graphs` plus the #9340 HTTP tenant filter, a transport
+#:       concern an SDK section could not answer.
 #:   health — this IS one of the container's approved sections
 #:       (`docs/product/canonical-mcp-tools.md`'s `tortoise_health` pointer is
 #:       `tortoise_graph_overview(section="health")`), but it has no SDK read to
@@ -11618,8 +11678,17 @@ def _preview_delete_entity(sdk, id: str) -> dict:
 
 
 def _preview_delete(sdk, id: str) -> dict:
-    """Preview `tortoise_delete` — resolve the label first, exactly as
-    `TortoiseSDK.delete` does, then preview the branch it would take.
+    """Preview `tortoise_delete_knowledge` — resolve the label first, exactly as the
+    writer does (`TortoiseSDK._delete`, the method the live door binds), then preview
+    the branch it would take.
+
+    ⛔ THE RECEIPT NAMES THE LIVE DOOR (#11609 P7 review, P2). It used to hard-code
+    `tortoise_delete` — the spelling this batch RETIRED forward into
+    `tortoise_delete_knowledge` — so a caller of the ADVERTISED door got back a
+    receipt whose `tool` field was the retired name, i.e. precisely the value such a
+    caller would naturally re-call, and the old name is absent from `tools/list`.
+    Both spellings still reach this preview (the retired shim forwards to the live
+    handler), so a receipt naming the advertisement is honest for either caller.
 
     #4649: the resolution is the SAME OR-set as the writer's — `by_url=True`
     included. Without it a url-keyed `:Source` (no `id`, minted by
@@ -11633,7 +11702,7 @@ def _preview_delete(sdk, id: str) -> dict:
         id, by_id=True, by_eventId=True, by_url=True)
     if not resolved:
         return _preview_result(
-            "tortoise_delete", "delete",
+            "tortoise_delete_knowledge", "delete",
             found=False,
             target={"id": id, "label": None},
             nodes_removed=0,
@@ -11644,7 +11713,7 @@ def _preview_delete(sdk, id: str) -> dict:
     label = resolved[0]["label"]
     out = (_preview_delete_point(sdk, id) if label == "Point"
            else _preview_delete_entity(sdk, id))
-    out["tool"] = "tortoise_delete"
+    out["tool"] = "tortoise_delete_knowledge"
     out["target"] = {"id": id, "label": label}
     return out
 

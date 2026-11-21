@@ -342,8 +342,10 @@ NO_CONTAINER_YET = {
     #   · `tortoise_org_create` — `tenancy:create_memory_graph` is an SDK/REST operation and
     #     the 2026-09-22 settlement keeps tenancy off the MCP, so there is NO MCP
     #     destination to forward to. Removing it is an ARCHIVE batch (no destination), and
-    #     it is not this lane's: `tests/test_13036_capstone_v2.py` drives it as a live door
-    #     and `tortoise/supabase_control.py` documents it as the MCP entry point.
+    #     it is not this lane's: `tests/test_13036_capstone_v2.py` records it in
+    #     `UNDRIVEN` as "excluded from tenant HTTP by design" (its own doctrine: an
+    #     UNDRIVEN row is recorded, never passed), and `tortoise/supabase_control.py`
+    #     documents it as the MCP entry point.
     #   · `tortoise_ingest` — `write_knowledge_batch` exists only on the SDK (so no MCP
     #     pointer can name it), and the MCP door has a LIVE product caller:
     #     `tortoise/curation.py`'s `IngestWriter` (`TOOL = "tortoise_ingest"`) writes through

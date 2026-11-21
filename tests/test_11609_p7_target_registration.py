@@ -503,3 +503,61 @@ class TestTheFiveDoorsRetiredForward:
                 f"{name} is pointed at {pointer!r}, which passes {rejected} — "
                 f"{target}{sig} does not take them, so the migration instruction is a "
                 "TypeError for the caller who follows it")
+
+
+class TestBothLinkArmsAreQuotaGated:
+    """#11609 P7 review (P1): the linking verb absorbed TWO metered write paths.
+
+    `tortoise_create_edge` and `tortoise_create_operator` both wrapped their writer
+    in `_quota_gated`; the single door that replaces them must meter both of its
+    arms, or the batch ships the surface's only unmetered edge-write path. The
+    inventory half is what `tests/test_mcp_http.py::TestIntrospectiveQuotaCompleteness`
+    cross-checks (it scans a handler body for `.create_operator`), so this pair pins
+    the OTHER arm too — the one no scan pattern reaches, because `.link_entities` is
+    the SDK's public name and no pattern names it.
+    """
+
+    def test_the_inventory_carries_it_because_BOTH_arms_write(self):
+        import inspect
+        import re
+
+        assert "tortoise_link_entities" in ms._QUOTA_GATED, (
+            "the #329 inventory omits the one linking verb — its LIST arm reaches "
+            "`_create_operator` (operator Points carry EP weight) and its SCALAR arm "
+            "reaches the edge writer, so it is the exact class the inventory exists for")
+        src = inspect.getsource(ms.tortoise_link_entities)
+        for writer in ("._create_operator", ".link_entities"):
+            assert re.search(rf"\._?{re.escape(writer[1:])}", src), (
+                f"the handler no longer reaches {writer}: if that arm was removed, the "
+                "quota inventory and this pin must move with it")
+
+    def test_both_arms_route_through_the_quota_wrapper(self, served, monkeypatch):
+        """A spy on `_quota_gated` proves the WRAP, not just the inventory row.
+
+        Membership alone is satisfied by a handler that names the tool and then calls
+        the writer bare — which is the state this finding described.
+        """
+        seen: list = []
+        real = ms._quota_gated
+
+        def spy(fn, resource="points", **kwargs):
+            seen.append(fn)
+            return real(fn, resource, **kwargs)
+
+        monkeypatch.setattr(ms, "_quota_gated", spy)
+        # the LIST arm — one operator over N targets
+        served("_create_operator", {"operator": 1})
+        assert ms.tortoise_link_entities("NAND", "a", ["b"]) == {"operator": 1}
+        # the SCALAR arm — the SDK's own relation-decided dispatch
+        served("link_entities", {"edge": 1})
+        assert ms.tortoise_link_entities("performs", "a", "b") == {"edge": 1}
+        # Identity, not a name: the `served` fixture substitutes each writer with its
+        # own recorder, so the NAME of the wrapped callable proves nothing — the
+        # object does. Zero entries would mean the wrap is gone entirely.
+        assert len(seen) == 2, (
+            f"the quota wrapper saw {len(seen)} of the handler's two arms — both must "
+            "pass through it")
+        assert getattr(seen[0], "__func__", seen[0]) is TortoiseSDK._create_operator, (
+            "the LIST arm reached the operator writer without the quota wrapper")
+        assert getattr(seen[1], "__func__", seen[1]) is TortoiseSDK.link_entities, (
+            "the SCALAR arm reached the SDK's edge dispatch without the quota wrapper")

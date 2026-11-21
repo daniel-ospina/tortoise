@@ -36,6 +36,7 @@ remove.
 from __future__ import annotations
 
 import asyncio
+import inspect
 
 import pytest
 
@@ -514,7 +515,7 @@ def test_a_no_dispatch_arm_claims_nothing_was_sent():
 
 
 def test_the_two_call_delete_preview_counts_as_a_preview():
-    """`tortoise_delete`'s FIRST call writes nothing, and it is the most
+    """`tortoise_delete_knowledge`'s FIRST call writes nothing, and it is the most
     destructive tool on the surface.
 
     Its own contract: with no `confirmation` it "CHANGES NOTHING: it reports …
@@ -522,16 +523,35 @@ def test_the_two_call_delete_preview_counts_as_a_preview():
     (`_preview_delete`; the token is signed and persists nothing). Reading only
     `dry_run` reported that call as a possible mutation and told the caller not
     to re-send — which is the one call the delete cannot proceed without.
+
+    ⛔ THE PIN IS ON THE ADVERTISED DOOR (#11609 P7 review, P1). This arm used to
+    spell `tortoise_delete`, the name the P7 batch RETIRED forward into
+    `tortoise_delete_knowledge` — and the guard it was pinning keyed on that same
+    LITERAL, so the pin stayed green while the live door fell straight through it
+    and told its preview caller "do NOT re-send it". Both spellings are asserted
+    (the retired shim answers the same protocol), and the population is DERIVED
+    from the handlers' signatures, so a rename can neither empty it nor move this
+    pin off the door it protects.
     """
-    first = _error(ms._wait_bound_refusal_result("tortoise_delete", {"id": "x"}))["data"]
-    assert first["committed"] == "none"
-    assert first["retry_safe"] is True
-    assert first["retry_rule"] == ms._WAIT_BOUND_RETRY_RULE_PREVIEW
-    # ...a CONFIRMED call is a real deletion.
-    done = _error(ms._wait_bound_refusal_result(
-        "tortoise_delete", {"id": "x", "confirmation": "tok"}))["data"]
-    assert done["committed"] == "unknown"
-    assert done["retry_safe"] is False
+    for name in ("tortoise_delete_knowledge", "tortoise_delete"):
+        first = _error(ms._wait_bound_refusal_result(name, {"id": "x"}))["data"]
+        assert first["committed"] == "none", name
+        assert first["retry_safe"] is True, name
+        assert first["retry_rule"] == ms._WAIT_BOUND_RETRY_RULE_PREVIEW, name
+        # ...a CONFIRMED call is a real deletion.
+        done = _error(ms._wait_bound_refusal_result(
+            name, {"id": "x", "confirmation": "tok"}))["data"]
+        assert done["committed"] == "unknown", name
+        assert done["retry_safe"] is False, name
+    # The DERIVATION half: every member really declares the parameter it was read
+    # from, and the live spelling is a member. A literal-based implementation can
+    # satisfy neither — it goes stale on a rename and it names tools by hand.
+    members = ms._confirmation_tool_names()
+    assert "tortoise_delete_knowledge" in members
+    assert "tortoise_delete" in members
+    for declared in members:
+        assert "confirmation" in inspect.signature(
+            getattr(ms, declared)).parameters, declared
 
 
 def test_create_document_is_not_advertised_as_repeatable():
