@@ -341,7 +341,8 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # ⛔ #14087 review: the span's END was one short — `:16081` is the paragraph's PENULTIMATE line and
     # `:16082` (`turns`` list is that same requirement for the record-held lane.`) is its last, with
     # `:16083` blank. A span token pins only its START, so the short end was invisible to `_PINS`;
-    # `test_the_jsonl_span_ends_on_the_paragraph_it_cites` derives the end from the source and grades it.
+    # `test_the_jsonl_contract_span_ends_on_its_paragraphs_last_line` derives the end from the source
+    # and grades it.
     ("docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md", "sdk.py:16077-16082", "tortoise/sdk.py", 16077, "**JSONL event log (#548):** written when *point* is provided"),
     (_AUDIT, 'sdk.py:3801', _SDK, 3801, 'sdk._emit_event("PointRetracted", _deleted_point_payload(tid))'),
 )
@@ -1711,7 +1712,8 @@ def test_the_jsonl_contract_span_ends_on_its_paragraphs_last_line() -> None:
     doc_text = (REPO / _JSONL_DOC).read_text(encoding="utf-8")
     cited = _cited_span_ends(doc_text, start)
     assert cited == [end], (
-        f"§6.3 cites `sdk.py:{start}-{cited}` but that paragraph's last line is `:{end}` — a span "
+        f"§6.3 cites `sdk.py:{start}-{cited[0] if cited else '???'}` but that paragraph's last line is "
+        f"`:{end}` — a span "
         "must end on it, not one short (`_PINS` pins the START, so the short END is green everywhere "
         "else in this file)"
     )
@@ -1967,9 +1969,9 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # 72 (ecb137107e) -> 77 (298d3328db, the five above) -> 80 (0a53ad23d8).
     # 80 -> 82 at the #14043 review (finding 1, this cycle): §6.3's `sdk.py:16077-16082` and
     # `sdk.py:3801` were in neither list and unpinned, and the pin default opens on prose and on an
-    # empty line respectively. (The span read `:16077-16081` when it landed (#13994, who re-derived
-    # this document on top of `#13994`'s `:Point` join); the END stayed one short until #14087
-    # re-derived it here. One ROW, one token — the row count did not move.)
+    # empty line respectively. (The span landed as `:16077-16081` in #13994, which re-derived this
+    # document on top of its own `:Point` join; the END stayed one short until #14087 re-derived it
+    # here. One ROW, one token — the row count did not move.)
     assert len(_PINS) == 82
 
 
