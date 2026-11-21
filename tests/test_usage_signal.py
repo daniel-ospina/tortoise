@@ -53,6 +53,83 @@ named test goes RED):
   as protecting something) → ``test_the_no_graph_guard_names_modules_that_EXIST``
   RED; and **miss the module that owns the graph client** (``.projection``) →
   ``test_the_no_graph_guard_covers_every_module_that_reaches_a_store`` RED.
+* **Scan the tree for one store root only** (the original ``"from falkordb import"
+  in source`` substring) → ``test_the_store_reach_scan_sees_the_REDIS_spelling_too``
+  RED, while ``…_covers_every_module_that_reaches_a_store`` stays GREEN — measured
+  with the predicate narrowed to ``falkordb`` alone. The ``falkordb``-only witness
+  (``cypher_guard``) reddens the symmetric case, dropping that root, which the
+  coverage row cannot see because its importers are already banned.
+* **Leave the ATTRIBUTE spelling out of the reachability scan** (drop
+  ``_package_root_attributes`` from ``_module_reaches_a_store``) →
+  ``test_the_store_reach_scan_sees_the_REDIS_spelling_too`` RED on the synthetic
+  attr-only module — measured at head ``88e771ab`` on the **102** tests this file
+  collects: **2 failed / 100 passed**. The second red is
+  ``…_pins_the_package_root_EXPORT_form``, which calls the same predicate, so a
+  ``1 failed`` figure hid a second gate firing. The coverage row stays GREEN,
+  because no tree module reaches a store ONLY that way (the leg flags 0 of 305
+  files) — that is the gap the two synthetic pins exist to fill. The ban already
+  saw that spelling, so the two directions disagreed about one file — the same
+  defect as the substring, one spelling over.
+* **Forget a root in the ban floor** (drop ``redislite`` from
+  ``_FORBIDDEN_GRAPH_ROOTS``) →
+  ``test_the_ban_covers_all_three_roots_the_tree_actually_uses`` RED —
+  measured, together with the scan row whose ``"tortoise"`` witness reaches the
+  client through ``redislite.falkordb_client``. The parametrized row cannot see it
+  (removing an entry removes its own case), which is why this floor exists: it is
+  the recorded decision that none of the three MEASURED roots may be dropped.
+* **Let the package-root EXPORT through** (drop the
+  ``_FORBIDDEN_CLIENT_EXPORTS`` intersection from ``_offending``) →
+  ``test_no_graph_dependency_pins_the_package_root_EXPORT_form`` RED on
+  ``from tortoise import FalkorDB``; drop ``_package_root_attributes`` from the
+  same union → RED on ``import tortoise`` + ``tortoise.FalkorDB``; disable its
+  rebinding fixpoint → RED on ``f = tortoise``. All three measured.
+* **Leave the ``from tortoise import __init__`` binding out of the attribute leg**
+  (drop the ``ast.ImportFrom`` branch from ``_package_root_attributes``) →
+  ``test_no_graph_dependency_pins_the_package_root_EXPORT_form`` RED on
+  ``from tortoise import __init__ as i`` + ``i.FalkorDB`` — measured at head
+  ``88e771ab``, same 102 collected: 1 failed / 101 passed, every other row green.
+  ``tortoise.__init__`` IS the package and ``_imports_of`` folds it onto the
+  UNBANNED root, so this was the one spelling of the package root no leg saw, in
+  the ban and in the direction scan alike.
+* **Bind only the ABSOLUTE ``from tortoise import __init__`` and leave the
+  relative spelling out** (drop the ``relative_root`` arm of the ``ast.ImportFrom``
+  branch in ``_package_root_attributes``) →
+  ``test_no_graph_dependency_pins_the_package_root_EXPORT_form`` RED on
+  ``from . import __init__ as i`` + ``i.FalkorDB`` — measured at head ``88e771ab``,
+  same 102 collected: 1 failed / 101 passed. ``ast`` records the relative form as
+  ``module=None, level=1``, so there is no module STRING to compare and an
+  absolute-only branch cannot see it;
+  ``_imports_of`` folds ``tortoise.__init__`` onto the unbanned package root, so
+  the ban AND the direction scan were both green on a live reach.
+* **Read the relative arm as ``level == 1`` only** (narrow ``relative_root``, so
+  ``from .. import __init__`` falls out) →
+  ``test_no_graph_dependency_pins_the_package_root_EXPORT_form`` RED on the
+  one-dot-further spelling — measured, 101 passed with the pin absent, so the
+  ``level >= 1`` reading was a claim no row held.
+* **Let the scan stop calling the pinned loop** (restore the pre-fix two-leg body
+  inside ``_modules_reaching_a_store``, leaving ``_scan_modules`` intact and
+  exercised) → ``test_the_scan_actually_calls_the_pinned_loop`` RED — measured at
+  head ``1f37c999``: **101 passed** without the pin, i.e. the wiring was invisible
+  to the row that fed the loop.
+* **Keep every module the loop is fed** (body → ``frozenset(module for module, _ in
+  sources)``) → ``test_the_store_reach_scan_sees_the_REDIS_spelling_too`` RED on its
+  loop pin — measured, and it reddens THAT pin only because the pin's input carries
+  a clean pair beside the reaching one. Fed a single reaching pair (as it was
+  before the control was added) the same mutant gave **1 failed, 101 passed**, the
+  one red being the coverage row — a different gate, several hundred lines up.
+* **Leave the ban auditing nothing** (``source = ""``, ``source = "# clean\n"``, a
+  misdirected path or a cached constant, all of which left every row green while
+  the ban's ~20 synthetic pins fed ``_offending`` literals) →
+  ``test_no_graph_dependency`` RED on its two provenance asserts, which compare the
+  string it audits against a fresh read of the module it names.
+* **Quote a stale count beside the ban's provenance claim** (``208 of the 305``
+  modules clean) → no row can redden a prose figure, which is why the count is
+  gone instead: measured at ``1f37c999`` the tree has 305 modules and ``_offending``
+  finds **228** clean (77 offending), so the quoted figure was already false.
+* **Exempt a banned module from the probe into a BAN exemption** (add a non-banned
+  name to ``_PROBE_EXEMPT``, or a real importer to ``_COVERAGE_EXEMPT``) →
+  ``test_the_no_graph_guard_covers_every_module_that_reaches_a_store`` RED —
+  measured, both levers.
 * **Open the door on a roll-up the window emptied** (drop ``not self.entries`` from
   :attr:`UsageReading.orderable`) →
   ``test_a_window_that_prunes_everything_refuses`` RED. ``served_total`` is
@@ -72,9 +149,12 @@ named test goes RED):
 
 from __future__ import annotations
 
+import ast
+import functools
 import json
 import subprocess
 import sys
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -651,33 +731,115 @@ def _stamp(value: str | None) -> float:
 #: the tree that imports a store client is named here. Scope, stated rather than
 #: implied: it covers DIRECT importers (the closure is not walked — this module
 #: legitimately imports `read_ledger` for `_stamp`/`row_key`, and a closure would
-#: have to forbid that too).
+#: have to forbid that too). ⛔ ONE MODULE IS OUT OF THE **PROBE'S** SCOPE AND STAYS
+#: IN THE BAN: `tortoise.embedded_lifecycle` imports `redis`, but importing
+#: `usage_signal` already pulls it in transitively (`tortoise/__init__.py` does
+#: `from tortoise.embedded_lifecycle import atexit_fast_close` at module level), so
+#: the subprocess probe — which asserts forbidden names are ABSENT from
+#: `sys.modules` — could never name it. An earlier cut therefore dropped it from
+#: the SET, which silently dropped the AST BAN too: a `from . import
+#: embedded_lifecycle` added to `usage_signal` reddened nothing, through the one
+#: module that owns the embedded store.
+#:
+#: ⛔ TWO EXEMPTIONS, TWO ROLES, TWO NAMES. An exemption is a way to switch a
+#: guard OFF, so each one is scoped to the single guard it is justified for;
+#: serving both roles from one list is how a coverage skip quietly becomes a ban
+#: exemption. `_PROBE_EXEMPT` only ever removes a name from the subprocess probe's
+#: list — every member must ALSO stay in `_FORBIDDEN_GRAPH_ROOTS`, so the AST ban
+#: still bites it (asserted in the direction test below). `_COVERAGE_EXEMPT` only
+#: ever excuses a module from the direction test's demand, and `tortoise` is its
+#: sole member: the package root is in `sys.modules` by construction and is
+#: deliberately NOT in the banned set, because banning the package would ban the
+#: module itself.
+_PROBE_EXEMPT = ("tortoise.embedded_lifecycle",)
+_COVERAGE_EXEMPT = ("tortoise",)
 _FORBIDDEN_GRAPH_ROOTS = (
     "falkordb",
     "redis",
+    "redislite",
     "tortoise.__main__",
+    "tortoise.acl_graph_users",
     "tortoise.backup",
     "tortoise.cypher_guard",
+    "tortoise.embedded_lifecycle",
+    "tortoise.ep",
+    "tortoise.hosted_api",
+    "tortoise.hosted_backup",
     "tortoise.projection",
+    "tortoise.retry",
     "tortoise.sdk",
     "tortoise.session_indexer",
+    "tortoise.tortoise_client",
 )
+
+#: ⛔ THE PACKAGE ROOT'S ATTRIBUTE FORM IS A STORE SPELLING THE SET CANNOT NAME.
+#: `from tortoise import FalkorDB` is resolved by `_imports_of` to
+#: `{tortoise, tortoise.FalkorDB}`, and neither name is a MODULE in the set above —
+#: so a function-body import of it passed every leg: the AST ban (no match), the
+#: subprocess probe (the import never executes at module scope, so `sys.modules`
+#: stays clean) and the direction scan (no new module is created). It is a real
+#: spelling: `tortoise/__init__.py` is a PEP-562 `__getattr__` that exports the
+#: guarded redislite `FalkorDB` and `Tortoise` (→ `tortoise.sdk`), and its own
+#: docstring names "code importing `tortoise.FalkorDB`" as the bypass surface.
+#: A SEPARATE set, not entries in `_FORBIDDEN_GRAPH_ROOTS`:
+#: `test_the_no_graph_guard_names_modules_that_EXIST` resolves every dotted entry
+#: as a module path and would report these as missing.
+#:
+#: ⛔ AND THE `from … import` FORM IS NOT THE ONLY ONE. `_imports_of` resolves
+#: `from tortoise import FalkorDB` to `tortoise.FalkorDB`, but `import tortoise`
+#: followed by `tortoise.FalkorDB` yields only `tortoise` — the package root, which
+#: is deliberately NOT banned (it is in `sys.modules` by construction). So the
+#: ATTRIBUTE form was still invisible to every leg — the AST ban matched no name,
+#: the probe sees it only when the read executes at module scope, and the direction
+#: scan creates no new module — which is the same reach this set exists to close,
+#: one spelling over. `_package_root_attributes` is the leg that closes it.
+_FORBIDDEN_CLIENT_EXPORTS = frozenset({"tortoise.FalkorDB", "tortoise.Tortoise"})
+
+#: Everything at the package root that reaches the store — the two export names
+#: ABOVE and every banned module BELOW, because `tortoise.sdk` is reached the same
+#: way `tortoise.FalkorDB` is: as an ATTRIBUTE of the imported package
+#: (`import tortoise; tortoise.sdk`). Filtering the attribute leg to the export set
+#: alone left `tortoise.sdk`, `tortoise.projection` and
+#: `tortoise.embedded_lifecycle` invisible through that spelling — the same hole,
+#: for the banned modules rather than the exports. (It is also live: `__init__.py`
+#: imports `embedded_lifecycle` eagerly, so the attribute resolves with no other
+#: import in the process.)
+_REACHABLE_FROM_ROOT = frozenset(_FORBIDDEN_CLIENT_EXPORTS) | frozenset(
+    _FORBIDDEN_GRAPH_ROOTS
+)
+
+#: The package roots that ARE a store client, DERIVED from the set above — the
+#: comment here used to claim the two "cannot drift" while nothing compared them,
+#: and they had already drifted twice (`falkordb` alone, then `+redis`, then a
+#: hand-added `redislite`). Deriving fails CLOSED: a dotless non-store entry would
+#: over-report into `uncovered` rather than go unseen.
+_STORE_CLIENT_ROOTS = tuple(r for r in _FORBIDDEN_GRAPH_ROOTS if "." not in r)
 
 
 def _imports_of(source: str) -> set[str]:
-    """Every module this source imports, RELATIVE IMPORTS RESOLVED.
+    """Every name this source imports or names through an imported module.
 
-    ⛔ The resolution is the whole point. An earlier version of this guard walked
-    `ast.ImportFrom` with `node.module` truthy and compared the leftover string,
-    so `from . import manager` (module is None) was SKIPPED and
+    ⛔ The name list is a SUPERSET that consumers match by PREFIX, so an entry that
+    is not a module path is harmless: `from tortoise import sdk` has to record
+    `tortoise.sdk` (a module) and `from tortoise import FalkorDB` has to record
+    `tortoise.FalkorDB` (an export, not a module) — `_offending` then matches both
+    against the two name sets, and so does the direction scan: it asks
+    `_reaches_a_store_client`, which tests the dotless store roots AND the export
+    names, so a module whose ONLY reach is `from tortoise import FalkorDB` is found
+    there too. (An earlier version of this paragraph said the scan "only ever asks
+    whether a name starts with a dotless store root, which no export can" — that
+    stopped being true when the export half was added to the shared predicate, and
+    the scan's own docstring said the opposite in the same file.)
+
+    ⛔ The RELATIVE resolution is the other point. An earlier version of this guard
+    walked `ast.ImportFrom` with `node.module` truthy and compared the leftover
+    string, so `from . import manager` (module is None) was SKIPPED and
     `from .graph_connection import get_connection` recorded `.graph_connection`,
     which matched nothing in the forbidden set. Both spellings are the ones this
     package actually uses (`from . import read_ledger`,
     `from .config import resolve_db_path`), so the guard passed on the exact
     regression it existed for.
     """
-    import ast
-
     found: set[str] = set()
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
@@ -698,14 +860,287 @@ def _imports_of(source: str) -> set[str]:
                 # ⛔ `from tortoise import sdk` imports the SUBMODULE
                 # `tortoise.sdk`; recording only `tortoise` left that spelling
                 # invisible, which is a third way to reach a store client.
-                if node.level == 0:
+                # ⛔ THE ALIAS IS EMITTED FOR THE RELATIVE FORM TOO, and that is
+                # not cosmetic: `from .__init__ import FalkorDB` resolves to
+                # `tortoise.__init__`, which FOLDS onto the deliberately-unbanned
+                # package root, so recording the module alone lost the export and
+                # the spelling reached the client with every leg green. For every
+                # other relative module the alias was redundant because the MODULE
+                # itself is banned — that redundancy is exactly what hid this.
+                prefix = "" if node.level == 0 else "tortoise."
+                found |= {
+                    f"{prefix}{node.module}.{alias.name}"
+                    for alias in node.names
+                    if alias.name != "*"
+                }
+                if node.level == 0 and any(a.name == "*" for a in node.names):
+                    # ⛔ `from <pkg> import *` BINDS THE PACKAGE'S PUBLIC NAMES, and
+                    # the bare `*` recorded above matches no root. For a root the
+                    # guard deliberately does not ban (`tortoise` itself), that made
+                    # the star form TRIPLY blind: the AST ban saw the literal `*`,
+                    # the direction scan saw no store root (`_imports_of` contains
+                    # none), and the probe cannot see `embedded_lifecycle` (it is
+                    # probe-exempt AND already in `sys.modules`). Measured: a
+                    # module-level `from tortoise import *` in the real
+                    # `usage_signal.py` bound `embedded_lifecycle` — the module that
+                    # owns the embedded store — with every row green. Emitting every
+                    # reachable name under that prefix is a SUPERSET (a star import
+                    # may bind fewer), which is this helper's stated contract and
+                    # fails CLOSED.
+                    star_prefix = f"{node.module}."
                     found |= {
-                        f"{node.module}.{alias.name}" for alias in node.names
+                        name
+                        for name in _REACHABLE_FROM_ROOT
+                        if name.startswith(star_prefix)
                     }
             elif node.level:
                 # `from . import x` — resolve each alias under the package.
-                found |= {f"tortoise.{alias.name}" for alias in node.names}
+                found |= {
+                    f"tortoise.{alias.name}"
+                    for alias in node.names
+                    if alias.name != "*"
+                }
+                # ⛔ THE RELATIVE STAR IS THE SAME HOLE ONE SPELLING OVER, and it
+                # cannot be reached by the absolute branch above because that one is
+                # nested under `node.level == 0`. `from . import *` binds the
+                # package's public names in a fresh interpreter (measured: 11 names,
+                # `embedded_lifecycle` among them, which owns the embedded store),
+                # while the literal `tortoise.*` alias matches no root, the scan sees
+                # no store root, and the probe cannot see `embedded_lifecycle`. Fixed
+                # the same way, and for the same reason: a superset, failing CLOSED.
+                if any(alias.name == "*" for alias in node.names):
+                    found |= {
+                        name
+                        for name in _REACHABLE_FROM_ROOT
+                        if name.startswith("tortoise.")
+                    }
     return found
+
+
+def _package_root_attributes(source: str) -> set[str]:
+    """`tortoise.FalkorDB`-style reads, resolved through the local names bound to
+    the package root.
+
+    ⛔ THE ATTRIBUTE FORM IS A SEPARATE SPELLING, NOT A VARIANT. `_imports_of`
+    resolves `from tortoise import FalkorDB` to `tortoise.FalkorDB` and the set
+    intersection catches it; `import tortoise` + `tortoise.FalkorDB` resolves to
+    just `tortoise`, which is deliberately unbanned, so nothing caught it. Aliases
+    are followed (`import tortoise as t` -> `t.FalkorDB`), because the alias is
+    what a caller writes.
+
+    Deliberately over-reports rather than under-reports: a local that shadows the
+    package name can only produce a FALSE POSITIVE here, and a guard that reddens
+    spuriously is recoverable while one that stays green is not.
+
+    ⛔ THE ATTRIBUTE FORM LIVES HERE, NOT IN `_imports_of`. That helper answers a
+    different question ("every name this source imports or names through an
+    imported module" — a SUPERSET that deliberately includes export names, because
+    `_offending`'s export intersection and the star handling need them). This one
+    asks which names are BOUND to the package root. One owner per question, and
+    deleting this leg reddens the export pin rather than nothing.
+
+    ⛔ AND `from tortoise import __init__ as i` IS THE PACKAGE ROOT, not a
+    submodule: the name it binds is the module that owns `FalkorDB`, so a read on
+    that name is the attribute spelling of the guarded client. It was the one
+    spelling of the root that neither bound loop saw — `ast.ImportFrom` was not
+    read here at all, and `_imports_of` FOLDS it onto the unbanned `tortoise` — so
+    `i.FalkorDB` reached the guarded client with every leg green (measured:
+    `from tortoise import __init__ as i` resolves to `<module 'tortoise.__init__'>`
+    and `i.FalkorDB` returns
+    `tortoise.__init__._build_guarded_falkordb.<locals>.FalkorDB`).
+
+    ⛔ AND THE RELATIVE SPELLING IS THE SAME BINDING, and the more natural one
+    inside this package. `ast` records `from . import __init__` as
+    `ImportFrom(module=None, level=1)` — there is no module STRING to compare, so
+    an absolute-only branch can never see it and the spelling sat in the hole the
+    absolute fix had just closed one word over: measured, the relative form binds
+    `<module 'tortoise.__init__'>` and `i.FalkorDB` is the same guarded client,
+    while this leg, `_offending` and `_module_reaches_a_store` were ALL green.
+    ⚠️ OVER-REPORTS for a nested module, where `from . import __init__` names
+    `tortoise.<sub>.__init__` and `from .. import __init__` names the root: the
+    source string carries no package depth, so the two cannot be told apart here.
+    Fail-closed, as the first paragraph sanctions, and measured to flag no file in
+    the tree today.
+    """
+    tree = ast.parse(source)
+    nodes = list(ast.walk(tree))
+    bound: set[str] = set()
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "tortoise" or alias.name.startswith("tortoise."):
+                    bound.add(alias.asname or "tortoise")
+        elif isinstance(node, ast.ImportFrom):
+            # ⛔ TWO SPELLINGS OF ONE BINDING, and the second has no module STRING
+            # to match: `from tortoise import __init__` is `level=0` with
+            # `module="tortoise"`, while `from . import __init__` is `level>=1`
+            # with `module=None`. Keying on the module string alone left the
+            # relative form — the one written INSIDE this package — invisible to
+            # every leg (measured; see this function's docstring).
+            absolute_root = node.level == 0 and node.module == "tortoise"
+            relative_root = node.level >= 1 and node.module is None
+            if absolute_root or relative_root:
+                for alias in node.names:
+                    if alias.name == "__init__":
+                        bound.add(alias.asname or alias.name)
+    # ⛔ FOLLOW THE REBINDING, not just the `import … as` hop. `t = tortoise` then
+    # `t.FalkorDB` is the SAME spelling one assignment over, and a walk that stops
+    # at the import statement records nothing for it — which is how closing the
+    # alias hop can leave the identical hole one line further along. Iterated to a
+    # FIXPOINT because the chain can be any length (`f = tortoise; g = f`).
+    changed = True
+    while changed:
+        changed = False
+        for node in nodes:
+            if isinstance(node, ast.Assign):
+                targets: list[ast.expr] = list(node.targets)
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            else:
+                continue
+            if _dotted_base(node.value) in bound:
+                for target in targets:
+                    if isinstance(target, ast.Name) and target.id not in bound:
+                        bound.add(target.id)
+                        changed = True
+    return {
+        f"tortoise.{node.attr}"
+        for node in nodes
+        if isinstance(node, ast.Attribute)
+        and _dotted_base(node.value) in bound
+        and f"tortoise.{node.attr}" in _REACHABLE_FROM_ROOT
+    } | _getattr_reaching_a_store(nodes, bound)
+
+
+def _getattr_reaching_a_store(
+    nodes: list[ast.AST], bound: set[str]
+) -> set[str]:
+    """`getattr(tortoise, "FalkorDB")` with BOTH arguments literal.
+
+    ⛔ OUT-OF-SCOPE IS NOT THE SAME AS UNREACHABLE, and this one is statically
+    decidable: the name is right there in a string constant. The scope note USED to
+    say "a STATIC import is the only thing this guard can see", which left this
+    spelling unseen while the code deliberately covered a non-import ATTRIBUTE
+    read; the note is now widened to match the code. A non-literal second argument
+    (`getattr(t, name)`) stays genuinely out of scope, and is named as such beside
+    `importlib.import_module`/`__import__`.
+
+    ⛔ THE BUILTIN `getattr` HAS NO EXHAUSTIVE KEYWORD FORM, BUT THE HOOK DOES.
+    `getattr` accepts NO keyword arguments (`getattr(o, name="x")` raises
+    `TypeError`, measured on 3.12), so for the BUILTIN the keyword spelling is not a
+    reach this leg misses — it cannot execute at all. That reasoning does NOT carry
+    to `tortoise.__getattr__`, which is `def __getattr__(name: str)` and therefore
+    DOES accept `name=`, so the hook's keyword form is a real live reach and is
+    read below alongside the positional one.
+
+    ⚠️ **AND COVERAGE IS SYNTACTIC — stated, because it cannot be completed.** A
+    `getattr`/hook reached through a local ALIAS (`f = getattr; f(tortoise, "X")`,
+    `g = tortoise.__getattr__; g("X")`), through `operator.attrgetter("X")`, or via
+    a direct `tortoise.__getattribute__("X")` call is NOT resolved here, and neither
+    is any name assembled at runtime. Each of those is a literal string one
+    indirection away and this walker does not follow indirections of that kind; the
+    set of such spellings has no natural end, so the boundary is declared rather
+    than chased. What IS guaranteed is the direct form, in every placement.
+    """
+    found: set[str] = set()
+    for node in nodes:
+        # ⛔ `tortoise.__getattr__("FalkorDB")` AND `tortoise.__getattr__(name=
+        # "FalkorDB")` — the PEP-562 hook itself, called with a literal name. Same
+        # reasoning as `getattr` above: the name is a string constant in the source,
+        # and `tortoise.__getattr__` really is a module attribute that returns the
+        # guarded client (`__init__.py:372`). The KEYWORD form is accepted because
+        # the hook is `def __getattr__(name: str)` — unlike the builtin, it does not
+        # reject it.
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "__getattr__"
+            and _dotted_base(node.func.value) in bound
+        ):
+            argument = None
+            if len(node.args) >= 1:
+                argument = node.args[0]
+            else:
+                argument = next(
+                    (
+                        keyword.value
+                        for keyword in node.keywords
+                        if keyword.arg == "name"
+                    ),
+                    None,
+                )
+            if (
+                isinstance(argument, ast.Constant)
+                and isinstance(argument.value, str)
+            ):
+                name = f"tortoise.{argument.value}"
+                if name in _REACHABLE_FROM_ROOT:
+                    found.add(name)
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+        ):
+            continue
+        base, attribute = node.args[0], node.args[1]
+        if (
+            _dotted_base(base) in bound
+            and isinstance(attribute, ast.Constant)
+            and isinstance(attribute.value, str)
+        ):
+            name = f"tortoise.{attribute.value}"
+            if name in _REACHABLE_FROM_ROOT:
+                found.add(name)
+    return found
+
+
+def _fold_init(name: str) -> str:
+    """`tortoise.__init__.X` -> `tortoise.X`, `tortoise.__init__` -> `tortoise`.
+
+    ⛔ `from tortoise.__init__ import FalkorDB` and `tortoise.__init__.FalkorDB` are
+    the SAME reach as the two forms `_FORBIDDEN_CLIENT_EXPORTS` exists to catch, and
+    they were missed by every leg: the resolved name is `tortoise.__init__.FalkorDB`,
+    which matches no banned root and no export entry, the attribute leg only fired on
+    `Attribute(value=Name)` so the chained base was invisible, and the probe is blind
+    to the function-body placement (`redislite` is not loaded until the read runs).
+    `tortoise.__init__` is a spelling of the package root, so the fold is applied to
+    every name this module derives rather than to one call site.
+    """
+    return name.replace(".__init__", "")
+
+
+def _dotted_base(source: ast.AST) -> str | None:
+    """The dotted name an attribute read is rooted at, folded — or None.
+
+    Follows a CHAIN (`tortoise.__init__.FalkorDB` roots at `tortoise`), which a
+    reader that insists on `Attribute(value=Name)` cannot do.
+    """
+    parts: list[str] = []
+    while isinstance(source, ast.Attribute):
+        parts.append(source.attr)
+        source = source.value
+    if not isinstance(source, ast.Name):
+        return None
+    parts.append(source.id)
+    return _fold_init(".".join(reversed(parts)))
+
+
+def _offending(source: str) -> set[str]:
+    """Every name in `source` that reaches a store client — modules AND exports."""
+    imported = {_fold_init(name) for name in _imports_of(source)}
+    return (
+        {
+            name
+            for name in imported
+            if any(
+                name == root or name.startswith(root + ".")
+                for root in _FORBIDDEN_GRAPH_ROOTS
+            )
+        }
+        | (imported & _FORBIDDEN_CLIENT_EXPORTS)
+        | _package_root_attributes(source)
+    )
 
 
 def test_no_graph_dependency() -> None:
@@ -715,27 +1150,74 @@ def test_no_graph_dependency() -> None:
     into the very store the window exists to bound (#14011), so this module is
     required to have no graph in reach.
 
-    ⚠️ **SCOPE: a STATIC import is the only thing this guard can see.** Every
-    static spelling is resolved (`from . import x`, `from .mod import x`,
-    `import a.b`, and imports inside function bodies — `ast.walk` descends).
-    `importlib.import_module("tortoise.manager")` or `__import__` would pass, and
-    are OUT OF SCOPE rather than covered. Said out loud because this docstring is
-    what a future reader consults to decide the guard is sufficient.
+    ⚠️ **SCOPE: a STATIC import or a literal ATTRIBUTE read is what this guard can
+    see.** Every static spelling is resolved (`from . import x`, `from .mod import
+    x`, `import a.b`, `from tortoise import FalkorDB`, `tortoise.FalkorDB` on the
+    bound package name — aliases and rebindings followed — and any of these inside
+    function bodies, since `ast.walk` descends). `importlib.import_module(...)`,
+    `__import__(...)`, `getattr(t, name)` with a NON-literal name, and any name
+    built at runtime (`tortoise.__dict__[...]`, `f"tortoise.{x}"`) would pass, and
+    are OUT OF SCOPE rather than covered. ⛔ SO ARE THE REBINDING FORMS THE FIXPOINT
+    DOES NOT WALK, which are STATIC and therefore easy to assume are covered: only
+    `x = …` and `x: T = …` propagate the bound name, and the exceptions are listed
+    as EXAMPLES rather than a closed set — a walrus (`if (t := tortoise): …`), a
+    loop or `with … as` target, a TUPLE, LIST or STARRED target, a comprehension
+    target, a `match` capture pattern, and a DEFAULT ARGUMENT
+    (`def f(t=tortoise): return t.Tortoise`) all reach the client and are not seen.
+    They are named because the clause above promises "aliases and rebindings
+    followed", and a reader deciding sufficiency must not read that as every static
+    form. (`getattr(tortoise, "FalkorDB")` with BOTH arguments literal IS covered —
+    see `_getattr_reaching_a_store` — because that is statically decidable.)
+
+    ⚠️ **ALSO OUT OF SCOPE, and easier to get wrong: the TRANSITIVE hop.** The ban
+    is one-hop by design (the closure is not walked — walking it would forbid the
+    legitimate `read_ledger` import too). So a module that reaches a store client
+    only through a LAZY import inside a function body is not banned by name, and
+    the subprocess probe cannot see it either, because the import never executes
+    at module scope (`from . import analyze` is the measured shape:
+    `tortoise/analyze.py` imports `tortoise.sdk` inside a function, and the probe's
+    bad-list stays EMPTY). That residual is stated rather than closed, because
+    closing it is a closure walk — a different design — not a spelling fix.
+
+    Said out loud because this docstring is what a future reader consults to
+    decide the guard is sufficient.
     """
     source = Path(usage_signal.__file__).read_text(encoding="utf-8")
-    imported = _imports_of(source)
-    offending = {
-        name
-        for name in imported
-        for root in _FORBIDDEN_GRAPH_ROOTS
-        if name == root or name.startswith(root + ".")
-    }
+    # ⛔ THE SUBJECT OF THIS BAN IS PINNED TOO. Every synthetic assert below feeds
+    # `_offending` a LITERAL, so the one call that reads the real module could be
+    # made to read nothing (`source = ""`, a wrong path, a cached constant) and
+    # every row stayed green (measured: 101 passed) — the guard protecting
+    # `usage_signal` itself, silently disabled, with nothing to notice it.
+    assert source.strip() and usage_signal.__file__.endswith("usage_signal.py"), (
+        f"the ban read {usage_signal.__file__!r} as "
+        f"{len(source)} chars — this test's whole subject is that module's source, "
+        "and an empty or misdirected read makes every assertion below vacuous")
+    # ⛔ AND ITS PROVENANCE, not just its non-emptiness. The assert above closes the
+    # EMPTY read only: `source = "# clean\n"` or a read of another tree module's
+    # file left every row green (measured: 101 passed each), because MOST of the
+    # tree's 305 modules `_offending` finds clean — the ban's own subject is the
+    # exception, so an empty, cached or misdirected read certifies a file nobody
+    # audited while the rows it feeds read green. No size figure is quoted here: the
+    # one that used to sit here had already gone stale twice in this file's own
+    # history — measured at the head it was removed from, the clean count was not the
+    # number it stated — and a figure beside the property it is used to argue is a
+    # fossil waiting to happen. So the ban compares the string it audits against a
+    # fresh read of the file it claims to audit.
+    assert source == Path(usage_signal.__file__).read_text(encoding="utf-8"), (
+        "the ban must examine THIS module's CURRENT source: a cached constant or a "
+        "misdirected read certifies a file the ban never looked at")
+    offending = _offending(source)
     assert not offending, (
         f"usage_signal imports a graph client: {sorted(offending)} — a residency "
         f"signal may never write to the store it is bounding"
     )
     # Cheap transitive check: importing the module must not drag a store client in
     # through some other path the AST of one file cannot see.
+    # ⚠️ What this can and cannot see: it observes what EXECUTES at import time. A
+    # module reached only through a lazy import inside a function body loads
+    # nothing here, so it is invisible to this leg — see the scope note in
+    # `test_no_graph_dependency`, which states that residual rather than implying
+    # the probe closes it.
     #
     # ⛔ IN A SUBPROCESS, not this one. `sys.modules` here is the WHOLE pytest
     # session's — the conftest and a hundred other tests import a store client long
@@ -749,32 +1231,49 @@ def test_no_graph_dependency() -> None:
     # that reaches the client. `test_the_no_graph_guard_names_modules_that_EXIST`
     # and `…_covers_every_module_that_reaches_a_store` hold the set in both
     # directions; this leg inherits whatever they certify.
-    probe = (
-        "import sys;"
-        "from tortoise import usage_signal;"
-        f"forbidden={_FORBIDDEN_GRAPH_ROOTS!r};"
-        "bad=[n for n in sys.modules if any(n == r or n.startswith(r + '.') "
-        "for r in forbidden)];"
-        "print(','.join(sorted(bad)))"
-    )
-    out = subprocess.run(
-        [sys.executable, "-c", probe],
-        capture_output=True,
-        text=True,
-        cwd=str(Path(__file__).resolve().parent.parent),
-        check=True,
-    )
-    assert out.stdout.strip() == "", (
-        f"importing usage_signal pulled a graph client into sys.modules: "
-        f"{out.stdout.strip()}"
-    )
+    def _probe(import_stmt: str) -> str:
+        """Run the sys.modules walk in a CLEAN interpreter over one import."""
+        src = (
+            "import sys;"
+            f"{import_stmt};"
+            f"forbidden={tuple(r for r in _FORBIDDEN_GRAPH_ROOTS if r not in _PROBE_EXEMPT)!r};"
+            "bad=[n for n in sys.modules if any(n == r or n.startswith(r + '.') "
+            "for r in forbidden)];"
+            "print(','.join(sorted(bad)))"
+        )
+        return subprocess.run(
+            [sys.executable, "-c", src],
+            capture_output=True,
+            text=True,
+            cwd=str(Path(__file__).resolve().parent.parent),
+            check=True,
+        ).stdout.strip()
+
+    # ⛔ AND THIS LEG NEEDS A POSITIVE CONTROL, not only the negative assertion.
+    # Everything above asserts the probe finds NOTHING, so every way of breaking the
+    # detector reads GREEN: an emptied derivation (`forbidden=()`), the historical
+    # hardcoded pair, or the subprocess call replaced by a constant all left the file
+    # at 101 passed (measured). A detector that cannot be shown to detect is not a
+    # detector — the same defect as the substring scan one level up. So the SAME body
+    # runs against a module that DOES pull a store client in (measured: `tortoise.ep`
+    # loads `redis` eagerly) and must come back non-empty.
+    assert "redis" in _probe("import tortoise.ep"), (
+        "the transitive probe cannot detect a store client at all: importing "
+        "tortoise.ep must put a `redis` module in sys.modules, so an empty answer "
+        "here means the probe (not the tree) is broken")
+    leaked = _probe("from tortoise import usage_signal")
+    assert leaked == "", (
+        f"importing usage_signal pulled a graph client into sys.modules: {leaked}")
 
 
 def test_the_no_graph_guard_catches_relative_imports() -> None:
     """The guard itself is pinned — it was defeated once by import spelling."""
     assert _imports_of("from . import projection\n") == {"tortoise.projection"}
+    # The alias IS recorded for the relative form too (load-bearing: see the
+    # `.__init__` case in the export pin), so this is a superposition.
     assert _imports_of("from .projection import FalkorProjection\n") == {
-        "tortoise.projection"
+        "tortoise.projection",
+        "tortoise.projection.FalkorProjection",
     }
     assert _imports_of("import redis\n") == {"redis"}
     assert _imports_of("from . import read_ledger\n") == {"tortoise.read_ledger"}
@@ -784,6 +1283,286 @@ def test_the_no_graph_guard_catches_relative_imports() -> None:
         "tortoise",
         "tortoise.sdk",
     }
+
+
+@pytest.mark.parametrize("root", _FORBIDDEN_GRAPH_ROOTS)
+def test_every_entry_in_the_ban_is_pinned(root: str) -> None:
+    """⛔ A BAN ENTRY THAT NOTHING EXERCISES CAN BE NARROWED SILENTLY.
+
+    The direction tests pin `_STORE_CLIENT_ROOTS` (the SCAN) and the set's tree
+    modules; nothing pinned the ENTRIES, so deleting `"redislite"` left the file
+    green, and so did narrowing the matcher itself to the three dotless roots
+    (`_FORBIDDEN_GRAPH_ROOTS` → `_STORE_CLIENT_ROOTS` inside `_offending`), which
+    is a full bypass for `from .projection import FalkorProjection` in a function
+    body. Parametrized over the WHOLE set — every entry is a module path, so both
+    assertions hold for all of them.
+
+    NOTE: parametrizing over the set cannot pin a REMOVAL (the case goes with the
+    entry). `test_the_ban_covers_all_three_roots_the_tree_actually_uses` is the
+    floor that holds the three roots the tree is measured to import from.
+    """
+    assert _offending(f"import {root}\n") == {root}
+    assert _offending(f"from {root}.client import Something\n") == {
+        f"{root}.client",
+        f"{root}.client.Something",
+    }
+
+
+def test_the_ban_covers_all_three_roots_the_tree_actually_uses() -> None:
+    """⛔ A FLOOR, not a mirror — the parametrization above cannot pin a REMOVAL.
+
+    Parametrizing over `_FORBIDDEN_GRAPH_ROOTS` pins each entry's BEHAVIOUR, but
+    deleting an entry also deletes its own case, so THAT row cannot see the loss.
+    The loss is not otherwise silent — measured at this head, dropping `redislite`
+    (or `redis`, or `falkordb`) reddens TWO rows: this one, and the scan row whose
+    witnesses reach the client through the dropped root. This test is therefore the
+    recorded DECISION rather than the only detector: these three roots are the ones
+    the tree is MEASURED to import a client from — `tortoise/__init__.py`
+    (`redislite.falkordb_client`), `hosted_backup`/`acl_graph_users`/
+    `tortoise_client`/`retry`/`ep`/`hosted_api` (`redis`), `projection` (`falkordb`)
+    — so the floor states that a fourth root must be added deliberately and that
+    none of these three may be dropped to green a scan.
+    """
+    assert set(_STORE_CLIENT_ROOTS) >= {"falkordb", "redis", "redislite"}
+
+
+def test_no_graph_dependency_pins_the_package_root_EXPORT_form() -> None:
+    """⛔ `from tortoise import FalkorDB` is a store spelling no module entry names.
+
+    `_imports_of` resolves it to `{tortoise, tortoise.FalkorDB}`, and the package
+    root is exempt from the ban (banning it bans the module itself), so before
+    `_FORBIDDEN_CLIENT_EXPORTS` this passed every leg — including from inside a
+    function body, where the subprocess probe cannot see it either because the
+    import never runs at module scope. `tortoise/__init__.py` is a PEP-562
+    `__getattr__` exporting the guarded redislite client, and names this form as
+    the bypass surface in its own docstring.
+    """
+    assert _offending("from tortoise import FalkorDB\n") == {"tortoise.FalkorDB"}
+    assert _offending("from tortoise import Tortoise\n") == {"tortoise.Tortoise"}
+    assert _offending("def f():\n    from tortoise import FalkorDB\n") == {
+        "tortoise.FalkorDB"
+    }
+    # ⛔ AND THE PLAIN ATTRIBUTE — no `import` statement at all. Inside a function
+    # body nothing else sees it: the probe is blind (the access never runs at import
+    # time) and no module appears for the direction scan. At module scope the probe
+    # catches it incidentally (the access loads redislite), which is what made the
+    # function-body spelling the surviving hole.
+    assert _offending("import tortoise\nx = tortoise.FalkorDB\n") == {
+        "tortoise.FalkorDB"
+    }
+    assert _offending("def f():\n    import tortoise\n    return tortoise.Tortoise\n") == {
+        "tortoise.Tortoise"
+    }
+    # ⛔ AND THE ALIASED ATTRIBUTE, which is the form a caller actually writes:
+    # `import tortoise as t` binds `t`, not `tortoise`, so a reader that only knows
+    # the canonical name records nothing. (`_package_root_attributes` follows the
+    # alias; the bare-name branch inside `_imports_of` cannot.)
+    assert _offending("import tortoise as t\nc = t.FalkorDB\n") == {
+        "tortoise.FalkorDB"
+    }
+    # ⛔ AND THE REBINDING, which is the alias hop one assignment over: a walk that
+    # stops at the `import` statement sees nothing here, so closing `import … as`
+    # alone leaves the identical hole. Chained once to prove the fixpoint.
+    assert _offending("import tortoise\nf = tortoise\nc = f.FalkorDB\n") == {
+        "tortoise.FalkorDB"
+    }
+    assert _offending("import tortoise as t\nf = t\ng = f\nc = g.Tortoise\n") == {
+        "tortoise.Tortoise"
+    }
+    # ⛔ AND THE ANNOTATED REBINDING (`ast.AnnAssign`), which is a separate node kind
+    # from `ast.Assign` — a fixpoint that walks only `Assign` follows `f = tortoise`
+    # and NOT `f: Any = tortoise`, leaving the same hole one spelling over. Pinned
+    # on its own because deleting that branch reddened nothing (measured: 98
+    # passed), i.e. it was the only unpinned line of the leg.
+    assert _offending(
+        "from typing import Any\nimport tortoise\nf: Any = tortoise\nc = f.FalkorDB\n"
+    ) == {"tortoise.FalkorDB"}
+    # ⛔ AND THE FIXPOINT ITERATION ITSELF. `ast.walk` is BREADTH-FIRST, so a
+    # rebinding inside a nested block is visited AFTER a module-level statement
+    # that consumes it — one pass sees `b = a` before it knows `a` is the package
+    # root and records nothing. Pinned because replacing `while changed:` with a
+    # single pass left the suite fully green (measured) while the
+    # shipped code catches the real spelling below.
+    assert _offending(
+        "import tortoise\nif True:\n    a = tortoise\nb = a\nc = b.FalkorDB\n"
+    ) == {"tortoise.FalkorDB"}
+    # …and `import tortoise.sdk` binds `tortoise` too, so it is both a banned
+    # module AND the handle the attribute form is read through.
+    assert _offending("import tortoise.sdk\nc = tortoise.FalkorDB\n") == {
+        "tortoise.sdk",
+        "tortoise.FalkorDB",
+    }
+    # ⛔ AND THE ATTRIBUTE FORM OF A BANNED MODULE — not just of an export. The leg
+    # was first filtered to `_FORBIDDEN_CLIENT_EXPORTS`, which left `tortoise.sdk`,
+    # `tortoise.projection` and `tortoise.embedded_lifecycle` reachable as
+    # attributes of the package with every leg green; `_REACHABLE_FROM_ROOT` is the
+    # union that closes it. `embedded_lifecycle` is the live one (`__init__.py`
+    # imports it eagerly, so reading it needs no other import in the process).
+    assert _offending("import tortoise as _t\nh = _t.embedded_lifecycle\n") == {
+        "tortoise.embedded_lifecycle"
+    }
+    assert _offending("import tortoise\nx = tortoise.projection\n") == {
+        "tortoise.projection"
+    }
+    assert _offending("def f():\n    import tortoise\n    return tortoise.sdk\n") == {
+        "tortoise.sdk"
+    }
+    # ⛔ AND `getattr` WITH BOTH ARGUMENTS LITERAL, which is statically decidable
+    # and was the one dynamic-looking spelling left unseen by a guard that
+    # deliberately covers a non-import attribute read.
+    assert _offending('import tortoise\nc = getattr(tortoise, "FalkorDB")\n') == {
+        "tortoise.FalkorDB"
+    }
+    assert _offending('import tortoise\nc = getattr(tortoise, "sdk")\n') == {
+        "tortoise.sdk"
+    }
+    # ⛔ AND THE `.__init__` SPELLING OF THE PACKAGE ROOT, which is the SAME reach as
+    # the two forms above and was missed by every leg: the base of the attribute is
+    # itself an Attribute, so a reader that only matches `Attribute(value=Name)` saw
+    # nothing, and the import form resolved to a name matching no root and no export.
+    assert _offending("from tortoise.__init__ import FalkorDB\n") == {
+        "tortoise.FalkorDB"
+    }
+    assert _offending("import tortoise.__init__\nc = tortoise.__init__.Tortoise\n") == {
+        "tortoise.Tortoise"
+    }
+    assert _offending("def f():\n    from tortoise.__init__ import Tortoise\n") == {
+        "tortoise.Tortoise"
+    }
+    assert _offending(
+        'import tortoise.__init__\nc = getattr(tortoise.__init__, "FalkorDB")\n'
+    ) == {"tortoise.FalkorDB"}
+    # ⛔ AND THE RELATIVE `.__init__` SPELLING, which is the one `usage_signal.py`'s
+    # own import style produces (`from .config import …`). It resolves to
+    # `tortoise.__init__`, which folds onto the UNBANNED package root, so emitting
+    # only the module there lost the alias — every other relative module was saved
+    # by its own ban, which is exactly what hid this one.
+    assert _offending("from .__init__ import FalkorDB\n") == {"tortoise.FalkorDB"}
+    assert _offending("from .__init__ import Tortoise\n") == {"tortoise.Tortoise"}
+    # …and the REBINDING through that spelling, which the fixpoint missed while it
+    # followed only a bare `ast.Name` value.
+    assert _offending(
+        "import tortoise.__init__\nf = tortoise.__init__\nc = f.FalkorDB\n"
+    ) == {"tortoise.FalkorDB"}
+    # A NON-literal name stays out of scope (and is named as such in the docstring).
+    assert _offending("import tortoise\nc = getattr(tortoise, NAME)\n") == set()
+    # ⛔ AND THE STAR IMPORT, which was TRIPLY blind: the bare `*` matched no root,
+    # the scan saw no store root, and the probe cannot see `embedded_lifecycle`. In a
+    # fresh interpreter `from tortoise import *` really does bind it (the package has
+    # no `__all__`, and `embedded_lifecycle` is a public name), so this spelling
+    # reached the module that owns the embedded store with every row green.
+    assert _offending("from tortoise import *\nh = embedded_lifecycle\n") >= {
+        "tortoise.embedded_lifecycle",
+        "tortoise.sdk",
+    }
+    # ⛔ AND THE RELATIVE STAR, which the absolute branch cannot reach (it is nested
+    # under `level == 0`). `from . import *` binds the package's public names in a
+    # fresh interpreter, `embedded_lifecycle` among them.
+    assert _offending("from . import *\nh = embedded_lifecycle\n") >= {
+        "tortoise.embedded_lifecycle",
+        "tortoise.sdk",
+    }
+    # ⛔ AND THE PEP-562 HOOK CALLED DIRECTLY with a literal name.
+    assert _offending('import tortoise\nc = tortoise.__getattr__("FalkorDB")\n') == {
+        "tortoise.FalkorDB"
+    }
+    assert _offending('import tortoise\nc = tortoise.__getattr__("sdk")\n') == {
+        "tortoise.sdk"
+    }
+    # …and the KEYWORD form, which the hook accepts (`def __getattr__(name: str)`)
+    # even though the builtin `getattr` rejects it.
+    assert _offending(
+        'import tortoise\nc = tortoise.__getattr__(name="FalkorDB")\n'
+    ) == {"tortoise.FalkorDB"}
+    # ⛔ AND THE RECEIVER GOES THROUGH `_dotted_base`, not a bare `ast.Name`.
+    # Reverting that one call site kept every row green (measured: 101 passed)
+    # while the `.__init__` spelling of the CHAIN silently stopped being seen —
+    # although `_fold_init`'s docstring claims the fold is applied to every name
+    # this module derives rather than to one call site.
+    assert _offending(
+        'import tortoise.__init__\nc = tortoise.__init__.__getattr__("FalkorDB")\n'
+    ) == {"tortoise.FalkorDB"}, (
+        "the `.__getattr__` receiver must be folded through `_dotted_base` like "
+        "every other name this module derives")
+    # ⛔ AND THE `from tortoise import __init__` SPELLING, which binds the PACKAGE
+    # under a fresh name (`tortoise.__init__` IS the package). It was the one
+    # spelling of the root outside the bound loop's view: `_imports_of` folds it to
+    # the unbanned `tortoise`, no banned root matched, and a function-body read is
+    # invisible to the probe. Measured reach, not a theoretical one — after
+    # `import tortoise.__init__` the parent's attribute IS the module, so the read
+    # returns the guarded client.
+    # ⛔ THE BINDING IS BY NAME, NOT BY LOAD ORDER — and this row is the one that
+    # actually witnesses the `ast.ImportFrom` branch. An earlier cut asserted
+    # `_offending("import tortoise.__init__\nfrom tortoise import __init__ as i\n")
+    # == set()`, which is green for EVERY mutation of this branch because the
+    # source contains no attribute read at all: it pinned nothing while reading as
+    # if it pinned the branch. The leg matches the NAME bound from the package
+    # root, so the read is reported with or without a preceding
+    # `import tortoise.__init__` — the deliberate fail-closed over-report this
+    # function's first paragraph sanctions.
+    assert _offending(
+        "from tortoise import __init__\nc = __init__.FalkorDB\n"
+    ) == {"tortoise.FalkorDB"}, (
+        "the binding is name-based: a read on the `__init__` name bound from the "
+        "package root is the guarded client whether or not the submodule was "
+        "imported first")
+    # ⛔ AND THE RELATIVE SPELLING, which is the one a module INSIDE this package
+    # writes and which `ast` records with NO module string (module=None, level=1)
+    # — so the absolute-only branch could never see it. Measured as a LIVE reach:
+    # `from . import __init__ as i` binds `<module 'tortoise.__init__'>` and
+    # `i.FalkorDB` IS the guarded client, while this leg, `_offending` and
+    # `_module_reaches_a_store` were all green.
+    assert _offending(
+        "from . import __init__ as i\nc = i.FalkorDB\n"
+    ) == {"tortoise.FalkorDB"}, (
+        "`from . import __init__` binds the package root in a module inside the "
+        "package; an absolute-only branch let `i.FalkorDB` through with the ban "
+        "and the direction scan both green")
+    assert _offending(
+        "from . import __init__\nc = __init__.FalkorDB\n"
+    ) == {"tortoise.FalkorDB"}, (
+        "the un-aliased relative binding is the same reach under the plain name")
+    assert _module_reaches_a_store(
+        "import tortoise.__init__\nfrom tortoise import __init__ as i\nc = i.sdk\n"
+    ), (
+        "the direction scan must see this bound form too, or it certifies a ban "
+        "it cannot see"
+    )
+    assert _module_reaches_a_store(
+        "from . import __init__ as i\nc = i.sdk\n"
+    ), (
+        "the direction scan must see the RELATIVE bound form too, or it certifies "
+        "a ban it cannot see"
+    )
+    # ⛔ AND ONE DOT FURTHER: `from .. import __init__`, written in a module ONE
+    # package deep, names the ROOT (`tortoise.__init__`), so the arm must read
+    # `level >= 1` rather than `level == 1`. Narrowing it to `== 1` kept every row
+    # green (measured: 101 passed) while this spelling stopped being seen — the
+    # same unpinned-leg class as the rest of this file. It over-reports for a
+    # module at the top level, where `from .. import __init__` is past the root and
+    # raises instead: fail-closed, per this function's first paragraph.
+    assert _offending(
+        "from .. import __init__ as i\nc = i.FalkorDB\n"
+    ) == {"tortoise.FalkorDB"}, (
+        "`from .. import __init__` in a module one package deep names the ROOT, so "
+        "a `level == 1` arm lets `i.FalkorDB` through every leg")
+    assert _module_reaches_a_store("from .. import __init__ as i\nc = i.sdk\n"), (
+        "the direction scan runs the same leg, so the one-dot-further spelling "
+        "must be visible there too")
+    # ⚠️ The remaining literal-name indirections are DECLARED out of scope in the
+    # scope note rather than resolved; pinned here so the boundary is visible and a
+    # future reader cannot mistake silence for coverage.
+    assert _offending('import tortoise\nf = getattr\nf(tortoise, "FalkorDB")\n') == set()
+    assert _offending(
+        'import tortoise\nc = tortoise.__getattribute__("FalkorDB")\n'
+    ) == set()
+    # …and the harmless spellings stay clean, so the ban is not a blanket. Bare
+    # `import tortoise` and an unrelated attribute must not redden, and neither
+    # must an attribute read on a name that was never bound to the package root
+    # (it would `NameError` at runtime, so flagging it is a pure false positive).
+    assert _offending("from tortoise import usage_signal\n") == set()
+    assert _offending("import tortoise\nx = tortoise.__version__\n") == set()
+    assert _offending("c = tortoise.FalkorDB\n") == set()
 
 
 def test_the_no_graph_guard_names_modules_that_EXIST() -> None:
@@ -809,34 +1588,355 @@ def test_the_no_graph_guard_names_modules_that_EXIST() -> None:
     )
 
 
+@functools.cache
+def _modules_reaching_a_store() -> frozenset[str]:
+    """Every module in the tree that reaches a store CLIENT, by parsed imports.
+
+    ⛔ PARSED, NOT GREPPED, AND BOTH FORMS OF REACH ARE SCANNED: the three
+    store-client roots (`_STORE_CLIENT_ROOTS`) AND the two package-root exports
+    that WRAP the client (`_FORBIDDEN_CLIENT_EXPORTS`), so a module whose only
+    reach is `from tortoise import FalkorDB` is found here too. The export half was
+    missing, and it made this row's "a module cannot slip past" claim false for the
+    one spelling the ban set was EXTENDED to catch: measured, a synthetic module
+    whose only reach was `def f(): from tortoise import FalkorDB` was absent from
+    `found` (98 passed) while `_offending()` on the same source returned
+    `['tortoise.FalkorDB']` — the scan and the ban disagreeing about one file. A
+    direction scan narrower than the ban it certifies is the same defect as a scan
+    narrower than the roots it declares, one layer in.
+
+    ⛔ AND THE ATTRIBUTE SPELLING IS NOW THE THIRD LEG. It used to be left out with
+    the reason "it cannot be told apart from an unrelated attribute read at this
+    granularity" — measurably FALSE: `_package_root_attributes` IS that
+    distinction (it filters through `_REACHABLE_FROM_ROOT`, so an unrelated
+    `tortoise.__version__` read returns nothing), and it flags no file in the tree
+    today, so wiring it in costs no false positive. Left out, this row was blind
+    to a module whose only reach is `import tortoise; tortoise.FalkorDB` while
+    `_offending` caught it — the scan/ban disagreement this docstring already
+    calls out one paragraph up, one spelling over. `_module_reaches_a_store` is
+    the ONE per-file predicate, and `_scan_modules` is the ONE loop, that this
+    scan and its pin BOTH call — so reverting either is a red, not a silent leg
+    loss.
+
+    ⚠️ NOT the whole ban set. `_FORBIDDEN_GRAPH_ROOTS` also lists modules that are
+    ORDINARY imports (`tortoise.sdk`, `tortoise.ep`, `tortoise.retry`, …) and
+    matching those would demand a ban on every importer of the public SDK — a large
+    share of the tree, and a direction scan that flags everything protects nothing.
+    ⛔ No count is quoted, and the sentence that used to be here said "measured,
+    that flags most of the package" — with a figure beside it, and then a SECOND
+    figure when the first was corrected. Both moved with the tree and both were
+    wrong by the time they were read, which is why no size figure belongs in a
+    justification (and why the commit that removed the first one said the count was
+    deleted rather than corrected). The reason this design is right is the
+    MECHANISM — a ban that demanded every SDK importer be banned collapses into
+    "ban most of the tree", and a direction scan that flags everything protects
+    nothing — not the size. If you want the size, measure it; do not read it here.
+
+    ⚠️ AND THIS SCAN DOES NOT SEE A TREE-RELATIVE REACH: `from .projection import
+    FalkorProjection` written in ANOTHER tree module is one hop from the client, and
+    the direction test's only input IS this scan — so no test reds on it. That is an
+    out-of-scope residual, not a hand-off: this sentence used to say such a reach
+    "belongs to the direction test", which does not scan for it either.
+
+    (Before that, the direction test read `"from falkordb import" in source` — a
+    substring test that saw only ONE of the roots the set itself declares, so the
+    modules that reach the store through `redis` (`hosted_backup` constructs a real
+    client over a derived pool, `acl_graph_users`, `tortoise_client`, `retry`, `ep`,
+    `hosted_api`, `embedded_lifecycle`) were invisible and the coverage test reported
+    protection it did not deliver. A substring is wrong in the other direction too:
+    `"import redis" in source` matches PROSE — `tortoise/embedded_lifecycle.py` says
+    "`import tortoise` must not import redislite" in a comment, which contains the
+    substring `import redis`.)
+
+    Cached: the tree cannot change within a run, and re-parsing every file in the
+    package on each call is seconds-scale — enough to blow the shard row this file
+    packs into, and paid for no benefit, since the answer cannot change mid-run.
+    ⛔ No local seconds figure is quoted on purpose: a figure beside a weight
+    re-stales against the run it came from (`config/ci-surfaces.yml` states the
+    same rule where the `durations:` rows live).
+    """
+    package = Path(usage_signal.__file__).parent
+    return _scan_modules(_tree_module_sources(package))
+
+
+def _tree_module_sources(package: Path) -> Iterator[tuple[str, str]]:
+    """`(module name, source)` for every module in the tree, `__init__` folded.
+
+    Split from `_scan_modules` so the LOOP is feedable by the pin: the tree cannot
+    discriminate the wiring (no file reaches a store ONLY through the attribute
+    spelling today), so a synthetic pair is the only input that can.
+    """
+    for path in package.rglob("*.py"):
+        rel = path.relative_to(package).with_suffix("")
+        parts = [part for part in rel.parts if part != "__init__"]
+        module = "tortoise" + ("." + ".".join(parts) if parts else "")
+        yield module, path.read_text(encoding="utf-8")
+
+
+def _scan_modules(sources: Iterator[tuple[str, str]]) -> frozenset[str]:
+    """THE SCAN'S LOOP: keep the modules whose source reaches a store client.
+
+    ⛔ ONE LOOP FOR THE TREE AND THE PIN. The pin that exercises the attribute leg
+    called `_module_reaches_a_store` directly, so reverting THIS loop to the
+    pre-fix two-leg expression kept every row green (measured: 101 passed) — the
+    helper was left correct and exercised, and the scan was silently back on the
+    narrower predicate. The wiring is pinned by feeding this function.
+    """
+    return frozenset(
+        module for module, source in sources if _module_reaches_a_store(source)
+    )
+
+
+def _module_reaches_a_store(source: str) -> bool:
+    """Does ONE module's source reach a store client — by any of the THREE legs?
+
+    ⛔ EXTRACTED SO THE LEGS ARE PINNABLE INDIVIDUALLY, and so the scan cannot
+    hold a predicate its own pin does not exercise. The three legs are the store
+    roots, the package-root EXPORTS (`from tortoise import FalkorDB`), and the
+    package-root ATTRIBUTES (`import tortoise; tortoise.FalkorDB` /
+    `getattr(tortoise, "FalkorDB")`). The attribute leg was missing here for two
+    rounds while `_offending` applied it — a direction scan narrower than the ban
+    it certifies, which is this PR's whole subject. Synthetic input is the only
+    input that can hold that leg: no tree module reaches a store ONLY that way.
+    """
+    return _reaches_a_store_client(_imports_of(source)) or bool(
+        _package_root_attributes(source)
+    )
+
+
+def _reaches_a_store_client(imported: set[str]) -> bool:
+    """Does this import set reach a store client, by ROOT or by EXPORT name?
+
+    ⛔ EXTRACTED SO THE EXPORT HALF CAN BE PINNED AT ALL. Inside the scan it was
+    inert against TREE DATA: the only module naming an export
+    (`tortoise/projection/__init__.py` → `tortoise.FalkorDB`) also imports
+    `falkordb` directly, so `found` is byte-identical with and without the export
+    clause — reverting it left the whole file green (measured: 100 passed). A leg
+    that no observable input exercises is a leg that can be deleted silently, which
+    is this PR's whole subject; the synthetic pins below are the observable input.
+
+    ⛔ AND THE `.__init__` FOLD BELONGS HERE, in the ONE predicate both directions
+    call. It was previously applied at the scan's call site only, which made it
+    unpinnable: removing it there left every row green, because the agreement pin
+    re-derived the predicate inline instead of calling this function — an inert leg,
+    which is this PR's whole subject.
+    """
+    folded = {_fold_init(name) for name in imported}
+    by_root = any(
+        name == root or name.startswith(root + ".")
+        for name in folded
+        for root in _STORE_CLIENT_ROOTS
+    )
+    return by_root or bool(folded & _FORBIDDEN_CLIENT_EXPORTS)
+
+
+def test_the_store_reach_scan_sees_the_REDIS_spelling_too() -> None:
+    """⛔ The scan must read EVERY declared root, or its verdict is vacuous.
+
+    Pinned POSITIVELY on purpose: `uncovered == []` alone cannot see a predicate
+    that narrowed, because a module that stops being scanned simply DROPS OUT of
+    `found` — so the coverage row never sees it, whatever its ban membership. The
+    pin is therefore SYMMETRIC in the roots it witnesses: `redis`/`redislite`
+    importers (whose loss is invisible because those modules are BANNED, so
+    `uncovered` cannot move) AND `tortoise.cypher_guard`, which reaches the store
+    through `falkordb` ALONE (whose loss is invisible for the same reason — every
+    `falkordb`-only importer is already banned, so dropping that root leaves
+    `uncovered == []` untouched). Without `cypher_guard` the pin named only the
+    roots it could afford to lose.
+    """
+    found = _modules_reaching_a_store()
+    for module in (
+        "tortoise.hosted_backup",
+        "tortoise.acl_graph_users",
+        "tortoise.tortoise_client",
+        "tortoise",  # the package root, via `redislite.falkordb_client`
+        "tortoise.cypher_guard",  # `falkordb` ONLY — the root the pin was missing
+    ):
+        assert module in found, (
+            f"{module} imports a store client and the scan did not see it — the "
+            f"reachability guard is narrower than the roots it declares: "
+            f"found={sorted(found)!r}"
+        )
+    # ⛔ AND THE SUBPACKAGE WALK — the one narrowing that loses the module this
+    # guard EXISTS because of. `tortoise.projection` reaches the client from
+    # `tortoise/projection/__init__.py`, so it is in `found` ONLY because the walk
+    # descends into subpackages. Narrowing `rglob` to `glob` keeps every row above
+    # green (measured: 100 passed) while dropping it — it is BANNED, so `uncovered`
+    # cannot move either, and the loss is invisible in both directions. Asserted
+    # positively here, on the module whose slip the coverage row's docstring says
+    # must never happen again.
+    assert "tortoise.projection" in found, (
+        f"tortoise.projection reaches the store from a SUBPACKAGE and is not in "
+        f"the scan — the walk does not descend, so every subpackage module is "
+        f"invisible: found={sorted(found)!r}")
+    # ⛔ AND THE EXPORT HALF OF THE PREDICATE, synthetically. No module in the tree
+    # reaches a store ONLY through an export spelling, so tree data could never hold
+    # this branch — reverting it left the whole file green (measured: 100 passed).
+    # These inputs are the only ones that can.
+    assert _reaches_a_store_client({"tortoise.FalkorDB"})
+    assert _reaches_a_store_client(
+        _imports_of("def f():\n    from tortoise import FalkorDB\n")
+    )
+    # …and the tree-relative form stays OUT of this predicate, as documented.
+    assert not _reaches_a_store_client(
+        _imports_of("from .projection import FalkorProjection\n")
+    )
+    # ⛔ AND THE ATTRIBUTE LEG, synthetically — the third spelling, and the one the
+    # scan was blind to while the ban saw it. No tree module reaches a store ONLY
+    # through an attribute read (measured: `_package_root_attributes` flags 0 of
+    # 305 files), so tree data could never hold this leg either; without these two
+    # asserting the SCAN's own predicate, deleting `_package_root_attributes` from
+    # `_module_reaches_a_store` kept every row green (measured: 101 passed).
+    attr_only = "import tortoise\n\ndef f():\n    return tortoise.FalkorDB\n"
+    assert _module_reaches_a_store(attr_only), (
+        "the reachability scan does not see `import tortoise; tortoise.FalkorDB`, "
+        "while the ban does — a scan narrower than the ban it certifies")
+    assert _offending(attr_only) == {"tortoise.FalkorDB"}, (
+        "the scan and the ban must agree about the attribute spelling: the scan "
+        "now sees it, so `_offending` must still name it")
+    assert _module_reaches_a_store(
+        'import tortoise\nc = getattr(tortoise, "FalkorDB")\n'
+    ), "the attribute leg must cover the `getattr` form too, not only the plain read"
+    # ⛔ AND THE SCAN'S OWN LOOP IS FED, not just the predicate. No file in the tree
+    # reaches a store ONLY through the attribute spelling, so reverting the LOOP to
+    # the pre-fix two-leg expression left every row green (measured: 101 passed) —
+    # the predicate stayed correct and exercised while the scan was back on the
+    # narrower predicate. A synthetic pair is the only input that can hold the
+    # wiring, so the pin goes through `_scan_modules` itself.
+    # ⛔ AND THE INPUT CARRIES A NEGATIVE CONTROL. A single reaching pair cannot
+    # distinguish "the loop applies the predicate" from "the loop keeps everything":
+    # a loop whose body is `frozenset(module for module, _ in sources)` satisfied the
+    # one-element form, and the row that reddened instead was the COVERAGE row (a
+    # different gate, several hundred lines up) — measured, 1 failed, 101 passed,
+    # with the loop pin among the 101. One clean pair beside the reaching one makes
+    # the predicate's own contribution visible HERE: keep-everything now returns two
+    # names where one is expected.
+    clean = "# clean module: no store client, no package-root export or attribute\n"
+    assert _scan_modules(
+        iter(
+            [
+                ("tortoise.synthetic_attr_only", attr_only),
+                ("tortoise.synthetic_clean", clean),
+            ]
+        )
+    ) == {"tortoise.synthetic_attr_only"}, (
+        "the scan's loop does not route through `_module_reaches_a_store`, so the "
+        "attribute leg can be dropped from the scan with every other row green")
+
+
+def test_the_scan_actually_calls_the_pinned_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⛔ THE EDGE BETWEEN THE SCAN AND ITS LOOP, pinned directly.
+
+    Feeding `_scan_modules` a synthetic pair pins the LOOP and nothing above it: a
+    scan that computed its own inline body left `_scan_modules` correct AND
+    exercised while the attribute leg was gone from the scan — measured at head
+    `1f37c999` by replacing the call site with the pre-fix two-leg loop, which gave
+    **101 passed**, every row green. That is the third appearance of one class in
+    this file (predicate, then loop, now the call site), so the edge is pinned by
+    substitution: a scan that does not route through `_scan_modules` cannot return
+    this sentinel.
+    """
+    sentinel = frozenset({"sentinel.from.a.patched.loop"})
+    monkeypatch.setattr(sys.modules[__name__], "_scan_modules", lambda sources: sentinel)
+    _modules_reaching_a_store.cache_clear()
+    try:
+        assert _modules_reaching_a_store() == sentinel, (
+            "`_modules_reaching_a_store` does not route through `_scan_modules`, "
+            "so the pinned loop can be bypassed and the scan silently narrowed")
+    finally:
+        _modules_reaching_a_store.cache_clear()
+
+
+def test_the_direction_scan_agrees_with_the_ban_on_the_FOLDED_spelling() -> None:
+    """⛔ L1 AND L2 MUST AGREE THROUGH THE SAME FOLD, or the pair hides a reach.
+
+    The scan compares against `_STORE_CLIENT_ROOTS` and `_FORBIDDEN_CLIENT_EXPORTS`;
+    before the fold it saw `tortoise.__init__.FalkorDB`, which matches neither — so a
+    module whose ONLY reach was `from tortoise.__init__ import FalkorDB` was red in
+    `_offending` (L1) and absent from `found` (L2), leaving the coverage row green
+    while the module stayed unbanned. This pins the shared predicate, so the two
+    directions cannot drift apart again.
+    """
+    source = "def f():\n    from tortoise.__init__ import FalkorDB\n"
+    # ⛔ CALLS THE SHARED PREDICATE, does not re-derive it. An inline copy here left
+    # the fold at the scan's call site unpinned (reverting it kept every row green),
+    # so the pin has to exercise the function the scan actually uses.
+    assert _reaches_a_store_client(_imports_of(source)), (
+        "the direction scan would not see this source, so L2 and L1 disagree about "
+        "a module whose only reach is the `.__init__` spelling"
+    )
+    assert _offending(source) == {"tortoise.FalkorDB"}
+
+
 def test_the_no_graph_guard_covers_every_module_that_reaches_a_store() -> None:
     """⛔ THE OTHER DIRECTION: a real graph-owning module may not be left out.
 
     Derived from the TREE rather than listed, so a future module that starts
     holding the client cannot slip past the guard the way `.projection` did.
     """
-    package = Path(usage_signal.__file__).parent
-    covered = [
-        p.relative_to(package).with_suffix("") for p in package.rglob("*.py")
-    ]
-    uncovered: list[str] = []
-    for rel in covered:
-        parts = [part for part in rel.parts if part != "__init__"]
-        module = "tortoise" + ("." + ".".join(parts) if parts else "")
-        source = package.joinpath(*rel.parts).with_suffix(".py").read_text(
-            encoding="utf-8"
-        )
-        if not ("from falkordb import" in source or "import falkordb" in source):
-            continue
-        if not any(
+    uncovered = [
+        module
+        for module in _modules_reaching_a_store()
+        if module not in _COVERAGE_EXEMPT  # cannot be banned; see the set's comment
+        and not any(
             module == root or module.startswith(root + ".")
             for root in _FORBIDDEN_GRAPH_ROOTS
-        ):
-            uncovered.append(module)
+        )
+    ]
     assert uncovered == [], (
         f"module(s) reach a graph client but are not in the forbidden set, so a "
-        f"serve counter could import them unnoticed: {uncovered}"
+        f"serve counter could import them unnoticed: {sorted(uncovered)}"
     )
+    # ⛔ AND THE PROBE'S EXEMPTION MUST NOT BECOME A BAN EXEMPTION. This module
+    # owns the embedded store and is exempt from the PROBE only (it is in
+    # `sys.modules` before the probe runs); dropping it from the SET would drop the
+    # AST ban too, which is the hole an earlier cut had. Asserted rather than
+    # inferred from the coverage row above: that row skips only `_COVERAGE_EXEMPT`
+    # (`{"tortoise"}`) and WOULD red on a dropped `embedded_lifecycle` today — but
+    # it stops demanding the ban the moment the name moves into that exemption,
+    # which is the lever this line pins directly. (This comment said the row "skips
+    # exempt modules by construction", which is false: it skips the COVERAGE
+    # exemption, not the probe one.)
+    assert "tortoise.embedded_lifecycle" in _FORBIDDEN_GRAPH_ROOTS
+    # ⛔ AND THE PROBE-EXEMPT LIST IS PINNED EXACTLY TOO, for the same reason the
+    # coverage list is: `unbanned_probe_exempt` only enforces MEMBERSHIP, so a
+    # member added here that IS in the ban set passes it — and the probe's name
+    # list is built by REMOVING the exempt names, so adding a banned store root
+    # here deletes that root's transitive check with every row green. Pinning the
+    # tuple makes `_PROBE_EXEMPT = ("tortoise.embedded_lifecycle", "redis")` red
+    # here instead of silently narrowing the probe this PR exists to keep.
+    assert _PROBE_EXEMPT == ("tortoise.embedded_lifecycle",), (
+        f"the probe exemption is {_PROBE_EXEMPT!r}; it may hold exactly the one "
+        "module that is already in `sys.modules` before the probe runs. Adding a "
+        "name here removes it from the probe's absent-list — a banned root added "
+        "here drops its transitive check and reddens nothing else.")
+    # ⛔ THE PROBE-EXEMPT LIST CANNOT BE A COVERAGE SKIP IN DISGUISE. Exempting from
+    # the probe is only MEANINGFUL for a name the probe would otherwise assert
+    # absent — one that is BANNED. A probe-exempt name that is not banned is
+    # removed from the probe (a no-op) and excused from THIS row (a silent hole):
+    # exactly the lever that made an earlier cut drop `embedded_lifecycle` from the
+    # set only. So the relation is enforced, not documented.
+    unbanned_probe_exempt = set(_PROBE_EXEMPT) - set(_FORBIDDEN_GRAPH_ROOTS)
+    assert unbanned_probe_exempt == set(), (
+        f"{sorted(unbanned_probe_exempt)} is exempt from the probe but is not in "
+        "_FORBIDDEN_GRAPH_ROOTS, so the exemption buys nothing there and silently "
+        "excuses it from THIS row — a ban exemption wearing a probe exemption's "
+        "name. Ban it, or move it to _COVERAGE_EXEMPT with a stated reason.")
+    # ⛔ AND THE COVERAGE EXEMPTION IS PINNED EXACTLY, because it is the remaining
+    # lever: adding a genuinely store-reaching module to it would make this row
+    # stop demanding the ban while the AST ban still does not name it. Pinning the
+    # exact set makes that a deliberate edit that reddens here, not a quiet skip.
+    assert set(_COVERAGE_EXEMPT) == {"tortoise"}, (
+        f"the coverage exemption is {sorted(_COVERAGE_EXEMPT)!r}; only the package "
+        "root may be excused (it is in `sys.modules` by construction, and banning "
+        "the package would ban the module itself). A store-reaching module added "
+        "here is invisible to the AST ban — ban it instead.")
+    # ⛔ The disjointness of the two roles is NOT asserted again here: both lists
+    # are pinned EXACTLY above (`_PROBE_EXEMPT` to one banned module, `_COVERAGE_EXEMPT`
+    # to `{"tortoise"}`, which is not banned), so the intersection is empty before
+    # any line here executes and no mutant could ever redden a third check — an
+    # assertion that cannot fail is a claim of coverage it does not deliver.
 
 
 def test_recording_never_raises_on_a_broken_path(tmp_path: Path) -> None:
