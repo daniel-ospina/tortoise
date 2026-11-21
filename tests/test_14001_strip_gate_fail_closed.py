@@ -1522,7 +1522,7 @@ def test_no_declared_entity_writer_mentions_a_dynamic_namespace():
     population = _writer_register_population()
     stray, missing = population["stray"], population["missing"]
     assert stray == [], (
-        "a writer could not be read for a reason that is not the environment, so it left this "
+        "a writer could not be read, and its skip is not DECLARED here, so it left this "
         f"pin's population: {stray} "
         f"(examined {len(population['examined'])} of {len(register.EMBED_WRITER_CLASSES)})")
     assert missing == [], (
@@ -1747,7 +1747,23 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
 
     monkeypatch.setattr(strip, "_module_source", folding(module, ValueError("loader changed")))
     with pytest.raises(AssertionError,
-                       match="could not be read for a reason that is not the environment"):
+                       match="could not be read, and its skip is not DECLARED here"):
+        test_no_declared_entity_writer_mentions_a_dynamic_namespace()
+
+    # ⛔ THE RED NAMES THE DECLARATION, NOT THE CAUSE CLASS (`#14099`, review of `f7667387`).
+    # `stray` has TWO members: a module outside the declaration (ANY cause, an absent dependency
+    # included) and a declared module with an unrecognised cause. The message used to say the
+    # reason "is not the environment", which is FALSE of the first member — measured here: this
+    # arm's cause is a real absent dependency (`name=` set, so the origin gate itself calls it
+    # environmental) and the key still belongs in `stray`, because the module is not DECLARED.
+    # A reader sent to "my install is broken" chases the wrong root; the remedy is the declaration.
+    environment_cause = ModuleNotFoundError("No module named 'prometheus_client'",
+                                           name="prometheus_client")
+    assert _is_absent_third_party_distribution(environment_cause), (
+        "this arm measures nothing unless the cause genuinely grades as the environment")
+    monkeypatch.setattr(strip, "_module_source", folding(module, environment_cause))
+    with pytest.raises(AssertionError,
+                       match="could not be read, and its skip is not DECLARED here"):
         test_no_declared_entity_writer_mentions_a_dynamic_namespace()
 
     # ⛔ THE EXEMPTION IS AN EXACT MODULE, NOT A PREFIX (`#14099` review of `310ddeeb`, whose fix was
