@@ -949,6 +949,22 @@ SWEEP_NAMES = 66
 #: statements `main` added between `05d218fcaf` and `69908d006b`. The count moved UP, so no
 #: SDK-typed call site was legitimised and `--check` exits 0 on this tree with
 #: `typed references still pointing at a public name: 0`.
+#:
+#: ⛔ MERGED `origin/main` A FOURTH TIME, at `72c104bcbb` — a CONFLICT on this very constant, so
+#: BOTH sides' numbers are recorded because both are measurements of DIFFERENT trees. `main`'s
+#: committed pin there is `(11843, "6aed5368ffa10513")` (read from `origin/main`'s own file, not
+#: inferred), re-pinned for DRIFT that is NOT this branch's — its own comment block attributes it to
+#: `f9f480a55ab3` (#14164, the #13094 change-feed reader census + measured residency), which added
+#: untyped `Graph` receivers and re-pinned nothing, so `--check` reds on `main`'s OWN tree; that
+#: block's row-by-row attribution (`--repin` at `2c0d66e2ec07` → `(11835, "891187f5a4636487")`, at
+#: `f9f480a55ab3` → `(11843, …)`, EXACTLY TWO rows moved, both FalkorDB `Graph` receivers, row
+#: SHAPE set unchanged) is CARRIED FROM THAT RECORD and is not re-measured here — the one thing
+#: re-measured on this merge tree is the pin. ⛔ NEITHER SIDE'S PAIR IS THIS TREE'S: `--repin` here
+#: prints `(11846, "0fd25aff58cf618b")`, i.e. `main`'s 11843 plus this branch's **+3** (attributed
+#: above) — a CROSS-CHECK of two measurements, never the evidence for the pin, which is `--repin`'s
+#: own output on this tree. `--check` exits 0 with `typed references still pointing at a public
+#: name: 0`.
+#: references still pointing at a public name: 0`.
 SWEEP_RESIDUE = (11846, "0fd25aff58cf618b")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —

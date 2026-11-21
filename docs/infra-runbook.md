@@ -2432,10 +2432,10 @@ Fly list price at the snapshot date, region `iad`, as published on the
 | **`shared-cpu-2x` / 4096 MB (this table's basis; pre-#13665 shape), running** | ~\$0.00000826/s · ~\$0.0297/hr | **~\$21.40** |
 | Stopped machine | rootfs only | \$0.15 per GB/30 days |
 | Volume storage (per volume, attached or not) | — | \$0.15/GB/mo |
-| **Two-machine fleet (both warm, 4 GB each, 2-core basis)** | — | **~$42.80** (+ volumes) |
+| **Two-machine fleet (both warm, 4 GB each, 2-core basis)** | — | **~\$42.80** (+ volumes) |
 
 The current volume's provisioned size is **not recorded in the repo** (verify
-with `fly volumes list -a tortoise-y4mjjq`) — factor it in at $0.15/GB/mo per
+with `fly volumes list -a tortoise-y4mjjq`) — factor it in at \$0.15/GB/mo per
 volume, and again for the second volume if §6.3 is ever executed.
 
 ### 6.6 The cheapest available redundancy: alert on the route, not the app
