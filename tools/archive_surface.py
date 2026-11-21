@@ -1505,9 +1505,9 @@ def shrink_violations(
             # ⛔ A row that froze the stub is not a record — and it is credited HERE, not only in
             # arm 1b: when the stub is deleted as the writer's own output asks, the module has NO
             # head carrier at all, so it is `base - head` that lands in this arm while the row's
-            # existence silences it. `_froze_only_stubs` reads the row's own `blocks[].path`
-            # (the archived file is always `.py` — see its docstring for the measured false
-            # PASS that made the suffix-keyed first cut dead code).
+            # existence silences it. Both sites call `_row_froze_a_stub`, which asks the SOURCE
+            # the row recorded (`archived_from`) — see its docstring for why the archived file's
+            # suffix is a dead question (`archive_rel` always emits `.py`).
             if runtime_carrier is not None and _row_froze_a_stub(working[key]):
                 out.append(
                     _record_froze_a_stub(
