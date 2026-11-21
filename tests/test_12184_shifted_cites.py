@@ -945,7 +945,10 @@ def test_the_drift_numerator_is_re_derived_from_the_pin_blob_not_carried() -> No
     reads this file. When the pin is unreadable the arm therefore grades the HISTORY-FREE identity the
     shipped defect violated — `comparable + incomparable == pairs`, and `drifted + incomparable ==
     drifters` — which needs no history and reds the `#14038` cycle-4 figures exactly
-    (`222 + 9 = 231` beside a 227-pair denominator). With history available it re-derives both bases in
+    (`222 + 9 = 231` beside the 229-pair denominator it was published over). ⛔ The denominator in
+    that example is the CYCLE-4 one, not this head's: the figures have since moved to 227 pairs, and a
+    reader who checks `222 + 9` against 227 is checking a number the defect was never about. With
+    history available this arm re-derives both bases in
     full, including the ALTERNATIVE one from the union set rather than `drifters + extra_pairs`.
 
     NON-VACUOUS, measured at this head BOTH ways: (a) restoring the pre-fix `159`/`150`/`222` while
@@ -984,7 +987,8 @@ def test_the_drift_numerator_is_re_derived_from_the_pin_blob_not_carried() -> No
     # (0) SELF-CONSISTENCY, and this is the arm the CI shape needs most: the comparable DENOMINATOR is
     # published in more than one sentence — the split's `N of the M comparable` and the `all M
     # comparable ones` that feeds the identity below — and ONE figure spelled twice is exactly the
-    # shape the shipped defect took (`222 + 9 = 231` beside a 227-pair population). ⛔ MEASURED, on a
+    # shape the shipped defect took (`222 + 9 = 231` beside the 229-pair population it shipped over —
+    # 227 is THIS head's pair count, and the two must not be quoted as one). ⛔ MEASURED, on a
     # shallow checkout (`_DRIFT_PIN` unresolvable, i.e. exactly what `actions/checkout`'s default
     # `fetch-depth: 1` produces): with the split's denominator mutated `218` → `300` this test stayed
     # GREEN — the only arm that compared the spellings is the WITH-HISTORY one below, which cannot run
@@ -2044,7 +2048,8 @@ def _token_spans(token: str) -> list[tuple[int, int]]:
     unrelated addresses (`:58315`/`:58317`) names two lines, NOT the line between them. Taking
     `min..max` over every number turned such a token into a range, so the arm accepted the `58316`
     the token never mentions — the exact false PASS this arm exists to refuse, one indirection
-    further out. Measured on the shipped tree: **0 of 96** rows carries more than one address, so
+    further out. Measured on the shipped tree: 0 of the rows this arm scans (`_PINS` ∪
+    `_MAIN_SET_MISSED`) carries more than one address, so
     no row's verdict moves; only the door the next row could have walked through is closed.
     """
     return [
