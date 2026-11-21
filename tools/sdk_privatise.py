@@ -314,8 +314,10 @@ SWEEP_NAMES = 66
 #:
 #: RE-CUT DOWN (11831, "1aef9c61f81faf39") → (11825, "539914480e400722") by the `#14001` lane,
 #: measured on `origin/main` `f392bb67d5`'s own tree. ⛔ THE SOURCE OF THIS RE-CUT IS `main`'S
-#: **TREE**, NOT ITS **PIN**, and the two disagree: `main`'s pin reads 11829 (the `#14062` re-cut at
-#: `d4a8dddc4e`) but `main`'s tree at `f392bb67d5` measures 11831, so a re-cut stated as
+#: **TREE**, NOT ITS **PIN**, and the two disagree: `main`'s pin reads 11829 (the `#14062` re-cut,
+#: MEASURED on `d4a8dddc4e`'s tree and COMMITTED at `8610ed965c` — `git show
+#: d4a8dddc4e:tools/sdk_privatise.py` still reads 11821, so the rev that CARRIES 11829 is the merge,
+#: not the base) but `main`'s tree at `f392bb67d5` measures 11831, so a re-cut stated as
 #: "11829 → 11825, delta −6" is arithmetically FALSE (11829 − 6 is 11823, and 11823 is the pair this
 #: lane first pasted before it measured). Both `main` pairs here are `--repin` output, not
 #: arithmetic on the pin: `11831, "1aef9c61f81faf39"` is what `main`'s own tree derives and
@@ -344,8 +346,9 @@ SWEEP_NAMES = 66
 #: `origin/main`'s own tree and on this one), and `poisoned.update` 6 → 0 is the ONLY row that
 #: differs. Nothing else moved in either direction.
 #: TWO absorbed rows are `main`'s, not this lane's, and they are named here because a re-pin that
-#: only states the count is what this block forbids. `main` re-cut to 11829 at `d4a8dddc4e`, then
-#: DRIFTED a further +2 before `f392bb67d5` — so `main`'s own tree measures 11831 against its own
+#: only states the count is what this block forbids. `main`'s re-cut measured 11829 on
+#: `d4a8dddc4e`'s tree and was COMMITTED at `8610ed965c`, then DRIFTED a further +2 before
+#: `f392bb67d5` — so `main`'s own tree measures 11831 against its own
 #: 11829 pin, and `--check` is RED on `main` right now (the same recurrence `#14062` documents: the
 #: pin is graded on PULL REQUESTS only, so `main` drifts and every open PR is then graded against a
 #: stale number). The two rows are `found.update` 10 → 12, both in `tests/test_usage_signal.py`,
