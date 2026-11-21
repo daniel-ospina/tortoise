@@ -445,21 +445,14 @@ SWEEP_NAMES = 66
 #: `graph` / `client` of no declared type, which is exactly what this pin counts beside `g.query`.
 #: The SDK population itself did not move (`typed references still pointing at a public name: 0`),
 #: so no typed call site is legitimised by this re-cut.
-#: ⛔ THIS LANE IS NOT THE CAUSE OF THE +8 — but NOT for the reason an earlier draft gave. It said
-#: "its whole diff is figure literals: stripping every digit run from each `-`/`+` pair leaves the
-#: pair identical", and that is FALSE at this head: this PR also rewrites
-#: `tests/test_13337_cache_graph_declaration.py` (the `_capture` helper and the anchors), so the
-#: digit-stripped `-`/`+` multisets differ in both files. The conclusion still holds, by a
-#: measurement that does reproduce: `--repin` reads the SAME pair — `(11839, '0a7e60fa05aa31b9')` —
-#: on `origin/main` (`2fe01fc775e`) and on this head, so the residue population is identical across
-#: this lane's diff and nothing in it moves a receiver row (raised by review).
-#: ⛔ THE "GATE IS RED HERE" NARRATION IS SCOPED, NOT PRESENT-TENSE. That paragraph described
-#: `ad79129cb5`, where the pin read 11825 while that tree derived 11833 — `--check` red. It is NOT
-#: the state of `main` TODAY: `origin/main` (`2fe01fc775e`) pins `(11839, "0a7e60fa05aa31b9")`,
-#: which is exactly what `--repin` derives there, so `--check` exits 0 on `main` and on this head.
-#: The recurrence `#14062` and `#14058` document (the pin graded on PULL REQUESTS only) is real, but
-#: an earlier draft asserted it as a live red and a later review falsified that (raised by review);
-#: the fix for the recurrence is still to grade the pin on `main`.
+#: ⛔ THIS LANE IS NOT THE CAUSE OF THE +8. Its whole diff is figure literals: stripping every digit
+#: run from each `-`/`+` pair leaves the pair identical, so it cannot move a receiver population. The
+#: reason the gate is red here is the recurrence `#14062` and `#14058` both document, now a THIRD
+#: time: the pin is graded on PULL REQUESTS only, so `main` merges with nothing grading it — and
+#: `main`'s own tree at `ad79129cb5` derived 11833 against its own 11825 pin, i.e. `--check` was RED on
+#: `main`.
+#: The real fix for the recurrence is grading the pin on `main`; carrying the re-cut is what unblocks
+#: a PR that touches nothing in this population, which is the same remedy the two blocks above took.
 #: RE-CUT AGAIN at the SECOND merge tree (#14068 × `main` `8ad6ac46f0`), for the same reason the
 #: note above states: `main` moved three more commits AFTER the first merge (`628765ff3c`,
 #: `1f654d16b5`, `8ad6ac46f0` — cite-census re-statements touching `tools/hosted_api_cite_census.py`,
@@ -487,19 +480,25 @@ SWEEP_NAMES = 66
 #: moved" are each true of the tree they were measured on, and a reader re-deriving the pin needs the
 #: chain, not just the surviving number.
 #: `--check` on this tree: `typed references still pointing at a public name: 0`.
-#: RE-CUT for the CAPTURE rewrite (#14108 review round 3): (11839, "0a7e60fa05aa31b9") →
-#: (11838, "de5664dc98549d56"). The −1 is THIS LANE's own and it is worth naming, because nothing
-#: about it looks like a receiver edit: `_capture` in
-#: `tests/test_13337_cache_graph_declaration.py` recorded calls with `seen.update(…)` and now
-#: APPENDS them (so a second read cannot be truncated — the review's finding), and `update` is a
-#: SWEPT NAME: `seen.update` is a residue row in its own right, so replacing the accumulator
-#: REMOVED one.
-#: ⛔ ATTRIBUTED BY MEASUREMENT: the residue row multisets were derived on the parent head and on
-#: this tree (`--report --base 28ca66878d… --top 5000`, then diffed) — `seen.update` 102 → 101 is
-#: the ONLY row that differs, and the pin is the pair `--repin` prints, never arithmetic.
-#: The row is a plain `dict` accumulator in a test, not a typed reference to a swept name, so the
-#: SDK population is untouched (`typed references still pointing at a public name: 0`).
-SWEEP_RESIDUE = (11838, "de5664dc98549d56")
+#:
+#: ⛔ RE-CUT-NOT-NEEDED at the FOURTH merge tree (`#14087` × `main` `2fe01fc775`), and this entry is a
+#: MEASUREMENT that says the pin above is ALREADY this tree's pin — not a re-cut, and not a carry.
+#: This branch's own re-cut (`11833` → `11831`, `4f3afdad7fb13ad7`) recorded the SAME fact as the block
+#: above: `#14071` `df0525a7a9` retired the two `found.update` rows `#14065` added, `12 → 10`. `main`
+#: reached it independently and landed it first; what this branch could not see from `df0525a7a9` is
+#: `#14068`, whose +8 receiver rows are on `main` and account for the whole `11831` vs `11839` gap. So
+#: the two pins were never in disagreement about the −2 — they were measured on trees an 8-row merge
+#: apart. Re-derived on THIS tree with `--check` (which recomputes the residue and compares BOTH the
+#: count and the digest): `untyped receivers left alone (deliberate, reported): 11839`, exit 0 — i.e.
+#: this PR's own diff moves the population by ZERO rows in either direction, which is what a diff of
+#: doc prose, pin data rows and comment text should do. ⛔ The pin is left at `main`'s pair deliberately:
+#: editing it to `11831` would paste this branch's OLDER tree over the merge tree's measurement, which
+#: is the arithmetic-on-the-last-pin error both blocks above exist to forbid. The lesson this PR's
+#: earlier edition recorded still stands and is now demonstrated in the opposite direction: a pin is a
+#: measurement of THIS tree, and a forecast is never a substitute for measuring — here the branch's own
+#: forecast was RIGHT about the row set and WRONG about the total, because a third merge moved it.
+#: `--check` on this tree: `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11839, "0a7e60fa05aa31b9")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
