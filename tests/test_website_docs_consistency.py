@@ -2352,6 +2352,18 @@ def test_the_storage_section_bound_cuts_at_a_RENDERED_heading_only() -> None:
         ("hidden subtree", '<div hidden><h2 id="quickstart">Quickstart</h2></div>'),
         ("hidden heading", '<h2 hidden id="quickstart">Quickstart</h2>'),
         ("closed details", '<details><h2 id="quickstart">Quickstart</h2></details>'),
+        # ⛔ A BARE `<option>`/`<optgroup>` — no `<select>` above it, so the `in
+        # select` rule does not apply and the element-type rule did not name it: the
+        # heading has a 0x0 rect and paints 0 px in this box's Chrome (measured), so
+        # it was a decoy that BOUND the slice while Chromium painted the claim under
+        # it. The optgroup is here because the refusal is ancestry, not the immediate
+        # parent — a fix that special-cased the direct parent would pass the first row
+        # and fail this one (#14073 review round 8).
+        ("bare option", '<option><h2 id="quickstart">Quickstart</h2></option>'),
+        (
+            "optgroup over a bare option",
+            '<optgroup><option><h2 id="quickstart">Quickstart</h2></option></optgroup>',
+        ),
     ):
         mutant = page[:boundary] + inert + "\n" + claim + page[boundary:]
         assert mutant != page, f"could not insert the {label} case"
@@ -2771,10 +2783,47 @@ def test_the_reader_met_rule_refuses_every_declared_unrendered_class() -> None:
         # The cost is a heading in a real summary does not bound: the slice runs
         # long and the extra text stays pinned.
         ("summary of a closed details", '<details><summary><h2 id="qs">Q</h2></summary></details>'),
+        # ⛔ `<option>`/`<optgroup>` ARE NOT AN ELEMENT-TYPE MEMBER OF `_UNRENDERED`,
+        # and this row is why the rule they need is `_UNBOUNDABLE_ANCESTORS` instead:
+        # their CHILD HEADINGS are unrendered (0x0 rect, 0 painted px — measured),
+        # but their own DIRECT TEXT paints, so the refusal must stay on the BOUNDARY
+        # question. A heading inside a bare `<option>` bounded the #storage slice with
+        # the claim under it outside every pin (#14073 review round 8, measured).
+        ("bare option", '<option><h2 id="qs">Q</h2></option>'),
+        ("bare optgroup", '<optgroup><h2 id="qs">Q</h2></optgroup>'),
+        (
+            "optgroup over a bare option",
+            '<optgroup><option><h2 id="qs">Q</h2></option></optgroup>',
+        ),
     ):
         assert extract_heading_positions(markup) == [], (
             f"a `<h2>` is recorded although no reader meets it ({label}): bounding "
             f"at it leaves the text under it outside every pin"
+        )
+    # ── and the three unboundable ancestors stay BOUNDARY-ONLY ────────────────
+    # ⛔ THE REFUSAL MUST NOT MOVE INTO `_UNRENDERED`. That set feeds the TEXT
+    # question too, and these elements' own DIRECT TEXT is rendered: measured on
+    # this box's Chrome, `<option>TAIL</option>` paints 244 px and
+    # `<option><h2>HELLO</h2>TAIL</option>` paints 613 px (TAIL — the heading is
+    # 0x0). A future edit that "simplifies" the rule into `_UNRENDERED` would DROP
+    # painted copy from the visible-text golden, which is the fail-open direction
+    # this file has already paid for three times (`<summary>`, `<object>`).
+    assert not {"select", "option", "optgroup"} & set(
+        _AnchorHrefParser._UNRENDERED
+    ), (
+        "an unboundable ancestor was added to `_UNRENDERED`: that set also drives "
+        "`extract_visible_text`, so the element's own rendered DIRECT text would be "
+        "dropped and a claim written there would leave every pin green"
+    )
+    for label, markup, expected in (
+        ("option direct text", "<option>TAIL</option>", "TAIL"),
+        ("option direct text beside a heading", "<option><h2>HELLO</h2>TAIL</option>", "HELLO TAIL"),
+        ("optgroup over an option", "<optgroup><option>TAIL</option></optgroup>", "TAIL"),
+    ):
+        assert " ".join(extract_visible_text(markup).split()) == expected, (
+            f"the text recording disagrees with the measurement ({label}): an "
+            f"`<option>`'s own text IS painted, so dropping it is the fail-open "
+            f"direction and counting a claim beside it is only the false-red one"
         )
     # ── positive controls: the same headings where a reader DOES meet them ────
     for label, markup, expected_id in (
@@ -2783,6 +2832,9 @@ def test_the_reader_met_rule_refuses_every_declared_unrendered_class() -> None:
         ("after the hidden subtree closes", '<div hidden></div><h2 id="qs">Q</h2>', "qs"),
         ("open details", '<details open><h2 id="qs">Q</h2></details>', "qs"),
         ("open dialog", '<dialog open><h2 id="qs">Q</h2></dialog>', "qs"),
+        # the refusal ends with the ancestor: a heading AFTER the option closes still
+        # bounds, so `_UNBOUNDABLE_ANCESTORS` is ancestry and not a page-wide switch
+        ("after a closed option", '<option>x</option><h2 id="qs">Q</h2>', "qs"),
     ):
         assert [
             heading_id

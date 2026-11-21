@@ -398,6 +398,31 @@ class _AnchorHrefParser(HTMLParser):
     # anywhere under it, so `("summary of a closed details", '<details><summary><h2
     # id="qs">Q</h2></summary></details>')` keeps bounding nothing.
     _RENDERS_WITH_ATTR = frozenset({"details", "dialog"})
+    #: Element types whose CHILD HEADINGS must not bound the slice, while their own
+    #: DIRECT TEXT may still be counted — the third pair of answers one flag must not
+    #: give, after `<summary>` and `<object>` (#14073 review, round 8).
+    #:
+    #: * `<select>` — the conservative side of a spec change, stated at length on
+    #:   `_record_heading`; ancestry, so `<optgroup><option>` under it is covered.
+    #: * `<option>`/`<optgroup>` — no insertion mode involved and nothing unsettled:
+    #:   a `<h2>` inside ONE of them is simply not rendered, and the rule that missed
+    #:   it (`_unmet_by_reader` asked about `<select>`, `_UNRENDERED`, `hidden` and
+    #:   `<details>`) let the heading bound the slice. MEASURED, not inferred — this
+    #:   box's `/usr/bin/google-chrome` driven by Playwright, non-white pixels on a
+    #:   white viewport, plus the element's own rect: `<option><h2>HELLO</h2></option>`
+    #:   → 0 px, rect 0x0; `<optgroup><option><h2>HELLO</h2></option></optgroup>` → 0
+    #:   px; and `<option><h2>HELLO</h2>TAIL</option>` → 613 px, the heading still
+    #:   0x0 (TAIL is what paints). So the refusal is BOUNDARY-ONLY on purpose:
+    #:   `<option>TAIL</option>` → 244 px, so the option's own text IS rendered and
+    #:   adding `option` to `_UNRENDERED` would DROP painted copy — the text-question
+    #:   fail-open this file keeps paying for.
+    #:
+    #: The end-to-end escape this closes, measured through `_docs_section` on a page
+    #: copy: a TOC entry for `#storage-limits` plus
+    #: `<option><h2 id="storage-limits">Limits</h2>FalkorDB … the allowance … tier…`
+    #: put the claim outside the slice with the golden, the vocabulary pin, the
+    #: destinations pin and the attribute allowlist ALL green.
+    _UNBOUNDABLE_ANCESTORS = frozenset({"select", "option", "optgroup"})
     #: Every recording of a DOCUMENT TREE, by attribute name. `_clear_recordings`
     #: iterates this tuple, and
     #: `test_the_parsers_recordings_forget_a_document_a_frameset_replaced` asserts it
@@ -670,6 +695,17 @@ class _AnchorHrefParser(HTMLParser):
         inside it is covered too. The cost is declared: a rendered heading inside a
         select does not end the slice.
 
+        ⛔ AND `<option>`/`<optgroup>` REFUSE FOR A MEASURED REASON, not a spec
+        question — `<select>` is the only member here whose answer is unsettled.
+        A `<h2>` inside a BARE `<option>` (no select above it) had a 0x0 rect and
+        painted 0 px in this box's Chrome, while the option's own direct text
+        painted 244 px — so leaving `option` out let a decoy heading no reader meets
+        bound the slice, with the claim under it outside the golden, the vocabulary
+        pin, the destinations pin and the attribute allowlist at once (measured on a
+        page copy, #14073 review round 8). All three members live in
+        `_UNBOUNDABLE_ANCESTORS`, and that set is the BOUNDARY question ONLY: the
+        option's text is rendered, so it stays in the TEXT recording.
+
         ⛔ AND "INSIDE A SELECT" IS THE SPEC'S QUESTION, NOT THIS STACK'S. The token
         that closes the scope in the LIVING standard is `<input>` alone — see
         `_SELECT_POP` for the citation and for the two tokens that were copied from
@@ -717,8 +753,11 @@ class _AnchorHrefParser(HTMLParser):
         Three reasons, all of them "the pins cannot see what the reader also cannot
         see" — refusing is what keeps the slice LONG, i.e. the loud direction:
 
-        * an open `<select>` ANCESTOR — the conservative side of a spec change, for
-          the reason `_record_heading` states at length;
+        * an open `_UNBOUNDABLE_ANCESTORS` ancestor — an open `<select>` (the
+          conservative side of a spec change, for the reason `_record_heading` states
+          at length), and `<option>`/`<optgroup>`, whose child headings are MEASURED
+          unrendered (0x0 rect, 0 painted px) while their own direct text paints — so
+          they are refused HERE and deliberately not in `_UNRENDERED`;
         * an open `_UNRENDERED` ancestor — `<datalist>` and the conditional-fallback
           elements put their children somewhere a supporting browser does not
           render;
@@ -745,7 +784,10 @@ class _AnchorHrefParser(HTMLParser):
         attribute pins are what a CSS-hidden heading's copy faces, and a page that
         hides copy with CSS is making a decision no markup-level guard can read.
         """
-        if any(open_tag == "select" for open_tag, _, _ in self._open_elements):
+        if any(
+            open_tag in self._UNBOUNDABLE_ANCESTORS
+            for open_tag, _, _ in self._open_elements
+        ):
             return True
         if any(open_tag in self._UNRENDERED for open_tag, _, _ in self._open_elements):
             return True
