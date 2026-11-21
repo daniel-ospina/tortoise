@@ -1628,6 +1628,51 @@ def test_archiving_a_module_must_not_freeze_a_LEFTOVER_scaffold(tree: Path) -> N
     )
 
 
+def test_the_CLI_refuses_to_freeze_a_leftover_scaffold(
+    tree: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """The row above is API-level; the OPERATOR sees `main()`'s exit code and stderr.
+
+    The review asked for a CLI-level row, and the arm it pins is a different one: `main()`'s
+    `except ArchiveRefused -> print("REFUSED …", stderr); return 2`. That mapping is pinned
+    NOWHERE else for the `archive` verb, so a refusal that exited 0 would read as a successful
+    archive that wrote nothing — the fail-open direction, on the writer's only refusal path.
+
+    Mutation: `return 0` in `main()`'s `except ArchiveRefused` arm -> RED here (rc is 0 and the
+    operator reads success), while every API-level assertion above stays green.
+    """
+    (tree / "tortoise" / "x.py").write_text("def f39():\n    return 39\n", encoding="utf-8")
+    _commit(tree, "tortoise/x.py")
+    _commit_drop(tree, "tortoise/x.py")
+    (tree / "tortoise" / "x").mkdir()
+    (tree / "tortoise" / "x" / "__init__.py").write_text(
+        '"""Scaffolding."""\n', encoding="utf-8"
+    )
+    (tree / "tortoise" / "x" / "sub.py").write_text("Y = 1\n", encoding="utf-8")
+    _commit(tree, ".")
+    monkeypatch.setattr(arch, "ROOT", tree)
+
+    rc = arch.main(
+        ["archive_surface.py", "archive", "module", "tortoise.x", "--batch", "b1",
+         "--reason", "split"]
+    )
+    err = capsys.readouterr().err
+    assert rc == 2, f"a refusal must not read as a successful archive (exit {rc})"
+    assert "REFUSED" in err and "git checkout <base-sha> -- tortoise/x.py" in err, (
+        f"the refusal must name the route that clears the red it came from: {err}"
+    )
+    assert not (tree / "archive" / "modules").exists(), (
+        "and it must write nothing — a row frozen from a scaffold IS the false record"
+    )
+    assert any(
+        p.startswith("tortoise.x: MODULE") and "REMOVED" in p
+        for p in arch.shrink_violations(tree, base_ref="HEAD~2")
+    ), (
+        "and the removal stays a red (arm 1: the module left the product) — declining to write "
+        "the record must not read as having written it"
+    )
+
+
 def test_an_archive_entry_dropped_from_the_manifest_is_reported(tree: Path) -> None:
     """#12291: the index of what was removed loses a row, and every gate stays green."""
     _archive_module(tree, "tortoise.gone")
