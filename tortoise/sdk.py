@@ -3370,6 +3370,30 @@ def _write_capture_turns(
         text = turn_texts[i]
         text_hash = _content_hash(text)
         turn_hashes.append(text_hash)
+        # ⛔ `#13971` (review P1, corrected): THIS WRITER DOES **NOT** ASK THE GATE, and that is a
+        # correction rather than an omission. `#13971`'s first cut blanked `emb` when the
+        # label's coverage verdict answered "stop", on the premise that "the graph copy of a
+        # turn's vector is a MIRROR, not the store". That premise is FALSE on every lane where
+        # this batch statement actually runs:
+        #
+        #   * `_record_first` False (no journal, a scratch buffer, no tenant, or the record's
+        #     connect breaker open) — this batch write IS the store, so the vector must go with
+        #     the turn;
+        #   * a turn the record REFUSED after the preflight approved it — see the fallback arm
+        #     below, which now re-attaches the vector for exactly those turns.
+        #
+        # The verdict it was gated on is also the wrong SHAPE for this writer:
+        # `record_vector.coverage` is `record_vectors >= graph_vectors` over a LABEL, and a
+        # label-level aggregate cannot say "the record holds THIS turn" — which is the only
+        # question that would make the graph copy redundant. Blanking on it wrote the turn's
+        # vector to NEITHER store on those lanes, and `#5004` forbids re-encoding while the
+        # journal heals only on a replay that may never come.
+        #
+        # ⚠️ THE CONSEQUENCE IS STATED, NOT HIDDEN: the strip's writer census now reports
+        # `sdk::_write_capture_turns` as a writer that does not ask
+        # (`tools/strip_graph_entity_vectors.py::_fold_consults_gate`), so the plan REFUSES
+        # `:Point` until the capture path can answer per-turn. That is the honest state: a strip
+        # the operator cannot run yet is cheap, a capture that drops the only copy is not.
         turn_rows.append({
             "id": _capture_turn_id(session_id, i, turn_offset),
             "c": text,
@@ -4003,6 +4027,13 @@ def _write_capture_turns(
         _unrecorded = [i for i, _row in enumerate(turn_rows)
                        if not _landed(_record_outcome.get(_row["id"]))]
         if _unrecorded:
+            # ⛔ THESE TURNS' GRAPH WRITE **IS** THEIR STORE, and their rows carry the vector
+            # (`#13971` review P1, arm 2). The row loop stores `turn_embs[i]` unconditionally —
+            # precisely so this arm, the one where the RECORD REFUSED the turn after the
+            # preflight approved it, does not leave the turn in neither store (the record
+            # declined it, and a NULL `emb` would leave the graph without the vector). The
+            # journal is not a rescue: it heals only on a replay that may never come, and
+            # `#5004` forbids re-encoding.
             # Loud, because a re-capture's journalled snapshot for these turns is
             # this capture's `now`/`draft` rather than the values a read-back
             # would have given — the residual of deciding after the append. The
@@ -56355,6 +56386,18 @@ class TortoiseSDK:
                     props.pop("embedding", None)
                 if (label == "Source" and not _derived_mirror_required("document")
                         and not _derived_mirror_required("source")):
+                    props = dict(_props_base)
+                    props.pop("embedding", None)
+                # ⛔ AND `:Point` (#13971), on BOTH of its types. `:Point` is ONE label
+                # serving TWO caller-facing entity types (`point`, `operator`,
+                # `tortoise/security.ENTITY_TYPE_LABELS`), and this door can land on
+                # either — so the vector is retired only when BOTH counters answer stop,
+                # exactly the `:Source` rule directly above. `#5004`'s "a Point vector is
+                # RECORD TRUTH" is why the graph copy is a redundant MIRROR once the
+                # record covers it (`#13330` retired the in-graph index, so nothing reads
+                # the property), not a reason to keep re-writing it.
+                if (label == "Point" and not _derived_mirror_required("point")
+                        and not _derived_mirror_required("operator")):
                     props = dict(_props_base)
                     props.pop("embedding", None)
                 # #4649: a canonical label's identity is an OR-SET, not one key.
