@@ -1313,28 +1313,28 @@ def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]
             # `try: def _inner(x=torch.query(…)): torch = _make_client()` and
             # `try: class C(torch.query(…)): torch = _make_client()` were both graded over
             # a legitimate probe. The node is skipped and the ascent continues outward.
-            # ⛔ EXCEPT ITS TYPE PARAMETERS, which DO reach a header call: PEP 695 puts a
-            # generic's `bound`/`default_value` in the TYPE-PARAMETER scope, where the
-            # list's OWN names are in scope — measured, `def f[T, S: T]()` gives
-            # `f.__type_params__[1].__bound__ is T`, and a type parameter named after the
-            # import shadows it inside a later bound, so in
-            # `def _inner[torch: object, T: torch.query("…")]()` the call resolves to the
-            # TypeVar, not the import. ⛔ NOT AT DEFINITION TIME: PEP 695 bounds are LAZY,
-            # and `exec` of that shape succeeds for the `def`, the `class` and the `type`
-            # spelling (measured) — the `AttributeError` appears when the bound is
-            # EVALUATED (`f.__type_params__[1].__bound__`).
-            # Skipping them here turned that silent drop into an exemption (review of this
-            # PR, P2); contributing them keeps the legitimate row exempt and grades the
-            # shadowing one.
-            #: BUT NOT EVERY HEADER POSITION: a DEFAULT and a DECORATOR evaluate BEFORE
-            #: the type-parameter scope exists, so a call there resolves the module import
-            #: — measured, `def f[torch](x=torch.query("S"))` returns the module object and
-            #: `@deco(torch.query("S")) def g[torch]()` passes it, while the same call in an
-            #: ANNOTATION, a class BASE or a type-parameter BOUND raises `AttributeError:
-            #: 'typing.TypeVar' object has no attribute 'query'`. Contributing the type
-            #: parameters for every header position graded a legitimate probe in the two
-            #: eager positions (review of #14160, cycle 9, P2-1).
-            if not _in_eager_header_position(node, seen):
+            # ⛔ EXCEPT ITS TYPE PARAMETERS, WHICH REACH ONLY THE PARTS OF THE HEADER THAT
+            # LIVE IN THE TYPE-PARAMETER SCOPE. PEP 695 gives a header THREE scopes, and
+            # only one of them can see the list's own names — measured on 3.12.3, and the
+            # list is tagged where a member is newer than that interpreter:
+            #   * TYPE-PARAMETER scope: the `bound` of the list itself (and its PEP 696
+            #     `default_value`, which is a 3.13 SyntaxError here, so it is routed — never
+            #     measured — by the whole `type_params` child), a
+            #     parameter/return ANNOTATION, a class BASE and a class KEYWORD. Here a
+            #     type parameter named after the import shadows it — `def f[T, S: T]()`
+            #     gives `f.__type_params__[1].__bound__ is T`, and in
+            #     `def _inner[torch: object, T: torch.query("…")]()` the call resolves to
+            #     the TypeVar. (⛔ NOT AT DEFINITION TIME: bounds are LAZY — the `def`,
+            #     `class` and `type` spellings all `exec` fine, and the `AttributeError`
+            #     arrives when the bound is EVALUATED.)
+            #   * ENCLOSING scope: DECORATORS (function and class) and a function's
+            #     DEFAULTS — `@deco(W) def f[W: object]()` and `def f[W: object](x=deco(W))`
+            #     both see the MODULE `W`, not the type parameter.
+            # Contributing the type parameters to the whole header therefore graded a
+            # legitimate probe over the import — a regression against `origin/main` on the
+            # decorator and default shapes (review of this PR, P1). The contribution is
+            # scoped to the children that actually evaluate there.
+            if not _header_child_is_enclosing_scope(node, seen):
                 out |= _type_param_names(node)
             previous = node
             node = parents.get(id(node))
@@ -1493,23 +1493,6 @@ def _header_expressions(node: ast.AST) -> list[ast.AST]:
     return out
 
 
-def _in_eager_header_position(node: ast.AST, seen: set[int]) -> bool:
-    """Whether the call reached `node` through a DEFAULT or a DECORATOR.
-
-    Those two evaluate BEFORE the definition's own scope exists — including its PEP 695
-    type parameters — so a call there resolves the enclosing scope and must not be charged
-    with the type parameters. An annotation, a class base and a type-parameter bound all
-    evaluate INSIDE that annotation scope (measured: each reads the `TypeVar`), which is why
-    this asks about two positions rather than about the header as a whole.
-    """
-    args = getattr(node, "args", None)
-    if args is not None:
-        for expression in (*args.defaults, *(d for d in args.kw_defaults if d is not None)):
-            if id(expression) in seen:
-                return True
-    return any(id(decorator) in seen for decorator in getattr(node, "decorator_list", ()) or ())
-
-
 def _is_header_child(node: ast.AST, child: ast.AST) -> bool:
     """Whether `child` sits in `node`'s HEADER rather than its body.
 
@@ -1568,6 +1551,34 @@ def _is_header_child(node: ast.AST, child: ast.AST) -> bool:
     if any(parameter is child for parameter in getattr(node, "type_params", ()) or ()):
         return True
     return any(expression is child for expression in _header_expressions(node))
+
+
+def _header_child_is_enclosing_scope(node: ast.AST, seen: set[int]) -> bool:
+    """Whether the header child the ascent reached evaluates in the ENCLOSING scope.
+
+    A header has THREE scopes under PEP 695, and only two of them matter here: a
+    DECORATOR (function or class) and a function's DEFAULTS are evaluated in the scope
+    that HOLDS the definition, where the generic's type parameters are NOT bound —
+    measured on 3.12.3, `@deco(W) def f[W: object]()` and `def f[W: object](x=deco(W))`
+    both see the module `W`. A parameter/return ANNOTATION, a class BASE, a class KEYWORD
+    and the type-parameter list itself are evaluated in the TYPE-PARAMETER scope, where
+    they ARE bound. So the type-parameter names belong to the second group only.
+
+    `seen` holds every node between the call and this definition (the call included), so
+    a call nested anywhere inside a decorator or a default is recognised by identity of
+    an ancestor — not by the direct child alone.
+    """
+    decorators = getattr(node, "decorator_list", ()) or ()
+    arguments = getattr(node, "args", None)
+    defaults: list[ast.AST] = []
+    if arguments is not None:
+        #: The DEFAULTS only — not the `ast.arguments` node itself, which also holds the
+        #: `ast.arg` nodes and therefore the ANNOTATIONS, and those evaluate in the
+        #: TYPE-PARAMETER scope (`def f[W: object](x: W)` sees the TypeVar).
+        defaults.extend(arguments.defaults)
+        defaults.extend(d for d in arguments.kw_defaults if d is not None)
+    enclosing = {id(child) for child in (*decorators, *defaults)}
+    return bool(seen & enclosing)
 
 
 def _walrus_targets(node: ast.AST) -> set[str]:
@@ -3628,12 +3639,14 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     block-granularity grades it, this tree `()`).
     #     ⛔ MEASURED WITHOUT A COUNT, ON PURPOSE. Putting the block-granularity subtraction
     #     back (the `ast.walk(block)` mechanism the deleted `_rebinds_within` was) reds this
-    #     control AND every other row that pins a BLOCK-SCOPED exemption: the CLASS-BODY
+    #     control AND other rows that pin a BLOCK-SCOPED exemption — INCLUDING the CLASS-BODY
     #     family (`_class_body_method_control`, `_class_body_comprehension_control`, and
     #     the `4j-sesvicesimus` nested-class-body row), both iterable rows of
     #     `4j-vicesimus-bis` (`outermost iterable`, `later generator iterable`), and the
-    #     header/definition-scope rows. The same error forbids every one of those shapes,
-    #     which is why the set is NAMED BY FAMILY and NOT counted — an explicit "two" for
+    #     header/definition-scope rows. The list is ILLUSTRATIVE, not exhaustive: the
+    #     mutation reds whichever row pins a shape the unscoped walk mis-resolves, and the
+    #     row set GROWS, which is why this is NAMED BY FAMILY and NOT counted — an explicit
+    #     "two" for
     #     the class-body family was already wrong WHEN WRITTEN: the `4j-sesvicesimus`
     #     nested-class-body row was present at that head (a sibling had added it in an
     #     earlier commit, `69a92755b21e`), so it was short on arrival rather than outgrown.
@@ -4411,6 +4424,50 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             "own bound (PEP 695), so the `.query` runs on the TypeVar and the probe must "
             f"be graded — exempting it is a silent drop: {_shadowed_bound_row}"
         )
+    # ⛔ THE OTHER DIRECTION OF THE SAME SPLIT, and the reason the contribution is SCOPED.
+    #     A parameter/return ANNOTATION evaluates in the TYPE-PARAMETER scope, where a type
+    #     parameter named after the import shadows it; a DECORATOR or a DEFAULT evaluates in
+    #     the ENCLOSING scope, where the type parameters are NOT bound — measured on 3.12.3,
+    #     `@deco(W) def f[W: object]()` and `def f[W: object](x=deco(W))` both see the MODULE
+    #     `W`. Contributing the list's names to the WHOLE header graded the last two shapes
+    #     over a legitimate probe, i.e. a false red and a regression against `origin/main`
+    #     (review of this PR, P1). Four rows: two that must stay exempt, two that must be
+    #     graded, so a partial revert reds the half it broke.
+    for _label, _generic_header, _must_be_graded in (
+        (
+            "a parameter annotation on a generic",
+            'def _inner[torch: object](x: torch.query("SELECT 1")):\n        X = 1',
+            True,
+        ),
+        (
+            "a return annotation on a generic",
+            'def _inner[torch: object]() -> torch.query("SELECT 1"):\n        X = 1',
+            True,
+        ),
+        (
+            "a decorator on a generic",
+            '@torch.query("SELECT 1")\n    def _inner[torch: object]():\n        X = 1',
+            False,
+        ),
+        (
+            "a default on a generic",
+            'def _inner[torch: object](x=torch.query("SELECT 1")):\n        X = 1',
+            False,
+        ),
+    ):
+        _split_row = roots(_header_reach_probe.format(header=_generic_header))
+        if _must_be_graded:
+            assert len(_split_row) == 1 and _split_row[0][1:] == ((), True, False, True), (
+                f"{_label} evaluates in the TYPE-PARAMETER scope, where the list's own "
+                "names ARE bound, so the `.query` runs on the TypeVar and the probe must be "
+                f"graded — exempting it is a silent drop: {_split_row}"
+            )
+        else:
+            assert _split_row == (), (
+                f"{_label} evaluates in the ENCLOSING scope, where the generic's type "
+                "parameters are NOT bound, so the call still runs on the import and the "
+                f"probe must stay EXEMPT — grading it is the 4k-/4l- false red: {_split_row}"
+            )
     _body_after_header = roots(
         _header_reach_probe.format(
             header=(
