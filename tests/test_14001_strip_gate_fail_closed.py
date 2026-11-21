@@ -1290,6 +1290,34 @@ def test_the_oracle_records_a_KEYWORD_handoff_to_the_write_channel():
 _UNREADABLE_EXEMPT_MODULES = ("tortoise.sdk",)
 
 
+def _is_absent_third_party_distribution(cause: BaseException | None) -> bool:
+    """Did this import failure come from a MISSING THIRD PARTY, or from THIS repo?
+
+    ⛔ ONLY THE FIRST MAY EXCUSE A SKIP (`#14099` F1). `ModuleNotFoundError` is a SUBCLASS of
+    `ImportError`, so grading the class alone accepts a strictly larger set than the pre-fix test
+    did — and the extra members include the one failure a source-reading pin exists to notice: a
+    renamed symbol or a circular import INSIDE `tortoise`, which raises
+    `ImportError: cannot import name 'x' from 'tortoise.retrieval'` and would otherwise drop all
+    ten `tortoise.sdk` writers out of the population while the pin read as fully measured.
+
+    The ORIGIN is graded, measured at this head (`.name` settles every REAL shape):
+
+      absent third party       `ModuleNotFoundError`  `.name == 'prometheus_client'`
+      partially installed dep  `ImportError`          `.name == 'prometheus_client'`
+      repo-side rename         `ImportError`          `.name == 'tortoise.retrieval'`
+      hand-raised, no `name=`  either class           `.name is None` -> the message decides
+
+    Both signals fail CLOSED: an origin that is neither named nor recognisably third-party is not
+    the environment, so it keeps the skip out.
+    """
+    if not isinstance(cause, ImportError):
+        return False
+    name = getattr(cause, "name", None) or ""
+    if name == "tortoise" or name.startswith("tortoise."):
+        return False
+    return "tortoise" not in str(cause)
+
+
 def _writer_register_population() -> dict[str, list[str]]:
     """Classify every entity-writer register key by what the pin below could READ of it.
 
@@ -1304,12 +1332,15 @@ def _writer_register_population() -> dict[str, list[str]]:
       missing     — the register names a `def` the module does not contain (a renamed writer);
       offenders   — read, and it mentions a dynamic namespace (what the pin exists to catch).
 
-    ⛔ THE CAUSE IS GRADED ONLY FOR THE DECLARED MODULE. Outside it a skip is `stray` whatever the
-    cause, because no reason makes a writer's gate disappear quietly. Inside it an import failure
-    is treated as the environment; the RESIDUAL — a repo-side `ImportError` (a circular import, a
-    `raise ImportError` guard) inside the declared module reads as environment — is named rather
-    than closed, because that module's ten writers are imported by ten test files which red on
-    such a break independently.
+    ⛔ THE CAUSE IS GRADED ONLY FOR THE DECLARED MODULE, AND ONLY WHEN ITS ORIGIN IS A MISSING
+    THIRD PARTY. Outside the declaration a skip is `stray` whatever the cause, because no reason
+    makes a writer's gate disappear quietly. Inside it `_is_absent_third_party_distribution`
+    decides: a missing `prometheus_client` is the environment, while a REPO-SIDE
+    `ImportError: cannot import name … from 'tortoise.…'` still reds — that is the one break a
+    source-reading pin exists to notice, and grading the class alone let it through. The residual
+    is a cause naming neither a module nor a `tortoise` one (a bare `raise ImportError("…")`
+    inside the declared module's own chain): it reads as environment, and that module's ten
+    writers are imported by ten test files which red on such a break independently.
     """
     import ast
 
@@ -1323,7 +1354,7 @@ def _writer_register_population() -> dict[str, list[str]]:
             source = strip._module_source(module_name)
         except strip._UnreadableFold as exc:
             exempt = (module_name in _UNREADABLE_EXEMPT_MODULES
-                      and isinstance(exc.__cause__, ImportError))
+                      and _is_absent_third_party_distribution(exc.__cause__))
             population["unreadable" if exempt else "stray"].append(key)
             continue
         bodies = strip._function_bodies(source)
@@ -1428,11 +1459,49 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
             f"`{declared_module}`'s loader changed shape and the skip was blamed on the "
             "environment")
 
+        # ⛔ …AND NOR MAY A REPO-SIDE IMPORT BREAK INSIDE IT (`#14099` F1). This is the measured
+        # shape of a renamed symbol in the module's chain: `ImportError` (NOT a
+        # `ModuleNotFoundError`) whose `.name` is the `tortoise` module that lost the symbol.
+        # Grading the class alone let this read as "the environment" and dropped all ten writers.
+        monkeypatch.setattr(
+            strip, "_module_source",
+            folding(declared_module, ImportError(
+                "cannot import name 'is_turn_echo_row' from 'tortoise.retrieval'",
+                name="tortoise.retrieval")))
+        assert declared in _writer_register_population()["stray"], (
+            f"`{declared_module}` failed on a REPO-SIDE import and the skip was blamed on the "
+            "environment — ten writers left the population silently")
+        # …and the same origin with no `name=`, where only the message carries it.
+        monkeypatch.setattr(
+            strip, "_module_source",
+            folding(declared_module,
+                    ImportError("cannot import name 'is_turn_echo_row' from 'tortoise.retrieval'")))
+        assert declared in _writer_register_population()["stray"], (
+            "a hand-raised repo-side ImportError carries its origin in the MESSAGE, and the "
+            "message was not read")
+
     # a renamed writer is `missing`, never silently dropped.
     blanked = outsider.partition("::")[0]
     monkeypatch.setattr(
         strip, "_module_source", lambda name: "" if name == blanked else sources[name])
     assert outsider in _writer_register_population()["missing"]
+
+    # ⛔ THE PIN ITSELF MUST RED (`#14099` F2). The arms above prove the WALK classifies; they do
+    # NOT prove the PIN reports. Measured: deleting the pin's `assert stray == []` left this whole
+    # file green, because every other row reads the helper rather than the assertion — so the guard
+    # could be removed and nothing would say so. Each red below names the key AND the population it
+    # measured, which is what a reader needs to tell a working guard from a deleted one.
+    monkeypatch.setattr(strip, "_module_source", folding(module, ModuleNotFoundError("absent")))
+    with pytest.raises(AssertionError) as red:
+        test_no_declared_entity_writer_mentions_a_dynamic_namespace()
+    assert outsider in str(red.value), (
+        f"the pin reds without naming the key that left its population: {red.value}")
+    assert f"of {len(keys)}" in str(red.value), (
+        f"the pin reds without naming the population it measured: {red.value}")
+
+    monkeypatch.setattr(strip, "_module_source", folding(module, ValueError("loader changed")))
+    with pytest.raises(AssertionError, match="outside the declared environment-optional modules"):
+        test_no_declared_entity_writer_mentions_a_dynamic_namespace()
 
 
 #: ⛔ RESIDUAL — A NAME the mention rule cannot READ (`#14001`, measured by the cycle-4 review).
