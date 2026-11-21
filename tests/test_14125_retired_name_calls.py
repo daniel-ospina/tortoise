@@ -785,11 +785,16 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     skip_gated = _skip_gating_functions(tree)
     skip_referenced = _skip_condition_names(tree)
     module_own = _own_imported_names(tree.body)
-    for stmt in tree.body:
-        if (
-            isinstance(stmt, ast.Try)
-            and _assigns_availability(stmt)
-            and (_imports_own_code(stmt) or _touches_own_code(stmt, module_own))
+    # MODULE-LEVEL control flow, not just `tree.body`. `tests/test_assembly_pure.py:2615`
+    # puts its probe inside `if _DOCKER_URI:`, so a walk over the direct children
+    # returned NO row for that file while `_skip_condition_names(tree)` already held
+    # `_FALKORDB_UP` — a live unarmed probe, 19 docker legs skipped behind it, and
+    # the census reporting `UNARMED = ()` (review of 3a363eb1a3a). The helper
+    # branches below already descended control flow; the module level did not, and
+    # that asymmetry was the hole.
+    for stmt in _control_flow_tries(tree.body):
+        if _assigns_availability(stmt) and (
+            _imports_own_code(stmt) or _touches_own_code(stmt, module_own)
         ):
             # The own-code gate applies to THIS branch too. Without it the rule
             # redded `TORCH_AVAILABLE = False / try: import torch …`, i.e. a probe
@@ -797,19 +802,18 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
             # false red the import-seam rule and the self-test refuse (review of
             # 03fc244, P2).
             roots.append(stmt)
-        elif isinstance(stmt, ast.Try) and (
-            _bound_names(stmt) & skip_referenced
-        ) and (
+        elif (_bound_names(stmt) & skip_referenced) and (
             _imports_own_code(stmt)
             or _touches_own_code(stmt, _own_imported_names(tree.body))
         ):
             # A module-body probe whose flag is spelled something other than
-            # `*AVAILABLE` — `LIVE`, `_FTS_ESCAPE_LIVE` — is NOT an availability
-            # flag by name, but it IS the decision: a `skipif` reads it. The
-            # same own-code test as the helper branches applies, so a probe whose
+            # `*AVAILABLE` — `LIVE`, `_FTS_ESCAPE_LIVE`, `_FALKORDB_UP` — is NOT an
+            # availability flag by name, but it IS the decision: a `skipif` reads it.
+            # The same own-code test as the helper branches applies, so a probe whose
             # only import is an optional third-party one is still left alone.
             roots.append(stmt)
-        elif (
+    for stmt in tree.body:
+        if (
             isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
             and stmt.name in resolvers
         ):
@@ -1576,6 +1580,59 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         f"neither a flag nor a `skipif` reaches it: {sentinel}"
     )
 
+    # 4c. A module-body guard NESTED in module-level control flow. The helper
+    #     branches always descended control flow, the module level did not — so
+    #     `tests/test_assembly_pure.py:2615`'s probe inside `if _DOCKER_URI:` got
+    #     NO row at all and the census read GREEN over an unarmed probe with 19
+    #     tests behind it (review of 3a363eb1a3a). The UN-nested source below is
+    #     the control: it was already graded, so the pair isolates module-level
+    #     control-flow descent as the thing that was missing.
+    flat_guard = roots(
+        """
+        import pytest
+
+        _DOCKER_URI = "redis://x"
+        _FALKORDB_UP = False
+        try:
+            import tortoise.sdk as _sdkmod
+            _sdkmod.TortoiseSDK().close()
+            _FALKORDB_UP = True
+        except Exception:
+            _FALKORDB_UP = False
+
+        @pytest.mark.skipif(not (_DOCKER_URI and _FALKORDB_UP), reason="docker")
+        def test_docker():
+            pass
+        """
+    )
+    assert flat_guard == ((6, (), True, True, True),), (
+        "the module-body guard outside control flow is the CONTROL: it must be "
+        f"graded exactly as before: {flat_guard}"
+    )
+    nested_guard = roots(
+        """
+        import pytest
+
+        _DOCKER_URI = "redis://x"
+        _FALKORDB_UP = False
+        if _DOCKER_URI:
+            try:
+                import tortoise.sdk as _sdkmod
+                _sdkmod.TortoiseSDK().close()
+                _FALKORDB_UP = True
+            except Exception:
+                _FALKORDB_UP = False
+
+        @pytest.mark.skipif(not (_DOCKER_URI and _FALKORDB_UP), reason="docker")
+        def test_docker():
+            pass
+        """
+    )
+    assert nested_guard == ((7, (), True, True, True),), (
+        "a guard inside a module-level `if` must be a ROOT too — the flag is read "
+        f"by a `skipif`, so it is the decision whatever the nesting: {nested_guard}"
+    )
+
     # 5. The real tree must carry all four shapes, or every assertion above is a
     #    statement about a sample rather than about the code it is meant to guard.
     graded = {row[0] for row in _probe_report()}
@@ -1591,6 +1648,11 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "tests/test_6151_annotation_band.py",
         # … and the sentinel helper (shape e)
         "tests/test_9226_dump_paging_v6.py",
+        # … and the module-body guard nested in control flow, pinned by presence:
+        # it was the ONE probe in tests/+tools/ that the direct-children walk left
+        # unarmed and unreported, so its absence from the report is the signal that
+        # the walk has gone blind again.
+        "tests/test_assembly_pure.py",
     ):
         assert rel in graded, (
             f"{rel} is absent from the probe census — a shape it grades has "
