@@ -1819,18 +1819,37 @@ def shrink_violations(
                         # ONE RUN after printing "THE RECORD FROZE A STUB" — two contradicting
                         # statements about the same entry, the false one pointing away from the
                         # only route that clears it.
-                        # ⛔ AND NAME A SOURCE THAT EXISTS (review F1 of round 19). This branch is
-                        # reached on a base carrying ONLY `tortoise/<x>.pyi` — `_modules_with_a_body`
-                        # admits a `.pyi` module (it filters only `__init__.py`), so membership here
-                        # does NOT mean the base holds the `.py`. An earlier round cleared this site
-                        # on the opposite assumption; it was wrong, so both copies now say "a commit
-                        # that still holds it".
-                        why = (
-                            f"{base_label} carries `{symbol}` ({kind}) and this tree does not "
-                            "— but the `module` entry you also passed FROZE ONLY A STUB, so it "
-                            "is not a record: restore the source from a commit that still holds "
-                            "it, archive it, and delete it again"
-                        )
+                        # ⛔ AND NAME A SOURCE THAT ACTUALLY EXISTS (review F1 of round 19).
+                        # `_modules_with_a_body` admits a `.pyi` module (it filters only
+                        # `__init__.py`), so membership here does NOT mean the base holds the `.py`.
+                        # An earlier round cleared this site on the opposite assumption.
+                        #
+                        # ⛔ AND SPLIT ON WHETHER A RUNTIME SOURCE EVER EXISTED (review F1 of
+                        # round 20). "Restore the source from a commit that still holds it" is
+                        # unfollowable for a module whose ONLY carrier is a stub: no commit holds a
+                        # `.py`, and re-running the writer just reproduces this row — the writer's
+                        # own rule says a stub-only module's only code IS the stub, so that row IS
+                        # a record and there was no runtime source to lose. Telling that operator
+                        # to hunt history for a file that never existed, AND that their correct row
+                        # is "not a record", is false on both counts. `base_paths_by_module`
+                        # PREFERS the runtime carrier (:1584-1586), so a `.pyi` there is positive
+                        # proof the base had nothing else.
+                        base_carrier = base_paths_by_module.get(symbol) or ""
+                        if base_carrier.endswith(".pyi"):
+                            why = (
+                                f"{base_label} carries `{symbol}` ({kind}) only as a stub "
+                                f"(`{base_carrier}`, and no `.py` on either side), so this module "
+                                "had no runtime source to record — the `module` entry you also "
+                                "passed is the writer's own output for a stub-only module, and "
+                                "nothing was removed for the waiver to waive: drop the flag"
+                            )
+                        else:
+                            why = (
+                                f"{base_label} carries `{symbol}` ({kind}) and this tree does "
+                                "not — but the `module` entry you also passed FROZE ONLY A STUB, "
+                                "so it is not a record: restore the source from a commit that "
+                                "still holds it, archive it, and delete it again"
+                            )
                     else:
                         why = (
                             f"{base_label} carries `{symbol}` ({kind}) and this tree does not "
