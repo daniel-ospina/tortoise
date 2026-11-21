@@ -252,7 +252,11 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 def _residue_block() -> str:
     """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
 
-    ⛔ ITS EXTENT IS THE ENTIRE RUN (651 lines at this head), AND THE ARMS GRADE ALL OF IT
+    ⛔ ITS EXTENT IS THE ENTIRE RUN, AND THE ARMS GRADE ALL OF IT. The extent is NOT typed here: it has
+    moved every time this file's block grew or shrank (651 when this sentence was written, 339 after a
+    fold, 812 at #14038's head) and no arm grades a literal, so a typed number would only rot (#14038
+    review, P3). The arms pin three PHRASE anchors at different depths instead, which is what makes them
+    fail when the block is truncated.
     (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
     which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
     and the residue section's prose is contiguous all the way up to its opening sentence — so
