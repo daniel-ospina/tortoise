@@ -1760,9 +1760,10 @@ def test_no_graph_dependency() -> None:
         "the subject's own import must reach NO banned root: got "
         f"{sorted(_observed_cases['from tortoise import usage_signal'])}. A name here is "
         "a REAL transitive reach of a graph client from `usage_signal` itself — the leak "
-        "this leg exists to catch, and a legitimate red. A filter or slice on the "
-        "expression hung off `_probe` cannot satisfy this half and the next one "
-        "together, so silencing the leak still reds here (#14118 item 1)")
+        "this leg exists to catch, and a legitimate red. A filter that keeps only exact "
+        "derivation members satisfies BOTH halves of this table — measured, it is 1 failed "
+        "/ 101 at the `<root>.<sub>` row above and NOWHERE here — so that row is the one "
+        "that catches it, not this one (#14118 item 1)")
     #
     # ⛔ AND THE WITNESS HALF IS A CONTAINMENT, NOT AN EQUALITY. `hosted_backup` is a
     # CONTROL — a module this test does not audit and the AST ban above never reads — so
@@ -1785,10 +1786,15 @@ def test_no_graph_dependency() -> None:
         "a `usage_signal` defect this test may fail on (#14118 item 1)")
     # AND the probe's verdict is still pinned in BOTH directions across the table: the
     # clean half reds on over-reporting (a probe that answers every banned root fails
-    # `== set()` above), and the witness half reds on under-reporting. Neither half alone
-    # can be satisfied by a filter: measured on this head, a `_probe` whose answer drops
-    # `tortoise.hosted_backup` is **1 failed / 101**, and so is one that adds a banned
-    # root to the subject's answer.
+    # `== set()` above), and the witness half reds on under-reporting. ⛔ BUT NEITHER
+    # HALF IS WHAT CATCHES A FILTER, and saying it is would be the #14118 item-2 class
+    # — naming the row that does the work wrong. Measured on this head: a returned-set
+    # filter keeping only exact derivation members (`… & set(_probe_forbidden())`)
+    # satisfies BOTH halves (**102 passed** with the `<root>.<sub>` row removed) and is
+    # caught by that row, not here (**1 failed / 101**); dropping
+    # `tortoise.hosted_backup` reds the `_all_roots` row ABOVE; and adding a banned root
+    # to the subject's answer reds the `leaked == {"falkordb"}` row ABOVE. A row that
+    # names the wrong one is what lets a load-bearing row be deleted on a false premise.
 
 
 def test_the_no_graph_guard_catches_relative_imports() -> None:
