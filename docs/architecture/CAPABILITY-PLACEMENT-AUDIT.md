@@ -251,7 +251,9 @@ sibling occurrence elsewhere in this file — so re-pointing **all six at once l
 passed** (measured, with a control above proving the mutation is live). Do not read this enumeration as
 guarded until those six have a site-level pin; the gap is the bare-`:NNNN`-code-span class recorded on
 #14089 (open: a wrong address in the "ten that are NOT comparable" enumeration above passed 24/24 — that
-list, not this one, is where its witness address lives), not the census-row gap on #14204. ⛔ **The three `sdk.py`
+list is where the case was OBSERVED; the witness addresses the issue quotes (`:58265`, `:58272`, `:58274`,
+`:58923`) appear nowhere in this document, so do not follow this pointer expecting to read them here), not
+the census-row gap on #14204. ⛔ **The three `sdk.py`
 numbers above are the ones the pin rows carry.** An earlier cut of this paragraph named
 `:15787`/`:15958-15962`/`:3777` and called them the PIN-side numbers; measured at the pin `ccb49741b2ec`
 that is false — `:15787` is an unrelated `#2199` comment, `:15958-15962` is `embed_compose` prose and
