@@ -1402,13 +1402,14 @@ def _row_froze_a_stub(entry: dict) -> bool:
     separated them:
 
       * the archived FILE's suffix — DEAD CODE. `archive_rel` always emits
-        `archive/modules/<batch>/<mirror>.py` (`:2224-2235`, "one symbol, one path, always"),
-        so no row the writer produces could satisfy it, and the fixtures that "covered" it
-        hand-wrote a `.pyi` path `archive_rel` cannot produce.
+        `archive/modules/<batch>/<mirror>.py` (its own docstring: "one symbol, one path,
+        always"), so no row the writer produces could satisfy it, and the fixtures that "covered"
+        it hand-wrote a `.pyi` path `archive_rel` cannot produce.
       * `archived_from` — SPOOFABLE. It is bound only to the frozen file's own `ARCHIVED_FROM`
-        header, i.e. to a string the same hand-splicing author writes; this file already records
-        that limit at `:1357-1361` ("bound to nothing else on this path … so a consistent lie
-        passed both"), and hand-splicing is what `MEMORY.md` recommends. Measured: a spliced row
+        header, i.e. to a string the same hand-splicing author writes; this file's `CLAIM_FIELD`
+        note on `_anchor_violations` records exactly that limit ("bound to nothing else on this
+        path … so a consistent lie passed both"), and hand-splicing is what `MEMORY.md`
+        recommends. Measured: a spliced row
         saying `tortoise/x.py` over frozen STUB bytes was credited, with `shrink_violations` AND
         `file_violations` both empty.
       * `blocks[0].path` — the field `file_violations` ties to the path baked into the frozen
@@ -1528,10 +1529,11 @@ def shrink_violations(
             # ⛔ A row that froze the stub is not a record — and it is credited HERE, not only in
             # arm 1b: when the stub is deleted as the writer's own output asks, the module has NO
             # head carrier at all, so it is `base - head` that lands in this arm while the row's
-            # existence silences it. `_row_froze_a_stub` reads the SOURCE the row recorded —
-            # `archived_from`, never the archived file's suffix (the archived file is always
-            # `.py`; see its docstring for the measured false PASS that made the suffix-keyed
-            # first cut dead code).
+            # existence silences it. `_row_froze_a_stub` asks `blocks[0].path` — the field bound to
+            # the frozen banner AND its sha256 — and falls back to `archived_from` only when the row
+            # records no block path; it never reads the archived file's suffix (that file is always
+            # `.py`; see its docstring for the measured false PASS that made the suffix-keyed first
+            # cut dead code).
             if runtime_carrier is not None and _row_froze_a_stub(working[key]):
                 out.append(
                     _record_froze_a_stub(
@@ -1755,9 +1757,17 @@ def shrink_violations(
                         "it, so nothing was removed for it to waive"
                     )
                 else:
-                    why = (
-                        f"{base_label} already records `{symbol}` ({kind}) and this tree does "
-                        "not carry it — the removal IS recorded by that `module` entry, so the "
+                    if _row_froze_a_stub(base_entries[key]):
+                        why = (
+                            f"{base_label} already records `{symbol}` ({kind}) and this tree does "
+                            "not carry it — but that `module` entry FROZE ONLY A STUB, so it is "
+                            "not a record of the source: restore the source from the base, "
+                            "archive it, and delete it again"
+                        )
+                    else:
+                        why = (
+                            f"{base_label} already records `{symbol}` ({kind}) and this tree does "
+                            "not carry it — the removal IS recorded by that `module` entry, so the "
                         "waiver waives nothing"
                     )
             elif symbol in base_modules:
@@ -1788,11 +1798,25 @@ def shrink_violations(
                     # removal IS recorded by the `module` entry you also passed" over a tree that
                     # has no such entry. Verdict right, stated fact false: this loop's own
                     # recurring class.
-                    if key in working:
+                    if key in working and not _row_froze_a_stub(working[key]):
                         why = (
                             f"{base_label} carries `{symbol}` ({kind}) and this tree does not "
                             "— the removal IS recorded by the `module` entry you also passed, "
                             "so the waiver waives nothing"
+                        )
+                    elif key in working:
+                        # ⛔ ASK THE RECORD, NOT THE KEY (review F1 of round 17). Arm 1b appends
+                        # `_record_froze_a_stub` and `continue`s BEFORE it consumes the waiver, so
+                        # on the shape the anti-stub rule was added for this loop re-derives the
+                        # same key, takes `key in working`, and printed "the removal IS recorded"
+                        # ONE RUN after printing "THE RECORD FROZE A STUB" — two contradicting
+                        # statements about the same entry, the false one pointing away from the
+                        # only route that clears it.
+                        why = (
+                            f"{base_label} carries `{symbol}` ({kind}) and this tree does not "
+                            "— but the `module` entry you also passed FROZE ONLY A STUB, so it "
+                            "is not a record: restore the source from the base, archive it, and "
+                            "delete it again"
                         )
                     else:
                         why = (
