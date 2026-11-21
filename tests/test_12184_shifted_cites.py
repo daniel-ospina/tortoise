@@ -2628,8 +2628,8 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # 82 -> 91 at this lane's review (86, then five more for the sibling cites on the same rows) of the #14038 delta: three addresses on the `:CommitRecord`
     # row and in §7 were pinned NOWHERE, so they rotted green — `hosted_api.py:22436-22437` opened
     # on an unrelated comment (the statement is `:22544-22545`), `:24592-24593` on a
-    # `store.discard_attempt` comment (`:25165-25166`), and the standalone `:Session`
-    # `value_nodes_held` statement `:24493-24497` on a quota comment (`:25067-25071`, cited at FOUR
+    # `store.discard_attempt` comment (`:25169-25170`), and the standalone `:Session`
+    # `value_nodes_held` statement `:24493-24497` on a quota comment (`:25071-25075`, cited at FOUR
     # sites — three long-form, one bare). Same shape as the `:6989` / `hosted_backup.py:2666` rows:
     # one ROW per SITE, and an unlisted token is coverage this file only appeared to have.
     # 91 -> 95: the `8f7724b593c` review's two "reported, not touched" sites — the composed
