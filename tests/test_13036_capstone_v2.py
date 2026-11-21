@@ -810,14 +810,15 @@ _DRIVEN_BY_TEST = (
     "tortoise_calibrate_summary", "tortoise_check_connection",
     "tortoise_check_structure", "tortoise_explore_connections",
     "tortoise_expand_relationships", "tortoise_review_link_candidates",
-    "tortoise_list_batches", "tortoise_list_graphs", "tortoise_list_namespaces",
+    "tortoise_list_batches", "tortoise_list_namespaces",
     "tortoise_manage_source_trust", "tortoise_register_source",
-    "tortoise_events_poll", "tortoise_diary_read", "tortoise_search_sessions",
+    "tortoise_poll_events", "tortoise_diary_read", "tortoise_search_sessions",
     "tortoise_suggest_entry_points", "tortoise_write_question",
-    "tortoise_record_decision", "tortoise_create_edge",
-    "tortoise_create_operator", "tortoise_adjust_relationship",
+    "tortoise_record_decision", "tortoise_link_entities",
+    "tortoise_adjust_relationship",
     "tortoise_approve_merge", "tortoise_ingest", "tortoise_update_knowledge",
-    "tortoise_supersede_knowledge", "tortoise_delete",
+    "tortoise_supersede_knowledge", "tortoise_delete_knowledge",
+    "tortoise_get_historical_knowledge",
     "tortoise_graph_set_recording", "tortoise_manage_sources",
     "tortoise_mine_knowledge_from_session",
 )
@@ -1228,8 +1229,8 @@ class TestWritesAreReadableBack:
                       {"type": "point", "name": "Operator target claim."})[1]
         a_id = (a.get("node") or a)["id"]
         b_id = (b.get("node") or b)["id"]
-        status, out = door.call("tortoise_create_operator",
-                                {"op_type": "NAND", "source_id": a_id,
+        status, out = door.call("tortoise_link_entities",
+                                {"relation": "NAND", "from_id": a_id,
                                  "target_ids": [b_id]})
         assert status == 200
         node = out.get("node") or out
@@ -1244,10 +1245,9 @@ class TestWritesAreReadableBack:
         """Asserts the EDGE ITSELF, not merely the absence of an error — a
         no-op or a wrongly-directed edge must fail."""
         door, s, _ = seeded
-        status, out = door.call("tortoise_create_edge",
-                                {"source_id": s["claim"],
-                                 "target_id": s["object"],
-                                 "predicate": "produces"})
+        status, out = door.call("tortoise_link_entities",
+                                {"relation": "produces", "from_id": s["claim"],
+                                 "to_id": s["object"]})
         assert status == 200
         assert not (isinstance(out, dict) and out.get("error")), out
         edge = out.get("edge") or {}
@@ -1336,7 +1336,7 @@ class TestWritesAreReadableBack:
         """`dry_run` must not delete — the payload names what WOULD go, and a
         confirmation token proves the preview was computed against the node."""
         door, s, _sdk = seeded
-        status, out = door.call("tortoise_delete",
+        status, out = door.call("tortoise_delete_knowledge",
                                 {"id": s["claim"], "dry_run": True})
         assert status == 200
         assert out.get("preview") is True, out
@@ -1362,13 +1362,13 @@ class TestWritesAreReadableBack:
         made = door.call("tortoise_create_entity",
                          {"type": "point", "name": "Doomed capstone claim."})[1]
         doomed = (made.get("node") or made)["id"]
-        status, preview = door.call("tortoise_delete",
+        status, preview = door.call("tortoise_delete_knowledge",
                                     {"id": doomed, "dry_run": True})
         assert status == 200
         assert preview.get("found") is True, preview
         token = preview.get("confirmation")
         assert token, preview
-        status, out = door.call("tortoise_delete",
+        status, out = door.call("tortoise_delete_knowledge",
                                 {"id": doomed, "confirmation": token})
         assert status == 200
         assert out.get("deleted") is True, out
@@ -1384,10 +1384,10 @@ class TestWritesAreReadableBack:
         because that binding is the whole point of the two-call protocol
         (#9660): a token minted for one claim must not destroy another."""
         door, s, _ = seeded
-        _status, preview = door.call("tortoise_delete",
+        _status, preview = door.call("tortoise_delete_knowledge",
                                      {"id": s["claim"], "dry_run": True})
         token = preview["confirmation"]
-        status, out = door.call("tortoise_delete",
+        status, out = door.call("tortoise_delete_knowledge",
                                 {"id": s["claim2"], "confirmation": token})
         assert status == 200
         # ⛔ The WIRE SHAPE, not only the wording (`#13886` r8, F2). This
@@ -1408,7 +1408,7 @@ class TestWritesAreReadableBack:
         not on the error text alone: a handler that raised after deleting would
         pass a message-only check."""
         door, s, _ = seeded
-        status, out = door.call("tortoise_delete",
+        status, out = door.call("tortoise_delete_knowledge",
                                 {"id": s["claim"],
                                  "confirmation": "not-a-token"})
         assert status == 200
@@ -2184,9 +2184,34 @@ class TestRelationshipsAndRemainingReads:
         assert isinstance(out.get("prune"), list), out
         assert out["prune"] == [], out
 
+    def test_get_historical_knowledge_answers_the_three_state_contract(self, seeded):
+        """#11609 lane P7's row 5 — the point-in-time read, driven end to end.
+
+        The contract is a THREE-STATE answer (`found` | `ambiguous` | `absent`) that a
+        caller must branch on, so the assertions are on `status` and its coupling to
+        `found`/`valid_point` rather than on one outcome: the seeded claim may or may not
+        cover the date asked for, and a case that hard-coded one answer would be pinning
+        the seed's clock, not the tool.
+        """
+        import datetime as _dt
+
+        door, s, _ = seeded
+        today = _dt.datetime.now(tz=_dt.UTC).date().isoformat()
+        status, out = door.call("tortoise_get_historical_knowledge",
+                                {"point_id": s["claim"], "at_date": today})
+        assert status == 200, out
+        assert isinstance(out, dict), out
+        assert out.get("status") in {"found", "ambiguous", "absent"}, out
+        assert isinstance(out.get("found"), bool), out
+        if out["status"] == "found":
+            assert (out.get("valid_point") or {}).get("id") == s["claim"], out
+        if out["status"] == "ambiguous":
+            assert "valid_point" not in out, out
+            assert out.get("candidates"), out
+
     def test_events_poll_returns_the_seeded_journal(self, seeded):
         door, s, _ = seeded
-        status, out = door.call("tortoise_events_poll", {})
+        status, out = door.call("tortoise_poll_events", {})
         assert status == 200
         events = out.get("events") if isinstance(out, dict) else out
         assert isinstance(events, list) and events, out
@@ -2206,7 +2231,7 @@ class TestRelationshipsAndRemainingReads:
         """`list_graphs` reports the STORAGE namespace, which is `org_<org_id>`
         — not the bare org id `graph_overview(section='status')` reports."""
         door, s, _ = seeded
-        status, out = door.call("tortoise_list_graphs", {})
+        status, out = door.call("tortoise_graph_overview", {"section": "graphs"})
         assert status == 200
         assert isinstance(out, list) and out, out
         assert f"org_{s['org']}" in {str(g) for g in out}, out

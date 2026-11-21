@@ -418,12 +418,21 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
             f"canonical-mcp-tools.md states `{lhs} = {rhs}`, which evaluates to {computed} — "
             f"the composed arithmetic does not add up"
         )
+    # ⛔ SIGNED, because #11609 lane P7 is the first wave that ADDS advertised rows: it
+    # registered the four approved target names that had no entry (#13391) and retired five
+    # doors in the same change, and it states them as TWO clauses (`+4 = 44`, then `−5 = 39`)
+    # so each intermediate figure is checkable. A subtraction-only reader silently stopped at
+    # the previous wave's `−2 = 40` and reported a stale head — the exact "record stops before
+    # the head it describes" failure its own message names. The middle prose is free-form
+    # (`with no container row arriving` is FALSE for the registration clause), so it is not
+    # part of the match; the sign and the two numbers are.
     movements = re.findall(
-        r"then the ([A-Za-z0-9/-]+)\s+wave's\s*−\s*(\d+)\s+with no container row arriving\s*"
-        r"=\s*(\d+)",
+        r"then the ([A-Za-z0-9/-]+)\s+wave's\s*(−|\+)\s*(\d+)[^=]*=\s*(\d+)",
         arithmetic)
+    movements = [(wave, ("-" if sign == "−" else "+") + count, stated)
+                 for wave, sign, count, stated in movements]
     assert movements, (
-        "canonical-mcp-tools.md's parenthetical stopped stating a wave's subtraction and its "
+        "canonical-mcp-tools.md's parenthetical stopped stating a wave's movement and its "
         "result; that is how the movement this container's own arithmetic records is told")
     # ⛔ ONE CLAUSE PER WAVE, IN ORDER, AND THE LAST ONE IS THE HEAD. The record has grown
     # five times now (the three container waves, then the door wave, then #11609 lane P1's
@@ -436,8 +445,8 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
     # the accumulation must land on `live`. A skipped or out-of-order wave reds, an append reds
     # until this reader is extended in the same change, and no clause is identified by position.
     running = int(movements[0][2])
-    for wave, subtracted, stated in movements[1:]:
-        running -= int(subtracted)
+    for wave, delta, stated in movements[1:]:
+        running += int(delta)
         assert running == int(stated), (
             f"canonical-mcp-tools.md says the {wave} wave lands the surface on {stated} "
             f"advertised tools, but the parenthetical's own terms give {running} — the "
@@ -476,19 +485,21 @@ def test_the_owner_facing_docs_present_tense_counts_are_the_derived_ones():
         "match a plus-chain at all, so it reds here. If the record grows, extend this pin "
         "in the same change rather than reshaping the sentence to fit it"
     )
-    assert int(advertised_eq.group(2)) - int(movements[0][1]) == int(movements[0][2]), (
+    # The delta is SIGNED (see the parse above): #11609 lane P7 is the first wave that ADDS
+    # advertised rows, so the join is an addition of the clause's own sign, not a subtraction.
+    assert int(advertised_eq.group(2)) + int(movements[0][1]) == int(movements[0][2]), (
         f"canonical-mcp-tools.md's first movement clause starts from "
-        f"{advertised_eq.group(2)} and subtracts {movements[0][1]}, but states "
+        f"{advertised_eq.group(2)} and applies {movements[0][1]}, but states "
         f"{movements[0][2]} — the running record does not join the advertised total")
-    # Every door-retirement wave subtracts, so the composition needs ALL of them: the chain's
-    # own terms, applied to the advertised equation's result, must land on `live`. This is
-    # the same accumulation as the walk above, stated as one equation so a wave that is in
-    # the chain but NOT applied advertises itself here rather than only in the loop.
-    assert int(advertised_eq.group(2)) - sum(
-        int(subtracted) for _wave, subtracted, _stated in movements) == live, (
-        f"canonical-mcp-tools.md's own terms stop composing: {advertised_eq.group(2)} − "
-        f"{sum(int(s) for _w, s, _t in movements)} = "
-        f"{int(advertised_eq.group(2)) - sum(int(s) for _w, s, _t in movements)}, not {live}"
+    # Every wave's term, SIGNED, applied to the advertised equation's result must land on
+    # `live` — the same accumulation as the walk above, stated as one equation so a wave that
+    # is in the chain but NOT applied advertises itself here rather than only in the loop.
+    # (`+` rather than `-` because P7's registration clause is an ADDITION; see the parse.)
+    assert int(advertised_eq.group(2)) + sum(
+        int(delta) for _wave, delta, _stated in movements) == live, (
+        f"canonical-mcp-tools.md's own terms stop composing: {advertised_eq.group(2)} "
+        f"+ {sum(int(d) for _w, d, _t in movements)} = "
+        f"{int(advertised_eq.group(2)) + sum(int(d) for _w, d, _t in movements)}, not {live}"
     )
     assert int(retired_eq.group(2)) == retired, (
         f"canonical-mcp-tools.md's retired-forward arithmetic (`{retired_eq.group(1)}`) states "
@@ -978,7 +989,17 @@ def test_every_rows_reason_agrees_with_the_dependency_column_beside_it():
 #:   manifest the same way — `_caller_lists(_manifest())` reads **7** here, and the arm is `>=`,
 #:   so 27 would have left a twenty-row allowance: exactly the hole this floor forbids. A small
 #:   floor is honest; a floor carried from a surface that no longer exists is not.
-COMPARABLE_CALLER_ROWS_FLOOR = 7
+#:   7 -> 6 on 2026-11-20 (#11609 lane P7): the row that left is `sdk:link_entities` — it was an
+#:   `sdk:` row carrying a caller list in both columns, and P7 REGISTERED it as an MCP tool
+#:   (`tortoise_link_entities`, the approved target row 19), so the `sdk:` row is gone and its
+#:   tool row does not carry the two-column caller evidence this comparison reads. ⛔ THE 6 WAS
+#:   NOT THE MEASURED COUNT and left a FOUR-row allowance: #11609 P7's review re-ran the same
+#:   instrument on the same manifest and `_caller_lists(_manifest())` reads **10**, not 6. The
+#:   arm is `>=`, so a floor one row below the measurement is one row of hole; a floor four below
+#:   is four. Corrected to the measurement on 2026-11-21 (same re-derivation: `uv run python -c`
+#:   over this file's own `_manifest()`/`_caller_lists()`), because "the bound is the measured
+#:   count, not one below it" is the doctrine this pin exists to enforce.
+COMPARABLE_CALLER_ROWS_FLOOR = 10
 
 
 def test_the_reason_dependency_cross_check_can_fail():
@@ -5661,7 +5682,13 @@ def test_the_live_surface_is_the_baseline_the_guard_froze():
     # #9660 ruling KEEPS (`tortoise_delete`, whose `TortoiseSDK.delete` dispatches by label),
     # so the destination is live under the kept entry's own name: again −2 live, no `+ n`,
     # no SDK movement.
-    assert live["mcp"] == manifest["counts"]["tools"] == 40
+    # #11609 LANE P7 (the last mile): 40 -> 39. This is the first wave with BOTH terms —
+    # FOUR approved target names that had no registry entry were registered
+    # (`link_entities`, `poll_events`, `delete_knowledge`, `get_historical_knowledge`, +4)
+    # and FIVE doors retired forward into them and into `graph_overview`
+    # (`create_edge`, `create_operator`, `events_poll`, `delete`, `list_graphs`, −5) — so
+    # 40 + 4 − 5 = 39, with no SDK movement (all four SDK methods already had a `def`).
+    assert live["mcp"] == manifest["counts"]["tools"] == 39
     # #4282 Phase 2.2 (#10053): 149 -> 150, the three approved-but-absent names now
     # having a `def` (+3) less `main`'s two retirements in #10012 (`graph_count` →
     # `_graph_count`, `org_list` deleted) (−2). The manifest pin records the same
@@ -8018,12 +8045,39 @@ def test_a_row_that_reappears_as_a_retired_name_is_not_a_shrink():
 
 
 def test_an_unchanged_baseline_is_green():
-    """Non-vacuity: the pin must not red an ordinary merge (a gate that always fires is off)."""
-    sm = _load_manifest_tool()
-    with MANIFEST.open() as fh:
-        doc = yaml.safe_load(fh)
+    """Non-vacuity: an ADDITION over the base must not red, and a CONSTANT must not pass.
 
-    assert sm.shrink_problems(doc, doc) == []
+    ⛔ The first cut asserted `shrink_problems(doc, doc) == []`, which is structurally empty
+    whatever the code does — `prior - derived` over the SAME object is the empty set — so a pin
+    that computed nothing stayed green (round-17 review, P3). `now` here genuinely differs from
+    `base`: it carries one row the base does not, which is what makes the assertions below
+    discriminating.
+
+    ⛔ AND SAY WHAT THEY DISCRIMINATE, NOT MORE (round-23 review, P3). The swapped-order
+    assertion reds a `shrink_problems` that returns a CONSTANT — the shape the inline comment
+    below measures. It does NOT red a reversed `prior - derived` inside an otherwise working
+    comparison: `removal_report` filters an addition out, so that mutant graded `[]` on BOTH
+    orders. This docstring used to claim the reversed comparison, contradicting the comment under
+    it three lines down; a pin that advertises a power it does not have is the next reader's
+    false premise.
+    """
+    sm = _load_manifest_tool()
+    base, now = _baseline_pair()
+    now = copy.deepcopy(now)
+    now["rows"] = [
+        dict(now["rows"][0], name="tortoise_added_after_the_base"), *now["rows"]
+    ]
+
+    assert sm.shrink_problems(base, now) == []
+    # ⛔ …and the SAME pair, argument-order swapped, IS a removal. That is the half that makes
+    # this row non-vacuous: a `shrink_problems` that returns a constant — the shape the first cut
+    # could not see — fails HERE, while a green-only assertion cannot tell it apart from a real
+    # comparison. (A reversed `prior - derived` graded `[]` on both orders in a measured mutant,
+    # because `removal_report` filters an addition out; the constant is the mutant that matters.)
+    assert sm.shrink_problems(now, base) != [], (
+        "the added row is a removal when it is the BASE that carries it — if this is empty, the "
+        "pin is not comparing its two arguments"
+    )
 
 
 def test_a_waiver_that_waives_nothing_is_reported():
@@ -8590,7 +8644,7 @@ def test_the_green_line_count_is_the_one_the_run_actually_produced(
     * the SHRINK arm has one path with nothing to compare: the base ref carries no baseline
       at all (`shrink_report`'s `graded=False`).
 
-    So the four reachable totals are 13/14/15, and every property that produced no verdict is
+    So the four reachable CASES produce three totals, 13/14/15, and every property that produced no verdict is
     NAMED on the line rather than dropped. Pinned as a pure function: the totals stay cheap to
     assert, which is why the arithmetic lives in one testable seam instead of in `cmd_check`.
 
@@ -8611,3 +8665,34 @@ def test_the_green_line_count_is_the_one_the_run_actually_produced(
     assert ("one provenance" in note) is provenance_answered, note
     assert ("one shrink" in note) is shrink_graded, note
     assert not_answered in unanswered, unanswered
+
+
+def test_the_shrink_refusal_PRINTS_the_route(checker, tmp_path, monkeypatch):
+    """Round-17 review, P3: the one operator who triggers the pin got no step to take.
+
+    `REMOVAL_WAYS` was printed by `cmd_cut` alone, and the CI path (`check --base-ref`) never
+    runs `cut` on a splice — so `check` printed a bare `was DROPPED with no record` and stopped.
+    The archive tool prints its route INSIDE every violation, and this file's own design note
+    says a new class needs "a runnable route in `REMOVAL_WAYS`, or the operator gets a refusal
+    they can act on". The route block is scoped to the shrink rows: the structural findings
+    above it have their own remedies.
+
+    Mutation: drop the `if _shrink_problems:` block in `cmd_check` -> RED (no route in `out`).
+    """
+    sm = checker
+    with MANIFEST.open() as fh:
+        doc = yaml.safe_load(fh)
+    problem = "tortoise_ghost (tool) was DROPPED with no record — it is gone from both"
+    monkeypatch.setattr(
+        sm, "shrink_report", lambda *a, **k: ([problem], "origin/main (merge base abc)", True)
+    )
+
+    rc, out = _check(sm, doc, tmp_path, base_ref="origin/main")
+
+    assert rc == 1, out
+    assert problem in out, out
+    assert "Account for the row(s) above reported as dropped by exactly one of:" in out, (
+        f"the violation must carry its route, not only the finding: {out}"
+    )
+    assert "archive/MANIFEST.json" in out, f"the freeze route must be named: {out}"
+    assert "RETIRED_SDK_METHODS" in out, f"the sdk map route must be named: {out}"

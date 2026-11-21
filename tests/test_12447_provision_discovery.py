@@ -243,11 +243,20 @@ class TestTheListingDoorTeachesTheSameWay:
             # The remedy must name what EXISTS. A first draft said no key-driven
             # route returns a graph id, and a second named a control-plane SDK
             # call a hosted builder cannot use — `GET /v1/team/keys` and the MCP
-            # tool `tortoise_list_graphs` are the routes that actually answer, so
-            # this pins the truthful remedy rather than the convenient one.
+            # tool `tortoise_graph_overview(section="graphs")` are the routes that
+            # actually answer, so this pins the truthful remedy rather than the
+            # convenient one. ⛔ The listing door's OLD spelling
+            # (`tortoise_list_graphs`) is retired forward into that section
+            # (#11609 lane P7): a tool-grant MCP client is handed `tools/list`, and
+            # the old name is absent from it — the handler still answers a caller
+            # that sends the name (FastMCP keeps the #3883 shim registered), so the
+            # defect is DISCOVERY, not a broken call: a remedy naming it hands the
+            # builder a door they cannot see. Same overstatement this comment's own
+            # history is about, one rename later.
             assert ORG_ENDPOINT in detail["message"], detail
             assert "/v1/team/keys" in detail["message"], detail
-            assert "tortoise_list_graphs" in detail["message"], detail
+            assert "tortoise_graph_overview(section='graphs')" in detail["message"], detail
+            assert "tortoise_list_graphs" not in detail["message"], detail
             # `list_memory_graphs` is a CONTROL-PLANE SDK call (no hosted
             # credential, no HTTP transport) — citing it here would send a
             # hosted builder to a call that answers `[]`.
