@@ -129,7 +129,20 @@ class _SdkSeedSurface:
     def query(self, cypher, **params):
         return _proj(self._sdk).query(cypher, **params)
 
-    def create_subject(self, name, subjectKind=None, **props):
+    def create_subject_anchor(self, name, subjectKind=None, **props):
+        # ⛔ NOT ``create_subject``: that spelling is a RETIRED SDK method name
+        # (``tortoise/sdk_retired.py``, #12901 — it collapsed into
+        # ``create_entity``), and the repo-wide census that refuses a retired
+        # name (``test_11609_write_containers.py::
+        # test_no_production_module_reaches_a_retired_sdk_name``) is
+        # receiver-blind by design, so a surface door spelled like one reds a
+        # correct call. It cannot be exempted either: the receiver arrives as a
+        # function PARAMETER (``seed._write_anchor(surface, …)``), and the
+        # census's exemption table refuses a parameter binding on purpose
+        # (#13863 P1 — an SDK handle could arrive under the exempted name).
+        # Renaming the door is the fix that removes the ambiguity instead of
+        # teaching the gate to ignore it.
+        #
         # #9572: ``None`` = not supplied, forwarded as absent (see
         # ``hosted_api._OrgSeedSurface`` for the hosted twin). A BLANK kind is
         # "not supplied" too (review P2) — ``kind_fallbacks.named_kind``.

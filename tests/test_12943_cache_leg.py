@@ -645,7 +645,16 @@ def test_the_rest_door_shares_both_seams_with_the_measured_door(monkeypatch):
     from tortoise import hosted_api
 
     handler = inspect.getsource(hosted_api.create_object)
-    assert "sdk.create_object" in handler
+    # ⛔ The PUBLIC spelling, not the private one: `hosted_api.create_object`
+    # reaches `sdk._create_object` (the retired public name is gone since
+    # #13899). This assertion used to read `"sdk.create_object"`, which the
+    # route's own COMMENT satisfied after the call was privatised — a green
+    # assertion that pinned prose rather than the call (#14125).
+    assert "sdk._create_object" in handler
+    assert "sdk.create_object(" not in handler, (
+        "the route calls the retired PUBLIC `sdk.create_object` again — it was "
+        "privatised to `sdk._create_object` by #13899 and the public name raises "
+        "AttributeError with a migration hint")
     assert "_data_sdk_offloaded" in handler
     # `_data_sdk` is the one opener both REST branches use, and it is the object
     # the SDK leg measures.

@@ -370,6 +370,10 @@ try:
     _p._get_proj().g.query("RETURN 1")
     _p.close()
     _LIVE_OK = True
+except (AttributeError, NameError, TypeError, ImportError):
+    # ⛔ A moved or renamed seam is a PROGRAMMING error, not "no server"
+    #   (#14114 class 2, #14125).
+    raise
 except Exception:
     _LIVE_URI = None
 finally:

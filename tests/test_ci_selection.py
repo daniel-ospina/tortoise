@@ -8478,6 +8478,81 @@ top:
     assert cs.parse_manifest_text(doc) == expected
 
 
+def _pyyaml_requirement() -> str:
+    """The declared `pyyaml` requirement from `[project].dependencies`."""
+    import tomllib
+
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    declared = tomllib.loads(pyproject.read_text())["project"]["dependencies"]
+    matches = [d for d in declared if d.split("=")[0].split("<")[0].split(">")[0].strip() == "pyyaml"]
+    assert len(matches) == 1, (
+        "pyyaml must be a declared dependency of the package itself, not a "
+        f"transitive of the test extras — found {matches!r} in {declared!r}"
+    )
+    return matches[0]
+
+
+def test_the_pyyaml_exclusion_that_keeps_merge_overrides_is_declared_and_satisfied():
+    """The merge-key pins above are only true on a pyyaml that is NOT 6.0.4.
+
+    Upstream yaml/pyyaml#953 (OPEN): the DoS fix in #937 dedupes the pairs a
+    `<<:` merge inserts by the KEY VALUE's identity, so — inside ONE merged
+    mapping — the anchor's pair survives and the document's own override is
+    DROPPED. Single-character keys only escaped by CPython string interning.
+    MEASURED here at 6.0.4: `mid: &m {<<: *b, x: 2}` merged by
+    `top: {<<: *m, y: 3}` resolves to `{'x': 1, 'y': 3}`; 6.0.3 gives
+    `{'x': 2, 'y': 3}`.
+
+    That is not cosmetic here: the overridden pair in `config/ci-surfaces.yml`
+    IS a `durations` weight, so a silently-wrong parse mis-sizes shards for
+    every lane — the class that ends in a watchdog kill, not a red test. So the
+    exclusion is a dependency contract, and this test owns it in three places
+    that can drift apart independently: the DECLARATION, the LOCK, and the
+    INTERPRETER actually running the suite. `pip install -U pyyaml` on a dev
+    box reds the third with a message that names the cause instead of leaving
+    the four merge-key pins above to fail as if our parser were at fault.
+
+    ⛔ The subject of the assertion is EXACTLY 6.0.4, not "anything newer": the
+    declared form is `!=6.0.4` and not a `<6.0.4` ceiling, because 6.0.5+ may
+    restore the nested-override semantics and a ceiling would refuse the fix on
+    the release that carries it. A `<` form is still accepted here (it excludes
+    6.0.4 too), so tightening later does not red this test for the wrong reason.
+    """
+    from tools import ci_selection  # noqa: F401 — this test guards ITS parser's dependency
+
+    requirement = _pyyaml_requirement()
+    spec = requirement.replace(" ", "")
+    assert "!=6.0.4" in spec or "<6.0.4" in spec, (
+        "pyyaml must exclude 6.0.4 (#953 drops a merge override and silently "
+        f"changes parsed durations); declared: {requirement!r}"
+    )
+
+    def _is_the_excluded_release(version: str) -> bool:
+        parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
+        return parts == [6, 0, 4]
+
+    import tomllib
+
+    lockfile = Path(__file__).resolve().parents[1] / "uv.lock"
+    locked = [
+        pkg["version"] for pkg in tomllib.loads(lockfile.read_text())["package"]
+        if pkg["name"] == "pyyaml"
+    ]
+    assert locked, "pyyaml is missing from uv.lock — the exclusion is unenforced there"
+    assert not any(_is_the_excluded_release(v) for v in locked), (
+        f"uv.lock resolved pyyaml {locked}, the exact release the declaration excludes"
+    )
+
+    installed = yaml.__version__
+    assert not _is_the_excluded_release(installed), (
+        f"the interpreter running this suite has pyyaml {installed}, the exact "
+        "release the declaration excludes: upstream yaml/pyyaml#953 makes a "
+        "merged mapping's own override lose to its anchor, so "
+        "`parse_manifest_text` returns the anchor's stale `durations` weight. "
+        "Reinstall the locked version (`uv sync`) — do not relax the pins above."
+    )
+
+
 def test_an_unhashable_key_is_refused_with_pyyaml_OWN_exception():
     """`safe_load` parity is a claim of this module's own docstrings, and it is
     the claim a caller catching pyyaml's error relies on.
@@ -10474,6 +10549,15 @@ ROWED_BY_THIS_FOLD = (
     # `tests/test_uri_requiring_selection.py::test_declared_list_matches_the_observation`,
     # which re-derives the set from a real URI-less collection.
     "test_evictor_invalidates_fallback_snapshot_13123.py",
+    # #14012 — the pin/outside-view trio. All ADDED by this PR and registered on `core`
+    # + `durations:` above. Listed here because the ENTRY-RULE pin above iterates this
+    # EXPLICIT tuple: a file nobody names is INVISIBLE to it, so dropping a
+    # `durations:` row would be silent. `--integrity` caught the missing SURFACE rows
+    # (`manifest drift: ['test_14012_outside_view.py', 'test_14012_resident_pin.py']`);
+    # this entry is what puts a missing DURATIONS row behind an assertion too.
+    "test_14012_outside_view.py",
+    "test_14012_resident_pin.py",
+    "test_14012_resident_cli.py",
     # ⛔ `test_usage_signal.py` IS NOT REPEATED HERE. This is the SECOND copy the merge of
     # `origin/main` created, and the #14070 argument above is why it must not stay: carrying
     # a second copy of a file that already has a row is exactly the duplicate shape that
