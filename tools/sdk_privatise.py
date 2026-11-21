@@ -357,10 +357,13 @@ SWEEP_NAMES = 66
 #: merge-base --is-ancestor ac57b2d38a 8610ed965c` says so, measured — so the +2 was already beneath
 #: the re-cut and `8610ed965c`'s own tree derives 11831. The 11829 pin was therefore STALE ON
 #: ARRIVAL, not stale from a later drift. "It drifted afterwards" would imply a window in which the
-#: pin was correct, and no such window existed; so `main`'s own tree measures 11831 against its own
-#: 11829 pin, and `--check` is RED on `main` right now (the same recurrence `#14062` documents: the
-#: pin is graded on PULL REQUESTS only, so `main` drifts and every open PR is then graded against a
-#: stale number). The two rows are `found.update` 10 → 12, both in `tests/test_usage_signal.py`,
+#: pin was correct, and no such window existed; so `main`'s own tree measured 11831 against the
+#: 11829 pin it then carried, and `--check` was RED on `main` from that merge onwards (the same
+#: recurrence `#14062` documents: the pin is graded on PULL REQUESTS only, so `main` drifts and every
+#: open PR is then graded against a stale number). ⛔ THE RECURRENCE IS NOT HISTORICAL — `main` is red
+#: again at this writing, one re-cut later and for the same reason: `origin/main` carries 11833 (the
+#: `#13874` re-cut below) while its own tree derives 11831, because `#14071` retired two rows with
+#: nothing grading it. That is why this pin is 11831 and not 11833. The two rows are `found.update` 10 → 12, both in `tests/test_usage_signal.py`,
 #: added by `ac57b2d38a` (`#14065`) — already an ancestor of the re-cut commit, so it sits between
 #: the 11821 pin and this tree, NOT "after" the 11829 one. Both sit on
 #: a plain `set` fed by a generator expression, so neither is a typed reference to a swept name
@@ -402,10 +405,16 @@ SWEEP_NAMES = 66
 #: both trees, with each row's file and count named.
 #: ⛔ NO NEW SHAPE APPEARED — the one thing a re-cut must never absorb silently. All three spellings
 #: are already pinned shapes on this tree: `graph.query` is a pinned row (274 here), and `client.delete`
-#: occurs 50 times across the tracked tree at this head
-#: (`git grep -hoE '\bclient\.(query|update|delete)\b' HEAD -- '*.py' | sort | uniq -c` → 50
-#: `client.delete`, 45-50 on the heads either side; the residue ROW this pin counts is 43, a different
-#: number again). So the
+#: measures **45** at this head OUTSIDE this file
+#: (`git grep -hoE '\bclient\.(query|update|delete)\b' HEAD -- '*.py' ':!tools/sdk_privatise.py' |
+#: sort | uniq -c` → 45). ⛔ THE TREE-WIDE COUNT IS DELIBERATELY NOT QUOTED, and the reason is measured:
+#: it includes THIS BLOCK's own prose, so it moves every time the block is edited. Two earlier editions
+#: demonstrate it — one wrote "46" (never true at any adjacent head), the next wrote "50", which was
+#: true of its PARENT and false the moment it was committed, and then "51", which the very next edit
+#: staled the same way. The 45 is the figure designed to survive editing, because it excludes this file.
+#: The residue ROW the digest actually counts is 43 — a third population again, since rows, lines and
+#: occurrences are three different measures and only the row is what the pin digests.
+#: So the
 #: condition this gate exists to catch — "a reference shape that was not there when this sweep was
 #: verified is now on the tree" — is NOT triggered; only counts on shapes already declared moved.
 #: All three rows are ordinary-word receivers (`query` and `delete` are retired SDK names) on a plain
