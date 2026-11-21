@@ -798,6 +798,42 @@ def _own_imported_names(nodes: list[ast.stmt]) -> set[str]:
     return out
 
 
+def _non_own_imported_names(nodes: list[ast.stmt]) -> set[str]:
+    """Names bound by imports that are NOT own code — third-party or stdlib.
+
+    The mirror of ``_own_imported_names``, and the evidence that keeps
+    ``_CAPABILITY_CALLS``' generic attribute (``query``) from grading an OPTIONAL
+    EXTRA as this repository's seam: `import some_optional_dep` …
+    `some_optional_dep.query(…)` binds its receiver HERE, so the attribute call is
+    a third-party client's verb, not a door a rename in this repo can move. A
+    receiver bound any other way — a PARAMETER (`proj.g.query`), or a client built
+    at module scope (`PROJ = _make_proj()`) — is in neither set and stays graded.
+    """
+    out: set[str] = set()
+    for stmt in nodes:
+        for node in ast.walk(stmt):
+            if isinstance(node, (ast.Import, ast.ImportFrom)) and not _is_own_code_import(node):
+                out |= {(alias.asname or alias.name.split(".")[0]) for alias in node.names}
+    return out
+
+
+def _receiver_root_name(node: ast.expr) -> str | None:
+    """The NAME at the root of a receiver chain — `PROJ.g.query` -> `PROJ`.
+
+    `None` when the chain bottoms out in something that binds no name (a literal,
+    a subscript of a comprehension, …): an unnameable receiver cannot be a
+    third-party import, so it is never excluded from grading.
+    """
+    while True:
+        if isinstance(node, ast.Attribute):
+            node = node.value
+        elif isinstance(node, ast.Call):
+            node = node.func
+        else:
+            break
+    return node.id if isinstance(node, ast.Name) else None
+
+
 def _touches_own_code(block: ast.AST, own_names: set[str]) -> bool:
     """Whether the block USES a name bound from own code.
 
@@ -821,7 +857,9 @@ _CAPABILITY_CALLS = frozenset({"from_uri", "_get_proj", "query", "graph_overview
 _CAPABILITY_NAMES = frozenset({"TortoiseSDK", "FalkorProjection"})
 
 
-def _reaches_capability_seam(block: ast.AST) -> bool:
+def _reaches_capability_seam(
+    block: ast.AST, third_party: frozenset[str] | set[str] = frozenset()
+) -> bool:
     """Whether the block CALLS the capability seam, however the client arrived.
 
     `_imports_own_code` and `_touches_own_code` both need the own-code name to be
@@ -837,12 +875,32 @@ def _reaches_capability_seam(block: ast.AST) -> bool:
     same programming error, and each one is invisible to the other two tests.
     Measured blast radius of adding it at this head: exactly TWO blocks tree-wide,
     both genuine skip-deciding probes (the other one already carries its arm).
+
+    ⛔ THE ATTRIBUTE FORM IS NARROWED, THE ARM IS NOT DROPPED. `query` and
+    `graph_overview` are OUR verbs, and they are also ordinary words a third-party
+    client answers to, so an ungated arm graded `import some_optional_dep` …
+    `some_optional_dep.query(…)` as a root and turned a legitimate skip into a
+    collection error (review of 4478e90782d, P2). Removing the arm instead was
+    worse in the other direction: a module-body guard whose client is built at
+    module scope (`PROJ = _make_proj()` … `try: PROJ.g.query(…)`) is then graded by
+    NOTHING, and a swallowed rename reads as "storage unavailable" again — the
+    class-2 false PASS this file exists to catch (review of 90a0e9e8b20c, finding
+    3). So the receiver decides, on EVIDENCE: a receiver whose root name a NON-own
+    import binds is that optional extra and is skipped; every other receiver — a
+    parameter (`def _probe(proj)` … `proj.g.query`), a client assigned at module
+    scope, `FalkorProjection.from_uri(…)` — is still graded. `receiver_is_sdk`
+    (tools/sdk_privatise.py) was considered for this and rejected: it answers from
+    annotations and stand-ins, so it cannot see the `PROJ = _make_proj()` shape the
+    finding names, and gating on it would break the pinned parameter-client witness
+    (`tests/test_8870_version_anchor_write_order.py:138`).
     """
     for node in ast.walk(block):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
         if isinstance(func, ast.Attribute) and func.attr in _CAPABILITY_CALLS:
+            if _receiver_root_name(func.value) in third_party:
+                continue
             return True
         if isinstance(func, ast.Name) and func.id in _CAPABILITY_NAMES:
             return True
@@ -883,6 +941,10 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     skip_gated = _skip_gating_functions(tree)
     skip_referenced = _skip_condition_names(tree)
     module_own = _own_imported_names(tree.body)
+    #: Names this module imported from a NON-own package (`import torch`, `import
+    #: some_optional_dep`). A capability ATTRIBUTE called on one of them is that
+    #: package's verb, not our seam — see `_reaches_capability_seam`.
+    third_party = _non_own_imported_names(tree.body)
     # MODULE-LEVEL control flow, not just `tree.body`. `tests/test_assembly_pure.py:2615`
     # puts its probe inside `if _DOCKER_URI:`, so a walk over the direct children
     # returned NO row for that file while `_skip_condition_names(tree)` already held
@@ -892,7 +954,9 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     # that asymmetry was the hole.
     for stmt in _control_flow_tries(tree.body):
         if _assigns_availability(stmt) and (
-            _imports_own_code(stmt) or _touches_own_code(stmt, module_own)
+            _imports_own_code(stmt)
+            or _touches_own_code(stmt, module_own)
+            or _reaches_capability_seam(stmt, third_party)
         ):
             # The own-code gate applies to THIS branch too. Without it the rule
             # redded `TORCH_AVAILABLE = False / try: import torch …`, i.e. a probe
@@ -900,24 +964,27 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
             # false red the import-seam rule and the self-test refuse (review of
             # 03fc244, P2).
             #
-            # `_reaches_capability_seam` is deliberately NOT ORed in here: it
-            # matches the generic attribute `query`, which a THIRD-PARTY client has
-            # too, so admitting it at module level graded
-            # `import some_optional_dep; some_optional_dep.query(...)` as a root —
-            # the very false red the paragraph above refuses, and a contradiction
-            # of the third-party rule pinned in this file. It also admitted ZERO
-            # roots here (measured), so gating it costs nothing (review of
-            # 4478e90782d, P2). Its two real roots come from the SKIP-GATED
-            # helper branch, where the capability call IS the own-code seam.
+            # The capability arm is ORed here, NARROWED rather than dropped: it is
+            # the ONLY arm that grades a module-body guard whose client was built
+            # above the `try` (`PROJ = _make_proj()` … `PROJ.g.query(…)`), which a
+            # removal left graded by nothing (review of 90a0e9e8b20c, finding 3).
+            # The third-party false red it used to admit is excluded by
+            # `third_party`, so `import some_optional_dep; some_optional_dep.query`
+            # is still left alone — that negative shape has its own witness, and
+            # re-adding an UNGATED arm reddens it (review of 90a0e9e8b20c, finding
+            # 1).
             roots.append(stmt)
         elif (_bound_names(stmt) & skip_referenced) and (
-            _imports_own_code(stmt) or _touches_own_code(stmt, module_own)
+            _imports_own_code(stmt)
+            or _touches_own_code(stmt, module_own)
+            or _reaches_capability_seam(stmt, third_party)
         ):
             # A module-body probe whose flag is spelled something other than
             # `*AVAILABLE` — `LIVE`, `_FTS_ESCAPE_LIVE`, `_FALKORDB_UP` — is NOT an
             # availability flag by name, but it IS the decision: a `skipif` reads it.
-            # The same own-code test as the helper branches applies, so a probe whose
-            # only import is an optional third-party one is still left alone.
+            # The same own-code test (and the same narrowed capability arm) as the
+            # helper branches applies, so a probe whose only import is an optional
+            # third-party one is still left alone.
             roots.append(stmt)
     for stmt in tree.body:
         if (
@@ -936,22 +1003,14 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
                 if (
                     _imports_own_code(block)
                     or _touches_own_code(block, own_names)
-                    # ⚠️ DECLARED RESIDUAL: `_CAPABILITY_CALLS` contains the
-                    # generic attribute `query`, so a skip-deciding helper whose
-                    # only seam is an OPTIONAL THIRD-PARTY client calling
-                    # `.query(…)` IS graded here and would be redded. It is left
-                    # ungated on purpose: the pinned rule one screen up — a probe
-                    # reaching the seam on a PASSED-IN client is a root even with
-                    # no own import in the block (`tests/test_8870_version_anchor_
-                    # write_order.py:138`) — is exactly this arm, and gating it on
-                    # own-code reachability breaks that witness. Measured at this
-                    # head: no third-party-only block is graded (the two real
-                    # capability roots, `test_8870_version_anchor_write_order.py:138`
-                    # and `test_9226_dump_paging_v6.py:518`, both import own code),
-                    # and the module-body branches no longer OR this arm at all, so
-                    # a third-party `.query` guard there is not graded (review of
-                    # 90a0e9e8b20c, findings 1+2).
-                    or _reaches_capability_seam(block)
+                    # The parameter-client arm, narrowed by `third_party` instead
+                    # of gated on own-code reachability: gating it WOULD break the
+                    # pinned witness (a probe reaching the seam on a PASSED-IN
+                    # client is a root even with no own import in the block —
+                    # `tests/test_8870_version_anchor_write_order.py:138`), and
+                    # leaving it ungated graded a third-party client's `.query` as
+                    # this repository's seam (review of 90a0e9e8b20c, findings 1+3).
+                    or _reaches_capability_seam(block, third_party)
                 )
             )
         elif (
@@ -974,22 +1033,10 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
                 if (
                     _imports_own_code(block)
                     or _touches_own_code(block, own_names)
-                    # ⚠️ DECLARED RESIDUAL: `_CAPABILITY_CALLS` contains the
-                    # generic attribute `query`, so a skip-deciding helper whose
-                    # only seam is an OPTIONAL THIRD-PARTY client calling
-                    # `.query(…)` IS graded here and would be redded. It is left
-                    # ungated on purpose: the pinned rule one screen up — a probe
-                    # reaching the seam on a PASSED-IN client is a root even with
-                    # no own import in the block (`tests/test_8870_version_anchor_
-                    # write_order.py:138`) — is exactly this arm, and gating it on
-                    # own-code reachability breaks that witness. Measured at this
-                    # head: no third-party-only block is graded (the two real
-                    # capability roots, `test_8870_version_anchor_write_order.py:138`
-                    # and `test_9226_dump_paging_v6.py:518`, both import own code),
-                    # and the module-body branches no longer OR this arm at all, so
-                    # a third-party `.query` guard there is not graded (review of
-                    # 90a0e9e8b20c, findings 1+2).
-                    or _reaches_capability_seam(block)
+                    # Same arm, same narrowing as the resolver branch above: the
+                    # passed-in client stays graded, a third-party client's
+                    # generic `.query` does not (review of 90a0e9e8b20c, 1+3).
+                    or _reaches_capability_seam(block, third_party)
                 )
             )
     return roots
@@ -2153,10 +2200,11 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     )
 
     # 4k-/4l-. `_reaches_capability_seam` matches the GENERIC attribute `query`, so it
-    #     must never admit a third-party-only probe — at the module body (removed
-    #     there: nothing is admitted), nor in either helper branch (gated on own-code
-    #     reachability). A re-added, ungated OR reddens these three rows; that is the
-    #     witness the removal itself lacked (review of 90a0e9e8b20c, findings 1+2).
+    #     must never admit a third-party-only probe: at the module body, nor in either
+    #     helper branch. The two rows below are the NEGATIVE half of the narrowing
+    #     (`third_party`): re-adding an UNGATED arm anywhere reddens them, and dropping
+    #     the arm outright reddens the positive rows 4k+ that follow (review of
+    #     90a0e9e8b20c, findings 1+3).
     module_body_third_party_query = roots(
         """
         FALKORDB_AVAILABLE = False
@@ -2172,6 +2220,75 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "a module-body guard whose only seam is a THIRD-PARTY client's `.query` "
         f"must not be graded — the attribute name is generic: {module_body_third_party_query}"
     )
+    skip_gated_third_party_query = roots(
+        """
+        import pytest
+
+        def _probe():
+            try:
+                import some_optional_dep
+                some_optional_dep.query("MATCH (n) RETURN n")
+                return True
+            except Exception:
+                return False
+
+        LIVE = _probe()
+
+        @pytest.mark.skipif(not LIVE, reason="live")
+        def test_live():
+            pass
+        """
+    )
+    assert skip_gated_third_party_query == (), (
+        "the same rule applies in a SKIP-GATED helper — a third-party client's "
+        f"`.query` is not this repository's seam: {skip_gated_third_party_query}"
+    )
+
+    # 4k+. The arm is NARROWED, not dropped, so its isolating POSITIVE witness must
+    #     exist too: a module-body guard whose client is built at module scope has no
+    #     import and no module-level own name to reach, so only the capability arm
+    #     admits it. This is the shape the removal graded by NOTHING — a swallowed
+    #     rename there reads as "storage unavailable" again, the class-2 false PASS
+    #     this file exists to catch (review of 90a0e9e8b20c, finding 3).
+    module_body_client_bound_above = roots(
+        """
+        PROJ = _make_proj()
+
+        FALKORDB_AVAILABLE = False
+        try:
+            PROJ.g.query("RETURN 1")
+            FALKORDB_AVAILABLE = True
+        except Exception:
+            FALKORDB_AVAILABLE = False
+        """
+    )
+    assert module_body_client_bound_above == ((5, (), True, False, True),), (
+        "a module-body guard whose client was BUILT above the `try` must still be "
+        "graded — `PROJ` is neither an import nor a module-level own name, so only "
+        f"the capability arm can admit it: {module_body_client_bound_above}"
+    )
+
+    # 4k++. `_imports_own_code`'s isolating witness (review of 90a0e9e8b20c, finding 2):
+    #     rows 4i/4j are admitted by `_touches_own_code` — they CALL the own import —
+    #     so blanking the import arm was silent. Here the own import sits INSIDE the
+    #     `try` and its bound name is never USED, so no `Name` node matches and only
+    #     `_imports_own_code` can admit the block.
+    module_body_own_import_unused = roots(
+        """
+        FALKORDB_AVAILABLE = False
+        try:
+            from tests._live_utils import docker_uri
+            FALKORDB_AVAILABLE = True
+        except Exception:
+            FALKORDB_AVAILABLE = False
+        """
+    )
+    assert module_body_own_import_unused == ((3, (), True, True, True),), (
+        "an own import INSIDE the guard whose name is never used must still be "
+        "graded — the import arm is the only one that can see it: "
+        f"{module_body_own_import_unused}"
+    )
+
     # 5. The real tree must carry all four shapes, or every assertion above is a
     #    statement about a sample rather than about the code it is meant to guard.
     graded = {row[0] for row in _probe_report()}
