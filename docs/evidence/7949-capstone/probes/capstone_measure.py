@@ -4486,13 +4486,19 @@ def measure_e6(*, packs_dir: Path | str | None = None,
             E6_NOT_READ_PREFIX + "the census could not be enumerated")
         # ⛔ A REFUSED ROW PUBLISHES NO COUNT FOR A COLUMN IT DID NOT READ (#14060 review round
         # 16, P3, measured): `written` stayed at the all-zero dict initialised above, so a
-        # refused census carrying ONE enumerable row rendered `unmeasured=0` — every row
-        # measured — immediately beside `not read`. That is the same silent-zero shape rounds 7
-        # and 9 closed on the two sibling columns, left open on the third: the cells are set
-        # here to what was actually established. The rows exist (`rows` is enumerated above the
-        # guard), so `unmeasured` is their count and the other three are a measured zero; where
-        # no census was read at all, all four are `None` (`_E6_WRITTEN_UNKNOWN`).
-        measurement["written"] = {"direct": 0, "mediated": 0, "none": 0,
+        # refused census carrying ONE enumerable row wrote `unmeasured=0` — every row measured —
+        # immediately beside `not read`. That is the same silent-zero shape rounds 7 and 9
+        # closed on the two sibling columns, left open on the third. Round 22 (P3) then held the
+        # fix to the MACHINE RECORD rather than the renderers: the three write cells were still
+        # literal zeros, so `written_counts` — built from this dict by `build_e6_row` and emitted
+        # into the JSON every consumer reads — published `direct=0 mediated=0 none=0` beside a
+        # source saying no cell was read, while the two human renderers suppressed it and no
+        # write path had been invoked on this branch at all. What IS established here is the
+        # refusal's aggregate and nothing else: the rows were enumerated above the guard, so
+        # `unmeasured` is their count, and the three write columns are `None` — the absence of a
+        # reading, never a zero, which is the rule `_E6_WRITTEN_UNKNOWN` states and this path now
+        # follows.
+        measurement["written"] = {"direct": None, "mediated": None, "none": None,
                                   "unmeasured": len(rows)}
         return measurement
     pnia = census_tool.RELATION_PREDICATE_NOT_IN_ALLOWLIST
@@ -4538,7 +4544,12 @@ def measure_e6(*, packs_dir: Path | str | None = None,
             value = cell.get("written")
             written[value if value in ("direct", "mediated", "none") else "unmeasured"] += 1
     except TypeError:  # an unhashable key field: the column reads NOTHING, never a crash
-        written = {"direct": 0, "mediated": 0, "none": 0, "unmeasured": len(rows)}
+        # ⛔ THE SAME RULE AS THE POPULATION GUARD ABOVE (#14060 round 22, P3): `unmeasured` is
+        # the count of rows presented to the column, and the three write columns are `None`. The
+        # literals were `0` here too, i.e. a published reading of "0 rows written" for rows that
+        # were never looked up — the mid-loop counts are discarded by this reset as well, so no
+        # cell of this column survived to be reported.
+        written = {"direct": None, "mediated": None, "none": None, "unmeasured": len(rows)}
         # ⛔ AND THE SOURCE FOLLOWS THE COUNT (#14060 review round 9, P3, measured): the reset
         # made the column read NOTHING while `written_source` kept the SUCCESSFUL-read string,
         # so the committed record rendered `unmeasured=<every row> from
