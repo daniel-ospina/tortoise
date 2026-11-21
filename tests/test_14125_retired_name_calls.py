@@ -1307,9 +1307,13 @@ def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]
             # ⛔ EXCEPT ITS TYPE PARAMETERS, which DO reach a header call: PEP 695 puts a
             # generic's `bound`/`default_value` in the TYPE-PARAMETER scope, where the
             # list's OWN names are in scope — measured, `def f[T, S: T]()` gives
-            # `f.__type_params__[1].__bound__ is T`, and
-            # `def _inner[torch: object, T: torch.query("…")]()` raises `AttributeError`
-            # at DEFINITION time, i.e. the call resolved to the TypeVar, not the import.
+            # `f.__type_params__[1].__bound__ is T`, and a type parameter named after the
+            # import shadows it inside a later bound, so in
+            # `def _inner[torch: object, T: torch.query("…")]()` the call resolves to the
+            # TypeVar, not the import. ⛔ NOT AT DEFINITION TIME: PEP 695 bounds are LAZY,
+            # and `exec` of that shape succeeds for the `def`, the `class` and the `type`
+            # spelling (measured) — the `AttributeError` appears when the bound is
+            # EVALUATED (`f.__type_params__[1].__bound__`).
             # Skipping them here turned that silent drop into an exemption (review of this
             # PR, P2); contributing them keeps the legitimate row exempt and grades the
             # shadowing one.
@@ -1494,7 +1498,7 @@ def _is_header_child(node: ast.AST, child: ast.AST) -> bool:
         return True
     if any(expression is child for expression in getattr(node, "decorator_list", ()) or ()):
         return True
-    #: A TYPE PARAMETER's `bound` / `default_value` evaluates in the ENCLOSING scope too
+    #: A TYPE PARAMETER's `bound` / `default_value` is NOT in the class body's scope
     #: (PEP 695): `class C[T: torch.query(…)]: torch = …` defines fine, so that call
     #: resolved the MODULE import, not the class body — yet it was charged with the
     #: generic's own bindings. Measured on this interpreter rather than inferred from the
@@ -1514,9 +1518,12 @@ def _is_header_child(node: ast.AST, child: ast.AST) -> bool:
     #: block-granularity note, `4j-vicesimus-bis`).
     #: ⛔ AND THE SCOPE IS THE TYPE-PARAMETER ONE, NOT THE ENCLOSING ONE — which matters
     #: because the list's OWN names are in scope in a bound: measured, `def f[T, S: T]()`
-    #: gives `f.__type_params__[1].__bound__ is T`, and
-    #: `def _inner[torch: object, T: torch.query("…")]()` raises `AttributeError` at
-    #: DEFINITION time, i.e. that call resolved to the TypeVar. So skipping the definition
+    #: gives `f.__type_params__[1].__bound__ is T`, and in
+    #: `def _inner[torch: object, T: torch.query("…")]()` the call resolves to the
+    #: TypeVar. ⛔ AND THAT IS OBSERVED BY EVALUATING THE BOUND, NOT AT DEFINITION: PEP 695
+    #: bounds are LAZY — `exec` of that shape succeeds for the `def`, the `class` and the
+    #: `type` spelling (measured), and the `AttributeError` appears when `__bound__` is
+    #: forced. So skipping the definition
     #: wholesale (what fixes the legitimate case) turned that silent drop into an
     #: exemption; `_enclosing_bindings` contributes `_type_param_names(node)` on the
     #: header-skip path instead, and the `def`/`class` spellings are pinned by their own
@@ -4348,8 +4355,10 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     # ⛔ …BUT A TYPE PARAMETER'S OWN LIST IS IN SCOPE IN ITS BOUND, so the exemption above
     #     must NOT be bought by a type parameter named after the import. PEP 695 puts the
     #     bound in the TYPE-PARAMETER scope: measured, `def f[T, S: T]()` gives
-    #     `f.__type_params__[1].__bound__ is T`, and this shape raises `AttributeError` at
-    #     DEFINITION time — the call resolved to the TypeVar, not the import. Skipping the
+    #     `f.__type_params__[1].__bound__ is T`, and this shape resolves the name to the
+    #     TypeVar — observed by EVALUATING the bound, not at definition: PEP 695 bounds are
+    #     LAZY, and `exec` of the def/class/type spellings all succeed (measured), the
+    #     `AttributeError` arriving on `__bound__`. Skipping the
     #     definition wholesale read it EXEMPT, i.e. a silent drop the widening opened
     #     (review of this PR, P2); `_enclosing_bindings` contributes the list's names now.
     for _label, _generic in {
