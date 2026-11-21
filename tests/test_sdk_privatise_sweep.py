@@ -1277,3 +1277,74 @@ def test_the_rearm_refspec_creates_the_ref_it_promises(tmp_path):
     assert printed.lstrip("+").partition(":")[2] == "refs/pull/14108/head", printed
     assert ":" in printed.lstrip("+"), (
         f"the printed remedy `{printed}` is the SOURCE-ONLY form measured above as inert")
+
+
+# ── a rev's OWN published PIN is a pair, and the pair must be that rev's ────────
+#
+# ⛔ THE DEFECT THIS GRADES (review, round 14, P2): the `#14068` attribution published
+# `d523c9be8c`'s OWN pin as `(11839, "0a7e60fa05aa31b9")` — the PARENT's pair — while that rev
+# commits `(11838, "de5664dc98549d56")`, and `git rev-parse d523c9be8c^{tree}
+# 1b82cc7063^{tree}` returns ONE sha. So the same paragraph said `d523c9be8c` "inherits that
+# deletion" (the capture rewrite's own row set) AND that it carries the parent's figures — a
+# published pair belonging to another tree, which is the class this block polices everywhere
+# else. Nothing graded a published PAIR: `test_the_residue_pin_is_a_reading_of_the_whole_set`
+# grades the SHAPE of `SWEEP_RESIDUE`, so mutating a true pair left the suite green.
+#
+# No `--repin` here: `--repin` is ~70 s per rev and re-derives a number, while the claim is
+# about what a REV CARRIES. `git show <rev>:tools/sdk_privatise.py` reads that rev's own
+# committed pin — deterministic, offline, and object-gated only in the honest sense (it SKIPS
+# where the rev is absent, and the skip names the refspec that would arm it).
+_OWN_PIN_CLAIM_RE = re.compile(
+    r"Its own pin[\s#:]+is[\s#:]*`\((\d+),[\s#:]*[\"']([0-9a-f]{16})[\"']\)`")
+_BACKTICKED_REV_RE = re.compile(r"`([0-9a-f]{7,40})`")
+
+
+def _own_pin_claims(block: str) -> list[tuple[str, int, str]]:
+    """`(rev, rows, digest)` for each "Its own pin is …" clause, with the rev it names.
+
+    The rev is the NEAREST backticked hex token BEFORE the claim, because that is how the
+    block writes it — the sentence it corrects reads "… `d523c9be8c`, the LAST of the eight,
+    inherits that deletion. … Its own pin is …". No claim returns an empty list; the caller
+    asserts non-vacuity so deleting the sentence is not a way to pass.
+    """
+    claims = []
+    for claim in _OWN_PIN_CLAIM_RE.finditer(block):
+        revs = _BACKTICKED_REV_RE.findall(block[:claim.start()])
+        if revs:
+            claims.append((revs[-1], int(claim.group(1)), claim.group(2)))
+    return claims
+
+
+def test_a_revs_published_own_pin_is_the_pin_that_rev_commits():
+    """A `(rows, digest)` published AS a rev's own pin must be that rev's committed pair."""
+    block = _residue_block()
+    claims = _own_pin_claims(block)
+    assert claims, (
+        "non-vacuity: the block still publishes at least one rev's OWN pin — deleting the "
+        "sentence is not the fix for a wrong pair")
+    _requires(*sorted({rev for rev, _, _ in claims}))
+    for rev, rows, digest in claims:
+        own = re.search(r"^SWEEP_RESIDUE = \((\d+), \"([0-9a-f]{16})\"\)",
+                        _git("show", f"{rev}:tools/sdk_privatise.py"), re.MULTILINE)
+        assert own, f"`{rev}` carries no readable `SWEEP_RESIDUE`, so its claim cannot be graded"
+        assert (rows, digest) == (int(own.group(1)), own.group(2)), (
+            f"the block publishes `{rev}`'s own pin as ({rows}, {digest!r}); that rev commits "
+            f"({own.group(1)}, {own.group(2)!r}) — a rev published with ANOTHER tree's pair is the "
+            "`address that resolves to a different tree` defect this block exists to catch")
+
+
+def test_the_parent_pair_attribution_is_only_ever_quoted_as_falsified():
+    """The specific false shape that landed: `the same pair as the parent`.
+
+    ⛔ OBJECT-FREE, so it runs in the sharded `test` job too (the premise arm above skips on a
+    `fetch-depth: 1` checkout). The sentence is honest prose only as a REFUTED draft; charging
+    it is what stops the next edit from reinstating the pair without an object to notice.
+    """
+    block = _residue_block()
+    hits = list(re.finditer(r"same pair as the parent", block, re.IGNORECASE))
+    assert hits, "non-vacuity: the block still records the falsified clause it replaced"
+    for hit in hits:
+        assert _refuted(block, hit.start()), (
+            "an UNREFUTED `same pair as the parent` claim is the round-14 defect: the pair one "
+            "rev commits is not its parent's, so the claim is only honest where the block itself "
+            "calls it wrong")

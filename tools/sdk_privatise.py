@@ -463,9 +463,21 @@ SWEEP_NAMES = 66
 #: refs/pull/14108/head`
 #: measured from a bare clone, and a FULL 40-character sha is served directly while the abbreviation
 #: is not — see the note above on `#14058` for which form reproduces and which does not. Its own pin
-#: is `(11839, "0a7e60fa05aa31b9")`, the same pair as the parent `2fe01fc775e`, so it carries no
-#: residue measurement the parent lacks and nothing here rests on it except the ADDRESS, which is
-#: the point: an address that resolves to a different tree is the defect this block exists to catch.
+#: is `(11838, "de5664dc98549d56")` — the capture rewrite's own row set — because `d523c9be8c`'s TREE
+#: IS `1b82cc7063`'s (`git rev-parse d523c9be8c^{tree} 1b82cc7063^{tree}` → one sha), which is what
+#: "inherits that deletion" above MEANS, and why it cannot carry the parent `2fe01fc775e`'s
+#: `(11839, …)`. ⛔ That clause said `(11839, "0a7e60fa05aa31b9")` — "the same pair as the parent" —
+#: and was FALSE (raised by review): a rev published with its PARENT's figures is the same "address
+#: that resolves to a different tree" this block exists to catch, caught here in its own words. The
+#: correct pair is the tree's own COMMITTED pin, `git show d523c9be8c:tools/sdk_privatise.py | grep
+#: '^SWEEP_RESIDUE'`, which is what this block's falsifier arm grades
+#: (`tests/test_sdk_privatise_sweep.py`,
+#: `test_a_revs_published_own_pin_is_the_pin_that_rev_commits`). ⛔ NOT "the arm below": the arms
+#: live in that test file, not under this block, so a relative pointer here would be the same
+#: self-falsifying offset this paragraph removes elsewhere (an earlier draft of THIS clause said
+#: "the arm below" and was wrong in the first place). Nothing here rests on the measurement; the
+#: ADDRESS is the point: an address that resolves to a different tree is the defect this block
+#: exists to catch.
 #: So `graph.query` is **276** here, `super().query` **68**, `client.delete` **43** — read with
 #: `--report`, not with a grep. A raw whole-tree grep is NOT that reading: it counts OCCURRENCES,
 #: prose included, not the pinned residue ROW, and it counts this block's OWN prose about the
