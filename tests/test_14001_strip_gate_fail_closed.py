@@ -1734,6 +1734,33 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
         f"the pin does not red — or reds without naming the key — for a register writer whose "
         f"`def` the module no longer contains: {red_missing.value}")
 
+    # ⛔ …AND THE THIRD REPORT NEEDS ITS FALSIFIER TOO (`#14099`, review of `89528b12`).
+    # `stray` and `missing` each got a pin-level RED; the `offenders` report — the one carrying
+    # this pin's WHOLE claim, that the blanket dynamic-namespace rule costs ZERO refusals — did
+    # not. Measured at `d7ac24da` on a /tmp copy: replacing `assert population["offenders"] == []`
+    # with `assert True` left the file GREEN (**96 passed**), so the assertion could be deleted
+    # and the over-refusal pin would report success while measuring nothing about over-refusals.
+    # The bucket's REACHABILITY is pinned separately (the shadowed-definition arm below drives a
+    # real walk to a non-empty `offenders`); this arm pins that the PIN REDS on it, naming the key.
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            sys.modules[__name__],
+            "_writer_register_population",
+            lambda: {
+                "examined": [outsider],
+                "unreadable": [],
+                "stray": [],
+                "missing": [],
+                "offenders": [outsider],
+            },
+        )
+        with pytest.raises(AssertionError) as red_offenders:
+            test_no_declared_entity_writer_mentions_a_dynamic_namespace()
+    assert outsider in str(red_offenders.value) and "mentions a dynamic namespace" in str(
+        red_offenders.value), (
+        "the pin does not red — or reds without naming the key — for a declared writer that "
+        f"mentions a dynamic namespace, so the rule's cost is unreported: {red_offenders.value}")
+
     # ⛔ THE PIN ITSELF MUST RED (`#14099` F2). The arms above prove the WALK classifies; they do
     # NOT prove the PIN reports. Measured: deleting the pin's `assert stray == []` left this whole
     # file green, because every other row reads the helper rather than the assertion — so the guard
