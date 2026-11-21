@@ -1369,6 +1369,46 @@ def _reanchor_is_verified(
     return True
 
 
+def _froze_only_stubs(entry: dict) -> bool:
+    """Did this `module` row freeze NOTHING but `.pyi` sources? (fresh-context review, P0)
+
+    A row records WHERE it froze from in `blocks[].path`. For `_module_source`'s `.pyi` fallback
+    that is `tortoise/x.pyi`, and arm 1b's own rule is that a `.pyi` is NEVER runtime code — so a
+    row whose every frozen source is a stub holds none of the module's body, and crediting it on
+    the row's EXISTENCE reads "the removal has its record" over a record holding no code.
+
+    ⛔ The ARCHIVED file's suffix is the wrong question, and asking it made the first cut of this
+    guard dead code: `archive_rel` renders EVERY module row as `.py`
+    (`archive/modules/<batch>/<mirror>.py`), so `str(entry["file"]).endswith(".pyi")` could not
+    be true for a row the writer produced. Measured on the pre-fix bytes, through the writer: the
+    stub's TEXT was frozen into `.../x.py`, the stub was then deleted as the writer prints, and
+    `check --base-ref` answered OK with the removed body in NO file under `archive/`.
+
+    An empty/missing `blocks` is `False` — nothing recorded to judge, and a row with no blocks is
+    the file arm's finding, not this one.
+    """
+    blocks = entry.get("blocks")
+    if not isinstance(blocks, list) or not blocks:
+        return False
+    sources = [str(block.get("path") or "") for block in blocks if isinstance(block, dict)]
+    return bool(sources) and all(source.endswith(".pyi") for source in sources)
+
+
+def _record_froze_a_stub(
+    module: str, base_label: str, base_carrier: str, head_desc: str, entry: dict
+) -> str:
+    """The violation for a `module` row that credits a removal while holding the stub."""
+    froze = ", ".join(f"`{block.get('path')}`" for block in entry["blocks"])
+    return (
+        f"{module}: THE RECORD FROZE A STUB — {base_label} carried the module's statements in "
+        f"`{base_carrier}`, this tree carries {head_desc}, and the `module` row present froze "
+        f"{froze}, which is that stub. This run reports the module body removed and then credits "
+        "a record that holds none of it, which is the false PASS `archive/` exists to prevent "
+        "(#12402). "
+        f"{MODULE_ROUTE}"
+    )
+
+
 def shrink_violations(
     root: Path | None = None,
     *,
@@ -1423,12 +1463,31 @@ def shrink_violations(
     gone_modules = base_modules - head_modules
     for module in sorted(gone_modules):
         key = (MODULE, module)
+        # `candidates` is the BASE's carrier set for this module, so it answers both "did the base
+        # hold RUNTIME code (not a `.pyi` stub only)?" and the `where` in the violation below.
+        candidates = sorted(path for path in base_paths if module_name(path) == module)
+        runtime_carrier = next((path for path in candidates if not path.endswith(".pyi")), None)
         if key in working:
+            # ⛔ A row that froze the stub is not a record — and it is credited HERE, not only in
+            # arm 1b: when the stub is deleted as the writer's own output asks, the module has NO
+            # head carrier at all, so it is `base - head` that lands in this arm while the row's
+            # existence silences it. `_froze_only_stubs` reads the row's own `blocks[].path`
+            # (the archived file is always `.py` — see its docstring for the measured false
+            # PASS that made the suffix-keyed first cut dead code).
+            if runtime_carrier is not None and _froze_only_stubs(working[key]):
+                out.append(
+                    _record_froze_a_stub(
+                        module,
+                        base_label,
+                        runtime_carrier,
+                        "no module file at all",
+                        working[key],
+                    )
+                )
             continue  # an entry of the right kind names it: the removal has its record
         if key in waivers:
             used.add(key)
             continue
-        candidates = sorted(path for path in base_paths if module_name(path) == module)
         where = candidates[0] if candidates else f"{module.replace('.', '/')}.py"
         out.append(
             f"{module}: MODULE REMOVED — {base_label} carries it and this tree does not, and "
@@ -1482,28 +1541,27 @@ def shrink_violations(
             continue  # scaffolding on BOTH sides: a placeholder that stayed a placeholder
         key = (MODULE, module)
         if key in working:
-            frozen = str(working[key].get("file") or "")
-            if stubbed and frozen.endswith(".pyi"):
-                # ⛔ A ROW THAT FROZE THE STUB IS NOT A RECORD (fresh-context review of PR #14039,
-                # P0). `_module_source`'s `.pyi` fallback resolves the stub whenever the only
-                # file left is `x.pyi`, so the writer can freeze `def f1() -> int: ...` as the
-                # SOURCE OF RECORD for a module whose statements this same run reports as
-                # removed — and crediting the row on EXISTENCE then reads "the removal has its
-                # record" over a record holding no code. `_init_carries_a_body` cannot be reused
-                # as the test: it is an AST question and a stub IS statements (`def f1() -> int:
-                # ...`), while arm 1b's own rule above is that a `.pyi` stub is NEVER runtime
-                # code — the two arms of one tool disagreeing about the same file is the hole.
-                # The condition is exactly `stubbed` (a runtime carrier at the base, only a stub
-                # here) AND a frozen `.pyi`, so the legit stub-only module — whose BASE carrier
-                # was a `.pyi` too, making `stubbed` False — never reaches this branch.
+            # ⛔ A ROW WHOSE FROZEN SOURCE IS THE STUB IS NOT A RECORD (fresh-context review of
+            # PR #14039, P0). `_module_source`'s `.pyi` fallback resolves the stub when the only
+            # file left is `x.pyi`, so the writer can freeze `def f1() -> int: ...` as the SOURCE
+            # OF RECORD for a module whose statements this same run reports as removed — and
+            # crediting the row on EXISTENCE then reads "the removal has its record" over a
+            # record holding no code. `_init_carries_a_body` cannot be the test: it is an AST
+            # question and a stub IS statements (`def f1() -> int: ...`). `_froze_only_stubs`
+            # reads the row's own `blocks[].path`, which is `tortoise/x.pyi` for the fallback —
+            # NOT the archived file's suffix, which is always `.py` (see its docstring for the
+            # false PASS that made the suffix-keyed first cut dead code). `stubbed` keeps the
+            # legit stub-only module (a `.pyi` carrier on BOTH sides) out of this branch, and a
+            # row that froze the REAL body is untouched.
+            if stubbed and _froze_only_stubs(working[key]):
                 out.append(
-                    f"{module}: THE RECORD FROZE A STUB — {base_label} carried the module's "
-                    f"statements in `{base_carrier}`, this tree carries only the `.pyi` stub "
-                    f"`{head_carrier}`, and the `module` row present records `{frozen}`, which "
-                    "is that stub. This run reports the module body removed and then credits a "
-                    "record that holds none of it, which is the false PASS `archive/` exists to "
-                    "prevent (#12402). "
-                    f"{MODULE_ROUTE}"
+                    _record_froze_a_stub(
+                        module,
+                        base_label,
+                        base_carrier,
+                        f"only the `.pyi` stub `{head_carrier}`",
+                        working[key],
+                    )
                 )
             continue  # an entry of the right kind names it: the removal has its record
         if key in waivers:
