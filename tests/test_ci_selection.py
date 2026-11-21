@@ -10510,6 +10510,31 @@ def test_every_fast_file_this_fold_rows_carries_a_durations_row():
         "from a push-to-main junit sweep later.")
 
 
+def test_ROWED_BY_THIS_FOLD_carries_no_duplicate_entries():
+    """The set is a SET — a repeated entry is the shape that breaks the pins.
+
+    A merge of `origin/main` can leave the SAME file listed twice (measured on
+    this PR: `test_usage_signal.py` at two positions, 28 entries / 27 unique).
+    That is inert only until a pin written for that file runs: the list-equality
+    form every ENTRY-RULE pin uses
+    (`[f for f in ROWED_BY_THIS_FOLD if f not in holed] == [name]`) yields
+    `['x', 'x']` against a one-element expectation, so the pin could never pass
+    and its failure would name the wrong cause (#14086, not-clean record).
+
+    Red on a duplicated tuple: append any existing entry — this assertion fails
+    and names BOTH the file and its positions.
+    """
+    seen: dict[str, list[int]] = {}
+    for i, name in enumerate(ROWED_BY_THIS_FOLD):
+        seen.setdefault(name, []).append(i)
+    dupes = {n: pos for n, pos in seen.items() if len(pos) > 1}
+    assert not dupes, (
+        "ROWED_BY_THIS_FOLD lists the same file more than once, so a pin "
+        "written for it can never pass and its message would name the wrong "
+        "cause (the list-equality ENTRY-RULE pins compare against a "
+        f"one-element list): {dupes} of {len(ROWED_BY_THIS_FOLD)} entries")
+
+
 def test_the_eviction_suite_is_in_the_entry_rule_set_13123():
     """#13123 non-vacuity: the ENTRY-RULE pin can only see what this set NAMES.
 

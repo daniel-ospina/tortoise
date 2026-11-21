@@ -2433,7 +2433,7 @@ def _measure_on_loop_graph_work(monkeypatch, turns: int, sid: str):
 
 def _measure_capture_graph_work(monkeypatch, turns: int, sid: str,
                                 conversation: list[dict] | None = None,
-                                session_gone: bool = False):
+                                session_gone: bool | int = False):
     """Like ``_measure_on_loop_graph_work``, but returns the per-thread
     ``(thread_name, cypher, duration)`` records so a caller can assert on
     WHICH statements the loop ran, not just how many (#4465).
@@ -2448,6 +2448,15 @@ def _measure_capture_graph_work(monkeypatch, turns: int, sid: str,
     REACH the delete-race branch, and therefore the orphan sweep, from a
     fixture (`#10893` cycle-4 review, P2 #2: every needle for that branch was
     inert because the ordinary fixture never gets there).
+
+    An INT answers "gone" from that probe ONWARD (1-based), which is what
+    reaches the OTHER sweep arm: the handler probes the session TWICE — a
+    pre-check before the receipt write (`hosted_api.py:21624`) and a re-check
+    after it (`:21650`) — so `2` models the delete landing in that window and
+    takes the `:21682` arm, while `True` answers the pre-check and takes
+    `:21691`. Both arms issue the sweep; measured, they are different lines and
+    inlining one of them does not red a test that reaches only the other
+    (#14086 review, P2).
     """
     import tortoise.hosted_api as ha_mod
     from tortoise import sdk as sdk_mod
@@ -2461,6 +2470,7 @@ def _measure_capture_graph_work(monkeypatch, turns: int, sid: str,
     orig_query = graph_cls.query
     records: list[tuple[str, str, float]] = []
     writer_threads: list[str] = []
+    alive_probes = {"n": 0}
     # #3551: the hosted lane now calls the shared SDK primitive, which calls
     # `_write_capture_turns` from `tortoise/sdk.py` — patch the DEFINITION site,
     # not a hosted-module alias (hosted no longer imports it).
@@ -2469,8 +2479,14 @@ def _measure_capture_graph_work(monkeypatch, turns: int, sid: str,
     def _timed_query(self, cypher, *args, **kwargs):
         started = time.perf_counter()
         try:
-            if session_gone and " ".join(cypher.split()) == _SESSION_ALIVE:
-                return _SessionAliveAnswered(False)
+            if " ".join(cypher.split()) == _SESSION_ALIVE:
+                alive_probes["n"] += 1
+                gone = session_gone is True or (
+                    isinstance(session_gone, int)
+                    and not isinstance(session_gone, bool)
+                    and alive_probes["n"] >= session_gone)
+                if gone:
+                    return _SessionAliveAnswered(False)
             return orig_query(self, cypher, *args, **kwargs)
         finally:
             records.append((threading.current_thread().name,
@@ -3034,30 +3050,15 @@ _SWEEP_STATEMENTS = {
 }
 
 
-def test_the_delete_race_sweep_never_runs_on_the_event_loop(
-        client, monkeypatch):
-    """#10893 (second cycle): the orphan SWEEP is tail work, not loop work.
+def _assert_the_sweep_never_runs_on_the_loop(records, *, arm: str) -> None:
+    """The three assertions every sweep arm owes, shared by both arms.
 
-    `test_the_capture_post_write_tail_never_runs_on_the_event_loop` cannot see
-    this leg: its Session is never deleted mid-capture, so the delete-race
-    branch never runs and a needle for the sweep would be satisfied by nothing.
-    Here the session-alive probe answers "gone", so the branch IS taken and the
-    statements are ISSUED — and the assertion is WHICH THREAD issued them.
-
-    Mutation check (must stay true): `await _run_off_loop(_CAPTURE_EXECUTOR,
-    _sweep_orphaned_writes)` -> `_sweep_orphaned_writes()` at
-    `hosted_api.py:21682`/`:21691` puts the sweep's statement back on
-    ``MainThread`` and fails the second assertion; deleting the sweep instead
-    fails the first.
+    Factored out because the delete-race branch has TWO sweep call sites
+    (`hosted_api.py:21682`, the receipt re-check window, and `:21691`, the
+    session already gone at the pre-check) and a test that reaches one of them
+    is silent about the other — measured: inlining the sweep at `:21682` only
+    left the `:21691` test GREEN (#14086 review, P2). Both arms now call this.
     """
-    resp, records, _writer = _measure_capture_graph_work(
-        monkeypatch, 40, "tail-off-loop-sweep-10893",
-        conversation=_ref_conversation(40), session_gone=True)
-
-    require_answered(
-        resp, what="POST /v1/sessions answered (delete-race tail run)")
-    assert resp.status_code == 200, resp.text[:300]
-
     on_loop = [c for name, c, _d in records if name == "MainThread"]
     all_cyphers = [c for _n, c, _d in records]
 
@@ -3065,7 +3066,7 @@ def test_the_delete_race_sweep_never_runs_on_the_event_loop(
     # never ran, and that is exactly how the sweep read as covered before.
     for needle, label in _SWEEP_STATEMENTS.items():
         assert any(needle in c for c in all_cyphers), (
-            f"{label} was never issued — the delete-race branch was not "
+            f"{label} was never issued — the {arm} sweep arm was not "
             f"reached, so this row proves nothing about it (expected a "
             f"statement containing {needle!r}; DETACH statements seen: "
             f"{[c[:90] for c in all_cyphers if 'DETACH' in c]})")
@@ -3077,9 +3078,9 @@ def test_the_delete_race_sweep_never_runs_on_the_event_loop(
         if needle in c
     ]
     assert not offenders, (
-        "the capture's delete-race orphan sweep is back on the event loop — "
-        "one capture pays it and every concurrent `/v1/search` on the single "
-        "uvicorn worker accrues it as `pre_handler` (#10893):\n  "
+        f"the capture's delete-race orphan sweep ({arm} arm) is back on the "
+        "event loop — one capture pays it and every concurrent `/v1/search` on "
+        "the single uvicorn worker accrues it as `pre_handler` (#10893):\n  "
         + "\n  ".join(offenders))
 
     # ⛔ And "off `MainThread`" is NECESSARY BUT NOT SUFFICIENT — the shared
@@ -3094,6 +3095,63 @@ def test_the_delete_race_sweep_never_runs_on_the_event_loop(
         if needle in c
     ]
     assert not mispooled, (
-        "the capture's delete-race orphan sweep ran off the event loop but NOT "
-        f"on the capture pool (expected a `{_CAPTURE_POOL_PREFIX}*` thread):\n  "
-        + "\n  ".join(mispooled))
+        f"the capture's delete-race orphan sweep ({arm} arm) ran off the "
+        "event loop but NOT on the capture pool (expected a "
+        f"`{_CAPTURE_POOL_PREFIX}*` thread):\n  " + "\n  ".join(mispooled))
+
+
+def test_the_delete_race_sweep_never_runs_on_the_event_loop(
+        client, monkeypatch):
+    """#10893 (second cycle): the orphan SWEEP is tail work, not loop work.
+
+    `test_the_capture_post_write_tail_never_runs_on_the_event_loop` cannot see
+    this leg: its Session is never deleted mid-capture, so the delete-race
+    branch never runs and a needle for the sweep would be satisfied by nothing.
+    Here the session-alive PRE-check (`hosted_api.py:21624`) answers "gone", so
+    the `:21691` arm IS taken and the statements are ISSUED — and the assertion
+    is WHICH THREAD issued them.
+
+    The OTHER sweep site (`:21682`, reached when the delete lands between the
+    receipt PATCH and the post-write re-check) is covered by the sibling below;
+    it is a different line and inlining one does not red the other.
+
+    Mutation check (must stay true): `await _run_off_loop(_CAPTURE_EXECUTOR,
+    _sweep_orphaned_writes)` -> `_sweep_orphaned_writes()` at
+    `hosted_api.py:21691` puts the sweep's statement back on ``MainThread`` and
+    fails the second assertion; deleting the sweep instead fails the first.
+    """
+    resp, records, _writer = _measure_capture_graph_work(
+        monkeypatch, 40, "tail-off-loop-sweep-10893",
+        conversation=_ref_conversation(40), session_gone=True)
+
+    require_answered(
+        resp, what="POST /v1/sessions answered (delete-race tail run)")
+    assert resp.status_code == 200, resp.text[:300]
+    _assert_the_sweep_never_runs_on_the_loop(records, arm="pre-check (21691)")
+
+
+def test_the_delete_race_sweep_never_runs_on_the_event_loop_when_the_delete_wins_the_recheck(
+        client, monkeypatch):
+    """#10893: the OTHER sweep site, `hosted_api.py:21682`.
+
+    The sibling above answers the session-alive PRE-check with "gone" and never
+    reaches the ordinary live path's post-PATCH re-check. Here the pre-check and
+    the receipt write succeed and the delete wins INSIDE the window the
+    off-load itself opened (`session_gone=2` — gone from the second probe), so
+    the compensation arm runs and its `_sweep_orphaned_writes` is the one under
+    test. Measured before this row existed: inlining the sweep at `:21682` only
+    was GREEN, so that arm was uncovered by every test in this tree and — unlike
+    the enrichment read above — not declared as a residual (#14086 review, P2).
+
+    Mutation check (must stay true): inlining `_sweep_orphaned_writes()` at
+    `:21682` reds the off-loop assertion; deleting that call reds the
+    non-vacuity one.
+    """
+    resp, records, _writer = _measure_capture_graph_work(
+        monkeypatch, 40, "tail-off-loop-sweep-recheck-10893",
+        conversation=_ref_conversation(40), session_gone=2)
+
+    require_answered(
+        resp, what="POST /v1/sessions answered (delete-race re-check run)")
+    assert resp.status_code == 200, resp.text[:300]
+    _assert_the_sweep_never_runs_on_the_loop(records, arm="re-check (21682)")
