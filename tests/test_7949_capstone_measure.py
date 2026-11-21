@@ -1712,8 +1712,8 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
         assert "unmeasured=" not in note, (why, note)
     # ⛔ …and the DENOMINATOR may not be read from a block that survived a coercion the ROWS
     # did not (#14060 review round 9, P2). ⛔ No fixture in the tuple above carries a `declared`
-    # that could DIFFER from `len(rows)` — four omit `population` and the fifth's
-    # (`{"population": [1]}`) coerces to `{}` — so the claim this loop used to make,
+    # that could DIFFER from `len(rows)` — its fixtures either omit `population` or carry one
+    # that coerces to `{}` (`{"population": [1]}`) — so the claim this loop used to make,
     # `sum(written) == declared`, compared 0 with 0 on every iteration and no mutant of the
     # guards it named could move it (the review's rule-3 finding, measured). The shapes below
     # carry a population that CAN disagree, which is the input that exposes it: a wrong-typed
