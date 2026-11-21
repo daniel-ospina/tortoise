@@ -390,9 +390,10 @@ NOT_SELECTED = [
     "is the onboarding flow for enterprise partners retired",
     # …a `which` head noun carrying a MODIFIER: the stated recall loss, now reported.
     "which customer claims were archived",
-    # …and boundary-free adverbs outside the admitted recency list: reported, never
-    # silent (`_RECENCY_TAIL` admits four spellings; `_BLOCKED_TAIL` reports the
-    # rest).
+    # …and boundary-free adverbs outside the admitted recency list: REPORTED, because
+    # their first word is a `_BLOCKED_TAIL` member (`_RECENCY_TAIL` admits four
+    # spellings; the closed tail list reports the ones it names a leading word for —
+    # `most recently` stands outside it and is silent, which that note states).
     "what ended previously",
     "which claims were retracted earlier",
     "list what we retired previously",
@@ -978,6 +979,11 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
         "have any claims been retracted in Q3",
         "which claims were retracted by legal",
         "ask the question in its unqualified form",
+        # …and the QUALIFIER RULE itself, which used to be restated in a parenthetical
+        # on the line that claimed the contract is "not written here" (#14033 review
+        # round 11, P2): the rule is served by `MISSED_ROUTE_HINT`, so a copy here is
+        # the same drift the paragraph warns about.
+        "carrying a narrowing the population cannot apply",
     ):
         assert _copied not in _docstring, (
             f"the phrase table is back in `tortoise_search.__doc__` ({_copied!r}), which "

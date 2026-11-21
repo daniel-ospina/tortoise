@@ -344,24 +344,27 @@ response_fields:
 - response: tortoise_search
   field: state_question
   emitted_when: '#14033 — the hosted `GET /v1/search` body ONLY, and only when the recogniser saw an ENDING-shaped
-    cue it could NOT apply: `{routed: false, population, reason, cue, hint}`, where `reason` is `shape` (a strong
-    ending cue that is not the question''s own predicate, so the relevance read answered), `cue` is the whole-word
-    signal it matched, and `hint` is the served remedy. ⛔ `reason` is a CLOSED two-value set (`MISSED_ROUTE_REASONS`
-    = shape|family) but only `shape` is REACHABLE on this response: the hosted route takes no `entity_type` (`hosted_api.py`
-    `search(q, limit, org)`), `_tortoise_fts_query` defaults it to `point`, and `point` IS a lifecycle family —
-    so `family` (the ended population has no arm for that entity_type) is produced only where a caller NAMES a non-lifecycle
+    cue it could NOT apply: `{routed: false, population, reason, cue, hint}`, where `reason` is `shape` (the recogniser
+    SAW an ending cue and did not apply it — for example an appended qualifier the population cannot apply, an attributive
+    ending word, a modified `which` head noun, an over-long copula subject, or an unguarded `existence` expression;
+    the earlier gloss "a cue that is not the question''s own predicate" was FALSE for `which_modified_noun`, `is_copula_long_subject`
+    and `existence_unguarded`, all measured at `reason: shape`), `cue` is the whole-word signal it matched, and
+    `hint` is the served remedy. ⛔ `reason` is a CLOSED two-value set (`MISSED_ROUTE_REASONS` = shape|family) but
+    only `shape` is REACHABLE on this response: the hosted route takes no `entity_type` (`hosted_api.py` `search(q,
+    limit, org)`), `_tortoise_fts_query` defaults it to `point`, and `point` IS a lifecycle family — so `family`
+    (the ended population has no arm for that entity_type) is produced only where a caller NAMES a non-lifecycle
     family, i.e. on the PRIVATE SDK sink below, and never on /v1/search. WHY IT EXISTS: without it a DECLINED state
     question is byte-identical to an honest "nothing has ended", which is the defect #14033 closes. ⛔ NOT on the
     MCP tool reply (`tortoise_search` takes no sink, and its description says so) and NOT on any PUBLIC SDK method
     — the same payload rides the PRIVATE `TortoiseSDK._tortoise_fts_query(...)` `read_status_out` sink instead.
-    ⛔ AND THE SELF-HOSTED `GET /v1/search` CARRIES NOTHING EITHER, which is DECLARED rather than left to be
-    discovered: it takes the same path (`tortoise/selfhost_api.py`) and the recogniser runs inside the same SDK call,
-    so it REFUSES a state question exactly as the hosted route does — but it passes no sink and its reply is the bare
+    ⛔ AND THE SELF-HOSTED `GET /v1/search` CARRIES NOTHING EITHER, which is DECLARED rather than left to be discovered:
+    it takes the same path (`tortoise/selfhost_api.py`) and the recogniser runs inside the same SDK call, so it
+    REFUSES a state question exactly as the hosted route does — but it passes no sink and its reply is the bare
     row list, so there the declined question is again byte-identical to "nothing has ended". Serving the field there
     would change a public response shape (a list), so it is out of scope for #14033 and recorded here instead; the
-    served `ROUTING_NOTE` says the same thing to the caller.
-    Recorded here because CONTRIBUTING''s carve-out is about what `check` FAILS on, not about what goes unrecorded:
-    `response_fields` is in `NON_DERIVABLE_DOC_KEYS`, so an absent row is invisible to every gate.'
+    served `ROUTING_NOTE` says the same thing to the caller. Recorded here because CONTRIBUTING''s carve-out is
+    about what `check` FAILS on, not about what goes unrecorded: `response_fields` is in `NON_DERIVABLE_DOC_KEYS`,
+    so an absent row is invisible to every gate.'
   unchanged_when_off: 'n/a — not flag-gated; the key is ABSENT unless the recogniser declined a state cue, so every
     ordinary search response stays byte-identical. ⛔ NOT reserved to state reads: a CONTENT query that NAMES an
     ending (`which features are deprecated in v3`) is declined too, so it DOES carry the notice, with `routed: false`
@@ -1548,7 +1551,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_search
-  served_from: tortoise/mcp_server.py:7a7ad6ebcbcac68d
+  served_from: tortoise/mcp_server.py:c669ff26174fa581
   served_attributes: a54ebe88150f0091
   family: memory
   family_rank: 1

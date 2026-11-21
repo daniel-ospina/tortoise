@@ -15078,8 +15078,10 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     #14033: a STATE question the recogniser SAW and could not route carries
     ``state_question`` — ``{routed: false, population, reason, cue, hint}`` — so
     the relevance reply is distinguishable from an honest "nothing has ended".
-    ``reason`` is ``shape`` (the question carries a qualifier or an attributive
-    ending word the population cannot apply). ⛔ ``family`` CANNOT OCCUR ON THIS
+    ``reason`` is ``shape`` — the recogniser SAW an ending cue and did not apply it
+    (for example an appended qualifier the population cannot apply, an attributive
+    ending word, a modified `which` head noun, an over-long copula subject, or an
+    unguarded `existence` expression). ⛔ ``family`` CANNOT OCCUR ON THIS
     ROUTE: it means a shape fired on a family with no lifecycle, which needs the
     caller to NAME a family — this route takes no ``entity_type``, so the recogniser
     always sees the SDK's ``point`` default and ``point`` HAS a lifecycle. The

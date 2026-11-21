@@ -157,8 +157,10 @@ _ENDING_BASE = (
 #: ⛔ THE RULE ADMITS MORE SPELLINGS THAN THE LIST DOES, and that is deliberate: this
 #: is the set of recency adverbs the shape ROUTES on, because a route serves the whole
 #: population and every admission is a decision. The boundary-free adverbs it does not
-#: route (`previously`, `earlier`, `before`) are REPORTED through `_BLOCKED_TAIL`
-#: instead — unrouted and reported, never unrouted and silent.
+#: route are reported ONLY when their FIRST word is a `_BLOCKED_TAIL` member
+#: (`previously`, `earlier`, `before` — unrouted and reported); one whose first word
+#: is not (`most recently`, `just recently`) is unrouted AND SILENT, which
+#: `_BLOCKED_TAIL`'s own note states as the limit of the closed list.
 _RECENCY_TAIL = r"(?:\s+(?:recently|lately|so far|to date))?"
 
 #: ENDING-question shapes. ⛔ EVERY SHAPE IS ANCHORED, and that is the lesson of

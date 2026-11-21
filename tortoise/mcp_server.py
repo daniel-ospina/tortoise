@@ -5600,15 +5600,16 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
     was.
 
     ⛔ THE PHRASE TABLE — which phrasings route, which do not — IS NOT WRITTEN HERE
-    (#14033), and neither is the qualifier rule that draws the boundary (an ending
-    question carrying a narrowing the population cannot apply keeps the relevance
-    read). Both live in ONE place: `state_intent.ROUTING_NOTE`, which is what
-    callers actually receive (see below). A second copy here would be the silent
-    kind of drift — developer prose that reads like the contract, reaches no
-    caller, and lets a test that pins it pass while the served text says something
-    else. This docstring states the caller OBLIGATIONS (arguments and families),
-    never a phrasing list; `tests/test_13557_13558_reachable_reads.py` pins the
-    absence so a copy cannot come back.
+    (#14033), and neither is the qualifier rule that draws the boundary. Both are
+    SERVED text, each from its own single home: the routing table is
+    `state_intent.ROUTING_NOTE` and the qualifier rule is
+    `state_intent.MISSED_ROUTE_HINT`, the remedy that rides every notice. A second
+    copy here would be the silent kind of drift — developer prose that reads like
+    the contract, reaches no caller, and lets a test that pins it pass while the
+    served text says something else. This docstring states the caller OBLIGATIONS
+    (arguments and families), never a phrasing list or a qualifier rule;
+    `tests/test_13557_13558_reachable_reads.py` pins both absences so a copy
+    cannot come back.
 
     ⛔ AND THE SERVED TEXT IS NOT THIS DOCSTRING (#14033). FastMCP never serves it
     when the registry supplies an explicit `description=`; the caller-facing text is
