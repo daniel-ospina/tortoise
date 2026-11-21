@@ -1417,12 +1417,31 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # both carry the +14, put there by #13807 (`9cd31e8227`) — so this commit changes
     # NO locator, it only records WHY the numbers are where they are. The pin asserts
     # the brief's own number, so the two cannot drift apart.
-    ("tortoise/projection/__init__.py", 21018, '("Object", "name", "FULLTEXT")',
-     "`tortoise/projection/__init__.py:21018`"),
-    ("tortoise/projection/__init__.py", 21461, "def _create_fulltext_index(",
-     "`:21461`"),
-    ("tortoise/projection/__init__.py", 21903,
-     "for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:", "`:21903`"),
+    # ⛔ RE-DERIVED AGAIN (main-red, un-red lane): #13994 (`e0accb8fe6`) inserted
+    # +24 net lines into `tortoise/projection/__init__.py` ABOVE all three rows —
+    # a 24-line `#13971` SNAPSHOT-RESTORE comment block at `:17442` (it records
+    # why the restore is never vector-gated), so the pin and §1 of the brief both
+    # had to move by +24 (21018→21042, 21461→21485, 21903→21927). Nothing about
+    # the mechanism moved: the SYMBOLS are identical, only the line numbers, which
+    # is exactly the drift this pin exists to make visible, and it is why the
+    # remedy is to re-derive the numbers rather than to relax the equality. The
+    # pin asserts the brief's own number, so the two cannot drift apart.
+    # ⛔ The block is that comment at `:17442` (first line of the 24-line run;
+    # `:17439` is the code above it), NOT the `("Point", "quote",
+    # "FULLTEXT")` entry: that entry was already there at `e0accb8fe6^:21014`,
+    # added by #11706 (`d06c001ff9`; its diff carries the `+` row — reachable from
+    # the backup refs, NOT from `main`'s SHALLOW history, whose boundary commit
+    # c2c6d38425 (#13967) ADDS the whole file, 23,875 lines).
+    # ⛔ Do NOT verify it with `git log -S'("Point", "quote", "FULLTEXT")'` over this
+    # path: a shallow boundary has NO parents, so pickaxe stops at c2c6d38425
+    # (#13967) and never names the origin. An earlier draft credited #13322
+    # (`5f6ed5ae6a`), a later one #11706 via that `-S`; both name the wrong commit.
+    ("tortoise/projection/__init__.py", 21042, '("Object", "name", "FULLTEXT")',
+     "`tortoise/projection/__init__.py:21042`"),
+    ("tortoise/projection/__init__.py", 21485, "def _create_fulltext_index(",
+     "`:21485`"),
+    ("tortoise/projection/__init__.py", 21927,
+     "for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:", "`:21927`"),
 )
 
 

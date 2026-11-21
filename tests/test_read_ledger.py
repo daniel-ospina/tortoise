@@ -378,7 +378,7 @@ def hooked_sdk(ledger, monkeypatch):
     return inst, _Graph
 
 
-def test_the_three_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
+def test_the_three_hooked_row_paths_feed_the_ledger(hooked_sdk):
     """A hook that is not exercised is a hook that will be lost in a refactor.
 
     ⛔ THIS PINS THREE OF THE HOOKED SDK METHODS, and its name says so. The other
@@ -390,11 +390,46 @@ def test_the_three_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
     did not have, so the claim is narrowed to what the body drives rather than
     the guard being trusted on its title.
 
-    Each of `query()`, `paginated_query()` and `query_points_by_tag()` returns
-    Point rows to a CALLER, so each must record exactly ONE read event per
-    returned key — no fewer (a missed record inflates the never-read mass, which
+    ⛔ WHICH of the three has a caller-facing recording path is NOT uniform at
+    this head, so the pin below is about each door's DEFAULT, not about three
+    live caller routes (asserting three would certify coverage this body does
+    not reach — the same error the former title made):
+
+    * `_paginated_query()` IS caller-facing: `list_knowledge(kind="claim")`
+      dispatches it with recording ON, so every row it returns is a caller read.
+    * `_query()` IS caller-facing, and through a route #13899 did NOT retire:
+      `tortoise/tortoise_client.py`'s `query_prior_research` /
+      `query_existing_strategies` / `query_existing_visions` call
+      `_query(kind=…)` and take the door's DEFAULT (`_record_reads=True`), so
+      their reads are recorded — the `_ledger_record("Point", …)` at the end of
+      `_query` is live on a real caller path. The three SDK-internal population
+      scans (`issue_insight`, the FTS TF-IDF fallback and `recall_gaps` — the
+      #7983 capture carve-out) pass `_record_reads=False`. The row pins that
+      DEFAULT, which is what the caller-facing routes and any future door
+      inherit.
+      ⛔ An earlier draft of this bullet said `_query` had NO caller-facing
+      recording route after #13899. It does (above), and the error was the
+      dangerous direction: it invites deleting the `_ledger_record` call, which
+      would stop recording real `tortoise_client` reads and bias `f` HIGH — the
+      one direction this file's header forbids.
+    * `_query_points_by_tag()` is reached by `search_knowledge(mode="tag")` with
+      `_record_reads=False`, and that container records the page it SERVES
+      itself (the MCP tag tool does the same two steps) — so the door default is
+      not what the container drives either. Same pin, same reason.
+
+    Each must therefore record exactly ONE read event per returned key on its
+    default — no fewer (a missed record inflates the never-read mass, which
     flatters the split) and no more (a double record overstates how many reads a
     key gets, which is the same class of wrong as a lost one).
+
+    ⛔ The PUBLIC spellings these hooks served (`query`, `paginated_query`,
+    `query_points_by_tag`) were retired by #13899/#4282, so the doors are driven
+    directly; driving a retired name would only prove the retirement hint still
+    raises. (`get_point` is in that retired group too, but it is NOT in this
+    clause for a measured reason: it has no retirement hint — `retirement_hint(
+    "get_point")` is `None`, so driving it raises a bare `AttributeError`, not
+    the #4282 message.) `_get_point` is driven for the OPPOSITE reason — it
+    must record NOTHING, pinned below.
     """
     inst, graph = hooked_sdk
     # The keys must exist as STOCK first, or every read is (correctly) reported
@@ -403,21 +438,21 @@ def test_the_three_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
         record_stock("Point", key, nbytes=100)
 
     graph.rows = [{"id": "p1"}, {"id": "p2"}]
-    got = inst.query()
+    got = inst._query()
     assert [r["id"] for r in got] == ["p1", "p2"]
 
     graph.rows = [{"id": "p3"}]
-    assert inst.paginated_query()["results"] == [{"id": "p3"}]
+    assert inst._paginated_query()["results"] == [{"id": "p3"}]
 
     graph.rows = [{"id": "p7"}]
-    assert inst.get_point("p7") == {"id": "p7"}
+    assert inst._get_point("p7") == {"id": "p7"}
 
     graph.rows = [{"id": "p8"}, {"id": "p9"}]
-    inst.query_points_by_tag("t")
+    inst._query_points_by_tag("t")
 
     folded = fold()
     counts = {k[2]: row.read_count for k, row in folded.rows.items()}
-    # `p7` stays at ZERO: `get_point` is the internal accessor the write paths
+    # `p7` stays at ZERO: `_get_point` is the internal accessor the write paths
     # use, so it must record NOTHING — if it ever starts recording, a
     # written-but-never-read node looks read and `f` is biased HIGH.
     assert counts == {"p1": 1, "p2": 1, "p3": 1, "p7": 0, "p8": 1, "p9": 1}
@@ -741,9 +776,15 @@ def test_a_capped_file_still_says_so_when_one_tenant_is_folded(ledger, monkeypat
 def test_an_internal_population_scan_is_not_recorded_as_a_read(hooked_sdk):
     """`recall_gaps` / `issue_insight` / the FTS fallback scan the WHOLE stock.
 
-    They call `query()` to do it, so recording them would mark every Point read
-    after one `recall_gaps()` call — `f` → ~1, the exact contamination excluding
-    `get_point` prevented, and it would silently invalidate the one-directional
+    They opt OUT of recording explicitly — `_query(_record_reads=False)` for a
+    POPULATION scan, and `_tortoise_fts_query(…, _record_reads=False)` for a
+    retrieval POOL (that is a different door, so a reader auditing the opt-outs
+    by grepping `_query(` will not find the FTS arm; `recall_gaps` drives both).
+    `_query` IS caller-facing with recording ON elsewhere
+    (`tortoise_client`'s `query_prior_research` / `query_existing_strategies` /
+    `query_existing_visions` take the default), which is exactly why these
+    population scans have to opt OUT explicitly: recording them would mark every Point read after one `recall_gaps()` call — `f` → ~1, the exact contamination excluding
+    `_get_point` prevented, and it would silently invalidate the one-directional
     "the gaps bias `f` LOW" caveat the docs rest on.
     """
     inst, graph = hooked_sdk
@@ -751,15 +792,17 @@ def test_an_internal_population_scan_is_not_recorded_as_a_read(hooked_sdk):
     record_stock("Point", "p2", nbytes=100)
 
     graph.rows = [{"id": "p1"}, {"id": "p2"}]
-    assert [r["id"] for r in inst.query(_record_reads=False)] == ["p1", "p2"]
+    assert [r["id"] for r in inst._query(_record_reads=False)] == ["p1", "p2"]
     assert {row.read_count for row in fold().rows.values()} == {0}, (
         "an internal scan must record NOTHING"
     )
 
     graph.rows = [{"id": "p1"}]
-    inst.query()
+    inst._query()
     counts = {k[2]: row.read_count for k, row in fold().rows.items()}
-    assert counts == {"p1": 1, "p2": 0}, "the caller-facing default still records"
+    assert counts == {"p1": 1, "p2": 0}, (
+        "the door's DEFAULT still records — a caller omitting the flag must "
+        "still be counted")
 
 
 def test_the_mode_tightening_skips_a_directory(tmp_path, monkeypatch):

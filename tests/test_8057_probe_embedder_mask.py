@@ -51,8 +51,18 @@ ROOT = Path(__file__).resolve().parent.parent
 #: The probe modules whose availability gate writes a point at import time.
 #: A registry, not a claim: `test_probe_census_matches_the_declared_set` reads
 #: the source and fails when this tuple and the code disagree in either
-#: direction, so a new module-level `create_point` probe cannot ride along
-#: unseen.
+#: direction — so a new module-level point-write probe that the census can SEE
+#: cannot ride along unseen.
+#: ⛔ The bound is what the census implements, not everything a probe could be
+#: (review P2): it scans `tests/**/test_*.py` (so a probe in a `conftest.py` or a
+#: non-test helper module is outside it), and it matches `ast.Attribute` CALLS
+#: whose name is in `_PROBE_WRITE_DOORS` — so a call through a LOCAL ALIAS
+#: (`f = sdk.create_entity; f(…)`) or through `getattr` is OUTSIDE it, because
+#: `_module_level_write_probe_lines` requires `isinstance(n.func, ast.Attribute)`
+#: and an aliased call is `ast.Call(func=ast.Name(id="f"))`. Stated, not hidden:
+#: the clause above used to claim a probe "cannot ride along unseen" without any
+#: bound named, and an earlier draft of THIS note named the alias case as the
+#: one it catches — the single shape it is blind to (#14127 review round 2).
 PROBE_MODULES = (
     "tests/test_assembly_sdk.py",
     "tests/test_assembly_fixtures.py",
@@ -62,9 +72,14 @@ PROBE_MODULES = (
 #: The doors a module-level point-write probe can be spelled with, so the
 #: census below survives an SDK-surface rename instead of reporting the probes
 #: as gone. `create_entity("point", …)` is the consolidated door (#888 W2) and
-#: RELAYS to `create_point` (#13899 retired the public spelling; the private
-#: `_create_point` remains) — both reach `encode_for_store`.
-_PROBE_WRITE_DOORS = ("create_point", "create_entity")
+#: RELAYS to `_create_point` (#13899 retired the public spelling, so there is no
+#: `create_point` left to relay to) — both reach `encode_for_store`.
+#: ⛔ `_create_point` IS IN THE TUPLE (review P2). The comment above already said
+#: the private spelling remains, and it is by far the most common spelling a
+#: migrating lane reaches for (thousands of sites across the suite), so leaving
+#: it out meant a module-level `sdk._create_point(…)` probe was invisible to a
+#: census whose whole job is to notice exactly that.
+_PROBE_WRITE_DOORS = ("create_point", "create_entity", "_create_point")
 
 #: Import a probe module in a FRESH interpreter with both embedder seams
 #: replaced by doubles that RECORD the call and return None. A lane imports the
@@ -104,6 +119,66 @@ _CHILD_SCRIPT = textwrap.dedent(
     spec.loader.exec_module(module)
 
     print(json.dumps({"available": bool(module.FALKORDB_AVAILABLE)}))
+    '''
+)
+
+#: Import each declared probe in a FRESH interpreter with the doors in its
+#: `_PROBE_DOORS` DELETED from `TortoiseSDK` — the #13899 rename REPLAYED.
+#: One process for all three modules: the guard fires before the probe's own
+#: `try` can reach storage (the URI is assigned inside it), so this arm needs
+#: neither a live FalkorDB nor an embedder, and it pays one `tortoise.sdk`
+#: import instead of three. Each module's outcome is reported separately, so a
+#: probe that lost its guard is NAMED rather than hidden behind a sibling.
+_DOOR_DELETION_SCRIPT = textwrap.dedent(
+    '''
+    import importlib.util
+    import json
+    import os
+    import sys
+    import traceback
+
+    root, payload = sys.argv[1], sys.argv[2]
+    targets = json.loads(payload)
+    sys.path.insert(0, root)
+    os.environ["TORTOISE_EMBEDDER_WARMUP"] = "0"
+
+    from tortoise.sdk import TortoiseSDK
+
+    out = {}
+    gone = set()
+    # Measured BEFORE anything is deleted, across every module: "absent after
+    # the replay" is satisfied TRIVIALLY by a name that never existed, so the
+    # replay alone cannot tell a deletion from a typo (review P2). The parent
+    # pins this set, and that is the arm which reddens on a `_PROBE_DOORS`
+    # mistake instead of proving a deletion that never happened.
+    pristine_missing = {
+        rel: [d for d in doors if not hasattr(TortoiseSDK, d)]
+        for rel, doors in targets
+    }
+    for rel, doors in targets:
+        for door in doors:
+            if hasattr(TortoiseSDK, door):
+                delattr(TortoiseSDK, door)
+        gone.update(doors)
+        # Cumulative on purpose: the deletion is process-wide, so by the second
+        # module its doors are already gone. What must hold for EVERY module is
+        # that the doors IT asserts are absent when IT imports.
+        absent = sorted(d for d in gone if not hasattr(TortoiseSDK, d))
+        missing_before = pristine_missing[rel]
+        spec = importlib.util.spec_from_file_location(
+            "_probe_renamed_" + rel.replace("/", "_").replace(".py", ""),
+            os.path.join(root, rel))
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            out[rel] = {"raised": traceback.format_exc(), "available": None,
+                        "absent": absent, "missing_before": missing_before}
+        else:
+            out[rel] = {"raised": None,
+                        "available": bool(module.FALKORDB_AVAILABLE),
+                        "absent": absent, "missing_before": missing_before}
+    print(json.dumps(out))
     '''
 )
 
@@ -177,6 +252,29 @@ def test_mask_embedder_restores_when_the_block_raises():
 # ── the census: no probe module can slip past the registry ───────────────
 
 
+def _declared_probe_doors(rel: str) -> tuple[str, ...]:
+    """The `_PROBE_DOORS` a probe module asserts, read WITHOUT importing it.
+
+    Parsed, not executed: importing the module here would run the probe in the
+    PARENT process, which is the one thing this file exists to keep out of an
+    import path.
+    """
+    import ast
+
+    for node in ast.parse((ROOT / rel).read_text()).body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(isinstance(t, ast.Name) and t.id == "_PROBE_DOORS"
+               for t in node.targets):
+            return tuple(ast.literal_eval(node.value))
+    raise AssertionError(
+        f"{rel} declares no module-level `_PROBE_DOORS`: the probe's doors must "
+        "be asserted BY NAME (#14114), or a renamed door is read as 'no "
+        "storage' by the broad `except Exception` again.")
+
+
+
+
 def _module_level_write_probe_lines(path: Path) -> list[int]:
     """Line numbers of probe WRITES executed at MODULE IMPORT.
 
@@ -188,10 +286,14 @@ def _module_level_write_probe_lines(path: Path) -> list[int]:
     only the handful of files that mention a probe door at all can answer
     yes to. It can only skip files that CANNOT match.
 
-    The doors are BOTH spellings of the point write, because the SDK surface
-    is not fixed: #13899 retired the public `create_point` in favour of
-    `create_entity("point", …)`, which RELAYS to the same write and therefore
-    pays the same `encode_for_store` -> `EmbeddingModel.get` cost at import.
+    The doors are every spelling of the point write, because the SDK surface
+    is not fixed: the consolidated `create_entity("point", …)`, the internal
+    `_create_point` (#13899 kept it), and the RETIRED public `create_point` —
+    still in the tuple so a branch mid-migration is flagged rather than
+    silently dropped, even though driving it now raises the #4282 retirement
+    hint before any write. So the two LIVE spellings pay the same
+    `encode_for_store` -> `EmbeddingModel.get` cost at import; the retired one
+    pays nothing, which is exactly why leaving it out would be a silent green.
     A census that knew only one spelling would report the three probes as gone
     (a silent green) the moment they migrated — which is exactly what happened
     on #13971's `test (a)`: the probes were still unmasked-in-spirit while the
@@ -216,6 +318,54 @@ def _module_level_write_probe_lines(path: Path) -> list[int]:
         and n.func.attr in _PROBE_WRITE_DOORS
         and not any(lo <= n.lineno <= hi for lo, hi in spans)
     ]
+
+
+def test_the_census_sees_every_declared_door_and_is_blind_to_an_alias(tmp_path):
+    """The three doors are EXERCISED, and the documented blind spot is measured.
+
+    ⛔ `_PROBE_WRITE_DOORS` is a claim about what the census can SEE, and a door
+    nothing ever writes is a claim no test measures: before this arm,
+    `_create_point` could be dropped from the tuple and this whole file still
+    passed, because no `tests/**/test_*.py` carries a module-level call of it.
+    Same standard this guard applies to the probes themselves — the claim is a
+    row, not prose.
+
+    ⛔ AND THE LOOP BELOW CANNOT CLOSE THAT ON ITS OWN (review P2): it iterates
+    `_PROBE_WRITE_DOORS`, so membership is never asserted — running this test
+    with the tuple narrowed to two doors still passes. The tuple itself is
+    therefore pinned explicitly, in the same "the declared registry IS the
+    census" spirit as `test_probe_census_matches_the_declared_set`.
+
+    The blind-spot arm is the OTHER half: `PROBE_MODULES`' note states that a
+    call through a local alias or through `getattr` is OUTSIDE the census, and a
+    documented blind spot that nothing measures is how a note comes to say the
+    opposite of the code — which is exactly what an earlier draft of it did.
+    """
+    assert set(_PROBE_WRITE_DOORS) == {
+        "create_point", "create_entity", "_create_point"}, (
+        "the declared door set is the census — narrowing it silently un-covers "
+        "a spelling a migrating module can reach for (#14127 review round 4); "
+        "this assertion is what makes the loop below non-vacuous about WHICH "
+        "doors exist")
+    for door in _PROBE_WRITE_DOORS:
+        probe = tmp_path / f"probe_{door}.py"
+        probe.write_text(
+            f"sdk = make_an_sdk()\n"
+            f'sdk.{door}("point", "a")\n')
+        assert _module_level_write_probe_lines(probe) == [2], (
+            f"a module-level `sdk.{door}(…)` is still a POINT-WRITE PROBE and "
+            "the census must see it — otherwise a module that migrates to this "
+            "spelling leaves the census silently")
+
+    for label, body in (
+            ("local_alias", "f = sdk.create_entity\nf(\"point\", \"a\")\n"),
+            ("getattr", "getattr(sdk, 'create_entity')(\"point\", \"a\")\n")):
+        probe = tmp_path / f"blind_{label}.py"
+        probe.write_text("sdk = make_an_sdk()\n" + body)
+        assert _module_level_write_probe_lines(probe) == [], (
+            f"the census DOES see a probe written through a {label} — then the "
+            "bound `PROBE_MODULES` states for it (OUTSIDE the census) is wrong "
+            "and the note must be corrected, not this assertion")
 
 
 def test_probe_census_matches_the_declared_set():
@@ -274,3 +424,90 @@ def test_probe_import_never_reaches_the_embedder(rel, tmp_path):
         f"({marker.read_text().strip()!r}). On a cold lane that is the "
         "50-205s sentence-transformers/torch load paid at import (#8057); wrap "
         "the probe in `tests._live_utils.mask_embedder()`.")
+
+
+# ── the guard's own failure path: a renamed door must NAME itself ─────────
+
+
+def test_a_renamed_probe_door_names_itself_instead_of_skipping():
+    """THE guard's failure path, made a row instead of a measurement (#14114).
+
+    `_PROBE_DOORS` + the `(AttributeError, TypeError, NameError)` re-raise are
+    the right SHAPE — pytest narrows `importorskip` to the missing-dependency
+    class for exactly this reason, a skip being for an unavailable ENVIRONMENT
+    and not for a programming defect — but until this arm existed nothing in the
+    tree moved when either was removed: the failure path needs an SDK-surface
+    change, so `test_probe_import_never_reaches_the_embedder` stays green while
+    the guard that names a renamed door is deleted. That is the non-vacuity gap
+    (the commit's evidence was a manual measurement with no artifact).
+
+    Here the rename is REPLAYED: the doors are removed from `TortoiseSDK` in a
+    child interpreter and each probe must fail at IMPORT with its OWN message.
+
+    Two mutants redden here, which is why the assertions are on the guard's
+    MESSAGE and not merely on a non-zero exit:
+
+    * delete the `_missing` block → the import blows up at the call site on a
+      live lane, and is swallowed into `FALKORDB_AVAILABLE = False` on a
+      no-storage lane; the guard's message is absent in BOTH;
+    * revert the narrowed catch to `except Exception` → nothing raises at all.
+
+    ⛔ The replay is split into TWO arms, because "absent afterwards" alone is
+    inert (review P2): a door NAME that never existed on the SDK is trivially
+    absent after a deletion loop that skipped it, so the row would stay green
+    while the deletion it exists to prove never happened. The child therefore
+    reports `missing_before` — the declared doors it could not find on a
+    PRISTINE `TortoiseSDK`, measured before any deletion — and the parent pins
+    that it is empty. Third mutant, which only this arm catches: add a
+    never-existent door (e.g. `create_entty`) to a probe's `_PROBE_DOORS`.
+    """
+    targets = [[rel, list(_declared_probe_doors(rel))] for rel in PROBE_MODULES]
+    proc = subprocess.run(
+        [sys.executable, "-c", _DOOR_DELETION_SCRIPT, str(ROOT),
+         json.dumps(targets)],
+        capture_output=True, text=True, cwd=str(ROOT), timeout=600,
+        env={**os.environ},
+    )
+    assert proc.returncode == 0, (
+        "the door-deletion child failed — that is this harness, not a probe:\n"
+        f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}")
+
+    report = json.loads(proc.stdout.strip().splitlines()[-1])
+    for rel, doors in targets:
+        entry = report[rel]
+        assert not entry["missing_before"], (
+            f"{rel}: {entry['missing_before']} is declared as a probe door but "
+            "does not exist on a pristine TortoiseSDK — the mask cannot remove a "
+            "door that is not there, so every assertion below would pass without "
+            "proving the replay (#14114 review P2). Fix `_PROBE_DOORS` in that "
+            "module, or the SDK-surface name it should be.")
+        assert set(doors) <= set(entry["absent"]), (
+            f"{rel}: {sorted(set(doors) - set(entry['absent']))} still present "
+            "on TortoiseSDK when the module imported, so the replay proves "
+            "nothing. Keep _PROBE_DOORS in step with the SDK surface.")
+        raised = entry["raised"]
+        assert raised is not None, (
+            f"{rel}: importing with {doors} REMOVED from TortoiseSDK did NOT "
+            "raise — that is the #14114 defect back. A renamed door read as "
+            f"'no storage' (FALKORDB_AVAILABLE={entry['available']}): a silent "
+            "skip locally and a hard CI fail naming no door.")
+        assert "RENAMED/REMOVED door, not missing storage (#14114)" in raised, (
+            f"{rel}: the import failed, but not with the guard's OWN message — "
+            "the `_missing` block is gone, so the renamed door is no longer "
+            f"named for whoever has to fix it:\n{raised}")
+        for door in doors:
+            assert door in raised, (
+                f"{rel}: the failure names no `{door}` — the message must say "
+                f"WHICH door moved:\n{raised}")
+        # …and it must say where to fix it: the census file AND all three probe
+        # modules, because `_PROBE_WRITE_DOORS` lists only the WRITE spelling
+        # and a reader sent there for a READ door is sent to a tuple that does
+        # not contain it.
+        assert "tests/test_8057_probe_embedder_mask.py" in raised, (
+            f"{rel}: the failure does not say where `_PROBE_WRITE_DOORS` "
+            f"lives:\n{raised}")
+        for other in PROBE_MODULES:
+            assert other in raised, (
+                f"{rel}: the failure does not name `{other}` — every one of "
+                "the three carries its own `_PROBE_DOORS`, and the reader is "
+                f"being told to fix exactly this one:\n{raised}")

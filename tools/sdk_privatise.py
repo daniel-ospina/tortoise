@@ -678,7 +678,34 @@ SWEEP_NAMES = 66
 #: merge, and `seen.update` is **101** — `main`'s −1, which is `tests/test_13337_cache_graph_declaration.py`
 #: accumulating by APPEND rather than `update` (#14108), a file this branch does not touch. That the
 #: figure lands at 11845 − 1 = 11844 is a CROSS-CHECK of the measurement, not the evidence for it.
-SWEEP_RESIDUE = (11844, "70d6cfdcd8b769e4")
+#: RE-CUT for the #14114 fallout repair → (11838, "749ca38af677eba4"), a **SHRINK of 6** and every
+#: row is named, because a shrink is not evidence on its own (see the −1 and −6 above). The six rows
+#: are ALL in `tests/test_read_ledger.py`, and they are the RETIRED PUBLIC SPELLINGS that test drove on
+#: a real `TortoiseSDK`: `inst.query` −3, `inst.paginated_query` −1, `inst.get_point` −1,
+#: `inst.query_points_by_tag` −1. #13899 retired all four names (→ `list_knowledge` / `get_entity`), so
+#: the module raised the migration hint; it now drives the doors the retirement kept INTERNAL
+#: (`_query`, `_paginated_query`, `_get_point`, `_query_points_by_tag`), which are not swept names and
+#: therefore leave no row. ⛔ ATTRIBUTED BY BISECTION ON THE REAL GATE, not by arithmetic. Measured in
+#: THIS head tree's frame (the frame `--check` reads): reverting `tests/test_read_ledger.py` alone to
+#: its parent head restores the pinned (11844, "70d6cfdcd8b769e4") and exit 0, while reverting
+#: `tests/test_7405_update_point_writes.py` alone leaves it at **11838** — that file's row multiset is
+#: identical on both sides, so it contributes no **DELTA** row — so the whole delta is that one
+#: file's six sites. The same measurement in the PARENT tree's frame
+#: (apply each file's change alone): 11844 everywhere except `tests/test_read_ledger.py`, which lands
+#: at 11838. ⛔ Name the frame or the numbers contradict each other: 11844 is the parent's residue and
+#: 11838 this head's, so "reverting X alone leaves 11844" is only true when X is the file that CARRIES
+#: the delta. The three module-level probes likewise contribute no DELTA row (they carry 14 untyped
+#: rows in all — 6 in `test_assembly_sdk.py`, 5 in `test_assembly_fixtures.py`, 3 in
+#: `longmem_eval/test_assembly_arm.py`, identical at both heads; 5/4/3 are the distinct row SHAPES, and
+#: this note states ROWS because that is the unit the paragraph defines and the unit the 80 above uses),
+#: so this re-cut shares none with the `#13994` probe shrink above. ⛔ "contributes no row" was the
+#: earlier wording and it is FALSE for every file named here: a row is what the census COUNTS, so "no
+#: row" would mean the file has no swept-name receiver at all, and
+#: `tests/test_7405_update_point_writes.py` alone carries 80 of them.
+#: The 6 are plain untyped receivers in a test (`inst` is built via `TortoiseSDK.__new__`), not typed
+#: references to a swept name, so the SDK population is untouched — `--check` still reports
+#: `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11838, "749ca38af677eba4")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —

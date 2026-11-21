@@ -103,11 +103,42 @@ class TestDe2e7:
         assert "scope='promote'" in by_name["tortoise_refresh_confidence"].description
         assert by_name["tortoise_review_link_candidates"].sdk_method == "review_link_candidates"
         assert by_name["tortoise_check_confidence"].sdk_method == "check_confidence"
-        # The retired doors still DRIVE their original SDK methods, which is what
-        # makes each container above the same answer rather than a new capability.
+        # The retired doors still DRIVE their SDK methods, which is what makes each
+        # container above the same answer rather than a new capability.
+        #
+        # ⛔ THE PROPERTY IS "RESOLVES TO THE DOOR IT NAMES", NOT THE SPELLING
+        # (#14114). This pinned the PUBLIC names `promote_point` / `belief_timeline`,
+        # and #13899's final batch retired those from the SDK's public surface while
+        # KEEPING the doors internally — so `tortoise/tool_registry.py` went to
+        # `_promote_point` / `_belief_timeline` and this pin kept asserting a door
+        # the retirement had removed.
+        #
+        # ⛔ AND A BARE `callable(getattr(…))` IS NOT THE PROPERTY EITHER (review
+        # P2). It would stay green if the shim were re-pointed at ANY existing
+        # callable (`list_knowledge`, say) — a retired door silently driving a
+        # DIFFERENT capability, which is exactly what "the same answer" forbids.
+        # The weak assertion would stay green here, and `tests/test_tool_registry.py`
+        # (`assert binding_resolution_violations(served_registry()) == []`) does red
+        # on a re-point — but with a sentence that names no expected door ("declares
+        # sdk_method 'list_knowledge' that its handler never reaches", #4337), so a
+        # reader cannot tell from it WHICH door the shim was supposed to drive.
+        # This pin states the door, so a re-point reds at the DECLARATION with the
+        # expected value in the message. (Neighbouring arms checked rather than
+        # asserted from memory: `sdk_method` IS read by
+        # `tests/test_surface_manifest.py` for existence, and the #4337 arm above is
+        # the one that catches a re-point.)
         retired_by_name = {t.name: t for t in RETIRED_TOOL_REGISTRY}
-        assert retired_by_name["tortoise_promote_point"].sdk_method == "promote_point"
-        assert retired_by_name["tortoise_belief_timeline"].sdk_method == "belief_timeline"
+        for door, expected in (("tortoise_promote_point", "_promote_point"),
+                              ("tortoise_belief_timeline", "_belief_timeline")):
+            method = retired_by_name[door].sdk_method
+            assert method in (expected, expected.removeprefix("_")), (
+                f"`{door}` declares sdk_method={method!r} — it must drive "
+                f"{expected!r} (or its public twin), or the retired shim answers a "
+                "different capability than the container that replaced it")
+            assert callable(getattr(TortoiseSDK, method, None)), (
+                f"`{door}` declares sdk_method={method!r}, which does not resolve "
+                "on TortoiseSDK — the retired door would raise at call time "
+                "(#4282/#14114)")
 
     def test_mcp_handler_error_contract(self, monkeypatch):
         """J-6: handlers return {error: message} on failure — the REAL SDK

@@ -5706,15 +5706,15 @@ _SERVER_MANAGED_EMBEDDING_MARKERS = frozenset({
 #: drop the reserved names before splatting, and `create_source` — the one door
 #: that bypasses intake — drops them itself. With every relay covered, the
 #: collision is impossible and live == replay.
-#: ``record_sink`` (#10000) is the second PER-CALL object the signature owns:
-#: the capture writer hands in a list and `_emit_event` appends the record
-#: write's OUTCOME to it, so the caller can decide a store from what the write
-#: actually did. A caller prop of that name splatted into the call would bind
-#: the parameter and silently suppress the outcome (the capture would then treat
-#: every turn as unrecorded and fall back to the graph — the safe direction, but
-#: a silent one), so it is reserved like the rest.
+#: ``record_sink`` (#10000) / ``write_sink`` (#14002): `_emit_event` appends the
+#: RECORD write's outcome, or for ``write_sink`` the CHOKEPOINT's ``LiveWrite``
+#: VERBATIM (not a "skip fact" — ``live_write.py``). A prop of either binds the
+#: parameter and suppresses that outcome; consequences DIFFER — a silent
+#: ``record_sink`` reads every turn unrecorded and falls back to the graph
+#: (safe but silent), while a silent ``write_sink`` leaves its only consumer
+#: ``hosted_api._report_narrative_home`` naming the wrong home and remedy.
 _RESERVED_EMIT_CALL_PROPS = ("type_", "new_content", "self", "aboutLinks",
-                            "record_sink")
+                            "record_sink", "write_sink")
 
 
 def _drop_reserved_emit_props(props: dict) -> list[str]:
