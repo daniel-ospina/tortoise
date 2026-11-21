@@ -189,16 +189,17 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # (`.venv/bin/python -c 'from pathlib import Path; t=Path("docs/architecture/
     # CAPABILITY-PLACEMENT-AUDIT.md").read_text(); print(t.count("`:11590`"))'` -> 3), with the site
     # lines RE-MEASURED on this document rather than carried — `grep -n '`:11590`' on the MERGED
-    # document gives `:179` / `:225` / `:651` (`:173`/`:186`/`:592` were the pre-`#14169` sites). They have moved twice since the pre-merge `:182`/`:585`
+    # document gives `:179` / `:225` / `:652` (`:173`/`:186`/`:592` were the pre-`#14169` sites, and
+    # `:173`/`:186`/`:592` are kept only as the pre-`#14169` history they are). They have moved twice since the pre-merge `:182`/`:585`
     # edition: `main`'s merge `0656b056d7` shifted two of them, the P2 fix above (which sits BETWEEN
     # them) added +2 to the third, and the two-line "five pairs as two code spans" correction
     # (#13991 review P2-A, which sits ABOVE all three) then shifted every one of them by +2 again —
     # which is why this block states the MEASUREMENT and not a delta:
-    #   :173  the header trio above — main's site, the one this row was created for;
-    #   :186  the §2.5 `:Tag`-family enumeration this branch adds, which lists all five reader
+    #   :179  the header trio above — main's site, the one this row was created for (was `:173`);
+    #   :225  the §2.5 `:Tag`-family enumeration this branch adds (was `:186`), which lists all five reader
     #         addresses (the four `sdk.py` ones plus this `mcp_server.py` one) as BARE siblings so the
     #         `_REDEFINED_13854` one-token counts are not doubled;
-    #   :592  the same branch's §2.5 provenance sentence, `:11280` -> `:11281`, later moved to `:11590`
+    #   :652  the same branch's §2.5 provenance sentence (was `:592`), `:11280` -> `:11281`, later moved to `:11590`
     #         by `#14169` — the ONE surviving `11281` spelling, kept because it is history, not an address.
     # Re-derive with `grep -n '`:11590`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` before
     # trusting this list on a later head: a line number in prose is exactly the claim this file pins
@@ -351,7 +352,9 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, '`:1292-1300`', _SSM, 1292, '_CONTROL_LEXICON_ROWS = ('),
     # --- #14043 review (finding 1, this cycle): §6.3's own two addresses were in neither list and
     # unpinned, and the header's default resolves them to the PIN — where `sdk.py:16077` is unrelated
-    # prose and `sdk.py:3801` is an EMPTY LINE. Both are one-token spellings already, so no figure
+    # prose and `sdk.py:3801` is a DIFFERENT STATEMENT (`sdk._graph_write_with_retry(`, re-opened at
+    # this head; the earlier "EMPTY LINE" claim here was the pre-`#14169` reading). Both are one-token
+    # spellings already, so no figure
     # moves (345 as-written stays 345); NON-VACUOUS: `+1` reds the content arm at both.
     # ⛔ #14087 review: the span's END was one short — `:16081` is the paragraph's PENULTIMATE line and
     # `:16082` (the line reading "turns list is that same requirement for the record-held lane.") is its
@@ -2156,8 +2159,8 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # re-review). MEASURED, not inferred: the count of `_PINS` rows at each of these heads is
     # 72 (ecb137107e) -> 77 (298d3328db, the five above) -> 80 (0a53ad23d8).
     # 80 -> 82 at the #14043 review (finding 1, this cycle): §6.3's `sdk.py:16077-16082` and
-    # `sdk.py:3801` were in neither list and unpinned, and the pin default opens on prose and on an
-    # empty line respectively. (The span landed as `:16077-16081` in #13994, which re-derived this
+    # `sdk.py:3801` were in neither list and unpinned, and the pin default opens on prose and on a
+    # DIFFERENT STATEMENT (`sdk._graph_write_with_retry(`, re-opened) respectively. (The span landed as `:16077-16081` in #13994, which re-derived this
     # document on top of its own `:Point` join; the END stayed one short until #14087 re-derived it
     # here. One ROW, one token — the row count did not move.)
     # 82 -> 83 at the #14087 review round 7 (P3): `00_index.md`'s entity-verdict row carries a
