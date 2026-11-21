@@ -341,7 +341,7 @@ Supports swapping backends: graph stores (Kuzu/Ladybug default, Neo4j, FalkorDB,
 | Behaviour | Detail |
 |---|---|
 | Grounding | Extracted entities/types are checked against the ontology **before graph nodes are built**. A match sets `ontology_valid=True` and attaches parent-class + object-property edges |
-| Modes | `annotate` (default — unmatched entities kept verbatim) / `strict` (unmatched **dropped**, with every touching edge) |
+| Modes | `ONTOLOGY_MODE=annotate` (default — unmatched entities kept verbatim) / `ONTOLOGY_MODE=strict` (unmatched **dropped**, with every touching edge). A per-call `ontology_mode` inside `ontology_config` overrides the environment value; an unrecognised value warns and falls back to `annotate` |
 | Reasoning | `ONTOLOGY_REASONING=owl_rl` expands the OWL 2 RL closure *so more things match*. Requires `cognee[ontology]`; closure is materialised in memory and cost grows with ontology size |
 | ❌ **Axioms are never evaluated** | *"Strict mode itself does no domain/range, cardinality, or disjointness checking"*; *"no reasoner runs either"* (without `owl_rl`), and even **with** `owl_rl` it *"never rejects an entity for violating an axiom"* |
 | ❌ Relationship names unchecked | *"Relationship names are never checked against the ontology's object properties, so no edge is dropped for its own sake — only for having a dropped endpoint"* |

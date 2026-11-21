@@ -32,6 +32,6 @@
 
 ## Coverage note
 
-Profiles are factual (11 dimensions + Notes & Sources). Interpretation, threat classification, the primitives matrix and the strategic implications live in `_analysis.md` (§1–§3). Raw research is bootstrapped from `_template.md`.
+Profiles are factual (11 dimensions + Notes & Sources). Interpretation, threat classification, the primitives matrix and the strategic implications live in `_analysis.md` (§1–§3, §10). Raw research is bootstrapped from `_template.md`.
 
 *Last updated: 2026-11-21.*
