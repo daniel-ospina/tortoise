@@ -740,9 +740,20 @@ def superset(graph_rows: list[dict[str, Any]],
 #: #14164 review round 2: six capability-bearing shapes returned `None` under a
 #: `-[*`-only arm, including the audit's own EP walk verbatim.
 #:
-#: ⛔ Matched against a WHITESPACE-STRIPPED snippet, so `- [r]->` and `-[r]->` are
-#: one shape rather than two — the engine accepts both spellings.
-_NO_WS = re.compile(r"\s+")
+#: ⛔ Matched against a WHITESPACE- AND BACKTICK-STRIPPED snippet, so `- [r]->` and
+#: `-[r]->` are one shape rather than two, and `` CALL `algo.pageRank`(…) `` is the
+#: same shape as `CALL algo.pageRank(…)` — the engine accepts all three spellings
+#: (this repo's own write gate documents the backticked procedure name as valid
+#: Cypher; `tortoise/projection/__init__.py:3570` carries the explicit `` `? ``).
+#:
+#: ⛔ THE BACKTICK IS THE FALSE-PASS DIRECTION, which is why it is STRIPPED rather
+#: than declared away (`#14183` round-8 review, P2/P3). A contiguous arm sees
+#: neither `- [r] -` nor a quoted procedure name, so a capability reader could
+#: space or backtick its way past every prose check and the census's derived
+#: verdict would read "no reader needs a graph capability" beside a real one —
+#: the single failure this guard exists to prevent. Measured before the strip:
+#: `CALL `algo.pageRank`(null, null)` returned `None`.
+_NO_WS = re.compile(r"[\s`]+")
 GRAPH_CAPABILITY_CYPHER = (
     "-[*",                # a variable-length traversal
     "*]",                 # a TYPED variable-length pattern, `-[r:NEXT*]->`
