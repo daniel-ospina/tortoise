@@ -142,7 +142,7 @@ exists at `ccb49741b2ec` — and **the nine that are NOT comparable are this bra
 written line sits past the pin's `sdk.py` (56,415 lines there; `git show ccb49741b2ec:tortoise/sdk.py
 | wc -l`), `sdk.py` `:61594`/`:61614` (the `:Meta` read and its `_config_reset_state` delegate, likewise
 past it — written as two code spans so they are resolved but not counted twice), `sdk.py:58923`,
-`:58265` and `:58274` (three reader cites re-derived at this head, which sits past the pin's `sdk.py`
+`:58272` and `:58274` (three reader cites re-derived at this head, which sits past the pin's `sdk.py`
 end), and `search_engine.py`'s `:7196`/`:7198`, whose written lines sit past the pin's `search_engine.py`
 (7,071 lines there; `git show ccb49741b2ec:tortoise/search_engine.py | wc -l`) — and `hosted_api.py`'s `:50935` (the `s.actor_user_id = $uid` condition, whose written line sits past the pin's `hosted_api.py`, 49,851 lines there) — all nine re-derived at
 a head that has since grown. So the drift is **128 of the 222 comparable, plus six of those nine pairs** (the three that do not exist at `main` either are `sdk.py`'s `:61594`/`:61614` and `hosted_api.py`'s `:50935`), and
