@@ -503,10 +503,12 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:2463`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:5250`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`mcp_server.py:11590`'): 1,
-    # 3: the header's BARE spelling of the same address, plus the two BARE sites the #13991 branch
-    # itself adds (§2.5's five-address enumeration and its `:11280` -> `:11590` provenance sentence) —
-    # see the row's own comment for the three line numbers. Measured on the merged document:
-    # `grep -o '`:11590`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 3.
+    # 4: the header's BARE spelling of the same address, the non-comparable enumeration in the drift
+    # header (added by #13998 — `5bb3b32518` re-pointed this address past the pin's `mcp_server.py`,
+    # which is what makes it a member of that set), plus the two BARE sites the #13991 branch itself
+    # adds (§2.5's five-address enumeration and its `:11280` -> `:11590` provenance sentence) — see the
+    # row's own comment for the four line numbers. Measured on the merged document:
+    # `grep -o '`:11590`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md | wc -l` -> 4.
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:11590`'): 4,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5720`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:8515`'): 2,
