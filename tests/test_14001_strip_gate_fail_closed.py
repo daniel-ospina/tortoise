@@ -1729,8 +1729,14 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
         )
         with pytest.raises(AssertionError) as red_missing:
             test_no_declared_entity_writer_mentions_a_dynamic_namespace()
-    assert outsider in str(red_missing.value) and "register names a writer" in str(
-        red_missing.value), (
+    # ⛔ GRADE THE PIN'S OWN MESSAGE, NOT PYTEST'S RENDER (`#14099`, review of `94890945`).
+    # Asserting `outsider in str(exc)` is a NO-OP CONJUNCT: when the offenders/missing assertion
+    # fires, pytest's rewritten-assert introspection appends `assert ['<key>'] == []` to the
+    # rendering UNCONDITIONALLY, so the key appears even after the pin's own message stops naming
+    # it (measured: dropping `{population[...]}` from the message left the arm GREEN). The message
+    # is the prefix before the rendered `assert` line; grade THAT.
+    missing_msg = str(red_missing.value).split("\nassert ")[0]
+    assert outsider in missing_msg and "register names a writer" in missing_msg, (
         f"the pin does not red — or reds without naming the key — for a register writer whose "
         f"`def` the module no longer contains: {red_missing.value}")
 
@@ -1756,8 +1762,10 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
         )
         with pytest.raises(AssertionError) as red_offenders:
             test_no_declared_entity_writer_mentions_a_dynamic_namespace()
-    assert outsider in str(red_offenders.value) and "mentions a dynamic namespace" in str(
-        red_offenders.value), (
+    # …GRADED ON THE PIN'S OWN MESSAGE, for the reason spelled out at the `missing` arm above:
+    # pytest's render supplies the key whether or not the message does.
+    offenders_msg = str(red_offenders.value).split("\nassert ")[0]
+    assert outsider in offenders_msg and "mentions a dynamic namespace" in offenders_msg, (
         "the pin does not red — or reds without naming the key — for a declared writer that "
         f"mentions a dynamic namespace, so the rule's cost is unreported: {red_offenders.value}")
 
