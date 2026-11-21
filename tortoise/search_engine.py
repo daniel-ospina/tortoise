@@ -7000,7 +7000,7 @@ def get_relationships_bounded(
     #: members walk the same operator fan-out independently.
     #: ⛔ No figure here may come from anywhere but that artifact: an earlier cut
     #: of this comment said "159 ms of a 231 ms search", and neither number is a
-    #: cell of either JSON, for the same reason ``beta_variance_sum_bound`` below
+    #: cell of either JSON, for the same reason ``beta_variance_sum_bound`` above
     #: withdraws its own. THE ARTIFACT IS THE AUTHORITY.
     _wave = _ReadWave()
 

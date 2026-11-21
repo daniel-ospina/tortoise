@@ -4,9 +4,13 @@ Two artifacts, both from `tools/read_wave_latency.py` (added by this issue). The
 answer the two halves of the issue's *Done when*: **a measured p50/p95 delta** and
 **a rank-identity verdict**.
 
-> Every number in the **three** tables below is copied from the two JSONs in this
-> directory, not from an earlier run. If a number is not in a JSON here, it is
-> not claimed here.
+> Every number in the **two result tables** below is copied from the two JSONs in
+> this directory, not from an earlier run. If a number is not in a JSON here, it
+> is not claimed here. ⚠️ The FIRST table is the exception and is not a results
+> table: it carries the corpus and provenance. `2000` Points and seed `42` are
+> cells of `ab-full-read.json` (both its `baseline` and `after` arms); `5000`
+> operator edges is a harness INPUT that appears in NEITHER JSON (`grep -c 5000`
+> is `0` in both); and the `git_sha` row is provenance, not a measurement.
 >
 > ⛔ **That rule governs the TABLES. Figures in the prose are a different class,
 > and this file has drifted on exactly that boundary before** — so the rule is
@@ -28,6 +32,10 @@ answer the two halves of the issue's *Done when*: **a measured p50/p95 delta** a
 >   variance list, are **this box's own earlier runs**, labelled as such where
 >   they appear; only `−43.479` (`verdict.total_delta_p50_ms`) is an artifact
 >   cell.
+> - **`6 reads recorded 1`** counter op is a **stub-graph probe**, not an
+>   artifact cell: it is produced by an instrumented stub graph in
+>   `test_every_wave_read_is_visible_to_the_capture_counter`, and it measures the
+>   capture counter, not latency.
 >
 > ⚠️ Earlier cuts of this note twice claimed a stronger form — that every number
 > was an artifact cell, then that no other *performance* figure was outside the
@@ -127,9 +135,11 @@ artifact's own figures for the same function are
 `verdict.member_delta.post_relationships`:
 
 - **the WAVE was ~69 % of the read** — 159 ms of a 231 ms search in the first
-  measurement, which is the figure `search_engine.py`'s own comment quotes
-  (`159 / 231 = 68.8 %`). The wave is the post-Q1a portion the re-schedule
-  covers, not the whole member.
+  measurement (`159 / 231 = 68.8 %`). ⚠️ An earlier cut of `search_engine.py`'s
+  wave comment quoted this same figure; that comment now **withdraws** it and
+  points at `ab-full-read.json` instead, so the comment is NOT a source for these
+  two numbers — this file's own history is. The wave is the post-Q1a portion the
+  re-schedule covers, not the whole member.
 - **the MEMBER was 167 ms p50 of that same 231 ms search** (`167 / 231 =
   72.3 %`). Its movement on the current head is
   `verdict.member_delta.post_relationships` in `ab-full-read.json`.

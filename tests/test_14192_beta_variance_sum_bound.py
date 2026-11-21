@@ -9,12 +9,13 @@ always going to be rejected:
 
     α+β < 1/(4·threshold) − 1        (`beta_variance_sum_bound`)
 
-⛔ **NO MILLISECOND FIGURE IS QUOTED HERE.** The committed artifacts
+⛔ **NO MILLISECOND FIGURE IS CLAIMED HERE.** The committed artifacts
 (`docs/evidence/14192-read-wave/`) measure the WHOLE function and its isolated
-A/B, never this expression alone. An earlier cut of this docstring said "160 ms
-of a 231 ms search"; neither number appears in either JSON, and `160 ms` could
-not have been right anyway — it exceeded the `159 ms` wave that was supposed to
-contain it. Both are WITHDRAWN rather than restated, which is the same rule
+A/B, never this expression alone. An earlier cut of this docstring claimed "160 ms
+of a 231 ms search" — both numbers appear below ONLY because this note withdraws
+them: neither is a cell of either JSON, and `160 ms` could not have been right
+anyway, because it exceeded the `159 ms` wave that was supposed to contain it.
+Both are WITHDRAWN rather than restated, which is the same rule
 `beta_variance_sum_bound`'s own docstring applies to its own earlier figures.
 
 The guard is only sound if it can NEVER reject a pair whose width clears the
