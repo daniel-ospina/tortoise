@@ -1707,6 +1707,46 @@ def test_a_waiver_for_a_row_that_FROZE_A_STUB_does_not_say_the_removal_IS_record
     assert "FROZE ONLY A STUB" in waived[0], waived[0]
 
 
+def test_a_waiver_over_a_STUB_ONLY_base_does_not_send_the_reader_to_the_base(
+    tree: Path,
+) -> None:
+    """The base may hold only a `.pyi`, so "restore from the base" can be impossible (review F1).
+
+    `_modules_with_a_body` filters only `__init__.py`, so a `.pyi`-only module IS in
+    `base_modules` — membership there does NOT mean the base holds the `.py`. An earlier round
+    cleared this second copy of the sentence on the opposite assumption; the shape below is the
+    counterexample: base carries only `tortoise/stubby.pyi`, this run archives that stub (the
+    writer sets `archived_from` to the `.pyi`, so `_row_froze_a_stub` is True and arm 1 refuses to
+    credit it), deletes it as the writer instructs, and passes an unnecessary waiver. The
+    diagnostic then runs and must not print a `git checkout <base> -- tortoise/stubby.py` route.
+
+    Discriminating: the old wording prints "restore the source from the base" here, and that base
+    has no `tortoise/stubby.py` for the route to resolve against.
+    """
+    (tree / "tortoise").mkdir(exist_ok=True)
+    (tree / "tortoise" / "stubby.pyi").write_text(
+        "def value() -> int: ...\n", encoding="utf-8"
+    )
+    _commit(tree, ".")
+    entry = arch.archive_symbol(
+        arch.MODULE, "tortoise.stubby", "batch-a", "review F1", root=tree
+    )
+    assert entry["archived_from"] == "tortoise/stubby.pyi", entry
+    subprocess.run(["git", "rm", "-q", "tortoise/stubby.pyi"], cwd=tree, check=True)
+    _commit(tree, ".")
+
+    problems = arch.shrink_violations(
+        tree, base_ref="HEAD~1", allowed=["module:tortoise.stubby"]
+    )
+    waived = [p for p in problems if "waives nothing" in p]
+    assert waived, f"the unconsumed waiver must still be reported: {problems}"
+    assert "from the base" not in waived[0], (
+        "the base holds only the stub, so a checkout from it cannot yield the source: "
+        f"{waived[0]}"
+    )
+    assert "a commit that still holds it" in waived[0], waived[0]
+
+
 def test_a_module_body_replaced_by_UNPARSEABLE_text_is_a_removal(tree: Path) -> None:
     """A body that no longer parses holds no statements a caller can reach (round-6 review).
 
