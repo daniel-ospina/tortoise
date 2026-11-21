@@ -119,10 +119,17 @@ _ON_LOOP_RESIDUAL: dict[str, str] = {
     # thread OWNS that lane, which is a behaviour change, not a move of WHERE the
     # same callable runs. It needs its own measurement (#14104).
     # ⚠️ This entry is keyed on a GENERIC retry wrapper with ~9 other call sites,
-    # so it exempts any FUTURE on-loop use of it at any cost. #14104's step 3
-    # replaces this with a leg-specific declaration; until then the entry says
-    # whose work it is, not that the leg is acceptable.
-    "_graph_write_with_retry": "#14104 (the capture's two provenance stamps)",
+    # so it exempts any FUTURE on-loop use of it at any cost. #14104 is CLOSED
+    # (NOT_PLANNED, 2026-11-21) and its closing comment WITHDRAWS the reason it
+    # recorded for leaving the stamps where they are: the write scope is a
+    # `ContextVar` and `_run_off_loop` confines context, so relocating them
+    # changes WHERE they run and nothing else. ⛔ So this entry is NOT a permanent
+    # exemption — it is the declaration that these two legs still run here, and
+    # the owner whose work removes them is the stamp off-load (#9350's
+    # journal-first ordering is what the move must preserve), not #14104.
+    "_graph_write_with_retry": "the capture's two provenance stamps — removal is the off-load "
+    "of `_stamp_capture_provenance` / `_capture_stamp_targets` (#14104's own closing "
+    "comment withdraws the reason it was left)",
     # NOT observed on the measured path (the checkpoint that reached it is now
     # off-loaded). Listed because the census drives ONE branch of this handler
     # and the completion gate is reached from others; an entry here is a
@@ -198,10 +205,16 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
     bar is 1 ms of TOTAL on-loop time for the request, two orders of magnitude
     below the 552 ms the mint cost.
 
-    Measured on the instrumented tree after this cycle's two commits: ONE
-    on-loop leg, `_get_registry` — the metering registry read inside
-    `record_write_ops` (#4451). Every other entry in the inherited table is a
-    declaration about OWNERSHIP that does not run on the path this test drives.
+    Which entries the census Actually OBSERVES on the path this test drives is
+    not restated here as a count. The declared set below is about OWNERSHIP
+    (which issue removes the leg); the only membership this file asserts is
+    `_get_registry` — the instrument-liveness row — plus the negative rule that
+    no UNDECLARED leg may appear at all. ⛔ An earlier cut of this paragraph
+    said "ONE on-loop leg, `_get_registry`", and the table two screens up
+    contradicted it in the same file ("measured 2.50 ms + 4.11 ms on the loop"
+    for `_graph_write_with_retry`) — a figure stated wider than the measurement
+    is the same defect this cycle's reviews kept correcting, so the number is
+    gone rather than re-copied (#14086 review F3).
 
     ⛔ Its COST is a reading, not a pin, and that distinction is deliberate:
     nothing here asserts a millisecond figure, because a wall-clock number
@@ -255,44 +268,52 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
         _probe.__doc__ = getattr(fn, "__doc__", None)
         return _probe
 
-    for name, attr in list(vars(TortoiseSDK).items()):
-        if name.startswith("__"):
-            continue
-        if isinstance(attr, staticmethod):
-            kind: type | None = staticmethod
-        elif isinstance(attr, classmethod):
-            kind = classmethod
-        elif inspect.isfunction(attr):
-            kind = None
-        else:
-            continue
-        raw = attr.__func__ if kind is not None else attr
-        if not inspect.isfunction(raw) or not _is_sync_callable(raw):
-            continue
-        saved[name] = attr
-        probe = _wrap(name, raw)
-        installed = probe if kind is None else kind(probe)
-        setattr(TortoiseSDK, name, installed)
-        # ⛔ THE INSTRUMENT CHECKS ITS OWN INSTALLATION. Re-installing under the
-        # WRONG descriptor kind is the F1 defect, and it is INVISIBLE from the
-        # measurement side: a `staticmethod` that becomes an instance method
-        # raises off the loop (on `capture-extract_*`), where this census does
-        # not record rows at all — so the capture is quietly broken and the
-        # census reads clean. Measured: reverting this line to
-        # `setattr(TortoiseSDK, name, probe)` and running the test still gives
-        # `2 passed`. A structural check is therefore the only falsifier that
-        # bites, and it costs nothing (#14086 cycle-5 review, F1'):
-        if kind is not None and not isinstance(vars(TortoiseSDK)[name], kind):
-            raise AssertionError(
-                f"the census changed {name!r}'s descriptor kind: it is a "
-                f"{kind.__name__} on TortoiseSDK and the probe installed a "
-                f"{type(vars(TortoiseSDK)[name]).__name__}. A `staticmethod` "
-                "installed as an instance method receives `self` as its first "
-                "argument and raises inside the capture being measured — off "
-                "the loop, where this census records nothing, so the run "
-                "would look clean over a broken capture.")
-
+    # ⛔ THE INSTALLATION IS INSIDE THE `try` THAT RESTORES IT. The check below
+    # RAISES on purpose — a `staticmethod` installed as an instance method is the
+    # one defect it exists to make loud — and a raise between `setattr` and this
+    # `try` left up to 381 probe-wrapped methods installed on `TortoiseSDK` for
+    # every later test in the shard, so the guard fired into a cross-file cascade
+    # that no longer named its cause. Registering each wrap in `saved` before it
+    # is installed, and wrapping the whole loop in the same `try/finally`, is what
+    # makes the restore unconditional (#14086 review F1).
     try:
+        for name, attr in list(vars(TortoiseSDK).items()):
+            if name.startswith("__"):
+                continue
+            if isinstance(attr, staticmethod):
+                kind: type | None = staticmethod
+            elif isinstance(attr, classmethod):
+                kind = classmethod
+            elif inspect.isfunction(attr):
+                kind = None
+            else:
+                continue
+            raw = attr.__func__ if kind is not None else attr
+            if not inspect.isfunction(raw) or not _is_sync_callable(raw):
+                continue
+            saved[name] = attr
+            probe = _wrap(name, raw)
+            installed = probe if kind is None else kind(probe)
+            setattr(TortoiseSDK, name, installed)
+            # ⛔ THE INSTRUMENT CHECKS ITS OWN INSTALLATION. Re-installing under the
+            # WRONG descriptor kind is the F1 defect, and it is INVISIBLE from the
+            # measurement side: a `staticmethod` that becomes an instance method
+            # raises off the loop (on `capture-extract_*`), where this census does
+            # not record rows at all — so the capture is quietly broken and the
+            # census reads clean. Measured: reverting this line to
+            # `setattr(TortoiseSDK, name, probe)` and running the test still gives
+            # `2 passed`. A structural check is therefore the only falsifier that
+            # bites, and it costs nothing (#14086 cycle-5 review, F1'):
+            if kind is not None and not isinstance(vars(TortoiseSDK)[name], kind):
+                raise AssertionError(
+                    f"the census changed {name!r}'s descriptor kind: it is a "
+                    f"{kind.__name__} on TortoiseSDK and the probe installed a "
+                    f"{type(vars(TortoiseSDK)[name]).__name__}. A `staticmethod` "
+                    "installed as an instance method receives `self` as its first "
+                    "argument and raises inside the capture being measured — off "
+                    "the loop, where this census records nothing, so the run "
+                    "would look clean over a broken capture.")
+
         r = client.post("/v1/sessions", json={"conversation": _CONV})
     finally:
         for name, original in saved.items():
