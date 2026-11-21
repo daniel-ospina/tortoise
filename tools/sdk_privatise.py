@@ -380,14 +380,15 @@ SWEEP_NAMES = 66
 #: 40-character sha IS served — `git fetch --depth=1 <url> <full sha>` in an EMPTY BARE repo returns
 #: the commit, measured. So the fragility is narrower than "unreproducible": the address works only
 #: written out in full, and reads as broken in the form this block normally prints it in. The rule
-#: therefore stands on what IS measured — no branch and no `main` reaches such a commit, so it sits
-#: outside every BRANCH history a reader browses (it IS inside `refs/pull/14108/head`'s, which is this
+#: therefore stands on what IS measured — no REMOTE branch and no `main` reaches such a commit (a
+#: leftover LOCAL branch may still contain it; the remote ref was deleted on merge), so it sits
+#: outside every branch history the repo PUBLISHES (it IS inside `refs/pull/14108/head`'s, which is this
 #: paragraph's own point, stated earlier in it — ⛔ NOT "four lines above", as an earlier draft of
 #: this clause said: that offset does not reproduce, and an offset is the same RELATIVE-REFERENCE
 #: class this block fixes below by naming the tree instead, since it rots as the prose above grows)
 #: — and not on a `gc` sweep that never happens: which is why
 #: this note points at the ISSUE NUMBER, and reserves the sha for the one place where the ADDRESS is
-#: the claim (the `#14068` attribution below, where it is written out and its limits stated).
+#: the claim (the `#14068` attribution below, where it is written out and its limits stated)).
 #: ⛔ The −6 is verified as an ATTRIBUTION and not as a direction: the residue row sets were
 #: MEASURED on both trees and diffed row by row (`py_files()` → `edits_for()` → `residue` on
 #: `origin/main`'s own tree and on this one), and `poisoned.update` 6 → 0 is the ONLY row that
@@ -532,7 +533,7 @@ SWEEP_NAMES = 66
 #: figure for the revision it names, never a stale claim about `main`'s head. ⛔ It names the TREE and
 #: not "the pair THIS head pins", which is what it said before a merge re-cut this head to
 #: `(11844, "70d6cfdcd8b769e4")` and left the sentence asserting a pair this head does not carry —
-#: the same relative-reference class this paragraph fixes one line below for `e022fc935b`, and a
+#: the same relative-reference class this paragraph fixes above for `e022fc935b`, and a
 #: reader should not have to reconcile it against this block's own pin (raised by review).
 #: The recurrence `#14062` and `#14058` document (the pin graded on PULL REQUESTS only) is real, but
 #: an earlier draft asserted it as a live red and a later review falsified that (raised by review);
