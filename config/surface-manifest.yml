@@ -398,23 +398,6 @@ response_fields:
   unchanged_when_off: n/a — always emitted; the flag is never consulted, so it cannot be off. `results` and `count`
     keep their exact prior values and the parameter set is unchanged
 - response: tortoise_search
-  field: state_question
-  emitted_when: 'the hosted GET /v1/search body, ONLY when a STATE question was recognised and NOT routed — the
-    relevance read kept its rows, and this key says so: `{routed: false, population, reason, cue, hint}`. `reason`
-    is `shape` (the question carries a qualifier or an attributive ending word the ended population cannot apply)
-    or `family` (a shape fired on a family with no lifecycle, e.g. an Event — design §8). `cue` names the words
-    the recogniser saw, `population` names what was NOT served, and `hint` is `tortoise/state_intent.py::MISSED_ROUTE_HINT`
-    (or `MISSED_ROUTE_FAMILY_HINT` for the family arm) — the ONE home, so the served text and the read path cannot
-    describe the boundary differently (#14033). It answers "did the router decline my state question?", so an empty
-    or unrelated reply stops being indistinguishable from "nothing has ended". NOT flag-gated and always computed:
-    an absent key is the positive claim that no ending cue was recognised, which is exactly the claim a caller must
-    be able to rely on. The MCP tool `tortoise_search` returns a bare list and takes no sink, so it does not carry
-    the field, and no PUBLIC SDK method exposes the sink either — the same payload rides the PRIVATE `TortoiseSDK._tortoise_fts_query(...,
-    read_status_out=...)` sink under `read_status_out["state_question"]`. Wrapping either surface is a declared
-    return-type change and therefore an MCP Surface Approval decision, not a consequence of this row'
-  unchanged_when_off: n/a — always computed; a query in which no ending cue is recognised produces no key, so `results`,
-    `count`, `truncated` and `status` keep their exact prior values
-- response: tortoise_search
   field: total_available
   emitted_when: 'the hosted GET /v1/search body, ONLY when `truncated` is true AND the count is EXACT — i.e. no
     retrieval leg filled its own window (len(candidates) < str_limit) and every ASKED leg answered (a leg that never
