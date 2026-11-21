@@ -679,13 +679,39 @@ _COPULA_SUBJECT = (
     # the word DIRECTLY before it is not a pre-determiner and not `of`:
     # `is all the data` (stacking) and `is one of the exports` (partitive) do not fire;
     # `is every report the board archived` and `is the report the board archived` do.
+    # ⛔ AND THE DETERMINER LIST WAS NARROWER THAN THE PROSE ABOVE CLAIMED (round-20
+    # review, P2, measured). "a subject whose tail is a SECOND NOUN PHRASE is refused"
+    # was FALSE for a second NP opening with a POSSESSIVE (`his|her`) or with a
+    # PRE-DETERMINER, and for a second NP with NO determiner at all — five content
+    # questions still ROUTED to the whole ended population with `signal=None`:
+    #
+    #   `is the report his team archived`               <- possessive second NP
+    #   `is the contract every employee signed archived` <- pre-determiner second NP
+    #   `is the report each manager reviewed archived`  <- …or `each`
+    #   `is the dashboard all customers use deprecated` <- …or `all`
+    #   `is the export customers requested archived`    <- second NP with NO determiner
+    #
+    # The list is now complete over the determiners this module already recognises
+    # elsewhere (`his|her` is the sibling list's spelling) and over the pre-determiners,
+    # and the determiner-less case gets its own narrow anchor: an `-ed` word immediately
+    # followed by the ending participle is a FINITE VERB inside the subject followed by
+    # the question's own predicate, which is what a determiner-less reduced relative is.
+    # ⛔ THE RECALL THIS COSTS IS STATED: a subject whose own modifier is an `-ed`
+    # ADJECTIVE immediately before the participle (`is the deprecated export archived`
+    # routes — the adjective is not followed by the participle) is kept, but a two-verb
+    # spelling that reads as a clause is refused, and a short refusal is SILENT (the
+    # notice-scope limit above), which is the price of not serving the whole population.
     r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){1,5}"
     r"(?:that|which|who|whom|whose|whether|because|since|when|while|if|unless|given|"
     r"where|whereas|after|before|now|what|how|why)(?![-/])\b)"
     r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){0,4}"
     r"(?!(?:all|both|half|such|many|most|some|any|no|each|every|of)\b)"
     r"[a-z0-9][a-z0-9'’._/-]*\s+"
-    r"(?:the|a|an|our|my|its|their|these|those|this|that|your)(?![-/])\b)"
+    r"(?:the|a|an|our|my|its|their|these|those|this|that|your|his|her|"
+    r"all|both|half|such|many|most|some|any|no|each|every)(?![-/])\b)"
+    # …and the determiner-less reduced relative: a finite `-ed` verb inside the subject
+    # IMMEDIATELY followed by the ending participle (`customers requested archived`).
+    rf"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){{0,4}}[a-z][a-z0-9'’._/-]*ed\s+(?:{_ENDING_WORDS})\b)"
     # ⛔ AND A SUBJECT PRONOUN MAY ONLY **BE** THE SUBJECT (round-18 review, P1,
     # measured — the SAME #14033 defect still open after round 17's two guards, in the
     # same worst direction). Both guards above miss it: a REDUCED RELATIVE whose

@@ -329,6 +329,11 @@ SELECTED = [
     ("has none of the data been archived", "ended", "is_copula"),
     ("is all of the data archived", "ended", "is_copula"),
     ("is most of our reports archived", "ended", "is_copula"),
+    # …and the `-ed` ADJECTIVE modifier the new determiner-less anchor must NOT refuse:
+    # the guard fires only when the `-ed` word is IMMEDIATELY followed by the ending
+    # participle, so an adjective modifier of the subject's own head noun still routes.
+    # This is the recall the anchor costs, kept and pinned rather than assumed.
+    ("is the deprecated export archived", "ended", "is_copula"),
 ]
 
 
@@ -658,6 +663,20 @@ NOT_SELECTED = [
     "is both reports the board archived",
     "is some report the board archived",
     "is no report the board archived",
+    # ── the same class with a POSSESSIVE / PRE-DETERMINER / NO determiner (round-20
+    # review, P2) ────────────────────────────────────────────────────────────
+    # The prose claimed "a subject whose tail is a second noun phrase is refused", and
+    # the closed determiner list was narrower than that claim: `his|her` and the
+    # pre-determiners were absent, and a second NP with NO determiner needed a different
+    # anchor (`-ed` verb immediately before the participle). All five routed to the whole
+    # ended population with `signal=None` before this round. The three long ones report
+    # `is_copula_long_subject` (pinned in NOTICE_ONLY below); the two short ones are
+    # SILENT, which is the stated notice-scope limit.
+    "is the report his team archived",
+    "is the contract every employee signed archived",
+    "is the report each manager reviewed archived",
+    "is the dashboard all customers use deprecated",
+    "is the export customers requested archived",
     # …the same class on the `which` shape, which is the row the pre-fix detector
     # also served (round-3 review, P1: *"`which claims were retracted by legal`
     # → `by legal` dropped"*). It is pinned HERE because the user-facing MCP
@@ -768,6 +787,11 @@ NOTICE_ONLY = [
     # notice names (`is_copula_long_subject`). Its short siblings stay in NOT_SELECTED
     # alone, which is the stated silent part of the recall loss.
     "is all the data the board archived",
+    # …and the three LONG rows of the possessive / pre-determiner / determiner-less
+    # class (round-20 review, P2): each reports `is_copula_long_subject`.
+    "is the contract every employee signed archived",
+    "is the report each manager reviewed archived",
+    "is the dashboard all customers use deprecated",
 ]
 
 
