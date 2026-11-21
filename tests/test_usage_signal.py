@@ -1574,7 +1574,10 @@ def test_no_graph_dependency() -> None:
     # WHOLE derivation to stay green. Measured on the previous head: a keep-list of six
     # literals — the three named controls plus the three roots the old `projection` row
     # named — left the probe blind to `tortoise.acl_graph_users` and
-    # `tortoise.hosted_backup` and was still **102 passed**; it reds here.
+    # `tortoise.hosted_backup` and was still **102 passed**. It reds wherever the
+    # witness reaches — matcher, child print, parent parse — and the production verdict
+    # below is graded across a clean and a leaking import in ONE comparison, so a
+    # filter there reds the leaking half instead of silencing the clean one.
     for _root in _probe_forbidden():
         assert _root in _probe(f"import {_root}"), (
             f"`import {_root}` puts `{_root}` in `sys.modules`, so the probe must "
@@ -1605,6 +1608,38 @@ def test_no_graph_dependency() -> None:
         "the matcher is not observing this run at all (it answers empty for the "
         "subject's own import, which is the leak this leg exists to detect), and an "
         "EXTRA name is that leak (#14118 item 1)")
+
+    # ⛔ AND THE VERDICT IS ALSO GRADED ACROSS TWO IMPORTS, because the injected witness
+    # above answers "is this run OBSERVED", not "would a REAL leak be SEEN". Measured on
+    # the head before either row: a filter keeping only `set(injected) | <six literals>`
+    # left `leaked == {'falkordb'}` satisfied while a module-level
+    # `import tortoise.hosted_backup` added to `usage_signal.py` shipped GREEN — a real,
+    # executing leak, and the probe is the only leg that can see it (the AST ban does
+    # not cover a module-level import in the module under audit). The leaking import
+    # carries no injected names, so that filter empties THIS row instead of hiding it.
+    _cases = {
+        "from tortoise import usage_signal": set(),
+        "import tortoise.hosted_backup": {"tortoise.hosted_backup"},
+    }
+    # AND the leaking case must STAY: deleting it would quietly turn the control off, and
+    # a removal is invisible to the comparison below.
+    assert _cases.get("import tortoise.hosted_backup") == {"tortoise.hosted_backup"}, (
+        "the table must carry the known-leaking import as its positive control — without "
+        "it the comparison below is satisfied by an empty expectation in both rows, "
+        "which is the exact shape this row exists to prevent")
+    _observed_cases = {stmt: _matching(_probe_modules(stmt)) for stmt in _cases}
+    assert {"tortoise", "tortoise.usage_signal"} <= set(
+        _probe_modules("from tortoise import usage_signal")
+    ), (
+        "the production import did not even report itself — an emptied stream makes the "
+        "table below vacuous")
+    assert _observed_cases == _cases, (
+        f"the probe disagrees with its own expectations: {_observed_cases}. "
+        f"`import tortoise.hosted_backup` MUST come back as {{'tortoise.hosted_backup'}} "
+        f"— if that half is wrong the detector is broken, not the tree — and "
+        f"`from tortoise import usage_signal` must come back empty. A filter or slice on "
+        f"this expression reds the leaking half instead of silencing the clean one "
+        f"(#14118 item 1)")
 
 
 def test_the_no_graph_guard_catches_relative_imports() -> None:
