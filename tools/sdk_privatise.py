@@ -351,7 +351,10 @@ SWEEP_NAMES = 66
 #: arithmetic on the pin: `11831, "1aef9c61f81faf39"` is what `main`'s own tree derives and
 #: `11825, "539914480e400722"` is what THIS tree derives. The recurrence is the one `#14062`
 #: documents: the pin is graded on PULL REQUESTS only, `main` merged `#14065` with nothing
-#: grading it, and `--check` is therefore RED on `main` today.
+#: grading it, and `--check` was therefore RED on `main` at `f392bb67d5` — that tree derives 11831
+#: against its own 11829 pin and `--check` exits 1 there, measured. ⛔ Scoped to that rev and NOT
+#: stated in the present tense: it was written as "`--check` is therefore RED on `main` today",
+#: which `main` has since falsified by re-cutting to a pin it derives (measured, `--check` exit 0).
 #: The delta from `main`'s tree is −6 and it is a REMOVAL, not an absorption: SIX of the
 #: eight rows the `#14062` block above declared are the `poisoned.update` shape, and this lane
 #: deleted the shape rather than declaring it. The binding-poison arms in
@@ -380,11 +383,12 @@ SWEEP_NAMES = 66
 #: merge-base --is-ancestor ac57b2d38a 8610ed965c` says so, measured — so the +2 was already beneath
 #: the re-cut and `8610ed965c`'s own tree derives 11831. The 11829 pin was therefore STALE ON
 #: ARRIVAL, not stale from a later drift. "It drifted afterwards" would imply a window in which the
-#: pin was correct, and no such window existed; so `main`'s own tree measures 11831 against its own
-#: 11829 pin, and `--check` is RED on `main` right now (the same recurrence `#14062` documents: the
-#: pin is graded on PULL REQUESTS only, so `main` drifts and every open PR is then graded against a
-#: stale number). The two rows are `found.update` 10 → 12, both in `tests/test_usage_signal.py`,
-#: added by `ac57b2d38a` (`#14065`) — already an ancestor of the re-cut commit, so it sits between
+#: pin was correct, and no such window existed; so `main`'s own tree at `f392bb67d5` measures 11831
+#: against its own 11829 pin, and `--check` exits 1 THERE (the same recurrence `#14062` documents:
+#: the pin is graded on PULL REQUESTS only, so `main` drifts and every open PR is then graded
+#: against a stale number). The two rows are `found.update` 10 → 12, both in
+#: `tests/test_usage_signal.py`, added by `ac57b2d38a` (`#14065`) — already an ancestor of the re-cut
+#: commit, so it sits between
 #: the 11821 pin and this tree, NOT "after" the 11829 one. Both sit on
 #: a plain `set` fed by a generator expression, so neither is a typed reference to a swept name
 #: (`typed references still pointing at a public name: 0` on this tree).
@@ -428,12 +432,15 @@ SWEEP_NAMES = 66
 #: So `graph.query` is **276** here, `super().query` **68**, `client.delete` **43** — read with
 #: `--report`, not with a grep. A raw whole-tree grep is NOT that reading: it counts OCCURRENCES,
 #: prose included, not the pinned residue ROW, and it counts this block's OWN prose about the
-#: shape — so any figure it prints is a function of the sentence quoting it, and NO head figure is
-#: stable. It is quoted here only against a NAMED revision, and with the pattern that actually
-#: produced the number: `git grep -hoE '\bclient\.delete\b' <rev> -- '*.py'` reads **48** at
-#: `2fe01fc775e`. ⛔ NO **GREP** FIGURE FOR THIS HEAD IS PUBLISHED, DELIBERATELY — the AST `--report`
-#: rows six lines above ARE head figures and are fine, because an AST count does not read this
-#: block's prose; only the grep does. The reason is measured:
+#: shape — so any WHOLE-TREE figure it prints is a function of the sentence quoting it, and no
+#: whole-tree head figure is stable. It is quoted here only against a NAMED revision, and with the
+#: pattern that actually produced the number: `git grep -hoE '\bclient\.delete\b' <rev> -- '*.py'`
+#: reads **48** at `2fe01fc775e`. ⛔ NO **WHOLE-TREE** GREP FIGURE FOR THIS HEAD IS PUBLISHED,
+#: DELIBERATELY, and the qualifier matters because an earlier draft of this very sentence dropped
+#: it and was therefore false: the AST `--report` rows quoted above ARE head figures and are fine
+#: (an AST count does not read this block's prose, only the grep does), and the SCOPED grep below
+#: also publishes a head figure — **45** — because excluding this file makes it stable. What is
+#: withheld is the WHOLE-TREE figure, the only one the prose moves. The reason is measured:
 #: a PREVIOUS DRAFT named the wrong pattern here — it published its figures beside
 #: `\bclient\.(query|update|delete)\b`, which also counts the 3 `client.query` hits and therefore
 #: reads **51** at that same rev, not 48 — a figure that does not reproduce against the command in
@@ -443,10 +450,12 @@ SWEEP_NAMES = 66
 #: STABLE number is the SCOPE, not the digit: excluding this file
 #: (`… -- '*.py' ':!tools/sdk_privatise.py'`) that same `\bclient\.delete\b` grep reads **45** at
 #: BOTH `2fe01fc775e` AND this head — the prose population did not move at all, so the whole-tree
-#: movement is entirely this block's own words, which is precisely why no head figure is published.
+#: movement is entirely this block's own words, which is precisely why no WHOLE-TREE head figure is
+#: published.
 #: ⛔ AND "46" WAS REAL: `git grep -hoE '\bclient\.delete\b' ad79129cb5 -- '*.py'` reads **46** —
 #: `ad79129cb5` being the very tree whose `graph.query` the old sentence quoted as "274 here"
-#: (that reading is cited nine lines above). Its defect was that the sentence shipped on LATER
+#: (that reading is cited above, in the `graph.query` bullet of this block). Its defect was that the
+#: sentence shipped on LATER
 #: trees that read 48, i.e. STALE ON ARRIVAL, not that the number was invented — an earlier draft of
 #: this correction over-charged it and is falsified by the same grep (raised by review). So the
 #: condition this gate exists to catch — "a reference shape that was not there when this sweep was
