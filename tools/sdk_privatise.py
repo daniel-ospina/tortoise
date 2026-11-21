@@ -429,7 +429,9 @@ SWEEP_NAMES = 66
 #: shape — so any figure it prints is a function of the sentence quoting it, and NO head figure is
 #: stable. It is quoted here only against a NAMED revision, and with the pattern that actually
 #: produced the number: `git grep -hoE '\bclient\.delete\b' <rev> -- '*.py'` reads **48** at
-#: `2fe01fc775e`. ⛔ NO FIGURE FOR THIS HEAD IS PUBLISHED, DELIBERATELY, and the reason is measured:
+#: `2fe01fc775e`. ⛔ NO **GREP** FIGURE FOR THIS HEAD IS PUBLISHED, DELIBERATELY — the AST `--report`
+#: rows six lines above ARE head figures and are fine, because an AST count does not read this
+#: block's prose; only the grep does. The reason is measured:
 #: a PREVIOUS DRAFT named the wrong pattern here — it published its figures beside
 #: `\bclient\.(query|update|delete)\b`, which also counts the 3 `client.query` hits and therefore
 #: reads **51** at that same rev, not 48 — a figure that does not reproduce against the command in
@@ -453,10 +455,20 @@ SWEEP_NAMES = 66
 #: "its whole diff is figure literals: stripping every digit run from each `-`/`+` pair leaves the
 #: pair identical", and that is FALSE at this head: this PR also rewrites
 #: `tests/test_13337_cache_graph_declaration.py` (the `_capture` helper and the anchors), so the
-#: digit-stripped `-`/`+` multisets differ in both files. The conclusion still holds, by a
-#: measurement that does reproduce: `--repin` reads the SAME pair — `(11839, '0a7e60fa05aa31b9')` —
-#: on `origin/main` (`2fe01fc775e`) and on this head, so the residue population is identical across
-#: this lane's diff and nothing in it moves a receiver row (raised by review).
+#: digit-stripped `-`/`+` multisets differ in both files. The conclusion still holds, but it must be
+#: SCOPED, and an earlier draft of THIS sentence got it wrong: it said `--repin` reads the same pair
+#: "on `origin/main` and on this head, so … nothing in it moves a receiver row", which CONTRADICTED
+#: the re-cut paragraph FURTHER DOWN THIS BLOCK ("The −1 is THIS LANE's own"). ⛔ No line distance is
+#: quoted on purpose: an earlier draft of this very sentence said "36 lines later", the measurement
+#: was 38, and the figure moves whenever this block is edited — the same self-falsifying shape the
+#: paragraphs above describe. Measured, and both halves
+#: are true of different trees: `--repin` reads the SAME pair — `(11839, '0a7e60fa05aa31b9')` — on
+#: `origin/main` (`2fe01fc775e`) AND on the capture rewrite's PARENT head (`83e94826a8a`), so
+#: everything up to that point moves no receiver row; the ONE row this lane's later capture rewrite
+#: moves is `seen.update` **102 → 101** (the re-cut paragraph below attributes it and states why a
+#: `dict` accumulator in a test is a swept receiver). ⛔ A reader must not have to reconcile two
+#: paragraphs that disagree, which is the "stale on arrival" class this block polices (raised by
+#: review).
 #: ⛔ THE "GATE IS RED HERE" NARRATION IS SCOPED, NOT PRESENT-TENSE. That paragraph described
 #: `ad79129cb5`, where the pin read 11825 while that tree derived 11833 — `--check` red. It is NOT
 #: the state of `main` TODAY: `origin/main` (`2fe01fc775e`) pins `(11839, "0a7e60fa05aa31b9")`,
