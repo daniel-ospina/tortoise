@@ -131,6 +131,7 @@ import json
 import re
 import subprocess
 import tomllib
+import unicodedata
 from functools import cache
 from pathlib import Path
 
@@ -648,7 +649,12 @@ def live_return(entry: dict, surface: dict, root: Path | None = None) -> str | N
         #     reverse that rule and un-red a shape the operator is meant to fix by deleting the
         #     stub — which IS the green route `archive/README.md` gives, so the finding's "no green
         #     route" does not hold either.
-        for candidate in (f"{base}.py", f"{base}/__init__.py", f"{base}.pyi"):
+        for candidate in (
+            f"{base}.py",
+            f"{base}/__init__.py",
+            f"{base}.pyi",
+            f"{base}/__init__.pyi",
+        ):
             if candidate not in surface.get("modules", set()):
                 continue
             if carriers is not None and symbol not in carriers:
@@ -779,6 +785,22 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _is_a_stated_reason(text: str) -> bool:
+    """Does *text* actually SAY something a reader can read? (round-18 review, P2 — measured)
+
+    `str.strip()` answers a different question. ZWSP (`\u200b`), LRM (`\u200e`) and BOM
+    (`\ufeff`) are not `isspace()`, so each survived `.strip()` and was ACCEPTED as a removal's
+    WHY while rendering as nothing — a record that reads as "a departure somebody checked" and
+    says nothing. A reason counts only when one of its characters is in a category that renders:
+    neither a separator (`Zs`/`Zl`/`Zp`), a control (`Cc`) nor a format/zero-width character
+    (`Cf`).
+    """
+    return any(
+        not ch.isspace() and unicodedata.category(ch) not in {"Cc", "Cf", "Zs", "Zl", "Zp"}
+        for ch in text
+    )
+
+
 def file_violations(entries: list[dict], archive_dir: Path | None = None,
                     root: Path | None = None) -> list[str]:
     """Every way the files on disk and the manifest index disagree."""
@@ -863,10 +885,10 @@ def file_violations(entries: list[dict], archive_dir: Path | None = None,
                 "sha (or is the all-zero placeholder) — the restore anchor was not recorded "
                 "(a guess is not a record)"
             )
-        if not str(entry.get("reason") or "").strip():
+        if not _is_a_stated_reason(str(entry.get("reason") or "")):
             out.append(
-                f"{symbol}: no `reason` — a reader cannot tell why it was removed (a blank or "
-                "whitespace-only reason is not one)"
+                f"{symbol}: no `reason` — a reader cannot tell why it was removed (a blank, "
+                "whitespace-only or invisible-character reason is not one)"
             )
 
     if archive_dir.exists():
@@ -1103,7 +1125,19 @@ def _init_carries_a_body(text: str) -> bool:
         node
         for node in body
         if not isinstance(node, ast.Pass)
-        and not (isinstance(node, ast.Expr) and not isinstance(node.value, _effectful))
+        # ⛔ THE RULE IS OVER THE SUBTREE, NOT THE OUTERMOST NODE (round-18 review, P3 — measured).
+        # Testing `isinstance(node.value, _effectful)` answers "is the OUTER node a call", which is
+        # a different question: `f"{register()}"` and `[register(x) for x in y]` both CALL, and
+        # both answered "inert", so a module whose only statement was one of them had its deletion
+        # CANCELLED as scaffolding while code with a side effect left the product — and the
+        # comment above plus `archive/README.md` both said the opposite. Walk the expression.
+        # (A `lambda: f()` is the one shape this now keeps as content although calling it is what
+        # would have the effect — over-block, never a fail-open, and a lambda statement is not real
+        # code.)
+        and not (
+            isinstance(node, ast.Expr)
+            and not any(isinstance(sub, _effectful) for sub in ast.walk(node.value))
+        )
     ]
     return bool(body)
 
@@ -1149,7 +1183,15 @@ def _carrier_carries_a_body(root: Path, sha: str, path: str) -> bool:
     the same fail-closed reading `_modules_with_a_body` documents.
     """
     if path.endswith(".pyi"):
-        return True
+        # ⛔ BY CONTENT, NOT BY SUFFIX (round-18 review, P2 — measured). A suffix test made a
+        # 0-BYTE or comment-only `.pyi` count as the module's code, so deleting it was `MODULE
+        # REMOVED`, the prescribed remedy (`archive module <dotted>`) froze an EMPTY block, and
+        # `file_violations` then red that block for holding no code — a false block with no way
+        # out (CI passes no waiver). The rule above it ("a `.pyi` COUNTS as the module's code") is
+        # about a STUB, and a real stub is a `FunctionDef`, so this still counts it; an empty file
+        # declares no surface at all.
+        source = _git_blob(root, sha, path)
+        return source is None or _init_carries_a_body(source)
     source = _git_blob(root, sha, path)
     return source is None or _init_carries_a_body(source)
 
@@ -1807,8 +1849,16 @@ def shrink_violations(
             root, module, head_paths_by_module, base_paths_by_module
         ):
             continue
-        base_text = _git_blob(root, sha, base_carrier)
-        if base_text is None or not _init_carries_a_body(base_text):
+        # ⛔ THE BASE SIDE ASKS THE WHOLE CARRIER SET, LIKE ARM 1 (round-18 review, P0 — a removal
+        # graded GREEN). This gate read ONE carrier — `base_paths_by_module[module]`, the
+        # lexicographically first non-`.pyi` path — and `.` (46) sorts before `/` (47), so a
+        # body-less leftover `tortoise/x.py` beat the real `tortoise/x/__init__.py`: arm 1b called
+        # the BASE "scaffolding" and `continue`d, so emptying the `__init__.py` IN PLACE was GREEN
+        # in every arm with the body in no file under `archive/` (measured, three shapes; the repo
+        # SHIPS the pairing — `tortoise/projection.py` beside `tortoise/projection/__init__.py`).
+        # Arm 1 was fixed for exactly this in round 23 (`base_body_modules`); the fix went to the
+        # sibling gate and not to the shared question, so the arm one gate over kept the defect.
+        if module not in base_body_modules:
             continue  # scaffolding on BOTH sides: a placeholder that stayed a placeholder
         key = (MODULE, module)
         # HOW this tree's module file stopped carrying code: the stub spelling, or the body-less
@@ -2439,6 +2489,7 @@ def _module_source(root: Path, symbol: str) -> list[tuple[str, str, str | None]]
     rel = symbol.replace(".", "/") + ".py"
     package_rel = symbol.replace(".", "/") + "/__init__.py"
     stub_rel = symbol.replace(".", "/") + ".pyi"
+    package_stub_rel = symbol.replace(".", "/") + "/__init__.pyi"
     path = root / rel
     if not path.exists():
         # ⛔ A PACKAGE is archived by its DOTTED path and its source is `<dotted>/__init__.py`.
@@ -2459,10 +2510,19 @@ def _module_source(root: Path, symbol: str) -> list[tuple[str, str, str | None]]
             # over from the package fallback above (round-7 review).
             if (root / stub_rel).exists():
                 rel, path = stub_rel, root / stub_rel
+            elif (root / package_stub_rel).exists():
+                # ⛔ THE FOURTH SPELLING (round-18 review, P2 — measured). `module_name` strips
+                # `.pyi`, so `<dotted>/__init__.pyi` IS a carrier of the module to arm 1 and arm
+                # 1b — both red it — but this resolution knew only three spellings, so the
+                # printed remedy was REFUSED ("no stub at tortoise/pp.pyi") and the red had no
+                # route at all. One suffix over from the package fallback above, and the same
+                # class: the gate reds a shape the writer cannot freeze.
+                rel, path = package_stub_rel, root / package_stub_rel
             else:
                 raise ArchiveRefused(
-                    f"module {symbol} has no file at {rel}, no package at {package_rel} and no "
-                    f"stub at {stub_rel} — nothing to archive"
+                    f"module {symbol} has no file at {rel}, no package at {package_rel}, no "
+                    f"stub at {stub_rel} and no package stub at {package_stub_rel} — nothing to "
+                    "archive"
                 )
     try:
         source = path.read_text(encoding="utf-8")
@@ -2641,10 +2701,18 @@ def archive_symbol(
     # through: the row was written carrying `"reason": "   "` and `file_violations` accepted it,
     # so the one field a future reader consults for WHY read as checked while saying nothing —
     # the same hole the pairing guards name for `--flag` ("an unexplained removal could be waived
-    # by pressing space"). The reason is NORMALISED in place, so the record cannot keep the
-    # padding that made the check pass.
-    reason = (reason or "").strip()
-    if not batch or not reason:
+    # by pressing space"). `str.strip()` was not enough either (round-18 review, P2 — measured):
+    # ZWSP `\u200b`, LRM `\u200e` and BOM `\ufeff` are not `isspace()`, so each was ACCEPTED and
+    # rendered as nothing, and a non-`str` reason raised a bare `AttributeError` out of a function
+    # whose other refusals are `ArchiveRefused`. The reason is NORMALISED in place, so the padding
+    # that made it pass cannot survive into the record.
+    if not isinstance(reason, str):
+        raise ArchiveRefused(
+            f"reason must be text, not {type(reason).__name__} — a record's WHY is what a future "
+            "reader consults"
+        )
+    reason = reason.strip()
+    if not batch or not _is_a_stated_reason(reason):
         raise ArchiveRefused("a batch slug and a reason are required: they are what a reader has")
     if not _BATCH_RE.match(batch):
         raise ArchiveRefused(
