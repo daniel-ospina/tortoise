@@ -1017,6 +1017,49 @@ def _artifact_percentages(art) -> set[str]:
     return out
 
 
+def _pp_terms(text: str) -> set[str]:
+    r"""Every `pp` figure a text states — including a RANGE's lower bound.
+
+    ⛔ `re.findall(r"(\d+\.\d) pp")` can only see the number immediately before
+    ` pp`, so in `34.8 – 36.0 pp` the `34.8` was unguarded: wronging both range
+    lower bounds in the README, §9.2 and the changelog left the suite green
+    (#14162 round 4; measured GREEN on 7 mutants). A range states TWO figures and
+    both are claims about the artifact.
+    """
+    terms = set(re.findall(r"(\d+\.\d) pp(?![/\w])", text))
+    for lower, upper in re.findall(r"(\d+\.\d) ?[–-] ?(\d+\.\d) pp(?![/\w])", text):
+        terms.update((lower, upper))
+    return terms
+
+
+def _section(text: str, start: str, end_prefix: str = "## ") -> str:
+    """One heading's slice — heading line to the next heading of that level."""
+    lines = text.splitlines()
+    at = next((i for i, ln in enumerate(lines) if ln.startswith(start)), None)
+    assert at is not None, f"no heading starting {start!r} — this pin has lost its subject"
+    for i in range(at + 1, len(lines)):
+        if lines[i].startswith(end_prefix):
+            return "\n".join(lines[at:i])
+    return "\n".join(lines[at:])
+
+
+def _m5_documents():
+    """Every surface that restates the record's figures, sliced to M5's own text.
+
+    ⛔ The two documents were read by ONE assertion (the `:Point` peak's interval),
+    so §9.2's prose and the changelog's pp figures could be mutated with the whole
+    suite green — and `tests/test_window_quality_m2.py`'s scan was (correctly)
+    bounded before §9.2, so nothing else reached them. `#14196`'s re-cut moves
+    exactly these arm-derived figures: the README would red and these two would not.
+    """
+    return [
+        ("README.md", README.read_text()),
+        ("SEARCH-ARCHITECTURE.md §9.2", _section(ARCH.read_text(), "### 9.2 ")),
+        ("SEARCH-ARCHITECTURE-CHANGELOG.md `#14015`",
+         _section(ARCH_CHANGELOG.read_text(), "## `#14015`")),
+    ]
+
+
 def test_no_record_percentage_is_outside_the_artifact():
     """The membership half — a figure that appears NOWHERE in the artifact.
 
@@ -1025,11 +1068,11 @@ def test_no_record_percentage_is_outside_the_artifact():
     `20.8 %` this round found before any table rule would.
     """
     allowed = _artifact_percentages(_artifact()) | _NON_ARTIFACT_FIGURES
-    text = README.read_text()
-    for figure in sorted(set(re.findall(r"(\d+\.\d) %", text))):
-        assert figure in allowed, (
-            f"the record states {figure} % and the artifact holds no such value — "
-            f"the doc and the evidence have drifted")
+    for name, text in _m5_documents():
+        for figure in sorted(set(re.findall(r"(\d+\.\d) %", text))):
+            assert figure in allowed, (
+                f"{name} states {figure} % and the artifact holds no such value — "
+                f"the doc and the evidence have drifted")
 
 
 # The one `pp` figure no run of this instrument's artifact can hold: §10's
@@ -1160,11 +1203,11 @@ def test_no_record_pp_figure_is_outside_the_artifact():
             allowed.add(_num(gain["pp_removed"]))
         for delta in art["labels"][key]["policy_delta"].values():
             allowed.add(_num(delta["pp_removed_by_usage_ordering"]))
-    text = README.read_text()
     # `0.1 pp/MB` is a RATE, not a pp figure — the negative lookahead keeps it out.
-    for figure in sorted(set(re.findall(r"(\d+\.\d) pp(?![/\w])", text))):
-        assert figure in allowed, (
-            f"the record states {figure} pp and no artifact gain or delta holds it")
+    for name, text in _m5_documents():
+        for figure in sorted(_pp_terms(text)):
+            assert figure in allowed, (
+                f"{name} states {figure} pp and no artifact gain or delta holds it")
 
 
 def test_the_record_attributes_the_point_peak_to_the_interval_the_artifact_holds():
