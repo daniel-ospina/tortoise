@@ -593,6 +593,69 @@ def test_unpinning_with_nothing_declared_reports_no_write():
     assert g.mutating == []
 
 
+# ── review round 5: the guard no row saw, the partial list, the no-op cap ───────
+def test_a_stored_declaration_with_an_injected_label_reads_as_malformed():
+    """`read()`'s identifier guard is the LAST gate before a stored pair reaches Cypher.
+
+    ⛔ Deleting it left the suite green. The `:Meta {key:'pins'}` node is operator metadata
+    in a shared store (SDK, `graph-scripts`, a restore can MERGE it), so the value it
+    validates is NOT one this module wrote; the existing malformed-declaration rows cover
+    the TYPE arm (`keys=7`) and the corrupt-ENTRY arm, neither of which reaches
+    `bare_identifier`. This row is the identifier arm's only coverage.
+    """
+    g = _FakeGraph(["p0"])
+    g.meta[PINS_META_KEY] = {"label": "Point}) DETACH DELETE n //", "key_prop": "id",
+                             "keys": ["p0"]}
+    reading = read(g, budget=PinBudget(max_nodes=10))
+    assert reading.readable is False
+    assert (reading.source or "").startswith("malformed:")
+    assert g.mutating == [], "a malformed declaration reached a query that mutates"
+
+
+def test_pin_refuses_a_list_carrying_a_bad_key_rather_than_applying_part_of_it():
+    """ALL OR NOTHING, the promise the docstring makes — enforced, not merely stated.
+
+    ⛔ Measured: `pin(g, ["a", ""])` wrote `['a']` and returned `written=True`, so a stray
+    empty argv element (`--key ""`) produced a partially applied declaration reported as
+    success. This is the CALLER's list — a different door from the stored one the
+    corrupt-entry test above covers, and a separate fix.
+    """
+    g = _FakeGraph(["a", "b"])
+    with pytest.raises(PinRefused) as exc:
+        pin(g, ["a", ""], budget=PinBudget(max_nodes=10))
+    assert exc.value.code == "bad-key"
+    assert "Nothing was pinned" in exc.value.reason
+    assert g.mutating == [], "a refused declaration still wrote"
+    assert PINS_META_KEY not in g.meta
+
+
+def test_unpin_refuses_a_list_carrying_a_bad_key_rather_than_releasing_part_of_it():
+    g = _FakeGraph(["a", "b"])
+    budget = PinBudget(max_nodes=10)
+    pin(g, ["a", "b"], budget=budget)
+    with pytest.raises(PinRefused) as exc:
+        unpin(g, ["a", ""], budget=budget)
+    assert exc.value.code == "bad-key"
+    assert g.meta[PINS_META_KEY]["keys"] == ["a", "b"], "a refused release still wrote"
+
+
+def test_repinning_declared_keys_on_an_over_budget_set_is_refused_not_reported_ok():
+    """The cap check lived only inside `if fresh:`, so a no-op pin skipped it entirely.
+
+    ⛔ Measured: re-pinning the same keys at `max_nodes=1` returned `written=True`,
+    `added=[]` and `verdict: OK`, while the envelope's own `set.over_budget` named the
+    violation and every sweep refused it.
+    """
+    g = _FakeGraph(["p0", "p1", "p9"])
+    g.link("p0", "p1")
+    pin(g, ["p0"], budget=PinBudget(max_nodes=10))
+    with pytest.raises(PinRefused) as exc:
+        pin(g, ["p0"], budget=PinBudget(max_nodes=1))
+    assert exc.value.code == "budget"
+    assert "over budget" in exc.value.reason
+    assert g.meta[PINS_META_KEY]["keys"] == ["p0"], "a refused re-pin still wrote"
+
+
 def test_a_degree_ceiling_is_a_declaration_time_guard_and_the_budget_is_the_invariant():
     """A hub pinned under a higher ceiling survives a lowered one — the budget does not.
 

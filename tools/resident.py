@@ -283,6 +283,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.verb == "show":
             reading = resident_pin.read(graph, budget=budget)
             refusal = reading.gate_reason()
+            # ⛔ `cap_checked` EXISTS BECAUSE THE VERDICT CANNOT CARRY THIS ON ITS OWN.
+            # With no resolvable budget (a lowered-but-unreadable window, or a window too
+            # small for a pin to exist) `show` deliberately still reads the declaration —
+            # but `over_budget()` then answers `None` by design, so `verdict: OK` meant
+            # "read fine, cap never checked", which a scheduler keying on the verdict
+            # records as "within budget". The skip is now a FIELD, and the reason says
+            # so, instead of a stderr note a consumer never reads.
             # ⛔ THE CAP IS THE QUESTION `show` EXISTS TO ANSWER, so "no budget could be
             # resolved" is an UNMEASURED answer, not a healthy one. It used to emit
             # `verdict: OK` / exit 0 over an unchecked declaration, disclosing the gap
@@ -295,6 +302,9 @@ def main(argv: list[str] | None = None) -> int:
                 _emit({
                     "verdict": "UNMEASURED",
                     "graph": args.graph,
+                    #: The same field the OK arm carries, so a consumer reads ONE key for
+                    #: "was the cap checked" whether the answer is OK or UNMEASURED.
+                    "cap_checked": False,
                     "reason": (f"the pin set's cap cannot be checked: no residency "
                                f"window was resolvable, so whether these "
                                f"{len(reading.keys)} key(s) are inside the pin budget is "
@@ -306,7 +316,13 @@ def main(argv: list[str] | None = None) -> int:
             _emit({
                 "verdict": "REFUSED" if refusal else "OK",
                 "graph": args.graph,
-                "reason": refusal or "",
+                "cap_checked": budget is not None,
+                "reason": refusal or (
+                    "" if budget is not None else
+                    "the declaration was read, but no pin budget could be resolved, so "
+                    "whether it is WITHIN BUDGET was not checked — `cap_checked` is "
+                    "false and every sweep will resolve its own budget"
+                ),
                 "pin": reading.as_dict(),
             }, args.out)
             return EXIT_REFUSED if refusal else EXIT_OK
