@@ -2779,9 +2779,11 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
 #
 # Measured on the embedded lane at the fixing commit's parent (40 turns, every
 # third carrying a `repo#N` reference): 57 graph round trips ON the event loop,
-# 105.0 ms of loop occupancy. After the tail moved to the capture pool: 10 on the
-# loop, 35-42 ms — and every remaining on-loop statement is the schema/bootstrap
-# class `test_capture_does_not_repeat_the_schema_bootstrap_on_the_loop` pins, not
+# 91-151 ms of loop occupancy across runs here (105.0 ms on the sample the fix
+# was measured on). After the tail moved to the capture pool the on-loop residual
+# is the SCHEMA/BOOTSTRAP class only — 6 statements, 14-39 ms across runs here —
+# and every one of those six is what
+# `test_capture_does_not_repeat_the_schema_bootstrap_on_the_loop` pins, not
 # this tail.
 #
 # ⛔ NO WALL-CLOCK BUDGET HERE, for the reason stated at
@@ -2811,7 +2813,7 @@ _CAPTURE_TAIL_STATEMENTS = {
 #: Both spellings of the #4625 leg-62 probe (`_capture_session_probe_off_loop`,
 #: `hosted_api.py:13370-13371`) already ran off the loop through
 #: `asyncio.to_thread` BEFORE this change, and `sdk.capture_session`'s
-#: prior-capture read (`sdk.py:19426-19427`) is not on the hosted path at all.
+#: prior-capture read (`sdk.py:19601-19605`) is not on the hosted path at all.
 #: Pinning them as this PR's tail made two of its assertions INERT: the
 #: prohibition half can never fire (those statements cannot appear on
 #: ``MainThread``), and the presence half was satisfied by a pre-existing leg the

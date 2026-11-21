@@ -20819,7 +20819,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # below) were already off-loaded, so the mint was the member of this
             # class that was missed, not a design choice. The submission rides
             # the same `_CAPTURE_EXECUTOR` pool and the same `_run_off_loop`
-            # contract (contextvars copied per attempt, bounded daemon workers) —
+            # contract (contextvars copied per attempt, bounded pool workers —
+            # NOT daemons: `ThreadPoolExecutor` threads have been non-daemon
+            # since CPython 3.9, which is why this pool needs the THREADING
+            # SHUTDOWN disposal hook at `hosted_api.py:382`) —
             # nothing about WHAT is written or in what order changes, only where
             # it runs, so the #4014/#1727 byte-parity with `sdk.capture_session`
             # is untouched.
@@ -51082,7 +51085,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 202 tracked files (749 distinct
+# ABSOLUTE line number from 202 tracked files (751 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
