@@ -72,13 +72,22 @@ import os
 from tortoise.sdk import TortoiseSDK
 sdk = TortoiseSDK(db_path=os.environ["TORTOISE_DB_PATH"])
 proj = sdk._get_proj()
-ev = sdk.create_point(
-    "evidence",
-    "CI deploys on main merge via GitHub Actions [supporting record]")
-claim = sdk.create_point(
-    "statement",
-    "The CI pipeline deploys via GitHub Actions on main merge.")
-sdk.create_operator("IMPL", ev["id"], [claim["id"]])
+# `create_point`/`create_operator` were retired by #13899; the consolidated
+# doors are `create_entity(type="point", props={"pointKind": …})` (which
+# returns `{"node": …, "nudges": …}`, so the id is `res["node"]["id"]`) and
+# `link_entities(relation, from, to, operator=True)` — `operator=True` is what
+# keeps the IMPL edge carried by an operator Point, the shape this seed needs
+# for `ep.py` to build a factor. Omitting it would degrade to a bare
+# `create_direct_edge` and the reflex would never surface the claim.
+ev = sdk.create_entity(
+    "point",
+    "CI deploys on main merge via GitHub Actions [supporting record]",
+    props={"pointKind": "evidence"})["node"]
+claim = sdk.create_entity(
+    "point",
+    "The CI pipeline deploys via GitHub Actions on main merge.",
+    props={"pointKind": "statement"})["node"]
+sdk.link_entities("IMPL", ev["id"], claim["id"], operator=True)
 for pid, a, b in ((claim["id"], 12.0, 1.0), (ev["id"], 12.0, 1.0)):
     m = round(a / (a + b), 4)
     proj.g.query(

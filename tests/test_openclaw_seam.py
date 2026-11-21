@@ -673,9 +673,16 @@ sdk = TortoiseSDK(db_path=os.environ["TORTOISE_DB_PATH"])
 proj = sdk._get_proj()
 
 def add(stmt):
-    ev = sdk.create_point("evidence", stmt + " [supporting record]")
-    claim = sdk.create_point("statement", stmt)
-    sdk.create_operator("IMPL", ev["id"], [claim["id"]])
+    # `create_point`/`create_operator` were retired by #13899 — see the same
+    # repair in `tests/test_pi_volunteer_seam.py`: the consolidated doors are
+    # `create_entity(type="point", …)` (id at `res["node"]["id"]`) and
+    # `link_entities(…, operator=True)`, which is what keeps the IMPL edge
+    # carried by an operator Point.
+    ev = sdk.create_entity("point", stmt + " [supporting record]",
+                           props={"pointKind": "evidence"})["node"]
+    claim = sdk.create_entity("point", stmt,
+                              props={"pointKind": "statement"})["node"]
+    sdk.link_entities("IMPL", ev["id"], claim["id"], operator=True)
     for pid in (claim["id"], ev["id"]):
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.confidence=0.9231, "

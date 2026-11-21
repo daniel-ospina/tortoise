@@ -189,7 +189,7 @@ gate = sdk._create_direct_edge(
 print("direct edge:", gate.get("created"))
 
 # ---------------------------------------------------------------- report counts
-kinds = {k["kind"]: k["count"] for k in sdk.list_pointkinds()}
+kinds = {k["kind"]: k["count"] for k in sdk.graph_overview("pointkinds")}
 print("POINT_KINDS:", kinds)
 print("MADE:", {k: len(v) for k, v in MADE.items()})
 print("EDGES:", EDGES)
