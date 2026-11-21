@@ -4119,15 +4119,29 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
     # be quietly dropped (a refusal rule that fires on legal/mended markup gets
     # deleted), and a well-formed unrendered subtree must not fire at all.
     for unrendered in ("audio", "video", "canvas", "datalist", "meter", "progress"):
-        escaped = section.replace(
-            "</h2>",
-            f"</h2><strong><{unrendered}><div>FalkorDB permanently deletes it"
-            f"</{unrendered}></strong>",
-            1,
-        )
-        assert escaped != section
-        with pytest.raises(ValueError, match="adoption-agency-relocation"):
-            _visible_text(escaped)
+        # ⛔ BOTH SPELLINGS, because the relocation is the browser IGNORING the
+        # misnested close and the two differ in WHICH end tag arrives first:
+        #   (i)  `</canvas>` present → this parser still holds the block, so the
+        #        unrendered end tag is where the pattern is visible;
+        #   (ii) `</canvas>` ABSENT  → the formatting end tag is the only arrival.
+        # Round 14 measured (i) and (ii) as SEPARATE escapes: a check keyed to one
+        # end tag alone leaves the other green over a painted claim.
+        for shape, body in (
+            ("closed", f"<strong><{unrendered}><div>{{claim}}</{unrendered}></strong>"),
+            ("unclosed", f"<strong><{unrendered}><div>{{claim}}</strong>"),
+            # AAA's furthestBlock must be a SPECIAL element; `button` is special and
+            # is NOT a `</p>`-closer, which is why `_SPECIAL` and not `_P_CLOSERS`
+            # governs this test.
+            ("button", f"<strong><{unrendered}><button>{{claim}}</{unrendered}></strong>"),
+        ):
+            escaped = section.replace(
+                "</h2>",
+                "</h2>" + body.replace("{claim}", "FalkorDB permanently deletes it"),
+                1,
+            )
+            assert escaped != section
+            with pytest.raises(ValueError, match="adoption-agency-relocation"):
+                _visible_text(escaped), shape
         # control 1: no formatting element below → AAA cannot lift it, the text really
         # is inside the unrendered element, and the seam keeps dropping it.
         control = section.replace(
