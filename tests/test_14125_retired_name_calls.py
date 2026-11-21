@@ -937,6 +937,15 @@ def _third_party_receivers(tree: ast.Module) -> set[str]:
     ``ast.arg`` or plain ``str`` fields, so a walk that read only ``ast.Name`` missed
     every other family.
 
+    ⛔ ONE §4.2.1 CONSTRUCT IS DELIBERATELY NOT COLLECTED, and this is the exception the
+    sentence above has to carry or it is literally false (review of this PR, P3): an
+    IMPORT STATEMENT binds (``import x``, ``import x as y``, ``from p as q``), yet a walk
+    that subtracted it would make ``import torch`` cancel the ``torch`` exemption — the
+    over-block ``889affc6`` reverted, because an import's right-hand side is always an
+    import and re-importing the name is not a rebind away from it (see
+    ``_function_local_bindings``, and row ``4j-sexdecies``, which reds if alias
+    collection comes back).
+
     ⛔ TWO OF THEM BIND IN THEIR OWN SCOPE, so WHICH WALK collects them is decided by
     scope, not node kind: a comprehension's iteration target binds in the comprehension
     and a type parameter binds in the generic's own body — both are unreachable from a
@@ -3632,6 +3641,101 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
             "be graded — nothing else in the file pins this rule, and a silent revert is "
             f"the swallowed-rename class: {_reach_row}"
         )
+
+    # 4j-quattuordecies-tris. THE SAME CLASS OF GAP, ON THE RULES THE LAST TWO COMMITS ADDED:
+    #     each of these three survives its own deletion with the whole file green, and two of
+    #     the three then regress BELOW `origin/main` (measured by execution on a mutated copy
+    #     of this head, review of #14160):
+    #       * the COMPREHENSION-target contribution in `_enclosing_bindings` — with it deleted,
+    #         `[torch.query(…) for torch in clients]` reads EXEMPT where `origin/main` grades
+    #         it, so the revert is a silent drop AND a regression;
+    #       * `_global_scope_bindings`' per-FUNCTION resolution — a `global` in a NESTED def
+    #         rebinds the module name (`def _inner(): global torch; torch = …`), and a
+    #         `tree.body`-only loop loses it;
+    #       * `_global_declarations`' non-descent into nested scopes — the control below, which
+    #         reds if an INERT nested `global` starts borrowing the outer function's local.
+    #     A row per term, because the comment block above claims this path is pinned.
+    _comprehension_target_row = roots(
+        textwrap.dedent(
+            """
+            import torch
+
+            def _probe(clients):
+                try:
+                    return [torch.query("SELECT 1") for torch in clients]
+                except Exception:
+                    return False
+
+            TORCH_AVAILABLE = _probe([])
+            """
+        )
+    )
+    assert (
+        len(_comprehension_target_row) == 1
+        and _comprehension_target_row[0][1:] == ((), True, False, True)
+    ), (
+        "a COMPREHENSION's iteration target binds in the comprehension and nowhere else, "
+        "so a call INSIDE it runs on the target — not on the import — and must be graded "
+        "(§4.2.2; `origin/main` grades it too, so exempting it is a regression as well as "
+        f"a silent drop): {_comprehension_target_row}"
+    )
+    _nested_global_row = roots(
+        textwrap.dedent(
+            """
+            import torch
+
+            def _outer():
+                def _inner():
+                    global torch
+                    torch = _make_client()
+                    return torch
+                return _inner()
+
+            TORCH_AVAILABLE = False
+            try:
+                torch.query("SELECT 1")
+                TORCH_AVAILABLE = True
+            except Exception:
+                TORCH_AVAILABLE = False
+            """
+        )
+    )
+    assert (
+        len(_nested_global_row) == 1 and _nested_global_row[0][1:] == ((), True, False, True)
+    ), (
+        "a `global` declared and bound inside a NESTED function still rebinds the MODULE "
+        "name (§4.2.2), so it reaches a module-level probe and the guard must be graded — "
+        "resolving declarations from module-level `def`s alone loses this and `origin/main` "
+        f"grades it: {_nested_global_row}"
+    )
+    _inert_nested_global_control = roots(
+        textwrap.dedent(
+            """
+            import torch
+
+            def _outer():
+                def _inner():
+                    global torch
+                    return torch
+                torch = _make_client()
+                return _inner()
+
+            TORCH_AVAILABLE = False
+            try:
+                torch.query("SELECT 1")
+                TORCH_AVAILABLE = True
+            except Exception:
+                TORCH_AVAILABLE = False
+            """
+        )
+    )
+    assert _inert_nested_global_control == (), (
+        "an INERT nested `global` must not borrow the OUTER function's local: that local "
+        "is a different scope and cannot reach a module-level probe, so `torch` still "
+        "denotes the import and grading it is the `4k-`/`4l-` false red — which is what a "
+        "`_global_declarations` that descends into nested scopes produces: "
+        f"{_inert_nested_global_control}"
+    )
 
     # 4j-sexies. The OTHER direction: a LOCAL of the function that HOLDS the probe CAN
     #     reach it, so it must be graded. `_function_scope_bindings` supplies it from the
