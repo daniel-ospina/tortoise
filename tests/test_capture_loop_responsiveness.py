@@ -2861,9 +2861,11 @@ def _is_a_pre_existing_offload(cypher: str) -> bool:
 
     ``_PRE_EXISTING_OFFLOAD_LEGS`` names the #4625 leg-62 probe's two spellings,
     which live in ``_capture_session_probe_off_loop`` and have run through
-    ``asyncio.to_thread`` since before this change. They are in the PROHIBITION
-    set (an on-loop copy would still be a bug) and out of the PRESENCE set (they
-    are issued whatever this tail does).
+    ``asyncio.to_thread`` since before this change. They are TAIL-ADJACENT: in
+    neither ``_CAPTURE_TAIL_STATEMENTS`` (the prohibition set) nor
+    ``_TAIL_MUST_BE_ISSUED`` (the presence set) — they are the statements the
+    prohibition is told to EXEMPT, and today no loop catches an on-loop copy of
+    them (see the paragraph below).
 
     ⛔ WHAT THIS EXEMPTION CAN AND CANNOT DO, measured rather than assumed
     (#14086 review, P2 — an earlier version of this docstring claimed the probe
@@ -3202,7 +3204,7 @@ def test_the_delete_race_sweep_never_runs_on_the_event_loop(
         resp, what="POST /v1/sessions answered (delete-race tail run)")
     assert resp.status_code == 200, resp.text[:300]
     _assert_the_sweep_never_runs_on_the_loop(
-        records, arm="pre-check (21694)", alive_probes=1)
+        records, arm="pre-check", alive_probes=1)
 
 
 def test_the_delete_race_sweep_never_runs_on_the_event_loop_when_the_delete_wins_the_recheck(
@@ -3233,7 +3235,7 @@ def test_the_delete_race_sweep_never_runs_on_the_event_loop_when_the_delete_wins
         resp, what="POST /v1/sessions answered (delete-race re-check run)")
     assert resp.status_code == 200, resp.text[:300]
     _assert_the_sweep_never_runs_on_the_loop(
-        records, arm="re-check (21685)", alive_probes=2)
+        records, arm="re-check", alive_probes=2)
 
 
 # ── the DISPATCH itself can fail, and it is fail-open ───────────────────────
@@ -3439,10 +3441,14 @@ def test_the_pre_existing_offload_exemption_is_actually_consumed():
     """A declaration the verdict does not read is bookkeeping, not a gate.
 
     ``_PRE_EXISTING_OFFLOAD_LEGS`` names the #4625 leg-62 probe's statements,
-    which emit some tail needles (``SET s.capture_ok=$ok``) on ``asyncio_0`` BY
-    DESIGN. Before this pin, nothing consulted it — the prohibition matched the
-    needle alone and would have accused the leg that was already off the loop
-    (#14086 review, P2). Both directions are pinned: an exempt statement is NOT
+    which have run on ``asyncio_0`` BY DESIGN since long before this change.
+    Before this pin, nothing consulted it — the prohibition matched the tail
+    needles alone and would have accused the leg that was already off the loop
+    (#14086 review, P2). ⛔ It emits NO tail needle (its statement READS
+    ``s.capture_ok AS ok``; it never ``SET``s one), so today the exemption changes
+    no verdict — it is a declared record with a caller, pinned so the verdict
+    computation reads the declaration if that probe ever moves to the pool.
+    Both directions are pinned: an exempt statement is NOT
     reported, and the same statement without the exempt fragment IS.
     """
     exempt_key = next(iter(_PRE_EXISTING_OFFLOAD_LEGS))
