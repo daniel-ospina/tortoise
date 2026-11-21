@@ -4159,6 +4159,70 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
         "the `-->` returns the tokenizer to script data, so `</script>` closes the "
         "element and the following text is painted — this must not wedge"
     )
+    # …and the wedge must NOT fire on the shapes a chunk-local regex got wrong
+    # (#14073 review round 13, P2, measured). Each of these was REFUSED while Chrome
+    # closes the script and paints what follows (372 px), reddening the destinations
+    # golden on legal markup: the `-->` returns the tokenizer to plain script data (so
+    # the later `<script` is just text), and a `</script` reached from the double-escaped
+    # state only drops back to ESCAPED, where the NEXT one closes the element.
+    for label, markup, expected in (
+        ("no escaped <script> at all", "<script><!--x--><script></script><p>SEE THIS</p>", "SEE THIS"),
+        ("--> then text then <script>", "<script><!--a-->b<script></script><p>SEE THIS</p>", "SEE THIS"),
+        ("--> then a second <script>", "<script><!--<script>--><script></script><p>SEE THIS</p>", "SEE THIS"),
+    ):
+        assert " ".join(_visible_text(markup).split()).endswith(expected), (
+            f"{label}: a browser closes the script and paints the following text, so "
+            f"this must be READ, not refused — the wedge is 'double-escaped with no "
+            f"`</script` still ahead', not 'a `<script` with no `-->` in this chunk'"
+        )
+
+    # …and the ONE shape that STAYS refused, because it is a genuine divergence: from
+    # double-escaped a `</script` only drops to ESCAPED, so the element really closes at
+    # the SECOND `</script` and everything between the two is script text a browser does
+    # not paint — while this parse re-reads it as markup. That is also the module's
+    # existing promise (an `<a href>` inside such a region must not count), so refusing
+    # is correct here and refusing the rows above was not.
+    with pytest.raises(ValueError, match="wedged"):
+        extract_visible_text("<script><!--<script></script>--></script><p>SWALLOWED</p>")
+
+    # ⛔ P0, ROUND 13 — A BREAKOUT TAG LEAVES THE FOREIGN NAMESPACE, so the implied
+    # sibling close must run even while `_foreign` is set (the exemption `_close_p_scope`
+    # already carries). Measured: `<nobr><audio><svg><nobr>CLAIM` renders
+    # `<nobr><audio><svg></svg></audio></nobr><nobr>CLAIM</nobr>` (372 px) because `nobr`
+    # breaks out of the SVG and the adoption-agency close fires — while the stack stayed
+    # foreign, returned early, kept the `audio` and dropped the claim. End-to-end: all
+    # four `#storage` pins green while Chrome paints it.
+    for foreign in ("svg", "math"):
+        broke_out = section.replace(
+            "</h2>",
+            f"</h2><nobr><audio><{foreign}><nobr>FalkorDB permanently deletes it</nobr>"
+            f"</audio>",
+            1,
+        )
+        assert broke_out != section
+        assert "falkor" in _banned_vocabulary(broke_out), (
+            f"`nobr` is a foreign-content breakout tag, so inside `<{foreign}>` it ends "
+            f"the foreign context and closes the outer `<nobr>` — the claim is painted "
+            f"at the parent's level"
+        )
+        with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
+            _assert_storage_section_reviewed(broke_out)
+
+    # …and `a`/`button` are NOT breakout tags, so they stay foreign and stay dark:
+    # Chrome keeps the claim inside the foreign element (0 painted px).
+    for not_breakout in ("a", "button"):
+        stayed_foreign = section.replace(
+            "</h2>",
+            f"</h2><{not_breakout}><audio><svg><{not_breakout}>FalkorDB permanently "
+            f"deletes it</{not_breakout}></audio>",
+            1,
+        )
+        assert stayed_foreign != section
+        assert "falkor" not in _banned_vocabulary(stayed_foreign), (
+            f"`<{not_breakout}>` does not break out of foreign content, so a browser "
+            f"paints none of this — counting it would be a false red"
+        )
+
     with pytest.raises(ValueError, match="wedged"):
         extract_visible_text("<script><!--<script></script><p>SWALLOWED</p>")
 

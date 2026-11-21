@@ -60,6 +60,46 @@ _BLOG_HOSTS = frozenset({"premiselabs.co", "tortoise.premiselabs.co"})
 # `<script` opening a nested script element, in the script-data escaped states.
 _SCRIPT_IN_SCRIPT = re.compile(r"<script[\s/>]", re.IGNORECASE)
 
+
+def _script_data_state(data: str) -> str:
+    """The tokenizer's escape state at the END of a `<script>` data chunk.
+
+    One of `data`, `escaped`, `double` — the spec's script-data, script-data-escaped
+    and script-data-double-escaped states, as far as a text scan can tell. Only the
+    distinctions that change how a `</script` behaves are modelled:
+
+    * plain data: `</script` CLOSES the element;
+    * escaped (`<!--` seen): `</script` also CLOSES it;
+    * double escaped (`<script` seen while escaped): `</script` does NOT close it.
+
+    So a chunk that ends `double` is the only one where the parse here and a browser
+    can disagree about whether the element closed, and the caller resolves that by
+    looking for a later `</script` (see `handle_data`).
+    """
+    state = "data"
+    i, n = 0, len(data)
+    while i < n:
+        if state == "data":
+            if data.startswith("<!--", i):
+                state, i = "escaped", i + 4
+            else:
+                i += 1
+        elif state == "escaped":
+            if data.startswith("-->", i):
+                state, i = "data", i + 3
+            elif data[i:i + 7].lower() == "<script" and i + 7 < n and data[i + 7] in " \t\n\f/>":
+                state, i = "double", i + 7
+            else:
+                i += 1
+        else:  # double escaped
+            if data.startswith("-->", i):
+                state, i = "data", i + 3
+            elif data[i:i + 9].lower() == "</script":
+                state, i = "escaped", i + 9
+            else:
+                i += 1
+    return state
+
 #: The ASCII whitespace a `class` attribute's tokens are split on — the
 #: space-separated-tokens microsyntax, which is where HTML defines a class VALUE
 #: (`\t`, `\n`, `\f`, `\r` and space, and nothing else).
@@ -994,7 +1034,7 @@ class _AnchorHrefParser(HTMLParser):
     _IMPLIED_END_TAGS = frozenset({"dd", "dt", "li", "optgroup", "option", "p", "rb",
                                    "rp", "rt", "rtc"})
 
-    def _close_implied(self, tag: str) -> None:
+    def _close_implied(self, tag: str, attrs: list[tuple[str, str | None]] | None = None) -> None:
         """Pop the elements a `tag` start tag implicitly closes.
 
         ⛔ MODELING ONLY `<p>` WAS NOT ENOUGH (#14073 review round 11, P0, measured).
@@ -1015,7 +1055,17 @@ class _AnchorHrefParser(HTMLParser):
         an `li` has been popped" does. Over-popping only REMOVES ancestors, so it can
         turn a drop into a count and never the reverse.
         """
-        if self._suppress or self.wedged_reason or self._foreign:
+        if self._suppress or self.wedged_reason:
+            return
+        # ⛔ A BREAKOUT TAG LEAVES THE FOREIGN NAMESPACE, so the guard must not stop it
+        # (#14073 review round 13, P0, measured) — this is the same exemption
+        # `_close_p_scope` already carries, and its absence was a FAIL-OPEN:
+        # `<nobr><audio><svg><nobr>CLAIM` renders `<nobr><audio><svg></svg></audio>
+        # </nobr><nobr>CLAIM</nobr>` (372 painted px) because `nobr` breaks out of the
+        # SVG and the AAA close runs, while this stack stayed foreign, returned early,
+        # kept the `audio` and dropped the claim. `<a>`/`<button>` are NOT breakout tags
+        # (Chrome keeps them foreign, 0 px) and stay dropped — that is the control.
+        if self._foreign and not self._breaks_out(tag, attrs or []):
             return
         targets = {
             "li": ("li",),
@@ -1440,7 +1490,7 @@ class _AnchorHrefParser(HTMLParser):
         # `<rt>`/`<rp>`/`<rb>`/`<rtc>` generates implied end tags) — see
         # `_close_implied`. Before `_open`/`_record_heading`/`_open_extent`, for the
         # same reason as the `<p>` rule: each pop reads the PRE-tag ancestry.
-        self._close_implied(tag)
+        self._close_implied(tag, attrs)
         # And the table contexts: a table-structure tag discards what the "in table"
         # mode had foster parented out — see `_clear_table_context`.
         self._clear_table_context(tag)
@@ -1517,15 +1567,37 @@ class _AnchorHrefParser(HTMLParser):
         # destinations pin went red on legal markup). The wedge holds only while an
         # escaped `<script` has NO `-->` after it — the case where the `</script`
         # genuinely stops closing and the rest of the page is swallowed.
-        if (
-            not self.wedged_reason
-            and self.cdata_elem == "script"
-            and "<!--" in data
-            and any(
-                "-->" not in data[match.end():] for match in _SCRIPT_IN_SCRIPT.finditer(data)
-            )
-        ):
-            self.wedged_reason = "script-data-escaped"
+        if not self.wedged_reason and self.cdata_elem == "script":
+            state = _script_data_state(data)
+            # ⛔ STATE ALONE DECIDES, and the remainder is deliberately NOT consulted
+            # (#14073 review round 13, P2 corrected against the round's own first
+            # suggestion). A "is another `</script` still ahead" test reads as the
+            # obvious refinement and is WRONG: from double-escaped a `</script` only
+            # drops to ESCAPED, so with one ahead the element truly closes at the
+            # SECOND one — and every byte between the two is script text a browser does
+            # not paint, while this parse re-reads it as markup. That is the divergence
+            # the guard exists for, and it is also what the module already promises:
+            # `_rendered_hrefs('<script><!--<script></script><a href="/blog">x</a>
+            # </script>')` must be `[]`, because the anchor is swallowed.
+            if state == "double":
+                # ⛔ THE TEST IS THE TOKENIZER'S STATE, NOT A REGEX ON ONE CHUNK
+                # (#14073 review round 13, P2, measured). The round-12 test asked
+                # "is there a `<script` with no `-->` after it IN THIS CHUNK", which is
+                # both too eager and too narrow: `<script><!--x--><script></script>` has
+                # no escaped `<script` at all (the `-->` returned the tokenizer to plain
+                # script data) and `<script><!--<script></script>--></script>` exits to
+                # data before the terminating `</script` — both were REFUSED while
+                # Chrome closes the script and paints what follows (372 px), reddening
+                # the destinations golden on legal markup.
+                #
+                # The wedge is exactly "double-escaped, and no `</script` left in the
+                # document": in double-escaped a `</script` only returns the tokenizer
+                # to ESCAPED (where the NEXT `</script` does close it), and a `-->`
+                # returns it to plain data — so any `</script` still ahead means the
+                # element closes and the rest of the page is painted. With none ahead,
+                # the script swallows the remainder, which is the partial-tree case this
+                # guard exists for.
+                self.wedged_reason = "script-data-escaped"
         # The text a reader MEETS: outside every suppressed region (raw text, inert
         # `<template>` content, `<noscript>` under scripting) and inside a subtree
         # that renders (`_open_elements`' inherited flag: `hidden`, `_UNRENDERED`
