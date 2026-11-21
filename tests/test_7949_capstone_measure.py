@@ -1390,11 +1390,13 @@ def test_e6_refuses_a_pack_the_registry_isolated_on_a_real_input(tmp_path):
     the commit that added the carry exists to refuse.
 
     Non-vacuity: delete the `"load_errors"` entry from `measurement.update(...)` and this case
-    reds on the `load_errors` assertion below — four statements BEFORE the row is built; ⛔ with
-    that assertion removed the row itself reads **GREEN `PASS 31 31`**, which is the false PASS
-    the carry exists to refuse, while every synthetic-`load_errors` arm stays green. That is the
-    mutant the review built, and round 13 measured that this docstring named the wrong assertion
-    (it said "reds on the row's verdict").
+    reds on the `assert list(e6["load_errors"]) == ["dev"]` line, which sits BEFORE the row is
+    built; ⛔ with that assertion removed the row itself reads **GREEN `PASS 31 31`**, which is
+    the false PASS the carry exists to refuse, while every synthetic-`load_errors` arm stays
+    green. That is the mutant the review built, and round 13 measured that this docstring named
+    the wrong assertion (it said "reds on the row's verdict") while a round-14 review measured
+    that the statement COUNT an intermediate cut gave ("four") was wrong too — the assertion is
+    therefore named, not counted, which is the durable form.
     """
     packs = _corrupted_packs_copy(tmp_path)
     e6 = measure.measure_e6(packs_dir=packs)
@@ -1814,15 +1816,19 @@ def test_the_e6_surface_breadth_is_stated_once_and_every_loop_reads_it():
     # parenthesised spelling: the `\s*` in the pattern crosses a line break, so that one IS
     # counted (measured, `2 spellings` — an earlier cut of this sentence claimed it evaded).
     # What catches a NARROWED tuple is not this case but the population guards in `measure_e6`
-    # plus the arms that read the enumeration — MEASURED on the mutant
-    # (`E6_SURFACES = ("relations",)` reds NINE cases: this one,
-    # `test_a_hierarchies_defect_reaches_the_bar_not_just_the_scan`,
-    # `test_e6_reads_the_population_from_the_packs_and_written_from_the_artifact`, and six other
-    # E6 cases including `test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_
-    # not_main`; ⛔ NOT `test_a_synthetic_hierarchies_defect_runs_through_the_runs_own_defect_
-    # scan`, which hands `e6_defects` a literal tuple and never reads the constant — the first
-    # cut named it, and a round-12 review measured that it stays green under the mutant). This
-    # case holds the LITERAL to one, which is the edit the comment invites.
+    # plus the arms that read the enumeration. MEASURED on the mutant
+    # (`E6_SURFACES = ("relations",)`, whole file, diffed against the head's own failing set):
+    # ELEVEN cases red — this one, `…hierarchies_defect_reaches_the_bar_not_just_the_scan`,
+    # `…e6_measures_the_packs_at_this_head…`, `…e6s_written_column…`, `…e6_refuses_a_pack_the_
+    # registry_isolated…`, `…measure_e6_reports_an_unloadable_registry…`,
+    # `…e6_reads_the_population…`, `…e6_reports_an_unmeasurable_written_cell…`,
+    # `…write_artifact_of_the_wrong_shape…`, plus the two that do not carry "e6" in their name —
+    # the renderer (its E6 census block reads all-zero) and this file's record arm (the bundle's
+    # mention count drops 19 -> 18). ⛔ NOT `test_a_synthetic_hierarchies_defect_runs_through_
+    # the_runs_own_defect_scan`, which hands `e6_defects` a literal tuple and never reads the
+    # constant: the first cut of this sentence named it, round 12 measured that it stays green
+    # under the mutant, and round 14 measured that saying "nine" was an undercount of the same
+    # mutant. This case holds the LITERAL to one, which is the edit the comment invites.
 
 
 def test_build_rows_refuses_an_e6_mapping_missing_a_required_key():
