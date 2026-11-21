@@ -366,9 +366,34 @@ _BLOCKED_TAIL = (
 #:
 #: Each was answered with the WHOLE ended population and the caller's own predicate
 #: (`complained`, `changed`) silently dropped. Two lookaheads close it: a SUBORDINATOR
-#: in the window, or a determiner + noun + FINITE VERB (a second clause's subject and
-#: predicate). The unguarded expression is kept as its own SIGNAL row below, so a
-#: question that fails only on this guard is still REPORTED rather than silenced.
+#: in the window, or an ASYNDETIC second clause — a determiner + noun followed by
+#: `has|have|had been`. The unguarded expression is kept as its own SIGNAL row below,
+#: so a question that fails only on this guard is still REPORTED rather than silenced.
+#:
+#: ⛔ AND THE SECOND LOOKAHEAD WAS THREE TIMES WIDER THAN THAT CLASS (round-9 review,
+#: P2). Its first cut refused `determiner + noun + ANY auxiliary` and called the
+#: sequence "a second clause's subject and predicate" — but that sequence is also the
+#: DOCUMENTED LEGITIMATE CONTENT of this window (":176 the relative clause between them
+#: is the thing asked about, and it is the only place a window is allowed"), so it
+#: refused the shape it guards. Measured: `has anything the board has approved been
+#: superseded`, `has anything the team is tracking been withdrawn`, `have any features
+#: the vendor has deprecated been archived` and four more were all refused and reported
+#: as `existence_unguarded` — and NOTHING pinned the lookahead at all (removing it red
+#: 0 rows across the whole corpus), which is the same defect this file repairs one
+#: shape above: a widening whose only justification is a comment is a rule nothing
+#: holds.
+#:
+#: Narrowed, because only `<aux> been` can supply the token the window requires
+#: (:data:`_EXISTENCE_WINDOW` needs the literal `been`): the class it protects is
+#: exactly `<det> <noun> has|have|had been`, the asyndetic hijack
+#: `have any users reported the vendor has been deprecated`. Both classes are pinned
+#: now, and each in the direction it belongs.
+#:
+#: ⛔ RESIDUAL, STATED RATHER THAN LEFT TO BE DISCOVERED: a RELATIVE clause whose head
+#: is preceded by a determiner and whose own verb is `has|have|had been` — `has
+#: anything the committee has been given been archived` — still reports rather than
+#: routes. That is strictly narrower than the class this replaces and is held by the
+#: two pins above, so a later simplification that re-widens the lookahead reds them.
 _EXISTENCE_HEAD = (
     r"\b(?:has|have|had)\s+(?:any|anything|someone|something|everything|anyone)\b"
 )
@@ -376,9 +401,7 @@ _EXISTENCE_GUARD = (
     r"(?![^?]{0,60}?\b(?:because|since|when|while|after|before|now|if|unless|given|"
     r"as|where|so|but|although|though|until)\b)"
     r"(?![^?]{0,60}?\b(?:the|a|an|its|his|her|their|our|your|my|these|those|this|"
-    r"that)\s+[a-z0-9][a-z0-9'’._/-]*\s+"
-    r"(?:has|have|had|is|are|was|were|will|would|can|could|did|does|do|may|might|"
-    r"must|should)\b)"
+    r"that)\s+[a-z0-9][a-z0-9'’._/-]*\s+(?:has|have|had)\s+been\b)"
 )
 _EXISTENCE_WINDOW = rf"[^?]{{0,60}}?\bbeen\s+(?:{_ENDING_WORDS})\b"
 _EXISTENCE_PREFIX = _EXISTENCE_HEAD + _EXISTENCE_GUARD + _EXISTENCE_WINDOW

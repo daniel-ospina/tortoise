@@ -329,6 +329,14 @@ NOT_SELECTED = [
     "have any users complained because the feature has been deprecated",
     "has anything changed since the old pricing has been deprecated",
     "have any customers churned after the tier has been deprecated",
+    # …and the ASYNDETIC class that lookahead DOES protect (#14033 round-9 review,
+    # P2): a second clause with its own subject and its own `has been`, no
+    # subordinator to catch it. Measured: each ROUTED (whole ended population, the
+    # caller's observation dropped) once the lookahead was removed wholesale, which
+    # is why the remedy narrows it rather than deleting it. Pinned so a later
+    # "simplification" cannot let them route again.
+    "have any users reported the vendor has been deprecated",
+    "have any customers said the feature has been deprecated",
     # ── the VERB-AND-OBJECT class on the attributive `which` row ─────────────
     # `which cancelled the deal` puts a finite past-tense verb with its own object
     # where a MODIFIER should be; the row now refuses a determiner after the
@@ -549,6 +557,11 @@ NOTICE_ONLY = [
     "have any users complained because the feature has been deprecated",
     "has anything changed since the old pricing has been deprecated",
     "have any customers churned after the tier has been deprecated",
+    # …including the asyndetic second clause the narrowed guard still refuses
+    # (`<det> <noun> has been`): reported, never routed, though it reads like the
+    # relative-clause form — the two are separated by which verb supplies `been`.
+    "have any users reported the vendor has been deprecated",
+    "have any customers said the feature has been deprecated",
     "is the SOC2 audit and its evidence package archived",
     "is the onboarding flow and its partner variants retired",
 ]
