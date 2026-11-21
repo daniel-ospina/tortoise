@@ -50,6 +50,7 @@ convention, ``tests/_live_utils.py``).
 """
 from __future__ import annotations
 
+import asyncio
 import inspect
 import os
 import sys
@@ -480,10 +481,6 @@ NOT_SELECTED = [
     # `which archived report has the Q3 numbers` (already pinned above) can never
     # come back through the window it was fixed for.
     "which archived reports were retracted",
-    # …and the recall the adjacency guard gives up, stated rather than discovered:
-    # a MODIFIED head noun sits in the same slot as the subordinate clause's verb,
-    # so it keeps the relevance read. See the shape's docstring.
-    "which customer claims were archived",
     # …and the recall the start anchor gives up, stated rather than discovered:
     # an IMPERATIVE set request keeps the relevance read, because the measured
     # hijack `show me the retired onboarding flow` is the same imperative frame
@@ -833,6 +830,7 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
     which is a false PASS over the exact deliverable the issue asks for. The
     docstring no longer carries the block at all — one home, checked below.
     """
+    from tortoise.mcp_server import mcp as _mcp
     from tortoise.mcp_server import tortoise_search
     from tortoise.state_intent import ROUTING_NOTE, detect_state_question
     from tortoise.tool_registry import TOOL_REGISTRY
@@ -843,6 +841,20 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
     assert ROUTING_NOTE in doc, (
         "the served tortoise_search description does not carry the routing block — "
         "the recogniser owns it, the registry must serve it (#14033)")
+
+    # ⛔ AND THE HOP THAT SERVES IT IS PINNED TOO (#14033 review, P2). The registry row
+    # is only the INPUT: `register_all` passes `description=entry.description`, and with
+    # that argument dropped FastMCP derives the text from the DOCSTRING instead — the
+    # caller then receives a description with no routing block while the assertion above
+    # stays green, because the row it reads never changed. Measured on this head: the
+    # mutant `description=entry.description` → `description=None` serves 5190 chars with
+    # no `WHICH PHRASINGS ROUTE`, and every assertion in this test still passed. So the
+    # object FastMCP would hand a client is read directly.
+    served = asyncio.run(_mcp.get_tool("tortoise_search")).description
+    assert served and ROUTING_NOTE in served, (
+        "the tool FastMCP serves does not carry the routing block: the registry row has "
+        "it but the serving hop lost it (a `description=` that stopped being passed "
+        "falls back to the docstring, which is not served text — #14033 review, P2)")
 
     # …and the docstring must NOT carry a second copy: prose there reaches no caller,
     # so a re-added copy reads like the contract while the served text drifts from it.
@@ -1372,9 +1384,15 @@ def test_an_ending_question_on_a_family_with_no_lifecycle_keeps_the_text_read(
     # two claims, not on whether the word "event" appears.
     from tortoise.state_intent import MISSED_ROUTE_FAMILY_HINT, MISSED_ROUTE_HINT
 
-    assert notice["hint"] == MISSED_ROUTE_FAMILY_HINT != MISSED_ROUTE_HINT
-    assert "no state-question shape applied" not in notice["hint"].lower()
-    assert "lifecycle" in notice["hint"].lower()
+    # ⛔ ONE assertion, because the two text probes this replaced could not fail
+    # independently (#14033 review, P3): `hint` is a module CONSTANT on both arms, so
+    # `"no state-question shape applied" not in …` and `"lifecycle" in …` only re-said
+    # what the identity below says, and a mutant that deletes the family arm reds the
+    # `reason == "family"` assertion above before either line is reached. The IDENTITY is
+    # the claim: a shape DID apply here, so this arm must not be handed the shape hint.
+    assert notice["hint"] == MISSED_ROUTE_FAMILY_HINT != MISSED_ROUTE_HINT, (
+        f"the family refusal was answered with the wrong hint ({notice['hint']!r}) — "
+        f"the shape arm's remedy tells a caller to re-ask a form they already used")
 
     # POSITIVE CONTROL — the same question, on a family that HAS a lifecycle: the
     # population IS reached, and there is no notice to report.
