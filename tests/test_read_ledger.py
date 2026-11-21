@@ -57,8 +57,12 @@ output is in the PR body):
 * **Report the page as the population** — replace the ``total``/``hasMore`` envelope
   with ``len(results)`` → the same test RED (total 2 where the population is 5).
 * **Drop the ``WHERE`` from the ``count(n)``** — or delete the terminal-status
-  exclusion that puts the tombstone clause in it → the same test RED: a retracted
-  row (`q6`) the caller asked to exclude would be counted into `total`.
+  exclusion that puts the tombstone clause in it, or the kind filter that puts the
+  `pointKind` clause in it → the same test RED: a retracted row (`q6`) or a
+  different-kind row (`q7`) the caller asked to exclude would be counted into
+  `total`.
+* **Scope the count to the page** — append ``SKIP``/``LIMIT`` to the ``count(n)``
+  query → the same test RED (`total` would report a page, not the population).
 * **Guess ``hasMore`` from ``len(page) == limit``** → the same test RED on EITHER
   door, because both tail pages are exactly ``limit`` long and still close the walk.
 * **Stop the tag accessor's own default arm recording** — delete the
@@ -397,15 +401,17 @@ def hooked_sdk(ledger, monkeypatch):
     `proj.g.query(...).result_set`, so a stub projection is enough to prove the
     HOOK fires — which is the part that rots silently if a path is refactored.
 
-    ⚠️ THE STUB MODELS THREE THINGS, AND NAMES THE REST AS NOT ITS JOB:
-    `SKIP $skip`/`LIMIT $limit`, the `count(n)` population, and the
-    terminal-status exclusion (a clause the production code builds into BOTH the
-    count and the page query, so the envelope a paged read reports can disagree
-    with the page it serves if either drops it). The other WHERE predicates —
-    `pointKind`, property filters, the operator-scope clause — are pinned by the
-    tests named for them (`tests/test_7108_operator_scope_predicate.py`,
-    `tests/test_10602_query_limit_bound.py`), and this body passes no
-    `point_kind=`, so it neither exercises nor claims them. A stub cannot be a
+    ⚠️ THE STUB MODELS FOUR THINGS, AND NAMES THE REST AS NOT ITS JOB:
+    `SKIP $skip`/`LIMIT $limit`, the `count(n)` population **after the same
+    WHERE**, the terminal-status exclusion, and the kind filter
+    (`n.pointKind = $kind` / `n.pointKind IN [...]`) — each is a clause the
+    production code builds into BOTH the count and the page query, so the
+    envelope a paged read reports can disagree with the page it serves if either
+    drops one. What it does NOT model is the kind EXPANSION:
+    `_read_filter_kinds` is stubbed to the identity, so an expansion bug
+    (descendants / equivalents / stored spellings) is a separate surface and
+    out of scope here — this fixture pins the FILTER, not the expansion. Nor
+    does it model property or operator-scope predicates. A stub cannot be a
     query engine; the boundary is stated so it is not mistaken for coverage.
     """
     from tortoise import sdk as sdk_module
@@ -434,12 +440,24 @@ def hooked_sdk(ledger, monkeypatch):
                     if r.get("status", "live") not in TERMINAL_EXCLUDED_STATUSES
                     and not r.get("outdated")
                 ]
-            if "count(n)" in cypher:
-                return _Res([[len(rows)]])
+            if "n.pointKind = $kind" in cypher:
+                rows = [r for r in rows if r.get("pointKind") == params.get("kind")]
+            elif "n.pointKind IN" in cypher:
+                wanted = {
+                    v for k, v in params.items() if k == "kind" or k.startswith("kind_")
+                }
+                rows = [r for r in rows if r.get("pointKind") in wanted]
+            # ⛔ THE COUNT IS SLICED HERE TOO — AFTER the WHERE, and through the
+            # same `SKIP`/`LIMIT` the page query carries. A count answered before
+            # the slice would report the whole population for a page-scoped count
+            # query, which is the "page reported as the population" fault this
+            # stub exists to make visible.
             if "SKIP $skip" in cypher:
                 skip = int(params.get("skip") or 0)
                 limit = params.get("limit")
                 rows = rows[skip:(skip + int(limit)) if limit is not None else None]
+            if "count(n)" in cypher:
+                return _Res([[len(rows)]])
             return _Res([(dict(row),) for row in rows])
 
     class _Proj:
@@ -449,6 +467,9 @@ def hooked_sdk(ledger, monkeypatch):
     inst = sdk_module.TortoiseSDK.__new__(sdk_module.TortoiseSDK)
     monkeypatch.setattr(inst, "_get_proj", lambda: _Proj, raising=False)
     monkeypatch.setattr(inst, "_expand_kind", lambda kind: [kind], raising=False)
+    # The kind EXPANSION is a separate surface (see this fixture's docstring);
+    # the FILTER it feeds is what the paged read's assertions need intact.
+    monkeypatch.setattr(inst, "_read_filter_kinds", lambda kind: [kind], raising=False)
     return inst, _Graph
 
 
@@ -477,7 +498,7 @@ def test_the_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
       (sdk.py:30905-30906 filters `status != "retracted"` BEFORE the slice), and
       never the HEAD of the scan — or a shorter slice — standing in for it;
     * `_get_point` records NOTHING **on its internal arm** (`served_out is None`,
-      `sdk.py:30567`) — the accessor the write paths use, so counting it would
+      `sdk.py:30557`) — the accessor the write paths use, so counting it would
       mark a written-but-never-read node as read. ⚠️ Its OTHER arm
       (`served_out` given — the opt-in caller-facing read, `#12941`) is not
       driven here, so this test pins the internal arm only.
@@ -499,17 +520,18 @@ def test_the_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
     # The keys must exist as STOCK first, or every read is (correctly) reported
     # as `unregistered` and there is no row to count on.
     for key in (
-        "q1", "q2", "q3", "q4", "q5", "q6",
+        "q1", "q2", "q3", "q4", "q5", "q6", "q7",
         "p7", "p8", "p9", "p10", "p11", "p12", "p13",
     ):
         record_stock("Point", key, nbytes=100)
 
     # THE CLAIM LIST IS THE OTHER PAGED DOOR, so it is driven as a REAL PAGE over
     # a bigger population. `q1` is skipped by `offset`, `q4` is never in a page,
-    # and `q6` is RETRACTED — it is in the stub's table and must NOT be in the
-    # population (`total == 5`), because the terminal exclusion is part of the
-    # count's `WHERE`. Both tail pages are exactly `limit` long, so `hasMore`
-    # cannot be guessed from `len(page) == limit`.
+    # `q6` is RETRACTED (in the stub's table, NOT in the population — the
+    # terminal exclusion is part of the count's `WHERE`) and `q7` is a DIFFERENT
+    # KIND (also in the table, also not in the population — the kind filter is the
+    # other half of the same `WHERE`). Both tail pages are exactly `limit` long,
+    # so `hasMore` cannot be guessed from `len(page) == limit`.
     graph.rows = [
         {"id": "q1", "pointKind": "claim"},
         {"id": "q2", "pointKind": "claim"},
@@ -517,11 +539,12 @@ def test_the_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
         {"id": "q4", "pointKind": "claim"},
         {"id": "q5", "pointKind": "claim"},
         {"id": "q6", "pointKind": "claim", "status": "retracted"},
+        {"id": "q7", "pointKind": "observation"},
     ]
-    mid = inst.list_knowledge("claim", offset=1, limit=2)
+    mid = inst.list_knowledge("claim", point_kind="claim", offset=1, limit=2)
     assert [r["id"] for r in mid["results"]] == ["q2", "q3"]
     assert mid["total"] == 5 and mid["hasMore"] is True
-    tail = inst.list_knowledge("claim", offset=4, limit=1)
+    tail = inst.list_knowledge("claim", point_kind="claim", offset=4, limit=1)
     assert [r["id"] for r in tail["results"]] == ["q5"]
     assert tail["total"] == 5 and tail["hasMore"] is False
 
@@ -570,7 +593,7 @@ def test_the_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
     # the tag row the first page skipped). `q5` and `p13` are 1 even though
     # their pages closed the walk (`hasMore == False`): the TAIL PAGE IS SERVED.
     assert counts == {
-        "q1": 0, "q2": 1, "q3": 1, "q4": 0, "q5": 1, "q6": 0,
+        "q1": 0, "q2": 1, "q3": 1, "q4": 0, "q5": 1, "q6": 0, "q7": 0,
         "p7": 0, "p8": 1, "p9": 1,
         "p10": 0, "p11": 0, "p12": 1, "p13": 1,
     }
