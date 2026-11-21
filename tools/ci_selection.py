@@ -1224,8 +1224,17 @@ SOURCE_PATTERNS = {
             # would have been told to call a name `tools/list` does not advertise, with
             # every gate green. Registered against `sdk`, the surface the guard itself is
             # registered in (`config/ci-surfaces.yml`), the narrower of the two remedies
-            # the review named: a concrete path costs nothing until this doc changes, where
-            # `tier1` would put the whole catalogue suite in every PR's smoke leg. Named as
+            # the review named. ⛔ WHAT IT COSTS WHEN THE DOC CHANGES, MEASURED (#14237
+            # round-2 review, P2 — the earlier wording said only "costs nothing until
+            # this doc changes" and left the other half unstated): `select([this doc])`
+            # -> surfaces=['sdk'], test_files=221 including the guard, `slow_run=True`
+            # (64 slow files, 3 of them the sdk legs) and `carve_out_run=True`. That is
+            # the ONE declared exception to the #2147/#2148 "docs-only touches no slow
+            # leg" property — pinned by tests/test_ci_selection.py::
+            # test_the_p7_how_to_selects_its_reader_and_declares_the_cost — and it is
+            # accepted because the alternatives are strictly wider: `tier1` would put the
+            # whole catalogue suite in every PR's smoke leg, and `core` would select the
+            # core pool without selecting the guard. Named as
             # a CONCRETE file, not a glob — `select()` matches with `startswith` and has no
             # glob support. If a SECOND doc-reading guard is added later, graduate this to
             # `tier1` instead of growing this row.

@@ -1103,8 +1103,16 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #: A `;` is a boundary too (#14237 N3): it joins two INDEPENDENT CLAUSES, so a note
     #: and an instruction glued with one shared a "sentence" and the instruction again
     #: passed on its neighbour's word. It is measured by its own case below, not asserted.
+    #:
+    #: A terminator followed by a CLOSING DELIMITER is still a terminator (#14237 round-2
+    #: review, P2): `(?=\s)` alone missed the `.` in `…retired forward into it.)`, so the
+    #: sentence did not end there and the NEXT line inherited the note's "retired" —
+    #: measured, the guard passed an instruction written directly under a parenthesised
+    #: migration note. Only the closing characters are skipped, and only up to whitespace,
+    #: so this can only ADD boundaries (never cut a sentence a plain terminator already
+    #: cut in two).
     SENTENCE_BREAK = re.compile(
-        r"[.!?](?=\s)"                                    # ends a sentence
+        r"[.!?][\"'\u2019\u201d)\]]*(?=\s)"                 # ends a sentence, maybe `.)`
         r"|;[ \t]*"                                       # ends a CLAUSE
         r"|\n[ \t]*\n"                                     # ends a block
         r"|\n(?=\||#{1,6} |[ \t]*[-*+] |[ \t]*\d+\. )"     # a new block begins
@@ -1169,6 +1177,23 @@ class TestEveryReaderNamesTheLiveListingDoor:
             text, instruction, instruction + 20).lower(), (
             "an instruction joined to the note by ';' was cleared by the note's "
             "'retired' — a clause boundary is not a sentence boundary")
+
+    def test_a_terminator_before_a_closing_delimiter_still_ends_the_sentence(self):
+        """`.)` ends a sentence (#14237 round-2 review, P2).
+
+        Measured fail-open: a parenthesised migration note ends `.`+`)`, so a boundary
+        that only looked for `[.!?]` followed by whitespace missed it, and the
+        instruction written on the next line inherited the note's "retired".
+        """
+        text = ("Intro about the wave.\n"
+                "(the door `tortoise_list_graphs` retired forward into "
+                "`tortoise_graph_overview`.)\n"
+                "Call `tortoise_list_graphs` for the names.\n")
+        instruction = text.rindex("Call `tortoise_list_graphs") + 6
+        assert "retire" not in self.sentence_around(
+            text, instruction, instruction + 20).lower(), (
+            "an instruction under a parenthesised `…retired….)` note was cleared by "
+            "it — a terminator followed by a closing delimiter is still a terminator")
 
     @pytest.mark.parametrize("relpath", CALL_INSTRUCTION_DOCS)
     def test_every_mention_says_the_name_is_retired(self, relpath):
