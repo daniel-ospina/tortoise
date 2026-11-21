@@ -282,34 +282,52 @@ measured: `--emit-push-matrix` on the merged manifest read 24 m, and it read 23 
 base that branch first merged (`2c67c0cf99`). ⛔ **`#14012` then moved it to 25 m, the same
 mechanism one minute further** — and it is measured by SUBTRACTION, not inferred: with its three
 `core` suites in the pool (`tests/test_14012_outside_view.py`, `tests/test_14012_resident_pin.py`,
-`tests/test_14012_resident_cli.py`) `--emit-push-matrix` reads **25 m** at `est_seconds` 720.4;
-with those three `core` entries removed it reads **24 m** at 719.8, which is exactly what
-`origin/main` `69908d006b` emits (719.8). ⛔ THE FIX IS NOT TO LOWER A WEIGHT: the three enter at
+`tests/test_14012_resident_cli.py`) `--emit-push-matrix` reads **25 m** (at the pre-merge head
+`23c22cc0df`, `est_seconds` **720.6**);
+⛔ MEASURED BY SUBTRACTION AT THAT HEAD: with those three `core` suites removed from the pool it reads
+**24 m** at **720.0** — the earlier `24 m` arm was right and only its `719.8` `est_seconds` was stale,
+because the pack as a whole moved to `720.0` (720.0 × 2.0 / 60 = 24.00, which `shard_watchdog_minutes`
+ceils to **24**; 720.6 lands at 24.02, which ceils to **25**). ⛔ An earlier cut of this sentence claimed
+the subtraction had stopped separating the pair and withdrew the `24 m` arm on that basis — that
+reading does NOT reproduce at the head it named and is itself withdrawn here. ⛔ **AND THE PAIR STOPS
+SEPARATING AFTER THE MERGE WITH `main` `b4da1f5c01`, WHICH IS THE FINDING WORTH KEEPING**: the pool now
+reads **25 m** at **720.7**, and with the same three removed it STILL reads **25 m** at **720.2** —
+because the 24/25 boundary is EXACTLY `est_seconds` 720.0 (`shard_watchdog_minutes` is
+`ceil(est / 60 × 2.0)`, so 720.0 → 24.00 → **24** and 720.2 → 24.0067 → **25**), and `main`'s pack moved
+the three-removed arm 0.2 s above that cliff. Two lanes measured this same pair opposite ways within
+an hour for exactly that reason, so the durable fact is NOT which minute a given tree emits: it is
+that these three suites move the ceiling by ~0.5 s around a 720.0 s cliff (`720.7 − 720.2` at the
+merged tree; their declared 6.0 s over the 11 shards is ~0.55 s/shard), so any conclusion quoted
+here MUST name the head it was measured at and re-derive BOTH arms with the verb. ⛔ THE FIX IS NOT TO
+LOWER A WEIGHT: the three enter at
 the pool's own default (`DEFAULT_FAST_WEIGHT = 2.0`, `tools/ci_selection.py:105`), identical to
 their `durations:` rows, so removing or shrinking those rows changes nothing (measured: dropping
-all three `durations:` rows still emits 720.4) — what moves it is three more files in the pack,
-+6 s over 11 shards, which crosses the minute boundary once the ×2 headroom is applied. ⛔ **THIS
-RE-CUT THEN MERGED THE TWO SIDES, WHICH IS A THIRD TREE, SO THE TERM IS READ OFF IT RATHER THAN
-INHERITED FROM EITHER PARENT:** `--emit-push-matrix` on THIS manifest emits **25 m on all eleven
-shards**, the worst at `est_seconds` **720.7** (`ceil(720.7/60 x 2)` = 25, re-read after the
-`origin/main` `b4da1f5c` merge — it emitted 720.6 on the previous tree), and the pool it packs now
-holds BOTH parents' added suites — `#14012`'s three (shards `d`, `e`, `i` — `test_14012_resident_cli`,
-`test_14012_resident_pin`, `test_14012_outside_view`) and `#14015`'s M5 `test_miss_rate_m5.py` (shard
-`d`, beside `resident_cli`) — so no arithmetic on the two parents' figures would have
-predicted the merged reading. The three
-hand-added figures are re-added from the
-emitted 25 m: 56.6 m / 85.0 m / 5.0 m (the row above, and the same three figures as the row's own
-`x 1.5 = 85.0`), which is the 1-decimal restatement of the
-terms' own total, 56.64 m, that
-`config/ci-surfaces.yml` already records for this same quantity — its S=11 header block reads
-**arm-2 SUM 56.64 m, x 1.5 = 85.0 m, 5.0 m of headroom**, and the
-`test_demo_session_read_exclusion_8290.py` `durations:` row repeats 85.0 m against the 90 m cap — ⛔ and the × 1.5 is taken on the UNROUNDED
-total, 56.64 → 84.96 → **85.0 m**, headroom 90 − 84.96 = 5.04 → **5.0 m**: multiplying the
-ROUNDED 56.6 instead reads 84.9 m / 5.1 m and overstates the headroom by a tenth of a metre, which
-is how this one sentence came to disagree with the row above it. ⛔ **THIS PARAGRAPH ITSELF RESTATED
-84.9 m / 5.1 m UNTIL THE `#14183` RE-CUT** — that is exactly the ROUNDED-SUM path the clause just
-above forbids — and `origin/main` and this branch corrected it independently, to the same pair —
-⛔ NOT the sum of the four ROUNDED
+all three `durations:` rows still emits **721.1** on THIS resolution — so lowering or dropping
+those rows moves NOTHING, which is the point of the sentence) — what moves the term is three more
+files in the pack, +6 s over 11 shards, which crosses the minute boundary once the ×2 headroom is
+applied at the earlier heads. ⛔ **EACH RE-CUT MERGES A DIFFERENT PAIR, SO THE TERM IS READ OFF THE
+RESULTING TREE RATHER THAN INHERITED FROM EITHER PARENT:** `--emit-push-matrix` on the tree that
+merged `origin/main` `b4da1f5c` emitted **25 m on all eleven shards**, the worst at `est_seconds`
+**720.7** (`ceil(720.7/60 x 2)` = 25, re-read after that merge — it emitted 720.6 on the tree before
+it), and the pool it packed held BOTH parents' added suites — `#14012`'s three (shards `d`, `e`, `i`
+— `test_14012_resident_cli`, `test_14012_resident_pin`, `test_14012_outside_view`) and `#14015`'s M5
+`test_miss_rate_m5.py` (shard `d`, beside `resident_cli`) — so no arithmetic on the two parents'
+figures would have predicted the merged reading. ⛔ **THE MERGE WITH `origin/main` `10e51693` IS A
+FURTHER TREE AND MOVES IT AGAIN, so the figure quoted above is HISTORY and not this tree's term:**
+`--emit-push-matrix` here emits **25 m on all eleven shards** at a worst `est_seconds` of **721.1**
+(and dropping the three `durations:` rows still reads 721.1 — measured by doing exactly that, then
+restoring the manifest), which is `#14192`'s added suites packing into the same pool. The three
+hand-added figures are re-added from the emitted 25 m: 56.6 m / **85.0 m** / **5.0 m** (the row
+above, plus `config/ci-surfaces.yml`'s S=11 header block, which reads **arm-2 SUM 56.64 m,
+x 1.5 = 85.0 m, 5.0 m of headroom**, and the `test_demo_session_read_exclusion_8290.py`
+`durations:` row, which repeats 85.0 m against the 90 m cap), which is the 1-decimal restatement of
+the terms' own total, 56.64 m — ⛔ the × 1.5 is taken on the UNROUNDED total, 56.64 → 84.96 →
+**85.0 m**, headroom 90 − 84.96 = 5.04 → **5.0 m**: multiplying the ROUNDED 56.6 instead reads
+84.9 m / 5.1 m and overstates the headroom by a tenth of a metre, which is how this one sentence came
+to disagree with the row above it — and the `84.9 / 5.1` this sentence itself carried was that same
+re-derivation, withdrawn here: ⛔ **THIS PARAGRAPH WAS RESTATED AT 84.9 m / 5.1 m UNTIL THE `#14183`
+RE-CUT** — exactly the ROUNDED-SUM path the clause just above forbids — and `origin/main` and this
+branch corrected it independently, to the same pair — ⛔ NOT the sum of the four ROUNDED
 terms, which reads 56.7 m: the startup term is 7.27 m (182 s + 254 s, where 254 s is ALREADY the 266 s window net of the
 embedder's 12 s — subtracting that 12 s a second time gives 7.07 m, which is how this figure was
 first mis-added here), not the ~7.3 it is printed as, and the last-failed save is 0.38 m, not 0.4) instead of the 0.5 m S=10 had been clearing by. The cap was

@@ -933,6 +933,21 @@ def test_every_pin_refusal_carries_the_same_pins_shape_as_the_success_body(
     assert body["pins"]["applied"] is False
     assert "cannot be resolved" in body["pins"]["not_applied_reason"]
 
+    # arm 3: the declaration is READABLE but its set is over the cap, so `gate_reason()`
+    # refuses the sweep. ⛔ This arm was the one the row did not cover: the two rows that
+    # reach it assert `out["reason"]` only, so reverting THIS envelope to bare
+    # `pins.as_dict()` left the suite green — the exact `KeyError` the row exists to close,
+    # on the refusal an operator must act on (unpin, or raise `TORTOISE_PIN_MAX_NODES`).
+    monkeypatch.setenv("TORTOISE_PIN_MAX_NODES", "1")
+    code = cache_evict.main(_sweep_argv(_report_file(tmp_path), "--max-nodes", "1000"))
+    assert code == cache_evict.CACHE_EVICTION_EXIT_REFUSED, "sanity: the set is over its cap"
+    body = json.loads(capsys.readouterr().out)
+    assert body["pins"]["applied"] is False, (
+        "the over-budget refusal reported `applied` as anything but False — a monitor "
+        "cannot tell a refused sweep from an applied one"
+    )
+    assert "pinned closure" in body["pins"]["not_applied_reason"]
+
 
 def test_show_with_no_declaration_and_no_window_still_says_cap_checked_is_false(
         wired, capsys, monkeypatch):
@@ -956,3 +971,40 @@ def test_show_with_no_declaration_and_no_window_still_says_cap_checked_is_false(
         "`budget is not None` expression is not what this field is measuring"
     )
     assert "not checked" in out["reason"].lower()
+
+
+def test_show_refuses_a_named_pair_that_disagrees_with_the_declaration(
+        wired, capsys):
+    """F8 — the `show --label`/`--key-prop` refusal was deletable with the suite green.
+
+    ⛔ `show` accepts both flags (they sit on the shared flag set) and used to IGNORE
+    them, so `show --label Source` on a `Point` declaration answered `OK` about a
+    population the operator named and the verb never consulted — and `show --key-prop
+    bogus` exited 0 where its own help promises a refusal. The loop that closes it was a
+    round-6 fix with NO row behind it: replacing the whole block with `pass` left 40/40
+    green, because no other row passes either flag to `show`. Same "answered about a
+    population they never named" class the PR pins for `pin` and `outside`; pinned here.
+    """
+    wired.meta[PINS_META_KEY] = {"label": "Point", "key_prop": "id", "keys": ["p0"]}
+
+    for flag, value, actual in (
+            ("--label", "Source", "Point"),
+            ("--key-prop", "bogus", "id")):
+        with pytest.raises(SystemExit) as exc:
+            resident.main(["show", *BASE, "--window-nodes", "1000", flag, value])
+        assert exc.value.code != 0, (
+            f"`show {flag} {value}` answered about a population the declaration does not "
+            f"describe ({actual!r}) — a named pair that disagrees is a usage error"
+        )
+        captured = capsys.readouterr()
+        assert captured.out.strip() == "", (
+            f"`show {flag} {value}` emitted a JSON body before refusing — a consumer "
+            f"reading `--out` would record an answer about the wrong population"
+        )
+        assert value in captured.err and actual in captured.err
+
+    # naming the declaration's OWN pair is fine, and so is naming none
+    assert resident.main(["show", *BASE, "--window-nodes", "1000",
+                          "--label", "Point", "--key-prop", "id"]) == resident.EXIT_OK
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdict"] == "OK"

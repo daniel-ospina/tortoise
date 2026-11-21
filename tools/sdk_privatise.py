@@ -1197,7 +1197,42 @@ SWEEP_NAMES = 66
 #: `(11860, "267dce26b4191743")` — unchanged from the pre-restoration pin, because every restored
 #: line is `#:`-prose and `edits_for` walks the AST and cannot see a comment. `--check` exits 0
 #: here with `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11860, "267dce26b4191743")
+#:
+#: ⛔ RE-CUT → (11858, "a1552662bf07a10b"). The 11857 pair was NOT measured on this branch: it is
+#: `main`'s own pin (`e74cf1d13d`), inherited here at the merge and left in place while this branch
+#: kept adding rows under it, so `--check` reds on this tree by exactly ONE. `git log` proves the
+#: inheritance rather than asserting it: the ONLY commit that ever set the constant to that pair is
+#: `e74cf1d13d` itself, and that tree carries no `out.update` (measured: 0 occurrences in
+#: `tests/test_14125_retired_name_calls.py`), so the pair was true of ITS tree and false of this one.
+#: THE ONE ROW: `out.update` 1 — `_global_declarations` in `tests/test_14125_retired_name_calls.py`,
+#: an `out: set[str]` accumulated with `out.update(node.names)` over an `ast.Global`. It arrived with
+#: this branch's own `a4e97d6f5b`, which is why the block above can still claim this branch's census
+#: contribution is "ZERO ROWS" and be wrong at this head — that reading was taken before the row
+#: existed and was never re-measured, the recurrence this pin chain keeps recording.
+#: ⛔ ATTRIBUTED BY MEASUREMENT, NOT ARITHMETIC: the residue counter was derived over the whole tree
+#: and the SINGLE row removed; `11858 − out.update` prints `(11857, "ed40203dbbf32b87")` — the pinned
+#: pair EXACTLY — so that one row is the whole delta and no other shape moved in either direction.
+#: The row is DECLARED rather than rewritten away, as `main` declared `terms.update` 0 → 1:
+#: a plain `set[str]` in a test helper is the ordinary-word receiver this sweep deliberately leaves
+#: alone, neither an SDK handle nor a FalkorDB `Graph`, and `typed references still pointing at a
+#: public name` stays **0**. Measured on the MERGED tree: this head has `origin/main` `9f83a63bfa`
+#: merged in, and `--repin` printed the same pair before and after that merge, so the merge
+#: contributes no row here either — nor do the sibling commits merged after it (all on this
+#: branch's census file, and named by log rather than counted here, because a count restated in this
+#: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
+#: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
+#: not carried forward.
+#: ⛔ MERGED `origin/main` `10e51693` INTO THIS BRANCH AND KEPT BOTH SIDES' BLOCKS ABOVE — each is a
+#: true measurement of the tree it NAMES, which is the ground rule of this run, so neither side is
+#: dropped to make the conflict go away. THE PIN IS THEN RE-MEASURED ON THE RESOLVED TREE, because
+#: that tree is a THIRD tree: the two parents pinned `(11860, "267dce26b4191743")` (this branch) and
+#: `(11858, "a1552662bf07a10b")` (`origin/main` `10e51693`'s own re-cut), and `--repin` ON THIS
+#: RESOLUTION prints `(11864, "2a6400518a87775c")` — FOUR MORE than this branch's parent, none of
+#: which is the branch's own +3 end-proof rows, so the four arrived with `origin/main`'s commits and
+#: an inheritance of either parent's line would have been wrong in both directions. Arithmetic
+#: across the parents is a CROSS-CHECK here, never the evidence. `--check` exits 0 on this
+#: resolution with `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11864, "2a6400518a87775c")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
