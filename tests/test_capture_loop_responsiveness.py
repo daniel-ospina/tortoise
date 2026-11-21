@@ -2986,12 +2986,21 @@ def test_the_capture_post_write_tail_never_runs_on_the_event_loop(
 #:     sibling needle `ENDS WITH $suffix`.
 #:   * the write-verb enrichment read (`n.posterior_alpha, n.ep_alpha`) —
 #:     `_measure_capture_graph_work` stubs the extractor to emit nothing, so
-#:     `if extracted:` (hosted_api.py:21861) is never entered and `_enrichment_read`
+#:     `if extracted:` (hosted_api.py:21862) is never entered and `_enrichment_read`
 #:     never runs. ⛔ UNCOVERED RESIDUAL: no test in this tree asserts WHICH THREAD
-#:     that leg runs on (`grep -rn 'posterior_alpha, n.ep_alpha' tests/`), so
-#:     returning it inline would be silent here. Making the fixture reach it needs
-#:     the extractor stub replaced with a realistic extraction, which is a fixture
-#:     redesign this change does not carry.
+#:     that leg runs on, so returning it inline would be silent here. The evidence
+#:     is a discriminating count, not a bare list of hits. It EXCLUDES this file,
+#:     which carries the needle five times — twice in code (the dict row and the
+#:     excluded-rows tuple) and three times in this note, the command included,
+#:     which would otherwise count its own text as a hit:
+#:         grep -rn 'posterior_alpha, n.ep_alpha' tests/ --include='*.py' \
+#:             --exclude=test_capture_loop_responsiveness.py | grep -ci thread
+#:         -> 0        (14 rows across 8 files, all cypher string literals in
+#:                      reader/stub tests — none is a thread assertion)
+#:     (the only tests that touch the leg at all assert the non-fatal warning:
+#:     `tests/test_hosted_api.py:4231`, `tests/test_capture_session.py:7428`).
+#:     Making the fixture reach it needs the extractor stub replaced with a
+#:     realistic extraction, which is a fixture redesign this change does not carry.
 _TAIL_MUST_BE_ISSUED = {
     k: v for k, v in _CAPTURE_TAIL_STATEMENTS.items()
     if k not in ("s.entity_links_attempted", "n.posterior_alpha, n.ep_alpha")
