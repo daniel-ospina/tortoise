@@ -32,6 +32,7 @@ map; this file pins that the five names are in it at all).
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 
@@ -599,14 +600,30 @@ class TestTheRelationDecidedArmCountsItsPointCreates:
         assert ms._link_entities_scalar_abuse_weight(
             {"": 1}, ("ownedBy", "a", "b"), {"operator": True}) == 1
 
-    def test_the_scalar_arm_PASSES_a_weight_to_the_wrapper(self):
-        """Wiring, not just the helper: the wrapper must RECEIVE the callable."""
-        import inspect
+    def test_the_scalar_arm_PASSES_a_weight_to_the_wrapper(self, served, monkeypatch):
+        """Wiring, measured on the OBJECT: the wrapper must RECEIVE the callable.
 
-        src = inspect.getsource(ms.tortoise_link_entities)
-        assert "abuse_weight=_link_entities_scalar_abuse_weight" in src, (
-            "the relation-decided arm is wrapped without an abuse_weight, so the "
-            "operator it can create is never recorded as a point_create")
+        ⛔ `inspect.getsource` was the previous form and it is not a gate (#14237 review
+        N1): it includes comments, so `abuse_weight=_link_entities_scalar_abuse_weight`
+        surviving in a COMMENT kept the row green while the call itself was mutated back
+        to passing no weight. `_quota_gated` is spied and the weight's IDENTITY asserted,
+        which is falsifiable by that one edit.
+        """
+        received: list[dict] = []
+        real = ms._quota_gated
+
+        def spy(fn, resource="points", **kwargs):
+            received.append(kwargs)
+            return real(fn, resource, **kwargs)
+
+        monkeypatch.setattr(ms, "_quota_gated", spy)
+        served("link_entities", {"edge": 1})
+        assert ms.tortoise_link_entities("performs", "a", "b") == {"edge": 1}
+        assert len(received) == 1, received
+        assert received[0].get("abuse_weight") is ms._link_entities_scalar_abuse_weight, (
+            "the relation-decided arm is wrapped WITHOUT the derived weight, so the "
+            "operator it can create is never recorded as a point_create — and a "
+            "source-text match cannot see that, so this asserts the object instead")
 
 
 class TestThePreviewReceiptIsNotWiderThanTheDefect:
@@ -624,30 +641,80 @@ class TestThePreviewReceiptIsNotWiderThanTheDefect:
     receipt must be naming the LIVE door, not the retired spelling.
     """
 
-    def _stub(self, monkeypatch, served):
+    def _stub(self, monkeypatch, served, *, resolved=False):
+        """Install the SDK recorder and a projection whose resolution we choose.
+
+        ⛔ `resolved=False` exercises the NOT-FOUND early return (`_preview_result(
+        "tortoise_delete_knowledge", …)`); `resolved=True` exercises the FOUND branch —
+        `out["tool"] = "tortoise_delete_knowledge"` — which is the assignment the P2 fix
+        is actually about and which the not-found stub never reaches (#14237 review F2).
+        """
         sdk, calls = served("_delete", True)
 
         class _Proj:
             @staticmethod
             def _resolve_entity(*_a, **_k):
-                return []
+                return [{"label": "Point", "id": "p1"}] if resolved else []
 
         monkeypatch.setattr(sdk, "_get_proj", lambda: _Proj(), raising=False)
+        if resolved:
+            # The leaf previews walk the graph; this class measures the DISPATCHER's
+            # `tool` field, so the leaves are substituted rather than queried.
+            monkeypatch.setattr(
+                ms, "_preview_delete_point",
+                lambda _sdk, _id: ms._preview_result(
+                    "tortoise_delete_point", "delete", found=True,
+                    target={"id": _id, "label": "Point"},
+                    nodes_removed=1, edges_removed=0, nodes=[_id], edges=[]))
         return sdk, calls
 
-    def test_the_preview_field_names_the_ADVERTISED_door(self, monkeypatch, served):
-        sdk, _calls = self._stub(monkeypatch, served)
-        preview = ms._preview_delete(sdk, "nope")
+    @pytest.mark.parametrize("resolved", [False, True], ids=["not-found", "resolved"])
+    def test_the_preview_field_names_the_ADVERTISED_door(self, monkeypatch, served,
+                                                         resolved):
+        """BOTH literals, because they are different assignments.
+
+        The not-found path returns `_preview_result("tortoise_delete_knowledge", …)`;
+        the found path returns a leaf preview and then stamps `out["tool"]`. A stub
+        that only ever answers "not found" pins the first and leaves the second free to
+        revert to the retired spelling with every row green — the false PASS #3442
+        exists to refuse.
+        """
+        sdk, _calls = self._stub(monkeypatch, served, resolved=resolved)
+        preview = ms._preview_delete(sdk, "p1")
         assert preview["tool"] == "tortoise_delete_knowledge", preview
         assert preview["tool"] in {t.name for t in TOOL_REGISTRY}, (
             "the preview names a door the surface does not advertise, so a caller "
             "following it calls a tool it was never offered")
 
-    def test_the_caller_visible_receipt_names_no_retired_door(self, monkeypatch, served):
-        _sdk, calls = self._stub(monkeypatch, served)
-        receipt = ms.tortoise_delete_knowledge("nope")
+    @pytest.mark.parametrize("resolved", [False, True], ids=["not-found", "resolved"])
+    def test_the_value_a_caller_can_get_back_names_no_retired_door(self, monkeypatch,
+                                                                   served, resolved):
+        """The fail-open half, made falsifiable.
+
+        ⛔ The previous form asserted `RETIRED_USE_INSTEAD` names never appear in the
+        receipt. That assertion could not fail under ANY revert: `_deletion.receipt`
+        carries no `tool` key, so no preview literal reaches it (measured, #14237 review
+        F2) — dead weight that reads as coverage (#3442 rule 3). And its plain `in`
+        check was wrong in the other direction: `tortoise_delete` is a SUBSTRING of the
+        live `tortoise_delete_knowledge`, so the CORRECT value would have tripped it.
+
+        So it measures the value a future consumer would forward, on the path that
+        produces it: the dispatcher's own `tool` (which reds when either literal is
+        reverted) and the receipt, with a WORD-BOUNDED match so the live door — and any
+        name the surface still advertises — cannot be misread as a retirement.
+        """
+        sdk, calls = self._stub(monkeypatch, served, resolved=resolved)
+        preview = ms._preview_delete(sdk, "p1")
+        receipt = ms.tortoise_delete_knowledge("p1")
         assert calls == [], "the preview reached the writer"
-        named = [name for name in RETIRED_USE_INSTEAD if name in str(receipt)]
-        assert not named, (
-            f"the receipt a caller receives names the retired {named} — the value a "
-            "caller re-calls must be one `tools/list` advertises")
+        live = {t.name for t in TOOL_REGISTRY}
+        for surface, payload in (("preview", preview), ("receipt", receipt)):
+            named = [
+                name for name in sorted(RETIRED_USE_INSTEAD)
+                if name not in live
+                and re.search(rf"\b{re.escape(name)}\b", str(payload))
+            ]
+            assert not named, (
+                f"the {surface} a caller receives names the retired {named} — the value "
+                "a caller re-calls must be one `tools/list` advertises")
+

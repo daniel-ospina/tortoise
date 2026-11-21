@@ -348,6 +348,18 @@ WEIGHT_BEARING_METHODS: frozenset[str] = frozenset({
     # `test_the_container_write_is_declared_weight_bearing` pins that BOTH halves of
     # this win — the site weighs AND the name is declared — stay).
     "create_entity",
+    # ⛔ #11609 lane P7 (#14237 review F1): the relation-decided `link_entities` arm DOES
+    # create a Point — an epistemic relation (`supports`/`refutes`/
+    # `mutuallySupportive`/`mutuallyExclusive`) routes through `SEMANTICS_MECHANISMS` to
+    # `create_operator`, and `operator=True` does so on any relation. Its `_quota_gated`
+    # site passes `abuse_weight=_link_entities_scalar_abuse_weight`, a CALLABLE for the
+    # same reason `create_entity`'s is: a plain edge (`performs`, `ownedBy`, `IMPL`) writes
+    # no Point and must record 0, or a linking burst of the most ordinary call this door
+    # serves trips R1. Without this row the partition reds on a site that legitimately
+    # weighs (`wrap_site_violations` → `_quota_gated(link_entities)@…: abuse_weight=True`),
+    # and the tempting green is the fail-open one — dropping the weight to match the
+    # declaration — which `test_abuse_integration.py` forbids in so many words.
+    "link_entities",
 })
 
 # #11609 lane C: four retired methods are still SERVED, through doors that call the
@@ -433,6 +445,14 @@ DECLARED_WRITE_SURFACE_MAP: dict[str, str] = {
     "mine_knowledge_from_session": "tortoise_mine_knowledge_from_session",
     "register_source": "tortoise_register_source",
     "manage_source_trust": "tortoise_manage_source_trust",
+    # #11609 lane P7 (#14237 review N3): `tortoise_link_entities` absorbed
+    # `tortoise_create_edge` AND `tortoise_create_operator` and quota-gates the SDK's
+    # `link_entities`, but the door was never declared here — so the forward arm reported
+    # `unmapped _quota_gated wrap sites: ['link_entities']` at the BASE commit too
+    # (`test_no_write_tool_counted_as_read` was already red on main in P7's wake). The map
+    # must be live in BOTH directions, so an undeclared write surface is the same stale-gate
+    # defect as a declared one with no wrap site.
+    "link_entities": "tortoise_link_entities",
 }
 
 # Tenant-scoped control-plane labels: a registry mutation whose labels are

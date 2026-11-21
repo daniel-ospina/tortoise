@@ -7771,6 +7771,15 @@ def _link_entities_scalar_abuse_weight(result, args, kwargs) -> int:
     is the one other term in that dispatch that reaches `create_operator`. A second,
     hand-maintained list here would silently disagree with the SDK the day a meaning
     is added — the parallel-list failure this door's own history is made of.
+
+    ⚠️ SCOPE, MEASURED (#14237 review N2) — the `operator is True` term is UNREACHABLE
+    from this door: `tortoise_link_entities` routes an explicit `operator=true` (and any
+    LIST target) to the OPERATOR arm, which passes `abuse_weight=1` directly and never
+    reaches this helper. The live rule here is "an epistemic relation", full stop. The
+    term is KEPT as belt-and-braces — it cannot add a wrong weight, and it keeps the
+    helper honest if the arm split ever moves — but nothing should read it as a path
+    production takes: `test_an_explicit_operator_true_is_weighted` exercises the helper
+    in isolation, not a call the handler can make.
     """
     relation = args[0] if args else kwargs.get("relation")
     try:

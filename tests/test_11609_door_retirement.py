@@ -1082,6 +1082,53 @@ class TestEveryReaderNamesTheLiveListingDoor:
         "docs/how-to/provision-a-graph-per-end-user.md",
     )
 
+    #: What ends a SENTENCE in this document. ⛔ A fixed ±N-character window is not one
+    #: (#14237 review F3): it spans sentence boundaries, so an instruction placed next to
+    #: an unrelated migration note passed. This is the assertion's stated property, so it
+    #: is what the assertion measures.
+    #:
+    #: A hard-wrapped PROSE line is deliberately NOT a boundary — the doc wraps at ~80
+    #: columns, so treating a bare newline as one would split a sentence mid-clause and
+    #: red a correct mention (the over-block direction). Blank lines and lines that OPEN a
+    #: new markdown block (table row, heading, list item) are boundaries, because that is
+    #: where prose actually stops.
+    SENTENCE_BREAK = re.compile(
+        r"[.!?](?=\s)"                                    # ends a sentence
+        r"|\n[ \t]*\n"                                     # ends a block
+        r"|\n(?=\||#{1,6} |[ \t]*[-*+] |[ \t]*\d+\. )"     # a new block begins
+    )
+
+    @classmethod
+    def sentence_around(cls, text: str, start: int, end: int) -> str:
+        """The sentence containing ``[start, end)`` — bounded by terminators, not width."""
+        left = 0
+        for match in cls.SENTENCE_BREAK.finditer(text, 0, start):
+            left = match.end()
+        following = cls.SENTENCE_BREAK.search(text, end)
+        right = following.end() if following else len(text)
+        return text[left:right]
+
+    def test_the_window_is_a_sentence_not_a_character_budget(self):
+        """The fail-open case, as a case (#14237 review F3).
+
+        A migration note on one line and an INSTRUCTION on the next: a ±140-character
+        window sees the neighbouring "retired" and passes the instruction; a sentence
+        window does not.
+        """
+        text = (
+            "The door `tortoise_list_graphs` retired forward into "
+            "`tortoise_graph_overview(section=\"graphs\")`.\n"
+            "Call `tortoise_list_graphs(graph_id=x)` to read one graph.\n"
+        )
+        instruction = text.index("Call `tortoise_list_graphs", text.index("Call"))
+        note = text.index("`tortoise_list_graphs`")
+        assert "retire" in self.sentence_around(text, note, note + 20).lower(), (
+            "the migration note is its own sentence and still says retired")
+        assert "retire" not in self.sentence_around(
+            text, instruction + 6, instruction + 26).lower(), (
+            "the INSTRUCTION shares a ±window with the note's 'retired' but not a "
+            "sentence — a window-based guard would call this labelled")
+
     @pytest.mark.parametrize("relpath", CALL_INSTRUCTION_DOCS)
     def test_every_mention_says_the_name_is_retired(self, relpath):
         """A retired name may be MENTIONED here — it may not be RECOMMENDED.
@@ -1093,17 +1140,27 @@ class TestEveryReaderNamesTheLiveListingDoor:
         labelled as a retirement in its own sentence. An INSTRUCTION ("call
         `tortoise_list_graphs`, which answers …") has no such word, and that is
         exactly the form the P7 review found twice in this file.
+
+        ⛔ "In its own sentence" is measured as a sentence (#14237 review F3), not as a
+        character window: ±N characters spans sentence boundaries, so an instruction
+        placed within 140 characters of an unrelated "retired" note would pass — the
+        guard's own failure mode, one doc edit away.
         """
         from pathlib import Path
 
         doc = Path(__file__).resolve().parent.parent / relpath
         text = doc.read_text(encoding="utf-8")
         unlabelled = []
+        mentions = 0
         for name in sorted(RETIRED_USE_INSTEAD):
             for match in re.finditer(rf"\b{re.escape(name)}\b", text):
-                window = text[max(0, match.start() - 140):match.end() + 140]
-                if "retire" not in window.lower():
-                    unlabelled.append((name, " ".join(window.split())))
+                mentions += 1
+                sentence = self.sentence_around(text, match.start(), match.end())
+                if "retire" not in sentence.lower():
+                    unlabelled.append((name, " ".join(sentence.split())))
+        assert mentions, (
+            f"{relpath} names no retired door at all, so this guard measured nothing — "
+            "a scan with an empty discovery set cannot pass")
         assert not unlabelled, (
             f"{relpath} names a retired door without saying it is retired, so the "
             f"reader takes it as the call to make: {unlabelled}. The name is "
