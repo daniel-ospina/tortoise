@@ -1769,23 +1769,27 @@ def test_a_carried_forward_figure_is_reported() -> None:
             {1: alt_pairs - 1},
             "the alternative basis is one pair short of what the two-code-span form measures, not level with it",
         ),
+        # ⛔ WHY THIS MUTANT IS DERIVED FROM THE BAND'S EDGE, AND NOT A FIXED OFFSET — kept here because
+        # the loop's assertion messages interpolate `why`, and a measurement table inside one of them
+        # buries the mismatch a failing row is trying to report (`#14038` review). The row shipped a
+        # literal `{2: alt_drifters + 7}` and the band's headroom is a property of the DOCUMENT.
+        # ⛔ MEASURED here: 3 UNCCOUNTED added pairs (the `_TWO_SPAN_NEW` arm's numeral, `**three**`), and
+        # the document also writes 5 two-code-span pairs IN TOTAL (`**five**`) — that `5` is
+        # `3 uncounted + 2 already counted`, so it is NOT the headroom and must not be read as one; the
+        # uncounted count has not moved off 3 on this branch. A fixed `+offset` therefore becomes a LEGAL
+        # value when `extra_pairs - (alt_drifters - drifters) >= offset`, which is `extra_pairs >= 10` at
+        # this head, NOT `>= 7`: at extra_pairs=8 the band is `155..163` and the `+7` value 165 is still
+        # outside it, and at 9 it is `155..164` against 165 — both measured — and only at 10 does the band
+        # reach 165 and fall silent, leaving the band's RULE-2 assertion to red blaming a band that is
+        # present and right (#14038 review, P3).
         (
             alt,
             {2: _drifters + two_span_uncounted + 1},
             "the alternative basis's numerator is overstated past what its added pairs can contribute — the "
             "direction a stale figure takes when a denominator moves under it. ⛔ DERIVED from the band's "
-            "own edge (`primary + extra_pairs`), not a fixed `+7`: the headroom is a property of the "
-            "document. ⛔ MEASURED here: 3 UNCCOUNTED added pairs (the `_TWO_SPAN_NEW` arm's numeral, "
-            "`**three**`), and the document also writes 5 two-code-span pairs IN TOTAL (`**five**`) — that "
-            "`5` is `3 uncounted + 2 already counted`, so it is NOT the headroom and must not be read as "
-            "one; the uncounted count has not moved off 3 on this branch. A fixed `+offset` therefore "
-            "becomes a LEGAL value when `extra_pairs - (alt_drifters - drifters) >= offset`, which is "
-            "`extra_pairs >= 10` at this head, NOT `>= 7`: at extra_pairs=8 the band is `155..163` and the "
-            "`+7` value 165 is still outside it, and at 9 it is `155..164` against 165 — both measured — "
-            "and only at 10 does the band reach 165 and fall silent, leaving the band's RULE-2 assertion "
-            "to red blaming a band that is present and right (#14038 review, P3). "
-            "`two_span_uncounted` is graded equal to that count by the `_TWO_SPAN_NEW` arm, so this anchor "
-            "is always exactly one above the upper edge",
+            "own edge (`primary + extra_pairs`), not a fixed offset: `two_span_uncounted` is graded equal "
+            "to that count by the `_TWO_SPAN_NEW` arm, so this anchor is always exactly one above the "
+            "upper edge (the measurement behind the derivation is in the comment above)",
         ),
         (
             alt,
