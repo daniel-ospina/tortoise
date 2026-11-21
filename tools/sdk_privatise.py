@@ -1077,7 +1077,7 @@ SWEEP_NAMES = 66
 #: identical digest is an identical residue SET, which says `main`'s `69908d006b..72c104bcbb` commits
 #: (the `reap-redislite-orphans` rewrite, the platform-gated node-id list, the `.env`/runbook edits)
 #: add and remove NO untyped-receiver row. `--check` exits 0 on this tree.
-SWEEP_RESIDUE = (11852, '52e4a15116d6f32b')
+#: ⛔ SUPERSEDED PIN at an earlier tree — the constant there read `(11852, "52e4a15116d6f32b")`; kept as HISTORY, not as a live pin.
 #:
 #: ⛔ RE-PINNED FROM `main`'s DRIFT, not by a change on this branch: `f9f480a55ab3` (#14164, the
 #: #13094 change-feed reader census + measured residency) added untyped `Graph` receivers and
@@ -1238,7 +1238,7 @@ SWEEP_RESIDUE = (11852, '52e4a15116d6f32b')
 #: rows, attributed row by row in that block, not this branch's. `11840 → 11857` is a CROSS-CHECK of
 #: two independent readings, never the derivation of this pin.
 #: `--check` exits 0 on this tree with `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11857, "ed40203dbbf32b87")
+#: ⛔ SUPERSEDED PIN at an earlier tree — the constant there read `(11857, "ed40203dbbf32b87")`; kept as HISTORY, not as a live pin.
 #:
 #: ⛔ MERGED `origin/main` `e74cf1d13d` (`#14161` + `#14208`) — a SEVENTH tree, so the pair is
 #: `--repin`'s output on THIS tree and NEITHER side's figure is carried: the 11857 in the block above
@@ -1273,7 +1273,34 @@ SWEEP_RESIDUE = (11857, "ed40203dbbf32b87")
 #: 0 on this tree with `typed references still pointing at a public name: 0`. ⛔ So this merge
 #: re-pins NOTHING, deliberately: the pin is not "refreshed" to show that a merge happened, and no
 #: numeral above is re-cut to match a tree that did not move it.
-SWEEP_RESIDUE = (11866, "74d2e8bbd0314d5a")
+#: ⛔ SUPERSEDED PIN at an earlier tree — the constant there read `(11866, "74d2e8bbd0314d5a")`; kept as HISTORY, not as a live pin.
+#:
+#: ⛔ RE-CUT → (11858, "a1552662bf07a10b"). The 11857 pair was NOT measured on this branch: it is
+#: `main`'s own pin (`e74cf1d13d`), inherited here at the merge and left in place while this branch
+#: kept adding rows under it, so `--check` reds on this tree by exactly ONE. `git log` proves the
+#: inheritance rather than asserting it: the ONLY commit that ever set the constant to that pair is
+#: `e74cf1d13d` itself, and that tree carries no `out.update` (measured: 0 occurrences in
+#: `tests/test_14125_retired_name_calls.py`), so the pair was true of ITS tree and false of this one.
+#: THE ONE ROW: `out.update` 1 — `_global_declarations` in `tests/test_14125_retired_name_calls.py`,
+#: an `out: set[str]` accumulated with `out.update(node.names)` over an `ast.Global`. It arrived with
+#: this branch's own `a4e97d6f5b`, which is why the block above can still claim this branch's census
+#: contribution is "ZERO ROWS" and be wrong at this head — that reading was taken before the row
+#: existed and was never re-measured, the recurrence this pin chain keeps recording.
+#: ⛔ ATTRIBUTED BY MEASUREMENT, NOT ARITHMETIC: the residue counter was derived over the whole tree
+#: and the SINGLE row removed; `11858 − out.update` prints `(11857, "ed40203dbbf32b87")` — the pinned
+#: pair EXACTLY — so that one row is the whole delta and no other shape moved in either direction.
+#: The row is DECLARED rather than rewritten away, as `main` declared `terms.update` 0 → 1:
+#: a plain `set[str]` in a test helper is the ordinary-word receiver this sweep deliberately leaves
+#: alone, neither an SDK handle nor a FalkorDB `Graph`, and `typed references still pointing at a
+#: public name` stays **0**. Measured on the MERGED tree: this head has `origin/main` `9f83a63bfa`
+#: merged in, and `--repin` printed the same pair before and after that merge, so the merge
+#: contributes no row here either — nor do the sibling commits merged after it (all on this
+#: branch's census file, and named by log rather than counted here, because a count restated in this
+#: block goes stale at the next sibling push, the class `2465cda150` was written to stop): `--check`
+#: exits 0 at this head on the SAME pair, so 11858 is re-measured on the tree that carries them,
+#: not carried forward.
+#: ⛔ SUPERSEDED PIN at an earlier tree — the constant there read `(11858, "a1552662bf07a10b")`; kept as HISTORY, not as a live pin.
+SWEEP_RESIDUE = (11870, "6da40999bb5162fa")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
