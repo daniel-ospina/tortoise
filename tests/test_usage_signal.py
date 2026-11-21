@@ -1276,15 +1276,34 @@ def test_the_no_graph_guard_names_modules_that_EXIST() -> None:
 
 @functools.cache
 def _modules_reaching_a_store() -> frozenset[str]:
-    """Every module in the tree that imports a STORE CLIENT, by parsed imports.
+    """Every module in the tree that reaches a store CLIENT, by parsed imports.
 
-    ⛔ PARSED, NOT GREPPED, AND AGAINST EVERY DECLARED **STORE-CLIENT** ROOT (the
-    three dotless entries). ⚠️ AND THIS SCAN DOES NOT SEE A TREE-RELATIVE REACH:
-    `from .projection import FalkorProjection` written in ANOTHER tree module is
-    one hop from the client, and the direction test's only input IS this scan — so
-    no test reds on it. That is an out-of-scope residual, not a hand-off: this
-    sentence used to say such a reach "belongs to the direction test", which does
-    not scan for it either. This read
+    ⛔ PARSED, NOT GREPPED, AND BOTH FORMS OF REACH ARE SCANNED: the three
+    store-client roots (`_STORE_CLIENT_ROOTS`) AND the two package-root exports
+    that WRAP the client (`_FORBIDDEN_CLIENT_EXPORTS`), so a module whose only
+    reach is `from tortoise import FalkorDB` is found here too. The export half was
+    missing, and it made this row's "a module cannot slip past" claim false for the
+    one spelling the ban set was EXTENDED to catch: measured, a synthetic module
+    whose only reach was `def f(): from tortoise import FalkorDB` was absent from
+    `found` (98 passed) while `_offending()` on the same source returned
+    `['tortoise.FalkorDB']` — the scan and the ban disagreeing about one file. A
+    direction scan narrower than the ban it certifies is the same defect as a scan
+    narrower than the roots it declares, one layer in. `tortoise.FalkorDB` as a
+    plain ATTRIBUTE is not matched here either, for the same reason it cannot be
+    told apart from an unrelated attribute read at this granularity; the AST ban
+    covers it, and that asymmetry is what this note exists to state.
+
+    ⚠️ NOT the whole ban set. `_FORBIDDEN_GRAPH_ROOTS` also lists modules that are
+    ORDINARY imports (`tortoise.sdk`, `tortoise.ep`, `tortoise.retry`, …) and
+    matching those would demand a ban on every importer of the public SDK —
+    measured, that flags most of the package, and a direction scan that flags
+    everything protects nothing.
+
+    ⚠️ AND THIS SCAN DOES NOT SEE A TREE-RELATIVE REACH: `from .projection import
+    FalkorProjection` written in ANOTHER tree module is one hop from the client, and
+    the direction test's only input IS this scan — so no test reds on it. That is an
+    out-of-scope residual, not a hand-off: this sentence used to say such a reach
+    "belongs to the direction test", which does not scan for it either. This read
     `"from falkordb import" in source` — a substring test that saw only ONE of the
     roots the set itself declares, so the modules that reach the store through
     `redis` (`hosted_backup` constructs a real client over a derived pool,
@@ -1313,7 +1332,7 @@ def _modules_reaching_a_store() -> frozenset[str]:
             name == root or name.startswith(root + ".")
             for name in imported
             for root in _STORE_CLIENT_ROOTS
-        ):
+        ) or (imported & _FORBIDDEN_CLIENT_EXPORTS):
             found.add(module)
     return frozenset(found)
 
