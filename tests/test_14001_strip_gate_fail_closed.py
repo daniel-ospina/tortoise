@@ -1590,6 +1590,12 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
     module did the same. Both are the "a pin reports green while it measures less" failure, so
     each bucket is driven here directly, one cause at a time, through a loader that refuses ONE
     module and serves the rest.
+
+    ⛔ ALL FOUR BUCKETS NOW HAVE A PIN-LEVEL FALSIFIER: `stray`, `missing`, `offenders` and
+    `examined` (`#14099` fixer lane, measured at `ac825bc0` — `examined` was the last one with
+    none, and deleting its assertion left the whole file green, **96 passed**). A bucket that is
+    REPORTED but never asserted here is a bucket a later edit can delete silently, which is how
+    the `offenders` (P2) and `missing` (P3) gaps were both found.
     """
     from tortoise import embed_writer_register as register
 
@@ -1811,6 +1817,36 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
     assert outsider in offenders_msg and "mentions a dynamic namespace" in offenders_msg, (
         "the pin does not red — or reds without naming the key — for a declared writer that "
         f"mentions a dynamic namespace, so the rule's cost is unreported: {red_offenders.value}")
+
+    # ⛔ …AND THE FOURTH BUCKET, `examined` — THE ONE THAT HAD NO FALSIFIER AT ALL (`#14099`
+    # fixer lane, measured at `ac825bc0`). The three arms above cover a population that SHRANK;
+    # this one covers a population that VANISHED. Measured on a copy of this file with
+    # `assert population["examined"], (…)` replaced by `pass`: the whole file stayed GREEN
+    # (**96 passed**), so the only assertion standing between a zero-key walk and a green
+    # over-refusal claim could be deleted with nothing red to say so. An EMPTY population
+    # satisfies `stray == []`, `missing == []` and `offenders == []` trivially, which makes this
+    # the bucket where a silent shrink reads as a silent PASS rather than a silent skip — the
+    # exact failure class this file exists to kill, inside the assertion that exists to catch it.
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            sys.modules[__name__],
+            "_writer_register_population",
+            lambda: {
+                "examined": [],
+                "unreadable": [],
+                "stray": [],
+                "missing": [],
+                "offenders": [],
+            },
+        )
+        with pytest.raises(AssertionError) as red_examined:
+            test_no_declared_entity_writer_mentions_a_dynamic_namespace()
+    # …graded on the PIN's own message, for the reason spelled out at the `missing` arm above.
+    examined_msg = _pin_message(red_examined.value)
+    assert "NO writer could be read" in examined_msg, (
+        "the pin does not red — or reds without saying so — for an EMPTY population, so a walk "
+        "that measured nothing would report the over-refusal cost as zero and certify the "
+        f"blanket rule as free: {red_examined.value}")
 
     # ⛔ THE PIN ITSELF MUST RED (`#14099` F2). The arms above prove the WALK classifies; they do
     # NOT prove the PIN reports. Measured: deleting the pin's `assert stray == []` left this whole
