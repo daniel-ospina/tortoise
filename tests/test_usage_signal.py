@@ -105,6 +105,17 @@ named test goes RED):
   exercised) → ``test_the_scan_actually_calls_the_pinned_loop`` RED — measured at
   head ``1f37c999``: **101 passed** without the pin, i.e. the wiring was invisible
   to the row that fed the loop.
+* **Keep every module the loop is fed** (body → ``frozenset(module for module, _ in
+  sources)``) → ``test_the_store_reach_scan_sees_the_REDIS_spelling_too`` RED on its
+  loop pin — measured, and it reddens THAT pin only because the pin's input carries
+  a clean pair beside the reaching one. Fed a single reaching pair (as it was
+  before the control was added) the same mutant gave **1 failed, 101 passed**, the
+  one red being the coverage row — a different gate, several hundred lines up.
+* **Leave the ban auditing nothing** (``source = ""``, ``source = "# clean\n"``, a
+  misdirected path or a cached constant, all of which left every row green while
+  the ban's ~20 synthetic pins fed ``_offending`` literals) →
+  ``test_no_graph_dependency`` RED on its two provenance asserts, which compare the
+  string it audits against a fresh read of the module it names.
 * **Quote a stale count beside the ban's provenance claim** (``208 of the 305``
   modules clean) → no row can redden a prose figure, which is why the count is
   gone instead: measured at ``1f37c999`` the tree has 305 modules and ``_offending``
@@ -1180,12 +1191,12 @@ def test_no_graph_dependency() -> None:
     # file left every row green (measured: 101 passed each), because MOST of the
     # tree's 305 modules `_offending` finds clean — the ban's own subject is the
     # exception, so an empty, cached or misdirected read certifies a file nobody
-    # audited while the rows it feeds read green. No count is quoted here: this
-    # figure has already gone stale twice in this file's own history (it read `208`
-    # while 228 modules were clean at head `1f37c999`, measured), and a figure
-    # beside the property it is used to argue is a fossil waiting to happen. So the
-    # ban compares the string it audits against a fresh read of the file it claims
-    # to audit.
+    # audited while the rows it feeds read green. No size figure is quoted here: the
+    # one that used to sit here had already gone stale twice in this file's own
+    # history — measured at the head it was removed from, the clean count was not the
+    # number it stated — and a figure beside the property it is used to argue is a
+    # fossil waiting to happen. So the ban compares the string it audits against a
+    # fresh read of the file it claims to audit.
     assert source == Path(usage_signal.__file__).read_text(encoding="utf-8"), (
         "the ban must examine THIS module's CURRENT source: a cached constant or a "
         "misdirected read certifies a file the ban never looked at")
@@ -1771,9 +1782,23 @@ def test_the_store_reach_scan_sees_the_REDIS_spelling_too() -> None:
     # the predicate stayed correct and exercised while the scan was back on the
     # narrower predicate. A synthetic pair is the only input that can hold the
     # wiring, so the pin goes through `_scan_modules` itself.
-    assert _scan_modules(iter([("tortoise.synthetic_attr_only", attr_only)])) == {
-        "tortoise.synthetic_attr_only"
-    }, (
+    # ⛔ AND THE INPUT CARRIES A NEGATIVE CONTROL. A single reaching pair cannot
+    # distinguish "the loop applies the predicate" from "the loop keeps everything":
+    # a loop whose body is `frozenset(module for module, _ in sources)` satisfied the
+    # one-element form, and the row that reddened instead was the COVERAGE row (a
+    # different gate, several hundred lines up) — measured, 1 failed, 101 passed,
+    # with the loop pin among the 101. One clean pair beside the reaching one makes
+    # the predicate's own contribution visible HERE: keep-everything now returns two
+    # names where one is expected.
+    clean = "# clean module: no store client, no package-root export or attribute\n"
+    assert _scan_modules(
+        iter(
+            [
+                ("tortoise.synthetic_attr_only", attr_only),
+                ("tortoise.synthetic_clean", clean),
+            ]
+        )
+    ) == {"tortoise.synthetic_attr_only"}, (
         "the scan's loop does not route through `_module_reaches_a_store`, so the "
         "attribute leg can be dropped from the scan with every other row green")
 
