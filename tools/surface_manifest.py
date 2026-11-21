@@ -4575,9 +4575,21 @@ def cmd_check(args: argparse.Namespace) -> int:
         # got a bare `was DROPPED with no record` line and no step to take, while the archive
         # tool prints its route INSIDE every violation and this file's own design note says a new
         # class needs "a runnable route in `REMOVAL_WAYS`, or the operator gets a refusal they can
-        # act on". Printed only when a SHRINK row is present: the structural findings above have
-        # their own remedies, and a route block under them would be noise.
-        if _shrink_problems:
+        # act on`.
+        #
+        # ⛔ SCOPED TO A ROW THAT WAS ACTUALLY DROPPED (round-18 review, P3 — measured). The first
+        # cut keyed on `_shrink_problems` being non-empty, but that list also carries the tail's
+        # `--allow-surface-shrink … waives nothing` rows, which are NOT dropped rows: a stale
+        # waiver printed "Account for the row(s) above reported as dropped by exactly one of:"
+        # over a finding whose remedy is "drop the flag", sending the operator to write an archive
+        # entry for a row that never left. The structural findings above have their own remedies,
+        # and a route block under them would be noise.
+        _needs_a_record = [
+            p
+            for p in _shrink_problems
+            if "DROPPED with no record" in str(p) or "is archived but absent" in str(p)
+        ]
+        if _needs_a_record:
             print("\nAccount for the row(s) above reported as dropped by exactly one of:")
             for way in REMOVAL_WAYS:
                 print(f"  - {way}")

@@ -7942,8 +7942,10 @@ def test_an_unchanged_baseline_is_green():
     # ⛔ …and the SAME pair, argument-order swapped, IS a removal. That is the half that makes
     # this row non-vacuous: a `shrink_problems` that returns a constant — the shape the first cut
     # could not see — fails HERE, while a green-only assertion cannot tell it apart from a real
-    # comparison. (A reversed `prior - derived` graded `[]` on both orders in a measured mutant,
-    # because `removal_report` filters an addition out; the constant is the mutant that matters.)
+    # comparison. ⚠️ An earlier note here claimed a REVERSED `prior - derived` graded `[]` on both
+    # orders; round-18 review measured that it DOES red this assertion, so that claim is deleted
+    # rather than reworded — a review record that steers the next lane away from the
+    # discriminating assertion is worse than no note.
     assert sm.shrink_problems(now, base) != [], (
         "the added row is a removal when it is the BASE that carries it — if this is empty, the "
         "pin is not comparing its two arguments"
@@ -8566,3 +8568,35 @@ def test_the_shrink_refusal_PRINTS_the_route(checker, tmp_path, monkeypatch):
     )
     assert "archive/MANIFEST.json" in out, f"the freeze route must be named: {out}"
     assert "RETIRED_SDK_METHODS" in out, f"the sdk map route must be named: {out}"
+
+
+def test_the_ROUTE_BLOCK_is_absent_when_nothing_was_DROPPED(checker, tmp_path, monkeypatch):
+    """Round-18 review, P3: the block keyed on the shrink ARM, not on a DROPPED row.
+
+    `_shrink_problems` also carries the tail's `--allow-surface-shrink … waives nothing` rows,
+    which are not dropped rows: measured, a stale waiver printed "Account for the row(s) above
+    reported as dropped by exactly one of:" followed by three archive/map routes, none of which
+    can clear a waiver whose remedy is to drop the flag — sending the operator to write an entry
+    for a row that never left.
+
+    Mutation: `if _needs_a_record:` -> `if _shrink_problems:` -> RED (the header appears).
+    """
+    sm = checker
+    with MANIFEST.open() as fh:
+        doc = yaml.safe_load(fh)
+    problem = (
+        "`--allow-surface-shrink tortoise_ghost` waives nothing: the base ref's baseline still "
+        "carries it"
+    )
+    monkeypatch.setattr(
+        sm, "shrink_report", lambda *a, **k: ([problem], "origin/main (merge base abc)", True)
+    )
+
+    rc, out = _check(sm, doc, tmp_path, base_ref="origin/main")
+
+    assert rc == 1, out
+    assert problem in out, out
+    assert "reported as dropped by exactly one of" not in out, (
+        "a stale waiver is not a dropped row: its remedy is to drop the flag, and no archive "
+        f"route can clear it: {out}"
+    )
