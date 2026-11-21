@@ -31,7 +31,6 @@ import pytest
 
 from tortoise import live_write, monitoring, projection_worker, record_writer
 
-
 #: The tenant every DEFERRAL-EXPECTING write carries BY VALUE. It is not
 #: decoration: a `threading.Thread` does not inherit the caller's contextvars, so
 #: a tenant resolved from the ambient carrier at fold time is resolved again in
@@ -677,7 +676,7 @@ def test_a_fold_that_wrote_NOTHING_is_a_failure_not_a_projection(armed):
     loop is the only surface that could see it.
     """
     before = monitoring.projection_worker_failure_counts().get(
-        "record_unarmed_at_fold", 0)
+        "record_no_outcome", 0)
 
     def project(event, seq, *, journal_skipped=False):
         return None  # exactly what `write_live_record` answers when unarmed
@@ -690,7 +689,52 @@ def test_a_fold_that_wrote_NOTHING_is_a_failure_not_a_projection(armed):
     assert stats.projected == 0, "a fold that wrote nothing is not a projection"
     assert stats.failures == 1, "…and it is the loss signal the caller reads"
     assert (monitoring.projection_worker_failure_counts().get(
-        "record_unarmed_at_fold", 0) - before) == 1
+        "record_no_outcome", 0) - before) == 1
+
+
+def test_an_ARMED_REFUSAL_is_a_failure_not_a_projection(armed):
+    """⛔ #14222 review cycle 3, P2-3: `circuit_open` is the realistic outage arm.
+
+    `write_live_record` returns a `RecordWrite` for EVERY armed path, refusals
+    included — so during a record outage the breaker opens and every deferred fold
+    is refused without a socket. Classifying on `result is None` alone counted
+    those as `projected`, so the loop's channel read
+    `armed: true, failures: {}` — "caught up" — through a total outage. The
+    outcome decides now.
+    """
+    before = monitoring.projection_worker_failure_counts().get(
+        "projection_refused", 0)
+
+    def project(event, seq, *, journal_skipped=False):
+        return types.SimpleNamespace(applied=False, refusal="circuit_open",
+                                     outcome="refused")
+
+    live_write.write({"type": "PointAdded"}, log=_Log(), project=project,
+                     tenant=_TENANT)
+    assert projection_worker.wait_for_drain(10) is True
+
+    stats = projection_worker.stats()
+    assert stats.projected == 0, "a refused fold wrote nothing"
+    assert stats.failures == 1
+    assert (monitoring.projection_worker_failure_counts().get(
+        "projection_refused", 0) - before) == 1
+
+
+def test_the_seams_healthy_decline_is_not_counted_as_a_loss(armed):
+    """#9231's `no_durable_journal` is a DECLINE, not a loss — the seam's own rule."""
+    before = monitoring.projection_worker_failure_counts()
+
+    def project(event, seq, *, journal_skipped=False):
+        return types.SimpleNamespace(applied=False,
+                                     refusal="no_durable_journal",
+                                     outcome="refused")
+
+    live_write.write({"type": "PointAdded"}, log=_Log(), project=project,
+                     tenant=_TENANT)
+    assert projection_worker.wait_for_drain(10) is True
+    assert projection_worker.stats().failures == 0, (
+        "nothing a replay could restore is missing — this is not a loss")
+    assert monitoring.projection_worker_failure_counts() == before
 
 
 def test_a_drain_predicate_is_exact_even_after_a_fork(armed):
@@ -714,6 +758,61 @@ def test_a_drain_predicate_is_exact_even_after_a_fork(armed):
         "a drained worker must not wait out the timeout")
     assert projection_worker.stats().submitted == 0, (
         "the child's counters are its own — the parent's are not its work")
+
+
+def test_a_forked_worker_republishes_its_gauges(armed):
+    """⛔ #14222 review cycle 3, P2-2: a child must not inherit the parent's lag.
+
+    The fork reset empties the queue and zeroes the counters — and the three
+    GAUGES are per-process readings too. Leaving them at the parent's last
+    published value made a preforked child advertise a PERMANENT backlog it does
+    not have, while `stats()` reported 0: the gauges and `stats()` disagreeing is
+    exactly the invariant cycle 1's P1-1 was about.
+    """
+    slow = _SlowProjector()
+    log = _Log()
+    for _ in range(3):
+        live_write.write({"type": "PointAdded"}, log=log, project=slow,
+                         tenant=_TENANT)
+    assert slow.in_flight.wait(5)
+    assert monitoring.projection_worker_gauges()["pending_positions"] == 3
+
+    worker = projection_worker.worker()
+    worker._pid = os.getpid() + 1_000_000          # pretend this was inherited
+
+    stats = projection_worker.stats()               # triggers the fork reset
+    gauges = monitoring.projection_worker_gauges()
+    assert stats.pending_positions == 0
+    assert gauges["pending_positions"] == 0, (
+        "a child must not export the parent's phantom backlog")
+    assert gauges["queue_depth"] == stats.queue_depth
+
+    slow.gate.set()
+    assert projection_worker.wait_for_drain(10) is True
+    projection_worker.shutdown(drain=True, timeout=5)
+
+
+def test_a_STOPPED_worker_still_refreshes_its_condition(armed):
+    """⛔ #14222 review cycle 3, P2-1: `stop()` leaves `_pid = None`, and a fork
+    taken after it inherits a Condition a peer thread may be HOLDING.
+
+    The predicate used to read `_pid is not None and _pid != os.getpid()`, so a
+    stopped worker looked "not inherited" and the child blocked on the parent's
+    lock forever — the exact failure `_ensure_not_inherited` exists to prevent,
+    left open by the one call that clears `_pid`. The mechanism is pinned here
+    (the Condition is replaced) without forking: a real fork in a multi-threaded
+    test process is the hazard being tested, not something to reproduce under
+    pytest.
+    """
+    worker = projection_worker.worker()
+    assert worker.stop(drain=False, timeout=5) is True
+    assert worker._pid is None
+
+    inherited = worker._cond
+    worker.stats()
+    assert worker._cond is not inherited, (
+        "a stopped worker's Condition must be re-created, not reused")
+    assert worker._pending is not None and worker.stats().queue_depth == 0
 
 
 def test_stopping_from_the_consumer_itself_does_not_clear_a_live_consumer(armed):

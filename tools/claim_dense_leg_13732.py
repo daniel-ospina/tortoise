@@ -1434,6 +1434,7 @@ class SeedReport:
         "record_applied",
         "record_armed",
         "record_declined",
+        "record_deferred",
         "record_dsn_fingerprint",
         "record_unprojected",
         "written",
@@ -1455,6 +1456,7 @@ class SeedReport:
         last_seq: int | None,
         record_declined: int = 0,
         record_dsn_fingerprint: str | None = None,
+        record_deferred: int = 0,
     ) -> None:
         self.journal = journal
         self.org_id = org_id
@@ -1468,6 +1470,7 @@ class SeedReport:
         self.first_seq = first_seq
         self.last_seq = last_seq
         self.record_declined = record_declined
+        self.record_deferred = record_deferred
         self.record_dsn_fingerprint = record_dsn_fingerprint
 
     def _fold_needed(self) -> bool:
@@ -1504,6 +1507,16 @@ class SeedReport:
             "record_applied": self.record_applied,
             "record_unprojected": self.record_unprojected,
             "record_declined": self.record_declined,
+            # ⛔ THE FIFTH STORE ANSWER, AND IT IS NOT A LOSS (#14185). With the
+            # projection worker armed, `live_write` acknowledges the write and
+            # QUEUES the record's fold: `applied` is False and `unprojected` is 1
+            # *because the row is not written YET*, not because it was lost. Left
+            # unfolded here, a HEALTHY armed seed reported "N write(s) came back
+            # unprojected" plus a repair command, and its measurement ran against
+            # a record the queue had not drained. So the seed drains the queue
+            # before reporting (see `_seed_population`) and counts these apart —
+            # a deferred write is neither applied nor unprojected nor declined.
+            "record_deferred": self.record_deferred,
             "positions_unproven": self.positions_unproven,
             "folded": self.folded,
             "first_seq": self.first_seq,
@@ -1746,7 +1759,7 @@ def _seed_population(
             exit_code=2,
         )
     log = EventLog(journal_path)
-    applied = unprojected = unproven = declined = folded = 0
+    applied = unprojected = unproven = declined = folded = deferred = 0
     armed_yes = armed_unmeasured = False
     first_seq = last_seq = None
     for row, vec in zip(population, vectors, strict=True):
@@ -1785,6 +1798,14 @@ def _seed_population(
             last_seq = outcome.seq
         if outcome.applied:
             applied += 1
+        elif getattr(outcome, "deferred", False):
+            # ⛔ CHECKED BEFORE `unprojected` (#14185). A deferred write carries
+            # `unprojected=1` — truthfully, since the record has not taken the line
+            # YET — so the branch below would count a healthy queued write as a
+            # lost one. `deferred` is the discriminator `live_write` added for
+            # exactly this, and the DRAIN below is what makes the count converged
+            # by the time the report is built.
+            deferred += 1
         elif outcome.unprojected:
             unprojected += 1
         elif outcome.refusal:
@@ -1802,6 +1823,27 @@ def _seed_population(
             armed_unmeasured = True
         if outcome.folded:
             folded += 1
+    # ⛔ DRAIN THE PROJECTION QUEUE BEFORE REPORTING (#14185). A deferred write is
+    # acknowledged before its record row exists, so a report built from the acks
+    # alone describes a record the queue has not reached — and
+    # `require_population_in_record` downstream would then refuse the arm for a
+    # seed that is perfectly healthy, or (worse) the measurement would run against
+    # a half-folded population. `wait_for_drain` is the one call that IS correct
+    # here: this is an operator tool at the end of a bounded seed, not a read path.
+    try:
+        from tortoise import projection_worker as _worker
+
+        if _worker.armed() and not _worker.wait_for_drain(timeout=120):
+            # A drain that did not finish is REPORTED, never assumed: the rows are
+            # queued and `live_write`'s own counters name the rest.
+            print(
+                "WARNING: the projection worker did not drain within 120 s — the "
+                "record may be short of positions this seed queued (#14185)",
+                file=sys.stderr)
+    except Exception:
+        # The worker is OPTIONAL; the seed is not. An unimportable or failing loop
+        # leaves the counts below exactly as the inline door reported them.
+        pass
     # The STORE this run wrote, in the only publishable form of a DSN
     # (`record_writer.dsn_fingerprint`, #2903/#2796) — and only when a DSN was
     # resolved at all, so an unarmed run publishes `null` rather than a hash of the
@@ -1825,6 +1867,7 @@ def _seed_population(
         last_seq=last_seq,
         record_declined=declined,
         record_dsn_fingerprint=dsn_fingerprint,
+        record_deferred=deferred,
     )
 
 

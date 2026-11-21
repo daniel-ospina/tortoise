@@ -33,7 +33,7 @@ from prometheus_client import Counter, Gauge, Histogram, generate_latest
 # so the baseline covers the graph they serve. It imports nothing from tortoise,
 # so it cannot participate in an import cycle.
 from . import code_freshness as _code_freshness
-from .env_truthy import env_flag, is_truthy  # #4097: the declared truthy contract
+from .env_truthy import is_truthy  # #4097: the declared truthy contract
 
 logger = logging.getLogger(__name__)
 
@@ -948,26 +948,40 @@ DERIVED_EMBED_DECLINE_COUNT = Counter(
 #:   `stop()` does not clear its thread after a timed-out join).
 #:
 #: ``PROJECTION_WORKER_FAILURE_COUNT`` is separate from both: it counts deferred
-#: folds that did not write a row. Unlike a lagging queue that is a real gap the
+#: folds that did NOT WRITE A ROW. Unlike a lagging queue that is a real gap the
 #: journal heals (`tools/record_runner.py apply`), and unlike the inline path's
 #: failures it is counted by the LOOP rather than by `write_live_record`'s own
 #: door — the seam swallows its own armed failures and reports them through
 #: ``record_write_failures``, so a projection failing out of the loop is the one
-#: shape only the worker can see. ``reason`` vocabulary is CLOSED at two:
+#: shape only the worker can see. ⛔ THE CLASSIFICATION READS THE OUTCOME, NOT
+#: ``None`` ALONE (#14222 review cycle 3): an ARMED REFUSAL also wrote nothing —
+#: ``circuit_open`` is the realistic one, where a record outage refuses every fold
+#: without a socket — and counting those as `projected` made this channel read
+#: ``armed: true, failures: {}`` ("caught up") through a total outage.
 #:
-#:   ``projection_raised``        the fold raised. The journal holds the line.
-#:   ``record_unarmed_at_fold``   the fold answered ``None``, which is
-#:                                `write_live_record`'s UNARMED verdict — and on
-#:                                this arm `live_write` PROVED the record armed
-#:                                before queueing (#14222 review cycle 2), so the
-#:                                arming changed between the ack and the fold. It
-#:                                is counted HERE because the seam's unarmed arm
-#:                                is deliberately SILENT (no counter, no log —
-#:                                §2.0's byte-identical deployment), so without
-#:                                this the row would vanish with nothing observably
-#:                                wrong. A lane that scopes `TORTOISE_RECORD_DSN`
-#:                                for one run and restores it in a `finally` is
-#:                                the live shape.
+#: ``reason`` vocabulary is CLOSED at three, one per observed answer:
+#:
+#:   ``projection_raised``     the fold raised. The journal holds the line.
+#:   ``record_no_outcome``     the callable answered NOTHING (no `RecordWrite`).
+#:                             Named for what was OBSERVED rather than for a cause
+#:                             it did not check: `write_live_record` answers
+#:                             ``None`` when unarmed, but a door's own `project`
+#:                             callable can answer ``None`` for its own reasons
+#:                             (the SDK's unimportable-record-half arm, #10000).
+#:   ``projection_refused``    an ARMED refusal (`applied=False` with a
+#:                             ``refusal`` token that is not the seam's healthy
+#:                             ``no_durable_journal`` decline, #9231). Counted
+#:                             here as well as on `record_write_failures` on
+#:                             purpose: the two answer different questions ("was a
+#:                             row lost?" vs "did the LOOP's fold land?"), and an
+#:                             operator reading THIS loop's channel needs the
+#:                             second one to be true.
+#:
+#: ⛔ Each of these is counted HERE rather than only at the seam because the seam's
+#: unarmed arm is deliberately SILENT (no counter, no log — §2.0's byte-identical
+#: deployment), so without this the row would vanish with nothing observably
+#: wrong. A lane that scopes `TORTOISE_RECORD_DSN` for one run and restores it in
+#: a `finally` is the live shape.
 #:
 #: Single writers: ``record_projection_queue_state``,
 #: ``record_projection_worker_failure`` and ``record_projection_inline_fallback``,
@@ -3041,12 +3055,12 @@ def record_projection_worker_failure(reason: str) -> None:
     at all — this counter is the only surface that sees the LOOP's own failures,
     which is a different fact.
 
-    ``reason`` vocabulary is CLOSED at ``projection_raised`` (the fold raised) and
-    ``record_unarmed_at_fold`` (the fold answered ``None`` — the record was armed
-    when the write was acknowledged and is not armed now). ⛔ The second one
-    exists because `write_live_record`'s unarmed arm is deliberately silent, so
-    this is the only surface that can see a deferred fold that wrote nothing
-    (#14222 review cycle 2).
+    ``reason`` vocabulary is CLOSED at ``projection_raised`` (the fold raised),
+    ``record_no_outcome`` (the callable answered nothing) and
+    ``projection_refused`` (an armed refusal — nothing was written). ⛔ The last
+    two exist because `write_live_record`'s unarmed arm is deliberately silent and
+    because an armed refusal still writes no row, so this is the only surface that
+    can see a deferred fold that did not land (#14222 review cycles 2 and 3).
     """
     PROJECTION_WORKER_FAILURE_COUNT.labels(reason=reason).inc()
 
@@ -3112,7 +3126,7 @@ def _projection_worker_metrics() -> dict[str, object]:
     """
     try:
         from . import projection_worker
-    except Exception:  # noqa: BLE001 — a metrics surface must not fail the read
+    except Exception:
         return {"armed": None, "error": "projection_worker_unimportable"}
     return {
         "armed": bool(projection_worker.armed()),

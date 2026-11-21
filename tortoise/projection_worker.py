@@ -124,17 +124,37 @@ from __future__ import annotations
 
 import atexit
 import collections
+import contextlib
 import copy
 import dataclasses
 import logging
 import os
 import threading
 import time
-from typing import Any, Callable, Mapping
+from collections.abc import Callable, Mapping
+from typing import Any
 
 from .env_truthy import env_flag
 
 LOGGER = logging.getLogger(__name__)
+
+#: Resolved once by :func:`_meter`: the metrics module, or ``False`` when it
+#: cannot be imported (so the failed import is not repeated per publish).
+_METRICS: Any = None
+
+def _non_durable_journal_refusal() -> str | None:
+    """The seam's healthy-decline token, READ from the module that mints it.
+
+    The same rule `live_write._is_durable_decline` follows: a second copy of a
+    closed vocabulary is how a rename stops matching in silence. ``None`` when the
+    seam cannot be imported, and then no outcome is dismissed as a decline — the
+    fail-closed direction, since a loss reported as a decline is a silent gap.
+    """
+    try:
+        from .record_writer import NON_DURABLE_JOURNAL_REFUSAL
+    except Exception:
+        return None
+    return NON_DURABLE_JOURNAL_REFUSAL
 
 #: The arming flag. OFF by default and read with
 #: :func:`tortoise.env_truthy.env_flag`, so an unset, blank, typo'd or garbage
@@ -237,6 +257,58 @@ class ProjectionStats:
         return self.pending_positions > 0
 
 
+def _classify_fold_outcome(result: Any, seq: int | None) -> str | None:
+    """Did this deferred fold actually write a row? ``None`` = yes (#14185).
+
+    ⛔ THE OUTCOME DECIDES, NOT ``result is None`` ALONE (#14222 review cycle 3,
+    P2-3). Two independent errors came from asking only whether the value was
+    ``None``:
+
+    * **AN ARMED REFUSAL WROTE NOTHING AND WAS COUNTED AS A PROJECTION.**
+      `write_live_record` returns a `RecordWrite` for every armed path, refusals
+      included — and ``circuit_open`` is the realistic one: during a record outage
+      the breaker opens and EVERY deferred fold is refused without a socket. The
+      loop counted those as `projected`, so its channel read
+      `armed: true, failures: {}` — "caught up" — while nothing landed. That is a
+      false green on the one surface an operator reads for this loop.
+    * **``None`` IS NOT ONLY "UNARMED".** It is `write_live_record`'s unarmed
+      verdict, but a door's own ``project`` callable can return ``None`` for its
+      own reasons (the SDK returns ``None`` when its record half cannot even be
+      imported, #10000). Asserting "the record was armed at ack and is not armed
+      now" would then state a fact nothing checked.
+
+    So the reason names WHAT WAS OBSERVED:
+    ``record_no_outcome`` (the callable answered nothing),
+    ``projection_refused`` (an armed refusal — nothing was written), and the
+    raise arm's ``projection_raised`` is minted by the caller.
+    `no_durable_journal` is NOT a failure: it is the seam's healthy decline for a
+    lane with no journal by design (#9231), and the gate here already refuses to
+    queue a non-durable log.
+    """
+    if result is None:
+        LOGGER.warning(
+            "projection_worker: the deferred record projection for journal "
+            "position %s answered NOTHING — no `RecordWrite` came back, so no "
+            "row was written and no error was raised. The record was armed when "
+            "the write was acknowledged, so either the arming moved or the "
+            "door's own record half declined; the journal holds the line and "
+            "`tools/record_runner.py apply` folds it idempotently (#14185)",
+            seq)
+        return "record_no_outcome"
+    if getattr(result, "applied", True) is False:
+        refusal = getattr(result, "refusal", None)
+        if refusal is not None and refusal == _non_durable_journal_refusal():
+            return None          # the seam's healthy decline, not a loss (#9231)
+        LOGGER.warning(
+            "projection_worker: the deferred record projection for journal "
+            "position %s was REFUSED (%s) — nothing was written. The journal "
+            "holds the line; `tools/record_runner.py apply` folds it idempotently "
+            "when the record is healthy again (#14185)",
+            seq, refusal or "no reason given")
+        return "projection_refused"
+    return None
+
+
 class ProjectionWorker:
     """One bounded FIFO queue and one daemon thread, folding as fast as it can.
 
@@ -250,6 +322,17 @@ class ProjectionWorker:
         self.max_queue = max(1, int(max_queue))
         self._name = name
         self._cond = threading.Condition()
+        #: ⛔ ORDERING FOR THE GAUGE WRITES, AND NOTHING ELSE (#14222 review cycle
+        #: 3, P2-4). The gauges must be applied in the order the snapshots were
+        #: taken (a slower thread overwriting a newer snapshot is exactly the lie
+        #: cycle 1's P1-1 was filed for), but `Gauge.set` is a FOREIGN call —
+        #: three file-backed writes, and on the first one a ~50 ms import of
+        #: `monitoring`. Holding `self._cond` across it would put the write ACK
+        #: and `stats()` behind the metrics backend, which is the coupling
+        #: `stats()`'s docstring promises does not exist ("a stalled projection
+        #: cannot slow a read"). So: read under `_cond`, publish under THIS lock,
+        #: never the other way round.
+        self._publish_lock = threading.Lock()
         self._pending: collections.deque[PendingProjection] = collections.deque()
         #: The item the loop is folding RIGHT NOW. It is counted as pending lag on
         #: purpose: a position being folded is still a position the record has not
@@ -285,22 +368,20 @@ class ProjectionWorker:
                 self._pending.append(item)
                 self._submitted += 1
                 declined = False
-                queued = self._depth_locked()
-                positions = self._pending_positions_locked()
-                oldest = self._oldest_age_locked()
-                # ⛔ PUBLISHED UNDER THE LOCK THE VALUES WERE READ UNDER (#14222
-                # review cycle 2, NEW-1). Publishing after the release let a
-                # slower thread overwrite a NEWER snapshot with an OLDER one — a
-                # backlog of 2 exporting 1, or a drained queue exporting 1, until
-                # the next transition. That is the same lie cycle 1's P1-1 was
-                # filed for, reachable from the other side. `Gauge.set` takes only
-                # prometheus' own value lock and no path here holds that while
-                # acquiring this Condition, so the order is safe.
-                _publish_queue_state(self._depth_locked(), positions, oldest)
+                # ⛔ READ UNDER `_cond`, PUBLISHED UNDER `_publish_lock` (#14222
+                # review cycles 2 and 3). Reading and publishing inside the SAME
+                # critical section is what stops a slower thread from applying an
+                # OLDER snapshot last; the separate publish lock is what stops
+                # that ordering guarantee from dragging a foreign library call
+                # (and its first-call import) under the queue lock.
+                snapshot = (self._depth_locked(),
+                            self._pending_positions_locked(),
+                            self._oldest_age_locked())
                 self._cond.notify()
         if declined:
             _publish_inline_fallback(declined)
             return False
+        self._publish(snapshot)
         return True
 
     # ── the read side (never blocks on the fold) ───────────────────────────
@@ -397,7 +478,19 @@ class ProjectionWorker:
             # no-op instead; submits then DECLINE and fold inline, which is the
             # honest answer for a loop that is still wedged.
             return False
+        # ⛔ COMPARE AND CLEAR UNDER ONE HOLD, AND RE-DERIVE THE VERDICT THERE
+        # (#14222 review cycle 3, P1-2). The join above runs with the lock
+        # RELEASED, so a concurrent `submit` can see the stopping consumer exit,
+        # clear `_stopping` and start a REPLACEMENT thread in that window.
+        # Clearing `_thread` from the captured object would then discard the
+        # reference to a LIVE replacement, and the next submit would start a third
+        # consumer — two folding one deque, and `stop()` returning `True` while a
+        # consumer was alive (which is also what made `shutdown()`'s keep-or-drop
+        # decision read the wrong fact). Re-reading `self._thread` makes the
+        # answer about the object as it IS, not as it was when the join started.
         with self._cond:
+            if self._thread is not None and self._thread.is_alive():
+                return False
             self._thread = None
             self._pid = None
         return True
@@ -448,43 +541,52 @@ class ProjectionWorker:
                 if self._inherited_locked():
                     self._reset_for_fork_locked()
                     continue
-                if self._pid is None:
-                    # Stopped (or never started) IN THIS PROCESS: adopt the pid
-                    # so `stats()`/`stop()` stop re-checking, and leave the
-                    # counters alone — they are this process's observations and a
-                    # stop does not unmake them.
-                    self._pid = os.getpid()
                 return
 
     def _inherited_locked(self) -> bool:
-        """Was this object inherited from ANOTHER process?
+        """Is the state in hand stale for THIS process?
 
-        ⚠️ ``_pid is None`` (a worker that was stopped, or never started) is NOT
-        "not inherited": the Condition is still the parent's object. It is
-        therefore treated as stale and reset — the reset is idempotent and cheap,
-        and guessing the other way leaves the inherited lock in place.
+        ⚠️ ``_pid is None`` (a worker that was stopped, or never started) IS
+        stale, and that is not pedantry (#14222 review cycle 3, P2-1): the
+        Condition in hand belongs to whoever last ran, and `stop()` sets
+        ``_pid = None`` — so a fork taken after a stop inherits a Condition a peer
+        thread may be HOLDING, and the child blocks on it forever. The earlier
+        reading of the code contradicted its own docstring here and left exactly
+        that window open.
         """
-        return self._pid is not None and self._pid != os.getpid()
+        return self._pid != os.getpid()
 
     def _reset_for_fork_locked(self) -> None:
-        """Replace the state a fork copies, holding the lock being replaced.
+        """Replace the state another process left behind, holding the lock being replaced.
 
-        The parent still owns the queue, so the child must not fold those items a
-        second time; the in-flight item can never be cleared by the child, so
-        leaving it would report one permanently pending position and a
-        monotonically growing lag; and the COUNTERS go too, because they are
-        per-process observations and an inherited `submitted=3, projected=1` with
-        an empty queue made `wait_for_drain` unsatisfiable (NEW-3).
+        The parent still owns the queue, so this process must not fold those items
+        a second time; the in-flight item can never be cleared here, so leaving it
+        would report one permanently pending position and a monotonically growing
+        lag; and the COUNTERS go too, because they are per-process observations and
+        an inherited `submitted=3, projected=1` with an empty queue made
+        `wait_for_drain` unsatisfiable (cycle 2, NEW-3).
+
+        ⚠️ A STOPPED worker (``_pid is None``) is stale in the same way but has
+        nothing to reset beyond the Condition: its queue is empty, its thread is
+        gone, and its counters are THIS process's observations, which a stop does
+        not unmake. So the counters are zeroed only when the state came from
+        ANOTHER process. The three GAUGES are republished either way — they are
+        per-process readings too, and leaving the previous process's values in
+        place made a preforked child export a permanent backlog while `stats()`
+        reported 0 (#14222 review cycle 3, P2-2).
         """
+        from_another_process = self._pid is not None
         self._cond = threading.Condition()
         self._pending = collections.deque()
         self._inflight = None
         self._thread = None
         self._stopping = False
-        self._submitted = 0
-        self._projected = 0
-        self._failures = 0
+        if from_another_process:
+            self._submitted = 0
+            self._projected = 0
+            self._failures = 0
         self._pid = os.getpid()
+        self._publish((0, 0, 0.0))
 
     # ── the loop ───────────────────────────────────────────────────────────
 
@@ -505,7 +607,7 @@ class ProjectionWorker:
             try:
                 result = item.project(item.record, item.seq,
                                       journal_skipped=item.journal_skipped)
-            except Exception as exc:  # noqa: BLE001 — the loop must survive
+            except Exception as exc:
                 failure = "projection_raised"
                 LOGGER.warning(
                     "projection_worker: the deferred record projection RAISED "
@@ -516,27 +618,7 @@ class ProjectionWorker:
                     "(#14185)",
                     type(exc).__name__, exc, item.seq)
             else:
-                # ⛔ A FOLD THAT DID NOTHING IS NOT A PROJECTION (#14222 review
-                # cycle 2, NEW-2). `write_live_record` returns ``None`` ONLY when
-                # the record is unarmed — and on this arm `live_write` PROVED it
-                # armed before queueing, so the answer means the arming changed
-                # between the ack and the fold (an in-process lane that scopes
-                # `TORTOISE_RECORD_DSN` for one run and restores it in a
-                # `finally` does exactly that). Counting it as `projected` made
-                # the loop's own success counter report a fold that wrote
-                # nothing, and the seam's unarmed arm is deliberately silent (no
-                # counter, no log — §2.0's byte-identical deployment), so this is
-                # the only surface that could see it.
-                if result is None:
-                    failure = "record_unarmed_at_fold"
-                    LOGGER.warning(
-                        "projection_worker: the deferred record projection for "
-                        "journal position %s did NOTHING — the record was armed "
-                        "when the write was acknowledged and is NOT armed now, so "
-                        "no row was written and no error was raised. The journal "
-                        "holds the line; `tools/record_runner.py apply` folds it "
-                        "idempotently once the record is armed again (#14185)",
-                        item.seq)
+                failure = _classify_fold_outcome(result, item.seq)
             # ⛔ ALL THREE GAUGES ARE READ HERE, AFTER `_inflight` IS CLEARED, and
             # never from a value captured at POP time (#14222 review P1-1). The
             # pop-time depth counts the item that is about to be folded, so
@@ -550,12 +632,18 @@ class ProjectionWorker:
                     self._failures += 1
                 else:
                     self._projected += 1
-                _publish_queue_state(self._depth_locked(),
-                                     self._pending_positions_locked(),
-                                     self._oldest_age_locked())
+                snapshot = (self._depth_locked(),
+                            self._pending_positions_locked(),
+                            self._oldest_age_locked())
                 self._cond.notify_all()
+            self._publish(snapshot)
             if failure is not None:
                 _publish_failure(failure)
+
+    def _publish(self, snapshot: tuple[int, int, float]) -> None:
+        """Apply ONE gauge snapshot, in the order the snapshots were taken."""
+        with self._publish_lock:
+            _publish_queue_state(*snapshot)
 
     # ── internals ──────────────────────────────────────────────────────────
 
@@ -576,10 +664,8 @@ class ProjectionWorker:
 
     @staticmethod
     def _quietly(fn: Callable[[], Any]) -> None:
-        try:
+        with contextlib.suppress(Exception):
             fn()
-        except Exception:  # noqa: BLE001 — shutdown must never raise
-            pass
 
 
 # ── the process singleton ──────────────────────────────────────────────────
@@ -650,7 +736,7 @@ def submit(*, record: Mapping[str, Any], seq: int | None,
     # reference rather than failing a write whose line has already committed.
     try:
         snapshot = copy.deepcopy(record)
-    except Exception:  # noqa: BLE001 — never fail a committed write over a copy
+    except Exception:
         # ⛔ DECLINE, DO NOT FALL BACK TO THE REFERENCE (#14222 review cycle 2,
         # NEW-8). The reference is the very aliasing this copy exists to remove,
         # and taking it would restore the undetectable divergence SILENTLY. Fold
@@ -686,9 +772,16 @@ def shutdown(*, drain: bool = True,
     global _WORKER
     with _WORKER_LOCK:
         current = _WORKER
-        _WORKER = None
     if current is None:
         return
+    # ⛔ THE SINGLETON STAYS VISIBLE FOR THE WHOLE STOP (#14222 review cycle 3,
+    # P2-5). Clearing it FIRST opened a window of up to two timeouts (the drain
+    # plus the join) in which a concurrent `write()` called `worker()`, found
+    # nothing, and built a FRESH instance with its own thread and deque beside the
+    # one still draining — the very second consumer the keep-on-failure rule below
+    # exists to prevent, created before that rule could run. While stopping, the
+    # retained instance DECLINES submits (`worker_stopping`) and the caller folds
+    # inline, which is the honest answer and costs nothing.
     if not current.stop(drain=drain, timeout=timeout):
         # ⛔ PUT IT BACK (#14222 review cycle 2, NEW-6). `stop()` returns ``False``
         # when a fold would not join, so the consumer is STILL RUNNING. Dropping
@@ -701,6 +794,13 @@ def shutdown(*, drain: bool = True,
         # which is the honest answer while a consumer is wedged.
         with _WORKER_LOCK:
             _WORKER = current
+        return
+    with _WORKER_LOCK:
+        if _WORKER is current:
+            # Only clear the slot if no one replaced it while the stop ran — and
+            # clearing it is what lets the NEXT `worker()` honour a changed
+            # `ENV_QUEUE_MAX`, which is read ONCE at construction.
+            _WORKER = None
 
 
 def _drain_at_exit(instance: ProjectionWorker) -> None:
@@ -722,37 +822,45 @@ def _drain_at_exit(instance: ProjectionWorker) -> None:
 # it.
 
 
+def _meter():
+    """The metrics module, resolved ONCE, or ``None`` if it cannot be imported.
+
+    ``None`` is cached too: a wheel that cannot import `monitoring` must not pay a
+    failing import on every publish.
+    """
+    global _METRICS
+    if _METRICS is None:
+        try:
+            from . import monitoring
+        except Exception:
+            _METRICS = False
+        else:
+            _METRICS = monitoring
+    return _METRICS or None
+
+
 def _publish_queue_state(depth: int, pending_positions: int,
                          oldest_age_seconds: float | None = None) -> None:
-    try:
-        from . import monitoring
-    except Exception:  # noqa: BLE001 — a metrics fault must not stop the loop
+    metrics = _meter()
+    if metrics is None:
         return
-    try:
-        monitoring.record_projection_queue_state(
+    with contextlib.suppress(Exception):
+        metrics.record_projection_queue_state(
             depth=depth, pending_positions=pending_positions,
             oldest_age_seconds=oldest_age_seconds)
-    except Exception:  # noqa: BLE001
-        pass
 
 
 def _publish_failure(reason: str) -> None:
-    try:
-        from . import monitoring
-    except Exception:  # noqa: BLE001
+    metrics = _meter()
+    if metrics is None:
         return
-    try:
-        monitoring.record_projection_worker_failure(reason)
-    except Exception:  # noqa: BLE001
-        pass
+    with contextlib.suppress(Exception):
+        metrics.record_projection_worker_failure(reason)
 
 
 def _publish_inline_fallback(reason: str) -> None:
-    try:
-        from . import monitoring
-    except Exception:  # noqa: BLE001
+    metrics = _meter()
+    if metrics is None:
         return
-    try:
-        monitoring.record_projection_inline_fallback(reason)
-    except Exception:  # noqa: BLE001
-        pass
+    with contextlib.suppress(Exception):
+        metrics.record_projection_inline_fallback(reason)
