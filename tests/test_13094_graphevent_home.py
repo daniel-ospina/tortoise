@@ -73,8 +73,12 @@ TOOL = REPO_ROOT / "tools" / "graphevent_home.py"
 
 #: Capability words a reader would have to need for the shape to stay resident.
 #: The vocabulary is the audit's own (`#13083` §2): the four capabilities only a
-#: graph engine provides, plus EP state.
-GRAPH_CAPABILITIES = ("traversal", "adjacency", "fulltext", "vector", "EP walk",
+#: graph engine provides, plus EP state. The PREDICATE lives in the tool, not
+#: here — a check whose vocabulary the checked module does not own is a second
+#: definition that drifts. This tuple is the EXPECTED set, pinned against the
+#: tool's own in `test_the_capability_vocabulary_has_one_owner`, so a narrowing
+#: edit to the tool cannot silently loosen the census pin.
+GRAPH_CAPABILITIES = ("traversal", "adjacency", "fulltext", "vector", "ep walk",
                       "variable-length")
 
 
@@ -141,25 +145,61 @@ def test_the_census_covers_the_labels_schema_as_well_as_its_readers():
         assert reader["class"] == "maintenance"
 
 
+def test_the_capability_vocabulary_has_one_owner():
+    """The census pin's vocabulary must be the TOOL's, not a second copy.
+
+    A test that keeps its own private word list can drift from the predicate it
+    claims to exercise: remove a word from the tool and the pin here would keep
+    passing over a capability the tool no longer recognises. Pinned as a set so
+    the ordering is not load-bearing.
+    """
+    module = _tool()
+    assert set(module.GRAPH_CAPABILITY_WORDS) == set(GRAPH_CAPABILITIES)
+    assert module.GRAPH_CAPABILITY_CYPHER, (
+        "the Cypher arm of the capability predicate is empty — the prose arm "
+        "alone is the vacuous check this pin exists to prevent")
+
+
 def test_no_reader_of_the_change_feed_needs_a_graph_capability():
     """The verdict the whole issue rests on, as a check on the table itself.
 
-    ⛔ The pin is not "the table says so" — it is that NO row's `needs` mentions
-    a graph capability. A future reader that needs one cannot be filed as
-    `maintenance` without reddening this, which is what makes
-    `record_only`-shaped a property of the census rather than a claim beside it.
+    ⛔ The pin is not "the table says so" — it is that NO row needs a graph
+    capability. A future reader that needs one cannot be filed as `maintenance`
+    without reddening this, which is what makes `record_only`-shaped a property
+    of the census rather than a claim beside it.
+
+    ⛔ THE PREDICATE IS THE TOOL'S, and it reads the CYPHER as well as the prose.
+    An earlier cut of this pin scanned `needs`/`why` only, which is the one place
+    a capability does NOT live: a row carrying
+    `MATCH (e:GraphEvent)-[*1..2]->(n) RETURN n` with prose worded around the
+    vocabulary filed as `maintenance` left every pin green while the evidence doc
+    promised the opposite (#14164 review, finding 3). The `snippets` arm below is
+    the case that made that true, kept as an EXECUTED control rather than as a
+    comment claiming it.
     """
     module = _tool()
     offenders = [
-        f"{r['file']}:{r['line']} {r['reader']} — {r['needs']}"
+        f"{r['file']}:{r['line']} {r['reader']} — needs {capability}"
         for r in module.READERS
-        if any(word.lower() in (r["needs"] + " " + r["why"]).lower()
-               for word in GRAPH_CAPABILITIES)
+        if (capability := module.graph_capability(r))
     ]
     assert not offenders, (
         "a reader of the change feed now needs a graph capability, so the "
         "shape is NOT a record_only candidate — re-open #13094's verdict:\n  "
         + "\n  ".join(offenders))
+
+    # The control: the predicate must CATCH a capability that lives only in the
+    # snippet, under a class that claims none. If this stops failing to be clean,
+    # the pin above has gone vacuous again.
+    smuggled = {
+        "file": "tortoise/event_store.py", "line": 992, "reader": "walk_out",
+        "needs": "walks outward from each event to the nodes it touched",
+        "why": "feed enrichment", "class": "maintenance",
+        "snippets": ("MATCH (e:GraphEvent)-[*1..2]->(n) RETURN n",),
+    }
+    assert module.graph_capability(smuggled), (
+        "the capability pin only reads prose, so a traversal filed as "
+        "`maintenance` passes it — the census can go false with every pin green")
 
 
 def test_the_census_has_exactly_one_row_producing_reader():

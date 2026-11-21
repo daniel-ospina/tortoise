@@ -87,6 +87,7 @@ import json
 import os
 import sys
 from collections import Counter
+from collections.abc import Mapping
 from typing import Any
 
 #: ── THE READER CENSUS ─────────────────────────────────────────────────────
@@ -671,15 +672,61 @@ def superset(graph_rows: list[dict[str, Any]],
     }
 
 
+#: Cypher shapes that only a graph engine can answer. A row carrying one of
+#: these is NOT a `record_only` candidate, whichever class it was filed under.
+GRAPH_CAPABILITY_CYPHER = (
+    "-[*",                # a variable-length traversal
+    "*1..", "*..",        # a bounded / open hop count
+    "shortestpath",       # path search
+    "call db.idx.fulltext", "db.idx.fulltext",
+    "call db.idx.vector", "db.idx.vector",
+)
+
+#: The audit's own vocabulary (`#13083` §2) — a graph engine's four capabilities
+#: plus EP state — for a row whose author describes the need in words instead.
+GRAPH_CAPABILITY_WORDS = (
+    "traversal", "adjacency", "fulltext", "vector", "ep walk",
+    "variable-length",
+)
+
+
+def graph_capability(row: Mapping[str, Any]) -> str | None:
+    """The graph capability this reader needs, or `None` — the ONE predicate.
+
+    ⛔ It reads the row's Cypher (`snippets`) as well as its prose. A prose-only
+    check cannot see the reader it exists to catch: a row whose `snippets` carry
+    `MATCH (e:GraphEvent)-[*1..2]->(n)` and whose `needs`/`why` are worded around
+    the vocabulary passes every prose check while needing a full traversal. The
+    snippet is where a capability actually lives, so it is what is read (#14164
+    review, finding 3 — reproduced: such a row filed as `maintenance` left every
+    pin green while this doc promised the opposite).
+    """
+    prose = f"{row.get('needs', '')} {row.get('why', '')}".lower()
+    for word in GRAPH_CAPABILITY_WORDS:
+        if word in prose:
+            return word
+    for snippet in row.get("snippets", ()):
+        haystack = snippet.lower()
+        for shape in GRAPH_CAPABILITY_CYPHER:
+            if shape in haystack:
+                return f"cypher:{shape}"
+    return None
+
+
 def readers_report() -> dict[str, Any]:
     """The reader census, with the class counts — the PR's table, as data."""
     counts = Counter(reader["class"] for reader in READERS)
+    # Every row, at every class — not only the `serving` ones. A capability
+    # reader misfiled as `maintenance` is exactly the case this must surface,
+    # and a filter on `class` cannot see it by construction.
     return {
         "readers": list(READERS),
         "counts": dict(counts),
-        "graph_capability_readers": [r for r in READERS
-                                     if r["class"] == "serving"
-                                     and "graph" in r["needs"]],
+        "graph_capability_readers": [
+            {"file": r["file"], "line": r["line"], "reader": r["reader"],
+             "capability": capability}
+            for r in READERS if (capability := graph_capability(r))
+        ],
         "verdict": ("no reader needs a graph capability — every reader is a "
                     "key lookup, an ordered range scan, an aggregate, a predicate "
                     "delete, or the schema those three depend on"),
