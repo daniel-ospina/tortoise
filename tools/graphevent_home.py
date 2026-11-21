@@ -208,12 +208,15 @@ READERS: tuple[dict[str, Any], ...] = (
                      "GraphEvent", "PROPERTIES 1 event_id"),
         "needs": "DDL: a uniqueness constraint on event_id",
         "class": "maintenance",
-        "why": "the belt behind the dedupe pre-check (the app-side probe is the "
-               "suspenders). ⚠️ `ensure_event_schema` issues it through `g.query()`, "
-               "which cannot parse a module command, so the constraint is never "
-               "created in production and the store admits a duplicated "
-               "`(seq, event_id)` row — the app-side probe is the belt that is "
-               "actually there. ⛔ THE `missing supporting exact-match index` THIS "
+        "why": "⛔ THE SUSPENDERS, not the belt — the row said both, in one "
+               "breath, until #14183 review round 10 measured which layer holds. "
+               "`ensure_event_schema` issues it through `g.query()`, which cannot "
+               "parse a module command, so the constraint is never created in "
+               "production: the app-side dedupe pre-check in `event_store.py` is "
+               "the belt that is actually there, and the store admits a duplicated "
+               "`(seq, event_id)` row if that probe goes. ⚠️ `event_store.py:794-797` "
+               "still states the reverse and is tracked as #14212 (a product-code "
+               "comment, out of this census's files). ⛔ THE `missing supporting exact-match index` THIS "
                "ROW ONCE RECORDED WAS A SCRIPT DEFECT, NOT A SERVER LIMIT (#14183 "
                "review round 9, measured): the measurement put `tortoise_ge_uid` in "
                "the GRAPH-KEY slot of the module command, so it ran against a "
