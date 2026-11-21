@@ -2046,6 +2046,12 @@ def _falkordb_available() -> bool:
         sdk._get_proj().g.query("RETURN 1")
         sdk.close()
         return True
+    # ⛔ A moved or renamed seam — including an import of a moved module — is a
+    #   PROGRAMMING error, not "no server" (#14114 class 2, #14125). `LIVE`
+    #   decides a module-level `skipif`, so an arm-less swallow SKIPPED the pair
+    #   over a broken tree.
+    except (AttributeError, NameError, TypeError, ImportError):
+        raise
     except Exception:
         return False
     finally:

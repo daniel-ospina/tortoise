@@ -538,9 +538,17 @@ def arm_kindgate(n: int, reps: int) -> dict:
     single_scan = _time_call(lambda: real(sdk), reps)
 
     shapes = [
-        ("point_core", "control — names no pack", lambda i: sdk.create_point(
+        # ⛔ The PRIVATE seam, matching the `point_ns` rows below and the rest
+        # of this arm: `create_point` was retired by #13899, so a
+        # `sdk.create_point(…)` here raised AttributeError and arm 2 could not
+        # run at all (#14125). The public consolidated door
+        # (`create_entity(type="point", …)`) is NOT interchangeable here — it
+        # takes the kind in `props`, not positionally, so the two "control"
+        # shapes would stop controlling for the `kind` spelling this arm
+        # measures.
+        ("point_core", "control — names no pack", lambda i: sdk._create_point(
             "core:Project", f"a core point {i}"), 0),
-        ("point_bare", "control — names no pack", lambda i: sdk.create_point(
+        ("point_bare", "control — names no pack", lambda i: sdk._create_point(
             "statement", f"a bare-kind point {i}"), 0),
         ("point_ns", "names a pack", lambda i: sdk._create_point(
             "dev:epic", f"a dev point {i}"), 1),
