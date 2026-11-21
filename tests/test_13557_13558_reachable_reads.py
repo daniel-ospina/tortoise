@@ -315,6 +315,20 @@ SELECTED = [
     # round 17 and nothing reddened then.
     ("is the when-in-doubt policy archived", "ended", "is_copula"),
     ("has any how-to guide been archived", "ended", "existence"),
+    # ── the `of`-PARTITIVE (round-19 review, P2) ─────────────────────────────
+    # One noun phrase (`one of the exports`), routed before round 17, refused with no
+    # notice after it. The determiner guard now fires only when the word DIRECTLY before
+    # the determiner is neither a pre-determiner nor `of`, which is what distinguishes
+    # `is one of the exports archived` from `is the report the board archived`.
+    ("is one of the exports archived", "ended", "is_copula"),
+    ("is one of our plans retired", "ended", "is_copula"),
+    ("is none of the reports archived", "ended", "is_copula"),
+    ("is neither of the reports archived", "ended", "is_copula"),
+    ("is either of the plans retired", "ended", "is_copula"),
+    ("is part of the data archived", "ended", "is_copula"),
+    ("has none of the data been archived", "ended", "is_copula"),
+    ("is all of the data archived", "ended", "is_copula"),
+    ("is most of our reports archived", "ended", "is_copula"),
 ]
 
 
@@ -630,6 +644,20 @@ NOT_SELECTED = [
     "is it fact legal retracted",
     "is it news legal retracted",
     "is there evidence legal retracted",
+    # ── the SAME reduced-relative shape whose subject OPENS with a pre-determiner
+    # (round-19 review, P1) ────────────────────────────────────────────────
+    # Round-18's exclusion sat inside EVERY tick of the word run, so a subject that
+    # opened with `every|all|most|both|some|no` could not start the run and the WHOLE
+    # guard was skipped — round-17's class re-opened by its own fix. These route as
+    # `ended` on the pre-round-17 module and were measured routing at round 18; they
+    # are refused now, and `is all the data the board archived` reports
+    # `is_copula_long_subject` while the short ones are silent (the stated recall).
+    "is every report the board archived",
+    "is all the data the board archived",
+    "is most data the board archived",
+    "is both reports the board archived",
+    "is some report the board archived",
+    "is no report the board archived",
     # …the same class on the `which` shape, which is the row the pre-fix detector
     # also served (round-3 review, P1: *"`which claims were retracted by legal`
     # → `by legal` dropped"*). It is pinned HERE because the user-facing MCP
@@ -735,6 +763,11 @@ NOTICE_ONLY = [
     # …and the FREE-RELATIVE (round-17 review, P2) rows pinned in NOT_SELECTED above.
     "has anyone asked why the old plan has been archived",
     "has anyone asked how the old plan has been archived",
+    # …and the ONE row of round-19's pre-determiner-opener class that REPORTS rather than
+    # going silent: it is five words long, so the subject bound exceeded is what the
+    # notice names (`is_copula_long_subject`). Its short siblings stay in NOT_SELECTED
+    # alone, which is the stated silent part of the recall loss.
+    "is all the data the board archived",
 ]
 
 
