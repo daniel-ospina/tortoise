@@ -866,23 +866,18 @@ class _AnchorHrefParser(HTMLParser):
         # those tokens), so a `hidden` on one of them cannot ride the stack's inherited
         # `renders` flag when there is one to ride.
         #
-        # ⛔ AND **WHICH ONE HIDES THE DOCUMENT DEPENDS ON THE TAG AND ON THE STACK** (#14073
-        # review rounds 26 and 28 — this paragraph used to say `html`/`body` BOTH "HIDE THE
-        # WHOLE DOCUMENT", which is the false premise that produced round 26's P1). Measured,
-        # and matching the living standard:
-        #   * `body` — its attributes merge into the body element (`[hidden]` is global), so it
-        #     hides everything — EXCEPT inside an open `<select>`, where the token is
-        #     COUNTED instead (a `_in_select()` read of this very stack; see the root-token
-        #     arm below, which takes the loud side because the two parsing models disagree
-        #     there);
-        #   * `html` — the attributes merge into the **TOP ELEMENT OF THE STACK**, so
-        #     `<div><html hidden>` hides the DIV and `<p>ONE<div><html hidden>D</div><p>TWO`
-        #     still paints `'ONE TWO'`; only an `html` token with NOTHING OPEN reaches the root
-        #     and can hide everything.
-        # `_open_extent` implements that split at the root-token arm; this flag is the
-        # nothing-open case, read by BOTH the text question (`_text_is_painted`) and the
-        # boundary question (`_unmet_by_reader`). Without it, skipping the push silently
-        # converted a hidden root into a visible one (#14073 review round 22, P2).
+        # ⛔ AND **BOTH OF THEM HIDE THE WHOLE DOCUMENT, IN EVERY STACK STATE** (#14073
+        # review round 31, P2 — measured). An `html` token's attributes merge into `<html>`, a
+        # `body` token's into `<body>`, and both contain every painted box, so `hidden` on
+        # either one paints nothing — inside an open `<select>`, inside an open `<div>`, with
+        # nothing open, all the same. Rounds 26–28 said the opposite for `html` ("the TOP
+        # ELEMENT OF THE STACK") and round 24 counted the text for `body` inside a `<select>`;
+        # both readings came from spec text this browser does not implement, and the measured
+        # answers are in `_open_extent`'s root-token arm.
+        # `_open_extent` sets this flag at the root-token arm; it is read by BOTH the text
+        # question (`_text_is_painted`) and the boundary question (`_unmet_by_reader`). Without
+        # it, skipping the push silently converted a hidden root into a visible one (#14073
+        # review round 22, P2).
         self._root_renders = True
         self.foreign_tags: list[str] = []
         self.foreign_unmatched_endtags: list[str] = []
@@ -2180,54 +2175,35 @@ class _AnchorHrefParser(HTMLParser):
         # disable that. `_open` has already run by now, so skipping only the PUSH keeps
         # the frameset arm intact.
         if tag in ("html", "body"):
-            # ⛔ A `body` TOKEN INSIDE AN OPEN `<select>` IS *BROWSER-DEPENDENT*, AND THIS TAKES
-            # THE LOUD SIDE (#14073 review round 24 P1, round 25 P2). The classic mode that
-            # had an explicit "in select" rule IGNORED any start tag it did not list, so
-            # `<body hidden>` there never reached the body; the CURRENT living standard no
-            # longer has that mode at all (`_SELECT_POP` records the removal), and its in-body
-            # `body` rule merges the attributes into the existing body, i.e. it DOES hide.
-            # Neither reading is "the" answer, so — exactly as `_record_heading` does for the
-            # same deleted mode — the flag and the clears are skipped here and the text is
-            # COUNTED: over-counting can only redden the golden, while clearing would drop
-            # copy a classic-mode browser paints.
+            # ⛔ BOTH ROOT TAGS MERGE THEIR ATTRIBUTES INTO THE ROOTS A BROWSER ALREADY
+            # INSERTED — `<html>` for an `html` token, `<body>` for a `body` token — so a
+            # `hidden` on EITHER ONE HIDES THE WHOLE DOCUMENT, whatever the stack holds
+            # (#14073 review round 31, P2 — this replaces rounds 24–28, which are falsified).
             #
-            # ⛔ `html` IS **NOT** IN THAT CLASS, so the select skip is gated on `body` alone
-            # (#14073 review round 27, P2 — this paragraph said the opposite and the code three
-            # lines below it is what is right; round 28 P3 corrected the classic-mode sentence).
-            # The two tags differ in BOTH models: a `body` token is the browser-dependent one
-            # above, while an `html` token is HANDLED everywhere — the living standard ignores
-            # it only inside a `template` and otherwise merges into the top element, and the
-            # deleted classic in-select mode had its own explicit `html` rule FORWARDING to
-            # that same in-body merge (HTML 5.1 REC, "in select": *"A start tag whose tag name
-            # is `html`: process the token using the rules for the 'in body' insertion mode"*) —
-            # so neither reading hides the DOCUMENT from this token, and there is nothing for a
-            # select skip to decide here. Routing its `hidden` to `_root_renders` (the earlier
-            # mistake) is what DROPPED copy a browser paints:
-            # `<p>ONE<select><html hidden></select><p>TWO` is `'ONE TWO'`, which
-            # `test_the_document_roots_a_browser_ignores_insert_nothing` now requires.
-            if tag == "body" and self._in_select():
-                return
-            # ⛔ AND `html`'s ATTRIBUTES DO **NOT** MERGE INTO THE DOCUMENT ROOT (#14073 review
-            # round 26, P1): both models merge them into **the TOP ELEMENT OF THE STACK**, not
-            # the root — living standard, "in body": *"Let htmlElement be the top element of
-            # the stack of open elements … if htmlElement does not have an attribute whose name
-            # is attribute's name, then add …"*; classic 2014 REC: the same "top element"
-            # wording via the in-body rules. So `<div><html hidden>` hides the DIV, and
-            # `<select><html hidden>` hides the SELECT, while every other paragraph paints —
-            # treating either as a hidden DOCUMENT dropped copy a browser paints:
+            # ⛔ THE SPEC TEXT SAYS "TOP ELEMENT OF THE STACK", AND THIS BROWSER DOES NOT DO
+            # THAT. Round 26 quoted "in body" (*"let htmlElement be the top element of the
+            # stack of open elements … add the attribute to that element"*) and pinned
+            # `'ONE TWO'` for four documents whose justification was "both paragraphs still
+            # paint". MEASURED in Chrome, NOT ONE of them paints a single word — the attribute
+            # lands on the ROOT every time (throwaway Playwright probe, `[hidden]` owners +
+            # per-text-node `getBoundingClientRect`, document by document):
             #
-            #   '<p>ONE<div><html hidden></div><p>TWO'          -> ''   # both paragraphs paint
-            #   '<p>ONE<select><html hidden></select><p>TWO'   -> ''   # round-25 regression
+            #   '<p>ONE<div><html hidden></div><p>TWO'           -> ['HTML'],   0 painted
+            #   '<p>ONE<select><html hidden></select><p>TWO'    -> ['HTML'],   0 painted
+            #   '<p>ONE<span><html hidden></span><p>TWO'        -> ['HTML'],   0 painted
+            #   '<div><span><html hidden>CLAIM</span>MORE</div>' -> ['HTML'],  0 painted
+            #   '<div><html hidden><h2 id="h">H</h2></div>'      -> ['HTML'],   0 painted
+            #   '<p>ONE<select><body hidden></select><p>TWO'    -> ['BODY'],   0 painted
             #
-            # With an open element the attribute lands ON IT, so the frame's own `renders`
-            # flag carries it (the same flag `<div hidden>` already sets) and nothing is
-            # cleared. Only an `html` token at the TOP of the document — nothing open — reaches
-            # the root and can hide everything, which is the `_root_renders` path below.
-            if tag == "html" and self._open_elements:
-                if any(name == "hidden" for name, _value in attrs):
-                    open_tag, container, _renders = self._open_elements[-1]
-                    self._open_elements[-1] = (open_tag, container, False)
-                return
+            # with the same documents minus the attribute painting both words (the controls
+            # in `test_the_document_roots_a_browser_ignores_insert_nothing`). So neither the
+            # `body`-inside-`<select>` skip (rounds 24/25/27) nor the `html`-lands-on-the-
+            # top-element mutation (round 26) models the browser: both COUNT text — and round 26
+            # also kept a `<h2>` — that no reader meets, which is the over-advertised-boundary
+            # direction this file exists to refuse. The module's contract is "what does a
+            # BROWSER put in the document tree?" (class docstring), so the browser's answer
+            # governs here and the spec quote is recorded as a DIVERGENCE, not as the model.
+            #
             # ⛔ THE `hidden` FLAG STILL HAS TO LAND SOMEWHERE. No element is inserted, so
             # the inherited `renders` flag cannot carry it — and before `_root_renders`
             # existed this early return turned `<body hidden><p>CLAIM` INTO VISIBLE TEXT
