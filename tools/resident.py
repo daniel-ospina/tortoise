@@ -283,6 +283,26 @@ def main(argv: list[str] | None = None) -> int:
         if args.verb == "show":
             reading = resident_pin.read(graph, budget=budget)
             refusal = reading.gate_reason()
+            # ⛔ THE CAP IS THE QUESTION `show` EXISTS TO ANSWER, so "no budget could be
+            # resolved" is an UNMEASURED answer, not a healthy one. It used to emit
+            # `verdict: OK` / exit 0 over an unchecked declaration, disclosing the gap
+            # only on stderr and in `pin.budget: null` — so a scheduler or a `--out`
+            # consumer keying on the verdict read a pass, while `pin` REFUSES the same
+            # configuration: the two halves of one control disagreeing.
+            # ⛔ `unpin` stays budget-free on purpose (it is the documented remedy, and
+            # `resident_pin.unpin` re-derives nothing), so nothing reachable is blocked.
+            if budget is None and reading.keys:
+                _emit({
+                    "verdict": "UNMEASURED",
+                    "graph": args.graph,
+                    "reason": (f"the pin set's cap cannot be checked: no residency "
+                               f"window was resolvable, so whether these "
+                               f"{len(reading.keys)} key(s) are inside the pin budget is "
+                               f"UNKNOWN — pass --window-nodes or set "
+                               f"{resident_pin.EVICTION_MAX_NODES_ENV}"),
+                    "pin": reading.as_dict(),
+                }, args.out)
+                return EXIT_UNMEASURED
             _emit({
                 "verdict": "REFUSED" if refusal else "OK",
                 "graph": args.graph,
@@ -323,7 +343,14 @@ def main(argv: list[str] | None = None) -> int:
                     # `unpin` can tell "the operator named nothing" from "the operator
                     # named a different population" (an explicit mismatch is REFUSED, not
                     # silently overridden). `pin`/`outside` resolve their own defaults.
-                    label=args.label or "Point", key_prop=args.key_prop or "id",
+                    # ⛔ THE LABEL DECIDES THE KEY PROPERTY (`cache_projection.KEY_PROPERTY`):
+                    # `id` is the contract key for four of six labels and the WRONG one
+                    # for `Event` (`eventId`) and `Source` (`url`). Defaulting to `id`
+                    # here was the fabricated-measurement path — the graph read returned
+                    # nothing and the record complement reported the whole population as
+                    # outside, with `complete=True` and exit 0. `None` hands the decision
+                    # to the module, which also REFUSES a non-contract property.
+                    label=args.label or "Point", key_prop=args.key_prop,
                     # ⛔ `is None`, NEVER `or`: `--max-keys 0` was silently rewritten to
                     # the DEFAULT — 200,000, the WIDENING direction — which also made the
                     # module's own floor refusal ("a bound of zero cannot read any key",

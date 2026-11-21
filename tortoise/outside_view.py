@@ -57,7 +57,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import record_projection as _rp
-from .cache_projection import NODE_TABLES
+from .cache_projection import KEY_PROPERTY, NODE_TABLES
 from .resident_pin import PinConfigError, bare_identifier
 
 #: How many resident keys one read may pull. A bounded read is what makes the answer
@@ -315,7 +315,7 @@ def read(
     org_id: str,
     graph_id: str,
     label: str = "Point",
-    key_prop: str = "id",
+    key_prop: str | None = None,
     topic_column: str | None = None,
     top: int = DEFAULT_TOP_TOPICS,
     key_limit: int = DEFAULT_RESIDENT_KEY_LIMIT,
@@ -334,6 +334,42 @@ def read(
 
     table = NODE_TABLES[label]
     columns_for_table = _rp.table_columns().get(table, frozenset())
+    # ⛔ THE GRAPH IS KEYED PER LABEL, AND `id` IS NOT ITS CONTRACT KEY FOR TWO OF THEM.
+    # `cache_projection.KEY_PROPERTY` is the authority —
+    # `{'Point': 'id', 'Event': 'eventId', 'Subject': 'id', 'Object': 'id',
+    #   'Source': 'url', 'Session': 'id'}` — and the two halves of this view only
+    # describe the same datum when `key_prop` IS that key: `resident_keys` reads the
+    # graph by `n.{key_prop}` while the complement is computed in the record on
+    # `node_key`, and the schema's own identity CHECKs are `node_key = event_id` and
+    # `node_key = url` (`record_writer.py` states the precedence: "`eventId` is the
+    # fold's MERGE key for a Point/Event row, so it wins over a generic `id`").
+    #
+    # ⛔ MEASURED, and this is the fabricated-measurement shape: with `id` on an
+    # `:Event` graph carrying `eventId` (and a NULL `id`, which placement does not
+    # populate), `MATCH (n:Event) RETURN n.id AS key` yields NULLs, the read drops them,
+    # `truncated` stays False (only `len(rows)` is compared) and the SQL complement runs
+    # against an EMPTY resident array — so the view reported the WHOLE population as
+    # outside with `complete=True`, i.e. `verdict: OK` and exit 0. The over-count that
+    # `--label Event`/`--label Source` would then state to a customer is the direction
+    # this module's truncation guard exists to prevent, reached through the one axis it
+    # does not look at.
+    default_key_prop = KEY_PROPERTY.get(label)
+    if key_prop is None:
+        if not default_key_prop:
+            raise ValueError(
+                f"no contract key property is declared for {label} "
+                f"(cache_projection.KEY_PROPERTY), so the graph's keys cannot be "
+                f"compared with the record's node_key: name one with --key-prop"
+            )
+        key_prop = default_key_prop
+    elif default_key_prop and key_prop != default_key_prop:
+        raise ValueError(
+            f"key property {key_prop!r} is not the contract key for {label} "
+            f"({default_key_prop!r}, cache_projection.KEY_PROPERTY) — the resident side "
+            f"reads the GRAPH by this property and the outside side compares the "
+            f"RECORD's node_key, so any other property makes the two halves measure "
+            f"different things and the complement is meaningless"
+        )
     # ⛔ RESOLVED PER TABLE, NEVER ASSUMED FROM `point`. A `None` here means the caller
     # named none, so the label's own default applies; a label whose table carries no
     # `*_kind` column (today: `session`) has NO default and must be told one. That is a
@@ -424,6 +460,22 @@ def read(
             complete=False,
             reason=(f"the fast layer's own key list could not be read "
                     f"({type(exc).__name__}: {exc}) — nothing is claimed"),
+            source=f"graph:{label}",
+        )
+
+    # ⛔ A GRAPH THAT REPORTS RESIDENTS BUT YIELDS NO KEYS IS A DISAGREEMENT BETWEEN ITS
+    # OWN TWO READS, and the complement of an empty resident set is the WHOLE population.
+    # That is the shape a wrong `key_prop` produced (see above), and it is also what a
+    # partially-populated key property produces on its own. Either way the view cannot
+    # claim a number: it is unmeasured, not "everything is outside".
+    if not keys and (resident_total or 0) > 0:
+        return OutsideView(
+            org_id=org_id, graph_id=graph_id, label=label,
+            resident=resident_total,
+            complete=False,
+            reason=(f"the graph reports {resident_total} resident {label} node(s) but "
+                    f"its key read ({key_prop!r}) returned none — the two halves of this "
+                    f"view disagree, so how much is outside cannot be measured"),
             source=f"graph:{label}",
         )
 

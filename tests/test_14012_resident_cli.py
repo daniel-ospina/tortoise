@@ -58,6 +58,13 @@ class _Graph:
             return _Result([])
         if "MATCH (n:Point) RETURN count(n)" in statement:
             return _Result([[len(self.nodes)]])
+        # ⛔ THE KEY READ, which this fake used to answer with `[]` while reporting a
+        # nonzero count — the self-inconsistent shape a wrong `key_prop` produces for
+        # real, and the one `outside_view.read` now refuses. A fake that says "3 resident"
+        # and then "no keys" is not a graph the product can be, so it must not be the
+        # shape the verb's test drives.
+        if "AS key LIMIT" in statement:
+            return _Result([[k] for k in self.nodes])
         if "UNWIND $keys AS k" in statement:
             rows = []
             for key in params["keys"]:
@@ -657,12 +664,43 @@ def test_a_record_scope_refusal_exits_4_with_the_reason(wired, capsys, monkeypat
     )
 
 
-def test_show_and_unpin_need_no_budget(wired, capsys, monkeypatch):
-    """`unpin` is the documented remedy for an over-budget set, so it must not need one."""
+def test_unpin_needs_no_budget_even_when_the_cap_cannot_be_checked(
+        wired, capsys, monkeypatch):
+    """`unpin` is the documented remedy for an over-budget set, so it must not need one.
+
+    ⛔ `show` is split out below, deliberately: it used to be asserted here as `OK`, which
+    locked in a healthy verdict over a cap that was never checked. The remedy (`unpin`)
+    must still work in EXACTLY that configuration — that is the whole reason the two
+    verbs are not the same, and it is what a blanket "require a budget" change would
+    have broken.
+    """
     monkeypatch.delenv("TORTOISE_CACHE_MAX_NODES", raising=False)
     monkeypatch.delenv("TORTOISE_PIN_MAX_NODES", raising=False)
     wired.meta[PINS_META_KEY] = {"label": "Point", "key_prop": "id", "keys": ["p0"]}
-    assert resident.main(["show", *BASE]) == resident.EXIT_OK
-    capsys.readouterr()
     assert resident.main(["unpin", *BASE, "--key", "p0"]) == resident.EXIT_OK
     assert PINS_META_KEY not in wired.meta
+
+
+def test_show_says_UNMEASURED_when_the_cap_cannot_be_checked(wired, capsys,
+                                                             monkeypatch):
+    """The cap is the question `show` answers, so "cannot check it" is not `OK`.
+
+    ⛔ Before this arm `show` emitted `verdict: OK` / exit 0 over a declaration whose
+    budget could not be resolved, disclosing the gap on stderr and in
+    `pin.budget: null` only — so a scheduler, or a `--out` consumer keying on the
+    verdict, recorded a healthy pass over an unmeasured state. `pin` already REFUSES the
+    same configuration; the two halves of one control must not disagree.
+    """
+    monkeypatch.delenv("TORTOISE_CACHE_MAX_NODES", raising=False)
+    monkeypatch.delenv("TORTOISE_PIN_MAX_NODES", raising=False)
+    wired.meta[PINS_META_KEY] = {"label": "Point", "key_prop": "id", "keys": ["p0"]}
+    assert resident.main(["show", *BASE]) == resident.EXIT_UNMEASURED
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdict"] == "UNMEASURED"
+    assert "--window-nodes" in out["reason"]
+    assert out["pin"]["budget"] is None
+
+    # And with NOTHING declared there is no cap to check, so `OK` is correct — the
+    # split is "is there a declaration whose cap we cannot check", not "is a budget set".
+    wired.meta.pop(PINS_META_KEY)
+    assert resident.main(["show", *BASE]) == resident.EXIT_OK

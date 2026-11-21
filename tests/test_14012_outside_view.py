@@ -400,6 +400,81 @@ def test_every_record_label_resolves_a_REAL_topic_and_timestamp_column():
         )
 
 
+def test_every_label_keys_the_graph_by_its_CONTRACT_property():
+    """`id` is the contract key for four of six labels — and the WRONG one for two.
+
+    ⛔ The resident side reads the GRAPH by `n.{key_prop}`; the outside side compares the
+    RECORD's `node_key`. `cache_projection.KEY_PROPERTY` is the authority
+    (`Event -> eventId`, `Source -> url`), and the schema's own identity checks are
+    `node_key = event_id` / `node_key = url`. With `id` the graph read returns NULLs, the
+    read drops them, `truncated` stays False (only `len(rows)` is compared) and the
+    complement runs against an EMPTY resident array — so the view reported the WHOLE
+    population as outside with `complete=True`, exit 0. This arm is the third column
+    axis, and the reason the other two had arms is that this one did not.
+    """
+    from tortoise.cache_projection import KEY_PROPERTY
+
+    for label in sorted(NODE_TABLES):
+        assert KEY_PROPERTY.get(label), f"no contract key recorded for {label}"
+    # The default follows the label, not a literal.
+    # The graph fake is Point-shaped and only has to RECEIVE the statement: the property
+    # it is asked for is the thing under test.
+    seen: dict[str, str] = {}
+    for label in sorted(NODE_TABLES):
+        graph = _Graph(["k0"])
+        _view(graph, _Conn(_record_rows(["k0"])), label=label) if label != "Session" \
+            else None
+        key_statements = [s for s in graph.statements if "AS key" in s]
+        if label == "Session":
+            # No kind column, so `read()` refuses before it reaches the graph — covered
+            # by the arm below; here only the contract key is asserted.
+            pass
+        else:
+            prop = KEY_PROPERTY[label]
+            assert any(f"n.{prop} AS key" in st for st in key_statements), (
+                f"{label} was read by a property other than its contract key "
+                f"{prop!r}: {key_statements[:2]}"
+            )
+        seen[label] = KEY_PROPERTY[label]
+    assert seen["Event"] == "eventId" and seen["Source"] == "url"
+
+
+def test_a_key_property_that_is_not_the_labels_contract_key_is_a_usage_error():
+    """`--key-prop id --label Event` must be REFUSED, not silently measured.
+
+    Measured before this refusal: the view answered `outside == record_total` with
+    `complete=True` — a fabricated measurement reported as a healthy pass, on the axis
+    the truncation guard does not look at.
+    """
+    with pytest.raises(ValueError) as exc:
+        _view(_Graph(["p0"]), _Conn(_record_rows(["p0"])), label="Event", key_prop="id")
+    text = str(exc.value)
+    assert "contract key" in text and "eventId" in text, text
+
+
+def test_a_graph_reporting_residents_it_cannot_key_is_unmeasured_never_everything_outside():
+    """The self-inconsistent read is refused as a MEASUREMENT, not reported as a number.
+
+    A graph that says "N resident" and then yields no keys for the requested property has
+    two readings that disagree; the complement of an empty resident set is the whole
+    population, so returning it would state that everything is outside with
+    `complete=True`.
+    """
+    class _CountOnly(_Graph):
+        def query(self, statement, params=None):
+            if "count(n)" in statement:
+                return _Result([[3]])
+            return _Result([])          # the key read yields nothing
+
+    view = _view(_CountOnly(["p0"]), _Conn(_record_rows(["p0"])))
+    assert view.complete is False
+    assert view.outside is None, (
+        "the view reported a number from a resident read that returned no keys — that "
+        "number is the whole population by construction"
+    )
+    assert "disagree" in view.reason
+
+
 def test_a_label_whose_table_has_no_kind_column_demands_one_instead_of_defaulting():
     """`session` carries no `*_kind`, so the grouping dimension has no default.
 
