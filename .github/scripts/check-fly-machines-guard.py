@@ -69,9 +69,11 @@ RESIDUAL GAPS (documented, not blocked):
    the implicit Fly ``app`` group would be flagged ORPHAN (fail-closed).
    Adding ``[processes]`` must explicitly include the traffic groups.
    (d) DECLARED-vs-LIVE machine SHAPE is not compared at all — the only
-   ``config`` keys this guard reads are ``env`` and ``metadata`` (the latter for
-   the process group); it never reads ``guest``. That is the same blind spot
-   ``check-fly-machine-env.py`` documents for ``[env]``. ``fly.toml``'s
+   ``config`` key this guard reads is ``metadata`` (for the process group, and to
+   reject a non-object); it never reads ``guest``. ``config.env`` is compared by
+   the SIBLING ``check-fly-machine-env.py``, not here — but the class that script
+   exists for (a declared value the running machine does not carry) applies one
+   key over. ``fly.toml``'s
    ``[[vm]]`` (``cpu_kind``/``cpus``/``memory_mb``) can therefore diverge from
    the running machine with no red signal: #13665 found the box running 4 cores
    while ``fly.toml`` declared 2, unnoticed for a whole measurement window. A

@@ -2426,7 +2426,7 @@ Fly list price at the snapshot date, region `iad`, as published on the
 | Item | Rate (approx., 2026-09-10) | Monthly (approx.) |
 |---|---|---|
 | `shared-cpu-2x` / 512 MB (preset base) | ~$0.00000150/s · ~$0.0054/hr | ~$3.89 |
-| + 3.5 GB RAM above the 512 MB preset (4096 MB total) | $5/GB/30 days (rate unchanged) | +$17.50 |
+| + 3.5 GB RAM above the 512 MB preset (4096 MB total) | $5/GB/30 days at this snapshot (2026-11-21 re-fetch: $6.00/GB/mo) | +$17.50 |
 | **`shared-cpu-2x` / 4096 MB (this table's basis; pre-#13665 shape), running** | ~$0.00000826/s · ~$0.0297/hr | **~$21.40** |
 | Stopped machine | rootfs only | $0.15 per GB/30 days |
 | Volume storage (per volume, attached or not) | — | $0.15/GB/mo |
