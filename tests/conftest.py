@@ -2143,7 +2143,8 @@ def _capture_ack_window_is_deterministic(monkeypatch):
     """#14232: the suite pins the IN-BUDGET capture, never the deferral.
 
     The handler joins the extraction for at most ``_CAPTURE_ACK_DEADLINE_S``
-    (1 s in production, clamped to half the transport bound) and answers with the
+    (0.5 s in production, anchored on arrival and clamped to half the transport
+    bound) and answers with the
     async `accepted` receipt when the join misses. Whether the join misses on a
     given run is a question about MACHINE LOAD — the offline `MockModel` seam's
     whole capture measured 0.008 s to 0.95 s on one host depending on the test

@@ -58337,7 +58337,7 @@ class TortoiseSDK:
             # read can see a missing tail.
             "s.client_captured_at, s.client_captured_at_source, s.capture_lane, "
             "s.turn_max_index, "
-            # #14232: APPENDED (sess[14]/sess[15]) — the in-flight extraction
+            # #14232: APPENDED (sess[13]/sess[14]) — the in-flight extraction
             # phase pair. Appended LAST for the reason this projection's header
             # gives: `list_sessions` and this read build dicts POSITIONALLY, so a
             # column inserted earlier silently re-binds every column after it.

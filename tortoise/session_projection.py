@@ -157,7 +157,14 @@ def session_extraction_status(
       ``stored``;
     * ``capture_ok is None`` -> ``stored`` with ``outcome_known False``.
 
-    ``outcome_known`` is the pinned qualifier: ``capture_ok IS NOT NULL``.
+    ``outcome_known`` is the pinned qualifier: ``capture_ok IS NOT NULL`` **and
+    no extraction is in flight** (#14232). The second half is what keeps the
+    answer about THIS capture on a #2335 TRUE retry: that lane re-extracts a
+    session whose record already carries `capture_ok = False` and writes the
+    in-flight phase, so without it the same read would report "the outcome is
+    known" for a capture that is running right now — and the phase would be
+    suppressed too, leaving the retry invisible on every read surface while the
+    ACK that triggered it says `outcome_known: false`.
     It is what carries the "stored, outcome UNRECORDED" case — a
     commit-created / budget-hold / demo-seeded / longmem-ingest session was
     written by a driver that never records an extraction outcome, so a naive
@@ -172,7 +179,10 @@ def session_extraction_status(
     the status because the status alone cannot say WHY a session was not
     processed; the pair is what a reader needs.
     """
-    outcome_known = capture_ok is not None
+    # ⛔ A live phase means the outcome is NOT known yet, whatever the record's
+    # `capture_ok` says — the retry lane keeps the previous attempt's `False`
+    # there (measured: the record-phase MERGE never touches `capture_ok`).
+    outcome_known = capture_ok is not None and not phase
     if capture_ok is True:
         status = "stored-and-processed"
     elif capture_ok is False:
@@ -190,15 +200,16 @@ def session_extraction_status(
         "extractor": capture_extractor,
         "outcome_known": outcome_known,
     }
-    # #14232: the in-flight phase, published ONLY while the outcome is unknown.
+    # #14232: the in-flight phase, published whenever the record carries one.
     # ⛔ ABSENT, never `None`: three surfaces pin this block's exact key set for a
     # terminal session (`set(row["extraction"]) == {"status", "extractor",
     # "outcome_known"}`, tests/test_session_capture_status.py), and that pin is
-    # #3520's. A terminal `capture_ok` therefore always WINS over a stale phase:
-    # the phase is cleared in the same statement that records the outcome, and
-    # this guard makes a survivor of any race unreportable rather than
-    # contradictory — a reader never has to choose between two live claims.
-    if capture_ok is None and phase:
+    # #3520's — it holds because the phase is CLEARED in the same statement that
+    # records the outcome, so a terminal row simply has none to publish.
+    # ⛔ Not `capture_ok is None and phase`: that suppressed the phase on the
+    # #2335 retry lane (whose record keeps the prior attempt's `False`), which is
+    # the one lane where a reader MOST needs to see that extraction is running.
+    if phase:
         assert phase in SESSION_EXTRACTION_PHASES, (
             f"extraction phase {phase!r} is outside the declared vocabulary "
             f"{SESSION_EXTRACTION_PHASES}")

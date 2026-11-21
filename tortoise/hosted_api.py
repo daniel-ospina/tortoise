@@ -746,14 +746,34 @@ def _schedule_capture_completion(task, report, slot, proj, session_id,
         try:
             await report(await task)
         finally:
-            slot.complete_tail()
+            _capture_slot_finished(slot)
 
     follow = asyncio.create_task(_finish())
     _CAPTURE_TAIL_TASKS.add(follow)
     follow.add_done_callback(_CAPTURE_TAIL_TASKS.discard)
-    follow.add_done_callback(slot.worker_done)
     follow.add_done_callback(lambda f: _capture_tail_failed(
         f, proj, session_id, state))
+
+
+def _capture_slot_finished(slot) -> None:
+    """The deferred capture is over: end the tail claim, release what is ours.
+
+    ⛔ `worker_done` is CONDITIONAL, and the condition is the whole point. When
+    the extraction was submitted, the slot's capacity belongs to the CONCURRENT
+    future (`_run_capture_bounded` bound it) — releasing here would free a slot a
+    parked pool thread still occupies, which is #3060's cap silently exceeding
+    itself, and the reason `test_capture_loop_responsiveness.py::
+    test_capture_slot_is_held_until_the_worker_finishes` exists. When it was
+    NOT submitted (the task died in one of the two awaits before the submit —
+    the phase write, the vocabulary compile), nothing else will ever release it,
+    and the leak is the silent direction: capacity ratchets to the ceiling and
+    every later capture 429s.
+    """
+    slot.complete_tail()
+    if not slot.worker_bound():
+        slot.worker_done()
+
+
 
 
 def _capture_tail_failed(task, proj, session_id, state) -> None:
@@ -849,6 +869,17 @@ class _CaptureSlot:
         # tail is still writing `capture_ok`, reopening the #3129 window this
         # slot exists to close.
         "_tail_done",
+        # #14232 review (P1): True once `_run_capture_bounded` attached
+        # `worker_done` to the CONCURRENT future, i.e. once a pool thread really
+        # owns the capacity. Before that instant nothing but the request can
+        # release it — and the deferred lane's extraction coroutine has TWO
+        # awaits before it submits (the `extracting` phase write, and the
+        # tenant-vocabulary compile), so a cancellation there kills the task with
+        # no future to report. `worker_bound` is what tells the two apart, in the
+        # one direction that leaks silently: capacity ratcheting to
+        # `_CAPTURE_MAX_IN_FLIGHT` (every later capture 429) and the session id
+        # 409-ing forever.
+        "_worker_bound",
     )
 
     def __init__(self, session_key: str | None = None) -> None:
@@ -860,6 +891,7 @@ class _CaptureSlot:
         self._request_done = False
         # #3129: False while an abandonment-marker write is in flight.
         self._cleanup_done = True
+        self._worker_bound = False
         # #14232: True unless a deferred completion owns the capture; see
         # ``tail_pending``. Default True so every non-deferred lane (and every
         # non-capture user of this class) is unaffected.
@@ -888,6 +920,20 @@ class _CaptureSlot:
             self._done = True
             _capture_slot_decrement()
         self._release_session()
+
+    def worker_bound(self) -> bool:
+        """True once the capacity really sits with a pool thread (#14232)."""
+        return self._worker_bound
+
+    def mark_worker_bound(self) -> None:
+        """The extraction was submitted: its future now owns the capacity.
+
+        Called from `_run_capture_bounded` in the SAME breath as binding
+        `worker_done` to that future — the flag and the binding must never
+        disagree, or the abandoned arm either releases a slot a parked thread
+        still occupies (#3060) or leaks one nothing will ever release (P1).
+        """
+        self._worker_bound = True
 
     def worker_done(self, _fut=None) -> None:
         if not self._done:
@@ -1649,6 +1695,10 @@ async def _run_capture_bounded(slot, fn, /, *args, **kwargs):
     cfut = _submit_off_loop(_CAPTURE_EXECUTOR, fn, *args, **kwargs)
     if slot is not None:
         slot.hand_off()  # before any await: only the worker frees it now
+        # #14232: the flag and the callback are set together — see
+        # `mark_worker_bound`. Anything that dies BEFORE this line has no future
+        # to report, so its releaser must know it is the last one.
+        slot.mark_worker_bound()
         cfut.add_done_callback(slot.worker_done)
     return await asyncio.wrap_future(cfut)
 
@@ -22914,12 +22964,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # idempotent, so binding them here is safe whether or not the extraction
     # future also reports.
 
-    # ⛔ THE JOIN WINDOW IS MEASURED FROM HERE, not from arrival: anchoring it on
-    # arrival subtracts whatever the RECORD phase cost, and on a slow graph that
-    # is the whole window — `wait_for(..., 0)` would answer the ack for a fast
-    # extractor too. `_capture_ack_grace_s` still clamps to half of `#3834`'s
-    # bound measured from ARRIVAL, so the response cannot approach the refusal
-    # this change exists to avoid.
+    # ⛔ THE WINDOW IS ANCHORED ON ARRIVAL (`_capture_ack_grace_s`, which owns the
+    # arithmetic): the ack deadline is `arrival + _CAPTURE_ACK_DEADLINE_S`, so a
+    # slow RECORD phase SHRINKS the join instead of being paid twice. Measuring
+    # from here was the first implementation and it measured p95 ack 1.95 s
+    # against this issue's 1 s target — the record phase plus a full window that
+    # could never land. The transport bound is still a ceiling this cannot
+    # approach.
     _grace = _capture_ack_grace_s(request)
     _joined = _NO_JOIN
     # ⛔ WHO RELEASES THE SLOT is decided ONCE, below, and the `finally` here is
@@ -22960,6 +23011,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # against the terminal write, and the marker would land second.
                 _abandoned = True
                 task.cancel()
+                # ⛔ The task now has NOBODY else: the request is raising and the
+                # completion continuation is never created. Without this the slot
+                # was never released when the cancellation landed before the
+                # submit (measured: `_CAPTURE_IN_FLIGHT` stayed at 1 with the
+                # session key still held, forever). The helper is safe here
+                # precisely because it checks `worker_bound`: if the worker WAS
+                # submitted, its own future still owns the capacity.
+                task.add_done_callback(lambda _t: _capture_slot_finished(slot))
                 raise
 
         if _joined is not _NO_JOIN:
@@ -23025,8 +23084,16 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # capture, which is the trigger for a user-visible disclosure. Absent is
         # the only honest answer here; the field is present on the in-budget
         # receipt, so a client that needs it reads `status_url`.
+        # ⛔ The record's own prior outcome on a #2335 TRUE-retry lane (`False`),
+        # `None` on a fresh capture — NOT a hardcoded `None`. A retry keeps the
+        # failed attempt's `capture_ok = False` in the record, so a literal `None`
+        # here made the ACK say `status: stored` while the very `status_url` it
+        # advertises derived `stored-extraction-failed` from the same record
+        # (reviewer-measured). The phase says the retry is running; the status
+        # says what the record last knew.
         "extraction": session_extraction_status(
-            None, _capture_lane(), phase=_capture_phase_view["phase"]),
+            False if retry_failed_capture else None,
+            _capture_lane(), phase=_capture_phase_view["phase"]),
         # The ONE address that answers "what happened to this session's memory" —
         # the same projection the CLI's confirmation already polls after a 504.
         # ADDITIVE and new on this endpoint: a client follows it verbatim; it is
@@ -26211,7 +26278,7 @@ async def get_session_detail(session_id: str, org: dict = Depends(get_current_or
             # mark the capture MERGE writes and the fold restores, read here so
             # `record_read.session_turns` can see a missing tail.
             "s.capture_lane, s.turn_max_index, "
-            # #14232: APPENDED (sess[14]/sess[15]) — the in-flight phase pair.
+            # #14232: APPENDED (sess[13]/sess[14]) — the in-flight phase pair.
             "s.capture_extraction_phase, s.capture_extraction_phase_at",
             params={"sid": session_id},
         ).result_set)

@@ -150,6 +150,45 @@ class _ParkedExtractor:
         return False
 
 
+# ── the window itself (review P2: it had no direct test) ──────────────────
+
+def test_the_ack_window_is_anchored_on_arrival(monkeypatch):
+    """`_capture_ack_grace_s` spends the deadline from ARRIVAL, not from the join.
+
+    MEASURED REASON, not a preference: with the window measured from the join's
+    start the ack's latency is `record phase + window` and the acceptance drain
+    read **p95 1.95 s** (then 1.14 s at a 1 s window) against this issue's 1 s
+    target. Every assertion below is a number, because the defect was a unit
+    mismatch between two clocks and prose could not have caught it.
+    """
+    import types
+
+    monkeypatch.setattr(ha, "_CAPTURE_ACK_DEADLINE_S", 0.5)
+    monkeypatch.setattr(ha._mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 10.0)
+
+    def _req(age_s):
+        state = types.SimpleNamespace(_wait_bound_t0=time.monotonic() - age_s)
+        return types.SimpleNamespace(state=state)
+
+    # ⌛ A fresh request gets (almost) the whole window …
+    assert 0.4 < ha._capture_ack_grace_s(_req(0.0)) <= 0.5
+    # ⌛ … a request whose record phase already spent 0.4 s of it gets the rest,
+    #    NOT a fresh 0.5 s — this is the double-payment the anchor removes.
+    assert 0.05 < ha._capture_ack_grace_s(_req(0.4)) < 0.15
+    # ⌛ … and a request that has spent the deadline gets ZERO, never a negative
+    #    wait (a negative `wait_for` raises instead of answering).
+    assert ha._capture_ack_grace_s(_req(2.0)) == 0.0
+    # ⛔ The CEILING is half the transport bound, so a future bump of the constant
+    # can never put the response near `#3834`'s refusal.
+    monkeypatch.setattr(ha._mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.2)
+    assert ha._capture_ack_grace_s(_req(0.0)) <= 0.1 + 0.02
+    # An absent binding (a direct call, a unit test) gets the full constant: the
+    # window is what makes the join worth doing, and a missing middleware must not
+    # silently disable the compatibility half.
+    assert ha._capture_ack_grace_s(types.SimpleNamespace(state=None)) == 0.5
+    assert ha._capture_ack_grace_s(None) == 0.5
+
+
 # ── R1: durable at the ACK ────────────────────────────────────────────────
 
 def test_the_record_is_durable_when_the_ack_is_served(client, monkeypatch):
@@ -551,3 +590,145 @@ def test_a_completion_that_dies_before_submitting_still_returns_capacity(
     assert row and row[0][1] is None, (
         "a dispatch FAILURE is not a cancellation and must not write the "
         f"abandoned marker (raise-shape contract): {row}")
+
+
+# ── review findings, now pinned ────────────────────────────────────────────
+
+def test_a_cancelled_request_during_the_join_returns_capacity_and_the_key(
+        client, monkeypatch):
+    """P1 — a cancel BEFORE the extraction is submitted must not leak the slot.
+
+    The deferred extraction has TWO awaits before it reaches
+    `_run_capture_bounded`: the `extracting` phase write and the tenant-vocabulary
+    compile. A cancellation in that window kills the task with no pool future to
+    report, and the request's own `hand_off()`/`tail_pending()` already retired its
+    claim — so before the review fix nothing ever released capacity or the session
+    key: `_CAPTURE_IN_FLIGHT` stayed at its reserved value and the session id 409'd
+    for the life of the process (silent in the one direction nobody can see:
+    capacity ratchets to the ceiling and every later capture 429s).
+
+    ⛔ Asserted on the ACCOUNTING, not on a response: the request is cancelled, so
+    there is no response to read. `_CAPTURE_SESSIONS` is the same registry the 409
+    reads.
+    """
+    import asyncio
+
+    from tortoise.hosted_api import app
+    # The shared async seam (#8582/#5049): a wait-bound refusal reaching THIS
+    # client is a non-answer (INCONCLUSIVE), never an assertion about the code.
+    from tests.test_capture_loop_responsiveness import (  # noqa: PLC0415
+        _verdict_async_client,
+    )
+    from tests.test_hosted_api import TEST_TEAM  # noqa: PLC0415
+
+    before = ha._CAPTURE_IN_FLIGHT
+    parked = threading.Event()          # the phase write is IN FLIGHT
+    release = threading.Event()         # …and stays there until we say so
+
+    def _parked_phase(_proj, _session_id, phase, _at):
+        """Park ONLY the `extracting` write — the one the EXTRACTION task makes.
+
+        ⛔ Not every phase write: the footer writes `queued` from the REQUEST,
+        before the task exists and before `hand_off()`. Parking that one too makes
+        the cancellation land before the split point, where the endpoint's own
+        teardown releases everything — which is how the first version of this test
+        passed against a build with the leak still in it (mutation-checked).
+        """
+        if phase != "extracting":
+            return None
+        parked.set()
+        assert release.wait(30.0), "test never released the phase writer"
+        return None
+
+    monkeypatch.setattr(ha, "_write_capture_phase", _parked_phase)
+    # A positive window, so the handler really is inside the join when the
+    # cancellation lands (the default path patches it to 0 for the ack tests).
+    monkeypatch.setattr(ha, "_capture_ack_grace_s", lambda _request: 5.0)
+
+    payload = {"conversation": _CONV, "session_id": "s-14232-cancel-pre-submit",
+               "harness": "pi"}
+
+    async def _run():
+        async with _verdict_async_client(app, base_url="http://test") as ac:
+            task = asyncio.create_task(ac.post("/v1/sessions", json=payload))
+            for _ in range(400):
+                if parked.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert parked.is_set(), (
+                "the extraction never reached its first await — this test would "
+                "then be exercising the submitted window instead")
+            task.cancel()  # the client goes away mid-join
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:  # noqa: BLE001 — the request may surface it
+                pass
+            for _ in range(400):  # the abandoned task's callback settles
+                if ha._CAPTURE_IN_FLIGHT == before and not ha._CAPTURE_SESSIONS:
+                    break
+                await asyncio.sleep(0.02)
+            return ha._CAPTURE_IN_FLIGHT, dict(ha._CAPTURE_SESSIONS)
+
+    try:
+        after_in_flight, after_sessions = asyncio.run(_run())
+    finally:
+        release.set()
+        _drain_tails()
+
+    assert after_in_flight == before, (
+        f"capacity leaked on a cancel BEFORE the extraction was submitted: "
+        f"{before} -> {after_in_flight} — every later capture in this process "
+        f"now 429s, silently")
+    assert not after_sessions, (
+        f"the in-flight session key was never released: {after_sessions} — that "
+        f"session id 409s forever")
+    assert TEST_TEAM  # the router auth override this client inherits
+
+
+def test_a_retry_in_flight_says_so_on_the_ack_AND_on_the_status_url(
+        client, monkeypatch):
+    """P2 — on the #2335 TRUE-retry lane the two surfaces must agree.
+
+    A retry re-extracts a session whose record ALREADY carries
+    `capture_ok = False` (the record-phase MERGE never touches it), and it writes
+    the in-flight phase. Before the review fix the ACK hardcoded `None` as the
+    outcome — so it said `status: stored`, `outcome_known: false` — while the
+    `status_url` it advertises derived `stored-extraction-failed` from the record
+    and SUPPRESSED the phase (`capture_ok is None and phase`), i.e. the live retry
+    was invisible on the one surface the ACK tells the client to poll, and the two
+    disagreed about the same capture.
+    """
+    session_id = "s-14232-retry-lane"
+    r = client.post("/v1/sessions", json={
+        "conversation": _CONV, "session_id": session_id})
+    assert r.status_code == 200, r.text
+    _drain_tails()
+    # Put the record in the state a FAILED v2 attempt leaves (`v2` is a
+    # retry-eligible convergent lane, so the next POST is a TRUE retry).
+    _proj().g.query(
+        "MATCH (s:Session {id:$sid}) SET s.capture_ok=false, "
+        "s.capture_extractor='v2'", params={"sid": session_id})
+
+    _force_ack(monkeypatch)
+    with _ParkedExtractor() as parked:
+        r = client.post("/v1/sessions", json={
+            "conversation": _CONV, "session_id": session_id})
+        assert r.status_code == 200, r.text
+        assert parked.started.wait(30.0), "the retry never re-extracted"
+        ack = r.json()["extraction"]
+        read = client.get(f"/v1/sessions/{session_id}").json()["extraction"]
+
+        assert ack["status"] == "stored-extraction-failed", ack
+        assert read["status"] == "stored-extraction-failed", read
+        # …and BOTH say the outcome is not known yet, and name the live phase.
+        for block in (ack, read):
+            assert block["outcome_known"] is False, block
+            assert block["phase"] in ("queued", "extracting"), block
+        parked.release.set()
+    _drain_tails()
+    # …and once the retry finishes the phase is gone and the outcome is known.
+    final = client.get(f"/v1/sessions/{session_id}").json()["extraction"]
+    assert final["outcome_known"] is True, final
+    assert "phase" not in final, final
