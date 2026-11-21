@@ -43,15 +43,35 @@ dependencies = [
     # FLOOR only: dependency hygiene, NOT the fix for #3459. Durable owner
     # decision (2026-09-13). Full rationale: PR #3476.
     "redis>=7.1,<8",
-    # ⛔ UPPER BOUND IS LOAD-BEARING, not hygiene (#14092): `tools/ci_selection.py`'s
-    # `parse_manifest_text` resolves `<<:` merge keys through PyYAML's own
-    # `flatten_mapping` (_NoDuplicateKeyLoader, tools/ci_selection.py:4373/4451), so a
-    # patch release can change WHAT A MANIFEST MEANS. 6.0.4 (uploaded
-    # 2026-11-20T23:34:39Z) makes a re-anchored mapping resolve to the anchor's
-    # pre-override value ({'x': 1, 'y': 3}) where 6.0.3 gives {'x': 2, 'y': 3}, which
-    # reds four `tests/test_ci_selection.py` arms under `test-slow` on a fresh install.
-    # LIFT when #14092 makes the parser independent of `flatten_mapping` ordering.
-    "pyyaml>=6.0,<6.0.4",
+    # ⛔ 6.0.4 IS EXCLUDED, AND THE EXCLUSION IS LOAD-BEARING — not hygiene. Its
+    # `flatten_mapping` change (upstream PR yaml/pyyaml#937, "Fix merge key performance")
+    # de-duplicates merge-key pairs ACROSS a nested `<<: *anchor` chain, so a document's own
+    # override no longer wins over a value inherited one level down: measured, PyYAML 6.0.3
+    # parses `top: {<<: *mid, y: 3}` with `mid: {<<: *base, x: 2}` as `top.x == 2`, and 6.0.4
+    # returns `top.x == 1`. `tools/ci_selection.py` parses this repo's manifests with
+    # `yaml.SafeLoader`, and `tests/test_ci_selection.py` pins that resolved VALUE (not just
+    # "no exception"), so 4 of its cases red on 6.0.4 — reproduced on this box with the 6.0.4
+    # sdist ahead of site-packages: exact failing set {
+    # test_a_merge_key_override_resolves_to_the_documents_own_value,
+    # test_a_sequence_merge_overrides_the_LAST_applied_mapping,
+    # test_an_override_of_a_NESTED_anchor_is_NOT_a_duplicate,
+    # test_the_same_chain_flat_in_document_order_is_also_accepted}. That file is in the SLOW
+    # pool, so the red lands in `test-slow` and therefore in the REQUIRED aggregate
+    # (`python-ci-gate` needs `test-slow`), on every PR that selects the core slow pool.
+    # ⚠️ The pin matters because the CI legs install with `pip install -e '.[test,…]'` — an
+    # UNBOUNDED resolve — before `uv sync --frozen`; the lock carries 6.0.3, so a box that
+    # resolves through the lock never sees this. `!=` and not `<`: 6.0.5+ may restore the
+    # nested-override semantics, and a ceiling would refuse the fix when it arrives — so the
+    # exclusion is a VERSION SET rather than an upper bound. It lifts the same way either form
+    # would: when the parser is independent of `flatten_mapping` ordering (#14092) or a
+    # release restores the semantics, this line goes back to `>=6.0` — and the reason it must
+    # not be a blanket ceiling is the same one the merge recorded: `parse_manifest_text`
+    # resolves `<<:` merge keys through PyYAML's own `flatten_mapping`
+    # (_NoDuplicateKeyLoader, tools/ci_selection.py:4373/4451), so a patch release can change
+    # WHAT A MANIFEST MEANS, and 6.0.4 (uploaded 2026-11-20T23:34:39Z) makes a re-anchored
+    # mapping resolve to the anchor's pre-override value ({'x': 1, 'y': 3}) where 6.0.3 gives
+    # {'x': 2, 'y': 3}.
+    "pyyaml>=6.0,!=6.0.4",
     "fastmcp==3.4.6",
     "prometheus-client>=0.16",
     "posthog>=3.0",

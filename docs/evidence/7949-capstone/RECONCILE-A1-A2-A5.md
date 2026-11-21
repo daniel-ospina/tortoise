@@ -201,10 +201,38 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    the writer a further +25 lines past it while its three cites still said `21336` — 54 SHORT of
    where the writer actually sat, i.e. stale at its own head, which is the drift this note
    exists to catch (`tests/test_7949_capstone_measure.py`'s reconcile-cite arm is what reds on
-   it). FOUR statements move together and never one alone: the prose cite above, the bare
-   parenthetical here, the `sed` below, and `probes/capstone_measure.py:281`'s docstring, which
-   carried that same short number. The bare
-   parenthetical is the statement no `sdk.py:` token and no `sed` covers, so it is the one that rots silently. #10226 removed 26 SDK methods above this writer, and the prose cite and the `sed` were re-derived with it while this bare parenthetical was not. Then `#12825` (`32011c4dad`, fix(sdk): allow `superseded -> live` when the write clears the carriers) inserted 286 lines into `tortoise/sdk.py`, 185 of them above this writer, so ALL THREE moved again — the prose cite, this parenthetical and the `sed` below — and were re-derived together off `grep -n '^ *proj\.link_source_to_event' tortoise/sdk.py`. Then `#12882` (`2dfbb5d455`) inserted 379 lines and deleted 29 in `tortoise/sdk.py` (`git show --numstat 2dfbb5d455 -- tortoise/sdk.py` → `379 29`, net `+350`; an earlier cut of this note said “inserted 408”, which is the CHURN, not the insertions) and `#12904` (`5cc36a42d4`) added 8 and deleted 2 in `tortoise/hosted_api.py` (`8 2`, net `+6`, not “added 10”), and a third re-derivation moved all three together again, by the same +20 net band, off the same grep. Then `#13084` inserted its own RAM-cap seam into `tortoise/sdk.py` above this writer, and a fourth re-derivation moved all three together off the same grep. --> What is missing is the *declared part-whole* edge, not every structural
+   it). FIVE statements move together and never one alone: the prose cite above, the bare
+   parenthetical here, the `sed` below, `probes/capstone_measure.py:281`'s docstring, which
+   carried that same short number, and `README.md`'s "reached from the capture path at
+   `sdk.py:<n>`" sentence, which names the same call and was the statement an earlier cut of this
+   note left out of its own enumeration — and an omission is exactly what a completeness claim
+   hides. ⛔ Named by its SENTENCE, not by a line number (#14060 round-17 review, P3): a
+   `README.md:<n>` pointer into a file that grows on any paragraph inserted above it is the same
+   unchecked anchor this note exists to catch — and the arms that DO resolve `README.md:<n>` cites
+   read `E1-E5-PROOFS.md` (`test_every_readme_line_cite_carries_the_sentence_it_quotes`) and one
+   test's own docstring, so neither reads one written HERE (#14060 review round 18, P3: this said
+   "no arm resolves cites INTO this README", which those two arms refute — what is true is that no
+   arm reads a `README.md:<n>` cite THIS RECORD carries). The bare
+   parenthetical is the statement no `sdk.py:` token and no `sed` covers, so it is the one that rots silently. #10226 removed 26 SDK methods above this writer, and the prose cite and the `sed` were re-derived with it while this bare parenthetical was not. Then `#12825` (`32011c4dad`, fix(sdk): allow `superseded -> live` when the write clears the carriers) inserted 287 lines and deleted 1 in `tortoise/sdk.py` (`git show --numstat 32011c4dad -- tortoise/sdk.py` -> `287 1`, net `+286` — this clause said "inserted 286", which is the NET column, not the added one the sibling `#12882` clause below counts), 185 of them above this writer, so ALL THREE moved again — the prose cite, this parenthetical and the `sed` below — and were re-derived together off `grep -n '^ *proj\.link_source_to_event' tortoise/sdk.py`. Then `#12882` (`2dfbb5d455`) inserted 379 lines and deleted 29 in `tortoise/sdk.py` (`git show --numstat 2dfbb5d455 -- tortoise/sdk.py` → `379 29`, net `+350`; an earlier cut of this note said “inserted 408”, which is the CHURN, not the insertions) and `#12904` (`5cc36a42d4`) added 8 and deleted 2 in `tortoise/hosted_api.py` (`8 2`, net `+6`, not “added 10”), and a third re-derivation moved all three together again, by the same +20 net band, off the same grep. Then `#13084` inserted its own RAM-cap seam into `tortoise/sdk.py` above this writer, and a fourth re-derivation moved all three together off the same grep. Then at the `#14060`
+   review head the writer sat at `tortoise/sdk.py:22440` — a figure READ at that head, so the figure
+   recorded one round earlier (`22385`) was 55 short there; measured at the head that wrote it,
+   `sed -n '22385p'` READ `#   * this door's lane authorizes BOTH writes, so a raise between them`
+   and `source_key = _mint_source_stub(` SAT at `22340`. The earlier round took its derivation on a
+   tree 55 lines behind its own head while asserting it was taken there; that sentence is corrected
+   here rather than left standing. The mint range was short by the same 55 and was `21158-21182` at
+   that head (`_ekind = _payload_entity_kind(e)` at `21158`, the `-A 24` window ending the mint
+   block). This lane re-derived the FIVE capture-path statements and the three mint-range cites off
+   `grep -n '^ *proj\.link_source_to_event' tortoise/sdk.py` and
+   `grep -n '_ekind = _payload_entity_kind(e)' tortoise/sdk.py` on the tree of that head.
+   ⛔ THESE FIGURES ARE HISTORICAL, NOT LIVE, and they went stale the moment `origin/main` advanced
+   under them: the merge of `#13971` (`e0accb8fe6`) inserted 43 lines into `tortoise/sdk.py`, 31 of
+   them above this writer (the live cite above is `sdk.py:22471`), so at the merged head
+   `22440` is `sourceKind="agentSession",`, `22385` is ``# re-capture kept the display column live and the replay wrote `''` ``, and the
+   mint opens at `21189` (`21189-21213`, same `-A 24` window). They are stamped by head and NOT
+   re-pointed, because re-pointing a past-tense sentence to a new number is the false claim this
+   note exists to catch; the LIVE figures are the prose cite above, which was re-derived on the
+   merged tree (`sdk.py:22471`). No arm reads the numbers in THIS block — which is why they rot
+   silently. --> What is missing is the *declared part-whole* edge, not every structural
    edge — and saying otherwise would send a lane off to build a writer the graph already has (the "second
    producer" the epic forbids).
 3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2800-2802`
@@ -789,20 +817,26 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — �
                                                           # — 3 — and tests/test_7949_capstone_measure.py
                                                           # — 4 — SOURCE-TEXT scans and one prose comment, not
                                                           # consumers: one is the `extractor_v2.py` scan
-                                                          # (`:15787`) that derives the doc's cite, two are the
-                                                          # ⛔ NEITHER side of this merge's conflict printed this
-                                                          # number: HEAD said `:15100`, `origin/main` said
-                                                          # `:15096`, and BOTH were stale on the merged tree
+                                                          # (`:16597`) that derives the doc's cite, two are the
+                                                          # ⛔ NEITHER side of THIS merge's conflict printed this
+                                                          # number: HEAD said `:15787`, `origin/main` said
+                                                          # `:16585`, and BOTH were stale on the merged tree
                                                           # because this branch's own added rows move the scan
                                                           # line — so it is RE-DERIVED by the TEST (`_self_scan_line` in
                                                           # `tests/test_7949_capstone_measure.py`) rather than side-picked, at
                                                           # whatever the head you merge derives. ⛔ **The two figures this
                                                           # note once typed (`:15228`, then `:15391`) are both refuted by
                                                           # later commits on this branch (#13802 review, P2)**: no line number
-                                                          # is typed HERE for that figure; the `:15775` cite earlier in this block IS the
+                                                          # is typed HERE for that figure; the (`:16597`) cite earlier in this block IS the
                                                           # derived value the guard reads at this head — named by the value, never by its
                                                           # DISTANCE from this comment, which is the same rotted-positional class this file
                                                           # exists to catch (#13802 review, P2: this said "six lines up", measured 10).
+                                                          # ⛔ IT IS PARENTHESISED IN BOTH PLACES ON PURPOSE (#14060 review, P3): the arm
+                                                          # that guards it needle-matches the parenthesised form, so a BARE occurrence
+                                                          # here was read by nothing — measured, mutating this one to its previous
+                                                          # head's value left the
+                                                          # whole reconcile subset green (16 passed), while the same mutation at the
+                                                          # first occurrence red it. Both are now counted.
                                                           # finder's own conditions (#12569), and the fourth is
                                                           # a prose line about `#11001`'s in-place correction
 # ⛔⛔ THIS GREP COUNTS LINES, NOT READERS — do not read the per-file numbers as "who consumes the

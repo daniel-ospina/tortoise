@@ -64,6 +64,9 @@ _CP = "tortoise/cache_projection.py"
 _AU = "tortoise/audit.py"
 _PI = "tortoise/projection/__init__.py"
 _SDK = "tortoise/sdk.py"
+#: `#14087` review round 7: `00_index.md`'s entity-verdict row points at this file's `:43` in the
+#: PRESENT tense ("the bullet is `entity_verdict.py:43`"), so the address is head-relative.
+_EV = "tortoise/entity_verdict.py"
 _MCP = "tortoise/mcp_server.py"
 _RS = "tortoise/record_serve.py"
 _GJ = "tortoise/goal_judgement.py"
@@ -293,11 +296,11 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # (§7 ×2, §2.4) were in NO row at all. Both re-derived at `69d79287f5f` by OPENING the statement,
     # not by applying the delta — verified against `ae26adf963`, where the same cites resolved:
     # `45028` was `prior = proj.g.query(` and `50935` was `conds.insert(0, "s.actor_user_id = $uid")`.
-    (_AUDIT, 'hosted_api.py:45180-45192', 'tortoise/hosted_api.py', 45184, 'RETURN s.turn_max_index, s.turn_count, count(t)'),
-    (_AUDIT, 'hosted_api.py:45180-45197', 'tortoise/hosted_api.py', 45184, 'RETURN s.turn_max_index, s.turn_count, count(t)'),
-    (_AUDIT, 'hosted_api.py:51087', 'tortoise/hosted_api.py', 51087, 's.actor_user_id = $uid'),
+    (_AUDIT, 'hosted_api.py:45185-45197', 'tortoise/hosted_api.py', 45189, 'RETURN s.turn_max_index, s.turn_count, count(t)'),
+    (_AUDIT, 'hosted_api.py:45185-45202', 'tortoise/hosted_api.py', 45189, 'RETURN s.turn_max_index, s.turn_count, count(t)'),
+    (_AUDIT, 'hosted_api.py:51092', 'tortoise/hosted_api.py', 51092, 's.actor_user_id = $uid'),
     # the same condition written BARE twice in the header's comparability clause — its own SITE
-    (_AUDIT, '`:51087`', 'tortoise/hosted_api.py', 51087, 's.actor_user_id = $uid'),
+    (_AUDIT, '`:51092`', 'tortoise/hosted_api.py', 51092, 's.actor_user_id = $uid'),
     # --- the four corrections this pass made that NO row reached (review cycle 3, F5). Each token
     # carries its own wording, not a bare number, because a bare `:NNNN` is satisfied by any sibling
     # spelling of the same digits — the defect `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence`
@@ -313,6 +316,13 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # (review cycle 6, P2-2). `grep -rn '28008\|28372' tests/ tools/` returned nothing before these rows:
     # the guard set is per-token, and an unlisted token is coverage the file only APPEARED to have.
     (_INDEX, '`sdk.py:28581` at this head', _SDK, 28581, 'WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL'),
+    # ⛔ #14087 review round 7 (P3): the SAME `00_index.md:118` line writes a SECOND present-tense
+    # this-head address — `the bullet is entity_verdict.py:43` — and no arm read it. Its sibling
+    # (`sdk.py:28581`, the row above) was pinned, which is exactly how an unpinned neighbour hides:
+    # `grep -c 'entity_verdict\.py:43' tests/test_12184_shifted_cites.py` -> 0 before this row, so a
+    # re-point or a rotation of `entity_verdict.py` under it would have moved the address with every
+    # arm green. One ROW per SITE, never one row per STRING.
+    (_INDEX, '`entity_verdict.py:43`', _EV, 43, "writing `dedup_reviewed='link'` is worse than inert"),
     (_EVIDENCE, '(`sdk.py:28581`), so any non-NULL', _SDK, 28581, 'WHERE n.dedup_candidate = true AND n.dedup_reviewed IS NULL'),
     (_EVIDENCE, 'called at `sdk.py:28945`', _SDK, 28945, 'result = apply_entity_merge('),
     # --- docs/plans/2026-09-25-4997-vector-index-parity.md — the vector-index reader table
@@ -372,7 +382,12 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # prose and `sdk.py:3801` holds `sdk._graph_write_with_retry(` (the EMPTY line is the OLD `:3777`).
     # Both are one-token spellings already, so no figure
     # moves (345 as-written stays 345); NON-VACUOUS: `+1` reds the content arm at both.
-    (_AUDIT, 'sdk.py:16077-16081', _SDK, 16077, '**JSONL event log (#548):** written when *point* is provided'),
+    # ⛔ #14087 review: the span's END was one short — `:16081` is the paragraph's PENULTIMATE line and
+    # `:16082` (the line reading "turns list is that same requirement for the record-held lane.") is its
+    # last, with `:16083` blank. A span token pins only its START, so the short end was invisible to `_PINS`;
+    # `test_the_jsonl_contract_span_ends_on_its_paragraphs_last_line` derives the end from the source
+    # and grades it.
+    (_AUDIT, 'sdk.py:16077-16082', _SDK, 16077, '**JSONL event log (#548):** written when *point* is provided'),
     (_AUDIT, 'sdk.py:3801', _SDK, 3801, 'sdk._emit_event("PointRetracted", _deleted_point_payload(tid))'),
     # --- #14038 review cycle 4 (P1): the header's "nine MORE addresses" enumeration names these three
     # SAME statements as BARE siblings ("`sdk.py`: `:15873`", "§6.3's `sdk.py`: `:16077-16081`",
@@ -550,15 +565,19 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:23126-23128`'): 1,
     # the composed `turn_max_index` site (long-form ×3 + row 7's own wider range) and the LIST
     # endpoint's `actor_user_id` condition (long-form ×1, bare ×2 in the header clause)
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:45180-45192'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:45180-45197'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:51087'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:51087`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:45185-45197'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:45185-45202'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:51092'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:51092`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5434` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7240` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6834` inside the same function'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:3062` derives the label'): 1,
     ('docs/00_index.md', '`sdk.py:28581` at this head'): 1,
+    # ⛔ #14087 review round 7: the pin row added for the SAME line's other present-tense address.
+    # Occurs ONCE in the document (`grep -o 'entity_verdict\.py:43' docs/00_index.md | wc -l` -> 1), so a
+    # second site must not appear unannounced.
+    ('docs/00_index.md', '`entity_verdict.py:43`'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', '(`sdk.py:28581`), so any non-NULL'): 1,
     ('docs/architecture/ENTITY-VERDICT-BANDS.md', 'called at `sdk.py:28945`'): 1,
     ('docs/plans/2026-09-25-4997-vector-index-parity.md', 'tortoise/hosted_backup.py:2683'): 1,
@@ -594,8 +613,8 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'session_source_prose_migration.py:277-279'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:1292-1300`'): 2,
     # #14043 review (finding 1): one site each in §6.3. Measured on this document:
-    # `grep -o -F 'sdk.py:16077-16081' <doc> | wc -l` -> 1, `... 'sdk.py:3801' ...` -> 1.
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:16077-16081'): 1,
+    # `grep -o -F 'sdk.py:16077-16082' <doc> | wc -l` -> 1, `... 'sdk.py:3801' ...` -> 1.
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:16077-16082'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:3801'): 1,
     # #14038 review cycle 4 (P1): the header's "nine MORE addresses" enumeration names these three
     # as BARE siblings (one path, then `:NNNN`), which the long-form rows above do NOT cover — a bare
@@ -725,9 +744,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "155 of this document's 227",
+        "156 of this document's 227",
         "dedupes the **345** as-written spellings to 227 — **118**",
-        "345 written spellings → 227 pairs → 118 collisions → 155 drifters of the 227",
+        "345 written spellings → 227 pairs → 118 collisions → 156 drifters of the 227",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",
@@ -2305,6 +2324,52 @@ def test_every_pinned_cite_lands_on_the_content_the_document_quotes() -> None:
     assert not errors, "\n".join(errors)
 
 
+_JSONL_DOC = "docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md"
+#: The first line of `_emit_event`'s JSONL half — the paragraph §6.3 item 1 quotes.
+_JSONL_QUOTE = "**JSONL event log (#548):** written when *point* is provided"
+
+
+def _cited_span_ends(doc_text: str, start: int) -> list[int]:
+    """Every END a `sdk.py:START-END` span opening at *start* states in *doc_text*."""
+    return [
+        int(match.group(1))
+        for match in re.finditer(rf"sdk\.py:{start}-(\d+)", doc_text)
+    ]
+
+
+def test_the_jsonl_contract_span_ends_on_its_paragraphs_last_line() -> None:
+    """A span cite must END on the last line of the paragraph it quotes, not one short.
+
+    #14087: §6.3 item 1 cited `sdk.py:16077-16081` while the contract's paragraph runs through
+    `:16082`, with `:16083` blank. A `_PINS` row pins a span's START only, so the short END was
+    green in every other test in this file — measured on a throwaway copy, moving the END back one
+    line left the whole suite passing. Derived, not hardcoded: the START is the line carrying the
+    quoted fragment, the END is the last line before the paragraph's blank terminator.
+    """
+    lines = (REPO / "tortoise/sdk.py").read_text(encoding="utf-8").splitlines()
+    start = next(i for i, line in enumerate(lines, 1) if _JSONL_QUOTE in line)
+    end = start
+    while end < len(lines) and lines[end].strip():  # `lines[end]` is the line AFTER `end`
+        end += 1
+    assert end > start, (
+        f"`sdk.py:{start}` is a one-line paragraph, so this arm would grade nothing — re-point "
+        "`_JSONL_QUOTE` at the contract it is meant to cover."
+    )
+    doc_text = (REPO / _JSONL_DOC).read_text(encoding="utf-8")
+    cited = _cited_span_ends(doc_text, start)
+    assert cited == [end], (
+        f"§6.3 cites `sdk.py:{start}-{cited[0] if cited else '???'}` but that paragraph's last line is "
+        f"`:{end}` — a span "
+        "must end on it, not one short (`_PINS` pins the START, so the short END is green everywhere "
+        "else in this file)"
+    )
+    for mutant in (end - 1, end + 1):  # NON-VACUOUS: one short and one long both red
+        tampered = doc_text.replace(f"sdk.py:{start}-{end}", f"sdk.py:{start}-{mutant}")
+        assert _cited_span_ends(tampered, start) != [end], (
+            f"a span end moved to `:{mutant}` still passed this arm"
+        )
+
+
 #: The numeric span a cite token names: `:START` or `:START-END`.
 _TOKEN_SPAN = re.compile(r":(\d+)(?:-(\d+))?")
 
@@ -2555,9 +2620,11 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # whose new address is unpinned "moves the defect rather than closing it" (that re-cut's own
     # re-review). MEASURED, not inferred: the count of `_PINS` rows at each of these heads is
     # 72 (ecb137107e) -> 77 (298d3328db, the five above) -> 80 (0a53ad23d8).
-    # 80 -> 82 at the #14043 review (finding 1, this cycle): §6.3's `sdk.py:16077-16081` and
+    # 80 -> 82 at the #14043 review (finding 1, this cycle): §6.3's `sdk.py:16077-16082` and
     # `sdk.py:3801` were in neither list and unpinned, and the pin default opens on prose and on an
-    # empty line respectively.
+    # empty line respectively. (The span landed as `:16077-16081` in #13994, which re-derived this
+    # document on top of its own `:Point` join; the END stayed one short until #14087 re-derived it
+    # here. One ROW, one token — the row count did not move.)
     # 82 -> 91 at this lane's review (86, then five more for the sibling cites on the same rows) of the #14038 delta: three addresses on the `:CommitRecord`
     # row and in §7 were pinned NOWHERE, so they rotted green — `hosted_api.py:22436-22437` opened
     # on an unrelated comment (the statement is `:22544-22545`), `:24592-24593` on a
@@ -2570,7 +2637,19 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # row) and the LIST endpoint's `actor_user_id` condition (long-form in §2.4, bare twice in the
     # header's comparability clause). Both had rotted to `45028-45045` / `:50935`, both still
     # resolved at `ae26adf963`, and NEITHER had a row that could redden. Same shape again.
-    assert len(_PINS) == 101
+    # 82 -> 83 at the #14087 review round 7 (P3): `00_index.md`'s entity-verdict row carries a
+    # SECOND present-tense this-head address on the line this PR edits (`entity_verdict.py:43`),
+    # and NOTHING read it — its `sdk.py:28581` sibling was pinned and the neighbour was not, so a
+    # rotation of `entity_verdict.py` under that cite would have moved it silently. Same shape as
+    # the `:6989` / `sdk.py:28085` / `hosted_backup.py:2683` rows above.
+    # ⛔ THE MERGED COUNT IS MEASURED, NOT INHERITED FROM EITHER PARENT. Both sides added rows to
+    # this list on top of the shared 82 — `main`'s `#14087` round 7 added the `entity_verdict.py:43`
+    # site (83), and this lane's review added the `:CommitRecord`/§7 sites and the two
+    # `turn_max_index`/`actor_user_id` sites (95) — and this lane's `sdk.py:16077-16081` long-form
+    # row is REPLACED by `main`'s corrected `-16082` spelling rather than added beside it. So the
+    # number below is neither 83 nor 95 nor their sum: it is `len(_PINS)` on THIS list — measured
+    # here with `len(census._PINS)` (no duplicates: 102 rows, 102 unique).
+    assert len(_PINS) == 102
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
