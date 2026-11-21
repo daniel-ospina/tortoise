@@ -16608,7 +16608,8 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         and 'result["relations"]' in line)
     # ⛔ BOTH occurrences, not `in text` (#14060 review, P3 — MEASURED): the record cites this value
     # TWICE, and the second one was BARE, so the substring needle never read it — mutating THAT
-    # occurrence to its previous head's `:16566` left the whole reconcile subset green (16 passed)
+    # occurrence to a value this cite carried at an earlier head, `:16566` (at `55d252ae04`),
+    # left the whole reconcile subset green (16 passed)
     # while the same mutation at the first one red it. The record's own reason for parenthesising
     # is that a bare cite is the shape no arm sees, so the arm now counts the form it can read.
     _self_scan_cites = text.count(f"(`:{_self_scan_line}`)")
