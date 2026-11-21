@@ -21982,36 +21982,34 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # it** — filed with both options and the acceptance bar; this block is the
         # in-code record so the merge does not land the behaviour silently.
         # (A key BOUND TO THE DEFAULT graph is NOT in that class — but ONLY when the
-        # comparison below can SEE that it is. ⛔ THE PREDICATE IS NARROWER THAN THE
-        # PROSE THAT USED TO SIT HERE: the checkpoint is kept iff the credential's
-        # bound name equals `_graph_name_for_namespace(org_id)` (i.e. `org_{org_id}`),
-        # and `_org_default_namespace` collapses more states to `None` than "the
-        # default never moved". Precisely, and per
-        # `supabase_control.moved_default_namespace`'s own contract — the value must
-        # have the SHAPE of a PER-GRAPH namespace of THIS org, so:
-        #   * `org_{org_id}` — the untouched default, `graph_name` PRESENT and equal
-        #     to the historical derivation ⇒ the equality HOLDS, checkpoint kept;
-        #   * any OTHER default-row name — the pre-#3543 org-level `team_{org_id}`,
-        #     the registry's `org_{name}` (#2023), and a REPAIRED legacy pointer
-        #     ("can still be the bare `team_{org_id}`/`org_{name}` that this
-        #     function answers `None` for", `_moved_default_namespace`) ⇒ answers
-        #     `None`, so the comparison falls back to `org_{org_id}`, does NOT equal
-        #     a bound `team_{…}` name, and the checkpoint is SKIPPED — where `main`
-        #     wrote it, because `main` wrote to the CAPTURE graph
-        #     (`write_completed_step(proj, …)`);
-        #   * no row / an unreadable or empty `graph_name`, the FAIL-SOFT read arm
-        #     for an org that HAS promoted, and `is_supabase_enabled()` false — all
-        #     three answer `None` at `_org_default_namespace`'s own guards, and all
-        #     three therefore take the same `org_{org_id}` comparison: kept when the
-        #     bound name IS that, skipped otherwise.
-        # ⛔ THE SKIPPED ARMS ARE SILENT AND THAT IS A KNOWN, DECLARED GAP, not an
+        # comparison below can SEE that it is. ⛔ READ THE COMPARISON, NOT THE WORD
+        # "DEFAULT": `bound_graph == (default_ns or _graph_name_for_namespace(
+        # org_id))`, and `_org_default_namespace` answers `None` for every stored
+        # name that does not have the SHAPE of a per-graph namespace of THIS org
+        # (`supabase_control.moved_default_namespace`'s contract), so the two
+        # answers land in different branches:
+        #   * `default_ns` is a NAME — the org HAS promoted and the stored
+        #     `graph_name` is a per-graph namespace (`org_{org_id}_{gid}`, or the
+        #     pre-#3543 `team_{org_id}_{gid}` still stored for older graphs). The
+        #     comparison is against THAT name, so a credential bound to the promoted
+        #     default matches it and KEEPS the checkpoint.
+        #   * `default_ns` is `None` — no row, an empty/unreadable `graph_name`, a
+        #     stored value that is not per-graph shaped (the untouched `org_{org_id}`,
+        #     the pre-#3543 org-level `team_{org_id}`, the registry's `org_{name}`,
+        #     or a REPAIRED legacy pointer), the FAIL-SOFT read arm, or
+        #     `is_supabase_enabled()` false. The comparison then falls back to
+        #     `org_{org_id}`: a credential bound to `org_{org_id}` KEEPS the
+        #     checkpoint, and any OTHER bound name (a legacy `team_{…}`, the bare
+        #     `org_{name}`) does NOT match and is SKIPPED — where `main` wrote it,
+        #     because `main` wrote to the CAPTURE graph
+        #     (`write_completed_step(proj, …)`).
+        # ⛔ THE SKIPPED ARM IS SILENT AND THAT IS A KNOWN, DECLARED GAP, not an
         # oversight: `first_capture` just comes back `False`, with none of the
-        # declared-warning treatment the custom-bound arm above gets. They are part
-        # of **#14131**'s class, not a fourth target graph to invent here — choosing
-        # where a default-bound checkpoint lives when the default's own name cannot
-        # be resolved is the decision #14131 already owns, and folding
-        # `_graph_name_for_namespace` in instead is the `_make_sdk` call-shape change
-        # refused below.)
+        # declared-warning treatment the custom-bound arm above gets. It is part of
+        # **#14131**'s class, not a fourth target graph to invent here — choosing
+        # where a legacy-default-bound checkpoint lives is the decision #14131
+        # already owns, and folding `_graph_name_for_namespace` in instead is the
+        # `_make_sdk` call-shape change refused below.)
         #
         # This construction is also where any `organizations.graph_name` read
         # happens (`_org_default_namespace`) — and it is a READ, so it rides the
@@ -51548,7 +51546,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 200 tracked files (743 distinct
+# ABSOLUTE line number from 200 tracked files (744 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
