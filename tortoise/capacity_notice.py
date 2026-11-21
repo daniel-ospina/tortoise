@@ -909,7 +909,14 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
         return {"status": reason, "org_id": org_id}
     if account.notice_pct is not None and notice.threshold <= account.notice_pct:
         # The high-water mark already covers this threshold — the ledger's whole
-        # job, and the check that makes a re-run of a finished pass free.
+        # job. What it SAVES is the render and the pre-send mark re-read below,
+        # i.e. a re-run of a finished pass costs no template work and no extra
+        # round trip. ⛔ It does NOT save the two GAUGE reads above: those are
+        # skipped only when the mark is already at the TOP threshold (the fast
+        # path higher up), because only then is no threshold left to send. An
+        # earlier revision called this check "what makes a re-run free" without
+        # that distinction, which reads as if an 80-marked account never paid the
+        # gauge — it does (#14038 review, mutation pass).
         return {"status": "already-notified", "org_id": org_id,
                 "threshold": notice.threshold,
                 "notified": account.notice_pct}
