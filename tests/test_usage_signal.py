@@ -1438,8 +1438,13 @@ def test_one_cause_reached_through_BOTH_doors_warns_on_each(
         assert usage_signal._window_days() is None
         assert usage_signal._window_days(0) is None
 
+        # Cause 3 (non-finite), same two doors — the third door-qualified key.
+        monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, "nan")
+        assert usage_signal._window_days() is None
+        assert usage_signal._window_days(float("nan")) is None
+
     messages = [record.getMessage() for record in caplog.records]
-    assert len(messages) == 4, (
+    assert len(messages) == 6, (
         "a door's refusal was swallowed — the two doors still share a key: "
         f"{messages}"
     )
@@ -1457,6 +1462,52 @@ def test_one_cause_reached_through_BOTH_doors_warns_on_each(
         "the argument door's warning must name ITS origin, not the env's: "
         f"{messages[3]}"
     )
+    assert "not a FINITE day count" in messages[4]
+    assert usage_signal.USAGE_WINDOW_DAYS_ENV in messages[4]
+    assert "not a FINITE day count" in messages[5]
+    assert "argument" in messages[5], (
+        "the argument door's non-finite warning must name ITS origin: "
+        f"{messages[5]}"
+    )
+
+
+def test_a_window_a_timedelta_cannot_carry_is_refused_not_raised(
+    stream: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ A FINITE bound wider than `timedelta` can hold must not escape as a raise.
+
+    `1e10` passes every arm above — it is positive, finite and parses — and then
+    `timedelta(days=…)` raises `OverflowError` out of `refresh`, which promises
+    it never raises and is called from the ops door. Both doors are exercised:
+    the env value and the call argument must be refused in the same voice as the
+    typo / non-positive / non-finite arms, and the roll-up must stay bounded by
+    "keep everything" rather than by a traceback.
+    """
+    import logging
+
+    usage_signal._warned.clear()
+    caplog.clear()
+    _serve(stream, "Point", ["ancient"], at=_at(1))
+    now = datetime(2026, 1, 4, 0, 0, tzinfo=UTC)
+
+    with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+        from_arg = usage_signal.refresh(stream, now=now, window_days=1e10)
+        monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, "10000000000")
+        from_env = usage_signal.refresh(stream, now=now)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 2, (
+        "a window too wide for a `timedelta` was not refused on both doors: "
+        f"{messages}"
+    )
+    assert all("cannot carry" in m and "UNBOUNDED" in m for m in messages)
+    assert "argument" in messages[0]
+    assert usage_signal.USAGE_WINDOW_DAYS_ENV in messages[1]
+    for got in (from_arg, from_env):
+        assert got.entry("Point", "ancient") is not None, (
+            "an unappliable bound pruned an entry — it was read as a real bound"
+        )
+        assert got.pruned == 0
 
 
 def test_a_positive_window_is_returned_and_warns_about_nothing(

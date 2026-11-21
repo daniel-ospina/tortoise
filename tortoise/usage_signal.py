@@ -456,6 +456,24 @@ def _checked_window(days: float, raw: str, origin: str, door: str) -> float | No
             raw,
         )
         return None
+    if abs(days) > timedelta.max.days:
+        # ⛔ AND NEITHER IS ONE A `timedelta` CANNOT CARRY. `1e10` is finite, so the
+        # arm above lets it through, and then `timedelta(days=…)` raises
+        # `OverflowError: Python int too large to convert to C int` straight out of
+        # `refresh` — whose docstring promises it never raises, and whose callers
+        # include the ops door. A bound nobody can apply is not a bound; it is
+        # refused in the same voice as the two arms above. The limit is read from
+        # `timedelta.max.days`, not restated as a literal, so it cannot drift from
+        # the value that actually raises.
+        _warn_once(
+            f"window-overflow-{door}",
+            "usage signal: %s=%r is a day count a `timedelta` cannot carry — the "
+            "roll-up is running UNBOUNDED (every entry kept); fix the value to "
+            "bound it",
+            origin,
+            raw,
+        )
+        return None
     return days
 
 
