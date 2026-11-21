@@ -30,6 +30,8 @@ import contextlib
 import re
 import sys
 import types
+from collections.abc import Callable
+from functools import partial
 
 import pytest
 
@@ -1387,6 +1389,84 @@ def _writer_register_population() -> dict[str, list[str]]:
     return population
 
 
+def _readable_module_sources(
+    keys: list[str],
+) -> tuple[dict[str, str], dict[str, BaseException]]:
+    """Read every module the register names, TOLERATING the one this venv cannot import.
+
+    Returns ``(sources, refusals)``. ``refusals`` holds the exception the loader ACTUALLY raised,
+    keyed by module — ⛔ NOT a re-synthesised one (`#14099` F1, the record's first finding).
+
+    The refusal is CARRIED because a fabricated cause is a DIFFERENT failure dressed as the
+    environment's. Measured: ``ModuleNotFoundError(name)`` passes ``name`` as the *message*, so
+    the copy has ``.name is None`` and a message that merely CONTAINS ``tortoise`` — which
+    `_is_absent_third_party_distribution` reads as repo-side. So the module the declaration
+    exists to excuse landed in ``stray`` (a population shrink) and every arm that re-raised
+    through the fake inherited the wrong verdict — silently, because those arms only assert an
+    outsider is ``stray``.
+
+    ⛔ EXTRACTED SO IT CAN BE PINNED (`#14099` F2). Inline, this loop ran BEFORE the control's
+    first `monkeypatch`, so no arm could fold a module into it: reverting the tolerance left the
+    file green in a full venv — the code added to survive a dev venv deleted without a red.
+    Pinned by `test_the_environment_refusal_is_carried_not_re_synthesised`.
+    """
+    sources: dict[str, str] = {}
+    refusals: dict[str, BaseException] = {}
+    for key in keys:
+        module_name = key.partition("::")[0]
+        if module_name in sources or module_name in refusals:
+            continue
+        try:
+            sources[module_name] = strip._module_source(module_name)
+        except strip._UnreadableFold as exc:
+            refusals[module_name] = exc
+    return sources, refusals
+
+
+def _env_source(
+    name: str, sources: dict[str, str], refusals: dict[str, BaseException],
+) -> str:
+    """The lookup a fake loader falls back to when it was built to refuse a DIFFERENT module.
+
+    A module this venv cannot read is absent from ``sources``, so indexing it died with
+    ``KeyError`` in exactly the environment the exemption exists for; ``_UnreadableFold`` therefore
+    re-raises THE ENVIRONMENT'S OWN refusal from ``refusals``, never a copy of it (see
+    `_readable_module_sources` for the measured cost of copying).
+
+    ⛔ ``KeyError`` is still possible, and deliberately loud: it means the caller passed a
+    population this helper was never shown, not that the environment refused anything.
+    """
+    if name in sources:
+        return sources[name]
+    if name in refusals:
+        raise refusals[name]
+    raise KeyError(
+        f"`{name}` was never read by _readable_module_sources(), so this fallback has no refusal "
+        "to reproduce — the population it was given and the one it is serving disagree")
+
+
+def _folding(
+    module_name: str, cause: BaseException,
+    sources: dict[str, str], refusals: dict[str, BaseException],
+) -> Callable[[str], str]:
+    """A loader fake that refuses ONE module with `cause` and serves every other one.
+
+    ⛔ HOISTED SO THE CONTROL'S OWN WIRING IS PINNED (`#14099` F2, second review round). While
+    this lived inside `test_the_over_refusal_population_is_itself_pinned` and the pin grew its
+    own copy, reverting the control's fallback to the pre-F1 `ModuleNotFoundError(name)`
+    synthesis left BOTH tests green: the pin exercised `_env_source` directly, so it graded the
+    helper while nothing graded the control's use of it. One builder, one wiring, measured once.
+
+    The fallback is `_env_source`, never an inline raise: a module this venv could not read must
+    re-raise THE ENVIRONMENT'S OWN refusal instead of a tailored copy of it.
+    """
+    def fake(name: str) -> str:
+        if name == module_name:
+            raise strip._UnreadableFold(f"{name} unreadable") from cause
+        return _env_source(name, sources, refusals)
+    return fake
+
+
 def test_no_declared_entity_writer_mentions_a_dynamic_namespace():
     """The blanket dynamic-namespace rule costs ZERO refusals on the real population — PINNED.
 
@@ -1444,48 +1524,31 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
     # Reading every module up front with no handling made this control ERROR in exactly the case its
     # exemption is for (measured: only `prometheus_client` absent → `tortoise.sdk` folds, the PIN
     # PASSES and this test died with an uncaught `_UnreadableFold`, then with `KeyError` once the
-    # fake indexed `sources`). A module this venv cannot read is simply not cached.
-    # ⛔ …AND THE ENVIRONMENT'S OWN REFUSAL IS RE-RAISED VERBATIM, NEVER FABRICATED (`#14099` F2,
-    # review of `ed6ff2ab`). `env_source` used to re-raise `ModuleNotFoundError(name)` —
+    # fake indexed `sources`). A module this venv cannot read is simply not cached — and the
+    # refusal it raised is CARRIED, so a fake that re-raises it reproduces the environment instead
+    # of inventing a different failure (`#14099` F1).
+    #
+    # ⛔ …AND THE ENVIRONMENT'S OWN REFUSAL IS RE-RAISED VERBATIM, NEVER FABRICATED (`#14099` F1,
+    # review of `ed6ff2ab`). The old fallback re-raised `ModuleNotFoundError(name)` —
     # POSITIONALLY, so `.name` is `None` (CPython's `name`/`path` are keyword-only) and the message
     # carries no `from '<module>'` token — which the origin gate correctly REFUSES. The declared
     # module's keys then landed in `stray`, so the `missing`-bucket arm below red-ed through the
     # STRAY assertion instead of the one it exists to drive, in the one venv this exemption exists
     # for (measured: with `prometheus_client` blocked, that arm failed while the pin it guards
     # passed). The real cause the loader folded — `ModuleNotFoundError('prometheus_client')`, whose
-    # `.name` is set — carries the origin, so keep it and re-raise THAT.
-    sources: dict[str, str] = {}
-    env_failure: dict[str, BaseException] = {}
-    for key in keys:
-        module_name = key.partition("::")[0]
-        if module_name in sources or module_name in env_failure:
-            continue
-        try:
-            sources[module_name] = strip._module_source(module_name)
-        except strip._UnreadableFold as exc:
-            # `_UnreadableFold` is always raised `from exc`, so the cause is the environment's own
-            # fact; the fallback stays FAIL-CLOSED (no origin → `stray`), never an excuse.
-            env_failure[module_name] = exc.__cause__ or ModuleNotFoundError(module_name)
+    # `.name` is set — carries the origin, so `_readable_module_sources` keeps the CAUGHT exception
+    # and `_env_source` re-raises that object.
+    sources, refusals = _readable_module_sources(keys)
     outsider = next(k for k in keys if k.partition("::")[0] not in _UNREADABLE_EXEMPT_MODULES)
     declared = next((k for k in keys if k.partition("::")[0] in _UNREADABLE_EXEMPT_MODULES), None)
 
-    def env_source(name: str) -> str:
-        # ⛔ THE ENVIRONMENT'S OWN REFUSAL MUST OUTLIVE THE FAKE, ORIGIN INCLUDED. A module this venv
-        # cannot read is absent from `sources`; indexing it died with `KeyError: 'tortoise.sdk'` in
-        # exactly the environment the exemption exists for, and fabricating a cause from the
-        # module's own NAME classified that refusal as repo-side. The declaration's own arms cover
-        # the declared module, so every other fake re-raises the environment's refusal instead.
-        if name in sources:
-            return sources[name]
-        raise strip._UnreadableFold(f"{name} unreadable") from env_failure.get(
-            name, ModuleNotFoundError(name))
-
-    def folding(module_name: str, cause: BaseException):
-        def fake(name: str) -> str:
-            if name == module_name:
-                raise strip._UnreadableFold(f"{name} unreadable") from cause
-            return env_source(name)
-        return fake
+    # ⛔ NO LOCAL COPIES OF THE FALLBACK (`#14099` F2, second review round). While the control kept
+    # its own `env_source`/`folding` and the pin grew a copy, reverting the control's half to the
+    # pre-F1 synthesis left BOTH tests green — the pin graded `_env_source` while nothing graded the
+    # control's use of it. These are bindings, not re-implementations, so the only place a revert
+    # can land is the module-level helper, and that one is pinned.
+    folding = partial(_folding, sources=sources, refusals=refusals)
+    served = partial(_env_source, sources=sources, refusals=refusals)
 
     # baseline: the real loader, nothing shrunk, nothing refused.
     base = _writer_register_population()
@@ -1599,7 +1662,7 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
     # a renamed writer is `missing`, never silently dropped.
     blanked = outsider.partition("::")[0]
     monkeypatch.setattr(
-        strip, "_module_source", lambda name: "" if name == blanked else env_source(name))
+        strip, "_module_source", lambda name: "" if name == blanked else served(name))
     assert outsider in _writer_register_population()["missing"]
 
     # ⛔ …AND THE PIN MUST RED FOR *THAT* BUCKET TOO (`#14099` F3, review of `00a5804`). The arm
@@ -1612,8 +1675,9 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
     # environment-coupled — under a partial install (a folded `tortoise.sdk`) the declared keys
     # land in `stray` and the pin reds on THAT assertion instead, which would attribute this arm
     # to the wrong guard (measured: the real-walker version of this arm failed under the F2
-    # simulation). `env_source` above keeps the environment's REAL cause, so the pin still
-    # classifies a partial install correctly; this arm simply does not depend on that either way.
+    # simulation). `_readable_module_sources`/`_env_source` above keep the environment's REAL
+    # cause, so the pin still classifies a partial install correctly; this arm simply does not
+    # depend on that either way.
     with monkeypatch.context() as mp:
         mp.setattr(
             sys.modules[__name__],
@@ -1668,6 +1732,115 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
                                     name="prometheus_client")))
     assert _writer_register_population()["stray"] == [neighbour], (
         "a module that merely starts with the declared name inherited its exemption")
+
+
+def test_the_environment_refusal_is_carried_not_re_synthesised(monkeypatch):
+    """⛔ THE FAKE MUST REPRODUCE THE ENVIRONMENT, NOT INVENT A DIFFERENT FAILURE (`#14099` F1).
+
+    Measured before this arm existed: the control's fallback was
+    ``raise _UnreadableFold(...) from ModuleNotFoundError(name)``, and `ModuleNotFoundError`'s
+    first positional argument is its *message*, not its ``name=`` — so the copy had
+    ``.name is None`` and a message that contains ``tortoise``. `_is_absent_third_party_distribution`
+    read that as a REPO-SIDE break, and the ten `tortoise.sdk` writers — the one population the
+    declaration exists to excuse — landed in ``stray``. Nothing red, because every other arm only
+    asserted that an OUTSIDER had left the population.
+
+    ⛔ AND THE TOLERANT READ ITSELF WAS UNPINNED (`#14099` F2). Both halves ran inline, BEFORE the
+    control's first `monkeypatch`, so in a full venv (CI) neither could be exercised: reverting
+    the tolerance, or reverting the fallback to ``sources[name]``, left the file green. This arm
+    folds the declared module BEFORE the read, so both halves are measured.
+
+    The arms are: the read TOLERATES the fold and CARRIES the refusal; the fallback re-raises THAT
+    object (so the declared module still grades ``unreadable``, not ``stray``); and the freshness
+    of the ``KeyError`` guard — a name never read cannot be excused by a refusal it never had.
+    """
+    from tortoise import embed_writer_register as register
+
+    keys = sorted(register.EMBED_WRITER_CLASSES)
+    assert keys, "the register is empty, so this control proves nothing"
+    declared_module = _UNREADABLE_EXEMPT_MODULES[0]
+    assert any(k.partition("::")[0] == declared_module for k in keys), (
+        f"no register key lives on `{declared_module}`, so this arm measures nothing about the "
+        "declaration's own population")
+    outsider_module = next(k.partition("::")[0] for k in keys
+                           if k.partition("::")[0] not in _UNREADABLE_EXEMPT_MODULES)
+    # THE ENVIRONMENT'S REAL SHAPE: a partially installed dependency — `.name` set, and the
+    # rendered message's parenthesised tail is a path under a directory called `tortoise`.
+    real = ModuleNotFoundError("No module named 'prometheus_client'", name="prometheus_client")
+    folds = 0
+
+    def fake(name: str) -> str:
+        nonlocal folds
+        if name == declared_module:
+            folds += 1
+            raise strip._UnreadableFold(
+                f"{name} could not be read for AST inspection "
+                f"(ModuleNotFoundError: {real})") from real
+        return "def _emit(props, ev):\n    return None\n"
+
+    monkeypatch.setattr(strip, "_module_source", fake)
+    # (1) THE READ TOLERATES IT AND CARRIES IT, rather than letting the fold escape (the pre-tolerance
+    # version died with an uncaught `_UnreadableFold`) or dropping the cause on the floor (the
+    # pre-F1 version re-synthesised one).
+    sources, refusals = _readable_module_sources(keys)
+    assert folds, "the fake was never asked for the declared module, so nothing was folded"
+    assert declared_module not in sources, (
+        f"`{declared_module}` is in `sources` although its import failed — the read invented a "
+        "source for a module this venv cannot load")
+    assert refusals.get(declared_module) is not None, (
+        f"the refusal for `{declared_module}` was dropped, so a later re-raise has to invent "
+        "one — which is F1 itself")
+    assert refusals[declared_module].__cause__ is real, (
+        "the caught refusal does not carry the environment's OWN cause, so re-raising it "
+        "reproduces a different failure than the one the loader raised: "
+        f"{refusals[declared_module].__cause__!r}")
+    assert outsider_module in sources, (
+        "one unreadable module took the whole read down with it — the tolerance is gone")
+
+    # (2) THE FALLBACK RE-RAISES THAT OBJECT. Pre-F1 it synthesised
+    # `ModuleNotFoundError(name)`; pre-`540c29ec` it indexed `sources` and died with `KeyError`.
+    with pytest.raises(strip._UnreadableFold) as carried:
+        _env_source(declared_module, sources, refusals)
+    assert carried.value is refusals[declared_module], (
+        "the fallback raised a COPY of the refusal instead of the environment's own — a copy is "
+        "a different failure, and grading it is how the declared module became `stray`")
+    assert carried.value.__cause__ is real
+    assert _is_absent_third_party_distribution(carried.value.__cause__), (
+        "the carried refusal does not grade as the environment, so the declared module's writers "
+        "would leave the measured population as `stray`")
+
+    # (3) AND THE WALK AGREES, THROUGH THE CONTROL'S OWN WIRING — `_folding`, the builder the
+    # control's fakes come from, so this arm reds if the control's fallback is reverted even
+    # while `_env_source` stays correct. This is the F1 verdict end to end: this box cannot read
+    # the declared module, the fake folds an UNRELATED module, and the declared module's keys must
+    # land in `unreadable` — not in `stray`, which is the population shrink the declaration bounds.
+    # MEASURED with the pre-F1 synthesis restored: `stray` = the folded outsider's keys PLUS all
+    # ten `tortoise.sdk` keys, `unreadable` 0 of 10.
+    #
+    # ⛔ WHY NOTHING SAW IT: the fallback is reached ONLY for a module this venv cannot read, so in
+    # a full venv — CI — it never runs and every existing `stray == []` row stayed green. (In a
+    # venv that genuinely cannot read the declared module, those rows red — but they attribute the
+    # declaration's own population to a repo-side break, which is this finding, not a report of
+    # it.) The population therefore has to be folded BEFORE the read, which is what this arm does
+    # and what the inline version could never do.
+    assert _env_source(outsider_module, sources, refusals)  # readable, so it cannot raise
+    outsider_keys = [k for k in keys if k.partition("::")[0] == outsider_module]
+    declared_keys = [k for k in keys if k.partition("::")[0] == declared_module]
+    monkeypatch.setattr(
+        strip, "_module_source",
+        _folding(outsider_module, ModuleNotFoundError("absent"), sources, refusals))
+    population = _writer_register_population()
+    assert sorted(population["unreadable"]) == sorted(declared_keys), (
+        "the declared module's writers did not land in `unreadable` — the environment's refusal "
+        f"was graded as something else: stray={population['stray']}")
+    assert sorted(population["stray"]) == sorted(outsider_keys), (
+        "the fake folded one outsider module, so `stray` must be exactly that module's keys and "
+        f"NOT the declaration's own population: {population['stray']}")
+
+    # (4) A NAME THE READ NEVER SAW CANNOT BORROW A REFUSAL. Loud, not silent: this is a caller
+    # bug, and a silent `KeyError`-swallowed ``stray`` would hide it.
+    with pytest.raises(KeyError, match="was never read"):
+        _env_source("tortoise.not_in_the_population", sources, refusals)
 
 
 #: ⛔ RESIDUAL — A NAME the mention rule cannot READ (`#14001`, measured by the cycle-4 review).
