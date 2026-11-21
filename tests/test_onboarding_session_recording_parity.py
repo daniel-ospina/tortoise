@@ -16,10 +16,12 @@ through the same primitive. Two consequences this file pins:
   `POST /v1/sessions/install-probe` route (no new endpoint) BEFORE it reports
   success.
 * **The disclosure touches no FLOW state.** The `capture-disclosed` step is
-  written AUTOMATICALLY by the capture path (and may be asserted by an ORG-WIDE
+  written AUTOMATICALLY by the capture path for a credential whose OWN graph IS
+  the org default (a CUSTOM-bound credential runs NEITHER half, so the
+  announcement does not fire for it, #14131), and may be asserted by an ORG-WIDE
   agent credential at the checkpoint surface, which refuses any `graph_id` and is
   only safe ON/AFTER the first capture — the step is first-write-wins and
-  `first_capture` is its `created`, so an early assert retires the announcement).
+  `first_capture` is its `created`, so an early assert retires the announcement.
   The pushed-down plan-review finding
   (§8) is that a new disclosure render can silently consume it, so the render
   is asserted to be a pure read.

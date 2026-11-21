@@ -21891,8 +21891,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # this one sits one call away in a sync helper). Pinned by
         # `tests/test_capture_loop_responsiveness.py::`
         # `test_the_graph_bound_default_resolve_rides_the_worker_not_the_loop`.
-        # The org-wide path is unaffected: it takes the published hint and reads
-        # nothing at all.
+        # An ORG-WIDE key on a REQUEST lane reads nothing (the hint is published);
+        # on the MCP capture lane it pays `main`'s point read — see below.
         if not org.get("graph_id"):
             completion_sdk = _org_sdk(org["org_id"])
         else:
@@ -39403,9 +39403,9 @@ def _maybe_apply_completion(org_id: str, *, sdk=None) -> bool:
     published the namespace (``_publish_default_namespace``, which publishes
     only for an ORG-WIDE credential — a graph-bound one is skipped by design).
     On the MCP capture lane nothing publishes it (``mcp_auth`` may not import
-    this module, and ``mcp_server`` calls ``_capture_session_impl`` directly),
-    and for an ORG-WIDE credential on either lane, ``_org_default_namespace``
-    does one primary-key control-plane read of ``organizations.graph_name``.
+    this module, and ``mcp_server`` calls ``_capture_session_impl`` directly), so
+    an ORG-WIDE credential THERE pays one primary-key control-plane read of
+    ``organizations.graph_name`` — ``main``'s read, not a new one.
     That read is PRE-EXISTING (``main`` resolved it on the loop too, through
     ``_org_proj`` inside the inline gate) and this change neither adds nor moves
     it — but it means the SDK construction must stay on whatever thread the lane
