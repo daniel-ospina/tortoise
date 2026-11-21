@@ -106,7 +106,8 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:2714-2715`", _CP, 2715, "un-indexes a restored session"),
     (_AUDIT, "cache_projection.py:2776", _CP, 2776, "tail_denied = forbidden | {"),
     # --- the rest of the header's enumerated `main` set, pinned by CONTENT like every other row.
-    # `_MAIN_SET_MISSED` below pins the EIGHT the header was missing; these are the entries the header
+    # `_MAIN_SET_MISSED` below pins the group the header was missing — the `#13124` eight plus Round 8's
+    # six, see the anti-shrink arm; these are the entries the header
     # already named. Without them the enumeration is a promise: `#13290` moved every `search_engine.py`
     # entry in it and NOTHING red — the document went on naming held addresses over a tree that had
     # moved them, and the reader rule sent the reader to the wrong line. A pin per entry is what turns
@@ -847,9 +848,10 @@ def _pin_blob_lines(path: str, rev: str = _DRIFT_PIN) -> list[str] | None:
     ⛔ MEMOISED per `(path, rev)` — the caller walks one entry per cited LINE, so without this the
     same module is re-rendered once per cite (measured at 227 `git show` calls over 53 distinct
     paths, the slowest arm in this file at 12.56 s; 53 calls after). ⚠️ That is a PERFORMANCE note,
-    not a graded behaviour: the GRADED call sites (`_re_derived_drift`'s two loops) never vary `rev`
-    — only the tree-probe test passes one, and nothing asserts the memo — so NO mutation of this
-    decorator can change a graded result. Deleting it only makes the suite ~7 s slower.
+    not a graded behaviour: the two call sites inside `_re_derived_drift` never vary `rev`, and the only
+    callers that pass one are the tree-probe test's two graded asserts (`== []`, `is None`) — nothing
+    asserts the memo itself, so NO mutation of this decorator can change a graded result. Deleting it
+    only makes the suite ~7 s slower.
     Stated so the next reader does not read the memo as covered (#14038 review, rule 3).
     """
     if not _rev_is_readable(rev):
@@ -949,9 +951,8 @@ def test_the_drift_numerator_is_re_derived_from_the_pin_blob_not_carried() -> No
 
     ⛔ NOT A SILENT SKIP (#13802's ruling, `tests/test_docs_citation_refs.py:1219` — the INERT-ENFORCER
     shape). Every job that runs a suite checks out at `actions/checkout@v4`'s DEFAULT `fetch-depth: 1`,
-    and `ccb49741b2ec` is contained by NO branch (`git for-each-ref --contains ccb49741b2ec` →
-    `refs/review/13095head` alone), so `pytest.skip` here would assert NOTHING in the only place the rail
-    reads this file. When the pin is unreadable the arm therefore grades the HISTORY-FREE identity the
+    so that checkout carries NO history at all and the pin's object is simply absent there — which is
+    why `pytest.skip` here would assert NOTHING in the only place the rail reads this file. When the pin is unreadable the arm therefore grades the HISTORY-FREE identity the
     shipped defect violated — `comparable + incomparable == pairs`, and `drifted + incomparable ==
     drifters` — which needs no history and reds the `#14038` cycle-4 figures exactly
     (`222 + 9 = 231` beside the 229-pair denominator it was published over). ⛔ The denominator in
@@ -1374,7 +1375,7 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
 
     Only the DENOMINATOR half is recomputed HERE (spellings, pairs, collisions, and the "N of those M"
     cross-references to them). This function grades the drifter numerator only for INTERNAL agreement —
-    with the denominator, and across its three published mentions. ⛔ Its own re-derivation is NOT this
+    with the denominator, and across its four published mentions. ⛔ Its own re-derivation is NOT this
     function's job and does not "need history": `test_the_drift_numerator_is_re_derived_from_the_pin_blob_not_carried`
     re-derives it from the pin's blobs where the pin is readable, and grades the history-free
     `comparable + incomparable == pairs` identity where it is not — so this file has a numerator
@@ -1451,13 +1452,22 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
         )
     if not 0 < drifters <= published_pairs:
         problems.append(f"{drifters} drifters is not a numerator over {published_pairs} pairs")
+    # ⛔ FOUR mentions, not three (#14038 review, P2). The split sentence restates the ratio as
+    # `**155 of the 227**` at its own tail, and NONE of the three patterns above reads it: measured,
+    # mutating that tail `155` -> `157` left this whole file GREEN with `_figure_problems == []`. A
+    # published number nothing re-derives is the exact defect class this file exists to catch, so the
+    # fourth spelling is graded here rather than left to prose.
     for pattern, what in (
         (re.compile(r"(\d+) of this document's (\d+)"), "the `N of this document's M` header line"),
         (re.compile(r"The drift is (\d+) of those (\d+)\."), "the `The drift is N of those M` restatement"),
+        (
+            re.compile(r"(\d+) of the (\d+), and the ratio below"),
+            "the split sentence's own `N of the M` restatement",
+        ),
     ):
         found = pattern.search(body)
         if not found:
-            problems.append(f"{what} is gone — the ratio is published in three places on purpose")
+            problems.append(f"{what} is gone — the ratio is published in four places on purpose")
         elif tuple(map(int, found.groups())) != (drifters, published_pairs):
             problems.append(
                 f"{what} reads {found.groups()} while the figures sentence reads "
