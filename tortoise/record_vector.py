@@ -483,10 +483,12 @@ class RecordVectorWithoutFallback(RecordVectorError):
     answering after it would return a SMALLER cohort and report it as the answer.
     That is the `#5090` Q2 defect on the branch that carries production traffic.
     ⛔ AND THAT PREMISE IS PER LABEL, not universal: only the labels in
-    :data:`MIRROR_RETIRED_LABELS` have writers that stop storing, so only they
+    :data:`MIRROR_RETIRED_LABELS` have folds that stop writing, so only they
     raise this. `point` and `operator` are still mirrored after their count
-    verifies (a `:Point`'s vector is record TRUTH and no fold derives it), so a
-    graph answer for them is a complete copy and they keep the named fallback.
+    verifies, because the JOURNAL FOLD never stops writing (a `:Point`'s vector is
+    record TRUTH and no fold derives it), so the graph leg stays fed on the primary
+    retrieval label and a graph answer for them is a complete copy — it keeps the
+    named fallback even though the SDK update door and the DR restore DO stop.
 
     So post-contract the leg does not fall back: it reports that it could not look
     (`degraded`, ``reason="query_failed"``), which is the honest answer and the
@@ -691,11 +693,15 @@ COVERAGE_GATED_LABELS: frozenset[str] = frozenset(LABEL_SERVED)
 #: premise is produced by exactly ONE thing: the writer consulting
 #: :func:`mirror_required` before it stores. `#13626` wired that for every writer of
 #: `object`, `subject`, `event`, `document` and `source`, so those five are here; a
-#: `:Point`'s vector is RECORD TRUTH (`#5004`) and is never derived, and `operator`
-#: (a `:Point` subset, `#13630`) has no fold of its own — nothing answers the gate
-#: for either, so their graph copy is still maintained and refusing it on a record
-#: blip would empty the dense leg for `point` (the primary retrieval label) on the
-#: DEFAULT posture, where `main` answered from that same copy.
+#: `:Point`'s vector is RECORD TRUTH (`#5004`) and its JOURNAL FOLD never stops writing,
+#: and `operator` (a `:Point` subset, `#13630`) has no fold of its own — so the dense leg
+#: keeps the graph as a named fallback on `point`, the primary retrieval label, exactly as
+#: `main` answered (`#13617` review F1). ⛔ `#13971` retires the STORED `:Point` vectors and
+#: gates the two writers that place a redundant copy (`sdk::_update_entity` and
+#: `hosted_backup.restore_graph`), and it deliberately does NOT gate the journal fold — so
+#: this set must stay without `point`, which
+#: `test_13610_graph_vector_copy.py::
+#: test_a_verified_label_whose_fold_still_writes_the_graph_keeps_the_fallback` pins.
 #:
 #: ⛔ AND THE SET NOW COVERS BOTH HALVES OF `:Source` (`document` AND `source`), which
 #: is not a re-cut of the union rule: each half is written by its own fold (`_upsert_document`

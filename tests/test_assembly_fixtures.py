@@ -65,10 +65,10 @@ try:
         # the module's ask-calibrations depend on the FULLTEXT surface (embedded
         # returns [] silently), so the availability gate must prove an FTS
         # round-trip, not just a bare ping: write a point, query it back.
-        _probe.create_point(
-            "statement", "probe zzqfulltext roundtrip token 7f3a9c", id="pProbe",
+        _probe.create_entity("point",
+            "probe zzqfulltext roundtrip token 7f3a9c", id="pProbe",
             session_id="sess-probe", is_episodic=True, status="draft")
-        _hits = _probe.tortoise_fts_query(
+        _hits = _probe._tortoise_fts_query(
             "zzqfulltext roundtrip token", entity_type="point", limit=3)
         if _hits and _hits[0].get("id") == "pProbe":
             FALKORDB_AVAILABLE = True

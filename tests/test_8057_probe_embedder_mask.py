@@ -59,6 +59,13 @@ PROBE_MODULES = (
     "tests/longmem_eval/test_assembly_arm.py",
 )
 
+#: The doors a module-level point-write probe can be spelled with, so the
+#: census below survives an SDK-surface rename instead of reporting the probes
+#: as gone. `create_entity("point", …)` is the consolidated door (#888 W2) and
+#: RELAYS to `create_point` (#13899 retired the public spelling; the private
+#: `_create_point` remains) — both reach `encode_for_store`.
+_PROBE_WRITE_DOORS = ("create_point", "create_entity")
+
 #: Import a probe module in a FRESH interpreter with both embedder seams
 #: replaced by doubles that RECORD the call and return None. A lane imports the
 #: module exactly this way, so the probe is exercised as shipped — including the
@@ -170,21 +177,30 @@ def test_mask_embedder_restores_when_the_block_raises():
 # ── the census: no probe module can slip past the registry ───────────────
 
 
-def _module_level_create_point_lines(path: Path) -> list[int]:
-    """Line numbers of `create_point(...)` calls executed at MODULE IMPORT.
+def _module_level_write_probe_lines(path: Path) -> list[int]:
+    """Line numbers of probe WRITES executed at MODULE IMPORT.
 
     Import-time means "inside no def/class" — the probe shape. Walked with
     `ast`, not a text match, so a call inside a fixture (already masked by
     `_no_embedder`) is correctly NOT counted. The substring pre-filter below
     is a COST gate, not the test: parsing every file in `tests/` to ask
     "module-level?" measured 8.3s of this file's own duration, for a question
-    only the handful of files that mention `create_point` at all can answer
+    only the handful of files that mention a probe door at all can answer
     yes to. It can only skip files that CANNOT match.
+
+    The doors are BOTH spellings of the point write, because the SDK surface
+    is not fixed: #13899 retired the public `create_point` in favour of
+    `create_entity("point", …)`, which RELAYS to the same write and therefore
+    pays the same `encode_for_store` -> `EmbeddingModel.get` cost at import.
+    A census that knew only one spelling would report the three probes as gone
+    (a silent green) the moment they migrated — which is exactly what happened
+    on #13971's `test (a)`: the probes were still unmasked-in-spirit while the
+    registry claimed to cover them.
     """
     import ast
 
     text = path.read_text()
-    if "create_point" not in text:
+    if not any(door in text for door in _PROBE_WRITE_DOORS):
         return []
     tree = ast.parse(text)
     spans = [
@@ -197,7 +213,7 @@ def _module_level_create_point_lines(path: Path) -> list[int]:
         for n in ast.walk(tree)
         if isinstance(n, ast.Call)
         and isinstance(n.func, ast.Attribute)
-        and n.func.attr == "create_point"
+        and n.func.attr in _PROBE_WRITE_DOORS
         and not any(lo <= n.lineno <= hi for lo, hi in spans)
     ]
 
@@ -211,10 +227,10 @@ def test_probe_census_matches_the_declared_set():
     declared = set(PROBE_MODULES)
     found: set[str] = set()
     for path in sorted((ROOT / "tests").rglob("test_*.py")):
-        if _module_level_create_point_lines(path):
+        if _module_level_write_probe_lines(path):
             found.add(str(path.relative_to(ROOT)))
     assert found == declared, (
-        "the module-level create_point probe set drifted — add the new module "
+        "the module-level point-write probe set drifted — add the new module "
         "to PROBE_MODULES (and mask its probe):\n"
         f"  declared-only: {sorted(declared - found)}\n"
         f"  found-only:    {sorted(found - declared)}")

@@ -17439,6 +17439,30 @@ class FalkorProjection(
             if (sp.get("content_hash") is not None
                     and pid not in journal_hash_write):
                 gap["content_hash"] = sp["content_hash"]
+            # ⛔ `#13971` (review P1, corrected): the SNAPSHOT restore is NOT a mirror of anything,
+            # so it is NEVER gated. `#13971`'s first cut popped `embedding` here on the coverage
+            # verdict, justified by "with coverage measured true the record holds that vector —
+            # that is what coverage means". It is not: `record_vector.coverage` is
+            # `record_vectors >= graph_vectors` over a LABEL (an aggregate), while this pass
+            # runs for a GRAPH-ONLY id whose journal carries no record of it at all — see the
+            # `#4305` comment below, and this file's own statement of the class a few thousand
+            # lines up ("`embedding` is stripped because this is a SYNTHETIC event for a
+            # GRAPH-ONLY id — the journal holds no record of it at all … The rebuild restores it
+            # from the live pre-wipe capture in the pass-1b tail").
+            #
+            # The restore below is ALREADY restricted to ids the journal does not own a vector
+            # for (`restore_embedding` requires `pid not in journal_embed_write`), so the pop
+            # could only ever delete the SOLE carrier of a vector: after the wipe, for an id with
+            # no journal vector and no record row, the node came back vectorless and nothing
+            # could heal it (`#5004` forbids re-encoding). That is the same data-loss class the
+            # journal fold is exempted from by decision — a `:Point`'s vector is RECORD TRUTH
+            # (`#5004`), and for a graph-only id the graph is the record.
+            #
+            # ⚠️ The consequence is stated, not hidden: `:Point` therefore does NOT satisfy the
+            # strip's writer census (`tools/strip_graph_entity_vectors.py::_fold_consults_gate`
+            # names this writer as one of the two that do not ask), so the plan refuses `:Point` until
+            # the snapshot-restore population can be answered per-id by the record. A strip an
+            # operator cannot run is cheap; a rebuild that drops the only copy is not.
             emb = sp.get("embedding")
             # #4305 review P2: only a numeric vector is writable through
             # `vecf32()`. A corrupt/legacy store value (non-iterable, a string,
