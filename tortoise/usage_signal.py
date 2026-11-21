@@ -425,7 +425,16 @@ def _as_float(explicit: int | float) -> float | None:
         return float(explicit)
     except OverflowError:
         _warn_once(
-            "window-overflow-arg",
+            # ⛔ NOT `window-overflow-arg` (#14011 review finding 1).
+            # `_checked_window` builds its timedelta-width key as
+            # `f"window-overflow-{door}"`, which IS `window-overflow-arg` on the
+            # argument door — so the two arms shared one key and the SECOND cause
+            # vanished: `_window_days(10**400)` (unrepresentable as a float) warned
+            # once, and a later `_window_days(1e10)` (finite, but wider than
+            # `timedelta.max`) was swallowed by the once-per-process contract —
+            # exactly the collision the sibling arms above were split to fix, one
+            # denominator short. Keying on the DOOR alone reintroduced it per CAUSE.
+            "window-unrepresentable-arg",
             "usage signal: window_days=%r is too large to be a day count — the "
             "roll-up is running UNBOUNDED (every entry kept); fix the value to "
             "bound it",
@@ -1068,13 +1077,37 @@ class UsageReading:
             )
         if not self.entries:
             return (
-                f"no surviving roll-up entries — {self.pruned:,} entr(ies) last "
-                f"served at or before {self.pruned_before} were pruned by the "
+                f"no surviving roll-up entries — {self._pruned_phrase()} by the "
                 f"{USAGE_WINDOW_DAYS_ENV} window, so this reading cannot speak for "
                 f"any coordinate, and treating every candidate as unserved is the "
                 f"creation-recency fallback this signal exists to remove"
             )
         return None
+
+    def _pruned_phrase(self) -> str:
+        """WHAT the window removed, named by ARM — because the two arms count apart.
+
+        ⛔ #14011 review finding 2. This message stated `{pruned} … at or before
+        {pruned_before}` unconditionally, so the case the undated arm creates —
+        `pruned == 0`, `pruned_before is None` while ``pruned_undated`` moves —
+        logged "0 entr(ies) last served at or before None were pruned" about a
+        deletion that DID happen, on the one branch whose job is to explain why
+        nothing survived. A caller reading that caveat is told the opposite of
+        what the window did, and the arm that did it is never named.
+        """
+        dated, undated = self.pruned, self.pruned_undated
+        if dated and undated:
+            return (
+                f"{dated:,} entr(ies) last served at or before "
+                f"{self.pruned_before} AND {undated:,} entr(ies) with no "
+                f"parseable `at` were pruned"
+            )
+        if undated:
+            return f"{undated:,} entr(ies) with no parseable `at` were pruned"
+        return (
+            f"{dated:,} entr(ies) last served at or before "
+            f"{self.pruned_before} were pruned"
+        )
 
     def staleness_seconds(self, now: datetime | None = None) -> float | None:
         """How far behind the stream this reading is, or ``None`` if unknown."""
