@@ -2049,6 +2049,93 @@ def test_the_storage_section_states_what_is_not_lost_and_quotes_no_figure() -> N
         )
 
 
+def test_a_table_scope_blocked_end_tag_cannot_end_the_storage_slice() -> None:
+    """POSITIVE CONTROL — the nested-table slice escape (#14073 round 17, P0).
+
+    Table scope (spec 13.2.4.2) is only `html`, `table`, `template`. So for
+    `<table><tbody><tr><td><table></td></table>` the walk down from the top meets
+    the INNER `table` before the `td`, and `</td>` is a parse error the browser
+    IGNORES. A carve-out that returns True unconditionally for table-structure end
+    tags pops the `td` AND the inner table; the following `</table>` then pops the
+    OUTER table, so the model holds no table at all while a browser still does —
+    and the next `<h2>` is cut across, ending the `#storage` slice before a claim
+    that is foster-parented back INTO the section a reader lands in.
+
+    Measured at round 17: that exact mutation left
+    `tests/test_website_docs_consistency.py tests/test_website_static.py` at
+    **287 passed, 1 skipped** with `_banned_vocabulary() == []`, while headless
+    Chrome painted the claim at 812x27 px at y=4648 with `#quickstart`'s ancestor
+    chain `H2#quickstart>TD>TR>TBODY>TABLE>DIV`. After the table-scope fix the same
+    mutant reds 9 tests.
+    """
+    page = _read(DOCS)
+    section = _docs_section()
+    boundary = _h2_offset(page, "storage") + len(section)
+    reviewed = " ".join(STORAGE_SECTION_GOLDEN.read_text(encoding="utf-8").split())
+
+    blocked = (
+        "<table><tbody><tr><td><table></td></table>\n"
+        '<h2 id="quickstart">Quickstart (5 minutes)</h2></td>\n'
+        "<p>FalkorDB permanently deletes items above the allowance for your tier "
+        "after thirty days.</p>\n"
+        "</table>\n"
+    )
+    mutant = page[:boundary] + blocked + page[boundary:]
+
+    caught = _docs_section(page=mutant)
+    sliced = " ".join(_visible_text(caught).split())
+    assert "permanently deletes items above the allowance" in sliced, (
+        "the `</td>` here is a table-scope parse error the browser IGNORES (the "
+        "inner `table` is a table-scope boundary), so the outer table is still open "
+        "and the slice must run PAST the next heading. Ending the slice on that "
+        "ignored token puts a contradicting claim outside every pin while it renders "
+        "inside #storage."
+    )
+    assert {"allowance", "falkor", "tier"} <= set(_banned_vocabulary(caught)), (
+        "the vocabulary pin does not see the claim, so the plain-language rule can "
+        "be walked around by a table-scope-blocked end tag"
+    )
+    assert sliced != reviewed
+
+
+def test_the_scope_walk_uses_the_plain_scope_list_not_button_scope() -> None:
+    """`button` does not end scope; `select` does. Both were wrong (#14073 round 17, P1).
+
+    The `<p>` rule needs BUTTON scope, so `_P_SCOPE_BOUNDARY` carries `button` — and
+    reusing that set for every ordinary end tag stops the downward walk at a
+    `<button>`, so an end tag a browser HONOURS is ignored here and a container a
+    browser closed stays open. An over-advertised set is the fail-open direction for
+    the TOC: `_docs_section`'s only source of "advertised" is the index, so a heading
+    whose fragment the browser never puts in the TOC could bound the slice.
+
+    Measured: `<div class="toc"><a href="#a">A</a><button></div><a href="#b">B</a>
+    </button></div>` — Chrome's DOM is `<div class="toc"><a>…<button></button></div>
+    <a href="#b">`, i.e. the `</div>` pops the button and the div, so `#b` is
+    OUTSIDE. Round 17 measured this model reporting `['#a', '#b']`.
+
+    `select` is the mirror omission: it ends scope in the spec and was absent from
+    the button-scope set entirely.
+    """
+    html = (
+        '<div class="toc"><a href="#a">A</a><button></div>'
+        '<a href="#b">B</a></button></div>'
+    )
+    assert extract_anchors_within(html, tag="div", class_token="toc") == [["#a"]], (
+        "a `<button>` stopped the scope walk, so the `</div>` was ignored and `#b` "
+        "was reported as advertised even though the browser puts it outside the TOC"
+    )
+    # `select` DOES end scope, so the mirror shape must keep `#b` inside.
+    select_html = (
+        '<div class="toc"><a href="#a">A</a><select></div>'
+        '<a href="#b">B</a></select></div>'
+    )
+    assert extract_anchors_within(select_html, tag="div", class_token="toc") == [["#a"]], (
+        "`select` ends scope in the spec, so a `</div>` inside a `<select>` is "
+        "ignored and `#b` stays inside the div — reporting it as outside is the "
+        "same divergence in the opposite direction"
+    )
+
+
 def test_an_end_tag_a_browser_ignores_does_not_end_the_storage_slice() -> None:
     """POSITIVE CONTROL — a scope-blocked end tag cannot walk the slice bound around.
 

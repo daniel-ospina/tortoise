@@ -1876,11 +1876,42 @@ class _AnchorHrefParser(HTMLParser):
             # below this one.
             return
 
+    #: ⛔ TWO SCOPE LISTS, and using the wrong one is a fail-open in each direction
+    #: (#14073 review round 17, P0 + P1, both measured).
+    #:
+    #: `_SCOPE` is the spec's plain **"in scope"** list (13.2.4.2): applet, caption,
+    #: html, table, td, th, marquee, object, **select**, template. It is NOT
+    #: `_P_SCOPE_BOUNDARY`, which also carries `button` because that set drives the
+    #: `<p>` rule and `<p>` uses **button scope**. Applying the button-scope set to
+    #: every ordinary end tag wrongly stops the walk at a `<button>`: measured,
+    #: `<div class="toc"><a href="#a">A</a><button></div><a href="#b">B</a></button></div>`
+    #: reported TOC entries `['#a','#b']` where Chrome's DOM is
+    #: `<div class="toc"><a>…<button></button></div><a>#b</a>` — the `</div>` pops the
+    #: button and the div, so `#b` is NOT in the TOC, and an unadvertised heading
+    #: must not bound the slice. `select` is the mirror omission: it ends scope in
+    #: the spec and was absent from the button-scope set entirely.
+    _SCOPE = frozenset({
+        "applet", "caption", "html", "marquee", "object", "select", "table",
+        "td", "template", "th",
+    })
+
+    #: **Table scope** (13.2.4.2) is `html`, `table`, `template` — a much shorter
+    #: list than `_SCOPE`, and it is the one the spec's in-cell and in-table rules
+    #: use for `td`/`th`/`table` end tags. The previous cut returned True
+    #: unconditionally for those tags, which popped the INNER table on a `</td>`
+    #: that the spec says to IGNORE: for `<table><tbody><tr><td><table></td></table>`,
+    #: walking down from the top hits the inner `table` — a table-scope boundary —
+    #: before the `td`, so `</td>` is a parse error and nothing pops. Measured: the
+    #: unconditional carve-out popped `td` AND the inner table, and the following
+    #: `</table>` then popped the OUTER table, so the model held no table at all and
+    #: the next `<h2>` was cut across — a claim rendered at 812x27 px inside
+    #: `#storage` with 287 tests green.
+    _TABLE_SCOPE = frozenset({"html", "table", "template"})
+
     #: End tags for a table's own structure are resolved by the spec's TABLE-CELL
-    #: and IN-TABLE rules, not by the generic scope test, so the boundary walk below
-    #: must not swallow them. Without this carve-out `</table>` inside a `<td>`
-    #: would be refused by its own `td`, and every table on the site would stop
-    #: closing.
+    #: and IN-TABLE rules, so they get the table-scope list above rather than the
+    #: plain scope list — without the carve-out `</table>` inside a `<td>` would be
+    #: refused by its own `td`'s scope walk and no table on the site would close.
     _TABLE_STRUCTURE = frozenset({
         "caption", "colgroup", "table", "tbody", "td", "tfoot", "th", "thead",
         "tr",
@@ -1900,10 +1931,11 @@ class _AnchorHrefParser(HTMLParser):
         six pins green (round 16 measured 812x27 px at y=4648, `closest('#storage')`
         non-null, vs a red baseline once the `</div>` was deleted).
         """
-        if tag in self._TABLE_STRUCTURE:
-            return True
+        boundary = (
+            self._TABLE_SCOPE if tag in self._TABLE_STRUCTURE else self._SCOPE
+        )
         return not any(
-            self._open_elements[k][0] in self._P_SCOPE_BOUNDARY
+            self._open_elements[k][0] in boundary
             for k in range(index + 1, len(self._open_elements))
         )
 
