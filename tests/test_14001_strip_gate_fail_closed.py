@@ -575,33 +575,30 @@ DEFEATED_RESOLVER_ROWS = (
     # CATCH anything is the opposite of what this comment first said: `gk` IS an ordinary assignment
     # target (`gk = "x"`), so the static value map knows `props[gk]` is the non-property `"x"` and
     # CERTIFIES the writer, and the own-scope dynamic-namespace arm then poisons the scope's `global`
-    # declarations (`poisoned |= _scope_declarations`). That arm is NOT the `ast.Nonlocal | ast.Global`
-    # arm: measured, stubbing the latter leaves this row green (`2 passed`, with `nonlocal-rebinding`),
-    # while stubbing the own-scope dynamic arm reds it — and only it. ⛔ `gk = "x"` IS LOAD-BEARING, not
-    # scenery: delete just that line and the row goes VACUOUS — measured, it then passes even with the
-    # arm stubbed to `pass`, because with no static value the stop arm is merely UNPROVEN and the gate
-    # refuses on its own. A lane that "tidied" the row to match the old comment would therefore have
-    # deleted the pin's discriminating power while the table stayed green. The two rows below pin
-    # the MUTATOR and the ONE-SCOPE-IN spellings; without this row the plain form the defect was
-    # MEASURED on had no regression pin, so an ordering change in the own-scope loop could re-open
-    # it with every row here still green. Re-measure when a row joins the table: `32 of 33` is the
-    # count at the row set below, and it is `32 of 33 ROWS`, not "32 of 33 siblings" — the table
-    # holds 33 rows INCLUDING this one, so it has 32 siblings and every one of them passes.
-    # ⛔ THE COUNT MOVED ONCE ALREADY: it read "30 of 31" until `#14057` added the two
-    # `masked-ask-*` rows and no sibling re-measure followed, which is exactly the rot this line
-    # warns about. Re-measured here at 33 rows: 1 failed, 58 passed of the file's 59 tests.
-    # ⛔ NAME THE MUTANT BY ITS TEXT, AND COUNT THE CANDIDATES FIRST — this comment has already
-    # sent one reviewer at the wrong arm. `poisoned |= _scope_declarations` appears FOUR times and
-    # TWO of them are in the own-scope loop: the subscript-write arm (line ~4666) and the
-    # `_dynamic_namespace_mutation` arm right below it (~4671). Disarming the SECOND also prints
-    # exactly "1 failed, 58 passed" — it reds `globals-mutator-rebinding` instead — so the bare
-    # count does not distinguish the right mutation from the wrong one. The mutant is the FIRST of
-    # the two: the `poisoned |= _scope_declarations` whose very next non-comment line is
-    # `elif isinstance(sub, ast.Call) and _dynamic_namespace_mutation(sub):`, in the branch that
-    # poisons on `_dynamic_namespace_write(target)`. Disarm THAT to `pass` and the file must print
-    # `1 failed, 58 passed` with the single failing id
-    # `test_the_resolver_bypasses_are_closed[globals-subscript-rebinding]`. Any other failing id is
-    # the wrong arm. Disarm-then-RESTORE, and never transcribe the number from a review.
+    # declarations (`poisoned |= _scope_declarations`). ⛔ AT THIS HEAD THE MENTION RULE IS WHAT
+    # REFUSES THIS ROW, not that arm (`#14001`, measured by the review of this branch and
+    # re-measured here): `globals` is named, so `_namespace_mentioned` short-circuits the scope to
+    # `{name: None …}` and the own-scope arms are never read. Disarming the arm alone therefore
+    # reds NOTHING — measured, 93 passed — which is why the blanket `poisoned |=
+    # _scope_declarations` beside the mention was deleted as inert (a mutant removing it reds no
+    # row either). The arm is a FALLBACK, and its own discriminating power is only measurable with
+    # the mention RETURN disabled (`return {name: None for name in assigned}` → `pass`). THE
+    # MEASURED RECIPE, at 56 rows in the table below and 93 tests in this file:
+    #   mention return → `pass`:                       19 failed, 74 passed
+    #   … plus this arm → `pass`:                      22 failed, 71 passed
+    #   ⇒ this arm's OWN contribution is exactly THREE rows — `globals-subscript-rebinding`,
+    #     `globals-annassign-own-scope`, `globals-annassign-inside-tuple-target`.
+    #   … plus the `_dynamic_namespace_mutation` arm → `pass` instead: 21 failed ⇒ that arm's own
+    #     are `globals-mutator-rebinding` and `namespace-unbound-setitem`. Disjoint sets, so the
+    #     two arms are not interchangeable and no bare failure COUNT identifies either.
+    # ⛔ THE PREVIOUS RECIPE HERE WAS FALSE and this comment had already sent one reviewer at the
+    # wrong arm: it claimed disarming the own-scope arm reds `globals-subscript-rebinding` "and
+    # only it" ("1 failed, 58 passed of the file's 59 tests"). Measured at this head: 0 failed, and
+    # the mention rule is why. Re-measure when a row joins; never transcribe a count from a review.
+    # ⛔ `gk = "x"` IS STILL LOAD-BEARING for the ARM's own measurement: with the mention return
+    # disabled, deleting it leaves the stop arm merely UNPROVEN (not certifying), so the arm's
+    # three rows stop reding. The two rows below pin the MUTATOR and the ONE-SCOPE-IN spellings;
+    # without this row the plain form the defect was MEASURED on would have no regression pin.
     ("globals-subscript-rebinding", """
     global gk
     gk = "x"
@@ -1070,6 +1067,52 @@ def test_the_helper_call_residual_is_PINNED_as_a_known_fail_open(tmp_path, monke
     gated, _why = _gate(tmp_path, monkeypatch, body, "helper_residual_14001")
     assert gated is True, (
         "the helper-call residual is CLOSED — good news, but it must not change silently: "
+        "delete this pin and move the row into DEFEATED_RESOLVER_ROWS")
+
+
+#: ⛔ RESIDUAL 1's REAL WITNESS — an `exec` STRING the gate cannot read, storing through the
+#: MAPPING OBJECT (`#14001`, measured by the review of this branch and re-measured here for the
+#: pre-fix tool: `gated=True` on BOTH `origin/main` and this head, so it is a pre-existing pin and
+#: not a diff regression). ⛔ NOT the bare `exec('k = …')` spelling: a NAME write from `exec`
+#: reaches no fast local on any supported version — 3.12 keeps it in the un-flushed `locals()`
+#: cache and discards it on the next refresh (measured: `lands=False`), and 3.13's PEP 667 gives
+#: each `exec` an independent snapshot so writes are "consistently ignored" (§Impact on exec() and
+#: eval()). ⛔ And NOT the `global`-statement variant (`exec('global k; k = "embedding"')`): it
+#: lands, but the gate REFUSES it (`gated=False`, measured on `origin/main` and here) because the
+#: rebound name resolves to no proven binding — so it is a refusal, not a fail-open.
+EXEC_STRING_RESIDUAL_ROWS = (
+    ("exec-string-subscript", """
+    if not _derived_mirror_required("object"):
+        exec('props["embedding"] = _encode(ev)')
+        return None
+    _write(props)
+"""),
+    ("exec-string-update", """
+    if not _derived_mirror_required("object"):
+        exec('props.update({"embedding": _encode(ev)})')
+        return None
+    _write(props)
+"""),
+)
+
+
+@pytest.mark.parametrize("case,arm", EXEC_STRING_RESIDUAL_ROWS,
+                         ids=[row[0] for row in EXEC_STRING_RESIDUAL_ROWS])
+def test_the_exec_string_residual_is_PINNED_as_a_known_fail_open(tmp_path, monkeypatch, case, arm):
+    """Residual 1's surviving witness: an exec'd string mutates `props`, and the gate certifies.
+
+    ⛔ PINNED, not celebrated — and PINNED AS A RESIDUAL, so the state cannot change silently: a
+    later fix that reads exec'd source, or refuses the `exec` callee, reds here and must move the
+    row into `DEFEATED_RESOLVER_ROWS`. The `gated is True` half is the pin that varies when the
+    boundary moves; the `lands is True` half is the measurement that makes the pin meaningful (a
+    row that certifies something that stores nothing documents nothing — the direction that turns
+    a pin vacuous).
+    """
+    assert _oracle(arm)["lands"] is True, (
+        "the exec-string residual no longer stores the vector, so it documents nothing")
+    gated, _why = _gate(tmp_path, monkeypatch, arm, f"exec_string_residual_14001_{case}")
+    assert gated is True, (
+        "the exec-string residual is CLOSED — good news, but it must not change silently: "
         "delete this pin and move the row into DEFEATED_RESOLVER_ROWS")
 
 

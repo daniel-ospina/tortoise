@@ -173,10 +173,23 @@ confidence:
 1. **A store that reaches the arm through an UNRECOGNISED HELPER CALL.** The reproducible
    witness is `list(map(props.update, [{"embedding": vec}]))` — pinned by
    `test_the_helper_call_residual_is_PINNED_as_a_known_fail_open`, so it cannot change silently.
-   `exec(code)` with NO namespace argument is the same class (it rebinds a fast local on 3.13+;
-   on 3.12 the writer stores nothing — measured here) and is not separately pinned. ⛔ `exec(code, globals())` is NOT part of this
-   residual any more: the mention rule refuses it (`globals` is named), measured — an earlier
-   revision of this paragraph still called it a certifying witness, and it was stale.
+   An `exec(code)` whose STRING the gate cannot read is the same class, and the spelling that
+   actually lands is a store through the MAPPING OBJECT: `exec('props["embedding"] = _encode(ev)')`
+   — or `exec('props.update({…})')` — CERTIFIES and LANDS on every supported version, because a
+   subscript/method store mutates the dict object whether `props` is read from a fast local or a
+   snapshot. PINNED by `test_the_exec_string_residual_is_PINNED_as_a_known_fail_open`.
+   ⛔ A BARE NAME WRITE FROM `exec` IS **NOT** A LEAK, on ANY supported version — the claim that it
+   "rebinds a fast local on 3.13+" was the inverse of PEP 667 and is corrected here (measured, and
+   from the PEP's own text): on 3.12 `exec('k = …')` lands in the un-flushed `locals()` cache and is
+   discarded by the next refresh (measured here: the writer still reads its own assignment), and on
+   3.13 PEP 667 makes `locals()` an independent snapshot per call "so that attempts to change the
+   values of local variables via `exec()` would be consistently ignored" (§Impact on exec() and
+   eval()). A `global` STATEMENT inside the exec'd string does rebind the module name and lands —
+   but the gate REFUSES it (`gated=False`, measured: the rebound name resolves to no proven
+   binding), so it is not a witness either. Nothing to pin on either spelling.
+   ⛔ `exec(code, globals())` is NOT part of this residual any more: the mention rule refuses it
+   (`globals` is named), measured — an earlier revision of this paragraph still called it a
+   certifying witness, and it was stale.
    The same class covers a local `def` written in the arm and CALLED there
    (`def _bg(): props["embedding"] = …; _bg()`): the body is not this arm's text, the call is a
    callee the gate cannot read, and `_stop_arm_walk` prunes it for that reason. `_set(props, k,
@@ -264,7 +277,10 @@ confidence:
    `__dict__`/`__builtins__` subscript, in any binding form, any scope depth.
    ⛔ THE BOUNDARY, stated as a scope and not a completeness claim. Two entries; each names its pin,
    or says plainly that it has none:
-     * residual 1 — `exec(code)` (no namespace argument). UNPINNED: nothing reds if it closes.
+     * residual 1 — an `exec(code)` whose STRING the gate cannot read. PINNED, as
+       `test_the_exec_string_residual_is_PINNED_as_a_known_fail_open` (an exec'd subscript/method
+       store on `props` certifies and LANDS, measured). The bare name-write spelling is not a leak
+       on any supported version, so it has nothing to pin — see residual 1 above.
      * residual 5 — a name the scanner cannot READ. COMPOSED at runtime
        (`builtins.__dict__["glob"+"als"]`) and reached by frame introspection
        (`sys._getframe(0).f_globals`) are both PINNED, as the two rows of
@@ -4771,9 +4787,15 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
     # `for`/`match` binding, a parameter default and the FUNCTION alias `g = globals; g()[…]` each
     # defeated a receiver-shape model one spelling later. The mention is the evidence; every name
     # the scope declares `global`/`nonlocal` could be what the write rebinds, so all are unproven.
+    # ⛔ THE MENTION SETTLES THE SCOPE BY ITSELF — no blanket scope-declaration poison belongs
+    # here. The early `{name: None …}` return below covers EVERY name, so one at this point is
+    # dead: nothing reads `poisoned` once `_namespace_mentioned` is true, and a mutant deleting it
+    # reds no row (measured — this is the same inert-arm shape the `_poison` arm was deleted for, so
+    # it is deleted here too rather than annotated as a mechanism it is not). ⛔ IF THAT RETURN IS
+    # EVER NARROWED, the declarations must be re-poisoned HERE: an exec'd or `globals()`-routed write
+    # can only reach a name the scope declares `global`/`nonlocal`, which is why the four narrow arms
+    # below still carry their own declaration poison.
     _namespace_mentioned = any(_is_dynamic_namespace_reference(node) for node in whole)
-    if _namespace_mentioned:
-        poisoned |= _scope_declarations    # `|=`, not `.update(…)`: see the residue note below
 
     # ⛔ AND A PARAMETER IS A BINDING THAT HAS **ALREADY** HAPPENED (`#14001`, measured by the
     # round-2 review): `def w(props, ev, key="x"): … props[key] = vec … key = "y"` resolved
@@ -4991,6 +5013,9 @@ def _string_bindings(scope) -> dict[str, frozenset[str] | None]:
         # spelling is residual 5's `frame-introspection` row, pinned as a known fail-open.
         # Measured cost on the real population: zero (only 8 of 15,090 functions in this
         # repo mention a dynamic namespace at all, and every one of them already refuses).
+        # ⛔ THIS RETURN IS THE MECHANISM, and it is what every `namespace-alias-*` row attributes
+        # to. Narrowing it re-opens the blanket case and must re-add the scope-declaration poison
+        # at the mention above; a mutant that deletes THAT poison reds no row today (measured).
         return {name: None for name in assigned}
     for _round in range(8):
         changed = False
