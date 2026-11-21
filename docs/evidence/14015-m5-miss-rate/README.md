@@ -107,7 +107,7 @@ The window keeps `F` of the tenant's graph resident. Residency is scored by **us
 criterion 1), so the resident set is the highest-usage nodes and the fault-in rate is the complement
 of that population's **Lorenz curve**:
 
-```
+```text
 fault_in_rate(F) = 1 − (the share of QUERY MASS carried by the hottest F of nodes)
 ```
 
@@ -365,6 +365,17 @@ quantities are published separately.
   window does not move the same way.
 - ⚠️ **Not a read ledger.** The mass is a recurrence proxy (§6). The ledger
   (`tortoise/read_ledger.py`) is the instrument that would replace it, and `#14011` carries that wiring.
+- ⚠️ **Not a calibrated arm/curve ratio, and the sample is distinct-node rather than independent.**
+  The arms draw 250 queries without replacement (§7), so their absolute rates run about twice the
+  modelled curve. Two consequences, and neither is fixed here because both need this bundle **re-cut**
+  and its `provenance.tool_sha256` re-pinned by a real run (`#14196`): (i) the sampler should draw with
+  replacement, so an arm estimates the mass share it claims to; (ii) `tools/miss_rate_m5.py` labels
+  `retrieval.mode` by embedder *availability* rather than by the legs that ran, so on the repo's
+  canonical dev env (`uv sync --extra embeddings`) a re-cut would write `hybrid` for a 100 % lexical
+  measurement —
+  `test_the_artifact_declares_which_retrieval_leg_it_measured` refuses that self-contradiction, so it
+  cannot ship silently, but the instrument cannot produce a correct artifact on that box until the
+  one-line fix lands with a re-cut.
 
 ---
 
@@ -397,8 +408,13 @@ conclusions in §3–§7 rest on gaps of tens of points and never on a decimal.
 tool's sha256 against `tools/miss_rate_m5.py`, and **every cell of every table above, recomputed from
 `measurement.json` at the row and column it is printed under**. A figure that is merely true somewhere
 in the artifact — the `:Point` peak quoted under the wrong doubling interval, or one label's mass
-column printed for both — fails the pin; so does a figure the artifact does not hold. It cannot
-re-derive a run — only a re-run can — and nothing here claims otherwise.
+column printed for both — fails the pin. ⚠️ **What the pins do NOT cover, so this paragraph is not read
+as more than it is:** the membership arms check `x.y %` and `x.y pp` figures against the set of values
+the artifact renders, and the table arms recompute every cell of every FIGURE table. A prose **size**
+(`≈1.2 GB`, `1193 MB`) is therefore **not** pinned — and the size sentence is exactly the form `#13989`
+receives the answer in. Nor does membership catch a wrong prose `%` that coincides with another cell's
+value; that class is caught by recomputing the cell, not by membership. It cannot re-derive a run —
+only a re-run can — and nothing here claims otherwise.
 
 ---
 

@@ -406,10 +406,13 @@ def test_the_tool_holds_no_copy_of_a_window_value():
 def test_the_committed_artifact_decomposes_its_own_miss_rate():
     """INVARIANT 3, plus a hand-edit cross-check the module header says is NOT an invariant.
 
-    ``miss == fault_in_rate + miss_resident × resident_query_share`` and
-    ``fault_in_rate == 1 - resident_query_share``. If either drifts, the two
-    halves were counted over different denominators and the split the record
-    publishes is not the split the measurement took.
+    ``miss == fault_in_rate + miss_resident × resident_query_share`` is the split a reader
+    reads, and ``fault_in_rate == 1 - resident_query_share`` is the identity the STORED bundle
+    must satisfy: both halves are written by the instrument, so a HAND-EDIT of one of them
+    drifts the other. ⛔ It is deliberately NOT a sampler or residency detector — the two
+    values are complementary slices of one list, so no mutation of the sampler can make this
+    fire, and the module header's "do not re-add this as an invariant" applies to exactly that
+    claim. Kept for the hand-edit class, which it does catch.
     """
     art = _artifact()
     checked = 0
@@ -1031,7 +1034,7 @@ def test_no_record_percentage_is_outside_the_artifact():
 
 # The one `pp` figure no run of this instrument's artifact can hold: §10's
 # run-to-run reproducibility band, which needs TWO re-runs to measure and is
-# recorded in prose for that reason ("The one figure that CANNOT be recomputed").
+# recorded in prose for that reason (see §10, "Measured between two runs:").
 _CROSS_RUN_FIGURES = {"0.4"}
 
 
@@ -1249,11 +1252,11 @@ def test_invariant_1c_refuses_a_complete_arm_that_missed_every_query():
 
 def test_invariant_1c_does_not_fire_on_a_real_floor():
     """⛔ BOUNDED ON PURPOSE: M2 measured 28.7 % found-deep on a COMPLETE `:Point`
-    graph, and this instrument's own artifact records 22.4 %. Only the TOTAL-miss
-    reading is impossible; a guard that refused any high floor would refuse the
-    measurement this instrument exists to make."""
+    graph, and this instrument's own artifact records 24.0 % (``labels.point.floor
+    .miss_resident``). Only the TOTAL-miss reading is impossible; a guard that refused
+    any high floor would refuse the measurement this instrument exists to make."""
     check_arm("point", 250, 1.0 - 0.7133, set(POP), POP)  # M2's found@deep ceiling
-    check_arm("point", 250, 0.287, set(POP), POP)        # this run's floor
+    check_arm("point", 250, 0.24, set(POP), POP)         # this run's floor, from the artifact
 
 
 def test_invariant_1c_does_not_fire_on_an_evicted_arm():

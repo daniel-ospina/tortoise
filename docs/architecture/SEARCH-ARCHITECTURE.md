@@ -858,6 +858,14 @@ measurement that makes `#13989`
 criterion 1 load-bearing rather than a refinement, and it is also why the shipped windows look adequate
 above: they are adequate BECAUSE residency is usage-ordered, not regardless of it.
 
+⚠️ **The two operands above are not from the same surface, so take the DIRECTION and not the ratio.**
+The policy deltas are arm readings; the doubling figure is read off the modelled curve; the arms draw
+the query set **without replacement**, which caps any single node at one query and lifts every arm's
+fault-in rate to about twice the curve at the same coverage. With replacement the `:Object` policy
+delta is **larger** (~39 pp), so the conclusion is safe while the published ratio is not a measurement
+of it. The sampler change and the re-cut that fixes it are `#14196`; the evidence record states the
+divergence in its §7 and §9.
+
 ⚠️ **What M5 does not settle.** Its query mass is a **recurrence proxy** from the capture corpus, not an
 observed read ledger (`§17.4.6` forbids the tenant-wide ledger as a product input, which is `#14011`'s
 subject); the sensitivity sweep brackets that assumption rather than removing it. It says nothing about
@@ -866,7 +874,6 @@ still unreturnable at depth 50) is a **lower bound on the production ceiling**, 
 more documents compete for those 50 ranks at production scale. And it **changes no window and no price**:
 the values are read from `product/pricing.json` and asserted equal to it. §11 still holds — this
 measures the input to the compute/IOPS/egress tier; it does not choose the tier.
-
 
 ---
 
