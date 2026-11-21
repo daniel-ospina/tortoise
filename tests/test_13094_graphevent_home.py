@@ -349,6 +349,31 @@ def test_a_read_that_could_not_run_reports_no_verdict(monkeypatch, capsys):
     assert "NO VERDICT" in capsys.readouterr().err
 
 
+def test_a_store_that_refused_exits_2_and_never_1(monkeypatch, capsys):
+    """A read that FAILED must not share exit 1 with "not covered".
+
+    This is not hypothetical politeness: `main()` returns 1 for a produced
+    `not_covered` verdict, so an uncaught store exception would leave Python's
+    default exit status — **also 1** — and a caller gating on the exit would read
+    "the record is short" from a record it never read. The two arms below are the
+    graph read and the record read.
+    """
+    module = _tool()
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:1/x")
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://nowhere/record")
+
+    def _refuse(*_a, **_k):
+        raise RuntimeError("the store refused the read")
+
+    monkeypatch.setattr(module, "residency", _refuse)
+    assert module.main(["residency"]) == 2
+    assert "NO VERDICT" in capsys.readouterr().err
+
+    monkeypatch.setattr(module, "_record_connection", _refuse)
+    assert module.main(["superset", "--org-id", "o", "--graph-id", "g"]) == 2
+    assert "NO VERDICT" in capsys.readouterr().err
+
+
 def test_the_declared_event_types_are_the_sdks_own():
     """The census names the store's type vocabulary; it must BE the store's.
 

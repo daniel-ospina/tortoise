@@ -5,11 +5,13 @@ measurement `#13083` §5.1 explicitly left UNMEASURED. It is written so the next
 measurement instead of re-deriving one — which is the whole cost `#13094` has carried since the
 census merged as `#14043`.
 
-**Status, stated plainly: this PR moves no bytes.** The shape is still written to the graph, and the
+**Status, stated plainly: this PR (#14164) moves no bytes.** The shape is still written to the graph, and the
 verdict below says why the *prescribed* mechanism cannot move it, what the actual route is, and what
-it is worth. The move itself is filed as its own work item (see §7) because it is a store re-home —
-a second durable store with cursor semantics — not a tier flip, and shipping half of it would put
-the change feed's durability at risk for the class of defect this issue exists to remove.
+it is worth. The move itself is **the remaining scope of `#13094`**, recorded on the issue
+(`#13094` comment 7065026251) rather than filed as a peer ticket — the root is there, so the route stays
+there. It is a store re-home (§7): a second durable store with cursor semantics, not a tier flip, and
+shipping half of it would put the change feed's durability at risk for the class of defect this issue
+exists to remove.
 
 Everything here is a measurement or an executed assertion. Numbers carry the command that produced
 them; claims carry the `file:line` that refutes them if wrong.
@@ -208,10 +210,11 @@ Both suites are re-run after this PR's last push; counts are in `WORKTREE-REPORT
 
 ---
 
-## 7. The route, and the work item it needs
+## 7. The route, and where it is recorded
 
 The prize is `#13082`'s largest single item: **40–43 MB measured** on the largest legacy graph (42 %
-of its nodes), for a shape no graph query reads. The route, in the order the constraints force:
+of its nodes), for a shape no graph query reads. The route below is recorded as **`#13094`'s remaining
+scope** (its comment 7065026251), in the order the constraints force:
 
 1. **A record home that is NOT a projection.** A dedicated table mirroring the node's five properties
    (`seq`, `ts`, `type`, `event_id`, `payload`) — `journal_event` cannot be it (§3). `cache_tier`

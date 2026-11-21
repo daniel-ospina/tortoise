@@ -466,19 +466,34 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.verb == "residency":
-        print(json.dumps(residency(args.graph_uri, args.graph), indent=2))
+        try:
+            print(json.dumps(residency(args.graph_uri, args.graph), indent=2))
+        except Exception as exc:  # noqa: BLE001 — a refused read is not a reading
+            print(f"the graph could not be read ({type(exc).__name__}: {exc}). "
+                  "NO VERDICT was produced.", file=sys.stderr)
+            return 2
         return 0
 
     if not args.record_dsn:
         print("no record DSN: pass --record-dsn or set TORTOISE_RECORD_DSN. "
               "NO VERDICT was produced.", file=sys.stderr)
         return 2
-    conn = _record_connection(args.record_dsn, args.org_id)
+    # ⛔ A STORE THAT REFUSED IS NOT A VERDICT (#9551's contract, and this verb's
+    # own reason for existing): an uncaught exception here would leave `main()`
+    # with Python's default exit 1 — the SAME code `not_covered` uses — so a
+    # caller gating on the exit would read "the record is short" from a record it
+    # never managed to read. Exit 2 says what happened.
     try:
-        journal = record_rows(conn, args.org_id, args.graph_id)
-    finally:
-        conn.close()
-    graph_rows_ = _graph_rows(_graph_connection(args.graph_uri), args.graph)
+        conn = _record_connection(args.record_dsn, args.org_id)
+        try:
+            journal = record_rows(conn, args.org_id, args.graph_id)
+        finally:
+            conn.close()
+        graph_rows_ = _graph_rows(_graph_connection(args.graph_uri), args.graph)
+    except Exception as exc:  # noqa: BLE001
+        print(f"a store could not be read ({type(exc).__name__}: {exc}). "
+              "NO VERDICT was produced.", file=sys.stderr)
+        return 2
     verdict = superset(graph_rows_, journal)
     verdict["org_id"] = args.org_id
     verdict["graph_id"] = args.graph_id
