@@ -2125,9 +2125,12 @@ def test_the_control_binds_the_shared_helpers(monkeypatch):
     (measured: the control's bindings stay live AND used by its own call sites, so identity, both
     flags and every other arm are satisfied). The halves are NOT independent, and the earlier text
     here claimed an asymmetry that does not exist:
-      - `_folding`: the flag is set by an INSTALLED, INVOKED fake — a decoy that builds and discards
-        the fake does not arm it, but a decoy that also CALLS it does (measured: the full `folding`
-        revert plus `folding(module, cause)(name)` was GREEN before the installed check).
+      - `_folding`: the flag is set by an INSTALLED fake that some walk INVOKES. A fake that is only
+        BUILT and CALLED does not arm it — measured RED, and that was the pre-fix hole. But an
+        INSTALLED fake that one walk invokes DOES, even when that walk's verdict is discarded:
+        measured GREEN, the full `folding` revert plus one installed-then-discarded walk. So this
+        half has the SAME one-decoy parity as `_env_source`, and both are declared here rather than
+        "no asymmetry" being asserted from the instrument's shape.
       - `_env_source`: the exclusion is `_folding`'s OWN CODE OBJECT, not the transitive ROLE — a
         COPY of the builder is a different code object, so it counts as real use, and one discarded
         `_env_source(…)` line re-arms this half.
