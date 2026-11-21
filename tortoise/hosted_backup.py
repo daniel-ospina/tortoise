@@ -1036,9 +1036,13 @@ def _require_served_restore_labels(
 
 
 #: The labels a coverage-gated ``embedding`` can be attached to, in the order the
-#: writer census scans them. ``:Point``/``:Operator`` are deliberately absent — a
-#: ``:Point``'s vector is RECORD TRUTH (`#5004`) and is never gated.
-_GATED_RESTORE_LABELS: tuple[str, ...] = ("Object", "Subject", "Event", "Source")
+#: writer census scans them. A ``:Point``'s vector is RECORD TRUTH (`#5004`), and since
+#: `#13971` that is exactly why its restored GRAPH copy is gated: the record holds it, and
+#: the in-graph `:Point` index is RETIRED (`#13330`), so re-writing the property on a DR
+#: restore would undo a strip that has already run. Gating it keeps the two stores
+#: consistent — the strip's own writer census asks this function for every label it
+#: stores, and an ungated restore is a writer that puts 37k vectors back on the next DR.
+_GATED_RESTORE_LABELS: tuple[str, ...] = ("Object", "Subject", "Event", "Source", "Point")
 
 
 def _gated_labels_of(node_labels) -> list[str]:
@@ -1060,14 +1064,18 @@ def _restore_retires_vector(node_labels) -> bool:
     no writer may produce.
 
     A node with NO gated label answers ``False``, and so does one carrying a label no
-    gate covers — ``:Point``'s vector is RECORD TRUTH (`#5004`) and never gated — or an
-    unreadable/unknown answer, because the predicate behind it is conservative.
+    gate covers, or an unreadable/unknown answer, because the predicate behind it is
+    conservative.
     """
     from tortoise.projection.entities import _derived_mirror_required
 
     # ⛔ A NON-GATED label means the vector may not be a mirror at all (#13854 review, P1):
-    # a restored ``:Point:Object`` node carries its Point's RECORD-TRUTH vector, so the
-    # ``object`` counter's stop is not authority over it. Keep it, and report nothing.
+    # a restored ``:Session:Object`` node carries a :Session's OWN vector, which no counter
+    # is authority over, so the ``object`` counter's stop cannot retire it. Keep it, and
+    # report nothing. ⚠️ THE EXAMPLE HERE USED TO BE ``:Point:Object`` and no longer can be
+    # (`#13971`): ``:Point`` IS gated now, so such a node is decided by the ``point`` /
+    # ``operator`` pair as well as the Object one — leaving the old sentence in place read as
+    # an instruction to un-gate ``:Point``.
     if set(node_labels or ()) - set(_GATED_RESTORE_LABELS):
         return False
     if "Object" in node_labels and _derived_mirror_required("object"):
@@ -1078,6 +1086,11 @@ def _restore_retires_vector(node_labels) -> bool:
         return False
     if "Source" in node_labels and (_derived_mirror_required("document")
                                     or _derived_mirror_required("source")):
+        return False
+    # `:Point` is ONE label serving TWO entity types (`point`, `operator`), so — exactly
+    # like `:Source` — the vector may go only when BOTH counters answer stop (`#13971`).
+    if "Point" in node_labels and (_derived_mirror_required("point")
+                                   or _derived_mirror_required("operator")):
         return False
     return bool(_gated_labels_of(node_labels))
 
@@ -1294,6 +1307,10 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
         if ("Source" in node_labels
                 and not _derived_mirror_required("document")
                 and not _derived_mirror_required("source")):
+            node_props.pop("embedding", None)
+        if ("Point" in node_labels
+                and not _derived_mirror_required("point")
+                and not _derived_mirror_required("operator")):
             node_props.pop("embedding", None)
         if not isinstance(node_props.get(EMBEDDING_PROPERTY), list):
             retired_vectors += 1

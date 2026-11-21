@@ -264,20 +264,23 @@ def _digest_in_a_fresh_process(entries: list[tuple[str, str]], hash_seed: str) -
 
 
 def test_point_is_in_the_default_population():
-    """`#13685`'s scope addition, asserted by NAME.
+    """`#13971`'s scope change, asserted by NAME.
 
-    The census's `RETIRED` population is the population a DESTRUCTIVE tool iterates, so
-    it must keep `:Point` out (`NOT_IN_SCOPE`, pinned by `#13629`'s suite). THIS tool
-    only fills, so `:Point` — ~9,106 graph-only Points, ~20 % of the corpus, invisible to
-    the ARMED dense leg — belongs in its DEFAULT scope. Both halves are asserted, so a
-    later edit cannot widen the stripper by "sharing" this tuple.
+    `:Point` used to be appended here BY HAND because the census's `RETIRED` population —
+    the population a DESTRUCTIVE tool iterates — excluded it (`NOT_IN_SCOPE`). `#13971`
+    moved it INTO `RETIRED` (record coverage for `point`/`operator` is measurable from a
+    fresh process, and two of its four declared writers ask that gate), so this
+    constant is now exactly the census's population and must not append the label twice:
+    a duplicate would run the fill twice for one label, and a constant that disagrees with
+    the population it says it derives from is the second spelling `#9553` records.
     """
     assert [label for _t, label, _k in backfill.BACKFILLED] == [
         "Object", "Subject", "Event", "Source", "Point"]
     assert [label for _t, label, _k in backfill._population(None)][-1] == "Point"
-    # The DESTRUCTIVE population is untouched.
-    assert "Point" not in {label for _t, label, _k in parity.RETIRED}
-    assert parity.NOT_IN_SCOPE == ("Point",)
+    # ONE population, not a union of two — the derivation is the whole claim.
+    assert tuple(parity.RETIRED) == backfill.BACKFILLED
+    assert len(backfill.BACKFILLED) == len(set(backfill.BACKFILLED))
+    assert parity.NOT_IN_SCOPE == ()
 
 
 def test_the_key_mapping_is_the_one_the_schema_pins(stores):
@@ -1497,13 +1500,15 @@ def test_a_failed_batch_write_exits_3_with_the_durable_report(
 
 
 def test_the_per_label_numbers_are_the_census_numbers(stores, monkeypatch):
-    """This tool's per-label table EQUALS `parity.census()`'s for the four labels it covers.
+    """This tool's per-label table EQUALS `parity.census()`'s for every label it covers.
 
-    The tool does not call `parity.census()` (see the module docstring: `:Point` is
-    outside that population, and a second full census read would double a 46k-Point
-    run's graph cost), so the equivalence is PINNED rather than assumed — the census's
-    own record leg is monkeypatched to read the same fake door, and the two tables are
-    compared field by field.
+    The tool does not call `parity.census()` (a second full census read would double a
+    46k-Point run's graph cost), so the equivalence is PINNED rather than assumed — the
+    census's own record leg is monkeypatched to read the same fake door, and the two
+    tables are compared field by field. ⛔ SINCE `#13971` THE POPULATIONS ARE THE SAME
+    SET (`:Point` is in `RETIRED`), so this compares all FIVE: the old `!= "Point"`
+    skip existed because the census excluded the label, and keeping it would now hide a
+    disagreement on the label this tool was written for.
 
     ⚠️ BOUNDED TO STRING IDENTITIES, on purpose and stated rather than left to the
     fixture to imply: since `#13647` the census joins on the RENDERED identity and adds
@@ -1534,6 +1539,11 @@ def test_the_per_label_numbers_are_the_census_numbers(stores, monkeypatch):
     door.seed("event", "evt-1")
     door.seed("source", "https://example.test/a")
     door.seed("event", "evt-unreadable", vector=_vec(0.3), readable=False)
+    # `:Point` — the label this tool was originally extended for, now in the census's own
+    # population too (`#13971`). One filled point is seeded so the comparison below is a
+    # real one for it rather than a pair of zeros that agree.
+    graph.add("Point", "pt-1", _vec(0.7))
+    door.seed("point", "pt-1", vector=_vec(0.7))
     # ⛔ `evt-unreadable` is a GRAPH node as well as a record row, and that is load-
     # bearing rather than decorative: the census's record leg is NARROWED to the graph's
     # rendered identities (`#13647`), so a record row outside that population is
@@ -1573,7 +1583,7 @@ def test_the_per_label_numbers_are_the_census_numbers(stores, monkeypatch):
                            graph_id="graph")
     ours = {row["label"]: row for row in (
         backfill._census_row(backfill._measure_label(graph, door, table, label))
-        for table, label, _k in backfill.BACKFILLED if label != "Point")}
+        for table, label, _k in backfill.BACKFILLED)}
 
     for row in census["labels"]:
         mine = ours[row["label"]]
@@ -1595,6 +1605,11 @@ def test_the_per_label_numbers_are_the_census_numbers(stores, monkeypatch):
     assert ours["Event"]["record_vectors"] == 0
     assert ours["Event"]["record_only"] == 1
     assert ours["Subject"]["graph_only"] == 0
+    # The Point row is compared like every other label and is a real measurement, not a
+    # vacuous pair of zeros: one node, one readable record copy.
+    assert ours["Point"]["graph_vectors"] == 1
+    assert ours["Point"]["record_vectors"] == 1
+    assert ours["Point"]["graph_only"] == 0
 
 
 def test_buckets_has_exactly_one_definition():
