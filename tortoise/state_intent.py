@@ -468,11 +468,24 @@ _EXISTENCE_HEAD = (
     r"\b(?:has|have|had)\s+(?:any|anything|someone|something|everything|anyone)\b"
 )
 _EXISTENCE_ADVERB = (
-    r"(?:[a-z]+ly|just|already|only|still|even|also|never|ever|now|yet)"
+    r"(?:[a-z]+ly|just|already|only|still|even|also|never|ever|now|yet|"
+    # ⛔ THE `-ly` CLASS IS NOT THE ADVERB CLASS (round-24 review, P1, measured):
+    # `very`, `quite`, `almost`, `just about`, `in fact` are adverbials that END IN
+    # SOMETHING ELSE, so the first cut of this slot was blind to the commonest English
+    # spelling — `have any users reported the vendor has very recently been deprecated`
+    # still routed the whole ended population with the caller's predicate dropped and
+    # `signal=None`, i.e. the round-23 defect one spelling over. Measured over 7 verbs x
+    # 7 subjects x 12 spellings: 291 of 588 routed before this list was widened.
+    r"very|quite|rather|almost|nearly|too|much|all|as|so|about|in|fact|practice|"
+    r"effect|good|long|since|far)"
 )
 _EXISTENCE_HELPER = (
-    rf"(?:not\s+)?(?:(?:{_EXISTENCE_ADVERB})\s+){{0,3}}"
-    rf"(?:have\s+)?(?:(?:{_EXISTENCE_ADVERB})\s+){{0,3}}been\b"
+    # …and the REPETITION BOUND is 5, not 3: `only just very recently` is four adverbials,
+    # and a count bound is a spelling this guard is blind to if it is one short (measured
+    # in the same round). The bound exists to keep the window from swallowing a whole
+    # clause, not to grade English.
+    rf"(?:not\s+)?(?:(?:{_EXISTENCE_ADVERB})\s+){{0,5}}"
+    rf"(?:have\s+)?(?:(?:{_EXISTENCE_ADVERB})\s+){{0,5}}been\b"
 )
 _EXISTENCE_GUARD = (
     r"(?![^?]{0,60}?\b(?:because|since|when|while|after|before|now|if|unless|given|"
@@ -493,7 +506,14 @@ _EXISTENCE_GUARD = (
     r"that)\s+)?(?!it\b|they\b|he\b|she\b|we\b|you\b|i\b)"
     r"[a-z0-9][a-z0-9'’._/-]*\s+"
     r"(?:has|have|had|is|are|was|were|will|would|can|could|did|does|do|may|might|"
-    rf"must|should)\s+{_EXISTENCE_HELPER})"
+    # ⛔ AND THE CLAUSE'S OWN PARTICIPLE ANCHORS IT (round-24 review, P2, measured):
+    # without the `been <ENDING>` anchor the widened adverb slot refused a RELATIVE
+    # clause whose own verb is `<aux> <adverb> been <other participle>`, which is the
+    # window content the module allows on purpose — `has anything the board has recently
+    # been briefed on been withdrawn` ROUTED before the adverb slot and went silent
+    # after. The anchor is the same one the pronoun branch below already uses: the
+    # lookahead fires only when the second clause's passive ends an ENDING participle.
+    rf"must|should)\s+{_EXISTENCE_HELPER}\s+(?:{_ENDING_WORDS})\b)"
     # ⛔ AND A PRONOUN SUBJECT IS ITS OWN ALTERNATIVE (round-14 review, P2, measured):
     # the slot above requires `<determiner> <noun>`, which a pronoun has NEITHER of, so
     # `have any users reported it has been deprecated` was ROUTED to the whole ended

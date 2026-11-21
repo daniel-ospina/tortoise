@@ -192,6 +192,11 @@ SELECTED = [
     # word) costs this row — measured: widened that way the row returns
     # `population=None, signal='existence_unguarded'`.
     ("has anything that the board approved been superseded", "ended", "existence"),
+    # …and a relative clause whose OWN verb is `<aux> <adverb> been <other participle>`
+    # must keep routing (round-24 review, P2): the adverb slot without a `been <ENDING>`
+    # anchor refused `has anything the board has recently been briefed on been withdrawn`,
+    # which routed before it. The anchor is the same one the pronoun branch uses.
+    ("has anything the board has recently been briefed on been withdrawn", "ended", "existence"),
     ("what ended", "ended", "wh_whole_question"),
     ("what ended?", "ended", "wh_whole_question"),
     ("what has been withdrawn", "ended", "wh_whole_question"),
@@ -693,6 +698,12 @@ NOT_SELECTED = [
     "have any users reported it has recently been deprecated",
     "have any users reported the vendor will have recently been deprecated",
     "have any users reported the vendor has only just been deprecated",
+    # …and the NON-`-ly` adverbials and the 4-deep stack (round-24 review, P1): the
+    # `-ly` class is not the adverb class, so `very recently` / `just about` / `in fact`
+    # slipped the first slot and `only just very recently` exceeded its {0,3} bound.
+    # Measured: 291 of 588 rounded off the 7x7x12 matrix before the widening.
+    "have any users reported the vendor has very recently been deprecated",
+    "have any users reported the vendor has only just very recently been deprecated",
     # ── and the SILENT direction of the notice's tail (round-16 review, P2) ──
     # `existence_unguarded` carried no tail guard, so ANY tail reported — falsifying the
     # two paragraphs that say a qualifier outside the closed tail list stays silent. The
@@ -877,6 +888,12 @@ NOTICE_ONLY = [
     "have any users reported it has recently been deprecated",
     "have any users reported the vendor will have recently been deprecated",
     "have any users reported the vendor has only just been deprecated",
+    # …and the NON-`-ly` adverbials and the 4-deep stack (round-24 review, P1): the
+    # `-ly` class is not the adverb class, so `very recently` / `just about` / `in fact`
+    # slipped the first slot and `only just very recently` exceeded its {0,3} bound.
+    # Measured: 291 of 588 rounded off the 7x7x12 matrix before the widening.
+    "have any users reported the vendor has very recently been deprecated",
+    "have any users reported the vendor has only just very recently been deprecated",
     # …and the ONE row of round-19's pre-determiner-opener class that REPORTS rather than
     # going silent: it is five words long, so the subject bound exceeded is what the
     # notice names (`is_copula_long_subject`). Its short siblings stay in NOT_SELECTED
