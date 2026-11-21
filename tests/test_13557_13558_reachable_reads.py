@@ -1175,16 +1175,31 @@ def test_the_bounded_cost_claims_name_every_scan():
         "order and its count, so the reader has no home to check the claim against")
 
     # ⛔ AND THE DERIVATION SENTENCE IS PINNED TO THE SPLIT IT DESCRIBES (#14033
-    # round-13 review, P3). The function said the 9 missed-cue signals were
-    # "derived from those shapes" while 4 of them are HAND-WRITTEN recall rows with
-    # no shape at all — the count was right and the derivation claim was not, and a
-    # count-only pin cannot see that. The split is derived here from the tables, so
-    # promoting a hand-written row (or demoting a derived one) reds this instead of
-    # silently leaving the sentence describing a different construction.
-    shape_names = {name for name, _ in si._ENDING_SHAPES}
-    derived = [name for name, _ in si._ENDING_SIGNALS if name in shape_names]
-    hand_written = [name for name, _ in si._ENDING_SIGNALS if name not in shape_names]
-    assert len(derived) + len(hand_written) == signals
+    # round-13 review, P3; the derivation hardened by the round-13 DELTA review, P3).
+    # The function said the 9 missed-cue signals were "derived from those shapes"
+    # while 4 of them are HAND-WRITTEN recall rows with no shape at all — the count
+    # was right and the derivation claim was not, and a count-only pin cannot see
+    # that.
+    #
+    # ⛔ THE SPLIT IS READ OFF THE CODE'S OWN PREDICATE, never off the NAMES. It was
+    # first written as `name in shape_names`, which certified a false sentence while
+    # green: `do_support` IS an ending-shape name but is NOT tail-anchored, so a
+    # hand-written recall row reusing that name was counted as DERIVED, and a
+    # docstring claiming "6 derived" passed (measured: the tables hold 5 derived /
+    # 4 hand-written). The construction in `_ENDING_SIGNALS` filters on
+    # `_TAIL_END in shape.pattern` — the same test this pin now uses — so a name
+    # collision cannot move the count, and the per-shape membership check below
+    # reds if the derivation ever drops or duplicates a row.
+    tail_anchored = [name for name, shape in si._ENDING_SHAPES
+                     if si._TAIL_END in shape.pattern]
+    signal_names = [name for name, _ in si._ENDING_SIGNALS]
+    derived = [name for name in signal_names if name in set(tail_anchored)]
+    hand_written = [name for name in signal_names if name not in set(tail_anchored)]
+    for name in tail_anchored:
+        assert signal_names.count(name) == 1, (
+            f"the tail-anchored shape `{name}` produced {signal_names.count(name)} "
+            f"missed-cue signals — the mechanical derivation is not one-to-one "
+            f"(signals: {signal_names})")
     assert f"{len(derived)} derived" in doc and f"{signals} missed-cue signals" in doc, (
         f"`detect_state_question` no longer states that {len(derived)} of the "
         f"{signals} missed-cue signals are DERIVED from the ending shapes (derived: "
