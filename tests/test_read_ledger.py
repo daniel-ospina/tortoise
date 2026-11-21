@@ -378,23 +378,34 @@ def hooked_sdk(ledger, monkeypatch):
     return inst, _Graph
 
 
-def test_the_three_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
+def test_the_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
     """A hook that is not exercised is a hook that will be lost in a refactor.
 
-    ⛔ THIS PINS THREE OF THE HOOKED SDK METHODS, and its name says so. The other
-    SDK methods recorded in §17.4.6 are not exercised here, and neither are the
-    two NON-SDK hooks (the session-start read, and the MCP tag tool's served
-    page): deleting any of those calls leaves this file green, no test drives
-    them, and §17.4.6 names the set. The former name
-    (`test_every_row_returning_read_path_feeds_the_ledger`) promised coverage it
-    did not have, so the claim is narrowed to what the body drives rather than
-    the guard being trusted on its title.
+    ⛔ THIS PINS THE CALLER-FACING ROW PATHS THAT EXIST, and its name says so. It
+    used to pin three of them (`query()`, `paginated_query()`,
+    `query_points_by_tag()`), and **#14129 retired all three** under #4282 phase 2
+    — the owner's ruling (#3836 (c)) is that a retired name FAILS and names its
+    replacement rather than resolving, so those calls raised `AttributeError` and
+    reddened this file instead of measuring a door no caller could reach. The
+    replacement is ONE door, `list_knowledge`, whose `kind=` selects the
+    collection; the two live arms that hand Point rows to a caller are pinned
+    here through it:
 
-    Each of `query()`, `paginated_query()` and `query_points_by_tag()` returns
-    Point rows to a CALLER, so each must record exactly ONE read event per
-    returned key — no fewer (a missed record inflates the never-read mass, which
-    flatters the split) and no more (a double record overstates how many reads a
-    key gets, which is the same class of wrong as a lost one).
+      * `list_knowledge("claim")` — the claim list, recording in
+        `_paginated_query`;
+      * `search_knowledge(mode="tag", tag=…)` — the tag list, recording the
+        SERVED page in the `mode="tag"` arm.
+
+    The other SDK reads recorded in §17.4.6 are not exercised here, and neither
+    are the two NON-SDK hooks (the session-start read, and the MCP tag tool's
+    served page): deleting any of those calls leaves this file green, no test
+    drives them, and §17.4.6 names the set. The claim is narrowed to what the
+    body drives rather than the guard being trusted on its title.
+
+    Each returns Point rows to a CALLER, so each must record exactly ONE read
+    event per returned key — no fewer (a missed record inflates the never-read
+    mass, which flatters the split) and no more (a double record overstates how
+    many reads a key gets, which is the same class of wrong as a lost one).
     """
     inst, graph = hooked_sdk
     # The keys must exist as STOCK first, or every read is (correctly) reported
@@ -403,21 +414,23 @@ def test_the_three_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
         record_stock("Point", key, nbytes=100)
 
     graph.rows = [{"id": "p1"}, {"id": "p2"}]
-    got = inst.query()
-    assert [r["id"] for r in got] == ["p1", "p2"]
+    got = inst.list_knowledge("claim")
+    assert [r["id"] for r in got["results"]] == ["p1", "p2"]
 
     graph.rows = [{"id": "p3"}]
-    assert inst.paginated_query()["results"] == [{"id": "p3"}]
+    assert inst.list_knowledge("claim")["results"] == [{"id": "p3"}]
 
     graph.rows = [{"id": "p7"}]
-    assert inst.get_point("p7") == {"id": "p7"}
+    assert inst._get_point("p7") == {"id": "p7"}
 
     graph.rows = [{"id": "p8"}, {"id": "p9"}]
-    inst.query_points_by_tag("t")
+    assert inst.search_knowledge(mode="tag", tag="t")["results"] == [
+        {"id": "p8"}, {"id": "p9"}
+    ]
 
     folded = fold()
     counts = {k[2]: row.read_count for k, row in folded.rows.items()}
-    # `p7` stays at ZERO: `get_point` is the internal accessor the write paths
+    # `p7` stays at ZERO: `_get_point` is the internal accessor the write paths
     # use, so it must record NOTHING — if it ever starts recording, a
     # written-but-never-read node looks read and `f` is biased HIGH.
     assert counts == {"p1": 1, "p2": 1, "p3": 1, "p7": 0, "p8": 1, "p9": 1}
@@ -741,23 +754,31 @@ def test_a_capped_file_still_says_so_when_one_tenant_is_folded(ledger, monkeypat
 def test_an_internal_population_scan_is_not_recorded_as_a_read(hooked_sdk):
     """`recall_gaps` / `issue_insight` / the FTS fallback scan the WHOLE stock.
 
-    They call `query()` to do it, so recording them would mark every Point read
-    after one `recall_gaps()` call — `f` → ~1, the exact contamination excluding
-    `get_point` prevented, and it would silently invalidate the one-directional
-    "the gaps bias `f` LOW" caveat the docs rest on.
+    They call `_query(_record_reads=False)` to do it, so recording them would
+    mark every Point read after one `recall_gaps()` call — `f` → ~1, the exact
+    contamination excluding `get_point` prevented, and it would silently
+    invalidate the one-directional "the gaps bias `f` LOW" caveat the docs rest
+    on.
+
+    ⛔ THE RECEIVER IS `_query`, NOT A RETIRED PUBLIC NAME. `query()` and the rest
+    of the read family left the surface in #14129 (#4282 phase 2), so the public
+    spelling of this pin raised `AttributeError`; the SEAM it guards is
+    unchanged, and it still has flipping callers that must keep recording —
+    `tortoise/tortoise_client.py` calls `sdk._query(kind=…)` with the DEFAULT, so
+    the `_record_reads=True` arm is live and this pins both directions.
     """
     inst, graph = hooked_sdk
     record_stock("Point", "p1", nbytes=100)
     record_stock("Point", "p2", nbytes=100)
 
     graph.rows = [{"id": "p1"}, {"id": "p2"}]
-    assert [r["id"] for r in inst.query(_record_reads=False)] == ["p1", "p2"]
+    assert [r["id"] for r in inst._query(_record_reads=False)] == ["p1", "p2"]
     assert {row.read_count for row in fold().rows.values()} == {0}, (
         "an internal scan must record NOTHING"
     )
 
     graph.rows = [{"id": "p1"}]
-    inst.query()
+    inst._query()
     counts = {k[2]: row.read_count for k, row in fold().rows.items()}
     assert counts == {"p1": 1, "p2": 0}, "the caller-facing default still records"
 
