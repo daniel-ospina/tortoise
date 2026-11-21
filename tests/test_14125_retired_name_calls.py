@@ -777,6 +777,14 @@ def _skip_call_read_names(fn: ast.AST) -> set[str]:
 
     Scope-aware on purpose (`_own_scope_nodes`): a name in a NESTED function is
     that scope's decision, not this one's.
+
+    ⛔ RESIDUAL (review P2) — BOTH HALVES match the ATTRIBUTE spelling only
+    (`pytest.skip`, `pytest.xfail`). A `from pytest import skip` re-import makes the
+    call an `ast.Name`, so a `try` whose skip uses the bare form reads `set()` here
+    and is not admitted. `_skip_guard_call_names` carries the SAME `.attr`-only
+    limit, and it is the helper this one now mirrors. Declared rather than widened
+    here: admitting the bare form changes the admission population and owes its own
+    witness row and population measurement.
     """
     out: set[str] = set()
     for node in _own_scope_nodes(fn):
@@ -1024,7 +1032,7 @@ def _reaches_capability_seam(
 
 
 def _probe_roots(tree: ast.Module) -> list[ast.Try]:
-    """The `try` blocks that DECIDE availability — FOUR admission rules.
+    """The `try` blocks that DECIDE availability — FIVE admission rules.
 
       * a module-body `try` that assigns an `*AVAILABLE` flag — admitted by the SAME
         three ORed arms as the skip-read rule below (own import inside the `try`,
@@ -1038,12 +1046,19 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
         helper's control flow — the guard may sit inside a `for`;
       * the probe `try` inside a helper a SKIP decision calls — directly from a
         `skipif`, or through a sentinel (`uri = _live_target()` … `if uri is None:
-        pytest.skip(…)`), where no flag exists at all.
+        pytest.skip(…)`), where no flag exists at all;
+      * the probe `try` in ANY OTHER function whose `skip`/`skipif`/`xfail`
+        decision READS a name that `try` BINDS — the test-body widening below
+        (`tests/test_index_surfacing.py:269`), which admits a probe that decides its
+        own skip with no flag, no `skipif` condition and no helper entry point.
 
     The contract above is the code's, not an aspiration: a docstring that said
     "two shapes" while the function admitted four told any lane auditing this
     gate from its own contract that half its population was ungraded (review of
-    3ce7ffdd867, P2). Measured per-branch root counts at that head: 26 / 5 / 15 / 5.
+    3ce7ffdd867, P2). Measured per-branch root counts at that head, for the four
+    rules that then existed: 26 / 5 / 15 / 5. The fifth rule is the `# ── ANY OTHER
+    function whose probe feeds its own SKIP decision` pass at the end of this
+    function; its blast radius is stated there with its measurement.
 
     Both module-body rules walk module-level CONTROL FLOW (`if`/`for`/`with`, and
     through a handler-less `try/finally` — a pure wrapper, see
@@ -1087,6 +1102,40 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     the `if`/`assert` GUARD now (`_skip_call_read_names`), which is also what
     surfaced the four unarmed blocks above; that is why the blast radius grew from
     the 1 measured against the argument-only rule to 5.
+
+    ⛔ DECLARED RESIDUAL — THE SKIP CALLED INSIDE THE BROAD HANDLER is graded by
+    NOTHING. The fifth rule admits a `try` only when the skip decision READS a name
+    that `try` BINDS (`_bound_names(block) & _skip_call_read_names(fn)`). With the
+    guard-keying above that reading covers the sentinel in the MESSAGE
+    (`unsupported = e` … `pytest.skip(f"…{unsupported}")`) and the sentinel in the
+    GUARD (`if not dropped: pytest.skip("…")`). It does not cover the third spelling
+    of the same decision: the skip called IN the broad handler, which binds NOTHING
+    (or binds only `exc` — `_bound_names` counts `Assign`/`AnnAssign` targets, not
+    `ast.ExceptHandler.name`) while the skip reads a reason LITERAL. Two gates then
+    reject it: an empty `skip_read` drops the whole FUNCTION at `if not skip_read:
+    continue`, and a disjoint one fails the `&` above.
+
+    Measured on the real tree at this head, in-process, by adding exactly that
+    admission (a `try` whose handler is `_swallows_everything` and whose handler body
+    calls a `skip`/`skipif`/`xfail` verb) to the fifth pass: THREE new rows in TWO
+    new files — 70 rows / 62 roots / 58 files → **73 / 65 / 60** — and all three come
+    back `covered=()`, i.e. UNARMED, so the rule cannot land without arming each:
+
+      * `tests/test_domain_validators.py:465` (`graph_sdk`) — `imports_own_code=True`
+        (`from tests._embedded import has_falkor`), so an own-code RENAME becomes
+        "embedded FalkorDBLite unavailable". OWES `ImportError` on top of the usual
+        arm (`_required_names(own_import=True)`); the three-name arm alone would red
+        it on BOTH the UNARMED and the import-seam gate, since the broad arm is kept.
+      * `tests/test_8870_version_anchor_write_order.py:202` (`_live_proj`) — reaches
+        the capability seam (`FalkorProjection.from_uri`, `proj.g.query`); binds
+        `{'proj'}`, the skip reads `{'exc','type','_live_utils','reason'}`.
+      * `tests/longmem_eval/test_variant_containment_judge.py:106` — binds
+        `instances`, the skip reads `{'ROWS'}`; the call shape it probes is own code.
+
+    DECLARED here rather than silently left out, per this block's own contract.
+    NOT LANDED because it re-pins the census AND arms three files outside this PR's
+    declared `files[]`; it owes its own witness row and a negative control whose
+    handler does NOT skip.
 
     Nested `try`s inside a probe body are not roots: a `try/_proj.close()/except
     Exception: pass` cleanup is not the availability decision. The import-seam
