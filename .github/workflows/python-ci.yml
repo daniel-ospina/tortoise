@@ -5197,9 +5197,15 @@ jobs:
         # ⛔ WHY THIS IS AN ARM AND NOT A HOPE: the file's own `_both_stores()`
         # reads the ENVIRONMENT, never a switch — `TEST_RECORD_DB_URI` (this
         # job) and `TORTOISE_DB_URI` (the provision above) both set means the
-        # legs MUST run, exactly one set is a FAILURE, and neither set is the
-        # only shape that may skip. A `REQUIRE_*` switch nobody exports would be
-        # an inert guard that only ever skips, which is why there is none here.
+        # legs MUST run, and neither set means there is nothing to test here.
+        # ⛔ THE TWO VARIABLES ARE NOT SYMMETRIC (review, this round): a record
+        # DSN with NO cache URI is a FAILURE — that is the arm that reds if the
+        # `falkordb-provision` step after this one is deleted, and only THIS job
+        # exports a record DSN. A cache URI with no record DSN is the ordinary
+        # docker lane (the sharded `test` matrix, `tools/test_lane.py`) and
+        # SKIPS; making that arm fail reds `test (f)` on every `full` selection.
+        # A `REQUIRE_*` switch nobody exports would be an inert guard that only
+        # ever skips, which is why there is none here.
         # The wiring itself is pinned by
         # `test_the_armed_CI_job_supplies_BOTH_stores` in this file, so deleting
         # the step or the provision reds a test instead of quietly restoring the
