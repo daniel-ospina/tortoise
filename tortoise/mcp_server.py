@@ -7717,11 +7717,14 @@ def tortoise_link_entities(relation: str, from_id: str, to_id: Any = None, *,
     ⛔ A keyword the chosen arm cannot record is REFUSED, never dropped (the SDK's
     own rule; a dropped keyword returns success for a write that stored a subset).
 
-    TWO SPELLINGS OF THE TARGET, and they select DIFFERENT writers on purpose:
-    `to_id` follows the RELATION (the surface's own contract), while
-    `target_ids` — the retired operator door's own argument — selects the
-    OPERATOR arm at any target count, INCLUDING one. The list form is the
-    part/whole fan-out: ONE operator over N targets, the shape
+    TWO SHAPES OF THE TARGET, and they select DIFFERENT writers on purpose:
+    a SCALAR target follows the RELATION (the surface's own contract), while a
+    LIST of targets — under either spelling, `target_ids` (the retired operator
+    door's own argument) or `to_id`; the registered description advertises the
+    list form on `to_id` too — selects the OPERATOR arm at any target count,
+    INCLUDING one. It is the SHAPE that selects, never the count: a list of one
+    is the same fan-out as a list of N. The list form is the part/whole
+    fan-out: ONE operator over N targets, the shape
     `tortoise_create_operator` had and a per-target loop would NOT reproduce.
     Both operator spellings dispatch to the same `_create_operator` writer the
     door used, and `semantics` (the Layer-2 meaning that resolves the direction)
@@ -7750,21 +7753,31 @@ def tortoise_link_entities(relation: str, from_id: str, to_id: Any = None, *,
     sdk = _get_org_sdk()
 
     # ── The OPERATOR arm: one operator over 1..N targets ───────────────────
-    # ⛔ THE PLURAL SPELLING (`target_ids`) OR AN EXPLICIT `operator=true` SELECTS THIS
-    # WRITER, whatever the target count — that is what preserves the retired
-    # `tortoise_create_operator` door's semantics. Measured failure this rule prevents
+    # ⛔ THE SHAPE OF THE TARGET SELECTS THIS WRITER — a LIST, whichever argument carried
+    # it (`target_ids=` at any count, or a list passed as `to_id`) — plus an explicit
+    # `operator=true`. It is NEVER the COUNT. Measured failure this rule prevents
     # (capstone V2, #11609 lane P7): `tortoise_link_entities("NAND", a, [b])` with ONE
     # target fell through to the singular arm, where IMPL/NAND without `operator=True` is
     # the operator-LESS direct edge — so a caller migrating from the operator door got a
     # plain edge, a different write with the same arguments and no error (the #8447 shape).
-    # `to_id` alone still follows the relation, which is `link_entities`'s own contract.
-    operator_arm = op_flag is True or target_ids is not None or len(targets) > 1
+    # ⛔ THE FIRST FIX CLOSED ONLY HALF OF IT: `len(targets) > 1` left the POSITIONAL list
+    # spelling deciding by arity, so `link_entities("NAND", a, [b])` still took the
+    # singular arm while `("NAND", a, [b, c])` took the operator arm — the same expression
+    # shape writing two different things by count alone, which is exactly what the
+    # retired door's positional signature (`create_operator(op_type, source_id,
+    # target_ids)`) hands a mechanically-renamed caller. The shape is the discriminator
+    # (cardinality is DECLARED in every comparable contract — proto3 `repeated`, AIP-158's
+    # repeated field — because a count-based rule makes the write a function of the data).
+    # A SCALAR `to_id` still follows the relation, which is `link_entities`'s own contract.
+    operator_arm = (
+        op_flag is True or target_ids is not None or isinstance(parsed_to, list))
     if operator_arm:
         if op_flag is False:
             return _SafeError({"error": (
-                "link_entities: the operator arm (`target_ids=` or `operator=true`) "
+                "link_entities: the operator arm (a LIST of targets, or `operator=true`) "
                 "always writes a carrying operator — `operator=false` has no meaning "
-                "there. Use `to_id=` with no `operator` for a relation-decided write."),
+                "there. Pass a SCALAR `to_id=` with no `operator` for a relation-decided "
+                "write."),
                 "code": ERR_INVALID})
         stray = [name for name, value in (
             ("confidence", confidence), ("weight", weight),
@@ -7790,8 +7803,9 @@ def tortoise_link_entities(relation: str, from_id: str, to_id: Any = None, *,
     # ── The single-target arm: the SDK's own dispatch ──────────────────────
     if semantics is not None:
         return _SafeError({"error": (
-            "link_entities: `semantics` is the OPERATOR arm's meaning argument (pass "
-            "`target_ids=` or `operator=true`). On the relation-decided arm the "
+            "link_entities: `semantics` is the OPERATOR arm's meaning argument (pass a "
+            "LIST of targets — `target_ids=` or a list as `to_id` — or `operator=true`). "
+            "On the relation-decided arm the "
             "RELATION itself is the meaning (e.g. relation='supports'), so it has no "
             "slot here — name the meaning as the relation instead of dropping it."),
             "code": ERR_INVALID})
@@ -7805,8 +7819,14 @@ def tortoise_link_entities(relation: str, from_id: str, to_id: Any = None, *,
 def tortoise_create_edge(source_id: str, target_id: str, predicate: str) -> dict:
     """Create a typed structural edge between two entities (reification rule).
 
-    RETIRED name (#11609 lane P7) — still served through the #3883 shim, and it
-    forwards to this same body through `tortoise_link_entities`'s plain-edge arm.
+    RETIRED name (#11609 lane P7) — still served through the #3883 shim. Unlike the
+    other retired names in this batch it does NOT forward: its body calls
+    `TortoiseSDK._create_edge` directly (the parenthetical below already named that
+    writer). The EQUIVALENT call through the live verb is
+    `tortoise_link_entities(relation=<predicate>, from_id=..., to_id=...)`, which the
+    SDK routes to the plain-edge writer (`create_edge` → `_create_edge`) for every
+    relation that is neither `wasDerivedFrom`, an epistemic relation needing a
+    carrying operator, nor `references` + `entity_label`.
 
     Relation (predicate): performs, produces, uses, memberOf, ownedBy, managedBy,
     about*, related, dependsOn, etc. Operator-less by default — lazy promotion

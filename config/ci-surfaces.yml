@@ -10316,6 +10316,20 @@ surfaces:
   # row is what `--integrity` requires: a test file with no surface row is `manifest
   # drift`, exit 1 — which is exactly how this one was caught at the head.
   - test_11609_confidence_arms.py
+  # #11609 P7 (this PR) — the FOUR unregistered targets and the five doors they free.
+  # Same surface as its four siblings above, and the file's subject is exactly theirs: it
+  # builds the container doors (`tortoise_link_entities`, `tortoise_poll_events`, …) and the
+  # `TortoiseSDK` methods behind them (`link_entities`, `poll_events`, `_create_operator`,
+  # `_delete`) by `__new__` + monkeypatch, then measures DISPATCH by substitution. ⛔ It
+  # shipped UNREGISTERED in this PR's first cut too — `tools/ci_selection.py --integrity`
+  # reports `manifest drift: ['test_11609_p7_target_registration.py']` (exit 1) and the
+  # required `manifest-integrity` job runs it, which is how the head reds. The row is what
+  # `--integrity` requires; the SELECTION for this diff is already the full matrix
+  # (`tortoise/sdk.py`, `tortoise/tool_registry.py` and `tortoise/mcp_server.py` are all
+  # `SHARED_MODULES`), so the row is load-bearing for the NEXT diff, not this one — but an
+  # unregistered file is a suite no leg has a reason to run, i.e. a gate reading green over
+  # work it never selected.
+  - test_11609_p7_target_registration.py
   - test_11858_source_door_markers.py
   # ⛔ NOT `test_13034_currency_rule_reads_position.py`, which #13110 (PR #13116) briefly put
   # here: its stated reason was FALSE. `tortoise/sdk.py` is a `SHARED_MODULES` entry, so an

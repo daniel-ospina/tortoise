@@ -175,6 +175,48 @@ class TestLinkEntitiesAnswersTheTwoDoorsItAbsorbs:
         assert args == ("NAND", "a", ["b"]), args
         assert kwargs["semantics"] is None, kwargs
 
+    @pytest.mark.parametrize("targets", [["b"], ["b", "c"]], ids=["one", "two"])
+    def test_the_list_SHAPE_selects_the_operator_arm_not_the_COUNT(self, served, targets):
+        """The POSITIONAL list spelling, at ONE target and at TWO — the same writer.
+
+        ⛔ MEASURED FAILURE this pins, and it is the half the FIRST fix left open: with
+        `len(targets) > 1` as the operator arm's count term, `link_entities("NAND", a, [b])`
+        took the relation-decided arm (→ the operator-LESS direct edge) while
+        `link_entities("NAND", a, [b, c])` took the operator arm — the SAME expression
+        shape writing two different things by count ALONE. That is precisely what the
+        retired door's own positional signature hands a mechanically-renamed caller
+        (`tortoise_create_operator(op_type, source_id, target_ids, ...)`), and the
+        registered description advertises the list form on `to_id`.
+
+        Parametrised over one and two targets ON PURPOSE: a count-based rule reds the
+        `one` row and greens the `two` row, so a fix that only widens the count term
+        (`> 0`) cannot pass this test while still deciding by arity somewhere else.
+        """
+        _sdk, calls = served("_create_operator", {"operator": 1})
+        ms.tortoise_link_entities("NAND", "a", targets)
+        assert len(calls) == 1, (
+            f"the positional list {targets!r} produced {len(calls)} operator writes: "
+            f"{calls} — a LIST of targets is the operator arm at ANY count, and this one "
+            "fell through to the relation-decided arm")
+        assert calls[0][0] == ("NAND", "a", targets), calls[0]
+
+    def test_a_json_string_list_in_to_id_is_the_same_shape(self, served):
+        """A raw transport sends the list as JSON text; `_parse` yields the LIST, so the
+        SHAPE (not the transport encoding) is what selects the arm."""
+        _sdk, calls = served("_create_operator", {"operator": 1})
+        ms.tortoise_link_entities("NAND", "a", '["b"]')
+        assert len(calls) == 1 and calls[0][0] == ("NAND", "a", ["b"]), calls
+
+    def test_a_SCALAR_to_id_still_follows_the_relation(self, served):
+        """The other half of the contract, pinned so the shape rule cannot over-reach:
+        a scalar target keeps the relation-decided arm (`link_entities`' own contract),
+        including for IMPL/NAND — where the caller asked for the bare edge."""
+        _sdk, calls = served("link_entities", {"edge": 1})
+        ms.tortoise_link_entities("NAND", "a", "b")
+        assert len(calls) == 1, calls
+        assert calls[0][0] == ("NAND", "a", "b"), calls[0]
+        assert calls[0][1]["operator"] is None, calls[0]
+
     def test_an_explicit_operator_true_selects_the_same_arm(self, served):
         _sdk, calls = served("_create_operator", {"operator": 1})
         ms.tortoise_link_entities("supports", "a", "b", operator=True)
