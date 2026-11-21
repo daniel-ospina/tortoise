@@ -1354,6 +1354,44 @@ def test_a_non_positive_window_is_not_a_silent_unbounded_rollup(
         )
 
 
+def test_a_typo_and_a_non_positive_window_are_warned_about_SEPARATELY(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ The typo arm and the non-positive arm must not share one `_warn_once` key.
+
+    `_warn_once` is once-per-process, and both arms used the key `"window"` — so
+    an operator who mistyped the value (warned once), then fixed it to `0`,
+    never saw the second refusal: the suppressed message is the one carrying the
+    NEWER `raw`. The non-finite arm is already a separate key for this reason;
+    the non-positive arm now is too.
+
+    A single-value test cannot see this — the collision only shows up in a
+    SEQUENCE inside one process, which is why the two values are exercised
+    against an uncleared `_warned` here.
+    """
+    import logging
+
+    monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, "seven")
+    usage_signal._warned.clear()
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+        assert usage_signal._window_days() is None
+        assert len(caplog.records) == 1, [r.getMessage() for r in caplog.records]
+
+        # The operator fixes the typo to a number that is still no bound.
+        monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, "0")
+        assert usage_signal._window_days() is None
+        messages = [record.getMessage() for record in caplog.records]
+
+    assert len(messages) == 2, (
+        "the second refusal was swallowed — both arms share a `_warn_once` key: "
+        f"{messages}"
+    )
+    assert "not a day count" in messages[0]
+    assert "not a positive day count" in messages[1]
+
+
 def test_a_positive_window_is_returned_and_warns_about_nothing(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
