@@ -37,6 +37,7 @@ import pytest
 
 from tools.bridge_table import TARGET_MCP
 from tortoise import mcp_server as ms
+from tortoise.pack_registry import SEMANTICS_MECHANISMS
 from tortoise.sdk import TortoiseSDK
 from tortoise.tool_registry import (
     RETIRED_TOOL_REGISTRY,
@@ -45,6 +46,11 @@ from tortoise.tool_registry import (
 )
 
 RETIRED_BY_NAME = {t.name: t for t in RETIRED_TOOL_REGISTRY}
+
+#: The writer's own, UNSUBSTITUTED entry point, captured at import: the `served` fixture
+#: replaces `TortoiseSDK._create_operator` with a recorder, so a case that wants to run the
+#: REAL `op_type` gate has to hold the real function from before the substitution.
+REAL_CREATE_OPERATOR = TortoiseSDK._create_operator
 
 #: The four names this batch registered, with the SDK method each must reach.
 NEW_TARGETS: dict[str, str] = {
@@ -282,6 +288,36 @@ class TestLinkEntitiesAnswersTheTwoDoorsItAbsorbs:
             f"meaning belongs in `semantics` and the MECHANISM ({mechanism!r}) in "
             "op_type — `_create_operator` refuses a meaning there on every call")
         assert kwargs["semantics"] == relation, kwargs
+
+    def test_every_dispatched_op_type_passes_the_writer_s_OWN_gate(self, served):
+        """The writer's real gate, RUN — because every case above substitutes it.
+
+        ⛔ The review named this as the hole in this file's own coverage: "every case
+        substitutes `TortoiseSDK._create_operator`, so it proves *dispatch shape* and
+        cannot see that the dispatched arguments are invalid for the real writer" — which
+        is exactly how the meaning-in-`op_type` defect shipped green. This runs the
+        writer's FIRST statement (the `op_type` allow-list, which fires before any graph
+        access), so the pre-fix value is proven refused and every value this door
+        actually dispatches is proven accepted — with no database involved.
+
+        Derived from `pack_registry.SEMANTICS_MECHANISMS` rather than a transcription, so
+        a vocabulary move cannot leave this assertion checking a stale nine-name list.
+        """
+        with pytest.raises(ValueError, match="op_type must be"):
+            REAL_CREATE_OPERATOR(object(), "supports", "a", ["b"])
+        for meaning in sorted(SEMANTICS_MECHANISMS):
+            _sdk, calls = served("_create_operator", {"operator": 1})
+            ms.tortoise_link_entities(meaning, "a", ["b"])
+            assert len(calls) == 1, (meaning, calls)
+            op_type = calls[0][0][0]
+            try:
+                REAL_CREATE_OPERATOR(object(), op_type, "a", ["b"])
+            except ValueError as exc:  # pragma: no cover - the regression this pins
+                pytest.fail(
+                    f"relation {meaning!r} dispatched op_type={op_type!r}, which the "
+                    f"writer's own gate refuses: {exc}")
+            except Exception:  # noqa: BLE001 - past the gate; it failed on the graph
+                pass
 
     def test_a_MECHANISM_spelling_passes_through_untouched(self, served):
         """The retired door's positional signature still works: an `op_type` that IS a
