@@ -337,7 +337,7 @@ class _AnchorHrefParser(HTMLParser):
         "dialog", "dir", "div", "dl", "dt", "fieldset", "figcaption", "figure",
         "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header",
         "hgroup", "hr", "li", "listing", "main", "menu", "nav", "ol", "p",
-        "plaintext", "pre", "section", "summary", "table", "ul", "xmp",
+        "plaintext", "pre", "search", "section", "summary", "table", "ul", "xmp",
     })
     #: The "button scope" boundaries for that test (spec: the scope element list —
     #: applet, caption, html, table, td, th, marquee, object, template — plus
@@ -1023,6 +1023,16 @@ class _AnchorHrefParser(HTMLParser):
             "dt": ("dd", "dt"),
             "option": ("option",),
             "optgroup": ("option", "optgroup"),
+            # ⛔ THE SIBLING FAMILY IS NOT ONLY THE LIST ITEMS (#14073 review round 12,
+            # P0, measured). `a`, `button` and `nobr` close an open element of their own
+            # kind by the adoption-agency rules, and each omission dropped painted copy:
+            # `<a><audio><a>CLAIM` renders `<a><audio></audio></a><a>CLAIM</a>` (122 px),
+            # `<button><audio><button>CLAIM` 75 px, `<nobr><audio><nobr>CLAIM` 122 px.
+            # `<h1><audio><h2>CLAIM` is the control that must NOT close: Chrome keeps the
+            # `<h2>` inside the `<audio>` (0 painted px), and this stack agrees.
+            "a": ("a",),
+            "button": ("button",),
+            "nobr": ("nobr",),
         }.get(tag)
         if targets:
             self._close_nearest(targets)
@@ -1499,11 +1509,21 @@ class _AnchorHrefParser(HTMLParser):
         needs BOTH markers, so the ordinary `document.write('<script …>')` idiom is
         unaffected (it never contains ``<!--``).
         """
+        # ⛔ `-->` ENDS THE ESCAPED STATE (#14073 review round 12, P2, measured): in
+        # script-data-escaped a `-->` returns the tokenizer to script data, where
+        # `</script` closes the element as usual. Raising for
+        # `<script><!--<script>--></script><p>CLAIM</p>` refused a document a browser
+        # reads normally (Chrome closes the script and paints CLAIM, 122 px, while the
+        # destinations pin went red on legal markup). The wedge holds only while an
+        # escaped `<script` has NO `-->` after it — the case where the `</script`
+        # genuinely stops closing and the rest of the page is swallowed.
         if (
             not self.wedged_reason
             and self.cdata_elem == "script"
             and "<!--" in data
-            and _SCRIPT_IN_SCRIPT.search(data)
+            and any(
+                "-->" not in data[match.end():] for match in _SCRIPT_IN_SCRIPT.finditer(data)
+            )
         ):
             self.wedged_reason = "script-data-escaped"
         # The text a reader MEETS: outside every suppressed region (raw text, inert
@@ -1582,10 +1602,28 @@ class _AnchorHrefParser(HTMLParser):
           still drops the text, and those are the residuals the module declares.
         """
         frames = self._foster_truncated_ancestry()
-        # A painted LABEL repaints its whole text content, so no wrapper inside it can
-        # be the thing that decides — see `_LABEL_RENDERS`.
-        if any(tag in self._LABEL_RENDERS and renders for tag, _c, renders in frames):
-            return True
+        # A painted LABEL repaints its whole text content, so nothing BETWEEN the select
+        # and the option can be the thing that decides — see `_LABEL_RENDERS`.
+        #
+        # ⛔ THE GATE IS THE ENCLOSING `<select>`'s FLAG, NOT THE OPTION'S (#14073 review
+        # round 12, P0, measured). An option's own flag inherits from what is directly
+        # above it, so gating on it let a wrapper BETWEEN the select and the option kill
+        # the exception: `<select><audio><option>CLAIM</option></audio></select>` paints
+        # the label (67 px, same as without the wrapper) while this scan returned `''`.
+        # What actually decides is whether the SELECT is rendered: with the wrapper the
+        # select is still rendered, and with `<div hidden><select>` it is not (0 px).
+        label_at = next(
+            (i for i, (tag, _c, _r) in enumerate(frames) if tag in self._LABEL_RENDERS),
+            None,
+        )
+        if label_at is not None:
+            select_at = next(
+                (i for i in range(label_at - 1, -1, -1) if frames[i][0] == "select"),
+                None,
+            )
+            decided_by = select_at if select_at is not None else label_at
+            if all(renders for _t, _c, renders in frames[:decided_by + 1]):
+                return True
         for tag, _container, renders in frames:
             if renders:
                 continue

@@ -2565,12 +2565,15 @@ def test_the_select_scope_closes_on_input_and_a_nested_select_and_nothing_else()
         "dialog", "dir", "div", "dl", "dt", "fieldset", "figcaption", "figure",
         "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header",
         "hgroup", "hr", "li", "listing", "main", "menu", "nav", "ol", "p",
-        "plaintext", "pre", "section", "summary", "table", "ul", "xmp",
+        "plaintext", "pre", "search", "section", "summary", "table", "ul", "xmp",
     }, (
         "`_P_CLOSERS` changed: each member's start tag CLOSES an open `<p>` in a "
         "browser, and closing it decides which ancestors the summary and any painted "
         "text inherit from. `li`/`dd`/`dt` belong (their own spec step closes a `<p>`); "
-        "`plaintext` belongs too, and it is the ROUND-10 addition: its own spec step "
+        "`search` is the ROUND-12 addition (its own spec step closes a `<p>`; Chrome: "
+        "`<p><audio><search>CLAIM` dumps as `<p><audio></audio></p><search>CLAIM`, so "
+        "the claim is painted while this stack dropped it). `plaintext` belongs too, "
+        "and it is the ROUND-10 addition: its own spec step "
         "closes a `<p>`, and Chrome agrees — `<p>one<plaintext>two<p>three` dumps as "
         "`<p>one</p><plaintext>two<p>three</plaintext>`, i.e. the `<p>` closed and "
         "everything after is plaintext's text. `td` does not (outside a table it "
@@ -4074,6 +4077,90 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
             f"{label}: this wrapper IS an ancestor of the text in a browser, so "
             f"counting it would be a false red that the loud rule must not introduce"
         )
+
+    # ⛔ P0, ROUND 12 — THE SIBLING FAMILY IS `a`/`button`/`nobr` TOO, and `search` is a
+    # block-start `<p>`-closer. Each omission left an `_UNRENDERED` wrapper on the stack
+    # and the loud rule dropped a claim a browser paints (measured, with the end-to-end
+    # injection leaving all four `#storage` pins green):
+    #   `<p><audio><search>CLAIM`   -> `<p><audio></audio></p><search>CLAIM`    122 px
+    #   `<a><audio><a>CLAIM`        -> `<a><audio></audio></a><a>CLAIM</a>`     122 px
+    #   `<button><audio><button>…`  -> `<button><audio></audio></button><button>…` 75 px
+    #   `<nobr><audio><nobr>CLAIM`  -> `<nobr><audio></audio></nobr><nobr>…`    122 px
+    # …and the CONTROL that must NOT close: a heading does not close a heading, so a
+    # browser keeps `<h2>` inside the `<audio>` (0 px) and this stack must agree.
+    for label, markup in (
+        ("search closes p", "<p><audio><search>FalkorDB permanently deletes it</search></audio></p>"),
+        ("a closes a", "<a><audio><a>FalkorDB permanently deletes it</a></audio></a>"),
+        ("button closes button",
+         "<button><audio><button>FalkorDB permanently deletes it</button></audio></button>"),
+        ("nobr closes nobr", "<nobr><audio><nobr>FalkorDB permanently deletes it</nobr></audio></nobr>"),
+    ):
+        closes = section.replace("</h2>", "</h2>" + markup, 1)
+        assert closes != section, f"the {label} control could not inject"
+        assert "falkor" in _banned_vocabulary(closes), (
+            f"{label}: a browser closes the earlier sibling AND discards the wrapper "
+            f"inside it, so the claim is painted at the parent's level"
+        )
+        with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
+            _assert_storage_section_reviewed(closes)
+
+    heading_in_audio = section.replace(
+        "</h2>",
+        "</h2><h1><audio><h2>FalkorDB permanently deletes it</h2></audio></h1>",
+        1,
+    )
+    assert heading_in_audio != section
+    assert "falkor" not in _banned_vocabulary(heading_in_audio), (
+        "a heading does NOT close a heading, so the browser keeps the claim inside the "
+        "`<audio>` and paints none of it — counting it would be a false red"
+    )
+
+    # ⛔ P0, ROUND 12 — THE LABEL GATE IS THE `<select>`'s FLAG, NOT THE OPTION'S. A
+    # wrapper BETWEEN them does not stop the label painting (measured: 67 px with and
+    # without), so gating on the option's inherited flag dropped a painted label.
+    for wrapper in ("audio", "video", "canvas", "meter", "progress", "rp"):
+        wrapped_label = section.replace(
+            "</h2>",
+            f"</h2><select><{wrapper}><option>FalkorDB permanently deletes it</option>"
+            f"</{wrapper}></select>",
+            1,
+        )
+        assert wrapped_label != section
+        assert "falkor" in _banned_vocabulary(wrapped_label), (
+            f"the option's LABEL is its text content, so `<{wrapper}>` between the "
+            f"select and the option does not hide it — the enclosing select's own "
+            f"render flag is what decides"
+        )
+        with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
+            _assert_storage_section_reviewed(wrapped_label)
+
+    # …and the select's flag still governs: a `hidden` select hides the label, and a
+    # `<datalist>` option is not painted at all (both measured 0 px).
+    for label, markup in (
+        ("hidden select", "<div hidden><select><option>FalkorDB permanently deletes it"
+                          "</option></select></div>"),
+        ("datalist option", "<datalist><option><audio>FalkorDB permanently deletes it"
+                            "</audio></option></datalist>"),
+    ):
+        dark_label = section.replace("</h2>", "</h2>" + markup, 1)
+        assert dark_label != section
+        assert "falkor" not in _banned_vocabulary(dark_label), (
+            f"{label}: a browser paints none of this, so the loud rule must not count it"
+        )
+
+    # ⛔ P2, ROUND 12 — `-->` ENDS script-data-escaped, so the wedge must NOT fire. The
+    # guard used to raise for `<script><!--<script>--></script>`, which a browser reads
+    # normally (Chrome closes the script and paints what follows, 122 px), reddening the
+    # destinations pin on legal markup. It still fires for the shape it exists for: an
+    # escaped `<script` with no `-->` after it, where `</script` stops closing.
+    assert " ".join(_visible_text(
+        "<script><!--<script>--></script><p>SEE THIS</p>"
+    ).split()) == "SEE THIS", (
+        "the `-->` returns the tokenizer to script data, so `</script>` closes the "
+        "element and the following text is painted — this must not wedge"
+    )
+    with pytest.raises(ValueError, match="wedged"):
+        extract_visible_text("<script><!--<script></script><p>SWALLOWED</p>")
 
     # …and the ONE thing that still hides it: an unrendered ancestor that is NOT the
     # disclosure itself, which is the residual class this module declares.
