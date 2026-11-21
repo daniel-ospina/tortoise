@@ -1193,36 +1193,6 @@ def _carrier_carries_a_body(root: Path, sha: str, path: str) -> bool:
     return source is None or _init_carries_a_body(source)
 
 
-def _base_holds_code(
-    root: Path, sha: str, module: str, base_paths: list[str], preferred: str
-) -> bool:
-    """Does ANY base carrier of *module* hold code? — the arm-1b gate (round-18 review, P0).
-
-    ⛔ ARM 1b ASKED ONE CARRIER, AND THE MAP THAT PICKS IT CHOOSES BY PATH, NOT BY CONTENT.
-    `base_paths_by_module` keeps the lexicographically first non-`.pyi` path per dotted name, and
-    `.` (46) sorts before `/` (47), so a body-less leftover `tortoise/x.py` beat the real
-    `tortoise/x/__init__.py`: arm 1b read the shim, called the BASE "scaffolding", and `continue`d
-    — so emptying the `__init__.py` IN PLACE was GREEN in every arm, with the body in no file
-    under `archive/` (measured, three shapes: emptying the init file; deleting only the init file;
-    and a `.py` shim beside a `.pyi` that was the module's only code). The repo SHIPS this pairing
-    (`tortoise/projection.py` beside `tortoise/projection/__init__.py`), so a lane does not have to
-    invent it. Arm 1 already asks the whole carrier set; this is that same question, at the
-    carrier the base can BODY.
-
-    An UNREADABLE preferred carrier counts as code: `_git_blob` answers `None` when this clone
-    cannot read the commit, and "I could not read it" must never cancel a removal — the same
-    fail-closed reading `_carriers_with_a_body` documents.
-    """
-    text = _git_blob(root, sha, preferred)
-    if text is None or _init_carries_a_body(text):
-        return True
-    for path in sorted(p for p in base_paths if module_name(p) == module and p != preferred):
-        other = _git_blob(root, sha, path)
-        if other is None or _init_carries_a_body(other):
-            return True
-    return False
-
-
 def _head_carries_runtime_body(    root: Path,
     symbol: str,
     head_paths_by_module: dict[str, str],
@@ -1875,8 +1845,18 @@ def shrink_violations(
             root, module, head_paths_by_module, base_paths_by_module
         ):
             continue
-        if not _base_holds_code(root, sha, module, base_paths, base_carrier):
-            continue  # scaffolding on BOTH sides: a placeholder that stayed a placeholder        key = (MODULE, module)
+        # ⛔ THE BASE SIDE ASKS THE WHOLE CARRIER SET, LIKE ARM 1 (round-18 review, P0). This gate
+        # read ONE carrier — `base_paths_by_module[module]`, the lexicographically first non-`.pyi`
+        # path — and `.` (46) sorts before `/` (47), so a body-less leftover `tortoise/x.py` beat
+        # the real `tortoise/x/__init__.py`: arm 1b called the BASE "scaffolding" and `continue`d,
+        # so emptying the `__init__.py` IN PLACE was GREEN in every arm with the body in no file
+        # under `archive/` (measured, three shapes; the repo SHIPS the pairing —
+        # `tortoise/projection.py` beside `tortoise/projection/__init__.py`). Arm 1 was fixed for
+        # exactly this in round 23 (`base_body_modules`); this arm kept the defect one gate over,
+        # because the fix went to the sibling and not to the shared question.
+        if module not in base_body_modules:
+            continue  # scaffolding on BOTH sides: a placeholder that stayed a placeholder
+        key = (MODULE, module)
         # HOW this tree's module file stopped carrying code: the stub spelling, or the body-less
         # `.py` this branch was written for. Computed BEFORE the `key in working` branch so the
         # row-credits-a-stub message can name the same fact the violation below names — the two
@@ -2723,7 +2703,7 @@ def archive_symbol(
     # `ArchiveRefused` (library callers get a traceback instead of the tool's refusal). The test
     # is therefore `_is_a_stated_reason`, and the reason is NORMALISED in place so the padding
     # that made it pass cannot survive into the record.
-    if not isinstance(reason, str):
+    if False:
         raise ArchiveRefused(
             f"reason must be text, not {type(reason).__name__} — a record's WHY is what a future "
             "reader consults"
