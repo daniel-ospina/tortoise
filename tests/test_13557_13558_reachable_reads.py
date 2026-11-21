@@ -50,6 +50,7 @@ convention, ``tests/_live_utils.py``).
 """
 from __future__ import annotations
 
+import inspect
 import os
 import sys
 import uuid
@@ -675,6 +676,46 @@ def test_a_strong_cue_that_does_not_fire_reports_itself_and_never_routes():
                              reason="invented")
 
 
+def test_a_missed_cue_names_words_it_saw_whole():
+    r"""The notice's `cue` ends on a WORD boundary (#14033 review, P3).
+
+    `signal_cue` is copied verbatim into `missed_route_payload`'s `cue`, which a
+    caller reads in `read_status_out["state_question"]["cue"]` and in the hosted
+    body's `state_question.cue`. Its contract is *"``cue`` names the words it
+    saw"* — so a match ending inside the next word is a diagnostic that misnames
+    what it saw. `which_names_an_ending` was the one signal that carried its
+    trailing context INSIDE the match (`\s+[a-z]`), so `group(0)` stopped on the
+    first letter of the following noun. Every other signal ends on a `\b`.
+    """
+    from tortoise.state_intent import detect_state_question, missed_route_payload
+
+    # The rows the review measured through the module's own functions.
+    measured = {
+        "which of our withdrawn claims affected pricing": "which of our withdrawn",
+        "which archived report has the Q3 numbers": "which archived",
+        "which archived reports were retracted": "which archived",
+    }
+    for query, want in measured.items():
+        got = detect_state_question(query)
+        assert got.signal == "which_names_an_ending", (query, got.signal)
+        assert got.signal_cue == want, (query, got.signal_cue)
+
+    # …and the PROPERTY, over every query that reports a notice — not only these
+    # three, so a new notice row cannot reintroduce the truncation.
+    for query in sorted(set(NOTICE_ONLY) | set(measured) | set(NOT_SELECTED)):
+        got = detect_state_question(query)
+        if not got.signal:
+            continue
+        cue = missed_route_payload(got)["cue"]
+        assert cue, query
+        assert query.startswith(cue), (query, cue)
+        rest = query[len(cue):]
+        assert not rest or not (rest[0].isalnum() or rest[0] == "_"), (
+            f"the cue {cue!r} for {query!r} is truncated MID-WORD ({rest[0]!r}) — a "
+            f"diagnostic whose contract is 'cue names the words it saw' cannot "
+            f"stop inside one")
+
+
 def test_every_signal_is_its_shape_without_the_end_anchor():
     """The anti-drift falsifier for the notice: ONE expression, two tails.
 
@@ -743,13 +784,36 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
     question reads the ended records", which invited exactly the failures its
     table measures. So the description now carries the phrasings in two groups —
     ROUTES and DOES NOT ROUTE — and this test reads those groups back out of the
-    docstring and checks each row against the recogniser. A description that
+    description and checks each row against the recogniser. A description that
     stops naming a phrasing, or files it under the wrong heading, reds here.
+
+    ⛔ IT READS THE **SERVED** STRING, NOT `tortoise_search.__doc__` (#14033
+    review, P1). `FastMCPAdapter.register_all` hands FastMCP
+    `ToolDefinition.description`, and an explicit `description=` OVERRIDES the
+    docstring (gofastmcp.com *Tools*: "when provided, FastMCP ignores the function
+    docstring for the tool description") — so a docstring copy is invisible to
+    every MCP caller. The first cut of this change put the block in the docstring
+    and pinned it here; the row then passed no matter what the served text said,
+    which is a false PASS over the exact deliverable the issue asks for. The
+    docstring no longer carries the block at all — one home, checked below.
     """
     from tortoise.mcp_server import tortoise_search
-    from tortoise.state_intent import detect_state_question
+    from tortoise.state_intent import ROUTING_NOTE, detect_state_question
+    from tortoise.tool_registry import TOOL_REGISTRY
 
-    doc = tortoise_search.__doc__ or ""
+    # The artifact an MCP caller actually receives: the registry row's description,
+    # which `FastMCPAdapter.register_all` passes to `FunctionTool.from_function(...)`.
+    doc = next(t for t in TOOL_REGISTRY if t.name == "tortoise_search").description
+    assert ROUTING_NOTE in doc, (
+        "the served tortoise_search description does not carry the routing block — "
+        "the recogniser owns it, the registry must serve it (#14033)")
+
+    # …and the docstring must NOT carry a second copy: prose there reaches no caller,
+    # so a re-added copy reads like the contract while the served text drifts from it.
+    assert "ROUTES — answered from the ended population" not in (
+        tortoise_search.__doc__ or ""), (
+        "the routing block is back in `tortoise_search.__doc__`, which FastMCP does "
+        "not serve when the registry supplies `description=` — one home only (#14033)")
     routes_head = "ROUTES — answered from the ended population"
     declines_head = "DOES NOT ROUTE — an ordinary relevance search"
     boundary_head = "SO A STATE QUESTION THAT DOES NOT ROUTE"
@@ -786,6 +850,29 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
         assert detect_state_question(query).population is None, (
             f"the MCP description files {query!r} under DOES NOT ROUTE, but it "
             f"does route — the description contradicts the code")
+
+    # ⛔ AND THE CHANNEL IT NAMES MUST EXIST (#14033 review, P1b). The block used to
+    # promise "the SDK, whose read-status sink carries the same payload" — no PUBLIC
+    # SDK method accepts that sink, so the served text sent every agent after an
+    # entry point that does not exist. Pin the corrected claim both ways.
+    import tortoise.sdk as _sdk_mod
+
+    assert "read_status_out" in doc and "_tortoise_fts_query" in doc, (
+        "the served description must name the PRIVATE SDK entry point that carries "
+        "the notice, or it promises a channel a customer cannot reach")
+    assert "read_status_out" in inspect.signature(
+        _sdk_mod.TortoiseSDK._tortoise_fts_query).parameters, (
+        "the served description names `_tortoise_fts_query(read_status_out=…)` but "
+        "that sink is gone from the method — the description is now false")
+    public_with_sink = [
+        n for n, m in inspect.getmembers(_sdk_mod.TortoiseSDK, inspect.isfunction)
+        if not n.startswith("_")
+        and "read_status_out" in inspect.signature(m).parameters
+    ]
+    assert not public_with_sink, (
+        f"a public SDK method now accepts `read_status_out` ({public_with_sink}) — the "
+        f"served description says no PUBLIC method exposes the notice; update the text "
+        f"to name it rather than leaving the one channel that exists unadvertised")
 
 
 def test_the_partitive_is_not_the_discriminator():

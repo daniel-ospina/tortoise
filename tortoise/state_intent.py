@@ -473,10 +473,17 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
         for name, shape in _ENDING_SHAPES
         if _TAIL_END in shape.pattern
     ),
+    # ⛔ THE TRAILING CONTEXT IS A LOOKAHEAD, never part of the match (#14033 review).
+    # `\s+[a-z]` INSIDE the pattern put the first letter of the next noun in
+    # `group(0)`, so the cue a caller is handed was truncated mid-word — measured:
+    # `which of our withdrawn claims affected pricing` reported
+    # `'which of our withdrawn c'` through `missed_route_payload`'s `cue`, whose
+    # contract is "``cue`` names the words it saw". Every other signal ends on a
+    # `\b`; this row is the one that did not.
     ("which_names_an_ending", re.compile(
         rf"^which\s+(?:of\s+)?"
         rf"(?:(?:our|the|all|your|their|its|my|these|those)\s+)?"
-        rf"(?:{_ENDING_WORDS})\s+[a-z]")),
+        rf"(?:{_ENDING_WORDS})(?=\s+[a-z])")),
 )
 
 #: What a caller is told when a state cue was seen and no shape applied. ONE
@@ -494,6 +501,59 @@ MISSED_ROUTE_HINT = (
     "QUALIFIER is what you are asking about (\"in v3\", \"by legal\", \"in "
     "Q3\"), this relevance read is the right one and the population cannot apply it."
 )
+
+#: WHICH PHRASINGS ROUTE — the caller-facing predictability block of #14033, owned
+#: here for the same reason :data:`MISSED_ROUTE_HINT` is: the SERVED text, the
+#: developer prose in ``mcp_server.tortoise_search`` and the routing test must not
+#: be able to describe the boundary differently.
+#:
+#: ⛔ IT IS SERVED FROM ``tool_registry`` — NOT from a docstring. `FastMCPAdapter.
+#: register_all` hands FastMCP ``ToolDefinition.description`` and an explicit
+#: ``description=`` OVERRIDES the docstring (gofastmcp.com *Tools*: "when provided,
+#: FastMCP ignores the function docstring for the tool description"), so prose added
+#: to ``tortoise_search.__doc__`` alone reaches NO caller — which is exactly what
+#: happened when this block first landed and the defect #14033 names stayed live on
+#: every MCP surface. The test reads the served string, not the docstring.
+ROUTING_NOTE = """\
+⛔ WHICH PHRASINGS ROUTE, SO YOU CAN PREDICT IT (#14033). The cue is the
+question's own PREDICATE, anchored to its grammatical role — never an ending
+word that happens to sit near a wh-word — so the boundary is readable off the
+wording. Of the phrasings this read is asked about:
+
+  ROUTES — answered from the ended population, each row with how it ended:
+    `has anything we relied on been withdrawn`   (has/have + quantifier + been)
+    `what ended`                                 (the whole question is the ending)
+    `what has ended recently`                    (a RECENCY adverb only: it names
+                                                  no window the read must apply,
+                                                  and every row carries `endedAt`)
+    `is the onboarding flow retired?`            (yes/no, subject = the record)
+    `list what we retired`                       (imperative over `what we …`,
+                                                  i.e. a request for a SET)
+  DOES NOT ROUTE — an ordinary relevance search, byte for byte:
+    `which of our withdrawn claims affected pricing`
+                                                 (the ending word MODIFIES
+                                                  `claims`; the question's own
+                                                  predicate is `affected
+                                                  pricing`, which the
+                                                  population cannot answer)
+
+⛔ SO A STATE QUESTION THAT DOES NOT ROUTE BEHAVES EXACTLY LIKE A NORMAL
+SEARCH. There is no second attempt and no fallback: you get the rows the words
+match, which may be empty or unrelated, and an EMPTY answer here is NOT
+evidence that nothing has ended. This tool takes NO argument that forces the
+ended read — the SHAPE is the only way in, so the way to be explicit is to ask
+a form from the ROUTES list above. ⛔ THIS TOOL CANNOT REPORT the cue it saw
+and could not apply — its reply is the row list and it takes no sink — so an
+MCP caller who needs that report must use the hosted `GET /v1/search` route,
+whose response body carries `state_question` (`{routed: false, cue, reason,
+hint}`), which is the only CUSTOMER-facing channel: no PUBLIC SDK method
+exposes it either — the same payload rides the PRIVATE
+`TortoiseSDK._tortoise_fts_query(..., read_status_out=...)` sink (under
+`read_status_out["state_question"]`), so an integration that calls the SDK
+directly must name that private method deliberately. The difference it makes
+there is that "the route declined my state question" stops looking like "the
+graph says nothing has ended".
+"""
 
 #: The reasons a strong cue can be seen without the population being served.
 #: CLOSED, because a caller branches on the value: ``shape`` is the guard refusing
@@ -699,6 +759,7 @@ __all__ = [
     "MISSED_ROUTE_HINT",
     "MISSED_ROUTE_REASONS",
     "POPULATIONS",
+    "ROUTING_NOTE",
     "StateQuestion",
     "detect_state_question",
     "missed_route_payload",

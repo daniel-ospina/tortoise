@@ -15108,8 +15108,11 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), org: dict = Depen
     # truncation marker is: it fires only for a query the recogniser SAW as a
     # state question and could not apply, and it is the only thing that makes the
     # relevance reply to such a question distinguishable from the factual claim
-    # "nothing has ended". A query with no state cue leaves it empty, so this
-    # response is byte-identical for every content search.
+    # "nothing has ended". ⛔ NOT "byte-identical for every content search": a
+    # content query that NAMES an ending — `which features are deprecated in v3` —
+    # DOES carry it, with `routed: false`, and must, because that reply would
+    # otherwise read as "nothing is deprecated" (the same wording the SDK's
+    # `_state_route_out` block and the read-level test use).
     state_out: dict = {}
     # #3718 (construction half of #4660, second batch): the SDK is BUILT off the
     # loop, not just used off it. In embedded mode `_make_sdk` probes the
