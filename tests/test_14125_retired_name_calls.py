@@ -892,20 +892,26 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     # that asymmetry was the hole.
     for stmt in _control_flow_tries(tree.body):
         if _assigns_availability(stmt) and (
-            _imports_own_code(stmt)
-            or _touches_own_code(stmt, module_own)
-            or _reaches_capability_seam(stmt)
+            _imports_own_code(stmt) or _touches_own_code(stmt, module_own)
         ):
             # The own-code gate applies to THIS branch too. Without it the rule
             # redded `TORCH_AVAILABLE = False / try: import torch …`, i.e. a probe
             # whose only seam is an OPTIONAL third-party extra — precisely the
             # false red the import-seam rule and the self-test refuse (review of
             # 03fc244, P2).
+            #
+            # `_reaches_capability_seam` is deliberately NOT ORed in here: it
+            # matches the generic attribute `query`, which a THIRD-PARTY client has
+            # too, so admitting it at module level graded
+            # `import some_optional_dep; some_optional_dep.query(...)` as a root —
+            # the very false red the paragraph above refuses, and a contradiction
+            # of the third-party rule pinned in this file. It also admitted ZERO
+            # roots here (measured), so gating it costs nothing (review of
+            # 4478e90782d, P2). Its two real roots come from the SKIP-GATED
+            # helper branch, where the capability call IS the own-code seam.
             roots.append(stmt)
         elif (_bound_names(stmt) & skip_referenced) and (
-            _imports_own_code(stmt)
-            or _touches_own_code(stmt, _own_imported_names(tree.body))
-            or _reaches_capability_seam(stmt)
+            _imports_own_code(stmt) or _touches_own_code(stmt, module_own)
         ):
             # A module-body probe whose flag is spelled something other than
             # `*AVAILABLE` — `LIVE`, `_FTS_ESCAPE_LIVE`, `_FALKORDB_UP` — is NOT an
@@ -1938,6 +1944,117 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "a SKIPIF-called helper reading a module-scope own-code name must be "
         f"graded too, or its branch's half of the rule is unwitnessed: "
         f"{module_scope_door_skipif}"
+    )
+
+    # 4i/4j/4k. ONE isolating witness per admission arm, because a rule whose arm
+    #     can be deleted with all tests green is the silent-drop class this gate
+    #     exists to forbid — the review of 4478e90782d measured that each of these
+    #     three could be blanked with the population unchanged.
+    #
+    # 4i — the module-body `*AVAILABLE` branch's OWN-CODE contact: a module-scope
+    #      own import is the only seam, and the flag is an availability flag, so
+    #      only this arm can admit it.
+    module_body_own_contact = roots(
+        """
+        from tests._live_utils import docker_uri
+
+        FALKORDB_AVAILABLE = False
+        try:
+            docker_uri("tortoise_test_x")
+            FALKORDB_AVAILABLE = True
+        except Exception:
+            FALKORDB_AVAILABLE = False
+        """
+    )
+    assert module_body_own_contact == ((5, (), True, False, True),), (
+        "a module-body availability guard whose only seam is a MODULE-scope own "
+        f"import must be graded by the own-code contact arm: {module_body_own_contact}"
+    )
+    # 4j — the module-body SKIP-READ branch: the same contact, but the flag is not
+    #      spelled `*AVAILABLE` — it is a name a `skipif` reads.
+    module_body_skip_read = roots(
+        """
+        import pytest
+        from tests._live_utils import docker_uri
+
+        LIVE = False
+        try:
+            docker_uri("tortoise_test_x")
+            LIVE = True
+        except Exception:
+            LIVE = False
+
+        @pytest.mark.skipif(not LIVE, reason="live")
+        def test_live():
+            pass
+        """
+    )
+    assert module_body_skip_read == ((6, (), True, False, True),), (
+        "a module-body guard binding a name a `skipif` READS must be graded even "
+        f"without an `*AVAILABLE` spelling: {module_body_skip_read}"
+    )
+    # 4k — the RESOLVER branch's capability-seam arm: the client is passed in, so
+    #      neither an import nor a bound own name is reachable — only the call
+    #      shape (`client.g.query`) is.
+    resolver_capability_seam = roots(
+        """
+        def _probe(client):
+            try:
+                client.g.query("RETURN 1")
+                return True
+            except Exception:
+                return False
+
+        FALKORDB_AVAILABLE = _probe(None)
+        """
+    )
+    assert resolver_capability_seam == ((3, (), True, False, True),), (
+        "a resolver helper whose only seam is the CAPABILITY CALL on a passed-in "
+        f"client must be graded: {resolver_capability_seam}"
+    )
+
+    # 4i-/4j-. The own-code contact on the two module-body branches is a FILTER, so
+    #     its isolating witness is the NEGATIVE one: a module-body availability
+    #     guard whose only seam is an optional THIRD-PARTY extra must NOT be graded.
+    #     Deleting either contact arm admits these and reddens exactly these rows
+    #     (measured after the review of 4478e90782d: both deletions were green
+    #     before these two rows existed).
+    module_body_third_party = roots(
+        """
+        TORCH_AVAILABLE = False
+        try:
+            import torch
+            torch.zeros(1)
+            TORCH_AVAILABLE = True
+        except Exception:
+            TORCH_AVAILABLE = False
+        """
+    )
+    assert module_body_third_party == (), (
+        "a module-body `*AVAILABLE` guard whose only seam is an optional THIRD-PARTY "
+        "extra must not be graded — demanding a re-raise there turns a legitimate "
+        f"skip into a collection error: {module_body_third_party}"
+    )
+    module_body_third_party_skip_read = roots(
+        """
+        import pytest
+
+        LIVE = False
+        try:
+            import torch
+            torch.zeros(1)
+            LIVE = True
+        except Exception:
+            LIVE = False
+
+        @pytest.mark.skipif(not LIVE, reason="live")
+        def test_live():
+            pass
+        """
+    )
+    assert module_body_third_party_skip_read == (), (
+        "the same filter must apply to the SKIP-READ branch — a third-party-only "
+        f"guard is not the own-code seam: {module_body_third_party_skip_read}"
     )
 
     # 5. The real tree must carry all four shapes, or every assertion above is a
