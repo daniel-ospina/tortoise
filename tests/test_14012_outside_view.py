@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tortoise import outside_view, record_projection
 from tortoise.cache_eviction import Assessment, CacheState
 from tortoise.cache_evictor import Candidate, EvictionPolicy, evict
+from tortoise.cache_projection import NODE_TABLES
 
 ORG = "org_test"
 GRAPH_ID = "g_abc"
@@ -368,6 +369,71 @@ def test_the_columns_this_module_reads_are_real_record_columns():
         f"outside_view reads {missing}, which public.point does not have "
         f"(record_projection.table_columns() parsed from the migrations)"
     )
+
+
+def test_every_record_label_resolves_a_REAL_topic_and_timestamp_column():
+    """The label axis is six tables; pinning `point` alone let two assumptions survive.
+
+    ⛔ Both were single-table assumptions and both shipped: `TOPIC_COLUMN` was hardcoded
+    to `point_kind` (which exists ONLY on `public.point`, so every other label failed out
+    of the box on a column the caller never passed), and `SPAN_SQL` hardcoded
+    `created_at` (which `public.event` does not have, so `--label Event` came back
+    UNMEASURED — exit 4, "the measurement failed, retry" — forever). Pinning the maps
+    against the parsed schema is what makes a renamed column a RED rather than a SQL
+    error in production.
+    """
+    tables = record_projection.table_columns()
+    for label, table in sorted(NODE_TABLES.items()):
+        columns = tables.get(table)
+        assert columns, f"no parsed schema for public.{table}"
+        topic = outside_view.TOPIC_COLUMN_BY_LABEL.get(label)
+        assert topic is not None, f"no topic mapping for {label}"
+        if topic:
+            assert topic in columns, (
+                f"outside_view groups {label} by {topic!r}, which public.{table} does "
+                f"not have (record_projection.table_columns())"
+            )
+        ts = outside_view.TIMESTAMP_COLUMN_BY_LABEL.get(label)
+        assert ts and ts in columns, (
+            f"outside_view reads the span of {label} from {ts!r}, which public.{table} "
+            f"does not have — that is the exit-4-forever shape this arm exists to catch"
+        )
+
+
+def test_a_label_whose_table_has_no_kind_column_demands_one_instead_of_defaulting():
+    """`session` carries no `*_kind`, so the grouping dimension has no default.
+
+    Refused as a USAGE error naming what the table DOES have — never as UNMEASURED (a
+    failed measurement) and never by silently applying `point_kind`, which is what made
+    every non-`Point` label unusable with the shipped defaults.
+    """
+    assert not outside_view.TOPIC_COLUMN_BY_LABEL["Session"]
+    with pytest.raises(ValueError) as exc:
+        _view(_Graph(["s0"]), _Conn(_record_rows(["s0"])), label="Session")
+    text = str(exc.value)
+    assert "no kind column" in text and "topic-column" in text, text
+
+
+def test_the_span_renders_the_labels_OWN_timestamp():
+    """`public.event` has no `created_at`; the rendered span must not ask it for one.
+
+    ⛔ Graded on the RENDER, not through a full `read()`: the fake graph answers `Point`
+    statements only, so driving `--label Event` end to end here would grade the fake. The
+    schema half (does `public.event` actually carry `started_at`?) is the arm above.
+    """
+    sql = outside_view.SPAN_SQL.format(
+        table=NODE_TABLES["Event"], tier="",
+        ts=outside_view.TIMESTAMP_COLUMN_BY_LABEL["Event"])
+    assert "created_at" not in sql, (
+        "the span asked public.event for created_at, which it does not have — the whole "
+        "view then reads as UNMEASURED (exit 4) for a table that answers fine"
+    )
+    assert "started_at" in sql
+    # And the default label's span is unchanged, so the fix did not move `Point`.
+    default_sql = outside_view.SPAN_SQL.format(
+        table=NODE_TABLES["Point"], tier="",
+        ts=outside_view.TIMESTAMP_COLUMN_BY_LABEL["Point"])
+    assert "created_at" in default_sql
 
 
 def test_a_useless_key_bound_is_refused_rather_than_read_as_an_empty_cache():

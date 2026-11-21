@@ -324,9 +324,17 @@ def main(argv: list[str] | None = None) -> int:
                     # named a different population" (an explicit mismatch is REFUSED, not
                     # silently overridden). `pin`/`outside` resolve their own defaults.
                     label=args.label or "Point", key_prop=args.key_prop or "id",
-                    topic_column=args.topic_column or outside_view.TOPIC_COLUMN,
-                    top=args.top or outside_view.DEFAULT_TOP_TOPICS,
-                    key_limit=args.max_keys or outside_view.DEFAULT_RESIDENT_KEY_LIMIT,
+                    # ⛔ `is None`, NEVER `or`: `--max-keys 0` was silently rewritten to
+                    # the DEFAULT — 200,000, the WIDENING direction — which also made the
+                    # module's own floor refusal ("a bound of zero cannot read any key",
+                    # pinned by `test_a_useless_key_bound_is_refused_rather_than_read_as_an_empty_cache`)
+                    # unreachable from the command line: the guard refuses zero, and the
+                    # verb handed it the maximum instead. `--top 0` had the same shape.
+                    topic_column=args.topic_column,
+                    top=(args.top if args.top is not None
+                         else outside_view.DEFAULT_TOP_TOPICS),
+                    key_limit=(args.max_keys if args.max_keys is not None
+                               else outside_view.DEFAULT_RESIDENT_KEY_LIMIT),
                 )
             except (ValueError, resident_pin.PinConfigError) as exc:
                 # A `--label` the record has no table for, or a `--topic-column` that is

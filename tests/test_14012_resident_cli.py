@@ -374,6 +374,24 @@ def test_outside_with_a_non_bare_key_prop_is_a_usage_error_not_unmeasured(
     assert exc.value.code == resident.EXIT_USAGE
 
 
+def test_outside_refuses_a_zero_key_bound_instead_of_widening_it(
+        wired, capsys, monkeypatch):
+    """`--max-keys 0` must reach the module's floor refusal, never be defaulted away.
+
+    ⛔ `args.max_keys or DEFAULT` silently rewrote `0` to 200,000 — the WIDENING
+    direction on the one flag that bounds a read — which also made the module's own floor
+    ("a bound of zero cannot read any key") unreachable from the command line. A caller
+    asking for a bound of zero is making a mistake; the answer is the refusal, not the
+    maximum.
+    """
+    _fake_psycopg(monkeypatch, _Conn())
+    with pytest.raises(SystemExit) as exc:
+        resident.main(["outside", *BASE, "--dsn", "postgresql://x", "--org-id",
+                       "org_a", "--graph-id", "g_1", "--max-keys", "0",
+                       "--window-nodes", "1000"])
+    assert exc.value.code == resident.EXIT_USAGE
+
+
 def test_pin_with_a_non_bare_label_is_a_refusal_not_a_traceback(wired, capsys):
     """A first pin on an EMPTY declaration reaches `bare_identifier` inside `pin`.
 

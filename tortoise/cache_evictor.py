@@ -1100,6 +1100,23 @@ def evict(
                 held_record[:] = [
                     c for c in held_record if c.node_id != candidate.node_id
                 ]
+            # ⛔ AND THE SAME PRUNE FOR THE PIN, which had none: `held_pinned_ids` only
+            # prevented a duplicate APPEND, it was never consulted when the node was
+            # taken — so a node whose pin predicate RAISED once (a store blip) and
+            # answered False on the retry reached `local` and was DELETED while staying
+            # in `skipped_pin_unanswerable`. `deleted` then intersected
+            # `skipped_pin_unanswerable`, which is precisely the "stale held entry" the
+            # record-probe list above clears for its own, and the pin's invariant is the
+            # stronger one ("a pinned node is never deleted").
+            if candidate.node_id in held_pinned_ids:
+                held_pinned_ids.discard(candidate.node_id)
+                held_pinned[:] = [
+                    c for c in held_pinned if c.node_id != candidate.node_id
+                ]
+                held_pinned_unanswerable[:] = [
+                    c for c in held_pinned_unanswerable
+                    if c.node_id != candidate.node_id
+                ]
             local.append(candidate)
             local_ids.add(candidate.node_id)
 
@@ -1381,10 +1398,20 @@ def evict(
             # so a held-back head at or beyond that bound is never passed — telling the
             # operator to re-run would send them into a loop that cannot converge.
             reach = resolved.batch_size * (2 ** (resolved.max_passes - 1))
-            if len(held_record) >= reach or len(held_leased) >= reach:
+            # ⛔ THE PIN IS A THIRD HOLD-BACK and it was missing here, so an all-pinned
+            # head was told "re-run to continue" — an instruction that examines the same
+            # nodes and stops in the same place, forever, while the only working reply
+            # ("unpin, or raise the pin budget") lives in the `pinned` arm this path
+            # never reaches. Reproduced: 6 pinned nodes, batch 1 x 3 passes (reach 4),
+            # `held_pinned=4`, `deleted=0`, reason "re-run to continue".
+            if (len(held_record) >= reach or len(held_leased) >= reach
+                    or len(held_pinned) >= reach
+                    or len(held_pinned_unanswerable) >= reach):
                 reason += (
                     f"; still {over_after} node(s) over the budget — the held-back head "
-                    f"({len(held_record)} unservable, {len(held_leased)} leased) has "
+                    f"({len(held_record)} unservable, {len(held_leased)} leased, "
+                    f"{len(held_pinned)} pinned, "
+                    f"{len(held_pinned_unanswerable)} pin-unanswerable) has "
                     f"reached the widest prefix ONE call can examine "
                     f"({reach} = batch {resolved.batch_size} x "
                     f"2^(max_passes-1 {resolved.max_passes - 1})); re-running will not "

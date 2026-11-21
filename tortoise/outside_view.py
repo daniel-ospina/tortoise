@@ -68,19 +68,53 @@ DEFAULT_RESIDENT_KEY_LIMIT = 200_000
 #: enough that the surface stays a summary rather than an export.
 DEFAULT_TOP_TOPICS = 5
 
-#: The record column the "what it was about" answer groups by. `point_kind` is the
-#: ontology's own kind vocabulary (`docs/ONTOLOGY.md` §4.1) — a stable, already-populated
-#: column, unlike `tags`, which is free-form and often absent.
+#: The record column the "what it was about" answer groups by for a ``Point``.
+#: `point_kind` is the ontology's own kind vocabulary (`docs/ONTOLOGY.md` §4.1) — a
+#: stable, already-populated column, unlike `tags`, which is free-form and often absent.
 TOPIC_COLUMN = "point_kind"
 
-#: The columns this module reads. Pinned against `record_projection.table_columns()` by
-#: the suite, so a renamed column is a RED rather than a SQL error in production.
+#: ⛔ THE LABEL AXIS IS SIX TABLES AND THE COLUMN AXIS WAS ONE. `read()` accepts every key
+#: of `NODE_TABLES` (`point, event, subject, object, source, session`), but the topic
+#: column was hardcoded to `point_kind` — which exists ONLY on `public.point`. So every
+#: other label failed out of the box with a usage error naming a column the CALLER never
+#: passed (the default did), and the CLI's own exit table described neither case. The
+#: default is now per table: `<label>_kind` where the record has it.
+TOPIC_COLUMN_BY_LABEL: dict[str, str] = {
+    "Point": "point_kind",
+    "Event": "event_kind",
+    "Subject": "subject_kind",
+    "Object": "object_kind",
+    "Source": "source_kind",
+    #: The session table carries no `*_kind` column at all, so "what it was about" has no
+    #: default here: the caller must name a grouping column. `read()` refuses otherwise,
+    #: as a USAGE error that lists what the table does have.
+    "Session": "",
+}
+
+#: ⛔ The same single-table assumption broke the SPAN: `created_at` does not exist on
+#: `public.event`, so `outside --label Event` read as UNMEASURED (exit 4) forever — a
+#: scheduler retrying a command no retry can fix, for a table that answers perfectly well
+#: about "roughly when" through `started_at`.
+TIMESTAMP_COLUMN_BY_LABEL: dict[str, str] = {
+    "Point": "created_at",
+    "Event": "started_at",
+    "Subject": "created_at",
+    "Object": "created_at",
+    "Source": "created_at",
+    "Session": "created_at",
+}
+
+#: The columns this module reads for the default label. Pinned against
+#: `record_projection.table_columns()` by the suite, so a renamed column is a RED rather
+#: than a SQL error in production — and the OTHER five tables are pinned the same way by
+#: that suite's per-label arm, because pinning `point` alone is what let the two
+#: single-table assumptions above survive.
 READ_COLUMNS: tuple[str, ...] = ("node_key", "created_at", "cache_tier", TOPIC_COLUMN)
 
 #: The span query: how many, and roughly when. One statement, aggregates only — nothing
 #: here transfers a row it does not have to.
 SPAN_SQL = (
-    "SELECT count(*) AS outside, min(created_at) AS oldest, max(created_at) AS newest "
+    "SELECT count(*) AS outside, min({ts}) AS oldest, max({ts}) AS newest "
     "FROM public.{table} "
     "WHERE org_id = %s AND graph_id = %s{tier} "
     "AND NOT (node_key = ANY(%s::text[]))"
@@ -282,7 +316,7 @@ def read(
     graph_id: str,
     label: str = "Point",
     key_prop: str = "id",
-    topic_column: str = TOPIC_COLUMN,
+    topic_column: str | None = None,
     top: int = DEFAULT_TOP_TOPICS,
     key_limit: int = DEFAULT_RESIDENT_KEY_LIMIT,
 ) -> OutsideView:
@@ -299,6 +333,34 @@ def read(
         raise ValueError(f"label {label!r} is not a record label {sorted(NODE_TABLES)}")
 
     table = NODE_TABLES[label]
+    columns_for_table = _rp.table_columns().get(table, frozenset())
+    # ⛔ RESOLVED PER TABLE, NEVER ASSUMED FROM `point`. A `None` here means the caller
+    # named none, so the label's own default applies; a label whose table carries no
+    # `*_kind` column (today: `session`) has NO default and must be told one. That is a
+    # USAGE error (the caller can fix it by naming a column), stated with the columns the
+    # table actually has — not the `point_kind` default this used to apply to every
+    # label, which made `--label Source|Event|Subject|Object|Session` fail out of the box
+    # naming a column nobody passed.
+    if topic_column is None:
+        topic_column = TOPIC_COLUMN_BY_LABEL.get(label, "")
+        if not topic_column:
+            raise ValueError(
+                f"the {label} table (public.{table}) carries no kind column, so the "
+                f"grouping dimension has no default: name one with --topic-column from "
+                f"{sorted(columns_for_table) or 'the record schema'}"
+            )
+    # ⛔ AND THE SPAN USES THE LABEL'S OWN TIMESTAMP. `created_at` does not exist on
+    # `public.event`, so the span raised there and the whole view came back UNMEASURED
+    # (exit 4) — for a table that answers "roughly when" perfectly well through
+    # `started_at`. A label with no timestamp at all is refused as a USAGE error rather
+    # than read as a failed measurement.
+    timestamp_column = TIMESTAMP_COLUMN_BY_LABEL.get(label, "")
+    if not timestamp_column or timestamp_column not in columns_for_table:
+        raise ValueError(
+            f"the {label} table (public.{table}) has no timestamp this view can read, "
+            f"so 'roughly when' cannot be answered for it: name a label whose table "
+            f"carries one, or ask this view for a different label"
+        )
     # ⛔ THE ONE IDENTIFIER THAT REACHES A **SQL** STRING, and therefore the one that
     # must be allowlisted rather than merely quoted: `TOPICS_SQL` puts `{topic}` in the
     # SELECT list and `GROUP BY 1`, which is an IDENTIFIER position — `%s` covers
@@ -324,6 +386,7 @@ def read(
     # expensive subquery could be forced on every call. `READ_COLUMNS` is the declared
     # surface; the schema is the authority it is checked against.
     _checked(topic_column, what="topic column")
+    _checked(timestamp_column, what="timestamp column")
     # ⛔ `key_prop` IS THE THIRD INTERPOLATED IDENTIFIER, and it is validated HERE rather
     # than only inside `resident_keys` — which sits behind the guard's `except Exception`.
     # Validated only there, a bad `--key-prop` came back as `complete=False` with
@@ -334,6 +397,15 @@ def read(
     # `except (ValueError, PinConfigError) -> parser.error` arm is what turns this into
     # exit 1 (usage).
     _checked(key_prop, what="key property")
+    # ⛔ THE BOUNDS ARE FLAGS TOO, so they are validated HERE for the same reason as the
+    # identifiers: inside the guard a `--max-keys 0` came back as UNMEASURED (exit 4,
+    # "retry") instead of a usage error the caller can fix. `tools/resident.py` had a
+    # second half of this defect — `args.max_keys or DEFAULT` rewrote `0` to 200,000, the
+    # WIDENING direction — and both are needed for the floor to be reachable at all.
+    if not isinstance(key_limit, int) or isinstance(key_limit, bool) or key_limit < 1:
+        raise ValueError(f"--max-keys must be a positive integer, got {key_limit!r}")
+    if not isinstance(top, int) or isinstance(top, bool) or top < 1:
+        raise ValueError(f"--top must be a positive integer, got {top!r}")
     columns = _rp.table_columns().get(table)
     if columns is not None and topic_column not in columns:
         raise ValueError(
@@ -381,7 +453,7 @@ def read(
     # reason) was broken on exactly the refusal it exists to report.
     try:
         cur = _rp.scope_connection(conn, org_id)
-        span = _rows(cur, SPAN_SQL.format(table=table, tier=tier),
+        span = _rows(cur, SPAN_SQL.format(table=table, tier=tier, ts=timestamp_column),
                      (org_id, graph_id, list(keys)))
         buckets = _rows(
             cur, TOPICS_SQL.format(table=table, tier=tier, topic=topic_column),
