@@ -4529,10 +4529,24 @@ def cmd_check(args: argparse.Namespace) -> int:
             + ", ".join(sorted(getattr(args, "allow_surface_shrink", ()) or ()))
             + f" — reason: {getattr(args, 'allow_surface_shrink_reason', '')}"
         )
+    # ⛔ THE COUNT MUST BE THE ONE THIS RUN ACTUALLY ASSERTED (review F2 of PR #14039).
+    # The shrink arm is the FIFTEENTH property (#12327), so a `check --base-ref` that
+    # still printed "fourteen" UNDER-STATED what it graded — the same defect class as the
+    # docstring above, in the other direction: a reported fact its own caller falsifies.
+    # A bare `check` (no base ref) keeps fourteen, which is what it really ran.
+    if _shrink_compared is not None:
+        _property_note = (
+            "fifteen properties hold (eleven structural, one derived-from-code, "
+            "one declared-vs-approved, one provenance, one shrink)"
+        )
+    else:
+        _property_note = (
+            "fourteen properties hold (eleven structural, one derived-from-code, "
+            "one declared-vs-approved, one provenance)"
+        )
     print(
         f"OK — {len(rows)} tool rows, {len(retired) if isinstance(retired, list) else 0} retired, "
-        "fourteen properties hold (eleven structural, one derived-from-code, "
-        "one declared-vs-approved, one provenance)"
+        + _property_note
         + (
             f"; shrink checked against {_shrink_compared}"
             if _shrink_compared is not None
