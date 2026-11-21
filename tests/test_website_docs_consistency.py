@@ -2511,7 +2511,33 @@ def test_the_select_scope_closes_on_input_and_a_nested_select_and_nothing_else()
     `origin/main` reported `['/blog']` and the pre-fix branch reported `[]` — a link
     every browser renders, reported absent to `_offers_blog_entry` and to the E2E
     legal-pages consumer.
+
+    ⛔ THE SET IS AN ALLOWLIST, AND THE TWO ROWS ABOVE ARE A BANNED LIST. Rows that
+    name the tokens which MUST NOT pop only constrain the tokens they name: a THIRD
+    token added to `_SELECT_POP` was measured leaving this whole module green
+    (`frozenset({'input', 'div', 'span'})` → `103 passed, 1 skipped`), so the
+    mechanism this test exists to protect was unguarded against exactly the edit that
+    widens it. End-to-end, with `div`/`span` added and a decoy
+    `<select><div></div><a href="#storage-limits">` inside the TOC block, the slice
+    bounded at that anchor, came out EQUAL to the reviewed wording, and the
+    allowlist, the destinations, the vocabulary scan and the golden were all green
+    while a contradicting `#storage-limits` heading sat outside it — the same
+    fail-open, one token over. The allowlist row below closes that: it pins the SET,
+    so adding any member reds here by name rather than silently widening the escape
+    (#14073 review round 8, P2).
     """
+    # ── THE SET ITSELF: an allowlist of the one token the spec pops on ──
+    declared_pop = set(_AnchorHrefParser._SELECT_POP)
+    assert declared_pop == {"input", "select"}, (
+        "`_SELECT_POP` changed: every member of this set CLOSES an open `<select>`, so "
+        "an extra one advertises anchors inside a select and bounds the slice at a "
+        "heading no reader meets. Allowlist the two tokens the living standard names "
+        "(`input` pops the scope, a nested `select` pops the outer one and is then "
+        "IGNORED — see `_SELECT_POP_IGNORED`); do not ban the ones reverted here, or "
+        "the next added token is unpinned — measured: with only 'input' in the set, "
+        "`{'input', 'div', 'span'}` was still 103 passed, 1 skipped, and a decoy "
+        "`<select><div><a href=\"#storage-limits\">` in the TOC block left every "
+        "storage pin green")
     # ── PRESENT: `<input>` pops the scope, so what follows is outside the select ──
     assert extract_anchor_hrefs(
         '<select><input><a href="/blog">Blog</a></select>'
@@ -3706,6 +3732,62 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
         )
         with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
             _assert_storage_section_reviewed(shelled)
+    # 3d. …and the same claim where the element this stack keeps sits INSIDE the `<p>`
+    #    rather than beside it (#14073 review round 9, P1, measured). The browser's
+    #    implied `</p>` — spec "in body", a block-start tag such as `<summary>` with a
+    #    `<p>` in button scope — pops the `<p>` AND everything opened inside it, so in
+    #    `<details><p>Tap to read more<span><summary>CLAIM` the `<summary>` is the
+    #    `<details>`' DIRECT child and is painted. The round-8 walk looked past
+    #    `_SUMMARY_TRANSPARENT` members only, and `<span>` is not one, so it stopped
+    #    there and dropped the claim. Measured in Chrome: `summary.parentElement` is
+    #    `DETAILS`, rect 1264×18, `innerText` contains the claim — while
+    #    `extract_visible_text` returned `''` and the allowlist, the destinations, the
+    #    vocabulary scan and the wording golden were all green.
+    #
+    #    DRIVEN FOR EVERY PHRASING ELEMENT, because the family is the test: the
+    #    round-8 row above drives a single wrapper and was what left this open.
+    for phrasing in ("span", "b", "em", "code", "label"):
+        nested = section.replace(
+            "</h2>",
+            "</h2><details><p>Tap to read more<" + phrasing + "><summary>FalkorDB "
+            "permanently deletes your least-used items after thirty days"
+            "</summary></" + phrasing + "></p></details>",
+            1,
+        )
+        assert nested != section, f"the `<{phrasing}>`-inside-`<p>` control could not inject"
+        assert _attributes_outside_allowlist(nested) == [], (
+            f"premise: the `<{phrasing}>`-inside-`<p>` shell adds no attribute, so the "
+            f"allowlist cannot be what catches this"
+        )
+        assert sorted(set(extract_anchor_hrefs(nested))) == list(
+            _REVIEWED_SECTION_HREFS
+        ), f"premise: the `<{phrasing}>`-inside-`<p>` shell adds no href, so the destination pin cannot catch this"
+        assert "falkor" in _banned_vocabulary(nested), (
+            f"the implied `</p>` pops `<{phrasing}>` together with the `<p>`, so the "
+            f"summary IS the details' child and its words reach the reader; dropping "
+            f"them is a claim painted and invisible to every storage pin"
+        )
+        with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
+            _assert_storage_section_reviewed(nested)
+    # …and the same NEGATIVE as above, one level in: a `<span>` with NO `<p>` between
+    # it and the `<details>` is kept by the browser, so the summary is not the
+    # details' child and a closed details paints no body. This is what stops the fix
+    # for 3d becoming "skip any phrasing element".
+    for kept_phrasing in ("span", "b"):
+        no_p = section.replace(
+            "</h2>",
+            "</h2><details><" + kept_phrasing + "><summary>FalkorDB permanently "
+            "deletes everything</summary></" + kept_phrasing + "></details>",
+            1,
+        )
+        assert no_p != section
+        assert "falkor" not in _banned_vocabulary(no_p), (
+            f"with no `<p>` in button scope there is no implied close, so `<{kept_phrasing}>` "
+            f"stays the summary's parent and a closed details paints no body — admitting "
+            f"it would count text nobody sees (Chrome: parentElement is "
+            f"`{kept_phrasing.upper()}`, not painted)"
+        )
+        assert " ".join(_visible_text(no_p).split()) == reviewed
     # …and the NEGATIVE that stops the carve-out becoming "skip anything": an element
     # the browser DOES keep between them (`<div>`, `<section>`) means the summary is not
     # the details' child, and a closed details paints no body.

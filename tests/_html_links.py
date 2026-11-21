@@ -337,6 +337,31 @@ class _AnchorHrefParser(HTMLParser):
     #: is not the details' child and nothing under it is painted. That negative is what
     #: stops the carve-out admitting a whole closed body.
     _SUMMARY_TRANSPARENT = _IMPLICITLY_CLOSED
+    #: The block-start tags whose START TAG closes an open `<p>` — spec "in body":
+    #: *"If the stack of open elements has a `p` element in button scope, then close
+    #: a `p` element"*, and "close a `p` element" is *"… pop the current node off
+    #: the stack of open elements until a `p` element has been popped"* — the `<p>`
+    #: AND everything opened inside it.
+    #:
+    #: `summary` is on this list, which is what makes the painted-summary carve-out
+    #: answer the browser's question rather than this stack's (#14073 review round 9,
+    #: P1, measured): with a `<span>` opened inside the `<p>`, the browser pops BOTH
+    #: and the `<summary>` becomes the `<details>`' direct child.
+    _P_CLOSERS = frozenset({
+        "address", "article", "aside", "blockquote", "center", "details",
+        "dialog", "dir", "div", "dl", "fieldset", "figcaption", "figure",
+        "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header",
+        "hgroup", "hr", "listing", "main", "menu", "nav", "ol", "p", "pre",
+        "section", "summary", "table", "ul", "xmp",
+    })
+    #: The "button scope" boundaries for that test (spec: the scope element list —
+    #: applet, caption, html, table, td, th, marquee, object, template — plus
+    #: `button` for the BUTTON scope). The search stops here: a `<p>` beyond one of
+    #: these is NOT in button scope, so no implied close happens.
+    _P_SCOPE_BOUNDARY = frozenset({
+        "applet", "button", "caption", "html", "marquee", "object", "table",
+        "td", "template", "th",
+    })
     #: The `_RAW` members whose CONTENT a reader DOES meet, so the visible-text
     #: recording must not drop it with the rest of the raw-text family.
     #:
@@ -863,6 +888,41 @@ class _AnchorHrefParser(HTMLParser):
         """
         return any(open_tag == "select" for open_tag, _, _ in self._open_elements)
 
+    def _close_p_scope(self, tag: str) -> None:
+        """Close an open `<p>` when `tag`'s start tag closes one.
+
+        Spec "in body", `summary` (among others, see `_P_CLOSERS`) — *"If the stack
+        of open elements has a `p` element in button scope, then close a `p`
+        element"* — and "close a `p` element" pops the `<p>` AND every element opened
+        inside it.
+
+        ⛔ WHY THE WHOLE CASCADE MATTERS, NOT JUST THE `<p>` ITSELF (#14073 review
+        round 9, P1, measured). The stack keeps a phrasing element opened INSIDE the
+        `<p>`, so in `<details><p>Tap to read more<span><summary>CLAIM</summary>` the
+        `<span>` sat between the `<details>` and the `<summary>`. The painted-summary
+        carve-out looked past only `_SUMMARY_TRANSPARENT` members, the `<span>` is not
+        one, so the walk stopped on it and inherited `renders=False` — while Chromium
+        pops the `<p>` and the `<span>` together and makes the `<summary>` a DIRECT
+        child of the `<details>` (measured: `summary.parentElement` is `DETAILS`, rect
+        1264×18, `innerText` contains the claim). `extract_visible_text` returned `''`
+        for that shape and `'<p>Tap to read more<b><summary>CLAIM'` likewise: a painted
+        claim invisible to every `#storage` pin.
+
+        The same three guards the rest of the ancestry reads use: a token inside a
+        suppressed region is template content or raw text, a wedged parse is already
+        refusing, and foreign content is not "in body" at all.
+        """
+        if tag not in self._P_CLOSERS:
+            return
+        if self._suppress or self.wedged_reason or self._foreign:
+            return
+        for open_tag, _container, _renders in reversed(self._open_elements):
+            if open_tag == "p":
+                self._close_extent("p")
+                return
+            if open_tag in self._P_SCOPE_BOUNDARY:
+                return
+
     def _close_select_scope(self, tag: str) -> bool:
         """Pop an open `<select>` for a token that pops it; `True` when IGNORED.
 
@@ -1173,9 +1233,13 @@ class _AnchorHrefParser(HTMLParser):
         super().set_cdata_mode(elem, *args, **kwargs)  # type: ignore[arg-type]
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        # FIRST, and before `_open`/`_collect`/`_record_heading`, so the pop reads
-        # the PRE-tag ancestry the browser's own step reads. A nested `<select>` is
-        # IGNORED whole: no element, no id, no extent (see `_SELECT_POP_IGNORED`).
+        # FIRST, and before `_open`/`_collect`/`_record_heading`, so each pop reads
+        # the PRE-tag ancestry the browser's own step reads. The spec's block-start
+        # rule (implied `</p>`) runs before the per-token select rules, and they do
+        # not overlap: see `_close_p_scope` and `_close_select_scope`.
+        self._close_p_scope(tag)
+        # A nested `<select>` is IGNORED whole: no element, no id, no extent (see
+        # `_SELECT_POP_IGNORED`).
         if self._close_select_scope(tag):
             return
         # Before `_open`, because this tag's own id/attributes count even where
