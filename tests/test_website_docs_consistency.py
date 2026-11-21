@@ -3158,13 +3158,24 @@ def test_a_base_element_moves_what_the_section_advertises() -> None:
         "only the FIRST `<base href>` a browser parses can move the base; "
         "returning a later one computes a URL no browser navigates from"
     )
-    # …and the bound follows the first base, not the last.
+    # …and the bound follows the first base, not the last — WITH A PREMISE THAT
+    # CAN FAIL. The obvious mutant (`<base href="/">` then a foreign host) is not
+    # a control for this rule: BOTH bases leave the page, so the slice is the rest
+    # of the document whichever one wins (measured: 21389 chars for either order),
+    # and a `!=` against the unbased slice passes both ways. The two bases below
+    # differ in what they do to the slice — the FIRST names this page, so the TOC
+    # entries stay same-page and the slice is the reviewed section; the SECOND
+    # leaves the page, so honouring it runs the slice to the end of the document
+    # (measured on this page: 2990 vs 21389).
     two_bases = page.replace(
-        "<head>", '<head><base href="/"><base href="https://evil.example/">', 1
+        "<head>", '<head><base href="/tortoise/docs"><base href="/">', 1
     )
-    assert _docs_section(page=two_bases) != _docs_section(), (
+    assert two_bases != page, "website/docs.html has no `<head>` to inject bases into"
+    assert _docs_section(page=two_bases) == _docs_section(), (
         "a second `<base href>` overrode the first: the bound must take the base "
-        "the browser takes, which is the first one"
+        "the browser takes, which is the FIRST one. Here the first base names "
+        "this page and the second leaves it, so a last-base-wins read runs the "
+        "slice to the end of the document and the reviewable section grows."
     )
 
 
