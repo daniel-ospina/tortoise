@@ -1787,12 +1787,32 @@ def test_the_storage_section_uses_no_internal_vocabulary() -> None:
     (#14073 review). Widening the allowlist later means re-widening this scan in
     the same change.
     """
-    section = re.sub(r"[^a-z0-9]+", " ", _visible_text(_docs_section()).lower())
-    for word, why in _BANNED_VOCABULARY.items():
-        assert word not in section, (
-            f"the #storage section contains {word!r}: {why}. Keep it in the "
-            f"same voice as the capacity notices (#13998/#14013)."
-        )
+    # ⛔ THE HELPER, NOT A COPY OF IT. This pin used to re-implement the fold
+    # inline while `_banned_vocabulary`'s docstring promised the caller's
+    # controls were "normalised the way the pin normalises" — so the helper could
+    # be reverted to the raw-markup scan the docstring says was fixed and the
+    # whole suite stayed green while every slice-bound control measured the
+    # reverted behaviour (measured, #14073 review round 4). One implementation.
+    found = _banned_vocabulary(_docs_section())
+    assert not found, (
+        f"the #storage section contains {found!r}: "
+        + "; ".join(_BANNED_VOCABULARY[word] for word in found)
+        + ". Keep it in the same voice as the capacity notices (#13998/#14013)."
+    )
+    # ⛔ AND THE NARROWING ITSELF IS PINNED, in the FALSE-RED direction. Tag and
+    # attribute text left the scan because a reader meets no claim there — so a
+    # banned word sitting in a `class` or an `href` VALUE must NOT red. Without
+    # this row, “the fold reads visible text only” is asserted by nothing, and the
+    # helper is free to revert to folding raw markup (measured, same review).
+    assert _banned_vocabulary('<span class="hot-cache">ok</span>') == [], (
+        "a banned word in a `class` value is not text a reader meets, so folding "
+        "the raw markup is the false-red half this pin was narrowed to remove"
+    )
+    assert _banned_vocabulary('<a href="#tier">ok</a>') == [], (
+        "an `href` VALUE is a destination, not reader-facing text: a banned word "
+        "there must not red the vocabulary pin (it is judged by "
+        "`_REVIEWED_SECTION_HREFS` instead)"
+    )
 
 
 #: The reviewed wording of `#storage`, as a reader sees it.
@@ -3004,6 +3024,37 @@ def test_every_storage_pin_reds_on_its_own_violation() -> None:
         _assert_storage_section_reviewed(reworded)
 
 
+def test_a_second_toc_block_refuses_rather_than_picking_one() -> None:
+    """The "exactly one rendered TOC block" refusal is DRIVEN, not just asserted.
+
+    `_docs_section` says the single-TOC rule is "asserted rather than assumed"
+    because with two blocks which one is the index is undecidable, and the second
+    could advertise a heading the reviewed one does not. Neutralising that assert
+    left the suite green (measured, #14073 review round 4): the control suite
+    covered a TOC inside a comment and inside an inert `<template>`, but not a
+    second RENDERED block — the one spelling the refusal exists for.
+
+    ⛔ WHAT THIS DRIVES IS THE REFUSAL, and only the refusal — the module-level
+    docstring on `_docs_section` explains the damage a second block does (an
+    un-advertised heading bounds the slice, carrying copy past every storage pin).
+    That explanation is prose, not a pin, and this test does not assert it: a
+    claim asserted by nothing is the defect this file keeps finding.
+    """
+    page = DOCS.read_text(encoding="utf-8")
+    marker = '<div class="toc">'
+    assert marker in page, "website/docs.html has no `<div class=\"toc\">`"
+    # A second RENDERED block, ahead of the real one, advertising a heading the
+    # reviewed TOC does not.
+    two_tocs = page.replace(
+        marker,
+        '<div class="toc"><a href="#storage-limits">Also</a></div>' + marker,
+        1,
+    )
+    assert two_tocs != page
+    with pytest.raises(AssertionError, match="toc"):
+        _docs_section(page=two_tocs)
+
+
 def test_a_base_element_moves_what_the_section_advertises() -> None:
     """A `<base href>` changes which document a fragment-only link lands on.
 
@@ -3078,6 +3129,25 @@ def test_a_base_element_moves_what_the_section_advertises() -> None:
     ) is None, (
         "a `<base>` inside an inert `<template>` is not one a browser applies, so "
         "honouring it would move the base to a page no reader navigates from"
+    )
+
+    # ⛔ AND THE FIRST ONE WINS. A later `<base href>` is ignored, so honouring it
+    # would compute a base no browser uses — a fail-open on this very question.
+    # Unpinned until round 4: deleting `or self.base_href is not None` left the
+    # whole suite green (measured, #14073 review).
+    assert extract_first_base_href(
+        '<head><base href="/first"><base href="https://evil.example/">'
+    ) == "/first", (
+        "only the FIRST `<base href>` a browser parses can move the base; "
+        "returning a later one computes a URL no browser navigates from"
+    )
+    # …and the bound follows the first base, not the last.
+    two_bases = page.replace(
+        "<head>", '<head><base href="/"><base href="https://evil.example/">', 1
+    )
+    assert _docs_section(page=two_bases) != _docs_section(), (
+        "a second `<base href>` overrode the first: the bound must take the base "
+        "the browser takes, which is the first one"
     )
 
 
