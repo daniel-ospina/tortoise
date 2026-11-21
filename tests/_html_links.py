@@ -1419,21 +1419,35 @@ class _AnchorHrefParser(HTMLParser):
         while this model kept the select open and reported `[]` — a rendered link
         DROPPED, i.e. a correct page reddened (the golden would cut the slice short).
 
-        ⛔ THE PRECONDITION IS "FOSTER-PARENTED OUT OF AN OPEN TABLE", NOT "current node
-        is a select" (#14073 review round 19, re-measured). `<select><table>` keeps the
-        table INSIDE the select (Chrome: `<select><table><tbody><tr><td>…`, one select,
-        the anchor inside it) — the close above happens only when a `<table>` is
-        already open and the select was moved out of it, which is the shape that
-        reddened this: `<table><select><table>` gives `<select></select><table></table>`.
-        So the rule fires only when an open `<table>` frame exists too; otherwise the
-        select survives, which is the `#storage` slice pin's own row.
+        ⛔ THE PRECONDITION IS "AN OPEN TABLE BENEATH THE SELECT", AT ANY DEPTH
+        (#14073 review round 19 re-measured, then widened in round 20 by measurement).
+        `<select><table>` keeps the table INSIDE the select (Chrome:
+        `<select><table><tbody><tr><td>…`, one select, the anchor inside it), so a
+        select with no table beneath it survives. But when a table IS beneath, the
+        close happens from any depth, not only when the select is the current node:
+        `<table><select><div><table><a href="/blog">L` gives Chrome
+        `<select><div></div></select><table></table><a href="/blog">L</a>` — the anchor
+        9.8×17 and outside the select — while a current-node-only guard returned `[]`
+        and DROPPED a rendered link (the loud direction). Same with an `<optgroup>`.
         """
         if tag != "table" or self._suppress or self.wedged_reason or self._foreign:
             return
-        if not self._open_elements or self._open_elements[-1][0] != "select":
+        select_at = next(
+            (
+                i
+                for i in range(len(self._open_elements) - 1, -1, -1)
+                if self._open_elements[i][0] == "select"
+            ),
+            None,
+        )
+        if select_at is None:
             return
-        if any(open_tag == "table" for open_tag, _c, _r in self._open_elements):
-            self._close_extent("select")
+        if not any(
+            open_tag == "table"
+            for open_tag, _c, _r in self._open_elements[:select_at]
+        ):
+            return
+        self._close_extent("select")
 
     #: The sibling closes whose spec step REMOVES the matched element from the stack
     #: rather than popping through it: the adoption agency's `existingA`
@@ -1581,11 +1595,15 @@ class _AnchorHrefParser(HTMLParser):
         landed (#14073 review round 19: mutating it away changed no behaviour and no
         pin reddened, which is how it was found).
 
-        ⛔ AND "NOT LEFT IN THE ANCESTRY" IS FALSE FOR THE FURTHEST BLOCK (#14073
-        review round 19, P1, measured). AAA removes from the stack only the nodes
-        BETWEEN the formatting element and its `furthestBlock` — the furthest block
-        and everything above it STAY. The furthest block is the topmost SPECIAL
-        element above the match, and `<select>` is special, so:
+        ⛔ AND "NOT LEFT IN THE ANCESTRY" IS FALSE FROM THE FURTHEST BLOCK UPWARD
+        (#14073 review round 19, P1, measured). AAA removes from the stack only the
+        nodes BETWEEN the formatting element and its `furthestBlock`; from that block
+        upward everything STAYS. The block is the NEAREST special element above the
+        match — measured, and the distinction is load-bearing: scanning top-down for
+        the deepest one instead kept only the last frame and dropped a `<select>`
+        below it (#14073 review round 20, P1: `<a><select><div><a href="/blog">L` came
+        back `['/blog']` while Chrome has the anchor `inSelect`, 0×0). `<select>` is
+        special, so with one wrapper the nearest special IS the select and:
 
             <a><select><a href="/blog">L</a>
               -> Chrome: <a><select><a href="/blog">L</a></select></a>; the second
@@ -1607,15 +1625,15 @@ class _AnchorHrefParser(HTMLParser):
             furthest = next(
                 (
                     above
-                    for above in range(len(self._open_elements) - 1, index, -1)
+                    for above in range(index + 1, len(self._open_elements))
                     if self._open_elements[above][0] in self._SPECIAL
                 ),
                 None,
             )
-            # The furthest block and everything above it STAY; everything from the
-            # match up to (not including) it goes. A CONTAINER among the removed ones
-            # survives as a relocated ancestor — and only a removed one, or the
-            # furthest block would be appended to itself (#14073 review round 19).
+            # The NEAREST special above the match and everything above it STAY;
+            # everything from the match up to (not including) it goes. Ascending on
+            # purpose: the nearest block is the one that keeps the shallower special
+            # frames alive too (#14073 review round 20, P1, measured).
             kept = self._open_elements[furthest:] if furthest is not None else []
             del self._open_elements[index:]
             self._open_elements.extend(kept)

@@ -2908,6 +2908,20 @@ def test_the_select_scope_closes_on_input_and_a_nested_select_and_nothing_else()
         ("the nobr sibling close", '<nobr><select><nobr><a href="/blog">L</a>', []),
         ("a table in a foster-parented select",
          '<table><select><table><a href="/blog">C</a>', ["/blog"]),
+        # …and BOTH rules hold at DEPTH (#14073 review round 20, P1 + P2, measured).
+        # The furthest block is the NEAREST special above the match, so a wrapper
+        # inside the select does not lose the select frame: Chrome has this anchor
+        # `closest('select')` at 0×0. Scanning top-down for the deepest special kept
+        # only the wrapper and advertised the href.
+        ("a wrapper inside the AAA's select", '<a><select><div><a href="/blog">L</a>', []),
+        ("an option inside the AAA's select",
+         '<a><select><option><div><a href="/blog">L</a>', []),
+        # …and the table rule fires from any depth, so a rendered link is not dropped:
+        # Chrome closes the select at that `<table>` and the anchor is 9.8×17 outside it.
+        ("a table two levels inside the select",
+         '<table><select><div><table><a href="/blog">L', ["/blog"]),
+        ("an optgroup between the table and the select",
+         '<table><select><optgroup><table><a href="/blog">L', ["/blog"]),
     ):
         assert extract_anchor_hrefs(markup) == expected, (
             f"{label}: an element a browser KEEPS was removed, or one it CLOSES was "
