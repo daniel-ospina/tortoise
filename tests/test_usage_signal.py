@@ -1355,9 +1355,14 @@ def test_no_graph_dependency() -> None:
         import, and truncating `sys.modules` are each **1 failed / 101**).
 
         ⛔ THE DERIVATION STILL HAS ONE OWNER HERE, `_probe_forbidden()`, pinned by
-        the assert above — so the list the parent matches with cannot be narrowed
-        without reddening that row (measured: dotless-only and the hardcoded pair are
-        each 1 failed / 101).
+        the assert above — so the DERIVATION cannot be narrowed without reddening a
+        row (measured: dotless-only and the hardcoded pair are each 1 failed / 101).
+        That pins the derivation, NOT its use: the list the matcher is handed can be
+        filtered after it (**102 passed**), and ADDING a name to `_PROBE_EXEMPT` leaves
+        the derivation row above green as well — it moves both sides of that equality
+        together. Narrowing `_PROBE_EXEMPT` is pinned by
+        `test_the_no_graph_guard_covers_every_module_that_reaches_a_store` and by the
+        `_PROBE_EXEMPT == (…)` row, not by this one.
 
         ⛔ THE CHILD DOES NOT MATCH ANYTHING — the matching happens HERE, IN THE
         PARENT, against `_probe_forbidden()`. This is the structural fix for six
@@ -1501,10 +1506,12 @@ def test_no_graph_dependency() -> None:
         "CHILD=False → the child's printed set is narrowed (a green mutant on its "
         "own — see the residual above); CHILD=True and in _probe_forbidden()=True → "
         "`_matching`, or the list it is handed, dropped it; "
-        "in _probe_forbidden()=False → the root was removed from "
-        "`_FORBIDDEN_GRAPH_ROOTS`, the matcher is innocent, and "
-        "`test_the_no_graph_guard_covers_every_module_that_reaches_a_store` names "
-        "that cause (#14118 item 1)")
+        "in _probe_forbidden()=False → the root is not in the probe's list, which is "
+        "EITHER removed from `_FORBIDDEN_GRAPH_ROOTS` OR added to `_PROBE_EXEMPT` "
+        "(that set is the ban set MINUS the exemptions), and "
+        "`test_the_no_graph_guard_covers_every_module_that_reaches_a_store` plus the "
+        "`_PROBE_EXEMPT == (…)` row together name which one. The matcher is innocent "
+        "either way (#14118 item 1)")
     # ⛔ AND EVERY ROOT IS WITNESSED AGAINST BOTH CLAUSES, so what the matcher must
     # keep is the DERIVATION, not a list of names a narrowing can satisfy. The
     # matcher is in this file now, so it can be run over a one-name input directly:
