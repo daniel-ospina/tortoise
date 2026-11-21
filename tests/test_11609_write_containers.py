@@ -568,24 +568,24 @@ NON_SDK_RECEIVERS: dict[tuple[str, str, str], str] = {
 #: ``test_the_census_still_catches_an_ambiguous_name_on_an_sdk_receiver`` pins BOTH
 #: directions of this branch so removing the receiver test cannot pass silently.
 #:
-#: `create_subject` is the second kind of collision, and it is a SURFACE DOOR rather
-#: than a Cypher one: `TortoiseSDK.create_subject` is retired (#11609, in favour of
-#: `create_entity`), and the SAME name is the published write door on the two seed
-#: surfaces — `_OrgSeedSurface.create_subject` (tortoise/hosted_api.py) and
-#: `_SdkSeedSurface.create_subject` (tortoise/onboarding/selfhost.py) — each of which
-#: delegates to `self._sdk._create_subject`. `tortoise/onboarding/seed.py` reaches it
-#: through a `surface` PARAMETER, which is why the path-and-receiver table above
-#: cannot carry the row: its pin (`_receiver_binding_violations`) refuses a
-#: parameter binding, and rightly so — a parameter can hold anything. The exemption
-#: is therefore expressed as the receiver test this branch already is, and the fact
-#: that justifies it is MEASURED by
-#: `test_the_two_seed_surfaces_publish_a_create_subject_door_that_delegates_privately`,
-#: so a surface that stops delegating (or loses the door) reds instead of silently
-#: widening the exemption. Residual, recorded not hidden: a `TortoiseSDK` bound to a
-#: name other than `sdk`/`_sdk` calling `.create_subject()` is missed here — exactly
-#: as `query` is — and `TortoiseSDK.__getattr__` still RAISES for it at runtime.
+#: `create_subject` USED to be the second kind of collision — a retired SDK name
+#: (#11609, in favour of `create_entity`) that was ALSO the published write door on
+#: the two seed surfaces — and the first cut of this branch exempted it through the
+#: receiver test below. ⛔ That exemption is GONE, and the reason it is gone is worth
+#: keeping: `tortoise/onboarding/seed.py` reaches the door through a `surface`
+#: PARAMETER, and the path-and-receiver table above refuses a parameter binding on
+#: purpose (`_receiver_binding_violations`) — a parameter can hold an SDK handle under
+#: any name. Widening the census to forgive it was the wrong direction; the ambiguity
+#: was removed from the PRODUCT instead (#14147): the surface door is
+#: `create_subject_anchor`, so no production module calls a retired name any more and
+#: no exemption is needed. The door pins below are kept and re-pointed at that name,
+#: because they measure the seed's own duck-typed contract — `seed._write_anchor`
+#: calls `surface.create_subject_anchor(...)`, so a surface that stops publishing it,
+#: or publishes one that delegates anywhere but privately
+#: (`self._sdk._create_subject`), must red rather than surface as a runtime
+#: `AttributeError` on every production seed run (#13899's regression shape).
 AMBIGUOUS_RETIRED_NAMES: frozenset[str] = frozenset(
-    {"query", "list_graphs", "link_source_to_entity", "create_subject"})
+    {"query", "list_graphs", "link_source_to_entity"})
 SDK_RECEIVER_NAMES: frozenset[str] = frozenset({"sdk", "_sdk"})
 
 
@@ -627,7 +627,7 @@ def _attribute_names(tree: ast.AST,
        path exempts nothing, so the synthetic-tree pins below keep their full strength.
     2. ``AMBIGUOUS_RETIRED_NAMES`` — the retired names that also name an ordinary method on
        another class this code base holds (the Cypher client's `query`/`list_graphs`/
-       `link_source_to_entity`, and the two seed surfaces' `create_subject`). This skip is
+       `link_source_to_entity`). This skip is
        PATH-INDEPENDENT on purpose (it keys on the RECEIVER alone: an
        ambiguous name counts only on an ``sdk``/``_sdk`` receiver), so it DOES apply when
        ``rel_path`` is None. An earlier version of this paragraph claimed "passing no path
@@ -706,14 +706,15 @@ def test_the_census_still_catches_an_ambiguous_name_on_an_sdk_receiver(name):
     """The ambiguous branch's CATCH direction is a pin, not a claim (#13036 review F3b).
 
     The retired names that also name an ordinary method on another class this code base
-    holds — the Cypher client's `query`/`list_graphs`/`link_source_to_entity` and the
-    two seed surfaces' `create_subject` — are exempted on every non-SDK receiver. That
-    branch carries **1561 of 1561** live hits in `tortoise/` (MEASURED at `e0accb8fe` by
+    holds — the Cypher client's `query`/`list_graphs`/`link_source_to_entity` — are
+    exempted on every non-SDK receiver. That
+    branch carries **1559 of 1559** live hits in `tortoise/` (MEASURED at this head by
     counting, over every `*.py` under `tortoise/` — `Path("tortoise").rglob("*.py")` —
     each `ast.Call` whose `func` is an `ast.Attribute` with an attr in the set and whose
     receiver's terminal name is not `sdk`/`_sdk`: 1543 `query`, 11 `list_graphs`,
-    5 `link_source_to_entity`, 2 `create_subject`; an earlier cut of this sentence said
-    "repo-wide" over 1558, which was this same `tortoise/`-only count at an older head —
+    5 `link_source_to_entity`; an earlier cut of this sentence said
+    "repo-wide" over 1558, which was this same `tortoise/`-only count at an older head, and
+    it carried 2 `create_subject` until #14147 renamed that door in the product —
     the figures ROT, so re-run that walk rather than quoting them) — so a mutant that
     forgot the receiver test
     (`if node.func.attr in AMBIGUOUS_RETIRED_NAMES: continue`) would forgive EVERY ONE
@@ -780,7 +781,7 @@ class _RecordingDoorSdk:
         return _DOOR_PROBE_SENTINEL
 
 
-def _door_binding_problems(cls: type, name: str = "create_subject") -> list[str]:
+def _door_binding_problems(cls: type, name: str = "create_subject_anchor") -> list[str]:
     """Every reason `cls`'s RUNTIME `name` is not a door this pin can read.
 
     ⛔ THE RUNTIME BINDING, NOT AN AST READING OF THE CLASS BODY. Six rounds of review
@@ -790,15 +791,15 @@ def _door_binding_problems(cls: type, name: str = "create_subject") -> list[str]
     readers that were deleted at this head — pin GREEN each time, on the real class:
 
       * a shadowing `def` — under `if True:`, a `match` case, `try`/`finally`, `except*`;
-      * a binder that is not a `def` — `except E as create_subject` (PEP 3110 deletes the
-        target at handler exit), `del (x, create_subject)`, `case (create_subject,):`,
-        `case [*create_subject]:`, `case {"k": _, **create_subject}:`, `create_subject =
-        ...`, a walrus in a default or decorator, a class named `create_subject`;
+      * a binder that is not a `def` — `except E as create_subject_anchor` (PEP 3110 deletes the
+        target at handler exit), `del (x, create_subject_anchor)`, `case (create_subject_anchor,):`,
+        `case [*create_subject_anchor]:`, `case {"k": _, **create_subject_anchor}:`, `create_subject_anchor =
+        ...`, a walrus in a default or decorator, a class named `create_subject_anchor`;
       * a MASKING DECORATOR — one `@` line replaces the function the class binds while
         the scanned `def` body still reads `self._sdk._create_subject(...)`;
       * DEAD CODE — `if False:` holding a delegating `def` after the live door.
 
-    `cls.__dict__[name]` is what `surface.create_subject(...)` resolves to, so reading it
+    `cls.__dict__[name]` is what `surface.create_subject_anchor(...)` resolves to, so reading it
     is not a proxy for the question — it IS the question, and no class-body form can
     reach it. The three refusals below are deliberately narrow so the pin cannot be
     satisfied by something the seed cannot use.
@@ -806,13 +807,12 @@ def _door_binding_problems(cls: type, name: str = "create_subject") -> list[str]
     door = cls.__dict__.get(name)
     if door is None:
         return [f"`{name}` is not bound on the class — the seed's own call would raise "
-                "`AttributeError`, so the exemption has outlived its reason"]
+                "`AttributeError`, so the seed's door contract is broken"]
     if type(door) is not types.FunctionType:
         return [f"`{name}` is a {type(door).__name__}, not a plain function — a "
                 "decorator or an assignment produced the runtime door, so what the seed "
-                "calls is not the `def` this pin can read, and the exemption is "
-                "unjustified until that wrapper is reviewed as a change to the write "
-                "path"]
+                "calls is not the `def` this pin can read, so the door the seed "
+                "reaches is a wrapper nobody reviewed as a change to the write path"]
     if door.__qualname__ != f"{cls.__name__}.{name}":
         return [f"`{name}` is {door.__qualname__!r} — a DECORATOR replaced the door "
                 "(the binding is a closure or a function from elsewhere), so the body "
@@ -827,7 +827,7 @@ def _door_binding_problems(cls: type, name: str = "create_subject") -> list[str]
     return []
 
 
-def _seed_door_behaviour_problems(cls: type, name: str = "create_subject",
+def _seed_door_behaviour_problems(cls: type, name: str = "create_subject_anchor",
                                  delegated: str = "_create_subject") -> list[str]:
     """Every reason `cls`'s RUNTIME `name` is not the private passthrough it claims.
 
@@ -847,7 +847,7 @@ def _seed_door_behaviour_problems(cls: type, name: str = "create_subject",
     which replaced an even earlier `ast.walk`, remains a model: it answered "this text
     contains a delegation that reaches a return", which is not the question.
 
-    So the measurement is the runtime behaviour the exemption actually claims, on a
+    So the measurement is the runtime behaviour the door contract actually claims, on a
     double (no graph, no journal, no network):
 
       1. the door does not RAISE — the seed's own `surface.<name>(...)` call must work;
@@ -884,19 +884,19 @@ def _seed_door_behaviour_problems(cls: type, name: str = "create_subject",
         returned = cls.__dict__[name](surface, _DOOR_PROBE_SUBJECT)
     except Exception as exc:               # any raise IS the finding
         return [f"the runtime `{name}` RAISED {type(exc).__name__}: {exc} — the "
-                f"seed's own `surface.{name}(...)` call would fail, so the exemption "
-                "that rests on it has outlived its reason"]
+                f"seed's own `surface.{name}(...)` call would fail, so the door the seed "
+                "relies on does not work"]
     if len(recorder.calls) != 1:
         return [f"the runtime `{name}` made {len(recorder.calls)} `{delegated}` "
                 f"call(s) in ONE execution, not exactly 1 — a door that delegates "
                 "nowhere (dead code, a branch it does not take) or more than once is "
-                "not the passthrough the exemption claims"]
+                "not the passthrough the contract claims"]
     forwarded = [call[0] for call in recorder.calls]
     if forwarded != [_DOOR_PROBE_SUBJECT]:
         return [f"the runtime `{name}` forwarded {forwarded!r} to `{delegated}`, not "
                 f"[{_DOOR_PROBE_SUBJECT!r}] — the subject is created under a name its "
                 "caller did not ask for (hard-coded, templated, re-derived), so the "
-                "door is not the passthrough the exemption claims and the seed would "
+                "door is not the passthrough the contract claims and the seed would "
                 "write the wrong subject"]
     forwarded_props = [call[1] for call in recorder.calls]
     if forwarded_props != [{}]:
@@ -908,11 +908,11 @@ def _seed_door_behaviour_problems(cls: type, name: str = "create_subject",
     if returned is not _DOOR_PROBE_SENTINEL:
         return [f"the runtime `{name}` did not RETURN what `{delegated}` returned "
                 f"(got {returned!r}) — the door's caller does not receive the "
-                "subject, so the door is not the passthrough the exemption claims"]
+                "subject, so the door is not the passthrough the contract claims"]
     return []
 
 
-def _door_problems(cls: type, name: str = "create_subject",
+def _door_problems(cls: type, name: str = "create_subject_anchor",
                    delegated: str = "_create_subject") -> list[str]:
     """The whole per-door measurement: the RUNTIME BINDING, then what it DOES.
 
@@ -933,7 +933,7 @@ def _door_problems(cls: type, name: str = "create_subject",
 
 
 def _exec_door_class(body: str) -> type:
-    """A REAL class whose `create_subject` body is `body` — measured, not read.
+    """A REAL class whose `create_subject_anchor` body is `body` — measured, not read.
 
     `exec` rather than a file on disk so a fixture is measured exactly as the
     production surfaces are: no source span to re-anchor when a door is reformatted,
@@ -941,20 +941,28 @@ def _exec_door_class(body: str) -> type:
     global, so a body can return it without reaching into this module.
     """
     namespace: dict[str, object] = {"_DOOR_PROBE_SENTINEL": _DOOR_PROBE_SENTINEL}
-    exec(compile(f"class C:\n    def create_subject(self, name):\n{body}",
+    exec(compile(f"class C:\n    def create_subject_anchor(self, name):\n{body}",
                  "<door-behaviour-fixture>", "exec"), namespace)
     return namespace["C"]  # type: ignore[return-value]
 
 
-def test_the_two_seed_surfaces_publish_a_create_subject_door_that_delegates_privately():
-    """The FACT behind `create_subject`'s presence in the ambiguous set, MEASURED.
+def test_the_two_seed_surfaces_publish_a_create_subject_anchor_door_that_delegates_privately():
+    """The FACT behind the seed's duck-typed door contract, MEASURED.
 
-    `create_subject` is a retired `TortoiseSDK` name (#11609, in favour of
-    `create_entity`), AND the published write door on the two seed surfaces. That second
-    half is the whole justification for exempting a `surface` receiver, so it is checked
-    here rather than asserted in prose: `_OrgSeedSurface` (tortoise/hosted_api.py) and
-    `_SdkSeedSurface` (tortoise/onboarding/selfhost.py) each have to expose a plain
-    `create_subject` FUNCTION that delegates to `self._sdk._create_subject`.
+    `tortoise/onboarding/seed.py` writes its anchor through a `surface` PARAMETER, so the
+    door's NAME is the only thing the seed can rely on: `_write_anchor` calls
+    `surface.create_subject_anchor(...)`. A surface that stops publishing it, or publishes
+    one that does not delegate privately, breaks every production seed run with an
+    `AttributeError` (#13899's regression shape) — and no gate can see that, because the
+    receiver is a parameter. So it is checked here rather than asserted in prose:
+    `_OrgSeedSurface` (tortoise/hosted_api.py) and `_SdkSeedSurface`
+    (tortoise/onboarding/selfhost.py) each have to expose a plain
+    `create_subject_anchor` FUNCTION that delegates to `self._sdk._create_subject`.
+
+    ⛔ The name is NOT the retired `create_subject` on purpose (#14147): that spelling
+    collided with a retired `TortoiseSDK` method (#11609), and the census refuses it on
+    every receiver it cannot prove is not an SDK handle — a `surface` parameter included.
+    Removing the ambiguity from the product is what lets the census stay strict.
 
     ⛔ THE RUNTIME BINDING, NOT AN AST READING OF THE CLASS BODY. Three review rounds
     each found a way for a syntactic scan to stay green over a door that is not the one
@@ -963,20 +971,20 @@ def test_the_two_seed_surfaces_publish_a_create_subject_door_that_delegates_priv
     (all on the real class, pin GREEN each time):
 
       * a shadowing `def` — under `if True:`, a `match` case, `try`/`finally`, `except*`;
-      * a binder that is not a `def` — `except E as create_subject` (PEP 3110 deletes the
-        target at handler exit), `del (x, create_subject)`, `case (create_subject,):`,
-        `create_subject = ...`, a walrus in a default or decorator, a class named
-        `create_subject`;
+      * a binder that is not a `def` — `except E as create_subject_anchor` (PEP 3110 deletes the
+        target at handler exit), `del (x, create_subject_anchor)`, `case (create_subject_anchor,):`,
+        `create_subject_anchor = ...`, a walrus in a default or decorator, a class named
+        `create_subject_anchor`;
       * a MASKING DECORATOR — `@_mask` replaces the tuple the class binds while the
         scanned body still delegates, so one `@` line defeated the whole pin;
-      * DEAD CODE — `if False: def create_subject(...)` shadowing a non-delegating live
+      * DEAD CODE — `if False: def create_subject_anchor(...)` shadowing a non-delegating live
         door (no reachability analysis can be trusted for this, and none is attempted).
 
-    So the pin reads `cls.__dict__['create_subject']` — exactly what the seed's
-    `surface.create_subject(...)` will call — and then requires:
+    So the pin reads `cls.__dict__['create_subject_anchor']` — exactly what the seed's
+    `surface.create_subject_anchor(...)` will call — and then requires:
 
     1. the attribute is a plain `types.FunctionType`;
-    2. its `__qualname__` is `"<Class>.create_subject"`, i.e. the class body's own
+    2. its `__qualname__` is `"<Class>.create_subject_anchor"`, i.e. the class body's own
        function and not a closure a decorator returned;
     3. it carries no `__wrapped__` — a `functools.wraps` mask is refused, not unwrapped;
     4. it does not RAISE when called, it makes EXACTLY ONE `_create_subject` call, it
@@ -999,8 +1007,8 @@ def test_the_two_seed_surfaces_publish_a_create_subject_door_that_delegates_priv
     for cls in (_OrgSeedSurface, _SdkSeedSurface):
         problems = _door_problems(cls)
         assert not problems, (
-            f"{cls.__module__}.{cls.__name__}.create_subject no longer satisfies the "
-            f"pin the `create_subject` exemption rests on: " + "; ".join(problems))
+            f"{cls.__module__}.{cls.__name__}.create_subject_anchor no longer satisfies the "
+            f"seed's own door contract: " + "; ".join(problems))
 
 
 #: Door bodies whose delegation is IN THE SOURCE but NOT ON THE EXECUTED PATH. Each was
@@ -1098,12 +1106,12 @@ def test_the_delegation_pin_refuses_a_DISCARDED_NESTED_or_UNREACHABLE_delegation
 #: before these arms the requirement was advertised in the docstring and pinned nowhere.
 _NON_EXACTLY_ONE_DELEGATION = {
     # Delegates NOWHERE and hands its caller the right object anyway: a door returning a
-    # cached or literal subject is not the passthrough the exemption claims.
+    # cached or literal subject is not the passthrough the contract claims.
     "zero-calls": (
         "        return _DOOR_PROBE_SENTINEL\n"),
     # THE DOUBLE-WRITE: a create-or-retry door writes the seed subject TWICE and returns
     # the second. The caller sees a correct subject while the graph holds two, so this is
-    # a real bypass of the exemption rather than a cosmetic shape.
+    # a real bypass of the contract rather than a cosmetic shape.
     "two-calls": (
         "        first = self._sdk._create_subject(name)\n"
         "        second = self._sdk._create_subject(name)\n"
@@ -1146,7 +1154,7 @@ def test_the_pin_requires_EXACTLY_ONE_delegation():
         recorder = _RecordingDoorSdk()
         surface = object.__new__(fixture)
         surface._sdk = recorder
-        returned = fixture.__dict__["create_subject"](surface, "pin-probe-subject")
+        returned = fixture.__dict__["create_subject_anchor"](surface, "pin-probe-subject")
         assert returned is _DOOR_PROBE_SENTINEL, (
             f"the `{label}` fixture must RETURN the sentinel, or the identity refusal "
             "would be what fires and this arm would pin nothing")
@@ -1214,7 +1222,7 @@ def test_the_pin_forwards_the_CALLER_NAME_to_the_delegated_call():
         recorder = _RecordingDoorSdk()
         surface = object.__new__(fixture)
         surface._sdk = recorder
-        returned = fixture.__dict__["create_subject"](surface, _DOOR_PROBE_SUBJECT)
+        returned = fixture.__dict__["create_subject_anchor"](surface, _DOOR_PROBE_SUBJECT)
         assert returned is _DOOR_PROBE_SENTINEL, (
             f"the `{label}` fixture must RETURN the sentinel, or the identity refusal "
             "would be what fires and this arm would pin nothing")
@@ -1245,7 +1253,7 @@ def test_the_pin_forwards_the_CALLER_NAME_to_the_delegated_call():
 #: `test_org_seed_surface_does_not_fabricate_a_kind` calls the surface twice — once WITH
 #: `"team"` and once WITHOUT — and asserts the stored kind is still `"team"`. A door that
 #: always forwards `subjectKind="team"` makes the SECOND call agree with the first, so it
-#: passes that pin while writing a property on the caller's `create_subject("Acme")` that
+#: passes that pin while writing a property on the caller's `create_subject_anchor("Acme")` that
 #: the caller never supplied. It catches a DEFAULT kind (`"other"`), not a FABRICATED one.
 #: This pin is property-level and needs no graph, so it closes the case the real-surface
 #: pin structurally cannot.
@@ -1267,7 +1275,7 @@ def test_the_pin_forwards_NO_property_the_caller_did_not_supply():
     `_RecordingDoorSdk` records `(name, props)`; the name half is pinned by the sibling
     test above and the PROPERTIES half was left recorded as out of scope. A door that
     invents a property its caller did not supply is not a passthrough: the seed's
-    `surface.create_subject("Acme")` would write a `subjectKind` nobody asked for, and
+    `surface.create_subject_anchor("Acme")` would write a `subjectKind` nobody asked for, and
     on an existing name `#9572`'s name-MERGE overwrites the stored discriminator — the
     customer-visible clobber that fix exists to stop, reached one layer further out.
 
@@ -1286,7 +1294,7 @@ def test_the_pin_forwards_NO_property_the_caller_did_not_supply():
         recorder = _RecordingDoorSdk()
         surface = object.__new__(fixture)
         surface._sdk = recorder
-        returned = fixture.__dict__["create_subject"](surface, _DOOR_PROBE_SUBJECT)
+        returned = fixture.__dict__["create_subject_anchor"](surface, _DOOR_PROBE_SUBJECT)
         assert returned is _DOOR_PROBE_SENTINEL, (
             f"the `{label}` fixture must RETURN the sentinel, or the identity refusal "
             "would be what fires and this arm would pin nothing")
@@ -1309,15 +1317,15 @@ def test_the_pin_forwards_NO_property_the_caller_did_not_supply():
             "312fa68703: `[]` on both arms)", problems)
 
 
-#: A delegating `def create_subject` in the class body, followed by a class-body form
-#: that changes what `C.__dict__["create_subject"]` ends up being. Every one of these
+#: A delegating `def create_subject_anchor` in the class body, followed by a class-body form
+#: that changes what `C.__dict__["create_subject_anchor"]` ends up being. Every one of these
 #: was measured FAIL-OPEN against the AST reader this pin shipped with — the reader
 #: answered the `def`, so the pin stayed GREEN while the class no longer bound it. They
 #: are the last review round's own table, kept as data so the surface is enumerable
 #: rather than whack-a-mole.
 _DOOR_CLASS_BODY = (
     "class C:\n"
-    "    def create_subject(self, name):\n"
+    "    def create_subject_anchor(self, name):\n"
     "        return self._sdk._create_subject(name)\n")
 
 
@@ -1326,40 +1334,40 @@ def _class_body_variant(tail: str) -> str:
 
 
 _CLASS_BODY_BINDING_BYPASSES = {
-    "del": _class_body_variant("    del create_subject\n"),
-    "del-tuple": _class_body_variant("    _x = 1\n    del (_x, create_subject)\n"),
-    "del-list": _class_body_variant("    _x = 1\n    del [_x, create_subject]\n"),
+    "del": _class_body_variant("    del create_subject_anchor\n"),
+    "del-tuple": _class_body_variant("    _x = 1\n    del (_x, create_subject_anchor)\n"),
+    "del-list": _class_body_variant("    _x = 1\n    del [_x, create_subject_anchor]\n"),
     "except-as": _class_body_variant(
         "    try:\n"
         "        raise ValueError()\n"
-        "    except ValueError as create_subject:\n"
+        "    except ValueError as create_subject_anchor:\n"
         "        pass\n"),
     "exceptstar-as": _class_body_variant(
         "    try:\n"
         "        raise ExceptionGroup('g', [ValueError()])\n"
-        "    except* ValueError as create_subject:\n"
+        "    except* ValueError as create_subject_anchor:\n"
         "        pass\n"),
     "match-tuple": _class_body_variant(
         "    match (1,):\n"
-        "        case (create_subject,):\n"
+        "        case (create_subject_anchor,):\n"
         "            pass\n"),
     "match-star": _class_body_variant(
         "    match [1, 2]:\n"
-        "        case [*create_subject]:\n"
+        "        case [*create_subject_anchor]:\n"
         "            pass\n"),
     "match-mapping": _class_body_variant(
         '    match {"k": 1}:\n'
-        '        case {"k": _, **create_subject}:\n'
+        '        case {"k": _, **create_subject_anchor}:\n'
         "            pass\n"),
-    "assign": _class_body_variant("    create_subject = 1\n"),
+    "assign": _class_body_variant("    create_subject_anchor = 1\n"),
     "walrus-in-default": _class_body_variant(
-        "    def other(self, x=(create_subject := 2)):\n"
+        "    def other(self, x=(create_subject_anchor := 2)):\n"
         "        pass\n"),
     "walrus-in-decorator": _class_body_variant(
-        "    @(create_subject := staticmethod)\n"
+        "    @(create_subject_anchor := staticmethod)\n"
         "    def other(self):\n"
         "        pass\n"),
-    "class-named": _class_body_variant("    class create_subject:\n        pass\n"),
+    "class-named": _class_body_variant("    class create_subject_anchor:\n        pass\n"),
 }
 
 
@@ -1373,8 +1381,8 @@ def test_the_pin_reads_the_RUNTIME_binding_so_a_class_body_form_cannot_hide_it(l
     captures (`MatchAs`/`MatchStar`/`MatchMapping.rest`, whose names are plain `str`
     fields a collector keyed on `ast.Name` never sees), a plain assignment, a walrus in
     a nested `def`'s default, a walrus in a decorator expression, and a nested `class` of
-    the same name. Any of them kept the `create_subject` exemption justified while the
-    seed's own call would raise `AttributeError` or reach a non-function.
+    the same name. Any of them kept the door "justified" while the seed's own call would
+    raise `AttributeError` or reach a non-function.
 
     ⛔ TEN of the twelve were measured FAIL-OPEN on the deleted reader (it answered the
     `def`); `assign` and `class-named` were already refused by it, and are kept as arms
@@ -1387,7 +1395,7 @@ def test_the_pin_reads_the_RUNTIME_binding_so_a_class_body_form_cannot_hide_it(l
     arm — CPython really does end with something that is not the delegating `def` (so the
     fixture is not vacuous), the source DOES still contain that `def` (so a class-body
     reader would have answered it), and the pin REFUSES the class. Reverting to any
-    class-body reader reds this test instead of silently widening the exemption.
+    class-body reader reds this test instead of silently accepting a door the class does not bind.
     """
     source = _CLASS_BODY_BINDING_BYPASSES[label]
     namespace: dict[str, object] = {}
@@ -1395,18 +1403,18 @@ def test_the_pin_reads_the_RUNTIME_binding_so_a_class_body_form_cannot_hide_it(l
     cls = namespace["C"]
     assert isinstance(cls, type), label
 
-    assert "def create_subject(self, name):" in source, (
+    assert "def create_subject_anchor(self, name):" in source, (
         "the fixture must still CONTAIN a delegating `def` — that is what made this a "
         "bypass of a class-body reader rather than a missing door")
-    assert not isinstance(cls.__dict__.get("create_subject"), types.FunctionType), (
+    assert not isinstance(cls.__dict__.get("create_subject_anchor"), types.FunctionType), (
         f"vacuous arm: `{label}` did NOT change what the class binds, so it never was "
         "a bypass of anything")
 
     problems = _door_binding_problems(cls)
     assert problems, (
-        f"the `{label}` form leaves `C.__dict__['create_subject']` as "
-        f"{type(cls.__dict__.get('create_subject')).__name__}"
-        f"{'' if 'create_subject' in cls.__dict__ else ' (absent)'}, while the class "
+        f"the `{label}` form leaves `C.__dict__['create_subject_anchor']` as "
+        f"{type(cls.__dict__.get('create_subject_anchor')).__name__}"
+        f"{'' if 'create_subject_anchor' in cls.__dict__ else ' (absent)'}, while the class "
         "body still shows a delegating `def` — the pin MUST refuse this; a GREEN here "
         "means the verdict came from the class body again")
 
@@ -1414,8 +1422,8 @@ def test_the_pin_reads_the_RUNTIME_binding_so_a_class_body_form_cannot_hide_it(l
 def test_the_door_pin_refuses_a_MASKED_rebound_or_absent_door():
     """Non-vacuity of the BINDING arms, one synthetic class per refusal.
 
-    Each arm keeps a delegating `def create_subject` in the source while what
-    `surface.create_subject(...)` resolves to is a different object — the ways a
+    Each arm keeps a delegating `def create_subject_anchor` in the source while what
+    `surface.create_subject_anchor(...)` resolves to is a different object — the ways a
     decorator or an assignment can defeat a body-only reading. All were GREEN against the
     AST reader deleted at this head, and two were measured against the REAL
     `_SdkSeedSurface` (`@_mask` returning a non-delegating closure, and a
@@ -1431,7 +1439,7 @@ def test_the_door_pin_refuses_a_MASKED_rebound_or_absent_door():
 
     plain = build(
         "class C:\n"
-        "    def create_subject(self, name):\n"
+        "    def create_subject_anchor(self, name):\n"
         "        return self._sdk._create_subject(name)\n")
     assert _door_binding_problems(plain) == [], (
         "the control arm: a plain delegating door must satisfy the binding checks, or "
@@ -1446,7 +1454,7 @@ def test_the_door_pin_refuses_a_MASKED_rebound_or_absent_door():
         "    return replacement\n"
         "class C:\n"
         "    @_mask\n"
-        "    def create_subject(self, name):\n"
+        "    def create_subject_anchor(self, name):\n"
         "        return self._sdk._create_subject(name)\n")
     problems = _door_binding_problems(wraps_masked)
     assert problems and "__wrapped__" in problems[0], (
@@ -1460,7 +1468,7 @@ def test_the_door_pin_refuses_a_MASKED_rebound_or_absent_door():
         "    return replacement\n"
         "class C:\n"
         "    @_mask\n"
-        "    def create_subject(self, name):\n"
+        "    def create_subject_anchor(self, name):\n"
         "        return self._sdk._create_subject(name)\n")
     problems = _door_binding_problems(closure_masked)
     assert problems and "DECORATOR" in problems[0], (
@@ -1471,9 +1479,9 @@ def test_the_door_pin_refuses_a_MASKED_rebound_or_absent_door():
         "def _other(self, name):\n"
         "    return 1\n"
         "class C:\n"
-        "    def create_subject(self, name):\n"
+        "    def create_subject_anchor(self, name):\n"
         "        return self._sdk._create_subject(name)\n"
-        "    create_subject = _other\n")
+        "    create_subject_anchor = _other\n")
     problems = _door_binding_problems(rebound)
     assert problems and "DECORATOR" in problems[0], (
         "rebinding the name to a function defined outside the class body is the same "
@@ -1483,7 +1491,7 @@ def test_the_door_pin_refuses_a_MASKED_rebound_or_absent_door():
         "import functools\n"
         "class C:\n"
         "    @functools.cache\n"
-        "    def create_subject(self, name):\n"
+        "    def create_subject_anchor(self, name):\n"
         "        return self._sdk._create_subject(name)\n")
     problems = _door_binding_problems(cached)
     assert problems and "not a plain function" in problems[0], (
@@ -1504,16 +1512,16 @@ def test_the_pin_never_reads_the_class_body_so_dead_code_cannot_satisfy_it():
     `return None` and an `if False:` block holding the delegating `def` after it, the
     reader's "last binder wins" rule answered the DEAD def and the pin stayed GREEN.
 
-    The pin now resolves `cls.__dict__["create_subject"]` and then CALLS it, so the dead
+    The pin now resolves `cls.__dict__["create_subject_anchor"]` and then CALLS it, so the dead
     block is never consulted in either step: the binding is CPython's own answer, and the
     verdict is the behaviour of the function the class actually holds.
     """
     source = (
         "class C:\n"
-        "    def create_subject(self, name):\n"
+        "    def create_subject_anchor(self, name):\n"
         "        return None\n"
         "    if False:\n"
-        "        def create_subject(self, name):\n"
+        "        def create_subject_anchor(self, name):\n"
         "            return self._sdk._create_subject(name)\n")
     assert "self._sdk._create_subject(" in source, (
         "the fixture must contain a delegating `def` — that is what made the dead-code "
@@ -1522,7 +1530,7 @@ def test_the_pin_never_reads_the_class_body_so_dead_code_cannot_satisfy_it():
     namespace: dict[str, object] = {}
     exec(compile(source, "<door-fixture:dead-code>", "exec"), namespace)
     cls = namespace["C"]
-    live = cls.__dict__["create_subject"]  # type: ignore[attr-defined]
+    live = cls.__dict__["create_subject_anchor"]  # type: ignore[attr-defined]
 
     assert "_create_subject" not in live.__code__.co_names, (
         "the LIVE door must not reference the private method at all, or the fixture "

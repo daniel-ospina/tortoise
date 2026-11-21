@@ -68,6 +68,12 @@ WHAT IS ENFORCED (both `check` and `tests/test_archive.py`)
       `live_surface(root)` already refuses when `import tortoise` is not inside `root`;
     · `archive/INDEX.md` is a regenerated view of `MANIFEST.json` — a stale index is a
       violation;
+    · THE SHRINK DIRECTION, when a base ref is given (`check --base-ref`, #12402/#12291): a
+      MODULE that left `tortoise/` since the merge base must carry a `module` entry, and an
+      entry that left — or was rewritten in — `archive/MANIFEST.json` must be restored or
+      waived with a stated reason. This is the half every other arm here is blind to, because
+      they all iterate the entries the manifest FINDS; it needs the base ref because the
+      reference has to be outside the diff (see the block comment above `CLAIM_FIELDS`);
     · NO product module imports the archive, which is the archive's promise turned around
       (removed BEHAVIOUR must not re-enter the product): a static `import archive…` /
       `from archive… import` and a dynamic `import_module("archive…")` / `__import__("archive…")`
@@ -84,6 +90,7 @@ WHAT IS ENFORCED (both `check` and `tests/test_archive.py`)
 
 Usage
     uv run python tools/archive_surface.py check
+    uv run python tools/archive_surface.py check --base-ref          # + the shrink arms
     uv run python tools/archive_surface.py index              # regenerate INDEX.md
     uv run python tools/archive_surface.py index --check      # assert it is current
     uv run python tools/archive_surface.py archive mcp-tool <tool> --batch <slug> --reason <text>
@@ -243,6 +250,7 @@ def live_surface(root: Path | None = None) -> dict:
             "would grade a different package than the manifest it read, and report CLEAN. "
             "Install this checkout (editable) or fix PYTHONPATH first"
         )
+    package_files = _package_modules(root)
     return {
         "tools": {entry.name for entry in TOOL_REGISTRY},
         "methods": {
@@ -255,7 +263,15 @@ def live_surface(root: Path | None = None) -> dict:
         # Every module the package tree carries (`tortoise/**/*.py`), repo-relative. An
         # archived `module` symbol must not appear here: a file under `tortoise/` is
         # importable and ships in the wheel.
-        "modules": _package_modules(root),
+        "modules": package_files,
+        # …and the subset of those dotted names whose OWN file carries a BODY. `live_return`
+        # reads this so "the module shipped" asks the same question arm 1 asks when it decides
+        # what LEFT (`_modules_with_a_body`): a scaffolding-only `__init__.py` is importable
+        # but carries nothing, and counting it as the module's return made the archive route
+        # arm 1 prints unusable for a module→package split (review C-F2).
+        "modules_with_a_body": _modules_with_a_body(
+            package_files, lambda path: _file_text(root, path)
+        ),
     }
 
 
@@ -589,18 +605,65 @@ def anchor_unverified(root: Path | None = None) -> list[str]:
 
 # ── violations: the surface half (pure — no filesystem) ─────────────────────────
 
-def surface_violations(entries: list[dict], surface: dict) -> list[str]:
+def live_return(entry: dict, surface: dict, root: Path | None = None) -> str | None:
+    """WHERE this entry's symbol is LIVE again, or `None` — the ONE definition of "came back".
+
+    Both directions read this, because the two arms grade the same event from opposite sides:
+    `surface_violations` reds an archived row whose symbol is live again, and
+    `shrink_violations` (arm 2) treats a DROPPED row whose symbol is live again as the RESTORE
+    it is rather than the loss it otherwise is. Two definitions of "live" would let the two
+    arms disagree about the same tree — one reding a restore, the other calling it clean.
+    """
+    kind = entry.get("kind")
+    symbol = str(entry.get("symbol") or "")
+    if kind == MCP_TOOL:
+        return symbol if symbol in surface["tools"] else None
+    if kind == SDK_METHOD:
+        return symbol if symbol in surface["methods"] else None
+    if kind == MODULE:
+        # A whole module archived from INSIDE the package. Its file must be GONE from the
+        # package tree: `tortoise/archived/x.py` is importable as `tortoise.archived.x` and
+        # ships in the wheel, which is the opposite of "not available".
+        #
+        # ⛔ CONTENT, not the path set — the same rule arm 1 uses to decide what LEFT. A module
+        # split into a package (`x.py` → `x/__init__.py` carrying only a docstring, the body in
+        # `x/sub.py`) leaves `x/__init__.py` importable while `x`'s own body moved; grading that
+        # as "the module came back" made the archive route arm 1 PRESCRIBES (archive the old
+        # path, then delete it again) refused by this arm after it was carried out — one
+        # legitimate refactor, two arms, no in-CI waiver, so the red had no route out (review
+        # C-F2). `modules_with_a_body` is absent only on a synthetic surface built without it,
+        # where the old path-set answer is the only one available.
+        base = symbol.replace(".", "/")
+        carriers = surface.get("modules_with_a_body")
+        for candidate in (f"{base}.py", f"{base}/__init__.py", f"{base}.pyi"):
+            if candidate not in surface.get("modules", set()):
+                continue
+            if carriers is not None and symbol not in carriers:
+                continue  # scaffolding only: the name resolves, the module's BODY is not here
+            if root is not None:
+                text = _file_text(root, candidate)
+                if text is not None and not _init_carries_a_body(text):
+                    # A leftover EMPTY / docstring-only file is not the module coming back: arm
+                    # 1b just called it a removal, and crediting it here would red the very
+                    # remedy arm 1b prints (round-8 review).
+                    continue
+            return candidate
+    return None
+
+
+def surface_violations(
+    entries: list[dict], surface: dict, root: Path | None = None
+) -> list[str]:
     """Every way an archived symbol can be back on the live surface, or mis-recorded.
 
     Pure on purpose: `tests/test_archive.py` calls it with a synthetic surface to prove
     the detector FIRES. A gate nobody has seen fire is indistinguishable from one that
     cannot.
     """
-    tools = surface["tools"]
-    methods = surface["methods"]
+    # `tools`/`methods`/`modules` are read through `live_return` below — ONE definition of
+    # "came back" for both directions, so the two arms cannot disagree about the same tree.
     forward = surface["forward"]
     sdk_retired = surface["sdk_retired"]
-    installed_modules = surface.get("modules", set())
     out: list[str] = []
     for entry in entries:
         kind = entry.get("kind")
@@ -608,8 +671,9 @@ def surface_violations(entries: list[dict], surface: dict) -> list[str]:
         if kind not in KINDS:
             out.append(f"{symbol or '<no symbol>'}: unknown kind {kind!r} (expected one of {KINDS})")
             continue
+        back = live_return(entry, surface, root)
         if kind == MCP_TOOL:
-            if symbol in tools:
+            if back is not None:
                 out.append(
                     f"{symbol}: REAPPEARED on the live MCP surface — an archived tool must not "
                     "be in TOOL_REGISTRY (archive/README.md, 'not available')"
@@ -621,7 +685,7 @@ def surface_violations(entries: list[dict], surface: dict) -> list[str]:
                     "these are different mechanisms and must not hold the same name"
                 )
         elif kind == SDK_METHOD:
-            if symbol in methods:
+            if back is not None:
                 out.append(
                     f"{symbol}: REAPPEARED as a public TortoiseSDK method — an archived method "
                     "must not be importable from the product package"
@@ -632,18 +696,11 @@ def surface_violations(entries: list[dict], surface: dict) -> list[str]:
                     "REMOVED_SDK_METHODS — a caller would then hit a bare AttributeError "
                     "instead of the recorded departure, so the removal is not accounted for"
                 )
-        else:
-            # A whole module archived from INSIDE the package. Its file must be GONE from the
-            # package tree: `tortoise/archived/x.py` is importable as `tortoise.archived.x` and
-            # ships in the wheel, which is the opposite of "not available".
-            base = symbol.replace(".", "/")
-            for candidate in (f"{base}.py", f"{base}/__init__.py", f"{base}.pyi"):
-                if candidate in installed_modules:
-                    out.append(
-                        f"{symbol}: REAPPEARED as an importable module in the shipped package "
-                        f"({candidate}) — archived code must not ship"
-                    )
-                    break
+        elif back is not None:
+            out.append(
+                f"{symbol}: REAPPEARED as an importable module in the shipped package "
+                f"({back}) — archived code must not ship"
+            )
     return out
 
 
@@ -898,18 +955,937 @@ def index_violations(entries: list[dict], root: Path | None = None) -> list[str]
     return []
 
 
-def check(root: Path | None = None, *, require_entries: bool = False) -> list[str]:
+# ── the SHRINK direction: the removals nothing else can see (#12402, #12291) ────
+#
+# Every arm above iterates the MANIFEST's own entries, so it answers one direction: an
+# archived symbol that came BACK is red. That leaves the other direction ungraded, and it is
+# the one that loses code:
+#
+#   #12402  a WHOLE MODULE deleted from `tortoise/` with no `module` entry. `module` is a
+#           first-class kind (`KINDS`) and the one committed archive entry IS a module, but
+#           the surface baseline carries no module rows, so `surface_manifest.cut`'s removal
+#           gate compares nothing for it and `removal_report` refuses the class by name
+#           rather than crash (`ARCHIVE_KIND_BY_CLASS`). A module is the largest removable
+#           unit and it was the one unit no gate could see.
+#   #12291  an entry DROPPED from `archive/MANIFEST.json` (or rewritten in place). `check`
+#           grades the entries PRESENT; an entry that is gone is not a row it can compare,
+#           so deleting the index row turned removed code into code that exists nowhere —
+#           green archive gate, green surface gate, green cut.
+#
+# WHY THE BASE REF AND NOT A SAME-TREE CHECK. Both artifacts are authored by the PR under
+# test, so a check over them can only ask "is this consistent with itself" — and a splicer
+# edits both sides consistently. The reference has to be outside the diff: the merge base.
+# This is the same property supply-chain transparency logs get from being append-only
+# (Sigstore's Rekor: "an immutable, tamper-resistant ledger of metadata generated within a
+# software project's supply chain", https://docs.sigstore.dev/logging/overview/), and the
+# same reason TUF makes a version counter MONOTONIC: a client that accepts a lower version
+# than the one it already trusts has been rolled back, so the update is aborted and the
+# rollback attack reported (TUF 1.0 §5.3, and §1.5.2's "Rollback attacks. An attacker
+# cannot trick clients into installing software that is older than that which the client
+# previously knew to be available"). Git history is this repo's append-only log; the merge
+# base is the last version this tree is allowed to disagree with, and a removal that lives
+# only in the new version must carry its own record (an archive row, or a stated waiver).
+#
+# ⛔ WHY MERGE-BASE AND NOT THE BASE TIP: on `refs/pull/N/merge` the merge base IS the base
+# tip, while on a feature branch it is the fork point — and using the base TIP on a stale
+# branch attributes MAIN's own removals to the PR (the #7628 class measured in MEMORY.md's
+# `[ci-diff-base]` note: every commit the base branch gained after the fork was attributed to
+# the PR). Merge-base is the one ref that means "what THIS change removed" in both shapes.
+
+#: The fields that carry a row's CLAIM: which code, from where, at which commit, with which
+#: bytes. `batch`/`reason` are deliberately NOT here — a prose correction is not a rewrite of
+#: the record's evidence, and gating it would refuse an honest typo fix for no gain.
+CLAIM_FIELDS = ("kind", "symbol", "file", "archived_from", "archived_at", "sources", "blocks")
+
+#: What to do about a module that left the tree — printed INSIDE the violation, because a gate
+#: whose remedy is elsewhere is a gate whose remedy is not read.
+MODULE_ROUTE = (
+    "REMEDY (archive/README.md, 'Archive a whole module'): restore it from the base FIRST "
+    "(`git checkout <base-sha> -- <path>`) — the writer freezes the source it reads from the "
+    "WORKING TREE and refuses without it, so archiving AFTER the deletion cannot work — then "
+    "`uv run python tools/archive_surface.py archive module <dotted.path> --batch <slug> "
+    "--reason <text>`, then delete it again in the same batch. A file that was RENAMED or "
+    "MOVED is the same case: the old path is the symbol that left the product, so archive the "
+    "old path and treat the new one as new code. If the removal is already recorded somewhere "
+    "this gate cannot read, state it on the command line "
+    "(`--allow-archive-shrink module:<dotted.path> --allow-archive-shrink-reason <why>`) and "
+    "say why in the PR body."
+)
+
+
+def module_name(path: str) -> str:
+    """`tortoise/a/b.pyi` → `tortoise.a.b` — the dotted name an archive row records.
+
+    `__init__` collapses onto its package (`tortoise/a/__init__.py` → `tortoise.a`), which is
+    what `archive module tortoise.a` names and what `tortoise.archived.search_legacy` shows in
+    the committed entry.
+    """
+    for suffix in (".pyi", ".py"):
+        if path.endswith(suffix):
+            path = path[: -len(suffix)]
+            break
+    parts = path.split("/")
+    if parts and parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(parts)
+
+
+def _init_carries_a_body(text: str) -> bool:
+    """Does this `__init__.py` carry anything of its OWN? (review F2, round 3)
+
+    A module body is CONTENT. `tortoise/__init__.py` is 406 lines of the product's public API,
+    so deleting it while `tortoise/sdk.py` survives removes everything a caller reaches through
+    `import tortoise` — while the dotted name still resolves, because the directory still holds
+    importable siblings. A comparison over PATHS therefore cancels that deletion, which is why
+    "the package still imports" is the wrong question to ask of `__init__.py`.
+
+    Only an `__init__.py` with no statements of its own — empty, whitespace, or a docstring
+    alone — is pure scaffolding, where deleting it while siblings survive removes nothing. Any
+    statement (an import, a re-export, `__all__`, an assignment, a function) is content.
+    Unparseable text is treated as carrying NOTHING: a body that no longer parses holds no
+    statements a caller can reach, so the arm reports the removal rather than reading the
+    garbage as content and cancelling it. (The previous version returned True here and called
+    that "fail CLOSED toward the violation" — it was the GREEN direction: a 40-function module
+    rewritten to `this is not python {{{` graded green, measured in round-5 review.)
+    """
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return False
+    body = list(tree.body)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]  # a docstring alone is prose about scaffolding, not content
+    return bool(body)
+
+
+def _modules_with_a_body(paths, read) -> set[str]:
+    """The dotted names whose OWN module file carries a body on this side.
+
+    Deliberately NOT `_dotted_modules`' ancestor expansion: adding every ancestor on both sides
+    is what made a 406-line `__init__.py` body disappear (review F2). A name is carried HERE if
+    this side holds a file for it, and a scaffolding-only `__init__.py` carries nothing at all,
+    so it cancels the way a namespace-package cleanup should. `read` returns `None` when the
+    side cannot answer, and an unreadable `__init__.py` is counted as content (fail closed).
+    """
+    out: set[str] = set()
+    for path in paths:
+        if path.endswith("/__init__.py"):
+            text = read(path)
+            if text is not None and not _init_carries_a_body(text):
+                continue
+        out.add(module_name(path))
+    return out
+
+
+def _head_carries_runtime_body(
+    root: Path,
+    symbol: str,
+    head_paths_by_module: dict[str, str],
+    base_paths_by_module: dict[str, str],
+) -> bool:
+    """Does the HEAD side still carry the module's RUNTIME body? — one answer, two callers.
+
+    ⛔ There is ONE predicate here on purpose: a second, body-only copy of this question ("the
+    file exists and parses") answers a DIFFERENT thing, and the difference is not cosmetic. A
+    body-only test counts a `.pyi` STUB as a body (it is an AST question, and a stub IS
+    statements) and counts an UNREADABLE file as content (the safe reading on the BASE side,
+    where a shallow clone explains the absence). Arm 1b grades BOTH of those as REMOVED on the
+    HEAD side — a stub holds no runtime statements, and a file that exists but cannot be read is
+    positive evidence about THIS tree. A second copy of the test is exactly how the unused-waiver
+    diagnostic came to print "this tree still carries it, so nothing was removed" about the very
+    removal the same run had just graded and credited (review P2 of PR #14039) — a correct
+    verdict beside a false stated fact, the class this file keeps having to remove.
+
+    ⛔ Unreadable counts as CONTENT on the BASE side and as REMOVED on the HEAD side; that is why
+    this helper takes both maps and decides the `stubbed` clause itself. Arm 1b is its other
+    caller, so the two can no longer disagree about the same file by construction.
+    """
+
+    head_carrier = head_paths_by_module.get(symbol)
+    if head_carrier is None:
+        return False
+    # Arm 1b's `stubbed`: a runtime carrier at the base, only a stub here.
+    if head_carrier.endswith(".pyi") and not (base_paths_by_module.get(symbol) or "").endswith(
+        ".pyi"
+    ):
+        return False
+    text = _file_text(root, head_carrier)
+    return text is not None and _init_carries_a_body(text)
+
+
+def _file_text(root: Path, path: str) -> str | None:
+    """The working tree's copy of a repo-relative file, or None when it cannot be read."""
+
+    try:
+        return (root / path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _package_paths_at(root: Path, sha: str) -> list[str]:
+    """The package's module files AS THE GIVEN COMMIT HOLDS THEM (repo-relative)."""
+    code, out = _git(root, "ls-tree", "-r", "--name-only", sha, "--", "tortoise")
+    if code != 0:
+        raise ArchiveRefused(
+            f"could not list tortoise/ at {sha[:12]} (`git ls-tree` exited {code}) — the shrink "
+            "check cannot tell what the tree held before this change, and it must not answer "
+            "'nothing was removed' from an unreadable base"
+        )
+    return [
+        line for line in out.splitlines()
+        if line.strip() and line.endswith((".py", ".pyi"))
+    ]
+
+
+def resolve_base(root: Path | None = None, ref: str | None = None) -> tuple[str, str]:
+    """`(sha, label)` of the commit this tree is graded AGAINST, or a refusal.
+
+    `ref` empty/None means "the default branch, as this clone names it". The answer is the
+    MERGE BASE of HEAD and that ref (see the block comment above for why not the tip).
+    """
+    root = Path(root or ROOT)
+    base = (ref or "").strip() or default_branch_ref(root)
+    if not base:
+        raise ArchiveRefused(
+            "the shrink check needs a base ref and this clone names none (no "
+            "refs/remotes/origin/HEAD, origin/main, main, origin/master or master). Pass "
+            "`--base-ref <ref>`; a gate that cannot say what it compared cannot verify a "
+            "removal, and must not report one as absent"
+        )
+    code, out = _git(root, "merge-base", "HEAD", base)
+    if code != 0 or not out.strip():
+        raise ArchiveRefused(
+            f"could not resolve the merge base of HEAD and {base} (`git merge-base` exited "
+            f"{code}) — a shallow or unrelated-history clone cannot answer, and answering "
+            "'no removals' from a base it cannot read is the false green this arm exists to "
+            "prevent. Fetch full history (`git fetch --unshallow`, or a `--depth=0` checkout) "
+            "or pass `--base-ref <ref>`"
+        )
+    return out.strip(), f"{base} (merge base {out.strip()[:12]})"
+
+
+def _entries_at(root: Path, sha: str) -> list[dict]:
+    """The archive entries AS THE GIVEN COMMIT RECORDS THEM (empty when it has no archive)."""
+    present, _ = _git(root, "cat-file", "-e", f"{sha}:archive/MANIFEST.json")
+    if present != 0:
+        # ABSENT is an honest answer here (the commit predates the archive), and it is a
+        # different fact from "unreadable" — which is why the question is asked of the tree
+        # rather than inferred from `_git_blob` returning None for both.
+        return []
+    blob = _git_blob(root, sha, "archive/MANIFEST.json")
+    if blob is None:
+        raise ArchiveRefused(
+            f"could not read archive/MANIFEST.json at {sha[:12]} even though that commit holds "
+            "it — the archive record at the base cannot be graded from here"
+        )
+    try:
+        data = json.loads(blob)
+    except json.JSONDecodeError as exc:
+        raise ArchiveRefused(
+            f"archive/MANIFEST.json at {sha[:12]} is not JSON ({exc}) — a base record this gate "
+            "cannot read must not read as 'no entries were dropped'"
+        ) from exc
+    entries = data.get("entries") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        raise ArchiveRefused(
+            f"archive/MANIFEST.json at {sha[:12]} carries no `entries` list — the base record "
+            "is unreadable, so a drop cannot be ruled out"
+        )
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def _entry_key(entry: dict) -> tuple[str, str]:
+    return str(entry.get("kind")), str(entry.get("symbol"))
+
+
+def _entry_claim(entry: dict) -> str:
+    """A canonical digest of the fields that carry this row's CLAIM (see `CLAIM_FIELDS`)."""
+    return json.dumps(
+        {field: entry.get(field) for field in CLAIM_FIELDS}, sort_keys=True, default=str
+    )
+
+
+def parse_shrink_waiver(text: str) -> tuple[str, str]:
+    """`kind:symbol` → `(kind, symbol)`, or a refusal. A waiver must name what it waives."""
+    kind, sep, symbol = str(text).partition(":")
+    if not sep or not symbol.strip() or kind not in KINDS:
+        raise ArchiveRefused(
+            f"--allow-archive-shrink {text!r} is not `<kind>:<symbol>` with a kind from "
+            f"{KINDS} — e.g. `module:tortoise.legacy_thing` or `mcp-tool:tortoise_old_tool`. "
+            "A waiver that does not name the record it waives cannot be audited"
+        )
+    return kind, symbol.strip()
+
+
+def _live_body_is_the_recorded_one(root: Path, entry: dict, carrier: str) -> bool | None:
+    """Does the LIVE carrier still hold the body this row recorded? None = cannot tell.
+
+    ⛔ A live NAME is not a restore. The restore credit is granted because "the code came back
+    to the product", so the question is about the CODE, not the path: a three-line stub dropped
+    at the dotted path used to earn the credit, which destroyed the record of what was removed
+    while nothing came back (round-7 review, measured on a 30-function module: frozen file
+    deleted, row dropped, `X = 1  # nothing of the module` written at the path → every arm
+    green). This asks the writer's own extractor what the symbol WOULD freeze from the live
+    file and compares its sha256 to the row — a verbatim restore is green. A restore that also
+    CHANGES the code is not green in either direction: the row cannot stay (direction one reds a
+    live symbol) and the drop cannot be credited (the body is not the recorded one), so the route
+    is to restore the block VERBATIM in the PR that lands and change the code after, when the row
+    is gone from the merge base.
+
+    `None` is returned in exactly two shapes, both of which mean "this row recorded nothing to
+    compare against" (no `blocks`, or `blocks` is not a list of dicts) — that can only come from
+    the BASE row, which a PR cannot author. An unreadable live file and a block the extractor
+    cannot key both return `False`: the code the row recorded is not in the tree, which is the
+    question this function exists to answer.
+    """
+    rows = entry.get("blocks")
+    if not isinstance(rows, list) or not rows:
+        return None  # nothing recorded to compare: absence is not evidence of a loss
+    kind = str(entry.get("kind") or "")
+    symbol = str(entry.get("symbol") or "")
+    targets: list[tuple[dict, str]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return None
+        path = str(row.get("path") or "")
+        if kind == MODULE and len(rows) == 1 and carrier and _file_text(root, carrier) is not None:
+            path = carrier  # a module may live at a different path after a split
+        targets.append((row, path))
+    for row, path in targets:
+        text = _file_text(root, path)
+        if text is None:
+            # ⛔ The row's OWN source file is not in the tree, so the code cannot be back. This
+            # is `False`, not `None`: for `mcp-tool` / `sdk-method` the carrier `live_return`
+            # returns is a SYMBOL, not a path, so the old code tried to read a file named
+            # `get_entity` and every one of those 110 rows fell into "cannot tell" and kept the
+            # credit — the body check was unreachable for all but the single `module` row
+            # (round-8 review).
+            return False
+        expected = expected_block(kind, symbol, str(row.get("path") or ""), text, row.get("node"))
+        if expected is None:
+            # ⛔ NOT a "cannot tell". The live file does not yield this block (the node key is not
+            # in it, or the kind branch finds no such symbol), so the code the row recorded is
+            # not in the tree — which is the whole question. The earlier `None` here read as
+            # "cannot tell" and the credit branch treats anything but False as credit, so a
+            # multi-block `mcp-tool` row whose handler was nowhere in the tree still earned the
+            # restore (round-8 review, measured).
+            return False
+        if _sha256(expected.strip("\n")) != row.get("sha256"):
+            return False
+    return True
+
+
+def _reanchor_is_verified(
+    root: Path, symbol: str, rel: str, entry: dict, base_entry: dict
+) -> bool:
+    """Is this REWRITE an EVIDENCED re-anchor, rather than a faithless edit? (#12291)
+
+    A re-anchor happens when the frozen body is refreshed from the commit that LAST held the
+    code (`main` edited the file while a batch was in flight — `archive/mcp-tools/b1-removed-no-
+    destination/tortoise_analyze.py` records one), and the anchor AND often the blocks must then
+    move together. The printed remedy for a rewrite is `--allow-archive-shrink`, a LOCAL-SHELL
+    waiver that the workflow deliberately never passes, so before this arm a legitimate
+    correction had no route a PR could take (review P2 of PR #14039) — and `verify-anchors`, run
+    immediately before this step in the same job, is what REQUIRES the correction. That is a
+    gate-against-gate deadlock, not a protection.
+
+    So the question asked here is the one the anchor arm already knows how to answer: does the
+    frozen file still match the recorded blocks, and does the NEW anchor hold each recorded body
+    BYTE-FOR-BYTE? When both hold, the record still proves exactly what it claims — the removed
+    code is what it says it is — which is the property #12291 exists to protect. When either
+    fails, it is the faithless edit and stays a violation.
+
+    ⛔ The anchor must be READABLE in this clone. `_anchor_violations` is deliberately
+    three-valued and returns [] when the commit object is absent (a shallow clone cannot tell a
+    forged anchor from an un-fetched one), so accepting on an unreadable anchor would turn this
+    arm into a rubber stamp. A clone that cannot read the anchor keeps the violation — fail
+    closed, and the archive's own step (`fetch-depth: 0`) is what makes it answerable in CI.
+
+    ⛔ AND IT IS NOT A LICENCE TO SHRINK THE EVIDENCE. The first version of this check was
+    handed only the NEW entry, so "the new record is internally consistent with the new file"
+    was the whole question — and a rewrite that DELETED a frozen block while deleting its row
+    from the manifest passed every arm (measured in round-6 review: a 2-block `mcp-tool` entry
+    reduced to 1 block, `_reanchor_is_verified: True`, `shrink_violations: []`,
+    `file_violations: []`, and `verify-anchors` iterates only the blocks that remain). That is
+    the "code that exists nowhere" loss #12291 was filed for, reached one level down: keep the
+    row, shrink its evidence. A re-anchor re-HASHES bodies; it does not delete them. So the
+    BASE entry is required too: the same number of blocks, the same set of block KEYs, and
+    `sources` still the writer's own derivation (`[path for path, … in blocks]`).
+    """
+    if not rel:
+        return False
+    recorded = entry.get("blocks")
+    base_recorded = base_entry.get("blocks")
+    if not isinstance(recorded, list) or not isinstance(base_recorded, list):
+        return False
+    if len(recorded) != len(base_recorded):
+        return False  # a refresh re-hashes bodies; dropping one is the loss this arm exists for
+    if sorted(str(row.get("node")) for row in base_recorded) != sorted(
+        str(row.get("node")) for row in recorded
+    ):
+        return False  # same blocks, same keys — a re-anchor does not swap the evidence
+    # ⛔ AS A MULTISET. The writer derives `sources` in block order, but the committed manifest
+    # already carries one row whose order differs from its blocks
+    # (`tortoise_analyze`: sources `[mcp_server.py, tool_registry.py]` over blocks in the
+    # opposite order), so an ORDER-SENSITIVE comparison refused the one legitimate re-anchor for
+    # that row with a remedy ("restore the recorded field(s)") that `verify-anchors` reds — a
+    # false block with no route, for 1 of 111 rows (round-9 review). Order carries no claim
+    # here: the block tuples are bound to their paths by the per-row comparison below.
+    if sorted(entry.get("sources") or []) != sorted(str(row.get("path")) for row in recorded):
+        return False  # a `sources` edit cannot ride along on a re-anchor
+    # ⛔ EVERY OTHER CLAIM FIELD IS FIXED. A re-anchor moves the anchor and re-hashes bodies;
+    # `archived_from` is a CLAIM_FIELD bound to nothing else on this path (`_anchor_violations`
+    # reads the block rows' `path`, and `file_violations` only makes the FILE's metadata agree
+    # with the manifest), so a consistent lie passed both (round-7 review: `archived_from`
+    # rewritten to a file that never held it, every block byte-identical → `file_violations: []`,
+    # `shrink_violations: []`).
+    for field in CLAIM_FIELDS:
+        if field in ("archived_at", "blocks", "sources"):
+            continue
+        if json.dumps(entry.get(field), sort_keys=True, default=str) != json.dumps(
+            base_entry.get(field), sort_keys=True, default=str
+        ):
+            return False
+    text = _file_text(root, rel)
+    if text is None:
+        return False
+    blocks = frozen_blocks(text)
+    if not blocks or len(recorded) != len(blocks):
+        return False
+    sha = str(entry.get("archived_at") or "")
+    if not _SHA_RE.match(sha) or not _git_has_commit(root, sha):
+        return False
+    # ⛔ THE ANCHOR MUST MOVE FORWARD, ON THE DEFAULT BRANCH. A readable anchor is not enough:
+    # re-rendering the frozen body from an OLDER revision of the same symbol and re-pointing
+    # `archived_at` at it satisfies every byte check above and silently ROLLS THE EVIDENCE BACK
+    # (round-7 review — the TUF rollback shape this module cites at the top of this file: "a
+    # client that accepts a lower version than the one it already trusts has been rolled
+    # back"). A side-branch anchor is refused for the same reason `anchor_sha` refuses to WRITE
+    # one: a squash merge orphans it.
+    previous = str(base_entry.get("archived_at") or "")
+    if _SHA_RE.match(previous) and _git_has_commit(root, previous):
+        code, _out = _git(root, "merge-base", "--is-ancestor", previous, sha)
+        if code != 0:
+            return False  # the anchor went BACKWARDS: a rollback, not a refresh
+    ref = default_branch_ref(root)
+    if ref is None:
+        return False  # durability unprovable here: keep the violation (fail closed)
+    code, _out = _git(root, "merge-base", "--is-ancestor", sha, ref)
+    if code != 0:
+        return False  # not on the default branch — this anchor is not a citation
+    for (path, body), row in zip(blocks, recorded, strict=True):
+        if not isinstance(row, dict):
+            return False
+        if row.get("path") != path or row.get("sha256") != _sha256(body):
+            return False
+        if _anchor_violations(root, symbol, rel, entry, path, body, row.get("node")):
+            return False
+    return True
+
+
+def _row_froze_a_stub(entry: dict) -> bool:
+    """Did this `module` row freeze FROM a `.pyi` stub? (fresh-context review, P0)
+
+    `_module_source`'s `.pyi` fallback resolves the stub when the only file left is `x.pyi`, so
+    the writer can freeze `def f1() -> int: ...` as the SOURCE OF RECORD for a module whose
+    statements this same run reports as removed. Arm 1b's own rule is that a `.pyi` is NEVER
+    runtime code, so such a row holds none of the module's body — and crediting it on the row's
+    EXISTENCE reads "the removal has its record" over a record holding no code.
+
+    ⛔ ASK `blocks[].path` — THE FIELD BOUND TO THE BYTES (round-3 correction of this helper).
+    Three successive cuts of this guard were each wrong in a different way, and only mutation
+    separated them:
+
+      * the archived FILE's suffix — DEAD CODE. `archive_rel` always emits
+        `archive/modules/<batch>/<mirror>.py` ("one symbol, one path, always"),
+        so no row the writer produces could satisfy it, and the fixtures that "covered" it
+        hand-wrote a `.pyi` path `archive_rel` cannot produce.
+      * `archived_from` — SPOOFABLE. It is bound only to the frozen file's own `ARCHIVED_FROM`
+        header, i.e. to a string the same hand-splicing author writes; this file already records
+        that limit in `_reanchor_is_verified`'s "EVERY OTHER CLAIM FIELD IS FIXED" note ("bound
+        to nothing else on this path … so a consistent lie passed both"), and hand-splicing is
+        what `MEMORY.md` recommends. Measured: a spliced row saying `tortoise/x.py` over frozen
+        STUB bytes was credited, with `shrink_violations` AND `file_violations` both empty.
+      * `blocks[0].path` — the field `file_violations` ties to the path baked into the frozen
+        file's verbatim banner AND to that body's sha256, so it cannot be re-pointed without the
+        bytes following. This is the one asked below.
+
+    ⛔ THESE CITATIONS NAME SYMBOLS, NOT LINE NUMBERS, ON PURPOSE. Each of the three cuts above
+    was once described by a line-number anchor and every one of them rotted: the `archive_rel`
+    cite said line 2177, then 2224-2235 at a head where the definition sat at 2314, and the
+    re-anchor note's 1357-1361 was correct when written and was 15 lines off after a merge that
+    INSERTED above it. `MEMORY.md` `[pin-defensive-claim]` states the rule ("re-derive from the
+    SYMBOL … never key a needle to a loop variable"); comments are held to it here too.
+
+    ⛔ AND FAIL CLOSED ON AN ABSENT SOURCE. An entry recording no block path proves nothing
+    about what it holds, so it is refused WITH the stub, never credited: hence
+    `not src.endswith(".py")`, not `src.endswith(".pyi")` — the latter answers False for an
+    absent field and silently credits it.
+
+    ⛔ `_init_carries_a_body` is deliberately NOT the test: it is an AST question and a stub IS
+    statements (`def f1() -> int: ...`).
+    """
+    rows = entry.get("blocks")
+    if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+        path = str(rows[0].get("path") or "")
+        if path:
+            # Authoritative: bound to the frozen banner AND the body's sha256, so it answers the
+            # question in BOTH directions (a real `.py` credits, anything else refuses).
+            return not path.endswith(".py")
+    src = str(entry.get("archived_from") or "")
+    if not src:
+        # Records NOTHING about what it froze. Unprovable, so it is refused rather than credited
+        # — but only in this shape: a row that does name a source falls through to the claim-field
+        # test, because `SOURCE_OF` is not a path and refusing it would red the README's own
+        # restore route (measured: two legitimate rows redded when absence alone refused).
+        return True
+    return src.endswith(".pyi")
+
+
+def _row_frozen_source(entry: dict) -> str:
+    """What the row says it froze FROM, preferring the field bound to the bytes."""
+
+    rows = entry.get("blocks")
+    if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+        path = str(rows[0].get("path") or "")
+        if path:
+            return path
+    return str(entry.get("archived_from") or "")
+
+
+def _record_froze_a_stub(
+    module: str, base_label: str, base_carrier: str, head_desc: str, entry: dict
+) -> str:
+    """The violation for a `module` row that credits a removal while holding only the stub."""
+    return (
+        f"{module}: THE RECORD FROZE A STUB — {base_label} carried the module's statements in "
+        f"`{base_carrier}`, this tree carries {head_desc}, and the `module` row present froze "
+        f"only `{_row_frozen_source(entry) or 'NO recorded source'}`, which is not the removed "
+        "runtime source. This run reports the module "
+        "body removed and then credits a record that holds none of it, which is the false PASS "
+        "`archive/` exists to prevent (#12402). "
+        f"{MODULE_ROUTE}"
+    )
+
+
+def shrink_violations(
+    root: Path | None = None,
+    *,
+    base_ref: str | None = None,
+    allowed: tuple[str, ...] | list[str] = (),
+    surface: dict | None = None,
+) -> list[str]:
+    """Every removal this tree made that left NO trace, graded against the base ref.
+
+    TWO arms, because the two artifacts fail differently (#12402, #12291):
+      · a MODULE that left `tortoise/` must carry a `module` archive entry — nothing else in
+        the repo can see a whole-module deletion;
+      · an archive entry that left (or was rewritten in) `archive/MANIFEST.json` must be
+        restored, or waived with a stated reason, because that manifest is the only index of
+        what was removed.
+
+    A DROPPED row is not always a loss. `archive/README.md`'s restore procedure ends by
+    deleting the row AND its frozen file, because the code came back to the product — and a
+    restore CANNOT keep the row, since direction one reds an archived symbol that is live
+    again. So a drop whose symbol `live_return` finds live AND whose live body is the one the
+    row recorded (`_live_body_is_the_recorded_one`; `False` on an unreadable or unkeyable file)
+    is a RESTORE: green, no waiver,
+    nothing lost (the code is in the product; the frozen bytes stay readable in git history at
+    the deletion commit). `surface` is what answers that question, and the same answer
+    `surface_violations` reds from its own side. `surface=None` means "liveness UNKNOWN" and
+    gives no restore credit — fail-closed toward the violation, so a caller that has not read
+    the surface can never turn a loss into a green.
+
+    `allowed` is the deliberate-departure escape hatch, applied to a NAMED record only — there
+    is no blanket flag, for the same reason `cut --allow-removal` has none: a blanket flag is
+    how a gate becomes decoration. A waiver that matches no violation is itself reported, so a
+    stale waiver cannot sit in a PR body looking like a record of something.
+    """
+    root = Path(root or ROOT)
+    sha, base_label = resolve_base(root, base_ref)
+    entries = load_manifest(root / "archive" / "MANIFEST.json")["entries"]
+    working = {_entry_key(entry): entry for entry in entries}
+    base_entries = {_entry_key(entry): entry for entry in _entries_at(root, sha)}
+    waivers: dict[tuple[str, str], str] = {parse_shrink_waiver(t): t for t in allowed}
+    used: set[tuple[str, str]] = set()
+    out: list[str] = []
+
+    # ── arm 1: a MODULE that disappeared from the package tree (#12402) ──────────
+    head_paths = _package_modules(root)
+    base_paths = _package_paths_at(root, sha)
+    # CONTENT decides, not the path set: an `__init__.py` with a body at the base is a module
+    # that left even though its package still resolves through a surviving sibling (review F2 —
+    # `tortoise/__init__.py` is 406 lines of the public API, and the ancestor expansion that
+    # used to cancel it graded that deletion green).
+    base_modules = _modules_with_a_body(base_paths, lambda path: _git_blob(root, sha, path))
+    head_modules = _modules_with_a_body(head_paths, lambda path: _file_text(root, path))
+    gone_modules = base_modules - head_modules
+    for module in sorted(gone_modules):
+        key = (MODULE, module)
+        # `candidates` is the BASE's carrier set for this module, so it answers both "did the base
+        # hold RUNTIME code (not a `.pyi` stub only)?" and the `where` in the violation below.
+        candidates = sorted(path for path in base_paths if module_name(path) == module)
+        runtime_carrier = next((path for path in candidates if not path.endswith(".pyi")), None)
+        if key in working:
+            # ⛔ A row that froze the stub is not a record — and it is credited HERE, not only in
+            # arm 1b: when the stub is deleted as the writer's own output asks, the module has NO
+            # head carrier at all, so it is `base - head` that lands in this arm while the row's
+            # existence silences it. `_row_froze_a_stub` asks `blocks[].path` — the field
+            # `file_violations` binds to the frozen banner AND the body's sha256 — and falls back
+            # to `archived_from` only for a row carrying no block list. Never the archived file's
+            # suffix (the archived file is always `.py`; see its docstring for the measured false
+            # PASS that made the suffix-keyed first cut dead code).
+            if runtime_carrier is not None and _row_froze_a_stub(working[key]):
+                out.append(
+                    _record_froze_a_stub(
+                        module,
+                        base_label,
+                        runtime_carrier,
+                        "no module file at all",
+                        working[key],
+                    )
+                )
+            continue  # an entry of the right kind names it: the removal has its record
+        if key in waivers:
+            used.add(key)
+            continue
+        where = candidates[0] if candidates else f"{module.replace('.', '/')}.py"
+        out.append(
+            f"{module}: MODULE REMOVED — {base_label} carries it and this tree does not, and "
+            "`archive/MANIFEST.json` has no `module` entry for it. A module is the largest "
+            "removable unit and the surface baseline carries no `module` rows, so neither "
+            "`surface_manifest.cut` nor the rest of this check can see the deletion (#12402). "
+            f"{MODULE_ROUTE} (the file was {where})"
+        )
+
+    # ── arm 1b: a module EMPTIED IN PLACE — the file is still there, its body is not (#12402) ──
+    # `_modules_with_a_body` grades an `__init__.py` by CONTENT because the PATH set cannot tell
+    # scaffolding from an API (review F2). The SAME reasoning holds for every module, and the
+    # version that applied it to `__init__.py` alone was a live fail-open (review P2): `>
+    # tortoise/x.py` — or `git rm` of the body while the file stays — left the name in BOTH sets,
+    # so the arm reported green while the module's code was gone, and no sibling arm sees it
+    # (`file_violations` walks manifest rows, `package_violations` only checks the archive
+    # locations). Reading is narrowed to the names present on BOTH sides and to the head file
+    # first, so the arm costs one working-tree read per shared module and no git call unless the
+    # head file is body-less.
+    base_paths_by_module: dict[str, str] = {}
+    head_paths_by_module: dict[str, str] = {}
+    for targets, paths in ((base_paths_by_module, base_paths), (head_paths_by_module, head_paths)):
+        # SORTED so the carrier choice is a property of the paths, not of a set's hash order:
+        # the preference below is what makes "add a stub beside the module" deterministic, and a
+        # hash-ordered map made that guarantee untestable (measured in round-7 review).
+        for path in sorted(paths):
+            name = module_name(path)
+            # ⛔ PREFER the RUNTIME carrier: a `.pyi` stub has no runtime statements, so it must
+            # never stand in for a module's code on the SHRINK side. Replacing `x.py` with
+            # `x.pyi` deletes the module from the product, and the stub used to satisfy both the
+            # name set AND (being non-empty) the content rule — graded green (round-5 review).
+            if name not in targets or targets[name].endswith(".pyi"):
+                targets[name] = path
+    for module in sorted(base_modules & head_modules):
+        base_carrier = base_paths_by_module[module]
+        head_carrier = head_paths_by_module[module]
+        stubbed = head_carrier.endswith(".pyi") and not base_carrier.endswith(".pyi")
+        # ⛔ A head carrier that EXISTS but cannot be read is the removed body, not a reason
+        # to stay silent: a dangling symlink, or a DIRECTORY named `x.py`, passes `exists()`
+        # while holding no code (round-7 review). This is the OPPOSITE polarity from
+        # `_modules_with_a_body`, and deliberately so: there a `None` answer means the BASE
+        # side could not read the commit (a shallow clone), where "counts as content" is the
+        # only safe reading — here the file is on disk in the working tree, so an unreadable
+        # one is evidence about THIS tree.
+        #
+        # ⛔ THE DECISION IS `_head_carries_runtime_body`, not a second copy of this test: the
+        # unused-waiver diagnostic below asks the same question, and when it carried its own copy
+        # it answered with a body-only test — which counts a stub and an unreadable file as
+        # bodies — so one run printed "the body was removed" here and "this tree still carries
+        # it" there (review P2 of PR #14039). The helper answers `stubbed` itself, which is why
+        # there is no `if not stubbed:` wrapper any more.
+        if _head_carries_runtime_body(
+            root, module, head_paths_by_module, base_paths_by_module
+        ):
+            continue
+        base_text = _git_blob(root, sha, base_carrier)
+        if base_text is None or not _init_carries_a_body(base_text):
+            continue  # scaffolding on BOTH sides: a placeholder that stayed a placeholder
+        key = (MODULE, module)
+        if key in working:
+            # ⛔ A ROW THAT FROZE THE STUB IS NOT A RECORD (fresh-context review of PR #14039,
+            # P0). `stubbed` keeps the legit stub-only module (a `.pyi` carrier on BOTH sides)
+            # out of this branch; `_row_froze_a_stub` asks `blocks[].path` (falling back to
+            # `archived_from` for a row with no block list) — see its docstring for why the
+            # archived file's suffix is a dead question.
+            if stubbed and _row_froze_a_stub(working[key]):
+                out.append(
+                    _record_froze_a_stub(
+                        module,
+                        base_label,
+                        base_carrier,
+                        f"only the `.pyi` stub `{head_carrier}`",
+                        working[key],
+                    )
+                )
+            continue  # an entry of the right kind names it: the removal has its record
+        if key in waivers:
+            used.add(key)
+            continue
+        if stubbed:
+            how = f"replaced by a `.pyi` STUB (`{head_carrier}`), which holds no runtime statements"
+        else:
+            head_body_text = _file_text(root, head_carrier) or ""
+            try:
+                ast.parse(head_body_text)
+            except SyntaxError:
+                how = (
+                    f"`{head_carrier}` no longer parses — text that is not Python holds no "
+                    "statements a caller can reach"
+                )
+            else:
+                how = (
+                    f"`{head_carrier}` carries none (empty, whitespace, comments or a bare "
+                    "docstring)"
+                )
+        out.append(
+            f"{module}: MODULE BODY REMOVED — {base_label} carries statements in "
+            f"`{base_carrier}` and this tree's module file {how}. The NAME survived, "
+            "so a set comparison over module names cannot see this, and the surface baseline "
+            "carries no `module` rows: the code left the product and nothing records it "
+            "(#12402). "
+            f"{MODULE_ROUTE}"
+        )
+
+    # ── arm 2: an entry that left, or was rewritten in, MANIFEST.json (#12291) ───
+    for key, base_entry in sorted(base_entries.items()):
+        kind, symbol = key
+        if key not in working:
+            if key in waivers:
+                used.add(key)
+                continue
+            # A RESTORE, not a loss: the row left because the code came BACK (direction
+            # one reds the row if it stays — archived ⇔ absent), so there is nothing the
+            # archive promised that the product no longer carries. Recognising it here is
+            # what keeps `archive/README.md`'s own restore procedure green in CI, which
+            # runs this arm with `--base-ref` on every PR.
+            #
+            # ⛔ The BODY decides, not the name: a stub dropped at the dotted path is not
+            # the code returning (see `_live_body_is_the_recorded_one`).
+            #
+            # ONE `and` chain, not two nested `if`s: the inner test only ever means
+            # "skip the report", so nesting it bought nothing and cost a ruff SIM102 on
+            # the required `surface-guard`/lint path.
+            if (
+                surface is not None
+                and (carrier := live_return(base_entry, surface, root)) is not None
+                and _live_body_is_the_recorded_one(root, base_entry, carrier) is not False
+            ):
+                continue
+            out.append(
+                f"{symbol} ({kind}): REMOVED from archive/MANIFEST.json — {base_label} records "
+                "it and this tree does not, so the only index of what was removed from the "
+                "product no longer names it. The frozen file under archive/ may still be on "
+                "disk — that sub-case is the one the file arm DOES see (`archived code that no "
+                "manifest row indexes — orphan`); what no other arm sees is dropping the row AND "
+                "the file together, because every other arm here iterates the rows it FINDS "
+                "(#12291). "
+                "REMEDY: restore the entry — or, if the code came back to the PRODUCT "
+                "BYTE-FOR-BYTE, delete its frozen file in the same commit (that is the restore "
+                "procedure in archive/README.md, and this arm credits a live symbol whose BODY "
+                "matches the record, so no waiver is needed). A restore that also CHANGES the "
+                "code has no green state here: putting the block back VERBATIM in this PR and "
+                "changing the code afterwards is the route. If the drop is neither, state it: "
+                f"`--allow-archive-shrink {kind}:{symbol} --allow-archive-shrink-reason <why>`. "
+                "A waiver is a local-shell record: CI passes none, deliberately."
+            )
+        elif _entry_claim(working[key]) != _entry_claim(base_entry):
+            if key in waivers:
+                used.add(key)
+                continue
+            if _reanchor_is_verified(
+                root, symbol, str(working[key].get("file") or ""), working[key], base_entry
+            ):
+                # Not a faithless edit: the frozen file still matches the record and the new
+                # anchor holds the recorded body byte-for-byte (see `_reanchor_is_verified`).
+                continue
+            changed = [
+                field for field in CLAIM_FIELDS
+                if json.dumps(base_entry.get(field), sort_keys=True, default=str)
+                != json.dumps(working[key].get(field), sort_keys=True, default=str)
+            ]
+            out.append(
+                f"{symbol} ({kind}): REWRITTEN in archive/MANIFEST.json — {base_label} records "
+                f"a different {', '.join(changed)} for it. A recorded entry is the evidence "
+                "that the removed code is what it says it is; editing it in place leaves the "
+                "same faithless record as deleting it, with the frozen file still on disk to "
+                "make the drop look complete (#12291). REMEDY: restore the recorded "
+                f"field(s), or state the correction: `--allow-archive-shrink {kind}:{symbol} "
+                "--allow-archive-shrink-reason <why>`."
+            )
+
+    # A waiver is a RECORD. One that waived nothing is a false record, and it is the kind of
+    # false record that makes a later reader believe a departure was checked (#12237's rule).
+    for key in sorted(set(waivers) - used):
+        kind, symbol = key
+        if kind == MODULE:
+            # ⛔ THE ARCHIVE IS NOT THE ARM-1 RECORD, so `base_entries` alone is the wrong
+            # question and its answer was false in the ORDINARY case: a module present at the
+            # base AND here printed "does not record `tortoise.x` (module) at all" while the
+            # same run listed it on both sides. A `module` removal is answered by the PACKAGE
+            # TREE (arm 1 above), so ask that first; the round-3 wording split just never
+            # reached this branch (review F2 of PR #14039, the same "the verdict was right, the
+            # stated fact was false" class the sibling branch was fixed for).
+            #
+            # ⛔ AND NOT THE TREE *INSTEAD* OF THE ROW: an ARCHIVED module is a row at the base
+            # and a module on NEITHER side, so answering only from the package tree flipped the
+            # same falsity one branch over — "carries no `tortoise.gone` (module) at all" over a
+            # base manifest that records it (measured: `test_a_waiver_for_a_row_that_never_LEFT_
+            # says_so_without_claiming_the_base_lacks_it` reds). The three answers are distinct
+            # facts and each states its own: the ROW is here, the LIVE module is here, neither.
+            if key in base_entries:
+                # ⛔ THE ROW AND THE LIVE MODULE ARE TWO FACTS (review F1 of the P8b landing).
+                # An ARCHIVED module is a row at the base and a module on NEITHER side — the
+                # ordinary case for `archive/`, not an edge case — so "the base records it"
+                # does NOT imply "this tree still carries it". Asking only the row printed
+                # "this tree still carries it, so nothing was removed" over a module the base
+                # had already frozen and this tree does not carry at all: the verdict (the
+                # waiver waives nothing) was right and the stated fact was false, which is the
+                # class this loop exists to remove, on the one branch still unasked. Measured
+                # on the committed row (`module:tortoise.archived.search_legacy`): a waiver
+                # for it claimed the tree carries a module present in neither tree.
+                # So ask the live BODY, exactly as the branch below does.
+                if _head_carries_runtime_body(
+                    root, symbol, head_paths_by_module, base_paths_by_module
+                ):
+                    why = (
+                        f"{base_label} records `{symbol}` ({kind}) and this tree still carries "
+                        "it, so nothing was removed for it to waive"
+                    )
+                else:
+                    if _row_froze_a_stub(base_entries[key]):
+                        why = (
+                            f"{base_label} already records `{symbol}` ({kind}) and this tree does "
+                            "not carry it — but that `module` entry FROZE ONLY A STUB, so it is "
+                            "not a record of the source: restore the source from the base, "
+                            "archive it, and delete it again"
+                        )
+                    else:
+                        why = (
+                            f"{base_label} already records `{symbol}` ({kind}) and this tree does "
+                            "not carry it — the removal IS recorded by that `module` entry, so the "
+                        "waiver waives nothing"
+                    )
+            elif symbol in base_modules:
+                # ⛔ ASK THE HEAD SIDE, and ask it about the BODY (review P2 of PR #14039). Set
+                # membership is a PATH set, so it was `True` in BOTH shapes that DID remove a
+                # module: arm 1's (the file left — `base_modules - head_modules` reaches here
+                # only when the removal is already recorded, since an unrecorded one is reported
+                # by arm 1 and would have CONSUMED the waiver) and arm 1b's (the file stayed and
+                # its body left, so the name is still in `head_modules`). In both, the old
+                # wording — "this tree still carries it, so nothing was removed" — pointed the
+                # operator at a removal that never happened while the run had just demanded a
+                # record for the one that did. Undoing an over-statement with an under-statement
+                # is not the fix either: the two answers are distinct facts and each states its
+                # own, which is this loop's stated rule.
+                if _head_carries_runtime_body(
+                    root, symbol, head_paths_by_module, base_paths_by_module
+                ):
+                    why = (
+                        f"{base_label} carries `{symbol}` ({kind}) and this tree still carries "
+                        "it, so nothing was removed for it to waive"
+                    )
+                else:
+                    # ⛔ SPLIT ON THE ROW, NOT ON THE MODULE (review P2 of PR #14039). The body
+                    # being gone does NOT imply a row records it: arm 1b `continue`s on
+                    # scaffolding-on-BOTH-sides BEFORE it can consume the waiver, so a module
+                    # whose base file was docstring-only arrives here with NO `module` entry
+                    # anywhere in the tree — and the one-sentence version told the operator "the
+                    # removal IS recorded by the `module` entry you also passed" over a tree that
+                    # has no such entry. Verdict right, stated fact false: this loop's own
+                    # recurring class.
+                    if key in working and not _row_froze_a_stub(working[key]):
+                        why = (
+                            f"{base_label} carries `{symbol}` ({kind}) and this tree does not "
+                            "— the removal IS recorded by the `module` entry you also passed, "
+                            "so the waiver waives nothing"
+                        )
+                    elif key in working:
+                        # ⛔ ASK THE RECORD, NOT THE KEY (review F1 of round 17). Arm 1b appends
+                        # `_record_froze_a_stub` and `continue`s BEFORE it consumes the waiver, so
+                        # on the shape the anti-stub rule was added for this loop re-derives the
+                        # same key, takes `key in working`, and printed "the removal IS recorded"
+                        # ONE RUN after printing "THE RECORD FROZE A STUB" — two contradicting
+                        # statements about the same entry, the false one pointing away from the
+                        # only route that clears it.
+                        why = (
+                            f"{base_label} carries `{symbol}` ({kind}) and this tree does not "
+                            "— but the `module` entry you also passed FROZE ONLY A STUB, so it "
+                            "is not a record: restore the source from the base, archive it, and "
+                            "delete it again"
+                        )
+                    else:
+                        why = (
+                            f"{base_label} carries `{symbol}` ({kind}) and this tree does not "
+                            "— and NO `module` entry records it, so the removal is UNRECORDED: "
+                            "the entry is what is missing, not what this waiver waives"
+                        )
+            elif symbol in head_modules:
+                why = (
+                    f"{base_label} carries no `{symbol}` ({kind}) and this tree does — that is "
+                    "an ADDITION, so nothing was removed for it to waive"
+                )
+            else:
+                why = f"{base_label} carries no `{symbol}` ({kind}) at all"
+        elif key in base_entries:
+            # The base DOES record it and it is still here: the stated fact must not claim
+            # otherwise (review round 3 — "does not record `symbol` at all" was false on this
+            # path, and misdirects the operator to look for a removal that never happened).
+            why = (
+                f"{base_label} records `{symbol}` ({kind}) and this tree still carries it, so "
+                "nothing was removed for it to waive"
+            )
+        else:
+            why = f"{base_label} does not record `{symbol}` ({kind}) at all"
+        out.append(
+            f"--allow-archive-shrink {waivers[key]!r} waives nothing: {why}. Drop the "
+            "flag (an override that replaces a real record is the state this arm exists to "
+            "make visible)"
+        )
+    return out
+
+
+def check(
+    root: Path | None = None,
+    *,
+    require_entries: bool = False,
+    base_ref: str | None = None,
+    allowed_shrink: tuple[str, ...] | list[str] = (),
+) -> list[str]:
     """Every violation, or an empty list when the archive is consistent.
 
     `require_entries` is OFF by default because the documented restore path ends with a LEGAL
     empty archive: restoring the last entry deletes its row and file, and `check` must then be
     clean (`archive/README.md` step 4). The `surface-guard` job passes the flag, where an empty
     archive means the archived code was deleted rather than restored.
+
+    `base_ref` is OFF by default and turns on the SHRINK arms (`shrink_violations`), which need
+    a ref to compare against: every other arm here iterates the entries the manifest FINDS, so
+    none of them can see an entry that is gone or a module that was deleted. `None` = the arm
+    does not run; a string (possibly empty → the default branch) = it runs, and an unresolvable
+    ref is a REFUSAL rather than a silent pass. Arm 2 recognises a RESTORE (the row left, the
+    symbol is live again, AND the live body is the one this row recorded —
+    `_live_body_is_the_recorded_one`; a live NAME alone is not a restore, as `archive/README.md`
+    says) and stays green, so the restore procedure in `archive/README.md`
+    is untouched by turning the arm ON — the live surface read for `surface_violations` below is
+    the same answer it reads, passed through rather than derived twice.
     """
     root = Path(root or ROOT)
     manifest = load_manifest(root / "archive" / "MANIFEST.json")
     entries = manifest["entries"]
     problems: list[str] = []
+    surface = live_surface(root)
     problems += manifest_violations(manifest, root / "archive")
     if require_entries and not entries:
         # A VACUOUS PASS. With no entries every arm below is silent, so a PR that empties the
@@ -921,9 +1897,13 @@ def check(root: Path | None = None, *, require_entries: bool = False) -> list[st
             "an empty manifest means the archived code was deleted, not that there is none"
         )
     problems += file_violations(entries, root / "archive", root)
-    problems += surface_violations(entries, live_surface(root))
+    problems += surface_violations(entries, surface, root)
     problems += package_violations(root)
     problems += index_violations(entries, root)
+    if base_ref is not None:
+        problems += shrink_violations(
+            root, base_ref=base_ref, allowed=allowed_shrink, surface=surface
+        )
     return problems
 
 
@@ -1212,13 +2192,66 @@ def _module_source(root: Path, symbol: str) -> list[tuple[str, str, str | None]]
     """
     rel = symbol.replace(".", "/") + ".py"
     path = root / rel
+    package_fallback = False
     if not path.exists():
-        raise ArchiveRefused(f"module {symbol} has no file at {rel} — nothing to archive")
+        # ⛔ A PACKAGE is archived by its DOTTED path and its source is `<dotted>/__init__.py`.
+        # Without this fallback the rule arm 1 grades was UNRUNNABLE for the very shape it was
+        # built for (review P1 of PR #14039): `_modules_with_a_body` grades an `__init__.py` by
+        # CONTENT, so deleting a 406-line `tortoise/__init__.py` reports `tortoise: MODULE
+        # REMOVED`, whose printed remedy is `archive module tortoise` — and this function refused
+        # it with "no file at tortoise.py" while CI passes no waiver, so the operator had a
+        # correct red and NO route. The archived FILE stays `<dotted>.py` (`archive_rel`), so no
+        # `__init__.py` ever lands under `archive/` (`package_violations` refuses that), and
+        # `archived_from` names the init file the body actually came from.
+        package_rel = symbol.replace(".", "/") + "/__init__.py"
+        if (root / package_rel).exists():
+            rel, path = package_rel, root / package_rel
+            package_fallback = True
+        else:
+            # …and a `.pyi`-only module is graded by every other arm (`_package_modules` reads
+            # `*.py*`, `module_name` strips `.pyi`, arm 1b's stub rule), so the remedy must be
+            # able to freeze one — otherwise the red the gate prints has no route, one suffix
+            # over from the package fallback above (round-7 review).
+            stub_rel = symbol.replace(".", "/") + ".pyi"
+            if (root / stub_rel).exists():
+                rel, path = stub_rel, root / stub_rel
+            else:
+                raise ArchiveRefused(
+                    f"module {symbol} has no file at {rel}, no package at {package_rel} and no "
+                    f"stub at {stub_rel} — nothing to archive"
+                )
     try:
         source = path.read_text(encoding="utf-8")
         ast.parse(source, filename=str(path))
     except (OSError, SyntaxError) as exc:
         raise ArchiveRefused(f"could not read {rel}: {exc}") from exc
+    # ⛔ A LEFTOVER SCAFFOLD IS NOT THE MODULE (fresh-context review of PR #14039, P2).
+    # The package fallback above exists so arm 1's printed remedy RUNS for the shape arm 1
+    # grades — but it resolves `<dotted>/__init__.py` whether or not that file still carries the
+    # module's code. Deleting `tortoise/x.py` (the body) and leaving `tortoise/x/__init__.py` as a
+    # docstring made this writer freeze `"""Scaffolding."""` as the SOURCE OF RECORD for the
+    # whole module, and `shrink_violations` then credits the removal on the row's EXISTENCE
+    # (`if key in working: continue`): every arm green, the removed body in NO file under
+    # `archive/` — the exact loss `archive/` exists to prevent, reading as a record. Measured on
+    # the pre-fix bytes: the CLI said "archived module tortoise.x", `check --base-ref` said
+    # "archive consistent", `verify-anchors` said OK, and the removed `f39` was in no archived
+    # file.
+    #
+    # The legitimate package shape is unaffected (the `tortoise/__init__.py` this fallback was
+    # built for carries 406 lines (12 top-level statements)), and so is the `.pyi` fallback above/below (a stub-only
+    # module's only code IS the stub). The route this refusal names is the one
+    # `archive/README.md` already gives: restore the source from the base, archive it, then
+    # delete it again in the same batch.
+    if package_fallback and not _init_carries_a_body(source):
+        plain = symbol.replace(".", "/") + ".py"
+        raise ArchiveRefused(
+            f"module {symbol} has no file at {plain}, and the only file left at {rel} is "
+            "SCAFFOLDING — no statements of its own. Freezing it would record a docstring as the "
+            "source of record for code that is gone, and `check --base-ref` would then read the "
+            "removal as recorded. Restore the deleted source from the base first "
+            f"(`git checkout <base-sha> -- {plain}`), archive it, and delete it again in the "
+            "same batch."
+        )
     return [(rel, source, None)]
 
 
@@ -1465,6 +2498,37 @@ def main(argv: list[str] | None = None) -> int:
             "documented restore of the last entry can finish)"
         ),
     )
+    check_parser.add_argument(
+        "--base-ref",
+        nargs="?",
+        const="",
+        default=None,
+        metavar="REF",
+        help=(
+            "ALSO grade the SHRINK direction (#12402, #12291) against REF (default: the "
+            "default branch), compared at its MERGE BASE with HEAD: a module that left "
+            "tortoise/ must carry a `module` entry, and an entry that left or was rewritten "
+            "in archive/MANIFEST.json must be restored or waived. Off unless given; an "
+            "unresolvable ref is a REFUSAL, never a pass"
+        ),
+    )
+    check_parser.add_argument(
+        "--allow-archive-shrink",
+        action="append",
+        default=[],
+        metavar="KIND:SYMBOL",
+        help=(
+            "waive ONE deliberate removal (repeatable): `module:<dotted.path>`, "
+            "`mcp-tool:<tool>` or `sdk-method:<method>`. Needs --base-ref and "
+            "--allow-archive-shrink-reason, and a waiver that waives nothing is reported"
+        ),
+    )
+    check_parser.add_argument(
+        "--allow-archive-shrink-reason",
+        default=None,
+        metavar="TEXT",
+        help="WHY the waived removal is legitimate — it belongs in the PR body, not only here",
+    )
 
     index_parser = sub.add_parser("index", help="regenerate archive/INDEX.md")
     index_parser.add_argument("--check", action="store_true", help="assert it is current")
@@ -1479,7 +2543,43 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.cmd == "check":
-            problems = check(require_entries=args.require_entries)
+            # An override is a RECORD: it needs the arm it waives, and a WHY. Both refusals are
+            # exit 2 (a defect in the invocation), never exit 1 — an unwaivable invocation is
+            # not a finding about the tree, and reading it as one would send the operator
+            # looking for a removal that does not exist.
+            # `.strip()` BEFORE the pairing test, the same normalisation `cmd_cut` applies to
+            # `--allow-removal-reason` and the surface tool applies to its own reason: `""` and
+            # `"   "` are not STATED reasons. Raw truthiness accepted both (measured: a whitespace
+            # reason satisfied the pairing test beside a real waiver), so an unexplained removal
+            # could be waived by pressing space. Normalised in place so the green line echoes the
+            # string that was graded. `reason_given` keeps a blank-but-PRESENT flag distinct from
+            # no flag at all, the same distinction the surface tool makes.
+            reason_given = args.allow_archive_shrink_reason is not None
+            args.allow_archive_shrink_reason = (
+                args.allow_archive_shrink_reason or ""
+            ).strip() or None
+            if bool(args.allow_archive_shrink) != bool(args.allow_archive_shrink_reason) or (
+                reason_given and not args.allow_archive_shrink
+            ):
+                print(
+                    "REFUSED --allow-archive-shrink and --allow-archive-shrink-reason go "
+                    "together: an override with no stated reason is not a record, and a "
+                    "reason with nothing waived waives nothing",
+                    file=sys.stderr,
+                )
+                return 2
+            if args.allow_archive_shrink and args.base_ref is None:
+                print(
+                    "REFUSED --allow-archive-shrink needs --base-ref: it waives a removal "
+                    "only the shrink arm can see, and that arm is off without a base ref",
+                    file=sys.stderr,
+                )
+                return 2
+            problems = check(
+                require_entries=args.require_entries,
+                base_ref=args.base_ref,
+                allowed_shrink=args.allow_archive_shrink,
+            )
             if args.anchors:
                 problems += anchor_unverified()
             if problems:
@@ -1493,7 +2593,21 @@ def main(argv: list[str] | None = None) -> int:
                 f"{sum(1 for e in entries if e['kind'] == kind)} {INDEX_LABEL[kind][2]}"
                 for kind in KINDS
             )
-            print(f"OK — archive consistent: {len(entries)} entries ({counts}).")
+            shrink = ""
+            if args.base_ref is not None:
+                # Say WHAT was compared, in the green line: a shrink pass that does not name
+                # its base reads identically to a run where the arm silently did nothing.
+                _sha, label = resolve_base(ROOT, args.base_ref)
+                shrink = f" Shrink checked against {label}"
+                if args.allow_archive_shrink:
+                    # ⛔ THE REASON IS REQUIRED AND WAS THEN DISCARDED (review N1 of PR #14039):
+                    # a WHY that is validated and never printed is a one-flag decoration, and
+                    # the green line is the only surviving record that a departure was checked.
+                    shrink += (
+                        f" (waived: {', '.join(args.allow_archive_shrink)}"
+                        f" — reason: {args.allow_archive_shrink_reason})"
+                    )
+            print(f"OK — archive consistent: {len(entries)} entries ({counts}).{shrink}")
             return 0
         if args.cmd == "verify-anchors":
             # The strict verb, and the only one that turns "this clone cannot answer" into a
