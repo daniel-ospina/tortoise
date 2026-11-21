@@ -160,23 +160,27 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, "`:2452`", _AU, 2452, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`:2463`", _AU, 2463, "OPTIONAL MATCH (carrier:Object) WHERE carrier.name"),
     (_AUDIT, "`mcp_server.py:5250`", _MCP, 5250, "entity_type=entity_type"),
-    # ⛔ §2.5's `:Tag` traversal row cites `mcp_server.py:11281` and, until this row, NOTHING read
-    # it (`grep -rn 11281 tests/` -> nothing): the audit document's header promises a reader for
-    # every entry it re-derives, and this one had none. `:11280` is the `g.query(` call; the
-    # document cites the query LITERAL's first line, which is `:11281` (its siblings in the same
-    # paragraph follow the same convention — `sdk.py:31533` is the literal while `:31377` is the call).
+    # ⛔ §2.5's `:Tag` traversal row cites this address and, until this row, NOTHING read it —
+    # at that head `grep -rn 11281 tests/` returned nothing (it returns this file's own comments
+    # now, which is not a read): the audit document's header promises a reader for every entry it
+    # re-derives, and this one had none. The document cites the query LITERAL's
+    # first line, not the `g.query(` call above it — at THIS head the call is `:11589` and the
+    # literal `:11590`; at the head that row was written for they were `:11280` / `:11281`, and
+    # `#14169` moved both together (its siblings in the same paragraph follow the same
+    # convention — `sdk.py:31533` is the literal while `:31532` is the `rows = proj.g.query(` call).
     (_AUDIT, "`mcp_server.py:11590`", _MCP, 11590, "OPTIONAL MATCH (t)<-[:TAGGED]-(q)"),
     # ⛔ The SAME address has a SECOND written site — the header enumeration spells it BARE
     # (`` `mcp_server.py:5250`/`:8515`/`:11590` ``), and the §2.5 token above cannot see a bare
     # `:NNNN`. Review at `b9e7822362c6`, P2: reverting ONLY the header half (`:11281` -> `:11280`,
-    # the address's spelling at that head)
-    # left every arm green — `_PINS` counts were unchanged (63/63), `_TOKEN_OCCURRENCES`' key count
+    # the address's spelling at that head) left every arm green — `_PINS` counts were unchanged
+    # (63/63), `_TOKEN_OCCURRENCES`' key count
     # stayed 1 (the §2.5 spelling is a different key), `_REDEFINED_13854` was untouched and the
     # `_resolved_pairs` census was identical (223 pairs) — so the document could name two addresses
     # for one reader with nothing red. That is the false pass this file exists to stop, and it is the
-    # `#13466` shape (four header entries re-pointed, nothing red). Its siblings on the same header
-    # line are pinned per SITE for exactly this reason: `` `:8515` `` and `` `:5720` `` each carry a
-    # bare-token row with count 2 (header + §2.5). This row and its count are the site the re-derived
+    # `#13466` shape (four header entries re-pointed, nothing red). Its two siblings are pinned per
+    # SITE for exactly this reason, and each carries a bare-token row with count 2 (header + §2.5):
+    # `` `:8515` `` sits on the same five-address header trio as this row; `` `:5720` `` sits on the
+    # earlier `entity_type` passthrough line. This row and its count are the site the re-derived
     # §2.5 row left behind.
     (_AUDIT, "`:11590`", _MCP, 11590, "OPTIONAL MATCH (t)<-[:TAGGED]-(q)"),
     # 3 -> 2 at the #14169 re-derivation (`b4da1f5c01`), which moved this address `+309`. The tally
@@ -188,7 +192,8 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # the path rather than a bare `:NNNN`) covers only the §2.5 one-token spelling; this row covers
     # the bare ones.
     # MEASURED on this document rather than carried: `t.count("`:11590`")` -> 2,
-    # `grep -n '`:11590`'` -> the header trio line and the §2.5 `:Tag` row, and
+    # `grep -n '`:11590`'` -> the header trio line and the §2.5 passage that spells the five
+    # `:Tag` reader addresses as bare siblings behind one path, and
     # `grep -n '`:11281`'` -> exactly one line, the provenance sentence. Re-derive before trusting
     # this: a line number stated in prose drifts exactly like the citations this file pins.
     # Re-pointing either live spelling alone still reds here, which is the discrimination this row
