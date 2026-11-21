@@ -209,17 +209,18 @@ READERS: tuple[dict[str, Any], ...] = (
         "needs": "DDL: a uniqueness constraint on event_id",
         "class": "maintenance",
         "why": "the belt behind the dedupe pre-check (the app-side probe is the "
-               "suspenders). ⚠️ Issued through `g.query()` inside a `try/except` "
-               "that only logs, so it does not raise the reader — and on the "
-               "server this was measured against it was REFUSED while the "
-               "`event_id` exact-match index was present and installed: "
-               "`ResponseError: missing supporting exact-match index` "
-               "(`measurement-payload88.json`). FalkorDB builds the index "
-               "asynchronously, so a constraint issued immediately after its "
-               "index can fail for that reason; that `installed` flag in the "
-               "measurement records \"the command did not raise\", NOT \"the "
-               "index is usable\". Production runs on the app-side probe "
-               "either way.",
+               "suspenders). ⚠️ `ensure_event_schema` issues it through `g.query()`, "
+               "which cannot parse a module command, so the constraint is never "
+               "created in production and the store admits a duplicated "
+               "`(seq, event_id)` row — the app-side probe is the belt that is "
+               "actually there. ⛔ THE `missing supporting exact-match index` THIS "
+               "ROW ONCE RECORDED WAS A SCRIPT DEFECT, NOT A SERVER LIMIT (#14183 "
+               "review round 9, measured): the measurement put `tortoise_ge_uid` in "
+               "the GRAPH-KEY slot of the module command, so it ran against a "
+               "freshly minted graph with no `event_id` index at all. Correctly "
+               "formed against a graph WITH that index the command is ACCEPTED "
+               "(`PENDING`) on `falkordb-server:v4.20.6`, empty and 20k-node graphs "
+               "alike — there is no asynchronous-index race to allow for.",
     },
     {
         "file": "tortoise/event_store.py",
@@ -452,7 +453,9 @@ def _graph_rows(db, graph: str, batch: int = 2000) -> list[dict[str, Any]]:
       hand-written `3.5`, and an `int()` cursor would never advance past it — an
       unbounded loop. The cursor keeps the value the server returned, so `> 3.5`
       advances.
-    * a row with NO `event_id` cannot take part in that cursor, so a page whose
+    * a row with no STRING `event_id` — absent, or a non-string that cannot be
+      compared with a string cursor (the same mixed-type ordering trap the
+      end-proof guards) — cannot take part in that cursor, so a page whose
       LAST row has none is a NAMED refusal: silently stopping there would be a
       partial read reported as a verdict.
 
@@ -466,10 +469,11 @@ def _graph_rows(db, graph: str, batch: int = 2000) -> list[dict[str, Any]]:
     hit makes `len(rows) < total` and the walk REFUSES (`Unpageable`) rather than
     returning a silently merged list. That includes the genuinely duplicated
     `(seq, event_id, type, payload)` row this store admits where the uniqueness
-    constraint is refused (`measurement-payload88.json`): it is refused as a
-    short read, never merged away. So the dedupe's only remaining effect is to
-    keep `len(rows)` meaning "distinct keys" — it must not be described as, and
-    must not be trusted to perform, a merge.
+    constraint never exists (production issues it through `g.query()`, which cannot
+    parse the module command): it is refused as a short read, never merged away. So
+    the dedupe's only remaining effect is to keep `len(rows)` meaning "distinct
+    keys" — it must not be described as, and must not be trusted to perform, a
+    merge.
     """
     # ⛔ THE REFUSAL LIVES HERE, not in a verb: `residency` and `superset` both
     # call this function, and a guard installed in one of them is how a
@@ -517,11 +521,13 @@ def _graph_rows(db, graph: str, batch: int = 2000) -> list[dict[str, Any]]:
         cursor_seq, _, cursor_id = page[-1][0], page[-1][1], page[-1][2]
         if not isinstance(cursor_id, str) or not cursor_id:
             raise Unpageable(
-                f"the row at seq {cursor_seq!r} carries no `event_id`, so the "
-                f"composite cursor cannot advance past it and the rest of the feed "
-                f"cannot be read. A partial read is not a verdict, so none is "
-                f"produced — repair the row (append_event always writes one) or "
-                f"read the feed with `read_after`, which pages on `seq` alone.")
+                f"the row at seq {cursor_seq!r} carries no STRING `event_id` — it is "
+                f"absent, or it is not a string and so cannot be compared with a "
+                f"string cursor — so the composite cursor cannot advance past it and "
+                f"the rest of the feed cannot be read. A partial read is not a "
+                f"verdict, so none is produced — repair the row (append_event always "
+                f"writes one) or read the feed with `read_after`, which pages on "
+                f"`seq` alone.")
         if not added:
             raise Unpageable(
                 f"the feed could not be paged past seq {cursor_seq!r}/"

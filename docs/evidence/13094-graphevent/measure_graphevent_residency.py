@@ -18,11 +18,15 @@ WHAT IS MEASURED, and what the number means:
   graph would fold in the two indexes' fixed cost and report a constant as a
   slope, which is the #13083 §5.1 error in the other direction.
 
-The SCHEMA IS PRODUCTION'S: the three DDL statements below are `event_store.
-ensure_event_schema`'s verbatim (`tortoise/event_store.py:410`, `:415`, `:421`), so
-the measurement includes the `event_id` index, the `seq` index and the unique
-constraint a production graph carries. A measurement against an un-indexed graph
-would understate the residency of the exact shape this issue is about.
+The SCHEMA IS PRODUCTION'S *intent*: the three DDL statements below are `event_store.
+ensure_event_schema`'s (`tortoise/event_store.py:410`, `:415`, `:421`), with ONE
+divergence the production path cannot avoid — `:415` sends the module command
+`GRAPH.CONSTRAINT CREATE …` through `g.query()`, which does not parse it, so the
+constraint is never created in production at all; here it is issued the module way
+(`execute_command`) against THIS probe graph, which is the only form that runs. The
+measurement therefore covers the `event_id` index, the `seq` index and the unique
+constraint. A measurement against an un-indexed graph would understate the
+residency of the exact shape this issue is about.
 
 The PAYLOAD is the census's own size: `#13083` §4 measured 12,768 B over 67
 `:GraphEvent` nodes ≈ 190 B each, which is the `PointAdded`-with-actor shape below.
@@ -57,13 +61,26 @@ GRAPH_PREFIX = "probe_13094"
 #: ⚠️ The third one is NOT Cypher and cannot go down `graph.query()`: `GRAPH.
 #: CONSTRAINT` is a module command, and `ensure_event_schema` sends it through
 #: `g.query()` inside a `try/except` that only logs (its own comment: *"FalkorDB
-#: #664 crash reports on string-property unique constraints"*). So on THIS server
-#: the constraint is REFUSED and production runs without it too — which is why the
+#: #664 crash reports on string-property unique constraints"*). So in production the
+#: constraint is NEVER created and the store runs without it — which is why the
 #: script records per-statement whether it was installed or refused instead of
-#: claiming a schema it may not have.
+#: claiming a schema it may not have. It therefore issues the module command the way
+#: the module command is actually issued, against its own probe graph.
 SCHEMA_STATEMENTS: tuple[tuple[str, str], ...] = (
     ("cypher", "CREATE INDEX FOR (n:GraphEvent) ON (n.event_id)"),
-    ("command", "GRAPH.CONSTRAINT CREATE tortoise_ge_uid UNIQUE NODE GraphEvent "
+    # ⛔ THE TOKEN AFTER `CREATE` IS THE **GRAPH KEY**, NOT A CONSTRAINT NAME.
+    # `event_store.py:415` writes `GRAPH.CONSTRAINT CREATE tortoise_ge_uid …` and
+    # sends it through `g.query()`, which cannot parse a module command at all, so
+    # that spelling never reaches a server that could interpret it. Issued the way
+    # the module command DOES run — `execute_command` — the same tokens put
+    # `tortoise_ge_uid` in the graph slot and MINT THAT GRAPH, which carries no
+    # `event_id` index; the `missing supporting exact-match index` this script used
+    # to record was that freshly made graph failing its own precondition, NOT a
+    # server limit on an indexed graph (#14183 review round 9, measured). With the
+    # probe graph's own key here, an immediate constraint on an indexed graph is
+    # ACCEPTED (`PENDING`) on `falkordb-server:v4.20.6`, empty and 20k-node graphs
+    # alike; there is no asynchronous-index race to allow for.
+    ("command", "GRAPH.CONSTRAINT CREATE {graph} UNIQUE NODE GraphEvent "
                 "PROPERTIES 1 event_id"),
     ("cypher", "CREATE INDEX FOR (n:GraphEvent) ON (n.seq)"),
 )
@@ -145,14 +162,18 @@ def measure(uri: str, graph: str, sizes: list[int], keep: bool,
     baseline_used = _used_memory(db)
     applied = []
     for kind, statement in SCHEMA_STATEMENTS:
+        # a `command` statement carries the probe graph's key, so the module command
+        # addresses the graph it measured instead of minting one named after what
+        # looks like a constraint name.
+        issued = statement.format(graph=graph)
         try:
             if kind == "cypher":
-                g.query(statement)
+                g.query(issued)
             else:
-                db.connection.execute_command(*statement.split())
-            applied.append({"statement": statement, "installed": True})
+                db.connection.execute_command(*issued.split())
+            applied.append({"statement": issued, "installed": True})
         except Exception as exc:  # the same tolerance production has
-            applied.append({"statement": statement, "installed": False,
+            applied.append({"statement": issued, "installed": False,
                             "refused": f"{type(exc).__name__}: {exc}"})
     g.query("MATCH (n:Warmup) DETACH DELETE n")
     after_schema = _used_memory(db)
