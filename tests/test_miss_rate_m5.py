@@ -404,7 +404,7 @@ def test_the_tool_holds_no_copy_of_a_window_value():
 # ── 2. the committed artifact satisfies the invariants ───────────────────────
 
 def test_the_committed_artifact_decomposes_its_own_miss_rate():
-    """INVARIANTS 1 and 3, checked on the artifact a reader will quote.
+    """INVARIANT 3, plus a hand-edit cross-check the module header says is NOT an invariant.
 
     ``miss == fault_in_rate + miss_resident × resident_query_share`` and
     ``fault_in_rate == 1 - resident_query_share``. If either drifts, the two

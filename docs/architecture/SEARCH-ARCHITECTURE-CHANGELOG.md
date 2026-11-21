@@ -421,8 +421,11 @@ DOUBLING of the window at every size — and `:Point` decays faster (from its pe
 bar. So "good enough" has to be a DECLARED miss bar rather
 than a discovered knee, which is why the record publishes the covered-tenant size at five bars (1/2/5/10/20 %).
 The two labels still do not share a shape, so an aggregate across them averages two different laws — which
-`#13989` forbids. And the residency POLICY is worth 34.8–36.0 pp at `F ≈ 0.5` against 10.4–10.6 pp from
-doubling the window, which is why `#13989` criterion 1 is load-bearing rather than a refinement.
+`#13989` forbids. And the residency POLICY is worth 34.8–36.0 pp at `F ≈ 0.5` against 10.4 pp (`:Object`)
+/ 5.6 pp (`:Point`) from doubling the window, which is why `#13989` criterion 1 is load-bearing rather
+than a refinement. ⚠️ The policy deltas are arm readings and the doubling figures are curve readings, and
+the arms sample the query set without replacement so they run ~2× the curve — take the direction and the
+sign, not the ratio; `#14196` carries the sampler fix and the re-cut.
 
 **What the document does not claim.** The query mass is a recurrence proxy, not an observed read ledger, and the
 sensitivity sweep brackets that assumption rather than removing it; `retrieval.mode` is `keyword_only`, so no

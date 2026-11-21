@@ -39,8 +39,16 @@ at five bars instead of one.
 
 **And the larger lever is not a megabyte: it is the policy.** At the coverage the shipped windows
 actually use (`F ≈ 0.5`), ordering residency by usage instead of at random removes **34.8 pp**
-(`:Object`) and **36.0 pp** (`:Point`) — against **10.4 pp** from doubling the window. `#13989`
-criterion 1 is worth three times the tariff.
+(`:Object`) and **36.0 pp** (`:Point`) — against **10.4 pp** (`:Object`) / **5.6 pp** (`:Point`)
+from doubling the window. `#13989`
+criterion 1 is the larger lever by a wide margin.
+
+⚠️ **Those two operands are NOT from the same surface, so read the direction and not the ratio.** The
+policy deltas are **arm** readings (§7); the doubling figure is read off the modelled **curve** (§3);
+the arms draw their 250 queries **without replacement**, so a node carrying 2 % of the mass occupies at
+most one of them and every arm's `fault_in_rate` sits about twice the curve at the same coverage (§7,
+"the two surfaces are not commensurable"). Measured **with** replacement the `:Object` policy delta is
+~39 pp — larger, not smaller — so the conclusion holds while the published ratio does not measure it.
 
 - **Artifact:** [`measurement.json`](./measurement.json)
 - **Instrument:** `tools/miss_rate_m5.py` · **git head:** `75970a958753` — the head these
@@ -281,10 +289,33 @@ seeded random order (the shape a creation-recency window approximates when age i
 | 0.25 | 41.6 % | 76.4 % | **34.8 pp** | 43.2 % | 74.4 % | **31.2 pp** |
 
 **At `F ≈ 0.5` — the coverage the shipped windows use on a 150 MB tenant — the ordering is worth
-34.8 – 36.0 pp against 10.4 – 10.6 pp from a doubling of the window.** The policy is the lever; the
+34.8 – 36.0 pp against 10.4 pp (`:Object`) / 5.6 pp (`:Point`) from a doubling of the window.**
+The policy is the lever; the
 allowance is the dial. This is the measurement that says `#13989` criterion 1 is load-bearing rather
 than a refinement — and it is also the reason the shipped windows look adequate in §4: they are
 adequate *because* residency is usage-ordered, not regardless of it.
+
+⚠️ **The two surfaces are not commensurable, and this is measured rather than argued.** *Within* the
+table above the comparison is like-for-like — every cell is an **arm** reading over the same query
+set, so the Δ column is sound. But an arm is **not** the mass distribution it is compared against in
+§3: `weighted_sample` draws its 250 queries from the population **without replacement**, so the
+hottest `:Object` node (2.0 % of the mass, i.e. ~5 draws if drawn independently) can occupy at most
+one of them. Every node is capped at one query, so the sample is pulled toward the *distinct-node*
+reading — measured against the sampler directly, on a Zipf(0.95) / n = 1000 population at `F = 0.5`
+where the true mass share is 0.109: the sampler returns **0.237** at n = 250 and **0.500** at a census
+n = 1000, which is the uniform reading, as it must be — a without-replacement sample of the whole
+population IS the population. (The sampler is a correct A-Res: it matches an independent
+exponential-race reference to 4 dp. This is the without-replacement design, not an implementation
+slip.)
+
+So an arm's `fault_in_rate` runs about **twice** the curve's at the same coverage (20.4 % arm vs
+10.4 % curve at `:Object`, `F = 0.5`; **1.30–1.96× on the published grid points**, and up to 3.2× at
+`F = 0.75`, where the curve is interpolated rather than published), and **an arm-derived pp must not be
+compared with a curve-derived one**. §3's doubling gain is curve-derived; this section's Δ is
+arm-derived. Each is correct in its own terms and §7's conclusion survives the correction — with
+replacement the `:Object` delta is ~39 pp, i.e. larger — but the *ratio* between them is an artefact
+of the sampler and is not quoted. The fix is a sampler change plus a re-cut of this bundle, so it is
+`#14196`'s job, never a hand-edit of a committed artifact.
 
 ---
 

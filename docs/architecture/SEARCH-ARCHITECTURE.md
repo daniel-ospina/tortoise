@@ -853,7 +853,8 @@ decays by a factor of four over the same range.
 
 **And the larger lever is the policy, not the tariff:** at `F ≈ 0.5` — the coverage the shipped windows
 use on a 150 MB tenant — ordering residency by usage instead of at random removes **34.8 – 36.0 pp** of
-miss rate, against **10.4 – 10.6 pp** from a doubling. That is the measurement that makes `#13989`
+miss rate, against **10.4 pp** (`:Object`) / **5.6 pp** (`:Point`) from a doubling. That is the
+measurement that makes `#13989`
 criterion 1 load-bearing rather than a refinement, and it is also why the shipped windows look adequate
 above: they are adequate BECAUSE residency is usage-ordered, not regardless of it.
 
