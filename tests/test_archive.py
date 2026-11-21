@@ -1721,7 +1721,12 @@ def test_a_waiver_over_a_STUB_ONLY_base_does_not_send_the_reader_to_the_base(
     diagnostic then runs and must not print a `git checkout <base> -- tortoise/stubby.py` route.
 
     Discriminating: the old wording prints "restore the source from the base" here, and that base
-    has no `tortoise/stubby.py` for the route to resolve against.
+    has no `tortoise/stubby.py` for the route to resolve against. The round-20 wording that
+    followed it ("a commit that still holds it") is unfollowable for the same reason — NO commit
+    holds a `.py` for a module whose only carrier is a stub — so this row also pins that the
+    diagnosis names the true fact instead: there was no runtime source to record, and the stub row
+    is the writer's own correct output for a stub-only module (see the writer's rule at
+    `_module_source`, "a stub-only module's only code IS the stub").
     """
     (tree / "tortoise").mkdir(exist_ok=True)
     (tree / "tortoise" / "stubby.pyi").write_text(
@@ -1744,7 +1749,12 @@ def test_a_waiver_over_a_STUB_ONLY_base_does_not_send_the_reader_to_the_base(
         "the base holds only the stub, so a checkout from it cannot yield the source: "
         f"{waived[0]}"
     )
-    assert "a commit that still holds it" in waived[0], waived[0]
+    assert "not a record" not in waived[0], (
+        "a stub-only module's stub IS its code, so this row is a record — calling it 'not a "
+        f"record' is false and sends the reader to redo a correct freeze: {waived[0]}"
+    )
+    assert "no runtime source to record" in waived[0], waived[0]
+    assert "drop the flag" in waived[0], waived[0]
 
 
 def test_a_module_body_replaced_by_UNPARSEABLE_text_is_a_removal(tree: Path) -> None:
