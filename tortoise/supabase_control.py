@@ -135,6 +135,8 @@ _ORG_ADDITIVE_SELECT = [
     "subscription_status", "customer_email",
     # #2406: onboarding-call offer email marker (20260907000001).
     "onboarding_email_sent_at",
+    # #13998: the capacity-notice high-water mark (20261120000001).
+    "storage_notice_pct",
 ]
 # Retry tiers for the fail-soft ladder (#1096): the NEWEST migration is
 # dropped FIRST, so a schema missing only the newest additive (e.g.
@@ -167,6 +169,46 @@ _ORG_ADDITIVE_BILLING_TIER = ["subscription_status", "customer_email"]
 # it as unset → one best-effort send attempt) while all older additive state
 # stays readable. Written by the service-role seam only — no RLS change.
 _ORG_ADDITIVE_ONBOARDING_TIER = ["onboarding_email_sent_at"]
+
+# #13998 capacity-notice high-water mark (20261120000001 — the NEWEST additive
+# migration): its OWN tier, dropped FIRST, so a schema one migration behind
+# degrades just the mark while every older additive stays readable. Written by
+# the service-role seam only — no RLS change.
+#
+# ⛔ THE LADDER DROPS THE TIER; IT DOES NOT MAKE THE SEND SAFE. Reading the mark
+# as unset is right for the QUOTA path (which is what the ladder protects) and
+# wrong for the NOTICE path, which OWNS this column: without a readable ledger
+# every pass would re-send the same one-shot notice, and the provider key only
+# collapses a SAME-threshold replay inside its 24 h window. So `capacity_notice.read_account`
+# deliberately has NO ladder behind it and reports `notice-mark-unavailable`
+# instead of sending — an earlier comment here claimed a "best-effort notice per
+# pass" that no code implements (#14038 review, P2).
+_ORG_ADDITIVE_STORAGE_NOTICE_TIER = ["storage_notice_pct"]
+
+#: THE ORDERED LADDER, one owner (#14038 review, P1). Every `_orgs_row_fail_soft`
+#: caller over `_QUOTA_SELECT` must pass the tiers in NEWEST-migration-first
+#: order, because `_orgs_row_fail_soft` drops `tier[0]`, then `tier[0..1]`, … and a
+#: column added to `_ORG_ADDITIVE_SELECT` without its tier in a caller's list
+#: survives EVERY rung — the for-else then re-raises and the read is a 500 on a
+#: schema one migration behind, instead of a degrade of the one new column.
+#:
+#: ⛔ THAT IS EXACTLY WHAT HAPPENED (#14038): `storage_notice_pct` was appended to
+#: `_ORG_ADDITIVE_SELECT` and TWO of the five ladders (`_session_user_org`,
+#: `_agent_recover_flow` in ``hosted_api``) were missed — a session-authed
+#: management lockout and a key-recovery lockout under drift, both green in tests
+#: because no test drifts those two sites. So the ladder is now declared ONCE
+#: here and every call site passes ``list(_ORG_ADDITIVE_TIERS)``: a future
+#: additive column cannot be added to the select without landing in this tuple,
+#: and a call site cannot spell a subset by accident.
+_ORG_ADDITIVE_TIERS: tuple[list[str], ...] = (
+    _ORG_ADDITIVE_STORAGE_NOTICE_TIER,   # 20261120000001
+    _ORG_ADDITIVE_ONBOARDING_TIER,       # 20260907000001
+    _ORG_ADDITIVE_2040_TIER,             # 20260830000001
+    _ORG_ADDITIVE_IMPORT_TIER,           # 20260817000001
+    _ORG_ADDITIVE_DKL_TIER,              # 20260813000005
+    _ORG_ADDITIVE_0015_TIER,             # 0015
+    _ORG_ADDITIVE_BILLING_TIER,          # 0012 — OLDER than 0015, dropped LAST
+)
 
 # Combined quota read (primary query) — the healthy path stays ONE round-trip.
 _QUOTA_SELECT = _ORG_BASE_SELECT + _ORG_ADDITIVE_SELECT
@@ -868,8 +910,11 @@ def _orgs_row_fail_soft(cp, org_id: str, *, select: list[str],
     """Orgs row with fail-soft additive columns (#1096).
 
     Primary query selects base+additive (one round-trip). When it raises —
-    a missing additive column → PostgREST HTTP 400 (PGRST204 per the
-    error reference; the error-blind seam discards the body) — retry
+    a missing additive column → PostgREST HTTP 400, whose body carries EITHER
+    ``PGRST204`` (a column missing from its schema cache) OR PostgreSQL's own
+    ``42703``; the reference documents both shapes and the error-blind seam
+    discards the body, so which one a given read sees is deliberately NOT
+    claimed — retry
     progressively dropping the additive TIERS (newest migration first:
     tier[0] dropped first), padding the dropped tier's fields to safe
     defaults. Tiered so a schema missing only the NEWEST additive
@@ -1071,10 +1116,7 @@ def resolve_api_key(cp, token: str) -> dict | None:
 
     org_row = _orgs_row_fail_soft(
         cp, org_id, select=_QUOTA_SELECT,
-        additive_tiers=[_ORG_ADDITIVE_2040_TIER,
-                         _ORG_ADDITIVE_IMPORT_TIER,
-                         _ORG_ADDITIVE_DKL_TIER, _ORG_ADDITIVE_0015_TIER,
-                         _ORG_ADDITIVE_BILLING_TIER])
+        additive_tiers=list(_ORG_ADDITIVE_TIERS))
     if org_row is None:
         # Key's org vanished — fail closed (401), never authenticate.
         return None
@@ -1516,11 +1558,7 @@ def org_by_id(cp, org_id: str) -> dict | None:
                 "backup_enabled", "backup_latest_at", "backup_restored_at",
                 "created_at", "deleted_at", "grace_hours"]
             + _ORG_ADDITIVE_SELECT,
-        additive_tiers=[_ORG_ADDITIVE_ONBOARDING_TIER,  # newest migration first
-                         _ORG_ADDITIVE_2040_TIER,
-                         _ORG_ADDITIVE_IMPORT_TIER,
-                         _ORG_ADDITIVE_DKL_TIER, _ORG_ADDITIVE_0015_TIER,
-                         _ORG_ADDITIVE_BILLING_TIER])
+        additive_tiers=list(_ORG_ADDITIVE_TIERS))
 
 
 # ── Session-key mint writes (E2E-2 round-trip: mint → api_keys → resolve) ──
@@ -2491,7 +2529,7 @@ def set_org_onboarding_email_sent(cp, org_id: str) -> bool:
     NULL (return=representation). True only when THIS call performed the
     stamp (one row updated) — a marker already set (concurrent provision /
     replay raced us) returns False and the provider Idempotency-Key
-    ``onboarding:{org_id}`` collapsed the duplicate send."""
+    ``onboarding:{org_id}`` collapsed the duplicate send, bounded by that key's 24 h window."""
     rows = cp.query(
         "organizations",
         select=["id"],
@@ -2500,6 +2538,99 @@ def set_org_onboarding_email_sent(cp, org_id: str) -> bool:
         method="PATCH",
         json_body={"onboarding_email_sent_at":
                    datetime.now(timezone.utc).isoformat()},  # noqa: UP017
+    )
+    return bool(rows)
+
+
+# ── #13998 capacity-notice high-water mark (migration 20261120000001) ──────
+#
+# The durable "exactly one send per threshold per account, ever" ledger for the
+# 80 %/100 % capacity notices (`tortoise/capacity_notice.py`). ONE integer
+# column holding the HIGHEST threshold ever notified, not one column per
+# threshold: two independent markers let a lagging 80 % pass email "at 80 %"
+# AFTER a 100 % notice went out. A high-water mark makes the legal send
+# `threshold > mark` and the sequence monotone by construction.
+
+def org_storage_notice_pct(cp, org_id: str) -> int | None:
+    """The highest capacity-notice threshold already sent for this account.
+
+    ``None`` means NO NOTICE HAS BEEN SENT — and also covers an org row that
+    does not exist, and a value that is not an integer. None of those are
+    distinguished on purpose: every caller enumerates orgs from the table
+    itself, so a missing row is not a state a caller can be in, and returning a
+    sentinel for it would invite a caller to branch on a case that cannot
+    occur; an unparseable figure is read as NO MARK because a re-send is the
+    safe direction (the provider Idempotency-Key collapses the duplicate inside
+    its 24 h window).
+
+    ⛔ A row whose COLUMN is missing (one migration behind) does NOT read as
+    ``None`` — it RAISES. ``cp.query`` raises ``RuntimeError`` on any status
+    ≥ 300, and PostgREST answers an unknown column with HTTP 400 carrying one of
+    TWO documented body shapes: ``PGRST204`` ("the column specified in the
+    ``columns`` query parameter is not found") or PostgreSQL's own ``42703``
+    forwarded as a 400. WHICH one a ``select=`` rejection carries is neither
+    stated by the reference for ``select=`` nor observable here — this seam
+    renders only the status and discards the body — so it is not claimed, and an
+    earlier cut of this line concluded that ``42703`` "is the shape it would
+    see" (#14038 fix lane, after the review's R2: an unmeasured vendor
+    attribution, the same class the review found in the sentence it replaced). That is
+    deliberate, not an oversight: the mark is the LEDGER, and an unreadable
+    ledger must FAIL CLOSED (the caller reports ``notice-mark-unavailable``)
+    rather than read as “never notified”, which would re-send the one-shot
+    notice every interval forever — ``capacity_notice`` states the same rule at
+    its ``_ACCOUNT_DRIFT_SOFT`` block, which lists the columns whose absence may
+    DEGRADE and DELIBERATELY excludes this one. This reader therefore carries NO
+    ladder (it is
+    not an additive tier): the fail-soft half is the CALLER's
+    ``try``/``except`` around the pre-send re-read, not this function's.
+    """
+    rows = cp.query(
+        "organizations", select=["storage_notice_pct"],
+        filters=[("id", "eq", org_id)],
+    )
+    if not rows:
+        return None
+    value = rows[0].get("storage_notice_pct")
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        # An unreadable figure is NO MARK, and a re-send is the direction that is
+        # safe: the provider Idempotency-Key collapses the duplicate within its
+        # 24 h window, and a customer receiving one extra capacity notice is a far
+        # smaller harm than a mark that silently suppresses every future notice.
+        return None
+
+
+def set_org_storage_notice_pct(cp, org_id: str, pct: int,
+                               *, previous: int | None) -> bool:
+    """Rowcount-gated compare-and-swap of the capacity-notice mark (#13998).
+
+    TRUE only when THIS call moved the mark: the PATCH carries the value the
+    caller READ (``previous``) as its guard, so a concurrent pass holding a
+    stale view cannot stamp over a newer one, and two passes that both saw
+    ``None`` cannot both claim the same first send.
+
+    ⛔ SEND-THEN-STAMP (the #2406 posture, mirrored): the caller stamps only
+    after the provider ACCEPTS, so a failed send stays retryable. The crash
+    window between accept and stamp is covered by the provider Idempotency-Key
+    ``capacity-notice:{org_id}:{pct}``, inside its 24 h window and not beyond it.
+
+    ⛔ MONOTONE: a stamp may never LOWER the mark. The guard already makes that
+    unreachable (a lower threshold only reaches here when it is above the value
+    it read), and the explicit comparison below keeps it true if a future caller
+    arrives with a different read order.
+    """
+    if previous is not None and int(pct) <= int(previous):
+        return False
+    guard: tuple[str, str, object] = (
+        ("storage_notice_pct", "is", None) if previous is None
+        else ("storage_notice_pct", "eq", int(previous)))
+    rows = cp.query(
+        "organizations",
+        select=["id"],
+        filters=[("id", "eq", org_id), guard],
+        method="PATCH",
+        json_body={"storage_notice_pct": int(pct)},
     )
     return bool(rows)
 
