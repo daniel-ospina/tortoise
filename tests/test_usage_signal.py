@@ -1407,6 +1407,58 @@ def test_a_typo_and_a_non_positive_window_are_warned_about_SEPARATELY(
     assert "not a positive day count" in messages[1]
 
 
+def test_one_cause_reached_through_BOTH_doors_warns_on_each(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ A cause-keyed `_warn_once` is still one key for two DOORS.
+
+    `_window_days` resolves the same question twice: once from the environment
+    and once from the call argument. Keying by cause alone
+    (`"window"`, `"window-nonpositive"`) leaves the env door able to consume
+    the key, so the ARG door's refusal — the one naming the CALLER's value — is
+    swallowed by `_warn_once`'s once-per-process contract. The message is not
+    the same either: each door reports its own `origin` and `raw`.
+
+    A single-door test cannot see this; the collision needs a SEQUENCE across
+    both doors inside one process, which is why `_warned` is not cleared here.
+    """
+    import logging
+
+    usage_signal._warned.clear()
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+        # Cause 1 (a typo), env door then arg door.
+        monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, "seven")
+        assert usage_signal._window_days() is None
+        assert usage_signal._window_days("2") is None
+
+        # Cause 2 (non-positive), same two doors.
+        monkeypatch.setenv(usage_signal.USAGE_WINDOW_DAYS_ENV, "0")
+        assert usage_signal._window_days() is None
+        assert usage_signal._window_days(0) is None
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 4, (
+        "a door's refusal was swallowed — the two doors still share a key: "
+        f"{messages}"
+    )
+    assert "not a day count" in messages[0]
+    assert usage_signal.USAGE_WINDOW_DAYS_ENV in messages[0]
+    assert "not a day count" in messages[1]
+    assert "window_days='2'" in messages[1], (
+        "the argument door's warning must name the CALLER's value: "
+        f"{messages[1]}"
+    )
+    assert "not a positive day count" in messages[2]
+    assert usage_signal.USAGE_WINDOW_DAYS_ENV in messages[2]
+    assert "not a positive day count" in messages[3]
+    assert "window_days" in messages[3] and "argument" in messages[3], (
+        "the argument door's warning must name ITS origin, not the env's: "
+        f"{messages[3]}"
+    )
+
+
 def test_a_positive_window_is_returned_and_warns_about_nothing(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

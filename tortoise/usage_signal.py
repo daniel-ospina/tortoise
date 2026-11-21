@@ -377,14 +377,14 @@ def _window_days(explicit: object = ENV_WINDOW) -> float | None:
             # degrades to "keep everything" silently un-bounds the roll-up, which
             # is the quiet direction; the warning names the refusal.
             _warn_once(
-                "window",
+                "window-env",
                 "usage signal: %s=%r is not a day count — the roll-up is running "
                 "UNBOUNDED (every entry kept); fix the value to bound it",
                 USAGE_WINDOW_DAYS_ENV,
                 raw,
             )
             return None
-        return _checked_window(days, raw, USAGE_WINDOW_DAYS_ENV)
+        return _checked_window(days, raw, USAGE_WINDOW_DAYS_ENV, "env")
     if explicit is None:
         # ⛔ NOT A FALLBACK TO THE ENVIRONMENT. `None` is the caller TURNING THE
         # WINDOW OFF for this call; the env default is `ENV_WINDOW`, so falling
@@ -392,20 +392,25 @@ def _window_days(explicit: object = ENV_WINDOW) -> float | None:
         return None
     if not isinstance(explicit, int | float):
         # ⛔ A STATED BOUND THIS CALL CANNOT READ IS NOT "NO BOUND" EITHER — the
-        # same quiet direction as the env typo arm above, so the same key.
+        # same quiet direction as the env typo arm above, which says why this is
+        # refused. It is NOT the same key: the arms answer different DOORS, and
+        # `_warn_once` is once-per-process, so one key across both makes the
+        # second door's refusal — the one carrying the CALLER's value — vanish
+        # whenever the env already warned. Cause alone cannot key these: the
+        # collision `_warn_once` eats is per DOOR, not per cause.
         _warn_once(
-            "window",
+            "window-arg",
             "usage signal: window_days=%r is not a day count — the roll-up is "
             "running UNBOUNDED (every entry kept); fix the value to bound it",
             explicit,
         )
         return None
     return _checked_window(
-        float(explicit), repr(explicit), "the `window_days` argument"
+        float(explicit), repr(explicit), "the `window_days` argument", "arg"
     )
 
 
-def _checked_window(days: float, raw: str, origin: str) -> float | None:
+def _checked_window(days: float, raw: str, origin: str, door: str) -> float | None:
     """A stated window that cannot bound anything is refused LOUDLY.
 
     ``0`` and the negatives prune nothing (an entry is never older than
@@ -426,8 +431,12 @@ def _checked_window(days: float, raw: str, origin: str) -> float | None:
             # once-per-process contract ate the second cause: an operator who
             # mistyped the value, fixed it to `0`, never saw the newer warning —
             # and the suppressed message carried the newer `raw`. The non-finite
-            # arm below is separate for the same reason.
-            "window-nonpositive",
+            # arm below is separate for the same reason, and EVERY key here is
+            # qualified by `door` (`env` or `arg`) for the same reason one step
+            # out: a cause-keyed name still collides when the SAME cause is
+            # reached through the other door, and the message names that door's
+            # own `origin`/`raw` (the caller's, for `arg`).
+            f"window-nonpositive-{door}",
             "usage signal: %s=%r is not a positive day count — the roll-up is "
             "running UNBOUNDED (every entry kept); fix the value to bound it",
             origin,
@@ -440,7 +449,7 @@ def _checked_window(days: float, raw: str, origin: str) -> float | None:
         # docstring promises it never raises. A separate key from the arm above so
         # an operator who fixes `0` still sees the `nan`.
         _warn_once(
-            "window-nonfinite",
+            f"window-nonfinite-{door}",
             "usage signal: %s=%r is not a FINITE day count — the roll-up is "
             "running UNBOUNDED (every entry kept); fix the value to bound it",
             origin,
