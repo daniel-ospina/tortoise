@@ -991,6 +991,36 @@ SWEEP_NAMES = 66
 #: hidden: the four retired `inst.*` rows are that test rewrite's own deletions, not an escape,
 #: and the direction the pin exists to catch — the SET moving — is what this re-pin declares.
 #:
+#: RE-CUT on the #13094 round-2 branch (the SECOND cut: the first was taken against
+#: `origin/main` `72c104bcbb` and printed `(11846, "af4be7eb196a5773")`), and THIS is the pin:
+#: `--repin` prints `(11843, "4f84aaf8cf662bc5")` on this merged tree. ⛔ ATTRIBUTED BY A
+#: ROW-BY-ROW DIFF, not by arithmetic: `--report --base 28ca66878d… --top 5000` was run in a
+#: detached worktree at `origin/main` (`1b0db0489408`) AND on this tree, both row sets sorted and
+#: diffed, and the row SHAPE set is identical (855 rows) with EXACTLY TWO rows differing —
+#: `g.query` 1499 → 1501 (+2) and `super().query` 68 → 69 (+1). The SAME two rows differ in both
+#: cuts, so the attribution is stable while main moves under it. All three are the change-feed
+#: walk's END-PROOF, which is the point of the change: the two `g.query(…)` in
+#: `tools/graphevent_home.py` (the NULL-`seq` count and the total count that make "reached the
+#: end" distinguishable from "the read stopped early") and the one `super().query(…)` in the
+#: `tests/test_13094_graphevent_home.py` stub that stands in for a FalkorDB connection. They are
+#: the ordinary-word receiver this counter exists to REPORT, not typed SDK call sites.
+#: `11840 + 3 = 11843` is a CROSS-CHECK of that measurement, never its evidence. `--check` exits
+#: 0 on this tree: `typed references still pointing at a public name: 0`.
+#:
+#:
+#: ⛔ THE BASE FIGURE IS THE BASE **TREE's** MEASUREMENT, never the `SWEEP_RESIDUE` line committed
+#: on it — AND AT THIS CUT THE TWO DISAGREE ON MAIN. `origin/main` `1b0db0489408` COMMITS
+#: `(11843, "6aed5368ffa10513")` while its tree MEASURES `(11840, "b7eb08ff3acdcce4")`, so
+#: `--check` exits 1 there: main's own drift (the `inst.*` rows `#14162` removed and the
+#: `terms.update` / `cur['proj'].g.query` rows it added), which belongs to main and is re-pinned
+#: there (#14180/#14170 are the same repair, twice). ⛔ NOTE THE COLLISION a reader must not fall
+#: into: main's committed COUNT is 11843 — the same count this pin carries — while its DIGEST is
+#: a different tree's. Read that committed line as the base and this pin looks off by 3, or worse,
+#: looks confirmed. ⛔ AND THE SAME TRAP IS WHY #14183'S ROUND-5 REVIEW CALLED THIS PAIR FALSE
+#: while `--check` was green: the base before it committed 11835 and measured 11843 — off by 8
+#: (#14183 review round 5, finding 2, falsified by measurement). The branch's figure stays its
+#: own `--repin` output, taken on the merged tree.
+#:
 #: ⛔ MERGED `origin/main` (`2c0d66e2ec`) INTO THIS BRANCH — the resolution of the ONE conflict this
 #: merge had. Both sides had edited ONLY this pin line (verified: with the `#:` blocks stripped, the
 #: three-way diff is a single `SWEEP_RESIDUE` replacement on each side and nothing else), so the
@@ -1077,6 +1107,16 @@ SWEEP_NAMES = 66
 #: `super().query` 74 → 75, the `_EventGraph` fake in `tests/test_14012_outside_view.py` delegating to
 #: its parent for the statements it does not answer (the end-to-end per-label timestamp row).
 #: `typed references still pointing at a public name` stays **0**.
+#:
+#: ⛔ RE-MEASURED AGAIN after merging `origin/main` `e74cf1d13da7` INTO this branch, which is the
+#: rule every block above states for a third tree: `--repin` prints `(11860, "267dce26b4191743")`
+#: on the MERGED tree and `--check` exits 0 there, so neither side's line is carried. The blocks
+#: above are all KEPT, because each is a true measurement of the tree it names — including the two
+#: that no longer match any tree this branch has, which is what a measurement log is for.
+#: `11857 + 3 = 11860` is a CROSS-CHECK, never the evidence: 11857 is what this merge's main side
+#: pinned for its own tree, and 3 is this branch's end-proof receivers (the two `g.query(…)` counts
+#: in `tools/graphevent_home.py` and the `super().query(…)` stub in the test). The evidence is
+#: `--repin`'s output on the merged tree.
 #:
 #: ⛔ MERGED `origin/main` (`e74cf1d13d`, the `#14012` lane's "keep this resident" + "see what's
 #: outside") INTO THIS BRANCH. ⛔ ITS "ZERO ROWS" PREMISE IS `main`'s OWN and NOT THIS BRANCH'S, and
@@ -1208,6 +1248,16 @@ SWEEP_NAMES = 66
 #: while `--check` was green: the base before it committed 11835 and measured 11843 — off by 8
 #: (#14183 review round 5, finding 2, falsified by measurement). The branch's figure stays its
 #: own `--repin` output, taken on the merged tree.
+#: ⛔ THAT "ZERO ROWS" READING ABOVE IS THE `#14195` LANE'S TREE, NOT THIS ONE — REBOUND BY
+#: MEASUREMENT and not deleted, because it is true of the tree it measured and this file's
+#: rule is to keep every block that names its tree. Read against THIS branch BOTH halves are
+#: FALSE, and it sits a dozen lines above the +3 this branch DOES contribute, so a lane
+#: trusting it would attribute a future delta to `main` instead of re-measuring: this branch's
+#: own contribution is its +3 end-proof receivers (`main`'s measured 11857 + 3 = the 11860
+#: this pin carries, both measured), and `git diff --stat origin/main` on THIS resolved tree
+#: spans TENS of files — one added line is executable, `import re` in
+#: `tools/graphevent_home.py`.
+#:
 #: ⛔ MERGED `origin/main` (`9f83a63bfab7`) INTO THIS BRANCH — a further tree, so the pair below is
 #: `--repin`'s output ON IT and neither side's line is inherited. Measured on `origin/main`
 #: `9f83a63bfab7` itself with `--repin`: `(11857, "ed40203dbbf32b87")`. Measured here:
@@ -1235,6 +1285,19 @@ SWEEP_NAMES = 66
 #: previous reading; if a block conflicts with the live pin, the block is HISTORY and the last one is
 #: the PIN. (This paragraph itself was dropped by a merge resolution and is restored here on review,
 #: together with the round-5 record above, because neither is duplicate prose.)
+#: ⛔ RESTORED AT THE RE-CUT — the resolution that merged `origin/main` `9f83a63bfab7` into this
+#: branch kept EVERY `main` block and dropped THREE OF THIS BRANCH'S OWN: the "SECOND cut" block,
+#: the "RE-MEASURED AGAIN after merging `origin/main` `e74cf1d13da7`" block, and the "THE BASE
+#: FIGURE IS THE BASE **TREE's** MEASUREMENT" block. That is the one thing this file's own rule
+#: forbids — "EVERY block above is carried, because each is a true measurement of the tree it
+#: NAMES" — and a merge that carries one side wholesale deletes the record of what THIS branch
+#: measured and why: its +3 end-proof receivers, and the round-5 review pair (11835 committed vs
+#: 11843 measured) those figures falsified. They are restored VERBATIM from `a2d29463`, ABOVE this
+#: block, so no side's text is dropped here: main's is intact and this branch's is back.
+#: ⛔ THE PIN IS RE-MEASURED ON THIS TREE, never carried: `--repin` prints
+#: `(11860, "267dce26b4191743")` — unchanged from the pre-restoration pin, because every restored
+#: line is `#:`-prose and `edits_for` walks the AST and cannot see a comment. `--check` exits 0
+#: here with `typed references still pointing at a public name: 0`.
 SWEEP_RESIDUE = (11860, "267dce26b4191743")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
