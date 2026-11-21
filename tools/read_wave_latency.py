@@ -240,6 +240,20 @@ def seed(proj, points_n: int, corpus_seed: int) -> int:
     return int(proj.g.query("MATCH (n:Point) RETURN count(n)").result_set[0][0])
 
 
+def _result_id(r):
+    """The hit's id from either shape the read can return (dict or object).
+
+    ⛔ ``_tortoise_fts_query`` returns DICTS (``r.to_dict()`` at sdk.py:49073),
+    so ``getattr(r, "id", None)`` yielded ``None`` for every hit and the
+    rank-identity verdict compared two lists of nulls — it could never have gone
+    red. A verdict that cannot fail is not a verdict; ``compare`` below also
+    refuses an arm whose ids did not record.
+    """
+    if isinstance(r, dict):
+        return r.get("id") or r.get("point_id") or r.get("eventId")
+    return getattr(r, "id", None) or getattr(r, "point_id", None)
+
+
 def run(args) -> dict:
     from tortoise import read_stages
     from tortoise.sdk import TortoiseSDK
@@ -290,7 +304,7 @@ def run(args) -> dict:
                  "count": e.get("count")}
                 for e in trace if e.get("leg")
             ],
-            "order": [getattr(r, "id", None) for r in results],
+            "order": [_result_id(r) for r in results],
         })
         print(f"  {q['id']}: total={total_ms:7.1f}ms "
               f"members={RECORDER.ms.get('legs_wave', 0.0):6.1f}ms "
@@ -336,6 +350,17 @@ def compare(new: dict, base: dict) -> dict:
                 "reason": "corpus or query set differs between the arms"}
 
     base_by_qid = {pq["qid"]: pq for pq in base["per_query"]}
+    # ⛔ REFUSE A VERDICT ON AN UNRECORDED ORDER. An arm whose hits carry no
+    # ids compares as "identical" however the pages are permuted, so the check
+    # is on the ARTIFACT (are there ids at all?), not on the comparison.
+    for label, arm in (("baseline", base), ("after", new)):
+        missing = [pq["qid"] for pq in arm["per_query"]
+                   if not any(pq["order"])]
+        if missing:
+            return {"comparable": False,
+                    "reason": f"{label} arm recorded no result ids for "
+                              f"{len(missing)} query(ies) — the rank-identity "
+                              f"verdict would be vacuous (first: {missing[0]})"}
     rank_diff = []
     for pq in new["per_query"]:
         other = base_by_qid.get(pq["qid"])

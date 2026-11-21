@@ -5820,6 +5820,17 @@ def beta_variance_sum_bound(threshold: float) -> float:
     only denominator-free quantity is the sum. The Python twin is
     ``tests/test_14192_beta_variance_sum_bound.py``, which sweeps the grid and
     asserts the invariant this function's comment claims.
+
+    ⛔ EXACT UP TO ONE ULP AT THE BOUNDARY, and that is stated rather than
+    papered over. The bound is exact in real arithmetic; the query's division is
+    IEEE double. A pair landing within ~2e-15 ABOVE ``s = 5.25`` with
+    ``alpha ≈ beta`` is the single point where the guard could reject a row
+    whose float division still rounds above the threshold. It cannot arise from
+    a stored belief — ``s = 5.25`` means a fractional Beta count, and the
+    operands this read sees are counts persisted as 1.0-defaulted columns — and
+    the direction it would fail in is one peer's omission from a decoration,
+    never a false claim. Recorded here because "provably cannot change a result
+    set" would otherwise be an unqualified claim about a float computation.
     """
     if threshold <= 0.0:
         # A threshold at or below zero admits everything, so no finite bound
@@ -5827,6 +5838,39 @@ def beta_variance_sum_bound(threshold: float) -> float:
         # the caller asked for.
         return float("inf")
     return 0.25 / threshold - 1.0
+
+
+def beta_variance_gt_cypher(
+    alpha_operand: str,
+    beta_operand: str,
+    *,
+    threshold_param: str = "$contested_threshold",
+    bound_param: str = "$contested_sum_bound",
+) -> str:
+    """#14192 — Cypher: `width > threshold`, PRUNED by the sum bound. ONE owner.
+
+    Emits both halves from this one function so a future change to the width
+    formula, its band, or its operand coercion cannot update the comparison and
+    leave the pruning predicate stale — the twin-drift class #11702 paid for
+    twice in this file. The bound and the comparison are generated from the
+    SAME operand expressions and the SAME ``numeric_operand_cypher`` coercion,
+    so they cannot disagree about what ``s`` is.
+
+    ``bound_param`` is supplied by the caller (``beta_variance_sum_bound``), not
+    baked in, because the threshold is the caller's: a caller with a different
+    threshold gets a correctly-scaled guard with no edit here.
+
+    ⛔ IT IS A NECESSARY CONDITION AND NOTHING MORE. A row it rejects was going
+    to be rejected by ``width > threshold`` anyway; a row it admits still has to
+    clear the division. So the result set is unchanged and only the arithmetic
+    is spared — measured at ~3x on the read's most expensive query, with the
+    decoration byte-identical (``docs/evidence/14192-read-wave/``).
+    """
+    a = numeric_operand_cypher(alpha_operand)
+    b = numeric_operand_cypher(beta_operand)
+    return (f"(({a} + {b}) < {bound_param} "
+            f" AND {beta_variance_cypher(alpha_operand, beta_operand)} "
+            f"     > {threshold_param})")
 
 
 def beta_variance_cypher(alpha_operand: str, beta_operand: str) -> str:
@@ -6647,6 +6691,20 @@ class RelationshipDecoration(dict):
     decoration_error: str = ""
 
 
+#: #14192 — how many members a ``_ReadWave`` can be handed.
+#:
+#: ``get_relationships_bounded`` submits FIVE (corrects, mitigations, crit,
+#: support, family), so the pool is sized to exactly what it can receive: one
+#: worker per member, no idle workers held for a request's length. The number is
+#: a module constant rather than a constructor default so the width is a stated
+#: fact a reader can check against the submit sites, and so the ceiling
+#: arithmetic is written down: the MCP surface dispatches sync tool bodies on
+#: anyio's default 40-token limiter, so the worst case here is 40 concurrent
+#: searches × 5 = 200 wave threads, each alive only for its own
+#: ``_DECORATION_TIMEOUT_MS`` (200 ms) at most.
+_READ_WAVE_WIDTH = 5
+
+
 class _ReadWave:
     """#14192 — independent graph reads, dispatched together, consumed later.
 
@@ -6665,25 +6723,59 @@ class _ReadWave:
     latency by SCHEDULING, never by patience, and a slow member stays bounded
     by the read that owns it.
 
+    ⛔ EVERY MEMBER IS METERED, AND THAT IS NOT OPTIONAL. ContextVars do not
+    cross a thread boundary, so a worker that simply calls ``graph.query`` runs
+    with ``graph_ops._ACTIVE`` and ``retrieval_metering._ACTIVE`` unset: the
+    capture's counter and the retrieval tally would silently miss every read
+    the wave performs. That is not hypothetical — it is the exact regression
+    ``graph_ops.bind_metering_context`` documents for ``degradation_chain``'s
+    legs, and ``submit`` therefore binds BOTH context wrappers (the same pair
+    the legs get) before handing the thunk to the pool, so no future member can
+    forget it. Both binders are identity when nothing is armed, so the
+    non-capture path is unchanged (measured: ``tests/test_capture_graph_ops.py``
+    counts the same ops through the wave as through the serial chain).
+
     ⛔ FAILURES SURFACE WHERE THEY USED TO. ``result()`` re-raises the worker's
     exception in the CONSUMING thread, so a caller's existing ``try/except``
     around the read still sees it and the degradation contract (#2952/#6971)
     does not move: a raise still resets the whole decoration and labels it.
 
+    ⛔ A MEMBER THAT CANNOT BE STARTED COSTS ITS OWN ROWS, NOT THE BATCH.
+    ``submit`` never raises: a scheduling failure (``RuntimeError: can't start
+    new thread`` on a thread-exhausted host) records the member as ABSENT, so
+    the other members still answer. Before this class existed such a host paid
+    nothing — the reads were on the caller's own thread — and a scheduling
+    failure must not be allowed to destroy a whole batch's decoration that the
+    reads themselves are perfectly able to produce.
+
     ⛔ THE ORDER OF A MEMBER'S OWN ROWS IS UNCHANGED — each query still returns
     its own result set, so a re-schedule can reorder WORK, never ROWS, and the
     fused ranking cannot be affected by it (``rrf_fusion`` is rank-based).
+
+    ⛔ THE WIDTH IS SIZED TO THE WAVE, AND IS A STATED NUMBER. Five members is
+    the ceiling ``get_relationships_bounded`` can submit, so the pool is five
+    threads wide (pooling more would leave idle workers alive for the length of
+    a request), and the executor is per call, which is the same shape this
+    module's other concurrent read (``degradation_chain``, ``max_workers=3``)
+    already uses. It is NON-daemon and per-call, so an abandoned member is
+    bounded by its own ``_DECORATION_TIMEOUT_MS`` (200 ms) rather than by the
+    process's exit join.
     """
 
     __slots__ = ("_futures", "_max_workers", "_pool")
 
-    def __init__(self, max_workers: int = 8) -> None:
+    def __init__(self, max_workers: int = _READ_WAVE_WIDTH) -> None:
         self._pool = None
         self._max_workers = max_workers
         self._futures: dict[str, object] = {}
 
     def submit(self, name: str, thunk) -> None:
-        """Start ``thunk`` now. Returns immediately; never raises."""
+        """Start ``thunk`` now. Returns immediately; never raises.
+
+        The metering binder is applied HERE, at the one seam, rather than at
+        each of the five call sites — see the class docstring for why a member
+        that ran unbound would be a silent measurement defect.
+        """
         if self._pool is None:
             import concurrent.futures
             self._pool = concurrent.futures.ThreadPoolExecutor(
@@ -6706,28 +6798,47 @@ class _ReadWave:
         # (``run_fts_query``/``run_vector_query``/…), and these are decoration
         # graph ops, not legs — binding it would attribute post-fusion
         # decoration to a figure that means "the retrieval arms" (#2952).
-        self._futures[name] = self._pool.submit(bind_metering_context(thunk))
+        metered = bind_metering_context(thunk)
+        try:
+            self._futures[name] = self._pool.submit(metered)
+        except Exception:  # noqa: BLE001 — a scheduler failure is not the read's
+            # ``ThreadPoolExecutor.submit`` starts a thread, and a host that
+            # refuses one (thread/FD exhaustion) raises here. Recording the
+            # member as ABSENT keeps the ``never raises`` contract and costs
+            # this member's rows only — the alternative is the caller's
+            # blanket handler resetting EVERY point's decoration (#6971).
+            logger.warning(
+                "read wave could not start member %r — it reads as absent",
+                name, exc_info=True)
+            self._futures[name] = None
 
     def result(self, name: str):
         """Block on ``name`` and return its value (``[]`` if never submitted).
 
         An ABSENT member is an empty read, not an error: the call sites submit
         conditionally (``if op_ids:``), and a caller must not have to
-        distinguish "the guard was false" from "the read answered nothing".
+        distinguish "the guard was false" from "the read answered nothing"
+        from "the scheduler refused it".
         """
         fut = self._futures.get(name)
         return [] if fut is None else fut.result()
 
     def close(self) -> None:
-        """Release the pool. Never blocks, never joins a member.
+        """Release the pool without joining a member still in flight.
 
         ``wait=False`` on purpose: this runs on BOTH the success and the
         failure path, and a caller that is abandoning a read must not pay the
-        latency of the reads it is abandoning. A member already running is
-        left to finish on its own worker — exactly how a
-        cancelled-but-running leg is handled in ``degradation_chain`` — while
-        one that has not started is cancelled. Both are bounded by the
-        per-read timeout the member was given.
+        latency of the reads it is abandoning — on the failure path the
+        function's blanket handler is already resetting the batch, so joining
+        would add up to ``_DECORATION_TIMEOUT_MS`` to a read that has already
+        failed. Members that have not started are cancelled.
+
+        ⛔ This is deliberately NOT how ``degradation_chain`` behaves: that
+        function's ``with ThreadPoolExecutor(...)`` JOINS its workers on exit
+        (its own comment says the join "is what actually bounds this call's
+        wall-clock duration"). The two differ because their failure paths
+        differ: a leg wave's straggler is part of the answer being assembled,
+        while these five reads have already been abandoned here.
         """
         pool = self._pool
         self._pool = None
@@ -6898,18 +7009,13 @@ def get_relationships_bounded(
                 # owner (`ep_has_belief_cypher` / `ep_pair_stored`).
                 f"       OR ({ep_measured_cypher('other')} "
                 f"           AND {ep_pair_stored_cypher('other')} "
-                # #14192: a NECESSARY precondition on the SUM, in front of the
-                # division. `alpha*beta <= s*s/4` bounds the width by
-                # `1/(4*(s+1))`, so a pair whose `alpha+beta` is at or above
-                # `$variance_sum_max` provably cannot exceed $contested_threshold
-                # — the guard rejects only rows the variance test was going to
-                # reject anyway, and spares the coercion CASE, the band checks
-                # and the division on every other row. Measured on the #14192
-                # corpus: 160 ms -> 58 ms, row set byte-identical
-                # (`beta_variance_sum_bound` carries the derivation).
-                f"           AND {numeric_operand_cypher('coalesce(other.posterior_alpha, other.ep_alpha, 1.0)')} "
-                f"               + {numeric_operand_cypher('coalesce(other.posterior_beta, other.ep_beta, 1.0)')} "
-                "               < $variance_sum_max "
+                # #14192: ONE owner emits both halves — the NECESSARY sum
+                # bound and the width comparison it prunes
+                # (`beta_variance_gt_cypher`). Writing the guard inline here
+                # would put a second spelling of "which alpha/beta pairs can be
+                # contested" beside the formula it guards, which is the #11702
+                # twin-drift class this file has already paid for twice.
+                f"           AND {beta_variance_gt_cypher('coalesce(other.posterior_alpha, other.ep_alpha, 1.0)', 'coalesce(other.posterior_beta, other.ep_beta, 1.0)')} "
                 # #11702 cycle 17: the shared width formula, not a local
                 # re-derivation. FalkorDB RAISES on `string * string` /
                 # `bool * bool` ("Type mismatch: expected Integer, Float, or
@@ -6943,7 +7049,9 @@ def get_relationships_bounded(
                 "LIMIT $raw_cap",
                 params={"op_ids": list(op_ids), "raw_cap": raw_cap,
                         "contested_threshold": CONTESTED_VARIANCE_THRESHOLD,
-                        "variance_sum_max": beta_variance_sum_bound(
+                        # ⛔ NOT ``VARIANCE_SUM_MAX`` (the 1e102 representability
+                        # ceiling). This is the PRUNE bound on alpha+beta.
+                        "contested_sum_bound": beta_variance_sum_bound(
                             CONTESTED_VARIANCE_THRESHOLD)},
                 timeout=_DECORATION_TIMEOUT_MS,
             ).result_set)

@@ -124,7 +124,7 @@ def test_degenerate_operands_stay_excluded_by_both_rules() -> None:
 # ⛔ Both exist because the arithmetic above is NOT sufficient on its own. Every
 # case above re-derives the predicate in Python against the twin; NONE of them
 # reads the query. Measured before these were added: deleting the three
-# `AND … < $variance_sum_max` lines from `get_relationships_bounded`, or moving
+# `AND … < $contested_sum_bound` lines from `get_relationships_bounded`, or moving
 # them out of the contested OR-branch, left all five cases GREEN — the guard
 # simply never ran, so a perfectly sound formula sat beside a query that had
 # stopped using it.
@@ -201,8 +201,8 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
 
     Three mutants, and what each reddens:
 
-    - DELETE the three ``AND … < $variance_sum_max`` lines → the parameter goes
-      with them, so ``$variance_sum_max`` appears in no query at all.
+    - DELETE the three ``AND … < $contested_sum_bound`` lines → the parameter goes
+      with them, so ``$contested_sum_bound`` appears in no query at all.
     - Move them to the top level of the ``WHERE`` (ANDed AFTER the ``OR`` group)
       → the guard's paren depth stops being greater than the arm's, and the
       guard would prune NAND/terminal peers, which are cap-exempt by design
@@ -213,16 +213,16 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
 
     OBSERVED at the reviewed head: one crit query, one occurrence, arm at
     offset 579 / guard at 2163, depth 1 → 2, ``$contested_threshold`` after the
-    guard, and ``variance_sum_max == 5.25`` — the same value the twin returns.
+    guard, and ``contested_sum_bound == 5.25`` — the same value the twin returns.
     """
     graph, _ = _decorate_under_capture()
     crits = [(c, kw) for c, kw in graph.calls
-             if "variance_sum_max" in (kw.get("params") or {})]
+             if "contested_sum_bound" in (kw.get("params") or {})]
     assert len(crits) == 1, (
         f"expected exactly one guarded read, found {len(crits)}")
     crit, kwargs = crits[0]
 
-    assert crit.count("$variance_sum_max") == 1, (
+    assert crit.count("$contested_sum_bound") == 1, (
         "the guard must appear once — twice would mean it was copied into "
         "another arm")
     # `OR ((other.posterior_alpha …` is the contested alternative's opener: the
@@ -230,7 +230,7 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
     # with `(other.posterior_alpha`. The NAND and terminal alternatives open
     # their own `OR ((other.status …`.
     arm = crit.index("OR ((other.posterior_alpha")
-    guard = crit.index("< $variance_sum_max")
+    guard = crit.index("< $contested_sum_bound")
     division = crit.index("$contested_threshold")
 
     assert crit.index("type(r2) = 'NAND'") < arm, (
@@ -241,12 +241,12 @@ def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
     assert _paren_depth(crit, guard) > _paren_depth(crit, arm), (
         "the guard is not enclosed by the contested arm — it would prune "
         "NAND/terminal peers")
-    assert kwargs["params"]["variance_sum_max"] == beta_variance_sum_bound(
+    assert kwargs["params"]["contested_sum_bound"] == beta_variance_sum_bound(
         CONTESTED_VARIANCE_THRESHOLD)
 
     for cypher, other in graph.calls:
         if other is kwargs:
             continue
-        assert "variance_sum_max" not in cypher, (
+        assert "contested_sum_bound" not in cypher, (
             "the guard leaked into a read that must keep its full population")
-        assert "variance_sum_max" not in (other.get("params") or {})
+        assert "contested_sum_bound" not in (other.get("params") or {})
