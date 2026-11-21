@@ -68,13 +68,15 @@ def _script_data_state(data: str) -> str:
     * escaped (`<!--` seen): `</script` also CLOSES it;
     * double escaped (`<script` seen while escaped): `</script` does NOT close it.
 
-    So a chunk that ends `double` is the only one where the parse here and a browser
-    can disagree about whether the element closed — and the disagreement cannot be
-    resolved from this chunk at all: from double-escaped a `</script` only returns the
-    tokenizer to ESCAPED, so the element closes at the SECOND such token and the bytes
-    between the two are script text a browser does not paint. `handle_data` therefore
-    WEDGES (stops answering) rather than guessing, and the cost of that refusal is
-    declared there: a FALSE RED on one legal shape, never a fail-open.
+    So a chunk that ends `double` — or ends exactly AT a `<script`/`</script` whose
+    delimiter is in the next chunk, which the same rule decides — is the one where the
+    parse here and a browser can disagree about whether the element closed, and the
+    disagreement cannot be resolved from this chunk at all: from double-escaped a
+    `</script` only returns the tokenizer to ESCAPED, so the element closes at the
+    SECOND such token and the bytes between the two are script text a browser does not
+    paint. `handle_data` therefore WEDGES (stops answering) rather than guessing. The
+    cost of that refusal is a CLASS of legal documents, declared there — never a
+    fail-open.
     """
     state = "data"
     i, n = 0, len(data)
@@ -87,15 +89,57 @@ def _script_data_state(data: str) -> str:
         elif state == "escaped":
             if data.startswith("-->", i):
                 state, i = "data", i + 3
-            elif data[i:i + 7].lower() == "<script" and i + 7 < n and data[i + 7] in " \t\n\f/>":
-                state, i = "double", i + 7
+            elif data[i:i + 7].lower() == "<script":
+                nxt = i + 7
+                if nxt >= n:
+                    # UNDECIDED: the delimiter, if any, is in the NEXT chunk. Staying
+                    # double makes `handle_data` wedge, which is the loud side; the
+                    # alternative reads the rest of a script body as markup.
+                    state = "double"
+                    i = n
+                elif data[nxt] in " \t\n\f/>":
+                    state, i = "double", nxt
+                else:
+                    i = nxt
             else:
                 i += 1
         else:  # double escaped
             if data.startswith("-->", i):
                 state, i = "data", i + 3
-            elif data[i:i + 9].lower() == "</script":
-                state, i = "escaped", i + 9
+            elif data[i:i + 8].lower() == "</script":
+                # ⛔ THE SLICE IS EIGHT CHARACTERS — `</script` — and it was NINE
+                # (#14073 review round 15, found by the delimiter rows below). A
+                # nine-character slice compared against an eight-character literal is
+                # never equal, so this branch NEVER FIRED: once a chunk reached `double`
+                # it stayed double for the rest of the scan, which is why a later
+                # `</script` in the same chunk could not bring the tokenizer back and the
+                # module's prose read as if a look-ahead were needed. With the length
+                # fixed, the state machine is the spec's:
+                #
+                # ⛔ AND THE DOUBLE-ESCAPE-END STATE NEEDS THE DELIMITER (#14073 review
+                # round 15, P2, measured). §13.2.5.31 switches back to ESCAPED only when
+                # the next character is tab/LF/FF/space, `/` or `>` — *"Anything else:
+                # reconsume in the script data double escaped state"*. Without that test,
+                # `<script><!--<script></script</script><a href="/blog">x</a>` was read
+                # as ESCAPED, so the element "closed" and the extractor reported a
+                # `/blog` link — while Chrome keeps the tokenizer double-escaped and
+                # swallows the document (measured: `1` script element, `body ''`, no
+                # anchors). That is the fail-open direction, one token past the state
+                # machine's own rule.
+                nxt = i + 8
+                if nxt >= n:
+                    # UNDECIDED: the delimiter is in the next chunk. Staying double is
+                    # the loud side — it wedges rather than guessing that the element
+                    # closed and re-reading script text as markup. ⛔ THIS is the branch
+                    # `handle_data` actually reaches: `HTMLParser`'s CDATA mode ends the
+                    # chunk AT the first `</script`, so the token is always last and the
+                    # delimiter test below is the FUNCTION's correctness (pinned directly)
+                    # rather than a path a real document takes here.
+                    i = n
+                elif data[nxt] in " \t\n\f/>":
+                    state, i = "escaped", nxt
+                else:
+                    i = nxt
             else:
                 i += 1
     return state
@@ -383,9 +427,18 @@ class _AnchorHrefParser(HTMLParser):
     #: applet, caption, html, table, td, th, marquee, object, template — plus
     #: `button` for the BUTTON scope). The search stops here: a `<p>` beyond one of
     #: these is NOT in button scope, so no implied close happens.
+    #:
+    #: ⛔ `select` IS ON THE LIST, and its absence was a fail-open (#14073 review round
+    #: 15, P1, measured). With it missing, `<p><select><div>…` and `<p><select><h2
+    #: id="q">…` walked past the select, closed the `<p>` — popping the select with it —
+    #: and recorded a heading/anchor a browser never puts in the rendering: Chrome's
+    #: `<h2>` inside a `<select>` has a **0×0** rect and `<select><div><a href>` has
+    #: `innerText ''` with the anchor inside the control. A TOC-advertised
+    #: `<h2 id="storage-limits">` parked in a `<select>` therefore BOUNDED the slice,
+    #: leaving a contradicting sentence outside the golden and the vocabulary pin.
     _P_SCOPE_BOUNDARY = frozenset({
-        "applet", "button", "caption", "html", "marquee", "object", "table",
-        "td", "template", "th",
+        "applet", "button", "caption", "html", "marquee", "object", "select",
+        "table", "td", "template", "th",
     })
     #: The spec's ORDINARY scope boundaries — `_P_SCOPE_BOUNDARY` minus `button`, which
     #: is a boundary for BUTTON scope only. Two different questions, two different sets:
@@ -775,6 +828,20 @@ class _AnchorHrefParser(HTMLParser):
         was missing the guard `_record_heading` carries for the same reason, and its
         direction is a fail-open on the same-page question: the seam would relocate
         the base to a URL no browser uses.
+
+        ⛔ DECLARED RESIDUAL — AN HTML INTEGRATION POINT INSIDE THE SVG (#14073 review
+        round 15, P2, measured). `<desc>`, `<title>` and `<foreignObject>` are
+        integration points, so their children are HTML again and a `<base>` written
+        there IS the HTML element: Chrome moves baseURI to `https://evil.example/` for
+        both `<svg><desc><base href>` and `<svg><foreignObject><base href>` (the base's
+        `namespaceURI` is the XHTML one). This guard refuses them because the parser
+        tracks foreign content as a DEPTH (`_foreign_roots`) and not as a per-element
+        stack, so it cannot tell an integration point from the SVG itself — the same
+        limitation the class docstring declares for foreign `template`/`script`. The
+        direction here is the OPPOSITE of the paragraph above (a missed base makes
+        every fragment-only link look same-page), which is why it is named rather than
+        implied, and `test_a_base_element_moves_what_the_section_advertises` pins it as
+        a declared divergence so closing it later reds there.
         """
         if tag != "base" or self.base_href is not None:
             return
@@ -1197,9 +1264,19 @@ class _AnchorHrefParser(HTMLParser):
     #: The sibling closes whose spec step REMOVES the matched element from the stack
     #: rather than popping through it: the adoption agency's `existingA`
     #: (§13.2.6.4.7, "remove element from the stack of open elements" — the NODE, not
-    #: the nodes above it). See `_remove_nearest` for the measured consequence of
-    #: truncating instead.
-    _REMOVE_NOT_POP = frozenset({"a", "button", "nobr"})
+    #: the nodes above it). `a` and `nobr` are the only two tags the adoption agency
+    #: runs for.
+    #:
+    #: ⛔ `button` IS NOT ONE OF THEM (#14073 review round 15, P2, measured). Its rule
+    #: is *"If the stack of open elements has a `button` element in scope, then …
+    #: generate implied end tags. Repeatedly pop the current node off the stack of open
+    #: elements until a `button` element has been popped"* — POP-THROUGH, which is
+    #: `_close_nearest`. Listing it here made `<button><div class="toc"><button><a
+    #: href="#x">X</a></div></button>` report `[['#x']]` while Chrome has the div
+    #: EMPTY and the anchor outside it (`.toc` children 0, anchor rect 9×15 outside):
+    #: a LARGER advertised set and therefore a SHORTER slice — the fail-open direction
+    #: `extract_anchors_within` exists to refuse.
+    _REMOVE_NOT_POP = frozenset({"a", "nobr"})
 
     #: The table-structure start tags the "in body" rules IGNORE — spec 13.2.6.4.7:
     #: *"A start tag whose tag name is one of: 'caption', 'col', 'colgroup', 'frame',
@@ -1665,7 +1742,18 @@ class _AnchorHrefParser(HTMLParser):
         # into DROPPED text (see `_ignored_token`, #14073 review round 14, measured).
         # Its own id/attributes are already recorded above: what the page WRITES is
         # the document's, while the ancestry has to be the tree's.
+        #
+        # ⛔ BUT IT STILL ENDS FOREIGN CONTENT (#14073 review round 15, P2, measured).
+        # `_open` is where `_breaks_out` runs, and `head` is on that list: a
+        # `<svg><head>` is an HTML `head` start tag that breaks OUT of the SVG ("Any
+        # other start tag" in foreign content is not reached for a breakout tag).
+        # Returning before `_open` left this parser "foreign" past it, so the following
+        # `<select>` was never pushed and an anchor inside it was reported as a link —
+        # measured: `<svg><head><select><a href="/blog">x</a></select>` gave `['/blog']`
+        # where Chrome has the select OUTSIDE the svg with the anchor at 0×0.
         if self._ignored_token(tag):
+            if self._breaks_out(tag, attrs):
+                self._foreign = 0
             return
         suppressed = self._open(tag, attrs)
         if not suppressed:
@@ -1742,19 +1830,23 @@ class _AnchorHrefParser(HTMLParser):
             # as markup is script text a browser keeps. That is the fail-open this
             # guard exists for.
             #
-            # ⛔ DECLARED COST — ONE LEGAL SHAPE IS A FALSE RED (#14073 review round
-            # 14, P2, measured). `<script><!--<script></script>--></script><p>CLAIM`
-            # is legal markup whose element closes at the SECOND `</script`, and Chrome
-            # paints CLAIM (`1` script element, `innerText` `CLAIM`) — yet this chunk
-            # ends `double`, so the whole document is REFUSED. A "is another
-            # `</script` still ahead" look-ahead does NOT settle it (tried in round 13
-            # and wrong in both directions): from double-escaped a `</script` only
-            # returns the tokenizer to ESCAPED, so the shape has to be resolved by
-            # CONTINUING the state machine past the stdlib's close point and SKIPPING
-            # the bytes between the two tokens. Until that exists, "not knowable" is
-            # the loud side, and `test_the_script_data_wedge_states_its_own_rule` pins
-            # the rule that IS implemented in both directions so the prose cannot drift
-            # from the code again.
+            # ⛔ DECLARED COST — A CLASS OF LEGAL DOCUMENTS IS A FALSE RED (#14073
+            # review round 14, P2 and round 15, P2, both measured). Every document whose
+            # script chunk ends double-escaped is refused, e.g.
+            # `<script><!--<script></script>--></script><p>CLAIM` (legal: the element
+            # closes at the SECOND `</script`; Chrome paints CLAIM — `1` script element,
+            # `innerText` `CLAIM`) and `<script><!--<script></script></script>` (nothing
+            # between the two tokens at all, also painted). A "is another delimited
+            # `</script` still ahead" look-ahead gives the browser's exact answer for the
+            # EMPTY-inter-token subset, and is wrong in both directions for the general
+            # one (tried in round 13): from double-escaped a `</script` only returns the
+            # tokenizer to ESCAPED, so the general shape has to be resolved by CONTINUING
+            # the state machine past the stdlib's close point and SKIPPING the bytes
+            # between the two tokens. Until that exists, "not knowable" is the loud side:
+            # a page carrying it fails the guard instead of passing silently, and
+            # `test_the_script_data_wedge_states_its_own_rule` pins the rule that IS
+            # implemented — including the false-red class — so the prose cannot drift from
+            # the code again.
             if state == "double":
                 self.wedged_reason = "script-data-escaped"
         # The text a reader MEETS: outside every suppressed region (raw text, inert

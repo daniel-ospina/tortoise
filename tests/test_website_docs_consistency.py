@@ -2686,6 +2686,33 @@ def test_the_select_scope_closes_on_input_and_a_nested_select_and_nothing_else()
         "cell is a scope boundary so the select survives, and a heading inside it is "
         "one no reader meets — bounding at it is the fail-open escape"
     )
+    # ── `select` IS ITSELF A SCOPE BOUNDARY (#14073 review round 15, P1, measured) ──
+    # §13.2.2.4's scope-element list contains `select`, so a `<p>` beyond an open
+    # `<select>` is NOT in button scope and the implied close must not run. Without the
+    # member the walk went past the select, closed the `<p>` and popped the select with
+    # it, so a heading and an anchor a browser never renders were recorded/collected.
+    # Chrome: the `<h2>` inside a `<select>` has a 0×0 rect, and `<select><div><a href>`
+    # has `innerText ''` with the anchor inside the control.
+    assert {"select"} <= set(_AnchorHrefParser._P_SCOPE_BOUNDARY) == set(
+        _AnchorHrefParser._SCOPE_BOUNDARY
+    ) | {"button"}, (
+        "`select` left the scope-boundary list (or the two lists stopped differing by "
+        "`button` alone): a `<p>` or `<ruby>` beyond an open `<select>` is then treated "
+        "as in scope, the select is popped by the implied close, and a heading/anchor "
+        "inside it is recorded although a browser renders none of it"
+    )
+    assert extract_heading_positions('<p><select><h2 id="q">Q</h2>') == [], (
+        "a `<h2>` inside a `<select>` was BOUNDED: Chrome gives it a 0×0 rect, so it "
+        "is no heading a reader meets and bounding the slice at it leaves a claim "
+        "outside every pin"
+    )
+    assert extract_anchor_hrefs(
+        '<p><select><div><a href="/blog">x</a></div>'
+    ) == [], (
+        "an anchor inside a `<select>` was reported as a link: Chrome keeps the div "
+        "and the anchor INSIDE the control (rect 0×0, `innerText` empty), so this is "
+        "a 'way in' no browser exposes"
+    )
     # ── NEGATIVE CONTROL: the pop must not fire from inside an inert `<template>` ──
     # A browser processes that token against the template's own fragment stack,
     # which never holds the outer select — so the select survives it.
@@ -3548,6 +3575,23 @@ def test_a_base_element_moves_what_the_section_advertises() -> None:
         "premise: an HTML `<base href>` IS applied, so the rows above measure the "
         "foreign half and not a broken seam"
     )
+    # ⛔ DECLARED DIVERGENCE — AN HTML INTEGRATION POINT (#14073 review round 15, P2,
+    # measured). `desc`/`title`/`foreignObject` are integration points, so their children
+    # are HTML again and a `<base>` written there IS applied: Chrome moves baseURI to
+    # `https://evil.example/` for both rows below (the base's `namespaceURI` is the XHTML
+    # one). This seam refuses them, because foreign content is tracked as a DEPTH and the
+    # parser cannot tell an integration point from the SVG itself. Pinned as a DECLARED
+    # divergence rather than left implicit: the day the foreign element stack lands, this
+    # row reds and the declared residual is due for deletion.
+    for integration_point in ("desc", "title", "foreignObject"):
+        assert extract_first_base_href(
+            f'<head><svg><{integration_point}><base href="https://evil.example/">'
+            f"</{integration_point}></svg>"
+        ) is None, (
+            f"a `<base>` inside `<svg><{integration_point}>` is now applied: that is the "
+            f"right answer (it is an HTML integration point) — delete this declared "
+            f"residual from `_record_base` and from here, and re-run the base rows"
+        )
 
     # ⛔ AND THE FIRST ONE WINS. A later `<base href>` is ignored, so honouring it
     # would compute a base no browser uses — a fail-open on this very question.
@@ -5438,6 +5482,31 @@ def test_extract_anchors_within_reads_the_parsed_tree() -> None:
         "a container inside a formatting element was CLOSED by the AAA: a browser keeps "
         "the div and puts the next anchor inside it, so this is an advertised set the "
         "section bound must be able to see"
+    )
+    # ⛔ BUT `button` IS NOT AN ADOPTION-AGENCY ELEMENT (#14073 review round 15, P2,
+    # measured). Its rule is "pop the current node until a `button` has been popped" —
+    # pop-through, i.e. `_close_nearest` — so the container inside it DOES close with
+    # it. Relocating a container for `button` would report an entry Chrome does not
+    # have: `<button><div class="toc"><button><a href="#x">X</a></div></button>` has
+    # the div EMPTY (`.toc` children 0) and the anchor outside it, at 9×15.
+    assert set(_AnchorHrefParser._REMOVE_NOT_POP) == {"a", "nobr"}, (
+        "`_REMOVE_NOT_POP` changed: only `a` and `nobr` run the adoption agency, which "
+        "removes the match and relocates a block above it. `button`'s rule POPS THROUGH "
+        "(its contents close with it), so listing it here reports a container Chrome "
+        "has already closed — a larger advertised set and a shorter slice"
+    )
+    assert extract_anchors_within(
+        '<button><div class="toc"><button><a href="#x">X</a></div></button>',
+        tag="div",
+        class_token="toc",
+    ) == [[]], (
+        "a container inside a `<button>` survived the sibling close: Chrome's rule pops "
+        "through the button, so the div is empty and the anchor is outside it"
+    )
+    assert extract_anchors_within(
+        '<nobr><div class="toc"><nobr><a href="#n">N</a></div></nobr>', tag="div", class_token="toc"
+    ) == [["#n"]], (
+        "`nobr` runs the adoption agency too, so its container is relocated, not closed"
     )
     # A CLASS TOKEN, not a substring, and one of several tokens.
     assert extract_anchors_within(
@@ -7491,6 +7560,29 @@ def test_the_table_structure_tokens_a_browser_ignores_insert_nothing() -> None:
         "`<td>` was ignored WITH a table open: the table modes insert it, and the "
         "foster-parenting rows depend on the cell being in the tree"
     )
+    # ⛔ AND AN IGNORED TOKEN STILL ENDS FOREIGN CONTENT (#14073 review round 15, P2,
+    # measured). `head` is on the foreign-content BREAKOUT list, and `_open` is where
+    # that runs — returning before it left this parser "foreign" past `<svg><head>`, so
+    # the following `<select>` was never pushed and an anchor inside it was reported as
+    # a link. Chrome: the select is outside the svg and the anchor's rect is 0×0.
+    assert extract_anchor_hrefs(
+        '<svg><head><select><a href="/blog">x</a></select>'
+    ) == [], (
+        "`<svg><head>` did not break out of the foreign context: `head` is a breakout "
+        "tag, so the `<select>` after it is HTML and the anchor inside it is no link"
+    )
+    assert extract_anchor_hrefs(
+        '<math><head><select><a href="/blog">x</a></select>'
+    ) == [], (
+        "`<math><head>` did not break out of the foreign context (MathML half of the "
+        "same rule)"
+    )
+    assert extract_anchor_hrefs(
+        '<svg><div><select><a href="/blog">x</a></select>'
+    ) == [], (
+        "premise: a NON-ignored breakout tag already ended the foreign context, so the "
+        "rows above measure the ignored-token path and not the select rule"
+    )
 
 
 def test_the_script_data_wedge_states_its_own_rule() -> None:
@@ -7529,9 +7621,40 @@ def test_the_script_data_wedge_states_its_own_rule() -> None:
             f"legal markup was refused: {markup!r} — a browser closes the script and "
             f"paints the following text, so the wedge must not fire"
         )
-    # ── and the DECLARED COST: legal markup whose element closes at the SECOND ──
-    # `</script`. Chrome paints SWALLOWED (`1` script element, `innerText`), and this
+    # ── and the DECLARED COST: legal markup whose element closes at a LATER ──
+    # `</script`. Chrome paints the following text (`1` script element), and this
     # refuses because its chunk ends at the FIRST `</script` and therefore never sees
     # the `-->` that returns the tokenizer to data. Loud, not silently wrong.
+    for declared in (
+        "<script><!--<script></script>--></script><p>SWALLOWED</p>",
+        "<script><!--<script></script></script><a href=\"/blog\">SWALLOWED</a>",
+    ):
+        with pytest.raises(ValueError, match="wedged"):
+            extract_visible_text(declared)
+    # ⛔ AND THE DELIMITER IS PART OF THE RULE (#14073 review round 15, P2, measured).
+    # §13.2.5.31 only returns to ESCAPED when the character after `</script` is a
+    # delimiter; without that test a chunk ending `</script` at the very end was read as
+    # "escaped", the element "closed", and the rest of the document — script text in a
+    # browser — was read as markup:
+    #
+    #     extract_anchor_hrefs('<script><!--<script></script</script><a href="/blog">x</a>')
+    #       -> [] here; Chrome has `1` script element, `body ''`, no anchors
+    #
+    # i.e. a `/blog` link no browser exposes, one token past the state machine's own rule.
+    assert _script_data_state("<!--<script></script") == "double", (
+        "a chunk ending at `</script` with no delimiter was decided as ESCAPED: the "
+        "delimiter is the next chunk's business, and guessing 'the element closed' "
+        "re-reads script text as markup (the fail-open direction)"
+    )
+    assert _script_data_state("<!--<script></script>") == "escaped", (
+        "a delimited `</script>` inside double-escaped must return the tokenizer to "
+        "ESCAPED — that is the rule the undecided case above defers to"
+    )
+    assert _script_data_state("<!--<script></script<") == "double", (
+        "the delimiter test was dropped: §13.2.5.31 returns to ESCAPED only on "
+        "tab/LF/FF/space, `/` or `>`, so `</script<` must stay DOUBLE-escaped — "
+        "anything else is text a browser keeps as script and this scan would re-read "
+        "as markup"
+    )
     with pytest.raises(ValueError, match="wedged"):
-        extract_visible_text("<script><!--<script></script>--></script><p>SWALLOWED</p>")
+        extract_visible_text("<script><!--<script></script</script><p>SWALLOWED</p>")
