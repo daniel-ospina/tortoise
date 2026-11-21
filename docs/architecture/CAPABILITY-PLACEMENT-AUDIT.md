@@ -188,13 +188,16 @@ named is the pin's `:23046`, which is not one of them:
 `sdk.py:22267` (the capture writer) with its read-back `:22390`, and `hosted_api.py:23501` (the commit
 door's `MERGE (s:Source {url:$did})`) with `_execute_commit_writes` at `:23313`. ⚠️ **The `hosted_api.py`
 pair is head-bound and has FIVE readings on record** — `:22301`/`:22113` at the pin, `:22919`/`:22731` at
-`ae54df166d` (the head `#13394` was re-cut onto, `9d20f74886` — and ⚠️ **not** the head `#14059` wrote
-them on; the clause above names `ae54df166d` only to say these four addresses were NOT pinned there, which is
+`ae54df166d` (`#13394` was re-cut onto it — `9d20f74886`, whose own subject says so — and ⚠️ **not** the
+head `#14059` wrote them on; the clause above names `ae54df166d` only to say these four addresses were NOT
+pinned there, which is
 why the row-13 note below still records this reading alongside the pin's), 23082 / 22894 when the `#14022`-rot repair `#14059` wrote them, 23503 / 23315 at the base this
 branch was then built on (`72c104bcbb`), and 23501 / 23313 at the head this sentence is written at (`main`
 `1b0db04894`, after `e4acf78705` moved them `−2`). **This edition took the last two**, and row 13's note
 below repeats the pin's and `ae54df166d`'s — it does not carry the branch-base 23503 / 23315, which no
-longer lands on the door, so this paragraph is the only place that reading appears. ⛔ **Re-derive by CONTENT:
+longer names the door's `MERGE` line or its `def` (it is `+2` into a BYTE-IDENTICAL region, so the door
+did not change between those heads — only the offsets above it did), so this paragraph is the only place
+that reading appears. ⛔ **Re-derive by CONTENT:
 never reuse the delta.** The `+419` all three of this
 row's and row 15's sites take between `#14059`'s head and this one is **not** one insert: that interval is
 **569 inserted and 59 deleted** lines (`git diff --numstat`), across **25** hunks — and the convention travels with
