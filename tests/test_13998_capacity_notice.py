@@ -2998,6 +2998,51 @@ def test_a_session_lane_account_without_the_column_address_is_still_notified():
     assert cp.tables["organizations"][0]["storage_notice_pct"] == 80
 
 
+def _send_with_rung1(stale: str):
+    """One pass for a row whose rung-1 value is *stale*; returns (summary, sent-to).
+
+    A helper rather than a loop-local closure: the send fake and the enumerator
+    both read ``stale``, and binding a loop variable inside a closure is exactly
+    the bug B023 refuses (the last iteration's value would be the one every call
+    saw).
+    """
+    cp = _fake_cp(email=stale, customer_email="billing@acme.example")
+    seen: list[str] = []
+
+    async def _fake_send(address, subject, html, text, **_kwargs):
+        seen.append(address)
+        return {"status": "sent", "message_id": "msg_rung2"}
+
+    with patch("tortoise.quota.resolve_org_limits", lambda org_id: _limits(102)), \
+         patch("tortoise.allowance_gate.read_dimension",
+               lambda dimension, org_id: _Reading(90.0)), \
+         patch("tortoise.email_notify.send_notice_email", _fake_send):
+        out = _pass(cp=cp, enumerate_orgs=lambda limit=None: [
+            _org_row(email=stale, customer_email="billing@acme.example")])
+    return out, seen, cp
+
+
+def test_a_stale_non_address_on_the_first_rung_does_not_shadow_a_deliverable_one():
+    """A truthy-but-not-an-address `email` falls through to `customer_email`.
+
+    ⛔ THE RUNG ORDER ALONE DOES NOT DELIVER (#14038 review, mutation pass, P2).
+    `organizations.email` is stale-prone and holds non-addresses in this codebase
+    (`"api"`, a Supabase user UUID — `hosted_api._billing_email_like` documents
+    both), so a truthiness test on rung 1 shadows a REAL address on rung 2: the
+    send fails, the mark is never stamped, and every later pass retries the same
+    undeliverable string. This row is the one that reds when the shape gate is
+    dropped — the plain "no address" row below cannot see the difference.
+    """
+    for stale in ("api", "0b6c3a4e-6d63-4f3e-9b3e-3f0d5f7a1c22", "  "):
+        out, seen, cp = _send_with_rung1(stale)
+        assert out["statuses"]["sent"] == 1, (
+            f"a stale rung-1 value {stale!r} shadowed the deliverable rung-2 "
+            f"address: {out['statuses']}")
+        assert seen == ["billing@acme.example"], (
+            f"the mailer was handed {seen!r} for a rung-1 value {stale!r}")
+        assert cp.tables["organizations"][0]["storage_notice_pct"] == 80
+
+
 def test_an_account_with_no_address_on_any_rung_is_reported_by_name():
     """The residual, pinned: nothing mailed, and the status says `no-email`."""
     cp = _fake_cp(email=None, customer_email=None)
