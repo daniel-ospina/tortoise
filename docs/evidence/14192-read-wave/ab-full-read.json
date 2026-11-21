@@ -1,7 +1,7 @@
 {
   "baseline": {
     "arm": "ab-full-read",
-    "git_sha": "381620c40746",
+    "git_sha": "0667b5358950",
     "db_uri": "docker://:@127.0.0.1:16446/tortoise_test_matrix",
     "points": 2000,
     "corpus_seed": 42,
@@ -11,15 +11,15 @@
         "n": 24,
         "p50": 0.1,
         "p95": 0.1,
-        "max": 0.2,
-        "mean": 0.104
+        "max": 0.1,
+        "mean": 0.1
       },
       "embed_get": {
         "n": 24,
         "p50": 0.5,
         "p95": 0.6,
         "max": 0.8,
-        "mean": 0.483
+        "mean": 0.529
       },
       "embed_encode": {
         "n": 24,
@@ -30,10 +30,10 @@
       },
       "retrieval": {
         "n": 24,
-        "p50": 149.5,
-        "p95": 191.3,
-        "max": 205.8,
-        "mean": 156.021
+        "p50": 157.1,
+        "p95": 193.1,
+        "max": 202.9,
+        "mean": 159.658
       },
       "fusion": {
         "n": 24,
@@ -44,17 +44,17 @@
       },
       "ep_annotation": {
         "n": 24,
-        "p50": 4.0,
-        "p95": 4.7,
-        "max": 4.8,
-        "mean": 4.067
+        "p50": 4.5,
+        "p95": 5.7,
+        "max": 6.7,
+        "mean": 4.608
       },
       "ordering": {
         "n": 24,
-        "p50": 0.1,
-        "p95": 0.2,
-        "max": 0.2,
-        "mean": 0.142
+        "p50": 0.2,
+        "p95": 0.3,
+        "max": 0.3,
+        "mean": 0.167
       },
       "response": {
         "n": 24,
@@ -67,10 +67,10 @@
     "member_table": {
       "leg_fts": {
         "n": 24,
-        "p50": 5.064,
-        "p95": 5.884,
-        "max": 6.094,
-        "mean": 5.092
+        "p50": 5.591,
+        "p95": 7.052,
+        "max": 7.36,
+        "mean": 5.629
       },
       "leg_vector": {
         "n": 24,
@@ -81,17 +81,17 @@
       },
       "leg_structural": {
         "n": 24,
-        "p50": 0.032,
-        "p95": 0.044,
-        "max": 0.046,
-        "mean": 0.031
+        "p50": 0.031,
+        "p95": 0.051,
+        "max": 0.052,
+        "mean": 0.032
       },
       "legs_wave": {
         "n": 24,
-        "p50": 5.549,
-        "p95": 6.479,
-        "max": 6.692,
-        "mean": 5.636
+        "p50": 6.246,
+        "p95": 7.907,
+        "max": 8.141,
+        "mean": 6.247
       },
       "fusion": {
         "n": 24,
@@ -102,24 +102,24 @@
       },
       "post_ep_annotate": {
         "n": 24,
-        "p50": 4.026,
-        "p95": 4.661,
-        "max": 4.817,
-        "mean": 4.062
+        "p50": 4.52,
+        "p95": 5.722,
+        "max": 6.718,
+        "mean": 4.595
       },
       "post_relationships": {
         "n": 24,
-        "p50": 137.763,
-        "p95": 179.981,
-        "max": 192.569,
-        "mean": 143.884
+        "p50": 143.048,
+        "p95": 179.501,
+        "max": 189.987,
+        "mean": 146.433
       },
       "post_epistemic": {
         "n": 24,
-        "p50": 3.055,
-        "p95": 4.071,
-        "max": 4.345,
-        "mean": 3.16
+        "p50": 3.368,
+        "p95": 4.387,
+        "max": 4.99,
+        "mean": 3.392
       }
     },
     "legs_declared": {
@@ -132,21 +132,21 @@
       {
         "qid": "q001",
         "query": "zero-cost onboarding for new teams",
-        "total_ms": 157.17,
+        "total_ms": 156.32,
         "stages": {
           "pre_handler": 0.1,
           "embed_get": 0.5,
-          "retrieval": 152.3,
-          "ep_annotation": 4.1,
-          "ordering": 0.1
+          "retrieval": 151.8,
+          "ep_annotation": 3.7,
+          "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.04641711711883545,
-          "leg_fts": 4.463117104023695,
-          "legs_wave": 4.977070726454258,
-          "post_ep_annotate": 4.070341121405363,
-          "post_relationships": 140.88648185133934,
-          "post_epistemic": 3.198597114533186
+          "leg_structural": 0.03703916445374489,
+          "leg_fts": 5.055175628513098,
+          "legs_wave": 5.651063751429319,
+          "post_ep_annotate": 3.7182001397013664,
+          "post_relationships": 139.40579583868384,
+          "post_epistemic": 3.5856012254953384
         },
         "member_calls": {
           "leg_structural": 1,
@@ -202,21 +202,21 @@
       {
         "qid": "q002",
         "query": "pricing tiers for enterprise plans",
-        "total_ms": 180.178,
+        "total_ms": 176.786,
         "stages": {
           "pre_handler": 0.1,
           "embed_get": 0.5,
-          "retrieval": 175.5,
-          "ep_annotation": 3.8,
-          "ordering": 0.1
+          "retrieval": 171.2,
+          "ep_annotation": 4.6,
+          "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.044442713260650635,
-          "leg_fts": 5.612863227725029,
-          "legs_wave": 6.202938035130501,
-          "post_ep_annotate": 3.8323248736560345,
-          "post_relationships": 162.74674935266376,
-          "post_epistemic": 3.684047143906355
+          "leg_structural": 0.03427406772971153,
+          "leg_fts": 5.650200881063938,
+          "legs_wave": 6.2906090170145035,
+          "post_ep_annotate": 4.606274887919426,
+          "post_relationships": 158.38474594056606,
+          "post_epistemic": 2.7634198777377605
         },
         "member_calls": {
           "leg_structural": 1,
@@ -272,21 +272,21 @@
       {
         "qid": "q003",
         "query": "memory retention across sessions",
-        "total_ms": 211.218,
+        "total_ms": 198.234,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.4,
-          "retrieval": 205.8,
-          "ep_annotation": 4.6,
-          "ordering": 0.2
+          "embed_get": 0.5,
+          "retrieval": 193.1,
+          "ep_annotation": 4.1,
+          "ordering": 0.3
         },
         "members": {
-          "leg_structural": 0.01898501068353653,
-          "leg_fts": 5.616368260234594,
-          "legs_wave": 6.111796945333481,
-          "post_ep_annotate": 4.6095033176243305,
-          "post_relationships": 192.569297272712,
-          "post_epistemic": 3.429227974265814
+          "leg_structural": 0.0516967847943306,
+          "leg_fts": 4.843669943511486,
+          "legs_wave": 5.431542173027992,
+          "post_ep_annotate": 4.053228069096804,
+          "post_relationships": 179.50050998479128,
+          "post_epistemic": 4.387294873595238
         },
         "member_calls": {
           "leg_structural": 1,
@@ -342,21 +342,21 @@
       {
         "qid": "q004",
         "query": "graph traversal operators and edges",
-        "total_ms": 151.947,
+        "total_ms": 161.912,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.4,
-          "retrieval": 146.7,
-          "ep_annotation": 4.5,
-          "ordering": 0.1
+          "embed_get": 0.6,
+          "retrieval": 154.1,
+          "ep_annotation": 6.7,
+          "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.019837170839309692,
-          "leg_fts": 5.759184714406729,
-          "legs_wave": 6.237350404262543,
-          "post_ep_annotate": 4.528281278908253,
-          "post_relationships": 134.16795572265983,
-          "post_epistemic": 2.9909880831837654
+          "leg_structural": 0.049413181841373444,
+          "leg_fts": 5.496737081557512,
+          "legs_wave": 6.295632105320692,
+          "post_ep_annotate": 6.718414835631847,
+          "post_relationships": 140.2210700325668,
+          "post_epistemic": 3.240944817662239
         },
         "member_calls": {
           "leg_structural": 1,
@@ -412,21 +412,21 @@
       {
         "qid": "q005",
         "query": "embedding dimension and vector index",
-        "total_ms": 182.641,
+        "total_ms": 192.214,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.4,
-          "retrieval": 177.9,
-          "ep_annotation": 3.9,
+          "embed_get": 0.5,
+          "retrieval": 186.8,
+          "ep_annotation": 4.5,
           "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.02162111923098564,
-          "leg_fts": 4.983612801879644,
-          "legs_wave": 5.549054592847824,
-          "post_ep_annotate": 3.9074071682989597,
-          "post_relationships": 166.24039504677057,
-          "post_epistemic": 3.1672269105911255
+          "leg_structural": 0.03158021718263626,
+          "leg_fts": 5.792219191789627,
+          "legs_wave": 6.373037584125996,
+          "post_ep_annotate": 4.490558989346027,
+          "post_relationships": 173.36053075268865,
+          "post_epistemic": 3.5761138424277306
         },
         "member_calls": {
           "leg_structural": 1,
@@ -482,21 +482,21 @@
       {
         "qid": "q006",
         "query": "belief propagation posterior update",
-        "total_ms": 153.559,
+        "total_ms": 157.186,
         "stages": {
           "pre_handler": 0.1,
           "embed_get": 0.6,
-          "retrieval": 148.2,
-          "ep_annotation": 4.4,
+          "retrieval": 151.3,
+          "ep_annotation": 4.9,
           "ordering": 0.1
         },
         "members": {
-          "leg_structural": 0.036458950489759445,
-          "leg_fts": 5.883599165827036,
-          "legs_wave": 6.478814873844385,
-          "post_ep_annotate": 4.38682409003377,
-          "post_relationships": 135.6945582665503,
-          "post_epistemic": 2.921947743743658
+          "leg_structural": 0.024402979761362076,
+          "leg_fts": 5.667024292051792,
+          "legs_wave": 6.245729047805071,
+          "post_ep_annotate": 4.896178841590881,
+          "post_relationships": 138.82851228117943,
+          "post_epistemic": 2.659495919942856
         },
         "member_calls": {
           "leg_structural": 1,
@@ -552,21 +552,21 @@
       {
         "qid": "q007",
         "query": "full text search over point content",
-        "total_ms": 177.904,
+        "total_ms": 183.587,
         "stages": {
           "pre_handler": 0.1,
           "embed_get": 0.5,
-          "retrieval": 173.0,
-          "ep_annotation": 4.1,
-          "ordering": 0.1
+          "retrieval": 178.9,
+          "ep_annotation": 3.8,
+          "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.03211991861462593,
-          "leg_fts": 5.400946829468012,
-          "legs_wave": 5.823436658829451,
-          "post_ep_annotate": 4.0718670934438705,
-          "post_relationships": 161.2141183577478,
-          "post_epistemic": 2.7927709743380547
+          "leg_structural": 0.025948043912649155,
+          "leg_fts": 5.591030232608318,
+          "legs_wave": 6.073684897273779,
+          "post_ep_annotate": 3.7485980428755283,
+          "post_relationships": 166.03702120482922,
+          "post_epistemic": 3.417267929762602
         },
         "member_calls": {
           "leg_structural": 1,
@@ -622,21 +622,21 @@
       {
         "qid": "q008",
         "query": "semantic similarity between claims",
-        "total_ms": 120.631,
+        "total_ms": 129.402,
         "stages": {
           "pre_handler": 0.1,
           "embed_get": 0.5,
-          "retrieval": 116.1,
-          "ep_annotation": 3.7,
-          "ordering": 0.1
+          "retrieval": 124.2,
+          "ep_annotation": 4.3,
+          "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.03723008558154106,
-          "leg_fts": 4.6959565952420235,
-          "legs_wave": 5.233544856309891,
-          "post_ep_annotate": 3.7318961694836617,
-          "post_relationships": 104.95288716629148,
-          "post_epistemic": 2.971210051327944
+          "leg_structural": 0.030908267945051193,
+          "leg_fts": 5.162053741514683,
+          "legs_wave": 5.7665761560201645,
+          "post_ep_annotate": 4.249711986631155,
+          "post_relationships": 111.19518196210265,
+          "post_epistemic": 3.513908013701439
         },
         "member_calls": {
           "leg_structural": 1,
@@ -692,21 +692,21 @@
       {
         "qid": "q009",
         "query": "hybrid ranking fusion strategy",
-        "total_ms": 163.715,
+        "total_ms": 167.912,
         "stages": {
           "pre_handler": 0.1,
           "embed_get": 0.4,
-          "retrieval": 159.4,
-          "ep_annotation": 3.7,
+          "retrieval": 162.2,
+          "ep_annotation": 5.0,
           "ordering": 0.1
         },
         "members": {
-          "leg_structural": 0.029715243726968765,
-          "leg_fts": 4.6981279738247395,
-          "legs_wave": 5.220531951636076,
-          "post_ep_annotate": 3.6759008653461933,
-          "post_relationships": 148.34211114794016,
-          "post_epistemic": 2.857122104614973
+          "leg_structural": 0.025989022105932236,
+          "leg_fts": 5.450398661196232,
+          "legs_wave": 6.032501347362995,
+          "post_ep_annotate": 4.929902032017708,
+          "post_relationships": 149.8838420957327,
+          "post_epistemic": 2.806290052831173
         },
         "member_calls": {
           "leg_structural": 1,
@@ -762,21 +762,21 @@
       {
         "qid": "q010",
         "query": "degraded fallback when database fails",
-        "total_ms": 152.656,
+        "total_ms": 174.606,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.4,
-          "retrieval": 148.0,
-          "ep_annotation": 3.8,
+          "embed_get": 0.5,
+          "retrieval": 167.9,
+          "ep_annotation": 5.7,
           "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.028043054044246674,
-          "leg_fts": 4.681715741753578,
-          "legs_wave": 5.298732779920101,
-          "post_ep_annotate": 3.7954049184918404,
-          "post_relationships": 135.87609864771366,
-          "post_epistemic": 3.314823843538761
+          "leg_structural": 0.026850029826164246,
+          "leg_fts": 4.9254619516432285,
+          "legs_wave": 5.4865749552845955,
+          "post_ep_annotate": 5.72182796895504,
+          "post_relationships": 155.22602200508118,
+          "post_epistemic": 3.2214391976594925
         },
         "member_calls": {
           "leg_structural": 1,
@@ -832,21 +832,21 @@
       {
         "qid": "q011",
         "query": "circuit breaker latency protection",
-        "total_ms": 139.445,
+        "total_ms": 144.161,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.6,
-          "retrieval": 134.6,
-          "ep_annotation": 3.9,
+          "embed_get": 0.4,
+          "retrieval": 139.1,
+          "ep_annotation": 4.3,
           "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.03808131441473961,
-          "leg_fts": 4.737452138215303,
-          "legs_wave": 5.335772410035133,
-          "post_ep_annotate": 3.9020851254463196,
-          "post_relationships": 123.04195901378989,
-          "post_epistemic": 2.7952701784670353
+          "leg_structural": 0.020167790353298187,
+          "leg_fts": 4.598892293870449,
+          "legs_wave": 5.054099950939417,
+          "post_ep_annotate": 4.2611281387507915,
+          "post_relationships": 126.9136480987072,
+          "post_epistemic": 3.4549757838249207
         },
         "member_calls": {
           "leg_structural": 1,
@@ -902,21 +902,21 @@
       {
         "qid": "q012",
         "query": "epistemic annotation confidence evidence",
-        "total_ms": 151.549,
+        "total_ms": 152.745,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.6,
-          "retrieval": 146.9,
-          "ep_annotation": 3.7,
-          "ordering": 0.2
+          "embed_get": 0.5,
+          "retrieval": 147.2,
+          "ep_annotation": 4.8,
+          "ordering": 0.1
         },
         "members": {
-          "leg_structural": 0.026850029826164246,
-          "leg_fts": 5.064033903181553,
-          "legs_wave": 5.594546906650066,
-          "post_ep_annotate": 3.653950057923794,
-          "post_relationships": 133.45287693664432,
-          "post_epistemic": 4.070650786161423
+          "leg_structural": 0.01821434125304222,
+          "leg_fts": 5.311466287821531,
+          "legs_wave": 5.791887640953064,
+          "post_ep_annotate": 4.765011835843325,
+          "post_relationships": 134.80882719159126,
+          "post_epistemic": 3.156146965920925
         },
         "member_calls": {
           "leg_structural": 1,
@@ -972,21 +972,21 @@
       {
         "qid": "q013",
         "query": "operator relationships between concepts",
-        "total_ms": 151.535,
+        "total_ms": 161.766,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.4,
-          "retrieval": 146.7,
-          "ep_annotation": 4.1,
+          "embed_get": 0.5,
+          "retrieval": 156.2,
+          "ep_annotation": 4.7,
           "ordering": 0.1
         },
         "members": {
-          "leg_structural": 0.03542611375451088,
-          "leg_fts": 4.479389172047377,
-          "legs_wave": 5.037311930209398,
-          "post_ep_annotate": 4.111617803573608,
-          "post_relationships": 134.58038680255413,
-          "post_epistemic": 3.2801409251987934
+          "leg_structural": 0.01760292798280716,
+          "leg_fts": 5.7410732842981815,
+          "legs_wave": 6.266504991799593,
+          "post_ep_annotate": 4.7011361457407475,
+          "post_relationships": 143.04841216653585,
+          "post_epistemic": 3.2566748559474945
         },
         "member_calls": {
           "leg_structural": 1,
@@ -1042,21 +1042,21 @@
       {
         "qid": "q014",
         "query": "agent memory graph storage",
-        "total_ms": 173.095,
+        "total_ms": 179.629,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.5,
-          "retrieval": 167.9,
-          "ep_annotation": 4.3,
-          "ordering": 0.1
+          "embed_get": 0.4,
+          "retrieval": 173.6,
+          "ep_annotation": 5.2,
+          "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.01794286072254181,
-          "leg_fts": 5.041616968810558,
-          "legs_wave": 5.509441718459129,
-          "post_ep_annotate": 4.314725287258625,
-          "post_relationships": 156.0108670964837,
-          "post_epistemic": 2.903733402490616
+          "leg_structural": 0.022181309759616852,
+          "leg_fts": 5.015491973608732,
+          "legs_wave": 5.618933122605085,
+          "post_ep_annotate": 5.214718170464039,
+          "post_relationships": 160.76798411086202,
+          "post_epistemic": 3.6825849674642086
         },
         "member_calls": {
           "leg_structural": 1,
@@ -1112,21 +1112,21 @@
       {
         "qid": "q015",
         "query": "cross entity retrieval source events",
-        "total_ms": 137.451,
+        "total_ms": 139.87,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.4,
-          "retrieval": 131.9,
-          "ep_annotation": 4.7,
-          "ordering": 0.2
+          "embed_get": 0.6,
+          "retrieval": 134.1,
+          "ep_annotation": 4.8,
+          "ordering": 0.1
         },
         "members": {
-          "leg_structural": 0.038222409784793854,
-          "leg_fts": 5.603168159723282,
-          "legs_wave": 6.328369956463575,
-          "post_ep_annotate": 4.660849925130606,
-          "post_relationships": 118.42403607442975,
-          "post_epistemic": 3.055016975849867
+          "leg_structural": 0.023523811250925064,
+          "leg_fts": 6.300950888544321,
+          "legs_wave": 7.018628995865583,
+          "post_ep_annotate": 4.830565769225359,
+          "post_relationships": 120.572529733181,
+          "post_epistemic": 3.0051441863179207
         },
         "member_calls": {
           "leg_structural": 1,
@@ -1182,21 +1182,21 @@
       {
         "qid": "q016",
         "query": "contested claims variance threshold",
-        "total_ms": 166.603,
+        "total_ms": 174.619,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.5,
-          "retrieval": 161.6,
-          "ep_annotation": 4.1,
+          "embed_get": 0.6,
+          "retrieval": 169.3,
+          "ep_annotation": 4.4,
           "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.02227211371064186,
-          "leg_fts": 5.186791066080332,
-          "legs_wave": 5.742497276514769,
-          "post_ep_annotate": 4.11588978022337,
-          "post_relationships": 149.46659607812762,
-          "post_epistemic": 3.086527343839407
+          "leg_structural": 0.03525521606206894,
+          "leg_fts": 5.132770631462336,
+          "legs_wave": 5.662915762513876,
+          "post_ep_annotate": 4.335507284849882,
+          "post_relationships": 156.55692666769028,
+          "post_epistemic": 3.2242238521575928
         },
         "member_calls": {
           "leg_structural": 1,
@@ -1252,21 +1252,21 @@
       {
         "qid": "q017",
         "query": "structured query over operator kind",
-        "total_ms": 154.237,
+        "total_ms": 159.651,
         "stages": {
           "pre_handler": 0.1,
           "embed_get": 0.5,
-          "retrieval": 149.4,
-          "ep_annotation": 4.0,
+          "retrieval": 154.7,
+          "ep_annotation": 4.1,
           "ordering": 0.1
         },
         "members": {
-          "leg_structural": 0.026119407266378403,
-          "leg_fts": 4.718806128948927,
-          "legs_wave": 5.3597427904605865,
-          "post_ep_annotate": 3.979438915848732,
-          "post_relationships": 137.76282500475645,
-          "post_epistemic": 3.0540749430656433
+          "leg_structural": 0.05084369331598282,
+          "leg_fts": 5.674868822097778,
+          "legs_wave": 6.351146847009659,
+          "post_ep_annotate": 4.087633918970823,
+          "post_relationships": 141.63580629974604,
+          "post_epistemic": 3.4934901632368565
         },
         "member_calls": {
           "leg_structural": 1,
@@ -1322,21 +1322,21 @@
       {
         "qid": "q018",
         "query": "recall completeness full scan mode",
-        "total_ms": 177.166,
+        "total_ms": 162.305,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.4,
-          "retrieval": 172.6,
-          "ep_annotation": 3.6,
-          "ordering": 0.2
+          "embed_get": 0.5,
+          "retrieval": 157.1,
+          "ep_annotation": 4.4,
+          "ordering": 0.1
         },
         "members": {
-          "leg_structural": 0.03786059096455574,
-          "leg_fts": 5.087167024612427,
-          "legs_wave": 5.541929975152016,
-          "post_ep_annotate": 3.593617118895054,
-          "post_relationships": 161.1220631748438,
-          "post_epistemic": 2.9244241304695606
+          "leg_structural": 0.038587022572755814,
+          "leg_fts": 7.360499352216721,
+          "legs_wave": 8.141051977872849,
+          "post_ep_annotate": 4.355384968221188,
+          "post_relationships": 142.56423991173506,
+          "post_epistemic": 3.1929099932312965
         },
         "member_calls": {
           "leg_structural": 1,
@@ -1392,21 +1392,21 @@
       {
         "qid": "q019",
         "query": "threshold filter score floor",
-        "total_ms": 145.171,
+        "total_ms": 135.051,
         "stages": {
-          "pre_handler": 0.2,
-          "embed_get": 0.5,
-          "retrieval": 140.2,
-          "ep_annotation": 4.0,
+          "pre_handler": 0.1,
+          "embed_get": 0.6,
+          "retrieval": 129.7,
+          "ep_annotation": 4.4,
           "ordering": 0.1
         },
         "members": {
-          "leg_structural": 0.03767106682062149,
-          "leg_fts": 4.769701976329088,
-          "legs_wave": 5.327817052602768,
-          "post_ep_annotate": 4.025958012789488,
-          "post_relationships": 128.8296296261251,
-          "post_epistemic": 2.7104527689516544
+          "leg_structural": 0.02450542524456978,
+          "leg_fts": 4.854151047766209,
+          "legs_wave": 5.424309056252241,
+          "post_ep_annotate": 4.392283968627453,
+          "post_relationships": 117.48237209394574,
+          "post_epistemic": 3.367680124938488
         },
         "member_calls": {
           "leg_structural": 1,
@@ -1462,21 +1462,21 @@
       {
         "qid": "q020",
         "query": "kind filter before truncation",
-        "total_ms": 127.277,
+        "total_ms": 152.203,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.4,
-          "retrieval": 122.6,
-          "ep_annotation": 3.9,
-          "ordering": 0.2
+          "embed_get": 0.6,
+          "retrieval": 147.0,
+          "ep_annotation": 4.0,
+          "ordering": 0.3
         },
         "members": {
-          "leg_structural": 0.03641890361905098,
-          "leg_fts": 4.264580085873604,
-          "legs_wave": 4.734056070446968,
-          "post_ep_annotate": 3.849009983241558,
-          "post_relationships": 110.80878600478172,
-          "post_epistemic": 3.3460319973528385
+          "leg_structural": 0.05022389814257622,
+          "leg_fts": 6.851594895124435,
+          "legs_wave": 7.665643934160471,
+          "post_ep_annotate": 3.980513196438551,
+          "post_relationships": 130.78444311395288,
+          "post_epistemic": 4.989934153854847
         },
         "member_calls": {
           "leg_structural": 1,
@@ -1532,21 +1532,21 @@
       {
         "qid": "q021",
         "query": "batch endpoint annotation efficiency",
-        "total_ms": 188.667,
+        "total_ms": 171.127,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.4,
-          "retrieval": 183.0,
-          "ep_annotation": 4.8,
+          "embed_get": 0.8,
+          "retrieval": 165.4,
+          "ep_annotation": 4.5,
           "ordering": 0.1
         },
         "members": {
-          "leg_structural": 0.027521979063749313,
-          "leg_fts": 6.093592848628759,
-          "legs_wave": 6.692165974527597,
-          "post_ep_annotate": 4.816520027816296,
-          "post_relationships": 168.273885268718,
-          "post_epistemic": 4.345251712948084
+          "leg_structural": 0.0400063581764698,
+          "leg_fts": 6.563795730471611,
+          "legs_wave": 7.233369164168835,
+          "post_ep_annotate": 4.519681911915541,
+          "post_relationships": 150.91819688677788,
+          "post_epistemic": 3.439667634665966
         },
         "member_calls": {
           "leg_structural": 1,
@@ -1602,21 +1602,21 @@
       {
         "qid": "q022",
         "query": "relationship filter traversal predicate",
-        "total_ms": 195.987,
+        "total_ms": 207.892,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.5,
-          "retrieval": 191.3,
-          "ep_annotation": 3.8,
-          "ordering": 0.1
+          "embed_get": 0.6,
+          "retrieval": 202.9,
+          "ep_annotation": 4.0,
+          "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.024145934730768204,
-          "leg_fts": 4.545390140265226,
-          "legs_wave": 5.004663951694965,
-          "post_ep_annotate": 3.799994010478258,
-          "post_relationships": 179.9807888455689,
-          "post_epistemic": 3.201169893145561
+          "leg_structural": 0.040667131543159485,
+          "leg_fts": 5.104199051856995,
+          "legs_wave": 5.672234110534191,
+          "post_ep_annotate": 4.011600278317928,
+          "post_relationships": 189.9872086942196,
+          "post_epistemic": 3.6776643246412277
         },
         "member_calls": {
           "leg_structural": 1,
@@ -1672,21 +1672,21 @@
       {
         "qid": "q023",
         "query": "retracted points excluded results",
-        "total_ms": 154.44,
+        "total_ms": 160.699,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.5,
-          "retrieval": 149.5,
-          "ep_annotation": 4.1,
-          "ordering": 0.1
+          "embed_get": 0.6,
+          "retrieval": 154.4,
+          "ep_annotation": 5.1,
+          "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.023663975298404694,
-          "leg_fts": 5.3140223026275635,
-          "legs_wave": 5.80144627019763,
-          "post_ep_annotate": 4.088594112545252,
-          "post_relationships": 137.5003238208592,
-          "post_epistemic": 2.8818421997129917
+          "leg_structural": 0.03037741407752037,
+          "leg_fts": 7.051825989037752,
+          "legs_wave": 7.907230872660875,
+          "post_ep_annotate": 5.106926430016756,
+          "post_relationships": 139.6111510694027,
+          "post_epistemic": 3.2004588283598423
         },
         "member_calls": {
           "leg_structural": 1,
@@ -1742,21 +1742,21 @@
       {
         "qid": "q024",
         "query": "operator point is operator flag",
-        "total_ms": 148.656,
+        "total_ms": 164.934,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.8,
-          "retrieval": 143.4,
-          "ep_annotation": 4.0,
-          "ordering": 0.2
+          "embed_get": 0.4,
+          "retrieval": 159.6,
+          "ep_annotation": 4.6,
+          "ordering": 0.1
         },
         "members": {
-          "leg_structural": 0.03468478098511696,
-          "leg_fts": 5.517970304936171,
-          "legs_wave": 6.119379773736,
-          "post_ep_annotate": 3.958490677177906,
-          "post_relationships": 131.26509496942163,
-          "post_epistemic": 2.8529278934001923
+          "leg_structural": 0.025426968932151794,
+          "leg_fts": 5.900080315768719,
+          "legs_wave": 6.470862776041031,
+          "post_ep_annotate": 4.576090723276138,
+          "post_relationships": 146.70366141945124,
+          "post_epistemic": 3.098888788372278
         },
         "member_calls": {
           "leg_structural": 1,
@@ -1813,7 +1813,7 @@
   },
   "after": {
     "arm": "ab-full-read",
-    "git_sha": "381620c40746",
+    "git_sha": "0667b5358950",
     "db_uri": "docker://:@127.0.0.1:16446/tortoise_test_matrix",
     "points": 2000,
     "corpus_seed": 42,
@@ -1823,15 +1823,15 @@
         "n": 24,
         "p50": 0.1,
         "p95": 0.1,
-        "max": 0.2,
-        "mean": 0.104
+        "max": 0.1,
+        "mean": 0.1
       },
       "embed_get": {
         "n": 24,
         "p50": 0.5,
         "p95": 0.6,
         "max": 0.6,
-        "mean": 0.45
+        "mean": 0.458
       },
       "embed_encode": {
         "n": 24,
@@ -1842,10 +1842,10 @@
       },
       "retrieval": {
         "n": 24,
-        "p50": 101.4,
-        "p95": 120.9,
-        "max": 130.5,
-        "mean": 102.104
+        "p50": 113.7,
+        "p95": 147.1,
+        "max": 158.6,
+        "mean": 115.587
       },
       "fusion": {
         "n": 24,
@@ -1856,17 +1856,17 @@
       },
       "ep_annotation": {
         "n": 24,
-        "p50": 4.2,
-        "p95": 6.3,
-        "max": 7.2,
-        "mean": 4.667
+        "p50": 4.6,
+        "p95": 7.5,
+        "max": 7.5,
+        "mean": 5.087
       },
       "ordering": {
         "n": 24,
         "p50": 0.2,
         "p95": 0.3,
         "max": 0.3,
-        "mean": 0.179
+        "mean": 0.192
       },
       "response": {
         "n": 24,
@@ -1879,10 +1879,10 @@
     "member_table": {
       "leg_fts": {
         "n": 24,
-        "p50": 5.191,
-        "p95": 6.032,
-        "max": 8.19,
-        "mean": 5.304
+        "p50": 5.777,
+        "p95": 7.333,
+        "max": 8.21,
+        "mean": 5.78
       },
       "leg_vector": {
         "n": 24,
@@ -1893,17 +1893,17 @@
       },
       "leg_structural": {
         "n": 24,
-        "p50": 0.027,
-        "p95": 0.039,
-        "max": 0.04,
-        "mean": 0.027
+        "p50": 0.032,
+        "p95": 0.044,
+        "max": 0.048,
+        "mean": 0.031
       },
       "legs_wave": {
         "n": 24,
-        "p50": 5.884,
-        "p95": 6.606,
-        "max": 8.82,
-        "mean": 5.87
+        "p50": 6.29,
+        "p95": 8.004,
+        "max": 8.966,
+        "mean": 6.385
       },
       "fusion": {
         "n": 24,
@@ -1914,24 +1914,24 @@
       },
       "post_ep_annotate": {
         "n": 24,
-        "p50": 4.198,
-        "p95": 6.317,
-        "max": 7.163,
-        "mean": 4.653
+        "p50": 4.61,
+        "p95": 7.493,
+        "max": 7.519,
+        "mean": 5.079
       },
       "post_relationships": {
         "n": 24,
-        "p50": 88.854,
-        "p95": 108.401,
-        "max": 113.511,
-        "mean": 88.964
+        "p50": 101.185,
+        "p95": 128.02,
+        "max": 143.561,
+        "mean": 101.267
       },
       "post_epistemic": {
         "n": 24,
-        "p50": 3.58,
-        "p95": 4.184,
-        "max": 5.483,
-        "mean": 3.573
+        "p50": 3.616,
+        "p95": 5.504,
+        "max": 5.871,
+        "mean": 3.885
       }
     },
     "legs_declared": {
@@ -1944,21 +1944,21 @@
       {
         "qid": "q001",
         "query": "zero-cost onboarding for new teams",
-        "total_ms": 107.606,
+        "total_ms": 103.103,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.5,
-          "retrieval": 102.1,
+          "embed_get": 0.3,
+          "retrieval": 97.6,
           "ep_annotation": 4.8,
-          "ordering": 0.1
+          "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.023093074560165405,
-          "leg_fts": 4.720501136034727,
-          "legs_wave": 5.393682979047298,
-          "post_ep_annotate": 4.744921810925007,
-          "post_relationships": 88.85356923565269,
-          "post_epistemic": 3.8162050768733025
+          "leg_structural": 0.02425583079457283,
+          "leg_fts": 4.164597950875759,
+          "legs_wave": 4.645105917006731,
+          "post_ep_annotate": 4.7694300301373005,
+          "post_relationships": 86.32436906918883,
+          "post_epistemic": 3.1039100140333176
         },
         "member_calls": {
           "leg_structural": 1,
@@ -2014,21 +2014,21 @@
       {
         "qid": "q002",
         "query": "pricing tiers for enterprise plans",
-        "total_ms": 127.997,
+        "total_ms": 130.19,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.5,
-          "retrieval": 120.9,
-          "ep_annotation": 6.2,
-          "ordering": 0.1
+          "embed_get": 0.4,
+          "retrieval": 125.0,
+          "ep_annotation": 4.4,
+          "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.020558014512062073,
-          "leg_fts": 5.146128125488758,
-          "legs_wave": 5.809992086142302,
-          "post_ep_annotate": 6.230500061064959,
-          "post_relationships": 108.40142797678709,
-          "post_epistemic": 3.2636779360473156
+          "leg_structural": 0.03875186666846275,
+          "leg_fts": 5.4611936211586,
+          "legs_wave": 6.046751979738474,
+          "post_ep_annotate": 4.4151172041893005,
+          "post_relationships": 111.78327305242419,
+          "post_epistemic": 3.61630879342556
         },
         "member_calls": {
           "leg_structural": 1,
@@ -2084,21 +2084,21 @@
       {
         "qid": "q003",
         "query": "memory retention across sessions",
-        "total_ms": 110.147,
+        "total_ms": 108.276,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.3,
-          "retrieval": 105.1,
+          "embed_get": 0.4,
+          "retrieval": 103.0,
           "ep_annotation": 4.4,
-          "ordering": 0.1
+          "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.01791398972272873,
-          "leg_fts": 4.108955152332783,
-          "legs_wave": 4.555359948426485,
-          "post_ep_annotate": 4.357457626610994,
-          "post_relationships": 93.34929566830397,
-          "post_epistemic": 3.3798562362790108
+          "leg_structural": 0.026479363441467285,
+          "leg_fts": 5.022905766963959,
+          "legs_wave": 5.642388015985489,
+          "post_ep_annotate": 4.427238833159208,
+          "post_relationships": 90.4147569090128,
+          "post_epistemic": 3.2394640147686005
         },
         "member_calls": {
           "leg_structural": 1,
@@ -2154,21 +2154,21 @@
       {
         "qid": "q004",
         "query": "graph traversal operators and edges",
-        "total_ms": 111.268,
+        "total_ms": 102.379,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.3,
-          "retrieval": 105.1,
-          "ep_annotation": 5.4,
+          "embed_get": 0.5,
+          "retrieval": 97.6,
+          "ep_annotation": 3.9,
           "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.03935396671295166,
-          "leg_fts": 5.8061848394572735,
-          "legs_wave": 6.476439069956541,
-          "post_ep_annotate": 5.414854269474745,
-          "post_relationships": 92.06771478056908,
-          "post_epistemic": 3.1916513107717037
+          "leg_structural": 0.03540702164173126,
+          "leg_fts": 5.440229084342718,
+          "legs_wave": 6.061943713575602,
+          "post_ep_annotate": 3.8528433069586754,
+          "post_relationships": 84.56105226650834,
+          "post_epistemic": 3.5894890315830708
         },
         "member_calls": {
           "leg_structural": 1,
@@ -2224,21 +2224,21 @@
       {
         "qid": "q005",
         "query": "embedding dimension and vector index",
-        "total_ms": 115.177,
+        "total_ms": 106.588,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.5,
-          "retrieval": 109.8,
-          "ep_annotation": 4.4,
+          "embed_get": 0.4,
+          "retrieval": 102.1,
+          "ep_annotation": 3.7,
           "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.02987496554851532,
-          "leg_fts": 6.032492034137249,
-          "legs_wave": 6.516037043184042,
-          "post_ep_annotate": 4.376404918730259,
-          "post_relationships": 95.40012897923589,
-          "post_epistemic": 3.854496870189905
+          "leg_structural": 0.02382509410381317,
+          "leg_fts": 4.785692319273949,
+          "legs_wave": 5.2793677896261215,
+          "post_ep_annotate": 3.7058070302009583,
+          "post_relationships": 90.45325685292482,
+          "post_epistemic": 3.1094690784811974
         },
         "member_calls": {
           "leg_structural": 1,
@@ -2294,21 +2294,21 @@
       {
         "qid": "q006",
         "query": "belief propagation posterior update",
-        "total_ms": 104.172,
+        "total_ms": 104.457,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.5,
-          "retrieval": 99.1,
-          "ep_annotation": 4.1,
+          "embed_get": 0.3,
+          "retrieval": 99.4,
+          "ep_annotation": 4.2,
           "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.03979494795203209,
-          "leg_fts": 5.433668382465839,
-          "legs_wave": 5.979318171739578,
-          "post_ep_annotate": 4.108672961592674,
-          "post_relationships": 85.41743597015738,
-          "post_epistemic": 3.7596262991428375
+          "leg_structural": 0.03971392288804054,
+          "leg_fts": 4.699491895735264,
+          "legs_wave": 5.385916214436293,
+          "post_ep_annotate": 4.216825123876333,
+          "post_relationships": 85.72428114712238,
+          "post_epistemic": 3.800668753683567
         },
         "member_calls": {
           "leg_structural": 1,
@@ -2364,21 +2364,21 @@
       {
         "qid": "q007",
         "query": "full text search over point content",
-        "total_ms": 108.305,
+        "total_ms": 123.263,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.4,
-          "retrieval": 103.3,
-          "ep_annotation": 4.2,
-          "ordering": 0.1
+          "embed_get": 0.5,
+          "retrieval": 117.2,
+          "ep_annotation": 4.9,
+          "ordering": 0.3
         },
         "members": {
-          "leg_structural": 0.03100791946053505,
-          "leg_fts": 5.582313984632492,
-          "legs_wave": 6.068987771868706,
-          "post_ep_annotate": 4.19830996543169,
-          "post_relationships": 90.7036243006587,
-          "post_epistemic": 3.3232313580811024
+          "leg_structural": 0.023603904992341995,
+          "leg_fts": 5.978909786790609,
+          "legs_wave": 6.594222970306873,
+          "post_ep_annotate": 4.844341892749071,
+          "post_relationships": 101.64591390639544,
+          "post_epistemic": 4.753882996737957
         },
         "member_calls": {
           "leg_structural": 1,
@@ -2434,21 +2434,21 @@
       {
         "qid": "q008",
         "query": "semantic similarity between claims",
-        "total_ms": 91.369,
+        "total_ms": 109.904,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.3,
-          "retrieval": 86.7,
-          "ep_annotation": 3.8,
+          "embed_get": 0.6,
+          "retrieval": 103.1,
+          "ep_annotation": 5.8,
           "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.027840957045555115,
-          "leg_fts": 5.137995816767216,
-          "legs_wave": 5.721594672650099,
-          "post_ep_annotate": 3.8226768374443054,
-          "post_relationships": 74.40716726705432,
-          "post_epistemic": 3.0974778346717358
+          "leg_structural": 0.037490855902433395,
+          "leg_fts": 7.333387620747089,
+          "legs_wave": 8.00380203872919,
+          "post_ep_annotate": 5.7864501141011715,
+          "post_relationships": 86.02429926395416,
+          "post_epistemic": 3.7288102321326733
         },
         "member_calls": {
           "leg_structural": 1,
@@ -2504,21 +2504,21 @@
       {
         "qid": "q009",
         "query": "hybrid ranking fusion strategy",
-        "total_ms": 106.253,
+        "total_ms": 115.704,
         "stages": {
           "pre_handler": 0.1,
           "embed_get": 0.4,
-          "retrieval": 101.4,
-          "ep_annotation": 4.0,
+          "retrieval": 110.6,
+          "ep_annotation": 4.3,
           "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.026870984584093094,
-          "leg_fts": 4.88751195371151,
-          "legs_wave": 5.3607020527124405,
-          "post_ep_annotate": 4.000806715339422,
-          "post_relationships": 89.06443510204554,
-          "post_epistemic": 3.5587609745562077
+          "leg_structural": 0.04799896851181984,
+          "leg_fts": 5.0519113428890705,
+          "legs_wave": 5.615206900984049,
+          "post_ep_annotate": 4.322593100368977,
+          "post_relationships": 98.10442989692092,
+          "post_epistemic": 3.6088163033127785
         },
         "member_calls": {
           "leg_structural": 1,
@@ -2574,21 +2574,21 @@
       {
         "qid": "q010",
         "query": "degraded fallback when database fails",
-        "total_ms": 103.684,
+        "total_ms": 125.447,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.4,
-          "retrieval": 98.9,
-          "ep_annotation": 3.9,
+          "embed_get": 0.5,
+          "retrieval": 119.3,
+          "ep_annotation": 5.3,
           "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.01713307574391365,
-          "leg_fts": 4.736148752272129,
-          "legs_wave": 5.116282030940056,
-          "post_ep_annotate": 3.9168321527540684,
-          "post_relationships": 86.26877004280686,
-          "post_epistemic": 4.183914978057146
+          "leg_structural": 0.03498466685414314,
+          "leg_fts": 5.947982892394066,
+          "legs_wave": 6.488553714007139,
+          "post_ep_annotate": 5.2551040425896645,
+          "post_relationships": 101.82893509045243,
+          "post_epistemic": 5.503839813172817
         },
         "member_calls": {
           "leg_structural": 1,
@@ -2644,21 +2644,21 @@
       {
         "qid": "q011",
         "query": "circuit breaker latency protection",
-        "total_ms": 103.035,
+        "total_ms": 111.407,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.4,
-          "retrieval": 98.0,
+          "embed_get": 0.6,
+          "retrieval": 106.2,
           "ep_annotation": 4.2,
           "ordering": 0.1
         },
         "members": {
-          "leg_structural": 0.02451566979289055,
-          "leg_fts": 5.4134177044034,
-          "legs_wave": 5.9426818042993546,
-          "post_ep_annotate": 4.1894009336829185,
-          "post_relationships": 85.13033809140325,
-          "post_epistemic": 3.098159097135067
+          "leg_structural": 0.021168962121009827,
+          "leg_fts": 5.940539296716452,
+          "legs_wave": 6.50027533993125,
+          "post_ep_annotate": 4.179565701633692,
+          "post_relationships": 92.5597227178514,
+          "post_epistemic": 3.7456220015883446
         },
         "member_calls": {
           "leg_structural": 1,
@@ -2714,21 +2714,21 @@
       {
         "qid": "q012",
         "query": "epistemic annotation confidence evidence",
-        "total_ms": 100.344,
+        "total_ms": 109.316,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.5,
-          "retrieval": 94.8,
-          "ep_annotation": 4.6,
+          "embed_get": 0.6,
+          "retrieval": 104.8,
+          "ep_annotation": 3.6,
           "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.029155053198337555,
-          "leg_fts": 5.172375123947859,
-          "legs_wave": 5.8842552825808525,
-          "post_ep_annotate": 4.594895988702774,
-          "post_relationships": 82.68424915149808,
-          "post_epistemic": 2.988422755151987
+          "leg_structural": 0.04447298124432564,
+          "leg_fts": 5.6026228703558445,
+          "legs_wave": 6.141253747045994,
+          "post_ep_annotate": 3.5897488705813885,
+          "post_relationships": 92.1592079102993,
+          "post_epistemic": 3.4659476950764656
         },
         "member_calls": {
           "leg_structural": 1,
@@ -2784,21 +2784,21 @@
       {
         "qid": "q013",
         "query": "operator relationships between concepts",
-        "total_ms": 101.372,
+        "total_ms": 115.484,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.5,
-          "retrieval": 96.5,
-          "ep_annotation": 3.9,
+          "embed_get": 0.4,
+          "retrieval": 107.8,
+          "ep_annotation": 6.9,
           "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.024526380002498627,
-          "leg_fts": 5.529617890715599,
-          "legs_wave": 6.0792709700763226,
-          "post_ep_annotate": 3.8670687936246395,
-          "post_relationships": 83.38294085115194,
-          "post_epistemic": 3.592635039240122
+          "leg_structural": 0.01912517473101616,
+          "leg_fts": 6.503882817924023,
+          "legs_wave": 7.030770182609558,
+          "post_ep_annotate": 6.861022207885981,
+          "post_relationships": 92.45299035683274,
+          "post_epistemic": 3.6113793030381203
         },
         "member_calls": {
           "leg_structural": 1,
@@ -2854,21 +2854,21 @@
       {
         "qid": "q014",
         "query": "agent memory graph storage",
-        "total_ms": 105.176,
+        "total_ms": 118.826,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.5,
-          "retrieval": 100.1,
-          "ep_annotation": 4.2,
-          "ordering": 0.2
+          "embed_get": 0.4,
+          "retrieval": 113.7,
+          "ep_annotation": 4.3,
+          "ordering": 0.1
         },
         "members": {
-          "leg_structural": 0.01651141792535782,
-          "leg_fts": 4.860713146626949,
-          "legs_wave": 5.3774709813296795,
-          "post_ep_annotate": 4.142341203987598,
-          "post_relationships": 88.2238750346005,
-          "post_epistemic": 3.148922696709633
+          "leg_structural": 0.03395369276404381,
+          "leg_fts": 5.569140892475843,
+          "legs_wave": 6.171158980578184,
+          "post_ep_annotate": 4.255747888237238,
+          "post_relationships": 101.18462517857552,
+          "post_epistemic": 2.9499209485948086
         },
         "member_calls": {
           "leg_structural": 1,
@@ -2924,21 +2924,21 @@
       {
         "qid": "q015",
         "query": "cross entity retrieval source events",
-        "total_ms": 96.203,
+        "total_ms": 123.759,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.6,
-          "retrieval": 90.4,
-          "ep_annotation": 4.7,
-          "ordering": 0.1
+          "embed_get": 0.4,
+          "retrieval": 118.4,
+          "ep_annotation": 4.6,
+          "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.0287545844912529,
-          "leg_fts": 4.9156551249325275,
-          "legs_wave": 5.788945592939854,
-          "post_ep_annotate": 4.70401905477047,
-          "post_relationships": 78.03663611412048,
-          "post_epistemic": 3.2714419066905975
+          "leg_structural": 0.024795997887849808,
+          "leg_fts": 6.647520698606968,
+          "legs_wave": 7.230464369058609,
+          "post_ep_annotate": 4.610081668943167,
+          "post_relationships": 104.06293394044042,
+          "post_epistemic": 3.804581705480814
         },
         "member_calls": {
           "leg_structural": 1,
@@ -2994,21 +2994,21 @@
       {
         "qid": "q016",
         "query": "contested claims variance threshold",
-        "total_ms": 106.016,
+        "total_ms": 165.122,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.3,
-          "retrieval": 101.5,
-          "ep_annotation": 3.7,
+          "embed_get": 0.4,
+          "retrieval": 158.6,
+          "ep_annotation": 5.6,
           "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.0377199612557888,
-          "leg_fts": 4.516185726970434,
-          "legs_wave": 4.901657812297344,
-          "post_ep_annotate": 3.727015107870102,
-          "post_relationships": 89.71839398145676,
-          "post_epistemic": 3.5973619669675827
+          "leg_structural": 0.033664051443338394,
+          "leg_fts": 5.5612060241401196,
+          "legs_wave": 6.290081888437271,
+          "post_ep_annotate": 5.584079306572676,
+          "post_relationships": 143.56101118028164,
+          "post_epistemic": 4.30158618837595
         },
         "member_calls": {
           "leg_structural": 1,
@@ -3064,21 +3064,21 @@
       {
         "qid": "q017",
         "query": "structured query over operator kind",
-        "total_ms": 100.028,
+        "total_ms": 155.714,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.4,
-          "retrieval": 95.2,
-          "ep_annotation": 4.0,
+          "embed_get": 0.6,
+          "retrieval": 147.1,
+          "ep_annotation": 7.5,
           "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.02512708306312561,
-          "leg_fts": 5.579475313425064,
-          "legs_wave": 6.065480876713991,
-          "post_ep_annotate": 3.9854319766163826,
-          "post_relationships": 83.01864704117179,
-          "post_epistemic": 3.04079195484519
+          "leg_structural": 0.02970593050122261,
+          "leg_fts": 8.209540043026209,
+          "legs_wave": 8.96596210077405,
+          "post_ep_annotate": 7.492939941585064,
+          "post_relationships": 128.0199931934476,
+          "post_epistemic": 4.975658841431141
         },
         "member_calls": {
           "leg_structural": 1,
@@ -3134,21 +3134,21 @@
       {
         "qid": "q018",
         "query": "recall completeness full scan mode",
-        "total_ms": 107.8,
+        "total_ms": 141.512,
         "stages": {
           "pre_handler": 0.1,
           "embed_get": 0.5,
-          "retrieval": 102.7,
-          "ep_annotation": 4.2,
-          "ordering": 0.2
+          "retrieval": 133.1,
+          "ep_annotation": 7.4,
+          "ordering": 0.1
         },
         "members": {
-          "leg_structural": 0.02789311110973358,
-          "leg_fts": 5.191369913518429,
-          "legs_wave": 5.6626820005476475,
-          "post_ep_annotate": 4.147750791162252,
-          "post_relationships": 90.36078210920095,
-          "post_epistemic": 3.604558762162924
+          "leg_structural": 0.029374845325946808,
+          "leg_fts": 7.273805793374777,
+          "legs_wave": 7.919659838080406,
+          "post_ep_annotate": 7.414001040160656,
+          "post_relationships": 117.38679790869355,
+          "post_epistemic": 3.1395619735121727
         },
         "member_calls": {
           "leg_structural": 1,
@@ -3204,21 +3204,21 @@
       {
         "qid": "q019",
         "query": "threshold filter score floor",
-        "total_ms": 101.793,
+        "total_ms": 101.949,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.4,
-          "retrieval": 96.6,
-          "ep_annotation": 4.2,
+          "embed_get": 0.3,
+          "retrieval": 97.2,
+          "ep_annotation": 3.8,
           "ordering": 0.3
         },
         "members": {
-          "leg_structural": 0.023995060473680496,
-          "leg_fts": 5.961275659501553,
-          "legs_wave": 6.606036797165871,
-          "post_ep_annotate": 4.159628879278898,
-          "post_relationships": 80.00006387010217,
-          "post_epistemic": 5.483008921146393
+          "leg_structural": 0.03314204514026642,
+          "leg_fts": 5.776827689260244,
+          "legs_wave": 6.242993753403425,
+          "post_ep_annotate": 3.8006450049579144,
+          "post_relationships": 84.13635333999991,
+          "post_epistemic": 3.509859088808298
         },
         "member_calls": {
           "leg_structural": 1,
@@ -3274,21 +3274,21 @@
       {
         "qid": "q020",
         "query": "kind filter before truncation",
-        "total_ms": 99.347,
+        "total_ms": 131.31,
         "stages": {
-          "pre_handler": 0.2,
+          "pre_handler": 0.1,
           "embed_get": 0.5,
-          "retrieval": 92.0,
-          "ep_annotation": 6.2,
-          "ordering": 0.3
+          "retrieval": 123.6,
+          "ep_annotation": 6.6,
+          "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.03907317295670509,
-          "leg_fts": 5.532480776309967,
-          "legs_wave": 6.198778282850981,
-          "post_ep_annotate": 6.155780050903559,
-          "post_relationships": 76.5672861598432,
-          "post_epistemic": 3.9195981808006763
+          "leg_structural": 0.032040756195783615,
+          "leg_fts": 5.944194737821817,
+          "legs_wave": 6.7087640054523945,
+          "post_ep_annotate": 6.619761697947979,
+          "post_relationships": 106.29501799121499,
+          "post_epistemic": 5.25375921279192
         },
         "member_calls": {
           "leg_structural": 1,
@@ -3344,21 +3344,21 @@
       {
         "qid": "q021",
         "query": "batch endpoint annotation efficiency",
-        "total_ms": 126.636,
+        "total_ms": 138.286,
         "stages": {
           "pre_handler": 0.1,
-          "embed_get": 0.6,
-          "retrieval": 118.5,
-          "ep_annotation": 7.2,
-          "ordering": 0.1
+          "embed_get": 0.5,
+          "retrieval": 129.6,
+          "ep_annotation": 7.5,
+          "ordering": 0.3
         },
         "members": {
-          "leg_structural": 0.02235081046819687,
-          "leg_fts": 5.6229811161756516,
-          "legs_wave": 6.200435105711222,
-          "post_ep_annotate": 7.162607274949551,
-          "post_relationships": 104.11311779171228,
-          "post_epistemic": 3.579657059162855
+          "leg_structural": 0.02379482612013817,
+          "leg_fts": 5.068912170827389,
+          "legs_wave": 5.693150218576193,
+          "post_ep_annotate": 7.518779020756483,
+          "post_relationships": 112.62711603194475,
+          "post_epistemic": 5.871468223631382
         },
         "member_calls": {
           "leg_structural": 1,
@@ -3414,21 +3414,21 @@
       {
         "qid": "q022",
         "query": "relationship filter traversal predicate",
-        "total_ms": 136.681,
+        "total_ms": 129.199,
         "stages": {
           "pre_handler": 0.1,
           "embed_get": 0.5,
-          "retrieval": 130.5,
-          "ep_annotation": 5.2,
+          "retrieval": 122.1,
+          "ep_annotation": 6.0,
           "ordering": 0.2
         },
         "members": {
-          "leg_structural": 0.024477019906044006,
-          "leg_fts": 8.190116845071316,
-          "legs_wave": 8.8201561011374,
-          "post_ep_annotate": 5.162048619240522,
-          "post_relationships": 113.51065896451473,
-          "post_epistemic": 3.964182920753956
+          "leg_structural": 0.03532692790031433,
+          "leg_fts": 6.1771501787006855,
+          "legs_wave": 6.93647563457489,
+          "post_ep_annotate": 5.9799328446388245,
+          "post_relationships": 106.72103380784392,
+          "post_epistemic": 4.05150605365634
         },
         "member_calls": {
           "leg_structural": 1,
@@ -3484,21 +3484,21 @@
       {
         "qid": "q023",
         "query": "retracted points excluded results",
-        "total_ms": 111.755,
+        "total_ms": 117.154,
         "stages": {
           "pre_handler": 0.1,
           "embed_get": 0.5,
-          "retrieval": 104.5,
-          "ep_annotation": 6.3,
-          "ordering": 0.2
+          "retrieval": 112.1,
+          "ep_annotation": 4.1,
+          "ordering": 0.1
         },
         "members": {
-          "leg_structural": 0.029564835131168365,
-          "leg_fts": 4.4844369404017925,
-          "legs_wave": 5.106818862259388,
-          "post_ep_annotate": 6.316540762782097,
-          "post_relationships": 91.63372917100787,
-          "post_epistemic": 3.8063018582761288
+          "leg_structural": 0.028133392333984375,
+          "leg_fts": 4.734006244689226,
+          "legs_wave": 5.342497956007719,
+          "post_ep_annotate": 4.068767186254263,
+          "post_relationships": 100.56057339534163,
+          "post_epistemic": 3.0062468722462654
         },
         "member_calls": {
           "leg_structural": 1,
@@ -3554,21 +3554,21 @@
       {
         "qid": "q024",
         "query": "operator point is operator flag",
-        "total_ms": 101.97,
+        "total_ms": 130.054,
         "stages": {
           "pre_handler": 0.1,
           "embed_get": 0.5,
-          "retrieval": 96.8,
-          "ep_annotation": 4.2,
-          "ordering": 0.2
+          "retrieval": 124.9,
+          "ep_annotation": 4.3,
+          "ordering": 0.1
         },
         "members": {
-          "leg_structural": 0.022791791707277298,
-          "leg_fts": 4.72825113683939,
-          "legs_wave": 5.258186720311642,
-          "post_ep_annotate": 4.1936407797038555,
-          "post_relationships": 84.82091128826141,
-          "post_epistemic": 3.2317480072379112
+          "leg_structural": 0.021029729396104813,
+          "leg_fts": 5.825862288475037,
+          "legs_wave": 6.3120829872787,
+          "post_ep_annotate": 4.326540976762772,
+          "post_relationships": 111.82386800646782,
+          "post_epistemic": 3.499699756503105
         },
         "member_calls": {
           "leg_structural": 1,
@@ -3627,20 +3627,20 @@
     "comparable": true,
     "baseline_total": {
       "n": 24,
-      "p50": 154.44,
-      "p95": 195.987,
-      "max": 211.218,
-      "mean": 160.954
+      "p50": 162.305,
+      "p95": 198.234,
+      "max": 207.892,
+      "mean": 165.2
     },
     "after_total": {
       "n": 24,
-      "p50": 106.016,
-      "p95": 127.997,
-      "max": 136.681,
-      "mean": 107.672
+      "p50": 118.826,
+      "p95": 155.714,
+      "max": 165.122,
+      "mean": 121.6
     },
-    "total_delta_p50_ms": -48.424,
-    "total_delta_p95_ms": -67.99,
+    "total_delta_p50_ms": -43.479,
+    "total_delta_p95_ms": -42.52,
     "stage_delta": {
       "pre_handler": {
         "baseline_p50": 0.1,
@@ -3658,9 +3658,9 @@
         "delta_ms": 0.0
       },
       "retrieval": {
-        "baseline_p50": 149.5,
-        "after_p50": 101.4,
-        "delta_ms": -48.1
+        "baseline_p50": 157.1,
+        "after_p50": 113.7,
+        "delta_ms": -43.4
       },
       "fusion": {
         "baseline_p50": 0.0,
@@ -3668,14 +3668,14 @@
         "delta_ms": 0.0
       },
       "ep_annotation": {
-        "baseline_p50": 4.0,
-        "after_p50": 4.2,
-        "delta_ms": 0.2
+        "baseline_p50": 4.5,
+        "after_p50": 4.6,
+        "delta_ms": 0.1
       },
       "ordering": {
-        "baseline_p50": 0.1,
+        "baseline_p50": 0.2,
         "after_p50": 0.2,
-        "delta_ms": 0.1
+        "delta_ms": 0.0
       },
       "response": {
         "baseline_p50": 0.0,
@@ -3685,9 +3685,9 @@
     },
     "member_delta": {
       "leg_fts": {
-        "baseline_p50": 5.064,
-        "after_p50": 5.191,
-        "delta_ms": 0.127
+        "baseline_p50": 5.591,
+        "after_p50": 5.777,
+        "delta_ms": 0.186
       },
       "leg_vector": {
         "baseline_p50": 0.0,
@@ -3695,14 +3695,14 @@
         "delta_ms": 0.0
       },
       "leg_structural": {
-        "baseline_p50": 0.032,
-        "after_p50": 0.027,
-        "delta_ms": -0.005
+        "baseline_p50": 0.031,
+        "after_p50": 0.032,
+        "delta_ms": 0.001
       },
       "legs_wave": {
-        "baseline_p50": 5.549,
-        "after_p50": 5.884,
-        "delta_ms": 0.335
+        "baseline_p50": 6.246,
+        "after_p50": 6.29,
+        "delta_ms": 0.044
       },
       "fusion": {
         "baseline_p50": 0.0,
@@ -3710,19 +3710,19 @@
         "delta_ms": 0.0
       },
       "post_ep_annotate": {
-        "baseline_p50": 4.026,
-        "after_p50": 4.198,
-        "delta_ms": 0.172
+        "baseline_p50": 4.52,
+        "after_p50": 4.61,
+        "delta_ms": 0.09
       },
       "post_relationships": {
-        "baseline_p50": 137.763,
-        "after_p50": 88.854,
-        "delta_ms": -48.909
+        "baseline_p50": 143.048,
+        "after_p50": 101.185,
+        "delta_ms": -41.863
       },
       "post_epistemic": {
-        "baseline_p50": 3.055,
-        "after_p50": 3.58,
-        "delta_ms": 0.525
+        "baseline_p50": 3.368,
+        "after_p50": 3.616,
+        "delta_ms": 0.248
       }
     },
     "rank_identical": true,

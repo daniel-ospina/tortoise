@@ -43,10 +43,10 @@ Whole read, 24 queries, same process, same corpus, arms differing only in
 
 | | baseline (`e74cf1d13d`) | after | delta |
 |---|---|---|---|
-| **total p50** | 154.4 ms | **106.0 ms** | **−48.4 ms (−31.4 %)** |
-| **total p95** | 196.0 ms | **128.0 ms** | **−68.0 ms (−34.7 %)** |
-| `retrieval` stage p50 | 149.5 ms | 101.4 ms | −48.1 ms |
-| `post_relationships` p50 (member column) | 137.8 ms | 88.9 ms | −48.9 ms |
+| **total p50** | 162.3 ms | **118.8 ms** | **−43.5 ms (−26.8 %)** |
+| **total p95** | 198.2 ms | **155.7 ms** | **−42.5 ms (−21.4 %)** |
+| `retrieval` stage p50 | 157.1 ms | 113.7 ms | −43.4 ms |
+| `post_relationships` p50 (member column) | 143.0 ms | 101.2 ms | −41.9 ms |
 | `fusion` p50 | 0.0 ms | 0.0 ms | 0.0 |
 | **fused order** | — | — | **RANK-IDENTICAL on all 24 queries** (real ids — `rank_divergent_queries: []`) |
 
@@ -82,13 +82,19 @@ total that same table stated, because `retrieval` is the stage that total is
 mostly made of. The table and both JSONs are regenerated together from the head
 that will merge; **if a future edit changes one it must change the other.**
 
+⚠️ **Run-to-run variance is real and is not hidden.** Successive whole-read A/Bs
+on this box measured `−68.6`, `−48.4` and `−43.5 ms` p50 for the same change
+(the box runs a fleet; load moved between them). The *direction and the
+rank-identity* were stable in all of them; the size of the win is not a constant
+and none of these should be quoted as a production figure.
+
 ## Result — `ab-relationships.json`
 
 The changed function in isolation, 9 alternating rounds on the same 12 ids:
 
 | | old | new |
 |---|---|---|
-| p50 | 195.0 ms | 109.1 ms (**−85.9 ms**) |
+| p50 | 191.2 ms | 117.5 ms (**−73.7 ms**) |
 | output | 193 entries | 193 entries — **identical** (`dict(old) == dict(new)`), `decoration_error` empty on both |
 
 ## The two halves of the change
