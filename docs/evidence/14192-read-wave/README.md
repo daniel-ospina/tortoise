@@ -36,9 +36,21 @@ Whole read, 24 queries, same process, same corpus:
 |---|---|---|---|
 | **total p50** | 164.3 ms | 95.7 ms | **−68.6 ms (−41.7 %)** |
 | **total p95** | 212.0 ms | 120.7 ms | **−91.3 ms (−43.1 %)** |
-| `retrieval` stage p50 | 160.7 ms | 79.7 ms | −81.0 ms |
-| `post_relationships` p50 | 148.2 ms | 72.3 ms *(member column; see note)* | −72.3 ms |
+| `retrieval` stage p50 | 158.6 ms | 90.1 ms | −68.5 ms |
+| `post_relationships` p50 | 144.6 ms | 72.3 ms *(member column)* | −72.3 ms |
 | fused order | — | — | **RANK-IDENTICAL on all 24 queries** |
+
+⛔ THE ARTIFACT IS THE AUTHORITY, this table is a transcription of it: `total` cells
+from `verdict.baseline_total`/`after_total`, the two stage/member rows from
+`verdict.stage_delta.retrieval` and `verdict.member_delta.post_relationships`,
+and `rank_identical`/`rank_divergent_queries` verbatim. An earlier cut of this
+table carried `160.7 → 79.7 / −81.0` for `retrieval` and `148.2` for the
+`post_relationships` baseline, neither of which appears in the artifact
+(`158.6 → 90.1 / −68.5` and `144.6`); a −81.0 ms `retrieval` delta cannot
+coexist with the `−68.6 ms` total this same table states, because `retrieval`
+is the stage that total is mostly made of. Re-derive with
+`python3 -c "import json; print(json.load(open('ab-full-read.json'))['verdict'])"`
+rather than trusting these cells.
 
 The two arms differ in exactly one function: `get_relationships_bounded`, which
 was **69 % of the read** (`post_relationships` 167 ms of a 231 ms search in the

@@ -173,6 +173,57 @@ def _git_sha() -> str:
         return "unknown"
 
 
+_AB_MODULE = "tortoise._ab_14192_old_search_engine"
+
+
+def _load_pre_change_search_engine(rev: str):
+    """Import ``tortoise/search_engine.py`` AS IT STOOD AT ``rev``.
+
+    ⛔ WHY NOT WRITE IT INTO ``tortoise/``. The obvious way to get a
+    package-relative module (``from .graph_ops import …``) off a git revision
+    is to drop the source into the package directory under a private name and
+    import it. That materialises a file inside the TRACKED tree, and any
+    failure between the write and the cleanup leaves an untracked
+    ``tortoise/_ab_14192_old_search_engine.py`` in the package, which the
+    import-closure and declaration guards then read as product source. It
+    cleaned up on the recorded run (``finally``), so this is a latent hazard
+    rather than an observed one — which is exactly why it is worth removing
+    instead of relying on the window staying small.
+
+    The module NAME stays dotted, so ``__package__`` is ``tortoise`` and the
+    relative imports resolve against the already-imported package; only the
+    FILE lives outside the tree, in a directory that outlives this call
+    (``__file__`` is still readable afterwards, which some modules touch). The
+    cleared temp directory is registered for removal at interpreter exit.
+    """
+    import atexit
+    import importlib.machinery
+    import importlib.util
+    import shutil
+    import tempfile
+
+    src = subprocess.run(
+        ["git", "show", f"{rev}:tortoise/search_engine.py"],
+        cwd=_REPO_ROOT, capture_output=True, text=True, check=True).stdout
+    tmp = Path(tempfile.mkdtemp(prefix="rv14192-ab-"))
+    atexit.register(shutil.rmtree, tmp, True)
+    path = tmp / "search_engine.py"
+    path.write_text(src)
+    loader = importlib.machinery.SourceFileLoader(_AB_MODULE, str(path))
+    spec = importlib.util.spec_from_loader(_AB_MODULE, loader)
+    module = importlib.util.module_from_spec(spec)
+    # Registered BEFORE execution: the module body's own imports look their
+    # package up in ``sys.modules``, and a module absent from it is
+    # re-executed by a cyclic import.
+    sys.modules[_AB_MODULE] = module
+    try:
+        loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(_AB_MODULE, None)
+        raise
+    return module
+
+
 def seed(proj, points_n: int, corpus_seed: int) -> int:
     """Seed the deterministic corpus ONCE; a re-run reuses what is there."""
     from benchmarks.synthetic_corpus import (
@@ -339,24 +390,11 @@ def ab_relationships(args) -> dict:
     equal. The output objects must be identical — a scheduling change that
     moves an entry is an answer change.
     """
-    import importlib
-    import subprocess
-    import tempfile
-
     from tortoise import search_engine
     from tortoise.sdk import TortoiseSDK
 
     rev = args.ab_relationships_from
-    src = subprocess.run(
-        ["git", "show", f"{rev}:tortoise/search_engine.py"],
-        cwd=_REPO_ROOT, capture_output=True, text=True, check=True).stdout
-    pkg_dir = Path(_REPO_ROOT) / "tortoise"
-    old_path = pkg_dir / "_ab_14192_old_search_engine.py"
-    old_path.write_text(src)
-    try:
-        old_mod = importlib.import_module("tortoise._ab_14192_old_search_engine")
-    finally:
-        old_path.unlink()
+    old_mod = _load_pre_change_search_engine(rev)
 
     sdk = TortoiseSDK()
     proj = sdk._get_proj()
@@ -437,22 +475,10 @@ def main() -> None:
         # attribute the SDK's call-site import resolves, arm 2 the working
         # tree's. The two arms therefore differ in exactly the change under
         # test, and ``compare`` reports both the totals and the rank verdict.
-        import importlib
-        import subprocess
-
         from tortoise import search_engine
 
         rev = args.ab_full_read_from
-        src = subprocess.run(
-            ["git", "show", f"{rev}:tortoise/search_engine.py"],
-            cwd=_REPO_ROOT, capture_output=True, text=True, check=True).stdout
-        pkg_dir = Path(_REPO_ROOT) / "tortoise"
-        old_path = pkg_dir / "_ab_14192_old_search_engine.py"
-        old_path.write_text(src)
-        try:
-            old_mod = importlib.import_module("tortoise._ab_14192_old_search_engine")
-        finally:
-            old_path.unlink()
+        old_mod = _load_pre_change_search_engine(rev)
 
         new_fn = search_engine.get_relationships_bounded
         search_engine.get_relationships_bounded = old_mod.get_relationships_bounded

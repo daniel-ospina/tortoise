@@ -6689,7 +6689,24 @@ class _ReadWave:
             self._pool = concurrent.futures.ThreadPoolExecutor(
                 max_workers=self._max_workers,
                 thread_name_prefix="read-wave")
-        self._futures[name] = self._pool.submit(thunk)
+        # ⛔ A NEW thread does not inherit ContextVars (CPython), and the choke
+        # point every graph access passes through — ``_GuardedGraph.query`` →
+        # ``graph_ops.record_graph_op`` — reads ``_ACTIVE`` out of one. Submitting
+        # the RAW thunk put five of this function's six reads on an unbound
+        # worker, so they vanished from the capture's counter: MEASURED on a stub
+        # graph, six ``graph.query`` calls and ``counter.total == 1``, with the
+        # other five dropped SILENTLY (``record_graph_op`` is a no-op when
+        # ``_ACTIVE`` is unset, so nothing logged the gap — the failure mode is a
+        # quietly low count in a figure this repo prices from). ``degradation_chain``
+        # binds its legs the same way for the same reason (its #4489 note); this is
+        # the same class of defect, one wave later. ``bind_metering_context``
+        # returns the thunk UNWRAPPED when no capture is active, so the common
+        # non-capture path pays one ContextVar read. ⛔ The RETRIEVAL tally is
+        # deliberately NOT bound here: it accounts the retrieval LEGS
+        # (``run_fts_query``/``run_vector_query``/…), and these are decoration
+        # graph ops, not legs — binding it would attribute post-fusion
+        # decoration to a figure that means "the retrieval arms" (#2952).
+        self._futures[name] = self._pool.submit(bind_metering_context(thunk))
 
     def result(self, name: str):
         """Block on ``name`` and return its value (``[]`` if never submitted).
@@ -6783,13 +6800,15 @@ def get_relationships_bounded(
 
     rels: RelationshipDecoration = RelationshipDecoration(
         {pid: [] for pid in point_ids})
-    #: #14192 — the wave the SIX independent reads below are submitted to.
-    #: They are all anchored on ``point_ids``/``op_ids``; only the operator
-    #: reads DEPEND on Q1a, so the wave is opened once Q1a has answered and
-    #: everything that can then be named is submitted -- measured, the four
-    #: operator reads were 6 sequential round trips on a read whose p50 was
-    #: 159 ms of a 231 ms search, and 3 of them walk the same operator
-    #: fan-out independently.
+    #: #14192 — the wave the FIVE independent reads below are submitted to
+    #: (CORRECTS, mitigations, Q2-crit, Q2-support, Q2-family; Q1a is NOT a
+    #: member — it is the read the wave waits on). They are all anchored on
+    #: ``point_ids``/``op_ids``; only the operator reads DEPEND on Q1a, so the
+    #: wave is opened once Q1a has answered and everything that can then be
+    #: named is submitted -- measured, the FOUR operator reads sat inside a
+    #: chain of 6 sequential round trips on a read whose p50 was 159 ms of a
+    #: 231 ms search, and 3 of them walk the same operator fan-out
+    #: independently.
     _wave = _ReadWave()
 
     try:

@@ -20,12 +20,19 @@ from __future__ import annotations
 
 import pytest
 
+from tortoise.graph_ops import (
+    GraphOpsCounter,
+    capture_phase,
+    count_graph_ops,
+    record_graph_op,
+)
 from tortoise.search_engine import (
     CONTESTED_VARIANCE_THRESHOLD,
     VARIANCE_SUM_MAX,
     VARIANCE_SUM_MIN,
     _beta_variance,
     beta_variance_sum_bound,
+    get_relationships_bounded,
 )
 
 
@@ -110,3 +117,136 @@ def test_degenerate_operands_stay_excluded_by_both_rules() -> None:
         admitted_by_guard = (a + b) < bound
         assert not (admitted_by_guard and
                     _beta_variance(a, b) > CONTESTED_VARIANCE_THRESHOLD)
+
+
+# ── the two pins that make everything above load-bearing ──────────────────────
+#
+# ⛔ Both exist because the arithmetic above is NOT sufficient on its own. Every
+# case above re-derives the predicate in Python against the twin; NONE of them
+# reads the query. Measured before these were added: deleting the three
+# `AND … < $variance_sum_max` lines from `get_relationships_bounded`, or moving
+# them out of the contested OR-branch, left all five cases GREEN — the guard
+# simply never ran, so a perfectly sound formula sat beside a query that had
+# stopped using it.
+
+_Q1A_ROW = ("p1", "IMPL", 0, "op1", "mechanism", "pred", "2026-01-01")
+
+
+class _Result:
+    """What FalkorDB's ``query()`` returns: an object carrying ``result_set``."""
+
+    __slots__ = ("result_set",)
+
+    def __init__(self, rows):
+        self.result_set = rows
+
+
+class _RecordingGraph:
+    """A graph double with the choke point's shape: it records AND meters.
+
+    ``record_graph_op`` is exactly what ``_GuardedGraph.query`` calls on every
+    access, so a double that omits it cannot observe the metering defect the
+    test below pins — it would pass no matter what the wave does.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def query(self, cypher, **kwargs):
+        record_graph_op(cypher)
+        self.calls.append((cypher, kwargs))
+        # Q1a is the only read whose projection is the operator-edge row; it
+        # answers ONE operator edge, which is what names ``op_ids`` and so what
+        # makes the four operator reads (and the crit query) namable at all.
+        if "type(r) AS et, r.idx AS n_idx" in cypher:
+            return _Result([_Q1A_ROW])
+        return _Result([])
+
+
+def _decorate_under_capture():
+    graph = _RecordingGraph()
+    counter = GraphOpsCounter()
+    with count_graph_ops(counter), capture_phase("session_store"):
+        get_relationships_bounded(graph, ["p1"])
+    return graph, counter
+
+
+def _paren_depth(text: str, index: int) -> int:
+    """Nesting depth at ``index`` (no parens appear inside string literals)."""
+    return text[:index].count("(") - text[:index].count(")")
+
+
+def test_every_wave_read_is_visible_to_the_capture_counter() -> None:
+    """The wave's WORKERS must inherit the metering context.
+
+    MUTANT: revert ``_ReadWave.submit`` to ``pool.submit(thunk)``. A NEW thread
+    does not inherit ContextVars (CPython) and ``record_graph_op`` early-returns
+    when ``_ACTIVE`` is unset, so the reads vanish from the counter SILENTLY.
+    REDDENED ROW: this one — 6 counted reads becomes 1.
+    OBSERVED both ways on this stub graph: mutant in place, six ``graph.query``
+    calls and ``counter.total == 1`` (the Q1a read, which stays on the caller
+    thread); fixed, ``counter.total == 6``.
+    """
+    graph, counter = _decorate_under_capture()
+    assert len(graph.calls) == 6, (
+        f"the read count moved ({len(graph.calls)}); this pin is written "
+        "against one Q1a + five wave members")
+    assert counter.by_phase["session_store"]["read"] == len(graph.calls)
+    assert counter.total == len(graph.calls)
+
+
+def test_the_guard_is_inside_the_contested_arm_and_ahead_of_the_division() \
+        -> None:
+    """The query — not just the formula — carries the guard, in the right arm.
+
+    Three mutants, and what each reddens:
+
+    - DELETE the three ``AND … < $variance_sum_max`` lines → the parameter goes
+      with them, so ``$variance_sum_max`` appears in no query at all.
+    - Move them to the top level of the ``WHERE`` (ANDed AFTER the ``OR`` group)
+      → the guard's paren depth stops being greater than the arm's, and the
+      guard would prune NAND/terminal peers, which are cap-exempt by design
+      (D3/D4) — the P0-class false rejection this file exists to prevent.
+    - Move them ANYWHERE after the width test → ``$contested_threshold`` would
+      precede the guard, i.e. the division would run first and the guard would
+      spare nothing, which is the entire point on the measured read.
+
+    OBSERVED at the reviewed head: one crit query, one occurrence, arm at
+    offset 579 / guard at 2163, depth 1 → 2, ``$contested_threshold`` after the
+    guard, and ``variance_sum_max == 5.25`` — the same value the twin returns.
+    """
+    graph, _ = _decorate_under_capture()
+    crits = [(c, kw) for c, kw in graph.calls
+             if "variance_sum_max" in (kw.get("params") or {})]
+    assert len(crits) == 1, (
+        f"expected exactly one guarded read, found {len(crits)}")
+    crit, kwargs = crits[0]
+
+    assert crit.count("$variance_sum_max") == 1, (
+        "the guard must appear once — twice would mean it was copied into "
+        "another arm")
+    # `OR ((other.posterior_alpha …` is the contested alternative's opener: the
+    # only place the query ORs into `ep_measured_cypher`, whose expansion begins
+    # with `(other.posterior_alpha`. The NAND and terminal alternatives open
+    # their own `OR ((other.status …`.
+    arm = crit.index("OR ((other.posterior_alpha")
+    guard = crit.index("< $variance_sum_max")
+    division = crit.index("$contested_threshold")
+
+    assert crit.index("type(r2) = 'NAND'") < arm, (
+        "the contested arm must still be the LAST alternative")
+    assert arm < guard < division, (
+        "the guard must sit inside the contested arm and in FRONT of the "
+        "division")
+    assert _paren_depth(crit, guard) > _paren_depth(crit, arm), (
+        "the guard is not enclosed by the contested arm — it would prune "
+        "NAND/terminal peers")
+    assert kwargs["params"]["variance_sum_max"] == beta_variance_sum_bound(
+        CONTESTED_VARIANCE_THRESHOLD)
+
+    for cypher, other in graph.calls:
+        if other is kwargs:
+            continue
+        assert "variance_sum_max" not in cypher, (
+            "the guard leaked into a read that must keep its full population")
+        assert "variance_sum_max" not in (other.get("params") or {})

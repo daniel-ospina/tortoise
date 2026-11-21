@@ -9628,6 +9628,25 @@ surfaces:
   - test_14012_resident_pin.py
   - test_14012_outside_view.py
   - test_14012_resident_cli.py
+  # #14192: the variance-sum bound the Q2-crit selection leans on. `core`, and the
+  # placement is MEASURED, not stylistic: both operands it pins
+  # (`beta_variance_sum_bound`, `_beta_variance`) live in `tortoise/search_engine.py`,
+  # which has no SOURCE_PATTERNS entry and falls through to `core` —
+  # `--changed-files tortoise/search_engine.py --event pull_request` -> `surfaces: ['core']`,
+  # `full: false`. That is exactly the guard it exists for: the file's whole
+  # assertion is the one-directional soundness property (the guard must never reject
+  # a pair whose Beta width clears `CONTESTED_VARIANCE_THRESHOLD`), so the revert the
+  # row has to catch is a diff to the bound or to the twin in `search_engine.py` —
+  # the same `core`-fallback shape the `test_12894` rows above record, and a row on
+  # any named surface would leave it asleep on precisely that diff class because a
+  # named-surface match REPLACES the `core` fallback (#2938/#7951).
+  # Hermetic on the fast lane: pure arithmetic over a fixed grid — no DB, no graph,
+  # no docker, no network, no model call. Five cases; measured with
+  # `TORTOISE_TEST_CARVE_OUT=1` at 6.6 s WALL, of which 4.34 s is the session
+  # fixture's setup and 2.04 s its teardown — every test BODY is under 0.02 s
+  # (`pytest --durations=8`). It is the shared session fixture that costs, not
+  # this file: it pays the same 6.6 s on any file in the suite.
+  - test_14192_beta_variance_sum_bound.py
   ep:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #11855: the ranker half of the unreadable-operand pins. `GraphRanker` and
@@ -15297,6 +15316,17 @@ durations:
   test_14012_resident_pin.py: 2.0
   test_14012_outside_view.py: 2.0
   test_14012_resident_cli.py: 2.0
+  # #14192 — a file this PR ADDS, so it can carry no CI junit reading yet
+  # (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only). The
+  # row must EXIST rather than merely default: the `core:` registration above is what
+  # puts the file in `fast_pool()`, and `--integrity` stays green either way, so only
+  # this row records the weight. `2.0` is the header's flat `DEFAULT_FAST_WEIGHT` and
+  # is the honest value here: measured with `TORTOISE_TEST_CARVE_OUT=1`, 5 cases in
+  # 6.6 s WALL of which 4.34 s is session-fixture setup and 2.04 s teardown, so the
+  # file's own cost is arithmetic over a fixed grid (19 x 19 x 2 + 7 extra pairs =
+  # 729) and every test body is under 0.02 s. `--refresh-durations` replaces this
+  # from junit once a push-to-main sweep includes the file.
+  test_14192_beta_variance_sum_bound.py: 2.0
   test_journal_segments.py: 0.3
   test_journal_segments_falsifier.py: 0.2
   test_name_entropy_12294.py: 0.1
