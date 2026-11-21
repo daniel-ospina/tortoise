@@ -855,13 +855,27 @@ _COPULA_SUBJECT = (
     # `signal=None` — measured, on the unchanged head. Both sites now interpolate
     # `_PREPOSITIONS`, and the membership is pinned by driving every member through the
     # detector, so a fourth drift reddens instead of shipping.
-    # ⛔ WHAT IS STILL NOT COVERED IS STATED, NOT IMPLIED: a CONJUNCTION or SUBORDINATOR
-    # (`because`, `when`, `if`, `and`, and the three words that are both — `after`,
-    # `before`, `since`) still silences this shape, because guard A refuses inside the
-    # subject and cannot tell a tail from a subject without bounding itself at the
-    # participle — measured to re-route the round-16 hijack. Those three are the notice
-    # genuinely still owed, which is why they stand OUTSIDE `_PREPOSITIONS` rather than
-    # being quietly counted as covered by it.
+    # ⛔ WHAT IS STILL NOT COVERED IS STATED, NOT IMPLIED — AND IT HAS TWO CAUSES, NOT
+    # ONE (review at `5b82bcdf03`, P2, measured: the previous draft of this sentence
+    # gave BOTH groups the subordinator reason, which is false for the second):
+    #   (a) SUBORDINATOR members (`because`, `when`, `if`, and the three that are both
+    #       preposition and subordinator — `after`, `before`, `since`) are refused by the
+    #       SUBORDINATOR lookahead above, which refuses inside the subject and cannot
+    #       tell a tail from a subject without bounding itself at the participle —
+    #       measured to re-route the round-16 hijack. Those three are the notice
+    #       genuinely still owed, which is why they stand OUTSIDE `_PREPOSITIONS` rather
+    #       than being quietly counted as covered by it. Excluding them HERE is a
+    #       NO-OP: measured, adding all three flips 0 of 277 probe outcomes.
+    #   (b) CONJUNCTIONS (`and|or|but|so|yet`) are NOT in that lookahead at all. What
+    #       refuses them is the "second noun phrase" test BELOW reading a coordination
+    #       as one — a LIST decision, not that guard's participle bound: excluding them
+    #       here DOES report them (measured: 5 probes flip, 0 pinned rows change). That
+    #       is a recall widening with its own review, so it is stated rather than made,
+    #       and `test_the_conjunction_silence_is_a_LIST_decision_not_a_participle_bound`
+    #       pins it.
+    # ⛔ AND A WORD LIST CANNOT SETTLE (a) EITHER: `after`/`before`/`since` are `ADP`
+    # before a nominal (`since the merger`) and `SCONJ` before a clause (`since the
+    # merger closed`), so the tags separate them only after the fact.
     r"(?!(?:all|both|half|such|many|most|some|any|no|each|every|"
     rf"{_PREPOSITION_RE}|"
     r"the|a|an|our|my|its|their|these|those|this|that|your|his|her)\b)"
