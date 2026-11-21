@@ -36,6 +36,14 @@ try:
     _probe = FalkorProjection.from_uri(os.environ["TORTOISE_DB_URI"])
     _probe.close()  # construction itself connects — raises on refusal
     FALKORDB_AVAILABLE = True
+    # ⛔ A rename or typo in a seam this probe touches must NOT be read as
+    #   "storage unavailable": that is exactly how #13899's retirement hid for
+    #   a whole wave — the probe's own `except Exception` turned an AttributeError
+    #   into a SKIP locally and a hard refusal in CI (#14114 class 2, #14125).
+    #   `AttributeError`/`NameError`/`TypeError`/`ImportError` are PROGRAMMING errors and are
+    #   re-raised; only genuine transport/driver failures fall through.
+except (AttributeError, NameError, TypeError, ImportError):
+    raise
 except Exception:
     FALKORDB_AVAILABLE = False
 finally:

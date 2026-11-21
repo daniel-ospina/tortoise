@@ -191,6 +191,6 @@ op_nand = sdk._create_operator(
 show("operator NAND", op_nand)
 
 print("\n=== counts ===")
-print(json.dumps(sdk.taxonomy(), indent=1))
+print(json.dumps(sdk.graph_overview("taxonomy"), indent=1))
 print("\n=== edges ===")
 print(json.dumps(edges, indent=1))

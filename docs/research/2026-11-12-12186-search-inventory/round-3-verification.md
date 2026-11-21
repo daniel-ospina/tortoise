@@ -88,7 +88,7 @@ is a worse merge" and "a redirect is a merge **plus** a visible duplicate".
 | the id resolver | `entity_identity.py:1102` `resolve_entity_id`, collapse at `:1173` | collapses carriers itself — its own comment at `:1164-1172` is about this exact disagreement |
 | the role-holder resolver | `entity_resolver.py:878` `resolve_role_holder`, hop at `:933` | *"A merged-away carrier is not the holder any more (same rule as the write path): hop to the entity the merge recorded"* |
 | the ANY-status / un-collapsed read | `entity_identity.py:410` `_name_holder_ids_same_entity` | deliberately does **not** collapse (a held name must not read as unheld) |
-| the onboarding seed's anchor collapse | `onboarding/seed.py:271` `_collapse_merged_anchor_rows`, hop at `:307` (`target = cur.get("resolved_from")`) | collapses merged-away carriers onto their survivor, docstring *"**any status**"* — one of the eight that retire |
+| the onboarding seed's anchor collapse | `onboarding/seed.py:279` `_collapse_merged_anchor_rows`, hop at `:315` (`target = cur.get("resolved_from")`) | collapses merged-away carriers onto their survivor, docstring *"**any status**"* — one of the eight that retire |
 
 **The retrieval readers — none of them knows the property exists.** Measured counts at this head:
 
