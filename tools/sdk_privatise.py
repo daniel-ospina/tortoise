@@ -367,7 +367,6 @@ SWEEP_NAMES = 66
 #: (`typed references still pointing at a public name: 0` on this tree).
 #: 11831 − 6 = 11825, and that arithmetic is a CROSS-CHECK of the measurement, not the evidence for
 #: it: what was pasted into the pin is the pair `--repin` printed on THIS tree.
-#: Which is what makes this safe to take: no typed call site is being legitimised by the re-cut.
 #: What made it URGENT is that the pin is graded only on PULL REQUESTS, so `main` sat one row off the
 #: pin with nothing grading it and every open PR then graded main's row as its own: #14045 measured
 #: `observed: (11822, …)` against the 11821 pin on a tree that itself derived 11821, while `main` at
@@ -381,11 +380,39 @@ SWEEP_NAMES = 66
 #: `ad79129cb59` DROPPED this retraction and re-asserted the 12-count with no conflict reported,
 #: which is the same shape #14062 documents one paragraph up: a merge takes a rewritten side and
 #: nothing flags the prose it silently left behind.
+
+#: RE-CUT UP (11825, "539914480e400722") → (11833, "addee5ad564bd9bc") by the `#13874` lane. The
+#: pasted pair is `--repin`'s output measured on THIS tree, never arithmetic on the last pin.
+#: The +8 is ONE merge's rows, attributed by measurement and not by count: over the whole range
+#: `1956b3431f` (the `#14058` re-cut) → this tree, the `.py` diff carries EIGHT added receiver rows
+#: and ONE removed receiver line that is the SAME statement re-indented (it is re-added, so nothing
+#: was deleted) — `git diff … -- '*.py' | grep -E '^[+-]' | grep -E '\.(query|update|delete)\b'`.
+#: SEVEN of the eight are `graph.query`, all inside the file `ad79129cb5` (`#14067`, "invalidate the
+#: degraded snapshot on the eviction path") ADDS,
+#: `tests/test_evictor_invalidates_fallback_snapshot_13123.py`; the eighth is `client.delete`, in
+#: `tortoise/cache_evictor.py`, from that same commit. Added rows (8) == net delta (11833 − 11825),
+#: which is the cross-check that NO row was silently absorbed in the other direction.
+#: ⛔ NO NEW SHAPE APPEARED — the one thing a re-cut must never absorb silently. Both spellings are
+#: already pinned shapes on this tree: `graph.query` is a pinned row (274 here), and `client.delete`
+#: occurs 46 times across the tracked tree
+#: (`git grep -hoE '\bclient\.(query|update|delete)\b' -- '*.py' | sort | uniq -c`). So the
+#: condition this gate exists to catch — "a reference shape that was not there when this sweep was
+#: verified is now on the tree" — is NOT triggered; only counts on shapes already declared moved.
+#: The SDK population itself did not move (`typed references still pointing at a public name: 0`),
+#: so no typed call site is legitimised by this re-cut.
+#: ⛔ THIS LANE IS NOT THE CAUSE OF THE +8. Its whole diff is figure literals: stripping every digit
+#: run from each `-`/`+` pair leaves the pair identical, so it cannot move a receiver population. The
+#: reason the gate is red here is the recurrence `#14062` and `#14058` both document, now a THIRD
+#: time: the pin is graded on PULL REQUESTS only, so `main` merges with nothing grading it — and
+#: `main`'s own tree today derives 11833 against its own 11825 pin, i.e. `--check` is RED on `main`.
+#: The real fix for the recurrence is grading the pin on `main`; carrying the re-cut is what unblocks
+#: a PR that touches nothing in this population, which is the same remedy the two blocks above took.
+#:
 #: ⛔ THIS RECORD CARRIES NO ASSIGNMENT, deliberately: merging two re-cuts left BOTH
 #: `SWEEP_RESIDUE` lines in this file, and Python binds the LAST one, so the earlier value was
 #: dead text that still read as the pin. ONE assignment, at the end of the records, cannot be
 #: shadowed by a second re-cut.
-#: ── #13998's own cut, on the tree that carries BOTH records ────────────────────────────────
+#: ── #13998's own cut, on the tree that carries ALL of the records above ───────────────────
 #: This PR adds SEVEN rows of its own on top of the above — SIX `cp.query` plus ONE `row.update`,
 #: which is why it cannot be summarised as "seven `cp.query` rows":
 #:
@@ -408,6 +435,10 @@ SWEEP_NAMES = 66
 #: measured on `f392bb67d5`'s tree, and the four commits that landed between that tree and
 #: `ad79129cb59` moved it to 11833. Subtracting 11825 here would invent a +15 that no diff
 #: supports. A doc edit moves a counted row, so only the reading at the final tree is the pin.
+#: ⛔ The SECOND merge into this branch (`origin/main` `8ad6ac46f0`, the `#13874` lane's own re-cut
+#: plus the inventory and scorecard commits) was re-measured the same way and did NOT move the pin:
+#: `--check` still exits 0 at 11840 on the merged tree, so the +7 attribution survives a base that
+#: carries a record claiming 11833. Neither record's number is this pin; the tree is.
 SWEEP_RESIDUE = (11840, "9f1b8cff93b3a480")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
