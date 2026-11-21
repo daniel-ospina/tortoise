@@ -484,9 +484,12 @@ SWEEP_NAMES = 66
 #: the very figure it stated, none converging, because the grep counts this block's prose. ⛔ The
 #: STABLE number is the SCOPE, not the digit: excluding this file
 #: (`… -- '*.py' ':!tools/sdk_privatise.py'`) that same `\bclient\.delete\b` grep reads **45** at
-#: BOTH `2fe01fc775e` AND this head — the prose population did not move at all, so the whole-tree
-#: movement is entirely this block's own words, which is precisely why no WHOLE-TREE head figure is
-#: published.
+#: BOTH `2fe01fc775e` AND this head — the prose population did not move at all, so any whole-tree
+#: movement WOULD be entirely this block's own words. ⛔ "WOULD", not "is": an earlier draft of this
+#: clause asserted that movement as a FACT, and a movement is not what the scoped pair measures — the
+#: SCOPED number is the stable one precisely because, at whole-tree scope, the count is a function of
+#: the prose quoting it (raised by review). So no WHOLE-TREE head figure is published and no movement
+#: is asserted here: the conditional is the whole claim.
 #: ⛔ AND "46" WAS REAL: `git grep -hoE '\bclient\.delete\b' ad79129cb5 -- '*.py'` reads **46** —
 #: `ad79129cb5` being the very tree whose `graph.query` the old sentence quoted as "274 here"
 #: (that reading is cited above, in the `graph.query` bullet of this block). Its defect was that the

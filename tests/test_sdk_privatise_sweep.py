@@ -328,6 +328,41 @@ def test_the_abbreviation_length_claim_reproduces():
             f"{len(RESIDUE_ABBREV)}")
 
 
+def test_whole_tree_movement_is_only_ever_stated_as_a_conditional():
+    """Round 11, P2: the clause attributed a whole-tree movement that is measurably ZERO.
+
+    The block said the scoped pair proved the prose population did not move "so the whole-tree
+    movement IS entirely this block's own words". Measured at both revs the clause names:
+
+        git grep -hoE '\\bclient\\.delete\\b' <rev> -- '*.py'                        -> 48 / 48
+        git grep -hoE '\\bclient\\.delete\\b' <rev> -- '*.py' ':!…privatise.py'       -> 45 / 45
+
+    so there is no whole-tree movement to attribute — the derived claim outlived the figure it
+    was derived from, which is this block's own defect class. The scoped pair measures the prose
+    EXCLUSION, never the whole-tree total, so whatever that total does is not what the sentence
+    may assert; the honest form is the CONDITIONAL, and the conditional is what is graded here.
+
+    ⛔ WHAT THIS ARM CANNOT DO: it matches the COPULA, not the claim, so a rewording that asserts
+    a movement without `is`/`was`/`remains` beside the word `movement` slips past it. That limit
+    is deliberate — every phrase-keyed alternative tried in this file turned an honest rewording
+    RED — and it is why the arm also requires the conditional to be PRESENT: deleting the clause
+    is not a fix, and a green-by-absence arm would be the vacuous shape this file rejects.
+    """
+    block = _residue_block()
+    # `_residue_block()` keeps the `#:` prefixes, so the clause wraps across lines here; the
+    # copula test needs the prose flowing, or `whole-tree\nmovement` never matches as one phrase.
+    flow = re.sub(r"\n#:\s?", " ", block)
+    for claim in re.finditer(r"(?is)whole-tree\s+(?:grep\s+)?movement\s+(is|was|remains)\b", flow):
+        assert _quoted(flow, claim.start()), (
+            "the whole-tree movement may only be stated as a CONDITIONAL (`any whole-tree "
+            "movement WOULD be …`): the scoped pair measures the exclusion, not the total, and "
+            "asserting a movement here is what round 11 falsified — "
+            f"{flow[claim.start():claim.start() + 90]!r}")
+    assert re.search(r"(?is)whole-tree\s+movement\s+would\b", flow), (
+        "the clause must state the conditional (any whole-tree movement WOULD be this block's "
+        "own words); deleting the sentence is not the fix")
+
+
 def test_the_seen_update_deletion_premises_hold_in_this_clone():
     """The REPO-STATE half of finding 2 — the premises the prose arm below is graded against.
 
@@ -415,6 +450,29 @@ def test_the_seen_update_deletion_is_attributed_to_the_commit_that_made_it():
         assert re.search(r"`[0-9a-f]{7,40}`", tail[:verb.start()]), (
             "`d523c9be8c` is the interval HEAD and only inherits the deletion; a delete verb "
             "near it with no other revision named in between credits it with doing it")
+    # ⛔ AND NO **OTHER** REVISION MAY CARRY THE DELETING VERB (review, round 11 — P2): the loop
+    # above sweeps ONE revision, the interval head, so appending
+    #   `⛔ Also, `4b7e9eb06f` DELETES the `seen.update` line in the same rewrite.`
+    # left this arm GREEN — and `4b7e9eb06f` is one of the SIX CARRIERS (it still holds the line),
+    # so the appended sentence is false, and the same hole admitted a credit to `d5ecef0d72`.
+    # The invariant is rev-agnostic and needs no git object: the revision bound to "deletes the
+    # `seen.update` line" is the DELETING commit, and only that one.
+    for claim in re.finditer(r"`([0-9a-f]{7,40})`", flat):
+        rev = claim.group(1)
+        if RESIDUE_DELETING_COMMIT.startswith(rev) or rev.startswith(RESIDUE_DELETING_COMMIT):
+            continue
+        tail = flat[claim.end():claim.end() + 200]
+        verb = re.search(r"(?i:\bdelet(e|es|ed)\b)[^`]{0,40}the `seen\.update` line", tail)
+        if verb is None:
+            continue
+        # A revision named BETWEEN this one and the verb owns the verb — that is the honest
+        # attribution, and it is the same escape the loop above applies.
+        if re.search(r"`[0-9a-f]{7,40}`", tail[:verb.start()]):
+            continue
+        raise AssertionError(
+            f"`{rev}` is bound to deleting the `seen.update` line, and that verb belongs to "
+            f"`{RESIDUE_DELETING_COMMIT}` alone: `{rev}` is not the deleting commit, so crediting "
+            "it with the deletion is false (the six other interval trees still HOLD the line)")
     # ⛔ THE SHAPE, NOT THE PHRASE (review, rounds 7-8): `ONLY on …` has paraphrases — `solely
     # on`, `ONLY for … is it true`, and a bare ` … alone` — and a phrase lookup let each
     # reinstate the too-narrow claim. The escape is the block's own honest form, which says the
