@@ -271,6 +271,19 @@ SELECTED = [
     # unrouted and unreported (the module's own example of a version-qualified name).
     ("is the v3 export deprecated?", "ended", "is_copula"),
     ("is our onboarding flow already retired", "ended", "is_copula"),
+    # ── the BARE-PRONOUN subject, and the recall the round-18 P1 guard KEEPS ──
+    # (round-18 review, P1.) Making a pronoun legal only as the WHOLE subject is the
+    # fix that closes the reduced-relative and extraposed classes; these three rows are
+    # what that rule must NOT cost. `is it archived` is the pronoun branch itself,
+    # `is it really retired` proves the prefix's ADVERB SLOT still carries the time /
+    # degree adverbs a caller actually writes, and `is the export still archived` proves
+    # the same slot applies to a noun-phrase subject. Measured at the pre-fix head: all
+    # three routed, and all three still route — a guard that bought the P1 class by
+    # refusing these would be a recall loss with no finding behind it.
+    ("is it archived", "ended", "is_copula"),
+    ("is it really retired", "ended", "is_copula"),
+    ("is the export still archived", "ended", "is_copula"),
+    ("has it been archived", "ended", "is_copula"),
     ("has the partner call been cancelled", "ended", "is_copula"),
     # An IMPERATIVE over a FREE RELATIVE CLAUSE — a request for a SET. ⛔ The
     # discriminator against `show me the retired onboarding flow` (which stays a
@@ -279,6 +292,81 @@ SELECTED = [
     ("list what we retired", "ended", "imperative_what"),
     ("show me what we archived", "ended", "imperative_what"),
     ("enumerate what we have cancelled", "ended", "imperative_what"),
+    # ── DETERMINER STACKING and COMPOUND-WORD subjects on `is_copula` (round-18
+    # review, P2 — the first cut of round-17's determiner lookahead broke these) ──
+    # `all|both|half|such` are PRE-determiners, so `all the` is ONE noun phrase; and a
+    # hyphen/slash is not a word boundary for this rule, so `how-to`, `what-if`,
+    # `all-hands` and `a/b` are single words. Both were measured SILENT regressions
+    # (routed before round-17, `population=None, signal=None` after it), and each row
+    # here is the spelling that broke. The perfect branch is pinned separately because
+    # it takes the same subject expression.
+    ("is all the data archived", "ended", "is_copula"),
+    ("is all our old plans retired", "ended", "is_copula"),
+    ("is half the exports archived", "ended", "is_copula"),
+    ("is such a report archived", "ended", "is_copula"),
+    ("is both the reports archived", "ended", "is_copula"),
+    ("has all the data been archived", "ended", "is_copula"),
+    ("is the how-to guide archived", "ended", "is_copula"),
+    ("is the what-if scenario archived", "ended", "is_copula"),
+    ("is our all-hands meeting cancelled", "ended", "is_copula"),
+    ("is the a/b test cancelled", "ended", "is_copula"),
+    # …and the PRE-EXISTING twin the same `(?![-/])` repairs on an older token, which
+    # is why it is pinned here rather than left as a comment: it was refused BEFORE
+    # round 17 and nothing reddened then.
+    ("is the when-in-doubt policy archived", "ended", "is_copula"),
+    ("has any how-to guide been archived", "ended", "existence"),
+    # ── the `of`-PARTITIVE (round-19 review, P2) ─────────────────────────────
+    # One noun phrase (`one of the exports`), routed before round 17, refused with no
+    # notice after it. The determiner guard now fires only when the word DIRECTLY before
+    # the determiner is neither a pre-determiner nor `of`, which is what distinguishes
+    # `is one of the exports archived` from `is the report the board archived`.
+    ("is one of the exports archived", "ended", "is_copula"),
+    ("is one of our plans retired", "ended", "is_copula"),
+    ("is none of the reports archived", "ended", "is_copula"),
+    ("is neither of the reports archived", "ended", "is_copula"),
+    ("is either of the plans retired", "ended", "is_copula"),
+    ("is part of the data archived", "ended", "is_copula"),
+    ("has none of the data been archived", "ended", "is_copula"),
+    ("is all of the data archived", "ended", "is_copula"),
+    ("is most of our reports archived", "ended", "is_copula"),
+    # …and the `-ed` ADJECTIVE modifier the new determiner-less anchor must NOT refuse:
+    # the guard fires only when the `-ed` word is IMMEDIATELY followed by the ending
+    # participle, so an adjective modifier of the subject's own head noun still routes.
+    # This is the recall the anchor costs, kept and pinned rather than assumed.
+    ("is the deprecated export archived", "ended", "is_copula"),
+    # ── the STATED boundary: a determiner-less second NP ROUTES (round-21 review, P2) ──
+    # Pinned as a ROUTING row on purpose. The `-ed` anchor that refused it also silently
+    # refused every `-ed`-ending head noun, so it was withdrawn; this row is what the
+    # module now does, and the prose on `_COPULA_SUBJECT` states it. A later lane that
+    # closes this class changes these rows deliberately, not by accident.
+    ("is the export customers requested archived", "ended", "is_copula"),
+    # ── …and the class the withdrawn anchor had silently broken (round-21 review, P1) ──
+    # `-ed`-ending HEAD NOUNS and DEGREE WORDS inside the subject all routed at
+    # `e84612d43f` (the revision BEFORE round 20) and returned `population=None,
+    # signal=None` after round 20. Both are pinned here so the next widening reds instead
+    # of costing them quietly. ⛔ THE BASELINE IS `e84612d43f`, NOT HEAD~1 — HEAD~1 IS round
+    # 20, the commit that refuses them (round-22 review, P3); a baseline a reader cannot
+    # reproduce reads as a fix that changed nothing.
+    ("is the feed archived", "ended", "is_copula"),
+    ("is the seed archived", "ended", "is_copula"),
+    ("is the migration seed archived", "ended", "is_copula"),
+    ("is the deprecated feed archived", "ended", "is_copula"),
+    ("is the most recent export archived", "ended", "is_copula"),
+    ("is the most recent report deprecated", "ended", "is_copula"),
+    ("is our most recent plan retired", "ended", "is_copula"),
+    ("is the data all archived", "ended", "is_copula"),
+    ("is our report all archived", "ended", "is_copula"),
+    # ── and the DEGREE/NEGATION-adverb tail (round-22 review, P2) ────────────────
+    # A determiner-vocabulary word followed by `no longer` / `any longer` / `all but` /
+    # `most recent` is still ONE noun phrase, not a second NP. Without position rule (c)
+    # these were SILENT while the semantically identical `is the export not archived`
+    # ROUTED — an internally inconsistent pair with no notice on the refused half.
+    ("is the export no longer archived", "ended", "is_copula"),
+    ("is our plan no longer retired", "ended", "is_copula"),
+    ("is the report any longer archived", "ended", "is_copula"),
+    ("is the invoice no longer cancelled", "ended", "is_copula"),
+    ("is the export all but archived", "ended", "is_copula"),
+    ("is the export most recent archived", "ended", "is_copula"),
 ]
 
 
@@ -582,6 +670,69 @@ NOT_SELECTED = [
     # signal now carries the same `_BLOCKED_TAIL` the shapes do, and this row is pinned
     # HERE and NOT in `NOTICE_ONLY` because "silent" is the claim being made.
     "has anything we relied on been withdrawn most recently",
+    # ── the PRONOUN-SUBJECT class on `is_copula` (round-18 review, P1) ─────────
+    # Round 17's two guards (a subordinator inside the subject; a second determiner
+    # after a word) miss two shapes: a REDUCED RELATIVE whose subject is a pronoun
+    # needs no second determiner, and an EXTRAPOSED frame (`is it <adj> <subject>
+    # <participle>`) has no determiner at all. Measured at the pre-fix head: every row
+    # below returned `population='ended', shape='is_copula', signal=None` — the whole
+    # ended population served with the caller's own predicate dropped and no notice.
+    # `is_copula` is NEW in this PR (`git grep -c is_copula <merge-base> --
+    # tortoise/state_intent.py` → 0), so on `main` these are ordinary relevance reads:
+    # the class is this PR's own regression.
+    # ⛔ THE GUARD IS A ROLE, NOT A WORD LIST: a subject pronoun may only BE the
+    # subject (a bare-pronoun branch), never sit inside a longer noun phrase — which is
+    # why the SELECTED rows above (`is it archived`, `is it really retired`) survive.
+    # Pinned here and NOT in NOTICE_ONLY on purpose, measured: `signal is None` for
+    # every one, so the remedy is the unchanged relevance read.
+    "is the plan we archived",
+    "is the flow we retired",
+    "is the report she archived",
+    "is the export we deprecated",
+    "is the report they archived",
+    "is the plan you archived",
+    "is it clear legal retracted",
+    "is it true legal retracted",
+    "is it obvious legal retracted",
+    "is it likely legal retracted",
+    "is it certain legal retracted",
+    "is it accurate legal retracted",
+    "is it possible legal retracted",
+    "is it fact legal retracted",
+    "is it news legal retracted",
+    "is there evidence legal retracted",
+    # ── the SAME reduced-relative shape whose subject OPENS with a pre-determiner
+    # (round-19 review, P1) ────────────────────────────────────────────────
+    # Round-18's exclusion sat inside EVERY tick of the word run, so a subject that
+    # opened with `every|all|most|both|some|no` could not start the run and the WHOLE
+    # guard was skipped — round-17's class re-opened by its own fix. These route as
+    # `ended` on the pre-round-17 module and were measured routing at round 18; they
+    # are refused now, and `is all the data the board archived` reports
+    # `is_copula_long_subject` while the short ones are silent (the stated recall).
+    "is every report the board archived",
+    "is all the data the board archived",
+    "is most data the board archived",
+    "is both reports the board archived",
+    "is some report the board archived",
+    "is no report the board archived",
+    # ── the same class with a POSSESSIVE / PRE-DETERMINER / NO determiner (round-20
+    # review, P2) ────────────────────────────────────────────────────────────
+    # The prose claimed "a subject whose tail is a second noun phrase is refused", and
+    # the closed determiner list was narrower than that claim: `his|her` and the
+    # pre-determiners were absent, and a second NP with NO determiner needed a different
+    # anchor. All five routed to the whole ended population with `signal=None` before this
+    # round. The three long ones report `is_copula_long_subject` (pinned in NOTICE_ONLY
+    # below); the other two are SILENT, which is the stated notice-scope limit.
+    # ⛔ THE DETERMINER-LESS ROW IS WITHDRAWN FROM THIS LIST (round-21 review, P1,
+    # measured): the `-ed` anchor that refused it also refused every subject whose HEAD
+    # NOUN ends in `ed` (`feed`, `seed`, `need`, `bed`, `shed`) and was SILENT about it, so
+    # the anchor is gone and `is the export customers requested archived` ROUTES — pinned
+    # in `SELECTED` below as the STATED boundary, not left to be discovered. Telling a
+    # bare noun from a bare verb needs a lexicon this detector does not have.
+    "is the report his team archived",
+    "is the contract every employee signed archived",
+    "is the report each manager reviewed archived",
+    "is the dashboard all customers use deprecated",
     # …the same class on the `which` shape, which is the row the pre-fix detector
     # also served (round-3 review, P1: *"`which claims were retracted by legal`
     # → `by legal` dropped"*). It is pinned HERE because the user-facing MCP
@@ -693,6 +844,16 @@ NOTICE_ONLY = [
     "have any users reported v3 has been deprecated",
     "has anyone complained billing has been deprecated",
     "have any users reported the search index has been deprecated",
+    # …and the ONE row of round-19's pre-determiner-opener class that REPORTS rather than
+    # going silent: it is five words long, so the subject bound exceeded is what the
+    # notice names (`is_copula_long_subject`). Its short siblings stay in NOT_SELECTED
+    # alone, which is the stated silent part of the recall loss.
+    "is all the data the board archived",
+    # …and the three LONG rows of the possessive / pre-determiner / determiner-less
+    # class (round-20 review, P2): each reports `is_copula_long_subject`.
+    "is the contract every employee signed archived",
+    "is the report each manager reviewed archived",
+    "is the dashboard all customers use deprecated",
 ]
 
 
@@ -1274,12 +1435,14 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
     # notice, while the served block listed the routes with no clause saying so. A
     # caller reading only this description therefore could not predict the outcome of
     # a filtered call, which is #14033's third acceptance criterion. The five names
-    # below are the retrieval arguments that SILENCE the report, which is NOT the
-    # same as "this tool's retrieval arguments beyond `query`" — the round-16
-    # review's third residual measured that over-claim, and this file now pins the
-    # other side of it below (`kind`/`entity_type`/`limit` narrow the read and leave
-    # the report intact). The signature assertion is what keeps the named five
-    # true: an argument that is renamed or dropped leaves the served clause
+    # below are the retrieval arguments that SILENCE the report — ⛔ EXAMPLES of the
+    # closed list, never the set (round-18 review, P2: the served sentence called them
+    # the set and named "the other three" as the remainder, while `_retrieval_knobs()`
+    # classifies **23** parameters — so a caller who passed `pool_size` or `time_aware`
+    # was told the report survived when it was silenced). The `_knob_names` set below
+    # is DECLARED FROM `sdk.py` rather than re-typed, so the examples cannot drift off
+    # the list they are examples of. The signature assertion is what keeps the named
+    # five true: an argument that is renamed or dropped leaves the served clause
     # describing an argument nobody can pass.
     _filter_args = {"threshold", "min_confidence", "order_by",
                     "relationship_filter", "traversal_path"}
@@ -1292,6 +1455,26 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
             f"the SERVED description does not name `{_name}`, so a caller who passes it "
             "is not told that the cue report is suppressed — the filter/population "
             "boundary is over-promised again (#14033 review round-12, P2)")
+
+    # ⛔ THE EXAMPLES MUST BE MEMBERS OF A BIGGER LIST, DERIVED FROM `sdk.py`
+    # (#14033 round-18 review, P2 — the review's own measurement, made mechanical). The
+    # condition this pins is not "the five are named" (they were, and the sentence was
+    # still wrong): it is that the guard classifies MORE than the examples, so a served
+    # sentence presenting them as the set is describing a different guard from the one
+    # that runs. `_retrieval_knobs()` is a nested function of the SDK read, and each of
+    # its rows is `("<name>", <condition>)`, so the names are read off the source and
+    # never re-typed here — the same rule the module applies to its own tables.
+    _knob_src = inspect.getsource(_sdk_mod.TortoiseSDK._tortoise_fts_query)
+    _knob_names = set(_re.findall(r'\(\s*"([a-z_]+)",', _knob_src))
+    assert _filter_args <= _knob_names, (
+        "the served filter examples are no longer members of `_retrieval_knobs()` — "
+        f"the description names a knob the guard does not classify (knobs: "
+        f"{sorted(_knob_names)})")
+    assert len(_knob_names) > len(_filter_args), (
+        "`_retrieval_knobs()` now classifies no more names than the served description "
+        "shows as examples — the round-18 P2 defect was that the text presented five "
+        "of twenty-three as the set; if the list really is down to five, re-cut the "
+        "text to say so instead of deleting this arm")
 
     # ⛔ AND THE CLAUSE ITSELF MUST BE TRUE, NOT MERELY NAME THE ARGUMENTS (#14033
     # round-13 review, P3). It first read "ANY RETRIEVAL ARGUMENT SILENCES THE
@@ -1331,19 +1514,37 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
         "passed `threshold=0` explicitly is then told they silenced a report that in "
         "fact still fires (#14033 round-13 review, P3)")
 
-    # ⛔ AND THE GENERAL SENTENCE MUST NOT BE READ AS COVERING THE OTHER THREE
-    # (#14033 round-16 review, third residual — the one that is a SERVED-TEXT
-    # defect rather than a note). "A RETRIEVAL ARGUMENT THAT CHANGES THE READ
-    # SILENCES THE REPORT" is read against `_retrieval_knobs()` in `sdk.py`, which
-    # does NOT classify `kind`, `entity_type` or `limit`: the population applies
-    # them, so they change WHICH rows a read returns and never whether the report
-    # fires (measured — `test_a_retrieval_knob_suppresses_the_notice_too` drives
-    # `kind=` and reads the sink). Without a carve-out the sentence tells a caller
-    # who narrowed by `kind` that they silenced a report that in fact still fires,
-    # i.e. the served block mispredicts the boundary it exists to make predictable.
+    # ⛔ AND THE SENTENCE MUST POINT AT THE CLOSED LIST RATHER THAN CLAIM TO BE IT
+    # (#14033 round-18 review, P2 — the served text said the five were the set and
+    # `kind`/`entity_type`/`limit` were "the other three", while `_retrieval_knobs()`
+    # classifies 23: eighteen beyond the five also silence the notice and were named
+    # nowhere, so `pool_size=` or `time_aware=` produced exactly the silence #14033
+    # exists to remove while the description said the report survived). ⛔ THE PIN IS
+    # THE AUTHORITY CLAIM, not a new subset: naming a different five would reproduce
+    # the defect with a different spelling, and the arm above already requires the
+    # examples to be members of a BIGGER list.
     assert _re.search(
-        r"AND THE TOOL'S OTHER THREE RETRIEVAL ARGUMENTS ARE NOT IN THAT SET",
+        r"THE CLOSED LIST IS THE AUTHORITY, NOT THIS SENTENCE",
         _doc_flat), (
+        "the SERVED description no longer says the closed list is the authority — that "
+        "sentence is what stops a reader from treating the examples it names as the set "
+        "(#14033 round-18 review, P2)")
+    assert _re.search(r"`_retrieval_knobs` in `tortoise/sdk\.py`", _doc_flat), (
+        "the SERVED description stopped naming `_retrieval_knobs` as the list — a reader "
+        "is then back to a subset with no pointer to the guard that actually runs")
+    assert _re.search(r"is an EXAMPLE of it, never the set", _doc_flat), (
+        "the SERVED description lost the EXAMPLE-not-the-SET clause: the five names are "
+        "then readable as the whole list again, which is the round-18 P2 defect")
+
+    # ⛔ AND THE OTHER SIDE OF THE BOUNDARY — the three the POPULATION applies
+    # (#14033 round-16 review, third residual; re-worded in round 18). "A RETRIEVAL
+    # ARGUMENT THAT CHANGES THE READ SILENCES THE REPORT" is not true of `kind`,
+    # `entity_type` or `limit`: the population applies them, so they change WHICH rows
+    # a read returns and never whether the report fires (measured —
+    # `test_a_retrieval_knob_suppresses_the_notice_too` drives `kind=` and reads the
+    # sink). Without this carve-out the sentence tells a caller who narrowed by `kind`
+    # that they silenced a report that in fact still fires.
+    assert _re.search(r"Only THREE parameters sit OUTSIDE it", _doc_flat), (
         "the SERVED description dropped the `kind`/`entity_type`/`limit` carve-out, so "
         "the general \"A RETRIEVAL ARGUMENT THAT CHANGES THE READ SILENCES THE "
         "REPORT\" reads as covering arguments that do NOT silence it (#14033 "
@@ -1353,7 +1554,7 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
             f"the carve-out no longer names `{_name}`, so a caller who narrowed by it "
             "cannot tell whether the cue report still fires")
     assert _re.search(
-        r"do NOT ask for a filtered relevance read and leave the report intact",
+        r"they change WHICH rows a read returns rather than asking for a filtered read",
         _doc_flat,
     ), (
         "the carve-out lost its AFFIRMATIVE claim — the names alone do not say what "

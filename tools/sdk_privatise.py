@@ -1001,9 +1001,16 @@ SWEEP_NAMES = 66
 #: `(count, digest)` pair exists to defeat, so the digest is the evidence and the count is only a
 #: cross-check. WHERE THE −3 CAME FROM, MEASURED: `main` at `1b0db0489408` is itself three below its
 #: own committed `(11843, "6aed5368ffa10513")` — `--repin` on `main` alone there prints
-#: `(11840, "b7eb08ff3acdcce4")` — and that −3 is `67dc298ec3a1` (#14194), which rewrote
-#: `tests/test_read_ledger.py` only, replaced THREE `inst.query()` receivers and re-pinned nothing;
-#: the same unpinned-drift class the block above records for #14164. ⛔ ATTRIBUTED BY ROW DIFF, NOT
+#: `(11840, "b7eb08ff3acdcce4")` — and ⛔ THAT NET −3 IS TWO COMMITS, NOT ONE. Measured, `--repin`
+#: on each of `main`'s commits with the checked-out HEAD printed beside it, so a stale tree cannot
+#: pass as a measurement: `72c104bcbb` → `(11843, "6aed5368ffa10513")` (its committed pin, exact
+#: there), `67dc298ec3a1` (#14194) → `(11837, "52e9a205697f528f")` — **−6**, `d2dd2355353f` (#14190)
+#: and `e4acf78705d5` (#14171) → unchanged at 11837, `1b0db0489408` (#14162) → `(11840,
+#: "b7eb08ff3acdcce4")` — **+3**. #14194's −6 is THREE `inst.query(...)` lines removed and NONE added,
+#: in `tests/test_read_ledger.py`, the only file it touches, and it re-pinned nothing: a test-only
+#: commit can move this number, because `py_files()` sweeps every tracked `*.py` (`tests/` included—
+#: only `archive/`, `.venv/` and `.worktrees/` are excluded), the same unpinned-drift class the block
+#: above records for #14164. ⛔ THE BRANCH'S OWN +3, ATTRIBUTED BY ROW DIFF, NOT
 #: ARITHMETIC: `--report --base 28ca66878d… --top 5000` on `main` there AND on this tree, both row
 #: sets sorted and diffed, differs in EXACTLY TWO rows — `_truncation_out.update` 1 → 2 and
 #: `_state_route_out.update` 0 → 2 (this branch's **+3**, the `dict | None` caller sinks #14033
@@ -1096,16 +1103,30 @@ SWEEP_NAMES = 66
 #: `super().query` 74 → 75, the `_EventGraph` fake in `tests/test_14012_outside_view.py` delegating to
 #: its parent for the statements it does not answer (the end-to-end per-label timestamp row).
 #: `typed references still pointing at a public name` stays **0**.
-#: ⛔ MERGED `origin/main` A SIXTH TIME, at `e74cf1d13d` (the `#14012` lane: "keep this resident"
-#: + "see what's outside"), and THIS is the pin: `--repin` printed `(11860,
-#: "d2d8707a7cc07e96")` on THIS merge tree. ⛔ NOT 11843 AND NOT 11857 CARRIED FORWARD — neither
-#: side's figure is this tree's, which is the rule every block above states. Both sides' deltas are
-#: true of THIS tree: this branch's **+3** (the two `dict | None` sinks, attributed in the block
-#: above) and `main`'s **+12** (`#14012`'s five files, attributed in the block above that), so the
-#: only thing measured here is the pin itself; `11843 + 12 = 11855` is a CROSS-CHECK of two
-#: measurements and NOT this tree's figure, which is 11860 because `main` also moved between
-#: `1b0db04894` and `e74cf1d13d`. `--check` exits 0 here with `typed references still pointing at a
-#: public name: 0`.
+#:
+#: ⛔ MERGED `origin/main` (`e74cf1d13d`) — A CONFLICT ON THIS CONSTANT AGAIN, and the resolution
+#: KEEPS BOTH sides' blocks (each is a measurement of the tree it NAMES) and RE-DERIVES the pair on
+#: this merge tree with `--repin`, which is the rule every block above states. ⛔ THIS TIME BOTH
+#: PARENTS' PINS ARE EXACT ON THEIR OWN TREES, measured rather than assumed — `--repin` in a
+#: detached worktree prints `(11843, "cc53ebb46ed4f709")` at this branch's parent `d418661d76` and
+#: `(11857, "ed40203dbbf32b87")` at `origin/main`'s `e74cf1d13d` — so the delta is attributable
+#: rather than only reconcilable, and it is measured in BOTH directions.
+#: ⛔ THE +17 OVER THIS BRANCH'S PARENT IS `main`'S OWN (#14012), ATTRIBUTED FILE BY FILE with the
+#: tool's own `edits_for` walk over the five files that lane adds: `tortoise/outside_view.py`
+#: `graph.query` ×2, `tortoise/resident_pin.py` `graph.query` ×3,
+#: `tests/test_14012_outside_view.py` `super().query` ×5 + `self.query` ×1,
+#: `tests/test_14012_resident_pin.py` `super().query` ×2 + `self.query` ×1 + `props.update` ×1 +
+#: `self.meta.setdefault(params['key'], {}).update` ×1, and
+#: `tests/test_14012_resident_cli.py` `self.meta.setdefault(params['key'], {}).update` ×1 — **17**,
+#: which is the same five rows `--report --base 28ca66878d7c --top 5000` yields when the row sets
+#: of the two trees are sorted and diffed (`graph.query` +5, `super().query` +7, `self.query` +2,
+#: `props.update` +1, `self.meta.setdefault(…).update` +2).
+#: ⛔ THE +3 OVER `main` IS THIS BRANCH'S OWN, and it is the SAME two rows the block above
+#: attributes: the row diff against `main`'s parent differs in EXACTLY `_state_route_out.update`
+#: 0 → 2 and `_truncation_out.update` 1 → 2 — the `dict | None` caller sinks #14033 threads out.
+#: So `11843 + 17 = 11860` and `11857 + 3 = 11860` both land on the pin: CROSS-CHECKS of the two
+#: measurements, never the evidence for it, which is `--repin`'s output on THIS tree.
+#: `--check` exits 0 here with `typed references still pointing at a public name: 0`.
 SWEEP_RESIDUE = (11860, "d2d8707a7cc07e96")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —

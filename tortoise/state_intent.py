@@ -469,7 +469,7 @@ _EXISTENCE_HEAD = (
 )
 _EXISTENCE_GUARD = (
     r"(?![^?]{0,60}?\b(?:because|since|when|while|after|before|now|if|unless|given|"
-    r"as|where|so|but|although|though|until|whether|once|whereas|why|how)\b)"
+    r"as|where|so|but|although|though|until|whether|once|whereas|why|how)(?![-/])\b)"
     r"(?![^?]{0,60}?\b[a-z0-9][a-z0-9'’._/-]*\s+(?:that|which|who|whom|whose)\b)"
     r"(?![^?]{0,60}?\b(?:(?:the|a|an|its|his|her|their|our|your|my|these|those|this|"
     # ⛔ THE DETERMINER IS OPTIONAL AND THE SUBJECT MAY BE A BARE NOUN (round-16 review,
@@ -644,26 +644,155 @@ _COPULA_SUBJECT = (
     #     cannot contain a second determiner, so the same preceding-word discriminator
     #     applies — the subject's OWN determiner opens the span and is untouched, which
     #     is what keeps `is that endpoint deprecated` and `is the v3 export deprecated`
-    #     routing. The recall given up is the subject whose tail is another NP
-    #     (`is our v3 export the one archived`), which is a yes/no about ONE record and
-    #     is now REPORTED rather than routed.
-    # ⛔ AND A SECOND AUXILIARY INSIDE THE SUBJECT IS THE SAME STRUCTURE (round-16
-    # review, measured): `has anyone complained billing has been deprecated` put its
-    # own verb (`complained`) plus a whole asyndetic clause (`billing has been …`)
-    # inside the perfect branch's subject, ROUTED to the whole ended population and
-    # dropped the caller's predicate. An auxiliary in the subject means a nested
-    # clause — the copula the shape needs is the one AFTER the subject — so the same
-    # `{1,5}`-words-then-token rule is extended over the auxiliary list. ⛔ BOTH SETS
-    # ARE ONE GUARD, not two: two overlapping lookaheads would let a later change drop
-    # one silently (each masks a row the other catches).
+    #     routing. The recall this gives up — including the part of it that goes SILENT
+    #     — is stated once, at the end of this block, so a later reader cannot take the
+    #     rule from one sentence and the recall from another.
+    # ⛔ TWO OVER-REFUSALS THE FIRST CUT OF THAT GUARD CAUSED (round-18 review, P2, both
+    # measured as REGRESSIONS — these routed before the guard and went SILENT after):
+    # (1) DETERMINER STACKING is not a second noun phrase. `all|both|half|such` are
+    #     PRE-determiners, so `all the`, `both the`, `half the`, `such a` is ONE noun
+    #     phrase, and `is all the data archived`, `is all our old plans retired`,
+    #     `is half the exports archived`, `is such a report archived`, `is both the
+    #     reports archived` and the perfect branch `has all the data been archived` all
+    #     went silent. So is an `of`-PARTITIVE (`is one of the exports archived`,
+    #     `has none of the data been archived`) — see the position rule below, which is
+    #     the one that handles both.
+    # (2) A HYPHEN OR SLASH IS NOT A WORD BOUNDARY FOR THIS RULE. `\b` matches before
+    #     `-` and `/`, so `how-to`, `what-if`, `all-hands` and `a/b` read as a
+    #     subordinator/determiner followed by a word, and `is the how-to guide archived`,
+    #     `is the what-if scenario archived`, `is our all-hands meeting cancelled` and
+    #     `is the a/b test cancelled` went silent. The token therefore has to END its
+    #     word. (This also repairs the pre-existing twins on the older tokens:
+    #     `is the when-in-doubt policy archived` routes again.)
+    # ⛔ AND THE RECALL THAT IS STILL GIVEN UP IS STATED, INCLUDING THE SILENT PART:
+    # a subject whose tail is a SECOND NOUN PHRASE (`is the report the board archived`) is
+    # refused. A LONG one REPORTS itself (`is our v3 export the one archived` ->
+    # `is_copula_long_subject`) because it exceeds the four-word subject bound; a SHORT
+    # one is SILENT (`is the report the board archived` -> `signal is None`), which is the
+    # module's stated notice-scope limit rather than a surprise. Both are measured, and
+    # the second is the price of closing the route: the same expression that refuses a
+    # reduced relative is what a caller sees as the unchanged relevance read.
+    # ⛔ THE PRE-DETERMINER EXCLUSION IS IN THE POSITION THAT MATTERS, NOT IN EVERY TICK
+    # OF THE WORD RUN (round-19 review, P1 + P2, both measured) — and the first cut of it
+    # got that wrong twice over. It read
+    #
+    #     (?: (?!(?:all|both|half|such…)) <word> \s+ ){1,5} <determiner>
+    #
+    # which excludes a pre-determiner from EVERY word position, so a subject that OPENS
+    # with one cannot start the run at all and the whole guard is SKIPPED — not narrowed.
+    # `is every report the board archived` and `is all the data the board archived` are
+    # the same reduced-relative shape as `is the report the board archived` and were
+    # answered with the WHOLE ended population, `signal=None`: round-17's P1 class,
+    # re-opened by its own fix. And the same over-broad exclusion is what kept the
+    # `of`-PARTITIVE silent: `is one of the exports archived` and `has none of the data
+    # been archived` are ONE noun phrase, routed before round 17, and were refused with
+    # no notice.
+    # So the rule is stated as what it is — a determiner is a SECOND noun phrase only if
+    # the word DIRECTLY before it is not a pre-determiner and not `of`:
+    # `is all the data` (stacking) and `is one of the exports` (partitive) do not fire;
+    # `is every report the board archived` and `is the report the board archived` do.
+    # ⛔ AND THE DETERMINER LIST WAS NARROWER THAN THE PROSE ABOVE CLAIMED (round-20
+    # review, P2, measured). "a subject whose tail is a SECOND NOUN PHRASE is refused"
+    # was FALSE for a second NP opening with a POSSESSIVE (`his|her`) or with a
+    # PRE-DETERMINER, and for a second NP with NO determiner at all — five content
+    # questions still ROUTED to the whole ended population with `signal=None`:
+    #
+    #   `is the report his team archived`               <- possessive second NP
+    #   `is the contract every employee signed archived` <- pre-determiner second NP
+    #   `is the report each manager reviewed archived`  <- …or `each`
+    #   `is the dashboard all customers use deprecated` <- …or `all`
+    #   `is the export customers requested archived`    <- second NP with NO determiner
+    #
+    # The list is now COMPLETE OVER ITS OWN TABLE — not over English (round-21 review,
+    # P2): `his|her` (the sibling list's spelling) and the pre-determiners are members, and
+    # the boundary is named so a later reader does not read "refused" as "all of them".
+    # ⛔ THE `-ed` ANCHOR THAT TRIED TO CLOSE THE DETERMINER-LESS CASE IS WITHDRAWN
+    # (round-21 review, P1, measured): "an `-ed` word" is not "a finite verb" — `feed`,
+    # `seed`, `need`, `bed` and `shed` all END in `ed`, so it silently refused a subject
+    # whose HEAD NOUN is one of them (`is the feed archived`, `is the seed archived`,
+    # `is the migration seed archived`, `is the deprecated feed archived`), where the
+    # revision BEFORE round 20 (`e84612d43f`) routed. A SILENT refusal of an ordinary state
+    # question is the second-worst outcome this module recognises and it bought exactly
+    # one spelling, so it is gone. (⛔ THE BASELINE MATTERS, AND THE FIRST CUT OF THIS NOTE
+    # NAMED IT WRONG — round-22 review, P3: HEAD~1 IS round 20, the commit that refused
+    # these; they route at HEAD~2. A trail a reader cannot reproduce reads as a fix that
+    # changed nothing.)
+    # ⛔ AND THE WIDENED LIST REFUSED DEGREE WORDS INSIDE THE SUBJECT (round-21 review,
+    # P1, measured): `is the most recent export archived` and `is the data all archived`
+    # returned `population=None, signal=None` where `e84612d43f` routed. THREE POSITION
+    # rules fix that — in the position slot, never in the word-run slot (the wrong
+    # placement kills the guard entirely, the round-19 failure mode):
+    #   (a) a determiner-vocabulary word DIRECTLY PRECEDED BY A DETERMINER is one NP
+    #       (`the most recent`), so it cannot open a second one;
+    #   (b) a determiner-vocabulary word IMMEDIATELY FOLLOWED BY THE PARTICIPLE is a
+    #       POST-NOMINAL quantifier (`the data all archived`), not a second NP;
+    #   (c) …nor is one followed by a DEGREE or NEGATION adverb (`no longer`, `any longer`,
+    #       `all but`, `most recent`). ⛔ RULE (c) IS THE ROUND-22 REVIEW'S P2, measured:
+    #       without it `is the export no longer archived`, `is our plan no longer retired`,
+    #       `is the report any longer archived`, `is the invoice no longer cancelled`,
+    #       `is the export all but archived` and `is the export most recent archived` were
+    #       SILENT while the semantically identical `is the export not archived` ROUTED —
+    #       an internally inconsistent pair, with no notice on the refused half.
+    # ⛔ AND THE RESIDUAL THIS GUARD CANNOT CLOSE IS STATED RATHER THAN CALLED CLOSED:
+    # a second NP with NO determiner (`is the export customers requested archived`) and one
+    # opening with an indefinite quantifier this module does not name (`several`, `fewer`,
+    # `other`, `another`, `much`, `enough` — `is the export several teams use deprecated`)
+    # still ROUTE, because telling a bare noun from a bare verb needs a lexicon this
+    # detector does not have.
     r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){1,5}"
     r"(?:that|which|who|whom|whose|whether|because|since|when|while|if|unless|given|"
+    # ⛔ AND A SECOND AUXILIARY IS A NESTED CLAUSE (round-16 review, measured):
+    # `has anyone complained billing has been deprecated` put the caller's own verb
+    # (`complained`) plus a whole asyndetic clause (`billing has been …`) inside the
+    # perfect branch's subject and ROUTED to the whole ended population with the
+    # predicate dropped. The copula the shape needs is the one AFTER the subject, so an
+    # auxiliary inside the subject refuses the shape. Measured after the round-20/21/22
+    # guards: this row still routed, and every routing row in the suite still routes with
+    # the tokens below (`is the data all archived`, `has the onboarding flow been
+    # retired`, `is the v3 export deprecated`).
     r"where|whereas|after|before|now|what|how|why|has|have|had|is|are|was|were|will|"
-    r"would|can|could|may|might|must|should|do|does|did)\b)"
-    r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){1,5}"
-    r"(?:the|a|an|our|my|its|their|these|those|this|that|all|your)\b)"
+    r"would|can|could|may|might|must|should|do|does|did)(?![-/])\b)"
+    r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){0,4}"
+    r"(?!(?:all|both|half|such|many|most|some|any|no|each|every|of|"
+    r"the|a|an|our|my|its|their|these|those|this|that|your|his|her)\b)"
+    r"[a-z0-9][a-z0-9'’._/-]*\s+"
+    r"(?:the|a|an|our|my|its|their|these|those|this|that|your|his|her|"
+    rf"all|both|half|such|many|most|some|any|no|each|every)(?![-/])\b"
+    rf"(?!\s+(?:(?:longer|more|less|recent|but|yet|than)\b|(?:{_ENDING_WORDS})\b)))"
+    # ⛔ AND A SUBJECT PRONOUN MAY ONLY **BE** THE SUBJECT (round-18 review, P1,
+    # measured — the SAME #14033 defect still open after round 17's two guards, in the
+    # same worst direction). Both guards above miss it: a REDUCED RELATIVE whose
+    # subject is a pronoun needs no second determiner, and an EXTRAPOSED frame
+    # (`is it <adjective> <subject> <participle>`) has no determiner at all:
+    #
+    #   `is the plan we archived`      <- reduced relative, pronoun subject (`we`)
+    #   `is the report she archived`   <- …or `she`/`they`/`you`
+    #   `is it clear legal retracted`  <- extraposed `it`, the REAL subject follows it
+    #   `is there evidence legal retracted`
+    #
+    # All fourteen probes were answered with the WHOLE ended population with the
+    # caller's own predicate dropped, and `signal` stayed None — so it was not even
+    # reported. `is_copula` is NEW in this PR, so on `main` every one of them is an
+    # ordinary relevance read: this class is the PR's own regression.
+    # ⛔ THE FIX IS A ROLE, NOT A WORD LIST: a personal pronoun can only BE a subject,
+    # never sit INSIDE a longer noun phrase — the pronoun is what a second clause opens
+    # with (`the plan we …`) or, when it leads, the SUBJECT IS the pronoun and every
+    # word after it belongs to another slot (an adverb, which the prefix owns, or the
+    # participle). So the subject is now TWO disjoint branches — a noun phrase, which
+    # may not contain a pronoun at all, or a BARE PRONOUN — and nothing else:
+    #   `is it archived` / `is it really retired` still ROUTE (the bare-pronoun branch,
+    #   with the adverb in the prefix's own adverb slot);
+    #   `is the plan we archived` / `is it clear legal retracted` are REFUSED.
+    # The recall given up is stated rather than discovered: a pronoun subject followed by
+    # a word that is NOT one of the prefix's adverbs (`is it probably retired`) keeps the
+    # relevance read, and so does a subject whose noun phrase contains a pronoun.
+    r"(?:"
+    r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){0,5}"
+    r"(?:i|you|he|she|it|we|they|there)(?![-/])\b)"
     r"(?:(?:the|our|my|its|their|these|those|this|that|all|your)\s+)?"
     r"[a-z0-9][a-z0-9'’._/-]*(?:\s+[a-z0-9][a-z0-9'’._/-]*){0,3}"
+    r"|(?:i|you|he|she|it|we|they|there)(?![-/])"
+    r")"
 )
 #: ⛔ THE PERFECT BRANCH REQUIRES `been`, AND THAT IS A HIJACK FIX (round-7 review,
 #: P1). `already`/`ever` in place of `been` reads as an ACTIVE third-party action —
@@ -672,9 +801,26 @@ _COPULA_SUBJECT = (
 #: serving the whole ended population with no notice. Only `is|are|was|were` can be
 #: followed by a bare participle, because there the passive/adjectival reading is
 #: forced.
+#: ⛔ THE ADVERB SLOT CARRIES THE TIME/DEGREE ADVERBS A CALLER MAY PUT BETWEEN THE
+#: SUBJECT AND ITS PARTICIPLE, and it is a CLOSED list for the same reason every other
+#: guard here is: an open `[a-z]+` there would swallow a NOUN, which is exactly the
+#: extraposed shape the pronoun branch above refuses (`is it clear legal retracted` —
+#: `clear` must not read as an adverb). `really|still|actually|just` are the round-18
+#: additions, and each one exists so the pronoun branch can stay STRICT (a pronoun is
+#: the whole subject) without losing a legitimate question: `is it really retired` and
+#: `is the export still archived` route, measured. `probably`/`likely` are NOT here —
+#: they are the extraposed frame's own adverbs (`is it likely legal retracted`), and
+#: admitting them would re-open the class this slot is closed against.
+#: ⛔ AND `now` IS DELIBERATELY ABSENT even though it is the commonest adverb here: it
+#: is ALREADY a member of the SUBORDINATOR lookahead above (`now the contract is
+#: archived` is exactly the subordinate-clause shape that guard exists to refuse, and
+#: that guard requires a PRECEDING WORD, so a bare-pronoun subject is refused too).
+#: Adding it here would be dead code that reads as coverage — measured:
+#: `is the export now archived` is REFUSED by the subordinator guard, not routed, and
+#: `is it now retired` likewise. Recorded rather than duplicated.
 _COPULA_PREFIX = (
     rf"^(?:(?:is|are|was|were)\s+{_COPULA_SUBJECT}"
-    rf"\s+(?:already\s+|ever\s+)?(?:{_ENDING_WORDS})\b"
+    rf"\s+(?:(?:already|ever|really|still|actually|just)\s+)?(?:{_ENDING_WORDS})\b"
     rf"|(?:has|have|had)\s+{_COPULA_SUBJECT}"
     rf"\s+been\s+(?:{_ENDING_WORDS})\b)"
 )
@@ -897,20 +1043,20 @@ evidence that nothing has ended. This tool takes NO argument that forces the
 ended read — the SHAPE is the only way in, so the way to be explicit is to ask
 a form from the ROUTES list above. ⛔ AND A RETRIEVAL ARGUMENT THAT CHANGES THE
 READ SILENCES THE REPORT, which is the other half of that boundary: a
-NON-DEFAULT `threshold`, `min_confidence`, `order_by`, `relationship_filter`
-or `traversal_path` asks for a FILTERED relevance read, and the cue report is
-raised inside the same guard that decides routing — so with any of those
-supplied you get that filtered read and NO report, and a state question you
-filtered looks exactly like an honest empty again. (A value equal to the
+NON-DEFAULT retrieval argument asks for a FILTERED relevance read, and the cue
+report is raised inside the same guard that decides routing — so with any of
+them supplied you get that filtered read and NO report, and a state question
+you filtered looks exactly like an honest empty again. (A value equal to the
 default — `threshold=0`, `min_confidence=0`, `order_by="relevance"` — is not a
-filter and does not silence it.) ⛔ AND THE TOOL'S OTHER THREE RETRIEVAL
-ARGUMENTS ARE NOT IN THAT SET, which is why this sentence names its members
-rather than saying "any argument": `kind`, `entity_type` and `limit` change
-WHICH rows a read returns and are applied by the population itself, so they do
-NOT ask for a filtered relevance read and leave the report intact — `kind=`
-alone never silences the notice, and neither does `limit=`. The filter and the
-population are different answers: send the question ALONE to get the population
-or the report. (The
+filter and does not silence it.) ⛔ THE CLOSED LIST IS THE AUTHORITY, NOT THIS
+SENTENCE: `_retrieval_knobs` in `tortoise/sdk.py`, and a name given here — a
+non-default `threshold`, `min_confidence`, `order_by`, `relationship_filter`,
+`traversal_path`, `pool_size`, `time_aware` — is an EXAMPLE of it, never the
+set. Only THREE parameters sit OUTSIDE it: they change WHICH rows a read
+returns rather than asking for a filtered read, because the POPULATION applies
+them — `kind`, `entity_type`, `limit` — so none silences the notice. The
+filter and the population are different answers: send the question ALONE to
+get the population or the report. (The
 hosted `GET /v1/search` route below takes only the question and `limit`,
 neither of which is a routing argument, so it is not silenced.)
 ⛔ THIS TOOL CANNOT REPORT the cue it saw
