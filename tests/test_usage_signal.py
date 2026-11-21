@@ -1017,6 +1017,14 @@ def test_no_graph_dependency_pins_the_package_root_EXPORT_form() -> None:
     assert _offending("import tortoise as t\nf = t\ng = f\nc = g.Tortoise\n") == {
         "tortoise.Tortoise"
     }
+    # ⛔ AND THE ANNOTATED REBINDING (`ast.AnnAssign`), which is a separate node kind
+    # from `ast.Assign` — a fixpoint that walks only `Assign` follows `f = tortoise`
+    # and NOT `f: Any = tortoise`, leaving the same hole one spelling over. Pinned
+    # on its own because deleting that branch reddened nothing (measured: 98
+    # passed), i.e. it was the only unpinned line of the leg.
+    assert _offending(
+        "from typing import Any\nimport tortoise\nf: Any = tortoise\nc = f.FalkorDB\n"
+    ) == {"tortoise.FalkorDB"}
     # …and `import tortoise.sdk` binds `tortoise` too, so it is both a banned
     # module AND the handle the attribute form is read through.
     assert _offending("import tortoise.sdk\nc = tortoise.FalkorDB\n") == {
