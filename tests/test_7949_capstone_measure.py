@@ -1389,9 +1389,12 @@ def test_e6_refuses_a_pack_the_registry_isolated_on_a_real_input(tmp_path):
     `load_errors` read the row reads **GREEN 31/31** over six packs, the exact false PASS
     the commit that added the carry exists to refuse.
 
-    Non-vacuity: delete the `"load_errors"` entry from `measurement.update(...)` and this
-    reds on the row's verdict (`PASS`/GREEN instead of REFUSED/BLOCKED) while every
-    synthetic-`load_errors` arm stays green — which is the mutant the review built.
+    Non-vacuity: delete the `"load_errors"` entry from `measurement.update(...)` and this case
+    reds on the `load_errors` assertion below — four statements BEFORE the row is built; ⛔ with
+    that assertion removed the row itself reads **GREEN `PASS 31 31`**, which is the false PASS
+    the carry exists to refuse, while every synthetic-`load_errors` arm stays green. That is the
+    mutant the review built, and round 13 measured that this docstring named the wrong assertion
+    (it said "reds on the row's verdict").
     """
     packs = _corrupted_packs_copy(tmp_path)
     e6 = measure.measure_e6(packs_dir=packs)
@@ -1793,9 +1796,10 @@ def test_the_e6_surface_breadth_is_stated_once_and_every_loop_reads_it():
     # ⛔ THE SPELLING, not the one exact byte sequence (#14060 review round 11, P3): the
     # original count matched `("relations", "hierarchies")` only, so the population guard this
     # same PR added — `("relations", "hierarchies", "declared")` — restated the breadth where
-    # the comment says it cannot be, and survived the pin. Any bracketed pair of the two names,
-    # in either quote style and with any spacing, is the shape an inline breadth takes.
-    spellings = re.findall(r'[(\[]\s*["\']relations["\']\s*,\s*["\']hierarchies["\']', text)
+    # the comment says it cannot be, and survived the pin. A pair of the two names bracketed by
+    # `(`, `[` or `{` — either quote style, any spacing INCLUDING a line break — is the shape an
+    # inline breadth takes; a `{…}` SET literal was measured evading the first widening (round 13).
+    spellings = re.findall(r'[(\[{]\s*["\']relations["\']\s*,\s*["\']hierarchies["\']', text)
     assert len(spellings) == 1, (
         f"the E6 surface breadth must be stated ONCE, in `E6_SURFACES` — found {len(spellings)} "
         "spellings of the pair; a second inline literal is how the beside column kept a breadth "
@@ -1803,18 +1807,22 @@ def test_the_e6_surface_breadth_is_stated_once_and_every_loop_reads_it():
     assert text.count("for surface in E6_SURFACES:") == 2, (
         "the population enumeration and the beside column must both READ the tuple — the claim "
         "the `E6_SURFACES` comment and `_e6_census_rows`' docstring make")
-    # ⚠️ STATED RESIDUAL, because the round-11 review measured the gap between this pin and the
-    # comment it guards: a breadth spelled as TWO separate arguments (`loop("relations",
-    # "hierarchies")` on two lines, or a set built by name) evades both counts. What catches a
-    # NARROWED tuple is not this case but the population guards in `measure_e6` plus the arms
-    # that read the enumeration — MEASURED on the mutant (`E6_SURFACES = ("relations",)` reds
-    # this case, `test_a_hierarchies_defect_reaches_the_bar_not_just_the_scan`,
-    # `test_e6_reads_the_population_from_the_packs_and_written_from_the_artifact`, and five
-    # other E6 cases; ⛔ NOT `test_a_synthetic_hierarchies_defect_runs_through_the_runs_own_
-    # defect_scan`, which hands `e6_defects` a literal tuple and never reads the constant — the
-    # first cut of this sentence named it, and a round-12 review measured that it stays green
-    # under the mutant). This case holds the LITERAL to one, which is the edit the comment
-    # invites.
+    # ⚠️ STATED RESIDUAL, twice corrected because a reviewer measured each cut rather than
+    # reading it (rounds 12 and 13): what still EVADES both counts is a breadth assembled without
+    # an adjacent bracketed pair — a bare tuple (`SURFACES = "relations", "hierarchies"`), or the
+    # names passed as two separate arguments on separate statements. ⛔ NOT the two-line
+    # parenthesised spelling: the `\s*` in the pattern crosses a line break, so that one IS
+    # counted (measured, `2 spellings` — an earlier cut of this sentence claimed it evaded).
+    # What catches a NARROWED tuple is not this case but the population guards in `measure_e6`
+    # plus the arms that read the enumeration — MEASURED on the mutant
+    # (`E6_SURFACES = ("relations",)` reds NINE cases: this one,
+    # `test_a_hierarchies_defect_reaches_the_bar_not_just_the_scan`,
+    # `test_e6_reads_the_population_from_the_packs_and_written_from_the_artifact`, and six other
+    # E6 cases including `test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_
+    # not_main`; ⛔ NOT `test_a_synthetic_hierarchies_defect_runs_through_the_runs_own_defect_
+    # scan`, which hands `e6_defects` a literal tuple and never reads the constant — the first
+    # cut named it, and a round-12 review measured that it stays green under the mutant). This
+    # case holds the LITERAL to one, which is the edit the comment invites.
 
 
 def test_build_rows_refuses_an_e6_mapping_missing_a_required_key():
