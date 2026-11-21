@@ -436,11 +436,20 @@ _EXISTENCE_GUARD = (
     # the slot above requires `<determiner> <noun>`, which a pronoun has NEITHER of, so
     # `have any users reported it has been deprecated` was ROUTED to the whole ended
     # population and the caller's own predicate (`reported`) was dropped — the exact
-    # hijack this guard exists to refuse, one subject class wide. The pronoun is the
-    # whole subject here, so it needs no noun after it.
-    r"(?![^?]{0,60}?\b(?:it|they|he|she|we|you)\s+"
+    # hijack this guard exists to refuse, one subject class wide.
+    # ⛔ BUT THE PRONOUN IS THE SECOND CLAUSE'S SUBJECT, NOT THE QUESTION'S (#14033
+    # round-15 review, P2, measured — the first cut of THIS lookahead caused it): a
+    # RELATIVE clause's subject can be a pronoun too, and there the participle that
+    # follows `been` belongs to the RELATIVE clause, which is the one place inside the
+    # window the module allows (`has anything we have been tracking been withdrawn` is
+    # the capstone question in the present perfect, and it ROUTES). So the lookahead
+    # fires only when the pronoun clause's own `been` introduces an ENDING participle —
+    # that is what separates `it has been deprecated` (asyndetic: the ending is the
+    # relative clause's) from `we have been tracking` (relative: the ending is still the
+    # question's).
+    rf"(?![^?]{{0,60}}?\b(?:it|they|he|she|we|you)\s+"
     r"(?:has|have|had|is|are|was|were|will|would|can|could|did|does|do|may|might|"
-    r"must|should)\s+(?:not\s+)?(?:have\s+)?been\b)"
+    rf"must|should)\s+(?:not\s+)?(?:have\s+)?been\s+(?:{_ENDING_WORDS})\b)"
 )
 _EXISTENCE_WINDOW = rf"[^?]{{0,60}}?\bbeen\s+(?:{_ENDING_WORDS})\b"
 _EXISTENCE_PREFIX = _EXISTENCE_HEAD + _EXISTENCE_GUARD + _EXISTENCE_WINDOW

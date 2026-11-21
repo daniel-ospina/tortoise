@@ -837,6 +837,49 @@ def test_the_two_silences_the_comments_name_are_measured_not_hoped():
             "comment's '`as yet` is outside the list' example becomes true again")
 
 
+def test_a_relative_clause_in_the_perfect_still_routes():
+    r"""The pronoun lookahead must not swallow the RELATIVE clause (#14033 round-15).
+
+    The guard's pronoun alternative was added to refuse the ASYNDETIC hijack
+    (`have any users reported it has been deprecated`, where the ending belongs to
+    the relative clause and the caller's own predicate is dropped). Its first cut
+    matched `we have been` in the RELATIVE form too — where the ending still belongs
+    to the question — so the capstone question in the present perfect became a
+    relevance read AND a notice whose remedy ("ask it as a whole question") is a
+    runaround, because re-asking in the same legitimate form is refused again.
+
+    The discriminator is what the pronoun clause's own `been` introduces: an ENDING
+    participle means asyndetic (refuse), anything else means the relative clause is
+    just describing the subject (route). Both directions are pinned here, because a
+    one-sided pin is what let the regression in.
+    """
+    from tortoise.state_intent import detect_state_question, missed_route_payload
+
+    for routed in (
+        "has anything we have been tracking been withdrawn",
+        "have any features we have been using been deprecated",
+        "has anything they have been told about been withdrawn",
+    ):
+        got = detect_state_question(routed)
+        assert got.population == "ended" and got.signal is None, (
+            f"{routed!r} no longer routes ({got.population!r}/{got.signal!r}) — the "
+            "pronoun lookahead is refusing a RELATIVE clause, whose participle is "
+            "still the question's own predicate")
+        assert missed_route_payload(got) is None, (
+            f"{routed!r} now carries a notice on top of a relevance read — the "
+            "remedy it names is a runaround, since the question is already in the "
+            "form the ROUTES list asks for")
+    for refused in (
+        "have any users reported it has been deprecated",
+        "have any customers noticed they have been cancelled",
+    ):
+        got = detect_state_question(refused)
+        assert got.population is None and got.signal is not None, (
+            f"{refused!r} ROUTES to the ended population again ({got!r}) — its "
+            "ending belongs to the relative clause, and the caller's own predicate "
+            "is dropped (#14033 round-14 review, P2)")
+
+
 def test_a_missed_cue_names_words_it_saw_whole():
     r"""The notice's `cue` ends on a WORD boundary (#14033 review, P3).
 
