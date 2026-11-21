@@ -104,6 +104,7 @@ from typing import Any
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tortoise import resident_pin
 from tortoise.cache_eviction import (
     CACHE_EVICTION_EXIT_CLEAN,
     CACHE_EVICTION_EXIT_PLAN,
@@ -229,6 +230,13 @@ def main(argv: list[str] | None = None) -> int:
                         help=("the destructive token: must EQUAL --graph. Required "
                               "with --execute — it proves the OPERATOR authorized "
                               "this graph, not that a placeholder was left filled."))
+    parser.add_argument("--allow-unapplied-pin-set", action="store_true",
+                        help=("proceed when the pin declaration addresses ANOTHER key "
+                              "space than --key-prop. Off by default: a sweep whose key "
+                              "space differs from the declaration's may be deleting "
+                              "nodes a user declared resident, so that run is REFUSED. "
+                              "Pass this only when you have established the two key "
+                              "spaces hold different populations."))
     parser.add_argument("--out", type=Path, help="write the report here (default: stdout)")
 
     args = parser.parse_args(argv)
@@ -359,10 +367,111 @@ def main(argv: list[str] | None = None) -> int:
                    "census": assessment.as_dict()}, args.out)
             return CACHE_EVICTION_EXIT_REFUSED
 
+        # ⛔ #14012 — THE PIN, AND IT HAS NO OFF-SWITCH. What a user declared resident
+        # may not be swept by an operator flag, so there is no `--ignore-pins`: the
+        # declaration is read here, always, and one that cannot be read, cannot be read in
+        # full, or no longer fits its budget REFUSES the sweep rather than either
+        # silently dropping the user's declaration or silently letting pins take over the
+        # fast layer.
+        #
+        # ⛔ THE DECLARATION IS READ **BEFORE** A BUDGET IS RESOLVED, and the budget is
+        # only required when something is declared. Resolving it first made every sweep
+        # refuse — including sweeps with NOTHING pinned — on an unrelated
+        # `TORTOISE_PIN_MAX_NODES` typo or a window too small for a pin to exist. That is
+        # the unbounded-cache state #10976 exists to prevent, reached through a
+        # configuration value about a control the sweep was not using.
+        pins = resident_pin.read(graph)
+        pin_note = ""
+        pinned_gate = None
+        # ⛔ UNREADABLE and TRUNCATED are settled FIRST and need no budget: they are
+        # facts about the DECLARATION, not about the cap. Resolving a budget before them
+        # reported a configuration error for a declaration nobody could read — the wrong
+        # cause, on the one refusal an operator has to act on.
+        # ⛔ AND EVERY REFUSAL CARRIES THE SAME `pins` SHAPE. The success body and the
+        # key-space-mismatch refusal emit `applied`/`not_applied_reason`; the three
+        # refusals below emitted bare `pins.as_dict()`, so a consumer keying on
+        # `pins.applied` — the field the success body defines — hit a KeyError on exactly
+        # the refusals it has to act on. That is the "second shape for one refusal" class
+        # `tools/resident.py::_refused` already closed for its own envelopes.
+        def _pins_refused(reason: str) -> dict:
+            return {**pins.as_dict(), "applied": False, "not_applied_reason": reason}
+
+        if not pins.readable or pins.truncated:
+            reason = pins.gate_reason() or "the pin declaration is unusable"
+            _emit({"verdict": "REFUSED", "reason": reason,
+                   "pins": _pins_refused(reason),
+                   "census": assessment.as_dict()}, args.out)
+            return CACHE_EVICTION_EXIT_REFUSED
+        if pins.keys:
+            try:
+                pin_budget = resident_pin.PinBudget.resolve(
+                    window_nodes=policy.max_nodes)
+            except resident_pin.PinConfigError as exc:
+                reason = (f"a pin declaration exists and its budget cannot be "
+                          f"resolved: {exc}")
+                _emit({"verdict": "REFUSED", "reason": reason,
+                       "pins": _pins_refused(reason),
+                       "census": assessment.as_dict()}, args.out)
+                return CACHE_EVICTION_EXIT_REFUSED
+            pins = resident_pin.read(graph, budget=pin_budget)
+            pin_refusal = pins.gate_reason()
+            if pin_refusal is not None:
+                _emit({"verdict": "REFUSED", "reason": pin_refusal,
+                       "pins": _pins_refused(pin_refusal),
+                       "census": assessment.as_dict()}, args.out)
+                return CACHE_EVICTION_EXIT_REFUSED
+            # ⛔ A PIN SET ADDRESSES ONE KEY SPACE, and this sweep addresses the one its
+            # `--key-prop` names. On a mismatch the set holds nothing in THIS population,
+            # so it must not be applied. ⛔ AND IT IS REFUSED BY DEFAULT rather than
+            # reported-and-proceeded (an earlier revision of this comment described the
+            # proceed-by-default behaviour, which is gone): the comparison is on the
+            # PROPERTY NAME, so it does not PROVE the two key spaces hold different
+            # populations — a sweep keying the same nodes by another property would evict a
+            # pinned closure while the report read `held_pinned: 0`. The over-block that
+            # motivated proceeding (a per-graph set is declared once) is real and is
+            # answered by ONE auditable flag, `--allow-unapplied-pin-set`. The flag pair
+            # that used to decide this is GONE: `--pins-label/--pins-key-prop` were both an
+            # over-block (any `Point` pin refused a `Source` sweep) and a bypass (naming
+            # the declaration's own pair rather than the sweep's re-armed it).
+            if pins.keys and pins.key_prop != args.key_prop:
+                pin_note = (
+                    f"the pin declaration addresses keys named by {pins.key_prop!r} "
+                    f"({len(pins.keys)} key(s) on {pins.label!r}), but this sweep keys on "
+                    f"{args.key_prop!r} — the declaration holds nothing in this "
+                    f"population's key space, so it was NOT applied"
+                )
+                # ⛔ REFUSED BY DEFAULT, and the reason is that the mismatch is NOT
+                # provably harmless: it is a comparison on the PROPERTY NAME, so a sweep
+                # that keys the same nodes by a different property (`--key-prop
+                # point_id` against a declaration on `id`) would evict a pinned closure
+                # while the report read `held_pinned: 0` — the control silently
+                # protecting nothing, on the one run that deletes. The alternative
+                # (block every sweep of another population for as long as any pin
+                # exists) is real, so the way past is ONE explicit, auditable flag
+                # rather than a silent default: `--allow-unapplied-pin-set`.
+                if not args.allow_unapplied_pin_set:
+                    _emit({"verdict": "REFUSED",
+                           "reason": (f"{pin_note}. A sweep may not run over a "
+                                      f"population whose key space it cannot check the "
+                                      f"declaration against — pass "
+                                      f"--allow-unapplied-pin-set if you have "
+                                      f"established the two key spaces hold different "
+                                      f"populations"),
+                           "pins": {**pins.as_dict(), "applied": False,
+                                    "not_applied_reason": pin_note},
+                           "census": assessment.as_dict()},
+                          args.out)
+                    return CACHE_EVICTION_EXIT_REFUSED
+                print(f"#14012: {pin_note}; continuing because "
+                      f"--allow-unapplied-pin-set was passed", file=sys.stderr)
+            else:
+                pinned_gate = pins.gate() if pins.keys else None
+
         report = evict(assessment, client, graph,
                        population=args.population,
                        selector=selector, record_probe=record_probe,
                        key_prop=args.key_prop,
+                       pinned=pinned_gate,
                        dry_run=not args.execute, policy=policy)
     finally:
         for handle in (client, graph):
@@ -385,6 +494,20 @@ def main(argv: list[str] | None = None) -> int:
         # ever emits it.
         "metric": report.metric(),
         "census": assessment.as_dict(),
+        # ⛔ `applied` IS `None` WHEN THERE IS NOTHING TO APPLY, not `False`. With no
+        # declaration `pinned_gate` stays `None` and the reason is empty, so `False` beside
+        # `""` was an alarm with no cause — on every clean sweep of an unpinned graph — and
+        # `False` is otherwise emitted only on the wrong-key-space path, where it always
+        # carries a sentence. A monitor keys on this field; it must distinguish "not
+        # applicable" from "needed and not applied", the same split `metric()` makes for
+        # `degraded_snapshot_invalidated`.
+        "pins": {
+            **pins.as_dict(),
+            "applied": (pinned_gate is not None) if pins.keys else None,
+            "not_applied_reason": pin_note or (
+                "" if pins.keys else "no pin declaration — nothing to apply"
+            ),
+        },
     }
     _emit(body, args.out)
 
