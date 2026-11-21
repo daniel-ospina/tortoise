@@ -36,7 +36,7 @@ import re
 import sys
 from html import unescape as html_unescape
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 from xml.etree import ElementTree
 
 import pytest
@@ -1310,32 +1310,36 @@ def _docs_section(anchor: str = "storage", *, page: str | None = None) -> str:
     return html[start:]
 
 
-#: Schemes an href may use and still be a same-page in-page link. A bare fragment
-#: has no scheme at all; `javascript:`/`mailto:`/`data:` never name a fragment on
-#: THIS document, so they are not advertisers.
-_THIS_PAGE_HREF_SCHEMES = ("", "http", "https")
-
-
 def _fragment_this_page_advertises(href: str, document: Path) -> str | None:
     """The heading id `href` advertises ON `document`, or `None`.
 
     See `_docs_section` for why a literal `href.startswith("#")` is the wrong test.
-    Two questions, in this order:
+    Three questions, in this order:
 
     1. WHICH FRAGMENT — the URL parser strips leading/trailing C0-or-space from an
        href value, so `" #quickstart"` and a value wrapped in newlines are the
        same URL as `"#quickstart"`. `urlparse` gives the fragment after that
-       stripping and after entity decoding, which is the tokenizer's work, not a
-       pattern's.
-    2. WHICH DOCUMENT — decided by the module's own route map
+       stripping, which is the tokenizer's work, not a pattern's.
+    2. WHICH URL — resolved with `urljoin` against the page's OWN canonical URL
+       (`_canonical_page_url`), so a RELATIVE href is rooted where a browser roots
+       it. Rooting it at `/` instead accepted `tortoise/docs#quickstart`, which a
+       browser resolves to `/tortoise/tortoise/docs` — a 404 — and REJECTED
+       `../docs#quickstart`, which is `/docs` and serves this page (the loud
+       direction, but wrong; #14073 review, measured both).
+    3. WHICH DOCUMENT — must be the same-origin canonical URL (`_canonical_page_url`)
+       AND resolve to this file through the module's route map
        (`_document_for_loc`), so `/docs` (the retired alias), `/tortoise/docs`,
-       `docs.html` and the full-URL form are ONE question instead of a second
-       list of spellings that rots at the next route change.
+       `docs.html` and `?query#frag` are ONE question instead of a second list of
+       spellings that rots at the next route change.
 
-    ⛔ A FOREIGN HOST IS NEVER SAME-PAGE. `//evil.example/docs#storage-limits`
-    resolves to this document's PATH, so a path-only rule would accept it and add
-    an entry to the advertised set — a larger set, a shorter slice, the fail-open
-    direction. A same-page absolute link must name a host this project serves.
+    ⛔ THE HOST IS THE CANONICAL ONE OR NOTHING. `//evil.example/docs#storage-limits`
+    resolves to this document's PATH, so a path-only rule accepts it — and
+    `app.premiselabs.co/tortoise/docs` is a SEPARATE Pages project that serves no
+    docs at all, yet `_document_for_loc` is host-blind below the root. Either would
+    GROW the advertised set: a larger set, a shorter slice, the fail-open direction
+    (#14073 review, both measured). A full-URL entry on a retired host is therefore
+    not advertised — the slice runs long and the golden says so, which is the
+    direction a guard wants to be wrong in.
     """
     target = href.strip(" \t\n\r\f\v")
     if not target:
@@ -1343,23 +1347,12 @@ def _fragment_this_page_advertises(href: str, document: Path) -> str | None:
     parsed = urlparse(target)
     if not parsed.fragment:
         return None
-    if not (parsed.path or parsed.netloc or parsed.scheme):
-        return parsed.fragment  # a bare fragment: this page by definition
-    if parsed.scheme not in _THIS_PAGE_HREF_SCHEMES:
+    canonical = _canonical_page_url(document)
+    resolved = urlparse(urljoin(canonical, target))
+    if resolved.netloc != urlparse(canonical).netloc:
         return None
-    if parsed.netloc:
-        if not parsed.scheme or parsed.hostname not in SITE_HOSTS:
-            return None
-        try:
-            if parsed.port not in (None, 80, 443):
-                return None
-        except ValueError:  # an unparsable port names no document here
-            return None
-        resolved = _document_for_loc(target)
-    else:
-        relative = target if target.startswith("/") else f"/{target}"
-        resolved = _document_for_loc(f"{MARKETING_ORIGIN}{relative}")
-    return parsed.fragment if resolved == document else None
+    document_url = resolved._replace(fragment="").geturl()
+    return parsed.fragment if _document_for_loc(document_url) == document else None
 
 
 #: An `<h2 …>` opening tag, its attribute text captured whole.
@@ -2171,7 +2164,31 @@ _SAME_PAGE_TOC_SPELLINGS = (
     ("absolute path", ' href="/tortoise/docs#quickstart"'),
     ("retired alias path", ' href="/docs#quickstart"'),
     ("relative file", ' href="docs.html#quickstart"'),
+    # A RELATIVE href is rooted at the PAGE's URL (`/tortoise/docs`), not at the site
+    # root: `../docs` is `/docs`, which serves this page. Rooting at `/` instead both
+    # rejected this spelling and ACCEPTED `tortoise/docs` (see the loud rows below).
+    ("parent-relative path", ' href="../docs#quickstart"'),
     ("full URL", ' href="https://premiselabs.co/tortoise/docs#quickstart"'),
+)
+
+#: Entries that do NOT name a heading on THIS page — a browser leaves this document, or
+#: 404s. Accepting any of them GROWS the advertised set, which is the fail-open
+#: direction (a larger set cuts the slice earlier). Each is a spelling a human can
+#: actually author, which is why they are pinned rather than argued away.
+_FOREIGN_TOC_SPELLINGS = (
+    ("another page's fragment", ' href="/tortoise/faq#quickstart"'),
+    ("a foreign host", ' href="//evil.example/docs#quickstart"'),
+    ("a foreign host with a scheme", ' href="https://evil.example/docs#quickstart"'),
+    ("a non-http scheme", ' href="mailto:team@premiselabs.co#quickstart"'),
+    # ⛔ THE SEPARATE PAGES PROJECT. `app.premiselabs.co` serves no docs at all, and
+    # `_document_for_loc` is host-blind below the site root, so a path-only rule
+    # accepted it (`https://app.premiselabs.co/docs#quickstart` → this document).
+    ("the dashboard host", ' href="https://app.premiselabs.co/tortoise/docs#quickstart"'),
+    ("a retired host", ' href="https://tortoise.premiselabs.co/tortoise/docs#quickstart"'),
+    # ⛔ MIS-ROOTED RELATIVE — a browser resolves `tortoise/docs` from `/tortoise/docs`
+    # to `/tortoise/tortoise/docs`, which the middleware 404s (`productRest` + the
+    # `PRODUCT_PAGES` gate). Rooting it at `/` made it look like this page.
+    ("a mis-rooted relative path", ' href="tortoise/docs#quickstart"'),
 )
 
 
@@ -2191,7 +2208,12 @@ def test_the_advertised_set_is_a_url_question_not_a_string_prefix() -> None:
     Both directions are asserted here: every legal same-page spelling must BOUND at
     `quickstart` exactly as the unmutated page does, and a link that does NOT name
     this document must not bound there — a larger advertised set is a shorter
-    slice, the fail-open direction.
+    slice, the fail-open direction. ⛔ Both halves of "does not name this document"
+    are pinned: navigation AWAY (`/tortoise/faq`, a foreign host, `mailto:`) and the
+    two spellings a PATH-ONLY rule wrongly accepted — the dashboard host (a separate
+    Pages project with no docs) and a mis-rooted relative path (`tortoise/docs`,
+    which a browser resolves to `/tortoise/tortoise/docs`, a 404). See
+    `_fragment_this_page_advertises`.
     """
     page = _read(DOCS)
     entry = '<a href="#quickstart">Quickstart (5 minutes)</a>'
@@ -2208,11 +2230,7 @@ def test_the_advertised_set_is_a_url_question_not_a_string_prefix() -> None:
             f"so the #storage slice ran past the section and the golden reddened "
             f"on copy nobody touched"
         )
-    for label, replacement in (
-        ("another page's fragment", ' href="/tortoise/faq#quickstart"'),
-        ("a foreign host", ' href="//evil.example/docs#quickstart"'),
-        ("a non-http scheme", ' href="mailto:team@premiselabs.co#quickstart"'),
-    ):
+    for label, replacement in _FOREIGN_TOC_SPELLINGS:
         mutant = page.replace(entry, f"<a{replacement}>Quickstart (5 minutes)</a>", 1)
         assert mutant != page, f"could not rewrite the TOC entry for the {label} case"
         wider = _docs_section(page=mutant)
@@ -2242,7 +2260,22 @@ def test_the_reader_met_rule_refuses_every_declared_unrendered_class() -> None:
     Each positive control is the same shape WITHOUT the invisibility, so a rule
     that simply refused everything would red here instead of passing.
     """
-    for element in sorted(_AnchorHrefParser._UNRENDERED):
+    # ⛔ THE SET UNDER TEST IS NAMED HERE, not read back out of `_UNRENDERED` — a loop
+    # over the declaration alone passes when a member is DELETED from it, which is the
+    # defect this test exists to pin (the same self-referential shape the
+    # `_IMPLICITLY_CLOSED` ratchet had; measured: dropping `object`, `audio`, `meter`,
+    # `progress` left the loop version green). The named set is a SUPERSET check on the
+    # declaration plus a behavioural check per tag.
+    unrendered = {
+        "audio", "canvas", "datalist", "meter", "object", "progress", "video",
+    }
+    assert not unrendered - set(_AnchorHrefParser._UNRENDERED), (
+        f"`_UNRENDERED` no longer declares "
+        f"{sorted(unrendered - set(_AnchorHrefParser._UNRENDERED))}: a `<h2>` there is "
+        f"recorded again, bounds the slice, and the claim under it leaves all three "
+        f"pins"
+    )
+    for element in sorted(unrendered):
         assert [
             heading_id
             for heading_id, _ in extract_heading_positions(
@@ -2259,6 +2292,14 @@ def test_the_reader_met_rule_refuses_every_declared_unrendered_class() -> None:
         ("inherited through a wrapper", '<div hidden><div class="x"><h2 id="qs">Q</h2></div></div>'),
         ("details without open", '<details><h2 id="qs">Q</h2></details>'),
         ("dialog without open", '<dialog><h2 id="qs">Q</h2></dialog>'),
+        # ⛔ A CLOSED `<details>`'s `<summary>` IS RENDERED, and this refusal is a
+        # DELIBERATE over-refusal in the loud direction, pinned so it reads as a
+        # decision: modelling "the first summary renders, a second one does not" is
+        # not attempted, because recording a heading in that second summary would
+        # bound the slice at something no reader meets — the fail-open direction.
+        # The cost is a heading in a real summary does not bound: the slice runs
+        # long and the extra text stays pinned.
+        ("summary of a closed details", '<details><summary><h2 id="qs">Q</h2></summary></details>'),
     ):
         assert extract_heading_positions(markup) == [], (
             f"a `<h2>` is recorded although no reader meets it ({label}): bounding "
@@ -2295,6 +2336,58 @@ def test_the_reader_met_rule_refuses_every_declared_unrendered_class() -> None:
     ) == [["#y"]], (
         "an anchor carrying `hidden` is advertised as a TOC entry, so its"
         " boundary is one no reader can reach"
+    )
+
+
+def test_the_link_set_and_the_boundary_set_answer_different_questions() -> None:
+    """`hidden` narrows the ADVERTISED boundary, never the rendered-LINK set (#14073).
+
+    The two questions were briefly answered by one rule, which made the blog guard
+    blind to a link the page's own script reveals: `website/product.html` renders its
+    OAuth error banner by clearing `el.hidden` (`#oauth-error-retry` → `/auth`), and a
+    static `hidden` refusal dropped that anchor from the rendered-link set — the
+    question "can a visitor reach the blog from this page?" then answers from a
+    document where a link a visitor CAN click does not exist (measured: 27 links
+    before the rule, 26 after; #14073 review).
+
+    So `_collect` keeps the LINK answer as it was (`<select>` only — an `<a>` in a
+    select is not clickable in any browser, under any cascade) and applies the wider
+    boundary rule to the container index only. Both directions are pinned here, at the
+    parser and on the real page that regressed.
+    """
+    hidden_link = '<a href="#x" hidden>x</a><a href="#y">y</a>'
+    assert extract_anchor_hrefs(hidden_link) == ["#x", "#y"], (
+        "an anchor carrying `hidden` is dropped from the rendered-link set: a page's "
+        "own script can reveal it, so the link guard would report a link a visitor "
+        "can click as absent"
+    )
+    assert extract_anchor_hrefs(
+        '<select><a href="#x">x</a></select><a href="#y">y</a>'
+    ) == ["#y"], (
+        "an anchor inside a `<select>` is counted as a link: no browser makes it "
+        "clickable, under any cascade or script"
+    )
+    # …and the boundary answer is still the wider one (asserted above, in
+    # `test_the_reader_met_rule_refuses_every_declared_unrendered_class`).
+    # The REAL page: the JS-revealed banner's link must survive.
+    product = _read(WEBSITE / "product.html")
+    banner_opening = '<div id="oauth-error" class="oauth-error-banner" role="alert" hidden>'
+    retry_anchor = '<a id="oauth-error-retry" href="/auth">Sign up again →</a>'
+    assert banner_opening in product, (
+        "website/product.html's OAuth error banner is no longer a `hidden` div at "
+        "this spelling, so this control no longer measures the JS-revealed case"
+    )
+    assert retry_anchor in product, (
+        "website/product.html no longer carries the JS-revealed OAuth retry link, "
+        "so this control cannot measure the link/boundary split"
+    )
+    assert product.index(banner_opening) < product.index(retry_anchor), (
+        "the OAuth retry link is no longer INSIDE the hidden banner, so this "
+        "control no longer measures a link the page's script reveals"
+    )
+    assert "/auth" in extract_anchor_hrefs(product), (
+        "the JS-revealed `/auth` link is missing from `product.html`'s "
+        "rendered-link set: a static `hidden` rule is modelling a page's script"
     )
 
 
@@ -4415,7 +4508,20 @@ def _document_for_loc(url: str) -> Path | None:
     under_prefix = (
         cleaned_path == PRODUCT_PREFIX or cleaned_path.startswith(PRODUCT_PREFIX + "/")
     )
-    if under_prefix and cleaned_path != PRODUCT_PREFIX and cleaned not in PRODUCT_PAGE_NAMES:
+    # ⛔ THE MIRROR IS THE MIDDLEWARE'S SET, WHICH LISTS BOTH SPELLINGS.
+    # `PRODUCT_PAGES` holds `/docs` AND `/docs.html` for every page, so this gate must
+    # accept a served name with or without its `.html`. Without the stem test,
+    # `/tortoise/docs.html` — served, and what a plain relative `href="docs.html#x"` from
+    # `/tortoise/docs` resolves to — reported None: a false "dangling" red, inherited by
+    # the advertised-set rule in `_docs_section` as a false red on a legal TOC spelling
+    # (#14073 review, measured). `/tortoise/privacy` still fails, because `privacy` is in
+    # `PRODUCT_PAGE_NAMES` neither with nor without the extension.
+    if (
+        under_prefix
+        and cleaned_path != PRODUCT_PREFIX
+        and cleaned not in PRODUCT_PAGE_NAMES
+        and Path(cleaned).stem not in PRODUCT_PAGE_NAMES
+    ):
         return None
     for candidate in (WEBSITE / cleaned, WEBSITE / f"{cleaned}.html"):
         if candidate.is_file():
@@ -4455,6 +4561,12 @@ def test_the_product_prefix_resolves_to_the_served_document() -> None:
     # …and the retired host's paths still resolve, so a stale sitemap is not the thing
     # that fails this file's job (it fails child 4's host assertion, where it belongs).
     assert _document_for_loc("https://premiselabs.co/docs") == WEBSITE / "docs.html"
+    # …and the middleware's OTHER spelling for the same page: `PRODUCT_PAGES` lists
+    # `/docs` AND `/docs.html`, so the mirror must resolve both, or a plain relative
+    # `href="docs.html#x"` from `/tortoise/docs` reads as a dangling URL (#14073
+    # review). A page OUTSIDE `PRODUCT_PAGE_NAMES` still fails in both spellings.
+    assert _document_for_loc("https://premiselabs.co/tortoise/docs.html") == WEBSITE / "docs.html"
+    assert _document_for_loc("https://premiselabs.co/tortoise/privacy.html") is None
     # An unknown page under the prefix is NOT silently the root: that would let a
     # sitemap advertise /tortoise/nope and pass.
     assert _document_for_loc("https://premiselabs.co/tortoise/nope") is None

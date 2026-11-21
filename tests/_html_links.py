@@ -227,11 +227,15 @@ class _AnchorHrefParser(HTMLParser):
         "rb", "rp", "rt", "rtc", "select", "table", "tbody", "td", "tfoot",
         "th", "thead", "tr",
     })
-    #: Elements whose CHILD CONTENT a browser does not render, by ELEMENT TYPE — the
-    #: second half of "does a reader meet this heading/link", after raw text, inert
-    #: `<template>` content and the `in select` rule. `<datalist>` is `display: none`
-    #: in the UA stylesheet, and the rest put their children in the FALLBACK slot,
-    #: which a browser that supports the element never renders. The guard's question
+    #: Elements whose CHILD CONTENT a browser does not RENDER UNCONDITIONALLY, by
+    #: ELEMENT TYPE — the second half of "does a reader meet this heading/link",
+    #: after raw text, inert `<template>` content and the `in select` rule.
+    #: `<datalist>` is `display: none` in the UA stylesheet, so its children are
+    #: never rendered; the rest put their children in the FALLBACK slot, which a
+    #: supporting browser renders only when the element itself cannot be used (no
+    #: supported source, a failed load, no canvas support) — a condition the page
+    #: does not control, so the honest answer is "a reader may or may not meet it"
+    #: and the rule takes the side that keeps the slice LONG. The guard's question
     #: is asked in a supporting browser — the same convention as `<noscript>` being
     #: raw text because `self.scripting` is True (see `_RAW`).
     #
@@ -243,10 +247,19 @@ class _AnchorHrefParser(HTMLParser):
     _UNRENDERED = frozenset({
         "datalist", "canvas", "video", "audio", "object", "meter", "progress",
     })
-    #: Elements whose content renders only WITH an attribute: `<details>` without
-    #: `open` shows its `<summary>` and nothing else, and `<dialog>` without `open`
-    #: is not in the rendering at all. Presence is what counts — an empty `open` is
-    #: the rendered spelling.
+    #: Elements whose content renders only WITH an attribute: `<dialog>` without
+    #: `open` is not in the rendering at all, and `<details>` without `open` shows
+    #: its `<summary>` and hides the rest. Presence is what counts — an empty `open`
+    #: is the rendered spelling.
+    #:
+    # ⛔ THE WHOLE CLOSED SUBTREE IS REFUSED, `<summary>` INCLUDED — and that is a
+    # DELIBERATE over-refusal in the LOUD direction, not an oversight: a `<summary>`
+    # IS rendered by a closed `<details>` (this line used to say so while the code
+    # refused it, #14073 review), so a heading inside one does not bound the slice
+    # and the extra text stays pinned. Modelling "the FIRST summary of a closed
+    # details renders, a second one does not" is not attempted: recording a heading
+    # in that second summary would BOUND the slice at something no reader meets —
+    # the fail-open direction this whole rule exists to close.
     _RENDERS_WITH_ATTR = frozenset({"details", "dialog"})
     #: Every recording of a DOCUMENT TREE, by attribute name. `_clear_recordings`
     #: iterates this tuple, and
@@ -504,12 +517,23 @@ class _AnchorHrefParser(HTMLParser):
 
         * an open `<select>` ANCESTOR — the conservative side of a spec change, for
           the reason `_record_heading` states at length;
-        * an open `_UNRENDERED` ancestor — `<datalist>` and the fallback-content
-          elements put their children somewhere no supported browser renders;
+        * an open `_UNRENDERED` ancestor — `<datalist>` and the conditional-fallback
+          elements put their children somewhere a supporting browser does not
+          render;
         * THIS element, or an open ancestor, declaring itself unrendered — the
           `hidden` attribute, or `<details>`/`<dialog>` before an `open` attribute
           arrives (`_RENDERS_WITH_ATTR`, carried on the stack as the inherited
-          third field).
+          third field). A closed `<details>`'s `<summary>` is caught by this too:
+          it IS rendered, so that is a deliberate over-refusal in the loud
+          direction, stated at `_RENDERS_WITH_ATTR`.
+
+        ⛔ THIS IS THE BOUNDARY QUESTION, and it is deliberately WIDER than the
+        LINK question `extract_anchor_hrefs` asks: `_collect` applies this rule only
+        to the container recording, while the rendered-link set keeps its own,
+        narrower refusal. A link inside a `hidden` banner is one the page's own
+        script can reveal (`website/product.html` un-hides `#oauth-error-retry` with
+        `el.hidden = false`), and dropping it would blind the blog guard to a link a
+        visitor can click (#14073 review, measured).
 
         ⛔ DECLARED RESIDUAL — CSS. A heading hidden by `style="display: none"`, by
         a stylesheet rule its `class` matches, or by anything else the cascade
@@ -527,17 +551,33 @@ class _AnchorHrefParser(HTMLParser):
             return True
         return any(name == "hidden" for name, _value in attrs)
 
+    def _in_select(self) -> bool:
+        """True when an open `<select>` ancestor makes this start tag no link at all.
+
+        The LINK question's own test, and the one `_collect` still asks about
+        `self.hrefs` — an `<a>` inside a `<select>` is not an element a reader can
+        follow, in any browser, under any cascade. The BOUNDARY question is wider
+        and lives in `_unmet_by_reader`; an anchor that fails only the wider test
+        (inside a `hidden` banner, say) is still a link the page's own script can
+        reveal, so it stays in the rendered-link set and is dropped from the
+        container index only.
+        """
+        return any(open_tag == "select" for open_tag, _, _ in self._open_elements)
+
     def _collect(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag != "a" or self._suppress or self.wedged_reason:
             return
-        if self._unmet_by_reader(attrs):
+        if self._in_select():
             # An `<a>` inside a `<select>` is not a link a reader can follow, and it
             # is not an entry the TOC's index may be built from — the same escape as
             # a heading there, one recording over (measured: an anchor inside a
             # `<select>` in the TOC still advertised `#storage-limits` and bounded
-            # the section, all pins green; #14073 review). The same applies under
-            # `_UNRENDERED`/`hidden`, for the same reason. See `_unmet_by_reader`.
+            # the section, all pins green; #14073 review).
             return
+        # The BOUNDARY answer, which is wider than "is this a link": an anchor no
+        # reader meets must not advertise a heading, but it is still a link for the
+        # blog guard if the page's script can reveal it. See `_unmet_by_reader`.
+        meets_reader = not self._unmet_by_reader(attrs)
         for name, value in attrs:
             if name == "href":
                 # First href wins — the tokenizer keeps the first of a duplicate
@@ -549,8 +589,9 @@ class _AnchorHrefParser(HTMLParser):
                     # ...and into EVERY container the anchor sits inside, which is
                     # the question an href alone cannot answer: "the TOC block's
                     # entries" is an ancestry, not a string match.
-                    for inside_container in self._open_containers:
-                        inside_container.append(value)
+                    if meets_reader:
+                        for inside_container in self._open_containers:
+                            inside_container.append(value)
                 break
 
     def _breaks_out(self, tag: str, attrs: list[tuple[str, str | None]]) -> bool:
