@@ -326,11 +326,17 @@ NOTICE_INTERVAL_DEFAULT_S = 6 * 60 * 60
 #: them, and a concurrent invite or OTP is still dropped. The guard lowers this
 #: notice's exposure from "whatever remains" to "at most 5 of 100"; it does not
 #: ring-fence anyone else's mail, and it must not be read as doing so.
-#: The fleet-wide daily aggregate is restarts × this cap, and it stays FINITE
-#: because the ledger is once-per-threshold-per-account-ever: a repeated boot
-#: pass finds an account already at its top threshold and short-circuits before
-#: the gauge is read (``notify_account``), so the ramp is a one-off per account
-#: rather than a daily charge. ``NOTICE_MAX_SENDS_ENV`` is an absolute override;
+#: The fleet-wide aggregate is bounded, and it is not one expression: a process
+#: spends at most this cap PER PASS — its boot pass plus every ``interval`` pass
+#: it lives through (``_capacity_notice_sweep_loop``), so ~25 for a process alive
+#: 24 h at the 6 h default — and across restarts that multiplies, with NO
+#: restarts still leaving the periodic passes to spend. ⛔ An earlier cut wrote
+#: "restarts × this cap", which is wrong in both directions (0 restarts ≠ 0
+#: sends; 9 passes ≠ 1 cap). It stays FINITE regardless because the ledger is
+#: once-per-threshold-per-account-ever: a repeated pass finds an account already
+#: at its top threshold and short-circuits before the gauge is read
+#: (``notify_account``), so the ramp is a one-off per account rather than a daily
+#: charge. ``NOTICE_MAX_SENDS_ENV`` is an absolute override;
 #: if you shorten the interval or raise the send budget, re-price against ONE
 #: process's budget — never against a pass count you did not measure.
 NOTICE_MAX_SENDS_PER_PASS_DEFAULT = 5
@@ -969,10 +975,14 @@ async def sweep_pass(*, cp=None, send=None, enumerate_orgs=None,
     if summary["sent"] or other:
         logger.info("capacity notice sweep %s", summary)
     elif summary["checked"]:
-        # Every account answered `below-threshold`, OR -- the state worth naming --
-        # every account answered `no-reading`, which is what a stopped gauge
-        # (BACKUP_SWEEP_ENABLED off) looks like. It must not read as "nobody is
-        # near capacity".
+        # Every account answered `below-threshold` — nothing else can reach here:
+        # `other` (`statuses` keys minus `below-threshold`) is truthy for ANY
+        # other status, so an all-`no-reading` pass takes the branch above and is
+        # logged with its own summary. ⛔ An earlier cut of this comment claimed
+        # the `no-reading` case arrived HERE, which it cannot; the hint below is
+        # still worth printing for the all-`below-threshold` case it does serve,
+        # because `no-reading` dominating is what a stopped gauge looks like and
+        # that state is visible in the branch above's summary.
         logger.info("capacity notice sweep: %s accounts checked, nothing sent (%s) "
                     "-- if `no-reading` dominates, the graph-storage gauge is not "
                     "being written (BACKUP_SWEEP_ENABLED)", summary["checked"],

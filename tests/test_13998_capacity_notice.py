@@ -1537,8 +1537,23 @@ def test_the_overlap_guard_grades_each_CLAUSE_not_each_line():
         "grading LINES again instead of clauses: "
         f"{refuted_on_one_line!r}")
 
+    # ⛔ `not` inside "not only" is an ADDITIVE, not a negation. The cycle-5
+    # paraphrase ended "…, not only N>1 replicas", so counting every `not` as a
+    # negation would re-open the exact sentence this guard exists to stop.
+    not_only_trap = (
+        "# which includes the old/new process overlap of a rolling replacement, "
+        "not only N>1 replicas.\n")
+    assert _affirmative_overlap_claims(not_only_trap), (
+        "'not only' was read as a negation and licensed an affirmative OVERLAP "
+        f"claim — it is an ADDITIVE: {not_only_trap!r}")
+
     for honest in (
         "# a rolling replacement cannot overlap an old and a new process.\n",
+        # The two TRUE spellings an earlier negation set false-REDded: the failure
+        # message accused an author's truthful sentence of "claim[ing] an OVERLAP
+        # without negating it", which invites a reword to satisfy the regex.
+        "# there is no overlap between the old and the new process.\n",
+        "# the overlap is not reachable in ordinary operation.\n",
         "# Fly does not promise the overlap either: `rolling` \"does not "
         "generally guarantee overlap\".\n",
         "# the volume is single-attach, so a replacement cannot overlap the old "
