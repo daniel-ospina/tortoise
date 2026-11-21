@@ -1001,7 +1001,21 @@ SWEEP_NAMES = 66
 #: tests. An ordinary-word receiver on an object no typing can decide, which is what this counter
 #: reports; `typed references still pointing at a public name` stays **0**, so no SDK-typed site is
 #: legitimised.
-SWEEP_RESIDUE = (11859, "a32f1e6cc360070c")
+#:
+#: ⛔ MERGED `origin/main` `1b0db0489408` — a FIFTH tree, so the pair is `--repin`'s output on THIS
+#: tree and neither side's figure is carried. ⛔ AND THE BASE'S OWN PIN IS STALE AGAIN, which is why
+#: the delta is taken against a MEASUREMENT: `--check` on a detached worktree of `1b0db0489408`
+#: reports **11840** against the 11843 that tree pins. The +16 over that measured 11840 is THIS
+#: branch's own, ATTRIBUTED ROW BY ROW (`--report --base 28ca66878d7c --top 5000` on both trees,
+#: both row sets sorted and diffed): `graph.query` 276 → 281 (+5; two reads in
+#: `tortoise/outside_view.py`, three in `tortoise/resident_pin.py`), `super().query` 68 → 74 (+6),
+#: `self.query` 15 → 17 (+2), `self.meta.setdefault(params['key'], …).update` 0 → 2 (+2) and
+#: `props.update` 14 → 15 (+1) — the last four across the three hermetic suites and the two sides'
+#: review-round fakes. Those five rows are the whole delta, so no shape was absorbed in the other
+#: direction. Every row is an ordinary-word receiver on an object no typing can decide, which is
+#: what this counter exists to report; `typed references still pointing at a public name` stays
+#: **0**, so no SDK-typed site is legitimised.
+SWEEP_RESIDUE = (11856, "d7fc1586144e750e")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.

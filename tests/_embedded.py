@@ -549,6 +549,15 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # server, where none of them mean anything).
     "test_projection_embedded_socket_timeout",
     "test_projection_lifecycle",
+    # #10502: two pins read `/proc/<pid>/comm`/`cmdline` from a REAL child, so they
+    # `skipif` off-Linux — a `sys.platform` gate that REGISTERS the file in
+    # `tests/test_markers.py::PLATFORM_GATED_TESTS`. A registered file must be
+    # executed by the lane owning `platform-gated.txt` (the URI-unset carve-out)
+    # or the registry is observed by nothing (#4215). Nothing here constructs an
+    # embedded store, so the stem's job is routing + redirect exemption, exactly
+    # as for #9639/#9018 above. Mirrors `carve_out:` and the `expected` set in
+    # `test_no_redirect_stems_registry_exact` — the three-way mirror.
+    "test_reap_redislite_orphans",
     "test_reaper",
     "test_reaper_orphan",
     # #2814: authoritative-config durability across rebuild_all — the wipe is

@@ -1394,13 +1394,27 @@ def test_no_doc_states_a_percentage_the_artifact_does_not_hold():
     arch_91 = ARCH.read_text(encoding="utf-8")
     start = arch_91.index("### 9.1 M2")
     end = arch_91.index("\n---", start)
+    # ⛔ The section ends at the NEXT `###` heading, whichever comes first. The
+    # slice used to run to the next `---`, which was the same boundary only while
+    # §9.1 was the last subsection before the rule; `#14015` added §9.2 below it
+    # and this test then scanned M5's figures as if they were M2's — a boundary
+    # assumption, not a figure moving.
+    nxt = arch_91.find("\n### ", start + 1)
+    if nxt != -1:
+        end = min(end, nxt)
     changelog = CHANGELOG.read_text(encoding="utf-8")
-    # the entry is the LAST `##` block in the file, so slice to the end: a figure
-    # appended below it is still scanned rather than silently out of scope.
+    # The entry runs from its heading to the NEXT `## ` heading. It used to be
+    # "the LAST `##` block in the file", which held only while `#12186`'s entry was
+    # the last one appended; an entry added below it (`#14015`) was silently
+    # scanned as part of this one. The new slice still scans every line of the
+    # entry — it just stops at the next entry's heading instead of at EOF.
     entry_start = changelog.index("## `#12186`")
+    entry_end = changelog.find("\n## `#", entry_start + 1)
+    if entry_end == -1:
+        entry_end = len(changelog)
     bad = []
     for name, text in (("README", readme), ("§9.1", arch_91[start:end]),
-                       ("changelog #12186", changelog[entry_start:])):
+                       ("changelog #12186", changelog[entry_start:entry_end])):
         # the RANGES first, so their lower bound is checked too (P2-5)
         for m in _DOC_RANGE_RE.finditer(text):
             low, high = m.group(1), m.group(2)

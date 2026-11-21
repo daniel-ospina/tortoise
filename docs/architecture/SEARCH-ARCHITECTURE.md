@@ -715,7 +715,7 @@ prints it.
 | **M2** | **retrieval quality under a windowed vs complete graph**, on a fixed query set | the gate that ARMS §7 (post-measurement) — the literature has no answer; the result is §9.1 |
 | **M3** | text ranking: a BM25-capable Postgres option vs the current `db.idx.fulltext` scores, **score distributions** + the `#8933` identifier fixture | whether the text index ever moves (§6.2) |
 | **M4** | rebuild peak memory and latency per tenant at the real window size, **and whether a KEPT `db.idx.fulltext` or range index blocks a restore the way the removed vector index did (§7)** | the 6× headroom (§7), the #1 risk — and whether §7's window is a feasibility question after all |
-| **M5** | the **miss rate** per tenant (a DIFFERENT M5 from `STORAGE-ARCHITECTURE.md` §15's, which asks where the vector index lives and was answered 2026-11-07) | the compute/IOPS/egress tier |
+| **M5** | the **miss rate** per tenant (a DIFFERENT M5 from `STORAGE-ARCHITECTURE.md` §15's, which asks where the vector index lives and was answered 2026-11-07) | the compute/IOPS/egress tier — the result is §9.2 (`#14015`) |
 
 ⛔ **What M1 does NOT cover, and must not be read as covering: model identity.** Neither leg compares `embedding_model`/`embedding_revision` — the dimension is the only gate on either side (`record_embedding_vector` returns NULL for anything that is not 384 long, the same semantics as the graph's `required_embedding_dim`, `#4280`), and no record table carries a model column (`grep embedding_model supabase/migrations/*.sql` → nothing). So a corpus holding vectors from two models is ranked **across two spaces** after the move exactly as it is today, with a plausible-looking ranked list either way. The move is neutral on this — it neither creates nor fixes it — but "aligned" does not include it, and M1's line-set needs at least one stale-model row or the measurement cannot see the difference at all.
 
@@ -836,6 +836,75 @@ vectors, which **contradicts §6.2's decision item 2** and is therefore a **reop
 home argued with this evidence, never a silent adoption; or the window excludes the search-indexed labels
 and is sized against §8's target on that basis; or every demoted answer is labelled with a reason and
 repaired from the record, which needs a record-served set read the record does not have.
+
+### 9.2 M5 — measured: the miss rate a window produces, and where it stops paying
+
+The record is `docs/evidence/14015-m5-miss-rate/` (README + artifact + the instrument
+`tools/miss_rate_m5.py`, `#14015`). As with §9.1 the result is a **design input**, so it is stated here
+and not only there.
+
+⛔ **Read M5 as the COST of §9.1's loss, never as a repair of it.** `#13103` arms the window **with
+fault-in**, so a demoted canonical is a record read rather than an error — which turns §9.1's quality
+loss into latency and IOPS. M5 measures **how often** that happens: `fault_in_rate`, the share of
+queries whose canonical is not resident. It does **not** satisfy §9.1's third option above: that option
+additionally requires every demoted answer to be **labelled with a reason**, M2 measured that no code
+path emits one (§5's Q2), and the labelling remains a separate obligation from the frequency M5 quotes.
+
+**The curve is the complement of the population's Lorenz curve**, because §7's residency is scored by
+usage (`#13989` criterion 1) rather than by creation: at coverage `F`, `fault_in_rate(F) = 1 − (the
+share of QUERY MASS in the hottest F of nodes)`. Measured on the real capture corpus (27 files, 738
+lines), with the shipped windows read from `product/pricing.json` (`S` = the tenant's graph in MB,
+`F = min(1, W/S)`):
+
+| tenant graph `S` | solo (77 MB) | pro (102 MB) | team (615 MB) |
+|---|---|---|---|
+| **150 MB** (§8's reference estimate) | 10.1 % `:Object` / 5.2 % `:Point` | 5.7 % / 1.4 % | **0 %** / 0 % |
+| 300 MB | 20.9 % / 25.9 % | 16.6 % / 16.5 % | 0 % / 0 % |
+| 600 MB | 32.5 % / 50.0 % | 27.4 % / 40.9 % | 0 % / 0 % |
+
+⚠️ **Every `0 %` above is a FULLY-RESIDENT graph** — the absence of a window rather than a good miss
+rate. A team tenant below 615 MB evicts nothing, so that cell says nothing about the window's quality.
+
+**Where it flattens, in the form an allowance needs** — the largest tenant a tier's window still holds
+at a 10 % miss bar: **solo ≈149 MB (`:Object`) / ≈184 MB (`:Point`); team ≈1.19 GB / ≈1.47 GB.** Stated
+as a size rather than a rate because the owner's criterion (`#13989`) is *"an amount that's good enough
+the system works"* — a tenant size, not a percentage.
+
+⛔ **Neither label's curve has a knee, and that is the finding rather than a gap in it.** Under "a
+doubling of the window removes < 2 pp", `:Object` gives a near-constant **10.4 – 12.0 pp per doubling
+after the first** (its first doubling, `0.05→0.10`, removes **15.5 pp**) (log-linear) and `:Point` decays
+faster — from its peak doubling (**24.6 pp** at
+`0.15→0.30`; **24.2 pp** at `0.20→0.40`) down to **5.6 pp** at `0.50→1.00` — without ever reaching the
+bar. So **"good enough" has to be a DECLARED bar, not a discovered knee** —
+which is why the record publishes the covered-tenant size at five bars (1/2/5/10/20 %) rather than one.
+
+⛔ **And the two labels do NOT share a shape, so an aggregate across them would average two different
+laws** (`#13989`: per label, never aggregate). `:Object` is near-log-linear; `:Point` is steeper and
+decays by a factor of four over the same range.
+
+**And the larger lever is the policy, not the tariff:** at `F ≈ 0.5` — the coverage the shipped windows
+use on a 150 MB tenant — ordering residency by usage instead of at random removes **34.8 – 36.0 pp** of
+miss rate, against **10.4 pp** (`:Object`) / **5.6 pp** (`:Point`) from a doubling. That is the
+measurement that makes `#13989`
+criterion 1 load-bearing rather than a refinement, and it is also why the shipped windows look adequate
+above: they are adequate BECAUSE residency is usage-ordered, not regardless of it.
+
+⚠️ **The two operands above are not from the same surface, so take the DIRECTION and not the ratio.**
+The policy deltas are arm readings; the doubling figure is read off the modelled curve; the arms draw
+the query set **without replacement**, which caps any single node at one query and lifts every arm's
+fault-in rate to about twice the curve at the same coverage. With replacement the `:Object` policy
+delta is **larger** (~39 pp), so the conclusion is safe while the published ratio is not a measurement
+of it. The sampler change and the re-cut that fixes it are `#14196`; the evidence record states the
+divergence in its §7 and §9.
+
+⚠️ **What M5 does not settle.** Its query mass is a **recurrence proxy** from the capture corpus, not an
+observed read ledger (`§17.4.6` forbids the tenant-wide ledger as a product input, which is `#14011`'s
+subject); the sensitivity sweep brackets that assumption rather than removing it. It says nothing about
+the fused read (`retrieval.mode = keyword_only`), and its `:Point` floor (24.0 % of resident queries
+still unreturnable at depth 50) is a **lower bound on the production ceiling**, not an estimate of it —
+more documents compete for those 50 ranks at production scale. And it **changes no window and no price**:
+the values are read from `product/pricing.json` and asserted equal to it. §11 still holds — this
+measures the input to the compute/IOPS/egress tier; it does not choose the tier.
 
 ---
 

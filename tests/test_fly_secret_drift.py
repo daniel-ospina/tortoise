@@ -6609,6 +6609,14 @@ def test_a_cost_note_pricing_a_shape_the_vm_block_does_not_declare_says_so():
 # inert-enforcer class. These probes mutate the real file and require the pin to
 # raise, so the discrimination is itself a test.
 #
+# EVERY assertion of `test_vm_block_declares_the_four_core_shape` is covered by
+# one probe below — `cpus`, `memory_mb`, `cpu_kind`, and the single-`[[vm]]`
+# cardinality — because a pin whose four claims share ONE probe is only a pin on
+# that one: a later softening of the other three (`== 4096` → `in (4096, 2048)`, a
+# `"shared"` → `"performance"`, a second `[[vm]]` left at the old size) would
+# redden nothing and the pin would read green forever. That is the same
+# inert-enforcer class the block above names, so it is closed rather than noted.
+#
 # Each `pytest.raises` is MATCHED against the pin's own message, not bare
 # `AssertionError`: a bare catch stays green if some *other* assertion in the
 # pin starts failing (e.g. `assert priced`), so the probe would then prove a
@@ -6631,6 +6639,75 @@ def test_the_shape_pin_reds_when_cpus_reverts(monkeypatch):
         _fixture("fly-cpus-reverted.toml", reverted),
     )
     with pytest.raises(AssertionError, match="the box runs 4 cores"):
+        test_vm_block_declares_the_four_core_shape()
+
+
+def test_the_shape_pin_reds_when_memory_reverts(monkeypatch):
+    """`memory_mb = 4096` → `2048` must redden the pin's OWN memory message.
+
+    A memory regression is the #545 OOM class, not a re-run of the core revert —
+    so the mutant moves memory alone, and the match is the memory assertion's
+    text, which the `cpus` probe's mutant cannot produce.
+    """
+    text = REAL_FLY_TOML.read_text(encoding="utf-8")
+    reverted = text.replace("  memory_mb = 4096\n", "  memory_mb = 2048\n", 1)
+    assert reverted != text, (
+        "fly.toml has no `  memory_mb = 4096` line to revert — the probe is "
+        "stale, so it is proving nothing about the pin"
+    )
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "REAL_FLY_TOML",
+        _fixture("fly-memory-reverted.toml", reverted),
+    )
+    with pytest.raises(AssertionError, match="memory_mb is pinned separately"):
+        test_vm_block_declares_the_four_core_shape()
+
+
+def test_the_shape_pin_reds_when_cpu_kind_changes(monkeypatch):
+    """`cpu_kind = "shared"` → `"performance"` must redden its own assertion.
+
+    `cpu_kind` is half of what a deploy provisions and is priced differently, so
+    a flip is a shape change even with `cpus` and `memory_mb` intact — the case
+    the `cpus` probe cannot see.
+    """
+    text = REAL_FLY_TOML.read_text(encoding="utf-8")
+    mutated = text.replace('  cpu_kind = "shared"\n', '  cpu_kind = "performance"\n', 1)
+    assert mutated != text, (
+        'fly.toml has no `  cpu_kind = "shared"` line to mutate — the probe is '
+        "stale, so it is proving nothing about the pin"
+    )
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "REAL_FLY_TOML",
+        _fixture("fly-cpu-kind-mutated.toml", mutated),
+    )
+    with pytest.raises(AssertionError, match="the measured 4-core shape is"):
+        test_vm_block_declares_the_four_core_shape()
+
+
+def test_the_shape_pin_reds_on_a_second_vm_block(monkeypatch):
+    """A SECOND `[[vm]]` table must redden the cardinality assertion.
+
+    Two declared shapes is the declared-vs-live drift one table over (#14159):
+    the reader cannot tell which one a deploy applies, and the OLD size can be
+    the one that wins. `cpus`/`memory_mb`/`cpu_kind` in the first table stay
+    untouched, so only the cardinality assertion can fire.
+    """
+    text = REAL_FLY_TOML.read_text(encoding="utf-8")
+    doubled = text + (
+        '\n[[vm]]\n  cpu_kind = "shared"\n  cpus = 2\n  memory_mb = 4096\n'
+    )
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "REAL_FLY_TOML",
+        _fixture("fly-two-vm-blocks.toml", doubled),
+    )
+    assert len(_real_fly_toml()["vm"]) == 2, (
+        "the doubled fixture does not parse as two [[vm]] blocks — the probe is "
+        "stale, so it is proving nothing about the cardinality assertion"
+    )
+    with pytest.raises(AssertionError, match="exactly one \\[\\[vm\\]\\] block"):
         test_vm_block_declares_the_four_core_shape()
 
 
@@ -6663,12 +6740,19 @@ def test_the_cost_note_pin_reds_when_the_historical_label_is_stripped(monkeypatc
 def test_the_cost_note_pin_reds_when_two_shapes_are_priced_unlabelled(monkeypatch):
     """The round-10 PREDICATE, guarded: one stale claim BESIDE one current one.
 
-    `if priced != {declared_cpus}` is the assertion with no other mutant: revert
-    it to the older `if declared_cpus not in priced:` and both probes above
-    still pass, because the declared shape is then PRESENT in the priced set and
-    the label leg is never evaluated. That state — a stale `shared-cpu-2x` price
-    row left standing next to a genuine `shared-cpu-4x` row, unlabelled — is the
+    `if priced != {declared_cpus}` is the assertion with no other mutant, and THIS
+    input is the only one that sees it. Revert it to the older
+    `if declared_cpus not in priced:` and the label-strip probe above still passes —
+    but NOT because it sees the predicate: its priced set is `{2}`, so the old form
+    (`4 not in {2}`) is TRUE, enters the label leg, and reds on the stripped label
+    just as the new form does. This probe's input is the only one whose priced set
+    CONTAINS the declared shape (`{2, 4}`), so there the old form skips the label
+    leg entirely and the pin reads GREEN — which is the two-claims state, and the
     one #14156 review F2 is about, so it is reproduced here rather than read.
+    (Corrected in the #14156 follow-up: the first version of this paragraph said
+    "both probes above still pass, because the declared shape is then PRESENT in
+    the priced set" — true of this input, false of the label-strip probe, which
+    passes for the reason above. A fresh reviewer measured it.)
 
     Non-vacuity of the mutation itself is asserted first: the two-claims input
     must really parse as {2, 4}, or the probe would be proving the label leg

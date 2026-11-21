@@ -252,7 +252,7 @@ watchdog + 6 m embedder + **~7.3 m of MEASURED startup, not the ~1 m an earlier 
 suite's first line — the 10:24:32 → 10:28:58 window of 266 s MINUS the embedder's own measured 12 s,
 whose 6 m cap is already a term above; run 42000057137, job `test (d)`, `actions/jobs/127165076497`)
 plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed save = **56.6 m against
-90, x 1.5 = 84.9** — 5.1 m of headroom, where the refreshed map at 9 shards stood at
+90, x 1.5 = 85.0** — 5.0 m of headroom, where the refreshed map at 9 shards stood at
 **63.6 m, x 1.5 = 95.5** and reded
 `test_the_test_job_carries_no_unbounded_cache_post_step`. The term that moved is
 the watchdog: it read **26 m** until #10999 registered its own fast suite
@@ -293,7 +293,7 @@ hand-added figures are re-added from the
 emitted 25 m: 56.6 m / 84.9 m / 5.1 m (the row above), which is the 1-decimal restatement of the
 terms' own total, 56.64 m, that
 `config/ci-surfaces.yml` already records for this same quantity — ⛔ NOT the sum of the four ROUNDED
-terms, which reads 55.7 m: the startup term is 7.27 m (182 s + 254 s, where 254 s is ALREADY the 266 s window net of the
+terms, which reads 56.7 m: the startup term is 7.27 m (182 s + 254 s, where 254 s is ALREADY the 266 s window net of the
 embedder's 12 s — subtracting that 12 s a second time gives 7.07 m, which is how this figure was
 first mis-added here), not the ~7.3 it is printed as, and the last-failed save is 0.38 m, not 0.4) instead of the 0.5 m S=10 had been clearing by. The cap was
 NOT moved — `#3239`'s stale-head exposure is what raising it re-opens, and the SUM rose from the
