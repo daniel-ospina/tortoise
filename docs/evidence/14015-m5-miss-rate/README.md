@@ -405,10 +405,11 @@ sessions working on this box, so the harvest's absolute counts move between runs
 That is a real reading of a live corpus rather than a reproducibility claim, and it is why the
 conclusions in §3–§7 rest on gaps of tens of points and never on a decimal.
 
-`tests/test_miss_rate_m5.py` pins the arithmetic, the three invariants the artifact can carry
-(**2, 3, 4** — the demoted-return guard, the decomposition, the delivered coverage), the two it
-cannot (INVARIANT 1 has no subject in a bundle that stores counts rather than per-query ids, and
-INVARIANT 5 is arithmetic inside `lorenz()`), the
+`tests/test_miss_rate_m5.py` pins the arithmetic, the four invariants the artifact can carry
+(**2, 3, 4, 5** — the demoted-return guard, the decomposition, the delivered coverage, and the
+curve sitting above the identity that `lorenz()` refuses to go below; the bundle stores both
+operands, so that one IS checkable on it), the one it cannot (INVARIANT 1 has no subject in a
+bundle that stores counts rather than per-query ids), the
 tool's sha256 against `tools/miss_rate_m5.py`, and **every cell of every table above, recomputed from
 `measurement.json` at the row and column it is printed under**. A figure that is merely true somewhere
 in the artifact — the `:Point` peak quoted under the wrong doubling interval, or one label's mass

@@ -1054,7 +1054,7 @@ def _m5_documents():
     """
     return [
         ("README.md", README.read_text()),
-        ("SEARCH-ARCHITECTURE.md §9.2", _section(ARCH.read_text(), "### 9.2 ")),
+        ("SEARCH-ARCHITECTURE.md §9.2", _section(ARCH.read_text(), "### 9.2 ", end_prefix="### ")),
         ("SEARCH-ARCHITECTURE-CHANGELOG.md `#14015`",
          _section(ARCH_CHANGELOG.read_text(), "## `#14015`")),
     ]
@@ -1233,6 +1233,35 @@ def test_the_record_attributes_the_point_peak_to_the_interval_the_artifact_holds
                     f"{path.name}: a sentence quotes the :Point peak {figure} without "
                     f"naming the {interval} doubling it was computed over: {sentence!r}")
     assert seen, f"no document quotes the :Point peak ({figure}) any more — this pin has lost its subject"
+
+
+def test_the_committed_curve_sits_above_the_identity_it_was_checked_against():
+    """INVARIANT 5, re-asserted ON the committed bundle.
+
+    `lorenz()` refuses a curve below the identity, and its identity side is
+    `covered_mass([1] * n, F)` — which is exactly `F`. The bundle stores the
+    coverage AND the covered mass of every curve point, so the property is
+    checkable here: a bundle that violates it stays green no longer.
+
+    ⛔ Why it was missing: the record claimed INVARIANT 5 could NOT be pinned on
+    the artifact ("it is arithmetic inside `lorenz()`"). That was wrong — the
+    operands are both in the bundle — so a mutant setting one curve point's
+    `covered_mass` to 0.01 at `F = 0.02` (with the record's cell kept consistent)
+    passed the whole suite (#14162 round 5). The bundle is what a reader quotes, so
+    a hand-edited one must red rather than publish an inverted curve.
+    """
+    art = _artifact()
+    for label in ("object", "point"):
+        block = art["labels"][label]
+        assert block["nodes"] > 0, f"{label}: no node count, so the identity has no operand"
+        for row in block["curve"]:
+            assert row["covered_mass"] >= row["coverage"] - 1e-6, (
+                f"{label}: at coverage {row['coverage']} the curve covers only "
+                f"{row['covered_mass']} of the mass — below the identity, which `lorenz()` "
+                f"refuses: the ordering it was built from is inverted")
+            assert row["fault_in_rate"] == pytest.approx(1.0 - row["covered_mass"], abs=1e-6), (
+                f"{label}: fault_in_rate {row['fault_in_rate']} is not 1 - covered_mass "
+                f"{row['covered_mass']}")
 
 
 def test_the_artifact_is_not_m2s_artifact_under_a_new_name():

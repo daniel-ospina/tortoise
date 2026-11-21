@@ -3077,7 +3077,7 @@ surfaces:
   # and the instrument's pure arithmetic and invariant guards are driven directly on the
   # module. ⛔ It does NOT claim every invariant is re-asserted ON the artifact: the
   # artifact carries counts, not per-query ids, so INVARIANT 1's population cross-check
-  # has no subject there, and INVARIANT 5 is arithmetic inside `lorenz()`. What the
+  # has no subject there, and INVARIANT 5 is pinned on the bundle itself (its `curve` stores the covered mass AND the coverage, so `covered_mass >= F` — the identity `lorenz()` refuses to go below — is recomputable there). What the
   # artifact DOES carry is re-checked on it — the miss rate's own decomposition, that a
   # demoted node is never returned, and the coverage each arm requested and delivered. ⛔ The guarded artifacts are under `docs/`
   # and `tools/`, and a docs-only diff takes the tier1 early return and selects NO
