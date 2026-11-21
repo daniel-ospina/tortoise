@@ -2838,8 +2838,13 @@ _CAPTURE_TAIL_STATEMENTS = {
 #:
 #: Both spellings of the #4625 leg-62 probe (`_capture_session_probe_off_loop`'s
 #: `OPTIONAL MATCH` in `hosted_api.py`) already ran off the loop through
-#: `asyncio.to_thread` BEFORE this change, and `sdk.capture_session`'s
-#: prior-capture read (`sdk.py:19601-19605`) is not on the hosted path at all.
+#: `asyncio.to_thread` BEFORE this change, and `TortoiseSDK._capture_session`'s
+#: prior-capture read (the `OPTIONAL MATCH (s:Session {id:$sid})` that fills
+#: `session_row` in `tortoise/sdk.py`) is not on the hosted path at all — cited by
+#: SYMBOL, not by line: the block was `sdk.py:19601-19605` before the `origin/main`
+#: `e0accb8fe6` merge and is `sdk.py:19632-19636` after it (+31, re-derived by
+#: reading the tree, not computed from the number), which is exactly the rot a
+#: numbered cite invites.
 #: Pinning them as this PR's tail made two of its assertions INERT: the
 #: prohibition half can never fire (those statements cannot appear on
 #: ``MainThread``), and the presence half was satisfied by a pre-existing leg the

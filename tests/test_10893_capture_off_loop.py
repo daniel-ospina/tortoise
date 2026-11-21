@@ -144,7 +144,8 @@ _ON_LOOP_RESIDUAL: dict[str, str] = {
     # `hosted_api.py` line below it) go through this ONE retry wrapper —
     # but the stamp is JOURNAL-FIRST, so it is TWO synchronous legs per stamp on
     # the loop and the census observes BOTH: this wrapper, and the journal
-    # `_emit_event` that precedes it (`sdk.py:11559`). Measured on FOUR
+    # `_emit_event` that precedes it (`sdk.py:11590` — re-derived after the
+    # `origin/main` `e0accb8fe6` merge moved it +31 from `11559`). Measured on FOUR
     # consecutive runs of this test on this tree: `_emit_event` 0.51 / 0.56 /
     # 0.83 / 0.92 ms and this wrapper 0.99–3.62 ms per row. ⛔ An earlier cut of
     # this comment said "the census sees a single leg and not two": the second
@@ -303,7 +304,8 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
         # as `fn(instance, x)` and raised `… got multiple values for argument
         # 'point_kind'` INSIDE the capture this census measures, leaving every
         # leg downstream of it uncharged (#14086 cycle-4 review, F1 — measured
-        # on `_dedup_match_clauses`, `sdk.py:32725`, on the point-creation
+        # on `_dedup_match_clauses`, `sdk.py:32756` (+31 from `32725` after the same
+        # merge), on the point-creation
         # path).
         def _probe(*a, **kw):
             # Re-entry guard: a sync SDK method calling another one must be
