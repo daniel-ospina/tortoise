@@ -2229,10 +2229,15 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     )
     # 4i-ter. The SAME import arm on the SKIP-READ filter. 4i-bis cannot stand in for
     #     it: a guard that assigns `*AVAILABLE` never reaches the SKIP-READ condition,
-    #     so `:914`'s `_imports_own_code` term was deletable with the entire file green
-    #     (measured by blanking each call site in turn — `:895` blanked reds 4i-bis,
-    #     `:914` blanked reds this row, and before it existed that deletion was silent;
-    #     review of 994fb1d52f, P2). Measured `((5, (), True, True, True),)`; the import
+    #     so the SKIP-READ filter's `_imports_own_code` term was deletable with the
+    #     entire file green (measured by blanking each call site in turn — the
+    #     `*AVAILABLE` filter's term blanked reds 4i-bis, the SKIP-READ filter's term
+    #     blanked reds this row, and before it existed that deletion was silent;
+    #     review of 994fb1d52f, P2). Line numbers are deliberately NOT cited here:
+    #     they move whenever this function is reflowed, and a stale cite reads to the
+    #     next lane as proof the claim is false (review of 291f27963787, P2 — an
+    #     earlier text did cite `:895`/`:914`, which stopped being the two call sites
+    #     the moment `61fc96cdd8aa` reflowed them). Measured `((5, (), True, True, True),)`; the import
     #     INSIDE the `try` binds no `Name`, and there is no capability call, so no other
     #     arm admits it.
     module_body_own_import_unused_skip_read = roots(
