@@ -1095,7 +1095,28 @@ SWEEP_NAMES = 66
 #: rows, attributed row by row in that block, not this branch's. `11840 → 11857` is a CROSS-CHECK of
 #: two independent readings, never the derivation of this pin.
 #: `--check` exits 0 on this tree with `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11857, "ed40203dbbf32b87")
+#:
+#: ⛔ RE-CUT → (11858, "a1552662bf07a10b"). The 11857 pair was NOT measured on this branch: it is
+#: `main`'s own pin (`e74cf1d13d`), inherited here at the merge and left in place while this branch
+#: kept adding rows under it, so `--check` reds on this tree by exactly ONE. `git log` proves the
+#: inheritance rather than asserting it: the ONLY commit that ever set the constant to that pair is
+#: `e74cf1d13d` itself, and that tree carries no `out.update` (measured: 0 occurrences in
+#: `tests/test_14125_retired_name_calls.py`), so the pair was true of ITS tree and false of this one.
+#: THE ONE ROW: `out.update` 1 — `_global_declarations` in `tests/test_14125_retired_name_calls.py`,
+#: an `out: set[str]` accumulated with `out.update(node.names)` over an `ast.Global`. It arrived with
+#: this branch's own `a4e97d6f5b`, which is why the block above can still claim this branch's census
+#: contribution is "ZERO ROWS" and be wrong at this head — that reading was taken before the row
+#: existed and was never re-measured, the recurrence this pin chain keeps recording.
+#: ⛔ ATTRIBUTED BY MEASUREMENT, NOT ARITHMETIC: the residue counter was derived over the whole tree
+#: and the SINGLE row removed; `11858 − out.update` prints `(11857, "ed40203dbbf32b87")` — the pinned
+#: pair EXACTLY — so that one row is the whole delta and no other shape moved in either direction.
+#: The row is DECLARED rather than rewritten away, as `main` declared `terms.update` 0 → 1:
+#: a plain `set[str]` in a test helper is the ordinary-word receiver this sweep deliberately leaves
+#: alone, neither an SDK handle nor a FalkorDB `Graph`, and `typed references still pointing at a
+#: public name` stays **0**. Measured on the MERGED tree: this head has `origin/main` `9f83a63bfa`
+#: merged in, and `--repin` printed the same pair before and after that merge, so the merge
+#: contributes no row here either.
+SWEEP_RESIDUE = (11858, "a1552662bf07a10b")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
