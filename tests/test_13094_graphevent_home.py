@@ -821,6 +821,22 @@ def test_a_row_without_an_event_id_refuses_instead_of_truncating():
         module._graph_rows(_StubDB(_StubGraph(rows)), "g_real", batch=2)
     assert "event_id" in str(refused.value)
 
+    # ⛔ A PRESENT NON-STRING id is the SAME refusal, and the message must say so: the
+    # predicate is `not isinstance(cursor_id, str)`, so "carries no `event_id`" is
+    # false for this row (round-9 review, finding 4). Both arms are pinned because
+    # relaxing the predicate to `cursor_id is None` left the suite green while a
+    # present non-string id became a mixed-type `e.event_id > $last_id` compare —
+    # measured to return nothing, i.e. a short read.
+    mixed = [
+        (1, "PointAdded", "e1", '{"id": "a"}'),
+        (2, "PointAdded", 12345, '{"id": "b"}'),
+        (3, "PointAdded", "e3", '{"id": "c"}'),
+    ]
+    with pytest.raises(module.Unpageable) as refused_int:
+        module._graph_rows(_StubDB(_StubGraph(mixed)), "g_real", batch=2)
+    assert "STRING `event_id`" in str(refused_int.value), str(refused_int.value)
+    assert "not a string" in str(refused_int.value), str(refused_int.value)
+
 
 def test_a_graph_the_server_does_not_hold_is_refused_before_it_is_read():
     """A read against an absent graph CREATES it (#11113, measured in this repo).
@@ -1136,6 +1152,33 @@ def test_the_residency_measure_script_refuses_a_graph_outside_its_prefix(
     err = capsys.readouterr().err
     assert "refusing" in err and module.GRAPH_PREFIX in err, err
     assert touched == [], "the refusal touched a graph it had just refused"
+
+
+def test_the_measure_scripts_constraint_names_the_graph_key_not_a_constraint():
+    """`GRAPH.CONSTRAINT CREATE` takes the GRAPH KEY, not a constraint name (#14183 r9).
+
+    The pre-fix spelling put `tortoise_ge_uid` — a NAME — in that slot, so the module
+    command MINTED that graph and then failed its own precondition (`missing
+    supporting exact-match index`), which a census row published as a server limit.
+    Measured: reverting the slot to the old spelling left this whole suite green, so
+    the slot and the argv are graded here rather than trusted.
+    """
+    module = _measure()
+    commands = [stmt for kind, stmt in module.SCHEMA_STATEMENTS if kind == "command"]
+    assert len(commands) == 1, f"one module command expected, got {commands}"
+    template = commands[0]
+    tokens = template.split()
+    assert tokens[:2] == ["GRAPH.CONSTRAINT", "CREATE"], template
+    assert tokens[2] == "{graph}", (
+        "the token after CREATE is the GRAPH KEY; a constraint NAME there mints a "
+        f"graph that carries no `event_id` index — template: {template!r}")
+    argv = module.command_tokens(template, "probe_13094_measure")
+    assert argv[2] == "probe_13094_measure", argv
+    assert not any("{graph}" in token for token in argv), argv
+    # ⛔ THE KEY STAYS ONE ARGUMENT: building the argv by re-splitting a formatted
+    # string would shift every following token when the key carries whitespace.
+    assert module.command_tokens(template, "a b")[2] == "a b", (
+        "a graph key containing whitespace must remain a single argv token")
 
 
 def test_the_declared_event_types_are_the_sdks_own():

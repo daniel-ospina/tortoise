@@ -25,7 +25,11 @@ divergence the production path cannot avoid — `:415` sends the module command
 constraint is never created in production at all; here it is issued the module way
 (`execute_command`) against THIS probe graph, which is the only form that runs. The
 measurement therefore covers the `event_id` index, the `seq` index and the unique
-constraint. A measurement against an un-indexed graph would understate the
+constraint when this script RUNS IT. ⚠️ THE TWO COMMITTED JSONs BESIDE IT PREDATE
+THIS CORRECTION: both record the constraint REFUSED (`schema[1].installed == false`,
+the graph-key-slot defect below), so their slopes were measured WITHOUT it —
+re-run before quoting a coverage claim from them.
+A measurement against an un-indexed graph would understate the
 residency of the exact shape this issue is about.
 
 The PAYLOAD is the census's own size: `#13083` §4 measured 12,768 B over 67
@@ -84,6 +88,18 @@ SCHEMA_STATEMENTS: tuple[tuple[str, str], ...] = (
                 "PROPERTIES 1 event_id"),
     ("cypher", "CREATE INDEX FOR (n:GraphEvent) ON (n.seq)"),
 )
+
+def command_tokens(statement: str, graph: str) -> list[str]:
+    """The module command's argv, with the probe graph's key substituted as ONE token.
+
+    ⛔ `GRAPH.CONSTRAINT CREATE <arg> …` takes the GRAPH KEY where a reader expects a
+    constraint name, so the key is substituted into the template's own token list
+    rather than re-split out of a formatted string — a graph key carrying whitespace
+    would otherwise shift every following argument by one (#14183 review round 9,
+    finding 6).
+    """
+    return [graph if token == "{graph}" else token for token in statement.split()]
+
 
 PAYLOAD = json.dumps({
     "id": "01J8ZK3M4N5P6Q7R8S9T0V1W2X",
@@ -170,7 +186,7 @@ def measure(uri: str, graph: str, sizes: list[int], keep: bool,
             if kind == "cypher":
                 g.query(issued)
             else:
-                db.connection.execute_command(*issued.split())
+                db.connection.execute_command(*command_tokens(statement, graph))
             applied.append({"statement": issued, "installed": True})
         except Exception as exc:  # the same tolerance production has
             applied.append({"statement": issued, "installed": False,
@@ -193,6 +209,11 @@ def measure(uri: str, graph: str, sizes: list[int], keep: bool,
         "graph": graph,
         "payload_bytes_per_event": len(payload),
         "schema": applied,
+        # ⛔ A RUN WHOSE SCHEMA WAS REFUSED IS NOT A MEASUREMENT OF PRODUCTION'S
+        # SCHEMA (#14183 review round 9, finding 6): the earlier cuts recorded the
+        # refusal and published the slope anyway, which is how a false `why` reached
+        # the census. `main()` exits 2 on this flag instead.
+        "schema_complete": all(entry["installed"] for entry in applied),
         "used_memory_baseline": baseline_used,
         "used_memory_after_schema": after_schema,
         "schema_bytes": after_schema - baseline_used,
@@ -238,8 +259,16 @@ def main(argv: list[str] | None = None) -> int:
         print("TORTOISE_DB_URI is not set — this measurement needs its own graph",
               file=sys.stderr)
         return 2
-    print(json.dumps(measure(uri, args.graph, args.sizes, args.keep,
-                             args.payload_bytes), indent=2))
+    result = measure(uri, args.graph, args.sizes, args.keep, args.payload_bytes)
+    print(json.dumps(result, indent=2))
+    if not result["schema_complete"]:
+        refused = [entry["statement"] for entry in result["schema"]
+                   if not entry["installed"]]
+        print("\nREFUSED: the schema statement(s) below did not install, so this run's "
+              "population does not carry the schema it claims and its slope must NOT be "
+              "quoted. 2 is \"could not run\", never a measurement:\n  "
+              + "\n  ".join(refused), file=sys.stderr)
+        return 2
     return 0
 
 

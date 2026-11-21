@@ -104,15 +104,19 @@ the other direction — every declared row resolves, and a reworded or deleted s
 
 `#13083` §5.1 is explicit that its own residency figure is **unmeasured**: the payload is exact
 (12,768 B over 67 `:GraphEvent` nodes ≈ **190 B/event**) and the RAM figure is run-dependent drift it
-refused to quote. So it is measured here, against a real FalkorDB, with production's own schema.
+refused to quote. So it is measured here, against a real FalkorDB, with production's schema INTENT —
+including the `event_id` unique constraint, which production's own path never manages to create (see
+`measure_graphevent_residency.py`'s docstring and `#14204`'s census rows).
 
 Instrument: `measure_graphevent_residency.py` (this directory), run at head `05d218fcaf` (recorded as
 `tree.git_head` in both JSONs). Outputs: `measurement-payload88.json`, `measurement-payload190.json`.
 
 **How it measures.** `INFO memory` `used_memory` at three populations (20k / 40k / 60k rows), and the
 **marginal slope** between the last two. The slope is the quoted number: the graph's fixed cost (the two
-`CREATE INDEX` statements, and where the server accepts it the `event_id` unique constraint — the same
-three statements `event_store.ensure_event_schema` issues) is paid once and would otherwise be divided
+`CREATE INDEX` statements, and the `event_id` unique constraint the script also issues — the same
+three statements `event_store.ensure_event_schema` WRITES, though production's `g.query()` cannot parse
+the constraint's module command, so every slope quoted below is either without it or must name the
+JSON that installed it) is paid once and would otherwise be divided
 into every node and reported as if it recurred.
 
 | synthetic payload | slope | `GRAPH.MEMORY USAGE` at 60k rows |
@@ -324,7 +328,7 @@ Both suites are re-run after this PR's last push; counts are in `WORKTREE-REPORT
 | file | what it is |
 |---|---|
 | `tools/graphevent_home.py` | the census as data (`READERS`), the residency reader, and the **`superset` verb** that answers `#13094`'s blocking question on a real tenant — read-only by mechanism (§3.1), with exit `2` for "no verdict" |
-| `tests/test_13094_graphevent_home.py` | 32 pins: the census resolving (with `min_occurrences`), its DDL completeness, the capability vocabulary, the capability-arm control table as a SPECIFICATION (a LITERAL expected arm per shape — three RE-SPACED and two BACKTICK-QUOTED spellings so `_NO_WS` is discriminating on both bypasses, `apoc.` / `call algo` / both `db.idx.*` procedures each pinned by their own row, and every arm that a first-match ordering does NOT exempt (`*1..`, `*..`, `<-`, `shortestpath`) — plus a completeness pin that every arm in the tool is either pinned or declared undecidable, and that the two sets are a PARTITION), the two producer refutations (executed, with a positive control), the `#4664` mechanism refusal (executed), the verdict's three deficit classes (missing type, missing row, mapped type), the empty-feed vacuity on BOTH sides, the paging cursor against duplicate and fractional `seq` (with two rows sharing `(seq, type, payload)` so the `event_id` half of the dedupe key is discriminating), the completeness counts (NULL `seq`, a short read), the graph-minting refusal at the reader, at `superset`, and at `residency`'s own totals read (including that the graph is refused BEFORE the journal is paged), which side the `no_verdict` message names, a capability-bearing reader making the derived census verdict say so, the exit-code contract, the measurement script's own refusal code, the committed census being the verb's own bytes (the drift pin), and this declared count matching the file's own |
+| `tests/test_13094_graphevent_home.py` | 33 pins: the census resolving (with `min_occurrences`), its DDL completeness, the capability vocabulary, the capability-arm control table as a SPECIFICATION (a LITERAL expected arm per shape — three RE-SPACED and two BACKTICK-QUOTED spellings so `_NO_WS` is discriminating on both bypasses, `apoc.` / `call algo` / both `db.idx.*` procedures each pinned by their own row, and every arm that a first-match ordering does NOT exempt (`*1..`, `*..`, `<-`, `shortestpath`) — plus a completeness pin that every arm in the tool is either pinned or declared undecidable, and that the two sets are a PARTITION), the two producer refutations (executed, with a positive control), the `#4664` mechanism refusal (executed), the verdict's three deficit classes (missing type, missing row, mapped type), the empty-feed vacuity on BOTH sides, the paging cursor against duplicate and fractional `seq` (with two rows sharing `(seq, type, payload)` so the `event_id` half of the dedupe key is discriminating), the completeness counts (NULL `seq`, a short read, and a PRESENT non-string `event_id` — the arm that reds if the predicate is relaxed to `is None`), the graph-minting refusal at the reader, at `superset`, and at `residency`'s own totals read (including that the graph is refused BEFORE the journal is paged), which side the `no_verdict` message names, a capability-bearing reader making the derived census verdict say so, the exit-code contract, the measurement script's own refusal code, the measurement script's module command addressing its PROBE GRAPH KEY rather than a constraint name (reverting that slot once left the suite green while the census published a false server limit), the committed census being the verb's own bytes (the drift pin), and this declared count matching the file's own |
 | `docs/evidence/13094-graphevent/measure_graphevent_residency.py` + 2 JSON outputs | the residency measurement above, reproducible; it refuses any graph name outside the `probe_13094` prefix with **exit 2** (`1` is reserved for a produced verdict, so a refusal must not share it) |
 | `docs/evidence/13094-graphevent/readers.json` | the census table, as the verb emits it |
 
