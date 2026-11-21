@@ -47,7 +47,6 @@ from __future__ import annotations
 import ast
 import functools
 import importlib.util
-import subprocess
 import sys
 import textwrap
 import warnings
@@ -102,10 +101,46 @@ def _load_privatise():
 
 privatise = _load_privatise()
 
+#: `sdk_standin_classes` calls `approved_methods()` once per module, and that function
+#: EXECS `tortoise/__all__.py` to read the declaration — ~2,400 module executions over
+#: this tree, which was the whole cost of this file (~103 s, of which ~25 s is the
+#: session conftest every file in the pool pays). Memoised HERE rather than in the tool:
+#: the answer is a constant of the tree, but `tools/sdk_privatise.py` is a shipped
+#: verifier and an optimisation to it belongs in its own reviewed change.
+privatise.approved_methods = functools.lru_cache(maxsize=1)(privatise.approved_methods)
+
 
 def _tracked_python_files() -> list[Path]:
     """Every tracked (and untracked-but-not-ignored) `.py`, exactly as the sweep sees it."""
     return privatise.py_files()
+
+
+@functools.lru_cache(maxsize=1)
+def _parsed_sources() -> tuple[tuple[str, str, ast.Module | None], ...]:
+    """`(repo-relative path, source, AST)` for the tree, parsed ONCE.
+
+    The gate has four arms that each need a walk, and parsing ~2,400 files four
+    times was ~40 s of its ~100 s budget. `None` means the file did not parse —
+    it is kept so the census still counts a file it could not read, rather than
+    silently shrinking the population it grades (`#14125` review: a censusing
+    arm that skips what it cannot parse is the fail-open shape it exists to
+    catch).
+    """
+    out: list[tuple[str, str, ast.Module | None]] = []
+    for path in _tracked_python_files():
+        try:
+            src = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        tree: ast.Module | None
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SyntaxWarning)
+                tree = ast.parse(src)
+        except SyntaxError:
+            tree = None
+        out.append((str(path.relative_to(ROOT)), src, tree))
+    return tuple(out)
 
 
 def _references(tree: ast.Module, in_sdk_file: bool) -> list[tuple[int, str]]:
@@ -178,21 +213,12 @@ def _references(tree: ast.Module, in_sdk_file: bool) -> list[tuple[int, str]]:
 @functools.lru_cache(maxsize=1)
 def _sweep() -> tuple[tuple[str, int, str], ...]:
     rows: list[tuple[str, int, str]] = []
-    for path in _tracked_python_files():
-        try:
-            src = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+    for rel, src, tree in _parsed_sources():
+        if tree is None:  # pragma: no cover — a broken file reds its own suite
             continue
         if not any(name in src for name in RETIRED_NAMES):
             continue
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", SyntaxWarning)
-                tree = ast.parse(src)
-        except SyntaxError:  # pragma: no cover — a broken file reds its own suite
-            continue
-        rel = str(path.relative_to(ROOT))
-        in_sdk_file = path.resolve() == privatise.SDK_SRC.resolve()
+        in_sdk_file = Path(rel).resolve() == privatise.SDK_SRC.resolve()
         for lineno, expr in _references(tree, in_sdk_file):
             rows.append((rel, lineno, expr))
     return tuple(rows)
@@ -295,24 +321,17 @@ def _assigns_availability(node: ast.AST) -> bool:
 
 
 @functools.lru_cache(maxsize=1)
-def _unarmed_probe_blocks() -> tuple[tuple[str, int], ...]:
-    """Module-scope probe `try` blocks that catch `Exception` without re-raising first.
+def _probe_blocks() -> tuple[tuple[str, int, bool], ...]:
+    """Every module-scope availability-probe `try` block: `(path, line, armed?)`.
 
     The scope is deliberately module level: a probe resolves `FALKORDB_AVAILABLE`
     at IMPORT (a fixture runs too late), so the block that sets it is the one that
-    decides whether a rename becomes a skip.
+    decides whether a rename becomes a skip. `armed` means a
+    `(AttributeError, NameError, TypeError)` re-raise arm precedes the broad one.
     """
-    out: list[tuple[str, int]] = []
-    for path in _tracked_python_files():
-        rel = str(path.relative_to(ROOT))
-        if not (rel.startswith("tests/") or rel.startswith("tools/")):
-            continue
-        try:
-            src = path.read_text(encoding="utf-8")
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", SyntaxWarning)
-                tree = ast.parse(src)
-        except (OSError, UnicodeDecodeError, SyntaxError):
+    out: list[tuple[str, int, bool]] = []
+    for rel, src, tree in _parsed_sources():
+        if tree is None or not (rel.startswith("tests/") or rel.startswith("tools/")):
             continue
         if "FALKORDB_AVAILABLE" not in src:
             continue
@@ -325,9 +344,8 @@ def _unarmed_probe_blocks() -> tuple[tuple[str, int], ...]:
                 kinds = [_handler_names(h) for h in block.handlers]
                 if not any("Exception" in k for k in kinds):
                     continue
-                if any(k & _RAISED for k in kinds):
-                    continue
-                out.append((rel, block.handlers[0].lineno))
+                armed = any(k & _RAISED for k in kinds)
+                out.append((rel, block.handlers[0].lineno, armed))
     return tuple(out)
 
 
@@ -341,7 +359,7 @@ def test_every_availability_probe_re_raises_a_programming_error():
     this gate: ten modules in the same shape, plus 13 more in the assembly and
     `_probe` families.
     """
-    unarmed = _unarmed_probe_blocks()
+    unarmed = [(rel, lineno) for rel, lineno, armed in _probe_blocks() if not armed]
     if unarmed:
         rendered = "\n".join(f"  {rel}:{lineno}" for rel, lineno in unarmed)
         pytest.fail(
@@ -359,20 +377,7 @@ def test_every_availability_probe_re_raises_a_programming_error():
 
 def test_the_probe_census_is_not_vacuous():
     """The census must find the probe blocks it claims to grade."""
-    total = 0
-    for path in _tracked_python_files():
-        rel = str(path.relative_to(ROOT))
-        if not (rel.startswith("tests/") or rel.startswith("tools/")):
-            continue
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", SyntaxWarning)
-                tree = ast.parse(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, SyntaxError):
-            continue
-        for top in tree.body:
-            if isinstance(top, ast.Try) and _assigns_availability(top):
-                total += 1
+    total = len(_probe_blocks())
     assert total >= 20, (
         f"the probe census found only {total} module-level availability `try` "
         "blocks — it has stopped seeing the population it grades (this box "
