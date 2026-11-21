@@ -3470,7 +3470,7 @@ def test_the_unobserved_cause_counts_the_keys_it_actually_inspected():
     assert _SEAM_SYMBOL in cause, cause
     assert "no receipt carries stats['step_witness']" in cause, cause
     assert "INSTRUMENT gap" in cause, cause
-    assert "tortoise/sdk.py:12197" not in cause, cause
+    assert "tortoise/sdk.py:12252" not in cause, cause
     assert "20 keys" not in cause, cause
     assert _SEAM_SYMBOL in unobserved["S2.3"], unobserved["S2.3"]
     # The cite resolves to the PRODUCTION fold — the seam is called from INSIDE
@@ -4596,10 +4596,10 @@ _BUNDLE_CITE = re.compile(
 # vanishing into the exclusion.
 _BUNDLE_HISTORICAL = {
     r"no longer\s+resolve": (
-        "sdk.py:12401", "sdk.py:12682", "sdk.py:2367", "edges.py:467",
+        "sdk.py:12456", "sdk.py:12737", "sdk.py:2422", "edges.py:467",
         "edges.py:494-503", "edges.py:2168-2192",
         "tortoise/extractor_v2.py:8278-8285", "tortoise/extractor_v2.py:8288-8292"),
-    r"SUPERSEDED and its file is gone": ("sdk.py:12196",),
+    r"SUPERSEDED and its file is gone": ("sdk.py:12251",),
 }
 
 # (label, source, phrases the DOCUMENT uses to name the line, what the line must
@@ -4778,7 +4778,7 @@ def _bundle_missing(kind: str, anchors, source_lines, start: int, end,
 
     ⛔ Each description is RESOLVED, not merely negative (#12989). The sweep knows
     the anchor the rule claims and the file it claims it in, so the old message —
-    `sdk.py:19326 reads '# #4716 Part 1: …', which carries none of
+    `sdk.py:19381 reads '# #4716 Part 1: …', which carries none of
     ['"stats": _capture_stats_with_step_witness(…)']` — told a fixer what was wrong
     and made them grep `sdk.py` to find what was right. That grep IS the
     re-derivation this whole exercise keeps paying for (#12877 re-derived these;
@@ -4979,7 +4979,7 @@ def test_the_bundles_cites_resolve_where_the_bundle_says_they_do():
     `00_index.md`'s fold cite back to `12401` reds it). The RED COUNT is a
     property of the base, not of the rule set, so it is stamped with the commit it
     was measured at rather than asserted about `main`: 17 of the 44 cites red
-    across three rules at `0c7062af1` (`sdk.py:12679` for the meta fold, `12960`
+    across three rules at `0c7062af1` (`sdk.py:12734` for the meta fold, `12960`
     for the call that writes the references edge, `11851` for the entry point — a
     supersession comment, an ORDER comment and a counters line instead of the
     symbols), and 26 of the 44 red at `f86ae965b` (`52e2be157^`), the base #9850
@@ -5356,11 +5356,11 @@ _LINE_CITE = re.compile(rf"{_SEP}\s*{_WRAP}{_NUM}{_WRAP}")
 #: removes, re-armable in the document's own words — measured, then closed here.
 _MANIFEST = r"(?:ci-surfaces\.ya?ml|the\s+manifest)"
 #: ⛔ THE SECOND ARM NEEDS `(?<![\w.])` IN FRONT OF ITS SEPARATOR. Without it
-#: ``sdk.py:9612`` — a legit cite of ANOTHER file that merely happens to sit before
+#: ``sdk.py:9667`` — a legit cite of ANOTHER file that merely happens to sit before
 #: the manifest's name — matched as a manifest cite, and the pin accused the author of
 #: a line-number cite they never wrote:
 #:
-#:     the loader (`sdk.py:9612`) reads `config/ci-surfaces.yml` on every run
+#:     the loader (`sdk.py:9667`) reads `config/ci-surfaces.yml` on every run
 #:
 #: Measured True before this guard, False after; a cite of THIS file in this order is
 #: written ``… `:9987`, see `config/ci-surfaces.yml```, so its separator follows
@@ -6328,7 +6328,7 @@ _EPIC_CITE_DOCS = {
     # COUNT, NOT A SENTENCE COUNT: eight are in the `Measured at` sentence and `:1194` is in the sentence
     # BEFORE it on the same markdown line ("…is STAMP-bound (`:1186` is the `corpus = {…}`
     # line here; the frozen literal is at `:1194`)"). Three are pinned on the two rows
-    # below (`19341`/`19448` here, `sdk.py:10037` on its own row because a row carries ONE
+    # below (`19341`/`19448` here, `sdk.py:10092` on its own row because a row carries ONE
     # source key), `10353`/`10406` on their OWN `05-verify.md` row (round 6 — NOT by the
     # `subject_binding_available` rows that predate this PR: those scope `00-plan.md` and
     # `03-test-design.md`, and a row resolves only against the `doc_label` it names, so they
@@ -6679,7 +6679,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # comment block that prints this record's own `git grep` output had readers for
         # NONE of its cites — and the document DID carry two numbers for one hit: at
         # `30d222f40b` (this PR's pre-rebase first commit, held by `refs/av/pr/12569`)
-        # §0 read `sdk.py:18999` while BOTH appendix copies still read `:18996` —
+        # §0 read `sdk.py:19054` while BOTH appendix copies still read `:18996` —
         # `git show 30d222f40b:docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md |
         # grep -n 'sdk\.py:[0-9]*'` → `104:…18999`, `732:…18996`, `756:…18996`. A scan
         # that found no such revision was a scan miss, not a refutation; `#12545`
@@ -7101,7 +7101,7 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
         # current-tense one is re-pointed wrongly (measured: 413 passed). `:10353`/`:10406`
         # are stated twice, both "at this head", so a partial move leaves one stale.
         "`EXTRACTOR-V4-ARCHITECTURE.md:1400` is a **`Projection`** row here",
-        "`sdk.py:10353`/`:10406` at the MERGE head (the SAME pair at the branch head `2584a86ec1`: `main`'s `#12948` hunks above these anchors are all 1-for-1 replacements (its first is at `:8164` at `d741bd4a5a`, changing the `register_source(..., raw_state=...)` rename that sits at `:9753` at this head (⛔ `:9683` was its value at `4df5a14635`; the row's OTHER statement of the same line was already corrected, so one present-tense fact must not carry two numbers)) and its only net insertions sit past them, so this re-cut moved nothing here — ⚠️ an earlier cut printed `:10271`/`:10324`, which are `94b237fccf`'s pair (measured: `git show 94b237fccf:tortoise/sdk.py \\| grep -n 'subject_binding_available'` -> 10271, 10324) and NOT the MERGE head's: `e61694255a` measures 10334/10387, `2584a86ec1` 10353/10406)",
+        "`sdk.py:10408`/`:10406` at the MERGE head (the SAME pair at the branch head `2584a86ec1`: `main`'s `#12948` hunks above these anchors are all 1-for-1 replacements (its first is at `:8164` at `d741bd4a5a`, changing the `register_source(..., raw_state=...)` rename that sits at `:9753` at this head (⛔ `:9683` was its value at `4df5a14635`; the row's OTHER statement of the same line was already corrected, so one present-tense fact must not carry two numbers)) and its only net insertions sit past them, so this re-cut moved nothing here — ⚠️ an earlier cut printed `:10271`/`:10324`, which are `94b237fccf`'s pair (measured: `git show 94b237fccf:tortoise/sdk.py \\| grep -n 'subject_binding_available'` -> 10271, 10324) and NOT the MERGE head's: `e61694255a` measures 10334/10387, `2584a86ec1` 10353/10406)",
         "(the same pair at the branch head `2584a86ec1`, `:10353`/`:10406` at the MERGE head)",
     ):
         assert _d5.count(_spelling) == 1, (
@@ -7175,8 +7175,8 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # prints `:28067` six times and it is still not what the clause says. The live value — and
     # the one the pin row above asserts — is `:28395`. (`:28358`/`:28359` are the `def` and signature lines, which is a
     # different statement again; this comment used to conflate all three.)
-    # MEASURED (#13589 review, at that head — the clause reads `sdk.py:28395` here): deleting
-    # the clause's own "sits at `sdk.py:28178`" left the row GREEN. The sentence is therefore
+    # MEASURED (#13589 review, at that head — the clause reads `sdk.py:28450` here): deleting
+    # the clause's own "sits at `sdk.py:28233`" left the row GREEN. The sentence is therefore
     # read WHOLE, with its number DERIVED from the source, so both halves are graded: a source move the document did not follow reds, and a document re-point the source did not make reds.
     _dedup_filter_lines = [
         _n for _n, _ln in enumerate(sources["sdk"], 1)
@@ -7952,13 +7952,13 @@ def test_the_merge_head_honours_line_is_what_that_head_carries():
     "`config/ci-surfaces.yml` — 12 shards",
     # ⛔ …AND THE FALSE-RED THAT `(?<![\w.])` ON THE SECOND ARM EXISTS FOR. Without
     # that lookbehind, ANOTHER file's cite sitting BEFORE the manifest's name is read
-    # as a manifest cite (`sdk.py:9612` matches `<sep><num>` and then any gap to the
+    # as a manifest cite (`sdk.py:9667` matches `<sep><num>` and then any gap to the
     # filename), and the pin accuses the author of a number they never wrote. Measured
     # by rebuilding the pattern without the lookbehind: both fixtures below become
     # matches (`True`), and with it they are clean (`False`) — so removing the guard
     # as noise REDs exactly these two rows, and nothing else in this table does.
-    "the loader (`sdk.py:9612`) reads `config/ci-surfaces.yml` on every run",
-    "`sdk.py:9612` then `config/ci-surfaces.yml`",
+    "the loader (`sdk.py:9667`) reads `config/ci-surfaces.yml` on every run",
+    "`sdk.py:9667` then `config/ci-surfaces.yml`",
     # ⛔ AND THE `entries` MEMBERSHIP OF `_UNIT_POSITION_WORDS` IS PAID FOR HERE
     # (#12369 review, P3). `entries` is in that list; `_UNIT` excludes those nouns, so
     # `_NUM` does not read `1450 entries` as a line cite — a COUNT of entries is a
@@ -8143,7 +8143,7 @@ def test_the_bare_number_arm_catches_a_line_number_and_a_head_but_not_a_count(pr
     # ⛔ THE NEIGHBOUR ARM MUST NOT REFUSE ANOTHER FILE'S CITE, and both of these were
     # measured RED before `_neighbour_number_strays` existed. They are the natural
     # prose of a maintainer explaining the block's mechanism — and `03-test-design.md`
-    # is the bundle's cite-heavy document (`sdk.py:10353`/`:10406`, `capstone_run.py`),
+    # is the bundle's cite-heavy document (`sdk.py:10408`/`:10406`, `capstone_run.py`),
     # so its neighbours WILL name other modules with line numbers. Both numbers are
     # re-derived at this head (`grep -n subject_binding_available tortoise/sdk.py`
     # -> 10353/10406 in `_decorate_fallback_hits`) — an earlier revision carried `9867`/`9920`
@@ -8153,7 +8153,7 @@ def test_the_bare_number_arm_catches_a_line_number_and_a_head_but_not_a_count(pr
      "`entry_lines` loop, `:4906`) and the entry line moves under them.", []),
     ("The `corpus` block in `capstone_run.py` is frozen; its literal sits at `:1186`.",
      []),
-    ("`sdk.py`'s `extraction_mode` literal sits at `sdk.py:16948` — another row's cite.",
+    ("`sdk.py`'s `extraction_mode` literal sits at `sdk.py:17003` — another row's cite.",
      []),
     # …and the forms it MUST still catch, so the "another file" exemption cannot become
     # a bypass: a bare cite with NO other file named, and the history-trimmed number.
@@ -9971,7 +9971,7 @@ def test_the_pre_registration_cites_the_turn_writer_by_symbol_not_by_line():
     written by `_TURN_WRITE_CYPHER`, which writes no `extractedFrom` link by
     construction. It named the writer by BOTH its symbol and a `tortoise/sdk.py`
     line — and the line was the half that rotted: at `f16ca1cf6` the paragraph said
-    `sdk.py:2408` while the constant sits at `2451`, the same symbol the merge
+    `sdk.py:2463` while the constant sits at `2451`, the same symbol the merge
     closing round 11 re-pointed in five other bundle files. Nothing read this one:
     `_PREREG_STEP_CITE_DOCS` resolves the two classify surfaces and §7's carve-out
     only, and `_BUNDLE_CITE` matches `sdk|edges|extractor_v2` cites in the SIX
@@ -9984,7 +9984,7 @@ def test_the_pre_registration_cites_the_turn_writer_by_symbol_not_by_line():
     instead, so a rename reds here rather than leaving the argument resting on
     code the tree does not have.
 
-    Non-vacuity: at the pre-fix head the document carried `tortoise/sdk.py:2408`,
+    Non-vacuity: at the pre-fix head the document carried `tortoise/sdk.py:2463`,
     so the numeric-cite refusal reds; once it is a symbol cite, the resolution arm
     is the one that can fail.
     """
@@ -15317,7 +15317,7 @@ _CITE_QUALIFIER_PATTERN = (
     # optional `(?:-\d+)?` tail the helper reported BOTH of them as UNQUALIFIED — a
     # false BLOCK of a conformant edit whose own message told the author to add the base
     # they had already added (measured by a fresh-context review at `f885a51663`).
-    # ⛔ A THIRD RANGE §2 CARRIES IS DELIBERATELY NOT IN THAT LIST: `sdk.py:18637-18661`
+    # ⛔ A THIRD RANGE §2 CARRIES IS DELIBERATELY NOT IN THAT LIST: `sdk.py:18692-18661`
     # (`A2`'s mint seam) is printed UNQUALIFIED in the record, and that is not a false
     # block — the range arm below reads the range OUT OF THE RECORD and asserts both of its
     # endpoints against `tortoise/sdk.py`, so this cite is pinned by derivation instead of
@@ -15465,8 +15465,8 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     """`RECONCILE-A1-A2-A5.md`'s LIVE cites, which no sweep reads.
 
     Rule 3 of agent-infra#3442: this leg pins the record's LIVE cites — the four
-    #11509 re-pointed (`extractor_v2.py:10815`->`:10891`, `sdk.py:17472`->`:17681`,
-    `sdk.py:16414-16428`->`:16536-16550` x3 — `#11548` moved this seam +13 after that
+    #11509 re-pointed (`extractor_v2.py:10815`->`:10891`, `sdk.py:17527`->`:17681`,
+    `sdk.py:16469-16428`->`:16536-16550` x3 — `#11548` moved this seam +13 after that
     re-point. ⛔ The number printed here is a CONVENIENCE COPY, not a pin: the arm below
     reads this range OUT OF THE RECORD and asserts both of its endpoints against
     `tortoise/sdk.py`, so the value above is what a reader is spared from grepping for,
@@ -15486,7 +15486,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     #11376 did not move these lines), the `:12929` `vet_enabled` live-cite, the
     bundle's `hasPart`/`hierarchies` split, and the four further LIVE cites a fresh
     review found still unwatched (`pack_hierarchy.py:431`, the
-    `probes/capstone_measure.py:275-283` window and the `sdk.py:19883` cite it carries
+    `probes/capstone_measure.py:275-283` window and the `sdk.py:19938` cite it carries
     INSIDE it, `identity_hold.py:125`, `value_gate.py:89`) — and, measured before
     this pin existed, re-staling ANY of them
     left every suite green: the record is in no `_BUNDLE_DOCS` entry and
@@ -15840,7 +15840,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "\"nothing consumes it\" reading is what this arm replaced")
     assert "nothing in this tree consumes" not in "\n".join(ext), (
         "the retracted sentence is back in the live file — it was false while this record's own §5 "
-        "cited `sdk.py:19883` as the consumer, so no arm may require it again")
+        "cited `sdk.py:19938` as the consumer, so no arm may require it again")
 
     # A1's environment block: the reproduction that states A1's producer claim — the
     # bare-token grep whose four `create_operator` mentions ARE its evidence that the
@@ -16189,7 +16189,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # ⛔ AND THE HOLE IS NOT CONFINED TO BARE `:N` CITES — §2 carries NINE FILE-QUALIFIED
         # cites and only THREE are held (main's enumeration, re-measured on this tree at this
         # merge: 9 found, matching this list exactly). Held: `identity_hold.py:125` and
-        # `tortoise/value_gate.py:89` (`_cite` loop below) and `sdk.py:18637-18661` (the count-3
+        # `tortoise/value_gate.py:89` (`_cite` loop below) and `sdk.py:18692-18661` (the count-3
         # range arm) — re-staling each inside §2 reds. UNHELD: `extractor_v2.py:1154`, `:8880`,
         # `:9617`, `:11731-11732`, and the `research-brief.md` / `02-research-brief.md` cites.
         # ⛔ Only ONE of those — `extractor_v2.py:1154` — is named by this file's SCOPE paragraph
@@ -17291,9 +17291,9 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
 
     # ⛔ The `04-plan.md` clause. THREE wrong cuts of it have now stood here, which is why
     # this asserts the MEASURED state and not only a phrase: it read "carries ONE numeric
-    # re-point — `sdk.py:28559` → `:28592`", while at THAT head the file was not in the diff at
+    # re-point — `sdk.py:28614` → `:28592`", while at THAT head the file was not in the diff at
     # all (`git diff --name-only origin/main...HEAD -- …/04-plan.md` was EMPTY there, and so was
-    # its `--numstat`) and the document's own row reads `sdk.py:28718`. ⛔ THAT MEMBERSHIP IS NOT
+    # its `--numstat`) and the document's own row reads `sdk.py:28773`. ⛔ THAT MEMBERSHIP IS NOT
     # TYPED AS CURRENT, on purpose: `main`'s `#13819` later moved `hosted_api.py` by +66 and this
     # branch re-derived the I7 range, which puts the file IN the diff — `git diff --numstat
     # origin/main...HEAD -- …/04-plan.md` at the head you merge is the command, never this line.
@@ -17321,26 +17321,26 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
             " origin/main...HEAD` at the head you merge, never a claim typed here "
             "(#13750 review, cycle 3; #13746 review round 2, finding 6)")
     # ⛔ THE PAIR IS THE MEASURED ONE, AND ONLY ONE (#13879 review, cycle 3 — MEASURED).
-    # This loop used to pin `sdk.py:28682` -> `:28913` AND the I7 range
+    # This loop used to pin `sdk.py:28737` -> `:28913` AND the I7 range
     # `:15262-15339` -> `:15346-15423` as "the pair 04-plan.md carries at this head". Both
     # halves were false: naming `:15346-15423` as this diff's pair was a CHIMERA of two
     # heads — `main` made that move, so both ends read identically at `origin/main` and
     # here.
     # ⛔ RE-MEASURED at the `origin/main` `ef1d6f7561` merge (the `#13879` lane's second
     # re-cut): `main`'s `#13854` (issue `#13826`) re-derived `04-plan.md`'s own row to
-    # `sdk.py:28935` while this PR waited, so the file is now NOT in this diff at all —
+    # `sdk.py:28990` while this PR waited, so the file is now NOT in this diff at all —
     # `git diff --numstat origin/main...HEAD -- …/04-plan.md` prints NOTHING — and the
-    # `sdk.py:28718` -> `sdk.py:28935` move is MAIN's, not a re-point this branch makes.
+    # `sdk.py:28773` -> `sdk.py:28990` move is MAIN's, not a re-point this branch makes.
     # The pin below asserts the MEMBERSHIP is absent and binds both ends of that move,
     # because a typed claim about a head-bound fact is the same defect class one layer up.
     # ⛔ THE ROW READS THE ADDRESS; THE BASE'S VALUE IS PROVENANCE, NOT A PAIR THE ROW
-    # "CARRIES" (#13879 re-cut — MEASURED: `04-plan.md` contains `sdk.py:28935` and
-    # NOT `sdk.py:28718`). Both ends are still pinned so the row cannot drift back to
+    # "CARRIES" (#13879 re-cut — MEASURED: `04-plan.md` contains `sdk.py:28990` and
+    # NOT `sdk.py:28773`). Both ends are still pinned so the row cannot drift back to
     # the base's value, which is what a re-derivation-by-offset produces.
-    for _provenance in ("its own row now reads `sdk.py:28935`", "the base read `sdk.py:28718`"):
+    for _provenance in ("its own row now reads `sdk.py:28990`", "the base read `sdk.py:28773`"):
         assert _provenance in text, (
             f"D5 no longer states {_provenance!r} about `04-plan.md`. The row carries "
-            "`sdk.py:28935` at this head and the base carried `sdk.py:28718` — pinning "
+            "`sdk.py:28990` at this head and the base carried `sdk.py:28773` — pinning "
             "both ends is what catches a re-derivation that keeps the base's value "
             "(#13750 review, cycle 3; re-derived at the `ef1d6f7561` merge)")
     assert "is the pair `04-plan.md` carries at this head" not in text, (
@@ -17364,8 +17364,8 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
         "`:15346-15423` reads identically on `origin/main` and at this head, because "
         "`main` made that move — a pair whose two halves come from two different heads "
         "is the chimera D5 exists to forbid (#13879 review, cycle 3)")
-    assert "sdk.py:28935" in text, (
-        "D5 no longer names `sdk.py:28935`, the value `04-plan.md`'s own row carries at "
+    assert "sdk.py:28990" in text, (
+        "D5 no longer names `sdk.py:28990`, the value `04-plan.md`'s own row carries at "
         "this head (`grep -n 'declared_relation_predicates()' "
         "docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md`). Re-derive the "
         "address; do not drop it")
@@ -17586,7 +17586,7 @@ def test_one_markdown_line_carries_one_pair_for_one_cite():
 
     ⛔ MEASURED ON THE PRE-FIX TREE (`c4451dcd03`), and why this is a pin and not a
     tidy-up: the SAME markdown line said `subject_binding_available` is "consumed
-    `sdk.py:12136`/`:12189`" and, ~1,270 characters later, that "the sibling `sdk.py`
+    `sdk.py:12191`/`:12189`" and, ~1,270 characters later, that "the sibling `sdk.py`
     cites … are `12110`/`12163` here". `12110` is `_registry_cache.load_all()` (the
     assignment an earlier cut of this docstring named is `:12109`) and `12163` is
     `r[key] = st[key]` — neither line carries the symbol, so a reader
