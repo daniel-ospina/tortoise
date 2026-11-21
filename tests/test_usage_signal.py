@@ -1274,15 +1274,21 @@ def test_no_graph_dependency() -> None:
     # that reaches the client. `test_the_no_graph_guard_names_modules_that_EXIST`
     # and `…_covers_every_module_that_reaches_a_store` hold the set in both
     # directions; this leg inherits whatever they certify.
-    # ⛔ AND THE DERIVATION HAS ONE OWNER, PINNED. A derivation written inline in the
-    # subprocess string can be NARROWED and every row stays green, because the
-    # positive control below witnesses the `redis` root and a narrowing keeps it:
-    # measured at `e022fc935b`, `forbidden={('falkordb', 'redis')!r}` (the very
+    # ⛔ AND THE DERIVATION HAS ONE OWNER, PINNED. The failure mode is a derivation
+    # living anywhere but in one readable place: a narrowing of it keeps the `redis`
+    # root the positive control below witnesses, so every row stays green. That was
+    # measured on the DELETED in-child-list design at `e022fc935b`,
+    # `forbidden={('falkordb', 'redis')!r}` (the very
     # hardcoded pair this comment says it replaced) and
     # `forbidden={tuple(_STORE_CLIENT_ROOTS)!r}` (dotless roots only) both left the
     # file at 102 passed, while a transitive pull of `tortoise.session_indexer` came
     # back empty under the dotless-only list — the module is pulled in and the leg
-    # certifies nothing. So the helper is the one owner and the assert reads IT: an
+    # certifies nothing. ⛔ AT THIS HEAD no list is interpolated into the child at all,
+    # so that SPELLING is gone — the AXIS it names is not: a narrowing now lives in the
+    # child's PRINT or the PARENT'S PARSE, the two lenient places the residual above
+    # names and the per-root rows below witness. Stated because a comment naming a
+    # deleted shape in the present tense is the #14118 item 2 class itself. So the
+    # helper is the one owner and the assert reads IT: an
     # assert against a fresh re-derivation would pin nothing, because the same
     # narrowing would move both sides.
     def _probe_forbidden() -> tuple[str, ...]:
