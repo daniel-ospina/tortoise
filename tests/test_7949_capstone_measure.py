@@ -4387,7 +4387,7 @@ def test_no_document_states_the_step_prediction_its_own_artifact_refutes():
 
 #: The `e1-aux` triple of the SUPERSEDED run — `capstone-measured-e0fc940b.log`
 #: measured 50 objects / 6 bare-definite / 0.12 share. The run this bundle now ships
-#: (`capstone-measured-9152448d.log`) measures 64 / 14 / 0.21975.
+#: (`capstone-measured-9152448d.log`) measures 64 / 14 / 0.21875 (14/64 = 0.21875; the `0.21975` this line carried was a digit transposition no arm reads).
 #:
 #: Measured at `7caace29c`: the bundle's E1 summary row already said "**64 Objects** …
 #: 14/64", while its own E1 narrative (`**50 `:Object` nodes** … 6/50 = 0.12`, and
