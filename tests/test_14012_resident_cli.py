@@ -410,7 +410,7 @@ def _report_file(tmp_path):
 
 
 def test_a_sweep_with_no_pin_set_passes_no_gate_and_proceeds(sweep, capsys, tmp_path):
-    graph, calls = sweep
+    _graph, calls = sweep
     code = cache_evict.main(_sweep_argv(_report_file(tmp_path), "--max-nodes", "1000"))
     assert code == 0
     assert len(calls) == 1
