@@ -2998,7 +2998,12 @@ def extract_anchors_within(
     reddened the golden (the slice ran past the section) or fired the bound's own
     "no TOC block" assertion (#14073 review, all three measured).
 
-    Limits, all inherited from the parser and declared rather than guessed. An
+    Limits, all inherited from the parser and declared rather than guessed. A
+    DOCUMENT ROOT (`html`, `body`) is REFUSED: such a tag inserts NO element (a browser
+    merges its attributes into the root/body it already has, spec 13.2.6.4.7), which is
+    why the parser does not push it either — so it can never be an extent, and answering
+    would report a silent ZERO containers over a page whose real one is the block
+    INSIDE the body. Refusing is the honest answer, never `[]`. An
     IMPLICIT-CLOSE tag is REFUSED outright (`_IMPLICITLY_CLOSED`, which covers BOTH
     families: spec 13.2.6.3's implied end tags and the tags a sibling START TAG
     closes — `<button>`, `<h1>`–`<h6>`, `<a>`, `<nobr>`, `<select>`, `<table>`): for a
