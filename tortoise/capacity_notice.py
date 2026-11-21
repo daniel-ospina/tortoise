@@ -314,7 +314,9 @@ NOTICE_INTERVAL_DEFAULT_S = 6 * 60 * 60
 #: and NO population reproduces that pair — 0.19 h is nearer `main`'s ALL-COMMIT
 #: median (0.08 h at n=1,594), which is the wrong population because most commits
 #: touch nothing `deploy-hosted.yml` ships; the deploy-run and `tortoise/**`-commit
-#: populations agree with each other (20.6/day, 0.47-0.48 h, run 82-83).
+#: populations agree with each other to within their own denominators: **20.6**
+#: (619/30) and **20.5** (615/30) runs per day, 0.47-0.48 h, run 82-83. ⛔ Quoting
+#: one rate for both would only hold if the denominator moved between them.
 #: The send budget is per-process in the same way
 #: (``email_notify``: "The counter is per-process (N replicas × cap) … Counters
 #: reset on process restart"), so no daily quotient across passes is a number
