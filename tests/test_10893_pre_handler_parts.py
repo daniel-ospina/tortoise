@@ -67,11 +67,13 @@ def test_the_parts_sum_to_pre_handler_exactly(monkeypatch):
     ⛔ THE ORIGINS ARE DELIBERATELY NON-DEGENERATE: the transport ARRIVAL
     (``started_at``) is 10 s BEFORE the clock this request is constructed at.
     In production ``begin(started_at=t0)`` is called with the arrival while the
-    object is built later (``hosted_api.py:6579``), so the interval the
+    object is built later (the transport seam's ``request_stages =
+    _begin_read_stages(t0)`` in ``hosted_api.py``), so the interval the
     ``middleware`` part is defined as — *arrival → the handler task created* —
     is exactly that gap. Making the two origins the same instant (as this row
     used to) leaves the sum invariant true under the mutant the invariant
-    exists to prevent: ``self._parts_t0 = now`` (``read_stages.py:359``).
+    exists to prevent: ``self._parts_t0 = now`` — the mutant replaces
+    ``self._parts_t0 = self._started_at`` in ``ReadStages.__init__``.
 
     ⛔ A ``file:line`` cite in a docstring is the pointer a fixer follows to re-run
     the mutant, and this one had already gone stale: it read ``:335`` until the
@@ -447,9 +449,11 @@ def test_require_scope_notes_the_dispatch_boundary_before_any_early_return(
     The set-equality row above is a STATIC scan, so it stays green when
     ``_note_stage("dispatch")`` is moved below
     ``if org.get("legacy_full_access") or org.get("key_id") is None: return``
-    (``hosted_api.py:10532``): the literal is still in the file, while the note
-    never runs for the repo's own fixture org (``tests/test_hosted_api.py:82-90``
-    sets ``legacy_full_access: True``). The whole arrival → SDK-open interval is
+    (``_require_scope``'s early-return guard in ``hosted_api.py``, taken for a
+    legacy or ownerless key): the literal is still in the file, while the note
+    never runs for the repo's own fixture org
+    (``tests/test_hosted_api.py``'s module-level org seed sets
+    ``legacy_full_access: True``). The whole arrival → SDK-open interval is
     then published as ``sdk_open`` — a six-second loop wait reads as a
     six-second graph call, and the fix that follows is the wrong one (#10893).
     This row DRIVES the boundary instead of scanning for it.

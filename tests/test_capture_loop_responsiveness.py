@@ -2454,10 +2454,10 @@ def _measure_capture_graph_work(monkeypatch, turns: int, sid: str,
 
     An INT answers "gone" from that probe ONWARD (1-based), which is what
     reaches the OTHER sweep arm: the handler probes the session TWICE — a
-    pre-check before the receipt write (`hosted_api.py:21627`) and a re-check
-    after it (`:21647`) — so `2` models the delete landing in that window and
-    takes the `:21685` arm, while `True` answers the pre-check and takes
-    `:21694`. Both arms issue the sweep; measured, they are different lines and
+    pre-check before the receipt write and a re-check after it (the receipt
+    block's two session-alive probes) — so `2` models the delete landing in that
+    window and takes the RE-CHECK arm, while `True` answers the pre-check and
+    takes the "already gone" arm. Both arms issue the sweep; measured, they are different lines and
     inlining one of them does not red a test that reaches only the other
     (#14086 review, P2).
     """
@@ -2836,8 +2836,8 @@ _CAPTURE_TAIL_STATEMENTS = {
 #: Statements that LOOK like this tail and are not, named so their absence from
 #: the two sets below is deliberate rather than an oversight.
 #:
-#: Both spellings of the #4625 leg-62 probe (`_capture_session_probe_off_loop`,
-#: `hosted_api.py:13370-13371`) already ran off the loop through
+#: Both spellings of the #4625 leg-62 probe (`_capture_session_probe_off_loop`'s
+#: `OPTIONAL MATCH` in `hosted_api.py`) already ran off the loop through
 #: `asyncio.to_thread` BEFORE this change, and `sdk.capture_session`'s
 #: prior-capture read (`sdk.py:19601-19605`) is not on the hosted path at all.
 #: Pinning them as this PR's tail made two of its assertions INERT: the
@@ -2859,13 +2859,22 @@ _SESSION_ALIVE = "MATCH (s:Session {id:$sid}) RETURN count(s)"
 def _is_a_pre_existing_offload(cypher: str) -> bool:
     """True when the statement belongs to a leg that ALREADY ran off the loop.
 
-    ⛔ THE EXEMPTION WAS DECLARED AND NOTHING CONSUMED IT (#14086 review, P2).
-    ``_PRE_EXISTING_OFFLOAD_LEGS`` names the #4625 leg-62 probe's statements,
-    which emit some of this file's tail needles (``SET s.capture_ok=$ok``) on
-    ``asyncio_0`` BY DESIGN — a pre-existing offload, not a tail leg. A
-    prohibition that matches the needle alone therefore accuses the leg that was
-    already fixed; the declaration has to be consulted where the verdict is
-    computed, or it is bookkeeping that reads as protection.
+    ``_PRE_EXISTING_OFFLOAD_LEGS`` names the #4625 leg-62 probe's two spellings,
+    which live in ``_capture_session_probe_off_loop`` and have run through
+    ``asyncio.to_thread`` since before this change. They are in the PROHIBITION
+    set (an on-loop copy would still be a bug) and out of the PRESENCE set (they
+    are issued whatever this tail does).
+
+    ⛔ WHAT THIS EXEMPTION CAN AND CANNOT DO, measured rather than assumed
+    (#14086 review, P2 — an earlier version of this docstring claimed the probe
+    emits this file's ``SET s.capture_ok=$ok`` needle, which is FALSE: the probe
+    READS ``s.capture_ok AS ok``, it never sets it, and its statement matches
+    ZERO of the six tail needles). In practice ``to_thread`` puts the probe on
+    ``asyncio_0``, not on a capture-pool worker, so neither loop below would
+    accuse it — the exemption changes no verdict today. It is kept as a DECLARED
+    record with a caller, so that if the probe ever moves to the capture pool the
+    verdict computation already consults the declaration instead of silently
+    re-accusing a leg that was fixed in #4625.
 
     It is a SUBSTRING test for the same reason prohibition is: the probe's query
     is assembled around these fragments and its exact spelling moves.
@@ -3032,7 +3041,8 @@ def test_the_capture_post_write_tail_never_runs_on_the_event_loop(
 #:     sibling needle `ENDS WITH $suffix`.
 #:   * the write-verb enrichment read (`n.posterior_alpha, n.ep_alpha`) —
 #:     `_measure_capture_graph_work` stubs the extractor to emit nothing, so
-#:     `if extracted:` (hosted_api.py:21865) is never entered and `_enrichment_read`
+#:     the write-verb leg's `if extracted:` branch is never entered and
+#:     `_enrichment_read`
 #:     never runs. ⛔ UNCOVERED RESIDUAL: no test in this tree asserts WHICH THREAD
 #:     that leg runs on, so returning it inline would be silent here. The evidence
 #:     is a discriminating count, not a bare list of hits. It EXCLUDES this file,
@@ -3045,9 +3055,12 @@ def test_the_capture_post_write_tail_never_runs_on_the_event_loop(
 #:         -> 0        (14 rows across 8 files — 12 cypher literals and 2 prose
 #:                      quotes — and none is a thread assertion)
 #:     The tests that touch the leg assert its ARMS, never its thread: the
-#:     non-fatal warning on failure (`tests/test_hosted_api.py:4231`,
-#:     `tests/test_capture_session.py:7428`) and `ep_updated is True` on success
-#:     (`tests/test_hosted_api.py:3998`).
+#:     non-fatal warning on failure (`tests/test_hosted_api.py`'s
+#:     `test_capture_enrichment_failure_never_500s_committed_capture` and
+#:     `tests/test_capture_session.py`'s
+#:     `test_phase_e_sdk_mirror_verification_fail_open_omits_marker`) and
+#:     `ep_updated is True` on success (`tests/test_hosted_api.py`'s
+#:     `test_capture_ingest_ep_user_visible_e2e5`).
 #:     Making the fixture reach it needs the extractor stub replaced with a
 #:     realistic extraction, which is a fixture redesign this change does not carry.
 #:
@@ -3067,8 +3080,8 @@ _TAIL_MUST_BE_ISSUED = {
 }
 
 
-#: The delete-race sweep's own statements (`_sweep_orphaned_writes`,
-#: `hosted_api.py:21490`). ⛔ They are reachable ONLY when the receipt's
+#: The delete-race sweep's own statements (`hosted_api.py`'s
+#: `_sweep_orphaned_writes`). ⛔ They are reachable ONLY when the receipt's
 #: session-alive pre-check answers "gone", which the ordinary tail fixture never
 #: produces — so a needle added for it without a fixture that reaches the branch
 #: is INERT in both directions (#10893 cycle-4 review, P2 #2: the mutant that
@@ -3080,8 +3093,8 @@ _SWEEP_STATEMENTS = {
     # this fixture (measured: all issued on `capture-extract_0`). Pinning only
     # the Point delete left the Event and Source deletes unwatched by both loops
     # below, so an on-loop copy of either was silent (#10893 cycle-5 review, P2):
-    # `_SWEEP_EVENT_DELETE_CYPHER` (`hosted_api.py:19785`, appended to the
-    # sweep's own match) and the Source delete.
+    # `_SWEEP_EVENT_DELETE_CYPHER` (in `hosted_api.py`, appended to the sweep's
+    # own match) and the Source delete.
     "MATCH (e:Event) WHERE e.eventId = $eid DETACH DELETE e":
         "the delete-race Event sweep",
     "MATCH (src:Source {url:$url}) DETACH DELETE src":
@@ -3093,11 +3106,12 @@ def _assert_the_sweep_never_runs_on_the_loop(records, *, arm: str,
                                             alive_probes: int) -> None:
     """The four assertions every sweep arm owes, shared by both arms.
 
-    Factored out because the delete-race branch has TWO sweep call sites
-    (`hosted_api.py:21685`, the receipt re-check window, and `:21694`, the
-    session already gone at the pre-check) and a test that reaches one of them
-    is silent about the other — measured: inlining the sweep at `:21685` only
-    left the `:21694` test GREEN (#14086 review, P2). Both arms now call this.
+    Factored out because the delete-race branch has TWO sweep call sites (the
+    receipt re-check window, and the session already gone at the pre-check) and
+    a test that reaches one of them
+    is silent about the other — measured: inlining the sweep in the re-check
+    arm only left the "already gone" test GREEN (#14086 review, P2). Both arms
+    now call this.
 
     ⛔ `alive_probes` is what says WHICH arm ran, and it is asserted FIRST. Both
     arms issue the SAME three sweep statements from the SAME pool, so the other
@@ -3166,17 +3180,18 @@ def test_the_delete_race_sweep_never_runs_on_the_event_loop(
     `test_the_capture_post_write_tail_never_runs_on_the_event_loop` cannot see
     this leg: its Session is never deleted mid-capture, so the delete-race
     branch never runs and a needle for the sweep would be satisfied by nothing.
-    Here the session-alive PRE-check (`hosted_api.py:21627`) answers "gone", so
-    the `:21694` arm IS taken and the statements are ISSUED — and the assertion
+    Here the session-alive PRE-check answers "gone", so the delete-race arm IS
+    taken and the statements are ISSUED — and the assertion
     is WHICH THREAD issued them.
 
-    The OTHER sweep site (`:21685`, reached when the delete lands between the
-    receipt PATCH and the post-write re-check) is covered by the sibling below;
+    The OTHER sweep site (the re-check arm, reached when the delete lands
+    between the receipt PATCH and the post-write re-check) is covered by the
+    sibling below;
     it is a different line and inlining one does not red the other.
 
     Mutation check (must stay true): `await _run_off_loop(_CAPTURE_EXECUTOR,
     _sweep_orphaned_writes)` -> `_sweep_orphaned_writes()` at
-    `hosted_api.py:21694` puts the sweep's statement back on ``MainThread`` and
+    the delete-race arm puts the sweep's statement back on ``MainThread`` and
     fails the second assertion; deleting the sweep instead fails the first.
     """
     resp, records, _writer = _measure_capture_graph_work(
@@ -3192,19 +3207,19 @@ def test_the_delete_race_sweep_never_runs_on_the_event_loop(
 
 def test_the_delete_race_sweep_never_runs_on_the_event_loop_when_the_delete_wins_the_recheck(
         client, monkeypatch):
-    """#10893: the OTHER sweep site, `hosted_api.py:21685`.
+    """#10893: the OTHER sweep site — the receipt re-check window.
 
     The sibling above answers the session-alive PRE-check with "gone" and never
     reaches the ordinary live path's post-PATCH re-check. Here the pre-check and
     the receipt write succeed and the delete wins INSIDE the window the
     off-load itself opened (`session_gone=2` — gone from the second probe), so
     the compensation arm runs and its `_sweep_orphaned_writes` is the one under
-    test. Measured before this row existed: inlining the sweep at `:21685` only
-    was GREEN, so that arm was uncovered by every test in this tree and — unlike
+    test. Measured before this row existed: inlining the sweep in the re-check
+    arm only was GREEN, so that arm was uncovered by every test in this tree and — unlike
     the enrichment read above — not declared as a residual (#14086 review, P2).
 
-    Mutation check (must stay true): inlining `_sweep_orphaned_writes()` at
-    `:21685` reds the off-loop assertion; deleting that call reds the
+    Mutation check (must stay true): inlining `_sweep_orphaned_writes()` in the
+    re-check arm reds the off-loop assertion; deleting that call reds the
     non-vacuity one; and collapsing the fixture onto the sibling's branch
     (`session_gone=True`, i.e. ONE alive probe instead of two) reds the
     arm-identity assertion, which is what stops this row passing on the wrong
