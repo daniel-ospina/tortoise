@@ -1060,14 +1060,23 @@ or skips it changes the flow with nobody deciding that it should).
 **Resolution — the render CONSUMES nothing and WRITES nothing.** `capture-disclosed`
 has exactly ONE writer, the capture path
 (`tortoise/hosted_api.py::_capture_session_impl` →
-`write_completed_step(proj, org_id, "capture-disclosed", ...)`, first-write-wins,
-on the org's first 2xx capture; a 409 off-switch capture never writes it). The
+`write_completed_step(<the org's DEFAULT-graph projection>, org_id,
+"capture-disclosed", ...)`, first-write-wins, on the org's first 2xx capture; a 409
+off-switch capture never writes it). ⛔ The handle is the **org DEFAULT graph**,
+never the capture's own `proj` — the step is an org-level surface, and
+`write_completed_step` mints the node, the step node and their edge in the graph
+it is handed. ⛔ And a **CUSTOM-graph-bound credential runs NEITHER half** (no
+`capture-disclosed` write, no completion gate): writing org-level state on behalf
+of a per-graph key is the cross-graph write `_reject_graph_bound_org_surface`
+answers 403 for on every sibling surface. A key bound to the DEFAULT graph is
+NOT that class — its graph *is* the org default, so it keeps the checkpoint. The
 disclosure reads onboarding state and is otherwise pure, so:
 
 - rendering it twice renders the same text and leaves state identical;
 - it creates no COMPLETED_STEP edge, before or after the first capture;
 - it neither suppresses nor advances the once-per-org announcement — the
-  `first_capture` flag on the capture response remains the only trigger.
+  `first_capture` flag on the capture response remains the only trigger (a
+  CUSTOM-graph-bound credential never gets it: it is `False` there by design).
 
 The accounting is declared once, in code
 (`tortoise/capture_disclosure.py::step_accounting`) and asserted by

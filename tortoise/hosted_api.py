@@ -527,6 +527,53 @@ async def _run_off_loop(executor: ThreadPoolExecutor, fn, /, *args, **kwargs):
     return await asyncio.wrap_future(_submit_off_loop(executor, fn, *args, **kwargs))
 
 
+#: Returned by :func:`_run_off_loop_fail_open` when the leg's RESULT IS UNAVAILABLE
+#: — either the dispatch failed or the leg raised. The wrapper's single ``except``
+#: arm catches both, so it CANNOT tell them apart; an arm must not read this as
+#: "the work never started". It is a value no offloaded leg in this module can
+#: legitimately return, so the arms below can branch on it without a second flag.
+_DISPATCH_FAILED = object()
+
+
+async def _run_off_loop_fail_open(fn, /, *args, executor=None, **kwargs):
+    """`_run_off_loop` on the capture pool, FAIL-OPEN when the leg cannot dispatch.
+
+    ⛔ THIS FAILURE MODE IS NEW, AND IT DID NOT EXIST INLINE (#14086 review, P2).
+    ``_submit_off_loop`` calls ``executor.submit(...)`` IN THE CALLING TASK, so it
+    raises ``RuntimeError`` once the pool is shut down (``_dispose_capture_executor``
+    runs at thread shutdown) and ``BrokenThreadPool`` when a worker cannot start —
+    neither of which a bare synchronous call could raise. Four arms in the capture
+    receipt block await the offload with no ``try``, while the block's own promises
+    are that the response still 200s on a committed capture (*"compensate (the
+    response still 200s; the capture itself was valid)"*) and that *"a sweep
+    failure never 500s the committed capture"* (``_sweep_orphaned_writes``).
+
+    Returns :data:`_DISPATCH_FAILED` instead of raising, so every arm keeps its own
+    fail-open DIRECTION (the receipt's probes read a failure as "alive" — the same
+    direction ``_session_alive`` itself takes on a failed read; a sweep failure is a
+    warning) without four copies of one ``try``/``except``.
+
+    Only for legs that are NON-FATAL by contract: an escaped worker exception is
+    swallowed here too, which is what "fail-open" means for the three capture
+    closures it serves — the session-alive probe, the orphan sweep, and the
+    extraction/EP pass.
+    """
+    try:
+        return await _run_off_loop(
+            _CAPTURE_EXECUTOR if executor is None else executor,
+            fn, *args, **kwargs)
+    except Exception:
+        # ⛔ The ONE ``except`` covers BOTH a dispatch failure (``_submit_off_loop``
+        # raising on a shut-down / broken pool) AND the offloaded leg itself
+        # raising, and it cannot tell them apart — so the message must not claim
+        # the narrower cause. Same wording class as the five
+        # ``extraction_warnings`` this serves (#14086 review, P3).
+        _logger.exception(
+            "capture off-loop leg did not complete (dispatch failed or it "
+            "raised; fail-open): %s", fn)
+        return _DISPATCH_FAILED
+
+
 def _capture_slot_decrement() -> None:
     """Return one reserved capture slot (capacity only — see _capture_session_release).
 
@@ -6230,6 +6277,18 @@ def _emit_wait_bound_breach(org_id: str, route_path: str, method: str,
         spent = stages.get("stages_ms")
         if spent:
             props["read_stages_ms"] = spent
+        # #10893 second cycle: the `pre_handler` decomposition. Published under
+        # its own key rather than folded into `read_stages_ms`, because the
+        # stage table and the part table are different questions asked of the
+        # same request — and a reader must never have to infer which is which
+        # from the key names inside one mapping. Validated against the closed
+        # part vocabulary for the same reason `read_stage` is.
+        from tortoise.read_stages import (
+            PRE_HANDLER_PART_SET as _PART_SET,
+        )
+        parts = stages.get("pre_handler_parts")
+        if parts and all(k in _PART_SET for k in parts):
+            props["read_pre_handler_parts"] = parts
 
     def _write() -> None:
         try:
@@ -6580,6 +6639,20 @@ class WaitBoundMiddleware:
             if request_stages is not None:
                 _bindings.enter_context(_bind_read_stages(request_stages))
             task = asyncio.ensure_future(self.app(scope, receive, _guarded_send))
+            # #10893 second cycle: the first boundary of the `pre_handler`
+            # decomposition — arrival → the handler task EXISTS. After this line
+            # the request is waiting for the loop to schedule that task, which
+            # is the `dispatch` part. ⛔ Before it, ONLY this outermost
+            # middleware's own preamble and this request's share of any loop
+            # saturation — NOT the inner middleware chain: those middlewares are
+            # wrapped by this one (registered LAST ⇒ outermost) and run INSIDE
+            # the task this line creates, so their time lands in `dispatch`.
+            # Noted INSIDE the binding (the note is a no-op when nothing is bound)
+            # and BEFORE the await, because a note is only meaningful while
+            # `pre_handler` is still open.
+            if request_stages is not None:
+                from tortoise.read_stages import note as _note_stage
+                _note_stage("middleware")
         try:
             # ``wait_for`` + ``shield``, not ``asyncio.wait``: on 3.12
             # ``wait_for`` is a single deadline around ``await fut``, and the two
@@ -10469,10 +10542,19 @@ async def _data_sdk_offloaded(org: dict, *,
     connect it does not use.
     """
     _bind_actor_context(org)
-    if attach_projection:
-        return await _graph_offload(
-            lambda: _data_sdk_with_projection(org), op="data_sdk.attach")
-    return await _graph_offload(lambda: _data_sdk(org), op="data_sdk")
+    # #10893 second cycle: close the `dispatch`/`sdk_open` boundary. The graph
+    # lane's SDK open + cold projection attach is a real WAIT this request owns,
+    # and it is one of the three mechanisms a six-second `pre_handler` can be.
+    from tortoise.read_stages import note as _note_stage
+    try:
+        if attach_projection:
+            sdk = await _graph_offload(
+                lambda: _data_sdk_with_projection(org), op="data_sdk.attach")
+        else:
+            sdk = await _graph_offload(lambda: _data_sdk(org), op="data_sdk")
+    finally:
+        _note_stage("sdk_open")
+    return sdk
 
 
 def _require_scope(org: dict, scope: str, surface: str) -> None:
@@ -10485,7 +10567,22 @@ def _require_scope(org: dict, scope: str, surface: str) -> None:
       scopes — C3); a deleg=0 key with no data scope stays 403 here.
 
     Never post-filter: the check is the FIRST statement of a data handler.
+
+    #10893 second cycle: it is also where the `dispatch` boundary of
+    ``pre_handler`` is closed. A data handler runs on a task the transport seam
+    created, so everything since that task existed and up to this line — the
+    REMAINING MIDDLEWARE CHAIN (the inner middlewares execute inside the created
+    task), the credential/org dependency stack, and any time the task sat
+    unscheduled behind another request's synchronous work — is the `dispatch`
+    part. The `middleware` part is ONLY arrival → task created: the outermost
+    transport middleware's own preamble and any pre-task loop wait
+    (``PRE_HANDLER_PARTS`` in ``tortoise/read_stages.py``). It is noted here
+    rather than per-route because this function's placement is already the
+    contract above, so a new data route inherits the attribution instead of
+    having to remember it.
     """
+    from tortoise.read_stages import note as _note_stage
+    _note_stage("dispatch")
     if org.get("legacy_full_access") or org.get("key_id") is None:
         return
     have = set(org.get("scopes") or [])
@@ -13229,6 +13326,12 @@ async def _read_offload(fn, *, op: str, unavailable=None, timeout=None):
     task and re-awaits THAT task after draining.
     """
     bound = read_offload_timeout_s() if timeout is None else timeout
+    # #10893 second cycle: everything up to the hand-off is the handler's own
+    # work (`read_submit`); everything after it, up to the read path's FIRST
+    # stage mark, is the wait for a read-lane worker (`read_lane` — the #13528
+    # starvation shape). Two boundaries, because they need opposite fixes.
+    from tortoise.read_stages import note as _note_stage
+    _note_stage("read_submit")
     # #4055: the identity + clock the exemption compares against. ``owner`` is
     # whatever this request bound as its one-time-load owner (``None`` unarmed,
     # which never exempts — ``_cold_setup_ran_during`` enforces that).
@@ -20738,7 +20841,47 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     _capture_mint_failed = False
     if not session_existed or (retry_failed_capture and not store_only):
         try:
-            event = sdk._create_event(
+            # ⛔ #10893 (SECOND cycle) — OFF THE EVENT LOOP, and this is the
+            # measured leg, not a precaution. `_create_event` is a SYNCHRONOUS
+            # SDK write (`graph_ops.counts_capture_ops` calls it that way on the
+            # SDK lane), and on the hosted deployment every SDK entity write
+            # ends in `live_write.write` -> `record_writer.write` ->
+            # `record_projection.replay`, i.e. a blocking Postgres round trip per
+            # statement, on whatever thread called it.
+            #
+            # It was called inline, so it ran on the single uvicorn worker's
+            # loop. MEASURED on production (`/health` -> `loop_blocks`, the
+            # loop thread's own stack, innermost LAST):
+            #
+            #   hosted_api.py:20741 in _capture_session_impl
+            #     -> sdk._create_event -> create_entity -> derived_embedding.wrapper
+            #     -> _emit_event -> live_write.write -> _write_record_projection
+            #     -> record_writer.write_live_record -> write_records -> write
+            #     -> record_projection.replay -> _apply_tenant_scope
+            #
+            # with `loop_age_s` 5.5 s and `capture.in_flight` pinned at 8/8, so
+            # the loop is blocked for ~5.5 s per capture and there is always one
+            # capture in flight. That IS `pre_handler`: a `/v1/search` whose own
+            # legs are inside budget still waits seconds for its first
+            # instruction, because the loop cannot schedule it. Attribution on a
+            # 2-turn local capture (every TortoiseSDK sync method instrumented):
+            # this call was 552 ms of the 640 ms of synchronous SDK work running
+            # on the loop — 86 % — and the next-largest leg was 26 ms.
+            #
+            # The two calls on either side of it in this handler
+            # (`_write_session_and_turns` above, `_materialize_session_source`
+            # below) were already off-loaded, so the mint was the member of this
+            # class that was missed, not a design choice. The submission rides
+            # the same `_CAPTURE_EXECUTOR` pool and the same `_run_off_loop`
+            # contract (contextvars copied per attempt, bounded pool workers —
+            # NOT daemons: `ThreadPoolExecutor` threads have been non-daemon
+            # since CPython 3.9, which is why this pool needs the THREADING
+            # SHUTDOWN disposal hook at `hosted_api.py:382`) —
+            # nothing about WHAT is written or in what order changes, only where
+            # it runs, so the #4014/#1727 byte-parity with `sdk.capture_session`
+            # is untouched.
+            event = await _run_off_loop(
+                _CAPTURE_EXECUTOR, sdk._create_event,
                 f"session_{session_id}",
                 "sessionCaptured",
                 _server_id=_session_capture_event_id(session_id),
@@ -21325,18 +21468,41 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # computed off the loop above, so the linker adds NO scrub pass of its
         # own.
         link_texts = _turn_texts
-        link_result = link_session_entities(
-            proj, session_id, link_texts,
-            turn_ids=[_capture_turn_id(session_id, i)
-                      for i in range(len(link_texts))],
-            sdk=sdk)
-        if link_result["attempted"]:
-            proj.g.query(
-                "MATCH (s:Session {id:$sid}) SET "
-                "s.entity_links_attempted=$a, s.entity_links_created=$c",
-                params={"sid": session_id, "a": link_result["attempted"],
-                        "c": link_result["created"]},
-            )
+
+        def _link_off_loop():
+            """The entity-linking pass — synchronous FalkorDB work, so OFF the loop.
+
+            ⛔ #10893 (second cycle): this ran INLINE on the single uvicorn
+            worker. It is not one query — `link_session_entities` resolves
+            targets and writes an `about*` edge PER TURN that carries a
+            reference (two round trips each) and the `SET` below is one more, so
+            a twenty-turn capture parked the event loop for tens of graph round
+            trips. The calls on either side of it were already offloaded (see
+            the #4625 legs above and below); THIS TAIL was the residue — the link
+            pass, the receipt probes, the onboarding writes, the sweep, the
+            write-verb enrichment read and the `capture_ok` stamp — and it is the
+            class that makes a CONCURRENT `/v1/search` accrue `pre_handler`
+            seconds it did not spend.
+
+            The same callable, the same result, the same non-fatal arm — only
+            WHERE it runs changes. `proj` cross-thread use is the established
+            pattern here (it is handed to workers throughout the capture path).
+            """
+            result = link_session_entities(
+                proj, session_id, link_texts,
+                turn_ids=[_capture_turn_id(session_id, i)
+                          for i in range(len(link_texts))],
+                sdk=sdk)
+            if result["attempted"]:
+                proj.g.query(
+                    "MATCH (s:Session {id:$sid}) SET "
+                    "s.entity_links_attempted=$a, s.entity_links_created=$c",
+                    params={"sid": session_id, "a": result["attempted"],
+                            "c": result["created"]},
+                )
+            return result
+
+        await _run_off_loop(_CAPTURE_EXECUTOR, _link_off_loop)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception(
@@ -21500,13 +21666,64 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             sdk._emit_event("SessionDeleted", id=session_id)
 
     receipt_key = _capture_receipt_key(capture_harness)
-    if _session_alive():
+    # ⛔ #10893 (second cycle): THE RECEIPT BLOCK IS SYNCHRONOUS GRAPH + REGISTRY
+    # WORK, and it used to run INLINE on the single uvicorn worker. Two
+    # `_session_alive` probes, one `_session_count_by_harness` count, and
+    # up to two `_update_onboarding_state` writes — the receipt key is an
+    # OPERATIONAL field, so it is a jsonb compare-and-set against the registry
+    # (or, in the selfhost lane, a `SET t.onboarding_state` on the registry Team
+    # node), with NO `OnboardingState` MERGE — all park the
+    # event loop. That is the `#2988`/`#3498` class this file offloads at every
+    # other leg of this handler (see the #4625 legs above), and it is the shape
+    # that makes a CONCURRENT `/v1/search` accrue `pre_handler` seconds it never
+    # spent: the read route's task cannot be scheduled while the loop is held.
+    #
+    # Only WHERE these run changes: order, fail-open arms, bucket-aware
+    # compensation and fail-closed warnings are byte-identical. ⛔ The ATOMICITY
+    # is NOT — an awaited thread is a scheduling point, so the pre-check → PATCH
+    # window is genuinely open; the post-write re-check below is exactly its arm.
+    # ⛔ AND THE DISPATCH IS A NEW FAILURE MODEL, so it gets its own arms:
+    # `_submit_off_loop` submits IN THE CALLING TASK and raises once the pool is
+    # shut down (`_dispose_capture_executor`, at thread shutdown) or a worker
+    # cannot start (`BrokenThreadPool`) — neither could happen to an inline call.
+    # So every arm that had NO `try` of its own now goes through
+    # `_run_off_loop_fail_open`, which reads a failed dispatch as "alive" for the
+    # probes (the same direction `_session_alive` already takes on a failed read)
+    # and as a warning for the sweep. The three awaits that KEEP their own
+    # `except`/`suppress` — the receipt write, the bucket count, the receipt
+    # clear — stay on `_run_off_loop`: wrapping them would duplicate an arm they
+    # already have. Either way a COMMITTED capture still 200s (#14086 review, P2).
+    alive_now = await _run_off_loop_fail_open(_session_alive)
+    if alive_now is _DISPATCH_FAILED:
+        # FAIL-OPEN IN THE SAME DIRECTION AS A FAILED READ: the receipt follows
+        # the committed capture, and the next delete's reconcile self-heals.
+        extraction_warnings.append(
+            "capture receipt probe did not complete (dispatch failed or the "
+            "probe raised; fail-open: the receipt is retained)")
+        alive_now = True
+    if alive_now:
         try:
             # #4625: write-only — the return is discarded here, and this is
             # the per-capture hot path (see ``_update_onboarding_state``).
-            _update_onboarding_state(org["org_id"], _echo=False, **{
-                receipt_key: now,
-            })
+            # ⛔ DECLARED RESIDUAL (#14086 review, round 2 P2) — this offload
+            # carries the receipt's REGISTRY CAS onto the pool, and
+            # `_write_jsonb_fields_cas` -> `_read_onboarding_state_and_version` /
+            # `_cas_write_onboarding_state` each construct
+            # `_make_sdk(namespace="registry")` THERE: the same
+            # `_make_sdk`-in-a-pooled-worker shape the checkpoint leg below
+            # deliberately avoids (#7500). It is NOT closed here, and that is a
+            # scoping decision, not an oversight: the handle would have to be
+            # threaded through the shared CAS writers, which every PATCH /
+            # checkpoint / onboarding route also calls, so that seam belongs with
+            # those writers rather than inside a capture-path change. In
+            # production the store path is env-derived and identical on every
+            # thread, so the exposure is the TEST harness's stale per-test stem
+            # (#7500's own mechanism) — measured, not assumed: the receipt write
+            # does land where the receipt tests read it. Named here because an
+            # undeclared residual is how the next reviewer re-finds it.
+            await _run_off_loop(
+                _CAPTURE_EXECUTOR, _update_onboarding_state,
+                org["org_id"], _echo=False, **{receipt_key: now})
             # #3520: the `session_capture_last_error_<harness>` clear used to sit
             # HERE, before `_capture_ok` was known — which is exactly how an
             # extraction failure cleared its own error. It now rides the outcome,
@@ -21520,7 +21737,17 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             extraction_warnings.append(
                 "session capture receipt write failed (non-fatal)")
         else:
-            if not _session_alive():
+            still_alive = await _run_off_loop_fail_open(_session_alive)
+            if still_alive is _DISPATCH_FAILED:
+                # A failed probe must NOT be read as "the session is gone":
+                # compensation on a failed dispatch would delete a live
+                # receipt. Retain it, and say so.
+                extraction_warnings.append(
+                    "capture receipt re-check did not complete (dispatch "
+                    "failed or the re-check raised; fail-open: the receipt is "
+                    "retained)")
+                still_alive = True
+            if not still_alive:
                 # The delete won between the pre-check and the receipt PATCH
                 # — compensate (the response still 200s; the capture itself
                 # was valid). Bucket-aware like the delete-side recompute:
@@ -21531,7 +21758,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # read leaves the receipt (fail-open; the next delete's
                 # reconcile self-heals).
                 try:
-                    bucket_empty = _session_count_by_harness(
+                    bucket_empty = await _run_off_loop(
+                        _CAPTURE_EXECUTOR, _session_count_by_harness,
                         proj, capture_harness) == 0
                 except Exception:
                     bucket_empty = False
@@ -21541,9 +21769,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                         # #4625: write-only — this return is discarded, and
                         # this is the same per-capture hot path as the
                         # receipt write above.
-                        _update_onboarding_state(
-                            org["org_id"], _echo=False,
-                            **{receipt_key: None})
+                        await _run_off_loop(
+                            _CAPTURE_EXECUTOR, _update_onboarding_state,
+                            org["org_id"], _echo=False, **{receipt_key: None})
                         cleared = True
                     if cleared:
                         extraction_warnings.append(
@@ -21557,7 +21785,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                     extraction_warnings.append(
                         "session deleted during capture — capture receipt "
                         "retained (sessions remain in this harness bucket)")
-                _sweep_orphaned_writes()
+                swept = await _run_off_loop_fail_open(_sweep_orphaned_writes)
+                if swept is _DISPATCH_FAILED:
+                    extraction_warnings.append(
+                        "capture orphan sweep did not complete (dispatch "
+                        "failed or the sweep raised; non-fatal)")
     else:
         # Session deleted mid-capture before the receipt write — never land
         # an orphan receipt (the mutation was already removed). The capture
@@ -21566,7 +21798,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # (exact-ids; best-effort).
         extraction_warnings.append(
             "session deleted during capture — capture receipt not recorded")
-        _sweep_orphaned_writes()
+        swept = await _run_off_loop_fail_open(_sweep_orphaned_writes)
+        if swept is _DISPATCH_FAILED:
+            extraction_warnings.append(
+                "capture orphan sweep did not complete (dispatch failed or the "
+                "sweep raised; non-fatal)")
         # #3520: the unconditional clear that used to sit HERE is gone as well.
         # The per-harness `last_error` is written ONCE, from the capture
         # outcome, above — clearing it here as well would be a second writer of
@@ -21595,11 +21831,140 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     try:
         legacy_mirror = bool(
             _onboard_state.get("onboarding_complete"))
-        _cd = _os.write_completed_step(
-            proj, org["org_id"], "capture-disclosed",
-            status_from_mirror=legacy_mirror)
-        first_capture = bool(_cd["created"])
-        _maybe_apply_completion(org["org_id"])
+
+        # ⛔ BOTH HALVES OF THIS BLOCK READ AND WRITE THE ORG **DEFAULT** GRAPH —
+        # NOT THE CAPTURE'S. They are org-level surfaces, kept on the default
+        # graph by the same rule their siblings state ("a graph-bound key
+        # writing it would be a cross-graph write" —
+        # `_reject_graph_bound_org_surface`). `proj` below is the CAPTURE graph,
+        # and for a graph-bound credential `_data_sdk`'s `if gid:` branch opens a
+        # CUSTOM one. Handed `proj`, the gate finds no node and returns False
+        # (completion silently stops firing for that org), AND the step write
+        # files org-level onboarding state inside the customer's CUSTOM graph —
+        # invisible to every org-level reader, and `first_capture` fires once per
+        # GRAPH instead of once per org (#14086 review, P2, both halves).
+        # ⛔ WHICH CREDENTIALS RUN THIS BLOCK: only those whose OWN graph IS the
+        # org's DEFAULT graph — an org-wide credential, AND a graph-BOUND key
+        # whose binding names the default row. That second class is real and
+        # `main` served it correctly: a legacy/pre-guard key bound to the default
+        # node "writes to the same physical graph an org-wide key writes to"
+        # (#3365, `_capture_session_key`), so its capture `proj` WAS the default
+        # graph — dropping the checkpoint there would silently lose it for a class
+        # that already had it (`onboarding/SKILL.md`: the capture path is the ONLY
+        # writer of `capture-disclosed`) [#14086 review round 4, P1].
+        # For a CUSTOM-bound key the block runs NEITHER half: the write would file
+        # org-level state inside the customer's graph, and the gate would read —
+        # and could COMPLETE — the org's, which is the cross-graph write
+        # `_reject_graph_bound_org_surface` answers 403 for on every sibling
+        # surface.
+        #
+        # ⛔ WHAT THE CUSTOM-BOUND SKIP COSTS, DECLARED RATHER THAN IMPLIED
+        # (#14086 review, P2). `first_capture` is NOT only a funnel fact — it is
+        # the **trigger** for the in-conversation disclosure announcement, and the
+        # `capture-disclosed` step is that disclosure's durable signal
+        # (`tortoise/capture_disclosure.py`; `onboarding/SKILL.md` §8 calls the
+        # flag "the only trigger"). So a CUSTOM-graph-scoped credential writes NO
+        # `capture-disclosed` step and never sets `first_capture` — the disclosure
+        # line does not fire for it, where on `main` it fired once per capture
+        # graph. That is a USER-FACING change and it is NOT settled here: neither
+        # target graph is legitimate (org-level state in the customer's custom
+        # graph is the cross-graph write this guard exists to prevent; the org
+        # default graph is what a per-graph key must never touch), so giving the
+        # disclosure a per-graph home is a decision, not a patch. **#14131 owns
+        # it** — filed with both options and the acceptance bar; this block is the
+        # in-code record so the merge does not land the behaviour silently.
+        # (A key BOUND TO THE DEFAULT graph is NOT in that class: it keeps the
+        # checkpoint and the trigger, exactly as it did on `main`.)
+        #
+        # This construction is also where any `organizations.graph_name` read
+        # happens (`_org_default_namespace`) — and it is a READ, so it rides the
+        # CAPTURE POOL while the construction stays on the loop (#7500: the
+        # read may be off-loaded, `_make_sdk` may not — the same split the
+        # indexing lane uses, `_org_sdk_from_name(org_id, await _cp_offload(…))`).
+        # ⛔ WHY THE READ MUST NOT RUN INLINE (#14086 fixer). For a GRAPH-BOUND
+        # credential NO auth seam publishes the hint (`_publish_default_namespace`
+        # is org-wide only), so `_org_default_namespace` takes its point read of
+        # `organizations.graph_name` — a synchronous PostgREST round trip, which
+        # inline here is a stall ON the single uvicorn worker's loop: the exact
+        # class this PR exists to remove, and one no existing guard sees (the AST
+        # guards match control-plane calls lexically inside an `async def`, and
+        # this one sits one call away in a sync helper). Pinned by
+        # `tests/test_capture_loop_responsiveness.py::`
+        # `test_the_graph_bound_default_resolve_rides_the_worker_not_the_loop`.
+        # The org-wide path is unaffected: it takes the published hint and reads
+        # nothing at all.
+        if not org.get("graph_id"):
+            completion_sdk = _org_sdk(org["org_id"])
+        else:
+            # ⛔ ONE read, and the CONSTRUCTION keeps `_org_sdk`'s own shape
+            # (`_org_sdk` = `_org_sdk_from_name(org_id, _org_default_namespace(
+            # org_id))`). A `None` here means "the default never moved", and
+            # `_org_sdk_from_name` then opens `namespace=org_id` — byte-for-byte
+            # what `main` built for this class. Folding the historical name in
+            # with `or _graph_name_for_namespace(...)` instead hands a
+            # never-`None` name to `_org_sdk_from_name`, which switches every
+            # UNMOVED default-bound credential from `_make_sdk(namespace=…)` to
+            # `_make_sdk(graph_name=…)`. That is not cosmetic: `_make_sdk` keys
+            # its keepalive anchor on exactly that choice
+            # (`key = graph_name if graph_name is not None else namespace or ""`,
+            # the #1475 "anchor pins a stray server" class) and the SDK loses
+            # `namespace=`, contradicting `_org_sdk`'s stated "byte-for-byte
+            # what `_make_sdk(namespace=org_id)` returns" contract for an
+            # organization that has not promoted (#14086 review, the
+            # SDK-call-form half of the round-4 fix).
+            #
+            # ⛔ AND THE READ RIDES THE CAPTURE POOL, not the loop (see the
+            # paragraph above): only the NAME resolution is off-loaded — the
+            # CONSTRUCTION below stays on the loop (#7500). An unresolved
+            # binding skips both, so no read is paid for a request that will
+            # 403 in `_data_sdk` anyway.
+            bound_graph = _data_graph_name(org)
+            default_ns = (await _run_off_loop(
+                _CAPTURE_EXECUTOR, _org_default_namespace, org["org_id"])
+                if bound_graph is not None else None)
+            completion_sdk = (
+                _org_sdk_from_name(org["org_id"], default_ns)
+                if bound_graph is not None
+                and bound_graph == (default_ns or _graph_name_for_namespace(
+                    org["org_id"]))
+                else None)
+        def _first_capture_checkpoint():
+            """The capture-disclosed checkpoint — synchronous graph work, OFF the loop.
+
+            ⛔ #10893 (second cycle): `write_completed_step` takes the per-org
+            lock and runs keyed MERGEs, and `_maybe_apply_completion` opens the
+            org's DEFAULT graph and MATCHes its `:OnboardingState` node; both used
+            to run INLINE here, on the single uvicorn worker, at the end of EVERY
+            first capture. Same callable, same non-fatal arm, and the WRITE still
+            precedes the GATE — but the SDK construction now comes BEFORE the
+            write (it must: the write needs the default-graph handle), so a
+            construction failure skips the checkpoint with a warning where `main`
+            still wrote it. That is the ONE ordering difference, stated rather
+            than implied (#14086 review round 3, P3).
+            """
+            # ⛔ THE WRITE GOES TO THE SAME DEFAULT GRAPH AS THE GATE BELOW.
+            # `write_completed_step` mints the `OnboardingState` node, the
+            # `OnboardingStep` node and their `COMPLETED_STEP` edge IN THE GRAPH
+            # IT IS HANDED (`onboarding/state.py`), and this step is org-level
+            # like every other writer of it here — the checkpoint route reaches
+            # the same call through `_org_proj`, behind
+            # `_reject_graph_bound_org_surface`; the capture route has no such
+            # guard. The attach is resolved HERE, not on the loop: this closure
+            # runs on the capture pool, where the cold open belongs (#7500).
+            default_proj = completion_sdk._get_proj()
+            created = bool(_os.write_completed_step(
+                default_proj, org["org_id"], "capture-disclosed",
+                status_from_mirror=legacy_mirror)["created"])
+            # ⛔ The DEFAULT-graph HANDLE is handed in, not resolved here: this
+            # closure runs on a POOLED worker, where `_make_sdk` must not
+            # construct a store path (#7500 — see `_maybe_apply_completion`'s
+            # docstring). The capture's `proj` is NOT a substitute: it is the
+            # capture graph (see the block above).
+            _maybe_apply_completion(org["org_id"], sdk=completion_sdk)
+            return created
+
+        first_capture = False if completion_sdk is None else await _run_off_loop(
+            _CAPTURE_EXECUTOR, _first_capture_checkpoint)
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception(
@@ -21699,7 +22064,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                     operator_ids=operator_ids,
                     warn=extraction_warnings.append)
 
-        await _run_off_loop(_CAPTURE_EXECUTOR, _capture_ep_pass)
+        # ⛔ The FIFTH arm with this failure mode, and the one the receipt-block
+        # fix left behind (#14086 review, P2 — found on this head after the
+        # four-arm fix landed). Its own comment above promises "a promotion/EP
+        # hiccup never 500s a committed capture" and the pass' body is fail-open,
+        # but `_run_off_loop` SUBMITS IN THE CALLING TASK: a shut-down pool raises
+        # `RuntimeError` straight out of the handler AFTER the capture committed,
+        # and `capture_session`'s outer handler then answers 500 *and* writes
+        # `session_capture_last_error_<harness>`. Same seam, same shape as the
+        # receipt block's four arms: fail open, warn, keep the 200.
+        ran = await _run_off_loop_fail_open(_capture_ep_pass)
+        if ran is _DISPATCH_FAILED:
+            extraction_warnings.append(
+                "capture EP pass did not complete (dispatch failed or the pass "
+                "raised; non-fatal)")
     # W5 (#2104, S12/DM-2): the capture response speaks the frozen write
     # verb (memory_write_v1) — protocol_version REQUIRED, provenance
     # REQUIRED, per-point status/ep_updated/dedup, additive over the legacy
@@ -21733,14 +22111,21 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # sdk.capture_session's twin read for why (a helper-composed clause
             # is unresolvable to the §17.1 census, and the raw columns are what
             # every other surface consumes).
-            rows = proj.g.query(
-                "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
-                "coalesce(n.pointKind, 'statement'), "
-                "coalesce(n.status, 'live'), "
-                "n.confidence, n.posterior_alpha, n.ep_alpha, "
-                "n.posterior_beta, n.ep_beta",
-                params={"ids": [p["id"] for p in extracted]},
-            ).result_set
+            #
+            # ⛔ #10893 (second cycle): a graph round trip on the single uvicorn
+            # worker, INLINE here until now. Off the loop on the capture pool;
+            # the callable, the result and the non-fatal arm are unchanged.
+            def _enrichment_read():
+                return proj.g.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
+                    "coalesce(n.pointKind, 'statement'), "
+                    "coalesce(n.status, 'live'), "
+                    "n.confidence, n.posterior_alpha, n.ep_alpha, "
+                    "n.posterior_beta, n.ep_beta",
+                    params={"ids": [p["id"] for p in extracted]},
+                ).result_set
+
+            rows = await _run_off_loop(_CAPTURE_EXECUTOR, _enrichment_read)
             facts = {
                 r[0]: (r[1] or "statement", r[2] or "live",
                        ep_state(confidence=r[3], posterior_alpha=r[4],
@@ -21876,12 +22261,18 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # legacy-replay instead of re-attempting. Additive warning names the
         # residue.
         try:
-            proj.g.query(
-                "MATCH (s:Session {id:$sid}) "
-                "SET s.capture_ok=$ok, "
-                "    s.capture_extractor=$extractor",
-                params={"sid": session_id, "ok": _capture_ok_record,
-                        "extractor": _capture_extractor_record})
+            # ⛔ #10893 (second cycle): a graph round trip INLINE on the single
+            # uvicorn worker until now — the LAST one on this handler's tail.
+            # Off the loop on the capture pool; same statement, same params,
+            # same non-fatal arm.
+            await _run_off_loop(
+                _CAPTURE_EXECUTOR,
+                lambda: proj.g.query(
+                    "MATCH (s:Session {id:$sid}) "
+                    "SET s.capture_ok=$ok, "
+                    "    s.capture_extractor=$extractor",
+                    params={"sid": session_id, "ok": _capture_ok_record,
+                            "extractor": _capture_extractor_record}))
         except Exception as exc:  # pragma: no cover - graph hiccup
             extraction_warnings.append(
                 f"capture_ok state write failed: {type(exc).__name__}")
@@ -38978,15 +39369,95 @@ def _org_proj(org_id: str):
     return _org_sdk(org_id)._get_proj()
 
 
-def _maybe_apply_completion(org_id: str) -> bool:
+def _maybe_apply_completion(org_id: str, *, sdk=None) -> bool:
     """Post-write gate eval (scope pin 12): reads the fresh node + step
     edges, evaluates the fork-aware gate, and writes status 'complete' when
     satisfied. MONOTONIC: complete can never regress; a grandfathered org's
     first FLOW write evals to no-op (status stays complete — never
     re-onboarded). Returns True when the org transitioned to complete
-    (the caller invalidates the MCP TTL cache)."""
+    (the caller invalidates the MCP TTL cache).
+
+    ⛔ ``sdk`` IS SUPPLIED BY THE CAPTURE CHECKPOINT, and BOTH halves of that are
+    load-bearing (#14086 review, P2 — twice over).
+
+    WHICH GRAPH: this gate is an ORG-LEVEL surface and lives on the org's DEFAULT
+    graph, exactly like its siblings — ``_reject_graph_bound_org_surface`` states
+    the rule for them ("a graph-bound key writing it would be a cross-graph
+    write"). The capture's OWN ``proj`` is the CAPTURE graph, and for a
+    graph-bound credential ``_data_sdk``'s ``if gid:`` branch opens a CUSTOM one,
+    so handing ``proj`` in moves the gate off the default graph. There it finds no
+    node, returns False, and onboarding completion silently stops firing for that
+    org — with nothing red (the fixtures' credential is org-wide, ``graph_id:``
+    None, so they cannot see it).
+
+    WHERE IT IS BUILT: resolving the handle here means ``_org_proj`` →
+    ``_org_sdk`` → ``_make_sdk``, and ``_org_sdk_from_name``'s own docstring
+    forbids building one in a POOLED worker: the store path comes from the worker
+    thread's stale inherited stamp once the pool reuses it, so the job writes to a
+    store the reader never looks at (``#7500``; measured as 3 reds under
+    ``#4645``). So the caller — ON the loop — CONSTRUCTS the DEFAULT-graph SDK
+    and hands the HANDLE in; the cold ``_get_proj()`` attach stays in the worker.
+
+    ⛔ ``_org_sdk`` IS NOT ALWAYS I/O-FREE, so that construction is free on a
+    REQUEST lane and NOT free everywhere. It is free only where the auth seam
+    published the namespace (``_publish_default_namespace``, which publishes
+    only for an ORG-WIDE credential — a graph-bound one is skipped by design).
+    On the MCP capture lane nothing publishes it (``mcp_auth`` may not import
+    this module, and ``mcp_server`` calls ``_capture_session_impl`` directly),
+    and for an ORG-WIDE credential on either lane, ``_org_default_namespace``
+    does one primary-key control-plane read of ``organizations.graph_name``.
+    That read is PRE-EXISTING (``main`` resolved it on the loop too, through
+    ``_org_proj`` inside the inline gate) and this change neither adds nor moves
+    it — but it means the SDK construction must stay on whatever thread the lane
+    already runs it on, and must never move into the capture-pool worker.
+    ⛔ THE CAPTURE ROUTE SKIPS THIS FOR A **CUSTOM**-BOUND CREDENTIAL — and that
+    is TRUE OF THE CAPTURE ROUTE ONLY, not of every caller. The capture's
+    org-level block constructs no ``_org_sdk`` for such a key (the predicate in
+    ``_capture_session_impl`` keeps the block only when the credential's own
+    graph IS the org default), so on THAT path the ``organizations.graph_name``
+    read above does not happen for it. A key BOUND TO THE DEFAULT graph is NOT in
+    that class: it keeps the block, and the read it pays is the SAME single
+    pre-existing one ``main`` paid inside the inline gate — resolved ONCE, in a
+    CAPTURE-POOL worker (the READ is off-loaded; the construction stays on the
+    loop, #7500), and reused to construct the SDK via ``_org_sdk_from_name`` (no
+    second read) [#14086 review round 4, P1: the guard is a property of the
+    binding, not ``bool(graph_id)``].
+    The other caller still reaches it: ``mcp_server._maybe_onboarding_auto_complete``
+    calls this with ``sdk=None`` for any hosted org, and the MCP tools that reach
+    it (``tortoise_create_point`` at ``mcp_server.py``'s ``_maybe_onboarding_auto_complete``
+    call site, and the decision/observe paths beside it) are NOT behind
+    ``_reject_graph_bound_mcp_org_surface`` — so for a graph-bound MCP credential
+    this function IS still called and ``_org_proj(org_id)`` DOES perform that one
+    primary-key ``organizations.graph_name`` read, exactly as
+    ``_org_default_namespace``'s own docstring states for a GRAPH-BOUND
+    credential. So the paragraph above remains accurate for the MCP auto-onboarding
+    lane as well as the ORG-WIDE one.
+    ⛔ AND THE EXEMPT SET HAS MORE THAN ONE MEMBER — an earlier draft of this
+    paragraph said "only the CAPTURE lane's custom-bound case is exempt", which
+    its own neighbours refute. Two lanes SKIP the call for a bound key, and the
+    rest simply do not skip:
+      * the CAPTURE route's org-level block — custom-bound only, above;
+      * the REST point-write lane: ``POST /v1/points`` runs
+        ``_maybe_file_harness_connected`` under ``if _credential_is_agent(org)
+        and not org.get("graph_id")``, so ANY key carrying a ``graph_id`` skips
+        it — and ``_maybe_file_harness_connected`` is itself a caller of this
+        function (``_maybe_apply_completion(org_id)`` inside it);
+      * the remaining callers do NOT skip: ``_update_onboarding_state``,
+        ``patch_onboarding_state``, ``onboarding_checkpoint``,
+        ``_run_onboarding_seed`` and ``_run_starter_seed`` all call it
+        unconditionally, and where an org-level ROUTE refuses a graph-bound key
+        that refusal is ``_reject_graph_bound_org_surface``, a different
+        mechanism from skipping this call.
+    So this function is still reached with a graph-bound credential — which is
+    why the ``_org_sdk`` construction constraint above is not relaxed by the
+    capture guard (#14086 review rounds 3-5: an earlier draft said it was "no
+    longer called at all" for such a key, then that only the capture lane
+exempts it; the tree refutes both. The user-facing half of the capture guard is
+    #14131).
+    Left as ``None`` the historical behaviour is unchanged for every other
+    caller."""
     try:
-        proj = _org_proj(org_id)
+        proj = _org_proj(org_id) if sdk is None else sdk._get_proj()
         node = _os.read_onboarding_node(proj, org_id)
         if node is None:
             return False
@@ -41486,6 +41957,12 @@ _ALLOWED_ANALYTICS_PROPS = {
     # apply to it; `read_stages_ms` is a nested ``{stage: float}`` mapping, which
     # the PII filter passes because it tests top-level keys only.
     "read_stage", "read_stages_ms",
+    # #10893 second cycle: the DECOMPOSITION of `read_stages_ms`'s
+    # `pre_handler` entry, so a six-second pre-handler wait names its mechanism
+    # instead of inviting an inference. Nested ``{part: float}`` mapping over a
+    # closed vocabulary (``read_stages.PRE_HANDLER_PARTS``), validated at the
+    # emit site; the PII filter tests top-level keys only, so it passes whole.
+    "read_pre_handler_parts",
     # #3675: the result-bearing half of the SAME row. Without it the
     # ``mcp_tool_call`` series cannot tell a ``tortoise_search`` that returned
     # 8 points from one that returned nothing — both are ``status: "ok"`` —
@@ -50928,7 +51405,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 199 tracked files (740 distinct
+# ABSOLUTE line number from 200 tracked files (743 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

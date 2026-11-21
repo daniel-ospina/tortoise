@@ -1417,12 +1417,12 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # both carry the +14, put there by #13807 (`9cd31e8227`) — so this commit changes
     # NO locator, it only records WHY the numbers are where they are. The pin asserts
     # the brief's own number, so the two cannot drift apart.
-    ("tortoise/projection/__init__.py", 21018, '("Object", "name", "FULLTEXT")',
-     "`tortoise/projection/__init__.py:21018`"),
-    ("tortoise/projection/__init__.py", 21461, "def _create_fulltext_index(",
-     "`:21461`"),
-    ("tortoise/projection/__init__.py", 21903,
-     "for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:", "`:21903`"),
+    ("tortoise/projection/__init__.py", 21042, '("Object", "name", "FULLTEXT")',
+     "`tortoise/projection/__init__.py:21042`"),
+    ("tortoise/projection/__init__.py", 21485, "def _create_fulltext_index(",
+     "`:21485`"),
+    ("tortoise/projection/__init__.py", 21927,
+     "for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:", "`:21927`"),
 )
 
 
