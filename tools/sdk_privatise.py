@@ -924,7 +924,34 @@ SWEEP_NAMES = 66
 #: `Graph` is never the SDK), so no shape was absorbed and no defect is hidden — the direction the
 #: pin exists to catch is a NEW shape, and there is none. `--check` exits 0 on this tree after the
 #: re-pin, with `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11843, "6aed5368ffa10513")
+#:
+#: ⛔ RE-PINNED FROM `main`'s DRIFT AGAIN — the THIRD re-pin from OTHER lanes' commits in one day
+#: (`2c0d66e2ec07` #14086, `f9f480a55ab3` #14164, and now these two), which is the shape of the
+#: problem rather than a coincidence: `SWEEP_RESIDUE` is a WHOLE-TREE census, so any commit that
+#: adds or retires an untyped receiver anywhere moves it, while the commits that do so have no
+#: reason to touch this file. The pair below is `--repin`'s output on THIS tree at `1b0db04894`
+#: (`(11840, "b7eb08ff3acdcce4")`), measured, never carried forward by arithmetic; at `72c104bcbb`
+#: the tree still satisfies its own pin `(11843, "6aed5368ffa10513")` — the row map re-derived
+#: there totals 11843 — so the move happened strictly between those two commits.
+#: THE −3 IS ATTRIBUTED BY A ROW-BY-ROW DIFF, not by arithmetic: the residue map was re-derived on
+#: BOTH heads from this file's own `edits_for`/`rename_map` (not by grep over the source, which
+#: over-counts receivers that appear inside comments and string literals), and EXACTLY SIX rows
+#: differ, with the row SHAPE set going 858 → 855:
+#:   `67dc298ec3` (#14194) REWROTE `tests/test_read_ledger.py` — it is the ONLY commit in the range
+#:   that touches that file, and it retires four `inst.*` rows: `inst.query` 3 → 0,
+#:   `inst.get_point` 1 → 0, `inst.paginated_query` 1 → 0, `inst.query_points_by_tag` 1 → 0, i.e.
+#:   the six removed `inst.*` source lines = −6;
+#:   `1b0db04894` (#14162) is the only commit in the range that touches `tools/miss_rate_m5.py` or
+#:   its test, and it GROWS `cur["proj"].g.query` 2 → 4 there (+2) and adds one NEW row,
+#:   `terms.update` 0 → 1 in `tests/test_miss_rate_m5.py` (+1), i.e. +3; net −3 → `11843 − 3`.
+#: The ONE new shape is DECLARED rather than waved through: `terms` at that site
+#: (`_pp_terms`, `tests/test_miss_rate_m5.py`) is a plain `set[str]` built by `re.findall`, so
+#: `.update` there is the ordinary-word receiver this sweep deliberately leaves alone — it is
+#: neither an SDK handle nor a FalkorDB `Graph`. `typed references still pointing at a public
+#: name: 0` on BOTH heads, so no public name was absorbed in either direction and no defect is
+#: hidden: the four retired `inst.*` rows are that test rewrite's own deletions, not an escape,
+#: and the direction the pin exists to catch — the SET moving — is what this re-pin declares.
+SWEEP_RESIDUE = (11840, "b7eb08ff3acdcce4")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
