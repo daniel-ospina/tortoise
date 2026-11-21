@@ -58,8 +58,11 @@ two whole-graph scans in the restore path, which carry the label without naming 
 
 ⚠️ **The line addresses in `#13083` §2.6 for rows 15–16 are stale at this head**: the census cites
 `:1316`/`:1517`, and the statements are at `:1333`/`:1534`. Re-derived here rather than shifted by a
-constant, because `hosted_backup.py`'s drift is not one offset (the census itself records `+2` below
-its `:1038` and `+134` above it).
+constant, because `hosted_backup.py`'s drift is not one offset: measured with `diff -U0` between the
+census's pin `ccb49741b2ec` and this head it is **three hunks** — `+2` after the pin's `:59-60`, `+60`
+after `:1035` (`@@ -1035,0 +1038,60 @@`) and `+89` after `:1175` (`@@ -1175,0 +1238,89 @@`) — i.e.
+cumulative `+2` / `+62` / `+151`, and the flat `+134` an earlier draft applied lands at
+`:1316`/`:1517`, which are NOT the statements (`:1316` is `retired_vectors += 1`).
 
 **Verdict: `record_only`-shaped.** Not one reader needs a graph capability — no traversal, no adjacency
 walk, no fulltext query, no EP walk, no vector query. Every one is a key lookup, an ordered range scan,
