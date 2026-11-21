@@ -103,11 +103,25 @@ class TestDe2e7:
         assert "scope='promote'" in by_name["tortoise_refresh_confidence"].description
         assert by_name["tortoise_review_link_candidates"].sdk_method == "review_link_candidates"
         assert by_name["tortoise_check_confidence"].sdk_method == "check_confidence"
-        # The retired doors still DRIVE their original SDK methods, which is what
-        # makes each container above the same answer rather than a new capability.
+        # The retired doors still DRIVE their SDK methods, which is what makes each
+        # container above the same answer rather than a new capability.
+        #
+        # ⛔ THE PROPERTY IS "RESOLVES", NOT THE SPELLING (#14114). This pinned the
+        # PUBLIC names `promote_point` / `belief_timeline`, and #13899's final batch
+        # retired those from the SDK's public surface while KEEPING the doors
+        # internally — so the registry went to `_promote_point` / `_belief_timeline`
+        # (#13899, `tortoise/tool_registry.py`) and this pin kept asserting a door the
+        # retirement had removed. A stale spelling is not a cosmetic rot: the claim
+        # this line makes is that the retired shim still reaches a real SDK door, so
+        # the assertion is that the declared `sdk_method` RESOLVES AND IS CALLABLE on
+        # the SDK. A future rename keeps it green; a door that stops existing reds.
         retired_by_name = {t.name: t for t in RETIRED_TOOL_REGISTRY}
-        assert retired_by_name["tortoise_promote_point"].sdk_method == "promote_point"
-        assert retired_by_name["tortoise_belief_timeline"].sdk_method == "belief_timeline"
+        for door in ("tortoise_promote_point", "tortoise_belief_timeline"):
+            method = retired_by_name[door].sdk_method
+            assert callable(getattr(TortoiseSDK, method, None)), (
+                f"`{door}` declares sdk_method={method!r}, which does not resolve "
+                "on TortoiseSDK — the retired door would raise at call time "
+                "(#4282/#14114)")
 
     def test_mcp_handler_error_contract(self, monkeypatch):
         """J-6: handlers return {error: message} on failure — the REAL SDK

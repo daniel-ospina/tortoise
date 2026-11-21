@@ -1417,12 +1417,21 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     # both carry the +14, put there by #13807 (`9cd31e8227`) — so this commit changes
     # NO locator, it only records WHY the numbers are where they are. The pin asserts
     # the brief's own number, so the two cannot drift apart.
-    ("tortoise/projection/__init__.py", 21018, '("Object", "name", "FULLTEXT")',
-     "`tortoise/projection/__init__.py:21018`"),
-    ("tortoise/projection/__init__.py", 21461, "def _create_fulltext_index(",
-     "`:21461`"),
-    ("tortoise/projection/__init__.py", 21903,
-     "for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:", "`:21903`"),
+    # ⛔ RE-DERIVED AGAIN (main-red, un-red lane): #13994 (`e0accb8fe6`) inserted
+    # +24 net lines into `tortoise/projection/__init__.py` ABOVE all three rows —
+    # the `#11682` `("Point", "quote", "FULLTEXT")` entry and its comment — so the
+    # pin and §1 of the brief both had to move by +24 (21018→21042, 21461→21485,
+    # 21903→21927). Nothing about the mechanism moved: the SYMBOLS are identical,
+    # only the line numbers, which is exactly the drift this pin exists to make
+    # visible, and it is why the remedy is to re-derive the numbers rather than to
+    # relax the equality. The pin asserts the brief's own number, so the two cannot
+    # drift apart.
+    ("tortoise/projection/__init__.py", 21042, '("Object", "name", "FULLTEXT")',
+     "`tortoise/projection/__init__.py:21042`"),
+    ("tortoise/projection/__init__.py", 21485, "def _create_fulltext_index(",
+     "`:21485`"),
+    ("tortoise/projection/__init__.py", 21927,
+     "for label, fields in _FULLTEXT_INDEX_LABEL_FIELDS:", "`:21927`"),
 )
 
 

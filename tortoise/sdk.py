@@ -5713,8 +5713,19 @@ _SERVER_MANAGED_EMBEDDING_MARKERS = frozenset({
 #: the parameter and silently suppress the outcome (the capture would then treat
 #: every turn as unrecorded and fall back to the graph — the safe direction, but
 #: a silent one), so it is reserved like the rest.
+#: ``write_sink`` (#14002) is the THIRD, and the same shape: the chokepoint hands
+#: in a list and `_emit_event` appends the write it actually performed, so a
+#: caller can tell a skip from a write. A caller prop of that name would bind the
+#: parameter and receive the SKIP fact the caller was meant to READ — the
+#: observation list would be the caller's own bag, and the caller would then
+#: mistake its own prop for the chokepoint's answer. Reserved like the rest.
+#: ⛔ The names above this line are prose, and prose is not a gate: the set is
+#: DERIVED against ``inspect.signature(TortoiseSDK._emit_event)`` by
+#: ``tests/test_2296_document_created_journal.py``, which is what caught
+#: `write_sink` — the parameter landed with #14002 and this set was not moved
+#: with it, so a caller prop of that name bound it silently.
 _RESERVED_EMIT_CALL_PROPS = ("type_", "new_content", "self", "aboutLinks",
-                            "record_sink")
+                            "record_sink", "write_sink")
 
 
 def _drop_reserved_emit_props(props: dict) -> list[str]:

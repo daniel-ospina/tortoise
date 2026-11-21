@@ -498,8 +498,16 @@ def test_the_two_chokepoints_strip_a_caller_seq_that_bypasses_intake(env,
     # ORDINAL `_carried_position` reads. Captured, not asserted against a fake
     # writer, so the strip is what the assertion is about.
     captured: list[dict] = []
-    monkeypatch.setattr(sdk, "_write_record_projection",
-                        lambda event, seq=None: captured.append(dict(event)))
+    # ⛔ The double MIRRORS the door's real signature (`_write_record_projection`
+    # takes `journal_skipped` since #14002). A stale double reds with a `TypeError`
+    # raised AFTER the journal append has committed — `live_write` then reports the
+    # write as a NAMED disagreement ("the journal holds position 1 and the record
+    # does not"), so the assertion below fails on `captured == []` and the failure
+    # message blames the `**extra` strip for a defect in this lambda.
+    monkeypatch.setattr(
+        sdk, "_write_record_projection",
+        lambda event, seq=None, *, journal_skipped=False:
+        captured.append(dict(event)))
     sdk._emit_event("PointRevised", id="p-extra", seq=44, content="x")
     assert captured, (
         "the emit produced no record payload to inspect — this leg proves "
