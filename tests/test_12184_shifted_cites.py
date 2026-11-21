@@ -377,7 +377,8 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # that one grades the SPELLED token, and a bare `:58274` is not a substring match for it. So the
     # gap F1 closed for `:58272` on the same line was open for its sibling, which is why this row is a
     # PER-SITE pin and not a duplicate of the family. `sdk.py:58274` is
-    # `"s.turn_count, s.actor_user_id, s.harness, "`, the line after `:58272`'s `rows = proj.g.query(`.
+    # `"s.turn_count, s.actor_user_id, s.harness, "`, the statement's SECOND fragment — two lines after
+    # `:58272`'s `rows = proj.g.query(`, with `:58273`'s first fragment between them.
     # NON-VACUOUS: with this row PRESENT the mutation above reds the token arm (count 1 -> 0) and, when
     # the pin's line is also moved, the content arm.
     (_AUDIT, '`:58274`', _SDK, 58274, '"s.turn_count, s.actor_user_id, s.harness, "'),
