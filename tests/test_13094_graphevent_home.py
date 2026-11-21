@@ -1291,6 +1291,22 @@ def test_a_refused_schema_statement_refuses_the_run(monkeypatch, capsys):
     assert "REFUSED" in err and "must NOT be quoted" in err, err
 
 
+def test_a_complete_schema_still_publishes_a_measurement(monkeypatch):
+    """The other arm of `main()`'s schema gate (#14183 review round 10, P2).
+
+    `test_a_refused_schema_statement_refuses_the_run` grades the REFUSING arm only, and
+    a gate asserted in one arm passes just as well when it refuses ALWAYS: a `main()`
+    that returned 2 unconditionally — no measurement ever published — leaves that test
+    green. This is the arm that reds it (measured).
+    """
+    module = _measure()
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://x")
+    monkeypatch.setattr(module, "measure", lambda *_a, **_k: {
+        "schema_complete": True, "schema": [{"installed": True, "statement": "s"}]})
+    assert module.main([]) == 0, (
+        "a run whose schema installed IS a measurement — 0, never a refusal")
+
+
 def test_the_declared_event_types_are_the_sdks_own():
     """The census names the store's type vocabulary; it must BE the store's.
 
