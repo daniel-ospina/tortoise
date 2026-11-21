@@ -920,43 +920,38 @@ def _third_party_receivers(tree: ast.Module) -> set[str]:
     at ``994fb1d52f`` and UNGRADED from ``61fc96cd`` on — the narrowing's own
     regression (two fresh reviewers, same finding; control unchanged on both heads).
 
-    So an imported name that is re-bound anywhere in the module is not evidence of the
-    import at a call site and buys no exemption. ⛔ "RE-BOUND" IS PYTHON'S OWN LIST OF
-    BINDING CONSTRUCTS (Language Reference §4.2.1), NOT A SUBSET OF IT: the ``ast.Name``
-    Store contexts (assignment, walrus, ``for``, ``with … as``, comprehension, and
-    ``type X = …``, which is a Store on its ``name`` field), FORMAL PARAMETERS
-    (``ast.arg``), ``def`` / ``class`` names, ``except`` / ``except*`` ``as`` targets,
-    and the structural-pattern captures ``MatchAs`` / ``MatchStar`` /
-    ``MatchMapping.rest``. Only the Store contexts are ``ast.Name`` nodes; the rest are
-    ``ast.arg`` or plain ``str`` fields, so a walk that read only ``ast.Name`` missed
-    every other family — and each of those re-bindings then still bought the exemption,
-    which is this function's own defect one construct family over (review P2; each
-    family has its own witness row below). An import binds through its ALIAS, not an
-    ``ast.Name`` Store, so ``import x`` alone never removes ``x``; and because every
-    term below only ADDS to ``rebound``, the whole-module walk can only make the gate
-    grade MORE, never less. The parameter / passed-in-client witnesses are unaffected,
-    because those receiver names are not in the import set to begin with.
+    So an imported name that is re-bound where the probe can SEE it is not evidence of
+    the import at a call site and buys no exemption:
+
+    ⛔ "RE-BOUND" IS PYTHON'S OWN LIST OF BINDING CONSTRUCTS (Language Reference §4.2.1),
+    NOT A SUBSET OF IT: the ``ast.Name`` Store contexts (assignment, walrus, ``for``,
+    ``with … as``, comprehension, and ``type X = …``), FORMAL PARAMETERS of a function
+    that HOLDS a probe, ``def`` / ``class`` names, ``except`` / ``except*`` ``as``
+    targets, and the structural-pattern captures ``MatchAs`` / ``MatchStar`` /
+    ``MatchMapping.rest`` — collected by ``_module_scope_bindings`` /
+    ``_probe_scope_bindings``, and by ``_rebinds_within`` for the block itself. Only the
+    Store contexts are ``ast.Name``; the rest are ``ast.arg`` or plain ``str`` fields,
+    so a walk that read only ``ast.Name`` missed every other family.
+
+    ⛔ AND THE SCOPE IS AS LOAD-BEARING AS THE LIST (review P2): a binding only cancels
+    the exemption when it can REACH the probe. Subtracting every binding construct
+    anywhere made an unrelated ``def _helper(torch)`` parameter — or a ``for torch in
+    range(3)`` in some other function — cancel the exemption for a legitimate
+    module-level ``torch.query(…)`` probe, turning it into a graded ROOT: a false red of
+    exactly the class ``4k-``/``4l-`` forbid. Measured on that scope-blind version
+    ``((6, (), True, False, True),)``, scoped ``()``. An import binds through its ALIAS,
+    so ``import x`` alone never removes ``x``, and the parameter / passed-in-client
+    witnesses are unaffected because those receiver names are not in the import set.
     """
     bound = _non_own_imported_names(tree.body)
     if not bound:
         return set()
-    rebound: set[str] = set()
+    rebound = _probe_scope_bindings(tree)
     for node in ast.walk(tree):
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-            # Every Store context: assignment, walrus, `for`, `with … as`,
-            # comprehension targets, and `type X = …`.
-            rebound.add(node.id)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-            # Formal parameters — always `ast.arg`, never an `ast.Name` — plus the
-            # def's own name, which is a `str` field (a lambda binds no name).
-            args = node.args
-            rebound |= {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
-            rebound |= {a.arg for a in (args.vararg, args.kwarg) if a is not None}
-            if not isinstance(node, ast.Lambda):
-                rebound.add(node.name)
-        elif isinstance(node, ast.ClassDef):
-            rebound.add(node.name)
-        elif isinstance(node, ast.MatchMapping) and node.rest is not None:
+        # Capture families bind through plain `str` fields, never an `ast.Name` Store,
+        # so they are collected tree-wide: they are rare, and missing one leaves the
+        # escape open while adding one can only make the gate grade MORE.
+        if isinstance(node, ast.MatchMapping) and node.rest is not None:
             # `case {**rest}:`
             rebound.add(node.rest)
         elif isinstance(node, ast.MatchAs) and node.name is not None:
@@ -969,6 +964,69 @@ def _third_party_receivers(tree: ast.Module) -> set[str]:
             # `except E as name` / `except* E as name`
             rebound.add(node.name)
     return bound - rebound
+
+
+def _module_scope_bindings(tree: ast.Module) -> set[str]:
+    """Names bound at MODULE scope — never descending into a function or class body.
+
+    `if`/`for`/`while`/`try`/`with` at module level stay module scope and ARE
+    descended; a `def`/`class` NAME binds here while its BODY is another scope, and a
+    `lambda` body is another scope entirely.
+    """
+    out: set[str] = set()
+    stack: list[ast.AST] = list(tree.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.add(node.name)  # the name binds HERE; the body is a different scope
+            continue
+        if isinstance(node, ast.Lambda):
+            continue
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            out.add(node.id)
+        stack.extend(ast.iter_child_nodes(node))
+    return out
+
+
+def _probe_scope_bindings(tree: ast.Module) -> set[str]:
+    """Bindings that can actually REACH a probe: module scope, plus the parameters of a
+    function that CONTAINS a handler-bearing `try`.
+
+    ⛔ THE SCOPE IS THE POINT (two fresh reviewers, P2). Subtracting every binding
+    construct ANYWHERE made an unrelated `def _helper(torch)` parameter or a `for torch
+    in …` in some other function cancel the exemption for a legitimate module-level
+    third-party probe, turning it into a graded ROOT — a false red of exactly the class
+    the `4k-`/`4l-` guards exist to prevent. Measured on the scope-blind version:
+    `((6, (), True, False, True),)`; scoped: `()`. A parameter only shadows the import
+    inside ITS function, so only a function that holds a probe try contributes one —
+    and a rebinding inside the probe block itself is caught by `_rebinds_within`.
+    """
+    out = _module_scope_bindings(tree)
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not any(isinstance(sub, ast.Try) and sub.handlers for sub in ast.walk(node)):
+            continue
+        args = node.args
+        out |= {a.arg for a in (*args.posonlyargs, *args.args, *args.kwonlyargs)}
+        out |= {a.arg for a in (args.vararg, args.kwarg) if a is not None}
+    return out
+
+
+def _rebinds_within(block: ast.AST, name: str) -> bool:
+    """Whether `name` is RE-BOUND inside `block` — the probe's own body."""
+    for node in ast.walk(block):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id == name:
+            return True
+        if isinstance(node, ast.ExceptHandler) and node.name == name:
+            return True
+        if isinstance(node, ast.MatchAs) and node.name == name:
+            return True
+        if isinstance(node, ast.MatchStar) and node.name == name:
+            return True
+        if isinstance(node, ast.MatchMapping) and node.rest == name:
+            return True
+    return False
 
 
 def _receiver_root_name(node: ast.expr) -> str | None:
@@ -1061,7 +1119,11 @@ def _reaches_capability_seam(
             continue
         func = node.func
         if isinstance(func, ast.Attribute) and func.attr in _CAPABILITY_CALLS:
-            if _receiver_root_name(func.value) in third_party:
+            root = _receiver_root_name(func.value)
+            # Exempt only when the name still denotes the import WHERE THE PROBE RUNS:
+            # the module-level set excludes module-scope re-bindings and probe-holding
+            # functions' parameters, and `_rebinds_within` covers the block's own body.
+            if root in third_party and not _rebinds_within(block, root):
                 continue
             return True
         if isinstance(func, ast.Name) and func.id in _CAPABILITY_NAMES:
