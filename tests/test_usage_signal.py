@@ -1472,6 +1472,51 @@ def test_one_cause_reached_through_BOTH_doors_warns_on_each(
     )
 
 
+def test_the_float_overflow_and_the_timedelta_one_warn_on_EACH(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """⛔ Two REFUSAL CAUSES on the argument door must not share one `_warn_once` key.
+
+    `_as_float` keyed its refusal `"window-overflow-arg"`, and `_checked_window`
+    builds its timedelta-width key as `f"window-overflow-{door}"` — the SAME
+    string on the argument door. `_warn_once` is once-per-process, so the first
+    refusal ate the second: a caller who passed `10**400` (unrepresentable as a
+    float) and then `1e10` (finite, wider than `timedelta.max`) saw only the
+    first warning, about the value they had already replaced.
+
+    A single-value test cannot see this — the collision only appears in a
+    SEQUENCE inside one process, so `_warned` is never cleared between the two
+    calls here. This is the same class the sibling arms above were split to fix;
+    that split keyed on the DOOR, which re-created it per CAUSE.
+    """
+    import logging
+
+    usage_signal._warned.clear()
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger=usage_signal.__name__):
+        # Cause A: no float can represent this value at all.
+        assert usage_signal._window_days(10**400) is None
+        assert len(caplog.records) == 1, [
+            record.getMessage() for record in caplog.records
+        ]
+
+        # Cause B: finite, but wider than a `timedelta` can carry — a DIFFERENT
+        # refusal with a different remedy, and it must still be said.
+        assert usage_signal._window_days(1e10) is None
+        messages = [record.getMessage() for record in caplog.records]
+
+    assert len(messages) == 2, (
+        "the second refusal was swallowed — the float arm and the timedelta arm "
+        f"share a `_warn_once` key on the argument door: {messages}"
+    )
+    assert "too large to be a day count" in messages[0]
+    assert "a `timedelta` cannot carry" in messages[1], (
+        "the surviving message must be the NEWER cause's, not the one already "
+        f"replaced by the caller: {messages[1]}"
+    )
+
+
 def test_a_window_a_timedelta_cannot_carry_is_refused_not_raised(
     stream: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1977,6 +2022,42 @@ def test_the_UNDATED_prune_arm_also_refuses_to_certify_unserved(stream: Path) ->
     assert got.unserved_keys(["undated-a", "undated-b", "never"], label="Point") == [], (
         "the undated prune arm deleted SERVED keys and the reading certified them "
         "as never served — the caller reads that as 'no signal' (cold-ordered)"
+    )
+
+
+def test_an_undated_only_prune_states_what_it_removed(stream: Path) -> None:
+    """⛔ The empty-roll-up caveat must name the arm that emptied it (#14011 review 2).
+
+    When the UNDATED arm clears the window, `pruned == 0` and
+    `pruned_before is None` by design — so the refusal message, which hardcoded
+    both, read "0 entr(ies) last served at or before None were pruned" while
+    three served entries HAD been dropped. That is the one place a caller is told
+    why nothing survived, and it denied the deletion it was explaining.
+
+    The existing pin for this branch asserted only the fixed substrings
+    ("surviving roll-up entries" / "creation-recency"), so the numbers could be
+    false without any test noticing.
+    """
+    for key in ("undated-a", "undated-b", "undated-c"):
+        _serve_row(stream, "Point", key, at="not-a-timestamp")
+
+    got = usage_signal.refresh(
+        stream, now=datetime(2026, 1, 4, tzinfo=UTC), window_days=7
+    )
+
+    assert got.entries == {}
+    assert got.pruned == 0, "the dated watermark must not claim the undated arm"
+    assert got.pruned_before is None
+    assert got.pruned_undated == 3
+
+    reason = got.refusal_reason() or ""
+    assert "no surviving roll-up entries" in reason
+    assert "3 entr(ies) with no parseable `at` were pruned" in reason, reason
+    assert "before None" not in reason, (
+        "the dated watermark cannot describe entries that have no time: " f"{reason}"
+    )
+    assert "0 entr(ies)" not in reason, (
+        "the caveat denies the deletion it exists to explain: " f"{reason}"
     )
 
 
