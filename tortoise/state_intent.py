@@ -471,8 +471,20 @@ _EXISTENCE_GUARD = (
     r"(?![^?]{0,60}?\b(?:because|since|when|while|after|before|now|if|unless|given|"
     r"as|where|so|but|although|though|until|whether|once|whereas|why|how)(?![-/])\b)"
     r"(?![^?]{0,60}?\b[a-z0-9][a-z0-9'’._/-]*\s+(?:that|which|who|whom|whose)\b)"
-    r"(?![^?]{0,60}?\b(?:the|a|an|its|his|her|their|our|your|my|these|those|this|"
-    r"that)\s+[a-z0-9][a-z0-9'’._/-]*\s+"
+    r"(?![^?]{0,60}?\b(?:(?:the|a|an|its|his|her|their|our|your|my|these|those|this|"
+    # ⛔ THE DETERMINER IS OPTIONAL AND THE SUBJECT MAY BE A BARE NOUN (round-16 review,
+    # P1, measured). Requiring `<det> <noun>` left the same asyndetic hijack open for
+    # every subject spelled without an article — `have any users reported v3 has been
+    # deprecated`, `has anyone complained billing has been deprecated`,
+    # `have any users reported the search index has been deprecated` all ROUTED and
+    # dropped the caller's predicate (`reported`, `complained`), while the pinned twin
+    # `have any users reported the vendor has been deprecated` was refused: the two
+    # differ only by `the`. The PRONOUNS are excluded instead of the bare noun, because
+    # a pronoun subject is the one class that is legitimately the RELATIVE clause's
+    # (`has anything we have been tracking been withdrawn` routes; see the fourth
+    # lookahead below, which owns that boundary).
+    r"that)\s+)?(?!it\b|they\b|he\b|she\b|we\b|you\b|i\b)"
+    r"[a-z0-9][a-z0-9'’._/-]*\s+"
     r"(?:has|have|had|is|are|was|were|will|would|can|could|did|does|do|may|might|"
     r"must|should)\s+(?:not\s+)?(?:have\s+)?been\b)"
     # ⛔ AND A PRONOUN SUBJECT IS ITS OWN ALTERNATIVE (round-14 review, P2, measured):
@@ -737,7 +749,17 @@ _COPULA_SUBJECT = (
     # detector does not have.
     r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){1,5}"
     r"(?:that|which|who|whom|whose|whether|because|since|when|while|if|unless|given|"
-    r"where|whereas|after|before|now|what|how|why)(?![-/])\b)"
+    # ⛔ AND A SECOND AUXILIARY IS A NESTED CLAUSE (round-16 review, measured):
+    # `has anyone complained billing has been deprecated` put the caller's own verb
+    # (`complained`) plus a whole asyndetic clause (`billing has been …`) inside the
+    # perfect branch's subject and ROUTED to the whole ended population with the
+    # predicate dropped. The copula the shape needs is the one AFTER the subject, so an
+    # auxiliary inside the subject refuses the shape. Measured after the round-20/21/22
+    # guards: this row still routed, and every routing row in the suite still routes with
+    # the tokens below (`is the data all archived`, `has the onboarding flow been
+    # retired`, `is the v3 export deprecated`).
+    r"where|whereas|after|before|now|what|how|why|has|have|had|is|are|was|were|will|"
+    r"would|can|could|may|might|must|should|do|does|did)(?![-/])\b)"
     r"(?!(?:[a-z0-9][a-z0-9'’._/-]*\s+){0,4}"
     r"(?!(?:all|both|half|such|many|most|some|any|no|each|every|of|"
     r"the|a|an|our|my|its|their|these|those|this|that|your|his|her)\b)"
@@ -948,7 +970,16 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
         rf"three|first|last|next)\b)[a-z])")),
     # …and the unguarded `existence` expression: a state question that fails ONLY on
     # the clause guard above is reported, never silenced (silence is the defect).
-    ("existence_unguarded", re.compile(_EXISTENCE_HEAD + _EXISTENCE_WINDOW)),
+    # ⛔ IT CARRIES THE TAIL GUARD, AND THAT IS THE ROUND-16 REVIEW'S P2 (measured):
+    # without one it reported on ANY tail — `… been withdrawn most recently`,
+    # `… been withdrawn only after the audit`, `… been withdrawn zzzz` all emitted a
+    # notice with the cue truncated at `withdrawn` — which falsified the two paragraphs
+    # above that say a qualifier OUTSIDE the closed tail list stays silent, and the
+    # definition of "strong" at `:317-322`. Its stated job is "fails only on the clause
+    # guard", so it is the shape's tail that decides; every `NOTICE_ONLY` existence row
+    # ends at `$` or punctuation and still reports.
+    ("existence_unguarded", re.compile(
+        _EXISTENCE_HEAD + _EXISTENCE_WINDOW + _BLOCKED_TAIL)),
     ("which_modified_noun", _WHICH_MODIFIED_NOUN),
     ("is_copula_long_subject", _COPULA_LONG_SUBJECT),
 )

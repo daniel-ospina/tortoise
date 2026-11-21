@@ -373,8 +373,12 @@ SELECTED = [
     # `has the data all BEEN archived` puts `been` between the quantifier and the
     # participle, so rule (b) never reached it: 77/77 focused probes were SILENT while both
     # flat twins (`has all the data been archived`, `has the data been archived`) ROUTED and
-    # are pinned as routing. The lookahead now accepts `been` + the participle too — the
-    # same position one auxiliary later.
+    # are pinned as routing — and BOTH really are, round-24 review's P3: this comment
+    # promised two pins while only `has all the data been archived` had one, so the bare
+    # twin below is pinned HERE, as the row the `(?:been\s+)?` widening exists for.
+    # The lookahead now accepts `been` + the participle too — the same position one
+    # auxiliary later.
+    ("has the data been archived", "ended", "is_copula"),
     ("has the data all been archived", "ended", "is_copula"),
     ("has the reports both been archived", "ended", "is_copula"),
     ("have the claims each been withdrawn", "ended", "is_copula"),
@@ -662,6 +666,25 @@ NOT_SELECTED = [
     "is it what we archived",
     "is that the endpoint we deprecated",
     "is the report the board archived",
+    # ── the BARE-NOUN SUBJECT class (round-16 review, P1) ────────────────────
+    # The asyndetic lookahead required `<determiner> <noun>` before the finite verb, so
+    # every subject spelled without an article still ROUTED and dropped the caller's own
+    # predicate — the pinned twin `have any users reported the vendor has been
+    # deprecated` was refused and these were not, differing only by `the`. The
+    # determiner is optional now and the PRONOUNS are excluded instead (a pronoun
+    # subject is the relative clause's, which is why
+    # `has anything we have been tracking been withdrawn` still routes). The last row is
+    # the same clause reaching the `is_copula` perfect branch, whose subject carried its
+    # own auxiliary; that branch's guard now refuses a nested auxiliary too.
+    "have any users reported v3 has been deprecated",
+    "has anyone complained billing has been deprecated",
+    "have any users reported the search index has been deprecated",
+    # ── and the SILENT direction of the notice's tail (round-16 review, P2) ──
+    # `existence_unguarded` carried no tail guard, so ANY tail reported — falsifying the
+    # two paragraphs that say a qualifier outside the closed tail list stays silent. The
+    # signal now carries the same `_BLOCKED_TAIL` the shapes do, and this row is pinned
+    # HERE and NOT in `NOTICE_ONLY` because "silent" is the claim being made.
+    "has anything we relied on been withdrawn most recently",
     # ── the PRONOUN-SUBJECT class on `is_copula` (round-18 review, P1) ─────────
     # Round 17's two guards (a subordinator inside the subject; a second determiner
     # after a word) miss two shapes: a REDUCED RELATIVE whose subject is a pronoun
@@ -830,6 +853,12 @@ NOTICE_ONLY = [
     # …and the FREE-RELATIVE (round-17 review, P2) rows pinned in NOT_SELECTED above.
     "has anyone asked why the old plan has been archived",
     "has anyone asked how the old plan has been archived",
+    # …and the BARE-NOUN spellings of the asyndetic class (round-16 review, P1): the
+    # clause guard refused them for lack of a determiner, the cue is real, so they are
+    # reported rather than routed.
+    "have any users reported v3 has been deprecated",
+    "has anyone complained billing has been deprecated",
+    "have any users reported the search index has been deprecated",
     # …and the ONE row of round-19's pre-determiner-opener class that REPORTS rather than
     # going silent: it is five words long, so the subject bound exceeded is what the
     # notice names (`is_copula_long_subject`). Its short siblings stay in NOT_SELECTED
