@@ -271,9 +271,17 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # content (`grep -n` for each statement), not by applying the +108 offset.
     (_AUDIT, 'hosted_api.py:22544-22545', 'tortoise/hosted_api.py', 22545, 'SET r.telemetry=$t, r.budget_warn=$warn'),
     (_AUDIT, '`:24744-24745`', 'tortoise/hosted_api.py', 24745, 'SET r.write_ops_billed=1'),
-    (_AUDIT, 'hosted_api.py:24646-24650', 'tortoise/hosted_api.py', 24650, 'params={"sid": payload.session_id'),
+    (_AUDIT, 'hosted_api.py:24646-24650', 'tortoise/hosted_api.py', 24648, 's.value_nodes_held = coalesce(s.value_nodes_held, 0) + $n'),
+    # ⚠️ Three addresses on the same rows that were 143-152 lines off and pinned NOWHERE — the mixed
+    # state a reader cannot tell apart: one exact, freshly pinned address beside three false ones.
+    # Re-derived at `69d79287f5f` by opening each line, not by offset.
+    (_AUDIT, 'hosted_api.py:22415-22416', 'tortoise/hosted_api.py', 22416, 'coalesce(s.value_nodes_created, 0), coalesce(s.value_nodes_held, 0)'),
+    (_AUDIT, 'hosted_api.py:23124', 'tortoise/hosted_api.py', 23124, 's.value_nodes_created = coalesce(s.value_nodes_created, 0) +'),
+    (_AUDIT, '`:23124`', 'tortoise/hosted_api.py', 23124, 's.value_nodes_created = coalesce(s.value_nodes_created, 0) +'),
+    (_AUDIT, 'hosted_api.py:23126-23128', 'tortoise/hosted_api.py', 23128, 's.commit_count = coalesce(s.commit_count, 0) +'),
+    (_AUDIT, '`:23126-23128`', 'tortoise/hosted_api.py', 23128, 's.commit_count = coalesce(s.commit_count, 0) +'),
     # the same statement written BARE on the label-scan row — a different SITE, so its own row
-    (_AUDIT, '`:24646-24650`', 'tortoise/hosted_api.py', 24650, 'params={"sid": payload.session_id'),
+    (_AUDIT, '`:24646-24650`', 'tortoise/hosted_api.py', 24648, 's.value_nodes_held = coalesce(s.value_nodes_held, 0) + $n'),
     # --- the four corrections this pass made that NO row reached (review cycle 3, F5). Each token
     # carries its own wording, not a bare number, because a bare `:NNNN` is satisfied by any sibling
     # spelling of the same digits — the defect `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence`
@@ -486,6 +494,11 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:24646-24650'): 3,
     # one ROW per SITE, never one row per STRING: the label-scan row writes this address BARE
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:24646-24650`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:22415-22416'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23124'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:23124`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23126-23128'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:23126-23128`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5375` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7181` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6834` inside the same function'): 1,
@@ -1777,14 +1790,14 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # 80 -> 82 at the #14043 review (finding 1, this cycle): §6.3's `sdk.py:16046-16050` and
     # `sdk.py:3777` were in neither list and unpinned, and the pin default opens on prose and on an
     # empty line respectively.
-    # 82 -> 86 at this lane's review of the #14038 delta: three addresses on the `:CommitRecord`
+    # 82 -> 91 at this lane's review (86, then five more for the sibling cites on the same rows) of the #14038 delta: three addresses on the `:CommitRecord`
     # row and in §7 were pinned NOWHERE, so they rotted green — `hosted_api.py:22436-22437` opened
     # on an unrelated comment (the statement is `:22544-22545`), `:24592-24593` on a
     # `store.discard_attempt` comment (`:24744-24745`), and the standalone `:Session`
     # `value_nodes_held` statement `:24493-24497` on a quota comment (`:24646-24650`, cited at FOUR
     # sites — three long-form, one bare). Same shape as the `:6989` / `hosted_backup.py:2666` rows:
     # one ROW per SITE, and an unlisted token is coverage this file only appeared to have.
-    assert len(_PINS) == 86
+    assert len(_PINS) == 91
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:
