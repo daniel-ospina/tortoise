@@ -388,7 +388,29 @@ SWEEP_NAMES = 66
 #: `main`'s number to fix, and this pin takes the MEASUREMENT (11829) rather than `main`'s stale pin,
 #: so none of that drift is attributed to this PR. `--check` on this tree exits 0 with
 #: `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11841, "53273cee50de5834")
+#: ⛔ RE-PINNED ONCE MORE at this PR's de-conflict head `548aabe8fe` (the merge of `origin/main`
+#: `ad79129cb5`), by the same method and never by arithmetic: `--repin` reads
+#: `(11845, "30fae9661ec31841")` on the merged tree, and the whole of the +4 over this pin's
+#: previous `11841` is `main`'s OWN movement, not this PR's. Three trees were measured
+#: separately, each on its own checkout, with `--report --base 28ca66878d --top 5000` row
+#: dumps diffed row by row: `origin/main` `d4a8dddc4e` printed **11829** (the figure the
+#: paragraph above records), `main`'s tip `ad79129cb5` prints **11833**, and this merged tree
+#: prints **11845**. Against `ad79129cb5` the row diff is EXACTLY the four rows this branch has
+#: carried since the seed work — `proj.g.query` 3637 → 3642 (+5), `g.query` 1490 → 1492 (+2),
+#: `surface.create_subject` 4 → 7 (+3), `surface.create_edge` absent → 2 (+2) — so
+#: 11833 + 12 = 11845 and nothing else moved. ⛔ `main`'s own pin reads 11825 on `ad79129cb5`,
+#: so `main` is RED by EIGHT on its own tree (`--check` there compares against 11825 while the
+#: tree measures 11833); that is `main`'s number to fix, and this pin takes the MEASUREMENT,
+#: so none of that drift is attributed to this PR. `--check` on this tree exits 0 with
+#: `typed references still pointing at a public name: 0`.
+#: ⛔ The residue does NOT move when a merge takes a correct side: `#14001`'s `1956b3431f`
+#: converted five `poisoned.update(…)` calls in `tools/strip_graph_entity_vectors.py` to
+#: `poisoned |=` precisely because that receiver shape is residue this pin counts, and the
+#: de-conflict kept all five (`git grep -c 'poisoned\.update(' 548aabe8fe -- tools/strip_graph_entity_vectors.py`
+#: -> `1`, against `6` on this branch's pre-merge head `5cc463be02`). A merge resolution that
+#: had taken the branch side there would have moved this pin by +5 and it would have been a
+#: DEFECT, not a re-pin: the +4 above is entirely `main`'s, and each row is named.
+SWEEP_RESIDUE = (11845, "30fae9661ec31841")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
