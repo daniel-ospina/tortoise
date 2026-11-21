@@ -1344,12 +1344,9 @@ def test_no_graph_dependency() -> None:
         ⛔ THE CHILD OBSERVES; THE PARENT DECIDES. The subprocess runs the import and
         prints `sys.modules`; every comparison against `_probe_forbidden()` happens
         here. Earlier cuts interpolated the list INTO the child program and had the
-        child match, then emitted a RECORD of what it matched, and each round of
-        review closed one axis of that two-hop arrangement while the next stayed
-        open — the emitter could build a narrowed program, the list could be filtered
-        at the interpolation, the loop header could be sliced, the predicate could be
-        guarded, and the record could be written instead of observed. All of those
-        were measured GREEN at some point on this PR. One hop has one place to look:
+        child match, then emitted a RECORD of what it matched. The shapes those cuts
+        left GREEN are listed ONCE, below, so this docstring does not grow two
+        accounts of the same history. One hop has one place to look:
         the child's only job is to say what is in `sys.modules`, and a change to
         what it says reds (measured: printing a constant, printing only the direct
         import, and truncating `sys.modules` are each **1 failed / 101**).
@@ -1379,6 +1376,8 @@ def test_no_graph_dependency() -> None:
         the next one open. Measured along the way, each **102 passed** while the
         guard certified a live miss (`import tortoise.projection` / `tortoise.sdk` /
         `tortoise.session_indexer` coming back empty):
+          * a narrowed PROGRAM — the emitter building a child that matches a filtered
+            list (`_probe_source()`);
           * a narrowed ITERABLE in the loop header / the interpolated list;
           * a narrowed PREDICATE — `and r in ('redis', 'tortoise.ep')`, and
             `and r != 'tortoise.projection'`, which excludes ONE non-control root
@@ -1587,10 +1586,25 @@ def test_no_graph_dependency() -> None:
         "being under it — `redis_probe` is not `redis.*`, and matching it would make "
         "the leg fail closed on unrelated modules")
     assert _matching([]) == set(), "the matcher must find nothing in an empty input"
-    leaked = _probe("from tortoise import usage_signal")
-    assert leaked == set(), (
-        f"importing usage_signal pulled a graph client into sys.modules: "
-        f"{sorted(leaked)}")
+    # ⛔ AND THE SUBJECT'S OWN ROW CARRIES A WITNESS, because it is the ONE row whose
+    # import is `usage_signal` itself, and it was the one row with NO positive control:
+    # a bare `== set()` cannot tell "nothing leaked" from "the matcher answered empty"
+    # for this run. Measured before this change — a matcher that returns `set()`
+    # whenever `tortoise.usage_signal` is in its input left the WHOLE FILE at **102
+    # passed**, so the leg was silently blind to exactly the leak it exists to detect
+    # (a store client reached indirectly, which the AST ban cannot see). Injecting a
+    # KNOWN banned root into the SAME run converts that negative into a witnessed one:
+    # `falkordb` is in `_FORBIDDEN_GRAPH_ROOTS` and not in `_PROBE_EXEMPT`, so it is
+    # supplied from outside and must come back — an empty answer is a defect either way.
+    # Measured at this head: this run yields exactly `{'falkordb'}`, and the mutant that
+    # was 102 passed above is 1 failed / 101 with it in place.
+    leaked = _probe("from tortoise import usage_signal", "falkordb")
+    assert leaked == {"falkordb"}, (
+        "importing usage_signal must pull NO banned root other than the injected "
+        f"witness: got {sorted(leaked)}, expected ['falkordb']. A MISSING witness means "
+        "the matcher is not observing this run at all (it answers empty for the "
+        "subject's own import, which is the leak this leg exists to detect), and an "
+        "EXTRA name is that leak (#14118 item 1)")
 
 
 def test_the_no_graph_guard_catches_relative_imports() -> None:
