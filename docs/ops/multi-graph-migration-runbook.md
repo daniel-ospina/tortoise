@@ -402,7 +402,7 @@ promotion = swap `kind` + move
    that SDK call".** A `sdk.org_create` org that **also** carries an
    `organizations` row gets a default row minted on its first credential miss, and
    `ensure_default_graph_row` takes that row's namespace from the **column**
-   (`supabase_control.py:4151` read, `:4168` insert) — which for that lane is
+   (`supabase_control.py:4421` read, `:4440` insert) — which for that lane is
    `org_{name}` (the user's chosen name, `sdk.py:35415`) while `org_id` is a ULID
    (`:35454`, passed to `_graph_create` at `:35550`). The row then names
    `org_{name}` while the derivation produces `org_{<ULID>}`, so **that org IS

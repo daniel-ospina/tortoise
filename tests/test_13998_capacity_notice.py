@@ -1728,7 +1728,7 @@ def test_every_idempotency_key_claim_names_the_providers_retention_window():
         sent/deliver/stamp/accept/duplicate/replay) — outside `_SEND_OBJECT`;
       * a claim phrased in session-row vocabulary (`session_id`, `one click`,
         `non-episodic`, `402`) with no delivery word — the session-create veto.
-        Its test is the ABSENCE of six words and nothing else, so it CAN swallow a
+        Its test is the ABSENCE of seven words and nothing else, so it CAN swallow a
         real claim: measured, "the provider Idempotency-Key collapses the duplicate
         a one click retry produces to the customer" grades nothing. The three
         sentences it used to hide on this branch ARE graded, and remain cases below;
