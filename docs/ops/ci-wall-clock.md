@@ -288,7 +288,13 @@ with those three `core` entries removed it reads **24 m** at 719.8, which is exa
 the pool's own default (`DEFAULT_FAST_WEIGHT = 2.0`, `tools/ci_selection.py:105`), identical to
 their `durations:` rows, so removing or shrinking those rows changes nothing (measured: dropping
 all three `durations:` rows still emits 720.4) — what moves it is three more files in the pack,
-+6 s over 11 shards, which crosses the minute boundary once the ×2 headroom is applied. The three
++6 s over 11 shards, which crosses the minute boundary once the ×2 headroom is applied. ⛔ **THIS
+RE-CUT THEN MERGED THE TWO SIDES, WHICH IS A THIRD TREE, SO THE TERM IS READ OFF IT RATHER THAN
+INHERITED FROM EITHER PARENT:** `--emit-push-matrix` on THIS manifest emits **25 m on all eleven
+shards**, the worst at `est_seconds` **720.6** (`ceil(720.6/60 x 2)` = 25), and the pool it packs now
+holds BOTH parents' added suites — `#14012`'s three (shards `a`, `d`, `i`) and `#14015`'s M5
+`test_miss_rate_m5.py` (shard `i`) — so no arithmetic on the two parents' figures would have
+predicted the merged reading. The three
 hand-added figures are re-added from the
 emitted 25 m: 56.6 m / 85.0 m / 5.0 m (the row above, and the same three figures as the row's own
 `x 1.5 = 85.0` — this paragraph restated 84.9 m / 5.1 m until the #14183 re-cut, which is the
