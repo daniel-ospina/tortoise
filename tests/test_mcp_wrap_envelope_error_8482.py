@@ -1001,8 +1001,9 @@ async def test_a_repaired_error_is_never_message_less(quiet):
     kept content is empty the repair must SYNTHESISE a message naming the tool
     and the violated schema.
 
-    No typed registry tool has this return path today (AST-checked across all
-    11) — the test pins the class, not a live producer.
+    No typed registry tool has this return path today (measured at the #14248
+    head: the 9 typed handlers' own sources carry no `return None`) — the test
+    pins the class, not a live producer.
     """
     def _none() -> list[dict]:
         return None  # type: ignore[return-value]
