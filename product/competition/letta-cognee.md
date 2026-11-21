@@ -152,7 +152,7 @@
 
 **The strategic reframing, stated by them:** the problem is no longer recall — it is that *"the resulting memory often mixed up distinct entities and generated circular answers"* and that graphs *"contained plenty of connections, but offered little tangible insight into how their product data was actually structured."* Both quoted complaints come from named customer segments (a manufacturing company-brain builder; a manufacturer).
 
-⚠️ **Read the vocabulary carefully:** the example they give to justify an ontology ("a 15% discount only applies to orders signed before March") is a **business rule**, but the mechanism they ship captures it as **entity types plus source-grounded descriptions**, not as an evaluable constraint. See `§6b.1` for what the ontology mechanically does and does not do.
+⚠️ **Read the vocabulary carefully:** the example they give to justify an ontology ("a company's 15% discount only applies to orders signed before March") is a **business rule**, but the mechanism they ship captures it as **entity types plus source-grounded descriptions**, not as an evaluable constraint. See `§6b.1` for what the ontology mechanically does and does not do.
 
 [Source](https://www.cognee.ai/) — retrieved 2026-09-11 · ["Meet the new cognee"](https://www.cognee.ai/new-cognee-experience) — retrieved 2026-11-21 · [cognee.ai/pricing](https://www.cognee.ai/pricing) — retrieved 2026-11-21
 
@@ -219,7 +219,7 @@ Explicitly segmented into three audiences on the homepage:
 
 **Their own cost guidance (verbatim, docs):** "Casual coding users (a few hours per day): Typically ~$100/mo+ usage"; "Power users (long sessions, many parallel agents): Often approach or exceed $200+/mo in total usage."
 
-**Open source:** Apache-2.0. Self-hosting supported: "Run Letta fully locally or on your own infrastructure — no Letta account required." MemFS **shared-memory repositories are a cloud feature**; self-hosted deployments must point agents at their own git remote.
+**Open source:** Apache-2.0. Self-hosting supported: run Letta locally or on your own infrastructure with no Letta account required. MemFS **shared-memory repositories are a cloud feature**; self-hosted deployments must point agents at their own git remote.
 
 ✅ Verified against the live pricing page (`letta.com/pricing` redirects to `docs.letta.com/pricing`). [Source](https://docs.letta.com/pricing) — retrieved 2026-09-11
 
@@ -377,7 +377,7 @@ Two releases, in sequence:
 
 - ❌ **Axioms are never enforced**, even in `owl_rl` — the ontology cannot catch "this entity is both a Person and a Company", a violated cardinality, or disjoint classes. It only *matches and annotates*
 - ❌ **Ontology is a retrieval router, not a reasoning substrate** — by their own description its job is *"to find relevant entities before retrieving"*
-- ⚠️ **Business rules are described as the reason for an ontology but are not modelled as rules** — the "15% discount only before March" example lands as a type plus a description, not an evaluable constraint
+- ⚠️ **Business rules are described as the reason for an ontology but are not modelled as rules** — the 15%-discount-before-March example lands as a type plus a description, not an evaluable constraint
 - ⚠️ **Conflict resolution does not propagate** — a human pick is local; nothing downstream of the rejected fact is revised
 - ⚠️ **Auto-ontology is Premium-cloud gated** and (per the docs gap above) its output format and its relationship to the OSS grounding path are unstated
 - ⚠️ **`strict` mode prunes inconsistently** — the graph prunes, chunk/RAG retrieval does not
@@ -486,7 +486,7 @@ Source: [github.com/letta-ai/letta](https://github.com/letta-ai/letta) (GitHub A
 | GitHub forks / contributors | **3,543 forks** / 304 contributors (forks read 2026-11-21; contributors are the 2026-09-11 read) |
 | GitHub open issues | **1,112 open issues including PRs** (`open_issues_count`, 2026-11-21 — GitHub's counter includes PRs; the 2026-09-11 read was 221 issues / 520 incl. PRs) |
 | PyPI downloads | **151,729/month**, 20,016/week, 3,127/day (`cognee`) |
-| SDK runs | **5M+ SDK runs/month** (homepage) |
+| SDK runs | **10M+ SDK runs/month** (homepage, read 2026-11-21; the 2026-09-11 read recorded 5M+) |
 | Pipeline volume growth | ~2,000 runs → 1M+ runs (per seed announcement) |
 | Discord | 4,078 members, 270 online |
 | Funding | $7.5M Seed (Feb 2026), led by Pebblebed; ~$9M total |
@@ -582,8 +582,8 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 - No vendor lock on memory format — memory is plain Markdown files
 
 **What users complain about:**
-- **Complexity / steep learning curve.** GitHub issue #490: MemGPT is "one of the hardest pieces of AI software to get to grips with." A third-party comparison: Letta "has a steeper learning curve, with concepts like core/recall/archival memory and Python-only setup taking more time to internalize"
-- **Integration friction.** Issue #689: MemGPT "did not update the expected memory layer"
+- **Complexity / steep learning curve.** GitHub issue #490: MemGPT is "one of the hardest pieces of AI software to get to grips with." A third-party comparison rates Letta as steeper to learn than Mem0, with core/recall/archival memory concepts and Python-only setup taking more time to internalize (our summary of that comparison's tradeoff section)
+- **Integration friction.** Issue #689: MemGPT did not update the expected memory layer (our summary of the report — the thread states the symptom, not this wording)
 - **Concept churn.** MemGPT → Letta server → Letta Code pivot; heartbeats deprecated; memory blocks now "legacy." Docs explicitly tell users to migrate off the shared-blocks pattern
 - **Self-hosting/ops effort** and **unpredictable usage cost** — their own docs warn casual coding users to expect ~$100/mo+ and power users $200+/mo
 - No semantic index by default — retrieval quality rests on the agent's own file-reading behavior
@@ -671,7 +671,7 @@ Source: Reddit r/LLMDevs (`https://www.reddit.com/r/LLMDevs/comments/1uzyyja/cog
 - [docs.cognee.ai/guides/resolve-conflicts](https://docs.cognee.ai/guides/resolve-conflicts) / [docs.cognee.ai/python-api/conflicts](https://docs.cognee.ai/python-api/conflicts) — `list_conflicts()` / `resolve_conflict()`; selected fact = current, alternatives = superseded; rejected facts retained as superseded evidence
 - [docs.cognee.ai/cognee-cloud/ui/memory-review](https://docs.cognee.ai/cognee-cloud/ui/memory-review) — Cloud UI conflict-review flow, optional reason capture
 - [docs.cognee.ai/core-concepts/further-concepts/ontologies](https://docs.cognee.ai/core-concepts/further-concepts/ontologies) — re-fetched 2026-11-21: `annotate`/`strict` modes, `ONTOLOGY_REASONING=none|owl_rl`, `EmptyOntologyInStrictModeError`, "no domain/range, cardinality, or disjointness checking", relationship names never checked against object properties, chunk/RAG retrieval unaffected by `strict` pruning, `cognee[ontology]` extra
-- ["Best Platforms to Build an AI Company Brain in 2026"](https://www.cognee.ai/build-an-ai-company-brain) (2026-09-28) — the company-brain category claim, the five-criteria self-ranking (cognee placed first), "30+ data sources", COGX exchange format, single-Postgres claim
+- ["Best Platforms to Build an AI Company Brain in 2026"](https://www.cognee.ai/build-an-ai-company-brain) (2026-09-28) — the company-brain category claim, the five-criteria self-ranking (cognee placed first), "over 30 data sources", COGX exchange format, single-Postgres claim
 - [cognee.ai/pricing](https://www.cognee.ai/pricing) — re-fetched 2026-11-21: Standard $0 + 100M tokens + $0.10/1M, **Premium $99/mo (auto-ontology)**, Enterprise feature list unchanged (bi-temporal & conflict resolution, provenance, personalization), BYOC engagement table, `gpt-oss-120b` cloud footer
 - `https://www.cognee.ai/benchmarks` — **404 at retrieval** (the live pages are `/research-and-evaluation-results` and the docs `accuracy-benchmarks`); recorded as a gap, not a negative finding
 
@@ -698,7 +698,7 @@ Source: Reddit r/LLMDevs (`https://www.reddit.com/r/LLMDevs/comments/1uzyyja/cog
 - ⚠️ **Cloud default LLM conflict:** the pricing-page footer says Cloud runs on `gpt-oss-120b`; the 2026-11-19 post names `gpt-5.6-luna` as "cognee's default LLM" when computing its 35 s baseline. Both recorded; unresolved which is the live default.
 - ⚠️ **The `$570/GB` and `30×` figures are Cognee's own estimates** against an *"estimated"* LLM baseline on a single Apple M4 Pro, not a reproduced measurement. Treated as vendor claims.
 - ⚠️ **The OSS extractor is not the accurate one:** Cognee states the open-source LLM-free extractor is *"a demo you can experiment with, while the production extractor, which offers higher accuracy and broader label coverage, is available through Enterprise"* — so the headline local-extraction numbers describe the less accurate tier. Do not read "LLM-free and 30× faster" as "as good as the LLM path".
-- ⚠️ **"500+ companies"** is Cognee's own claim on its 2026-11-19 post; no independent confirmation (the older "70+ deployments incl. Bayer" single-source note still stands as a separate, smaller figure).
+- ⚠️ **"500+ companies"** is Cognee's own claim on its 2026-11-19 post; no independent confirmation (the older "70+ company deployments including Bayer" single-source note still stands as a separate, smaller figure).
 - ⚠️ **No public ARR, headcount, or churn** after the Premium launch; the $99 price is published but attach rate is unknown.
 - ⚠️ **Auto-ontology accuracy unmeasured:** no published evaluation of the generated taxonomy (precision/recall of type assignment), and no third-party review found.
 
