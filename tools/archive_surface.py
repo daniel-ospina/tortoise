@@ -1458,6 +1458,40 @@ def _row_frozen_source(entry: dict) -> str:
     return str(entry.get("archived_from") or "")
 
 
+def _stub_waiver_why(prefix: str, base_carrier: str, head_carrier: str) -> str:
+    """Why an unconsumed waiver over a stub-frozen `module` row waives nothing.
+
+    ⛔ ONE CONSTRUCTION, TWO CALL SITES (review F1 of round 21). This sentence existed in two
+    copies — the `key in base_entries` branch and the `elif symbol in base_modules` branch — and
+    two consecutive rounds fixed ONE copy, leaving the same falsity standing one branch below,
+    contradicting its sibling for the same state depending only on whether the row was committed
+    at the base. Reusing one helper is what makes a third copy impossible.
+
+    ⛔ AND IT NAMES WHAT IS TRUE OF THIS TREE (review F2 of round 21). "No `.py` on either side"
+    was not provable from `base_paths_by_module` alone — that map is built from the BASE paths
+    only, and the head can hold a `.py` (an emptied one, or a docstring `__init__.py`) which
+    `module_name` collapses onto the same symbol. So the head carrier is named explicitly, and
+    the claim is only ever about what the two maps can prove.
+
+    `base_paths_by_module` PREFERS the runtime carrier (the sorted builder skips a `.pyi` once a
+    non-`.pyi` is stored), so a `.pyi` there is positive proof the base carried nothing else.
+    """
+
+    if not base_carrier.endswith(".pyi"):
+        return (
+            f"{prefix} — but the `module` entry you also passed FROZE ONLY A STUB, so it is not "
+            "a record: restore the source from a commit that still holds it, archive it, and "
+            "delete it again"
+        )
+    return (
+        f"{prefix} — only as a stub (`{base_carrier}`): the base held no `.py` for this module "
+        f"and this tree carries {head_carrier or 'no module file'}, so there was no runtime "
+        "source to record. The `module` entry you also passed is the writer's own output for a "
+        "stub-only module (a stub-only module's only code IS the stub), and nothing was removed "
+        "for the waiver to waive: drop the flag"
+    )
+
+
 def _record_froze_a_stub(
     module: str, base_label: str, base_carrier: str, head_desc: str, entry: dict
 ) -> str:
@@ -1765,11 +1799,11 @@ def shrink_violations(
                     )
                 else:
                     if _row_froze_a_stub(base_entries[key]):
-                        why = (
-                            f"{base_label} already records `{symbol}` ({kind}) and this tree does "
-                            "not carry it — but that `module` entry FROZE ONLY A STUB, so it is "
-                            "not a record of the source: restore the source from a commit that "
-                            "still holds it, archive it, and delete it again"
+                        why = _stub_waiver_why(
+                            f"{base_label} already records `{symbol}` ({kind}) and this tree "
+                            "does not carry it",
+                            base_paths_by_module.get(symbol) or "",
+                            head_paths_by_module.get(symbol) or "",
                         )
                     else:
                         why = (
@@ -1833,23 +1867,14 @@ def shrink_violations(
                         # to hunt history for a file that never existed, AND that their correct row
                         # is "not a record", is false on both counts. `base_paths_by_module`
                         # PREFERS the runtime carrier (:1584-1586), so a `.pyi` there is positive
-                        # proof the base had nothing else.
-                        base_carrier = base_paths_by_module.get(symbol) or ""
-                        if base_carrier.endswith(".pyi"):
-                            why = (
-                                f"{base_label} carries `{symbol}` ({kind}) only as a stub "
-                                f"(`{base_carrier}`, and no `.py` on either side), so this module "
-                                "had no runtime source to record — the `module` entry you also "
-                                "passed is the writer's own output for a stub-only module, and "
-                                "nothing was removed for the waiver to waive: drop the flag"
-                            )
-                        else:
-                            why = (
-                                f"{base_label} carries `{symbol}` ({kind}) and this tree does "
-                                "not — but the `module` entry you also passed FROZE ONLY A STUB, "
-                                "so it is not a record: restore the source from a commit that "
-                                "still holds it, archive it, and delete it again"
-                            )
+                        # proof the base had nothing else. The split lives in ONE helper
+                        # (`_stub_waiver_why`), shared with the `key in base_entries` copy, so the
+                        # two can no longer drift apart — two rounds fixed one and left the other.
+                        why = _stub_waiver_why(
+                            f"{base_label} carries `{symbol}` ({kind}) and this tree does not",
+                            base_paths_by_module.get(symbol) or "",
+                            head_paths_by_module.get(symbol) or "",
+                        )
                     else:
                         why = (
                             f"{base_label} carries `{symbol}` ({kind}) and this tree does not "
