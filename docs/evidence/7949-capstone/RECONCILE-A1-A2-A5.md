@@ -789,7 +789,7 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — �
                                                           # — 3 — and tests/test_7949_capstone_measure.py
                                                           # — 4 — SOURCE-TEXT scans and one prose comment, not
                                                           # consumers: one is the `extractor_v2.py` scan
-                                                          # (`:15775`) that derives the doc's cite, two are the
+                                                          # (`:15787`) that derives the doc's cite, two are the
                                                           # ⛔ NEITHER side of this merge's conflict printed this
                                                           # number: HEAD said `:15100`, `origin/main` said
                                                           # `:15096`, and BOTH were stale on the merged tree
