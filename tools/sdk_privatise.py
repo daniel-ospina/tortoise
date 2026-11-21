@@ -1007,7 +1007,6 @@ SWEEP_NAMES = 66
 #: `11840 + 3 = 11843` is a CROSS-CHECK of that measurement, never its evidence. `--check` exits
 #: 0 on this tree: `typed references still pointing at a public name: 0`.
 #:
-#:
 #: ⛔ THE BASE FIGURE IS THE BASE **TREE's** MEASUREMENT, never the `SWEEP_RESIDUE` line committed
 #: on it — AND AT THIS CUT THE TWO DISAGREE ON MAIN. `origin/main` `1b0db0489408` COMMITS
 #: `(11843, "6aed5368ffa10513")` while its tree MEASURES `(11840, "b7eb08ff3acdcce4")`, so
