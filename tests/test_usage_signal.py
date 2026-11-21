@@ -702,8 +702,8 @@ _FORBIDDEN_GRAPH_ROOTS = (
 #: spelling: `tortoise/__init__.py` is a PEP-562 `__getattr__` that exports the
 #: guarded redislite `FalkorDB` and `Tortoise` (→ `tortoise.sdk`), and its own
 #: docstring names "code importing `tortoise.FalkorDB`" as the bypass surface.
-#: A SEPARATE set, not entries in `_FORBIDDEN_GRAPH_ROOTS`
-#:: `test_the_no_graph_guard_names_modules_that_EXIST` resolves every dotted entry
+#: A SEPARATE set, not entries in `_FORBIDDEN_GRAPH_ROOTS`:
+# `test_the_no_graph_guard_names_modules_that_EXIST` resolves every dotted entry
 #: as a module path and would report these as missing.
 _FORBIDDEN_CLIENT_EXPORTS = frozenset({"tortoise.FalkorDB", "tortoise.Tortoise"})
 
@@ -756,6 +756,21 @@ def _imports_of(source: str) -> set[str]:
             elif node.level:
                 # `from . import x` — resolve each alias under the package.
                 found |= {f"tortoise.{alias.name}" for alias in node.names}
+        elif (
+            isinstance(node, ast.Attribute)
+            # ⛔ THE ATTRIBUTE FORM IS NOT AN IMPORT STATEMENT, so this walk used to
+            # record nothing for it: `tortoise.FalkorDB` inside a function body was
+            # green on every leg — the AST ban (no match), the subprocess probe (the
+            # access never runs at import) and the direction scan (no new module).
+            # At MODULE scope the probe happens to catch it (the access loads
+            # redislite), which is exactly what made the function-body spelling the
+            # surviving hole. Recorded as `tortoise.<attr>` so the existing
+            # `_FORBIDDEN_CLIENT_EXPORTS` intersection in `_offending` sees it.
+            and f"tortoise.{node.attr}" in _FORBIDDEN_CLIENT_EXPORTS
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "tortoise"
+        ):
+            found.add(f"tortoise.{node.attr}")
     return found
 
 
@@ -844,18 +859,21 @@ def test_the_no_graph_guard_catches_relative_imports() -> None:
     }
 
 
-@pytest.mark.parametrize(
-    "root", [r for r in _FORBIDDEN_GRAPH_ROOTS if "." not in r]
-)
-def test_every_store_ROOT_in_the_ban_is_pinned(root: str) -> None:
-    """⛔ A BAN ENTRY THAT NOTHING EXERCISES CAN BE DELETED SILENTLY.
+@pytest.mark.parametrize("root", _FORBIDDEN_GRAPH_ROOTS)
+def test_every_entry_in_the_ban_is_pinned(root: str) -> None:
+    """⛔ A BAN ENTRY THAT NOTHING EXERCISES CAN BE NARROWED SILENTLY.
 
     The direction tests pin `_STORE_CLIENT_ROOTS` (the SCAN) and the set's tree
-    modules; nothing pinned the dotless roots in the SET, so deleting `"redislite"`
-    from it left the file green — the ban half of the same fix, unpinned, and the
-    same was true of `falkordb` and `redis`. Parametrized OVER THE SET, so a fourth
-    root added later is pinned by construction rather than by remembering to add a
-    case.
+    modules; nothing pinned the ENTRIES, so deleting `"redislite"` left the file
+    green, and so did narrowing the matcher itself to the three dotless roots
+    (`_FORBIDDEN_GRAPH_ROOTS` → `_STORE_CLIENT_ROOTS` inside `_offending`), which
+    is a full bypass for `from .projection import FalkorProjection` in a function
+    body. Parametrized over the WHOLE set — every entry is a module path, so both
+    assertions hold for all of them.
+
+    NOTE: parametrizing over the set cannot pin a REMOVAL (the case goes with the
+    entry). `test_the_ban_covers_all_three_roots_the_tree_actually_uses` is the
+    floor that holds the three roots the tree is measured to import from.
     """
     assert _offending(f"import {root}\n") == {root}
     assert _offending(f"from {root}.client import Something\n") == {
@@ -895,6 +913,17 @@ def test_no_graph_dependency_pins_the_package_root_EXPORT_form() -> None:
     assert _offending("def f():\n    from tortoise import FalkorDB\n") == {
         "tortoise.FalkorDB"
     }
+    # ⛔ AND THE PLAIN ATTRIBUTE — no `import` statement at all. Inside a function
+    # body nothing else sees it: the probe is blind (the access never runs at import
+    # time) and no module appears for the direction scan. At module scope the probe
+    # catches it incidentally (the access loads redislite), which is what made the
+    # function-body spelling the surviving hole.
+    assert _offending("import tortoise\nx = tortoise.FalkorDB\n") == {
+        "tortoise.FalkorDB"
+    }
+    assert _offending("def f():\n    import tortoise\n    return tortoise.Tortoise\n") == {
+        "tortoise.Tortoise"
+    }
     # …and the harmless spellings stay clean, so the ban is not a blanket.
     assert _offending("from tortoise import usage_signal\n") == set()
 
@@ -926,7 +955,9 @@ def test_the_no_graph_guard_names_modules_that_EXIST() -> None:
 def _modules_reaching_a_store() -> frozenset[str]:
     """Every module in the tree that imports a STORE CLIENT, by parsed imports.
 
-    ⛔ PARSED, NOT GREPPED, AND AGAINST EVERY DECLARED ROOT. This read
+    ⛔ PARSED, NOT GREPPED, AND AGAINST EVERY DECLARED **STORE-CLIENT** ROOT (the
+    three dotless entries — a `from .projection import X` reach is a TREE module
+    and belongs to the direction test, not to this scan). This read
     `"from falkordb import" in source` — a substring test that saw only ONE of the
     roots the set itself declares, so the modules that reach the store through
     `redis` (`hosted_backup` constructs a real client over a derived pool,
@@ -961,7 +992,7 @@ def _modules_reaching_a_store() -> frozenset[str]:
 
 
 def test_the_store_reach_scan_sees_the_REDIS_spelling_too() -> None:
-    """⛔ The scan must read BOTH declared roots, or its verdict is vacuous.
+    """⛔ The scan must read ALL THREE declared roots, or its verdict is vacuous.
 
     Pinned POSITIVELY on purpose: `uncovered == []` alone cannot see a predicate
     that narrowed back to `falkordb` (it would simply scan fewer modules and stay
