@@ -925,11 +925,15 @@ SWEEP_NAMES = 66
 #: pin exists to catch is a NEW shape, and there is none. `--check` exits 0 on this tree after the
 #: re-pin, with `typed references still pointing at a public name: 0`.
 #:
-#: ⛔ RE-PINNED FROM `main`'s DRIFT AGAIN. The pin has now moved THREE times in one day, and twice it
-#: moved because ANOTHER lane's commit moved the census and re-pinned nothing: `2c0d66e2ec07`
-#: (#14086) moved the set and re-pinned inside its OWN commit; `f9f480a55ab3` (#14164) moved it again
-#: and the re-pin was only recovered later, by `427c418ebb` (#14188); and now `67dc298ec3` (#14194)
-#: with `1b0db04894` (#14162) moved it and re-pinned nothing at all. That is the shape of the
+#: ⛔ RE-PINNED FROM `main`'s DRIFT AGAIN. `SWEEP_RESIDUE` moved repeatedly on 2026-11-21 — count it
+#: yourself with `git log -G'^SWEEP_RESIDUE = ' -- tools/sdk_privatise.py`, and bucket it on ONE clock,
+#: because the total depends on the timezone window you pick and `git log -L` on this line TRUNCATES the
+#: chain at `2c0d66e2ec` (it reports three and hides the rest) — so a numeral quoted here is a claim
+#: about the instrument, not about the drift. This paragraph therefore quotes none. What the day does
+#: measure is not thrift: twice at least, the census moved in a commit that re-pinned NOTHING and the
+#: recovery landed later, in a commit about something else. `f9f480a55ab3` (#14164) moved it and
+#: `427c418ebb` (#14188) re-pinned afterwards; `67dc298ec3` (#14194) with `1b0db04894` (#14162) moved it
+#: and THIS commit re-pins. That is the shape of the
 #: problem rather than a coincidence: `SWEEP_RESIDUE` is a WHOLE-TREE census, so any commit that
 #: adds or retires an untyped receiver anywhere moves it, while the commits that do so have no
 #: reason to touch this file. The pair below is `--repin`'s output on THIS tree at `1b0db04894`
