@@ -23,10 +23,12 @@ Three consequences, each asserted by a test:
    here is model-authored and nothing is guessed: an unknown field renders as an
    honest absence, never as an invention.
 3. **The disclosure is a pure READ of onboarding state.** It neither consumes
-   nor writes the ``capture-disclosed`` FLOW step. That step is written exactly
-   once by the CAPTURE path (``_capture_session_impl`` →
-   ``write_completed_step(..., "capture-disclosed")``, first-write-wins) and is
-   what makes the first-capture announcement fire exactly once per org. A render
+   nor writes the ``capture-disclosed`` FLOW step. That step is written by the
+   CAPTURE path (``_capture_session_impl`` →
+   ``write_completed_step(..., "capture-disclosed")``, first-write-wins) — or
+   asserted by an ORG-WIDE agent credential at the checkpoint surface
+   (``hosted_api.py::onboarding_checkpoint``; it refuses any ``graph_id``) — and
+   is what makes the first-capture announcement fire exactly once per org. A render
    that wrote or skipped it would silently change the flow — see
    :func:`step_accounting` and
    ``tests/test_onboarding_session_recording_parity.py::TestDisclosureStepAccounting``.
@@ -60,7 +62,8 @@ def step_accounting() -> dict:
 
     Declared here rather than in prose so the claim is executable: the render
     is a read of onboarding state, so it consumes nothing and writes nothing.
-    The step's single writer is the capture path.
+    The step's AUTOMATIC writer is the capture path; an ORG-WIDE agent credential
+    may also assert it at the checkpoint surface (``onboarding_checkpoint``).
     """
     return {
         "step": CAPTURE_DISCLOSED_STEP,

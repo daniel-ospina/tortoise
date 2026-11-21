@@ -15,8 +15,10 @@ through the same primitive. Two consequences this file pins:
   installed, so the yes-branch fires the EXISTING
   `POST /v1/sessions/install-probe` route (no new endpoint) BEFORE it reports
   success.
-* **The disclosure touches no FLOW state.** The `capture-disclosed` step has
-  exactly one writer — the capture path. The pushed-down plan-review finding
+* **The disclosure touches no FLOW state.** The `capture-disclosed` step is
+  written AUTOMATICALLY by the capture path (and may be asserted by an ORG-WIDE
+  agent credential at the checkpoint surface, which refuses any `graph_id`). The
+  pushed-down plan-review finding
   (§8) is that a new disclosure render can silently consume it, so the render
   is asserted to be a pure read.
 
@@ -408,7 +410,7 @@ class TestDisclosureStepAccounting:
     step/state accounting is #3517's, and `capture-disclosed` must never be
     silently consumed by a render."""
 
-    def test_the_declaration_matches_the_capture_path_single_writer(self):
+    def test_the_declaration_matches_the_capture_path_automatic_writer(self):
         """Mutation: flip either flag in `step_accounting()`."""
         accounting = cd.step_accounting()
         assert accounting["step"] == "capture-disclosed"
