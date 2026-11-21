@@ -4483,8 +4483,8 @@ def measure_e6(*, packs_dir: Path | str | None = None,
     if error:
         measurement["error"] = error
         measurement["written_source"] = (
-            E6_NOT_READ_PREFIX + "the census's population block was REFUSED, so no row was "
-            "keyed beside it")
+            E6_NOT_READ_PREFIX + "this row's population guard REFUSED the census — "
+            + error + " — so no row was keyed beside it")
         # ⛔ A REFUSED ROW PUBLISHES NO COUNT FOR A COLUMN IT DID NOT READ (#14060 review round
         # 16, P3, measured): `written` stayed at the all-zero dict initialised above, so a
         # refused census carrying ONE enumerable row wrote `unmeasured=0` — every row measured —
@@ -4502,8 +4502,14 @@ def measure_e6(*, packs_dir: Path | str | None = None,
         # measured): the branch runs only AFTER `rows = _e6_census_rows(census)`, so the old
         # message — "the census could not be enumerated" — was FALSE on every fixture that does
         # enumerate a row (the `declared != len(rows)` shapes), i.e. the same narration class the
-        # pack-registry message was fixed for one branch up. All three conditions here are faults
-        # in the census's OWN population block, which is what the message now says.
+        # pack-registry message was fixed for one branch up. ⛔ AND THE REPLACEMENT WAS THE SAME
+        # CLASS ONE STEP FURTHER (#14060 review round 24, P3, measured): it said "the census's
+        # population block was REFUSED" for ALL THREE conditions, but only the first two are
+        # population-block faults — the third fires with a PERFECTLY usable block (`{"packs":
+        # "x", "population": {… 45 == 39 + 6 …}}` enumerates ZERO rows, so `declared != len(rows)`
+        # is the fault and the `packs` block is what this function names 60 lines above). The
+        # source therefore SPLICES the guard's own `error` — the fault it was told about, the
+        # rule round 9 set for `build_e6_row`'s note — instead of asserting a shared cause.
         measurement["written"] = {"direct": None, "mediated": None, "none": None,
                                   "unmeasured": len(rows)}
         return measurement

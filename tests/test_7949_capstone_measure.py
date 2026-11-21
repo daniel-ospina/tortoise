@@ -1770,6 +1770,16 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
         assert "could not be enumerated" not in str(e6["written_source"]), (
             why, e6["written_source"])
         assert "population" in str(e6["written_source"]), (why, e6["written_source"])
+        # ⛔ AND THE SOURCE NAMES THE FAULT THAT FIRED, not a cause the guard assumed (#14060
+        # review round 24, P3, measured): the replacement said "the census's population block was
+        # REFUSED" for ALL THREE conditions, but the third fires with a PERFECTLY usable block
+        # (`{"packs": "x", "population": {… 45 == 39 + 6 …}}` enumerates ZERO rows — the fault is
+        # the `packs` block, which `measure_e6` names 60 lines above). The source now splices the
+        # guard's own `error`, so a shared cause cannot be asserted over three different faults.
+        assert str(e6["error"]) in str(e6["written_source"]), (why, e6["written_source"])
+        if refusal == "could be enumerated":
+            assert "population block" not in str(e6["written_source"]), (
+                why, e6["written_source"])
         # ⛔ AND THE REFUSED COLUMN CARRIES WHAT WAS ESTABLISHED, not four zeros (#14060
         # review rounds 16 and 22, P3, measured): the cells stayed at the initialised all-zero
         # dict, so a refusal carrying ONE enumerable row published `unmeasured=0` — every row
