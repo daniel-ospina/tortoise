@@ -2790,7 +2790,7 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
 # `hosted_api.py in capture_session` -> `graph_ops.py in wrapper` on the loop
 # thread, one 5.38 s episode.
 #
-# Every graph leg of `_capture_session_impl` was already offloaded (#4625 legs 62
+# Every graph leg OUTSIDE the post-write tail was already offloaded (#4625 legs 62
 # and 72); the POST-WRITE TAIL was the residue, and it ran wholly inline: the
 # entity-linking pass (two round trips per turn that carries a reference), the
 # receipt probes and the bucket count, the delete-race sweep, the onboarding
@@ -2871,15 +2871,15 @@ def _is_a_pre_existing_offload(cypher: str) -> bool:
     copy IS caught — by that arm, not by a needle (see the paragraph below).
 
     ⛔ WHAT THIS EXEMPTION CAN AND CANNOT DO, measured rather than assumed
-    (#14086 review, P2 — an earlier version of this docstring claimed the probe
-    emits this file's ``SET s.capture_ok=$ok`` needle, which is FALSE: the probe
-    READS ``s.capture_ok AS ok``, it never sets it, and its statement matches
-    ZERO of the six tail needles). In practice ``to_thread`` puts the probe on
-    ``asyncio_0``, not on a capture-pool worker, so neither loop below would
-    accuse it — the exemption changes no verdict today. It is kept as a DECLARED
-    record with a caller, so that if the probe ever moves to the capture pool the
-    verdict computation already consults the declaration instead of silently
-    re-accusing a leg that was fixed in #4625.
+    (#14086 review, P2). An on-loop copy of the probe is still CAUGHT — by the
+    prohibition's `session-alive` leg, which consults no exemption and matches the
+    probe's statement as a substring (mutant-verified: inlining `_probe` reds this
+    test with `session-alive probe: MATCH (s:Session {id:$sid}) RETURN count(s)`).
+    What the exemption covers is the TAIL-NEEDLE legs, which can never see the
+    probe anyway: it READS ``s.capture_ok AS ok`` (it never SETs one) and matches
+    ZERO of the six tail needles. So the exemption changes no verdict today; it is
+    a declared record with a caller, so that a probe which ever matches a tail
+    needle is not re-accused as new residue.
 
     It is a SUBSTRING test for the same reason prohibition is: the probe's query
     is assembled around these fragments and its exact spelling moves.

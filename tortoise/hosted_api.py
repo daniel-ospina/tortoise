@@ -21460,10 +21460,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             targets and writes an `about*` edge PER TURN that carries a
             reference (two round trips each) and the `SET` below is one more, so
             a twenty-turn capture parked the event loop for tens of graph round
-            trips. Every other leg of this handler was already offloaded (see
-            the #4625 legs above and below); this tail was the residue, and it
-            is the class that makes a CONCURRENT `/v1/search` accrue
-            `pre_handler` seconds it did not spend.
+            trips. The calls on either side of it were already offloaded (see
+            the #4625 legs above and below); THIS TAIL was the residue — the link
+            pass, the receipt probes, the onboarding writes, the sweep, the
+            write-verb enrichment read and the `capture_ok` stamp — and it is the
+            class that makes a CONCURRENT `/v1/search` accrue `pre_handler`
+            seconds it did not spend.
 
             The same callable, the same result, the same non-fatal arm — only
             WHERE it runs changes. `proj` cross-thread use is the established
@@ -51180,7 +51182,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 200 tracked files (743 distinct
+# ABSOLUTE line number from 200 tracked files (744 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

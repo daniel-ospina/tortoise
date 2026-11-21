@@ -455,7 +455,7 @@ def test_the_census_bar_reports_magnitude_and_not_probe_overhead():
     totals: the measured probe-overhead band is NOT reported, and a leg of the
     size the census exists to catch still is.
 
-    Verified non-vacuous: restoring the bar to 1.0 reds the second assertion
+    Verified non-vacuous: restoring the bar to 1.0 reds the first assertion
     (`_emit_event` at 1.2 ms comes back as unreported-but-blocking), and no
     other row in this file depends on `_ON_LOOP_BAR_MS`.
     """
