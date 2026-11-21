@@ -50,10 +50,12 @@ convention, ``tests/_live_utils.py``).
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import inspect
 import os
 import sys
+import textwrap
 import uuid
 from pathlib import Path
 
@@ -915,10 +917,52 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
 
     # …and the docstring must NOT carry a second copy: prose there reaches no caller,
     # so a re-added copy reads like the contract while the served text drifts from it.
-    assert "ROUTES — answered from the ended population" not in (
-        tortoise_search.__doc__ or ""), (
-        "the routing block is back in `tortoise_search.__doc__`, which FastMCP does "
-        "not serve when the registry supplies `description=` — one home only (#14033)")
+    # ⛔ THE ABSENCE PIN COVERS THE WHOLE PHRASE TABLE, not one head string (#14033
+    # review round-9, P2, measured): the docstring used to restate the qualifier rule
+    # WITH both of its examples, on the lines immediately above the paragraph claiming
+    # the contract "is not written here" — and the single-head check stayed green
+    # through it, so a second copy could drift with no test seeing it. Every string
+    # here is a row or phrase only the SERVED text may carry; each reds if a copy
+    # comes back (`have any claims been retracted in Q3` was the measured miss).
+    _docstring = tortoise_search.__doc__ or ""
+    for _copied in (
+        "ROUTES — answered from the ended population",
+        "DOES NOT ROUTE — you get the relevance rows",
+        "have any claims been retracted in Q3",
+        "which claims were retracted by legal",
+        "ask the question in its unqualified form",
+    ):
+        assert _copied not in _docstring, (
+            f"the phrase table is back in `tortoise_search.__doc__` ({_copied!r}), which "
+            "FastMCP does not serve when the registry supplies `description=` — one "
+            "home only (#14033 review, P2)")
+    # ⛔ AND THE SERVED REMEDY NAMES THE SELF-HOSTED OMISSION (#14033 review round-9,
+    # P3, measured). `selfhost_api`'s `GET /v1/search` takes the SAME path and routes
+    # the cue too (the recogniser runs inside `_tortoise_fts_query`), but it passes no
+    # sink, so a self-hoster reading "use the hosted `GET /v1/search` route" follows it
+    # to a route that cannot report anything. The claim is pinned on BOTH sides: the
+    # served text must say so, and the self-host route must still be the sinkless
+    # caller that makes it true — wire a sink there and this reds, because the
+    # sentence would then be false.
+    assert "SELF-HOSTED `GET /v1/search`" in ROUTING_NOTE, (
+        "`ROUTING_NOTE` no longer names the self-hosted route, so a self-hosted caller "
+        "is told to use a remedy their own deployment cannot serve — and the omission "
+        "is silent again (#14033 review, P3)")
+    from tortoise import selfhost_api as _selfhost_api
+
+    # …measured on the CALL, not on the text: the docstring above names the sink to say
+    # it is NOT passed, so a source-substring check would red on its own explanation.
+    _selfhost_calls = {
+        kw.arg
+        for node in ast.walk(ast.parse(textwrap.dedent(
+            inspect.getsource(_selfhost_api.search))))
+        if isinstance(node, ast.Call)
+        for kw in node.keywords
+    }
+    assert "_state_route_out" not in _selfhost_calls, (
+        "`selfhost_api.search` now passes `_state_route_out`, so the served sentence "
+        "saying the self-hosted route carries no `state_question` is FALSE — update "
+        "`ROUTING_NOTE` and the manifest row in the same change (#14033 review, P3)")
     routes_head = "ROUTES — answered from the ended population"
     declines_head = "DOES NOT ROUTE — you get the relevance rows"
     boundary_head = "SO A STATE QUESTION THAT DOES NOT ROUTE"

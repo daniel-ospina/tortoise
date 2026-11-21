@@ -275,14 +275,16 @@ _RECENCY_TAIL = r"(?:\s+(?:recently|lately|so far|to date))?"
 #:   noun that does not END the question or is not preceded by a set determiner;
 #:   "current commitments", "our commitments" and "what are we committed to" do
 #:   route.
-#: * "show me the retired onboarding flow" / "list our commitments" — an
-#:   imperative over a NOUN PHRASE, which was measured as a hijack: `show me the
-#:   retired onboarding flow` is a lookup for ONE record. ⛔ The imperative over a
-#:   FREE RELATIVE CLAUSE (`list what we retired`) IS a set question and does
-#:   route — see `imperative_what`; the discriminator is the clause, not the
-#:   imperative frame. The same frame with a SET NOUN (`list our commitments`,
-#:   `show me all the commitments`) is the recall the start anchor gives up, and
-#:   it is named here so it is a decision and not a gap.
+#: * "show me the retired onboarding flow" — an imperative over a NOUN PHRASE,
+#:   which was measured as a hijack: it is a lookup for ONE record, so the
+#:   population is the wrong answer. ⛔ The imperative over a FREE RELATIVE
+#:   CLAUSE (`list what we retired`) IS a set question and does route — see
+#:   `imperative_what`; the discriminator is the clause, not the imperative frame.
+#:   The same frame with a SET NOUN (`list our commitments`, `show me all the
+#:   commitments`) is the recall the start anchor gives up — a DIFFERENT class
+#:   from the hijack above (there the imperative asks for a set and we answer it
+#:   with the relevance read; here it asked for one record) — and it is named here
+#:   so it is a decision and not a gap.
 #: * "do we ever archive plans" / "do we archive customer emails" — the
 #:   PRESENT-habitual frame, which `do_support` refuses on purpose (round-5
 #:   review, P1): it asks what we do, not which records ended.
@@ -462,11 +464,15 @@ _WHICH_PREFIX = (
 #: is cancelled` has its copula in a SUBORDINATE clause (the shape requires the
 #: auxiliary as the FIRST word), and `is the archived pricing document live` has
 #: the ending word ATTRIBUTIVE with the question's own predicate after it.
-#: ⛔ AND THE PERFECT BRANCH REQUIRES `been|already|ever` IMMEDIATELY BEFORE THE
-#: PARTICIPLE, which is the same attributive discriminator `existence` uses:
-#: `have any customers cancelled this month` is a question about what customers
-#: did this month, not about which records ended, and without this it would have
-#: been reported as a missed state cue.
+#: ⛔ AND THE PERFECT BRANCH REQUIRES `been` IMMEDIATELY BEFORE THE PARTICIPLE,
+#: which is the same attributive discriminator `existence` uses: `have any
+#: customers cancelled this month` is a question about what customers did this
+#: month, not about which records ended, and without this it would have been
+#: reported as a missed state cue. ⛔ `already`/`ever` are admitted ONLY on the
+#: copula branch (`is|are|was|were … already <participle>`); in the perfect branch
+#: they read as an ACTIVE third-party action, so they are refused there — see the
+#: round-7 hijack note below `_COPULA_SUBJECT`, which is the one statement of that
+#: rule and which this paragraph used to contradict.
 #: The recall given up is stated rather than discovered, and both examples are
 #: MEASURED rather than imagined: a subject with a modifier clause inside it (`is the
 #: onboarding flow, as agreed in March, retired`) keeps the relevance read, and so
@@ -562,9 +568,13 @@ _ENDING_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
 #: asymmetry is pre-existing and deliberate (see its note above), so it is excluded by
 #: CONSTRUCTION here rather than by somebody remembering to leave it out.
 #:
-#: ⛔ ``which_names_an_ending`` IS THE ONE HAND-WRITTEN ROW, and it is the ATTRIBUTIVE
-#: case: the ending word immediately followed by the NOUN it modifies, inside a
-#: ``which`` question. That is #14033's fourth row — `which of our withdrawn claims
+#: ⛔ ``which_names_an_ending`` IS THE FIRST OF THE FOUR ROWS THAT ARE NOT A
+#: TAIL-SWAPPED SHAPE — the others are ``existence_unguarded`` (the same cue without
+#: the clause guard), ``which_modified_noun`` and ``is_copula_long_subject`` (both
+#: standalone expressions, not a shape with its tail swapped); the identity test
+#: asserts exactly that set, so a new hand-written row cannot appear silently. It is
+#: the ATTRIBUTIVE case: the ending word immediately followed by the NOUN it
+#: modifies, inside a ``which`` question. That is #14033's fourth row — `which of our withdrawn claims
 #: affected pricing` — whose ending word is a modifier and whose own predicate
 #: (`affected pricing`) the population cannot answer, so it keeps the relevance read
 #: and must still say that it saw a cue.
@@ -705,13 +715,20 @@ evidence that nothing has ended. This tool takes NO argument that forces the
 ended read — the SHAPE is the only way in, so the way to be explicit is to ask
 a form from the ROUTES list above. ⛔ THIS TOOL CANNOT REPORT the cue it saw
 and could not apply — its reply is the row list and it takes no sink — so an
-MCP caller who needs that report must use the hosted `GET /v1/search` route,
-whose response body carries `state_question` (`{routed: false, population,
-reason, cue, hint}`), which is the only CUSTOMER-facing channel: no PUBLIC SDK
-method exposes it either — the same payload rides the PRIVATE
+MCP caller who needs that report must use the HOSTED deployment's
+`GET /v1/search` route, whose response body carries `state_question`
+(`{routed: false, population, reason, cue, hint}`), which is the only
+CUSTOMER-facing channel: no PUBLIC SDK method exposes it either — the same
+payload rides the PRIVATE
 `TortoiseSDK._tortoise_fts_query(..., read_status_out=...)` sink (under
 `read_status_out["state_question"]`), so an integration that calls the SDK
-directly must name that private method deliberately. The difference it makes
+directly must name that private method deliberately. ⛔ AND THE HOSTING MATTERS
+rather than being a detail of the path: the SELF-HOSTED `GET /v1/search` (the
+same path, `selfhost_api.py`) recognises the cue too — routing happens inside
+the SDK call — but it passes NO sink and answers with the bare row list, so on
+a self-hosted deployment a declined state question is still indistinguishable
+from "nothing has ended"; the private SDK sink above is the only way to read it
+there. The difference it makes
 there is that "the route declined my state question" stops looking like "the
 graph says nothing has ended".
 """

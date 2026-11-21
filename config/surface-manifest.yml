@@ -354,6 +354,12 @@ response_fields:
     question is byte-identical to an honest "nothing has ended", which is the defect #14033 closes. ⛔ NOT on the
     MCP tool reply (`tortoise_search` takes no sink, and its description says so) and NOT on any PUBLIC SDK method
     — the same payload rides the PRIVATE `TortoiseSDK._tortoise_fts_query(...)` `read_status_out` sink instead.
+    ⛔ AND THE SELF-HOSTED `GET /v1/search` CARRIES NOTHING EITHER, which is DECLARED rather than left to be
+    discovered: it takes the same path (`tortoise/selfhost_api.py`) and the recogniser runs inside the same SDK call,
+    so it REFUSES a state question exactly as the hosted route does — but it passes no sink and its reply is the bare
+    row list, so there the declined question is again byte-identical to "nothing has ended". Serving the field there
+    would change a public response shape (a list), so it is out of scope for #14033 and recorded here instead; the
+    served `ROUTING_NOTE` says the same thing to the caller.
     Recorded here because CONTRIBUTING''s carve-out is about what `check` FAILS on, not about what goes unrecorded:
     `response_fields` is in `NON_DERIVABLE_DOC_KEYS`, so an absent row is invisible to every gate.'
   unchanged_when_off: 'n/a — not flag-gated; the key is ABSENT unless the recogniser declined a state cue, so every
@@ -1542,7 +1548,7 @@ rows:
   class: agent-reachable
   cluster_canonical: null
 - name: tortoise_search
-  served_from: tortoise/mcp_server.py:08fe8e299f1ca05b
+  served_from: tortoise/mcp_server.py:7a7ad6ebcbcac68d
   served_attributes: a54ebe88150f0091
   family: memory
   family_rank: 1
@@ -1569,12 +1575,16 @@ rows:
     and an EMPTY answer here is NOT evidence that nothing has ended. This tool takes NO argument that forces the
     ended read — the SHAPE is the only way in, so the way to be explicit is to ask a form from the ROUTES list above.
     ⛔ THIS TOOL CANNOT REPORT the cue it saw and could not apply — its reply is the row list and it takes no sink
-    — so an MCP caller who needs that report must use the hosted `GET /v1/search` route, whose response body carries
-    `state_question` (`{routed: false, population, reason, cue, hint}`), which is the only CUSTOMER-facing channel:
-    no PUBLIC SDK method exposes it either — the same payload rides the PRIVATE `TortoiseSDK._tortoise_fts_query(...,
+    — so an MCP caller who needs that report must use the HOSTED deployment''s `GET /v1/search` route, whose response
+    body carries `state_question` (`{routed: false, population, reason, cue, hint}`), which is the only CUSTOMER-facing
+    channel: no PUBLIC SDK method exposes it either — the same payload rides the PRIVATE `TortoiseSDK._tortoise_fts_query(...,
     read_status_out=...)` sink (under `read_status_out["state_question"]`), so an integration that calls the SDK
-    directly must name that private method deliberately. The difference it makes there is that "the route declined
-    my state question" stops looking like "the graph says nothing has ended".'
+    directly must name that private method deliberately. ⛔ AND THE HOSTING MATTERS rather than being a detail of
+    the path: the SELF-HOSTED `GET /v1/search` (the same path, `selfhost_api.py`) recognises the cue too — routing
+    happens inside the SDK call — but it passes NO sink and answers with the bare row list, so on a self-hosted
+    deployment a declined state question is still indistinguishable from "nothing has ended"; the private SDK sink
+    above is the only way to read it there. The difference it makes there is that "the route declined my state question"
+    stops looking like "the graph says nothing has ended".'
   dependency: declares TortoiseSDK._tortoise_fts_query (resolves)
   lifecycle: active
   used_by: never called, eval-harness, tooling, docs
