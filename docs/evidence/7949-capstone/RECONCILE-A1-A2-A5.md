@@ -817,17 +817,20 @@ git grep -c 'result\["relations"\]' -- tests/          # tree-wide MATCHES — �
                                                           # — 3 — and tests/test_7949_capstone_measure.py
                                                           # — 4 — SOURCE-TEXT scans and one prose comment, not
                                                           # consumers: one is the `extractor_v2.py` scan
-                                                          # (`:16597`) that derives the doc's cite, two are the
+                                                          # (`:16626`) that derives the doc's cite, two are the
                                                           # ⛔ NEITHER side of THIS merge's conflict printed this
-                                                          # number: HEAD said `:15787`, `origin/main` said
-                                                          # `:16585`, and BOTH were stale on the merged tree
+                                                          # number: HEAD said `:16597`, `origin/main` said
+                                                          # `:16614`, and BOTH were stale on the merged tree
+                                                          # (the two earlier conflicts this note recorded typed
+                                                          # `:15787`/`:16585` and `:15100`/`:15096`; all four are
+                                                          # dead lines and none of them is cited here)
                                                           # because this branch's own added rows move the scan
                                                           # line — so it is RE-DERIVED by the TEST (`_self_scan_line` in
                                                           # `tests/test_7949_capstone_measure.py`) rather than side-picked, at
                                                           # whatever the head you merge derives. ⛔ **The two figures this
                                                           # note once typed (`:15228`, then `:15391`) are both refuted by
                                                           # later commits on this branch (#13802 review, P2)**: no line number
-                                                          # is typed HERE for that figure; the (`:16597`) cite earlier in this block IS the
+                                                          # is typed HERE for that figure; the (`:16626`) cite earlier in this block IS the
                                                           # derived value the guard reads at this head — named by the value, never by its
                                                           # DISTANCE from this comment, which is the same rotted-positional class this file
                                                           # exists to catch (#13802 review, P2: this said "six lines up", measured 10).

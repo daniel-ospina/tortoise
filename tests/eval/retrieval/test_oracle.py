@@ -26,9 +26,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
 
 def _has_embedded() -> bool:
+    # Own code is imported OUTSIDE the guard: a moved or renamed tortoise module
+    # must fail LOUDLY, while an absent `redislite` extra is the one genuine skip
+    # this probe asks about (#14114 class 2, #14125).
+    from tortoise.projection import FalkorProjection  # noqa: F401
     try:
-        import redislite.falkordb_client  # noqa: F401, I001
-        from tortoise.projection import FalkorProjection  # noqa: F401
+        import redislite.falkordb_client  # noqa: F401
         return True
     except Exception:
         return False

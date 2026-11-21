@@ -38,6 +38,13 @@ _uri_candidates = [
 
 _old_uri = _os.environ.get("TORTOISE_DB_URI")
 _working_uri: str | None = None
+# ⛔ ⛔ A rename or typo in a seam this probe touches must NOT be read as
+#   "storage unavailable": that is exactly how #13899's retirement hid for a
+#   whole wave — the probe's own `except Exception` turned an AttributeError
+#   into a SKIP locally and a hard refusal in CI that names no retired door
+#   (#14114 class 2, #14125). `AttributeError`/`NameError`/`TypeError`/`ImportError` are
+#   PROGRAMMING errors and are re-raised; only genuine transport/driver
+#   failures fall through to the unavailable arm.
 try:
     for _uri in _uri_candidates:
         if not _uri:
@@ -60,8 +67,12 @@ try:
                 break
             finally:
                 _sdk.close()
+        except (AttributeError, NameError, TypeError, ImportError):
+            raise
         except Exception:
             continue
+except (AttributeError, NameError, TypeError, ImportError):
+    raise
 except Exception:
     pass
 finally:

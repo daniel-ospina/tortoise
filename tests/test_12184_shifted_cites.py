@@ -270,37 +270,37 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, 'sdk.py:22225', _SDK, 22225, 'search_text = _source_search_text(topics=topics)'),
     (_AUDIT, 'sdk.py:22267', 'tortoise/sdk.py', 22267, 's.summary=CASE WHEN $sum'),
     (_AUDIT, '`:22390`', 'tortoise/sdk.py', 22390, 's.summary, s.topics, s.'),
-    (_AUDIT, 'hosted_api.py:23190', 'tortoise/hosted_api.py', 23190, 'MERGE (s:Source {url:$did})'),
-    (_AUDIT, '`:23002`', 'tortoise/hosted_api.py', 23002, 'def _execute_commit_writes'),
-    (_AUDIT, '`:33961`', 'tortoise/hosted_api.py', 33961, 'MERGE (p:PackInstall {namespace: $ns})'),
+    (_AUDIT, 'hosted_api.py:23611', 'tortoise/hosted_api.py', 23611, 'MERGE (s:Source {url:$did})'),
+    (_AUDIT, '`:23423`', 'tortoise/hosted_api.py', 23423, 'def _execute_commit_writes'),
+    (_AUDIT, '`:34382`', 'tortoise/hosted_api.py', 34382, 'MERGE (p:PackInstall {namespace: $ns})'),
     # ⚠️ Three sites on this row that had NO pin at all, which is why they rotted green: the
     # `:CommitRecord` reader pair and the standalone `:Session` MERGE sat outside every `_PINS` /
     # occurrence entry, so a stale number there produced no red. Re-derived at `8f7724b593c` by
     # content (`grep -n` for each statement), not by applying the +108 offset.
-    (_AUDIT, 'hosted_api.py:22544-22545', 'tortoise/hosted_api.py', 22545, 'SET r.telemetry=$t, r.budget_warn=$warn'),
-    (_AUDIT, '`:24744-24745`', 'tortoise/hosted_api.py', 24745, 'SET r.write_ops_billed=1'),
-    (_AUDIT, 'hosted_api.py:24646-24650', 'tortoise/hosted_api.py', 24648, 's.value_nodes_held = coalesce(s.value_nodes_held, 0) + $n'),
+    (_AUDIT, 'hosted_api.py:22965-22966', 'tortoise/hosted_api.py', 22966, 'SET r.telemetry=$t, r.budget_warn=$warn'),
+    (_AUDIT, '`:25165-25166`', 'tortoise/hosted_api.py', 25166, 'SET r.write_ops_billed=1'),
+    (_AUDIT, 'hosted_api.py:25067-25071', 'tortoise/hosted_api.py', 25069, 's.value_nodes_held = coalesce(s.value_nodes_held, 0) + $n'),
     # ⚠️ Three addresses on the same rows that were 143-152 lines off and pinned NOWHERE — the mixed
     # state a reader cannot tell apart: one exact, freshly pinned address beside three false ones.
     # Re-derived at `69d79287f5f` by opening each line, not by offset.
-    (_AUDIT, 'hosted_api.py:22415-22416', 'tortoise/hosted_api.py', 22416, 'coalesce(s.value_nodes_created, 0), coalesce(s.value_nodes_held, 0)'),
-    (_AUDIT, 'hosted_api.py:23124', 'tortoise/hosted_api.py', 23124, 's.value_nodes_created = coalesce(s.value_nodes_created, 0) +'),
-    (_AUDIT, '`:23124`', 'tortoise/hosted_api.py', 23124, 's.value_nodes_created = coalesce(s.value_nodes_created, 0) +'),
-    (_AUDIT, 'hosted_api.py:23126-23128', 'tortoise/hosted_api.py', 23128, 's.commit_count = coalesce(s.commit_count, 0) +'),
-    (_AUDIT, '`:23126-23128`', 'tortoise/hosted_api.py', 23128, 's.commit_count = coalesce(s.commit_count, 0) +'),
+    (_AUDIT, 'hosted_api.py:22836-22837', 'tortoise/hosted_api.py', 22837, 'coalesce(s.value_nodes_created, 0), coalesce(s.value_nodes_held, 0)'),
+    (_AUDIT, 'hosted_api.py:23545', 'tortoise/hosted_api.py', 23545, 's.value_nodes_created = coalesce(s.value_nodes_created, 0) +'),
+    (_AUDIT, '`:23545`', 'tortoise/hosted_api.py', 23545, 's.value_nodes_created = coalesce(s.value_nodes_created, 0) +'),
+    (_AUDIT, 'hosted_api.py:23547-23549', 'tortoise/hosted_api.py', 23549, 's.commit_count = coalesce(s.commit_count, 0) +'),
+    (_AUDIT, '`:23547-23549`', 'tortoise/hosted_api.py', 23549, 's.commit_count = coalesce(s.commit_count, 0) +'),
     # the same statement written BARE on the label-scan row — a different SITE, so its own row
-    (_AUDIT, '`:24646-24650`', 'tortoise/hosted_api.py', 24648, 's.value_nodes_held = coalesce(s.value_nodes_held, 0) + $n'),
+    (_AUDIT, '`:25067-25071`', 'tortoise/hosted_api.py', 25069, 's.value_nodes_held = coalesce(s.value_nodes_held, 0) + $n'),
     # ⚠️ The LAST TWO sites of the same rot, left "reported, not touched" by the `8f7724b593c` review
     # and unpinned here, which is exactly why they were still stale at `69d79287f5f`: the composed
     # `turn_max_index` site (§2.4 ×2, §6.1, row 7) and the LIST endpoint's `actor_user_id` condition
     # (§7 ×2, §2.4) were in NO row at all. Both re-derived at `69d79287f5f` by OPENING the statement,
     # not by applying the delta — verified against `ae26adf963`, where the same cites resolved:
     # `45028` was `prior = proj.g.query(` and `50935` was `conds.insert(0, "s.actor_user_id = $uid")`.
-    (_AUDIT, 'hosted_api.py:45185-45197', 'tortoise/hosted_api.py', 45189, 'RETURN s.turn_max_index, s.turn_count, count(t)'),
-    (_AUDIT, 'hosted_api.py:45185-45202', 'tortoise/hosted_api.py', 45189, 'RETURN s.turn_max_index, s.turn_count, count(t)'),
-    (_AUDIT, 'hosted_api.py:51092', 'tortoise/hosted_api.py', 51092, 's.actor_user_id = $uid'),
+    (_AUDIT, 'hosted_api.py:45692-45704', 'tortoise/hosted_api.py', 45696, 'RETURN s.turn_max_index, s.turn_count, count(t)'),
+    (_AUDIT, 'hosted_api.py:45692-45709', 'tortoise/hosted_api.py', 45696, 'RETURN s.turn_max_index, s.turn_count, count(t)'),
+    (_AUDIT, 'hosted_api.py:51599', 'tortoise/hosted_api.py', 51599, 's.actor_user_id = $uid'),
     # the same condition written BARE twice in the header's comparability clause — its own SITE
-    (_AUDIT, '`:51092`', 'tortoise/hosted_api.py', 51092, 's.actor_user_id = $uid'),
+    (_AUDIT, '`:51599`', 'tortoise/hosted_api.py', 51599, 's.actor_user_id = $uid'),
     # --- the four corrections this pass made that NO row reached (review cycle 3, F5). Each token
     # carries its own wording, not a bare number, because a bare `:NNNN` is satisfied by any sibling
     # spelling of the same digits — the defect `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence`
@@ -445,8 +445,8 @@ _MAIN_SET_MISSED: tuple[tuple[str, str, int, str], ...] = (
     ("search_engine.py:6891", _SE, 6891, "MATCH (op)-[r2:IMPL|NAND|hasPart]-(other:Point)"),
     ("sdk.py:22267", _SDK, 22267, "s.summary=CASE WHEN $sum"),
     (":22390", _SDK, 22390, "s.summary, s.topics, s."),
-    ("hosted_api.py:23190", "tortoise/hosted_api.py", 23190, "MERGE (s:Source {url:$did})"),
-    (":23002", "tortoise/hosted_api.py", 23002, "def _execute_commit_writes"),
+    ("hosted_api.py:23611", "tortoise/hosted_api.py", 23611, "MERGE (s:Source {url:$did})"),
+    (":23423", "tortoise/hosted_api.py", 23423, "def _execute_commit_writes"),
 )
 
 
@@ -550,25 +550,25 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:22225'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'sdk.py:22267'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:22390`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23190'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:23002`'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:33961`'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:22544-22545'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:24744-24745`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:24646-24650'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23611'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:23423`'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:34382`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:22965-22966'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:25165-25166`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:25067-25071'): 3,
     # one ROW per SITE, never one row per STRING: the label-scan row writes this address BARE
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:24646-24650`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:22415-22416'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23124'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:23124`'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23126-23128'): 2,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:23126-23128`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:25067-25071`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:22836-22837'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23545'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:23545`'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23547-23549'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:23547-23549`'): 1,
     # the composed `turn_max_index` site (long-form ×3 + row 7's own wider range) and the LIST
     # endpoint's `actor_user_id` condition (long-form ×1, bare ×2 in the header clause)
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:45185-45197'): 3,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:45185-45202'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:51092'): 1,
-    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:51092`'): 2,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:45692-45704'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:45692-45709'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:51599'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:51599`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5434` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7240` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6834` inside the same function'): 1,
@@ -744,9 +744,9 @@ def test_the_measured_figures_and_the_pin_side_descriptions_are_the_re_measured_
     """
     text = (REPO / _AUDIT).read_text(encoding="utf-8")
     for claimed in (
-        "156 of this document's 227",
+        "167 of this document's 227",
         "dedupes the **345** as-written spellings to 227 — **118**",
-        "345 written spellings → 227 pairs → 118 collisions → 156 drifters of the 227",
+        "345 written spellings → 227 pairs → 118 collisions → 167 drifters of the 227",
         # ⛔ The RULE, not the bare sha: the sha occurs 8x in the file, so asserting the string alone let a
         # revert of the reader-rule sentence (back to `340d500491`) pass green.
         "an address in it opens at `main` `ae54df166d`",

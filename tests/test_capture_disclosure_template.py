@@ -663,7 +663,7 @@ class TestCliRender:
         accounting, so a caller can assert it without parsing prose.
 
         Mutation: make `step_accounting()['writes']` True — the render's
-        declaration then contradicts the capture path's single-writer claim.
+        declaration then contradicts the capture path's automatic-writer claim.
         """
         rc, out = self._invoke(capsys, harness="pi", json=True)
         assert rc == 0

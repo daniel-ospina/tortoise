@@ -391,7 +391,7 @@ last two *"gated on the status fold"*. **No measurement was re-read and no figur
 `tests/test_11642_vector_move_live.py` (the file `test-record-postgres` runs) on `pgvector/pgvector:pg16`; the
 structural pins are `tests/test_13422_object_subject_dense_leg.py`.
 
-## The 60 s fallback corpus is invalidated on the eviction path (`#13123`, landed via `#14067`)
+## `#13123` — the 60 s fallback corpus is invalidated on the eviction path (landed via `#14067`)
 
 `SEARCH-ARCHITECTURE.md`'s finding-6 sentence said the fallback corpus's invalidation was outstanding. It is not:
 `tortoise/cache_evictor.py::_delete_nodes` invalidates it explicitly, so the sentence now states that as the

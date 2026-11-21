@@ -126,11 +126,19 @@ def _probe_falkordb(candidates: list[str | None]) -> tuple[bool, str | None]:
         if not _uri:
             continue
         _proj = None
+        # ⛔ A rename or typo in a seam this probe touches must NOT be read as
+        #   "storage unavailable": that is exactly how #13899's retirement hid for
+        #   a whole wave — the probe's own `except Exception` turned an AttributeError
+        #   into a SKIP locally and a hard refusal in CI (#14114 class 2, #14125).
+        #   `AttributeError`/`NameError`/`TypeError`/`ImportError` are PROGRAMMING errors and are
+        #   re-raised; only genuine transport/driver failures fall through.
         try:
             from tortoise.projection import FalkorProjection
             _proj = FalkorProjection.from_uri(_uri)
             _proj.g.query("RETURN 1")
             return True, _uri
+        except (AttributeError, NameError, TypeError, ImportError):
+            raise
         except Exception:
             if _uri == _env_uri and _uri:
                 break  # env-specified DB unreachable — don't fall through (#196)
@@ -1415,6 +1423,13 @@ def test_legacy_single_field_point_index_is_upgraded_with_flat_data(graph_factor
             g.query(f"CALL {proc}('Point')")
             dropped = True
             break
+        # #14125 class 2 (review of `cd75ec7144`, P1): a PROGRAMMING error here is
+        # not "this engine has no drop procedure" — swallowing it turns a moved
+        # door into a SKIP whose reason names an engine limitation that does not
+        # exist. A genuine refusal arrives as `redis.exceptions.ResponseError` (a
+        # RedisError, NOT a TypeError), so the broad arm stays.
+        except (AttributeError, NameError, TypeError):
+            raise
         except Exception:
             continue
     if not dropped:

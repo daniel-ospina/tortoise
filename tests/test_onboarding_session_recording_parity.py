@@ -15,8 +15,14 @@ through the same primitive. Two consequences this file pins:
   installed, so the yes-branch fires the EXISTING
   `POST /v1/sessions/install-probe` route (no new endpoint) BEFORE it reports
   success.
-* **The disclosure touches no FLOW state.** The `capture-disclosed` step has
-  exactly one writer — the capture path. The pushed-down plan-review finding
+* **The disclosure touches no FLOW state.** The `capture-disclosed` step is
+  written AUTOMATICALLY by the capture path for a credential whose OWN graph IS
+  the org default (a CUSTOM-bound credential runs NEITHER half, so the
+  announcement does not fire for it, #14131), and may be asserted by an ORG-WIDE
+  agent credential at the checkpoint surface, which refuses any `graph_id` and is
+  only safe ON/AFTER the first capture — the step is first-write-wins and
+  `first_capture` is its `created`, so an early assert retires the announcement.
+  The pushed-down plan-review finding
   (§8) is that a new disclosure render can silently consume it, so the render
   is asserted to be a pure read.
 
@@ -408,13 +414,27 @@ class TestDisclosureStepAccounting:
     step/state accounting is #3517's, and `capture-disclosed` must never be
     silently consumed by a render."""
 
-    def test_the_declaration_matches_the_capture_path_single_writer(self):
-        """Mutation: flip either flag in `step_accounting()`."""
+    def test_the_declaration_matches_the_capture_path_automatic_writer(self):
+        """Mutation: flip either flag in `step_accounting()`.
+
+        ⛔ THE HANDLE IS PART OF THE CLAIM. `write_completed_step` is called with
+        `default_proj` (the org DEFAULT-graph projection), never the capture's own
+        `proj` — writing org-level state into a customer's CUSTOM graph is the
+        cross-graph defect #10893 exists to remove, and this string is emitted to
+        callers in machine form (`tortoise/__main__.py` under `--json`). The
+        handle drifted here once already, when the call site moved to
+        `default_proj` and this declaration did not (measured on #14086), so it is
+        pinned rather than left to the reader.
+        """
         accounting = cd.step_accounting()
         assert accounting["step"] == "capture-disclosed"
         assert accounting["consumes"] is False
         assert accounting["writes"] is False
         assert "write_completed_step" in accounting["writer"]
+        assert "write_completed_step(default_proj" in accounting["writer"], (
+            "the declared writer names the capture graph's handle (`proj`) — the "
+            "step is written on the org DEFAULT graph (`default_proj`); see "
+            "hosted_api.py::_first_capture_checkpoint")
 
     def test_rendering_writes_no_capture_disclosed_step(self, org_lane):
         """A render before OR after the step is idempotent and graph-silent.
