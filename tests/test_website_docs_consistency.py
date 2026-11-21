@@ -8553,17 +8553,38 @@ def test_the_document_roots_a_browser_ignores_insert_nothing() -> None:
         "control: without `hidden` the pre-root text stays, so the row above is about the "
         "attribute and not about dropping earlier text on any root token"
     )
-    # ⛔ AND THE CLEAR MUST NOT FIRE FOR A TOKEN A BROWSER *IGNORES* (#14073 review round
-    # 24, P1). Inside an open `<select>` a start tag the mode does not list is a parse error
-    # that IGNORES the token (`_SELECT_POP` cites the same rule), so `hidden` never reaches
-    # the body — while the clear would still throw away text the browser paints:
+    # ⛔ A `body` TOKEN INSIDE AN OPEN `<select>` IS BROWSER-DEPENDENT, AND THE LOUD SIDE IS
+    # TAKEN (#14073 review round 24 P1, round 25 P2). The classic mode that still had an "in
+    # select" rule IGNORED any start tag it did not list, so `hidden` never reached the body;
+    # the current living standard has no such mode (`_SELECT_POP` records the removal) and its
+    # in-body `body` rule merges the attributes in, i.e. it DOES hide. `_record_heading` takes
+    # the same loud side for the same deleted mode. So the text is COUNTED here:
     assert extract_visible_text("<p>ONE<select><body hidden></select><p>TWO") == "ONE TWO", (
-        "the root token was honoured inside an open `<select>`, where a browser ignores it: "
-        "`ONE` was dropped although the body keeps rendering — the DROP direction, the one "
-        "`_text_is_painted`'s docstring calls out as how three P1s shipped"
+        "the `body` token inside an open `<select>` is browser-dependent — a classic-mode "
+        "browser ignores it, the living standard merges `hidden` into the body — so the loud "
+        "side must keep the text. Clearing it would DROP copy one of the two browsers "
+        "paints, which `_text_is_painted`'s docstring calls out as how three P1s shipped"
     )
     assert extract_visible_text("<p>ONE<select>X") == "ONE X", (
         "control: the same shape without the root token keeps both words"
+    )
+    # ⛔ ...AND `html` IS NOT IN THAT CLASS IN EITHER MODEL (#14073 review round 25, P2): the
+    # living standard ignores an `html` start tag only while a `template` is open and
+    # otherwise MERGES it into the root, and the classic mode processed it "using the rules for
+    # the in-body mode" — so its `hidden` always lands and nothing is painted, even inside a
+    # `<select>`. Gating it on the select stack un-hid the document (measured: `'ONE TWO'` and
+    # a pre-root `<h2>` back as a boundary):
+    assert extract_visible_text("<p>ONE<select><html hidden></select><p>TWO") == "", (
+        "an `html` token inside an open `<select>` was treated as an ignored token: both "
+        "parsing models MERGE it into the root, so its `hidden` hides the document and the "
+        "text must not reach the golden"
+    )
+    assert extract_heading_positions('<h2 id="h">H</h2><select><html hidden><p>X') == [], (
+        "a `<h2>` read before a hidden `html` root survived, and it would BOUND the section "
+        "at a heading no reader meets"
+    )
+    assert extract_visible_text("<p>ONE<select><html></select><p>TWO") == "ONE TWO", (
+        "control: the same `html` token WITHOUT `hidden` changes nothing"
     )
     # ⛔ A PRE-ROOT HEADING CANNOT BOUND EITHER (#14073 review round 24, P2): the clear the
     # row above pins for `text` has to cover `headings` too, or the boundary question answers

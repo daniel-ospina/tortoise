@@ -2167,14 +2167,25 @@ class _AnchorHrefParser(HTMLParser):
         # disable that. `_open` has already run by now, so skipping only the PUSH keeps
         # the frameset arm intact.
         if tag in ("html", "body"):
-            # ⛔ THE TOKEN IS *IGNORED* IN THE "IN SELECT" MODE, and that has to be answered
-            # BEFORE either the flag or the clear: `<select>`'s rule ignores any start tag it
-            # does not list (the same rule `_SELECT_POP` cites), so `<body hidden>` there
-            # inserts nothing and its `hidden` NEVER reaches the body — while the clear below
-            # would still throw away text the browser paints. Measured (#14073 review round
-            # 24, P1): `<p>ONE<select><body hidden></select><p>TWO` is `'ONE TWO'` in a
-            # browser, was `'ONE'` before the clear existed, and became `''` with it.
-            if self._in_select():
+            # ⛔ A `body` TOKEN INSIDE AN OPEN `<select>` IS *BROWSER-DEPENDENT*, AND THIS TAKES
+            # THE LOUD SIDE (#14073 review round 24 P1, round 25 P2). The classic mode that
+            # had an explicit "in select" rule IGNORED any start tag it did not list, so
+            # `<body hidden>` there never reached the body; the CURRENT living standard no
+            # longer has that mode at all (`_SELECT_POP` records the removal), and its in-body
+            # `body` rule merges the attributes into the existing body, i.e. it DOES hide.
+            # Neither reading is "the" answer, so — exactly as `_record_heading` does for the
+            # same deleted mode — the flag and the clears are skipped here and the text is
+            # COUNTED: over-counting can only redden the golden, while clearing would drop
+            # copy a classic-mode browser paints.
+            #
+            # ⛔ `html` IS **NOT** IN THAT CLASS and must never be skipped here: in BOTH models
+            # the `html` start tag is handled (living standard: ignore only when a `template`
+            # is open, else merge into the root; classic: "process using the rules for the
+            # in-body mode"), so its `hidden` always lands on the root and nothing is painted.
+            # Gating `html` on the select stack was measured to UN-hide the document:
+            # `<p>ONE<select><html hidden></select><p>TWO` came back `'ONE TWO'` and a
+            # pre-root `<h2>` came back as a boundary.
+            if tag == "body" and self._in_select():
                 return
             # ⛔ THE `hidden` FLAG STILL HAS TO LAND SOMEWHERE. No element is inserted, so
             # the inherited `renders` flag cannot carry it — and before `_root_renders`
