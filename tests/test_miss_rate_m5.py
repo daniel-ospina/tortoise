@@ -716,8 +716,13 @@ def test_the_run_head_is_a_commit_that_could_have_produced_this_artifact():
     # bare substring test is satisfied by setting `run_git_head := git_head` while
     # the record still never mentions the run — measured GREEN in the CI shape. The
     # run head must appear ALONGSIDE the field name that makes it the run side.
+    # ⛔ `[\s\S]`, not `[^\n]`: a pure RE-WRAP of a correct record must not red
+    # this pin (measured: the two tokens sit 18 chars apart on one line, and the
+    # line is already near the doc's wrap width, so `[^\n]` is a false block
+    # waiting to happen — while `[\s\S]` still rejects the anchor substitution,
+    # whose nearest `provenance.run_git_head` is far beyond the window).
     text = README.read_text()
-    assert re.search(rf"`{run_head[:12]}`[^\n]{{0,80}}provenance\.run_git_head", text), (
+    assert re.search(rf"`{run_head[:12]}`[\s\S]{{0,80}}provenance\.run_git_head", text), (
         f"the record does not present `{run_head[:12]}` AS `provenance.run_git_head` — "
         f"naming it anywhere (the anchor is printed in the same form) is not enough, "
         f"and that substitution is what this pin exists to forbid")

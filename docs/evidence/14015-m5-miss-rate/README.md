@@ -47,8 +47,9 @@ criterion 1 is worth three times the tariff.
   figures are ANCHORED to: the artifact's `git_head`, pinned against this line and against
   the instrument's bytes at that commit. ⛔ **It is not the head the run ran at.** The run
   was performed at `5cc6bad05cf2` (the artifact's `provenance.run_git_head`, with the bytes
-  that ran in `provenance.run_tool_sha256`); the only change to the instrument since then is
-  INVARIANT 3's refusal band, which decides whether a run is refused and cannot move a
+  that ran in `provenance.run_tool_sha256`); the only changes to the instrument since then are
+  INVARIANT 3's refusal band (which decides whether a run is REFUSED) and the
+  run-side provenance producer that emits the `run_*` fields — neither can move a
   computed number.
   A pin checks the pair: the run head's commit time is not after `generated_at`, so an
   anchor can never again be substituted for a run head unnoticed.
