@@ -1310,17 +1310,32 @@ def journal_skip_forwarding_problems(tree: ast.AST, rel: str) -> list[str]:
         # away, with the gate green. So the name must be either a PARAMETER of the
         # enclosing door (the forwarding shape the SDK uses) or bound in that
         # scope from a call whose callee is the chokepoint's decision.
-        if _is_parameter(scope, value.id):
+        #
+        # ⛔ AND A PARAMETER THAT IS REBOUND IS NOT A FORWARD EITHER (#14002
+        # review cycle 8, F1). The arm below asks whether the NAME is in the
+        # signature — and a name that is in the signature AND assigned a constant
+        # in this scope is a REBIND, not a forward: the call still reads
+        # `journal_skipped=journal_skipped`, the caller's decision is gone by the
+        # time that name is read, and this gate certified it. That is the same
+        # two defects one assignment away, reached through the arm that was
+        # supposed to close it, so the parameter arm is skipped when this scope
+        # ASSIGNS the name and the provenance check below decides instead (a
+        # rebind from the chokepoint's own `*record_owns_position(…)` is still a
+        # forward, and still passes).
+        assigned = _assigned_targets_in(scope)
+        if _is_parameter(scope, value.id) and value.id not in assigned:
             continue
-        origins = _assigned_targets_in(scope).get(value.id, [])
+        origins = assigned.get(value.id, [])
         if any(callee.endswith("record_owns_position")
                for origin in origins for callee in _call_names_in(origin)):
             continue
         problems.append(
             f"{rel}:{call.lineno} forwards `{value.id}` as `journal_skipped`, but "
-            f"`{value.id}` is neither a parameter of {_function_name(scope)}() nor "
-            "bound from the chokepoint's `*record_owns_position(…)` decision in "
-            "this scope — a locally bound constant is the same defect as a "
+            f"`{value.id}` is not an UNREBOUND parameter of "
+            f"{_function_name(scope)}() nor bound from the chokepoint's "
+            "`*record_owns_position(…)` decision in this scope — a parameter "
+            f"this scope REBINDS (`{value.id} = …`), or a locally bound "
+            "constant, is the same defect as a "
             "literal: `False` skips the append and gets every cut-over write "
             "refused, `True` forces allocation on a graph that is not cut over "
             "(#14002)")

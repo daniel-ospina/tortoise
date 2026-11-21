@@ -304,17 +304,22 @@ map had to go) — measured at this head as `tortoise/live.py:1237,1247` and
 `tortoise/why.py:200`. That move is the same kind as the five before it — prose that
 names the retired label in order to explain a rule about it — and it is the first
 one whose point is a WIDENING rather than a retirement. The seventh, #12434's `:Document`
-retirement prose in `tortoise/mcp_server.py:4430`, IS a retirement. The eighth
+retirement prose in `tortoise/mcp_server.py:4477`, IS a retirement. The eighth
 is #12915's (`#4282` Phase 2, lane B) `record_decision` docstring —
-`tortoise/sdk.py:37361` and `_file_human_approval`'s `:37208`, one line each in a file this population already
+`tortoise/sdk.py:37516` and `_file_human_approval`'s `:37558`, one line each in a file this population already
 reached (⛔ **the `:4382` and `:36687,36718` addresses this sentence carried are
-DELETED, re-measured at this head: `mcp_server.py:4382` is a BLANK line and the
-`:Document` retirement prose is at `:4430`; `sdk.py:36745` is a
-``# `[a, a, b]` was answered with the `[a, b, b]` operator`` comment and `:36776`
+DELETED and every address in this parenthesis is re-measured at this head — `ac57b2d38a`
+(`#14065`) inserted 62 lines into `sdk.py`, 55 of them above `:13686`, so every `sdk.py`
+address here moved +55 from the head `#14022` was cut at (`d4a8dddc4e`), and each was read again on the
+line that carries it now:**
+`mcp_server.py:4382` now carries the
+``# prop named "error" must not suppress the onboarding observation.`` comment and the
+`:Document` retirement prose is at `:4477`; `sdk.py:37095` is the
+``# `[a, a, b]` was answered with the `[a, b, b]` operator`` comment and `:37126`
 is `conds.append("o.label IS NULL")`, neither naming `:Document` — the two
-`:Document` docstring lines are `:37166` in `record_decision` (opening `:37146`;
-`:37165` is the `:Source` line immediately above it, which is what a re-measure by that
-phrase alone lands on) and `:37403` in `_file_human_approval` (opening `:37186`)**), whose
+`:Document` docstring lines are `:37516` in `record_decision` (opening `:37496`;
+`:37515` is the `:Source` line immediately above it, which is what a re-measure by that
+phrase alone lands on) and `:37558` in `_file_human_approval` (opening `:37536`)**), whose
 `Args:` block for `artifact_id` says the artifact may be "the url of the document
 Source" and parenthesises the D10 rule ("a document is a ``:Source``, not a
 ``:Document`` node") because the retired label is what a reader arriving from the

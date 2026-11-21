@@ -128,9 +128,10 @@ hard-refuse at 1.5x — because every exclusion removes bytes; #13084.)
 THE METRIC
 ----------
 :meth:`EvictionReport.metric` is the documented, flat, stable-key surface: nodes
-before/after, bytes before/after, planned/evicted, and the two hold-back reasons
-(record-cannot-serve, leased). A value nothing measured is ``None``, never a
-fabricated ``0``.
+before/after, bytes before/after, planned/evicted, whether the degraded snapshot was
+invalidated (``None`` = not applicable, ``False`` = needed and failed), and the two
+hold-back reasons (record-cannot-serve, leased). A value nothing measured is ``None``,
+never a fabricated ``0``.
 
 IN-FLIGHT READS
 ---------------
@@ -144,9 +145,43 @@ lease acquired AFTER the snapshot, while the statement is in flight, is not seen
 behind every delete, which is worse than the window). It is also **opt-in** — no read
 site calls `lease()` yet, so a reader that does not register is not protected. Both
 limits are stated here rather than implied.
+
+THE OTHER CACHE THIS DELETE MUST INVALIDATE (#13123)
+----------------------------------------------------
+A node removed here is not only gone from FalkorDB: ``fallback_snapshot`` keeps a 60 s
+in-memory copy of the whole ``:Point`` corpus and serves it from the DEGRADED tier —
+the in-memory TF-IDF path that answers when the retrieval strategies fail. That copy is
+invalidated by ``SDK._mark_dirty``, which every normal write surface calls and which a
+raw ``DETACH DELETE`` does not. Deleting without invalidating it therefore reports
+success while the node it removed is still served, which the M2 instrument measured as
+``recall@10`` **0.1133** against ``resident_share`` **0.1100** — more nodes retrievable
+than the graph held.
+
+So :func:`_delete_nodes` calls ``fallback_snapshot.invalidate_graph(graph_name)``
+AFTER its statement returns — on every route that removed rows, and also when the
+statement RAISED (its effect is then unverified) — and ``evict()`` reports the outcome
+as ``degraded_snapshot_invalidated`` (``None`` = nothing removed, so nothing to
+invalidate; ``True`` = the stamp moved; ``False`` = needed and FAILED, which ``reason``
+says in words on BOTH exits). The stamp is per-GRAPH, not per-key and not the whole-store
+epoch: the evictor has a proven graph name and no projection, and a global stamp is the
+measured ``#10602`` regression (20 builds, 0 hits).
+
+⚠️ What it closes, and what it does not. It closes the CACHED entry and the PUT of any
+build that read the graph before the delete. It does not stop a read that is already in
+flight: a ``get`` landing between the delete committing and the stamp move, or a reader
+that joined a build started before the stamp moved, is still served that flight's rows —
+bounded by one round trip / one build, never by the TTL. Best-effort in the same posture
+as the write path's COMMIT→INVALIDATE WINDOW, one statement wide instead of one TTL wide.
+
+⚠️ The bound that remains: the snapshot store is PROCESS-LOCAL. An evictor in another
+process (``tools/cache_evict.py`` run by an operator against a hosted API) cannot reach
+the serving process's snapshot, and that store is still bounded only by the 60 s TTL.
+The sweeper that arms the window (#13103) must run in the process that serves degraded
+reads, or accept that bound.
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 from collections.abc import Callable, Iterator, Sequence
@@ -156,6 +191,8 @@ from threading import Lock
 from typing import Any
 
 from tortoise.cache_eviction import Assessment, node_total
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "DEFAULT_BATCH",
@@ -168,6 +205,17 @@ __all__ = [
     "ReadLeases",
     "evict",
 ]
+
+#: The sentence a report carries when an eviction's degraded-snapshot invalidation
+#: FAILED. One constant because it must appear on BOTH exits from a deleting pass — the
+#: normal return AND the abort return (a delete statement that raised after earlier
+#: passes deleted nodes). A failure reported in the metric but not in the prose is a
+#: monitor-only signal, and the field's own contract says the reason says it in words.
+_INVALIDATION_FAILED = (
+    "; the degraded-fallback snapshot could NOT be invalidated, so a node this pass "
+    "removed may still be served on the degraded read path (#13123) until the "
+    "snapshot TTL expires"
+)
 
 #: The enforced bound: how many nodes the cache may hold.
 #:
@@ -372,6 +420,17 @@ class EvictionReport:
     #: True when the delete statement removed fewer rows than it was asked to (a
     #: concurrent writer/evictor won the race). The metric must not claim otherwise.
     delete_unverified: bool = False
+    #: #13123 — whether the degraded-fallback corpus snapshot was invalidated after
+    #: nodes were removed. Three states, and the third is why this is not a bool:
+    #:
+    #: ``True``   nodes were removed AND the snapshot for that graph was dropped;
+    #: ``None``   nothing was removed, so nothing needed invalidating (a CLEAN pass, a
+    #:            dry run, or a refusal);
+    #: ``False``  nodes were removed and the invalidation FAILED — an evicted node may
+    #:            still be served on the degraded read path until the snapshot TTL.
+    #:            That is a false PASS of this eviction, so ``reason`` says it in words
+    #:            too; a monitor must not read ``False`` as "nothing to do".
+    degraded_snapshot_invalidated: bool | None = None
     #: True when a DRY RUN ran out of pass budget before reaching the node budget, so
     #: ``planned`` under-reports the real plan. A truncated plan is not a complete one.
     truncated: bool = False
@@ -412,6 +471,9 @@ class EvictionReport:
             "held_record_cannot_serve": len(self.skipped_record_cannot_serve),
             "held_leased": len(self.skipped_leased),
             "delete_unverified": self.delete_unverified,
+            # ⛔ `None` = NOT APPLICABLE, `False` = NEEDED AND FAILED. Collapsing the
+            # two would let a failed invalidation read as a clean pass.
+            "degraded_snapshot_invalidated": self.degraded_snapshot_invalidated,
             "plan_truncated": self.truncated,
             "pass_budget_exhausted": self.budget_exhausted,
             "max_passes": self.policy.max_passes if self.policy else None,
@@ -482,7 +544,57 @@ def _key_property(key_prop: str) -> str:
     return quoted
 
 
-def _delete_nodes(graph: Any, rows: Sequence[Candidate], key_prop: str) -> tuple[int, set[int]]:
+def _invalidate_degraded_snapshot(graph_name: Any) -> bool:
+    """Drop the degraded-fallback corpus snapshot for the graph just deleted from.
+
+    ⛔ WHY THIS LIVES ON THE DELETE PATH AND NOT ON ITS CALLERS (#13123).
+    ``fallback_snapshot`` keeps a 60 s in-memory copy of the whole corpus and serves it
+    from the DEGRADED tier — the in-memory TF-IDF path that answers when the retrieval
+    strategies fail. It is invalidated by ``SDK._mark_dirty``, which every normal write
+    surface calls and which a raw ``DETACH DELETE`` does NOT. So a delete here left the
+    node returnable, measured by the M2 instrument as ``recall@10`` **0.1133** against
+    ``resident_share`` **0.1100** — more nodes retrievable than the graph held.
+
+    That is a FALSE PASS of the eviction (it reports success while the node it removed
+    is still served), and it is worst exactly when it matters: the degraded tier is
+    active only when retrieval is already failing. Putting the invalidation in
+    :func:`_delete_nodes` rather than at each caller means every delete route inherits
+    it, including one added later.
+
+    NEVER RAISES. This is cache bookkeeping running inside a sweep whose report is the
+    only record of what was deleted: a raise here would replace a truthful report with
+    a traceback and leave the caller unable to tell whether nodes went. A failure is
+    logged and returned as ``False`` so the metric can say so.
+
+    Returns ``True`` only when the invalidation actually ran. A non-string graph name
+    (a stub handle with no ``name``) returns ``False`` — the honest reading, since a
+    snapshot keyed on something else cannot be shown to have been reached.
+    """
+    if not isinstance(graph_name, str) or not graph_name:
+        return False
+    try:
+        from tortoise.fallback_snapshot import invalidate_graph
+
+        invalidate_graph(graph_name)
+        return True
+    except Exception as exc:  # noqa: BLE001, RUF100 - bookkeeping must never raise
+        logger.warning(
+            "#13123: the degraded-fallback snapshot for graph %r could NOT be "
+            "invalidated after an eviction (%s: %s) — a node this pass removed may "
+            "stay servable on the degraded read path for up to the snapshot TTL",
+            graph_name, type(exc).__name__, exc,
+        )
+        return False
+
+
+def _delete_nodes(
+    graph: Any,
+    rows: Sequence[Candidate],
+    key_prop: str,
+    *,
+    snapshot_graph: str | None = None,
+    snapshot_out: dict[str, bool | None] | None = None,
+) -> tuple[int, set[int], bool | None]:
     """Delete the candidates, matching ``id(n)`` **and** the record key.
 
     ⛔ BOTH halves of the predicate are load-bearing. FalkorDB REUSES an internal node
@@ -494,19 +606,82 @@ def _delete_nodes(graph: Any, rows: Sequence[Candidate], key_prop: str) -> tuple
     ``DETACH`` because a cache node's incident edges are part of the same cache entry
     — leaving dangling edges behind would be a partially-evicted node.
 
-    Returns ``(removed_count, survivor_ids)`` so the caller reports what it can PROVE
-    it removed rather than what it asked to remove.
+    ⛔ THE DEGRADED SNAPSHOT IS INVALIDATED HERE, AFTER THE STATEMENT RETURNS (#13123).
+    Invalidation must come AFTER the delete, not before: a build that reads rows while
+    the node is still resident would cache it, and only a stamp moved after the deletion
+    refuses that build's put. It runs on every route that actually removed rows, and
+    ALSO when the statement RAISED — an errored statement's effect is unverified and may
+    be partial. A statement that returned ``count(n) = 0`` removed nothing, so it
+    invalidates nothing: it cannot have introduced staleness, and blanking a warm
+    snapshot on it would be a rebuild for no reason.
+
+    ⚠️ THE WINDOW THIS DOES NOT CLOSE, stated here rather than left to the reader
+    (review round 1, and the same class the write path documents at length under
+    COMMIT→INVALIDATE WINDOW). Between the server COMMITTING the delete and this
+    function's stamp move there is one round trip, and during it a degraded read can
+    still be served the deleted node from the (still valid) cached entry — and a reader
+    that joined a build started BEFORE the stamp moved is served that flight's result,
+    which is bounded by the flight's duration, not by this stamp. So the guarantee is
+    exactly: no snapshot is *cached* from a corpus read before the delete, and no cached
+    entry survives the statement — never "no reader can observe the node". Best-effort
+    in the same posture as the write path, one statement wide instead of one TTL wide.
+
+    ``snapshot_graph`` is the graph name the caller has already PROVEN (``evict``'s
+    gate 5 makes the handle's name equal the census's). It is not defaulted from
+    ``graph.name`` on the production path: a name that was never checked against the
+    licence is exactly the kind of coincidence this module refuses elsewhere. A direct
+    caller that passes nothing gets the handle's own name, or no invalidation if the
+    handle has none.
+
+    Returns ``(removed_count, survivor_ids, snapshot_invalidated)`` so the caller
+    reports what it can PROVE it removed rather than what it asked to remove, and can
+    tell "the snapshot was invalidated" from "nothing needed invalidating"
+    (``None``) and from "it was needed and FAILED" (``False``).
+
+    ⛔ ``snapshot_out`` CARRIES THE OUTCOME ACROSS A RAISE. Without it the abort path
+    cannot report the invalidation it performed (or failed to perform): the tuple never
+    reaches the caller, so the report would say ``None`` — "not applicable" — about a
+    statement whose effect is explicitly unverified. A failed invalidation on a raising
+    statement is then indistinguishable from a failed invalidation on a successful one:
+    both are ``False``.
+
+    ⛔ THE MAPPING IS FILLED ON EVERY ROUTE THAT RUNS A STATEMENT — including the raising
+    one — but NOT on the empty-payload return at the top, where no statement is issued and
+    nothing is filled. A caller must read it with ``.get(...)`` and must not treat an empty
+    mapping as an answer (``evict`` guards with ``snapshot_outcome.get(...) is not None``,
+    which is correct for both reasons: absent and ``None`` both mean "no answer here").
     """
     payload = [{"id": c.node_id, "key": c.key} for c in rows if c.key is not None]
     if not payload:
-        return 0, set()
+        return 0, set(), None
     quote = _key_property(key_prop)
-    result = graph.query(
-        f"UNWIND $rows AS r MATCH (n) WHERE id(n) = r.id AND n.{quote} = r.key "
-        f"DETACH DELETE n RETURN count(n)",
-        {"rows": payload},
-    )
+    target = snapshot_graph if isinstance(snapshot_graph, str) and snapshot_graph else \
+        getattr(graph, "name", None)
+
+    def _invalidate(needed: bool) -> bool | None:
+        """Invalidate (when *needed*), publish the outcome, return it."""
+        outcome = _invalidate_degraded_snapshot(target) if needed else None
+        if snapshot_out is not None:
+            snapshot_out["invalidated"] = outcome
+        return outcome
+
+    try:
+        result = graph.query(
+            f"UNWIND $rows AS r MATCH (n) WHERE id(n) = r.id AND n.{quote} = r.key "
+            f"DETACH DELETE n RETURN count(n)",
+            {"rows": payload},
+        )
+    except Exception:
+        # ⛔ The statement was ISSUED and its effect is unverified, so the snapshot may
+        # now name a node that is gone. Invalidate before the caller turns this into a
+        # `delete_unverified` report and re-raises nothing.
+        _invalidate(True)
+        raise
     removed = int(result.result_set[0][0]) if result.result_set else 0
+    # ⛔ `removed` from the STATEMENT. A statement that removed nothing introduced no
+    # staleness, and a pass that skipped eviction must not blank a warm snapshot for
+    # nothing (`None` = not needed).
+    invalidated = _invalidate(bool(removed))
     survivors: set[int] = set()
     if removed != len(payload):
         # One extra read, only on the divergent path: name exactly which candidates
@@ -517,7 +692,7 @@ def _delete_nodes(graph: Any, rows: Sequence[Candidate], key_prop: str) -> tuple
             {"rows": payload},
         ).result_set
         survivors = {int(row[0]) for row in still}
-    return removed, survivors
+    return removed, survivors, invalidated
 
 
 def evict(
@@ -734,6 +909,9 @@ def evict(
     after_nodes = before_nodes
     after_bytes = before_bytes
     delete_unverified = False
+    #: #13123 — `None` until a statement actually removes a node, so a CLEAN pass, a dry
+    #: run and a refusal all report "not applicable" rather than a fabricated `True`.
+    degraded_snapshot_invalidated: bool | None = None
     abort_reason: str | None = None
     #: WHY the loop stopped — "satisfied" | "population" | "licence" | "pass_budget".
     #: ⛔ Reported, not inferred: "ran out of passes" and "the population had nothing
@@ -911,8 +1089,18 @@ def evict(
             # answer is "a reader is holding these", which no population query reveals.
             stop_reason = "leased"
             break
+        # ⛔ `snapshot_out` IS HOW THE ABORT PATH LEARNS WHAT THE INVALIDATION DID. On a
+        # raise the tuple below never arrives, so without this channel the report would
+        # have to say `None` — "not applicable" — about a statement whose effect is
+        # explicitly UNVERIFIED. That is the one reading this field must never produce:
+        # `None` means "nothing was removed, so nothing needed invalidating", and a
+        # raising delete may well have removed rows.
+        snapshot_outcome: dict[str, bool | None] = {}
         try:
-            removed, survivors = _delete_nodes(graph, final, key_prop)
+            removed, survivors, snapshot_invalidated = _delete_nodes(
+                graph, final, key_prop, snapshot_graph=measured_graph,
+                snapshot_out=snapshot_outcome,
+            )
         except Exception as exc:  # any store fault aborts, never raises
             # ⛔ THE PASS MAY ALREADY HAVE DELETED NODES. Unguarded, a fault here
             # escaped `evict()` after earlier passes had committed deletes, so the
@@ -924,6 +1112,19 @@ def evict(
             delete_unverified = True
             after_measured = False
             bytes_measured = False
+            # ⛔ GUARD ON THE VALUE, NOT THE DICT (review round 2, P1 — measured).
+            # `_invalidate(needed=False)` deliberately publishes `None` ("nothing removed,
+            # so nothing needed invalidating"). Guarding on the dict alone therefore let a
+            # LATER pass that removed 0 rows blank what an EARLIER pass proved: measured
+            # pass 1 deleting 2 rows with a FAILED invalidation, pass 2 removing 0 and its
+            # re-count raising → report said `deleted=2`, `nodes_evicted=2`,
+            # `degraded_snapshot_invalidated=None`, and no "could NOT be invalidated"
+            # sentence — a failed invalidation erased from the machine-readable surface on
+            # the very exit this channel was added for. `None` means "needed nothing", so
+            # it must never overwrite a real answer; this mirrors the normal path's
+            # `if snapshot_invalidated is not None:`.
+            if snapshot_outcome.get("invalidated") is not None:
+                degraded_snapshot_invalidated = snapshot_outcome["invalidated"]
             # ⛔ `deleted` counts EARLIER passes at this point — this pass's own rows
             # are not in it yet. Saying "after {len(deleted)} node(s) were already
             # removed by this pass" understated the removal (0 on pass 1) while the
@@ -937,6 +1138,11 @@ def evict(
             break
         if removed != len(final):
             delete_unverified = True
+        # ⛔ RECORD the invalidation outcome rather than assume it. `True` proves it ran;
+        # `False` means a node this pass removed may still be served on the degraded
+        # path, which the reason states so the metric and the prose agree.
+        if snapshot_invalidated is not None:
+            degraded_snapshot_invalidated = snapshot_invalidated
         # ⛔ Count from the STATEMENT's own number. `survivors` is the complement of a
         # predicate query, so a row a peer evicted inside the probe→delete window is
         # absent from BOTH sets — taking `final - survivors` would count it as ours,
@@ -995,6 +1201,12 @@ def evict(
             if deleted
             else ""
         )
+        # ⛔ The invalidation clause is NOT conditional on the exit path. A pass that
+        # deleted nodes and then aborted still owes the reader "and the degraded tier may
+        # still serve them"; leaving it off here would report `False` in the metric
+        # beside a reason that never mentions it.
+        if degraded_snapshot_invalidated is False:
+            suffix += _INVALIDATION_FAILED
         return EvictionReport(
             verdict="REFUSED",
             reason=abort_reason + suffix,
@@ -1014,6 +1226,7 @@ def evict(
             bytes_after=after_bytes if (after_measured and bytes_measured) else None,
             byte_ceiling_bytes=ceiling,
             delete_unverified=delete_unverified,
+            degraded_snapshot_invalidated=degraded_snapshot_invalidated,
             truncated=dry_run and abort_over > len(planned),
             dry_run=dry_run,
             passes=passes,
@@ -1111,6 +1324,11 @@ def evict(
             "; the delete statement removed fewer rows than planned (a concurrent "
             "writer or evictor), so only the proven removals are counted"
         )
+    # ⛔ A FAILED INVALIDATION IS A FALSE PASS, so it is stated in prose as well as in the
+    # metric. The nodes ARE gone (that half succeeded); what this pass cannot claim is
+    # that they stopped being served.
+    if degraded_snapshot_invalidated is False:
+        reason += _INVALIDATION_FAILED
     report = EvictionReport(
         verdict=verdict,
         reason=reason,
@@ -1126,6 +1344,7 @@ def evict(
         bytes_after=after_bytes if (after_measured and bytes_measured) else None,
         byte_ceiling_bytes=ceiling,
         delete_unverified=delete_unverified,
+        degraded_snapshot_invalidated=degraded_snapshot_invalidated,
         truncated=truncated,
         budget_exhausted=budget_exhausted,
         dry_run=dry_run,

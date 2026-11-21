@@ -4081,13 +4081,29 @@ def _d5_split_top_level(body: str, sep: str) -> list[str] | None:
 
 
 def _d5_class_members(char_class: str) -> set[str] | None:
-    """The single characters a `[...]` class matches, or `None` if it is not a plain set of them.
+    r"""The single characters a `[...]` class matches, or `None` if it is not a plain set of them.
 
     A negated class, a RANGE (`[a-z]`, and `[+-z]` where the hyphen sits between two members) and
-    an incomplete escape are all answered `None` rather than interpreted. ⛔ A BACKSLASH IS NOT AN
-    ESCAPE IN A POSIX BRACKET EXPRESSION (#13995 review round 12, P2 — MEASURED): `[\-+]` is the
-    descending range `\`–`+` (`grep: Invalid range end`, rc 2), which this helper used to read as
-    the members `{-, +}` because it consumed `\-` as an escaped hyphen.
+    an incomplete escape are all answered `None` rather than interpreted.
+
+    ⛔ `[\-+]` IS REFUSED AS A DESCENDING RANGE, AND THAT IS NOT THE CLAIM "backslash is not an
+    escape here" (#13995 review round 12, P2; stated precisely by #14026 review, P2 — MEASURED).
+    `[\-+]` is the range `\`–`+` (`grep: Invalid range end`, rc 2), and this helper used to read it
+    as the members `{-, +}` by consuming `\-` as an escaped hyphen.
+
+    ⛔ BUT THE ESCAPE MACHINERY SURVIVES, AND POSIX HAS NO SUCH THING — so this helper really does
+    over-accept, deliberately, with the cost stated (#14026 review, P2 — MEASURED). A backslash
+    inside a bracket is an ORDINARY MEMBER: `^[+\-]$` is the class `{+,-,\}` and counts `3` on a
+    probe carrying a lone `\` line, where this class counts `2` — on a `\`-free probe that
+    carries both signs they agree, not only on the 4-line one. So the escape model, answering
+    `{+,-}`, grades a SUPERSET as the class. That over-acceptance is the DECLARED superset at
+    `_d5_counts_the_blank_class` and pinned as ACCEPTED in the spellings cell, and its cost is one
+    impossible diff line (no line of a unified diff is a bare `\`: every diff BODY line carries a
+    `+`/`-`/space prefix, and the header lines — `diff --git`, `index`, `---`/`+++`, `@@` — and
+    the `\ No newline at end of file` marker are all multi-character). Removing the machinery would
+    be stricter and would reverse a landed decision, so it is a reopen rather than a tidy-up —
+    which is why the case for keeping it rests on what the CODE does and on that decision, rather
+    than on POSIX's reading.
     """
     content = char_class[1:-1]
     if not content or content[0] == "^":
@@ -4104,9 +4120,27 @@ def _d5_class_members(char_class: str) -> set[str] | None:
             # (#13995 review round 12, P2 — MEASURED). `[\-+]` reads as the DESCENDING RANGE
             # `\`–`+` — `grep -cE '^[\-+]$'` → `grep: Invalid range end`, rc 2, in BRE and ERE —
             # so consuming `\-` as an escaped member (which this helper did) graded a command that
-            # cannot run as a BLANK-class prescription. An escaped `-` BETWEEN two members is the
-            # range case; one at either end is the literal `[+\-]`/`[-+]` spelling, kept because
-            # GNU grep accepts it (it also carries a literal `\` member — a declared superset).
+            # cannot run as a BLANK-class prescription. The rule, exactly as the escape branch
+            # below, the `if escaped:` consumer at the top of the loop and the two `return None`
+            # branches implement it (#14026 review, P2 — MEASURED: this comment used to merge three
+            # different spellings into one sentence, and then two of them into a second one):
+            #   * an escaped `-` with any character after it is refused as a RANGE. grep agrees
+            #     where that range DESCENDS (`grep -cE` refuses `^[\-+]$` and `^[+\-+]$` with
+            #     `Invalid range end`, rc 2) — and DISAGREES for a range whose endpoints are
+            #     EQUAL or that ASCENDS, both of which grep RUNS: `^[+\-\]$` is `{+}` plus the
+            #     range `\`..`\`, and `^[+\-z]$` is `{+}` plus `\`..`z`; each exits 0 and counts
+            #     the `+` and the `\` lines of the 6-line probe (`2`, measured). This helper
+            #     answers `None` to all of them, an over-refusal in the safe direction rather
+            #     than agreement with grep;
+            #   * an escaped `-` in the LAST position is consumed as the member `-`, which is
+            #     what keeps `[+\-]` accepted — it also matches a lone `\`, so it counts `3` on
+            #     a probe carrying one where this class counts `2`;
+            #   * a backslash before any OTHER character is consumed as that character, which is
+            #     what keeps `[-\+]` accepted; there the ESCAPED character is `+` and the leading
+            #     hyphen is unescaped, so it reaches the same backslash-bearing superset (`3`);
+            #   * the UNESCAPED `[-+]` is the plain class, no `\` member at all (counts `2` on
+            #     that probe), and it is kept as the class itself — not as a superset.
+            # What the superset costs is stated in the docstring above: one impossible diff line.
             if index + 2 < len(content) and content[index + 1] == "-":
                 return None  # a `-` between members is a RANGE, escaped or not
             escaped = True
@@ -4121,12 +4155,26 @@ def _d5_counts_the_blank_class(expr: str) -> bool:
     r"""Does `expr` count exactly the lines that are one `+` or one `-`?
 
     ⛔ A BOUNDED EQUIVALENCE, NOT A REGEX-EQUIVALENCE DECISION (#13995 review, P2 — MEASURED).
-    The test this replaces was a SPELLING LIST, `\^(?:\\[+-]|\[[-+]+\])\$`, so
-    `^[+\\-]$` and `^(\\+|-)$` — the same class, measured `2` on the 4-line probe — were read as
-    expressions of some OTHER class. Two consequences, both measured: a second blank-class
-    prescription spelled either way left the arm GREEN (a false PASS), and putting one in place
+    The test this replaces was a SPELLING LIST, `\^(?:\\[+-]|\[[-+]+\])\$`, so `^(\+|-)$` — the
+    same class as the row's own `^[+-]$`, measured `2` on the 4-line probe — was read as an
+    expression of some OTHER class. Two consequences, both measured: a second blank-class
+    prescription spelled `^(\+|-)$` left the arm GREEN (a false PASS), and putting one in place
     of the row's own expression tripped the ZERO assertion, whose message blames the count READER
     for a spelling the CLASS TEST was the one to reject (a false RED with a misattributed cause).
+
+    ⛔ AND THIS SENTENCE USED TO NAME A SECOND SPELLING BESIDE IT, ON A PREMISE THAT IS FALSE
+    (#14026 review, P2 — MEASURED). It read that `^[+\-]$` and `^(\+|-)$` were "the same class,
+    measured `2` on the 4-line probe" and were read as expressions of some OTHER class. Only
+    `^(\+|-)$` is this class; `^[+\-]$` is NOT — a POSIX bracket has no escapes, so its members
+    are `{+,-,\}` and it counts `3` on a probe carrying a lone `\` line, which is the DECLARED
+    SUPERSET documented in the NEXT paragraph. On a `\`-free probe that carries both signs they
+    agree, not only on the 4-line one. So the retired list REFUSING `^[+\-]$` was reading it as
+    what it is — NOT this class — rather than mis-reading it; that `main` now accepts the spelling
+    as a DECLARED
+    SUPERSET is a deliberate widening (stated below), not a claim that it IS the class. The
+    sentence therefore used a true statement about one spelling to carry a false one about the
+    other — contradicting this docstring's own next paragraph, in the paragraph that justifies the
+    widening.
 
     Accepted here, each measured — SPELLINGS CHECKED, NOT A GRAMMAR: `^[+-]$`, `^[-+]$`,
     `^[+\-]$`, and the alternation forms `^(\+|-)$` / `^(-|\+)$` (PLAIN groups, each counting `2`
@@ -4658,12 +4706,20 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
         "fragment claim is stale (#13995 review rounds 1-2)")
 
     # ⛔ THE BLANK-CLASS TEST IS A BOUNDED EQUIVALENCE, NOT A SPELLING LIST (#13995 review, P2 —
-    # MEASURED). Each spelling below counts the SAME class (`2` on the 4-line probe). The old test,
-    # `\^(?:\\[+-]|\[[-+]+\])\$`, carried the first and the third of these and REJECTED the other
-    # two — measured on the pre-fix reader — in both directions: as a SECOND prescription it left
-    # the arm GREEN (false PASS), and in place of the row's own expression it tripped the ZERO
-    # assertion whose message blamed the count READER (false RED, misattributed). The two the list
-    # already carried are kept as controls, so a narrowing that loses them reds here too.
+    # MEASURED). Each spelling below counts the SAME class on the 4-line probe — `2`, which is what
+    # makes them controls here — although `^[+\-]$` reaches that `2` as a DECLARED SUPERSET rather
+    # than as an equivalence: it also matches a lone `\`, so on a probe carrying one it counts `3`
+    # where the class counts `2` (see `_d5_counts_the_blank_class`). Stated rather than implied,
+    # because "the SAME class" on its own was false for that row (#14026 review, P2 — MEASURED).
+    # The old spelling list, `\^(?:\\[+-]|\[[-+]+\])\$`, carried `^[+-]$` and `^[-+]$` — the two
+    # controls — and REJECTED `^(\+|-)$`, which IS this class: measured on the pre-fix reader that
+    # cost in both directions, as a SECOND prescription it left the arm GREEN (false PASS) and in
+    # place of the row's own expression it tripped the ZERO assertion whose message blamed the
+    # count READER (false RED, misattributed). ⛔ IT ALSO REJECTED `^[+\-]$`, AND THAT ONE WAS NOT A
+    # DEFECT (#14026 review, P2 — MEASURED): `^[+\-]$` is not this class (it is the declared
+    # superset above), so the list's refusal was the CORRECT class verdict, and `main` accepts the
+    # spelling now as a deliberate widening rather than because the list mis-read it. The two the
+    # list already carried are kept as controls, so a narrowing that loses them reds here too.
     for equivalent_class in (
         "grep -cE '^[+-]$'",           # the form the row itself uses
         "grep -cE '^[+\\-]$'",         # the hyphen escaped inside the class
@@ -4703,6 +4759,11 @@ def test_the_d5_count_reader_sees_one_command_however_it_is_spelled():
         "an expression-level pin cannot witness this rule (#13995 review round 21, P2)")
     assert _d5_class_members("[+\\-]") == {"+", "-"}, (
         "and the ordinary escaped-hyphen spelling is a plain set: `[+\\-]` is `{+,-}`")
+    assert _d5_class_members("[-\\+]") == {"+", "-"}, (
+        "and the spelling whose ESCAPED character is the `+` is the same plain set: `[-\\+]` "
+        "consumes an escaped `+` over an UNESCAPED leading hyphen, so the bullet list in "
+        "`_d5_class_members` is witnessed here too — `grep -cE '^[-\\+]$'` counts 3 on a "
+        "`\\`-carrying probe (measured)")
 
     # ⛔ THE DECLARED SUPERSET IS PINNED, because the docstring makes a claim about it
     # (#13995 review round 18, P2 — MEASURED). Refusing a bracket that carries TWO backslashes
