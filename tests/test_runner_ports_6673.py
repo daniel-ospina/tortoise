@@ -90,6 +90,23 @@ PROVISIONED_JOBS = [
     # takes the action's defaults — `uri_graph` empty (its URI is computed in a
     # later step) and the passwordless legacy service started.
     (EVAL_SUITE, "eval-suite", None, "true"),
+    # #13337 (PR #14068 review, finding 3): `test-record-postgres` gained a
+    # FalkorDB pair so the cache-graph declaration's END-TO-END legs can arm —
+    # they need the record (this job's provisioners) AND a cache, and a
+    # record-DSN-only job left them skipping everywhere, i.e. the issue's
+    # headline acceptance with no machine coverage at all. `uri_graph` is REQUIRED
+    # here (the file reads `TORTOISE_DB_URI`, and `_both_stores()` fails when the
+    # cache half is missing while the record half is set), and `legacy: "false"`
+    # because this job replaces no `services:` block: it never had the
+    # passwordless 16379 family, and starting one would create containers nothing
+    # in it reads.
+    #
+    # ⚠️ ORDERING MATTERS AND IS PINNED ELSEWHERE: `uri_graph` exports
+    # `TORTOISE_DB_URI` into `$GITHUB_ENV`, so the provision sits AFTER the job's
+    # twelve record-only legs (which deliberately run with no URI).
+    # `tests/test_13337_cache_graph_declaration.py::
+    # test_the_armed_CI_job_supplies_BOTH_stores` asserts that position.
+    (PYTHON_CI, "test-record-postgres", "tortoise_test_matrix", "false"),
 ]
 
 

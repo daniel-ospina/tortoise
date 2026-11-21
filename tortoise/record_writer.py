@@ -312,9 +312,11 @@ RECORD_SINGLE_TENANT_ENV = "TORTOISE_RECORD_SINGLE_TENANT"
 #: product read `degraded`. Armed + an `active` cursor row therefore means the
 #: record is the ONLY allocator: `tortoise.live_write.write` asks
 #: :func:`record_owns_position` BEFORE it appends and skips the file append
-#: entirely, and the counted number comes from the counter alone. The JSONL is an
-#: EXPORT from that point (an explicit export job writes it); it is no longer a
-#: position source, so nothing numbers off it and the truncation class of failure
+#: entirely, and the counted number comes from the counter alone. The JSONL is a
+#: FROZEN PREFIX from that point — an OPTIONAL copy, not an export: nothing writes
+#: it yet (no drainer ships; `event_id`/`initiated_by`/`projection_version` have
+#: no column, `§A7.8` item 6). What is true either way is that it is no longer a
+#: POSITION SOURCE, so nothing numbers off it and the truncation class of failure
 #: is gone.
 #:
 #: ⛔ IT IS SAFE TO SET ONLY ON A CUT-OVER GRAPH (`record_cursor` row in mode
@@ -2778,8 +2780,15 @@ def record_owns_position(*, tenant: tuple[str, str] | None = None,
     THE FIX IS NOT IN THE GUARD — the guard is right, and it is the only thing
     that kept the record honest while both allocators existed. The fix is to
     remove the SECOND allocator: while the record owns the ordinal, the write path
-    must not append to the JSONL at all. Then there is one number space, the file
-    becomes an export (written only by an explicit export job), concurrent writers
+    must not append to the JSONL at all. Then there is one number space, writing
+    the file becomes OPTIONAL (nothing on the write path depends on it) and — on a
+    cut-over graph — the file is a FROZEN PREFIX rather than an export: the append
+    stops when the BOX's `TORTOISE_RECORD_ALLOCATE` is rolled with the row
+    `active`, NOT at the per-graph `arm` (the arm→roll window still appends), and
+    no exporter exists (`event_id`/`initiated_by`/
+    `projection_version` have no column, so a line rendered from the record would
+    be a different journal; §A7.8 item 6 and §A7.5.6's drainer are unbuilt).
+    ⛔ Do not describe it as "an export" until they are. Concurrent writers then
     serialise on a real database transaction, and the truncation class of failure
     disappears because nothing numbers off the file.
 
