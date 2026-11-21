@@ -925,24 +925,32 @@ SWEEP_NAMES = 66
 #: pin exists to catch is a NEW shape, and there is none. `--check` exits 0 on this tree after the
 #: re-pin, with `typed references still pointing at a public name: 0`.
 #:
-#: ⛔ RE-PINNED FOR A −6 THAT **IS** THIS BRANCH'S — `eeed8c2ea8` (`tests/test_read_ledger.py`,
-#: "the read-ledger pins drove three doors #14129 retired") replaced its last calls to the RETIRED
-#: doors with the live ones, and those calls were themselves residue rows (an untyped receiver on an
-#: ordinary-word method is exactly the shape this pin counts, whatever the receiver is called).
-#: THE −6 IS MEASURED, AND IT IS THE PR'S OWN, not `main`'s drift carried forward:
-#: `git diff origin/main HEAD` over the WHOLE PR touches exactly six lines of that shape —
-#: `-inst.query()` ×3, `-inst.paginated_query()`, `-inst.query_points_by_tag()`, `-inst.get_point()`
-#: (counted: `git diff origin/main HEAD -U0 | grep -E '^[+-]' | grep -cE
-#: '\.(query|update|delete|paginated_query|query_points_by_tag|get_point)\('` → **6**, and every
-#: one of them is a REMOVAL in `tests/test_read_ledger.py`), and the observed residue total falls by
-#: exactly those six, `11843 → 11837`. No other file in the PR adds or removes a row. So the delta
-#: is not attributable to `main` and cannot be left to a later main re-pin: this is the direction
-#: the pin's contract requires be DELIBERATE ("re-pin in a commit that says why"), and the
-#: direction is the harmless (downward) one — fewer references to retired doors, no new shape.
-#: `11837` is NOT `main`'s `11843`: this branch removes six rows `main` still has.
-#: `--check` exits 0 on this tree after the re-pin, with
-#: `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11837, "52e9a205697f528f")
+#: ⛔ RE-PINNED FROM `main`'s DRIFT AGAIN, and this time the drift is measured on BOTH trees so the
+#: branch's innocence is a reading, not an argument: `--check` in a detached worktree at `origin/main`
+#: `1b0db04894` prints the SAME pair this merge tree prints — `(11840, "b7eb08ff3acdcce4")` — against
+#: main's own pin of `(11843, …)`, so main reds itself by 3 and this PR moves nothing. This PR's own
+#: four files (`tests/_html_links.py`, `tests/test_website_docs_consistency.py`,
+#: `tests/fixtures/14013_storage_section.txt`, `website/docs.html`) contain ZERO residue-shaped calls:
+#: `grep -cE '\.(query|update|delete)\('` → 0 for both `.py` files (and they are the only two that can
+#: carry one), which is why the merged total equals main's exactly.
+#: THE −3 IS ATTRIBUTED BY A ROW-BY-ROW DIFF, never by arithmetic: `--report --base 28ca66878d… --top
+#: 5000` was run in detached worktrees at `427c418ebb` (the commit that cut the previous pin, #14188)
+#: and at `origin/main` `1b0db04894`, both row sets sorted and diffed — EIGHT row counts differ, and
+#: every one of them is main's:
+#: * `inst.query` 3 → 0, `inst.paginated_query` 1 → 0, `inst.query_points_by_tag` 1 → 0,
+#:   `inst.get_point` 1 → 0 (−6) — `67dc298ec3` (#14194) drove the read-ledger pins through the doors
+#:   #4282 retired, so those six residue rows left with the dead names;
+#: * `cur['proj'].g.query` 2 → 0 and `cur["proj"].g.query` 0 → 4 (+2 net) — the SAME FalkorDB project
+#:   graph readers in `tools/miss_rate_m5.py` / `tools/window_quality_m2.py` (#14162, the M5 miss
+#:   rate), re-spelled and expanded; the row KEY is the receiver's source span, so a quote-style change
+#:   renames the row rather than creating a shape;
+#: * `terms.update` 0 → 1 — a plain Python `set[str].update` in `tests/test_miss_rate_m5.py`'s
+#:   `_pp_terms`, i.e. the ordinary-word edge this pin exists to make VISIBLE (`update` on a set is not
+#:   a `Graph` write); no shape was absorbed and no SDK receiver is hidden.
+#: No row was removed in the fail-open direction (an SDK receiver losing its row), and the row SHAPE
+#: set still differs only by those two ordinary-word shapes. `--check` exits 0 on this tree after the
+#: re-pin, with `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11840, "b7eb08ff3acdcce4")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
