@@ -1817,13 +1817,22 @@ def test_the_idempotency_bound_guard_grades_a_bound_and_an_unbounded_claim():
     for sample in (
         "the provider Idempotency-Key collapses the duplicate within its 24 h "
         "window.",
-        "the crash window is covered by the provider Idempotency-Key, inside "
-        "its 24 h window.",
-        "the provider Idempotency-Key onboarding:{org_id} collapses "
-        "cross-process replays <=24h.",
-        "Resend keeps that key for the last 24 hours.",
+        "the duplicate send a crash between accept and stamp can produce is "
+        "covered by the provider Idempotency-Key, inside its 24 h window.",
+        "the provider Idempotency-Key onboarding:{org_id} collapses the "
+        "duplicate notice from cross-process replays <=24h.",
+        "Resend keeps the Idempotency-Key for the last 24 hours, so it "
+        "collapses a replayed notice inside that window.",
     ):
-        _claims, unbounded = _idempotency_claims(sample)
+        claims, unbounded = _idempotency_claims(sample)
+        # ⛔ #14038 review (P3, tree): the previous cut asserted only
+        # `not unbounded`, so a sample the detector did not read as a CLAIM
+        # satisfied it vacuously — three of these four did exactly that
+        # (measured: claims=0, unbounded=0). A bounded sample that is not a
+        # claim grades nothing, so both halves are asserted now.
+        assert claims, (
+            f"this sample is not read as a claim at all, so it grades no bound: "
+            f"{sample!r}")
         assert not unbounded, (
             f"a bounded sentence was graded unbounded: {sample!r}")
     # ⛔ AND NOT A CLAIM AT ALL: the session-create idempotency key is a different

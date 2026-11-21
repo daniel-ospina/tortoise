@@ -1814,7 +1814,7 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # `value_nodes_held` statement `:24493-24497` on a quota comment (`:24646-24650`, cited at FOUR
     # sites — three long-form, one bare). Same shape as the `:6989` / `hosted_backup.py:2666` rows:
     # one ROW per SITE, and an unlisted token is coverage this file only appeared to have.
-    # 86 -> 90: the `8f7724b593c` review's two "reported, not touched" sites — the composed
+    # 91 -> 95: the `8f7724b593c` review's two "reported, not touched" sites — the composed
     # `turn_max_index` range (§2.4 ×2, §6.1, row 7 — the last two write a WIDER range, so its own
     # row) and the LIST endpoint's `actor_user_id` condition (long-form in §2.4, bare twice in the
     # header's comparability clause). Both had rotted to `45028-45045` / `:50935`, both still
