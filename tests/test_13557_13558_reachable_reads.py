@@ -1171,6 +1171,27 @@ def test_the_bounded_cost_claims_name_every_scan():
         "the module docstring no longer points at the function that owns the scan "
         "order and its count, so the reader has no home to check the claim against")
 
+    # ⛔ AND THE DERIVATION SENTENCE IS PINNED TO THE SPLIT IT DESCRIBES (#14033
+    # round-13 review, P3). The function said the 9 missed-cue signals were
+    # "derived from those shapes" while 4 of them are HAND-WRITTEN recall rows with
+    # no shape at all — the count was right and the derivation claim was not, and a
+    # count-only pin cannot see that. The split is derived here from the tables, so
+    # promoting a hand-written row (or demoting a derived one) reds this instead of
+    # silently leaving the sentence describing a different construction.
+    shape_names = {name for name, _ in si._ENDING_SHAPES}
+    derived = [name for name, _ in si._ENDING_SIGNALS if name in shape_names]
+    hand_written = [name for name, _ in si._ENDING_SIGNALS if name not in shape_names]
+    assert len(derived) + len(hand_written) == signals
+    assert f"{len(derived)} derived" in doc and f"{signals} missed-cue signals" in doc, (
+        f"`detect_state_question` no longer states that {len(derived)} of the "
+        f"{signals} missed-cue signals are DERIVED from the ending shapes (derived: "
+        f"{derived} — #14033 round-13 review, P3)")
+    assert f"{len(hand_written)} hand-written" in doc, (
+        f"`detect_state_question` no longer states that {len(hand_written)} of the "
+        f"{signals} missed-cue signals are HAND-WRITTEN recall rows with no shape "
+        f"(hand-written: {hand_written}) — the sentence would again claim every "
+        f"signal is derived from a shape that does not exist for it")
+
 
 def test_the_partitive_is_not_the_discriminator():
     """The `which` guard is HEAD-NOUN ADJACENCY, not the partitive marker.
@@ -1972,6 +1993,83 @@ def test_a_retrieval_knob_suppresses_the_notice_too(sdk):
     sdk._tortoise_fts_query("which claims were retracted by legal",
                             entity_type="point", limit=5, _state_route_out=plain)
     assert plain.get("reason") == "shape", plain
+
+
+def test_the_missed_route_hint_states_only_what_the_read_did():
+    """The served notice's REMEDY is content-pinned, not identity-pinned.
+
+    #14033 round-13 review, P3. The `reason="shape"` arm was pinned only by
+    `payload["hint"] == MISSED_ROUTE_HINT` — a constant compared with itself — so
+    replacing the whole remedy with a FALSE statement ("this question was ROUTED
+    to the ended population and is complete") shipped green, measured: 163 passed.
+    The sibling `reason="family"` hint had been content-pinned for rounds; this
+    arm had not, and it is the one that reaches the ATTRIBUTIVE rows whose whole
+    remedy is the sentence.
+
+    ⛔ AND THE FIRST CLAUSE IS THE CLAIM THE SERVED ROUTING BLOCK CONTRADICTED.
+    `which archived report has the Q3 numbers` fires the `which_names_an_ending`
+    SIGNAL (cue `which archived`) while `ROUTING_NOTE` files that phrasing under
+    DOES NOT ROUTE — the ending word MODIFIES its noun and the question's own
+    predicate is `has the Q3 numbers`. So the hint may report what was SEEN ("a
+    strong ENDING cue was seen"), it may say no shape applied, and it MUST carry
+    the QUALIFIER branch that tells that caller the relevance read is the right
+    one. It may not tell them their question named an ending STATE.
+    """
+    from tortoise.state_intent import (
+        MISSED_ROUTE_HINT,
+        detect_state_question,
+        missed_route_payload,
+    )
+
+    hint = MISSED_ROUTE_HINT
+    flat = " ".join(hint.split()).lower()
+
+    # The notice really does reach the attributive rows, with the cue it reports.
+    for phrasing, cue in (
+        ("which archived report has the Q3 numbers", "which archived"),
+        ("which of our withdrawn claims affected pricing",
+         "which of our withdrawn"),
+    ):
+        payload = missed_route_payload(detect_state_question(phrasing))
+        assert payload is not None, (
+            f"`{phrasing}` is an attributive row whose ending cue was seen and not "
+            f"routed — the notice that IS its remedy no longer fires")
+        assert payload["reason"] == "shape" and payload["cue"] == cue, (
+            f"`{phrasing}` reported {payload!r}, not the attributive cue it saw")
+        assert payload["hint"] == hint
+
+    # WHAT IT MUST SAY — each clause is the caller's only remedy on this arm.
+    for needle, why in (
+        ("no state-question shape applied",
+         "the caller is not told WHY they got the relevance rows"),
+        ("relevance read",
+         "the caller is not told which read answered"),
+        ("not evidence that nothing has ended",
+         "an empty reply is again indistinguishable from an honest \"nothing has "
+         "ended\", which is the silence #14033 exists to remove"),
+        ("qualifier",
+         "the ATTRIBUTIVE branch is gone — the caller whose ending word MODIFIES "
+         "its noun is not told the relevance read is the right one"),
+        ("successorid",
+         "the caller is not told what the population would have given them"),
+    ):
+        assert needle in flat, (
+            f"MISSED_ROUTE_HINT no longer states `{needle}`: {why} "
+            f"(hint: {hint!r})")
+
+    # WHAT IT MUST NOT SAY — the round-13 false clause, and the round-13 mutant.
+    assert "names an ending state" not in flat, (
+        "MISSED_ROUTE_HINT is back to telling an ATTRIBUTIVE content question ("
+        "`which archived report has the Q3 numbers`) that it \"names an ENDING "
+        "state\", which the served ROUTING_NOTE contradicts for exactly that "
+        "phrasing (it is under DOES NOT ROUTE) — the notice and the routing block "
+        "would describe the boundary differently, which is the drift this module "
+        "is the one home against")
+    for forbidden in ("was routed", "routed to the ended population", "is complete"):
+        assert forbidden not in flat, (
+            f"MISSED_ROUTE_HINT claims `{forbidden}` — this arm fires precisely "
+            f"because the population was NOT served, so that sentence is the "
+            f"false reassurance the notice exists to prevent")
 
 
 def test_the_hosted_search_body_carries_the_missed_cue(monkeypatch):

@@ -686,11 +686,21 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
 #: string, owned here, so the read path, the MCP description and the routing test
 #: cannot drift into describing the boundary differently — the drift #14033 is
 #: about ("the feature exists but did not fire, and nothing says so").
+#: ⛔ THE FIRST CLAUSE SAYS WHAT WAS SEEN, NOT WHAT THE QUESTION IS (round-13
+#: review, P3). It used to read "this question names an ENDING state", which the
+#: served ``ROUTING_NOTE`` contradicts for the ATTRIBUTIVE rows: `which archived
+#: report has the Q3 numbers` fires the `which_names_an_ending` SIGNAL (cue
+#: `which archived`) while the note files that phrasing under DOES NOT ROUTE
+#: because the ending word MODIFIES its noun and the question's predicate is
+#: `has the Q3 numbers`. An ending CUE was seen — that is what a signal means and
+#: it is what the payload reports — and the last paragraph here is the branch that
+#: tells an attributive caller the relevance read is the right one.
 MISSED_ROUTE_HINT = (
-    "this question names an ENDING state, but no state-question shape applied to "
-    "it, so it was answered by the RELEVANCE read — an empty or unrelated reply "
-    "here is NOT evidence that nothing has ended. If the ENDING is what you are "
-    "asking about, ask it as a whole question (\"what ended\", \"is <record> "
+    "a strong ENDING cue was seen in this question, but no state-question shape "
+    "applied to it, so it was answered by the RELEVANCE read — an empty or "
+    "unrelated reply here is NOT evidence that nothing has ended. If the ENDING "
+    "is what you are asking about, ask it as a whole question (\"what ended\", "
+    "\"is <record> "
     "retired?\", \"list what we retired\") or as an unqualified set (\"which "
     "<records> were retracted\"); every row of the ended population states how it "
     "ended (status, successorId/successorName, stage+outcome, endedAt). If the "
@@ -893,8 +903,9 @@ def detect_state_question(text: str | None) -> StateQuestion:
 
     Deterministic and bounded — one normalisation plus AT MOST 18 compiled
     patterns in three passes that stop at the first shape that fires: the 6
-    ending shapes, then (only if none fired) the 9 missed-cue signals derived
-    from those shapes (:data:`_ENDING_SIGNALS`), then the 3 commitment shapes
+    ending shapes, then (only if none fired) the 9 missed-cue signals (5 derived
+    from those shapes + 4 hand-written recall rows, :data:`_ENDING_SIGNALS`),
+    then the 3 commitment shapes
     (:data:`_COMMITMENT_SHAPES`). No model call and no IO, so the hot read path
     pays microseconds and the mapping is unit-testable offline.
 
