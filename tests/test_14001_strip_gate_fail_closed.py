@@ -2111,16 +2111,22 @@ def test_the_control_binds_the_shared_helpers(monkeypatch):
     ⛔ NOT a `return`: returning the wiring from a test function makes pytest warn
     (`PytestReturnNotNoneWarning`), and a module-level side channel would outlive the test.
 
-    ⛔ DECLARED RESIDUAL — ONE ARM THAT INSTALLS ITS OWN INLINE PRE-F1 FAKE is NOT covered here
-    (measured: the control's bindings stay live AND used by its own call sites, so identity, the
-    scoped use-flags and every other arm are satisfied). Covering it needs per-arm identity, and
-    every cheap instrument for that (a fake tag propagated through each `monkeypatch.setattr`, or
-    a whitelist of the control's own code objects) also admits the inline fake it is meant to
-    refuse — the class this arm closes is the FULL revert, and a single-arm bypass still has to be
-    argued in review rather than certified silent.
-    ⛔ AND THE `folding` HALF CANNOT BE NARROWED THE WAY `_env_source` WAS: its legitimate calls
-    come from the control's BODY, so "not the body" would red every real run; the `_env_source`
-    clause exists only because that half's live calls always arrive from a fake.
+    ⛔ WHAT THE FLAGS PROVE — AND WHAT THEY DO NOT (`#14099`, reviews of `5d4b31588d` and after).
+    Each flag proves the named helper RAN at least once under the control's own wiring; NEITHER is
+    per-call-site. ONE ARM THAT INSTALLS ITS OWN INLINE PRE-F1 FAKE is therefore not covered
+    (measured: the control's bindings stay live AND used by its own call sites, so identity, both
+    flags and every other arm are satisfied). The halves are NOT independent, and the earlier text
+    here claimed an asymmetry that does not exist:
+      - `_folding`: the flag is set by an INSTALLED, INVOKED fake — a decoy that builds and discards
+        the fake does not arm it, but a decoy that also CALLS it does (measured: the full `folding`
+        revert plus `folding(module, cause)(name)` was GREEN before the installed check).
+      - `_env_source`: the exclusion is `_folding`'s OWN CODE OBJECT, not the transitive ROLE — a
+        COPY of the builder is a different code object, so it counts as real use, and one discarded
+        `_env_source(…)` line re-arms this half.
+    Both are review-argument residuals: the plain revert of either half IS caught (measured), and a
+    deliberate re-planting inside the control is the class no cheap instrument separates from a real
+    use — a frame whitelist both admits decoys (measured: nested `def` and lambda) and false-reds
+    the module-level forwarder the F2 fix itself introduced (measured).
     """
     real_folding, real_env_source = _folding, _env_source
     control_code = test_the_over_refusal_population_is_itself_pinned.__code__
@@ -2136,13 +2142,15 @@ def test_the_control_binds_the_shared_helpers(monkeypatch):
         inner = real_folding(module_name, cause, sources, refusals)
 
         def installed_fake(name):
-            # ⛔ INVOCATION, NOT CONSTRUCTION (`#14099`, review of `ac825bc012`). The flag is set when
-            # the fake the builder RETURNED is CALLED — the only thing an installed loader ever
-            # does. An inert decoy `_folding(…)` call whose result is discarded builds a fake that
-            # is never called, so it cannot re-arm this half. Measured: all sixteen `folding(…)`
-            # sites reverted to a local builder PLUS one inert in-body decoy → GREEN under the
-            # caller-keyed version, RED here.
-            used["folding"] = True
+            # ⛔ INSTALLED **AND** INVOKED, not merely CALLED (`#14099`, reviews of `ac825bc012` and
+            # `5d4b31588d`). Invocation alone is not enough: a decoy that also CALLS the fake it
+            # built — `folding(module, cause)(name)`, one extra call on the same line — re-armed the
+            # flag while every assertion-bearing site used a local builder (measured GREEN). The
+            # flag is set only when the fake being called IS the object installed as the loader,
+            # which is the only thing the walk ever calls; a decoy's fake is never that object
+            # unless the control really installed it.
+            if strip._module_source is installed_fake:
+                used["folding"] = True
             return inner(name)
 
         return installed_fake
@@ -2152,12 +2160,13 @@ def test_the_control_binds_the_shared_helpers(monkeypatch):
         # of `0c4e706e61`–`ac825bc012`). `_folding`'s inner fake resolves `_env_source` through the
         # module globals, so ITS calls must not count; every other caller — the control's body, its
         # lambdas, a nested def, a MODULE-LEVEL forwarder that really delegates — is a real use.
-        # ⛔ DECLARED RESIDUAL: because this half cannot tell an inert decoy call from a real site
-        # (both are the same spy called from a legitimate frame), ONE discarded `_env_source(…)`
-        # line inside the control re-arms this flag. Measured GREEN that way. Closing it needs
-        # per-call-site identity, which no cheap instrument has — a frame whitelist both admits
-        # decoys (measured, nested `def` and lambda) and false-reds the module-level forwarder the
-        # F2 fix itself introduced. The plain revert is what this half closes, and it does.
+        # ⛔ DECLARED RESIDUAL: this half cannot tell an inert decoy call from a real site (both are
+        # the same spy called from a legitimate frame), so ONE discarded `_env_source(…)` line
+        # inside the control re-arms this flag (measured GREEN) — and so does a COPY of the
+        # builder, because the exclusion is one CODE OBJECT, not the transitive role. Closing it
+        # needs per-call-site identity, which no cheap instrument has — a frame whitelist both
+        # admits decoys (measured: nested `def` and lambda) and false-reds the module-level
+        # forwarder the F2 fix itself introduced. The plain revert is what this half closes.
         if sys._getframe(1).f_code is not transitive_code:
             used["env_source"] = True
         return real_env_source(*args, **kwargs)
