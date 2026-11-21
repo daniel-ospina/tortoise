@@ -725,6 +725,17 @@ SWEEP_NAMES = 66
 #: (`ha_mod._make_sdk(namespace='registry')._.query` 11 → 12), so `--repin` here prints
 #: `(11847, '327c14afa2e43e7c')`, which is the pin below. Same class as the two rows above: a test
 #: double, not a typed reference to a swept name — no call site is legitimised by it.
+#: ⛔ AND ONE MORE OF THE SAME SHAPE (#14086 fixer):
+#: `test_the_graph_bound_default_resolve_rides_the_worker_not_the_loop` seeds the `Graph` row its
+#: graph-bound capture needs through the SAME registry control plane, so
+#: `ha_mod._make_sdk(namespace='registry')._.query` moves **12 → 13** and `--repin` prints
+#: `(11848, '5e58f2032543c415')` — the pin below. Attributed by the row-by-row diff this block
+#: requires (`--report --base 28ca66878d7c --top 5000` run in a detached worktree at the pre-change
+#: head `60bfeb1a55` AND on this tree, both row sets sorted and diffed): EXACTLY that one row differs,
+#: so no shape was silently absorbed in the other direction and NO NEW SHAPE APPEARED. `hosted_api.py`
+#: adds no receiver row at all (the guard's `_org_default_namespace` call is off-loaded, and the file's
+#: own `.query(` occurrence count is unchanged). A test double again, not a typed reference to a swept
+#: name — `typed references still pointing at a public name: 0`, so no call site is legitimised.
 #: ⛔ RE-MEASURED, NOT INHERITED. A digest measured while a merge was half-resolved is a digest of
 #: the WRONG tree: an intermediate measurement of this block read `ea69254fe59a30ab` with the SAME
 #: count, because stale conflict markers were still embedded in `activation_scorecard.py` and added
@@ -732,7 +743,7 @@ SWEEP_NAMES = 66
 #: `--repin` prints on the RESOLVED tree, and the sibling commit that reverted the inert `dispatch`
 #: note is already accounted for in it. This is the pin below; no other digest in this block is
 #: current.
-SWEEP_RESIDUE = (11847, "327c14afa2e43e7c")
+SWEEP_RESIDUE = (11848, "5e58f2032543c415")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
