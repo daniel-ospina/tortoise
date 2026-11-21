@@ -15359,8 +15359,10 @@ durations:
   test_14192_beta_variance_sum_bound.py: 2.0
   # #14192 — a file this PR ADDS, so it can carry no CI junit reading yet
   # (`tools/ci_timing.py --refresh-durations` samples push-to-main runs only).
-  # `2.0` is the header's flat `DEFAULT_FAST_WEIGHT`: five cases that load one module by
-  # path and compare dicts. As above, NO WALL/SETUP/TEARDOWN FIGURE is quoted — the
+  # `2.0` is the header's flat `DEFAULT_FAST_WEIGHT`: a handful of cases that load one
+  # module by path and compare dicts. ⛔ NO CASE COUNT IS QUOTED (it re-stales on every
+  # case a later round adds — this row's first cut said "five" and the commit that wrote
+  # it added a sixth). As above, NO WALL/SETUP/TEARDOWN FIGURE is quoted — the
   # wall time `pytest -q` reports belongs to the shared session fixture; `--durations=5`
   # is the authority and `--refresh-durations` replaces this row from junit.
   test_14192_read_wave_tool.py: 2.0

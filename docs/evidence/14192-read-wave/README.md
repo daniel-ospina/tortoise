@@ -56,10 +56,6 @@ Whole read, 24 queries, same process, same corpus, arms differing only in
 | `fusion` p50 | 0.0 ms | 0.0 ms | 0.0 |
 | **fused order** | — | — | **RANK-IDENTICAL on all 24 queries** (real ids — `rank_divergent_queries: []`) |
 
-The arms differ in exactly one function. It was **the dominant post-fusion read**
-(`post_relationships` 167 ms of a 231 ms search in the first measurement) because
-it issued six independent graph reads in a chain.
-
 ⛔ THE ARTIFACT IS THE AUTHORITY, this table is a transcription of it: `total` cells
 from `verdict.baseline_total`/`after_total`, the two stage/member rows from
 `verdict.stage_delta.retrieval` and `verdict.member_delta.post_relationships`,
@@ -68,9 +64,12 @@ and `rank_identical`/`rank_divergent_queries` verbatim. Re-derive with
 rather than trusting these cells.
 
 The two arms differ in exactly one function: `get_relationships_bounded`, which
-issued six graph reads in a chain. Two figures describe it and they are NOT
-interchangeable, so both are stated with what they measure — and both are read
-from the artifact, never transcribed twice:
+issued six graph reads in a chain and was the dominant post-fusion read. Two
+figures describe it and they are NOT interchangeable, so both are stated with
+what they measure. ⚠️ Both are the FIRST measurement's figures (kept because
+this file's history records them), not cells of the artifact above — the
+artifact's own figures for the same function are
+`verdict.member_delta.post_relationships`:
 
 - **the WAVE was ~69 % of the read** — 159 ms of a 231 ms search in the first
   measurement, which is the figure `search_engine.py`'s own comment quotes
