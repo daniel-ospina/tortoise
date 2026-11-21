@@ -34,6 +34,33 @@ that leg ran (`python-ci.yml`, `orphan-bound.sh`). With four jobs per run
 that `pkill` in its setup, any leg that starts later kills the embedded servers
 of every leg that started earlier.
 
+## How a server is IDENTIFIED — and why it is not `argv[0]` (#10502)
+
+The identity of a redis server comes from something no wrapper can set: the
+kernel's own name for the process (`/proc/<pid>/comm`, and the resolved
+executable as the last resort). Both are written by the KERNEL at `exec`, from
+the binary's file name — a wrapper that `exec`s the server inherits them, while
+its own `argv` is whatever it passed. Identity used to be read out of `argv[0]`
+only, and that is how this tool came to print
+
+    applied: 0 candidate(s), 0 reaped        # exit 0, no REAP/KEEP line at all
+
+on a cell carrying **1,555 `redis-server` processes, 1,537 of them orphaned**
+(2026-11-21; 589 on the first report, 2026-11-01). `ps -eo comm` saw every one of
+them. Zero `REAP`/`KEEP` lines is the tell: a run that *classifies and declines*
+prints one line per row, so no lines at all means no rows were ever built — the
+filter dropped the population before `classify()` saw it.
+
+`argv[0]` is still read first (it is the cheap, common case), but it is no
+longer the authority, and a command line that arrived as ONE argv element
+(`argc == 1`, the shape the runner actually produces:
+`argv[0] == '<bin>/redis-server unixsocket:<dir>/redis.socket'`) is tokenised
+before the socket directory is read out of it.
+
+Every run now prints the pre-filter **census** — every process named
+`redis-server`, counted independently of the inventory — so `0 candidate(s)` is
+never again indistinguishable from "could not see the host".
+
 ## What it does instead
 
 It kills a redislite server only when the server is provably nobody's:
@@ -70,12 +97,16 @@ Usage:
     python3 .github/scripts/reap-redislite-orphans.py --apply          # kill
     python3 .github/scripts/reap-redislite-orphans.py --max-age-minutes 95 --apply
 
-Exit codes: 0 = ran (dry or apply) — INCLUDING when it found nothing to look at;
-2 = something this tool was told to read could not be read (`--proc-json`, or the
-process inventory itself: neither `/proc` nor `ps` answered — `ps` missing AND
-`ps` exiting non-zero are the same fact — so NOTHING was measured and nothing was
-reaped). Every other unmeasurable case is per-row and KEEPS its process with a
-printed reason, which is still exit 0.
+Exit codes: 0 = ran (dry or apply) — INCLUDING when it MEASURED the host and
+found no litter; 2 = something this tool was told to read could not be read
+(`--proc-json`, or the process inventory itself: neither `/proc` nor `ps`
+answered — `ps` missing AND `ps` exiting non-zero are the same fact — so NOTHING
+was measured and nothing was reaped); 3 = the census and the inventory disagree:
+processes are NAMED `redis-server` by the kernel but were neither enumerated as
+candidates nor excluded with a stated reason, so this run did not see the
+population it reported on. Exit 3 is the #10502 signal — a parse/filter gap must
+never read as a measured zero. Every other unmeasurable case is per-row and
+KEEPS its process with a printed reason, which is still exit 0.
 """
 
 from __future__ import annotations
@@ -86,9 +117,17 @@ import os
 import re
 import signal
 import sys
+from typing import NamedTuple
 
 # The redislite signature: the redis-server binary plus a unix socket in argv.
 _IS_REDIS = re.compile(r"(?:^|/)(redis-server)$")
+#: The kernel's name for a redis server (`/proc/<pid>/comm`, or the basename of
+#: the resolved `/proc/<pid>/exe`). Anchored, with a boundary that accepts the
+#: name redis gives itself when built with `setproctitle` ("redis-server *:6379")
+#: and the truncation `comm` applies at 15 bytes, while still refusing a name
+#: that merely STARTS the same ("redis-serverish"). Nothing else on a host is
+#: called `redis-server…`, so this cannot widen the population.
+_REDIS_KERNEL_NAME = re.compile(r"^redis-server(?![A-Za-z])")
 _SOCKET_FLAG = "unixsocket"
 
 # ── the age arm: DERIVED from the cancel bound, never a remembered measurement ─
@@ -198,6 +237,24 @@ CANCEL_SLACK_MINUTES = 5
 DEFAULT_MAX_AGE_MINUTES = WIDEST_EMBEDDED_JOB_TIMEOUT_MINUTES + CANCEL_SLACK_MINUTES
 
 
+def _socket_dir_from_tokens(tokens: list[str]) -> str | None:
+    """The socket directory from an already-tokenised command line."""
+    for i, arg in enumerate(tokens):
+        if not arg:
+            continue
+        if arg.startswith(_SOCKET_FLAG + ":"):
+            path = arg.split(":", 1)[1].strip()
+            if path:
+                return os.path.dirname(path) or None
+        elif arg in ("--" + _SOCKET_FLAG, _SOCKET_FLAG) and i + 1 < len(tokens):
+            path = tokens[i + 1].strip()
+            if path:
+                return os.path.dirname(path) or None
+        elif arg.endswith(".config"):
+            return os.path.dirname(arg) or None
+    return None
+
+
 def socket_dir_from_argv(argv: list[str]) -> str | None:
     """The directory a redislite instance serves its socket out of, or None.
 
@@ -206,20 +263,23 @@ def socket_dir_from_argv(argv: list[str]) -> str | None:
     config-file form (`redis-server <dbdir>/redis.config …`) used on macOS.
     An argv this function cannot read yields None and the caller keeps the
     process — unreadable is never authority to kill.
+
+    Now also covers the shape a WRAPPER produces, where the command line is not
+    aligned with argv boundaries at all: the whole invocation in ONE element
+    (`argc == 1`, see `_split_one_arg_line`), or a launcher's string carrying it
+    (`sh -c 'exec <bin>/redis-server unixsocket:…'`). That retry runs ONLY when
+    the direct pass has already found nothing, so every shape that pass reads is
+    unaffected — including a socket path that itself contains a space, which the
+    direct pass still returns whole.
     """
-    for i, arg in enumerate(argv):
-        if not arg:
-            continue
-        if arg.startswith(_SOCKET_FLAG + ":"):
-            path = arg.split(":", 1)[1].strip()
-            if path:
-                return os.path.dirname(path) or None
-        elif arg in ("--" + _SOCKET_FLAG, _SOCKET_FLAG) and i + 1 < len(argv):
-            path = argv[i + 1].strip()
-            if path:
-                return os.path.dirname(path) or None
-        elif arg.endswith(".config"):
-            return os.path.dirname(arg) or None
+    found = _socket_dir_from_tokens(argv)
+    if found is not None:
+        return found
+    for arg in argv:
+        if _has_whitespace(arg):
+            found = _socket_dir_from_tokens(arg.split())
+            if found is not None:
+                return found
     return None
 
 
@@ -276,26 +336,151 @@ def _process_age(pid: int) -> float | None:
     return age if age is not None else _age_from_ps(pid)
 
 
-def _iter_proc_inventory() -> list[dict] | None:
-    """Every redis-server carrying a unix socket in argv, with its age.
+def _has_whitespace(token: str) -> bool:
+    return " " in token or "\t" in token
+
+
+def _split_one_arg_line(argv: list[str]) -> list[str]:
+    """`argv` as the server itself parses it, for the `argc == 1` shape (#10502).
+
+    A launcher that hands the kernel ONE argv element carrying the whole command
+    line — `<bin>/redis-server unixsocket:<dir>/redis.socket` — leaves
+    `_IS_REDIS.search(argv[0])` with no match, because the regex is anchored at
+    END of string and the element ends in the socket path. The runner produces
+    exactly that shape (measured on `pi-runner-x64-2`), so the single element is
+    split on whitespace before anything reads it. A multi-element argv is
+    returned untouched: there, argv boundaries are already the truth.
+    """
+    if len(argv) == 1 and _has_whitespace(argv[0]):
+        return argv[0].split()
+    return argv
+
+
+def _read_proc_cmdline(pid: int) -> list[str] | None:
+    """`argv` for `pid`, or None when `/proc/<pid>/cmdline` cannot be read.
+
+    None (unreadable) is deliberately distinct from `[]` (empty command line —
+    a zombie or a kernel thread): the first may be a process that vanished
+    mid-scan, the second is a process that HAS no argv to read a socket out of.
+    Both keep the process; only the second is a fact about the process itself.
+    """
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return None
+    return [p.decode("utf-8", "replace") for p in raw.split(b"\0") if p]
+
+
+def _read_proc_name(pid: int) -> str | None:
+    """The KERNEL's name for the process (`/proc/<pid>/comm`), or None.
+
+    Set at `exec` from the executed file's name, so a wrapper cannot disguise
+    it from its own argv — the property #10502 needs. `comm` is world-readable,
+    so a missing read means the process is gone, not that it is foreign.
+    """
+    try:
+        with open(f"/proc/{pid}/comm") as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
+
+
+def _read_proc_exe_name(pid: int) -> str | None:
+    """Basename of `/proc/<pid>/exe`, or None (gone, or not ours to read)."""
+    try:
+        return os.path.basename(os.readlink(f"/proc/{pid}/exe")) or None
+    except OSError:
+        return None
+
+
+def _redis_identity(pid: int, argv: list[str] | None) -> str | None:
+    """HOW this pid is known to be a redis server, or None for "not one".
+
+    Three sources, in cost order, and the LAST two are the authority:
+
+    * `argv[0]` — the cheap fast path, and enough for a server started directly
+      (and for any process that renames itself in place, where `comm` is no
+      longer `redis-server` while `argv[0]` still is);
+    * `/proc/<pid>/comm` — the kernel's own name, which a wrapper-exec'd server
+      carries and the wrapper cannot set;
+    * `/proc/<pid>/exe` — the resolved executable, for the corner where `comm`
+      was renamed by `prctl` but the binary on disk is still `redis-server`.
+
+    ⛔ NOT "any argv element names `redis-server`". A process that merely NAMES
+    the binary in its arguments is not the server — it is a client, a test
+    helper, a launcher whose child is the server — and reaping it on that
+    evidence would be the live-peer kill #3653 removed. Identity is a fact about
+    the EXECUTED binary, never about a string in someone's arguments.
+    """
+    if argv and _IS_REDIS.search(argv[0]):
+        return "argv[0]"
+    name = _read_proc_name(pid)
+    if name is not None and _REDIS_KERNEL_NAME.search(name):
+        return "comm"
+    exe = _read_proc_exe_name(pid)
+    if exe is not None and _REDIS_KERNEL_NAME.search(os.path.basename(exe)):
+        return "exe"
+    return None
+
+
+class ProcInventory(NamedTuple):
+    """What one pass over the process table measured.
+
+    `census` is measured INDEPENDENTLY of the rows: it counts every process the
+    kernel names `redis-server`, including the ones that never become a
+    candidate. Keeping the two apart is the point — a filter that excludes
+    everything then reports a number it cannot account for instead of printing
+    `0 candidate(s)` as if it had measured the host (#10502).
+    """
+
+    rows: list[dict]
+    census: int
+    excluded_no_socket: int
+    source: str
+
+    @property
+    def unaccounted(self) -> int:
+        """Census members that are neither a candidate nor a stated exclusion.
+
+        Today this is 0 by construction: every census member is either returned
+        as a row or counted in `excluded_no_socket`. It is asserted anyway, and
+        `main()` exits 3 on it, because the edit that produced #10502 is exactly
+        the edit that would make it non-zero — a filter between "this IS a redis
+        server" and "therefore here is its row" — and that edit must RED, not
+        silently restore a measured zero to a host it never saw.
+        """
+        return max(0, self.census - len(self.rows) - self.excluded_no_socket)
+
+
+def _iter_proc_inventory() -> ProcInventory | None:
+    """Every redislite candidate carrying a unix socket, with its age.
 
     Linux reads /proc directly (no subprocess, no shell, no glob). Anywhere
-    else it shells out to `ps -eo pid=,args=`. A row whose argv cannot be read
-    is still returned — with `socket_dir` None — so the caller can report it
-    rather than silently dropping it.
+    else it shells out to `ps -eo pid=,comm=,args=`. The process is IDENTIFIED
+    by `_redis_identity` — `argv[0]` first, then the kernel's `comm`, then the
+    resolved exe — never by `argv[0]` alone (#10502, see the module docstring).
 
-    `None` — not `[]` — when the inventory could not be read AT ALL: /proc
-    unlistable, or absent with `ps` unavailable or exiting non-zero. The
-    distinction is the documented exit 2, and it is the difference between
+    A row whose argv cannot be read is still returned — with `socket_dir` None —
+    so the caller can report it rather than silently dropping it. Excluding a
+    process from the candidate list is only ever for a STATED reason: the
+    `no unix socket in argv` arm (a plain TCP `redis-server` is not redislite
+    litter), counted in `excluded_no_socket` so the census reconciles.
+
+    `None` — not an empty inventory — when the inventory could not be read AT
+    ALL: /proc unlistable, or absent with `ps` unavailable or exiting non-zero.
+    The distinction is the documented exit 2, and it is the difference between
     "measured the host and found no litter" and "never saw the host":
-    returning `[]` for both printed
-    `0 candidate(s), 0 reaped` and exited 0, so the tool's one failure signal
-    could not fire where it was meant to (PR #10254 review, round 13). A single
-    unreadable `/proc/<pid>/cmdline` is NOT this case — that pid simply
-    vanished mid-scan, and skipping it keeps the process, which is the safe
-    direction.
+    returning `[]` for both printed `0 candidate(s), 0 reaped` and exited 0, so
+    the tool's one failure signal could not fire where it was meant to
+    (PR #10254 review, round 13). A single unreadable `/proc/<pid>/cmdline` is
+    NOT this case — that pid either vanished mid-scan or is not readable, and it
+    comes back as a row with `socket_dir` None, i.e. KEPT and reported (the safe
+    direction), never as an empty inventory.
     """
     rows: list[dict] = []
+    census = 0
+    excluded_no_socket = 0
     proc = os.path.isdir("/proc/self")
     if proc:
         try:
@@ -306,15 +491,32 @@ def _iter_proc_inventory() -> list[dict] | None:
             if not entry.isdigit():
                 continue
             pid = int(entry)
-            try:
-                with open(f"/proc/{pid}/cmdline", "rb") as fh:
-                    raw = fh.read()
-            except OSError:
+            argv = _read_proc_cmdline(pid)
+            if argv is not None:
+                argv = _split_one_arg_line(argv)
+            source = _redis_identity(pid, argv)
+            if source is None:
                 continue
-            argv = [p.decode("utf-8", "replace") for p in raw.split(b"\0") if p]
-            if not argv or not _IS_REDIS.search(argv[0]):
+            census += 1
+            if not argv:
+                # Identified as a server, but there is no argv to read a socket
+                # out of (gone mid-scan, unreadable, or a zombie): KEEP it and
+                # REPORT it, which is this module's documented contract. It is a
+                # row — not a silent drop — so the census keeps reconciling.
+                rows.append(
+                    {
+                        "pid": pid,
+                        "argv": [],
+                        "socket_dir": None,
+                        "age_seconds": _process_age(pid),
+                        "identified_by": source,
+                    }
+                )
                 continue
             if not any(_SOCKET_FLAG in a for a in argv):
+                # A redis server with no unix socket is not redislite litter and
+                # is none of this tool's business. Stated, counted, never silent.
+                excluded_no_socket += 1
                 continue
             rows.append(
                 {
@@ -322,15 +524,16 @@ def _iter_proc_inventory() -> list[dict] | None:
                     "argv": argv,
                     "socket_dir": socket_dir_from_argv(argv),
                     "age_seconds": _process_age(pid),
+                    "identified_by": source,
                 }
             )
-        return rows
+        return ProcInventory(rows, census, excluded_no_socket, "/proc")
 
     import subprocess
 
     try:
         result = subprocess.run(
-            ["ps", "-eo", "pid=,args="],
+            ["ps", "-eo", "pid=,comm=,args="],
             capture_output=True,
             text=True,
             timeout=20,
@@ -343,30 +546,59 @@ def _iter_proc_inventory() -> list[dict] | None:
         # Its empty stdout is not a measurement, and this is the exact case the
         # None/exit-2 distinction exists for: a host that was never read must
         # not report `0 candidate(s)` as if it had been (PR #10254 review, P3).
+        # `comm=` is part of that same contract: the pre-fix `-eo pid=,args=`
+        # shipped the #10502 defect on this branch too, since `args` is argv and
+        # a wrapper's argv names the wrapper. A `ps` that does not know `comm=`
+        # exits non-zero here, which is exit 2 — "never saw the host" — instead
+        # of a silent zero.
         return None
     out = result.stdout
     for line in out.splitlines():
         line = line.strip()
         if not line:
             continue
-        pid_str, _, args = line.partition(" ")
+        # `ps` joins argv with spaces and prints `comm` as a single field. A
+        # process that renamed itself with a space in the name is unparseable
+        # here and falls through to the argv path exactly as before; that can
+        # only make the census SMALLER, so it can never invent a gap signal.
+        pid_str, _, rest = line.partition(" ")
         if not pid_str.isdigit():
             continue
+        comm, _, args = rest.strip().partition(" ")
         argv = args.split()
-        if not argv or not _IS_REDIS.search(argv[0]):
-            continue
-        if not any(_SOCKET_FLAG in a for a in argv):
+        source = None
+        if argv and _IS_REDIS.search(argv[0]):
+            source = "argv[0]"
+        elif _REDIS_KERNEL_NAME.search(os.path.basename(comm)):
+            source = "comm"
+        if source is None:
             continue
         pid = int(pid_str)
+        census += 1
+        if not argv:
+            rows.append(
+                {
+                    "pid": pid,
+                    "argv": [],
+                    "socket_dir": None,
+                    "age_seconds": _process_age(pid),
+                    "identified_by": source,
+                }
+            )
+            continue
+        if not any(_SOCKET_FLAG in a for a in argv):
+            excluded_no_socket += 1
+            continue
         rows.append(
             {
                 "pid": pid,
                 "argv": argv,
                 "socket_dir": socket_dir_from_argv(argv),
                 "age_seconds": _process_age(pid),
+                "identified_by": source,
             }
         )
-    return rows
+    return ProcInventory(rows, census, excluded_no_socket, "ps")
 
 
 def classify(row: dict, max_age_s: float) -> tuple[bool, str]:
@@ -445,11 +677,14 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(rows, list):
             print("--proc-json must hold a JSON list", file=sys.stderr)
             return 2
+        # No census: this inventory was HANDED to the tool, not measured by it.
+        # Say so, so the run does not read as a host measurement either.
+        print("census: not measured (inventory read from --proc-json)")
     else:
-        rows = _iter_proc_inventory()
-        if rows is None:
-            # Exit 2 is the ONE documented failure signal: the host was never read, so
-            # "0 candidate(s)" would be a claim this run cannot make. Reported on
+        inventory = _iter_proc_inventory()
+        if inventory is None:
+            # Exit 2 is the ONE documented "could not read the host" signal, so
+            # "0 candidate(s)" is never a claim this run cannot make. Reported on
             # stderr and kept distinct from "measured, found nothing" (exit 0).
             print(
                 "could not read the process inventory at all (neither /proc nor `ps`) — "
@@ -457,6 +692,24 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             return 2
+        rows = inventory.rows
+        # The pre-filter population, printed EVERY run: this is the line that makes
+        # `0 candidate(s)` readable, and it is what `ps -eo comm` saw on the host
+        # where this tool reported a clean sweep over 1,537 orphans (#10502).
+        print(
+            f"census: {inventory.census} redis-server process(es) by kernel name "
+            f"via {inventory.source}; {len(rows)} enumerated; "
+            f"{inventory.excluded_no_socket} excluded (no unix socket in argv)"
+        )
+        if inventory.unaccounted:
+            print(
+                f"census gap: {inventory.unaccounted} process(es) are NAMED "
+                "redis-server but were neither enumerated nor excluded — this run did "
+                "not see the population it reports on, so its candidate count is a "
+                "parse/filter gap and NOT a measured zero (#10502)",
+                file=sys.stderr,
+            )
+            return 3
 
     return run(rows, args.max_age_minutes * 60.0, args.apply)
 

@@ -24,9 +24,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -612,6 +615,298 @@ def test_a_measured_empty_host_is_still_exit_0(reaper, tmp_path):
     inventory.write_text("[]")
     assert reaper.main(["--proc-json", str(inventory)]) == 0
     assert reaper.run([], max_age_s=_age_bound_s(reaper), apply=True) == 0
+
+
+# ── #10502: identity is the kernel's name, never the wrapper's argv[0] ──────
+#
+# The measured defect: a wrapper-exec'd server has `argv[0]` pointing at the
+# WRAPPER, so `_IS_REDIS.search(argv[0])` matched no row, `_iter_proc_inventory()`
+# returned an empty list, and the tool printed `applied: 0 candidate(s), 0 reaped`
+# and exited 0 on a cell carrying 1,555 `redis-server` processes, 1,537 of them
+# orphaned. Zero `REAP`/`KEEP` lines is the tell: it classified nothing at all.
+#
+# The scan is driven through its three `/proc` seams (`_read_proc_cmdline`,
+# `_read_proc_name`, `_read_proc_exe_name`) so the exact shapes are pinned
+# deterministically on every platform; the shapes themselves are the ones MEASURED
+# on the runner, not invented here.
+
+#: `<bin>/redis-server` — the binary the runner actually executes, at a
+#: `redislite` site-packages path, so a wrapper-shaped argv is realistic.
+REDIS_BIN = "/opt/gh-runner/_work/_tool/Python/3.12.15/x64/lib/python3.12/site-packages/redislite/bin/redis-server"
+
+
+def _seed_proc_scan(
+    reaper,
+    monkeypatch,
+    procs: dict[int, tuple[list[str] | None, str | None, str | None]],
+    age_seconds: float = 60.0,
+) -> None:
+    """Seed `_iter_proc_inventory()` with `{pid: (argv, comm, exe)}`.
+
+    `argv` is what `/proc/<pid>/cmdline` yields — the kernel hands back exactly
+    the argv the process was exec'd with, which for a wrapper-exec'd server is
+    NOT the server's binary. `comm`/`exe` are the kernel's own answers.
+    """
+    real_isdir = os.path.isdir
+    # Only `/proc` is faked: `classify()` must still see the REAL filesystem, or
+    # a socket-dir arm would silently pass here and fail in CI.
+    monkeypatch.setattr(
+        reaper.os.path, "isdir", lambda p: True if str(p) == "/proc/self" else real_isdir(p)
+    )
+    monkeypatch.setattr(reaper.os, "listdir", lambda _p: [str(pid) for pid in procs] + ["self"])
+    monkeypatch.setattr(reaper, "_read_proc_cmdline", lambda pid: procs[pid][0])
+    monkeypatch.setattr(reaper, "_read_proc_name", lambda pid: procs[pid][1])
+    monkeypatch.setattr(reaper, "_read_proc_exe_name", lambda pid: procs[pid][2])
+    monkeypatch.setattr(reaper, "_process_age", lambda _pid: age_seconds)
+
+
+@pytest.mark.parametrize(
+    "argv,comm,exe,expected_socket_dir,identified_by",
+    [
+        # THE MEASURED SHAPE (issue #10502, `pi-runner-x64-2`): ONE argv element
+        # carrying the whole command line, so `redis-server` is not at end-of-
+        # string and the pre-fix `_IS_REDIS` filter matches nothing. Pre-fix this
+        # row does not exist at all.
+        (
+            [f"{REDIS_BIN} unixsocket:/tmp/tt_pcfpx8kg/tmpjo77yr86/redis.socket"],
+            "redis-server",
+            REDIS_BIN,
+            "/tmp/tt_pcfpx8kg/tmpjo77yr86",
+            # Post-fix identity is `argv[0]` — because the ONE element has been
+            # tokenised, so `argv[0]` IS the binary. Before the fix the element
+            # was never split, and no row existed at all.
+            "argv[0]",
+        ),
+        # The wrapper-shape the brief names: `argv[0]` IS the wrapper's path.
+        (
+            [
+                "/opt/gh-runner/_work/_tool/Python/3.12.15/x64/bin/python3",
+                REDIS_BIN,
+                "unixsocket:/tmp/tt_ab/tmpcd/redis.socket",
+            ],
+            "redis-server",
+            None,
+            "/tmp/tt_ab/tmpcd",
+            "comm",
+        ),
+        # Comm renamed away (`prctl`), binary on disk still the server.
+        (
+            ["redis-server@wrapper", "unixsocket:/tmp/tt_ab/tmpcd/redis.socket"],
+            "redis-server:6379",
+            REDIS_BIN,
+            "/tmp/tt_ab/tmpcd",
+            "comm",
+        ),
+        # The fast path is UNCHANGED: a directly-started server still resolves
+        # from argv[0] without a /proc/<pid>/comm read.
+        (
+            [REDIS_BIN, "unixsocket:/tmp/tt_ab/tmpcd/redis.socket"],
+            None,
+            None,
+            "/tmp/tt_ab/tmpcd",
+            "argv[0]",
+        ),
+        # `comm` renamed AND unreadable → the resolved exe is the last authority.
+        (
+            ["/usr/bin/env", "unixsocket:/tmp/tt_ab/tmpcd/redis.socket"],
+            "some-renamed-name",
+            REDIS_BIN,
+            "/tmp/tt_ab/tmpcd",
+            "exe",
+        ),
+    ],
+)
+def test_a_wrapper_execd_server_is_enumerated(
+    reaper, monkeypatch, argv, comm, exe, expected_socket_dir, identified_by
+):
+    """THE #10502 REGRESSION: every one of these counts ZERO on the pre-fix code.
+
+    Non-vacuous in the strict sense: with `_IS_REDIS`-on-`argv[0]` for identity,
+    cases 1-3 and 5 are dropped before `classify()` is ever reached, so the
+    inventory is empty and `main()` prints `0 candidate(s), 0 reaped` and exits 0
+    — the exact output that read as a clean host over 1,537 orphans.
+    """
+    _seed_proc_scan(reaper, monkeypatch, {4242: (argv, comm, exe)})
+    inventory = reaper._iter_proc_inventory()
+    assert inventory is not None, "a readable host must never be None"
+    rows = {row["pid"]: row for row in inventory.rows}
+    assert 4242 in rows, (
+        "a server whose argv[0] is not the binary must still be enumerated — "
+        f"identity {identified_by!r} is the kernel's, not the wrapper's"
+    )
+    assert rows[4242]["socket_dir"] == expected_socket_dir
+    assert rows[4242]["identified_by"] == identified_by
+    assert inventory.census == 1, "the census must count the process it identified"
+
+
+def test_the_seeded_wrapper_row_reaches_the_decision_table(reaper, monkeypatch, capsys):
+    """End-to-end: enumeration → classify → a printed REAP line, not a silent zero."""
+    # `socket_dir` names a directory that does not exist, i.e. the #1005 residue.
+    _seed_proc_scan(
+        reaper,
+        monkeypatch,
+        {
+            4242: (
+                [f"{REDIS_BIN} unixsocket:/nonexistent-tt-10502/redis.socket"],
+                "redis-server",
+                None,
+            )
+        },
+    )
+    assert reaper.main([]) == 0
+    out = capsys.readouterr().out
+    assert re.search(r"^REAP pid=4242\b", out, re.M), out
+    assert "0 candidate(s)" not in out, (
+        "the pre-fix output — and the one that read as a clean host over 1,537 "
+        f"orphans — must be impossible here:\n{out}"
+    )
+    assert "1 candidate(s)" in out, out
+
+
+def test_the_pre_fix_identity_filter_is_what_dropped_the_measured_shape(reaper):
+    """The root cause, pinned as a FACT about the two predicates.
+
+    The measured `argv[0]` on the runner was ONE element holding the whole
+    command line, so the pre-fix identity filter could not match it — not
+    "classified and declined", but never matched. If a future edit loosens
+    `_IS_REDIS` in a way that would silently change this, the mechanism the fix
+    describes stops being true and this reds.
+    """
+    measured_argv0 = f"{REDIS_BIN} unixsocket:/tmp/tt_pcfpx8kg/tmpjo77yr86/redis.socket"
+    assert reaper._IS_REDIS.search(measured_argv0) is None, (
+        "the pre-fix filter matched this element — then #10502's root cause was "
+        "something else and this fix describes it wrongly"
+    )
+    assert reaper._split_one_arg_line([measured_argv0])[0] == REDIS_BIN
+    assert reaper.socket_dir_from_argv([measured_argv0]) == "/tmp/tt_pcfpx8kg/tmpjo77yr86"
+
+
+def test_a_process_that_only_NAMES_the_binary_is_not_a_server(reaper, monkeypatch):
+    """Identity is about the EXECUTED binary, never a string in someone's args.
+
+    A client, a test helper, or a launcher whose CHILD is the server is not the
+    server. Reaping one on "its argv mentions redis-server" would be the
+    live-peer kill #3653 removed, so `_redis_identity` deliberately does not scan
+    argv for the name — this pins that narrowing.
+    """
+    _seed_proc_scan(
+        reaper,
+        monkeypatch,
+        {
+            900: (
+                ["/usr/bin/python3", "-m", "pytest", REDIS_BIN],
+                "python3",
+                "/usr/bin/python3.12",
+            ),
+            901: (
+                ["/bin/sh", "-c", f"{REDIS_BIN} unixsocket:/tmp/tt_ab/tmpcd/redis.socket"],
+                "sh",
+                "/usr/bin/dash",
+            ),
+        },
+    )
+    inventory = reaper._iter_proc_inventory()
+    assert inventory is not None
+    assert inventory.rows == [], inventory.rows
+    assert inventory.census == 0, "neither process IS a redis server, so neither is census"
+
+
+def test_a_plain_tcp_redis_is_excluded_with_a_stated_reason(reaper, monkeypatch, capsys):
+    """A measured zero of REDISLITE litter: a redis server with no unix socket.
+
+    This is the case a naive "the census is non-zero, so refuse to call it a
+    measured zero" would turn into a false red on any host that runs a plain
+    TCP `redis-server` for something else. It is EXCLUDED and COUNTED, and the
+    run is still a measured zero — exit 0 with the census line saying so.
+    """
+    _seed_proc_scan(
+        reaper, monkeypatch, {777: (["redis-server", "--port", "6379"], "redis-server", None)}
+    )
+    assert reaper.main([]) == 0
+    out = capsys.readouterr().out
+    assert "census: 1 redis-server process(es)" in out, out
+    assert "0 enumerated; 1 excluded (no unix socket in argv)" in out, out
+    assert "0 candidate(s)" in out, out
+
+
+def test_a_census_the_inventory_cannot_account_for_is_exit_3(reaper, monkeypatch, capsys):
+    """NON-VACUOUS: the pre-fix run printed `0 candidate(s)` and exited 0 here.
+
+    `census=1555, rows=0, excluded=0` is the measured shape of #10502: 1,555
+    processes named `redis-server`, none of them enumerated. A parse/filter gap
+    must say so and exit non-zero; only a genuine measured zero may exit 0.
+    """
+    inventory = reaper.ProcInventory(rows=[], census=1555, excluded_no_socket=0, source="/proc")
+    assert inventory.unaccounted == 1555
+    monkeypatch.setattr(reaper, "_iter_proc_inventory", lambda: inventory)
+    assert reaper.main([]) == 3, "a gap must not exit 0 — that is the whole defect"
+    err = capsys.readouterr().err
+    assert "census gap: 1555" in err, err
+    assert "NOT a measured zero" in err, err
+
+
+def test_an_accounted_census_is_not_a_gap(reaper):
+    """The other direction, so the guard cannot fire on a healthy measurement."""
+    assert (
+        reaper.ProcInventory(
+            rows=[{"pid": 1}], census=1, excluded_no_socket=0, source="/proc"
+        ).unaccounted
+        == 0
+    )
+    assert (
+        reaper.ProcInventory(rows=[], census=2, excluded_no_socket=2, source="/proc").unaccounted
+        == 0
+    )
+    assert (
+        reaper.ProcInventory(rows=[], census=0, excluded_no_socket=0, source="/proc").unaccounted
+        == 0
+    )
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc is Linux-only")
+def test_a_real_argv0_wrapper_process_is_enumerated(reaper, tmp_path):
+    """The kernel's own answer, no seams: a live `argc == 1` server shape.
+
+    A real process is exec'd with ONE argv element carrying the whole command
+    line (the shape measured on the runner) and a binary file named
+    `redis-server`, so `/proc/<pid>/comm` is `redis-server` while
+    `/proc/<pid>/cmdline` holds a string that does not end in it. The pre-fix
+    filter drops this process; the inventory must list it.
+    """
+    binary = tmp_path / "redis-server"
+    binary.write_bytes(Path(shutil.which("cat") or "/bin/cat").read_bytes())
+    binary.chmod(0o755)
+    gone = tmp_path / "gone-socket-dir"
+    line = f"{binary} unixsocket:{gone}/redis.socket"
+    child = subprocess.Popen(
+        [line], executable=str(binary), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL
+    )
+    try:
+        seen = False
+        for _ in range(200):
+            try:
+                with open(f"/proc/{child.pid}/comm") as fh:
+                    seen = fh.read().strip() == "redis-server"
+            except OSError:
+                seen = False
+            if seen:
+                break
+            time.sleep(0.02)
+        assert seen, "the fixture process never came up with comm == redis-server"
+        inventory = reaper._iter_proc_inventory()
+        assert inventory is not None
+        # Written against the rows ALONE, so the pre-fix tree fails on the FACT
+        # (the process is missing) rather than on the newer return type.
+        rows_list = inventory.rows if hasattr(inventory, "rows") else inventory
+        rows = {row["pid"]: row for row in rows_list}
+        assert child.pid in rows, (
+            "a live wrapper-exec'd server must be enumerated from the kernel's "
+            f"name, not from argv[0] — inventory held {sorted(rows)}"
+        )
+        assert rows[child.pid]["socket_dir"] == str(gone)
+    finally:
+        child.kill()
+        child.wait(timeout=30)
 
 
 # ── the workflow shape: the blind, host-global reap must not come back ──────
