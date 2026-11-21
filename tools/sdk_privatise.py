@@ -974,9 +974,16 @@ SWEEP_NAMES = 66
 #: `(count, digest)` pair exists to defeat, so the digest is the evidence and the count is only a
 #: cross-check. WHERE THE −3 CAME FROM, MEASURED: `main` at `1b0db0489408` is itself three below its
 #: own committed `(11843, "6aed5368ffa10513")` — `--repin` on `main` alone there prints
-#: `(11840, "b7eb08ff3acdcce4")` — and that −3 is `67dc298ec3a1` (#14194), which rewrote
-#: `tests/test_read_ledger.py` only, replaced THREE `inst.query()` receivers and re-pinned nothing;
-#: the same unpinned-drift class the block above records for #14164. ⛔ ATTRIBUTED BY ROW DIFF, NOT
+#: `(11840, "b7eb08ff3acdcce4")` — and ⛔ THAT NET −3 IS TWO COMMITS, NOT ONE. Measured, `--repin`
+#: on each of `main`'s commits with the checked-out HEAD printed beside it, so a stale tree cannot
+#: pass as a measurement: `72c104bcbb` → `(11843, "6aed5368ffa10513")` (its committed pin, exact
+#: there), `67dc298ec3a1` (#14194) → `(11837, "52e9a205697f528f")` — **−6**, `d2dd2355353f` (#14190)
+#: and `e4acf78705d5` (#14171) → unchanged at 11837, `1b0db0489408` (#14162) → `(11840,
+#: "b7eb08ff3acdcce4")` — **+3**. #14194's −6 is THREE `inst.query(...)` lines removed and NONE added,
+#: in `tests/test_read_ledger.py`, the only file it touches, and it re-pinned nothing: a test-only
+#: commit can move this number, because `py_files()` sweeps every tracked `*.py` (`tests/` included—
+#: only `archive/`, `.venv/` and `.worktrees/` are excluded), the same unpinned-drift class the block
+#: above records for #14164. ⛔ THE BRANCH'S OWN +3, ATTRIBUTED BY ROW DIFF, NOT
 #: ARITHMETIC: `--report --base 28ca66878d… --top 5000` on `main` there AND on this tree, both row
 #: sets sorted and diffed, differs in EXACTLY TWO rows — `_truncation_out.update` 1 → 2 and
 #: `_state_route_out.update` 0 → 2 (this branch's **+3**, the `dict | None` caller sinks #14033
