@@ -72,13 +72,18 @@ import os
 from tortoise.sdk import TortoiseSDK
 sdk = TortoiseSDK(db_path=os.environ["TORTOISE_DB_PATH"])
 proj = sdk._get_proj()
-ev = sdk.create_point(
-    "evidence",
-    "CI deploys on main merge via GitHub Actions [supporting record]")
-claim = sdk.create_point(
-    "statement",
-    "The CI pipeline deploys via GitHub Actions on main merge.")
-sdk.create_operator("IMPL", ev["id"], [claim["id"]])
+# The approved doors (#13899 retired `create_point` / `create_operator`):
+# `create_entity("point", …)` returns `{node, nudges}`, so the id moves one
+# level in; `link_entities(…, operator=True)` is the arm that builds the
+# carrying operator (`create_operator`'s consolidated replacement).
+ev = sdk.create_entity(
+    "point",
+    "CI deploys on main merge via GitHub Actions [supporting record]",
+    pointKind="evidence")["node"]
+claim = sdk.create_entity(
+    "point",
+    "The CI pipeline deploys via GitHub Actions on main merge.")["node"]
+sdk.link_entities("IMPL", ev["id"], claim["id"], operator=True)
 for pid, a, b in ((claim["id"], 12.0, 1.0), (ev["id"], 12.0, 1.0)):
     m = round(a / (a + b), 4)
     proj.g.query(

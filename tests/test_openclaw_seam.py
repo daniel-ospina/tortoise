@@ -673,9 +673,13 @@ sdk = TortoiseSDK(db_path=os.environ["TORTOISE_DB_PATH"])
 proj = sdk._get_proj()
 
 def add(stmt):
-    ev = sdk.create_point("evidence", stmt + " [supporting record]")
-    claim = sdk.create_point("statement", stmt)
-    sdk.create_operator("IMPL", ev["id"], [claim["id"]])
+    # The approved doors (#13899 retired `create_point` / `create_operator`):
+    # `create_entity("point", …)` returns `{node, nudges}`; `link_entities(…,
+    # operator=True)` is the arm that builds the carrying operator.
+    ev = sdk.create_entity(
+        "point", stmt + " [supporting record]", pointKind="evidence")["node"]
+    claim = sdk.create_entity("point", stmt)["node"]
+    sdk.link_entities("IMPL", ev["id"], claim["id"], operator=True)
     for pid in (claim["id"], ev["id"]):
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.confidence=0.9231, "
