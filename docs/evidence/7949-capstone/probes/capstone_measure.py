@@ -4133,7 +4133,7 @@ PACKS_DIR = "packs"
 #: an invented quote inside a bundle whose pins enforce that a cite carries the sentence it
 #: quotes (#11695 review round 3, P3). The wording above is the section's own; this note names
 #: the section and NOT a line number, so it cannot rot.
-E6_SURFACES = ("relations", "hierarchies")
+E6_SURFACES = ("relations",)
 
 #: The open issue that owns a declared row which binds NO write path — `#11484`
 #: ("a pack-declared object relation must be writable as an edge, not just an IMPL label").
