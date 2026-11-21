@@ -2302,12 +2302,12 @@ def test_the_storage_section_bound_cuts_at_a_RENDERED_heading_only() -> None:
     ⛔ AND THE ONE TOKEN THAT DOES CLOSE THE SCOPE IS MODELLED — `<input>`, the
     living standard's "in body" rule (`_SELECT_POP`). This paragraph used to say
     the classic mode's `input`/`keygen`/`textarea` were all unmodelled; that was
-    wrong twice over: `<input>` is modelled now, and `keygen`/`textarea` have no
-    select-scope step in the living standard, so modelling them would be the
-    FAIL-OPEN direction — a `<select><textarea>` decoy pops the select, advertises
-    its anchor and bounds the slice early, which is the escape #14073 exists to
-    close. Both readings are pinned in
-    `test_the_select_scope_closes_on_the_tokens_a_browser_closes_it_on`.
+    wrong twice over: `<input>` and a nested `<select>` are modelled now, and
+    `keygen`/`textarea` have no select-scope step in the living standard, so
+    modelling them would be the FAIL-OPEN direction — a `<select><textarea>` decoy
+    pops the select, advertises its anchor and bounds the slice early, which is the
+    escape #14073 exists to close. Both readings are pinned in
+    `test_the_select_scope_closes_on_input_and_a_nested_select_and_nothing_else`.
 
     ⛔ AND THE IMPLICIT-CLOSE RULES ARE NOT MODELLED, in the SAFE direction only
     because the container helper refuses the tags they affect: for an ordinary
@@ -2471,7 +2471,7 @@ def test_the_storage_section_bound_cuts_at_a_RENDERED_heading_only() -> None:
     )
 
 
-def test_the_select_scope_closes_on_input_and_on_nothing_else() -> None:
+def test_the_select_scope_closes_on_input_and_a_nested_select_and_nothing_else() -> None:
     """Only `<input>` pops an open `<select>` — and the other two tokens MUST NOT.
 
     The living standard has no "in select" insertion mode (`grep -c 'in select'
@@ -2514,6 +2514,34 @@ def test_the_select_scope_closes_on_input_and_on_nothing_else() -> None:
         "a `<h2>` after `<input>` in a select was treated as a heading no reader "
         "meets: the select is already popped in the browser, so this is a rendered "
         "heading and must bound the slice"
+    )
+    # ── PRESENT: a NESTED `<select>` pops the outer one and is IGNORED whole ──
+    # Spec: *"Parse error. Ignore the token. Repeatedly pop the current node off
+    # the stack of open elements until a select element has been popped."* So the
+    # outer select closes, the inner one never exists, and an anchor after it is a
+    # rendered sibling link. Measured in Chromium:
+    # `<select id=o><select id=i><a href="/blog">` -> one select (`o`), anchor a
+    # sibling `<a>` in the body. Without the IGNORE half the anchor would still be
+    # suppressed by an element the browser discarded.
+    assert extract_anchor_hrefs(
+        '<select><select><a href="/blog">Blog</a></select></select>'
+    ) == ["/blog"], (
+        "a nested `<select>` did not pop the outer one: an anchor after it is a "
+        "link every browser renders"
+    )
+    assert extract_element_ids(
+        '<select id="o"><select id="i"><a href="/b">B</a></select></select>'
+    ) == [("o", 1)], (
+        "a nested `<select>` created an element of its own: the spec says IGNORE "
+        "the token after popping, and a browser has only the outer select, so "
+        "recording the inner `id` invents an element that does not exist"
+    )
+    assert extract_heading_positions(
+        '<select><select><h2 id="qs">Q</h2></select></select>'
+    ) == [("qs", len("<select><select>"))], (
+        "a `<h2>` after a nested `<select>` was treated as a heading no reader "
+        "meets: the outer select is popped and the inner one ignored, so this is a "
+        "rendered heading and must bound the slice"
     )
     # ── ABSENT: `textarea`/`keygen` do NOT pop — the scope stays open ──
     for token in ("textarea", "keygen"):
@@ -2916,12 +2944,22 @@ def test_extract_anchors_within_refuses_every_tag_a_sibling_can_close() -> None:
 
     The refusal listed only the implied-end-tag tags (`li`, `p`, `td`, …), while
     its own message promised that every accepted tag is closed by its end tag
-    alone. `button`, `h1`–`h6`, `a`, `form`, `nobr`, `select` and `table` are also
+    alone. `button`, `h1`–`h6`, `a`, `nobr`, `select` and `table` are also
     closed by a FOLLOWING START TAG, and for them the extent ran past the sibling:
     `'<button class="toc"><a href="#a">A</a><button><a href="#b">B</a>'` gave
     `[['#a', '#b']]` where a browser has `[['#a']]` — a larger advertised set and a
     SHORTER slice, the fail-open direction (measured, #14073 review). Only `div` is
     a safe answer today, and that is the positive control below.
+
+    ⛔ `form` IS NOT IN THIS FAMILY, and this test asserted it was. The in-body
+    `<form>` rule is *"If the form element pointer is not null … then this is a
+    parse error; ignore the token"* — it acts as an end tag for nothing, so an open
+    form is closed by its own `</form>` alone and the end-tag extent IS the
+    browser's tree. Measured in Chromium:
+    `<form class=toc id=f1><a href="#a">A</a><form id=f2><a href="#b">B</a>` → one
+    form with BOTH anchors in it. Refusing the tag therefore blocked a correct
+    question, so `form` is asserted ACCEPTED below, with its extent checked
+    against that measurement (#14073 review).
     """
     declared = set(_AnchorHrefParser._IMPLICITLY_CLOSED)
     # ⛔ THE SET UNDER TEST IS NAMED HERE, not read back out of the refusal list — a
@@ -2931,7 +2969,7 @@ def test_extract_anchors_within_refuses_every_tag_a_sibling_can_close() -> None:
     # this test green). The named set is a SUPERSET check on the declaration plus a
     # behavioural check per tag, so neither half can be removed silently.
     sibling_closed = {
-        "a", "button", "form", "h1", "h2", "h3", "h4", "h5", "h6", "li",
+        "a", "button", "h1", "h2", "h3", "h4", "h5", "h6", "li",
         "nobr", "option", "p", "select", "table", "td",
     }
     assert not sibling_closed - declared, (
@@ -2947,6 +2985,23 @@ def test_extract_anchors_within_refuses_every_tag_a_sibling_can_close() -> None:
                 tag=tag,
                 class_token="toc",
             )
+    # `form` is the OTHER direction: it is in no sibling-close family, so the helper
+    # must answer it — and answer it with the browser's tree, where a nested `<form>`
+    # is IGNORED and its anchors belong to the outer element.
+    assert "form" not in declared, (
+        "`_IMPLICITLY_CLOSED` refuses `form` again: a nested `<form>` start tag is "
+        "IGNORED by a browser, not an end tag for the open one, so the refusal "
+        "blocks a container whose end-tag extent is already the browser's tree"
+    )
+    assert extract_anchors_within(
+        '<form class="toc"><a href="#a">A</a><form><a href="#b">B</a></form></form>',
+        tag="form",
+        class_token="toc",
+    ) == [["#a", "#b"]], (
+        "a `form` container's extent does not match the browser: a nested `<form>` "
+        "is ignored, so both anchors belong to the ONE outer form (measured in "
+        "Chromium)"
+    )
     # POSITIVE CONTROL: the tag the callers actually ask for is accepted, and it
     # measures what the refusal protects — the sibling's anchor is NOT included.
     assert extract_anchors_within(
