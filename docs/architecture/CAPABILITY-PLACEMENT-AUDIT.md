@@ -187,16 +187,19 @@ the commit door — the `params={"eid": _eid, "oid": _oid},` statement an earlie
 named is the pin's `:23046`, which is not one of them (`main`'s `:22919` is a different line of the same door):
 `sdk.py:22267` (the capture writer) with its read-back `:22390`, and `hosted_api.py:23501` (the commit
 door's `MERGE (s:Source {url:$did})`) with `_execute_commit_writes` at `:23313`. ⚠️ **The `hosted_api.py`
-pair is head-bound, and this edition re-derived it THREE times before it held** — 23082 / 22894 when the
-`#14022`-rot repair `#14059` wrote them, then 23503 / 23315, and 23501 / 23313 at the head this sentence is
-written at (`main` `1b0db04894`). ⛔ **Re-derive by CONTENT: never reuse the delta.** (The pair is
+pair is head-bound, and it has had THREE readings, the last two of them this edition's** — 23082 / 22894 when the
+`#14022`-rot repair `#14059` wrote them, 23503 / 23315 at the base this branch was
+then built on (`72c104bcbb`), and 23501 / 23313 at the head this sentence is
+written at (`main` `1b0db04894`), after `e4acf78705` moved them `−2`. ⛔ **Re-derive by CONTENT: never reuse the delta.** (The pair is
 `:22919`/`:22731` at `ae54df166d` — the head `#13394` was re-cut onto, as the clause above says, and not the
 head `#14059` wrote them on; row 13's note below carries all three readings.) The `+419` all three of this
 row's and row 15's sites take between `#14059`'s head and this one is **not** one insert: that interval is
-**25 hunks, 569 inserted and 59 deleted** lines (`git diff --numstat`), `+419` of it above the three sites
-(20 hunks, largest net `+157`) and `+91` below them, and a cite at old 10500 moved `+97` while one at 40000
-moved `+499`. The three happened to share a delta because the hunks above them are uniform in position; a
-lane
+**569 inserted and 59 deleted** lines (`git diff --numstat`), across **25** hunks — and the convention travels with
+that second figure, because `git diff -U0 … | grep -c '^@@'` gives 25 while git's default `-U3` gives 23, which
+`--numstat` does not print at all. `+419` of the growth sits above the three sites (20 hunks, largest net `+157`)
+and `+91` below them, and at the same two heads a cite at old 10500 moved `+97` while one at 40000
+moved `+499`. The three share a delta because **no hunk between them changes the count** — the cumulative
+shift is `+419` for every old address from 21885 to 38986, and that is a BAND, not a property of the file — a lane
 that applies `+419` to a different address lands on a line nobody read, which is the failure this header
 exists to stop. What makes the row survive is narrower and is what the pin guard grades directly: the
 door region a reader opens is **byte-identical** across these heads and no deleted line in it carries
@@ -281,7 +284,7 @@ five are *at risk* of drifting silently: no symbol will be there to re-find — 
 citation — so an insert above a cited site is undetectable from the row alone. The risk has already begun
 to bite: of the line-numbered cites in these five rows, **ten no longer name the same line at `main`**
 (re-measured at `main` `ae54df166d`, the head this header's own lists are written at, and RE-MEASURED again for this edition — the `111-of-217` this clause used to defer to has been retired) — row 15's `hosted_api.py:32965`, whose
-`MERGE (p:PackInstall …)` is at `:33583` there (`:34272` at this head — the 33853 this clause carried is the SAME `+419` move row 13's pair takes, not a second one: `33853 + 419 = 34272`, and adding two deltas would land on `:34425`, which is no line of this file; re-derived by content at `main` `1b0db04894`), and **9 of row 18's 16** (that row's `hosted_api.py`, `sdk.py` and `pipeline.py` addresses moved; its seven `metering.py` / `cohort_cost.py` ones are unchanged) — while rows 10, 11 and 14 and row
+`MERGE (p:PackInstall …)` is at `:33583` there (`:34272` at this head — the 33853 this clause carried is the SAME `+419` move row 13's pair takes, NOT a second one: `33853 + 419 = 34272`, one band not two; re-derived by content at `main` `1b0db04894`), and **9 of row 18's 16** (that row's `hosted_api.py`, `sdk.py` and `pipeline.py` addresses moved; its seven `metering.py` / `cohort_cost.py` ones are unchanged) — while rows 10, 11 and 14 and row
 15's `pack_manifest_store.py:467` still do. ⚠️ **The comparison this count is taken on is the PIN against `main`, never `main` against this head** — `git show ccb49741b2ec:tortoise/pipeline.py | sed -n '529p'` is `"k": pipe.pipeline_key, "kind": pipe.pipeline_key,`, while `ae54df166d` holds `"MATCH (p:Pipeline {pipelineKey:$k}) RETURN p.defaultStageId, "` on that line: it MOVED, which is what makes it the ninth of row 18's sixteen, even though `main` and this head agree on it.
 ⚠️ **Row 14 does NOT, and this clause is measured at `ae54df166d`, not at THIS head**: `63bc13edb44` — the +8 shift of `webhook_delivery.py` that §2.7 records — is not an ancestor of `ae54df166d` (`git merge-base --is-ancestor 63bc13edb44 ae54df166d` → 1), so at `ae54df166d` row 14's census address `:487` still opens on its quoted `CREATE`, while §2.7 re-derived it to `:495` for THIS head. Every other address this document carried into that file moved in the same pass, and §2.7's `:GraphEventMeta` row records the whole old→new mapping. (For rows 10, 11 and 14 the SHAPE's reader half is anchored — §2.7 names `_drop` and quotes the
 Cypher — but the row's own WRITE cite is not.) Re-derive each cite from the text
