@@ -761,8 +761,22 @@ def test_the_verbs_never_shadow_the_DSNs_ROLE_with_a_connect_kwarg(monkeypatch):
 
     No database is contacted: ``psycopg2.connect`` is replaced, and both DSN
     forms are covered because a deployment may use either.
+
+    ⛔ The driver is the OPTIONAL ``[postgres]`` extra, and this file is in
+    ``fast_pool()`` on two surfaces (``api`` and ``core``), so a bare import here
+    ERRORS — not skips — on every job that installs ``.[test,embeddings]`` alone.
+    That is the sharded ``test`` matrix, i.e. a required context Red on an import
+    rather than on the behaviour, while the row never runs. ``importorskip`` is
+    the polarity the job's own comment states (``python-ci.yml``, the
+    ``test-record-postgres`` step: "the optional ``[postgres]`` extra, so on the
+    fast pool that ORACLE is skipped by absence of the driver") and the spelling
+    the sibling leg already uses (``tests/test_12943_cache_leg.py``,
+    ``_both_stores``). ``test-record-postgres`` installs the extra, so the
+    assertion still EXECUTES there — this fixes the failure mode, it does not
+    weaken the pin.
     """
-    import psycopg2
+    psycopg2 = pytest.importorskip(
+        "psycopg2", reason="psycopg2-binary is the record's driver")
 
     captured: list = []
 
