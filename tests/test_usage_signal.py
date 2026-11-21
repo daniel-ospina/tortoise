@@ -1310,7 +1310,7 @@ def test_no_graph_dependency() -> None:
             if any(name == root or name.startswith(root + ".") for root in forbidden)
         }
 
-    def _probe_modules(import_stmt: str) -> list[str]:
+    def _probe_modules(import_stmt: str, *injected: str) -> list[str]:
         """The child's RAW report: every name in `sys.modules` after `import_stmt`.
 
         The child is the ONLY place this program is built, and it matches NOTHING —
@@ -1322,10 +1322,14 @@ def test_no_graph_dependency() -> None:
         src = (
             "import sys;"
             f"{import_stmt};"
+            # the ONLY way to make the name stream carry a name it could not otherwise
+            # produce: supplied from outside, so the stream can be witnessed at EVERY
+            # root without importing fifteen store clients
+            "sys.modules.update({n: None for n in sys.argv[1:]});"
             "print(chr(31).join(sorted(sys.modules)))"
         )
         out = subprocess.run(
-            [sys.executable, "-c", src],
+            [sys.executable, "-c", src, *injected],
             capture_output=True,
             text=True,
             cwd=str(Path(__file__).resolve().parent.parent),
@@ -1333,7 +1337,7 @@ def test_no_graph_dependency() -> None:
         ).stdout.rstrip("\n")
         return [name for name in out.split(chr(31)) if name]
 
-    def _probe(import_stmt: str) -> set[str]:
+    def _probe(import_stmt: str, *injected: str) -> set[str]:
         """The banned roots present in `sys.modules` after `import_stmt`, in a CLEAN
         interpreter.
 
@@ -1404,29 +1408,25 @@ def test_no_graph_dependency() -> None:
         expectations. That is a rewrite of the SUBJECT, not a narrowing of it, and it
         is the structural reason this arrangement is worth preferring to a two-hop
         one where a narrowed child and a fabricated record could BOTH be green.
-        ⛔ AND THE NAME STREAM IS STILL AN OPEN AXIS, one hop outside the matcher — in
-        two places, and they are the same class: what the child EMITS, and what the
-        parent PARSES before the matcher sees it.
-          * THE CHILD'S PRINT. The per-root witnesses above grade `_matching`
-            DIRECTLY, so they say nothing about what the child printed. Measured at
-            this head: a child narrowed to the roots the named controls use —
+        ⛔ AND THE NAME STREAM IS WITNESSED AT EVERY ROOT TOO — `_probe` is run once
+        with EVERY root supplied to the child, and the result must be the whole
+        derivation. That closes both places the earlier version of this paragraph
+        called unclosable, and each is measured RED now:
+          * THE CHILD'S PRINT. A child narrowed to the roots the named controls use —
             `sorted(n for n in sys.modules if n in ('redis','tortoise.ep',
-            'tortoise.session_indexer'))` — is **102 passed**, with `_matching` and
-            `_probe_forbidden()` both untouched, and the probe is then blind to the
-            rest of the ban set (`_probe("import tortoise.projection")` is `set()`,
-            while the honest child reports `tortoise.cypher_guard`,
-            `tortoise.projection`, …).
-          * THE PARENT'S PARSE. `[name for name in out.split(chr(31)) if name]` reads
-            the child's output before the matcher sees it, so suppressing one name
-            THERE drops a root with every row green — measured at `904a9429`,
-            `… if name and name != 'tortoise.projection'` is **102 passed**.
-        Neither can be closed from this side: some code must read the child's output,
-        and an assert that reads the same output cannot tell a suppressed name from an
-        absent one. So a narrowed child is green BY ITSELF — it no longer needs a
-        fabricated record beside it, and "a narrowed child and a fabricated record
-        could BOTH be green" understates it. The child mutants that DO red (a
-        constant, the direct import only, a truncated `sys.modules`) all red for other
-        reasons — none of them keeps the named roots.
+            'tortoise.session_indexer'))` — was **102 passed** before this row and is
+            **1 failed / 101** after it, because the injected roots never reach the
+            output.
+          * THE PARENT'S PARSE. Suppressing one name in
+            `[name for name in out.split(chr(31)) if name]` was **102 passed** and is
+            **1 failed / 101** after it, on the suppressed root.
+        The old objection — "an assert that reads the same output cannot tell a
+        suppressed name from an absent one" — is true of an assert over an IMPORT, and
+        false of an assert over an input the test supplies: the injected roots are
+        known to be present, so their absence from the result is a defect either way.
+        What remains is only PREDICTION of this test's inputs, the same residual as
+        above, and a narrowed child now reds BY ITSELF instead of merely being
+        undetectable.
         """
         # ⚠️ THE PREFIX CLAUSE `or n.startswith(r + '.')` IS DEFENSIVE, AND IT IS
         # NOW PINNED — this comment used to say "DELIBERATELY UNPINNED … deleting it
@@ -1448,7 +1448,7 @@ def test_no_graph_dependency() -> None:
         # NARROWED silently; this clause cannot be narrowed into a hole — it is
         # exercised in one direction by the per-root row and in the other by the
         # `_matching(['redis_probe', …]) == set()` boundary assert.
-        return _matching(_probe_modules(import_stmt))
+        return _matching(_probe_modules(import_stmt, *injected))
 
     # ⛔ AND THIS LEG NEEDS POSITIVE CONTROLS, not only the negative assertion.
     # Everything above asserts the probe finds NOTHING, so every way of breaking the
@@ -1528,6 +1528,21 @@ def test_no_graph_dependency() -> None:
     # AND the clause's BOUNDARY, both directions: a name that merely CONTAINS a root
     # is not under it, and an empty input finds nothing. Without this, `startswith`
     # could be widened to a substring test and every row above would stay green.
+    # ⛔ AND THE NAME STREAM IS WITNESSED AT EVERY ROOT, not only the matcher in
+    # isolation. Pinning `_matching` alone left the production path open one hop
+    # later: measured on the previous head, narrowing the child's print to the three
+    # named controls was **102 passed** with `import tortoise.projection` coming back
+    # empty, and suppressing one name in the parent's parse was **102 passed** too.
+    # Both are red below, and this is why: the injected roots are KNOWN to be present,
+    # so their absence from the result is a defect rather than an ambiguity.
+    _all_roots = _probe("pass", *_probe_forbidden())
+    assert _all_roots == set(_probe_forbidden()), (
+        f"with every root supplied to the child, the probe reported "
+        f"{sorted(_all_roots)} — it must report the WHOLE derivation. A missing root "
+        "means the name stream was narrowed after `sys.modules` (the child's print), or "
+        "on the way into `_matching` (the parent's parse), or inside the matcher; each "
+        "is a live miss for that root and none of them is visible to a row that "
+        "imports a real module (#14118 item 1)")
     assert _matching(["redis_probe", "tortoise_ep", "notfalkordb"]) == set(), (
         "the matcher must not treat a name that merely CONTAINS a banned root as "
         "being under it — `redis_probe` is not `redis.*`, and matching it would make "
