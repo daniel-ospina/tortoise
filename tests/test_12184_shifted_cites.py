@@ -1478,8 +1478,12 @@ def _figure_problems(text: str, repo: Path = REPO) -> list[str]:
         # `test_the_drift_numerator_is_re_derived_from_the_pin_blob_not_carried` grades the alternative
         # basis from the pin's union set, so an alt numerator this BAND still contains is caught there —
         # MEASURED on this head: `230 pairs and 158 drifters` → `… and 156 drifters` sits inside
-        # `155..158`, passes this band, and reds that arm (1 failed, 29 passed). The band bounds the
-        # figure; the re-derivation MEASURES it.
+        # `155..158`, passes this band, and reds that arm — nothing else moves, so the failure names the
+        # figure and not an unrelated row. ⛔ No pass TOTAL is published here: an earlier draft of this
+        # very sentence said "1 failed, 29 passed", and a peer's commit on the same branch added a test
+        # one minute later, so the total was stale before it was pushed (`#14038`, the same rot as the
+        # retired "0 of 112 rows"). The ARM is the claim; the total is a moving picture of the file.
+        # The band bounds the figure; the re-derivation MEASURES it.
         if extra_pairs is not None and not drifters <= alt_drifters <= drifters + extra_pairs:
             problems.append(
                 f"the alternative basis reads {alt_drifters} drifters against the primary basis's "
