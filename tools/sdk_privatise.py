@@ -422,14 +422,15 @@ SWEEP_NAMES = 66
 #: already pinned rows on this tree, and their counts were re-read at THIS head rather than quoted
 #: from `ad79129cb5`. ⛔ The move past the 274 measured there is `#14068`'s (`2fe01fc775e`), NOT this
 #: lane's: `git diff 2fe01fc775e 83e94826a8a -- '*.py'` carries no added receiver row at all (its
-#: only `+`/`-` pair is the re-indented `seen.update` above, already counted). So
-#: `graph.query` is **276** here, `super().query` **68**, `client.delete` **43**. A raw whole-tree
-#: grep of the three shapes (`git grep -hoE '\bclient\.(query|update|delete)\b' <rev> -- '*.py'`)
-#: reports `client.delete` **48** at `2fe01fc775e` — it counts OCCURRENCES, not the pinned residue
-#: ROW, and it counts a block's OWN prose about the shape, so the figure reproduces only against a
-#: NAMED revision: the same grep at this head reports **49**, because this block names
-#: `client.delete` one more time than the block it replaced (measured at both revs, not inferred).
-#: Earlier prose quoting "46" matched neither figure. So the
+#: only non-comment `+`/`-` receiver line is the re-indented `seen.update` above, already counted).
+#: So `graph.query` is **276** here, `super().query` **68**, `client.delete` **43** — read with
+#: `--report`, not with a grep. A raw whole-tree grep of the three shapes
+#: (`git grep -hoE '\bclient\.(query|update|delete)\b' <rev> -- '*.py'`) is NOT that reading: it
+#: counts OCCURRENCES, prose included, not the pinned residue ROW, and it counts this block's OWN
+#: prose about the shape — so any figure it prints is a function of the sentence quoting it, and NO
+#: head figure is stable. It is therefore quoted here only against a NAMED revision (it reads **48**
+#: at `2fe01fc775e`; earlier prose quoting "46" matched no tree's reading). ⛔ Measured twice, at two
+#: heads: each correction that stated this figure moved the very figure it stated. So the
 #: condition this gate exists to catch — "a reference shape that was not there when this sweep was
 #: verified is now on the tree" — is NOT triggered; only counts on shapes already declared moved.
 #: The SDK population itself did not move (`typed references still pointing at a public name: 0`),
