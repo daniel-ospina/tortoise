@@ -1680,13 +1680,14 @@ def test_a_carried_forward_figure_is_reported() -> None:
       1. a pair count and its collision arithmetic one edition behind (the `triple`);
       2. collisions that stop following the pair count they are arithmetic on;
       3. a ratio naming a denominator it does not carry;
-      4. one of the three mentions of the ratio disagreeing with the others;
+      4. one of the ratio's published mentions disagreeing with the others (the loop grades three of the
+         four; the fourth is the mention-agreement leg below);
       5. an alternative basis one pair short of what the two-code-span form measures, not level with it;
       6. an alternative numerator inflated past what its added pairs can contribute;
       7. an alternative basis reading FEWER drifters than the primary — adding pairs cannot remove one;
-      8. the SECOND publication of that alternative numerator disagreeing with the first while both stay
-         inside the band;
-      9. a two-code-span pair count stated below what the document measures;
+      8. the SECOND publication of that alternative numerator disagreeing with the first;
+      9. a two-code-span pair count that DISAGREES with what the document measures (below it at this
+         edition);
      10. one more of those pairs claimed uncounted than the union adds.
 
     Each is applied to the sentence AS SHIPPED, by capture-group position.
@@ -1759,7 +1760,7 @@ def test_a_carried_forward_figure_is_reported() -> None:
         (
             ratio,
             {1: ratio_drifters - 1},
-            "one of the three mentions of the ratio disagrees with the others",
+            "one of the three GRADED mentions of the ratio disagrees with the others",
         ),
         (
             alt,
@@ -1857,6 +1858,20 @@ def test_a_carried_forward_figure_is_reported() -> None:
                 "mention-agreement leg was never consulted — the anchor `alt_drifters - 2` can fall OUTSIDE "
                 "the band after a legitimate re-measurement, and a row that then passes on the band's red "
                 "proves nothing"
+            )
+        if match is alt and 2 in overrides:
+            # ⛔ RULE 2 FOR THE BAND, and it was needed the moment the mention leg landed: the two rows
+            # that mutate the alternative numerator (`+7`, and `_drifters - 1`) now red TWICE, and the
+            # only observation the table makes is `!= []`. MEASURED: with the band arm deleted (`:1542`
+            # -> `if False:`) this control stays GREEN at this head, while the same edit at the pre-leg
+            # `d37d356e2ffd` reds it — so the mention leg had taken over the entire red those two rows
+            # produced, and the band was proven by nothing. That is the `#13599` finding-1 revert: restore
+            # the one-sided lower bound and nothing in this file notices. The red must NAME the band.
+            assert any("drifters against the primary basis's" in problem
+                       for problem in _figure_problems(mutated)), (
+                f"the control for {why!r} red for some other reason ({_figure_problems(mutated)}), so the "
+                "BAND was never consulted — the mention-agreement leg supplies this row's red on its own, "
+                "and deleting the band (or reverting it to a one-sided lower bound) would go unnoticed"
             )
         assert _figure_problems(mutated) != [], (
             f"a document carrying {stale!r} ({why}) reported no problem — the comparator is decoration"
