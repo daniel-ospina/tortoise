@@ -282,6 +282,17 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     (_AUDIT, '`:23126-23128`', 'tortoise/hosted_api.py', 23128, 's.commit_count = coalesce(s.commit_count, 0) +'),
     # the same statement written BARE on the label-scan row — a different SITE, so its own row
     (_AUDIT, '`:24646-24650`', 'tortoise/hosted_api.py', 24648, 's.value_nodes_held = coalesce(s.value_nodes_held, 0) + $n'),
+    # ⚠️ The LAST TWO sites of the same rot, left "reported, not touched" by the `8f7724b593c` review
+    # and unpinned here, which is exactly why they were still stale at `69d79287f5f`: the composed
+    # `turn_max_index` site (§2.4 ×2, §6.1, row 7) and the LIST endpoint's `actor_user_id` condition
+    # (§7 ×2, §2.4) were in NO row at all. Both re-derived at `69d79287f5f` by OPENING the statement,
+    # not by applying the delta — verified against `ae26adf963`, where the same cites resolved:
+    # `45028` was `prior = proj.g.query(` and `50935` was `conds.insert(0, "s.actor_user_id = $uid")`.
+    (_AUDIT, 'hosted_api.py:45180-45192', 'tortoise/hosted_api.py', 45184, 'RETURN s.turn_max_index, s.turn_count, count(t)'),
+    (_AUDIT, 'hosted_api.py:45180-45197', 'tortoise/hosted_api.py', 45184, 'RETURN s.turn_max_index, s.turn_count, count(t)'),
+    (_AUDIT, 'hosted_api.py:51087', 'tortoise/hosted_api.py', 51087, 's.actor_user_id = $uid'),
+    # the same condition written BARE twice in the header's comparability clause — its own SITE
+    (_AUDIT, '`:51087`', 'tortoise/hosted_api.py', 51087, 's.actor_user_id = $uid'),
     # --- the four corrections this pass made that NO row reached (review cycle 3, F5). Each token
     # carries its own wording, not a bare number, because a bare `:NNNN` is satisfied by any sibling
     # spelling of the same digits — the defect `test_no_pinned_token_can_be_satisfied_by_a_sibling_occurrence`
@@ -499,6 +510,12 @@ _TOKEN_OCCURRENCES: dict[tuple[str, str], int] = {
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:23124`'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:23126-23128'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:23126-23128`'): 1,
+    # the composed `turn_max_index` site (long-form ×3 + row 7's own wider range) and the LIST
+    # endpoint's `actor_user_id` condition (long-form ×1, bare ×2 in the header clause)
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:45180-45192'): 3,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:45180-45197'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', 'hosted_api.py:51087'): 1,
+    ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:51087`'): 2,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:5375` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:7181` at this head'): 1,
     ('docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md', '`:6834` inside the same function'): 1,
@@ -1797,7 +1814,12 @@ def test_the_pinned_documents_are_the_ones_this_diff_shifted() -> None:
     # `value_nodes_held` statement `:24493-24497` on a quota comment (`:24646-24650`, cited at FOUR
     # sites — three long-form, one bare). Same shape as the `:6989` / `hosted_backup.py:2666` rows:
     # one ROW per SITE, and an unlisted token is coverage this file only appeared to have.
-    assert len(_PINS) == 91
+    # 86 -> 90: the `8f7724b593c` review's two "reported, not touched" sites — the composed
+    # `turn_max_index` range (§2.4 ×2, §6.1, row 7 — the last two write a WIDER range, so its own
+    # row) and the LIST endpoint's `actor_user_id` condition (long-form in §2.4, bare twice in the
+    # header's comparability clause). Both had rotted to `45028-45045` / `:50935`, both still
+    # resolved at `ae26adf963`, and NEITHER had a row that could redden. Same shape again.
+    assert len(_PINS) == 95
 
 
 def test_the_recorded_wrong_addresses_are_never_delta_shifted() -> None:

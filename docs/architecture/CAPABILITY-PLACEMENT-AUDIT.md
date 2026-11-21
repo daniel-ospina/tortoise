@@ -134,8 +134,8 @@ written line sits past the pin's `sdk.py` (56,415 lines there; `git show ccb4974
 past it — written as two code spans so they are resolved but not counted twice), `sdk.py:58923`,
 `:58265` and `:58274` (three reader cites re-derived at this head, which sits past the pin's `sdk.py`
 end), and `search_engine.py`'s `:7196`/`:7198`, whose written lines sit past the pin's `search_engine.py`
-(7,071 lines there; `git show ccb49741b2ec:tortoise/search_engine.py | wc -l`) — and `hosted_api.py`'s `:50935` (the `s.actor_user_id = $uid` condition, whose written line sits past the pin's `hosted_api.py`, 49,851 lines there) — all nine re-derived at
-a head that has since grown. So the drift is **128 of the 222 comparable, plus six of those nine pairs** (the three that do not exist at `main` either are `sdk.py`'s `:61594`/`:61614` and `hosted_api.py`'s `:50935`), and
+(7,071 lines there; `git show ccb49741b2ec:tortoise/search_engine.py | wc -l`) — and `hosted_api.py`'s `:51087` (the `s.actor_user_id = $uid` condition, whose written line sits past the pin's `hosted_api.py`, 49,851 lines there) — all nine re-derived at
+a head that has since grown. So the drift is **128 of the 222 comparable, plus six of those nine pairs** (the three that do not exist at `main` either are `sdk.py`'s `:61594`/`:61614` and `hosted_api.py`'s `:51087`), and
 the ratio below counts them rather than pretending it compares them. ⛔ **That is a fact about the drift, not a licence to
 re-derive from a symbol.**
 **The drift is 134 of those 231.** ⚠️ **These counts are a parsing decision, and this header states which
@@ -538,7 +538,7 @@ session-detail read, which is a **pure point lookup** (`MATCH (s:Session {id:$si
 the statement at all** and still returns `machine_id`, `model`, `capture_ok`, `capture_extractor`,
 `client_captured_at`, `client_captured_at_source`, `capture_lane` **and** `turn_max_index`: a property's
 capability cannot turn on a walk that is not there, which is why `turn_max_index`'s `graph` verdict rests on the
-COMPOSED site (`hosted_api.py:45028-45040`) and not on this one. ⛔ Applied consistently below: the four sibling
+COMPOSED site (`hosted_api.py:45180-45192`) and not on this one. ⛔ Applied consistently below: the four sibling
 members of verdict row 7 move into row 7b, and **no label's verdict changes** — four *properties* change row,
 which is the whole point of a census that classifies properties rather than statements. ⚠️ The rule cuts inside a
 `graph` row too: `harness` is a sibling projection in BOTH session reads (`sdk.py:58274`, `hosted_api.py:24929`) and
@@ -561,7 +561,7 @@ property participates in a walk, not by which query happens to mention it.**
   capability is needed to read it (§2.4's sibling rule).
 
 **`turn_max_index` is `graph`**, by the composed rule and one query family over — but the justification is
-**single-site**, and an earlier draft of this paragraph claimed two. At `hosted_api.py:45028-45040` the
+**single-site**, and an earlier draft of this paragraph claimed two. At `hosted_api.py:45180-45192` the
 returned answer IS composed with the walk: `total = int(nodes or 0)` then `total = max(total, mark + 1)`,
 the anti-phantom prior count. At `sdk.py:4368-4375` the walk supplies a **sibling column** —
 `_prior_mark_index(_prior[0][0], _prior[0][1])` takes only `turn_max_index` and `turn_count`, and
@@ -581,7 +581,7 @@ MIXED set, and precision here is the point — it is not one claim:
   the statement at all); **`actor_user_id`** is a sibling in that same LIST row (`hosted_api.py:24929`) and in the
   session-detail endpoint's OWN point lookup, which has no `CONTAINS` walk either
   (`hosted_api.py:25148-25167`, `s.turn_count, s.actor_user_id, s.harness,` at `:25151`), a filter
-  in the **LIST** endpoint's own conditions (`hosted_api.py:50935`, `s.actor_user_id = $uid`) and carries its own `:Session` index
+  in the **LIST** endpoint's own conditions (`hosted_api.py:51087`, `s.actor_user_id = $uid`) and carries its own `:Session` index
   (`projection/__init__.py:21185`) — sibling, filter, index, and no walk, so `none` like its neighbours;
   `entity_links_attempted` is a sibling column of the entity-link walk
   (`session_schema.py:916-917`); `value_nodes_created` and `value_nodes_held` are BOTH named by the commit-path
@@ -736,7 +736,7 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 | 5 | `:Event` core | §2.3 | **yes** — `aboutObject`/`aboutSubject` adjacency **and a fulltext index on `subject`/`name`** | **graph** | lifecycle edges are how status folds, and `name`/`subject` are FTS fields |
 | 5b | `:Event.project` (a passthrough property) | **no Cypher names it** — written through the Event passthrough (`projection/entities.py:2022-2030` records the measurement: `create_event(…, project="kept-228")` lands it while `story_arc` is denied), read back only by the `:Event` **whole-node** reads — at least the **eight** §2.3 names (`session_indexer.py:746`, `record_reconcile.py:533`, and the six in `sdk.py` at `:40752`, `:41271`, `:52042`, `:52143`, `:52149`, `:53744`) | **no** — `none` capability | **`record_only`** (property-level) | the same class rows 9 and 14 are in: reachable through `RETURN properties(n)` and nothing else — and, like them, a property-level placement ruling rather than a free deletion |
 | 6 | `:Session` core (`id`, `harness`, counters) | §2.4 | **yes** — `CONTAINS`, and `turn_count` is composed with two walks (above) | **graph** | the session→turn/claim walk is the read path and `turn_count` gates it. ⚠️ `harness` is in this row for identity only: it is a **sibling** projection in both session reads and `none`-capability (§2.4) — do not read the row as a verdict on every member |
-| 7 | `:Session` properties whose ANSWER is **composed with a walk** (`turn_max_index`, `entity_links_created`; `turn_count` is in row 6 and is composed the same way) | `hosted_api.py:45028-45045` (`RETURN s.turn_max_index, s.turn_count, count(t)` → `max(count(t), mark + 1)`, the anti-phantom prior count); `session_schema.py:908-918` (`WHERE live_edges > s.entity_links_created`, `live_edges` from two `aboutObject` walks); `session_schema.py:855-862` (`WHERE stored_turns < s.turn_count`, `stored_turns` from the `CONTAINS` walk). ⚠️ `sdk.py:4373-4380` returns the mark but consumes it WITHOUT the walk — a SIBLING site, not a carrying one (§2.4) | **yes** — the returned figure is a function of the property AND the walk | **graph** | the shortfall count, the entity-link under-count and the hosted prior-count each compare a walk-derived number to the property; no `public.session` row answers any of them alone |
+| 7 | `:Session` properties whose ANSWER is **composed with a walk** (`turn_max_index`, `entity_links_created`; `turn_count` is in row 6 and is composed the same way) | `hosted_api.py:45180-45197` (`RETURN s.turn_max_index, s.turn_count, count(t)` → `max(count(t), mark + 1)`, the anti-phantom prior count); `session_schema.py:908-918` (`WHERE live_edges > s.entity_links_created`, `live_edges` from two `aboutObject` walks); `session_schema.py:855-862` (`WHERE stored_turns < s.turn_count`, `stored_turns` from the `CONTAINS` walk). ⚠️ `sdk.py:4373-4380` returns the mark but consumes it WITHOUT the walk — a SIBLING site, not a carrying one (§2.4) | **yes** — the returned figure is a function of the property AND the walk | **graph** | the shortfall count, the entity-link under-count and the hosted prior-count each compare a walk-derived number to the property; no `public.session` row answers any of them alone |
 | 7b | `:Session` telemetry — the **sibling** members of row 7 plus the remainder (`capture_ok`, `capture_extractor`, `capture_lane`, `entity_links_attempted`, `harness`, `actor_user_id`, `capture_redactions`, `machine_id`, `model`, `client_captured_at*`, `value_nodes_*`, `draft_count`, `commit_count`) | **sibling columns / plain projections** — `hosted_api.py:24909-24941` (`list_sessions`: `s.machine_id, s.model` at `:24930`, `s.capture_ok, s.capture_extractor` at `:24936`, the provenance triplet at `:24940`, each beside `count(p)`), `sdk.py:58272-58296` (the session-detail point lookup — **no walk in the statement**), `session_schema.py:855-861`/`:916-917` (reported beside the retrofit walks), `sdk.py:19302`; point lookups and `SET`-that-reads: `hosted_api.py:22415-22416` (the commit-state load, which names BOTH `value_nodes_*` members), `:23124` (`value_nodes_created`, inside the commit atom), `:23126-23128` (`draft_count`, `commit_count`), `:24646-24650` (**`value_nodes_held`** — its own `:Session` `MERGE`/`SET` with no `:CommitRecord` in the statement, §2.4's split), `sdk.py:4234-4237`; whole-node reads for `capture_redactions` (`tools/backfill_copy_turns.py:188-192`, `projection/__init__.py:14484`) | **no** — `none` capability | **`record_only`** (property-level; §6.1) | read, but by nothing that needs the graph — property projections, property guards and node dumps, not edges. ⚠️ **The four sibling members (`capture_ok`, `capture_extractor`, `capture_lane`, `entity_links_attempted`) were in row 7 until the `#13095` review**; they are siblings of the walks that made the round trip look, and §2.4's rule is what moved them. The counter increments stay graph-coupled, so see §6.1 |
 | 8 | `:Object` / `:Subject` core | §2.5 | **yes** — `aboutObject` adjacency (`assembly.py:2632`), the `-[r]->` walk (`sdk.py:37875`) **and a fulltext index on `name`** | **graph** | an Event reaches its Object by EDGE; ⚠️ `supersededBy` is a **string matched by equality** (`audit.py:817`), not a walk — SQL-shaped, and an earlier draft wrongly cited it as the reason |
 | 9 | `story_arc` (on **any** label) | **no Cypher query NAMES it** — but six whole-node reads carry it (`sdk.py:27769`, `:28668`, `:30326`, `:30422`, `:30521`, `:44150`); capability **`none`** | **no** | **`record_only`** ⛔ **move gated on a deliberate pin decision** (§5.1) | its one NAMED reader is `public.session_narrative`; the graph carries it only via `RETURN properties(n)`, which is `none`-capability by the same disposition row 14 gives `Point.mentions`; the mechanism CAN deny it, two policy pins currently refuse the entry |
@@ -1058,7 +1058,7 @@ What remains a placement question is the **remainder plus the four siblings** �
 
 ⚠️ `turn_max_index` is **NOT** in this remainder: it is `graph` (row 7). An earlier draft listed it here as
 `none` on the strength of the session-detail read (`sdk.py:52283`) alone, missing the reader whose ANSWER is
-the mark/count comparison over the `CONTAINS` walk (`hosted_api.py:45028-45040`) — row 7's rule applied to a
+the mark/count comparison over the `CONTAINS` walk (`hosted_api.py:45180-45192`) — row 7's rule applied to a
 property, the same sibling confusion `capture_lane` records above, one property later. (That justification is ONE
 site: `sdk.py:4368-4375` returns the mark but consumes it without the walk, and is cited in row 7 only for that
 contrast.)
