@@ -307,7 +307,13 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # unguarded. It read `:15750`, the +55 offset carried on a bare span while its sibling `:15842`
     # got the +55 too but the ADDRESS ten lines above kept a delta from the wrong boundary. The
     # assembly's `first = ""` is `:15805` at this head; at the pin `ccb49741b2ec` `:15750` was
-    # CHANGE_FEED docstring prose, so the sentence was false on EVERY head it declares.
+    # the `#6151` CALIBRATION-BASELINE comment at that line — the text reads "forever and
+    # compute_confidence(require_calibration=True) raised", about `_existing_label` / `baseline_set`,
+    # not the assembly either, so the sentence was false on EVERY head it declares. ⛔ That descriptor is
+    # stated from the line and not from memory: the nearest CHANGE_FEED occurrence at the pin is
+    # `:13665`, ~2,000 lines above `:15750` — the first edition of this comment called `:15750`
+    # "CHANGE_FEED docstring prose", which is the same class of untested claim about a LINE this whole
+    # file exists to stop, so it is corrected here rather than carried.
     # NON-VACUOUS, MEASURED both ways: restore the pre-fix `:15750` and the token arm reds; keep the
     # token and move the pin's line to `15750` and the CONTENT arm reds with "that line reads 'types.
     # It is an off-by-default additive response field' ".
