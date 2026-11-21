@@ -110,7 +110,7 @@ The remaining two ✗ rows — success-path stage metrics and the scaling unit �
 - **Storage:** **PostgreSQL + pgvector**. Not a bespoke vector engine — the same stack we chose in `STORAGE-ARCHITECTURE.md` §12.1c.
 - **Retrieval:** *"Recall combines **vector, keyword, graph, and temporal** search **in parallel**"* — we run three of those
   four legs and **already dispatch them concurrently** (`degradation_chain` → `ThreadPoolExecutor(max_workers=3)`, 500 ms collective
-  cap, since `#7780`). The stage still measures **1,199 ms**, so what remains is contention and cap overrun, not sequencing — a
+  cap, landed in `4abff72cbb`, 2026-08-04). The stage still measures **1,199 ms**, so what remains is contention and cap overrun, not sequencing — a
   distinction the plan's D2 has to get right, because it changes what `#14192` should build.
 - **The sentence that should reorganise our roadmap:** *"The design shifts **LLM cost to writes** … Embeddings, fact
   extraction, and graph structures are **prepared during retention to reduce retrieval-time work**."* We do the exact
