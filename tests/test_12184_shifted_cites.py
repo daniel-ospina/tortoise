@@ -165,7 +165,7 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # every entry it re-derives, and this one had none. The `g.query(` call is `:11589` here; the
     # document cites the query LITERAL's first line, which is `:11590` (`#14169` moved it from `:11281`, which
     # in turn had moved from `:11280`; the call is `:11589` at this head); its siblings in the same
-    # paragraph follow the same convention — `sdk.py:31533` is the literal while `:31377` is the call).
+    # paragraph follow the same convention — `sdk.py:31533` is the literal while `:31532` is the call).
     (_AUDIT, "`mcp_server.py:11590`", _MCP, 11590, "OPTIONAL MATCH (t)<-[:TAGGED]-(q)"),
     # ⛔ The SAME address has a SECOND written site — the header enumeration spells it BARE
     # (`` `mcp_server.py:5250`/`:8515`/`:11590` `` on this head; `:5184`/`:8206`/`:11281` before
@@ -189,17 +189,20 @@ _PINS: tuple[tuple[str, str, str, int, str], ...] = (
     # (`.venv/bin/python -c 'from pathlib import Path; t=Path("docs/architecture/
     # CAPABILITY-PLACEMENT-AUDIT.md").read_text(); print(t.count("`:11590`"))'` -> 3), with the site
     # lines RE-MEASURED on this document rather than carried — `grep -n '`:11590`' on the MERGED
-    # document gives `:179` / `:225` / `:652` (`:173`/`:186`/`:592` were the pre-`#14169` sites, and
-    # `:173`/`:186`/`:592` are kept only as the pre-`#14169` history they are). They have moved twice since the pre-merge `:182`/`:585`
+    # document gives `:179` / `:225` / `:652`. ⛔ `:173`/`:186`/`:592` below are the `d009f5d8916d`
+    # edition's, not the pre-`#14169` head's (that one already read `:179`/`:225`/`:645`): they are kept
+    # as history, never as a delta to apply. They have moved twice since the pre-merge `:182`/`:585`
     # edition: `main`'s merge `0656b056d7` shifted two of them, the P2 fix above (which sits BETWEEN
     # them) added +2 to the third, and the two-line "five pairs as two code spans" correction
     # (#13991 review P2-A, which sits ABOVE all three) then shifted every one of them by +2 again —
     # which is why this block states the MEASUREMENT and not a delta:
-    #   :179  the header trio above — main's site, the one this row was created for (was `:173`);
-    #   :225  the §2.5 `:Tag`-family enumeration this branch adds (was `:186`), which lists all five reader
+    #   :179  the header trio above — main's site, the one this row was created for (`:173` at
+    #         `d009f5d8916d`);
+    #   :225  the §2.5 `:Tag`-family enumeration this branch adds (`:186` at `d009f5d8916d`), which lists all five reader
     #         addresses (the four `sdk.py` ones plus this `mcp_server.py` one) as BARE siblings so the
     #         `_REDEFINED_13854` one-token counts are not doubled;
-    #   :652  the same branch's §2.5 provenance sentence (was `:592`), `:11280` -> `:11281`, later moved to `:11590`
+    #   :652  the same branch's §2.5 provenance sentence (`:592` at `d009f5d8916d`, `:645` just before
+    #         `#14169`), `:11280` -> `:11281`, later moved to `:11590`
     #         by `#14169` — the ONE surviving `11281` spelling, kept because it is history, not an address.
     # Re-derive with `grep -n '`:11590`' docs/architecture/CAPABILITY-PLACEMENT-AUDIT.md` before
     # trusting this list on a later head: a line number in prose is exactly the claim this file pins
