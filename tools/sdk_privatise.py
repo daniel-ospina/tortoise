@@ -434,8 +434,10 @@ SWEEP_NAMES = 66
 #: to be measured with the same measure the pin uses. Corrected here by the row-set diff above, run on
 #: both trees, with each row's file and count named.
 #: ⛔ NO NEW SHAPE APPEARED — the one thing a re-cut must never absorb silently. All three spellings
-#: are already pinned shapes on this tree: `graph.query` is a pinned row (274 here), and `client.delete`
-#: occurs 45 times across the tracked tree at this head EXCLUDING this file's own prose
+#: are already pinned shapes on this tree: `graph.query` is a pinned row (276 here — the module's own
+#: `residue` row, re-measured at the FOURTH merge tree, whose `#14068` moved it +2 from the 274 this
+#: clause carried before it), and `client.delete` occurs 45 times across the tracked tree at this head
+#: EXCLUDING this file's own prose
 #: (`git grep -hoE '\bclient\.(query|update|delete)\b' HEAD -- '*.py' ':!tools/sdk_privatise.py' |
 #: sort | uniq -c` → 45). ⛔ The UNFILTERED form of that same command prints **50** at this head —
 #: 45 plus the token's five mentions in this file's own prose (four `#:` lines above, and the
