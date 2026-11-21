@@ -481,7 +481,7 @@ Two releases, in sequence:
 
 | Signal | Value |
 |---|---|
-| GitHub stars | **33,448** (`topoteretes/cognee`, Apache-2.0) — `api.github.com` read 2026-11-21. **Up from 30,642 on 2026-09-11** (+2,806 in ~10 weeks). 3,543 forks, 1,112 open issues. More stars than Letta's main repo |
+| GitHub stars | **33,448** (`topoteretes/cognee`, Apache-2.0) — `api.github.com` read 2026-11-21. **Up from 30,642 on 2026-09-11** (+2,806 in ~10 weeks). **More stars than Letta's main repo** (24,699 — the 2026-09-11 read; see §10) |
 | Companies | **"More than 500 companies build with cognee"** in software, finance, legal, pharma, research and education (Cognee's own claim, 2026-11-19) |
 | GitHub forks / contributors | **3,543 forks** / 304 contributors (forks read 2026-11-21; contributors are the 2026-09-11 read) |
 | GitHub open issues | **1,112 open issues including PRs** (`open_issues_count`, 2026-11-21 — GitHub's counter includes PRs; the 2026-09-11 read was 221 issues / 520 incl. PRs) |
@@ -498,7 +498,7 @@ Two releases, in sequence:
 
 🔄 **Changed 2026-11-21:** stars 30,642 → **33,448** (API read), forks 3,015 → **3,543**, open issues 520 → **1,112** incl. PRs, and the "more than 500 companies" figure added. PyPI/Discord and contributor figures remain the 2026-09-11 reads and are marked as such.
 
-[Source](https://api.github.com/repos/topoteretes/cognee) · [pypistats](https://pypistats.org/api/packages/cognee/recent) · [BEAM benchmarking post](https://www.cognee.ai/benchmarking-cognee-on-beam) · [cognee.ai/research-and-evaluation-results](https://www.cognee.ai/research-and-evaluation-results) · ["Meet the new cognee"](https://www.cognee.ai/new-cognee-experience) (stars + companies) — retrieved 2026-11-21
+[Source](https://api.github.com/repos/topoteretes/cognee) · [pypistats](https://pypistats.org/api/packages/cognee/recent) · [BEAM benchmarking post](https://www.cognee.ai/benchmarking-cognee-on-beam) · [cognee.ai/research-and-evaluation-results](https://www.cognee.ai/research-and-evaluation-results) · ["Meet the new cognee"](https://www.cognee.ai/new-cognee-experience) (stars) · ["What Are 500+ Companies Actually Building with AI Memory?"](https://www.cognee.ai/ai-memory-use-cases) (companies) — retrieved 2026-11-21
 
 *Last checked: 2026-11-21.*
 
@@ -547,7 +547,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 
 | Channel | Letta | Cognee |
 |---|---|---|
-| GitHub | 24,699 stars (letta) + 3,274 (letta-code), 155 contributors | **33,448 stars**, 3,543 forks (2026-11-21; was 30,642 / 3,015 on 2026-09-11), 304 contributors (2026-09-11 read) |
+| GitHub | 24,699 stars (letta) + 3,274 (letta-code), 155 contributors — the 2026-09-11 read | **33,448 stars**, 3,543 forks (2026-11-21; was 30,642 / 3,015 on 2026-09-11), 304 contributors (2026-09-11 read) |
 | Discord | **11,911 members / 1,188 online** | **4,078 members / 270 online** |
 | npm / PyPI | 288,317 npm downloads/mo | 151,729 PyPI downloads/mo |
 | X/Twitter | Company handle not confirmed (footer link only) | Third-party advocate posts embedded on homepage (@svpino, @akshay_pachaar, @iruletheworldmo); no verified company follower count |
@@ -696,7 +696,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 - ⚠️ **Cloud default LLM conflict:** the pricing-page footer says Cloud runs on `gpt-oss-120b`; the 2026-11-19 post names `gpt-5.6-luna` as "cognee's default LLM" when computing its 35 s baseline. Both recorded; unresolved which is the live default.
 - ⚠️ **The `$570/GB` and `30×` figures are Cognee's own estimates** against an *"estimated"* LLM baseline on a single Apple M4 Pro, not a reproduced measurement. Treated as vendor claims.
 - ⚠️ **The OSS extractor is not the accurate one:** Cognee states the open-source LLM-free extractor is *"a demo you can experiment with, while the production extractor, which offers higher accuracy and broader label coverage, is available through Enterprise"* — so the headline local-extraction numbers describe the less accurate tier. Do not read "LLM-free and 30× faster" as "as good as the LLM path".
-- ⚠️ **"500+ companies"** is Cognee's own claim on its 2026-11-19 post; no independent confirmation (the older "70+ deployments incl. Bayer" single-source note still stands as a separate, smaller figure).
+- ⚠️ **"500+ companies"** is Cognee's own claim, carried in the preview text of its 2026-11-19 post *"What Are 500+ Companies Actually Building with AI Memory?"* rather than in the launch post's body — no independent confirmation (the older "70+ deployments incl. Bayer" single-source note still stands as a separate, smaller figure).
 - ⚠️ **No public ARR, headcount, or churn** after the Premium launch; the $99 price is published but attach rate is unknown.
 - ⚠️ **Auto-ontology accuracy unmeasured:** no published evaluation of the generated taxonomy (precision/recall of type assignment), and no third-party review found.
 
