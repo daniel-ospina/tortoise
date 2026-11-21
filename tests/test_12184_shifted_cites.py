@@ -1773,23 +1773,31 @@ def test_a_carried_forward_figure_is_reported() -> None:
         # the loop's assertion messages interpolate `why`, and a measurement table inside one of them
         # buries the mismatch a failing row is trying to report (`#14038` review). The row shipped a
         # literal `{2: alt_drifters + 7}` and the band's headroom is a property of the DOCUMENT.
-        # ⛔ MEASURED here: 3 UNCCOUNTED added pairs (the `_TWO_SPAN_NEW` arm's numeral, `**three**`), and
-        # the document also writes 5 two-code-span pairs IN TOTAL (`**five**`) — that `5` is
-        # `3 uncounted + 2 already counted`, so it is NOT the headroom and must not be read as one; the
-        # uncounted count has not moved off 3 on this branch. A fixed `+offset` therefore becomes a LEGAL
-        # value when `extra_pairs - (alt_drifters - drifters) >= offset`, which is `extra_pairs >= 10` at
-        # this head, NOT `>= 7`: at extra_pairs=8 the band is `155..163` and the `+7` value 165 is still
-        # outside it, and at 9 it is `155..164` against 165 — both measured — and only at 10 does the band
-        # reach 165 and fall silent, leaving the band's RULE-2 assertion to red blaming a band that is
-        # present and right (#14038 review, P3).
+        # ⛔ TWO different distances, named here so they are not swapped again: the band's SLACK below its
+        # edge is `extra_pairs - (alt - primary)` — MEASURED 0 or 1 over every edition this branch has
+        # carried (`extra_pairs` 1..4 against a gap of 1 or 3) — and the `+7` literal sits ABOVE the edge
+        # by `7 - slack`, i.e. 6 or 7, which is the figure this rationale once published under the slack's
+        # name (0 is not 6). So the literal never went legal here.
+        # ⛔ TWO counts must not be confused: 3 UNCOUNTED added pairs here (the `_TWO_SPAN_NEW` arm's
+        # numeral, `**three**`), and 5 two-code-span pairs IN TOTAL — the document writes that total
+        # UNBOLDED, `The document also writes five pairs as two code spans` (its only `**five**` is
+        # unrelated, §2.5's `:Tag` count), so grep the sentence, not the marker — that `5` is
+        # `3 uncounted + 2 already counted`, so it is NOT the headroom and must not be read as one. That
+        # misreading is how this rationale first claimed the branch 'had already carried 5'; the
+        # uncounted count has never left 3..4 on this branch (5 exists only on `feat/13971-point-strip`).
+        # A fixed `+offset` therefore goes legal when `extra_pairs - (alt_drifters - drifters) >= offset`,
+        # which is `extra_pairs >= 10` at this head, NOT `>= 7`: at extra_pairs=8 the band is `155..163`
+        # and the `+7` value 165 is still outside it, and at 9 it is `155..164` against 165 — both
+        # measured — and only at 10 does the band reach 165 and fall silent, leaving the band's RULE-2
+        # assertion to red blaming a band that is present and right (#14038 review, P3).
         (
             alt,
             {2: _drifters + two_span_uncounted + 1},
             "the alternative basis's numerator is overstated past what its added pairs can contribute — the "
             "direction a stale figure takes when a denominator moves under it. ⛔ DERIVED from the band's "
-            "own edge (`primary + extra_pairs`), not a fixed offset: `two_span_uncounted` is graded equal "
-            "to that count by the `_TWO_SPAN_NEW` arm, so this anchor is always exactly one above the "
-            "upper edge (the measurement behind the derivation is in the comment above)",
+            "own edge (`primary + extra_pairs`), not a fixed `+7`; `two_span_uncounted` is graded equal "
+            "to `extra_pairs` by the `_TWO_SPAN_NEW` arm, so this anchor is always exactly one above the "
+            "upper edge (the measurements behind it are in the comment above)",
         ),
         (
             alt,
