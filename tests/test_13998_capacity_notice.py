@@ -2987,3 +2987,79 @@ def test_a_schema_without_the_billing_contact_column_still_notifies():
     assert out["statuses"]["sent"] == 1
     assert any("customer_email" not in select for select in cp.calls), (
         "the retry must actually drop the rejected column")
+
+
+def test_the_owner_rung_is_paid_once_per_DUE_account_not_once_per_send():
+    """⛔ THE COST BOUND, MEASURED — because the published one was false.
+
+    `_notice_recipient`'s docstring said rung 3 is reached "at most ``max_sends``
+    times per pass". It is not: `sweep_pass` stops calling `notify_account` once
+    `sent` reaches the cap, and a due account that does NOT send (no address on
+    any rung, a budget-skipped send, a provider failure) never increments `sent`,
+    so the loop never `continue`s past it for that reason and the next account is
+    processed — paying rung 3 again. Three due addressless accounts at
+    `max_sends=1` pay it three times.
+
+    This grades the CLAIM as well as the measurement. The sentence is prose, so no
+    other arm in this suite can see it rot back: reverting the docstring to the
+    `max_sends` bound reds HERE even though the code is unchanged.
+    """
+    calls: list[str] = []
+
+    def _owner(cp, org_id):
+        calls.append(org_id)
+        return None
+
+    rows = [_org_row(id=f"team-rung3-{n}", email=None, customer_email=None)
+            for n in range(3)]
+    cp = FakeControlPlane({"organizations": rows})
+    with patch("tortoise.quota.resolve_org_limits", lambda org_id: _limits(102)), \
+         patch("tortoise.allowance_gate.read_dimension",
+               lambda dimension, org_id: _Reading(90.0)), \
+         patch("tortoise.supabase_control.owner_email", _owner):
+        out = _pass(cp=cp, send=_Sender(), max_sends=1,
+                    enumerate_orgs=lambda limit=None: rows)
+    assert out["sent"] == 0, "nothing could send, so the cap never bit — the case under test"
+    assert len(calls) == 3, (
+        "the rung is paid once per DUE ACCOUNT, not once per send: measured "
+        f"{len(calls)} invocations at max_sends=1")
+    doc = cn._notice_recipient.__doc__ or ""
+    assert "at most ``max_sends`` times" not in doc, (
+        "the docstring re-asserts a bound `sweep_pass` does not implement — the "
+        "send cap bounds SPEND, not this read")
+    assert "DUE ACCOUNT" in doc, (
+        "the docstring must publish the true bound it does have: one call pair "
+        "per DUE account per pass")
+
+
+def test_a_failed_owner_lookup_is_logged_and_not_reported_as_absent(caplog):
+    """⛔ TWO STATES, ONE `None`: absent vs unreadable (#14038 fix lane).
+
+    `_owner_email` degrades to ``None`` both when the owner has no address and
+    when the lookup itself failed. The fail-soft is right; SILENCE is not — an
+    operator reading a fleet-wide `no-email` count cannot tell a GoTrue outage
+    from a population that genuinely has no address. So the degrade logs its
+    cause, and the `no-email` line no longer asserts the rung was empty.
+    """
+    cp = _fake_cp(email=None, customer_email=None)
+    send = _Sender()
+    with patch("tortoise.quota.resolve_org_limits", lambda org_id: _limits(102)), \
+         patch("tortoise.allowance_gate.read_dimension",
+               lambda dimension, org_id: _Reading(90.0)), \
+         patch("tortoise.supabase_control.owner_email",
+               side_effect=RuntimeError("control-plane read escaped")), \
+         caplog.at_level(logging.INFO, logger="tortoise.capacity_notice"):
+        out = _pass(cp=cp, send=send, enumerate_orgs=lambda limit=None: [
+            _org_row(email=None, customer_email=None)])
+
+    # The fail-soft survives the logging: the rung degrades, the account is not
+    # mailed, and nothing raises.
+    assert out["statuses"]["no-email"] == 1 and send.calls == []
+    lines = " ".join(r.getMessage() for r in caplog.records)
+    assert "RuntimeError" in lines and ORG_ID in lines, (
+        "the rung-3 degrade is silent: a GoTrue failure is indistinguishable "
+        "from an account that has no address (causes: "
+        f"{[type(r.msg).__name__ for r in caplog.records]})")
+    assert "are all empty" not in lines, (
+        "the no-address line asserts the owner rung was EMPTY, which this run "
+        "cannot know — it was unreadable")

@@ -832,7 +832,20 @@ def _owner_email(org_id: str, cp) -> str | None:
 
     try:
         return owner_email(cp, org_id)
-    except Exception:  # degrade the RUNG, never the account's notice
+    except Exception as e:  # degrade the RUNG, never the account's notice
+        # ⛔ LOGGED, NOT SWALLOWED SILENTLY: this rung answers ``None`` for TWO
+        # different states — no address, and an address that could not be READ —
+        # and `notify_account`'s ``no-email`` line is what an operator reads to
+        # diagnose a fleet-wide silence. Without this line a GoTrue/control-plane
+        # outage is indistinguishable from every account genuinely having no
+        # address, and the ``no-email`` count would be read as the second when it
+        # is the first (#14038 fix lane — the same class as the docstring that
+        # named one of two ``None`` causes).
+        logger.warning(
+            "capacity notice: the owner-address lookup for %s failed (%s) — "
+            "rung 3 degrades to no address for this pass; this is NOT the same "
+            "state as an account that has no address at all",
+            org_id, _logged_reason(e))
         return None
 
 
@@ -858,8 +871,20 @@ def _notice_recipient(account: Account, cp) -> str | None:
        this rung is what closes the common session-lane case.
     3. ``supabase_control.owner_email`` — the ACTIVE OWNER's GoTrue address
        (``#1765``'s promoted property, the rung `_billing_owner_email` calls).
-       Two network calls, so it is reached ONLY for an account whose notice is
-       already known to be due — at most ``max_sends`` times per pass.
+       Two BLOCKING calls, so it is reached ONLY for an account whose notice is
+       already known to be due.
+
+    ⛔ "DUE" IS NOT "``max_sends``", AND AN EARLIER CUT SAID IT WAS — "at most
+    ``max_sends`` times per pass" — which is MEASURED FALSE (#14038 fix lane).
+    `sweep_pass` stops calling `notify_account` once its ``sent`` count reaches the
+    cap; a due account that does NOT send (no address on any rung, a budget-skipped
+    send, a provider failure) never increments ``sent``, so that loop's `continue`
+    never fires for it and the pass walks straight past it, paying the rung again
+    for the next one. Measured: three due addressless accounts at ``max_sends=1``
+    pay it THREE times, asserted by
+    ``test_the_owner_rung_is_paid_once_per_DUE_account_not_once_per_send``. The
+    true bound is ONE CALL PAIR PER DUE ACCOUNT PER PASS — the DUE POPULATION, not
+    the send cap. The cap bounds SPEND; it has never bounded this read.
 
     ⛔ RESIDUAL, STATED RATHER THAN IMPLIED: an account with none of the three
     (a registry/agent-minted org carries no address at all) still answers
@@ -867,6 +892,15 @@ def _notice_recipient(account: Account, cp) -> str | None:
     nobody to greet. What changed is that the RUNG ORDER now lets the notice reach
     the account that HAS an address anywhere on these surfaces, instead of only the
     ones whose row happens to carry the one column this module used to read.
+
+    ⛔ AND FOR THAT ACCOUNT THE COST IS PER-PASS, NOT ONCE: it is never stamped
+    (nothing was sent), so every later pass re-resolves it and pays rung 3 again.
+    Comparable notification systems close that with a durable suppression ledger
+    consulted BEFORE a retry and bound the transient case with backoff; this
+    module does not adopt one here, because its only ledger is
+    `organizations.storage_notice_pct`, whose contract is sent-then-stamp after
+    the provider ACCEPTS — an "unsendable" mark would be a SECOND ledger, i.e. a
+    schema change and a decision for #13998's owner rather than for a fix lane.
     """
     for candidate in (account.email, account.customer_email):
         if candidate and str(candidate).strip():
@@ -1006,8 +1040,11 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
         # greets a PERSON, so there is nobody to greet.
         logger.info(
             "capacity notice: team %s owes the %s%% notice but resolves no "
-            "address (organizations.email, organizations.customer_email and the "
-            "owner's GoTrue email are all empty) — nothing is sent for it",
+            "address — organizations.email and organizations.customer_email are "
+            "empty, and the owner's GoTrue address answered none EITHER (absent, "
+            "or the lookup FAILED and logged a warning above; the two states are "
+            "not the same and this line does not claim which) — nothing is sent "
+            "for it",
             org_id, notice.threshold)
         return {"status": "no-email", "org_id": org_id}
     copy = render(notice.threshold,
