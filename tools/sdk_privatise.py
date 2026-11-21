@@ -943,7 +943,7 @@ SWEEP_NAMES = 66
 #:   names;
 #: * `cur['proj'].g.query` 2 → 4 (+2, the same row) — the FalkorDB project-graph readers in
 #:   `tools/miss_rate_m5.py` / `tools/window_quality_m2.py` (#14162, the M5 miss rate), expanded. The
-#:   row KEY is `ast.unparse(receiver)[:40]` (`:1400` in this file), and `ast.unparse` NORMALISES
+#:   row KEY is `ast.unparse(receiver)[:40]` (`:1403` in this file), and `ast.unparse` NORMALISES
 #:   quote style (`cur["proj"]` and `cur['proj']` are the SAME key), so a re-spelling cannot move a
 #:   row — only added receivers do;
 #: * `terms.update` 0 → 1 (one NEW shape) — a plain Python `set[str].update` in
