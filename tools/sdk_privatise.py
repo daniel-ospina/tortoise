@@ -1015,7 +1015,14 @@ SWEEP_NAMES = 66
 #: direction. Every row is an ordinary-word receiver on an object no typing can decide, which is
 #: what this counter exists to report; `typed references still pointing at a public name` stays
 #: **0**, so no SDK-typed site is legitimised.
-SWEEP_RESIDUE = (11856, "d7fc1586144e750e")
+#:
+#: RE-CUT → (11857, "ed40203dbbf32b87") by this lane's round-7 rows, ON THE MERGED TREE (a sixth
+#: tree, so the pair is `--repin`'s own output and neither side's figure is carried). The +1 over the
+#: 11856 this block pinned is ATTRIBUTED by the tool's row diff: exactly one row moves —
+#: `super().query` 74 → 75, the `_EventGraph` fake in `tests/test_14012_outside_view.py` delegating to
+#: its parent for the statements it does not answer (the end-to-end per-label timestamp row).
+#: `typed references still pointing at a public name` stays **0**.
+SWEEP_RESIDUE = (11857, "ed40203dbbf32b87")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
