@@ -1441,9 +1441,15 @@ def test_measure_e6_reports_an_unloadable_registry_as_a_named_gap(tmp_path, monk
     assert broken["declared"] == 0 and broken["defects"] == [], broken
     # ⛔ AND IT PUBLISHES NO COUNT FOR A COLUMN NO CENSUS WAS READ FOR (#14060 round 20, P3,
     # measured): this path returns BEFORE any census exists, so `written` must be the all-`None`
-    # marker, not the four zeros `measure_e6` initialises. Unpinned until now — deleting that
-    # assignment (the last commit's mutant `e`) left this whole file's red set UNCHANGED
-    # (27 before, 27 after, identical ids), because this case never read the cells and both
+    # marker, not the four zeros `measure_e6` initialises. Unpinned until now, and that is measured
+    # rather than asserted by a count: with THIS line removed, the mutant leaves the case green —
+    # none of its other assertions reads `written` — so the only red it caused was POSITIONAL
+    # (one line deleted above the three probe cites that `tools/capstone_verdict_check.py` types
+    # shifts all of them, redding `test_the_probes_cross_file_cites_resolve_to_the_symbols_they
+    # _name`), which is no witness of the cells at all. That is exactly why the pin below exists,
+    # and no count is quoted here: a count would re-stale the moment another row moves a line —
+    # the drift this file's own cites are pinned against. The cause is structural: this case never
+    # read the cells and both
     # renderers key off `written_source`, never off the dict. The wrong-shape arm pins the two
     # OTHER refusal paths (non-object census, population guard); the loader fault is this one,
     # and no other arm patches `_pack_census_module` to raise.

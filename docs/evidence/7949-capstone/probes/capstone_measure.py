@@ -5050,13 +5050,18 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         # does not add up …`, `… N row(s) … could be enumerated`) that no registry had anything
         # to do with — rendered into a COMMITTED, scored log. `build_e6_row`'s note was fixed
         # for this in round 9 and its sibling here was left asserting the same false cause; this
-        # is the line the log actually reads, so this is the one an arm below drives.
+        # is the line the log actually reads, so this is the one
+        # `test_the_renderer_renders_a_log_from_the_committed_record` drives, through its
+        # `gap_lines` block in tests/test_7949_capstone_measure.py — this file carries no arms.
         add(f"e6 error: {e6['error']}")
     written = e6.get("written") or {}
     written_source = e6.get("written_source")
     # ⛔ AND THE COMMITTED LOG MAY NOT PRINT A COUNT IT NEVER READ EITHER (#14060 review round
     # 16, P3 — the same sentence one renderer over): this line printed `unmeasured=0 …` beside
-    # `source=not read — …` for every refused row. The two renderers are pinned together below.
+    # `source=not read — …` for every refused row. The two renderers are pinned together in
+    # `test_the_renderer_renders_a_log_from_the_committed_record` — its `gap_lines` block for the
+    # `e6 error:` line above and its `written_lines` block for THIS one, which reads the rendered
+    # LINE, so a fix to `build_e6_row`'s note alone cannot pass it.
     add("e6 written (REPORTED BESIDE the bar, NEVER the bar — A1 owns the written "
         "graph): "
         + (f"NOT MEASURED — no cell was read: "
