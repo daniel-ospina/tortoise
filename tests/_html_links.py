@@ -214,7 +214,16 @@ class _AnchorHrefParser(HTMLParser):
     * **Not a link** — comments; the contents of ``<script>``/``<style>``;
       ``<noscript>`` (raw text in a scripting-enabled browser, which is the
       default, so no anchor exists there); and the contents of ``<template>``,
-      which is parsed but never rendered. ``<textarea>``/``<title>`` are RCDATA
+      which is parsed but never rendered — **except declarative shadow DOM**, which
+      this model deliberately does not track (#14073 review round 18, P2, measured:
+      ``<div><template shadowrootmode="open"><span>CLAIM</span></template></div>``
+      has a real ``div.shadowRoot`` in Chrome and the span paints 84×17 px, ink 590
+      vs 0, while this scan returns ``''``). It is named here rather than tracked
+      because a shadow tree is a second ancestry with its own flattening order, and
+      the loud half already exists: the attribute backstop refuses the
+      ``shadowrootmode`` token, so no page using it can pass the pins silently. Also
+      declared in the same class: foreign content tracked as depth only, and
+      ``<frameset>`` trees. ``<textarea>``/``<title>`` are RCDATA
       and the stdlib parser already treats their contents as text
       (``RCDATA_CONTENT_ELEMENTS``, present on the interpreter this repo pins);
       they are listed in ``_RAW`` anyway so the answer does not depend on that
@@ -2228,8 +2237,34 @@ class _AnchorHrefParser(HTMLParser):
         the label (67 px, same as without the wrapper) while the scan returned `''`.
         What decides is whether the SELECT is rendered: with the wrapper the select is
         still rendered, and with `<div hidden><select>` it is not (0 px).
+
+        ⛔ TWO MEASURED CORRECTIONS, ROUND 18 (#14073 review, P1 + P2).
+
+        (a) THE ANCESTRY IS THE UNTRUNCATED ONE, because this question is the mirror
+        image of the one the truncation exists for. `_foster_truncated_ancestry`
+        removes frames on the FOSTER-PARENTING side, to answer "what does this TEXT sit
+        under"; but a table's foster-parenting moves the ELEMENT out and keeps it real,
+        so the `<select>`/`<option>` frames are the EVIDENCE here and truncating at the
+        table discarded exactly them:
+
+            <table><select><option><title>CLAIM</title></option></select></table>
+              -> `extract_visible_text` ''   # Chrome: the SELECT is foster-parented out
+              -> 91 px wide with the claim, 22 px without (+591 ink px), and it sits
+                 between `#storage` and `#quickstart`
+
+        i.e. a painted contradicting claim with all four `#storage` pins green. The
+        truncation's own docstring called itself "LOUD only" — true for the text
+        question, false for this one, and that sentence is now corrected there.
+
+        (b) A LABEL NEEDS A `<select>` ANCESTOR. A painted label flattens its text
+        content; a BARE `<option>`/`<optgroup>` (no select above it) does not — the
+        browser lays out its children normally, so a `<title>` inside it is
+        `display:none`. Measured on this box: `<option><title>CLAIM</title></option>`
+        -> the `<title>` rect is 0×0 and the ink delta is 0, while the option's own text
+        paints 626 px and `extract_visible_text` used to COUNT the claim (a false red
+        inside the golden). The `else label_at` fallback that allowed it is gone.
         """
-        frames = self._foster_truncated_ancestry()
+        frames = self._open_elements
         label_at = next(
             (i for i, (tag, _c, _r) in enumerate(frames) if tag in self._LABEL_RENDERS),
             None,
@@ -2240,8 +2275,9 @@ class _AnchorHrefParser(HTMLParser):
             (i for i in range(label_at - 1, -1, -1) if frames[i][0] == "select"),
             None,
         )
-        decided_by = select_at if select_at is not None else label_at
-        return all(renders for _t, _c, renders in frames[:decided_by + 1])
+        if select_at is None:
+            return False
+        return all(renders for _t, _c, renders in frames[:select_at + 1])
 
     def _text_is_painted(self) -> bool:
         """Is the text just read inside a subtree the wording pin should READ?
@@ -2306,8 +2342,15 @@ class _AnchorHrefParser(HTMLParser):
         `_UNRENDERED` inside `table>…>table` reproduced it, `object` the only exception.
 
         Approximating the insertion modes is unnecessary: truncating the ancestry at the
-        table is LOUD, because it can only REMOVE ancestors, so it turns a drop into a
-        count and never the reverse. The modes that end foster parenting — "in cell"
+        table is LOUD for the TEXT question, because it can only REMOVE ancestors, so it
+        turns a drop into a count. ⛔ NOT SO FOR EVERY CALLER — the caller that asks
+        whether a painted LABEL repaints this text needs the `<select>`/`<option>` frames
+        and truncating here REMOVED exactly those, turning a count into a drop (#14073
+        review round 18, P1, measured: `<table><select><option><title>CLAIM` returned
+        `''` while Chrome foster-parents the select out and paints the claim). That
+        caller therefore reads `self._open_elements` directly — "removes ancestors" is
+        loud only where the remaining frames are not the evidence. The modes that end
+        foster parenting — "in cell"
         (`td`/`th`) and "in caption" (`caption`) — are the ones where text stays inside
         the table, so those stop the truncation. FOSTER PARENTED ELEMENTS are the other
         half and are handled structurally, by `_clear_table_context`: a table-structure

@@ -4755,6 +4755,63 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
             f"where a painted label repaints it"
         )
 
+    # ⛔ P1, ROUND 18 — THE LABEL QUESTION NEEDS THE UNTRUNCATED ANCESTRY, and this is
+    # the shape that proved it. A `<select>` written inside a `<table>` is
+    # FOSTER-PARENTED OUT of the table by the browser, so it is real and painted — and
+    # because the label admission asked `_foster_truncated_ancestry()`, the `<select>`
+    # and `<option>` frames were cut away and the claim was dropped. Measured on this
+    # box: the foster-parented select is 91 px wide with the claim and 22 px without
+    # (+591 ink px), and it sits between `#storage` and `#quickstart` — so an
+    # end-to-end insertion left all four `#storage` pins green over a painted sentence.
+    foster_label = (
+        "<table><select><option><title>FalkorDB permanently deletes it</title></option>"
+        "</select></table>"
+    )
+    assert "falkor" in _banned_vocabulary(section.replace("</h2>", "</h2>" + foster_label, 1)), (
+        "a `<select>` inside a `<table>` is foster-parented OUT of it and painted (Chrome: "
+        "91 px with the claim, 22 px without), so the label admission must read the "
+        "UNTTRUNCATED stack — truncating at the table removed exactly the frames that "
+        "are the evidence, turning a count into a drop"
+    )
+    with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
+        _assert_storage_section_reviewed(section.replace("</h2>", "</h2>" + foster_label, 1))
+
+    # ⛔ P2, ROUND 18 — BUT A LABEL NEEDS A `<select>` ANCESTOR. Only a *select's* option
+    # is flattened to a label; a BARE `<option>`/`<optgroup>` lays its children out
+    # normally, so a `<title>` inside it is `display:none` and paints nothing. Measured:
+    # `<option><title>CLAIM</title></option>` -> the `<title>` rect is 0×0 and the ink
+    # delta is 0 (while the option's own text paints 626 px). Counting it was a false red
+    # INSIDE the golden — the wrong direction to be wrong in, but still wrong.
+    for label, markup in (
+        ("a bare `<option>`", "<option><title>FalkorDB permanently deletes it</title></option>"),
+        ("a bare `<optgroup>`",
+         "<optgroup><title>FalkorDB permanently deletes it</title></optgroup>"),
+    ):
+        bare_label = section.replace("</h2>", "</h2>" + markup, 1)
+        assert bare_label != section, f"the {label} control could not inject"
+        assert "falkor" not in _banned_vocabulary(bare_label), (
+            f"{label} with no `<select>` above it is NOT flattened to a label: a browser "
+            f"lays its children out normally, so the `<title>` is `display:none` and "
+            f"paints nothing (measured: `<title>` rect 0×0, ink delta 0)"
+        )
+
+    # ⛔ DECLARED RESIDUAL: DECLARATIVE SHADOW DOM (#14073 review round 18, P2, measured).
+    # `<template shadowrootmode>` IS rendered by a browser (Chrome: `div.shadowRoot` is
+    # the span, range 84×17 px, ink 590 vs 0), and this model drops it like any other
+    # template. Not fixed here: it needs a shadow-tree boundary that the rest of the
+    # ancestry model does not have, and the class docstring names it as a limit next to
+    # the foreign/`<frameset>` ones. What this row holds is the LOUD half — the
+    # attribute backstop refuses the mode attribute, so a page using it cannot pass
+    # silently on the pins even though the text scan is blind.
+    shadow = "<div><template shadowrootmode=\"open\"><span>FalkorDB permanently deletes it</span></template></div>"
+    assert "shadowrootmode" in " ".join(_attributes_outside_allowlist(
+        section.replace("</h2>", "</h2>" + shadow, 1)
+    )), (
+        "the text scan is blind to declarative shadow DOM, so the ATTRIBUTE allowlist is "
+        "the loud half: a page that uses `<template shadowrootmode>` must be refused "
+        "there, or this residual becomes a silent fail-open"
+    )
+
     # ⛔ P2, ROUND 12 — `-->` ENDS script-data-escaped, so the wedge must NOT fire. The
     # guard used to raise for `<script><!--<script>--></script>`, which a browser reads
     # normally (Chrome closes the script and paints what follows, 122 px), reddening the
