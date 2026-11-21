@@ -2922,6 +2922,15 @@ def test_the_select_scope_closes_on_input_and_a_nested_select_and_nothing_else()
          '<table><select><div><table><a href="/blog">L', ["/blog"]),
         ("an optgroup between the table and the select",
          '<table><select><optgroup><table><a href="/blog">L', ["/blog"]),
+        # …and only a FOSTER-PARENTED select closes (#14073 review round 21, P1,
+        # measured). A select inside a `<caption>`/cell is a legitimate table descendant
+        # and the browser keeps it open across a later `<table>` — the anchor is 0×0
+        # and `closest('select')`. A select in a ROW is foster-parented like one in the
+        # table itself, so that one still closes (anchor 11×17, outside).
+        ("a select in a caption", '<table><caption><select><table><a href="/blog">B</a>', []),
+        ("a select in a cell",
+         '<table><tr><td><select><table><a href="/blog">B</a>', []),
+        ("a select in a row", '<table><tr><select><table><a href="/blog">B</a>', ["/blog"]),
     ):
         assert extract_anchor_hrefs(markup) == expected, (
             f"{label}: an element a browser KEEPS was removed, or one it CLOSES was "
@@ -2929,6 +2938,22 @@ def test_the_select_scope_closes_on_input_and_a_nested_select_and_nothing_else()
             f"three AAA/sibling shapes and is a rendered sibling link after the table "
             f"closes the select in the fourth"
         )
+    # ⛔ THE SIBLING CLOSE ASKS "IN SCOPE" TOO (#14073 review round 21, P1, measured).
+    # A `<button>`'s rule is scope-gated, and a `<select>` is an ordinary scope boundary,
+    # so no pop happens across one — Chrome keeps the anchor inside the select at 0×0
+    # while popping through it advertised the href. The control with no boundary pops
+    # and Chrome exposes that link (9×15).
+    assert extract_anchor_hrefs(
+        '<button><select><div><button><a href="/blog">B</a></div></select></button>'
+    ) == [], (
+        "a `<button>` sibling close popped THROUGH a `<select>`: `select` is an "
+        "ordinary scope boundary, so the browser never pops the outer button and the "
+        "anchor stays inside the select (Chrome: `closest('select')`, 0×0)"
+    )
+    assert extract_anchor_hrefs('<button><div><button><a href="/blog">B</a>') == ["/blog"], (
+        "premise: with no scope boundary between them the pop DOES happen and the "
+        "anchor is a rendered link (Chrome: 9×15, not in a select)"
+    )
     assert extract_anchor_hrefs('<select><table><td><input><h2 id="qs">Q</h2>'
     ) == [], (
         "a `<h2>` after an `<input>` that never popped the select was BOUNDED: the "

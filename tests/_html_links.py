@@ -535,6 +535,13 @@ class _AnchorHrefParser(HTMLParser):
     #: boundary in BOTH lists, so `<ruby><table><rp>P<rt>CLAIM` must keep the `<rp>`
     #: (measured in Chrome: `rt.parentElement` `RP`, and nothing paints), which is what
     #: distinguishes "the ordinary list" from "any ancestor".
+    #: The scope-boundary list for the SIBLING-CLOSE walk, which includes `button`:
+    #: `button`'s own rule asks "is there a `button` in BUTTON scope", and BUTTON scope
+    #: is the one list `button` IS a boundary in (#14073 review round 21, measured). The
+    #: two lists are kept apart for the same reason `_SCOPE_BOUNDARY` is: one question,
+    #: one set.
+    _SCOPE_BOUNDARY_WITH_BUTTON = _P_SCOPE_BOUNDARY
+
     _SCOPE_BOUNDARY = _P_SCOPE_BOUNDARY - {"button"}
     #: The `_RAW` members whose CONTENT a reader DOES meet, so the visible-text
     #: recording must not drop it with the rest of the raw-text family.
@@ -1405,6 +1412,12 @@ class _AnchorHrefParser(HTMLParser):
             del self._open_elements[index + 1:]
             return
 
+    #: The frames whose insertion mode FOSTER-PARENTS a `<select>` out of the table
+    #: (#14073 review round 21, measured). `td`/`th`/`caption` are deliberately absent:
+    #: "in cell"/"in caption" insert normally, so a select inside one is a real table
+    #: descendant and survives.
+    _TABLE_FOSTER_CONTEXT = frozenset({"table", "tbody", "thead", "tfoot", "tr", "colgroup"})
+
     def _table_start_ends_an_open_select(self, tag: str) -> None:
         """A `<table>` start tag while the current node is a `<select>` CLOSES it.
 
@@ -1442,10 +1455,23 @@ class _AnchorHrefParser(HTMLParser):
         )
         if select_at is None:
             return
-        if not any(
-            open_tag == "table"
-            for open_tag, _c, _r in self._open_elements[:select_at]
-        ):
+        # ⛔ AND IT MUST HAVE BEEN FOSTER-PARENTED OUT, not merely sit under a table
+        # (#14073 review round 21, P1, measured). A select inside a `<caption>` or a
+        # cell is a LEGITIMATE table descendant and the browser keeps it open across a
+        # later `<table>`:
+        #
+        #   <table><caption><select><table><a href="/blog">B</a>
+        #     -> Chrome: the select is still open, the anchor 0×0 and `closest('select')`
+        #   <table><tr><td><select><table><a href="/blog">B</a>   -> same
+        #   <table><select><table><a href="/blog">B</a>          -> the select is
+        #     FOSTER-PARENTED OUT of the table, and only that one closes (11×17 outside)
+        #
+        # Foster parenting is exactly "the parser was in a table mode when the select
+        # arrived", which is the frame directly below it being the table or a
+        # table-structure frame — not `td`/`th`/`caption`, whose modes insert normally.
+        if select_at == 0:
+            return
+        if self._open_elements[select_at - 1][0] not in self._TABLE_FOSTER_CONTEXT:
             return
         self._close_extent("select")
 
@@ -1550,13 +1576,31 @@ class _AnchorHrefParser(HTMLParser):
 
         The spec's "pop until an `li` has been popped" / "pop the current node"
         shapes: the match and everything opened inside it goes.
+
+        ⛔ "IN SCOPE" IS THE PRECONDITION, exactly as it is for `<input>`/`</select>`
+        (#14073 review round 21, P1, measured). Every one of these rules reads *"if the
+        stack of open elements has an X element in scope"*, and an ordinary scope
+        boundary between the token and the match answers NO — so popping through it
+        closed elements a browser keeps:
+
+            <button><select><div><button><a href="/blog">B</a>
+              -> Chrome: the `select` blocks the outer `<button>`'s scope, no pop
+                 happens, and the anchor is `closest('select')`, 0×0
+              -> before this guard: ['/blog']
+
+        The walk below visits every frame, so a boundary ANYWHERE above the match
+        refuses the close; the control `<button><div><button><a href="/blog">` (no
+        boundary) still pops, and Chrome exposes that link (9×15).
         """
         for index in range(len(self._open_elements) - 1, -1, -1):
-            if self._open_elements[index][0] in targets:
+            open_tag = self._open_elements[index][0]
+            if open_tag in targets:
                 for _open_tag, opened_container, _renders in self._open_elements[index:]:
                     if opened_container and self._open_containers:
                         self._open_containers.pop()
                 del self._open_elements[index:]
+                return
+            if open_tag in self._SCOPE_BOUNDARY_WITH_BUTTON:
                 return
 
     def _remove_nearest(self, targets: tuple[str, ...]) -> None:
