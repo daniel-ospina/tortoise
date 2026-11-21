@@ -4000,6 +4000,23 @@ surfaces:
   # file, so it matches no SOURCE_PATTERN) nor tortoise/sdk.py selects anything
   # narrower, and the hook it pins lives in the read funnel every surface uses.
   - test_read_ledger.py
+  # #14011: the per-node USAGE signal (`tortoise/usage_signal.py`) and the SDK hook
+  # that feeds it. `core` is the right arm for the same reason the row above states,
+  # MEASURED the same way rather than inferred:
+  #
+  #   select(['tortoise/usage_signal.py'], 'pull_request', m)                  -> ['core']
+  #   select(['tests/test_usage_signal.py'], 'pull_request', m)                -> ['core']
+  #   select([module, test], 'pull_request', m)                                -> ['core']
+  #
+  # `usage_signal.py` matches no SOURCE_PATTERNS row, and the test file falls through
+  # `select()`'s `tests/` fallback, so both resolve to `core` — whose fallback MEMBER
+  # LIST did not contain this file, so a module-only diff ran the guard of nothing it
+  # touches. ⛔ Without this row `tools/ci_selection.py --integrity` exits 1 with
+  # `manifest drift: ['test_usage_signal.py']`, which is the REQUIRED
+  # `manifest-integrity` leg — red on `main` too, so this registration is also
+  # #14070's fix. The PR body's own verification command
+  # (`TORTOISE_TEST_CARVE_OUT=1`) is inert for this file: it is NOT in `carve_out:`.
+  - test_usage_signal.py
   - test_5509_name_keyed_identity_reads.py
   - test_7925_route_parity.py
   # #6211: `tortoise/ep.py` and `tortoise/sdk.py` are SHARED_MODULES, so a
@@ -9131,6 +9148,34 @@ surfaces:
   - test_cache_evict_cli.py
   - test_cache_eviction_evictor.py
   - test_cache_eviction_evictor_pins.py
+  # #13123: the eviction path's OWN end-to-end suite — delete a node through
+  # `evict()`, then ask the cache the degraded read path actually consults
+  # (`FallbackSnapshotStore.get_or_build`) what it serves now. ⛔ Without this row the
+  # file is in NO surface and `ci_selection.py --integrity` lists it as manifest
+  # drift, redding `manifest-integrity` — measured on PR #14067 at `05802ec1912`:
+  # `❌ manifest drift: ['test_evictor_invalidates_fallback_snapshot_13123.py']`,
+  # exit 1.
+  # ⚠️ The registration is THREE entries, not one, and each is enforced by a
+  # DIFFERENT check — only the FIRST by `--integrity`, whose drift list names only a file
+  # no surface owns. ⛔ `leg_coverage_issues` is NOT one of the three: it is push-leg
+  # membership (shards vs slow/carve-out/on-demand, `tools/ci_selection.py:6382`) and it
+  # never reads `uri_requiring` or `durations` — an earlier revision of this note said it
+  # did and the #14067 review measured that false, which is why the enforcers are named
+  # one by one here:
+  #   * the `core` row above → `--integrity`'s drift list (a file NO surface owns);
+  #   * `uri_requiring:` below → the suite module-skips at import
+  #     (`allow_module_level=True`) unless `TORTOISE_DB_URI` is set and docker is
+  #     reachable, exactly as `test_cache_eviction_evictor.py` beside it does, so
+  #     `tests/test_uri_requiring_selection.py`
+  #     `::test_declared_list_matches_the_observation` re-derives the set by running
+  #     pytest with an EMPTY URI and reds a declared/observed mismatch (#6884);
+  #   * the `durations:` row → the ENTRY RULE pin
+  #     (`tests/test_ci_selection.py::test_every_fast_file_this_fold_rows_carries_a_durations_row`),
+  #     which sees ONLY the files named in `ROWED_BY_THIS_FOLD`; the coverage check is a
+  #     0.90 RATIO with headroom and is silent over one missing row.
+  # The three are added together because a lane that adds one and stops is red in a leg
+  # it is not looking at — not because any one check reds the others.
+  - test_evictor_invalidates_fallback_snapshot_13123.py
   # #11047 REPLACES a #11052 file that had already been MERGED — not a branch that superseded one.
   # `#11052` merged as `bc5a26436e`, an ancestor of this PR's merge base (`30c961a43f`), so `main`
   # carried its own `core` membership, `durations` row and `CORE_ALSO` entry for THIS path; the
@@ -12405,6 +12450,12 @@ uri_requiring:
 # declaration reintroduces the #6884 collect-nothing leg: the file collects 0 items on
 # the URI-less pool and the leg passes green having run nothing.
 - test_cache_eviction_evictor.py
+# #13123: same declaration, same reason — the file module-skips with
+# `allow_module_level=True` unless `TORTOISE_DB_URI` is set and docker is reachable
+# (it seeds real `:Point` nodes and evicts them through the engine). Registering it
+# `core` WITHOUT this declaration reintroduces the #6884 collect-nothing leg: the file
+# collects 0 items on the URI-less pool and the leg passes green having run nothing.
+- test_evictor_invalidates_fallback_snapshot_13123.py
 - test_capabilities_endpoint.py
 - test_eval_ingest_cache.py
 - test_invite_fusion_docker.py
@@ -14966,6 +15017,7 @@ durations:
   test_oauth_consent_jti_store.py: 0.1
   test_onboarding_session_recording_parity.py: 1.8  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 2.6
   test_read_ledger.py: 1.0  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.6
+  test_usage_signal.py: 2.0  # new in #14011 / #14065 (registered by #14072) — the #3400/#4348 trap: this row cannot carry a junit reading because the file was in NO surface until this change, so no push-to-main sweep ever ran it (`durations_captured_at` above predates the file landing). It takes the header's flat `DEFAULT_FAST_WEIGHT`, NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration beside `test_read_ledger.py` is what puts the file in `fast_pool()`, and `--integrity`'s 0.90 coverage check stays green either way, so only this row records the weight — `tools/ci_selection.py --integrity` is the authority for the coverage and `tools/ci_timing.py --refresh-durations` replaces this value from the first push-to-main junit sweep that includes the file. Hermetic (a `tmp_path` stream and checkpoint, no DB, no graph, no docker, no network, no model call): the six cycle-3 guards — the prefix fingerprint captured BEFORE the body read (an in-place rewrite during a refresh is detected next time and replays from cold), `window_days` as part of the checkpoint identity, `capped` re-derived from the stream's tail rather than latched, a zero-serve / window-emptied / line-skipped roll-up refusing at the door, the write-side torn-tail newline repair, `MAX_LINE_BYTES`, and the ops door's exit code being identical in both output modes. ⛔ No local seconds figure and no CASE COUNT are quoted on purpose — a figure beside a weight re-stales against the run it came from, and the count moves whenever a review round adds a pin.
   test_run_affected.py: 9.9  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 8.8
   test_s3_prior_ablation.py: 2.5  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 1.2
   test_sdk_surface_declaration.py: 2.1  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 2.4
@@ -14990,6 +15042,16 @@ durations:
   test_cache_evict_cli.py: 0.1
   test_cache_eviction_evictor.py: 0.3  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 0.2
   test_cache_eviction_evictor_pins.py: 0.2
+  # #13123: a PR-ADDED row takes DEFAULT_FAST_WEIGHT (2.0) — the map's own rule, so this
+  # is NOT a hand-picked wall clock. The local reading is context only, not the weight:
+  # the file is a live suite on the private lane container, and a figure copied next to a
+  # shard-layout input re-stales against the run it came from. The row must EXIST, not
+  # merely default ("a default is not a reading"), and the file is named in
+  # `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD` so that ENTRY-RULE pin can SEE it —
+  # without that name this row could be dropped and nothing would red, which is the state
+  # the #14067 review measured. A later junit sweep (`tools/ci_timing.py
+  # --refresh-durations`) re-cuts the value.
+  test_evictor_invalidates_fallback_snapshot_13123.py: 2.0
   test_ci_cancel_guard.py: 17.0  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 28.5
   test_ci_runner_label_coverage.py: 2.4
   test_container_reaper.py: 0.3

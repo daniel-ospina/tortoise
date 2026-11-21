@@ -1539,3 +1539,83 @@ def test_get_or_build_still_caches_when_another_graph_writes_mid_build():
     assert second is not None and second["tag"] == "mine2", (
         "the second read must be a CACHE HIT, not a rebuild")
     assert len(builds) == 1, "no second build — the foreign write did not evict us"
+
+
+# ── #13123: the EVICTION path's invalidation (a graph, not a key) ──────────────
+#
+# `tortoise/cache_evictor.py` deletes nodes with a raw `DETACH DELETE`, which never
+# reaches `SDK._mark_dirty` — the hook every normal write surface calls. It has a
+# proven graph NAME and no projection, so it cannot build a `snapshot_key`; and a build
+# that started before its delete may finish after it, so popping the entries that
+# EXIST is not enough. `invalidate_graph` is the seam for both halves, and these pin
+# its three properties: it drops what is cached, it refuses what is in flight, and it
+# does neither outside the graph whose nodes were actually deleted.
+
+def test_invalidate_graph_drops_this_graphs_entries_and_moves_only_its_stamp():
+    store = fs.FallbackSnapshotStore()
+    mine = ("test_invgraph_mine", "ns")
+    theirs = ("test_invgraph_theirs", "ns")
+    store.put(mine, _snap_stub("mine"))
+    store.put(theirs, _snap_stub("theirs"))
+    mine_generation = store.generation(mine)
+    theirs_generation = store.generation(theirs)
+
+    assert store.invalidate_graph("test_invgraph_mine") == 1, (
+        "the count is what the sweep REPORTS; it must be the entries actually dropped")
+    assert store.get(mine) is None, "the evicted graph's cached corpus survived"
+    assert store.get(theirs) is not None, (
+        "another graph's snapshot was dropped — the invalidation is wider than the "
+        "graph whose nodes were deleted (#10602 review round 4's measured regression), "
+        "and there is no eviction of that graph to justify it")
+
+    # ⛔ A build that started BEFORE the eviction must not cache its (now stale) rows.
+    assert store.put_if_generation(mine, _snap_stub("stale"), mine_generation) is False, (
+        "an in-flight build for the evicted graph was allowed to cache a corpus that "
+        "may still name the deleted node")
+    # …while the neighbour's in-flight build is untouched.
+    assert store.put_if_generation(theirs, _snap_stub("fresh"), theirs_generation) is True
+
+
+def test_invalidate_graph_also_refuses_a_key_it_had_never_seen():
+    """The stamp is per-GRAPH, so it covers a key created after the invalidation.
+
+    This is the window `invalidate(key)` cannot close: a reader sits between
+    ``generation()`` and ``_flight_begin()`` for a few instructions, so at the instant
+    of the eviction there may be NO entry and NO flight to enumerate for its key — yet
+    its build can read rows the delete has not committed, then cache them.
+    """
+    store = fs.FallbackSnapshotStore()
+    unborn = ("test_invgraph_later", "ns")
+    generation = store.generation(unborn)   # captured before the key ever exists
+    store.invalidate_graph("test_invgraph_later")
+    assert store.put_if_generation(unborn, _snap_stub("stale"), generation) is False
+
+
+def test_invalidate_graph_refuses_a_nameless_graph_without_touching_anything():
+    """A handle that cannot name its graph is NOT a reason to blank the whole store."""
+    store = fs.FallbackSnapshotStore()
+    key = ("test_invgraph_kept", "ns")
+    store.put(key, _snap_stub("kept"))
+    generation = store.generation(key)
+    for bad in ("", None, 42):
+        assert store.invalidate_graph(bad) == 0
+    assert store.get(key) is not None
+    assert store.put_if_generation(key, _snap_stub("still-fine"), generation) is True
+
+
+def test_module_level_invalidate_graph_reaches_the_shared_store():
+    """The evictor calls the module verb: it must hit the singleton a read uses.
+
+    The key is written in ``snapshot_key``'s own shape — ``(graph_name, backend,
+    namespace)`` — because that first element is the ONLY handle the evictor has, and a
+    verb that matched on some other part of the key would be unreachable from a delete.
+    """
+    fs._store.clear()
+    try:
+        key = ("test_invgraph_module", ("uri", "/tmp/elsewhere"), None)
+        fs._store.put(key, _snap_stub("shared"))
+        assert fs.invalidate_graph("test_invgraph_module") == 1
+        assert fs._store.get(key) is None, (
+            "the module verb did not reach the store the degraded read path uses")
+    finally:
+        fs._store.clear()
