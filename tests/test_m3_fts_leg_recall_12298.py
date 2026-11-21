@@ -1437,11 +1437,16 @@ _S1_LOCATORS: tuple[tuple[str, int, str, str], ...] = (
     #
     # ⚠️ WHY THIS NOTE NO LONGER TELLS A "SHALLOW BOUNDARY" STORY: depth is an
     # ENVIRONMENT fact, not a fact about `main`, so a note that asserts one is
-    # only ever true in the clone it was measured in. A full clone (this box:
-    # `git rev-parse --is-shallow-repository` -> false, no `.git/shallow`)
+    # only ever true in the clone it was measured in. An UNGRAFTED clone
+    # (`git rev-parse --is-shallow-repository` -> false, no `.git/shallow`)
     # resolves `git log -S'("Point", "quote", "FULLTEXT")' origin/main -- <path>`
     # to `d06c001ff9` on the first try, while a `fetch-depth: 1` CI checkout has a
-    # grafted boundary with no parents and cannot walk back past it. Two earlier
+    # grafted boundary with no parents and cannot walk back past it. ⛔ Do NOT pin
+    # either reading as a fact about the READER's clone: an earlier cut of this
+    # paragraph said "this box: false, no `.git/shallow`", and the clone this note
+    # now lives in answers `true` with two boundary commits in `.git/shallow` —
+    # the same defect one turn further in. Run the two commands; do not trust a
+    # parenthetical. Two earlier
     # cuts of this note each measured ONE of those and stated it as universal:
     # one named `c2c6d38425` (#13967) as "the boundary" — measured, that commit
     # edits ONLY `tests/test_bridge_table.py` (+31/-10) — and the other forbade
