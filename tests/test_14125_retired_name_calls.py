@@ -3344,6 +3344,78 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         f"{_nested_def_control}"
     )
 
+    # 4j-quattuordecies-bis. THE REMAINING UNWITNESSED RULES ON THE REACH PATH, each of which
+    #     survives its own deletion with the whole file green (measured, review of #14160,
+    #     cycle 3). Every one is correct today; none was pinned — the unwitnessed-arm defect
+    #     class this gate has filed as a P1 twice — and `_function_scope_bindings` was
+    #     rewritten from a whole-tree `ast.walk` to the scoped form during this repair, so a
+    #     silent regression there is invisible without these rows.
+    for _label, _source in {
+        # formal parameters of the function that HOLDS the probe
+        "a positional parameter of the probe-holding function": (
+            "import torch\n"
+            "def _probe(torch):\n"
+            "    try:\n"
+            '        torch.query("SELECT 1")\n'
+            "        return True\n"
+            "    except Exception:\n"
+            "        return False\n"
+            "TORCH_AVAILABLE = _probe(None)\n"
+        ),
+        "a vararg parameter of the probe-holding function": (
+            "import torch\n"
+            "def _probe(*torch):\n"
+            "    try:\n"
+            '        torch.query("SELECT 1")\n'
+            "        return True\n"
+            "    except Exception:\n"
+            "        return False\n"
+            "TORCH_AVAILABLE = _probe(None)\n"
+        ),
+        # a `returns` annotation evaluates in the enclosing scope, like any argument one
+        "a walrus in a `returns` annotation": (
+            "import torch\n"
+            "def _h() -> (torch := object()):\n"
+            "    return None\n"
+            "TORCH_AVAILABLE = False\n"
+            "try:\n"
+            '    torch.query("SELECT 1")\n'
+            "    TORCH_AVAILABLE = True\n"
+            "except Exception:\n"
+            "    TORCH_AVAILABLE = False\n"
+        ),
+        # a lambda DEFAULT inside the probe-holding function evaluates in THAT scope
+        "a walrus in a lambda default inside the probe-holding function": (
+            "import torch\n"
+            "def _probe():\n"
+            "    _f = lambda x=(torch := _make_client()): x\n"
+            "    try:\n"
+            '        torch.query("SELECT 1")\n'
+            "        return True\n"
+            "    except Exception:\n"
+            "        return False\n"
+            "TORCH_AVAILABLE = _probe()\n"
+        ),
+        # …and a walrus in a COMPREHENSION there binds that function's scope (PEP 572)
+        "a walrus in a comprehension inside the probe-holding function": (
+            "import torch\n"
+            "def _probe():\n"
+            "    _ = [(torch := c) for c in _clients()]\n"
+            "    try:\n"
+            '        torch.query("SELECT 1")\n'
+            "        return True\n"
+            "    except Exception:\n"
+            "        return False\n"
+            "TORCH_AVAILABLE = _probe()\n"
+        ),
+    }.items():
+        _reach_row = roots(_source)
+        assert _reach_row != (), (
+            f"{_label} reaches the block and rebinds the non-own import, so the probe must "
+            "be graded — nothing else in the file pins this rule, and a silent revert is "
+            f"the swallowed-rename class: {_reach_row}"
+        )
+
     # 4j-sexies. The OTHER direction: a LOCAL of the function that HOLDS the probe CAN
     #     reach it, so it must be graded. `_function_scope_bindings` supplies it from the
     #     probe's own ancestor chain; before that, a local bound before the block was
@@ -3401,7 +3473,7 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         f"a ROOT: {roots(_nested_scope_control)}"
     )
 
-    # 4j-quattuordecies. AN IMPORT STATEMENT NEVER CANCELS THE EXEMPTION — NOT EVEN AN
+    # 4j-sexdecies. AN IMPORT STATEMENT NEVER CANCELS THE EXEMPTION — NOT EVEN AN
     #     ALIASED ONE, and not a `from … import … as`. The RIGHT-HAND SIDE OF AN IMPORT
     #     IS ALWAYS AN IMPORT, so the name still denotes an imported object after it,
     #     which is this exemption's premise; `_non_own_imported_names` is NAME-keyed, so
