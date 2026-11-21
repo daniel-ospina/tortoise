@@ -1941,7 +1941,9 @@ tradeoff: keeping ≥1 machine warm is ~$21.40/mo on §6.5's dated 2-core
 snapshot (≈+$1.4/mo for the 2→4 shape step, plus §6.5's dated-vs-live gap —
 see §6.5), which is already paid today
 because the app serves continuously; the counterfactual is an unpredictable
-cold-start outage for ~$21/mo of savings, which is not worth it for a P0 API.
+cold-start outage for ≈$26/mo of savings at the declared 4-core shape and
+today's rates (~$21 on the dated sheet) — understated by ≈$5 if you read the
+snapshot figure alone — which is not worth it for a P0 API.
 
 Two Fly behaviors operators expect but do **not** get (both from the
 [health-checks reference](https://fly.io/docs/reference/health-checks/)):

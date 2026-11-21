@@ -75,8 +75,9 @@ RESIDUAL GAPS (documented, not blocked):
    exists for (a declared value the running machine does not carry) applies one
    key over. ``fly.toml``'s
    ``[[vm]]`` (``cpu_kind``/``cpus``/``memory_mb``) can therefore diverge from
-   the running machine with no red signal: #13665 found the box running 4 cores
-   while ``fly.toml`` declared 2, unnoticed for a whole measurement window. A
+   the running machine with no red signal: #14156 records the box running 4 cores
+   while ``fly.toml`` declared 2, unnoticed for a whole measurement window (found
+   while investigating #13665). A
    shape leg (compare ``config.guest.*`` against ``[[vm]]``, fail-closed like
    the env gate) is #14159; until it lands, versioning ``cpus`` in
    ``fly.toml`` is what makes the size survive a deploy.
