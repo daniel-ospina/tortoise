@@ -3420,10 +3420,12 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     block-granularity grades it, this tree `()`).
     #     Measured: green here, and the ONLY row that reds when the block-granularity
     #     subtraction (the `ast.walk(block)` mechanism the deleted `_rebinds_within` was)
-    #     is put back — verified over every one of the 573 source classifications this
-    #     self-test makes, exactly one of which flips. That is why the fail-open row above
-    #     cannot stand alone (review of #14160, P2: without this the fix could be reverted
-    #     with all eight tests green).
+    #     is put back — verified by comparing EVERY source classification this self-test
+    #     makes against the mutant (576 of them when this line was written): exactly one
+    #     flips, and it is this control. The total grows as rows are added; the flip count
+    #     does not, and each head re-measures it rather than inheriting the previous one.
+    #     That is why the fail-open row above cannot stand alone (review of #14160, P2:
+    #     without this the fix could be reverted with all eight tests green).
     _nested_def_control = roots(
         textwrap.dedent(
             """
