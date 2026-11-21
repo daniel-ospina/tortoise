@@ -1625,6 +1625,38 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
                                           "to_kind": "b"})], (
         f"a non-object ROW contributes no row and must not raise — a non-dict row still counts "
         f"toward `declared` and then dies in `e6_row_reasons`: {rows!r}")
+    # ⛔ AND THE NON-DICT `load_errors` CARRY one layer over (#14060 review round 19, P3). The
+    # census's `load_errors` is whatever the artifact holds, and the carry has an `else` branch
+    # that WRAPS a non-dict reason as `{"<census>": …}`. No fixture drove a non-object
+    # `load_errors`, so replacing that branch with `else {}` left the whole E6 selection green
+    # (measured: 19 passed) — and that mutant restores the exact false PASS #11695 F1 exists to
+    # refuse: a census whose `load_errors` is the string `boom` then reads `load_errors={}` and
+    # scores GREEN instead of refusing on the isolated subject. The carry is what this arm
+    # reads, so it reds on the branch and not on the row's downstream verdict.
+    real_carry = measure._pack_census_module()
+    one_block = {"dev": {"relations": [{"predicate": "p", "from_kind": "a",
+                                         "to_kind": "b"}],
+                          "hierarchies": []}}
+
+    class _BoomCensus:
+        RELATION_WRITABLE = real_carry.RELATION_WRITABLE
+        RELATION_PREDICATE_NOT_IN_ALLOWLIST = real_carry.RELATION_PREDICATE_NOT_IN_ALLOWLIST
+
+        @staticmethod
+        def build_census(_packs_dir):
+            # ⛔ internally CONSISTENT on purpose: a census the guard refuses returns BEFORE the
+            # carry, so an inconsistent one would leave this arm green under the mutant.
+            return {"packs": one_block,
+                    "population": {"packs": 1, "relations": 1, "hierarchies": 0,
+                                   "declared": 1},
+                    "load_errors": "boom"}
+
+    monkeypatch.setattr(measure, "_pack_census_module", _BoomCensus)
+    e6 = measure.measure_e6()
+    assert e6.get("error") is None, e6.get("error")
+    assert e6["load_errors"] == {"<census>": "boom"}, (
+        f"a NON-OBJECT `load_errors` must be carried, not dropped — dropping it scores the "
+        f"isolated subject GREEN (#11695 F1's false PASS, one type over): {e6['load_errors']!r}")
     # …and the two levels ABOVE the surface one, which are the same class one input over: the
     # `packs` block and — in `measure_e6` itself — the `population` read. Measured, each raised
     # OUTSIDE the `try` and killed a run that had already paid its cost:
