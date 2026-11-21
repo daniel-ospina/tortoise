@@ -1593,10 +1593,26 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
     # reporting one. Measured at `00a5804`: deleting the pin's `assert missing == []` left this
     # whole file GREEN (94 passed) — the `stray` bucket had the red below, `missing` had nothing,
     # so a renamed writer could silently leave the population the declaration exists to bound.
-    monkeypatch.setattr(
-        strip, "_module_source", lambda name: "" if name == blanked else env_source(name))
-    with pytest.raises(AssertionError) as red_missing:
-        test_no_declared_entity_writer_mentions_a_dynamic_namespace()
+    #
+    # The population is SYNTHETIC here, deliberately: an arm driven by the real walker would be
+    # environment-coupled — under the F2 simulation (a folded `tortoise.sdk`) the `env_source`
+    # fallback re-raises with the module's own name as the cause, so the declared keys land in
+    # `stray` and the pin reds on THAT assertion instead, which would attribute this arm to the
+    # wrong guard (measured: the real-walker version of this arm failed under `sim_f2`).
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            sys.modules[__name__],
+            "_writer_register_population",
+            lambda: {
+                "examined": [outsider],
+                "unreadable": [],
+                "stray": [],
+                "missing": [outsider],
+                "offenders": [],
+            },
+        )
+        with pytest.raises(AssertionError) as red_missing:
+            test_no_declared_entity_writer_mentions_a_dynamic_namespace()
     assert outsider in str(red_missing.value) and "register names a writer" in str(
         red_missing.value), (
         f"the pin does not red — or reds without naming the key — for a register writer whose "
