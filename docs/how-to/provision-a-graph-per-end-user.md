@@ -130,7 +130,9 @@ Persist `graph.id` too. There is no key-driven **REST** graph-listing route —
 `403 GRAPH_LISTING_VIA_SESSION` — but the id is not lost if you miss it: keep it
 from this 201, or recover it later from **`GET /v1/team/keys`** (each row carries
 its key's `graph_id`; it needs the account's full-access key, or a key holding
-`keys:manage`) or from the MCP tool **`tortoise_list_graphs`**, which answers a
+`keys:manage`) or from the MCP tool **`tortoise_graph_overview(section="graphs")`**
+(the door `tortoise_list_graphs` retired forward into — #11609 lane P7 — so the
+old name is not in `tools/list`), which answers a
 key-driven HTTP MCP caller with the calling account's graph names. `GET /v1/team`
 with a key reports limits (`max_graphs`, `max_api_keys`), not graph ids.
 
@@ -251,7 +253,7 @@ answers a key without `graphs:delete` with `403 "Missing graphs:delete scope"`
 | `PROVISION_VIA_ORG_ENDPOINT` | called `POST /v1/graphs` with an API key (the session alias) | call `POST /v1/organizations/{org_id}/graphs`, §2 |
 | `PROVISION_REQUIRES_ORG_KEY` | called the provisioning door with a **minted** key | provision from the account-level key; §4 |
 | `PROVISION_SCOPE_REQUIRED` | called it with an account key that lacks `graphs:create` | mint/grab a key carrying `graphs:create`, §1 |
-| `GRAPH_LISTING_VIA_SESSION` | called `GET /v1/graphs` with an API key | keep `graph.id` from the 201, or recover the **id** from `GET /v1/team/keys` (§2); the MCP tool `tortoise_list_graphs` lists graph **names**, not ids |
+| `GRAPH_LISTING_VIA_SESSION` | called `GET /v1/graphs` with an API key | keep `graph.id` from the 201, or recover the **id** from `GET /v1/team/keys` (§2); the MCP tool `tortoise_graph_overview(section="graphs")` lists graph **names**, not ids (`tortoise_list_graphs` retired forward into it, #11609 lane P7) |
 | `GRAPH_SCOPED_TEAM_SURFACE` | a minted key touching a team/account surface | expected — the key is graph-scoped, §3 |
 | `402` + `X-Upgrade-CTA: pro` | the account is `free`/`anon` | upgrade to Builder (`pro`), §1 |
 | `409` + `X-Graph-Quota: n/max` | the graph quota is full | `solo` holds 1 custom graph; upgrade, or delete a graph |

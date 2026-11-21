@@ -74,9 +74,10 @@ claim:
    `how-to-use-tortoise`: T0 direct observation … T4 speculative. A claim with
    no tier is a claim you cannot grade later.
 2. Connect it to **itself** — the claims in this round support or contradict
-   each other. `tortoise_create_operator("IMPL", src, [targets])` where the
-   source implies the target; `tortoise_create_operator("NAND", src, [targets])`
-   where it conflicts.
+   each other. `tortoise_link_entities("IMPL", src, target_ids=[targets])` —
+   the `target_ids=` spelling selects the carrying-operator writer — where the
+   source implies the target; `tortoise_link_entities("NAND", src,
+   target_ids=[targets])` where it conflicts.
 3. Connect it to **what the graph already holds** — this is the half that is
    usually skipped, and the half that makes the graph a memory instead of a
    dump. `tortoise_review_connections(mode="add", scope="<domain label>")`

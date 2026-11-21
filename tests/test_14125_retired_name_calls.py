@@ -448,7 +448,6 @@ def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
     documented-legitimate skip unescapable, there being no class-2 allowance, so the
     `ImportError` decision stays with `_probe_blocks_with_an_uncovered_import_seam`.
 
-
     Whether the handler re-raises is part of the question, not a separate one:
     the property is *"the programming error never reaches the caller"*, and a
     broad arm that re-raises never swallows anything. Charging it would be a
@@ -507,12 +506,11 @@ def _covered(handlers: list[ast.ExceptHandler]) -> set[str]:
     property as one four-name tuple and must not be redded for its shape. The
     broad arm is never coverage: it is what swallows the rest.
 
-    A handler only COUNTS when it ends by PROPAGATING the caught error — a bare `raise`,
-    `raise <caught name>`, or `raise … from <caught name>` (see `_reraises`); a trailing
-    `raise … from None` discards the cause and does not count. Naming a programming
-    error in the clause is not the property — `except ImportError: return False`
-    names the seam and then swallows it, and counting the name would let a probe
-    pass this gate with exactly the behaviour it exists to forbid.
+    A handler only COUNTS when its LAST statement re-raises its own caught exception —
+    a bare `raise`, `raise exc`, or a chained `raise X from exc` (see `_reraises`) — and
+    never when it merely NAMES a programming error in the clause: `except ImportError:`
+    `return False` names the seam and then swallows it, and counting the name would let a
+    probe pass this gate with exactly the behaviour it exists to forbid.
 
     ⛔ ORDER IS PART OF THE PROPERTY (review F2, and it was still open at
     `9b7ac6ee8d`). Python tests `except` clauses in source order and runs only
@@ -1491,17 +1489,37 @@ def _is_header_child(node: ast.AST, child: ast.AST) -> bool:
     #: class keyword through an `ast.keyword`, so the direct-child identity test alone
     #: misses the two largest families — measured, the default-header case stayed graded
     #: through a `previous` that was the `arguments` node.
-    if isinstance(child, (ast.arguments, ast.keyword, ast.arg)):
+    #: ⛔ AND NO `ast.arg` TERM. `ast.arg` used to sit in this tuple as a third member and
+    #: it can never fire: an `ast.arg`'s only parent is `ast.arguments`, which is not a
+    #: `def`/`class`/`lambda`, and this function is called for those three node kinds only
+    #: — so it cannot receive an `ast.arg` as `child`. Measured, not inferred: an
+    #: instrumented copy that logged every `ast.arg` arrival ran the ENTIRE graded corpus
+    #: (this file's rows plus the 58-file probe census) with ZERO hits. A term that can
+    #: never fire is not coverage, it is a CLAIM of coverage — the same defect this file
+    #: filed against `_is_probe_container`, whose docstring said the self-test used it.
+    #: Removing it changes no row, and that is exactly the point: no row could ever pin it.
+    if isinstance(child, (ast.arguments, ast.keyword)):
         return True
     if any(expression is child for expression in getattr(node, "decorator_list", ()) or ()):
         return True
     #: A TYPE PARAMETER's `bound` / `default_value` evaluates in the ENCLOSING scope too
     #: (PEP 695): `class C[T: torch.query(…)]: torch = …` defines fine, so that call
     #: resolved the MODULE import, not the class body — yet it was charged with the
-    #: generic's own bindings. `_header_expressions` excludes these fields for a different
-    #: reason (a `:=` in a bound is a COMPILE-TIME SyntaxError, so it can bind nothing),
-    #: and inheriting that exclusion into the REACH direction graded a legitimate probe:
-    #: measured `()` → `((3, (), True, False, True),)` (review of this PR, P3).
+    #: generic's own bindings. Measured on this interpreter rather than inferred from the
+    #: prose: for `class C[T: torch]: torch = "CLASS-BODY-torch"` over a module-level
+    #: `torch`, `C.__type_params__[0].__bound__` IS the enclosing `torch`, not the class
+    #: body's — the bound never sees the body it is part of.
+    #: `_header_expressions` excludes these fields for a different reason (a `:=` in a
+    #: bound is a COMPILE-TIME SyntaxError, so it can bind nothing), and inheriting that
+    #: exclusion into the REACH direction graded a legitimate probe (review of this PR,
+    #: P3). The witness is the `"a type-parameter bound"` row of `4j-tervicesimus`: `()`
+    #: at this head, and graded the moment this test is removed (revert it on a copy and
+    #: the row comes back as exactly one entry — the probe's own `try`). ⛔ The row's LINE
+    #: NUMERAL is deliberately not restated here: the first element of a row is the PROBE
+    #: `try`'s line, so it moves with the template and the live value is already in the
+    #: assertion message — a numeral written into a growing file is stale by construction,
+    #: which is the defect this file has now falsified five times (see the
+    #: block-granularity note, `4j-vicesimus-bis`).
     #: The ascent reaches the definition with the TYPE-PARAMETER node as the child, not
     #: the bound expression itself, so the test is on that node's identity.
     if any(parameter is child for parameter in getattr(node, "type_params", ()) or ()):
@@ -3573,8 +3591,9 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     `4j-vicesimus-bis` (`outermost iterable`, `later generator iterable`), and the
     #     header/definition-scope rows. The same error forbids every one of those shapes,
     #     which is why the set is NAMED BY FAMILY and NOT counted — an explicit "two" for
-    #     the class-body family was itself off by one at the next head, because a sibling
-    #     had added the nested-class-body row in between.
+    #     the class-body family was already wrong WHEN WRITTEN: the `4j-sesvicesimus`
+    #     nested-class-body row was present at that head (a sibling had added it in an
+    #     earlier commit, `69a92755b21e`), so it was short on arrival rather than outgrown.
     #     ⛔ NO TOTAL IS RESTATED HERE, and that is the correction, not an omission. This
     #     sentence carried one four times ("one", "three", "four", "five") and each was
     #     falsified by the next commit that added a row: the flip set GROWS with the file,
