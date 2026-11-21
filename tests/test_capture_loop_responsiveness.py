@@ -2864,8 +2864,11 @@ def _is_a_pre_existing_offload(cypher: str) -> bool:
     ``asyncio.to_thread`` since before this change. They are TAIL-ADJACENT: in
     neither ``_CAPTURE_TAIL_STATEMENTS`` (the prohibition set) nor
     ``_TAIL_MUST_BE_ISSUED`` (the presence set) — they are the statements the
-    prohibition is told to EXEMPT, and today no loop catches an on-loop copy of
-    them (see the paragraph below).
+    NEEDLE loop is told to EXEMPT, and no NEEDLE catches an on-loop copy of them
+    (they match zero of the six). ⛔ The session-alive arm is a different matter:
+    the probe CONTAINS ``_SESSION_ALIVE``, and that arm never consults this
+    exemption (`if any(_SESSION_ALIVE in c for c in on_loop)`), so an on-loop
+    copy IS caught — by that arm, not by a needle (see the paragraph below).
 
     ⛔ WHAT THIS EXEMPTION CAN AND CANNOT DO, measured rather than assumed
     (#14086 review, P2 — an earlier version of this docstring claimed the probe
@@ -3438,18 +3441,30 @@ def test_the_first_capture_checkpoint_hands_its_projection_in():
 
 
 def test_the_pre_existing_offload_exemption_is_actually_consumed():
-    """A declaration the verdict does not read is bookkeeping, not a gate.
+    """The declaration's consumer is real; nothing pins its USE in the verdict.
 
     ``_PRE_EXISTING_OFFLOAD_LEGS`` names the #4625 leg-62 probe's statements,
     which have run on ``asyncio_0`` BY DESIGN since long before this change.
-    Before this pin, nothing consulted it — the prohibition matched the tail
-    needles alone and would have accused the leg that was already off the loop
-    (#14086 review, P2). ⛔ It emits NO tail needle (its statement READS
-    ``s.capture_ok AS ok``; it never ``SET``s one), so today the exemption changes
-    no verdict — it is a declared record with a caller, pinned so the verdict
-    computation reads the declaration if that probe ever moves to the pool.
-    Both directions are pinned: an exempt statement is NOT
-    reported, and the same statement without the exempt fragment IS.
+    Its only consumer in a verdict is the needle loop of
+    ``test_the_capture_post_write_tail_never_runs_on_the_event_loop``
+    (``if not _is_a_pre_existing_offload(c)``) — and that is the one arm which
+    cannot reach these statements: the probe matches ZERO of the six
+    ``_CAPTURE_TAIL_STATEMENTS``, so the needle-matched prohibition could never
+    have accused the leg that was already off the loop (#14086 review, P2).
+    ⛔ It emits NO tail needle (its statement READS ``s.capture_ok AS ok``; it
+    never ``SET``s one), so today the exemption changes no verdict — it is a
+    declared record with a caller.
+
+    ⛔ WHAT IS PINNED HERE IS THE HELPER, NOT ITS USE IN THE VERDICT (#14086
+    review, P3). No row drives an exempt statement through an offenders list, so
+    the exemption could be deleted from the verdict computation and this test
+    would stay green — and in the fixture that computes that list, the arm which
+    DOES match the probe (session-alive) does not consult the exemption at all.
+    Pinning the consumption needs a statement the needle loop matches and the
+    session-alive arm ignores; this probe is not that statement.
+
+    Both directions ARE pinned for the HELPER: an exempt statement is
+    recognised, and the same statement without the exempt fragment is not.
     """
     exempt_key = next(iter(_PRE_EXISTING_OFFLOAD_LEGS))
     tail_needle = "SET s.capture_ok=$ok"

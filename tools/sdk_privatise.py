@@ -710,9 +710,12 @@ SWEEP_NAMES = 66
 #: MEASURED HERE: `.venv/bin/python tools/sdk_privatise.py --repin` on this merged tree printed
 #: `SWEEP_RESIDUE = (11839, '7159a040b69431a9')`. The COUNT is `main`'s 11838 plus this PR's single
 #: declared row (`captured.update` in `tests/test_10893_pre_handler_parts.py`, untouched by `main`,
-#: so the +1 is structural rather than assumed). The DIGEST is new against BOTH parents, which is
-#: the point of re-measuring: `main`'s `#14108` respelled `tests/test_usage_signal.py`, so rows that
-#: survive it no longer hash the same. ⛔ THE ROW-BY-ROW DELTA IS NOW DERIVED, in BOTH directions:
+#: so the +1 is structural rather than assumed). The DIGEST is new against BOTH parents because the
+#: ROW SET differs by exactly that one row — `residue_digest` hashes each row's NAME with its COUNT
+#: and carries no file identity, so a row that survives with an unchanged count contributes an
+#: identical line and cannot move the digest. Measured, not inferred: decrementing ONLY
+#: `captured.update` to 30 reproduces `main`'s committed pin `de5664dc98549d56` (11838) exactly.
+#: ⛔ THE ROW-BY-ROW DELTA IS NOW DERIVED, in BOTH directions:
 #: `--report --base 28ca66878d7c --top 5000` was run in a worktree at EACH parent, its rows sorted,
 #: and diffed against this tree's. Against the branch parent `7658139ea8` the ONLY differing row is
 #: `seen.update` 102 → 101 (that is `main`'s `#14108` capture rewrite — the arm the block above names),
