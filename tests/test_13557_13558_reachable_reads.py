@@ -880,7 +880,17 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
     # relevance answer and hand them a population).
     import re as _re
 
-    named = [span for span in _re.findall(r"`([^`]+)`", declines) if " " in span]
+    # ⛔ A SPAN THAT WRAPS ACROSS LINES IS PROSE, NOT A PHRASING (#14033 review, P2). The
+    # block's explanatory parenthetical — "the question's own predicate is `affected
+    # pricing`" — is backticked too, and a multi-line span is not a question: fed to the
+    # recogniser it answers `population is None` under EVERY mutant, so an iteration over
+    # it asserts nothing while the comment above claims every phrasing is checked. A real
+    # phrasing in this block is always on one line, so the newline IS the discriminator.
+    named = [
+        span
+        for span in _re.findall(r"`([^`]+)`", declines)
+        if " " in span and "\n" not in span
+    ]
     assert named, "the DOES NOT ROUTE block names no phrasings — nothing is pinned"
     for query in named:
         assert detect_state_question(query).population is None, (
