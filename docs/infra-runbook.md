@@ -1937,7 +1937,9 @@ stop (or suspend) it for idleness. Fly's default when the key is absent is
 `"off"` (never stop). Setting it explicitly to `"off"` guarantees that a
 de-registration cannot cascade into a cold stop — otherwise a routing glitch
 would become an ~85 s cold start on the next request. Availability/cost
-tradeoff: keeping ≥1 machine warm is ~$21.40/mo, which is already paid today
+tradeoff: keeping ≥1 machine warm is ~$21.40/mo on §6.5's dated 2-core
+snapshot (≈+$1.4/mo at the 4 cores `fly.toml` declares since #13665 — §6.5),
+which is already paid today
 because the app serves continuously; the counterfactual is an unpredictable
 cold-start outage for ~$21/mo of savings, which is not worth it for a P0 API.
 
@@ -2038,7 +2040,10 @@ already enforces.
 **Cost of the decision (§6.5 for the derivation):** a second
 `shared-cpu-2x:4096MB` machine adds **+$21.40/mo** in `iad`, plus its volume at
 $0.15/GB/mo — roughly **$42.80/mo total compute** for the two-machine fleet,
-double today's compute run-rate. That is material: it is the operator's call,
+double today's compute run-rate. Both figures are on §6.5's dated 2-core basis,
+so at the 4 cores the file declares they are a slight UNDERSTATEMENT (≈+$1.4/mo
+per machine) — never an overstatement; §6.5 owns the re-derivation. That is
+material: it is the operator's call,
 not something to enable quietly. What was done instead costs **$0** and removes
 the dominant failure mode (§6.2 + the app-side `/health` fix + the TCP routing
 check in §6.4).
@@ -2374,9 +2379,15 @@ curl -s -m 5 -w '\n%{time_total}s\n' https://api.premiselabs.co/liveness
 > ⚠️ **LIST-PRICE ESTIMATES — not a quote — and DATED (snapshot 2026-09-10).**
 > These are approximate list-price estimates derived from Fly's published
 > per-second and per-GB rates; Fly bills actual usage, so this is not a quote and
-> not a guaranteed monthly figure. They assume the machine shape declared in
-> `fly.toml` `[[vm]]` — **`shared-cpu-2x` with `memory_mb = 4096`**, region
-> `iad`, running continuously — and one attached volume.
+> not a guaranteed monthly figure. They assume ONE machine, region `iad`,
+> running continuously, and one attached volume — and, because this table has
+> not been re-derived since 2026-09-10, they price the **pre-#13665
+> `shared-cpu-2x` / `memory_mb = 4096`** shape. The `[[vm]]` block has declared
+> **`shared-cpu-4x` (4 cores) since #13665**, and that shape is ≈+$1.4/mo more on
+> either dated rate sheet (cores up, the RAM-above-preset line down as the
+> preset's included RAM doubles) — `fly.toml`'s `[[vm]]` comment carries that
+> derivation. Every figure below is therefore the 2-core basis, not today's
+> declared box.
 > These figures are kept so the *shape* of the cost argument (one machine ≈ half
 > a two-machine fleet; RAM above the 512 MB preset dominates) stays reviewable.
 > Fly's live prices differ by ~4 % on these line items (re-checked 2026-09-12:
@@ -2385,11 +2396,19 @@ curl -s -m 5 -w '\n%{time_total}s\n' https://api.premiselabs.co/liveness
 > — including the two-machine figure and the ~$21.40 references in §6.2/§6.3 —
 > is **low**. The live
 > [pricing page](https://fly.io/docs/about/pricing/) **is the source of truth;
-> re-fetch it before making a spend decision.**
+> re-fetch it before making a spend decision.** (Re-fetched 2026-11-21 for the
+> `[[vm]]` comment: $2.19/mo per shared vCPU including 256 MB of RAM per vCPU,
+> plus $6.00/GB/mo beyond the preset. The lines move in BOTH directions — that
+> 512 MB preset is now ≈$3.69, *below* the $4.04 recorded here, while a
+> 4096 MB two-core machine is ≈$25.38, well above the $21.40 this table
+> carries — so the monthly TOTALS below remain low, but do not read any single
+> line item as directionally safe. That is why the table is dated.)
 >
 > *Controller follow-up: re-fetch and re-derive this table (and the `fly.toml`
 > COST comment, which carries the same snapshot) — flagged, not silently
-> edited.*
+> edited. #13665 moved the shape from 2 to 4 cores WITHOUT a re-fetch, so the
+> table stays on its 2-core basis and is LABELLED as such below; re-pricing it
+> is this follow-up's job, not the resize's.*
 
 Fly list price at the snapshot date, region `iad`, as published on the
 [pricing page](https://fly.io/docs/about/pricing/) (retrieved 2026-09-10):
@@ -2398,10 +2417,10 @@ Fly list price at the snapshot date, region `iad`, as published on the
 |---|---|---|
 | `shared-cpu-2x` / 512 MB (preset base) | ~$0.00000150/s · ~$0.0054/hr | ~$3.89 |
 | + 3.5 GB RAM above the 512 MB preset (4096 MB total) | $5/GB/30 days (rate unchanged) | +$17.50 |
-| **`shared-cpu-2x` / 4096 MB (current `[[vm]]`), running** | ~$0.00000826/s · ~$0.0297/hr | **~$21.40** |
+| **`shared-cpu-2x` / 4096 MB (this table's basis; pre-#13665 shape), running** | ~$0.00000826/s · ~$0.0297/hr | **~$21.40** |
 | Stopped machine | rootfs only | $0.15 per GB/30 days |
 | Volume storage (per volume, attached or not) | — | $0.15/GB/mo |
-| **Two-machine fleet (both warm, 4 GB each)** | — | **~$42.80** (+ volumes) |
+| **Two-machine fleet (both warm, 4 GB each, 2-core basis)** | — | **~$42.80** (+ volumes) |
 
 The current volume's provisioned size is **not recorded in the repo** (verify
 with `fly volumes list -a tortoise-y4mjjq`) — factor it in at $0.15/GB/mo per
