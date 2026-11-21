@@ -270,6 +270,12 @@ def test_e2e6_server_mode_fts_text_disambiguation(tmp_path):
                 g.query(probe)
                 unsupported = None
                 break
+            except (AttributeError, NameError, TypeError):
+                # #14125 class 2: `g.query` is the seam a rename moves. Reading
+                # that as "this engine cannot hold a fulltext index" is how a
+                # programming error becomes a SKIP with no door in its message;
+                # the census grades this probe because it skips on `unsupported`.
+                raise
             except Exception as e:
                 if "already" in str(e).lower():
                     unsupported = None

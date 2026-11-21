@@ -203,6 +203,13 @@ def _live_proj() -> FalkorProjection:
         proj = FalkorProjection.from_uri(
             _live_uri(), graph_name=f"test_8870_{os.urandom(4).hex()}")
         proj.g.query("MATCH (n) DETACH DELETE n")
+    except (AttributeError, NameError, TypeError):
+        # #14125 class 2: `from_uri` / `.g.query` are OUR doors. A retired or
+        # renamed one must fail LOUDLY here, not be read as "the lane is
+        # unusable" — that conversion is exactly how #13899's retirement hid
+        # for a whole wave. The probe decides a SKIP, so the census grades it
+        # (tests/test_14125_retired_name_calls.py).
+        raise
     except Exception as exc:
         pytest.skip(
             f"{_live_utils.LIVE_URI_SKIP_REASON} (the lane is reachable but "

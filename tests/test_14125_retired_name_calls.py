@@ -594,7 +594,7 @@ def _resolver_functions(tree: ast.Module) -> set[str]:
 
 
 def _skipif_conditions(tree: ast.Module) -> list[ast.expr]:
-    """Every `skipif`/`skip` condition expression in the module.
+    """Every `skipif`/`skip`/`xfail` condition expression in the module.
 
     This is the SECOND place availability is resolved at import time, and it is
     not a flag at all: `@pytest.mark.skipif(not _falkordb_available(), …)` calls
@@ -616,7 +616,13 @@ def _skipif_conditions(tree: ast.Module) -> list[ast.expr]:
             if isinstance(func, ast.Name)
             else None
         )
-        if name in {"skipif", "skip"}:
+        # `xfail(cond)` decides a resolution exactly as `skipif(cond)` does, and
+        # it is the MORE dangerous of the two for this gate: a rename inside the
+        # probe makes the test XFAILED, so the failure the probe exists to
+        # surface is marked as expected instead of redding (review of
+        # 61fc96cdd8, P2-3 — measured `()` for `xfail(not LIVE)` while the
+        # identical `skipif(not LIVE)` form graded).
+        if name in {"skipif", "skip", "xfail"}:
             out.append(node.args[0])
     return out
 
@@ -695,6 +701,54 @@ def _skip_guard_call_names(tree: ast.Module) -> set[str]:
     return out
 
 
+def _skip_decision_names(node: ast.AST) -> set[str]:
+    """Every NAME a `skip`/`skipif`/`xfail` CALL inside this node READS.
+
+    The complement of ``_bound_names``: one says what a block binds, this says
+    what its skip decision reads, and their intersection is the sentinel shape
+    ``_skips_on_a_bound_name`` admits. ``skipif`` is matched as a CALL here (the
+    decorator form `@pytest.mark.skipif(cond)` is an Attribute call with
+    `attr == "skipif"`), so the decorator and the `pytest.skip(...)` statement
+    are graded by the same walk.
+    """
+    out: set[str] = set()
+    for sub in ast.walk(node):
+        if not isinstance(sub, ast.Call):
+            continue
+        func = sub.func
+        name = (
+            func.attr
+            if isinstance(func, ast.Attribute)
+            else func.id
+            if isinstance(func, ast.Name)
+            else None
+        )
+        if name not in {"skip", "skipif", "xfail"}:
+            continue
+        for arg in sub.args:
+            out |= {n.id for n in ast.walk(arg) if isinstance(n, ast.Name)}
+    return out
+
+
+def _skips_on_a_bound_name(func: ast.AST) -> bool:
+    """Whether this function SKIPS on a sentinel it bound ITSELF.
+
+    `unsupported = e` … `pytest.skip(f"… {unsupported}")` inside a `def test_…`
+    body is the class-2 decision: the `try` that produced `unsupported` swallowed
+    a programming error, and the test skips instead of redding. `_probe_roots`
+    admitted only MODULE-LEVEL helpers a `skipif` names, so a test body was graded
+    by nothing at all (review of `61fc96cdd8`, P1-1; live instance
+    `tests/test_index_surfacing.py:269-281`).
+
+    Deliberately NOT "any function that skips": both halves are required. A body
+    that skips on a module-level flag is already graded by the module-body
+    branch, and admitting every skipping function would make the whole `tests/`
+    tree a root population with no arm to give it meaning.
+    """
+    read = _skip_decision_names(func)
+    return bool(read) and bool(_bound_names(func) & read)
+
+
 def _skip_gating_functions(tree: ast.Module) -> set[str]:
     """Module-level helpers whose value decides a SKIP at import/collection.
 
@@ -750,6 +804,19 @@ def _control_flow_tries(body: list[ast.stmt]) -> list[ast.Try]:
     the census's own rule it IS the decision. Same hole as the `if _DOCKER_URI:`
     one one level out (a control-flow node it failed to descend), and the same
     consequence: a de-armed probe behind it reads GREEN (review of 3ce7ffdd867).
+
+    ⛔ THREE DESCENT GAPS CLOSED HERE (review of 61fc96cdd8, P2-2), all measured
+    as NOTHING rather than as a false row before this fix:
+
+      * a `class` body was never descended, so a probe in one produced no row;
+      * a `match` arm was never descended (neither `body` nor `orelse` is an
+        attribute of `ast.Match` — its statements live on the `match_case`s);
+      * a `try` WITH handlers was appended and then `continue`d, so its `orelse`
+        and `finalbody` were never visited — a probe in an `else` arm
+        (`try: … except Exception: … else: try: <probe>`) was invisible.
+
+    Descending a `class` body stops where every other descent here stops:
+    `def`/`class`/`lambda` bodies are their own pass, not this one.
     """
     out: list[ast.Try] = []
     stack: list[ast.stmt] = list(body)
@@ -758,6 +825,10 @@ def _control_flow_tries(body: list[ast.stmt]) -> list[ast.Try]:
         if isinstance(node, ast.Try):
             if node.handlers:
                 out.append(node)
+                # …and keep looking INSIDE it: `orelse`/`finalbody` are part of
+                # the same construct (`try/except/else` is one decision shape).
+                stack.extend(node.orelse)
+                stack.extend(node.finalbody)
             else:
                 # `try/finally`: descend the GUARDED region (and no further).
                 # `finalbody` is the restoration arm, never the probe.
@@ -767,6 +838,15 @@ def _control_flow_tries(body: list[ast.stmt]) -> list[ast.Try]:
                              ast.While)):
             stack.extend(node.body)
             stack.extend(getattr(node, "orelse", []) or [])
+        elif isinstance(node, ast.ClassDef):
+            # A class BODY binds names too (`class _C: PROBE = _probe()`), and a
+            # `try` directly in it is module-level control flow. Method bodies
+            # are NOT descended: they are their own pass (a `def` is skipped by
+            # this walk, exactly as it is in a plain module body).
+            stack.extend(node.body)
+        elif isinstance(node, ast.Match):
+            for case in node.cases:
+                stack.extend(case.body)
         elif isinstance(node, ast.ExceptHandler):
             stack.extend(node.body)
     return out
@@ -808,6 +888,11 @@ def _non_own_imported_names(nodes: list[ast.stmt]) -> set[str]:
     a third-party client's verb, not a door a rename in this repo can move. A
     receiver bound any other way — a PARAMETER (`proj.g.query`), or a client built
     at module scope (`PROJ = _make_proj()`) — is in neither set and stays graded.
+
+    ⛔ IT IS A BINDING SET, NOT AN EXEMPTION SET — see ``_seam_exempt_names``.
+    Read on its own this set says "somewhere in this module a non-own import binds
+    this name", which is not the same question as "the receiver at THIS call site
+    still is that import" (review of `61fc96cdd8`, P1-2).
     """
     out: set[str] = set()
     for stmt in nodes:
@@ -815,6 +900,72 @@ def _non_own_imported_names(nodes: list[ast.stmt]) -> set[str]:
             if isinstance(node, (ast.Import, ast.ImportFrom)) and not _is_own_code_import(node):
                 out |= {(alias.asname or alias.name.split(".")[0]) for alias in node.names}
     return out
+
+
+def _rebound_names(tree: ast.AST) -> set[str]:
+    """Every name this file binds to something OTHER than a module-level import.
+
+    The disambiguator for ``_seam_exempt_names``: an exemption keyed on a NAME
+    ("`falkordb` is a non-own import") is wrong the moment the name is bound
+    again, because the receiver at the call site is then some other object. This
+    is the escaped shape the review measured (P1-2) — the collision `import
+    falkordb` + `falkordb = proj` inside the probe lost a root the previous head
+    graded:
+
+        import falkordb                     # a non-own import anywhere in the file
+        def _probe(proj):
+            try:
+                falkordb = proj             # …but THIS is our client
+                falkordb.g.query("RETURN 1")
+                return True
+            except Exception:
+                return False
+        FALKORDB_AVAILABLE = _probe(None)
+
+    Conservative by construction — it answers "is this name bound by anything
+    that is not an import" from ANYWHERE in the file, module scope or a function
+    body, because the walk that consumes it is file-wide too. A name that is
+    merely bound (``targets``/``arg``/``with … as``/``except … as``/
+    comprehension targets) and never imported is unaffected: it is not in
+    ``_non_own_imported_names`` and the exemption never considered it.
+    """
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            targets: list[ast.expr] = list(node.targets)
+        elif isinstance(
+            node, (ast.AnnAssign, ast.AugAssign, ast.For, ast.AsyncFor, ast.comprehension)
+        ):
+            targets = [node.target]
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            targets = [item.optional_vars for item in node.items if item.optional_vars]
+        elif isinstance(node, ast.arg):
+            out.add(node.arg)
+            continue
+        elif isinstance(node, ast.ExceptHandler):
+            if node.name:
+                out.add(node.name)
+            continue
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            out |= set(node.names)
+            continue
+        else:
+            continue
+        for target in targets:
+            out |= {n.id for n in ast.walk(target) if isinstance(n, ast.Name)}
+    return out
+
+
+def _seam_exempt_names(tree: ast.Module) -> frozenset[str]:
+    """The receiver roots ``_reaches_capability_seam`` may EXEMPT for this tree.
+
+    A name is exempt only when BOTH hold, and the second half is what the review
+    of `61fc96cdd8` (P1-2) added: the name is bound by a non-own import **and**
+    no statement in the file binds it again to something else. Making the
+    exemption binding-aware is what keeps the narrowing from swallowing the
+    own-code seam it exists to leave graded.
+    """
+    return frozenset(_non_own_imported_names(tree.body) - _rebound_names(tree))
 
 
 def _receiver_root_name(node: ast.expr) -> str | None:
@@ -858,7 +1009,7 @@ _CAPABILITY_NAMES = frozenset({"TortoiseSDK", "FalkorProjection"})
 
 
 def _reaches_capability_seam(
-    block: ast.AST, third_party: frozenset[str] | set[str] = frozenset()
+    block: ast.AST, third_party: frozenset[str] | set[str]
 ) -> bool:
     """Whether the block CALLS the capability seam, however the client arrived.
 
@@ -893,6 +1044,17 @@ def _reaches_capability_seam(
     annotations and stand-ins, so it cannot see the `PROJ = _make_proj()` shape the
     finding names, and gating on it would break the pinned parameter-client witness
     (`tests/test_8870_version_anchor_write_order.py:138`).
+
+    ⛔ `third_party` HAS NO DEFAULT, ON PURPOSE (review of `61fc96cdd8`, P2-4).
+    The old default was `frozenset()` — the UNGATED arm — so a fifth call site that
+    forgot the argument would silently restore the false red the narrowing exists
+    to remove, and nothing would red. A required argument makes that a `TypeError`
+    at collection instead: fail closed, not fail open.
+
+    ⛔ AND THE EXEMPTION IS ONLY SOUND BECAUSE IT IS BINDING-AWARE. The caller
+    passes `_seam_exempt_names(tree)`, not the raw import names: a name that is
+    imported third-party AND rebound elsewhere in the file is NOT exempt, so the
+    receiver is graded on what it actually holds at the call site.
     """
     for node in ast.walk(block):
         if not isinstance(node, ast.Call):
@@ -910,26 +1072,40 @@ def _reaches_capability_seam(
 def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     """The `try` blocks that DECIDE availability — FOUR admission rules.
 
-      * a module-body `try` that assigns an `*AVAILABLE` flag (own-code contact
-        required);
+      * a module-body `try` that assigns an `*AVAILABLE` flag. THREE arms admit
+        it, and the third is the one that is easy to get wrong from the
+        contract alone: an own-code import inside the `try`, an own-code name
+        reachable from it, **or** a call to the capability seam
+        (`_reaches_capability_seam`) — so an `*AVAILABLE` guard whose client was
+        built at module scope (`PROJ = _make_proj()` … `PROJ.g.query(…)`) IS
+        graded, and "own-code contact required" was a stale over-claim (review of
+        `61fc96cdd8`, P2-4);
       * a module-body `try` that binds a name the module's own `skipif`/`skip`
         condition READS — `LIVE`, `_FTS_ESCAPE_LIVE`, `_LIVE_OK` are the same
-        decision as `FALKORDB_AVAILABLE` even though none ends in `AVAILABLE`;
+        decision as `FALKORDB_AVAILABLE` even though none ends in `AVAILABLE`
+        (same three arms, capability seam included);
       * the probe `try` inside a module-level helper the flag is RESOLVED by
         (`FALKORDB_AVAILABLE = _falkordb_available()`), reached through the
         helper's control flow — the guard may sit inside a `for`;
-      * the probe `try` inside a helper a SKIP decision calls — directly from a
-        `skipif`, or through a sentinel (`uri = _live_target()` … `if uri is None:
-        pytest.skip(…)`), where no flag exists at all.
+      * the probe `try` inside ANY function a SKIP decision reaches — a helper a
+        `skipif` calls, or through a sentinel (`uri = _live_target()` … `if uri is
+        None: pytest.skip(…)`), where no flag exists at all. **Any function, at
+        any nesting depth** — a `def test_…` body that skips on a sentinel it
+        bound itself is the same decision and was graded by nothing (review of
+        `61fc96cdd8`, P1-1).
 
     The contract above is the code's, not an aspiration: a docstring that said
     "two shapes" while the function admitted four told any lane auditing this
     gate from its own contract that half its population was ungraded (review of
     3ce7ffdd867, P2). Measured per-branch root counts at that head: 26 / 5 / 15 / 5.
 
-    Both module-body rules walk module-level CONTROL FLOW (`if`/`for`/`with`, and
-    through a handler-less `try/finally` — a pure wrapper, see
-    `_control_flow_tries`).
+    Both module-body rules walk module-level CONTROL FLOW (`if`/`for`/`with`/
+    `match`, a `class` body, and through a handler-less `try/finally` — a pure
+    wrapper, see `_control_flow_tries`).
+
+    The capability arm's exemption is `_seam_exempt_names(tree)`, a BINDING-AWARE
+    set: a name bound by a non-own import is exempt only while nothing re-binds
+    it (review of `61fc96cdd8`, P1-2).
 
     Nested `try`s inside a probe body are not roots: a `try/_proj.close()/except
     Exception: pass` cleanup is not the availability decision. The import-seam
@@ -942,9 +1118,12 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
     skip_referenced = _skip_condition_names(tree)
     module_own = _own_imported_names(tree.body)
     #: Names this module imported from a NON-own package (`import torch`, `import
-    #: some_optional_dep`). A capability ATTRIBUTE called on one of them is that
-    #: package's verb, not our seam — see `_reaches_capability_seam`.
-    third_party = _non_own_imported_names(tree.body)
+    #: some_optional_dep`) and never bound again. A capability ATTRIBUTE called on
+    #: one of them is that package's verb, not our seam — see
+    #: `_reaches_capability_seam` and `_seam_exempt_names` (a name that is ALSO
+    #: bound elsewhere is not exempt: the receiver at the call site is not
+    #: provably that import).
+    third_party = _seam_exempt_names(tree)
     # MODULE-LEVEL control flow, not just `tree.body`. `tests/test_assembly_pure.py:2615`
     # puts its probe inside `if _DOCKER_URI:`, so a walk over the direct children
     # returned NO row for that file while `_skip_condition_names(tree)` already held
@@ -1013,32 +1192,59 @@ def _probe_roots(tree: ast.Module) -> list[ast.Try]:
                     or _reaches_capability_seam(block, third_party)
                 )
             )
-        elif (
-            isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and stmt.name in skip_gated
-        ):
-            # Only a probe that TOUCHES own code is graded — it imports own code
-            # inside the `try`, or it calls a name it imported from own code
-            # above it. That is the seam this class exists for (a module or door
-            # that is moved must fail loudly). A THIRD-PARTY import in the same
-            # `try` — `import redislite.falkordb_client` in the embedded
-            # harnesses, `sentence_transformers` in the model probes — is an
-            # optional extra, and demanding a re-raise for it would turn a
-            # legitimate skip into a collection error, contradicting the rule
-            # that an absent capability skips.
-            own_names = _own_imported_names(stmt.body) | module_own
-            roots.extend(
-                block
-                for block in _control_flow_tries(stmt.body)
-                if (
-                    _imports_own_code(block)
-                    or _touches_own_code(block, own_names)
-                    # Same arm, same narrowing as the resolver branch above: the
-                    # passed-in client stays graded, a third-party client's
-                    # generic `.query` does not (review of 90a0e9e8b20c, 1+3).
-                    or _reaches_capability_seam(block, third_party)
-                )
+
+    # ⛔ THE SKIP-GATED ARM REACHES **EVERY** FUNCTION, NOT ONLY THE MODULE-LEVEL
+    # HELPERS A `skipif` NAMES (review of `61fc96cdd8`, P1-1). A `def test_…`
+    # body that binds a sentinel and then skips on it is the SAME decision, and
+    # the census graded NOTHING there while `_skip_guard_call_names` already
+    # walked the whole tree to find the sentinel names — an asymmetry that is
+    # exactly the hole. Measured live instance:
+    # `tests/test_index_surfacing.py:269-281` — a broad `except Exception` in a
+    # `for` inside the test body, capturing the error into `unsupported` and
+    # feeding `pytest.skip(f"… {unsupported}")`; before this widening that file
+    # was absent from the census entirely and its swallowed arm was invisible.
+    #
+    # The test named in that finding is only half the class, so the rule is the
+    # general one: any function (nested, method, test, helper) that (a) contains
+    # a `skip`/`skipif`/`xfail` call and (b) BINDS a name that call READS is a
+    # skip-gated decision, and the same three admission arms apply to it.
+    module_level = {
+        id(stmt)
+        for stmt in tree.body
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    for func in ast.walk(tree):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        # A module-level resolver keeps its OWN branch below/above: the two
+        # rules were an if/elif over `tree.body`, and re-admitting a resolver
+        # function here would grade it twice.
+        if id(func) in module_level and func.name in resolvers:
+            continue
+        if func.name not in skip_gated and not _skips_on_a_bound_name(func):
+            continue
+        # Only a probe that TOUCHES own code is graded — it imports own code
+        # inside the `try`, or it calls a name it imported from own code
+        # above it. That is the seam this class exists for (a module or door
+        # that is moved must fail loudly). A THIRD-PARTY import in the same
+        # `try` — `import redislite.falkordb_client` in the embedded
+        # harnesses, `sentence_transformers` in the model probes — is an
+        # optional extra, and demanding a re-raise for it would turn a
+        # legitimate skip into a collection error, contradicting the rule
+        # that an absent capability skips.
+        own_names = _own_imported_names(func.body) | module_own
+        roots.extend(
+            block
+            for block in _control_flow_tries(func.body)
+            if (
+                _imports_own_code(block)
+                or _touches_own_code(block, own_names)
+                # Same arm, same narrowing as the resolver branch: the
+                # passed-in client stays graded, a third-party client's
+                # generic `.query` does not (review of 90a0e9e8b20c, 1+3).
+                or _reaches_capability_seam(block, third_party)
             )
+        )
     return roots
 
 
@@ -2210,17 +2416,38 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     #     (`tests/test_8870_version_anchor_write_order.py:138`). Instead the arm is back
     #     in every branch and NARROWED: `_reaches_capability_seam(block, third_party)`
     #     skips an ATTRIBUTE call only when the receiver's ROOT name is bound by a
-    #     NON-own import (`_non_own_imported_names`) — the `some_optional_dep.query`
-    #     false red — and grades everything else. `4k+` below is the POSITIVE witness
-    #     for this exact document; deleting the arm again reds it, which is the
-    #     guarantee the `()` pin could never give.
+    #     NON-own import (`_seam_exempt_names`) — the `some_optional_dep.query`
+    #     false red — and grades everything else.
+    #
+    #     FOUR branches, FOUR witnesses (review of `61fc96cdd8`, P1-3 — the count here
+    #     used to say "three branches" and the fourth was unwitnessed, so deleting its
+    #     arm was silent): the module-body `*AVAILABLE` branch is `4k+`, the
+    #     module-body SKIP-READ branch is `skip_read_client_bound_above` (4o), the
+    #     RESOLVER branch is `4k`, and the skip-gated branch is `3c`. Per-branch
+    #     mutants: delete exactly one `or _reaches_capability_seam(…)` term and the
+    #     named row goes red, each time. `4k+` below is the POSITIVE witness for this
+    #     document; deleting an arm again reds its row, which is the guarantee the
+    #     `()` pin could never give.
 
-    # 4k-/4l-. `_reaches_capability_seam` matches the GENERIC attribute `query`, so it
-    #     must never admit a third-party-only probe: at the module body, nor in either
-    #     helper branch. The two rows below are the NEGATIVE half of the narrowing
-    #     (`third_party`): re-adding an UNGATED arm anywhere reddens them, and dropping
-    #     the arm outright reddens the positive rows 4k+ that follow (review of
+    # 4k-/4l-. `_reaches_capability_seam` matches the GENERIC attribute `query`, so the
+    #     THIRD-PARTY-IMPORT case must never be admitted: at the module body, nor in
+    #     either helper branch. The two rows below are the NEGATIVE half of the
+    #     narrowing (`third_party`): re-adding an UNGATED arm anywhere reddens them,
+    #     and dropping the arm outright reddens the positive rows 4k+/4o (review of
     #     90a0e9e8b20c, findings 1+3).
+    #
+    #     ⛔ WHAT IS IMPLEMENTED IS NARROWER THAN "no third-party probe is graded",
+    #     AND THIS COMMENT USED TO CLAIM THE WIDER THING (review of `61fc96cdd8`,
+    #     P2-1). The exemption fires only when the receiver's ROOT is bound by a
+    #     non-own IMPORT, so a receiver bound by a CALL to one is still graded:
+    #     `CLIENT = make_client(); CLIENT.query(…)` (a chromadb/qdrant handle) IS a
+    #     root and WOULD demand a re-raise of a legitimate optional-extra skip.
+    #     Measured `((7, (), True, False, True),)`. No live instance exists in this
+    #     tree, and widening the exemption to follow the call would exempt real
+    #     seam receivers too; so this is declared a RESIDUAL rather than fixed:
+    #     **RESIDUAL (P2-1) — a receiver bound by a call to a non-own import is
+    #     graded; if such a probe ever appears, the re-raise it demands is a false
+    #     red on a legitimate skip.** The comment now says what the code does.
     module_body_third_party_query = roots(
         """
         FALKORDB_AVAILABLE = False
@@ -2284,7 +2511,236 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         f"the capability arm can admit it: {module_body_client_bound_above}"
     )
 
-    # 5. The real tree must carry all four shapes, or every assertion above is a
+    # 4k++ — THE EXEMPTION IS BINDING-AWARE, NOT NAME-KEYED (review of
+    #     `61fc96cdd8`, P1-2). A name that a non-own import binds is exempt only
+    #     while NOTHING re-binds it: here `import falkordb` sits at module scope
+    #     and `falkordb = proj` inside the probe rebinds it to OUR client, so the
+    #     receiver at the call site is the seam and must be graded. Measured at
+    #     `61fc96cdd8` (name-keyed exemption): `()` — a root the previous head
+    #     `994fb1d52f` DID grade was lost, so this was a real regression. The row
+    #     below is that escaped shape; `4k-`/`4l-` are its two negative halves.
+    shadowed_third_party = roots(
+        """
+        import falkordb
+
+        def _probe(proj):
+            try:
+                falkordb = proj
+                falkordb.g.query("RETURN 1")
+                return True
+            except Exception:
+                return False
+
+        FALKORDB_AVAILABLE = _probe(None)
+        """
+    )
+    assert shadowed_third_party == ((5, (), True, False, True),), (
+        "a receiver whose root name is a non-own import BUT is rebound elsewhere "
+        "is not provably that import at the call site, so it must stay graded — "
+        f"a name-keyed exemption loses this root: {shadowed_third_party}"
+    )
+    # …and the CONTROL, identical except that the import is absent: this shape
+    #     was graded at BOTH heads, so the pair isolates the shadowing (not the
+    #     parameter client) as the thing the exemption was wrongly swallowing.
+    shadowed_control = roots(
+        """
+        def _probe(proj):
+            try:
+                falkordb = proj
+                falkordb.g.query("RETURN 1")
+                return True
+            except Exception:
+                return False
+
+        FALKORDB_AVAILABLE = _probe(None)
+        """
+    )
+    assert shadowed_control == ((3, (), True, False, True),), (
+        f"the control must be graded exactly as before: {shadowed_control}"
+    )
+
+    # 4n. `_reaches_capability_seam` takes its exemption set as a REQUIRED
+    #     argument (review of `61fc96cdd8`, P2-4). The old default was
+    #     `frozenset()` — the UNGATED arm — so a fifth call site that forgot it
+    #     would silently restore the third-party false red, and no row could see
+    #     it. A missing argument is now a `TypeError` at collection: fail closed.
+    with pytest.raises(TypeError):
+        _reaches_capability_seam(ast.parse("pass"))  # type: ignore[call-arg]
+    assert isinstance(_seam_exempt_names(ast.parse("import torch")), frozenset)
+
+    # 4n. A `def test_…` BODY that skips on a sentinel it bound ITSELF is the same
+    #     decision as a module-level helper — and it was graded by NOTHING, because
+    #     `_probe_roots` admitted only MODULE-LEVEL functions whose NAME a `skipif`
+    #     names, while `_skip_guard_call_names` already walked the whole tree to
+    #     find the sentinels (review of `61fc96cdd8`, P1-1). Live instance:
+    #     `tests/test_index_surfacing.py:269-281`. Deleting `_skips_on_a_bound_name`
+    #     from the walk reddens exactly this row.
+    test_body_sentinel = roots(
+        """
+        import pytest
+
+        def test_fts_index_supported(g):
+            unsupported = None
+            for probe in ("A", "B"):
+                try:
+                    g.query(probe)
+                    unsupported = None
+                    break
+                except Exception as e:
+                    unsupported = e
+            if unsupported is not None:
+                pytest.skip(f"unsupported: {unsupported}")
+        """
+    )
+    assert test_body_sentinel == ((7, (), True, False, True),), (
+        "a probe inside a `def test_…` body that skips on a sentinel it bound "
+        f"must be graded like any other skip decision: {test_body_sentinel}"
+    )
+
+    # 4o. The MODULE-BODY SKIP-READ branch's capability arm needs its OWN witness
+    #     (review of `61fc96cdd8`, P1-3). Per-branch mutants measured that three of
+    #     the four arms red a row when deleted and this one red NOTHING — while it
+    #     is the ONLY rule that grades a module-body skip-read guard whose client
+    #     was built above the `try` (a suffix-spelled flag, so `*AVAILABLE` does not
+    #     admit it; `PROJ` is neither an import nor an own name, so neither does any
+    #     other arm). Deleting `or _reaches_capability_seam(stmt, third_party)` from
+    #     THAT branch reddens exactly this row and nothing else.
+    skip_read_client_bound_above = roots(
+        """
+        import pytest
+
+        PROJ = _make_proj()
+        LIVE = False
+        try:
+            PROJ.g.query("RETURN 1")
+            LIVE = True
+        except Exception:
+            LIVE = False
+
+        @pytest.mark.skipif(not LIVE, reason="live")
+        def test_live():
+            pass
+        """
+    )
+    assert skip_read_client_bound_above == ((6, (), True, False, True),), (
+        "the SKIP-READ branch's capability arm is load-bearing: an unspelled flag "
+        "and a client built above the `try` leave only that arm, so deleting it "
+        f"was a silent drop of a class-2 false PASS: {skip_read_client_bound_above}"
+    )
+
+    # 5. DESCENT GAPS in `_control_flow_tries` (review of `61fc96cdd8`, P2-2), all
+    #    measured as `()` before the fix — a probe behind them produced NO row at
+    #    all, which reads exactly like "there is no probe here".
+    #
+    #  5a. a `class` body: `ClassDef` was not descended, so a module-level probe in
+    #      one was invisible. The escape `class` is a plain namespace here; nothing
+    #      about the probe changes.
+    class_body_probe = roots(
+        """
+        FALKORDB_AVAILABLE = False
+
+        class _Probe:
+            try:
+                from tortoise.sdk import TortoiseSDK
+                TortoiseSDK()
+                FALKORDB_AVAILABLE = True
+            except Exception:
+                pass
+        """
+    )
+    assert class_body_probe == ((5, (), True, True, True),), (
+        "a probe in a module-level `class` body is module-level control flow and "
+        f"must be graded: {class_body_probe}"
+    )
+    #  5b. a `match` ARM: `ast.Match` has no `body`/`orelse` — its statements live
+    #      on `match_case` — so the generic descent skipped it entirely.
+    match_arm_probe = roots(
+        """
+        import pytest
+
+        LIVE = False
+        match "x":
+            case "x":
+                try:
+                    from tortoise.sdk import TortoiseSDK
+                    TortoiseSDK()
+                    LIVE = True
+                except Exception:
+                    LIVE = False
+
+        @pytest.mark.skipif(not LIVE, reason="live")
+        def test_live():
+            pass
+        """
+    )
+    assert match_arm_probe == ((7, (), True, True, True),), (
+        "a probe in a `match` arm must be graded — `Match` carries its statements "
+        f"on its cases, not on `body`: {match_arm_probe}"
+    )
+    #  5c. a `try` WITH handlers was appended and then `continue`d, so its `orelse`
+    #      and `finalbody` were never visited: a probe in an `else` arm was
+    #      invisible. The outer row is PRE-EXISTING and unchanged (a handler-bearing
+    #      `try` at module level was always a root; its arm here re-raises, so it
+    #      swallows nothing); the row at 10 is the one this fix adds.
+    orelse_probe = roots(
+        """
+        import pytest
+
+        LIVE = False
+        try:
+            _setup()
+        except Exception:
+            raise
+        else:
+            try:
+                from tortoise.sdk import TortoiseSDK
+                TortoiseSDK()
+                LIVE = True
+            except Exception:
+                LIVE = False
+
+        @pytest.mark.skipif(not LIVE, reason="live")
+        def test_live():
+            pass
+        """
+    )
+    assert orelse_probe == (
+        (5, (), False, False, True),
+        (10, (), True, True, False),
+        (10, (), True, True, True),
+    ), (
+        "a probe in a `try/except/else` `else` arm must be graded — the walk "
+        f"appended the outer `try` and `continue`d past its `orelse`: {orelse_probe}"
+    )
+
+    # 6. `@pytest.mark.xfail(cond)` is a graded RESOLUTION (review of `61fc96cdd8`,
+    #    P2-3). It is the more dangerous of the two: a rename inside the probe makes
+    #    the test XFAILED, i.e. it marks as EXPECTED the exact failure the probe
+    #    exists to surface. Measured `()` for this source before `xfail` joined
+    #    `_skipif_conditions`, and the identical `skipif(not LIVE)` form graded.
+    xfail_resolution = roots(
+        """
+        import pytest
+
+        LIVE = False
+        try:
+            from tortoise.sdk import TortoiseSDK
+            TortoiseSDK()
+            LIVE = True
+        except Exception:
+            LIVE = False
+
+        @pytest.mark.xfail(not LIVE, reason="live")
+        def test_live():
+            pass
+        """
+    )
+    assert xfail_resolution == ((5, (), True, True, True),), (
+        "`xfail(cond)` decides a resolution exactly as `skipif(cond)` does, so the "
+        f"probe feeding it is the availability decision: {xfail_resolution}"
+    )
+
+    # 7. The real tree must carry all four shapes, or every assertion above is a
     #    statement about a sample rather than about the code it is meant to guard.
     graded = {row[0] for row in _probe_report()}
     for rel in (
@@ -2308,6 +2764,13 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         # (a pure wrapper the walk must descend). Its absence is the signal that
         # the walk has gone back to stopping at every `try`.
         "tests/test_integration_search.py",
+        # … and the two `def`-body sentinels the any-function widening added (P1-1):
+        # a probe in a TEST body, and one in a fixture helper, that skip on a
+        # sentinel they bound. Both were graded by nothing before that fix, and
+        # both now carry an arm (`except (AttributeError, NameError, TypeError):
+        # raise`) — so their presence also pins that the arms were not dropped.
+        "tests/test_index_surfacing.py",
+        "tests/test_8870_version_anchor_write_order.py",
     ):
         assert rel in graded, (
             f"{rel} is absent from the probe census — a shape it grades has "
