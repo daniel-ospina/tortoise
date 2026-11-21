@@ -54,7 +54,7 @@ D5 refuses writes once the corpus outgrows the graph; D6 hides all of it behind 
 
 ## 3. What the comparables say the destination looks like
 
-Four of five converged; we already match two of the four moves.
+Four of the five have moved their expensive write work behind a queue; we already match two of the four moves.
 
 | move | Mem0 | Zep | Hindsight | Supermemory | turbopuffer | us |
 |---|---|---|---|---|---|---|
