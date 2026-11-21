@@ -271,7 +271,26 @@ def test_no_sync_sdk_leg_runs_on_the_event_loop_during_a_capture(
             continue
         saved[name] = attr
         probe = _wrap(name, raw)
-        setattr(TortoiseSDK, name, probe)  # MUTANT rv5
+        installed = probe if kind is None else kind(probe)
+        setattr(TortoiseSDK, name, installed)
+        # ⛔ THE INSTRUMENT CHECKS ITS OWN INSTALLATION. Re-installing under the
+        # WRONG descriptor kind is the F1 defect, and it is INVISIBLE from the
+        # measurement side: a `staticmethod` that becomes an instance method
+        # raises off the loop (on `capture-extract_*`), where this census does
+        # not record rows at all — so the capture is quietly broken and the
+        # census reads clean. Measured: reverting this line to
+        # `setattr(TortoiseSDK, name, probe)` and running the test still gives
+        # `2 passed`. A structural check is therefore the only falsifier that
+        # bites, and it costs nothing (#14086 cycle-5 review, F1'):
+        if kind is not None and not isinstance(vars(TortoiseSDK)[name], kind):
+            raise AssertionError(
+                f"the census changed {name!r}'s descriptor kind: it is a "
+                f"{kind.__name__} on TortoiseSDK and the probe installed a "
+                f"{type(vars(TortoiseSDK)[name]).__name__}. A `staticmethod` "
+                "installed as an instance method receives `self` as its first "
+                "argument and raises inside the capture being measured — off "
+                "the loop, where this census records nothing, so the run "
+                "would look clean over a broken capture.")
 
     try:
         r = client.post("/v1/sessions", json={"conversation": _CONV})
