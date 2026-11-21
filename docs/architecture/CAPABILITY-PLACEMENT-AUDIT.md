@@ -141,14 +141,14 @@ a head that has since grown. So the drift is **146 of the 218 comparable, plus a
 door), so it is one the pin cannot hold at any line. ⛔ **That is a fact about the drift, not a licence to
 re-derive from a symbol.**
 **The drift is 155 of those 227.** ⚠️ **These counts are a parsing decision, and this header states which
-one it took**: the 231 counts unique `(resolved path, start line)` pairs over `path.py:NNNN` spellings
+one it took**: the 227 counts unique `(resolved path, start line)` pairs over `path.py:NNNN` spellings
 written as ONE token. The document also writes five pairs as two code spans
 (`` `cache_projection.py` `:2485` ``, a `main`-set address listed above, plus
 `` `sdk.py` `:2917` ``, `` `sdk.py` `:61999` ``, `` `sdk.py` `:62019` `` and
 `` `projection/entities.py` `:5824` ``); **three** of them are resolved but not counted by the one-token rule — two are ALSO written
 one-token (the `:Meta` read and its `_config_reset_state` delegate), so they are among the 227
 already, measured as the two pairs the two sets share — and counting that form gives **230 pairs and 158 drifters**. So the
-basis must travel with the figure — 159 and 162 are one measurement under two counting decisions, not two
+basis must travel with the figure — 155 and 158 are one measurement under two counting decisions, not two
 findings. ⚠️ **An earlier form of
 this paragraph sat in the MIDDLE of the sentence it qualifies**, between `103` and `collisions`, so the
 sentence read "…to 211 — 103 … collisions —" around a full paragraph; its alternative basis then quoted a
@@ -224,7 +224,7 @@ orphan GC), and `mcp_server.py`: `:11281` (`MATCH (t:Tag) OPTIONAL MATCH (t)<-[:
 does, and NOT as new `path.py:NNNN` pairs (a bare sibling is not counted at all — that is the point):
 a pair spelling would
 add five more **as-written spellings** — 345 → 350 — and so 118 → 123 collisions, since a collision is a
-spelling that shares its `(path, line)` pair with another, while adding **no pair at all**: 231 either
+spelling that shares its `(path, line)` pair with another, while adding **no pair at all**: 227 either
 way, because each of the five already carries its pair from §2.5. A bare sibling adds neither. The pin
 agrees: `_REDEFINED_13854` pins each of these four by content at ONE occurrence of the
 §2.5 token, so a second one-token spelling would red it. Each was
