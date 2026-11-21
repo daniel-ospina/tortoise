@@ -105,15 +105,15 @@ the fragment the row quotes, and a cite in NEITHER list has an **UNDECLARED** he
 census USUALLY wrote it, not where it provably is — resolved by opening, never by inference. ⛔ Do not
 repair one by adding the delta: that is the false correction `test_12184_shifted_cites.py` was written for.
 ⚠️ **`#14065` (`ac57b2d38a`, "a per-node USAGE signal derived") then inserted a further 62 lines into
-`tortoise/sdk.py`, and the pinned set was re-derived a second time at that head (`#14067`)** — so the
-unpinned remainder below the old boundaries moved AGAIN, and this time the deltas COMPOUND rather than
-replace. Content-mapped `d4a8dddc4e → f392bb67d5` with `git diff -U0`, the inserts are three, not one:
-**+48** above `sdk.py:13538`, a further **+7** above `:13590`, and a further **+7** above `:46406`
-(48 + 7 + 7 = 62). An address measured at `d4a8dddc4e` therefore carries **+48** above `13538`, **+55**
-above `13590` and **+62** above `46406` at this head — verified by opening both ends
-(`sed -n '<old>p'` == `sed -n '<old+delta>p'`), never by arithmetic on a cite; `hosted_api.py` did not
-move again. The rule is unchanged and now has two witnesses: **an unpinned cite in these two files must
-be re-opened at the head its row names, never read at this one and never repaired by adding a delta.**
+`tortoise/sdk.py`, and the pinned set was re-derived a second time at that head (`#14085`)** — so the
+unpinned remainder below the old boundaries moved AGAIN, and the deltas **COMPOUND** rather than replace:
+the second insert sits on top of the first, so an address's drift is the sum of every insert above it,
+not the boundary nearest it. That is why the head cannot be recovered by arithmetic and why the rule is
+unchanged rather than relaxed — **an unpinned cite in these two files must be re-opened at the head its
+row names, never read at this one and never repaired by adding a delta.** The proportional maps for both
+inserts are carried where they are MEASURED (the `SWEEP_RESIDUE` block in `tools/sdk_privatise.py`, and
+§5's parenthesis in `SUBSTRATE-REBUILD-MAP.md`, which re-points its seven `sdk.py` addresses to the lines
+that carry them at this head); this header states the rule and the fact, not a delta to apply.
 ⛔ **Take the head from the list, never from the row.** §2.1's whole-node row carries one of each
 (`record_serve.py:468` is in THIS revision's group above; `projection/__init__.py:14169` is in neither list, and opening it there confirms the pin),
 and reading a row's head off its neighbours is exactly how a cite gets opened on a line nobody read. The
