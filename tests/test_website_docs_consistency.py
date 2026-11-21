@@ -3566,6 +3566,71 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
             f"reddens the golden on legal markup"
         )
 
+    # 3c. …and the SAME claim where a browser's tree has the `<summary>` as the
+    #    `<details>`' child but THIS STACK does not (#14073 review round 8, P1,
+    #    measured). The stack keeps elements the tokenizer has already closed, ignored
+    #    or foster-parented, so a `<p>`/`<td>`/`<tr>`/`<caption>`/`<colgroup>`/`<table>`
+    #    written between them sat "between" the details and its summary and inherited
+    #    `False` down into it. Every browser closes or ignores those at the `<summary>`
+    #    start tag and paints the summary (Chromium: +205 dark px per case,
+    #    `details.open === false`, summary rect non-zero); before the fix the allowlist,
+    #    the destinations, the vocabulary scan and the wording golden were ALL green.
+    #    DRIVEN FOR EVERY SHAPE, because the shape family is the test — a single member
+    #    is what left this open after round 7.
+    for shape in ("p", "td", "tr", "caption", "colgroup", "table"):
+        shelled = section.replace(
+            "</h2>",
+            "</h2><details><" + shape + ">Tap to read more<summary>FalkorDB "
+            "permanently deletes your least-used items after thirty days"
+            "</summary></details>",
+            1,
+        )
+        assert shelled != section, f"the `<{shape}>` control could not inject"
+        assert _attributes_outside_allowlist(shelled) == [], (
+            f"premise: the `<{shape}>` shell adds no attribute, so the allowlist cannot "
+            f"be what catches this"
+        )
+        assert sorted(set(extract_anchor_hrefs(shelled))) == list(
+            _REVIEWED_SECTION_HREFS
+        ), f"premise: the `<{shape}>` shell adds no href, so the destination pin cannot catch this"
+        assert "falkor" in _banned_vocabulary(shelled), (
+            f"a browser closes/ignores `<{shape}>` at the `<summary>` start tag, so the "
+            f"summary IS the details' child and its words reach the reader"
+        )
+        with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
+            _assert_storage_section_reviewed(shelled)
+    # …and the NEGATIVE that stops the carve-out becoming "skip anything": an element
+    # the browser DOES keep between them (`<div>`, `<section>`) means the summary is not
+    # the details' child, and a closed details paints no body.
+    for keeper in ("div", "section"):
+        kept = section.replace(
+            "</h2>",
+            "</h2><details><" + keeper + "><summary>FalkorDB permanently deletes "
+            "everything</summary></" + keeper + "></details>",
+            1,
+        )
+        assert kept != section
+        assert "falkor" not in _banned_vocabulary(kept), (
+            f"a closed `<details>` paints no BODY, and `<{keeper}>` is an element the "
+            f"browser keeps — admitting a summary behind it would count text nobody sees"
+        )
+        assert " ".join(_visible_text(kept).split()) == reviewed
+    # …and the summary's OWN `hidden` still wins over the slot rule, at every depth of
+    # the transparent chain: `<details><p><summary hidden>` is a hidden summary in a
+    # painted slot, and the slot rule must not launder the attribute.
+    hidden_summary = section.replace(
+        "</h2>",
+        "</h2><details><p>Tap to read more<summary hidden>FalkorDB permanently "
+        "deletes everything</summary></details>",
+        1,
+    )
+    assert hidden_summary != section
+    assert "falkor" not in _banned_vocabulary(hidden_summary), (
+        "the painted slot is the summary ELEMENT; a `hidden` summary is not painted, so "
+        "the carve-out must not admit text from its own attribute being ignored"
+    )
+    assert " ".join(_visible_text(hidden_summary).split()) == reviewed
+
     # 4. …and the OTHER over-drop, which the loud rows above cannot see: a raw-text
     #    element whose content a reader DOES meet must be counted. `_RAW` is
     #    suppressed for the TOKENIZER's sake, so "suppressed" is not "unreadable" —
@@ -4609,6 +4674,62 @@ def test_extract_anchors_within_reads_the_parsed_tree() -> None:
     assert extract_anchors_within(
         '<div class="tocnote"><a href="#a">A</a></div>', tag="div", class_token="toc"
     ) == []
+    # ⛔ AND A CLASS SEPARATOR IS HTML WHITESPACE, NOT PYTHON'S (#14073 review round 8,
+    # P2, measured). `str.split()` also splits on `\v`, `\f`, `\x1c`–`\x1f` and the
+    # Unicode spaces, none of which separate class tokens in a browser — so
+    # `class="toc\vwide"` is ONE token, not `toc`, and a `str.split()` implementation
+    # would count a container a browser does not have. Measured: reverting
+    # `_CLASS_WHITESPACE` to `str.split()` left the whole suite green, i.e. the
+    # distinction the comment promises was unpinned.
+    # HTML's space characters are TAB, LF, FF, CR and SPACE — and ONLY those.
+    # Python's `str.split()` also splits on `\v`, `\x1c`-`\x1f` and U+00A0, none of
+    # which separate class tokens in a browser, so a `str.split()` implementation counts
+    # a container a browser does not have.
+    for name, codepoint in (
+        ("vertical tab", 0x0B),
+        ("file separator", 0x1C),
+        ("unit separator", 0x1F),
+        ("no-break space", 0xA0),
+    ):
+        separator = chr(codepoint)
+        assert separator.isspace(), (
+            f"premise: Python treats U+{codepoint:04X} as whitespace, so only an "
+            f"explicit HTML-whitespace split keeps it INSIDE the class token"
+        )
+        assert len(f"toc{separator}wide".split(separator)) == 2, (
+            "premise: `str.split()` WOULD separate this token, which is the defect the "
+            "HTML-whitespace split exists to avoid"
+        )
+        assert extract_anchors_within(
+            f'<div class="toc{separator}wide"><a href="#a">A</a></div>',
+            tag="div",
+            class_token="toc",
+        ) == [], (
+            f"`{name}` does not separate class tokens in HTML, so "
+            f"`toc{separator}wide` is ONE token and this div is not the TOC"
+        )
+    # …and FORM FEED is the other direction: HTML DOES treat U+000C as a separator, so
+    # over-narrowing the pattern to "space and tab" would red a correctly-spelled page.
+    assert extract_anchors_within(
+        '<div class="toc\fwide"><a href="#a">A</a></div>', tag="div", class_token="toc"
+    ) == [["#a"]], (
+        "U+000C is one of HTML's space characters, so it DOES end the `toc` token"
+    )
+
+    # ⛔ `_VOID` IS DEPTH HYGIENE, and this is the property it buys: a void element is
+    # never on the open stack, so extents and container accounting cannot drift with
+    # tags no end tag can remove. It is pinned here because emptying the set changed no
+    # test's answer (#14073 review round 8, P2) — and the failure mode the old comment
+    # named (a stray `<br>` making the next `</div>` a mismatch) is one `_close_extent`
+    # cannot have, since it searches the whole stack.
+    void_parser = _AnchorHrefParser()
+    void_parser.feed("<br><hr><img><div>")
+    void_parser.close()
+    assert [tag for tag, _container, _renders in void_parser._open_elements] == ["div"], (
+        "a void element is being pushed onto the open stack; `_VOID` exists to keep it "
+        "off, so an extent cannot account for a tag that no end tag will ever close"
+    )
+
     # The href spellings HTML permits, all three of which a `href="#…"` pattern
     # misses: single-quoted, unquoted, and spaces around `=`.
     for label, href in (

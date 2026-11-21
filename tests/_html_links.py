@@ -217,9 +217,14 @@ class _AnchorHrefParser(HTMLParser):
     # `<font>` breaks out only when it carries one of its presentational attrs.
     _BREAKOUT_FONT_ATTRS = frozenset({"color", "face", "size"})
     # Elements that never hold content, so no end tag is coming for them. The
-    # open-element stack below must not push one: a `<br>` left on the stack would
-    # make the NEXT `</div>` a mismatch and the container it belongs to would never
-    # close.
+    # open-element stack below must not push one — DEPTH HYGIENE, not a closure
+    # failure: `_close_extent` searches the WHOLE stack for the tag it closes, so a
+    # leftover `<br>` above a `<div>` is popped with it and the container still closes.
+    # This comment used to claim the opposite (that a stray `<br>` would make the next
+    # `</div>` a mismatch and the container would never close), which the code cannot
+    # do; measured: emptying this set changed no test's answer (#14073 review round 8,
+    # P2). What the set still buys is a stack that holds only elements an end tag can
+    # remove, so extent and container accounting cannot drift with void tags in it.
     _VOID = frozenset({
         "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
         "meta", "param", "source", "track", "wbr",
@@ -288,6 +293,21 @@ class _AnchorHrefParser(HTMLParser):
         "rb", "rp", "rt", "rtc", "select", "table", "tbody", "td", "tfoot",
         "th", "thead", "tr",
     })
+    #: Elements a browser NEVER KEEPS between a closed `<details>` and its `<summary>`,
+    #: so the text recording looks past them when it asks whether a `<summary>` is the
+    #: details' child (#14073 review round 8, P1, measured). It IS `_IMPLICITLY_CLOSED`:
+    #: the tags the tokenizer closes on its own or ignores outside a table (`<p>`,
+    #: `<td>`, `<tr>`, `<caption>`, `<colgroup>`, …) — and `table` is already a member,
+    #: which is what covers a `<summary>` written INSIDE a table (the browser
+    #: FOSTER-PARENTS it out in front of the table, so it is the `<details>`' child
+    #: again). Kept as its own name so the two questions can diverge without one edit
+    #: silently changing both.
+    #:
+    #: ⛔ THIS SET SAYS "THE BROWSER HAS NO ELEMENT HERE", NOT "SKIP ANYTHING". A `<div>`
+    #: or `<section>` is NOT in it: the browser keeps those, so a `<summary>` behind one
+    #: is not the details' child and nothing under it is painted. That negative is what
+    #: stops the carve-out admitting a whole closed body.
+    _SUMMARY_TRANSPARENT = _IMPLICITLY_CLOSED
     #: The `_RAW` members whose CONTENT a reader DOES meet, so the visible-text
     #: recording must not drop it with the rest of the raw-text family.
     #:
@@ -614,7 +634,9 @@ class _AnchorHrefParser(HTMLParser):
 
         ⛔ `<noscript>` IS THE ONE REGION THIS CANNOT ANSWER, AND THE CALLER MUST
         REFUSE IT — not clear it. `<noscript>` is suppressed because
-        `self.scripting` is True (line 180), so an attribute on an element INSIDE
+        `self.scripting` is True (the attribute, not a line number — this reference used
+        to name one and went stale when the file grew; #14073 review round 8, P2), so an
+        attribute on an element INSIDE
         it is not recorded: a browser with JS does not render it, and a `title`
         there reaches only a reader with JS DISABLED — where the children ARE
         parsed as markup (MDN, quoted on `_MODE_DEPENDENT`). The two questions
@@ -1026,7 +1048,7 @@ class _AnchorHrefParser(HTMLParser):
         if (
             self._open_elements
             and not self._open_elements[-1][2]
-            and not (tag == "summary" and self._open_elements[-1][0] == "details")
+            and not self._is_painted_summary_slot(tag)
         ):
             renders = False
         self._open_elements.append((tag, opened_container, renders))
@@ -1182,6 +1204,37 @@ class _AnchorHrefParser(HTMLParser):
         ):
             self.text.append(data)
 
+    def _is_painted_summary_slot(self, tag: str) -> bool:
+        """Is `tag` the `<summary>` a closed `<details>` is PAINTING?
+
+        A closed `<details>` hides its BODY and paints its summary slot, so the
+        inheritance that makes its children `renders=False` must not reach that one
+        element — otherwise the text recording drops a claim a reader meets (measured:
+        `<details><summary>FalkorDB permanently deletes…</summary></details>` in
+        `#storage` left the allowlist, the destinations, the vocabulary scan and the
+        wording golden all green while Chromium painted the summary).
+
+        ⛔ "THE SLOT" IS NOT "THE NEXT STACK ENTRY" (#14073 review round 8, P1,
+        measured). The stack keeps elements the tokenizer has already closed, ignored or
+        foster-parented, so in `<details><p>Tap to read more<summary>CLAIM</summary>` the
+        `<p>` sits between the two and inherited `False` down into the summary — while
+        every browser closes the `<p>` at the `<summary>` start tag and paints the
+        summary at 812×54 px. So the walk looks PAST `_SUMMARY_TRANSPARENT`: the
+        elements a browser never keeps in that position. It does NOT look past anything
+        else, so `<details><div><summary>…` stays dark (the browser keeps the `div`, the
+        summary is not the details' child, and a closed details paints no body).
+
+        Its own attributes still win: the caller applies this on top of the
+        OWN-attribute decision, so `<details><p><summary hidden>…` stays unpainted.
+        """
+        if tag != "summary":
+            return False
+        stack = self._open_elements
+        index = len(stack) - 1
+        while index >= 0 and stack[index][0] in self._SUMMARY_TRANSPARENT:
+            index -= 1
+        return index >= 0 and stack[index][0] == "details" and not stack[index][2]
+
     def _text_is_painted(self) -> bool:
         """Is the text just read inside a subtree a browser PAINTS?
 
@@ -1211,19 +1264,31 @@ class _AnchorHrefParser(HTMLParser):
         the span. Skipping the FLAG (rather than matching the current tag) makes depth
         irrelevant, which is the property the browser's rendering has.
         """
-        for index, (tag, _container, renders) in enumerate(self._open_elements):
-            if renders:
+        stack = self._open_elements
+        # Elements the browser does NOT have on this path, so their inherited `False`
+        # must not block: the closed `<details>` whose summary slot is painted, and the
+        # elements it never keeps between itself and that summary.
+        transparent: set[int] = set()
+        for index, (tag, _container, renders) in enumerate(stack):
+            if renders or tag != "details":
                 continue
-            # A closed `<details>` hides its BODY, not its `<summary>` slot. The
-            # summary is the element OPENED DIRECTLY INSIDE it, so its presence at
-            # `index + 1` is what makes this flag describe a hidden body rather than
-            # a hidden subtree. Everything above keeps its own inherited flags, so a
-            # `hidden` ancestor above the pair still answers False.
+            moved_past = index + 1
+            while moved_past < len(stack) and stack[moved_past][0] in self._SUMMARY_TRANSPARENT:
+                moved_past += 1
             if (
-                tag == "details"
-                and index + 1 < len(self._open_elements)
-                and self._open_elements[index + 1][0] == "summary"
+                moved_past < len(stack)
+                and stack[moved_past][0] == "summary"
+                # Belt-and-braces with the loop below, which checks the summary's own
+                # flag anyway: measured, removing THIS condition alone changes no
+                # answer (#14073 review round 8). It stays because it states the rule
+                # at the point the carve-out is decided, so a later change to the loop
+                # cannot silently admit a `hidden` summary.
+                and stack[moved_past][2]
             ):
+                transparent.add(index)
+                transparent.update(range(index + 1, moved_past))
+        for index, (_tag, _container, renders) in enumerate(stack):
+            if renders or index in transparent:
                 continue
             return False
         return True
