@@ -40,6 +40,7 @@ import os
 import threading
 import time
 from contextlib import suppress
+from pathlib import Path
 
 import httpx
 import pytest
@@ -96,6 +97,8 @@ STALL_START_WAIT_S = 60.0
 # tracked defect — measured at ~4.75s for a max-size 500-turn capture (#3086)
 # — and is deliberately not what this file measures: these tests pin the
 # extraction (unbounded, provider-dependent) and the liveness-pool isolation.
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 _CONV = [
     {"role": "user",
@@ -2431,10 +2434,33 @@ def _measure_on_loop_graph_work(monkeypatch, turns: int, sid: str):
             [c for _, c, _ in records])
 
 
-def _measure_capture_graph_work(monkeypatch, turns: int, sid: str):
+def _measure_capture_graph_work(monkeypatch, turns: int, sid: str,
+                                conversation: list[dict] | None = None,
+                                session_gone: bool | int = False):
     """Like ``_measure_on_loop_graph_work``, but returns the per-thread
     ``(thread_name, cypher, duration)`` records so a caller can assert on
-    WHICH statements the loop ran, not just how many (#4465)."""
+    WHICH statements the loop ran, not just how many (#4465).
+
+    ``conversation`` overrides the default turn bodies (#10893 second cycle):
+    a test of the entity-linking tail needs turns that actually CARRY a
+    reference, and a test that silently ran a reference-free conversation would
+    assert a property of code it never reached.
+
+    ``session_gone`` answers the receipt's session-alive probe with "gone"
+    (`_session_alive` False) without racing a real DELETE — the only way to
+    REACH the delete-race branch, and therefore the orphan sweep, from a
+    fixture (`#10893` cycle-4 review, P2 #2: every needle for that branch was
+    inert because the ordinary fixture never gets there).
+
+    An INT answers "gone" from that probe ONWARD (1-based), which is what
+    reaches the OTHER sweep arm: the handler probes the session TWICE — a
+    pre-check before the receipt write and a re-check after it (the receipt
+    block's two session-alive probes) — so `2` models the delete landing in that
+    window and takes the RE-CHECK arm, while `True` answers the pre-check and
+    takes the "already gone" arm. Both arms issue the sweep; measured, they are different lines and
+    inlining one of them does not red a test that reaches only the other
+    (#14086 review, P2).
+    """
     import tortoise.hosted_api as ha_mod
     from tortoise import sdk as sdk_mod
     from tortoise.hosted_api import app
@@ -2447,6 +2473,7 @@ def _measure_capture_graph_work(monkeypatch, turns: int, sid: str):
     orig_query = graph_cls.query
     records: list[tuple[str, str, float]] = []
     writer_threads: list[str] = []
+    alive_probes = {"n": 0}
     # #3551: the hosted lane now calls the shared SDK primitive, which calls
     # `_write_capture_turns` from `tortoise/sdk.py` — patch the DEFINITION site,
     # not a hosted-module alias (hosted no longer imports it).
@@ -2455,6 +2482,14 @@ def _measure_capture_graph_work(monkeypatch, turns: int, sid: str):
     def _timed_query(self, cypher, *args, **kwargs):
         started = time.perf_counter()
         try:
+            if " ".join(cypher.split()) == _SESSION_ALIVE:
+                alive_probes["n"] += 1
+                gone = session_gone is True or (
+                    isinstance(session_gone, int)
+                    and not isinstance(session_gone, bool)
+                    and alive_probes["n"] >= session_gone)
+                if gone:
+                    return _SessionAliveAnswered(False)
             return orig_query(self, cypher, *args, **kwargs)
         finally:
             records.append((threading.current_thread().name,
@@ -2470,9 +2505,11 @@ def _measure_capture_graph_work(monkeypatch, turns: int, sid: str):
 
     async def _run():
         async with _verdict_async_client(app, base_url="http://test") as ac:
-            return await ac.post("/v1/sessions",
-                                 json={"conversation": _capture_conv(turns),
-                                       "session_id": sid})
+            return await ac.post(
+                "/v1/sessions",
+                json={"conversation": (conversation if conversation is not None
+                                       else _capture_conv(turns)),
+                      "session_id": sid})
 
     resp = asyncio.run(_run())
     monkeypatch.setattr(graph_cls, "query", orig_query)
@@ -2741,3 +2778,1143 @@ def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
     message = str(excinfo.value)
     assert "INCONCLUSIVE [#5049]" in message
     assert "POST /v1/sessions answered" in message
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# #10893 (SECOND CYCLE) — the capture's POST-WRITE TAIL must not run on the loop
+# ═══════════════════════════════════════════════════════════════════════════════
+# The first cycle removed probe-start work from the request's accounting; after
+# the deploy `/v1/search` still reported `pre_handler 5996.5` — six seconds
+# BEFORE its handler ran, on a box with a single uvicorn worker. The reopened
+# issue's own evidence named the mechanism from outside the process:
+# `hosted_api.py in capture_session` -> `graph_ops.py in wrapper` on the loop
+# thread, one 5.38 s episode.
+#
+# Every graph leg OUTSIDE the post-write tail was already offloaded (#4625 legs 62
+# and 72); the POST-WRITE TAIL was the residue, and it ran wholly inline: the
+# entity-linking pass (two round trips per turn that carries a reference), the
+# receipt probes and the bucket count, the delete-race sweep, the onboarding
+# state writes, the write-verb enrichment read, and the `capture_ok` stamp.
+#
+# Measured on the embedded lane at the fixing commit's parent (40 turns, every
+# third carrying a `repo#N` reference): 57 graph round trips ON the event loop
+# (70-250 ms of loop occupancy across runs here; 105.0 ms on the sample the fix
+# was measured on). After the tail moved to the capture pool the on-loop residual
+# is 6 statements, ~10-40 ms across runs here — the SCHEMA/BOOTSTRAP PROBE trio,
+# 2x each of `MATCH (n) RETURN 1 LIMIT 1`, `CALL db.indexes()` and the
+# `search_keys` index MATCH. The COUNT is the stable observation (6/6 runs); the
+# millisecond figure is host-dependent and nothing asserts it.
+#
+# ⛔ THOSE SIX ARE NOT WHAT
+# `test_capture_does_not_repeat_the_schema_bootstrap_on_the_loop` PINS. Its
+# `_is_schema_sweep` matches the index DDL (`CREATE INDEX FOR` / `DROP INDEX ON` /
+# the fulltext API) and deliberately excludes the vector-index PROBE those
+# statements are — so it never sees them, and this test's green says nothing about
+# them. They are the pre-existing bootstrap this PR does not address.
+#
+# ⛔ NO WALL-CLOCK BUDGET HERE, for the reason stated at
+# `test_capture_write_does_not_scale_loop_blocking_with_turns`: on a shared
+# runner a time bound passes and fails identically pre- and post-fix. The
+# assertion is WHICH THREAD the tail's statements ran on, which is deterministic.
+
+#: Statements that belong to the capture's post-write tail. Each is matched as a
+#: substring of the whitespace-normalised cypher, so a reformat cannot hide one.
+_CAPTURE_TAIL_STATEMENTS = {
+    # the entity-linking pass — target resolution, per-turn, and its SET
+    "ENDS WITH $suffix": "entity-link target resolution",
+    "s.entity_links_attempted": "entity-link counters",
+    # the onboarding state writes (#2002 first-capture checkpoint + receipt)
+    "MERGE (n:OnboardingState {org_id: $org_id})": "the onboarding state write",
+    "MERGE (s:OnboardingStep {org_id: $org_id, step_id: $step_id})":
+        "the first-capture checkpoint",
+    # the write-verb enrichment read (raw belief columns)
+    "n.posterior_alpha, n.ep_alpha": "the write-verb enrichment read",
+    # the recorded outcome
+    "SET s.capture_ok=$ok": "the capture_ok stamp",
+}
+
+#: Statements that LOOK like this tail and are not, named so their absence from
+#: the two sets below is deliberate rather than an oversight.
+#:
+#: Both spellings of the #4625 leg-62 probe (`_capture_session_probe_off_loop`'s
+#: `OPTIONAL MATCH` in `hosted_api.py`) already ran off the loop through
+#: `asyncio.to_thread` BEFORE this change, and `TortoiseSDK._capture_session`'s
+#: prior-capture read (the `OPTIONAL MATCH (s:Session {id:$sid})` that fills
+#: `session_row` in `tortoise/sdk.py`) is not on the hosted path at all — cited by
+#: SYMBOL, not by line: the block was `sdk.py:19601-19605` before the `origin/main`
+#: `e0accb8fe6` merge and is `sdk.py:19632-19636` after it (+31, re-derived by
+#: reading the tree, not computed from the number), which is exactly the rot a
+#: numbered cite invites.
+#: Pinning them as this PR's tail made two of its assertions INERT: the
+#: prohibition half can never fire (those statements cannot appear on
+#: ``MainThread``), and the presence half was satisfied by a pre-existing leg the
+#: moment ``POST /v1/sessions`` ran, whatever the tail did (cycle-3 review,
+#: finding 1).
+_PRE_EXISTING_OFFLOAD_LEGS = {
+    "count(s) AS n, s.capture_ok AS ok": "the #4625 leg-62 probe",
+    "s.capture_extractor AS extractor": "the #4625 leg-62 probe",
+}
+
+#: A session-alive probe is `MATCH (s:Session …) RETURN count(s)`; the exact
+#: spelling varies with the optional-return shape, so prohibition matches it as
+#: a SUBSTRING (a false positive there is a loud test failure, not a silence).
+_SESSION_ALIVE = "MATCH (s:Session {id:$sid}) RETURN count(s)"
+
+
+def _is_a_pre_existing_offload(cypher: str) -> bool:
+    """True when the statement belongs to a leg that ALREADY ran off the loop.
+
+    ``_PRE_EXISTING_OFFLOAD_LEGS`` names the #4625 leg-62 probe's two spellings,
+    which live in ``_capture_session_probe_off_loop`` and have run through
+    ``asyncio.to_thread`` since before this change. They are TAIL-ADJACENT: in
+    neither ``_CAPTURE_TAIL_STATEMENTS`` (the prohibition set) nor
+    ``_TAIL_MUST_BE_ISSUED`` (the presence set) — they are the statements the
+    NEEDLE loop is told to EXEMPT, and no NEEDLE catches an on-loop copy of them
+    (they match zero of the six). ⛔ The session-alive arm is a different matter:
+    the probe CONTAINS ``_SESSION_ALIVE``, and that arm never consults this
+    exemption (`if any(_SESSION_ALIVE in c for c in on_loop)`), so an on-loop
+    copy IS caught — by that arm, not by a needle (see the paragraph below).
+
+    ⛔ WHAT THIS EXEMPTION CAN AND CANNOT DO, measured rather than assumed
+    (#14086 review, P2). An on-loop copy of the probe is still CAUGHT — by the
+    prohibition's `session-alive` leg, which consults no exemption and matches the
+    probe's statement as a substring (mutant-verified: inlining `_probe` reds this
+    test with `session-alive probe: MATCH (s:Session {id:$sid}) RETURN count(s)`).
+    What the exemption covers is the TAIL-NEEDLE legs, which can never see the
+    probe anyway: it READS ``s.capture_ok AS ok`` (it never SETs one) and matches
+    ZERO of the six tail needles. So the exemption changes no verdict today; it is
+    a declared record with a caller, so that a probe which ever matches a tail
+    needle is not re-accused as new residue.
+
+    It is a SUBSTRING test for the same reason prohibition is: the probe's query
+    is assembled around these fragments and its exact spelling moves.
+    """
+    return any(needle in cypher for needle in _PRE_EXISTING_OFFLOAD_LEGS)
+
+
+class _SessionAliveAnswered:
+    """The `_session_alive` probe's own result, answered without a graph read.
+
+    `hosted_api._session_alive` reads `.result_set` and returns `count > 0`, so
+    `_SessionAliveAnswered(False)` is the delete-race answer — the branch that
+    runs `_sweep_orphaned_writes` — produced without racing a real DELETE.
+    """
+
+    def __init__(self, alive: bool):
+        self.result_set = [[1 if alive else 0]]
+
+#: The thread-name prefix `_run_off_loop(_CAPTURE_EXECUTOR, …)` gives its
+#: workers. The tail must be observed ON one of these, not merely off
+#: `MainThread`: the shared default executor (`asyncio_N`) is the #3060
+#: starvation the dedicated pool exists to prevent.
+_CAPTURE_POOL_PREFIX = "capture-extract"
+
+#: Statements the fixture must issue MORE THAN ONCE, matched by EXACT equality
+#: on the whitespace-normalised cypher.
+#:
+#: *Why exact, while prohibition is a substring:* the leg-62 probe's
+#: ``OPTIONAL MATCH (s:Session {id:$sid}) RETURN count(s) AS n, …`` CONTAINS
+#: ``_SESSION_ALIVE``, so a substring presence needle would again be satisfied by
+#: a leg this change never touched — the same inertness, one set over.
+#:
+#: *Why a count:* the receipt block probes the Session TWICE — the pre-check
+#: (write no receipt for a Session already deleted, the T1-P12 orphan guard) and
+#: the post-write re-check (compensate when the delete raced the PATCH). Both are
+#: fail-open arms, so DELETE one of them and the other still issues the statement:
+#: a "present at least once" needle cannot see the edit, and the mutant is exactly
+#: the "deleted, not offloaded" failure this test says it catches.
+_TAIL_MUST_BE_ISSUED_N_TIMES = {
+    _SESSION_ALIVE: ("the receipt's session-alive pre-check and re-check", 2),
+}
+
+
+def _ref_conversation(turns: int) -> list[dict]:
+    """Turns where every third carries a `repo#N` reference.
+
+    The reference matters: without one `extract_refs` returns nothing and the
+    linking pass does no graph work at all, so the test would pass over an
+    on-loop linker that had never been exercised.
+    """
+    out = []
+    for i in range(turns):
+        if i % 3 == 0:
+            body = (f"turn {i} the database schema needs work on "
+                    f"daniel-ospina/tortoise#{100 + i} before the storage "
+                    f"migration lands")
+        else:
+            body = f"turn {i} the database schema needs work " * 3
+        out.append({"role": "user" if i % 2 == 0 else "assistant",
+                    "content": body})
+    return out
+
+
+def test_the_capture_post_write_tail_never_runs_on_the_event_loop(
+        client, monkeypatch):
+    """#10893 (second cycle): the tail is capture-pool work, not loop work.
+
+    Mutation check (must stay true) FOR THE LEGS THIS FIXTURE REACHES: restoring
+    any one of them inline puts its statements back on ``MainThread`` and fails
+    the first assertion. Deleting the work instead fails the second, for the
+    rows in ``_TAIL_MUST_BE_ISSUED`` — the ones this fixture actually ISSUES.
+
+    ⛔ THE CLAIM IS SCOPED, NOT UNIVERSAL (#14086 review, P2). Two declared tail
+    legs are INERT in THIS fixture: `s.entity_links_attempted` (its SET fires
+    only when a link was ATTEMPTED, and `_resolve_targets` never creates an
+    Object on an empty graph) and the write-verb enrichment read
+    (`n.posterior_alpha, n.ep_alpha` — `_measure_capture_graph_work` stubs the
+    extractor to emit nothing, so `if extracted:` is never entered). An inline
+    copy of either would NOT red here. The link PASS is still caught by its
+    sibling needle (`ENDS WITH $suffix`); the enrichment read is UNCOVERED — see
+    the residual note on `_TAIL_MUST_BE_ISSUED` below, so nobody reads this
+    test's green as evidence about that leg.
+    """
+    resp, records, _writer = _measure_capture_graph_work(
+        monkeypatch, 40, "tail-off-loop-10893",
+        conversation=_ref_conversation(40))
+
+    require_answered(resp, what="POST /v1/sessions answered (40-turn tail run)")
+    assert resp.status_code == 200, resp.text[:300]
+
+    on_loop = [c for name, c, _d in records if name == "MainThread"]
+    all_cyphers = [c for _n, c, _d in records]
+
+    offenders = [
+        f"{label}: {c[:110]}"
+        for c in on_loop
+        if not _is_a_pre_existing_offload(c)
+        for needle, label in _CAPTURE_TAIL_STATEMENTS.items()
+        if needle in c
+    ]
+    if any(_SESSION_ALIVE in c for c in on_loop):
+        offenders.append(f"session-alive probe: {_SESSION_ALIVE}")
+    assert not offenders, (
+        "the capture's post-write tail is back on the event loop — every "
+        "request behind it on the single uvicorn worker pays that time as "
+        "`pre_handler` (#10893):\n  " + "\n  ".join(offenders))
+
+    for needle, label in _TAIL_MUST_BE_ISSUED.items():
+        assert any(needle in c for c in all_cyphers), (
+            f"{label} was never issued — the tail was deleted, not offloaded "
+            f"(expected a statement containing {needle!r})")
+
+    for needle, (label, want) in _TAIL_MUST_BE_ISSUED_N_TIMES.items():
+        issued = [c for c in all_cyphers if c == needle]
+        assert len(issued) >= want, (
+            f"{label} was issued {len(issued)} time(s), expected at least "
+            f"{want} — one of the two fail-open guards was DELETED, not "
+            f"offloaded (the #4625 leg-62 probe also mentions this statement, "
+            f"but as part of a longer query, so it cannot satisfy this): "
+            f"{[c[:100] for c in all_cyphers if needle in c]}")
+
+    # ⛔ "not on MainThread" is NECESSARY BUT NOT SUFFICIENT. `asyncio.to_thread`
+    # and any `run_in_executor(None, …)` put the tail on the SHARED default
+    # executor's `asyncio_N` workers — which is exactly the #3060 starvation the
+    # dedicated pool exists to prevent — and that placement satisfies the
+    # prohibition above. So the positive half is pinned too, on the thread NAME
+    # (the same house check `test_10893_capture_off_loop.py` applies to the
+    # mint). The session-alive probe is matched by EXACT equality for the reason
+    # `_TAIL_MUST_BE_ISSUED_N_TIMES` records: the #4625 leg-62 probe CONTAINS it
+    # and runs on `asyncio_0` BY DESIGN — that is `_PRE_EXISTING_OFFLOAD_LEGS`,
+    # not this tail (#14086 cycle-4 review, F3).
+    mispooled = [
+        f"{label}: ran on {name!r}"
+        for name, c, _d in records
+        if not str(name).startswith(_CAPTURE_POOL_PREFIX)
+        for needle, label in _CAPTURE_TAIL_STATEMENTS.items()
+        if needle in c
+    ]
+    mispooled += [
+        f"session-alive probe: ran on {name!r}"
+        for name, c, _d in records
+        if not str(name).startswith(_CAPTURE_POOL_PREFIX) and c == _SESSION_ALIVE
+    ]
+    assert not mispooled, (
+        "the capture's post-write tail ran off the event loop but NOT on the "
+        f"capture pool (expected every tail statement on a "
+        f"`{_CAPTURE_POOL_PREFIX}*` thread). The shared default executor's "
+        "workers are what every other `to_thread` caller waits behind, so a long "
+        "or stalled tail there starves them — `_run_off_loop(_CAPTURE_EXECUTOR, "
+        "…)` is the seam (#3060):\n  " + "\n  ".join(mispooled))
+
+
+#: The tail statements THIS fixture is guaranteed to reach, so their ABSENCE is
+#: a real failure ("the work was deleted, not offloaded").
+#:
+#: The two `_CAPTURE_TAIL_STATEMENTS` members left out are named here rather than
+#: silently dropped. Both stay in the PROHIBITION set (an on-loop copy is still a
+#: bug), but neither is PRESENT under this fixture, so in this test they are
+#: INERT in both directions — and the honest consequence is stated rather than
+#: implied (#14086 review, P2):
+#:   * `s.entity_links_attempted` — its SET fires only when the linking pass
+#:     ATTEMPTED a link, and `_resolve_targets` never creates an Object, so with
+#:     an empty graph nothing resolves. The link PASS itself IS covered, by its
+#:     sibling needle `ENDS WITH $suffix`.
+#:   * the write-verb enrichment read (`n.posterior_alpha, n.ep_alpha`) —
+#:     `_measure_capture_graph_work` stubs the extractor to emit nothing, so
+#:     the write-verb leg's `if extracted:` branch is never entered and
+#:     `_enrichment_read`
+#:     never runs. ⛔ UNCOVERED RESIDUAL: no test in this tree asserts WHICH THREAD
+#:     that leg runs on, so returning it inline would be silent here. The evidence
+#:     is a discriminating count, not a bare list of hits. It EXCLUDES this file,
+#:     which carries the needle five times — twice in code (the dict row and the
+#:     excluded-rows tuple) and three in prose (the tail test's docstring above,
+#:     this bullet, and the command below), so an unfiltered `grep -ci thread`
+#:     counts this sentence as a hit:
+#:         grep -rn 'posterior_alpha, n.ep_alpha' tests/ --include='*.py' \
+#:             --exclude=test_capture_loop_responsiveness.py | grep -ci thread
+#:         -> 0        (14 rows across 8 files — 12 cypher literals and 2 prose
+#:                      quotes — and none is a thread assertion)
+#:     The tests that touch the leg assert its ARMS, never its thread: the
+#:     non-fatal warning on failure (`tests/test_hosted_api.py`'s
+#:     `test_capture_enrichment_failure_never_500s_committed_capture` and
+#:     `tests/test_capture_session.py`'s
+#:     `test_phase_e_sdk_mirror_verification_fail_open_omits_marker`) and
+#:     `ep_updated is True` on success (`tests/test_hosted_api.py`'s
+#:     `test_capture_ingest_ep_user_visible_e2e5`).
+#:     Making the fixture reach it needs the extractor stub replaced with a
+#:     realistic extraction, which is a fixture redesign this change does not carry.
+#:
+#: ⛔ AND NOT EVERY TAIL LEG CAN BE A NEEDLE AT ALL. The receipt write
+#: (`_update_onboarding_state`) keys on an OPERATIONAL field, so it routes to
+#: `_write_jsonb_fields_cas` — a registry CAS (`_make_sdk(namespace="registry")`,
+#: or `write_operational_state` on the default graph for the selfhost org), or a
+#: Supabase jsonb PATCH. NONE of those is an `OnboardingState`/`OnboardingStep`
+#: MERGE, so the `MERGE (n:OnboardingState …)` needle beside it is satisfied by a
+#: DIFFERENT writer — which is why this table read green over an unwatched third
+#: leg (#14086 review, P2). Its statement is also LANE-DEPENDENT (registry Cypher
+#: vs a Supabase PATCH that emits none), so a needle would be inert on one lane;
+#: it is watched by a RECORDER instead
+#: (`test_the_receipt_write_runs_on_the_capture_pool`), on the seam's own
+#: calling thread. Same reason `_PRE_EXISTING_OFFLOAD_LEGS` is consulted by
+#: `_is_a_pre_existing_offload` rather than left as a declaration.
+_TAIL_MUST_BE_ISSUED = {
+    k: v for k, v in _CAPTURE_TAIL_STATEMENTS.items()
+    if k not in ("s.entity_links_attempted", "n.posterior_alpha, n.ep_alpha")
+}
+
+
+#: The delete-race sweep's own statements (`hosted_api.py`'s
+#: `_sweep_orphaned_writes`). ⛔ They are reachable ONLY when the receipt's
+#: session-alive pre-check answers "gone", which the ordinary tail fixture never
+#: produces — so a needle added for it without a fixture that reaches the branch
+#: is INERT in both directions (#10893 cycle-4 review, P2 #2: the mutant that
+#: inlines the sweep red nothing). This is the fixture and the needle together.
+_SWEEP_STATEMENTS = {
+    "MATCH (p:Point) WHERE p.id IN $ids DETACH DELETE p":
+        "the delete-race orphan sweep",
+    # The sweep deletes THREE kinds of orphan, and all three are reachable under
+    # this fixture (measured: all issued on `capture-extract_0`). Pinning only
+    # the Point delete left the Event and Source deletes unwatched by both loops
+    # below, so an on-loop copy of either was silent (#10893 cycle-5 review, P2):
+    # `_SWEEP_EVENT_DELETE_CYPHER` (in `hosted_api.py`, appended to the sweep's
+    # own match) and the Source delete.
+    "MATCH (e:Event) WHERE e.eventId = $eid DETACH DELETE e":
+        "the delete-race Event sweep",
+    "MATCH (src:Source {url:$url}) DETACH DELETE src":
+        "the delete-race Source sweep",
+}
+
+
+def _assert_the_sweep_never_runs_on_the_loop(records, *, arm: str,
+                                            alive_probes: int) -> None:
+    """The four assertions every sweep arm owes, shared by both arms.
+
+    Factored out because the delete-race branch has TWO sweep call sites (the
+    receipt re-check window, and the session already gone at the pre-check) and
+    a test that reaches one of them
+    is silent about the other — measured: inlining the sweep in the re-check
+    arm only left the "already gone" test GREEN (#14086 review, P2). Both arms
+    now call this.
+
+    ⛔ `alive_probes` is what says WHICH arm ran, and it is asserted FIRST. Both
+    arms issue the SAME three sweep statements from the SAME pool, so the other
+    three assertions cannot tell them apart: forcing `session_gone=True` into
+    the re-check row (i.e. collapsing it onto its sibling's branch) left that
+    row GREEN before this count existed (#14086 review, P2). The ordinal is the
+    only arm-dependent observable the fixture exposes — the pre-check arm
+    answers the first `_session_alive` "gone", the re-check arm answers the
+    first "alive" and the second "gone".
+    """
+    # ⛔ WHICH ARM: the session-alive probe count, before anything about threads.
+    observed = sum(1 for _n, c, _d in records if c == _SESSION_ALIVE)
+    assert observed == alive_probes, (
+        f"this row is supposed to drive the {arm} sweep arm, which probes "
+        f"`_session_alive` {alive_probes}x, but it probed {observed}x — so the "
+        "capture took the OTHER arm (or a new query was added ahead of the "
+        "pre-check and shifted the ordinal). The sweep needles below are "
+        "identical in both arms, so without this count the row passes on its "
+        "sibling's branch and proves nothing about its own")
+
+    on_loop = [c for name, c, _d in records if name == "MainThread"]
+    all_cyphers = [c for _n, c, _d in records]
+
+    # ⛔ NON-VACUITY FIRST: "not on the loop" is satisfied by a branch that
+    # never ran, and that is exactly how the sweep read as covered before.
+    for needle, label in _SWEEP_STATEMENTS.items():
+        assert any(needle in c for c in all_cyphers), (
+            f"{label} was never issued — the {arm} sweep arm was not "
+            f"reached, so this row proves nothing about it (expected a "
+            f"statement containing {needle!r}; DETACH statements seen: "
+            f"{[c[:90] for c in all_cyphers if 'DETACH' in c]})")
+
+    offenders = [
+        f"{label}: {c[:110]}"
+        for c in on_loop
+        for needle, label in _SWEEP_STATEMENTS.items()
+        if needle in c
+    ]
+    assert not offenders, (
+        f"the capture's delete-race orphan sweep ({arm} arm) is back on the "
+        "event loop — one capture pays it and every concurrent `/v1/search` on "
+        "the single uvicorn worker accrues it as `pre_handler` (#10893):\n  "
+        + "\n  ".join(offenders))
+
+    # ⛔ And "off `MainThread`" is NECESSARY BUT NOT SUFFICIENT — the shared
+    # default executor's `asyncio_N` workers satisfy it, which is the #3060
+    # starvation the dedicated pool exists to prevent (the same reasoning the
+    # tail row above applies to its own statements).
+    mispooled = [
+        f"{label}: ran on {name!r}"
+        for name, c, _d in records
+        if not str(name).startswith(_CAPTURE_POOL_PREFIX)
+        for needle, label in _SWEEP_STATEMENTS.items()
+        if needle in c
+    ]
+    assert not mispooled, (
+        f"the capture's delete-race orphan sweep ({arm} arm) ran off the "
+        "event loop but NOT on the capture pool (expected a "
+        f"`{_CAPTURE_POOL_PREFIX}*` thread):\n  " + "\n  ".join(mispooled))
+
+
+def test_the_delete_race_sweep_never_runs_on_the_event_loop(
+        client, monkeypatch):
+    """#10893 (second cycle): the orphan SWEEP is tail work, not loop work.
+
+    `test_the_capture_post_write_tail_never_runs_on_the_event_loop` cannot see
+    this leg: its Session is never deleted mid-capture, so the delete-race
+    branch never runs and a needle for the sweep would be satisfied by nothing.
+    Here the session-alive PRE-check answers "gone", so the delete-race arm IS
+    taken and the statements are ISSUED — and the assertion
+    is WHICH THREAD issued them.
+
+    The OTHER sweep site (the re-check arm, reached when the delete lands
+    between the receipt PATCH and the post-write re-check) is covered by the
+    sibling below;
+    it is a different line and inlining one does not red the other.
+
+    Mutation check (must stay true): `await _run_off_loop(_CAPTURE_EXECUTOR,
+    _sweep_orphaned_writes)` -> `_sweep_orphaned_writes()` at
+    the delete-race arm puts the sweep's statement back on ``MainThread`` and
+    fails the second assertion; deleting the sweep instead fails the first.
+    """
+    resp, records, _writer = _measure_capture_graph_work(
+        monkeypatch, 40, "tail-off-loop-sweep-10893",
+        conversation=_ref_conversation(40), session_gone=True)
+
+    require_answered(
+        resp, what="POST /v1/sessions answered (delete-race tail run)")
+    assert resp.status_code == 200, resp.text[:300]
+    _assert_the_sweep_never_runs_on_the_loop(
+        records, arm="pre-check", alive_probes=1)
+
+
+def test_the_delete_race_sweep_never_runs_on_the_event_loop_when_the_delete_wins_the_recheck(
+        client, monkeypatch):
+    """#10893: the OTHER sweep site — the receipt re-check window.
+
+    The sibling above answers the session-alive PRE-check with "gone" and never
+    reaches the ordinary live path's post-PATCH re-check. Here the pre-check and
+    the receipt write succeed and the delete wins INSIDE the window the
+    off-load itself opened (`session_gone=2` — gone from the second probe), so
+    the compensation arm runs and its `_sweep_orphaned_writes` is the one under
+    test. Measured before this row existed: inlining the sweep in the re-check
+    arm only was GREEN, so that arm was uncovered by every test in this tree and — unlike
+    the enrichment read above — not declared as a residual (#14086 review, P2).
+
+    Mutation check (must stay true): inlining `_sweep_orphaned_writes()` in the
+    re-check arm reds the off-loop assertion; deleting that call reds the
+    non-vacuity one; and collapsing the fixture onto the sibling's branch
+    (`session_gone=True`, i.e. ONE alive probe instead of two) reds the
+    arm-identity assertion, which is what stops this row passing on the wrong
+    branch.
+    """
+    resp, records, _writer = _measure_capture_graph_work(
+        monkeypatch, 40, "tail-off-loop-sweep-recheck-10893",
+        conversation=_ref_conversation(40), session_gone=2)
+
+    require_answered(
+        resp, what="POST /v1/sessions answered (delete-race re-check run)")
+    assert resp.status_code == 200, resp.text[:300]
+    _assert_the_sweep_never_runs_on_the_loop(
+        records, arm="re-check", alive_probes=2)
+
+
+# ── the DISPATCH itself can fail, and it is fail-open ───────────────────────
+
+def test_a_shut_down_capture_pool_is_fail_open_and_not_an_exception():
+    """⛔ A FAILURE MODE THAT DID NOT EXIST WHILE THE LEG WAS INLINE (#14086 review, P2).
+
+    ``_submit_off_loop`` calls ``executor.submit(...)`` IN THE CALLING TASK, so it
+    raises ``RuntimeError`` once the pool is shut down. Inline, the receipt block's
+    four ``_run_off_loop`` awaits could not fail that way — and the block's own
+    promises are that the response still 200s on a committed capture and that a
+    sweep failure never 500s it. ``_run_off_loop_fail_open`` is the arm that keeps
+    those promises now that a dispatch can fail.
+
+    Non-vacuity: the second half is the same pool through the PLAIN seam, which
+    raises — i.e. the exception the arm exists to absorb, demonstrated rather than
+    asserted.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    import tortoise.hosted_api as ha_mod
+
+    pool = ThreadPoolExecutor(max_workers=1)
+    pool.shutdown(wait=True)
+
+    out = asyncio.run(
+        ha_mod._run_off_loop_fail_open(lambda: "done", executor=pool))
+    assert out is ha_mod._DISPATCH_FAILED, (
+        "a failed DISPATCH must be a sentinel the arm can choose a direction "
+        f"from, not a value — got {out!r}")
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(ha_mod._run_off_loop(pool, lambda: "done"))
+
+
+def test_a_failed_receipt_probe_dispatch_never_500s_a_committed_capture(
+        client, monkeypatch):
+    """The receipt's probe arms are fail-open when their own DISPATCH fails.
+
+    Both ``_session_alive`` probe sites are awaited with ``try``-less
+    ``_run_off_loop`` in the pre-fix body, which turns a shut-down capture pool —
+    a state that can only exist AFTER this change moved them off the loop — into
+    a 500 on a capture whose writes already committed. A failed probe reads as
+    "the session is alive" (the same direction ``_session_alive`` takes on its own
+    failed READ), the receipt is retained, and the failure is announced in
+    ``warnings`` ONCE PER SITE.
+
+    Non-vacuity: reverting either site to a bare ``await _run_off_loop(...)``
+    drops its warning and reds the count below (measured both ways).
+    """
+    import tortoise.hosted_api as ha_mod
+
+    real = ha_mod._run_off_loop_fail_open
+
+    async def _dispatch_fails_for_the_receipt_probes(fn, /, *args, **kwargs):
+        if getattr(fn, "__name__", "") in ("_session_alive",):
+            return ha_mod._DISPATCH_FAILED
+        return await real(fn, *args, **kwargs)
+
+    monkeypatch.setattr(ha_mod, "_run_off_loop_fail_open",
+                        _dispatch_fails_for_the_receipt_probes)
+
+    resp = client.post("/v1/sessions", json={"conversation": _CONV})
+    require_answered(resp, what="POST /v1/sessions answered (failed-dispatch arm)")
+    assert resp.status_code == 200, (
+        "a capture whose probe could not be DISPATCHED 500'd — the arm is not "
+        f"fail-open: {resp.text[:300]}")
+    warnings = resp.json().get("warnings") or []
+    # ⛔ THE WARNING NAMES WHAT IS KNOWN, NOT MORE (#14086 review, round 3 P3):
+    # `_run_off_loop_fail_open` has ONE `except`, so it cannot tell a failed
+    # dispatch from a leg that ran and raised — the messages say "did not
+    # complete (dispatch failed or … raised)" for exactly that reason, and this
+    # row matches THAT contract rather than the old "could not be dispatched".
+    dispatch_incomplete = [
+        w for w in warnings
+        if "receipt probe did not complete" in w
+        or "receipt re-check did not complete" in w]
+    # ⛔ TWO sites, and each says so: the pre-check and the post-write re-check
+    # are separate fail-open arms (the same reason the tail test counts the
+    # `_SESSION_ALIVE` statement instead of merely finding it). Asserting the
+    # COUNT is what makes this row discriminating per site — a revert of either
+    # one leaves a single warning and reds this assertion.
+    assert len(dispatch_incomplete) == 2, (
+        "the receipt's two probe arms must EACH report an incomplete dispatch, "
+        "so neither can be reverted to a bare `await _run_off_loop(...)` "
+        f"silently (saw {len(dispatch_incomplete)}: {dispatch_incomplete})")
+
+
+def test_a_failed_EP_pass_dispatch_never_500s_a_committed_capture(
+        client, monkeypatch):
+    """The FIFTH arm with this failure mode — the one the receipt block's fix missed.
+
+    ⛔ #14086 review (P2), found on this head AFTER the four-arm fix landed. The
+    Phase C EP pass is awaited with the plain ``_run_off_loop``, so a shut-down
+    pool raises ``RuntimeError`` straight out of the handler — 300 lines past the
+    comment that promises *"a promotion/EP hiccup never 500s a committed
+    capture"* — and ``capture_session``'s outer handler answers **500** on a
+    capture whose writes committed (and writes
+    ``session_capture_last_error_<harness>``, flipping the dashboard sub-line).
+
+    No row in this tree reached the branch, which is why it survived: the
+    fixtures stub the extractor to emit nothing, so ``if ep_ids or
+    operator_ids:`` is never entered. It is forced here at the derivation
+    (``_capture_ep_target_ids``) — the guard under test is the DISPATCH, not the
+    id derivation — and the seam stubbed is the same
+    ``_run_off_loop_fail_open`` the four fixed arms use, so a revert of THIS arm
+    cannot be masked by them.
+
+    Non-vacuity: reverting the arm to a bare ``await _run_off_loop(...)`` reds
+    this row — the RuntimeError escapes the handler (measured).
+    """
+    import tortoise.hosted_api as ha_mod
+
+    monkeypatch.setattr(ha_mod, "_capture_ep_target_ids",
+                        lambda extracted, proj: ["ep-target-10893"])
+    real = ha_mod._run_off_loop_fail_open
+
+    async def _dispatch_fails_for_the_ep_pass(fn, /, *args, **kwargs):
+        if getattr(fn, "__name__", "") == "_capture_ep_pass":
+            return ha_mod._DISPATCH_FAILED
+        return await real(fn, *args, **kwargs)
+
+    monkeypatch.setattr(ha_mod, "_run_off_loop_fail_open",
+                        _dispatch_fails_for_the_ep_pass)
+
+    resp = client.post("/v1/sessions", json={"conversation": _CONV})
+    require_answered(resp, what="POST /v1/sessions answered (EP dispatch arm)")
+    assert resp.status_code == 200, (
+        "a committed capture 500'd because its EP pass could not be DISPATCHED "
+        f"— the arm is not fail-open: {resp.text[:300]}")
+    assert any("EP pass did not complete" in w
+               for w in (resp.json().get("warnings") or [])), (
+        resp.json().get("warnings"))
+
+
+# ── the pooled checkpoint must not build a store path (#7500) ───────────────
+
+def test_the_org_projection_is_resolved_on_the_loop_not_in_the_pooled_checkpoint(
+        monkeypatch):
+    """``_make_sdk`` must not run in a POOLED worker (``#7500``).
+
+    The first-capture checkpoint closure runs on ``_CAPTURE_EXECUTOR``, and it
+    called ``_maybe_apply_completion(org_id)``, which resolves the projection
+    itself: ``_org_proj`` → ``_org_sdk`` → ``_org_sdk_from_name`` → ``_make_sdk``.
+    ``_org_sdk_from_name``'s docstring states the rule this crossed, verbatim —
+    *"built in a POOLED worker thread that path comes from the thread's stale
+    inherited test-module stamp once the pool reuses it — the job then writes to a
+    store the test's reader never looks at"* — and two other sites still split the
+    READ off-loop for exactly that reason.
+
+    Non-vacuity: this row reds the moment ``_maybe_apply_completion`` stops
+    honouring a supplied ``sdk`` (it calls ``_org_proj``, which raises here).
+    """
+    import tortoise.hosted_api as ha_mod
+
+    # The gate eval returns False for an org with no onboarding node, without
+    # touching the projection at all — which isolates the question this row asks.
+    monkeypatch.setattr(ha_mod._os, "read_onboarding_node",
+                        lambda proj, org_id: None)
+
+    def _forbidden(_org_id):
+        raise AssertionError(
+            "_maybe_apply_completion resolved `_org_proj` — that builds an SDK "
+            "(`_make_sdk`) and this call is reachable from a POOLED worker, "
+            "where the store path comes from a stale inherited stamp (#7500). "
+            "SCOPE: this gate covers `_maybe_apply_completion`'s OWN resolution. "
+            "The receipt write's registry CAS still constructs `_make_sdk` on "
+            "this pool — a DECLARED residual named at its call site in "
+            "`_capture_session_impl`, not a licence to resolve one here.")
+
+    monkeypatch.setattr(ha_mod, "_org_proj", _forbidden)
+    assert ha_mod._maybe_apply_completion(
+        TEST_ORG_ID, sdk=_StubDefaultGraphSdk()) is False
+
+    # …and a caller that supplies nothing keeps the historical shape, so the
+    # seam is additive rather than a behaviour change for the other sites.
+    resolved: list[str] = []
+
+    def _record(org_id):
+        resolved.append(org_id)
+        return object()
+
+    monkeypatch.setattr(ha_mod, "_org_proj", _record)
+    assert ha_mod._maybe_apply_completion(TEST_ORG_ID) is False
+    assert resolved == [TEST_ORG_ID], (
+        "passing no `sdk` must still resolve one — the seam is additive")
+
+
+class _StubDefaultGraphSdk:
+    """A stand-in for ``_org_sdk``'s handle — only ``_get_proj()`` is load-bearing."""
+
+    def __init__(self):
+        self.proj = object()
+        self.proj_threads: list[str] = []
+
+    def _get_proj(self):
+        import threading
+        self.proj_threads.append(threading.current_thread().name)
+        return self.proj
+
+
+def test_the_first_capture_checkpoint_hands_in_the_DEFAULT_graph_handle():
+    """The wiring half: the closure must PASS a handle, not the capture's `proj`.
+
+    A seam nobody uses protects nothing, and the closure is the one caller that
+    runs on the pool. Parsed rather than grepped so a reflowed comment cannot
+    satisfy it. The keyword must be ``sdk`` and NOT ``proj``: `proj` is the
+    CAPTURE graph, which for a graph-bound credential is a CUSTOM graph, and this
+    gate is an org-level surface on the DEFAULT graph
+    (``_reject_graph_bound_org_surface``) — see the behavioural row below.
+    """
+    import ast
+
+    src = (_REPO_ROOT / "tortoise" / "hosted_api.py").read_text(encoding="utf-8")
+    keyword_sets = []
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.FunctionDef) and node.name == "_first_capture_checkpoint":
+            for sub in ast.walk(node):
+                if (isinstance(sub, ast.Call)
+                        and getattr(sub.func, "id", "") == "_maybe_apply_completion"):
+                    keyword_sets.append({kw.arg for kw in sub.keywords})
+    assert keyword_sets, (
+        "`_first_capture_checkpoint` no longer calls `_maybe_apply_completion` "
+        "— re-point this pin at whatever replaced it")
+    assert all("sdk" in kws for kws in keyword_sets), (
+        "the pooled checkpoint resolved its own projection instead of being "
+        "handed one — `_make_sdk` must not construct a store path on a pooled "
+        f"worker (#7500); keyword sets: {keyword_sets}")
+    assert not any("proj" in kws for kws in keyword_sets), (
+        "the checkpoint handed in the CAPTURE projection — for a graph-bound "
+        "key that is a CUSTOM graph, and the completion gate is an org-level "
+        f"surface on the org DEFAULT graph (#14086 review, P2); got: {keyword_sets}")
+
+
+def test_the_capture_completion_gate_reads_the_org_DEFAULT_graph_not_the_capture_graph(
+        client, monkeypatch):
+    """⛔ THE COMPLETION GATE MUST STAY ON THE ORG **DEFAULT** GRAPH (#14086 review, P2).
+
+    ``_maybe_apply_completion`` is an ORG-LEVEL surface: its siblings in this
+    module are guarded by ``_reject_graph_bound_org_surface`` with the reason
+    stated verbatim — *"checkpoint writes onboarding FLOW state into the org's
+    DEFAULT graph via _org_proj — a graph-bound key writing it would be a
+    cross-graph write (org-level surface, like the siblings)"*. The capture route
+    carries no such guard, and ``_data_sdk``'s ``if gid:`` branch opens a CUSTOM
+    graph for a graph-bound credential, so the capture's own ``proj`` is the WRONG
+    handle for this gate.
+
+    The earlier fix for #7500 handed that ``proj`` in, which kept ``_make_sdk``
+    off the pool but moved the gate off the default graph. Nothing red: the
+    fixtures' credential is org-wide (``graph_id: None``), so ``proj`` and
+    ``_org_proj`` name the same graph and no assertion in the tree could tell them
+    apart. This row tells them apart by making the default-graph handle a
+    SENTINEL that no other seam can produce.
+
+    ⛔ BOTH HALVES OF THE BLOCK, not just the gate. The same closure also WRITES
+    the ``capture-disclosed`` step, and ``write_completed_step`` mints its
+    ``OnboardingState`` node, ``OnboardingStep`` node and ``COMPLETED_STEP`` edge
+    in the graph it is handed — so the write was filing org-level onboarding
+    state through the CAPTURE graph while the gate read the default one. For a
+    graph-bound key that is a cross-graph write no org-level reader sees, and
+    ``first_capture`` fires once per GRAPH instead of once per org. The write's
+    handle is recorded below for exactly that reason (#14086 review, P2).
+
+    Mutation check (must stay true): restoring ``proj`` in EITHER half reds an
+    assertion here — ``proj`` is a real FalkorProjection, the sentinel is a bare
+    ``object()``. Measured for the write half (the half the previous version of
+    this row could not see): ``write_completed_step(proj, ...)`` -> the
+    capture-disclosed handle assertion reds while the READ assertions stay green.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    stub = _StubDefaultGraphSdk()
+    real_org_sdk = ha_mod._org_sdk
+    default_graph_requests: list[str] = []
+
+    def _recording_org_sdk(org_id, **kwargs):
+        # Delegate for every OTHER org: this fixture drives a whole request, and
+        # a blanket stub would be asserting about seams this row does not judge.
+        if org_id != TEST_ORG_ID:
+            return real_org_sdk(org_id, **kwargs)
+        default_graph_requests.append(org_id)
+        return stub
+
+    monkeypatch.setattr(ha_mod, "_org_sdk", _recording_org_sdk)
+
+    seen: list[tuple[object, str]] = []
+
+    def _recording_read(proj, org_id):
+        seen.append((proj, threading.current_thread().name))
+        return None  # no onboarding node -> the gate is a no-op, as in the seam rows
+
+    monkeypatch.setattr(ha_mod._os, "read_onboarding_node", _recording_read)
+
+    written: list[tuple[object, str]] = []
+
+    def _recording_write_step(graph, org_id, step_id, **kwargs):
+        written.append((graph, step_id))
+        # The sentinel is a bare ``object()``, so the real writer cannot run on
+        # it; the created-signal shape is all this row reads.
+        return {"created": True, "step_id": step_id}
+
+    monkeypatch.setattr(ha_mod._os, "write_completed_step",
+                        _recording_write_step)
+
+    resp, _records, _writer = _measure_capture_graph_work(
+        monkeypatch, 2, "completion-default-graph-14086")
+    require_answered(
+        resp, what="POST /v1/sessions answered (completion-graph run)")
+    assert resp.status_code == 200, resp.text[:300]
+
+    assert default_graph_requests == [TEST_ORG_ID], (
+        "the capture checkpoint never asked `_org_sdk` for the org's DEFAULT "
+        "graph — it handed `_maybe_apply_completion` the CAPTURE projection, "
+        "which for a graph-bound key is a CUSTOM graph (a cross-graph write "
+        f"`_reject_graph_bound_org_surface` refuses elsewhere); got "
+        f"{default_graph_requests!r}")
+    assert stub.proj in [proj for proj, _thread in seen], (
+        "the completion gate read onboarding state through a projection that is "
+        "NOT the org's default graph — for a graph-bound key it would find no "
+        "node and onboarding completion would silently stop firing "
+        f"(#14086 review, P2); projections seen: "
+        f"{[id(p) for p, _t in seen]} vs default {id(stub.proj)}")
+    assert stub.proj_threads and all(
+        name.startswith("capture-extract") for name in stub.proj_threads), (
+        "the default-graph projection's cold `_get_proj()` open ran on "
+        f"{stub.proj_threads!r}, not the capture pool — `_make_sdk`'s store "
+        "path must not be resolved on the event loop either (#7500)")
+
+    disclosed_handles = [graph for graph, step in written
+                         if step == "capture-disclosed"]
+    assert disclosed_handles == [stub.proj], (
+        "the capture-disclosed checkpoint wrote its `OnboardingState` node, "
+        "`OnboardingStep` node and `COMPLETED_STEP` edge through a projection "
+        "that is NOT the org's default graph — `write_completed_step` mints "
+        "them IN THE GRAPH IT IS HANDED, so for a graph-bound key this files "
+        "org-level onboarding state inside the customer's CUSTOM graph, where "
+        "no org-level reader looks and `first_capture` fires once per GRAPH "
+        "instead of once per org (#14086 review, P2); handles: "
+        f"{[id(g) for g in disclosed_handles]} vs default {id(stub.proj)}")
+
+
+def test_a_graph_bound_capture_skips_the_org_level_checkpoint_entirely(
+        client, monkeypatch):
+    """⛔ A PER-GRAPH KEY MUST NOT RUN AN ORG-LEVEL SURFACE (#14086 review, round 3 P2).
+
+    `capture-disclosed` and the completion gate are ORG-LEVEL: their sibling
+    checkpoint route REFUSES a graph-bound key outright
+    (``_reject_graph_bound_org_surface(org, "onboarding checkpoint")`` — *"a
+    graph-bound key writing it would be a cross-graph write"*). The capture route
+    cannot refuse (it must keep capturing data), so it must not perform the
+    org-level side effect either. Handed the org DEFAULT graph, a per-graph key
+    would mint — and the gate could COMPLETE — the org's onboarding: exactly the
+    cross-graph leak that guard exists to prevent, on behalf of a credential
+    scoped to one graph.
+
+    The fixtures' credential is org-wide, so every other row in this file runs the
+    block; this one overrides the org with a CUSTOM `graph_id` and asserts the
+    block is never entered.
+
+    Mutation check (must stay true): dropping the `org.get("graph_id")` guard ->
+    `_org_sdk` is asked for the org's DEFAULT graph on a graph-bound capture and
+    the `capture-disclosed` step is written — both assertions below red.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app, get_current_org
+
+    org_sdk_calls: list[str] = []
+    real_org_sdk = ha_mod._org_sdk
+
+    def _recording_org_sdk(org_id, **kwargs):
+        if org_id == TEST_ORG_ID:
+            org_sdk_calls.append(org_id)
+        return real_org_sdk(org_id, **kwargs)
+
+    monkeypatch.setattr(ha_mod, "_org_sdk", _recording_org_sdk)
+
+    steps_written: list[str] = []
+    real_write_step = ha_mod._os.write_completed_step
+
+    def _recording_write_step(graph, org_id, step_id, **kwargs):
+        steps_written.append(step_id)
+        return real_write_step(graph, org_id, step_id, **kwargs)
+
+    monkeypatch.setattr(ha_mod._os, "write_completed_step",
+                        _recording_write_step)
+
+    previous = app.dependency_overrides.get(get_current_org)
+    app.dependency_overrides[get_current_org] = lambda: dict(
+        TEST_TEAM, graph_id="gid_custom_14086",
+        graph_namespace="org_team-001_gid_custom_14086")
+    # The graph-ownership probe requires a `Graph` row for the key's graph (403
+    # GRAPH_NOT_FOUND otherwise), so the capture itself must be able to succeed —
+    # otherwise this row never reaches the checkpoint block it is about.
+    ha_mod._make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (g:Graph {id:$gid, org_id:$tid, name:$gid, kind:'custom', "
+        "namespace:$ns, status:'active'})",
+        params={"gid": "gid_custom_14086", "tid": TEST_ORG_ID,
+                "ns": "org_team-001_gid_custom_14086"})
+    try:
+        resp, _records, _writer = _measure_capture_graph_work(
+            monkeypatch, 2, "graph-bound-skips-org-surface-14086")
+    finally:
+        if previous is not None:
+            app.dependency_overrides[get_current_org] = previous
+        else:
+            app.dependency_overrides.pop(get_current_org, None)
+
+    require_answered(
+        resp, what="POST /v1/sessions answered (graph-bound run)")
+    assert resp.status_code == 200, resp.text[:300]
+    assert org_sdk_calls == [], (
+        "a GRAPH-BOUND capture resolved the org's DEFAULT-graph SDK — that is the "
+        "cross-graph write `_reject_graph_bound_org_surface` refuses for every "
+        "sibling org-level surface (#14086 review, round 3 P2)")
+    assert "capture-disclosed" not in steps_written, (
+        "a GRAPH-BOUND capture wrote the org-level `capture-disclosed` step — and "
+        f"with it could complete the org's onboarding; steps: {steps_written!r}")
+    assert resp.json().get("first_capture") is False, (
+        "a GRAPH-BOUND capture reported `first_capture` — an org-level funnel fact "
+        "cannot be derived per graph; got "
+        f"{resp.json().get('first_capture')!r}")
+
+
+def test_a_bound_DEFAULT_key_keeps_the_org_level_checkpoint(client, monkeypatch):
+    """⛔ THE SKIP IS FOR CUSTOM BINDINGS, NOT FOR "graph_id is set" (#14086 round 4, P1).
+
+    A legacy/pre-guard key BOUND TO THE DEFAULT node carries a real ``g_<hex>``
+    ``graph_id`` while writing to the SAME physical graph an org-wide key writes
+    to (``_data_graph_name`` / ``_capture_session_key``, #3365). For that class
+    the capture's graph IS the org default, so `main`'s write and gate were on one
+    graph and were CORRECT — skipping by ``bool(org["graph_id"])`` would silently
+    drop the checkpoint, the completion gate and `first_capture` for a class that
+    already had them (`onboarding/SKILL.md`: the capture path is its only AUTOMATIC writer).
+
+    This row is the other half of the pair: the custom-bound row above asserts the
+    skip, this one asserts the KEEP. A coarse predicate reds exactly one of them.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app, get_current_org
+
+    steps_written: list[str] = []
+    real_write_step = ha_mod._os.write_completed_step
+
+    def _recording_write_step(graph, org_id, step_id, **kwargs):
+        steps_written.append(step_id)
+        return real_write_step(graph, org_id, step_id, **kwargs)
+
+    monkeypatch.setattr(ha_mod._os, "write_completed_step",
+                        _recording_write_step)
+
+    # ⛔ THE CONSTRUCTION KEEPS `_org_sdk`'s SHAPE FOR AN UNMOVED DEFAULT. The
+    # resolved default is `None` here (no control plane in tests), so
+    # `_org_sdk_from_name` must be handed `None` and take its historical arm —
+    # `_make_sdk(namespace=org_id)`, byte-for-byte what `main` built for this
+    # class and what `_org_sdk`'s docstring promises. Handing it a never-`None`
+    # graph name instead switches every unmoved default-bound credential to
+    # `_make_sdk(graph_name=…)`, which re-keys `_make_sdk`'s keepalive anchor
+    # (#1475) and drops the SDK's `namespace=`.
+    sdk_builds: list[tuple[str, str | None]] = []
+    real_from_name = ha_mod._org_sdk_from_name
+
+    def _recording_from_name(org_id, moved):
+        sdk_builds.append((org_id, moved))
+        return real_from_name(org_id, moved)
+
+    monkeypatch.setattr(ha_mod, "_org_sdk_from_name", _recording_from_name)
+
+    previous = app.dependency_overrides.get(get_current_org)
+    app.dependency_overrides[get_current_org] = lambda: dict(
+        TEST_TEAM, graph_id=_LEGACY_DEFAULT_GID, graph_namespace="org_team-001")
+    ha_mod._make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (g:Graph {id:$gid, org_id:$tid, name:$gid, kind:'default', "
+        "namespace:$ns, status:'active'})",
+        params={"gid": _LEGACY_DEFAULT_GID, "tid": TEST_ORG_ID,
+                "ns": "org_team-001"})
+    try:
+        resp, _records, _writer = _measure_capture_graph_work(
+            monkeypatch, 2, "bound-default-keeps-checkpoint-14086")
+    finally:
+        if previous is not None:
+            app.dependency_overrides[get_current_org] = previous
+        else:
+            app.dependency_overrides.pop(get_current_org, None)
+
+    require_answered(
+        resp, what="POST /v1/sessions answered (bound-default run)")
+    assert resp.status_code == 200, resp.text[:300]
+    assert "capture-disclosed" in steps_written, (
+        "a key BOUND TO THE DEFAULT graph lost the `capture-disclosed` checkpoint "
+        "— its graph IS the org default, so the block is not a cross-graph write "
+        "for it and `main` wrote it (#14086 review round 4, P1); steps: "
+        f"{steps_written!r}")
+    assert resp.json().get("first_capture") is True, (
+        "a key bound to the DEFAULT graph reported first_capture=False — the "
+        "org's first capture is the org's, whatever credential shape carried it; "
+        f"got {resp.json().get('first_capture')!r}")
+    assert (TEST_ORG_ID, None) in sdk_builds, (
+        "the bound-DEFAULT checkpoint did not resolve the org default through "
+        "`_org_sdk_from_name(org_id, _org_default_namespace(org_id))` — the ONE "
+        f"seam `_org_sdk` uses; builds: {sdk_builds!r}")
+    assert all(moved is None for _org, moved in sdk_builds), (
+        "this org's default never MOVED, but the checkpoint SDK was constructed "
+        "from a resolved graph NAME — that switches `_make_sdk` from "
+        "`namespace=` to `graph_name=`, re-keying its keepalive anchor (#1475) "
+        "and dropping the SDK's `namespace=`, where `_org_sdk` promises "
+        "byte-for-byte `_make_sdk(namespace=org_id)` for an unpromoted org; "
+        f"builds: {sdk_builds!r}")
+
+
+def test_the_graph_bound_default_resolve_rides_the_worker_not_the_loop(client, monkeypatch):
+    """⛔ THE ROUND-4 GUARD'S DECISION READ IS A CONTROL-PLANE CALL (#14086 fixer).
+
+    Deciding whether a GRAPH-BOUND credential's own graph IS the org default
+    needs the org default's name, and for a graph-bound credential NO auth seam
+    publishes the hint (`_publish_default_namespace` is org-wide only) — so
+    `_org_default_namespace` takes its `organizations.graph_name` point read.
+    Run inline in `_capture_session_impl` that is a synchronous PostgREST round
+    trip ON the single uvicorn worker's loop: the same class of stall this PR
+    exists to remove (`/v1/search` waiting 8–17 s behind a capture), and one the
+    AST guards in `tests/test_health_ready_nonblocking.py` cannot see — they
+    match control-plane calls lexically inside an `async def`, and this one sits
+    one call away, in a sync helper.
+
+    #7500 is why only the READ moves: `_make_sdk` must stay on the loop, so the
+    split is `_run_off_loop(read)` and then `_org_sdk_from_name` — the same
+    idiom the indexing lane already uses
+    (`_org_sdk_from_name(org_id, await _cp_offload(...))`).
+
+    Mutation check (must stay true): resolving inline again puts every recorded
+    resolve back on `MainThread` and reds the assertion below; the sibling rows
+    (`..._graph_bound_capture_skips_the_org_level_checkpoint_entirely` and
+    `..._a_bound_DEFAULT_key_keeps_the_org_level_checkpoint`) pin that moving
+    the read changes WHERE it runs and nothing about the verdict.
+    """
+    import tortoise.hosted_api as ha_mod
+    from tortoise.hosted_api import app, get_current_org
+
+    threads: list[str] = []
+    real_resolve = ha_mod._org_default_namespace
+
+    def _recording_resolve(org_id):
+        threads.append(threading.current_thread().name)
+        return real_resolve(org_id)
+
+    monkeypatch.setattr(ha_mod, "_org_default_namespace", _recording_resolve)
+
+    previous = app.dependency_overrides.get(get_current_org)
+    app.dependency_overrides[get_current_org] = lambda: dict(
+        TEST_TEAM, graph_id="gid_resolve_14086",
+        graph_namespace="org_team-001_gid_resolve_14086")
+    ha_mod._make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (g:Graph {id:$gid, org_id:$tid, name:$gid, kind:'custom', "
+        "namespace:$ns, status:'active'})",
+        params={"gid": "gid_resolve_14086", "tid": TEST_ORG_ID,
+                "ns": "org_team-001_gid_resolve_14086"})
+    try:
+        resp, _records, _writer = _measure_capture_graph_work(
+            monkeypatch, 2, "graph-bound-resolve-off-loop-14086")
+    finally:
+        if previous is not None:
+            app.dependency_overrides[get_current_org] = previous
+        else:
+            app.dependency_overrides.pop(get_current_org, None)
+
+    require_answered(
+        resp, what="POST /v1/sessions answered (graph-bound resolve run)")
+    assert resp.status_code == 200, resp.text[:300]
+    assert threads, (
+        "a GRAPH-BOUND capture never resolved the org default — this row would "
+        "prove nothing about WHERE that read runs")
+    on_loop = [n for n in threads if n == "MainThread"]
+    assert not on_loop, (
+        "the graph-bound default resolve — one `organizations.graph_name` "
+        "control-plane point read — ran ON the event loop; it must ride the "
+        f"capture pool (#10893/#14086); threads: {threads!r}")
+
+
+def test_the_pre_existing_offload_exemption_is_actually_consumed():
+    """The declaration's consumer is real; nothing pins its USE in the verdict.
+
+    ``_PRE_EXISTING_OFFLOAD_LEGS`` names the #4625 leg-62 probe's statements,
+    which have run on ``asyncio_0`` BY DESIGN since long before this change.
+    Its only consumer in a verdict is the needle loop of
+    ``test_the_capture_post_write_tail_never_runs_on_the_event_loop``
+    (``if not _is_a_pre_existing_offload(c)``) — and that is the one arm which
+    cannot reach these statements: the probe matches ZERO of the six
+    ``_CAPTURE_TAIL_STATEMENTS``, so the needle-matched prohibition could never
+    have accused the leg that was already off the loop (#14086 review, P2).
+    ⛔ It emits NO tail needle (its statement READS ``s.capture_ok AS ok``; it
+    never ``SET``s one), so today the exemption changes no verdict — it is a
+    declared record with a caller.
+
+    ⛔ WHAT IS PINNED HERE IS THE HELPER, NOT ITS USE IN THE VERDICT (#14086
+    review, P3). No row drives an exempt statement through an offenders list, so
+    the exemption could be deleted from the verdict computation and this test
+    would stay green — and in the fixture that computes that list, the arm which
+    DOES match the probe (session-alive) does not consult the exemption at all.
+    Pinning the consumption needs a statement the needle loop matches and the
+    session-alive arm ignores; this probe is not that statement.
+
+    Both directions ARE pinned for the HELPER: an exempt statement is
+    recognised, and the same statement without the exempt fragment is not.
+    """
+    exempt_key = next(iter(_PRE_EXISTING_OFFLOAD_LEGS))
+    tail_needle = "SET s.capture_ok=$ok"
+    assert tail_needle in _CAPTURE_TAIL_STATEMENTS, (
+        "this row picks a needle that must be a tail statement — re-point it")
+
+    exempt = f"MATCH (s:Session {{id:$sid}}) RETURN {exempt_key} {tail_needle}"
+    assert _is_a_pre_existing_offload(exempt), (
+        "the declared exemption was not recognised — the leg-62 probe's own "
+        "statement would be accused by the prohibition")
+    assert not _is_a_pre_existing_offload(f"MERGE (n) {tail_needle}"), (
+        "a tail statement with no pre-existing-offload fragment must NOT be "
+        "exempted — an over-broad exemption is a hole in the prohibition")
+
+    # …and EVERY declared exemption key is recognised, so a new key cannot join
+    # the dict without being consumed.
+    for key in _PRE_EXISTING_OFFLOAD_LEGS:
+        assert _is_a_pre_existing_offload(f"MATCH (x) RETURN {key}"), (
+            f"_PRE_EXISTING_OFFLOAD_LEGS[{key!r}] is declared but not consumed")
+
+
+def test_the_receipt_write_runs_on_the_capture_pool(client, monkeypatch):
+    """The receipt write is a THIRD tail leg, and it is not watched by any needle.
+
+    ⛔ WHY NO NEEDLE CAN SEE IT (#14086 review, P2). The receipt key is an
+    OPERATIONAL key, so the router routes the write to its jsonb compare-and-set
+    rather than to Cypher: the leg emits no statement of its own, and the
+    ``MERGE (n:OnboardingState {org_id: $org_id})`` needle in
+    ``_CAPTURE_TAIL_STATEMENTS`` is satisfied by a DIFFERENT writer. Presence and
+    prohibition are therefore both silent about it, and a test that reads green
+    while this leg sits on the loop is the exact shape ``_TAIL_MUST_BE_ISSUED``
+    exists to prevent.
+
+    So the leg is watched by a RECORDER rather than a needle: the seam is the
+    module global the block passes to ``_run_off_loop``, and its calling THREAD is
+    the observable. Non-vacuity: inlining either receipt call
+    (``await _run_off_loop(_CAPTURE_EXECUTOR, _update_onboarding_state, …)`` →
+    a direct call) records ``MainThread`` and reds this row.
+    """
+    import tortoise.hosted_api as ha_mod
+
+    seen: list[str] = []
+    real = ha_mod._update_onboarding_state
+
+    def _record(*args, **kwargs):
+        # The receipt/clear shape only: `_echo` plus the single receipt key. The
+        # other `_update_onboarding_state` callers (onboarding flows) are not
+        # this leg and are reached on the loop by design.
+        if kwargs.get("_echo") is False and len(kwargs) == 2:
+            seen.append(threading.current_thread().name)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(ha_mod, "_update_onboarding_state", _record)
+
+    resp = client.post("/v1/sessions", json={"conversation": _CONV})
+    require_answered(resp, what="POST /v1/sessions answered (receipt-thread arm)")
+    assert resp.status_code == 200, resp.text[:300]
+
+    assert seen, (
+        "the receipt write never ran — this row watches a leg that did not "
+        "execute, so it would prove nothing (the capture path changed?)")
+    on_loop = [name for name in seen if not str(name).startswith(_CAPTURE_POOL_PREFIX)]
+    assert not on_loop, (
+        "the capture receipt write ran on "
+        f"{on_loop} — it is a registry/jsonb CAS and parks the single "
+        "uvicorn worker, which every concurrent `/v1/search` pays as "
+        "`pre_handler` (#10893). No needle in this table can see this leg (its "
+        "statement is lane-dependent, and it is never an `OnboardingState` "
+        "MERGE), which is why it is recorded here")

@@ -662,3 +662,50 @@ def test_claim_regex_rejects_unrelated_source_of_truth_prose():
         assert not CLAIM_RE.search(unrelated), (
             f"scan false-positives on unrelated copy: {unrelated!r}"
         )
+
+
+def test_the_chokepoint_keeps_its_replay_ORDER_statement():
+    """#14130 review F1 — the gate's silence here is correct, and is not a licence
+    to reword the site.
+
+    ``docs/durability-posture.md`` records TWO exemptions, verbatim: the
+    ``truth store`` phrase ``is mostly NOT this claim`` (§17.1's *every write
+    goes to the truth store first*, the residency repair, ``onboarding/state.py``
+    "all name the **record** … **A sweep that reworded those would damage it**"),
+    and ``tortoise/``'s legitimate *replay-ORDER* axis — *the derived store must
+    never lead the truth* — "which the rule above does not forbid".
+
+    ``tortoise/sdk.py``'s chokepoint comment is the live replay-order site, so
+    ``CLAIM_RE`` is silent on it **by design** (measured: the sentence is clean
+    before and after the reword an earlier revision of #14130 carried). That is
+    exactly why it needs its own pin, and why the doc warns that "the widened
+    pattern and the per-site reword have to land as ONE change": nothing else in
+    the tree notices when the statement is swept away for looking like a claim.
+
+    RED on the reword (subject becomes *the append*, the ordering statement and
+    its ``truth store`` subject are gone and the paragraph says "commit point"
+    twice) and RED on deletion. GREEN on main's wording, asserted here.
+    """
+    source = (Path(__file__).resolve().parent.parent / "tortoise" / "sdk.py").read_text(
+        encoding="utf-8"
+    )
+    # Whitespace-joined with the comment markers dropped, so a REFLOW is not a
+    # failure — only a reword or a deletion is, which is precisely the damage the
+    # canonical doc names. (The sentence spans a line break, so the `#` would
+    # otherwise sit inside it.)
+    joined = " ".join(source.replace("#", " ").split())
+    sentence = "the truth store does not wait for a derived store"
+    assert sentence in joined, (
+        "the chokepoint's replay-order statement is one of the two exemptions "
+        "docs/durability-posture.md records (`truth store` mostly names the "
+        "RECORD; the derived-store-vs-truth ORDER is a use the rule does not "
+        "forbid) — a blind durability sweep must not reword or delete it "
+        "(#14130 review F1)"
+    )
+    # And the gate that could never protect it stays silent, which is why the
+    # pin above exists rather than a wider pattern: widening until this reds is
+    # the *other* half of the damage the doc names.
+    assert not CLAIM_RE.search(sentence), (
+        "if CLAIM_RE starts matching the legitimate replay-order statement, the "
+        "pattern was widened without the per-site read the doc requires"
+    )
