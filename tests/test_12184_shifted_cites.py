@@ -1001,14 +1001,16 @@ def test_the_drift_numerator_is_re_derived_from_the_pin_blob_not_carried() -> No
     # `fetch-depth: 1` produces): with the split's denominator mutated `218` → `300` this test stayed
     # GREEN — the only arm that compared the spellings is the WITH-HISTORY one below, which cannot run
     # there. So the half that runs in CI asserted a numerator agreement over a denominator it never read.
-    assert int(split.group(2)) == int(comparable_said.group(1)) == int(drifted_said.group(2)), (
+    # ⛔ TWO spellings, not three (#14038 review, P3, rule 3). `drifted_said`'s span is NESTED INSIDE
+    # `split`'s on this document — it matches the very same sentence — so chaining its group (2) here
+    # would be a leg no edit of this text can turn red. "A comment explaining why it cannot fail is NOT
+    # a fix" is the rule, so the leg is DELETED rather than disclosed. `drifted_said` is still
+    # load-bearing: its group (1) feeds the drifters identity below, so nothing stops being graded.
+    assert int(split.group(2)) == int(comparable_said.group(1)), (
         "the header publishes its comparable denominator in more than one sentence — "
         f"{split.group(2)} in the split sentence and {comparable_said.group(1)} in `all … comparable "
-        "ones` — and they are ONE figure. (The third term above is that SAME split sentence's own "
-        f"`{drifted_said.group(2)} of the M comparable`, kept so this arm names the text it grades "
-        "below: it is not an INDEPENDENT spelling.) Re-measure it by content and update EVERY "
-        "spelling; if these name different sentences, re-point the patterns above rather than "
-        "widening this arm."
+        "ones` — and they are ONE figure. Re-measure it by content and update EVERY spelling; if these "
+        "two name different sentences, re-point the patterns above rather than widening this arm."
     )
     # (1) HISTORY-FREE — the arm the CI shape gets. The halves must add up to the whole.
     assert int(comparable_said.group(1)) + incomparable == pairs, (
@@ -1113,12 +1115,17 @@ def test_the_tree_probe_grades_absence_and_an_unreadable_tree_DIFFERENTLY(tmp_pa
         )
         assert _pin_blob_lines("sub/x.py", rev=broken) is None
 
-        # ⛔ THE MUTANT THIS PINS: `rev-parse --verify '<rev>:<path>'` answers False HERE — the same
-        # answer it gives for a genuine absence — so a re-implementation using it returns `[]` and
-        # counts an unreadable pair as not-comparable, inflating the drifter figure.
+        # ⛔ THE GIT PREMISE THIS ROW RESTS ON — not a fixture guard. The graded claim is the `is None`
+        # above; this states WHY only `ls-tree` can grade it. `rev-parse --verify '<rev>:<path>'`
+        # answers False here — the same answer it gives for a genuine absence — so a re-implementation
+        # using it returns `[]` and counts an unreadable pair as not-comparable, inflating the drifter
+        # figure. ⚠️ No single edit of THIS FILE can turn this line red: the `is None` row above fires
+        # first on any fixture change. It reds only if git itself changes how `<rev>:<path>` resolves an
+        # unreadable subtree, which is a premise worth failing on loudly (#14038 review, P3).
         assert _git_resolves(f"{broken}:sub/x.py") is False, (
-            "the fixture stopped constructing the shape: `<rev>:<path>` must resolve the same way it "
-            "would for an absent path, otherwise this row no longer discriminates"
+            "GIT PREMISE BROKEN: `<rev>:<path>` now distinguishes an unreadable subtree from an absent "
+            "path, so the reason `_path_in_tree` asks `ls-tree` no longer holds and this row should be "
+            "re-derived rather than kept"
         )
     finally:
         _pin_blob_lines.cache_clear()
