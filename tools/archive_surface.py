@@ -1052,9 +1052,10 @@ def _init_carries_a_body(text: str) -> bool:
     importable siblings. A comparison over PATHS therefore cancels that deletion, which is why
     "the package still imports" is the wrong question to ask of `__init__.py`.
 
-    Only an `__init__.py` with no statements of its own — empty, whitespace, or a docstring
-    alone — is pure scaffolding, where deleting it while siblings survive removes nothing. Any
-    statement (an import, a re-export, `__all__`, an assignment, a function) is content.
+    Only an `__init__.py` with no statements of its own — empty, whitespace, a docstring
+    alone, or a bare no-op (`pass` / `...`) — is pure scaffolding, where deleting it while
+    siblings survive removes nothing. Any statement (an import, a re-export, `__all__`, an
+    assignment, a function) is content.
     Unparseable text is treated as carrying NOTHING: a body that no longer parses holds no
     statements a caller can reach, so the arm reports the removal rather than reading the
     garbage as content and cancelling it. (The previous version returned True here and called
@@ -1073,6 +1074,26 @@ def _init_carries_a_body(text: str) -> bool:
         and isinstance(body[0].value.value, str)
     ):
         body = body[1:]  # a docstring alone is prose about scaffolding, not content
+    # ⛔ A NO-OP STATEMENT IS NOT CONTENT EITHER (round-16 review, P2 — measured in BOTH
+    # directions). A file reduced to `pass` or `...` carries nothing a caller can reach, which is
+    # exactly the README's test ("the name no longer resolves to any code"). Counting them as a
+    # body was a false PASS one branch over from the docstring hole: the WRITER accepted `pass` as
+    # the module's source of record (`archived_from = tortoise/x.py`) and `shrink_violations` then
+    # credited the row on its EXISTENCE — every arm green, the body in no file under `archive/`.
+    # The SAME predicate over-blocked the mirror shape: a `pass`-only `__init__.py` read as
+    # CONTENT, so deleting a scaffolding package went RED while deleting a docstring-only one was
+    # green. Only TOP-LEVEL bare no-ops are dropped: a `def`/`class`/`if` whose body happens to be
+    # `pass` is still a statement, and a `.pyi` stub's `def f() -> int: ...` is a FunctionDef.
+    body = [
+        node
+        for node in body
+        if not isinstance(node, ast.Pass)
+        and not (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and node.value.value is Ellipsis
+        )
+    ]
     return bool(body)
 
 
