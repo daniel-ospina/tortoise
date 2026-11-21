@@ -1785,8 +1785,8 @@ def test_a_carried_forward_figure_is_reported() -> None:
             one_measurement,
             {2: alt_drifters - 2},
             "the SECOND publication of the alternative numerator disagrees with the first — and the mutant "
-            "is anchored two INSIDE the band on purpose: a value the band already rejects would let this "
-            "row pass on the BAND's red and prove nothing about the mention-agreement leg it exists for",
+            "is anchored two INSIDE the band on purpose, so the disagreement is the ONLY thing wrong with "
+            "the mutated document and its red cannot be explained away as an out-of-band figure",
         ),
         (
             two_total,
@@ -1836,13 +1836,19 @@ def test_a_carried_forward_figure_is_reported() -> None:
                 f"{rematched.group(1)!r} vs {next(iter(overrides.values()))!r}"
             )
         if match is one_measurement:
-            # ⛔ RULE 2, for the same reason as the count rows below: the generic observation is only
-            # `_figure_problems(mutated) != []`, and the BAND satisfies it too. The anchor is
-            # `alt_drifters - 2` precisely so the mutant sits INSIDE the band, but "inside the band" is a fact
-            # about TODAY's figures — a legal re-measurement putting `alt_drifters` at the band's lower edge
-            # (`{drifters, drifters + 1}`) lands the mutant below it, and the row would then pass on the
-            # BAND's red while the leg it exists for stayed unproven. So assert the red NAMES the leg: the
-            # mention-disagreement message must be among the problems, whatever the figures become.
+            # ⛔ RULE 2's PARSEABILITY half — and NOT the band's, which is what this block claimed until it
+            # was measured. This mutant edits the MENTION sentence; the band grades the `counting that form
+            # gives …` sentence, which the mutation never touches, so the band cannot fire here at ALL,
+            # whatever the figures become. MEASURED on this head, and on a re-measured document carrying the
+            # band's inclusive lower edge (`alt == primary`, `problems == []`): the shipped mutant reports the
+            # mention-disagreement message and nothing else, and the lower-edge mutant (`155 and 153`) still
+            # reports only that message. So there is no "passes on the BAND's red" state to guard against;
+            # what CAN go wrong is the mutant itself — a value the pattern cannot read (a `-1` after a
+            # re-measurement that puts the alternative numerator at one) reds through the ABSENT-SENTENCE
+            # arm, and the row would pass without the agreement comparator ever being consulted. That is the
+            # false PASS of the control the count rows' RULE 2 forbids, so it gets the same treatment: the
+            # mutated sentence must still parse, its new figure must be the one the pattern grades, and the
+            # red must NAME the leg.
             rematched = _ONE_MEASUREMENT.search(_unbolded(mutated))
             assert rematched is not None, (
                 f"the control for {why!r} produced {stale!r}, which `_ONE_MEASUREMENT` cannot read, so the "
@@ -1852,12 +1858,20 @@ def test_a_carried_forward_figure_is_reported() -> None:
                 f"the control for {why!r} rewrote a figure the pattern does not grade: "
                 f"{rematched.group(2)!r} vs {next(iter(overrides.values()))!r}"
             )
+            mention_problems = _figure_problems(mutated)
             assert any("sentence disagrees with the figures it claims to restate" in problem
-                       for problem in _figure_problems(mutated)), (
-                f"the control for {why!r} red for some other reason ({_figure_problems(mutated)}), so the "
-                "mention-agreement leg was never consulted — the anchor `alt_drifters - 2` can fall OUTSIDE "
-                "the band after a legitimate re-measurement, and a row that then passes on the band's red "
-                "proves nothing"
+                       for problem in mention_problems), (
+                f"the control for {why!r} red for some other reason ({mention_problems}), so the "
+                "mention-agreement leg was never consulted and the row proves nothing about it"
+            )
+            # ⛔ The claim above, PINNED rather than asserted in prose: the band reads the alternative-basis
+            # sentence, so a mention-only mutation cannot reach it. If a later edit re-points the band at the
+            # mention sentence (or this mutation starts hitting two sentences), the mechanism described above
+            # is no longer the mechanism, and the comment must be re-measured instead of trusted.
+            assert not any("can add at most" in problem for problem in mention_problems), (
+                f"the band filed a problem for a MENTION-only mutation: {mention_problems} — the block above "
+                "says the band grades the `counting that form gives …` sentence and cannot see this mutant, "
+                "so re-measure that claim rather than deleting this assertion"
             )
         if match is alt and 2 in overrides:
             # ⛔ RULE 2 FOR THE BAND, and it was needed the moment the mention leg landed: the two rows
