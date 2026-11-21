@@ -1478,10 +1478,11 @@ def test_skill_decide_protocol_tools_are_registered_mcp_tools():
     # part/whole fan-out `create_operator` had (one operator over N targets). Naming the
     # container without the list would admit a protocol that cannot perform that fan-out.
     # Measured at this head: the door is still SERVED (forwarded), so the `missing` sweep
-    # above cannot catch a stale name; this pin is that sweep's only guard against one
-    # (canonical-only staleness is also caught by the byte-parity test below, and a revert
-    # of BOTH copies by test_1652_served_skills_name_only_advertised_tools — neither of
-    # which keeps the protocol teaching the part/whole fan-out).
+    # above cannot catch a stale name; this pin is that sweep's only guard against one.
+    # Canonical-only staleness is caught separately by
+    # `test_m8_deploy_mirror_matches_canonical`, and a revert of BOTH copies by
+    # `test_1652_served_skills_name_only_advertised_tools` — neither of those keeps the
+    # protocol teaching the part/whole fan-out, which is what the arm pin below does.
     for required in ("tortoise_check_confidence", "tortoise_link_entities"):
         assert required in tokens, f"decide protocol must use {required}"
     assert "`target_ids=[…]` selects the operator writer" in decide_section, (
