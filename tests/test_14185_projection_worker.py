@@ -313,28 +313,45 @@ def test_a_snapshot_from_BEFORE_a_fork_reset_cannot_undo_it(armed):
     projection_worker.shutdown(drain=True, timeout=5)
 
 
-def test_a_metrics_failure_never_escapes_into_the_loop(armed):
-    """⛔ #14222 review cycle 5, P2-2: the observability channel cannot kill the fold.
+def test_a_metrics_failure_never_escapes_into_the_loop(armed, monkeypatch):
+    """⛔ #14222 review cycles 5 and 6: the observability channel cannot kill the fold.
 
-    `_run` calls `_publish` outside its own `try`, and `_meter()` sits on that
-    path — with a WARNING that can now raise. An escape there is a DEAD consumer,
-    not a lost counter: the loop would stop folding and nothing would say so.
+    `_run` calls `_publish` OUTSIDE its own `try`, so anything that raises on that
+    path kills the consumer thread. The escalation across three review rounds is
+    what makes this leg worth reading:
+
+    * cycle 5: the WRITER was made to raise — but the writer call was already
+      inside `contextlib.suppress`, so that leg was green on the broken code;
+    * cycle 6: the arm that actually regressed is the LOOKUP (`_meter()` sat
+      outside the guard and had just gained a WARNING), so `_meter` is what raises
+      here.
     """
-    def exploding(*args, **kwargs):
-        raise RuntimeError("the metrics backend went away")
+    worker = projection_worker.worker()
+    worker.start()                      # a running consumer, before anything fails
+    consumer = worker._thread
 
+    def exploding(*args, **kwargs):
+        raise RuntimeError("the metrics module is unreachable")
+
+    # ⛔ THE DIRECT ASSERTION: `_publish` must not raise. A raise here is the
+    # consumer thread's death — and because it happens AFTER the counters are
+    # updated, an integration assertion alone cannot see it: the fold already
+    # looks done, and the next `submit` would silently start a replacement thread.
+    monkeypatch.setattr(projection_worker, "_meter", exploding)
+    with worker._cond:
+        snapshot = worker._stamp_locked()
+    projection_worker.ProjectionWorker._publish(worker, snapshot)   # must not raise
+
+    # ⛔ AND THE OBSERVABLE HALF: the SAME consumer keeps folding. Identity, not
+    # just liveness — a dead thread is replaced on the next submit, so `running`
+    # alone would pass over the churn the fix exists to prevent.
     before = projection_worker.stats().projected
-    monkey = monitoring.record_projection_queue_state
-    monitoring.record_projection_queue_state = exploding
-    try:
-        live_write.write({"type": "A"}, log=_Log(), project=_fast_projector(),
-                         tenant=_TENANT)
-        assert projection_worker.wait_for_drain(10) is True
-        assert projection_worker.stats().projected == before + 1, (
-            "the fold died behind a metrics failure")
-        assert projection_worker.stats().running is True
-    finally:
-        monitoring.record_projection_queue_state = monkey
+    live_write.write({"type": "A"}, log=_Log(), project=_fast_projector(),
+                     tenant=_TENANT)
+    assert projection_worker.wait_for_drain(10) is True
+    assert worker._thread is consumer, "the consumer thread was replaced"
+    assert projection_worker.stats().running is True
+    assert projection_worker.stats().projected == before + 1
 
 
 def test_the_metrics_surface_carries_the_lag(armed):
