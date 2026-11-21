@@ -1362,8 +1362,8 @@ def _module_writer_facts(source: str) -> tuple[frozenset[str], frozenset[str]]:
     KEY (measured #14099: shard `(d)`'s watchdog killed the leg — `exit 137`, no pytest summary,
     `job-unreadable` — and `python-ci-gate` red-ed with it). The population walk asked
     `_function_bodies(source)` once per REGISTER KEY, so a 9-module population re-`ast.parse`d
-    6.51 MB of source (3.78 MB of it `tortoise/sdk.py` — measured over the register's 9 modules at
-    this head; the earlier `5.5 MB` figure here was low) on every key of every call: profiled at
+    6.51 MB of source TEXT (3.75 MB of it `tortoise/sdk.py` by the same measure; 6.55 MB / 3.78 MB
+    on disk — the earlier `5.5 MB` figure here was low) on every key of every call: profiled at
     this head, ONE test made **275** `_function_bodies` calls and **14.2 M** `ast.walk` yields —
     111 s of its 118 s — for a walk whose input had not changed once. The file went 15.8 s on
     main to 250 s here, and it is packed into shard `(d)`, whose watchdog is 24 min: ~4.2 min of
