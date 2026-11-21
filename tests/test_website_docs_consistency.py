@@ -2168,7 +2168,7 @@ def test_an_end_tag_a_browser_ignores_does_not_end_the_storage_slice() -> None:
     # that contradicts the reviewed copy.
     blocked = (
         "<div><table><tr><td></div>\n"
-        f'<h2 id="quickstart">Quickstart (5 minutes)</h2></td></tr>\n'
+        '<h2 id="quickstart">Quickstart (5 minutes)</h2></td></tr>\n'
         "<p>FalkorDB permanently deletes items above the allowance for your tier "
         "after thirty days.</p>\n"
         "</table>\n"
@@ -2823,7 +2823,26 @@ def test_the_select_scope_closes_on_input_and_a_nested_select_and_nothing_else()
         "premise: with nothing between them the `<input>` IS in the select's scope "
         "and the pop must still happen (Chrome: `aInSelect` false, `innerText` 'x')"
     )
-    assert extract_heading_positions(
+    # ⛔ THE IGNORED-TOKEN ANSWER IS GATED BY THE SAME SCOPE QUESTION, and this row holds
+    # the two apart. A `<select>` start tag that a browser IGNORES after popping is only
+    # ignored when a pop actually HAPPENED; but the pop is itself scope-gated, and the
+    # scope gate lives inside `_close_extent`. So a nested `<select>` behind a cell
+    # boundary — where the outer select is NOT in scope and no pop happens — still opens
+    # a real second select, and the browser keeps the anchor inside it. Measured in
+    # Chrome: two selects, `a` chained to the INNER select, `innerText ''`, width 0 — so
+    # reporting the href would advertise a second "way in" that no browser exposes.
+    # (Without this row the outer scope check can be deleted and nothing reds, because
+    # `_close_extent` refuses the pop on its own while `_close_select_scope` still
+    # answers "ignored" — a false red the shape below is the only witness to.)
+    assert extract_anchor_hrefs(
+        '<select><table><td><select><a href="/blog">x'
+    ) == [], (
+        "a nested `<select>` behind a cell boundary did NOT pop anything (the outer "
+        "select is out of scope), so it is NOT an ignored token: the browser opens a "
+        "real second select and the anchor is inside it (Chrome: 2 selects, "
+        "`innerText ''`, width 0) — reporting it advertises a link no reader meets"
+    )
+    assert extract_anchor_hrefs(
         '<select><table><td><input><h2 id="qs">Q</h2>'
     ) == [], (
         "a `<h2>` after an `<input>` that never popped the select was BOUNDED: the "

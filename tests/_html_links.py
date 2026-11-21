@@ -1551,32 +1551,6 @@ class _AnchorHrefParser(HTMLParser):
         if opened_container and self._open_containers:
             self._open_containers.pop()
 
-    def _select_in_scope(self) -> bool:
-        """Is an open `<select>` IN SCOPE — the precondition `_SELECT_POP` names?
-
-        ⛔ "IS ANY `<select>` OPEN?" IS NOT THE SPEC'S QUESTION (#14073 review round
-        14, P2, measured). The rule is *"If the stack of open elements has a select
-        element in scope"*, so a `table`/`td`/`th`/`caption`/`object`/`template`
-        between the current node and the `<select>` makes the answer NO and NO POP
-        HAPPENS. This used to be `any(open_tag == "select" …)`, so a select above a
-        table cell was popped by an `<input>` a browser leaves it open through:
-
-            extract_anchor_hrefs('<select><table><td><input><a href="/blog">x')
-              -> ['/blog']      # Chrome: the anchor is INSIDE the still-open select
-            extract_anchor_hrefs('<select><input><a href="/blog">x')
-              -> ['/blog']      # …and here Chrome has it OUTSIDE (the control)
-
-        The first is the fail-open direction the blog guard exists to prevent: a "way
-        in" no browser exposes (`aInSelect` true, `innerText` empty). The second is
-        correct both before and after — it is the row that must not move.
-        """
-        for open_tag, _container, _renders in reversed(self._open_elements):
-            if open_tag == "select":
-                return True
-            if open_tag in self._SCOPE_BOUNDARY:
-                return False
-        return False
-
     def _close_select_scope(self, tag: str) -> bool:
         """Pop an open `<select>` for a token that pops it; `True` when IGNORED.
 
@@ -1595,6 +1569,23 @@ class _AnchorHrefParser(HTMLParser):
         inner select the browser discarded would be pushed here and every anchor
         after it would stay suppressed by an element that does not exist.
 
+        ⛔ "IS ANY `<select>` OPEN?" IS NOT THE SPEC'S QUESTION (#14073 review round
+        14, P2, measured). The rule is *"If the stack of open elements has a select
+        element in scope"*, so a `table`/`td`/`th`/`caption`/`object`/`template`
+        between the current node and the `<select>` makes the answer NO and NO POP
+        HAPPENS. `_close_extent` asks exactly that before it pops (see
+        `_end_tag_is_in_scope`), so it — not a second open-stack scan here — is the
+        gate, and its return value is what this method answers with.
+
+            extract_anchor_hrefs('<select><table><td><input><a href="/blog">x')
+              -> []             # Chrome: the anchor is INSIDE the still-open select
+            extract_anchor_hrefs('<select><input><a href="/blog">x')
+              -> ['/blog']      # …and here Chrome has it OUTSIDE (the control)
+
+        The first is the fail-open direction the blog guard exists to prevent: a "way
+        in" no browser exposes (`aInSelect` true, `innerText` empty). The second is
+        correct either way — it is the row that must not move.
+
         The same three guards the rest of the ancestry reads use: a token inside a
         suppressed region is template content or raw text, whose end tags and
         start tags a browser processes against that region's own stack (the reason
@@ -1605,12 +1596,20 @@ class _AnchorHrefParser(HTMLParser):
             return False
         if self._suppress or self.wedged_reason or self._foreign:
             return False
-        if self._select_in_scope():
-            # `select` and everything opened inside it, which is the spec's "pop
-            # until a select element has been popped".
-            self._close_extent("select")
-            return tag in self._SELECT_POP_IGNORED
-        return False
+        # ⛔ ONE SCOPE GATE, AND THE ANSWER TIED TO A POP THAT ACTUALLY HAPPENED
+        # (#14073 review round 17, measured). This used to scan the open stack for a
+        # `<select>` itself and then call `_close_extent`, which asks the same question
+        # about the SAME element — so the outer test was unobservable belt-and-braces
+        # (deleting it changed no behaviour on any shape the suite had), while the
+        # RETURN value it guarded stayed wrong: "ignored" was answered even when the
+        # nearest `<select>` was out of scope and nothing was popped. A nested `<select>`
+        # behind a cell boundary is a REAL second select in the browser (measured: 2
+        # selects, the anchor chained to the inner one, `innerText ''`), so calling its
+        # token ignored would have dropped an element a browser created. Reporting
+        # whether the pop happened keeps one gate and makes the ignored answer mean
+        # what it says.
+        popped = self._close_extent("select")
+        return popped and tag in self._SELECT_POP_IGNORED
 
     def _collect(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag != "a" or self._suppress or self.wedged_reason:
@@ -1851,8 +1850,13 @@ class _AnchorHrefParser(HTMLParser):
             renders = False
         self._open_elements.append((tag, opened_container, renders))
 
-    def _close_extent(self, tag: str) -> None:
+    def _close_extent(self, tag: str) -> bool:
         """Pop `tag` and everything opened after it, as a browser's end tag does.
+
+        Returns True only when a pop HAPPENED. Callers that decide something from the
+        pop — `_close_select_scope` answers "is this token IGNORED" — must ask, or an
+        out-of-scope element would be reported as popped when the browser left it open
+        (#14073 review round 17, measured; see `_close_select_scope`).
 
         An end tag naming no open element is IGNORED (a browser's "any other end
         tag" does nothing when the stack holds no matching element), which is what
@@ -1864,7 +1868,7 @@ class _AnchorHrefParser(HTMLParser):
         holds `(tag, opened a container)` rather than a bare depth.
         """
         if self.wedged_reason:
-            return
+            return False
         for index in range(len(self._open_elements) - 1, -1, -1):
             if self._open_elements[index][0] != tag:
                 continue
@@ -1873,13 +1877,13 @@ class _AnchorHrefParser(HTMLParser):
                     if opened_container and self._open_containers:
                         self._open_containers.pop()
                 del self._open_elements[index:]
-                return
+                return True
             # ⛔ NOT IN SCOPE — the browser IGNORES this end tag (#14073 review round
             # 16, P0, measured). Falls through to the next (outer) match, exactly as
             # the spec's "ignore the token" leaves the stack untouched: an outer
             # match cannot exist either, because the boundary that stopped us is
             # below this one.
-            return
+            return False
 
     #: ⛔ TWO SCOPE LISTS, and using the wrong one is a fail-open in each direction
     #: (#14073 review round 17, P0 + P1, both measured).
