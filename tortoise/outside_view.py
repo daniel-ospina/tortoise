@@ -211,32 +211,37 @@ def resident_keys(graph: Any, *, label: str = "Point", key_prop: str = "id",
         raise ValueError(
             f"label {label!r} is not a record label {sorted(NODE_TABLES)}"
         )
-    from .resident_pin import _bare  # one identifier validator in the tree, not two
+    # One identifier validator for this package, not a second copy.
+    from .resident_pin import bare_identifier
 
-    _bare(label, what="label")
-    _bare(key_prop, what="key property")
+    bare_identifier(label, what="label")
+    bare_identifier(key_prop, what="key property")
     # ⛔ The bound is INTERPOLATED, not parameterised: `LIMIT $limit` is not accepted by
     # every engine version this runs against, and a rejected statement would turn the
     # whole view into "could not be read" — a control that never works rather than one
     # that answers. The value is an int, validated here, so there is nothing to inject.
-    bound = int(limit) + 1
-    if bound < 1:
+    # ⛔ The floor is on `limit`, not on the `+1` probe row: `limit=0` used to pass a
+    # `bound < 1` check (`0 + 1 = 1`) and return an EMPTY resident set declared
+    # truncated — which is exactly the shape the truncation guard reports as unmeasured,
+    # reached through an argument that looked harmless.
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
         raise ValueError(f"limit must be a positive integer, got {limit!r}")
+    bound = limit + 1
     rows = graph.query(
         f"MATCH (n:{label}) RETURN n.{key_prop} AS key LIMIT {bound}",
         params={},
     ).result_set
     keys = [row[0] for row in rows if row and isinstance(row[0], str) and row[0]]
-    return keys[: int(limit)], len(rows) > int(limit)
+    return keys[:limit], len(rows) > limit
 
 
 def resident_count(graph: Any, *, label: str = "Point") -> int | None:
     """How many nodes of this label the graph holds. ``None`` when unreadable."""
     if label not in NODE_TABLES:
         raise ValueError(f"label {label!r} is not a record label {sorted(NODE_TABLES)}")
-    from .resident_pin import _bare
+    from .resident_pin import bare_identifier
 
-    _bare(label, what="label")
+    bare_identifier(label, what="label")
     try:
         rows = graph.query(
             f"MATCH (n:{label}) RETURN count(n)", params={}

@@ -365,3 +365,17 @@ def test_the_columns_this_module_reads_are_real_record_columns():
         f"outside_view reads {missing}, which public.point does not have "
         f"(record_projection.table_columns() parsed from the migrations)"
     )
+
+
+def test_a_useless_key_bound_is_refused_rather_than_read_as_an_empty_cache():
+    """`limit=0` must not reach the truncation arm with an empty resident set.
+
+    The floor used to be checked on the `+1` probe row (`0 + 1 = 1`), so a caller could
+    ask for zero keys and receive `([], truncated=True)` — the exact shape the
+    truncation guard reports as UNMEASURED, reached through an argument that looks
+    harmless.
+    """
+    graph = _Graph(["p0"])
+    for bad in (0, -1, True, "10"):
+        with pytest.raises(ValueError):
+            outside_view.resident_keys(graph, limit=bad)
