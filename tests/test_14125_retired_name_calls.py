@@ -962,20 +962,37 @@ def _third_party_receivers(tree: ast.Module) -> set[str]:
     module-wide set holds a neighbouring function's locals too and was measured to red
     its legitimate third-party probe (review of #14160, P2).
 
-    ⛔ AND THERE IS NO SEPARATE "the block rebinds it" TERM, measured, not omitted. A
-    ``_rebinds_within(block, name)`` clause stood at ``_reaches_capability_seam``'s
-    exemption and DELETING it left the whole file green (measured: 8 passed) — an
-    unwitnessed arm, the defect class this gate exists to forbid. It is also redundant:
-    ``_shadowed(block)`` is the probe's whole enclosing FUNCTION chain, collected by
-    descending each function's statements, so an in-block ``falkordb = proj`` (or a
-    ``with … as`` / ``for`` / ``def`` / ``except … as`` / walrus rebind) is already in it;
-    a module-scope block has the name subtracted module-wide by this function; and a
-    class body — the one scope neither reaches — is never a probe root
-    (``_probe_roots`` walks ``tree.body`` and functions, not class bodies). Measured on a
-    probe-local rebind: ``third_party=['falkordb']``, ``_shadowed=['falkordb', 'proj']``
-    — the exemption is cancelled without it. Removed; it had also drifted from the family
-    list it was credited with (``ast.Name``/``Store`` only — no ``Del``, no
-    ``def``/``class`` names), so it was never the backstop its prose claimed.
+    ⛔ THERE *IS* A SEPARATE "the block rebinds it" TERM, AND IT IS LOAD-BEARING (a
+    removal on this branch was measured WRONG). A ``_rebinds_within(block, name)`` clause
+    stood at ``_reaches_capability_seam``'s exemption and was deleted as "dead", on the
+    evidence that nothing red — which is the unwitnessed-arm defect class this gate exists
+    to forbid, but "nothing red" only meant no ROW pinned it; the term was not dead.
+    Measured on the tree that removed it, with the clause stubbed and restored:
+
+        import falkordb
+        FALKORDB_AVAILABLE = False
+        try:
+            def _run():
+                falkordb = _make_client()      # rebind INSIDE a def nested in the block
+                return falkordb.g.query("RETURN 1")
+            FALKORDB_AVAILABLE = _run()
+        except Exception:
+            FALKORDB_AVAILABLE = False
+
+    ``()`` exempt with the term gone, a graded root with it. The three reasons given for
+    its redundancy each cover a DIFFERENT shape: ``_shadowed(block)`` is the probe's
+    enclosing FUNCTION chain and a MODULE-scope block has none; ``_module_scope_bindings``
+    adds a nested ``def``'s NAME, not its BODY; and the module-wide subtraction covers
+    ``def falkordb():`` (which binds that name at MODULE scope), not ``def _run():
+    falkordb = …``. Row ``4j-terdecies`` pins it, with a control whose nested ``def``
+    rebinds a different name, so the row cannot pass on code that simply dropped the
+    exemption.
+
+    The drift the removal DID find is real, and is fixed rather than used as a reason to
+    delete: the term read ``ast.Name``/``Store`` only — no ``Del`` (§4.2.1 counts a
+    ``del`` target as bound) and no ``ast.arg`` (a ``lambda`` parameter inside the block).
+    It is the full family list now, and rows ``4j-duodecies`` / ``4j-terdecies`` pin the
+    two additions.
     """
     bound = _non_own_imported_names(tree.body)
     if not bound:
@@ -986,7 +1003,69 @@ def _third_party_receivers(tree: ast.Module) -> set[str]:
     #: at each `_reaches_capability_seam` call site. Returning one module-wide set that
     #: had already folded every probe-holding function's locals in was measured to red a
     #: legitimate third-party probe in a neighbouring function (review of #14160, P2).
-    return bound - _module_scope_bindings(tree)
+    return bound - (_module_scope_bindings(tree) | _global_scope_bindings(tree))
+
+
+def _global_scope_bindings(tree: ast.Module) -> set[str]:
+    """Names a `global` declaration binds into MODULE scope (Language Reference §4.2.2).
+
+    *"If the `global` statement occurs within a block, all uses of the names specified in
+    the statement refer to the bindings of those names in the top-level namespace … The
+    `global` statement has the same scope as a name binding operation in the same
+    block."* So `global torch; torch = _make_client()` inside ANY function rebinds the
+    MODULE-level name and can therefore reach a module-level probe — while
+    `_module_scope_bindings` never descends a function body and `_enclosing_bindings`
+    only holds the probe's own chain, so NO walk saw it. Measured: exempt, and the block
+    dropped out of the population entirely, so `UNARMED == ()` read green over it
+    (review of #14160, P2).
+
+    A DECLARATION alone is not a binding (`global x` with no assignment is inert), so a
+    name counts only where the tree also BINDS it somewhere — otherwise a bare
+    `global torch` would cost a legitimate third-party probe its exemption, the false red
+    `4k-`/`4l-` forbid. Witnessed both ways in `4j-undecies`.
+    """
+    declared = {
+        name for node in ast.walk(tree) if isinstance(node, ast.Global) for name in node.names
+    }
+    if not declared:
+        return set()
+    bound: set[str] = set()
+    for node in ast.walk(tree):
+        _collect_binding(node, bound)
+    return declared & bound
+
+
+def _rebinds_within(block: ast.AST, name: str) -> bool:
+    """Whether `name` is RE-BOUND inside `block` — the probe's own body.
+
+    Load-bearing, not redundant: a rebind inside a `def` NESTED in the block is reached
+    by no other walk (the enclosing chain is empty for a module-scope block, and
+    `_module_scope_bindings` adds a nested `def`'s NAME but not its BODY). See
+    `_third_party_receivers` for the measurement that falsified its removal.
+
+    ⛔ THE FULL FAMILY LIST, not `ast.Name`/`Store` only: `ast.arg` (a `lambda` parameter
+    inside the block — the one family no other walk can see, because the module walk skips
+    a `lambda` body by construction) and the `Del` context (§4.2.1 counts a `del` target
+    as bound).
+    """
+    for node in ast.walk(block):
+        if isinstance(node, ast.arg) and node.arg == name:
+            return True
+        if (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            and node.id == name
+        ):
+            return True
+        if isinstance(node, ast.ExceptHandler) and node.name == name:
+            return True
+        if isinstance(node, ast.MatchAs) and node.name == name:
+            return True
+        if isinstance(node, ast.MatchStar) and node.name == name:
+            return True
+        if isinstance(node, ast.MatchMapping) and node.rest == name:
+            return True
+    return False
 
 
 def _module_scope_bindings(tree: ast.Module) -> set[str]:
@@ -1313,11 +1392,12 @@ def _reaches_capability_seam(
             root = _receiver_root_name(func.value)
             # Exempt only when the name still denotes the import WHERE THE PROBE RUNS:
             # module scope is already subtracted in `third_party` and `shadowed` carries
-            # the enclosing function chain — which INCLUDES the block's own body, because
-            # a function scope's bindings are collected by descending its statements. A
-            # separate "the block rebinds it" term stood here and was measured DEAD and
-            # unwitnessed; see `_third_party_receivers`.
-            if root in third_party and root not in shadowed:
+            # Exempt only when the name still denotes the import WHERE THE PROBE RUNS:
+            # module scope (`third_party`), the enclosing function chain (`shadowed`), and
+            # the block's own body (`_rebinds_within` — a rebind inside a `def` NESTED in
+            # the block is reached by NEITHER of the other two; see
+            # `_third_party_receivers`).
+            if root in third_party and root not in shadowed and not _rebinds_within(block, root):
                 continue
             return True
         if isinstance(func, ast.Name) and func.id in _CAPABILITY_NAMES:
@@ -3018,6 +3098,138 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         "a TYPE PARAMETER naming the non-own import shadows it inside the generic's own "
         "body (co_freevars, measured), so this probe must be graded — the exemption here "
         f"is a silent drop of the class this file exists to catch: {_generic_row}"
+    )
+
+    # 4j-undecies. A `global` RE-BINDING reaches a MODULE-level probe (Language Reference
+    #     §4.2.2), and it was invisible to EVERY walk: the module walk never descends a
+    #     function body, and the closure chain only holds the probe's own ancestors. Measured
+    #     exempt before this row, with the block dropped out of the population entirely — so
+    #     `UNARMED == ()` read green over it (review of #14160, P2). The control is the other
+    #     direction: a `global` DECLARATION with no binding anywhere is inert and must keep
+    #     the exemption, or a legitimate optional-extra probe is graded as a ROOT (4k-/4l-).
+    _global_rebind_guard = textwrap.dedent(
+        """
+        import torch
+
+        def _helper():
+            global torch
+            torch = _make_client()
+            return torch
+
+        TORCH_AVAILABLE = False
+        try:
+            torch.query("SELECT 1")
+            TORCH_AVAILABLE = True
+        except Exception:
+            TORCH_AVAILABLE = False
+        """
+    )
+    _global_rebind_row = roots(_global_rebind_guard)
+    assert len(_global_rebind_row) == 1 and _global_rebind_row[0][1:] == ((), True, False, True), (
+        "a `global` re-binding puts the name in MODULE scope, so it can reach a "
+        "module-level probe and must NOT buy the third-party exemption — missing it "
+        "leaves a swallowed rename reading as 'capability unavailable': "
+        f"{_global_rebind_row}"
+    )
+    _bare_global_control = roots(
+        textwrap.dedent(
+            """
+            import torch
+
+            def _helper():
+                global torch
+                return torch
+
+            TORCH_AVAILABLE = False
+            try:
+                torch.query("SELECT 1")
+                TORCH_AVAILABLE = True
+            except Exception:
+                TORCH_AVAILABLE = False
+            """
+        )
+    )
+    assert _bare_global_control == (), (
+        "a `global` DECLARATION is not a binding: with no assignment anywhere the name "
+        "still denotes the import and the guard must stay exempt — counting the bare "
+        f"declaration grades a legitimate third-party probe: {_bare_global_control}"
+    )
+
+    # 4j-duodecies. A FORMAL PARAMETER inside the probe BLOCK is a binding only
+    #     `_rebinds_within` can see (`ast.arg` is not an `ast.Name`, and the module walk
+    #     skips a `lambda` body by construction), so `(lambda torch: torch.query(…))(...)`
+    #     ran `.query` on OUR client and stayed exempt (review of #14160, P2).
+    _lambda_param_in_block = textwrap.dedent(
+        """
+        import torch
+
+        TORCH_AVAILABLE = False
+        try:
+            TORCH_AVAILABLE = (lambda torch: bool(torch.query("SELECT 1")))(_make_client())
+        except Exception:
+            TORCH_AVAILABLE = False
+        """
+    )
+    _lambda_param_row = roots(_lambda_param_in_block)
+    assert len(_lambda_param_row) == 1 and _lambda_param_row[0][1:] == ((), True, False, True), (
+        "a lambda parameter named after the non-own import rebinds it inside the block "
+        "itself, so the `.query` runs on OUR client and must be graded: "
+        f"{_lambda_param_row}"
+    )
+
+    # 4j-terdecies. THE `_rebinds_within` TERM'S OWN WITNESS, and the reason it is not dead
+    #     (removing it was measured wrong — see `_third_party_receivers`). The shape is the
+    #     one ONLY that term catches: the enclosing chain is empty for a module-scope block
+    #     and `_module_scope_bindings` does not descend a nested `def`'s BODY, so with the
+    #     term gone the block reads exempt again over OUR client.
+    _rebind_inside_nested_def = textwrap.dedent(
+        """
+        import falkordb
+
+        FALKORDB_AVAILABLE = False
+        try:
+            def _run():
+                falkordb = _make_client()
+                return falkordb.g.query("RETURN 1")
+
+            FALKORDB_AVAILABLE = _run()
+        except Exception:
+            FALKORDB_AVAILABLE = False
+        """
+    )
+    _rebind_nested_row = roots(_rebind_inside_nested_def)
+    assert len(_rebind_nested_row) == 1 and _rebind_nested_row[0][1:] == (
+        (),
+        True,
+        False,
+        True,
+    ), (
+        "a re-binding inside a `def` nested in the probe BLOCK can reach the probe, and "
+        "`_rebinds_within` is the only term that sees it — dropping it leaves the block "
+        f"exempt over OUR client: {_rebind_nested_row}"
+    )
+    _nested_def_control = roots(
+        textwrap.dedent(
+            """
+            import falkordb
+
+            FALKORDB_AVAILABLE = False
+            try:
+                def _run(other):
+                    other = _make_client()
+                    return other
+
+                falkordb.g.query("RETURN 1")
+                FALKORDB_AVAILABLE = True
+            except Exception:
+                FALKORDB_AVAILABLE = False
+            """
+        )
+    )
+    assert _nested_def_control == (), (
+        "the CONTROL: the nested `def` rebinds a name that is NOT the import, so the "
+        "block stays exempt — without this the row above would also pass on code that "
+        f"had simply dropped the exemption: {_nested_def_control}"
     )
 
     # 4j-sexies. The OTHER direction: a LOCAL of the function that HOLDS the probe CAN
