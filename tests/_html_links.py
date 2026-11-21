@@ -2178,13 +2178,17 @@ class _AnchorHrefParser(HTMLParser):
             # COUNTED: over-counting can only redden the golden, while clearing would drop
             # copy a classic-mode browser paints.
             #
-            # ⛔ `html` IS **NOT** IN THAT CLASS and must never be skipped here: in BOTH models
-            # the `html` start tag is handled (living standard: ignore only when a `template`
-            # is open, else merge into the root; classic: "process using the rules for the
-            # in-body mode"), so its `hidden` always lands on the root and nothing is painted.
-            # Gating `html` on the select stack was measured to UN-hide the document:
-            # `<p>ONE<select><html hidden></select><p>TWO` came back `'ONE TWO'` and a
-            # pre-root `<h2>` came back as a boundary.
+            # ⛔ `html` IS **NOT** IN THAT CLASS, so the select skip is gated on `body` alone
+            # (#14073 review round 27, P2 — this paragraph said the opposite and the code three
+            # lines below it is what is right). The two tags differ in BOTH models: a `body` token
+            # is the browser-dependent one above, while an `html` token is HANDLED everywhere —
+            # ignored only when a `template` is open, and otherwise merged into the top element
+            # (see the next paragraph, which is the measurement that settled it) — and in the
+            # deleted classic in-select mode it was ignored outright. Neither reading hides the
+            # DOCUMENT from this token, so there is nothing for a select skip to decide here, and
+            # routing `html`'s `hidden` to `_root_renders` (the earlier mistake) is what DROPPED
+            # copy a browser paints: `<p>ONE<select><html hidden></select><p>TWO` is `'ONE TWO'`,
+            # which `test_the_document_roots_a_browser_ignores_insert_nothing` now requires.
             if tag == "body" and self._in_select():
                 return
             # ⛔ AND `html`'s ATTRIBUTES DO **NOT** MERGE INTO THE DOCUMENT ROOT (#14073 review
