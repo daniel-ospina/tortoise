@@ -56,6 +56,11 @@ output is in the PR body):
   as ``offset=1, limit=2`` of five and not as one whole-population page.
 * **Report the page as the population** — replace the ``total``/``hasMore`` envelope
   with ``len(results)`` → the same test RED (total 2 where the population is 5).
+* **Drop the ``WHERE`` from the ``count(n)``** — or delete the terminal-status
+  exclusion that puts the tombstone clause in it → the same test RED: a retracted
+  row (`q6`) the caller asked to exclude would be counted into `total`.
+* **Guess ``hasMore`` from ``len(page) == limit``** → the same test RED on EITHER
+  door, because both tail pages are exactly ``limit`` long and still close the walk.
 * **Stop the tag accessor's own default arm recording** — delete the
   ``if _record_reads:`` hook in ``_query_points_by_tag`` →
   ``test_the_tag_accessor_default_arm_records_the_caller_arm`` RED.
@@ -391,8 +396,20 @@ def hooked_sdk(ledger, monkeypatch):
     The three structural read paths are ordinary SDK methods over
     `proj.g.query(...).result_set`, so a stub projection is enough to prove the
     HOOK fires — which is the part that rots silently if a path is refactored.
+
+    ⚠️ THE STUB MODELS THREE THINGS, AND NAMES THE REST AS NOT ITS JOB:
+    `SKIP $skip`/`LIMIT $limit`, the `count(n)` population, and the
+    terminal-status exclusion (a clause the production code builds into BOTH the
+    count and the page query, so the envelope a paged read reports can disagree
+    with the page it serves if either drops it). The other WHERE predicates —
+    `pointKind`, property filters, the operator-scope clause — are pinned by the
+    tests named for them (`tests/test_7108_operator_scope_predicate.py`,
+    `tests/test_10602_query_limit_bound.py`), and this body passes no
+    `point_kind=`, so it neither exercises nor claims them. A stub cannot be a
+    query engine; the boundary is stated so it is not mistaken for coverage.
     """
     from tortoise import sdk as sdk_module
+    from tortoise.live import TERMINAL_EXCLUDED_STATUSES
 
     class _Res:
         def __init__(self, rows):
@@ -403,12 +420,22 @@ def hooked_sdk(ledger, monkeypatch):
 
         def query(self, cypher, params=None, **kwargs):
             params = params or {}
-            if "count(n)" in cypher:
-                # The POPULATION the stub holds — not a constant. A page that is
-                # also the population cannot witness "records the page, not the
-                # pool it was sliced from".
-                return _Res([[len(self.rows)]])
             rows = self.rows
+            # THE CLAIM QUERY'S `WHERE` IS PART OF THE QUESTION. Production builds
+            # it (kind filters + the terminal-status exclusion) and hands it to
+            # BOTH the `count(n)` and the page query, so the stub models the one
+            # clause this test can carry rows for. Without it, `count(n)` answers
+            # "however many rows the stub holds" and the population a paged read
+            # reports can never disagree with the page it serves — which is what
+            # `total`/`hasMore` exist to prevent.
+            if "n.status <> 'retracted'" in cypher:
+                rows = [
+                    r for r in rows
+                    if r.get("status", "live") not in TERMINAL_EXCLUDED_STATUSES
+                    and not r.get("outdated")
+                ]
+            if "count(n)" in cypher:
+                return _Res([[len(rows)]])
             if "SKIP $skip" in cypher:
                 skip = int(params.get("skip") or 0)
                 limit = params.get("limit")
@@ -455,10 +482,10 @@ def test_the_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
       (`served_out` given — the opt-in caller-facing read, `#12941`) is not
       driven here, so this test pins the internal arm only.
       (Its public spelling `get_point` is not on the class at all: it is in
-      `sdk_retired.REMOVED_SDK_METHODS` like the other four, but
-      `retirement_hint` does NOT answer for it — so the interpreter's "Did you
-      mean: '_get_point'" is the only guidance a caller gets, not the registry's
-      migration hint.)
+      `sdk_retired.REMOVED_SDK_METHODS`, a DIFFERENT registry from the
+      `RETIRED_SDK_METHODS` map the other three are in — which is exactly why
+      `retirement_hint` answers for them and returns `None` for this one, leaving
+      the caller only the interpreter's "Did you mean: '_get_point'".)
 
     The other hooked SDK paths in §17.4.6 are not exercised here, and neither are
     the two NON-SDK hooks (the session-start read, and the MCP tag tool's served
@@ -472,21 +499,29 @@ def test_the_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
     # The keys must exist as STOCK first, or every read is (correctly) reported
     # as `unregistered` and there is no row to count on.
     for key in (
-        "q1", "q2", "q3", "q4", "q5",
+        "q1", "q2", "q3", "q4", "q5", "q6",
         "p7", "p8", "p9", "p10", "p11", "p12", "p13",
     ):
         record_stock("Point", key, nbytes=100)
 
     # THE CLAIM LIST IS THE OTHER PAGED DOOR, so it is driven as a REAL PAGE over
     # a bigger population. `q1` is skipped by `offset`, `q4` is never in a page,
-    # and the SECOND call takes the tail page — where `hasMore` is False.
+    # and `q6` is RETRACTED — it is in the stub's table and must NOT be in the
+    # population (`total == 5`), because the terminal exclusion is part of the
+    # count's `WHERE`. Both tail pages are exactly `limit` long, so `hasMore`
+    # cannot be guessed from `len(page) == limit`.
     graph.rows = [
-        {"id": "q1"}, {"id": "q2"}, {"id": "q3"}, {"id": "q4"}, {"id": "q5"},
+        {"id": "q1", "pointKind": "claim"},
+        {"id": "q2", "pointKind": "claim"},
+        {"id": "q3", "pointKind": "claim"},
+        {"id": "q4", "pointKind": "claim"},
+        {"id": "q5", "pointKind": "claim"},
+        {"id": "q6", "pointKind": "claim", "status": "retracted"},
     ]
     mid = inst.list_knowledge("claim", offset=1, limit=2)
     assert [r["id"] for r in mid["results"]] == ["q2", "q3"]
     assert mid["total"] == 5 and mid["hasMore"] is True
-    tail = inst.list_knowledge("claim", offset=4, limit=2)
+    tail = inst.list_knowledge("claim", offset=4, limit=1)
     assert [r["id"] for r in tail["results"]] == ["q5"]
     assert tail["total"] == 5 and tail["hasMore"] is False
 
@@ -518,7 +553,7 @@ def test_the_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
     # dropped BEFORE the slice (sdk.py:30905-30907), so 5, not 6.
     assert served["total"] == 5
 
-    tail = inst.search_knowledge(mode="tag", tag="t", offset=4, limit=3)
+    tail = inst.search_knowledge(mode="tag", tag="t", offset=4, limit=1)
     assert tail["results"] == [{"id": "p13"}]
     assert tail["hasMore"] is False, "the tail page is SERVED, so it must be recorded"
 
@@ -535,7 +570,7 @@ def test_the_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
     # the tag row the first page skipped). `q5` and `p13` are 1 even though
     # their pages closed the walk (`hasMore == False`): the TAIL PAGE IS SERVED.
     assert counts == {
-        "q1": 0, "q2": 1, "q3": 1, "q4": 0, "q5": 1,
+        "q1": 0, "q2": 1, "q3": 1, "q4": 0, "q5": 1, "q6": 0,
         "p7": 0, "p8": 1, "p9": 1,
         "p10": 0, "p11": 0, "p12": 1, "p13": 1,
     }
