@@ -320,6 +320,26 @@ NOT_SELECTED = [
     "which archived report has the Q3 numbers",
     "what is the archived pricing document",
     "what did we learn from the cancelled launch",
+    # ── the CLAUSE-IN-THE-EXISTENCE-WINDOW class (#14033 round-8 review, P1) ─
+    # `existence`'s window is `[^?]{0,60}?`, which admits any clause, not only a
+    # relative one — so an ending participle in a SUBORDINATE clause routed and the
+    # caller's own predicate was dropped. Each of these was measured ROUTED (and, on
+    # the read, served the whole ended population). They now report instead.
+    "have any customers complained since the old plan has been cancelled",
+    "have any users complained because the feature has been deprecated",
+    "has anything changed since the old pricing has been deprecated",
+    "have any customers churned after the tier has been deprecated",
+    # ── the VERB-AND-OBJECT class on the attributive `which` row ─────────────
+    # `which cancelled the deal` puts a finite past-tense verb with its own object
+    # where a MODIFIER should be; the row now refuses a determiner after the
+    # participle, so these are neither routed nor reported.
+    "which cancelled the deal",
+    "which ended the argument",
+    "which retired the old process",
+    # …and a coordinated SUBJECT over the copula bound: reported (it is a plain long
+    # noun phrase), never routed.
+    "is the SOC2 audit and its evidence package archived",
+    "is the onboarding flow and its partner variants retired",
     # ── the ACTIVE-VOICE class on the perfect branch (#14033 round-7 review, P1)
     # `already` / `ever` in place of `been` is an ACTIVE third-party action, not a
     # state of the record: each of these routed to the whole ended population,
@@ -521,6 +541,16 @@ NOTICE_ONLY = [
     "which claims were retracted earlier",
     "list what we retired previously",
     "is the onboarding flow retired anymore",
+    # …and the `existence` clause class: the CUE is really there (`has … been
+    # <ended>`), only the clause guard refused it, so it is reported rather than
+    # silenced — the notice's hint is conditional on what the caller is asking, and
+    # their rows are unchanged either way.
+    "have any customers complained since the old plan has been cancelled",
+    "have any users complained because the feature has been deprecated",
+    "has anything changed since the old pricing has been deprecated",
+    "have any customers churned after the tier has been deprecated",
+    "is the SOC2 audit and its evidence package archived",
+    "is the onboarding flow and its partner variants retired",
 ]
 
 
@@ -740,8 +770,12 @@ def test_a_missed_cue_names_words_it_saw_whole():
             continue
         cue = missed_route_payload(got)["cue"]
         assert cue, query
-        assert query.startswith(cue), (query, cue)
-        rest = query[len(cue):]
+        # the detector lower-cases and collapses whitespace before it matches, so
+        # the cue is a prefix of the NORMALISED query (a `SOC2` in the caller's
+        # spelling arrives as `soc2`).
+        normalised = " ".join(query.lower().split())
+        assert normalised.startswith(cue), (query, cue)
+        rest = normalised[len(cue):]
         assert not rest or not (rest[0].isalnum() or rest[0] == "_"), (
             f"the cue {cue!r} for {query!r} is truncated MID-WORD ({rest[0]!r}) — a "
             f"diagnostic whose contract is 'cue names the words it saw' cannot "
@@ -781,7 +815,10 @@ def test_every_signal_is_its_shape_without_the_end_anchor():
     # constraint, a pre-existing deliberate trade), and `which_names_an_ending` is
     # the attributive row.
     assert set(signals) - set(tail_anchored) == {
-        "which_names_an_ending", "which_modified_noun", "is_copula_long_subject"}
+        "which_names_an_ending", "which_modified_noun", "is_copula_long_subject",
+        # the UNGUARDED `existence` expression: the same cue, matched without the
+        # clause guard, so a question the guard refused is reported, not silenced.
+        "existence_unguarded"}
 
     # The BEHAVIOUR the identity buys, driven through the detector: each shape's own
     # routed example, given a qualifier, declines and REPORTS — including the
@@ -863,7 +900,7 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
         "the routing block is back in `tortoise_search.__doc__`, which FastMCP does "
         "not serve when the registry supplies `description=` — one home only (#14033)")
     routes_head = "ROUTES — answered from the ended population"
-    declines_head = "DOES NOT ROUTE — an ordinary relevance search"
+    declines_head = "DOES NOT ROUTE — you get the relevance rows"
     boundary_head = "SO A STATE QUESTION THAT DOES NOT ROUTE"
     for head in (routes_head, declines_head, boundary_head):
         assert head in doc, (

@@ -353,10 +353,34 @@ _BLOCKED_TAIL = (
 #: population. The leak PREDATES this change; it is the same active-versus-passive
 #: discriminator as the `is_copula` perfect branch, so it is closed here rather than
 #: left as a known hole in the table this change is repairing.
-_EXISTENCE_PREFIX = (
-    rf"\b(?:has|have|had)\s+(?:any|anything|someone|something|everything|anyone)"
-    rf"\b[^?]{{0,60}}?\bbeen\s+(?:{_ENDING_WORDS})\b"
+#: ⛔ AND THE WINDOW IS GUARDED AGAINST A CLAUSE (round-8 review, P1). `[^?]{0,60}?`
+#: admits ANY clause between the quantifier and `been`, not only a relative one — so
+#: an ending participle belonging to a SUBORDINATE clause routed, which is the class
+#: round 6 rated P0 for `is_copula` and round 4 for `which_predicate`, left open in
+#: the one shape that never got the guard:
+#:
+#:   `have any customers complained since the old plan has been cancelled`
+#:   `have any users complained because the feature has been deprecated`
+#:   `has anything changed since the old pricing has been deprecated`
+#:
+#: Each was answered with the WHOLE ended population and the caller's own predicate
+#: (`complained`, `changed`) silently dropped. Two lookaheads close it: a SUBORDINATOR
+#: in the window, or a determiner + noun + FINITE VERB (a second clause's subject and
+#: predicate). The unguarded expression is kept as its own SIGNAL row below, so a
+#: question that fails only on this guard is still REPORTED rather than silenced.
+_EXISTENCE_HEAD = (
+    r"\b(?:has|have|had)\s+(?:any|anything|someone|something|everything|anyone)\b"
 )
+_EXISTENCE_GUARD = (
+    r"(?![^?]{0,60}?\b(?:because|since|when|while|after|before|now|if|unless|given|"
+    r"as|where|so|but|although|though|until)\b)"
+    r"(?![^?]{0,60}?\b(?:the|a|an|its|his|her|their|our|your|my|these|those|this|"
+    r"that)\s+[a-z0-9][a-z0-9'’._/-]*\s+"
+    r"(?:has|have|had|is|are|was|were|will|would|can|could|did|does|do|may|might|"
+    r"must|should)\b)"
+)
+_EXISTENCE_WINDOW = rf"[^?]{{0,60}}?\bbeen\s+(?:{_ENDING_WORDS})\b"
+_EXISTENCE_PREFIX = _EXISTENCE_HEAD + _EXISTENCE_GUARD + _EXISTENCE_WINDOW
 
 #: "what ended" / "what has been withdrawn" / "what was retracted" — the WHOLE
 #: question, anchored at the start and at the participle.
@@ -382,13 +406,13 @@ _WH_PREFIX = (
 _WHICH_PREFIX = (
     rf"^which\s+(?:of\s+)?"
     rf"(?:(?:our|the|all|your|their|its|my|these|those)\s+)?"
-    # the wh-phrase's HEAD noun. ⛔ IT MAY CARRY DIGITS, for the same measured reason
-    # the `is_copula` subject class had to: `[a-z]+` cannot spell `2024` or `v3`, so a
-    # head noun like that was unrepresentable. In practice such a word is a MODIFIER
-    # (`which 2024 reports were archived`, `which v3 features are deprecated`), which
-    # this shape still refuses — and `which_modified_noun` below reports — so the
-    # widening buys the one-word case and changes no measured string.
-    rf"[a-z0-9][a-z0-9'’._/-]*\s+"
+    # the wh-phrase's HEAD noun. ⛔ NO DIGIT WIDENING HERE: `[a-z0-9]…` was tried and
+    # removed (round-8 review, P2) because it buys no MEASURED string — a digit-bearing
+    # word before an auxiliary is a MODIFIER (`which 2024 reports were archived`,
+    # `which v3 features are deprecated`), which this shape still refuses and
+    # `which_modified_noun` below reports. A widening whose only justification is a
+    # comment is a rule nothing holds.
+    rf"[a-z][a-z'’._/-]*\s+"
     rf"(?:is|are|was|were|has|have|had)\s+"
     rf"(?:been\s+)?(?:{_ENDING_WORDS})\b"
 )
@@ -544,7 +568,11 @@ _COPULA_LONG_SUBJECT = re.compile(
     rf"^(?:is|are|was|were)\s+"
     rf"(?:(?:the|our|my|its|their|these|those|this|that|all|your)\s+)?"
     rf"(?!(?:[a-z0-9'’._/-]+\s+){{0,12}}"
-    rf"(?:because|that|given|since|when|while|if|unless|after|before|now|and|or|"
+    # ⛔ `and`/`or` are NOT in this list: they introduce no finite verb, and a
+    # coordinated SUBJECT (`is the SOC2 audit and its evidence package archived`) is a
+    # plain long noun phrase this row exists to report. A coordinated CLAUSE still
+    # carries its own verb, which the list below already refuses.
+    rf"(?:because|that|given|since|when|while|if|unless|after|before|now|"
     rf"which|who|whom|whose|where|is|are|was|were|has|have|had|do|does|did|will|"
     rf"would|can|could|may|might|must|should)\b)"
     rf"(?:[a-z0-9][a-z0-9'’._/-]*\s+){{5,}}"
@@ -564,10 +592,20 @@ _ENDING_SIGNALS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # `'which of our withdrawn c'` through `missed_route_payload`'s `cue`, whose
     # contract is "``cue`` names the words it saw". Every other signal ends on a
     # `\b`; this row is the one that did not.
+    # ⛔ A DETERMINER AFTER THE PARTICIPLE MEANS A VERB, NOT A MODIFIER (#14033
+    # round-8 review, P2). `which cancelled the deal` / `which ended the argument` /
+    # `which retired the old process` put a finite past-tense verb with its own
+    # OBJECT where a modifier should be, and each carried the notice. A modifier is
+    # followed by the NOUN it modifies, never by a determiner.
     ("which_names_an_ending", re.compile(
         rf"^which\s+(?:of\s+)?"
         rf"(?:(?:our|the|all|your|their|its|my|these|those)\s+)?"
-        rf"(?:{_ENDING_WORDS})(?=\s+[a-z])")),
+        rf"(?:{_ENDING_WORDS})"
+        rf"(?=\s+(?!(?:the|a|an|this|that|these|those|its|their|our|my|your|his|her|"
+        rf"any|some|every|no)\b)[a-z])")),
+    # …and the unguarded `existence` expression: a state question that fails ONLY on
+    # the clause guard above is reported, never silenced (silence is the defect).
+    ("existence_unguarded", re.compile(_EXISTENCE_HEAD + _EXISTENCE_WINDOW)),
     ("which_modified_noun", _WHICH_MODIFIED_NOUN),
     ("is_copula_long_subject", _COPULA_LONG_SUBJECT),
 )
@@ -615,7 +653,7 @@ wording. Of the phrasings this read is asked about:
     `is the onboarding flow retired?`            (yes/no, subject = the record)
     `list what we retired`                       (imperative over `what we …`,
                                                   i.e. a request for a SET)
-  DOES NOT ROUTE — an ordinary relevance search, byte for byte:
+  DOES NOT ROUTE — you get the relevance rows, and ONLY the rows change:
     `which of our withdrawn claims affected pricing`
                                                  (the ending word MODIFIES
                                                   `claims`; the question's own
@@ -631,8 +669,9 @@ ended read — the SHAPE is the only way in, so the way to be explicit is to ask
 a form from the ROUTES list above. ⛔ THIS TOOL CANNOT REPORT the cue it saw
 and could not apply — its reply is the row list and it takes no sink — so an
 MCP caller who needs that report must use the hosted `GET /v1/search` route,
-whose response body carries `state_question` (`{routed: false, cue, reason,
-hint}`), which is the only CUSTOMER-facing channel: no PUBLIC SDK method
+whose response body carries `state_question` (`{routed: false, population,
+reason, cue, hint}`), which is the only CUSTOMER-facing channel: no PUBLIC SDK
+method
 exposes it either — the same payload rides the PRIVATE
 `TortoiseSDK._tortoise_fts_query(..., read_status_out=...)` sink (under
 `read_status_out["state_question"]`), so an integration that calls the SDK

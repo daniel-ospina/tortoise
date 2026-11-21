@@ -240,7 +240,7 @@
 # it down here, not "fix" a row by cutting.
 manifest_version: 1
 issue: 3863
-cut_at_commit: e0accb8fe6362942a0c847c7daa1829e272296a9
+cut_at_commit: a8550d11abecc822f359f19af8bb37cac53b9f6e
 allowed_transforms:
 - _HTTPToolFilter
 - _RetiredToolTransform
@@ -397,6 +397,23 @@ response_fields:
     of this row'
   unchanged_when_off: n/a — always emitted; the flag is never consulted, so it cannot be off. `results` and `count`
     keep their exact prior values and the parameter set is unchanged
+- response: tortoise_search
+  field: state_question
+  emitted_when: 'the hosted GET /v1/search body, ONLY when a STATE question was recognised and NOT routed — the
+    relevance read kept its rows, and this key says so: `{routed: false, population, reason, cue, hint}`. `reason`
+    is `shape` (the question carries a qualifier or an attributive ending word the ended population cannot apply)
+    or `family` (a shape fired on a family with no lifecycle, e.g. an Event — design §8). `cue` names the words
+    the recogniser saw, `population` names what was NOT served, and `hint` is `tortoise/state_intent.py::MISSED_ROUTE_HINT`
+    (or `MISSED_ROUTE_FAMILY_HINT` for the family arm) — the ONE home, so the served text and the read path cannot
+    describe the boundary differently (#14033). It answers "did the router decline my state question?", so an empty
+    or unrelated reply stops being indistinguishable from "nothing has ended". NOT flag-gated and always computed:
+    an absent key is the positive claim that no ending cue was recognised, which is exactly the claim a caller must
+    be able to rely on. The MCP tool `tortoise_search` returns a bare list and takes no sink, so it does not carry
+    the field, and no PUBLIC SDK method exposes the sink either — the same payload rides the PRIVATE `TortoiseSDK._tortoise_fts_query(...,
+    read_status_out=...)` sink under `read_status_out["state_question"]`. Wrapping either surface is a declared
+    return-type change and therefore an MCP Surface Approval decision, not a consequence of this row'
+  unchanged_when_off: n/a — always computed; a query in which no ending cue is recognised produces no key, so `results`,
+    `count`, `truncated` and `status` keep their exact prior values
 - response: tortoise_search
   field: total_available
   emitted_when: 'the hosted GET /v1/search body, ONLY when `truncated` is true AND the count is EXACT — i.e. no
@@ -1558,19 +1575,19 @@ rows:
     (has/have + quantifier + been) `what ended` (the whole question is the ending) `what has ended recently` (a
     RECENCY adverb only: it names no window the read must apply, and every row carries `endedAt`) `is the onboarding
     flow retired?` (yes/no, subject = the record) `list what we retired` (imperative over `what we …`, i.e. a request
-    for a SET) DOES NOT ROUTE — an ordinary relevance search, byte for byte: `which of our withdrawn claims affected
-    pricing` (the ending word MODIFIES `claims`; the question''s own predicate is `affected pricing`, which the
-    population cannot answer) ⛔ SO A STATE QUESTION THAT DOES NOT ROUTE BEHAVES EXACTLY LIKE A NORMAL SEARCH. There
-    is no second attempt and no fallback: you get the rows the words match, which may be empty or unrelated, and
-    an EMPTY answer here is NOT evidence that nothing has ended. This tool takes NO argument that forces the ended
-    read — the SHAPE is the only way in, so the way to be explicit is to ask a form from the ROUTES list above.
+    for a SET) DOES NOT ROUTE — you get the relevance rows, and ONLY the rows change: `which of our withdrawn claims
+    affected pricing` (the ending word MODIFIES `claims`; the question''s own predicate is `affected pricing`, which
+    the population cannot answer) ⛔ SO A STATE QUESTION THAT DOES NOT ROUTE BEHAVES EXACTLY LIKE A NORMAL SEARCH.
+    There is no second attempt and no fallback: you get the rows the words match, which may be empty or unrelated,
+    and an EMPTY answer here is NOT evidence that nothing has ended. This tool takes NO argument that forces the
+    ended read — the SHAPE is the only way in, so the way to be explicit is to ask a form from the ROUTES list above.
     ⛔ THIS TOOL CANNOT REPORT the cue it saw and could not apply — its reply is the row list and it takes no sink
     — so an MCP caller who needs that report must use the hosted `GET /v1/search` route, whose response body carries
-    `state_question` (`{routed: false, cue, reason, hint}`), which is the only CUSTOMER-facing channel: no PUBLIC
-    SDK method exposes it either — the same payload rides the PRIVATE `TortoiseSDK._tortoise_fts_query(..., read_status_out=...)`
-    sink (under `read_status_out["state_question"]`), so an integration that calls the SDK directly must name that
-    private method deliberately. The difference it makes there is that "the route declined my state question" stops
-    looking like "the graph says nothing has ended".'
+    `state_question` (`{routed: false, population, reason, cue, hint}`), which is the only CUSTOMER-facing channel:
+    no PUBLIC SDK method exposes it either — the same payload rides the PRIVATE `TortoiseSDK._tortoise_fts_query(...,
+    read_status_out=...)` sink (under `read_status_out["state_question"]`), so an integration that calls the SDK
+    directly must name that private method deliberately. The difference it makes there is that "the route declined
+    my state question" stops looking like "the graph says nothing has ended".'
   dependency: declares TortoiseSDK._tortoise_fts_query (resolves)
   lifecycle: active
   used_by: never called, eval-harness, tooling, docs
