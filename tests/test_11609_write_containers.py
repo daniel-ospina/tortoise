@@ -867,7 +867,12 @@ def _seed_door_behaviour_problems(cls: type, name: str = "create_subject",
          exists to "make assertions about which methods/attributes were used and
          ARGUMENTS they were called with", and its canonical entrance is
          `assert_called_once_with(...)` — count and arguments in one assertion;
-      4. it RETURNS what `<delegated>` returned, by identity — a door that throws the
+      4. it passes NO property the caller did not supply — the same requirement one
+         dimension over, and the one that guards #9572's clobber. The probe supplies no
+         properties, so a door that INVENTS one (`subjectKind="team"`) makes a write the
+         seed never asked for, and `#9572`'s name-MERGE then overwrites a stored kind.
+         `test_the_pin_forwards_NO_property_the_caller_did_not_supply` is its arm;
+      5. it RETURNS what `<delegated>` returned, by identity — a door that throws the
          subject away gives its caller nothing.
 
     Reachability, ordering and dead branches are settled by CPython, not modelled here.
@@ -893,6 +898,13 @@ def _seed_door_behaviour_problems(cls: type, name: str = "create_subject",
                 "caller did not ask for (hard-coded, templated, re-derived), so the "
                 "door is not the passthrough the exemption claims and the seed would "
                 "write the wrong subject"]
+    forwarded_props = [call[1] for call in recorder.calls]
+    if forwarded_props != [{}]:
+        return [f"the runtime `{name}` passed {forwarded_props!r} as properties to "
+                f"`{delegated}` for a call that supplied NONE — the door INVENTED a "
+                "property its caller did not ask for. A fabricated `subjectKind` here "
+                "is #9572's discriminator clobber arriving through the surface instead "
+                "of through the SDK, so the seed would write more than it asked for"]
     if returned is not _DOOR_PROBE_SENTINEL:
         return [f"the runtime `{name}` did not RETURN what `{delegated}` returned "
                 f"(got {returned!r}) — the door's caller does not receive the "
@@ -1220,6 +1232,81 @@ def test_the_pin_forwards_the_CALLER_NAME_to_the_delegated_call():
             "refusal can stop it. A GREEN here means the pin measures the call count "
             "and calls that a passthrough (MEASURED at e0da30d3a5: `[]` on both arms)",
             problems)
+
+
+#: Door bodies whose ONLY fault is the PROPERTIES they forward: each does not raise,
+#: makes EXACTLY ONE `_create_subject` call, forwards the caller's own name, and RETURNS
+#: the recorded sentinel — so the RAISED, EXACTLY-ONE, NAME and identity refusals all pass
+#: them and only the PROPERTIES check can refuse them. MEASURED at `312fa68703` (the head
+#: that added the name check and left this one recorded as out of scope): `_door_problems`
+#: answered `[]` for both shapes.
+#:
+#: ⛔ Why the sibling real-surface pin does NOT cover these: `#9572`'s
+#: `test_org_seed_surface_does_not_fabricate_a_kind` calls the surface twice — once WITH
+#: `"team"` and once WITHOUT — and asserts the stored kind is still `"team"`. A door that
+#: always forwards `subjectKind="team"` makes the SECOND call agree with the first, so it
+#: passes that pin while writing a property on the caller's `create_subject("Acme")` that
+#: the caller never supplied. It catches a DEFAULT kind (`"other"`), not a FABRICATED one.
+#: This pin is property-level and needs no graph, so it closes the case the real-surface
+#: pin structurally cannot.
+_FABRICATED_PROPS = {
+    # A door that labels every seeded subject, whatever the caller asked for. On a name
+    # that already exists, `#9572`'s name-MERGE writes this kind over the stored one.
+    "kind-fabricated": (
+        '        return self._sdk._create_subject(name, subjectKind="team")\n'),
+    # The default-fabricating twin: the exact shape #9572 fixed on the SDK doors, here
+    # arriving through the surface instead of the SDK.
+    "kind-defaulted": (
+        '        return self._sdk._create_subject(name, subjectKind="other")\n'),
+}
+
+
+def test_the_pin_forwards_NO_property_the_caller_did_not_supply():
+    """The pin's fourth requirement has its own arms — the clobber, one layer out.
+
+    `_RecordingDoorSdk` records `(name, props)`; the name half is pinned by the sibling
+    test above and the PROPERTIES half was left recorded as out of scope. A door that
+    invents a property its caller did not supply is not a passthrough: the seed's
+    `surface.create_subject("Acme")` would write a `subjectKind` nobody asked for, and
+    on an existing name `#9572`'s name-MERGE overwrites the stored discriminator — the
+    customer-visible clobber that fix exists to stop, reached one layer further out.
+
+    Both arms prove the fixture cannot be refused by any adjacent branch (no raise, one
+    call, the caller's own name, the recorded sentinel) before asserting that the pin
+    refuses it, and the assertion names the branch's own `INVENTED a property` fragment
+    so the red is attributable. The table is guarded by name for the reason the sibling
+    arm sets are: every arm comes from it, so an emptied one would decide no verdict.
+    """
+    assert _FABRICATED_PROPS, (
+        "no fixtures — every arm of this test comes from the table, so an empty one "
+        "would decide no verdict at all (vacuity is a red, not an empty loop)")
+    for label, body in sorted(_FABRICATED_PROPS.items()):
+        fixture = _exec_door_class(body)
+
+        recorder = _RecordingDoorSdk()
+        surface = object.__new__(fixture)
+        surface._sdk = recorder
+        returned = fixture.__dict__["create_subject"](surface, _DOOR_PROBE_SUBJECT)
+        assert returned is _DOOR_PROBE_SENTINEL, (
+            f"the `{label}` fixture must RETURN the sentinel, or the identity refusal "
+            "would be what fires and this arm would pin nothing")
+        assert len(recorder.calls) == 1, (
+            f"the `{label}` fixture must make exactly 1 `_create_subject` call, or the "
+            "count refusal would be what fires and this arm would pin nothing")
+        assert recorder.calls[0][0] == _DOOR_PROBE_SUBJECT, (
+            f"the `{label}` fixture must forward the CALLER'S OWN name, or the name "
+            "branch would be what fires and this arm would pin nothing")
+        assert recorder.calls[0][1], (
+            f"the `{label}` fixture must pass at least one property, or there is "
+            "nothing for this branch to refuse")
+
+        problems = _door_problems(fixture)
+        assert problems and "INVENTED a property" in problems[0], (
+            f"the `{label}` door delegates once, under the caller's own name, and "
+            "returns the right object, while INVENTING a property the caller never "
+            "supplied, so only the properties refusal can stop it. A GREEN here means "
+            "the pin accepts a write the seed never asked for (MEASURED at "
+            "312fa68703: `[]` on both arms)", problems)
 
 
 #: A delegating `def create_subject` in the class body, followed by a class-body form
