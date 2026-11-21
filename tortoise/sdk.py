@@ -5706,24 +5706,13 @@ _SERVER_MANAGED_EMBEDDING_MARKERS = frozenset({
 #: drop the reserved names before splatting, and `create_source` — the one door
 #: that bypasses intake — drops them itself. With every relay covered, the
 #: collision is impossible and live == replay.
-#: ``record_sink`` (#10000) is the second PER-CALL object the signature owns:
-#: the capture writer hands in a list and `_emit_event` appends the record
-#: write's OUTCOME to it, so the caller can decide a store from what the write
-#: actually did. A caller prop of that name splatted into the call would bind
-#: the parameter and silently suppress the outcome (the capture would then treat
-#: every turn as unrecorded and fall back to the graph — the safe direction, but
-#: a silent one), so it is reserved like the rest.
-#: ``write_sink`` (#14002) is the THIRD, and the same shape: the chokepoint hands
-#: in a list and `_emit_event` appends the write it actually performed, so a
-#: caller can tell a skip from a write. A caller prop of that name would bind the
-#: parameter and receive the SKIP fact the caller was meant to READ — the
-#: observation list would be the caller's own bag, and the caller would then
-#: mistake its own prop for the chokepoint's answer. Reserved like the rest.
-#: ⛔ The names above this line are prose, and prose is not a gate: the set is
-#: DERIVED against ``inspect.signature(TortoiseSDK._emit_event)`` by
-#: ``tests/test_2296_document_created_journal.py``, which is what caught
-#: `write_sink` — the parameter landed with #14002 and this set was not moved
-#: with it, so a caller prop of that name bound it silently.
+#: ``record_sink`` (#10000) and ``write_sink`` (#14002) are the PER-CALL objects
+#: the signature owns: the writer hands in a list and `_emit_event` appends the
+#: write's OUTCOME (or its SKIP fact) to it, so the caller decides a store from
+#: what the write did. A caller prop of either name splatted into the call binds
+#: the parameter and suppresses the outcome, so both are reserved — and prose is
+#: not the gate: the set is DERIVED against `inspect.signature(_emit_event)` by
+#: `tests/test_2296_document_created_journal.py`, which caught `write_sink`.
 _RESERVED_EMIT_CALL_PROPS = ("type_", "new_content", "self", "aboutLinks",
                             "record_sink", "write_sink")
 
