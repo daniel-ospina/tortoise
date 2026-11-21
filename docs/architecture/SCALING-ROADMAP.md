@@ -8,14 +8,22 @@ infrastructure that can handle load. We can have things ready for scaling withou
 3 returned. Sources are vendor papers, engineering blogs and architecture references; they are **third-party claims, not
 reproduced here**.
 
+⚠️ **Provenance, stated per claim, because it is uneven.** Only the Mem0 claims carry a durable link
+(`docs.mem0.ai/core-concepts/memory-evaluation`, cited where used). The Zep, Hindsight, Supermemory and turbopuffer figures in §1
+and §2.5 are summaries of their papers/blogs with **no URL recorded here** — they are re-checkable only by re-sourcing them, and
+one of them already came back wrong when checked (the Mem0 cells at §1, §2.5, §3 and the §2.5 convergence count were corrected
+on that check). Re-source a figure before quoting it outside this document.
+
 ---
 
 ## 1. What the comparables actually do
 
 ### Mem0 — separate the write plane from the read plane
 
-- **Topology:** a SQL **source of truth**, a **vector store** for embeddings, an **entity store** for relationship-aware
-  retrieval. *That is our shape* — Postgres record + graph + vectors.
+- **Topology:** a **vector store** holding the memory text, embeddings and metadata as *"primary fact storage"*, a **graph/entity
+  store** for relationship-aware retrieval, and a **SQL** database holding an ADD-event history log plus a rolling message window.
+  *That is nearly our shape* — Postgres record + graph + vectors, except that **their system of record is the vector store and the
+  SQL side is the audit trail**, not the other way round.
 - **Writes are asynchronous**: an add returns in **< 50 ms** and the real work (fact distillation, deduplication, embedding,
   entity linking, temporal reasoning) happens on a queue. Workers autoscale on **queue depth**, and tenant ordering is kept by
   **partitioning**.
@@ -58,7 +66,7 @@ purpose-built index, or an external API.
 
 | property | ours today | the comparable's posture |
 |---|---|---|
-| system of record | **Postgres record** (§2.0 owner ruling) | Mem0: SQL source of truth ✅ same |
+| system of record | **Postgres record** (`STORAGE-ARCHITECTURE.md` §2.0 owner ruling) | Mem0: vector store primary; SQL = ADD history log — ⚠️ **not the same** |
 | derived search layer | **graph cache + pgvector** | Zep: Konig with hot-graph cache ✅ same shape |
 | hybrid retrieval | **semantic + keyword + graph** | Zep/Mem0: same three legs ✅ same |
 | **write path** | synchronous through the API | **queued, acked < 50 ms**, workers autoscaled ✗ ours is inline |
@@ -82,7 +90,7 @@ Two structural gaps, everything else is already aligned or landed:
 
 ### Hindsight (Vectorize) — the closest match to us, and the most useful
 
-- **Storage:** **PostgreSQL + pgvector**. Not a bespoke vector engine — the same stack we chose in §12.1c.
+- **Storage:** **PostgreSQL + pgvector**. Not a bespoke vector engine — the same stack we chose in `STORAGE-ARCHITECTURE.md` §12.1c.
 - **Retrieval:** *"Recall combines **vector, keyword, graph, and temporal** search **in parallel**"* — we run three of those
   four legs, but **sequentially**.
 - **The sentence that should reorganise our roadmap:** *"The design shifts **LLM cost to writes** … Embeddings, fact
@@ -101,7 +109,8 @@ Two structural gaps, everything else is already aligned or landed:
 
 ### Mem0 — the write plane as a product
 
-- SQL source of truth + vector store + entity store. Adds ack in **< 50 ms**; extraction/embedding/dedup/entity-linking run on a
+- Vector store as **primary fact storage** + graph/entity store, with SQL as an ADD-event history log. Adds ack in **< 50 ms**;
+  extraction/embedding/dedup/entity-linking run on a
   **queue**, workers autoscaled on **queue depth**, tenant ordering by **partitioning**. Search **100–150 ms**
   (p50 0.148 s, p95 0.200 s).
 
@@ -136,12 +145,13 @@ making our API tier **stateless** — their servers hold no state, ours hold a v
 
 The four moves, and how many of the five actually exhibit each:
 
-1. **Durable, cheap source of truth** (Postgres / object storage) — **3 of 5** (Mem0, Hindsight, turbopuffer) — we have it.
+1. **Durable, cheap source of truth** (Postgres / object storage) — **2 of 5** (Hindsight, turbopuffer); Mem0's primary fact storage is its vector store, with SQL an ADD history log, so counting it here would be our inference rather than its documentation — we have it.
 2. **A derived, hot, disposable layer** in front — **5 of 5** — we have the shape, and the eviction executor.
 3. **Expensive work at write time, behind a queue** — **4 of 5** (Mem0, Zep, Hindsight, Supermemory) — we do not.
-4. **Parallel retrieval legs with bounded traversal** — **1 of 5** (Hindsight alone) — we do not (we chain them).
+4. **Parallel retrieval legs with bounded traversal** — **2 of 5** (Hindsight's four legs; Mem0's four signals, scored in parallel
+   and rank-fused — no bounded graph traversal) — we do not (we chain them).
 
-So: move 2 is universal, move 3 is near-universal, move 1 is a majority, and **move 4 rests on a single competitor's published design** — worth adopting, and worth labelling as one source rather than a convergence. Item 3 is Phase A work (`A1`); item 4 is `#14192`, tracked as PLAN `F1`. Both cost only code.
+So: move 2 is universal, move 3 is near-universal, move 1 is **half** and depends on how generously "cheap store" is read, and **move 4 rests on two comparables' published designs** (Hindsight's four parallel legs, Mem0's multi-signal scorer) — worth adopting, and still the thinnest of the four moves rather than a convergence. Item 3 is Phase A work (`A1`); item 4 is `#14192`, tracked as PLAN `F1`. Both cost only code.
 
 ## 3. The roadmap — phase A is free
 
@@ -158,8 +168,8 @@ So: move 2 is universal, move 3 is near-universal, move 1 is a majority, and **m
 ### Phase B — small spend, when A is measured
 
 - **B1. Dedicated CPU** on the API box (removes burst throttling; the 0.24 s ↔ 2.07 s spread on identical work is the signal).
-- **B2. A second API instance** for survivability (a restart or a wedged process stops being an outage) — **after** `#13123`'s
-  snapshot invalidation and with the deploy queue fixed, or it will be an availability *risk* as it was on 2026-11-20.
+- **B2. A second API instance** for survivability (a restart or a wedged process stops being an outage) — **after** `#14067`
+  (snapshot invalidation, **merged**; it closes `#13123`) and with the deploy queue fixed, or it will be an availability *risk* as it was on 2026-11-20.
 
 ### Phase C — when load justifies it
 
@@ -184,16 +194,20 @@ So: move 2 is universal, move 3 is near-universal, move 1 is a majority, and **m
 batchable work into queues and workers, and we still do it inside the request.** Phase A is entirely free, and it is the
 difference between "a machine that answers in 6 s" and "a machine that answers in 300 ms and catches up in the background".
 
-**Contradiction test:** no recorded decision is reversed. §2.0 (record is truth, graph is derived) *requires* A1 — the fold is
+**Contradiction test:** no recorded decision is reversed. `STORAGE-ARCHITECTURE.md` §2.0 (record is truth, graph is derived) *requires* A1 — the fold is
 already the mechanism. `#11758` (per-account storage) and `#4495`/`#5331` (no node pricing) are untouched. A2 does not pick a
 vendor; it makes the choice reversible.
 
 ---
 
-## 6. Reconciliation with `HANDOFF-2026-11-21-tortoise-hosted.md`
+## 6. Reconciliation with the 2026-11-21 hosted handoff
 
-The handoff is from another agent's session. Each claim below was re-measured before being adopted — several were true when
-written and are not true now, which is exactly what its own §5.4 warns about.
+⛔ **The handoff is an external session document — it is NOT in this repo** (no `HANDOFF-2026-11-21*` file exists on any ref; the
+tracked handoffs under `docs/` are from August). Its claims are therefore **restated in full in the table below**, so this section
+stands alone and nothing here is checkable only against a file a reader cannot open.
+
+Each claim was re-measured before being adopted — several were true when written and are not true now, which is exactly what the
+handoff's own §5.4 warns about.
 
 | handoff claim | verdict | evidence (2026-11-21) |
 |---|---|---|
