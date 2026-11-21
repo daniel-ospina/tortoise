@@ -1520,6 +1520,40 @@ def test_a_package_is_archivable_by_its_dotted_path(tree: Path) -> None:
     )
 
 
+def test_archiving_a_module_must_not_freeze_a_LEFTOVER_scaffold(tree: Path) -> None:
+    """The package fallback must not record a SCAFFOLD as the module's source of record.
+
+    Fresh-context review of PR #14039 (P2). The fallback above resolves `<dotted>/__init__.py`
+    whatever it holds, so `archive module <dotted>` on a DELETED body whose package was left as a
+    bare docstring froze that docstring — and `shrink_violations` credits the removal on the
+    row's EXISTENCE, so `check --base-ref` then reported "archive consistent", `verify-anchors`
+    said OK, and the removed code was in NO file under `archive/`. Measured on the pre-fix bytes
+    (scratch repo, `tortoise/x.py` = `def f39`): the CLI printed "archived module tortoise.x" /
+    "now delete it from tortoise/x/__init__.py", the frozen file held only the docstring, and
+    `f39` was in no archived file. A record that names code it does not hold is the one thing
+    `archive/` exists to make impossible.
+
+    Mutation: delete `if package_fallback and not _init_carries_a_body(source)` from
+    `_module_source` -> RED here (the writer succeeds and writes the scaffold). The positive
+    control is `test_a_package_is_archivable_by_its_dotted_path` above, whose `__init__.py`
+    carries statements and must STAY archivable.
+    """
+    (tree / "tortoise" / "x.py").write_text("def f39():\n    return 39\n", encoding="utf-8")
+    _commit(tree, "tortoise/x.py")
+    subprocess.run(["git", "rm", "-q", "tortoise/x.py"], cwd=tree, check=True)
+    (tree / "tortoise" / "x").mkdir()
+    (tree / "tortoise" / "x" / "__init__.py").write_text('"""Scaffolding."""\n', encoding="utf-8")
+    (tree / "tortoise" / "x" / "sub.py").write_text("Y = 1\n", encoding="utf-8")
+    _commit(tree, ".")
+
+    with pytest.raises(arch.ArchiveRefused, match="SCAFFOLDING"):
+        arch.archive_symbol(arch.MODULE, "tortoise.x", "batch-a", "r", root=tree)
+    assert not list((tree / "archive").rglob("*.py")), (
+        "the refusal must not leave a record behind: a row frozen from a scaffold is the false "
+        "record this guard exists to prevent"
+    )
+
+
 def test_an_archive_entry_dropped_from_the_manifest_is_reported(tree: Path) -> None:
     """#12291: the index of what was removed loses a row, and every gate stays green."""
     _archive_module(tree, "tortoise.gone")

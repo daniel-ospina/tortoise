@@ -2004,6 +2004,7 @@ def _module_source(root: Path, symbol: str) -> list[tuple[str, str, str | None]]
     """
     rel = symbol.replace(".", "/") + ".py"
     path = root / rel
+    package_fallback = False
     if not path.exists():
         # ⛔ A PACKAGE is archived by its DOTTED path and its source is `<dotted>/__init__.py`.
         # Without this fallback the rule arm 1 grades was UNRUNNABLE for the very shape it was
@@ -2017,6 +2018,7 @@ def _module_source(root: Path, symbol: str) -> list[tuple[str, str, str | None]]
         package_rel = symbol.replace(".", "/") + "/__init__.py"
         if (root / package_rel).exists():
             rel, path = package_rel, root / package_rel
+            package_fallback = True
         else:
             # …and a `.pyi`-only module is graded by every other arm (`_package_modules` reads
             # `*.py*`, `module_name` strips `.pyi`, arm 1b's stub rule), so the remedy must be
@@ -2035,6 +2037,33 @@ def _module_source(root: Path, symbol: str) -> list[tuple[str, str, str | None]]
         ast.parse(source, filename=str(path))
     except (OSError, SyntaxError) as exc:
         raise ArchiveRefused(f"could not read {rel}: {exc}") from exc
+    # ⛔ A LEFTOVER SCAFFOLD IS NOT THE MODULE (fresh-context review of PR #14039, P2).
+    # The package fallback above exists so arm 1's printed remedy RUNS for the shape arm 1
+    # grades — but it resolves `<dotted>/__init__.py` whether or not that file still carries the
+    # module's code. Deleting `tortoise/x.py` (the body) and leaving `tortoise/x/__init__.py` as a
+    # docstring made this writer freeze `"""Scaffolding."""` as the SOURCE OF RECORD for the
+    # whole module, and `shrink_violations` then credits the removal on the row's EXISTENCE
+    # (`if key in working: continue`): every arm green, the removed body in NO file under
+    # `archive/` — the exact loss `archive/` exists to prevent, reading as a record. Measured on
+    # the pre-fix bytes: the CLI said "archived module tortoise.x", `check --base-ref` said
+    # "archive consistent", `verify-anchors` said OK, and the removed `f39` was in no archived
+    # file.
+    #
+    # The legitimate package shape is unaffected (the `tortoise/__init__.py` this fallback was
+    # built for carries 406 statements), and so is the `.pyi` fallback above/below (a stub-only
+    # module's only code IS the stub). The route this refusal names is the one
+    # `archive/README.md` already gives: restore the source from the base, archive it, then
+    # delete it again in the same batch.
+    if package_fallback and not _init_carries_a_body(source):
+        plain = symbol.replace(".", "/") + ".py"
+        raise ArchiveRefused(
+            f"module {symbol} has no file at {plain}, and the only file left at {rel} is "
+            "SCAFFOLDING — no statements of its own. Freezing it would record a docstring as the "
+            "source of record for code that is gone, and `check --base-ref` would then read the "
+            "removal as recorded. Restore the deleted source from the base first "
+            f"(`git checkout <base-sha> -- {plain}`), archive it, and delete it again in the "
+            "same batch."
+        )
     return [(rel, source, None)]
 
 
