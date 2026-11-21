@@ -31,7 +31,7 @@ Each has the evidence, a confidence, and **what would disprove it**.
 |---|---|---|---|
 | **D1** | **Batchable work runs inline on the read path.** Every search embeds the query inside the request: `embed_encode` **2,078–4,003 ms** for one query. Batched: **0.36 s/item** (32 in 11.6 s vs 8 sequential in 15.2 s). | stage attribution, production | HIGH |
 | **D2** | **Legs run sequentially, so latency is the sum.** `pre_handler 5,996 · embed_encode 4,003 · retrieval 1,199 · fusion 0.2 · ep 156`. Hindsight: *"latency is determined by the slowest parallel branch rather than the sum"*. | stage attribution vs competitor design | HIGH |
-| **D3** | **Live session-capture traffic competes with reads.** 9-second log window: **6 × `POST /v1/sessions`, all 429** (≈36/min). The writer is the **pi capture extension inside agent sessions** — this session's own verifier run printed `[tortoise-capture] spool flush … paused 218 (budget; continues in the background)`. So the traffic is ours, continuous, and rate-limited rather than stopped. | production logs + the capture extension's own output | HIGH |
+| **D3** | **Live session-capture traffic competes with reads.** 9-second log window: **6 × `POST /v1/sessions`, all 429** (≈40/min). The writer is the **pi capture extension inside agent sessions** — this session's own verifier run printed `[tortoise-capture] spool flush … paused 218 (budget; continues in the background)`. So the traffic is ours, continuous, and rate-limited rather than stopped. | production logs + the capture extension's own output | HIGH |
 | **D4** | **One worker, one process.** Single uvicorn worker; `TORTOISE_MULTI_WORKER=1` is gated by `worker_topology.py::UNLANDED_GUARDS`, which holds **nine rows, one per holder** — the file's own docstring warns that collapsing them is how a single row gets read as "covered". The three most quoted are duplicate daemons filing issues N times, in-memory OAuth CSRF 404s at N≥2, and per-process index jobs; the rest include **rate-limit buckets × N** and the **model pre-warm at ~N× RSS on a 4096 MB box** — the ledger's row says ~85 s, while the tree's own measurement is a **≈196 s COLD load** (`embeddings.py:885-910`: 156.5 s of imports + 39.3 s construct) — both of which change the real cost of enabling workers. | `worker_topology.py::UNLANDED_GUARDS` | HIGH |
 | **D5** | **Storage pressure converts slow into refused.** Graph hit **82 % of 1 GB**; org allowance **cap 102 MB / hard stop 153 MB** refused writes; a 142 MB retirement restored them. The bounded projection is designed (`#13989`) but **not armed** (`#13103`). | measured today | HIGH |
 | **D6** | **Operational fragility mimics product failure.** Deploy **queued 8 min** behind runners while the site 503'd; a manual size change that did not survive a deploy (fixed by `#14156`); an alert step reporting `issue search failed — the finding may be UNRECORDED`. | observed today | MED |
@@ -76,7 +76,7 @@ Four of the five have moved their expensive write work behind a queue; we alread
 
 ### Track F — make it work reliably *(cheap, immediate; F = fix)*
 
-**F0 · Stabilise — free, days.** Stop the retry storm; serialise the capture drain; find the machine POSTing ~36 sessions/min;
+**F0 · Stabilise — free, days.** Stop the retry storm; serialise the capture drain; find the machine POSTing ~40 sessions/min;
 verify allowance headroom before any drain. *Exit:* 429s ≈ 0, spool shrinking, 20/20 searches 200.
 
 **F1 · Read path — free, ~1–2 weeks.** Parallel legs (`#14192`) · embedder seam + query micro-batching with a hard max-wait
@@ -113,7 +113,7 @@ makes the later spend cheap.
 | **S6 Second instance for survivability** | ≈ +$25/mo | a restart stops being an outage. After `#14067` (snapshot invalidation, merged) |
 | **S7 Embedder as its own deployment** (S1's payoff) | ~+$25/mo | API never embeds inline; scale it independently |
 | **S8 Replicas scaled on queue depth** (S1+S3 payoff) | variable | the Mem0 posture |
-| **S9 Keyword leg to Postgres** (`#14000`), tokenisation first | free | cost per GB of searchable text drops 283–584× |
+| **S9 Keyword leg to Postgres** (`#14000`), tokenisation first | free | cost per GB of searchable text drops 350–467× (`STORAGE-ARCHITECTURE.md` §17.4.4) |
 
 **Sequencing rule (cheap first, not "wait for permission"):** S1–S4 proceed **in parallel with** Track F because they are free and they are the foundation. S5–S9 wait only on **a measurement**, never on "we don't need it yet".
 
@@ -156,6 +156,6 @@ No measurement is taken "to see". Each exists to gate a phase or size a decision
 
 ## 8. Open decisions (owner)
 
-1. **The ~36 session-writes/min source** — wanted traffic during beta, or a runaway loop to stop?
+1. **The ~40 session-writes/min source** — wanted traffic during beta, or a runaway loop to stop?
 2. **The 916-entry spool** — drain into the graph (demo prerequisite) or discard as stale and start clean?
 3. **`#1677` guards** — pull S4 forward now (free, unblocks the cores we pay for) or leave it in Track S order?
