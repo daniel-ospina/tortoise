@@ -54,7 +54,7 @@ two whole-graph export scans, which carry the label without naming it.
 | 13 | `webhook_delivery._head_seq` fallback | `webhook_delivery.py:1049` | aggregate `max` | maintenance |
 | 14 | backup footprint | `hosted_backup.py:892` | aggregate `max, min` | maintenance |
 | 15 | whole-graph scan (restore's dirty-target pre-check) | `hosted_backup.py:1333` | a label-agnostic read of the target graph | maintenance |
-| 16 | whole-graph export (restore-side scan) | `hosted_backup.py:1534` | a label-agnostic dump | maintenance |
+| 16 | whole-graph scan (restore's node-count verification) | `hosted_backup.py:1534` | a label-agnostic read of the graph | maintenance |
 
 ⚠️ **The line addresses in `#13083` §2.6 for rows 15–16 are stale at this head**: the census cites
 `:1316`/`:1517`, and the statements are at `:1333`/`:1534`. Re-derived here rather than shifted by a

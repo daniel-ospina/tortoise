@@ -176,14 +176,14 @@
     {
       "file": "tortoise/hosted_backup.py",
       "line": "1534",
-      "reader": "whole-graph export (restore-side scan)",
+      "reader": "whole-graph scan (restore's node-count verification)",
       "snippets": [
         "MATCH (n) RETURN labels(n), properties(n)"
       ],
       "min_occurrences": 2,
-      "needs": "a full label-agnostic dump",
+      "needs": "a full label-agnostic read of the graph",
       "class": "maintenance",
-      "why": "the second whole-graph scan (the restore's node-count verification): the same statement shape as the line above, so both rows require two occurrences \u2014 see the residual noted on that row."
+      "why": "the second restore-side scan (the restore's `actual_nodes` verification, `hosted_backup.py:1533-1534`): the same statement shape as the line above, so both rows require two occurrences \u2014 see the residual noted on that row."
     }
   ],
   "counts": {

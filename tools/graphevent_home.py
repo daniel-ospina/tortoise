@@ -121,8 +121,8 @@ from typing import Any
 #: Every statement in `tortoise/` that READS or MAINTAINS the `:GraphEvent`
 #: label — including the three `ensure_event_schema` DDL statements, because a
 #: re-home has to recreate the schema they describe (the `event_id` dedupe index
-#: and the `seq` range index `read_after` scans), plus the two whole-graph export
-#: scans that carry the label WITHOUT naming it. That is the inclusion rule,
+#: and the `seq` range index `read_after` scans), plus the two whole-graph scans in
+#: the RESTORE path that carry the label WITHOUT naming it. That is the inclusion rule,
 #: stated rather than implied: **statements that name the label, plus the two
 #: statements that carry it by being label-agnostic and would therefore carry it
 #: into (or drop it from) a new home.**
@@ -134,7 +134,7 @@ from typing import Any
 #: same statement twice. ⛔ WHERE THAT WORKS AND WHERE IT DOES NOT, because the
 #: two cases differ and only one is a proof: the `event_store.py` dedupe pair is
 #: the ONLY two occurrences of its text in that file, so deleting one reds the
-#: census; the two export scans are byte-identical to two OTHER occurrences in
+#: census; the two restore-side scans are byte-identical to two OTHER occurrences in
 #: `hosted_backup.py` (four in total), so there `min_occurrences: 2` proves the
 #: file still carries the statement twice and NOT that both censused sites
 #: survive — the `line` is the address for those two, and the residual is named
@@ -334,12 +334,13 @@ READERS: tuple[dict[str, Any], ...] = (
     {
         "file": "tortoise/hosted_backup.py",
         "line": "1534",
-        "reader": "whole-graph export (restore-side scan)",
+        "reader": "whole-graph scan (restore's node-count verification)",
         "snippets": ("MATCH (n) RETURN labels(n), properties(n)",),
         "min_occurrences": 2,
-        "needs": "a full label-agnostic dump",
+        "needs": "a full label-agnostic read of the graph",
         "class": "maintenance",
-        "why": "the second whole-graph scan (the restore's node-count verification): "
+        "why": "the second restore-side scan (the restore's `actual_nodes` verification, "
+               "`hosted_backup.py:1533-1534`): "
                "the same statement shape as the line above, so both rows require two "
                "occurrences — see the residual noted on that row.",
     },
