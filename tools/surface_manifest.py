@@ -3253,8 +3253,8 @@ def shrink_report(
     base_ref: str | None,
     allowed: tuple[str, ...] | list[str] = (),
     root: Path | None = None,
-) -> tuple[list[str], str]:
-    """`(problems, compared)` for a committed surface that SHRANK with no record (#12327).
+) -> tuple[list[str], str, bool]:
+    """`(problems, compared, graded)` for a committed surface that SHRANK with no record (#12327).
 
     A symbol in the BASE ref's baseline and absent from the COMMITTED one is a removal, and
     it is accounted for exactly as `cut` would demand: an `archive/MANIFEST.json` entry of
@@ -3268,6 +3268,11 @@ def shrink_report(
 
     `compared` is the human label of what was compared, so a green run says so instead of
     leaving the reader to assume an arm ran.
+
+    `graded` is False on the ONE path where the base ref carries no baseline at all, so there
+    was nothing to compare. It is deliberately NOT the same fact as "no problems": an arm
+    that never asked its question must not be counted with the ones that answered it, which
+    is what the caller's property count keys on (#14039 review round 13, F1).
     """
     root = Path(root or ROOT)
     try:
@@ -3288,9 +3293,9 @@ def shrink_report(
         # No baseline at the base: nothing to have shrunk. SAID, not silent — a gate that
         # skipped its own question must not read as one that answered it.
         return [], f"{label} (which carries no {Path('config/surface-manifest.yml').name} — " \
-            "no shrink to grade)"
+            "no shrink to grade)", False
     try:
-        return shrink_problems(base_doc, doc, allowed=allowed), label
+        return shrink_problems(base_doc, doc, allowed=allowed), label, True
     except SurfaceEvidenceUnreadable:
         raise
     except Exception as exc:
@@ -4199,6 +4204,42 @@ def _partition_rows(rows: list) -> tuple[list[dict], list[str]]:
     return usable, problems
 
 
+def property_count_note(*, provenance_answered: bool, shrink_graded: bool) -> tuple[str, str]:
+    """`(count note, not-answered note)` for `cmd_check`'s green line (#14039 reviews 12-13).
+
+    ⛔ THE COUNT MUST BE THE ONE THIS RUN ACTUALLY PRODUCED. Two of the tail properties can
+    be DEFINED without being ANSWERED, and the obvious line counts them anyway — a reported
+    fact its own run falsifies, which is the exact overclaim this file spends its length
+    forbidding:
+
+    * the PROVENANCE arm returns no problem when the clone cannot resolve `cut_at_commit`
+      (`provenance_report`'s `unprovable`, and `cmd_check` prints that as a `::notice::`);
+    * the SHRINK arm has one path with nothing to compare — the base ref carries no baseline
+      at all (`shrink_report`'s `graded`).
+
+    So each component is counted only when it produced a verdict, and the verdicts that did
+    not happen are NAMED on the same line rather than silently dropped. A pure function on
+    purpose: the four reachable totals are pinned in the suite without paying `cmd_check`'s
+    surface derivation. The word is spelled out to keep the line readable.
+    """
+    counted = 13  # eleven structural + one derived-from-code + one declared-vs-approved
+    parts = ["eleven structural, one derived-from-code, one declared-vs-approved"]
+    not_answered: list[str] = []
+    if provenance_answered:
+        parts.append("one provenance")
+        counted += 1
+    else:
+        not_answered.append("provenance NOT VERIFIED in this checkout")
+    if shrink_graded:
+        parts.append("one shrink")
+        counted += 1
+    word = {13: "thirteen", 14: "fourteen", 15: "fifteen"}[counted]
+    return (
+        f"{word} properties hold ({', '.join(parts)})",
+        "; " + "; ".join(not_answered) if not_answered else "",
+    )
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     """AC13's lint: eleven structural properties, a twelfth derived from the code, a
     thirteenth that the DECLARED surface is the approved one (#10034), a fourteenth
@@ -4496,10 +4537,11 @@ def cmd_check(args: argparse.Namespace) -> int:
     # on both — the #12327 shape. The reference has to be a version the PR cannot author,
     # which is the merge base (see `shrink_report`).
     _shrink_compared: str | None = None
+    _shrink_graded = False
     _base_ref = getattr(args, "base_ref", None)
     if _base_ref is not None:
         try:
-            _shrink_problems, _shrink_compared = shrink_report(
+            _shrink_problems, _shrink_compared, _shrink_graded = shrink_report(
                 doc,
                 base_ref=_base_ref,
                 allowed=getattr(args, "allow_surface_shrink", ()) or (),
@@ -4529,29 +4571,24 @@ def cmd_check(args: argparse.Namespace) -> int:
             + ", ".join(sorted(getattr(args, "allow_surface_shrink", ()) or ()))
             + f" — reason: {getattr(args, 'allow_surface_shrink_reason', '')}"
         )
-    # ⛔ THE COUNT MUST BE THE ONE THIS RUN ACTUALLY ASSERTED (review F2 of PR #14039).
-    # The shrink arm is the FIFTEENTH property (#12327), so a `check --base-ref` that
-    # still printed "fourteen" UNDER-STATED what it graded — the same defect class as the
-    # docstring above, in the other direction: a reported fact its own caller falsifies.
-    # A bare `check` (no base ref) keeps fourteen, which is what it really ran.
-    if _shrink_compared is not None:
-        _property_note = (
-            "fifteen properties hold (eleven structural, one derived-from-code, "
-            "one declared-vs-approved, one provenance, one shrink)"
-        )
-    else:
-        _property_note = (
-            "fourteen properties hold (eleven structural, one derived-from-code, "
-            "one declared-vs-approved, one provenance)"
-        )
+    # ⛔ THE COUNT IS THE ONE THIS RUN ACTUALLY PRODUCED (review F2 of PR #14039, rounds 12-13):
+    # the provenance arm and the shrink arm can each be defined without being answered, so the
+    # count is computed from the two verdicts — see `property_count_note` for why, and for the
+    # four reachable totals.
+    _shrink_note = (
+        f"; shrink checked against {_shrink_compared}" if _shrink_graded else ""
+    )
+    _property_note, _not_answered_note = property_count_note(
+        provenance_answered=_unprovable is None,
+        shrink_graded=_shrink_graded,
+    )
+    if _shrink_compared is not None and not _shrink_graded:
+        _not_answered_note += f"; shrink NOT graded — {_shrink_compared}"
     print(
         f"OK — {len(rows)} tool rows, {len(retired) if isinstance(retired, list) else 0} retired, "
         + _property_note
-        + (
-            f"; shrink checked against {_shrink_compared}"
-            if _shrink_compared is not None
-            else ""
-        )
+        + _shrink_note
+        + _not_answered_note
         + _waived_note
     )
     return 0

@@ -122,9 +122,12 @@ enforced at two different seams, deliberately:
   `counts.keyword_distribution`, the `response_fields` entry,
   `config/surface-order.yml`'s `baseline_counts`), which is what the `[surface-cut]` note in
   `MEMORY.md` prescribes for slice PRs because a raw cut rewrites the whole file — used to
-  defeat it the same way, and no longer does: it still leaves `check` and `surface-guard`
-  green, because both compare the committed baseline with a derivation of THIS tree, so the
-  only way to see the splice is a version the PR cannot author. A batch that
+  defeat it the same way, and no longer does: it still leaves `check` and the pinned
+  `tools/surface-guard.py` green, because both compare the committed baseline with a
+  derivation of THIS tree, so the only way to see the splice is a version the PR cannot
+  author. (Name those two ARTIFACTS, not the `surface-guard` JOB — the job runs
+  `tools/surface_manifest.py check --base-ref` below, so the job is RED on a splice.)
+  A batch that
   takes the splice path leaves **no** archive entry and **no** retirement record — which is why
   `tools/surface_manifest.py check --base-ref` compares the committed baseline's symbol set with
   the MERGE BASE's, so a row deleted by hand is RED even though `cut` never ran

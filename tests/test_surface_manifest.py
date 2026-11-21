@@ -8020,7 +8020,7 @@ def test_the_shrink_arm_is_off_unless_a_base_ref_is_given(checker, tmp_path, mon
         doc = yaml.safe_load(fh)
 
     called = []
-    monkeypatch.setattr(sm, "shrink_report", lambda *a, **k: called.append(1) or ([], "x"))
+    monkeypatch.setattr(sm, "shrink_report", lambda *a, **k: called.append(1) or ([], "x", False))
 
     rc, out = _check(sm, doc, tmp_path)
 
@@ -8260,7 +8260,11 @@ def test_the_green_line_echoes_the_waiver_reason(checker, tmp_path, monkeypatch)
     sm = checker
     with MANIFEST.open() as fh:
         doc = yaml.safe_load(fh)
-    monkeypatch.setattr(sm, "shrink_report", lambda *a, **k: ([], "origin/main (merge base abc)"))
+    # `(problems, compared, graded)` — the arm GRADED here, which is what makes the line say
+    # "shrink checked against …" (see `property_count_note`).
+    monkeypatch.setattr(
+        sm, "shrink_report", lambda *a, **k: ([], "origin/main (merge base abc)", True)
+    )
 
     rc, out = _check(
         sm,
@@ -8282,3 +8286,50 @@ def test_the_green_line_echoes_the_waiver_reason(checker, tmp_path, monkeypatch)
     # assert the value the arm produced rather than the literal prefix.
     assert "shrink checked against origin/main (merge base abc)" in out, out
 
+
+
+@pytest.mark.parametrize(
+    ("provenance_answered", "shrink_graded", "word", "parts", "not_answered"),
+    [
+        (True, True, "fifteen", "one shrink", ""),
+        (True, False, "fourteen", "", ""),
+        (False, True, "fourteen", "one shrink", "provenance NOT VERIFIED"),
+        (False, False, "thirteen", "", "provenance NOT VERIFIED"),
+    ],
+)
+def test_the_green_line_count_is_the_one_the_run_actually_produced(
+    provenance_answered, shrink_graded, word, parts, not_answered
+):
+    """Reviews F2 of PR #14039 (rounds 12-13): the count, and the two ways it can lie (#12327).
+
+    The shrink arm is a fifteenth property, so a `check --base-ref` that said "fourteen"
+    UNDER-stated what it graded. The first cut of that fix then OVER-stated it on two paths,
+    which is the same defect class in the other direction — and the repo's rule is that a
+    verification that did not happen must never read as one that passed:
+
+    * the PROVENANCE arm returns no problem when the clone cannot answer (`_unprovable`, a
+      `::notice::` in `cmd_check`) — a shallow checkout, or a ref behind the record;
+    * the SHRINK arm has one path with nothing to compare: the base ref carries no baseline
+      at all (`shrink_report`'s `graded=False`).
+
+    So the four reachable totals are 13/14/15, and every property that produced no verdict is
+    NAMED on the line rather than dropped. Pinned as a pure function: the totals stay cheap to
+    assert, which is why the arithmetic lives in one testable seam instead of in `cmd_check`.
+
+    DISCRIMINATION: deleting either `else` branch — counting a property that did not run —
+    reds exactly the two False rows, and hard-coding "fourteen" reds the 13 and 15 rows.
+    """
+    sm = _load_manifest_tool()
+
+    note, unanswered = sm.property_count_note(
+        provenance_answered=provenance_answered, shrink_graded=shrink_graded
+    )
+
+    assert note.startswith(f"{word} properties hold ("), note
+    if parts:
+        assert parts in note, note
+    # A property that was not answered is never ALSO claimed as one that holds — the
+    # direction this test exists for, so it is asserted on every row, not only the False ones.
+    assert ("one provenance" in note) is provenance_answered, note
+    assert ("one shrink" in note) is shrink_graded, note
+    assert not_answered in unanswered, unanswered
