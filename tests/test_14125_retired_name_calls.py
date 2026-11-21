@@ -449,9 +449,9 @@ def _swallows_everything(handlers: list[ast.ExceptHandler]) -> bool:
 def _reraises_its_own(handler: ast.ExceptHandler) -> bool:
     """Whether the handler's body re-raises the exception it caught.
 
-    Wider than `_reraises` (which is deliberately exactly one bare `raise`, the
-    only shape that counts as COVERAGE): for swallowing, `raise` and
-    `raise exc` are the same outcome — nothing is dropped.
+    Wider than `_reraises` (which reads the handler's LAST statement — the only
+    shape that counts as COVERAGE): for swallowing, `raise` and `raise exc` are
+    the same outcome, so nothing is dropped.
     """
     caught = _handler_names(handler) | ({handler.name} if handler.name else set())
     for node in ast.walk(handler):
@@ -504,10 +504,11 @@ def _reraises(handler: ast.ExceptHandler) -> bool:
     """Whether the handler ENDS by re-raising (nothing is dropped).
 
     The last statement is what decides it, so the correct cleanup shape —
-    `except (AttributeError, …): _proj.close(); raise` — counts. This PR ships
-    that exact shape (`tests/test_9226_dump_paging_v6.py:517`), and a coverage
-    rule demanding "exactly one bare `raise`" would have redded it the moment the
-    block became a root (review of `ee5457f`, P3).
+    `except (AttributeError, …): _proj.close(); raise` — counts. A coverage rule
+    demanding "exactly one bare `raise`" redded that shape as soon as the block
+    became a root (review of `ee5457f`, P3). The shape is exercised by the
+    `cleanup_raise` self-test below rather than by a live probe: the one probe
+    that had it now propagates with a bare `raise`, which is stricter.
 
     A trailing bare `raise` keeps the anti-`except ImportError: return False`
     property: the clause is only coverage if it actually propagates.
@@ -1333,10 +1334,20 @@ def test_the_import_seam_census_sees_the_shapes_it_grades():
     # — the "a silent drop is a fail" class, which nothing else here can see
     # (review of `ee5457f`, P2: a sentinel whose skip is `pytest.xfail` was that
     # hole). Both lists live in this file, so the pin is a set comparison.
-    for verb in ("skip", "skipif", "xfail", "importorskip"):
-        assert any(verb in marker for marker in _PREFILTER_MARKERS), (
-            f"the prefilter lost `{verb}` — a file whose only skip verb is that one "
-            "is dropped UNPARSED and recorded as nothing: a silent drop"
+    # ⛔ A SUBSTRING test per verb was vacuous: `"skip" in "skipif"` is True, so
+    # deleting BOTH `skip(` and `pytest.skip` left this green while the sentinel
+    # family (`tests/test_9226_dump_paging_v6.py`) lost its only markers. Each
+    # guard verb needs a marker that carries it ALONE.
+    for verb, needles in (
+        ("skip", ("skip(", "pytest.skip")),
+        ("skipif", ("skipif",)),
+        ("xfail", ("xfail",)),
+        ("importorskip", ("importorskip",)),
+    ):
+        assert any(needle in _PREFILTER_MARKERS for needle in needles), (
+            f"the prefilter lost `{verb}` (needs one of {needles}) — a file whose "
+            "only skip verb is that one is dropped UNPARSED and recorded as "
+            "nothing: a silent drop"
         )
 
     # An OPTIONAL third-party import is out of scope: it must not be redded,
