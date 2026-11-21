@@ -70,15 +70,23 @@ NOT taken here — this is a STATED, ACCEPTED RESIDUAL rather than a shelved one
 The LEDGER stays monotone in every case; only the INBOX can show the two notices
 in the wrong order, and it needs two live processes reading the same account
 within one round trip plus a gauge that moved ≥20 pp between those reads.
-⛔ Two live processes are NOT exotic here: `deploy-hosted.yml` replaces the
-machine on every `tortoise/**` push to `main` (median gap 0.19 h over the 30 days
-to 2026-11-20), and a rolling replacement overlaps an old and a new process, each
-of which runs a boot pass. `worker_topology.assert_multi_worker_admissible`
-refuses N>1 replicas BY DEFAULT (it warns instead when `TORTOISE_MULTI_WORKER=1`
-is acknowledged), but that gate covers replicas on ONE machine — it does not
-cover the overlap across a replacement — so treat this residual as reachable in
-normal operation. Its cost is bounded: two notices in the wrong order, never a
-lost or duplicated record. The stamp itself is a
+⛔ REACHABILITY, WITHOUT INVENTING A TOPOLOGY (#14038 review cycle 3, P2 — the
+sentence this replaces was REASONED, and `fly.toml` refutes it). Two live
+processes are what this needs, and the ordinary path excludes it twice over:
+`worker_topology.assert_multi_worker_admissible` refuses N>1 replicas BY DEFAULT
+(it warns instead when `TORTOISE_MULTI_WORKER=1` is acknowledged), and a deploy
+does not create the second process either — the app runs ONE machine on a
+SINGLE-ATTACH volume (`fly.toml`: `[[mounts]] source = "tortoise_api_data"`, with
+its own lifecycle note "the volume is single-attach"), so a replacement machine
+cannot mount the volume the old process still holds and the old process exits
+FIRST. Fly does not promise the overlap either: its config reference says
+`rolling` "does not generally guarantee overlap" and reserves the alongside-boot
+for `bluegreen` (`fly.toml` sets `strategy = "rolling"`). The residual therefore
+becomes reachable when a second process is ADMITTED (`TORTOISE_MULTI_WORKER=1`)
+or the 2-machine topology lands — which `fly.toml` records as costed and BLOCKED
+on runbook §6 — not because deploys are frequent. Its cost is bounded in every
+case: two notices in the wrong order, never a lost or duplicated record. The
+stamp itself is a
 compare-and-swap on the value this pass read (:func:`claim_notice`), so two
 processes cannot interleave into a LOWER mark, and the provider Idempotency-Key
 (`capacity-notice:{org_id}:{pct}`) collapses the cross-process replay that

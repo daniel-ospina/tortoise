@@ -1448,6 +1448,47 @@ def test_the_module_docstring_names_the_post_rename_table():
         "say `organizations`")
 
 
+def test_the_residuals_reachability_is_pinned_to_what_fly_toml_documents():
+    """⛔ #14038 review cycle 3 (P2): "reachable in normal operation" was an
+    INFERENCE about the platform, and `fly.toml` refutes it.
+
+    The out-of-order residual needs two LIVE processes on the same account. The
+    deployed app is ONE machine mounting a SINGLE-ATTACH volume, so a rolling
+    replacement cannot bring a second process up while the first still holds that
+    volume — the old process must release it first. Fly does not promise the
+    overlap either: its config reference says `rolling` "does not generally
+    guarantee overlap" and reserves the alongside-boot for `bluegreen` (this app
+    sets `strategy = "rolling"`).
+
+    Cycles 2 and 3 shipped the opposite claim into the module docstring AND into
+    the migration header, which is append-only once applied — so the artifact that
+    can never be corrected carried the least-verified sentence in the PR. This row
+    is what stops the third copy, and it grades the PREMISE rather than prose
+    style: if this app ever gets a second machine, or a topology without the
+    single-attach volume, both comments must be re-derived and this row says so.
+    """
+    fly = (ROOT / "fly.toml").read_text(encoding="utf-8")
+    mounts = fly.split("[[mounts]]")[1:]
+    assert len(mounts) == 1, (
+        f"fly.toml declares {len(mounts)} `[[mounts]]` blocks. The 'a rolling "
+        "replacement cannot overlap an old and a new process' premise in "
+        "`capacity_notice`'s residual paragraph and in the "
+        "20261120000001_storage_notice_pct.sql header rests on exactly ONE "
+        "single-attach volume — re-derive both before changing the topology")
+    claimed = [
+        path.relative_to(ROOT).as_posix()
+        for path in (
+            ROOT / "tortoise" / "capacity_notice.py",
+            MIGRATIONS / "20261120000001_storage_notice_pct.sql",
+        )
+        if "overlaps an old and a new process" in path.read_text(encoding="utf-8")
+    ]
+    assert not claimed, (
+        "these artifacts still claim a rolling replacement OVERLAPS an old and a "
+        f"new process, which fly.toml's single-attach volume makes impossible: {claimed}"
+    )
+
+
 def test_the_mark_migration_targets_the_post_rename_table():
     """⛔ #13998 review 1 (BLOCKING): `public.teams` was RENAMED.
 

@@ -35,8 +35,11 @@
 -- unset), which is NOT taken here — a known, ACCEPTED residual rather than a
 -- property this column gives you. It needs two live processes reading the same
 -- account within one round trip, plus a gauge that moved >=20 pp between those
--- reads, and a rolling replacement overlaps an old and a new process at every
--- deploy, so treat it as reachable in normal operation. The cost is bounded: the
+-- reads — i.e. N>1 replicas (TORTOISE_MULTI_WORKER=1) or the 2-machine topology.
+-- A deploy does NOT create that second process: the app runs ONE machine on a
+-- SINGLE-ATTACH volume (`fly.toml` `[[mounts]] source = "tortoise_api_data"`), so
+-- a replacement cannot mount the volume the old process still holds and the old
+-- process exits first. The cost is bounded: the
 -- LEDGER stays monotone in every case and only the INBOX can show the two notices
 -- in the wrong order — never a lost or duplicated record (#14038 review cycle 3).
 -- ⛔ This header is corrected BEFORE this migration merges on purpose: migrations
