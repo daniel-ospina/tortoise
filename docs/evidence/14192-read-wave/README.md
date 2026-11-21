@@ -4,8 +4,15 @@ Two artifacts, both from `tools/read_wave_latency.py` (added by this issue). The
 answer the two halves of the issue's *Done when*: **a measured p50/p95 delta** and
 **a rank-identity verdict**.
 
-> Every number below is copied from the two JSONs in this directory, not from an
-> earlier run. If a number is not in a JSON here, it is not claimed here.
+> Every number in the two tables below is copied from the two JSONs in this
+> directory, not from an earlier run. If a number is not in a JSON here, it is
+> not claimed here.
+>
+> ⛔ **The one deliberate exception, because silence about it is how this file
+> drifted before:** the bullet pair under "What the first measurement found"
+> quotes the FIRST measurement's `159 ms` / `231 ms` / `167 ms`. Those are **not**
+> cells of either JSON — they are kept because this file's history records them,
+> and they are marked there as such. Nothing else here is outside the JSONs.
 
 ## What was measured, and on what
 
@@ -15,7 +22,7 @@ answer the two halves of the issue's *Done when*: **a measured p50/p95 delta** a
 | corpus | `benchmarks.synthetic_corpus`, 2000 Points, seed 42, 5000 operator edges |
 | queries | the first 24 of `benchmarks/query_mix.json`, identical in both arms |
 | read | `TortoiseSDK._tortoise_fts_query` — what `/v1/search` and the MCP `tortoise_search` call |
-| arms | pre-change `get_relationships_bounded` out of `e74cf1d13d` vs the working tree, **in one process, alternating** |
+| arms | pre-change `get_relationships_bounded` out of `e74cf1d13d` vs the working tree, in one process — ⚠️ **the two artifacts interleave differently and the difference matters for drift**: `ab-relationships` alternates old/new **per round** (9 rounds), while `ab-full-read` runs **two sequential 24-query blocks** (baseline first, then after), so a load spike lands entirely inside one arm there |
 | code measured | the working tree at the time of measurement — ⛔ **the recorded `git_sha` does not resolve, so this row cannot be checked as written**; see the provenance note below |
 
 ⛔ **PROVENANCE: BOTH ARTIFACTS RECORD A `git_sha` THAT DOES NOT EXIST IN THIS
@@ -103,8 +110,17 @@ artifact's own figures for the same function are
 `post_relationships` baseline, copied from a harness run made BEFORE the
 metering fix. A `−81.0 ms` retrieval delta cannot coexist with the `−68.6 ms`
 total that same table stated, because `retrieval` is the stage that total is
-mostly made of. The table and both JSONs are regenerated together from the head
-that will merge; **if a future edit changes one it must change the other.**
+mostly made of. The table and both JSONs are regenerated together; **if a future
+edit changes one it must change the other.**
+
+⛔ **THE JSONs describe `5c9cfe5407`, NOT THIS HEAD.** That commit re-measured
+both artifacts, and **two later commits then changed the code they measure
+without regenerating them**: `7d276aa07a` removed the duplicated predicate from
+the Q2-crit query (26,463 chars → 14,732, `$contested_threshold` twice → once),
+and `6ec51de9ec` added the `_InlineMember` inline fallback. So the after-arm
+over-states this head's cost, in the direction that flatters the change, and
+`ab-relationships`' `new` p50 prices a query that no longer exists. Re-measure
+before quoting any after-arm figure as the head's.
 
 ⚠️ **Run-to-run variance is real and is not hidden.** Successive whole-read A/Bs
 on this box measured `−68.6`, `−48.4` and `−43.5 ms` p50 for the same change
@@ -119,7 +135,21 @@ The changed function in isolation, 9 alternating rounds on the same 12 ids:
 | | old | new |
 |---|---|---|
 | p50 | 191.2 ms | 117.5 ms (**−73.7 ms**) |
+| mean | 205.9 ms | 179.6 ms (−26.3 ms) |
+| p95 | 273.0 ms | **502.6 ms** (⚠️ **worse**) |
+| max | 273.0 ms | **502.6 ms** (⚠️ **worse**) |
 | output | 193 entries | 193 entries — **identical** (`dict(old) == dict(new)`), `decoration_error` empty on both |
+
+⚠️ **The tail moved the WRONG WAY and that is stated here rather than left in
+the JSON.** `n=9` aggregated rounds: the new arm's worst round is **502.6 ms**
+against the old arm's **273.0 ms** (its own p50 × 4.3). p50 improves 38.6 % and
+the mean only 12.8 %, which is the signature of **one outlier round**, and the
+artifact stores aggregates with no per-round series — so it cannot be attributed
+here. It is either first-round pool warm-up or a real tail on per-call pool
+creation, and **nobody knows which**, which is exactly why the figure is
+reported instead of dropped. The whole-read artifact is clean on the same axis
+(`p95 198.2 → 155.7 ms`, `max 207.9 → 165.1 ms`, n=24), so this reads as an
+open question about the isolation run, not a refutation of the change.
 
 ## The two halves of the change
 
@@ -151,8 +181,11 @@ The changed function in isolation, 9 alternating rounds on the same 12 ids:
 
    The correctness claim is pinned twice: by
    `tests/test_14192_beta_variance_sum_bound.py` (the guard never rejects a
-   contested pair, across a grid including negatives, subnormals and the band
-   edges) and by the isolation run above, which compares the whole decoration
+   contested pair, across a **positive** grid spanning `VARIANCE_SUM_MIN`
+   `1e-154` … `VARIANCE_SUM_MAX` `1e102`, the exact halves of the bound from
+   `5.24` to `5.26`, and the band edges — ⚠️ `_grid()` constructs no negative and
+   no subnormal operand, and `1e-154` is a NORMAL double) and by the isolation
+   run above, which compares the whole decoration
    object and finds it identical. ⚠️ The timing of the crit query alone (a scratch
    probe — not committed, so not quoted here) is what motivated the guard; the
    artifact for its effect is `ab-relationships.json`'s whole-function delta.
@@ -168,15 +201,20 @@ uv run python tools/read_wave_latency.py --points 2000 --queries 24 --no-embed \
     --out docs/evidence/14192-read-wave/ab-full-read.json
 
 uv run python tools/read_wave_latency.py --points 2000 \
-    --ab-relationships-from e74cf1d13d \
+    --ab-relationships-from e74cf1d13d --ab-rounds 9 \
     --out docs/evidence/14192-read-wave/ab-relationships.json
+# ⛔ `--ab-rounds 9` is REQUIRED to reproduce the committed artifact: the flag
+# defaults to 7, and `ab-relationships.json` records `"rounds": 9`. Without it
+# you get a different p50 and may read the evidence as drifted.
 ```
 
 ## What the first measurement found that the issue did not assume
 
 - **The legs were already parallel.** `degradation_chain` submits fts / vector /
   structural to a `ThreadPoolExecutor` since #7780, and the measured leg wave is
-  **5–6 ms of a 231 ms read** (`legs_wave` in the member table). The issue's
+  **6.2 ms of a 162.3 ms baseline read**
+  (`verdict.member_delta.legs_wave`: `6.246 → 6.29`, in the artifact's member
+  table). The issue's
   premise ("we run three of those four legs, but sequentially") is true of the
   *chain*, not of the legs: the sequentiality was **after** the legs — in the
   decoration reads.
