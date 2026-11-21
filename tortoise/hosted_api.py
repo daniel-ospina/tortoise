@@ -20292,6 +20292,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
 
     session_id = body.session_id or mint_session_id()
     now = datetime.now(UTC).isoformat()
+    # ⛔ THE `dispatch` BOUNDARY, CLOSED HERE (#14086 review, P2). `note()` closes
+    # the interval that ENDED, so this note assigns EVERYTHING between the last
+    # note and this line to `dispatch` — which is what the part is for: on REST
+    # that is the admission reservation, the whole gate stack and the quota
+    # estimate since `_require_scope`'s own note; on the MCP lane, where
+    # `mcp_server.py`'s `tortoise_session_capture` calls this impl directly and
+    # never passes through `_require_scope`, it is the ONLY `dispatch` note there
+    # is — without it the MCP tool dispatch, the credential/org resolution and
+    # the entire gate stack were published under `sdk_open` (the graph lane's SDK
+    # open), which sends a reader to the wrong mechanism. Two `dispatch` notes on
+    # the REST path are additive, not a double count: `_close_part_unlocked`
+    # banks each interval on the part that follows it.
+    from tortoise.read_stages import note as _note_stage
+    _note_stage("dispatch")
     sdk, proj, session_row = await _capture_session_probe_off_loop(
         org, session_id)
     # #5632: snapshot the LIFETIME journal-failure counter at the START of THIS
@@ -51294,7 +51308,7 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from 200 tracked files (744 distinct
+# ABSOLUTE line number from 200 tracked files (745 distinct
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason

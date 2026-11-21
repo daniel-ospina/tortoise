@@ -187,6 +187,17 @@ _ON_LOOP_RESIDUAL: dict[str, str] = {
     # off-loaded). Listed because the census drives ONE branch of this handler
     # and the completion gate is reached from others; an entry here is a
     # declaration about ownership, not a claim that the leg runs today.
+    # ⚠️ AND, LIKE THE `_graph_write_with_retry` ROW ABOVE, ITS SIZE IS THE
+    # PROBLEM: the verdict is keyed on the METHOD NAME alone, so this line
+    # exempts EVERY on-loop `sdk._get_proj()` on the capture path, at any cost,
+    # whatever its caller — and `_get_proj` is not a capture-specific leg
+    # (measured: 396 `_get_proj(` references under `tortoise/`), it is the cold
+    # projection attach. `#4451` owns the completion-gate leg named here and
+    # NOT that population; a future on-loop `_get_proj` elsewhere joins the
+    # exemption silently and is then reported as `#4451`'s. Declared rather
+    # than narrowed because narrowing needs a call-site label the census does
+    # not carry; whoever owns `#4451` should prefer the label over the name
+    # (#14086 review, P3).
     "_get_proj": "#4451 (onboarding completion gate)",
 }
 
