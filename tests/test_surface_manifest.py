@@ -7915,13 +7915,21 @@ def test_a_row_that_reappears_as_a_retired_name_is_not_a_shrink():
 
 
 def test_an_unchanged_baseline_is_green():
-    """Non-vacuity: an ADDITION over the base must not red, in BOTH directions of the comparison.
+    """Non-vacuity: an ADDITION over the base must not red, and a CONSTANT must not pass.
 
     ⛔ The first cut asserted `shrink_problems(doc, doc) == []`, which is structurally empty
-    whatever the code does — `prior - derived` over the SAME object is the empty set, and a pin
-    that computed nothing, or that compared the pair BACKWARDS, stayed green (round-17 review,
-    P3). `now` here genuinely differs from `base`: it carries one row the base does not, so a
-    reversed comparison reports it and this row reds.
+    whatever the code does — `prior - derived` over the SAME object is the empty set — so a pin
+    that computed nothing stayed green (round-17 review, P3). `now` here genuinely differs from
+    `base`: it carries one row the base does not, which is what makes the assertions below
+    discriminating.
+
+    ⛔ AND SAY WHAT THEY DISCRIMINATE, NOT MORE (round-23 review, P3). The swapped-order
+    assertion reds a `shrink_problems` that returns a CONSTANT — the shape the inline comment
+    below measures. It does NOT red a reversed `prior - derived` inside an otherwise working
+    comparison: `removal_report` filters an addition out, so that mutant graded `[]` on BOTH
+    orders. This docstring used to claim the reversed comparison, contradicting the comment under
+    it three lines down; a pin that advertises a power it does not have is the next reader's
+    false premise.
     """
     sm = _load_manifest_tool()
     base, now = _baseline_pair()

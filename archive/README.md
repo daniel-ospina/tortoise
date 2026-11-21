@@ -242,8 +242,9 @@ scaffolding, so the package still resolves and nothing left the product — whil
 that carries statements IS a removal even though the package name still resolves through a
 surviving sibling, because the code that answered as that package's front door left. The SAME
 rule grades every module file, not just an `__init__.py`: a module whose file survives with its
-body gone — truncated to nothing, reduced to a docstring, reduced to a bare no-op (`pass` or
-`...`, which is not code a caller can reach), replaced by a `.pyi` stub, or rewritten to text
+body gone — truncated to nothing, reduced to a docstring, reduced to a bare no-op (`pass`,
+`...`, `None`, or any other expression statement with no effect: a statement is content only if
+it calls, awaits, yields or binds a `:=`), replaced by a `.pyi` stub, or rewritten to text
 that no longer parses — is a removal too, because the name no longer resolves to any code,
 and a comparison over paths cannot see it. It is part
 of the `surface-guard` job on every PR, and an unresolvable base ref is a REFUSAL (exit 2),
