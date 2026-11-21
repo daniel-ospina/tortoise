@@ -8097,7 +8097,7 @@ def test_the_call_site_passes_the_CHECK_flag_to_removal_report(checker, tmp_path
     with MANIFEST.open() as fh:
         doc = yaml.safe_load(fh)
     base = copy.deepcopy(doc)
-    base["rows"] = list(base["rows"]) + [dict(doc["rows"][0], name="tortoise_base_only_ghost")]
+    base["rows"] = [*base["rows"], dict(doc["rows"][0], name="tortoise_base_only_ghost")]
 
     seen: list[dict] = []
 
