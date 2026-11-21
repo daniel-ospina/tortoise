@@ -1292,19 +1292,36 @@ def test_no_declared_entity_writer_mentions_a_dynamic_namespace():
     from tortoise import embed_writer_register as register
 
     offenders: list[str] = []
-    examined = 0
+    examined: list[str] = []
+    unreadable: list[str] = []
+    missing: list[str] = []
     for key in sorted(register.EMBED_WRITER_CLASSES):
         module_name, _, symbol = key.partition("::")
         try:
             source = strip._module_source(module_name)
-        except Exception:               # an unreadable module is the gate's refusal, not this pin
+        except strip._UnreadableFold as exc:
+            # ⛔ A MISSING DEPENDENCY IS NOT A LOADER SHAPE CHANGE. `examined` alone could shrink
+            # to one and still satisfy a bare `> 0` (measured: 14 of 24 keys here, the other 10
+            # being `tortoise.sdk::*` with `prometheus_client` absent), so the CAUSE is graded: an
+            # absent third party is the environment, anything else is the loader, and the loader
+            # refusing is exactly what must not silently shrink the population this pin covers.
+            cause = exc.__cause__
+            assert isinstance(cause, ModuleNotFoundError), (
+                f"`{key}`: the source loader refused for a reason that is NOT a missing "
+                f"dependency ({type(cause).__name__ if cause is not None else 'no cause'}: {exc}) "
+                "— a loader shape change must red here, not shrink this pin's population")
+            unreadable.append(key)
             continue
-        if symbol not in strip._function_bodies(source):
+        bodies = strip._function_bodies(source)
+        if symbol not in bodies:
+            missing.append(key)         # a renamed writer, not an environment fact
             continue
-        function = strip._function_bodies(source)[symbol][0]
-        examined += 1
-        if any(strip._is_dynamic_namespace_reference(node) for node in ast.walk(function)):
+        examined.append(key)
+        if any(strip._is_dynamic_namespace_reference(node) for node in ast.walk(bodies[symbol][0])):
             offenders.append(key)
+    assert missing == [], (
+        "the register names a writer whose `def` the module does not contain — the writer was "
+        f"renamed or the key is stale, so it left this pin's population: {missing}")
     assert examined, (
         "NO writer could be read, so this pin asserts nothing — the register or the source "
         "loader changed shape and the over-refusal cost it guards is unmeasured")
