@@ -1362,7 +1362,8 @@ def _module_writer_facts(source: str) -> tuple[frozenset[str], frozenset[str]]:
     KEY (measured #14099: shard `(d)`'s watchdog killed the leg — `exit 137`, no pytest summary,
     `job-unreadable` — and `python-ci-gate` red-ed with it). The population walk asked
     `_function_bodies(source)` once per REGISTER KEY, so a 9-module population re-`ast.parse`d
-    5.5 MB of source (3.75 MB of it `tortoise/sdk.py`) on every key of every call: profiled at
+    6.51 MB of source (3.78 MB of it `tortoise/sdk.py` — measured over the register's 9 modules at
+    this head; the earlier `5.5 MB` figure here was low) on every key of every call: profiled at
     this head, ONE test made **275** `_function_bodies` calls and **14.2 M** `ast.walk` yields —
     111 s of its 118 s — for a walk whose input had not changed once. The file went 15.8 s on
     main to 250 s here, and it is packed into shard `(d)`, whose watchdog is 24 min: ~4.2 min of
@@ -1370,9 +1371,17 @@ def _module_writer_facts(source: str) -> tuple[frozenset[str], frozenset[str]]:
     only input, so this changes no verdict — the arms below monkeypatch `strip._module_source`,
     and a folded module never yields a source here at all.
 
-    Only NAME SETS are retained, never the trees: a `bodies` cache would pin the AST of every
-    module (hundreds of MB for `sdk.py`) for the life of the run. `maxsize=64` is well above the
-    register's module count and bounded.
+    Only the SOURCE TEXT (which `lru_cache` keeps as the argument, so the key's bytes are retained:
+    measured `currsize=9` / 6.51 MB after one walk) and two NAME SETS are held — no AST, since a
+    `bodies` cache would pin the tree of every module (hundreds of MB for `sdk.py`) for the life of
+    the run. `maxsize=64` is well above the register's module count and bounded.
+
+    ⛔ THE INVARIANT THIS RESTS ON, unstated until a review asked: the key is the source text
+    ALONE, so `_function_bodies` and `_is_dynamic_namespace_reference` must stay PURE and
+    unpatched — a monkeypatch of either is served a STALE entry for unchanged text (measured:
+    warm, then `strip._function_bodies = lambda s: {}` → the cached 25 names still returned). No
+    current arm does that (every arm patches `strip._module_source`, which feeds the key), but any
+    future one must call `_module_writer_facts.cache_clear()` first.
     """
     bodies = strip._function_bodies(source)
     offenders = frozenset(
