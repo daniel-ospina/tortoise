@@ -9657,17 +9657,6 @@ def _upsert_object(props, ev):
         return None
     _write(props)
 """,
-        # ⛔ A `{**<name>}` MERGE HANDED TO THE WRITE CHANNEL stays an honest control: the
-        # mapping is BUILT in the arm, and the arm's own docstring (residual 4) records that
-        # this channel is NOT proved — a withdrawn positional rule refuses these and leaks
-        # everywhere it does not look.
-        """
-def _upsert_object(props, ev):
-    if not _derived_mirror_required("object"):
-        _write({**props, **extra})
-        return None
-    _write(props)
-""",
         """
 def _upsert_object(props, ev):
     if not _derived_mirror_required("object"):
@@ -9920,6 +9909,16 @@ def _upsert_object(props, ev):
     # this tuple is that these rows are NOT stores: widening acceptance here needs the doctrine
     # argued first, not a quiet key-reading improvement.
     over_refused = (
+        # ⛔ `_write({**props, **extra})` USED TO LIVE HERE AS AN "HONEST CONTROL" AND IT IS
+        # NOT ONE (`#14001`, measured by the review of this branch): `extra` is CALLER-SUPPLIED,
+        # so the arm hands the write channel the property whenever that mapping carries it —
+        # measured, `extra={"embedding": VECTOR}` hands the vector to `_write`, and `props |
+        # extra` does too. The shipped gate still CERTIFIES it (that channel is not proved), so
+        # it is neither an honest control nor an over-refusal: it is a KNOWN FAIL-OPEN, pinned
+        # with its caller argument in
+        # `tests/test_14001_strip_gate_fail_closed.py::REBUILD_RESIDUAL_ROWS`
+        # (`rebuilt-mapping-extra-unpack` / `-bitor`), where closing it reds instead of
+        # silently widening this tuple.
         # ⛔ THESE ROWS ARE REFUSED **BECAUSE OF THE POLARITY INVERSION** (`#14001`).
         # Every one of them was in `accepted` while the stop arm's key source was a shape
         # the gate ABSTAINED on — a call (`_keys()`, `_pair(ev)`, `zip(_keys(ev), …)`), a

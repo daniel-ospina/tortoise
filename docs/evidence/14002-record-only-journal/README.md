@@ -163,8 +163,16 @@ cutover by the same window. The measured cost above is the alternative.
    `docs/architecture/STORAGE-ARCHITECTURE.md` §3 makes journal completeness a
    PRECONDITION of `derived = replay(journal)` (the gap is tracked as `#5089`).
    Once the file stops growing, a rebuild from it would produce a graph as of the
-   arming point and **silently drop every later record** — `rebuild_all` prints
-   `Done:` either way and its counts are the journal's own. So the operator door
+   point the append stopped — the box flag roll
+   (`TORTOISE_RECORD_ALLOCATE`), which is LATER than the per-graph `arm` — and
+   **silently drop every later record** — `rebuild_all` prints
+   `Done:` either way and its counts are the journal's own. ⚠️ The instant is the
+   FLAG ROLL, not `arm`: every graph is armed first and the flag is rolled
+   afterwards (`live_write.py:105-109`), and `record_owns_position` bails on
+   `record_live_allocate()` before it ever reads the row
+   (`record_writer.py:2852`), so the arm→roll window still appends and a
+   rebuild dated at `arm` understates the dropped span by that whole window. So
+   the operator door
    refuses when a RECORD DSN resolves (`__main__._journal_rebuild_refusal`) —
    keyed on the record's EXISTENCE, never on the writer's
    `TORTOISE_RECORD_ALLOCATE`, because an operator shell, a cron job and a
@@ -201,9 +209,11 @@ cutover by the same window. The measured cost above is the alternative.
    claiming the journal could not have fed the record — and (ii) made
    `record-reconcile --journal` unable to report clean on a healthy pair, which is
    the arming step `journal_ready` tells an operator to run. So the reading now
-   carries `journal_is_export` — the ROW ALONE, in mode `active`, decides, and
-   the mode is what separates "export" from "still an input" — and that shape
-   answers `unprojected == 0` instead. ⚠️ `record_owns_position` additionally
+   carries `journal_is_export` — the ROW ALONE, in mode `active`, decides — and
+   that shape answers `unprojected == 0` instead. (The mode is what separates a
+   CUT-OVER graph from a journal that is still an input; the flag is a separate
+   fact, which is why the door can still append on a row-`active` graph whose
+   flag is not rolled yet.) ⚠️ `record_owns_position` additionally
    requires the deployment to be ARMED; that difference is deliberate (#14002
    cycle 3 P2): a reader does not carry a writer's flag, and a reading keyed on
    it reported a healthy cut-over pair as an impossible journal. ⚠️ **The reading asks the RECORD, never the reading process's
@@ -259,13 +269,38 @@ cutover by the same window. The measured cost above is the alternative.
    pre-change, the same failure left a line a replay could heal. The door counts
    it (`record_write_failures`) and WARNs that it is in neither store — a
    notification, not a recovery.
-4. **The JSONL is now an EXPORT artifact** and no export job writes it yet. The
+4. **The JSONL is off the write path, and NOT yet an export** — it is a FROZEN
+   PREFIX once the box flag is rolled (the append stops when the FLAG is rolled, not
+   at `arm`: on a row-`active` graph that is not yet armed the file still grows), and
+   no export job writes it (and no drainer ships). The
    file's content is not reproducible from the record alone (`event_id`,
    `initiated_by`, `projection_version` are stored by neither column nor
    payload — measured in `docs/evidence/12894-live-wiring/README.md` §3.1), so an
    export that must be replayable needs those keys first (§A7.8 item 6). This
    change does not claim the export exists; it claims the write path no longer
    depends on the file.
+   ⚠️ "NOTHING WRITES IT" IS A CLAIM ABOUT THE WRITE PATH, NOT ABOUT THE PATH:
+   `tortoise restore` REPLACES the destination journal wholesale
+   (`backup.py:625` — the comment; the copy itself is `:638` — "the journal
+   always"), and `journal_segments.seal_active`
+   moves the active file aside and creates a fresh empty one. Both are operator
+   verbs (seal has no production caller), so the frozen prefix holds absent
+   operator action. ⚠️ And a restore onto an ARMED cut-over graph lands in a
+   quieter state than `record_writer`'s journal-behind warning describes: the guard
+   is skipped there (there is no second reading), so neither a write-path refusal
+   nor a `record-reconcile --journal` contradiction fires — while the record, which
+   `restore` does not rewind, still owns the ordinal. It is not unreported though:
+   `tools/record_allocator_cli.py status --journal <path>` computes
+   `position_divergence` from exactly that pair (a row-`active` cursor whose
+   enumeration is shorter than the counter) and reports both readings side by
+   side — which IS the decision — but it names no remedy in any output mode
+   (`_cmd_status` returns readings; `_emit` prints them). The remedy for THIS
+   state is named only by the door's WARNING on the still-appending arm, which
+   the paragraph above says this state does not reach, so an operator reading
+   this page must be told the numbers, not sent looking for advice. The
+   journal-behind case that the DOOR warns about is the still-appending arm, where
+   it does not wedge: it loses a row per write, with one WARNING each, for
+   `counter - floor` records.
 5. **A sealed layout (#13050) is still a procedural gate**: `read_cursor` answers
    the file-local/segment-spanning question the same way it did, so *do not arm
    across a seal* continues to hold. Segment-aware numbering is #13050's.
