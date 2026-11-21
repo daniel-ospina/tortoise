@@ -569,9 +569,11 @@ class TestTheRelationDecidedArmCountsItsPointCreates:
 
     `_quota_gated(sdk.link_entities, "points")` records no `point_create` at all, and
     the SCALAR arm can create a Point — `link_entities("supports", a, b)` reaches the
-    SDK's `create_operator` (the meaning's mechanism), and so does `operator=True` on
-    any relation. So the arm that shipped counted a plain edge correctly and lost the
-    operator half of its own dispatch. A flat `1` would be the opposite error: an
+    SDK's `create_operator` (the meaning's mechanism). That is the whole live rule
+    (#14237 N2): an explicit `operator=true`, like any LIST target, never reaches this
+    arm — the handler routes it to its OPERATOR writer, which weighs `1` directly. So
+    the arm that shipped counted a plain edge correctly and lost the operator half of
+    its own dispatch. A flat `1` would be the opposite error: an
     ordinary `performs` link would be billed as a Point create, tripping an abuse
     signal on the most common call this door serves.
 

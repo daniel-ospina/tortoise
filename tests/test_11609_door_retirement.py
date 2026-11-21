@@ -1099,8 +1099,13 @@ class TestEveryReaderNamesTheLiveListingDoor:
     #: passed on its neighbour's word (measured — the first form of this fix let exactly
     #: that through). `|` is the cell separator, and it is not a character this doc uses
     #: in prose.
+    #:
+    #: A `;` is a boundary too (#14237 N3): it joins two INDEPENDENT CLAUSES, so a note
+    #: and an instruction glued with one shared a "sentence" and the instruction again
+    #: passed on its neighbour's word. It is measured by its own case below, not asserted.
     SENTENCE_BREAK = re.compile(
         r"[.!?](?=\s)"                                    # ends a sentence
+        r"|;[ \t]*"                                       # ends a CLAUSE
         r"|\n[ \t]*\n"                                     # ends a block
         r"|\n(?=\||#{1,6} |[ \t]*[-*+] |[ \t]*\d+\. )"     # a new block begins
         r"|\|"                                            # a table CELL boundary
@@ -1150,6 +1155,20 @@ class TestEveryReaderNamesTheLiveListingDoor:
         note = row.rindex("`tortoise_list_graphs`")
         assert "retire" in self.sentence_around(row, note, note + 20).lower(), (
             "the migration note's own cell says retired")
+
+    def test_a_semicolon_separates_clauses_not_a_label(self):
+        """A `;` joins independent clauses, so it is a boundary (#14237 N3).
+
+        The measured fail-open: a note and an instruction glued with `;` sat in one
+        "sentence", so the instruction inherited the note's "retired" and passed.
+        """
+        text = ("The door `tortoise_list_graphs` retired forward into it; call "
+                "`tortoise_list_graphs(graph_id=x)` to read one graph.")
+        instruction = text.index("call `tortoise_list_graphs") + 6
+        assert "retire" not in self.sentence_around(
+            text, instruction, instruction + 20).lower(), (
+            "an instruction joined to the note by ';' was cleared by the note's "
+            "'retired' — a clause boundary is not a sentence boundary")
 
     @pytest.mark.parametrize("relpath", CALL_INSTRUCTION_DOCS)
     def test_every_mention_says_the_name_is_retired(self, relpath):
