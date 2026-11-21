@@ -131,14 +131,14 @@ from typing import Any
 #: `tests/test_13094_graphevent_home.py` asserts every `snippets` entry still
 #: appears in its `file` (whitespace-collapsed, so a re-indent is not a false red
 #: while a reword is a real one) and `min_occurrences` where one file holds the
-#: same statement twice. ⛔ WHERE THAT WORKS AND WHERE IT DOES NOT, because the
-#: two cases differ and only one is a proof: the `event_store.py` dedupe pair is
-#: the ONLY two occurrences of its text in that file, so deleting one reds the
-#: census; the two restore-side scans are byte-identical to two OTHER occurrences in
-#: `hosted_backup.py` (four in total), so there `min_occurrences: 2` proves the
-#: file still carries the statement twice and NOT that both censused sites
-#: survive — the `line` is the address for those two, and the residual is named
-#: on the rows themselves.
+#: same statement twice. ⛔ WHERE THAT WORKS AND WHERE IT DOES NOT: the
+#: `event_store.py` dedupe pair is the ONLY two occurrences of its text in that
+#: file, so deleting one reds the census; the two restore-side scans share their
+#: text with two more occurrences in `hosted_backup.py` (four in total), so those
+#: rows pin the EXACT count in `occurrences` — deleting ANY of the four reds, which
+#: a bare `min_occurrences` floor did NOT do (measured: deleting both censused
+#: sites left two and stayed green). What no pin can do is say WHICH occurrence a
+#: row addresses: the `line` is that address and nothing grades it.
 #:
 #: CLASSIFICATION — the three classes, and what each one can justify:
 #:
@@ -327,8 +327,8 @@ READERS: tuple[dict[str, Any], ...] = (
                "EXPORT-SIDE READER IS IN THIS CENSUS: the paged dump's node statement is "
                "`_DUMP_NODE_PAGE_QUERY` (`hosted_backup.py:454`, consumed by `dump_graph` "
                "at `:647`), and the export endpoint's own whole-graph scan is "
-               "`hosted_api.py:33402` (`_export_graph_snapshot`, which branches on "
-               "`\"GraphEvent\" in labels` and appends it to the export payload — a "
+               "`hosted_api.py:33400` (`_export_graph_snapshot`; the `"
+               "\"GraphEvent\" in labels` branch is `:33416` and the append `:33424` — a "
                "SERVING reader under this census's own class rule, so the `serving: 1` "
                "count in this file excludes it). No row carries either (#14204). ⚠️ This "
                "statement occurs FOUR times in `hosted_backup.py` — `:1333`, `:1534`, the "

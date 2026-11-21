@@ -74,14 +74,14 @@ The **serving** row is exactly one statement, so a re-home re-points one read an
   one file holds the same statement twice. ⛔ **Where that is a proof and where it is not**: the
   `event_store.py` dedupe pair is the ONLY two occurrences of its text in that file, so deleting one reds
   the census; the two `hosted_backup.py` restore-side scans share their text with four occurrences in
-  that file (two MORE live reads at `:3603`, plus a docstring mention at `:3442`), so those rows pin the
+  that file (one more live read at `:3603`, plus a docstring mention at `:3442`), so those rows pin the
   EXACT count — deleting any of the four reds (`occurrences`), which a `min_occurrences` floor did not
   do: measured, deleting BOTH censused sites left 2 and stayed green. What the pin still cannot do is
   say WHICH occurrence a row addresses — the `line` is that address and nothing grades it. ⚠️ Both of
   those rows are in `restore_graph`; **the export side is not censused at all** — the paged dump's node
   statement is `_DUMP_NODE_PAGE_QUERY` (`hosted_backup.py:454`) and the export endpoint's own
-  whole-graph scan is `hosted_api.py:33402` (`_export_graph_snapshot`, which carries `:GraphEvent`
-  nodes into the export payload), and no row carries either (`#14204`).
+  whole-graph scan is `hosted_api.py:33400` (`_export_graph_snapshot`; the `:GraphEvent` branch is
+  `:33416` and the append `:33424`), and no row carries either (`#14204`).
 * `…::test_the_census_covers_the_labels_schema_as_well_as_its_readers` — the three DDL rows exist and are
   `maintenance`; an earlier cut of this census omitted them, which is how a re-home ships a store with no
   indexes.
@@ -355,7 +355,7 @@ remaining scope** (its comment 7065026251), in the order the constraints force:
    `read_after`: `_head_seq`'s fallback (`webhook_delivery.py:1049`), the backup footprint
    (`hosted_backup.py:892`), and the two restore-side scans (`:1333`/`:1534`). ⚠️ Neither is an
    export scan — both are in `restore_graph`, and the export side is NOT censused at all
-   (`hosted_backup.py:454` and `hosted_api.py:33402`, #14204), so a re-point driven by this census
+   (`hosted_backup.py:454` and `hosted_api.py:33400`, #14204), so a re-point driven by this census
    alone would leave the export endpoint reading the old home.
 5. **Prove it on a scratch tenant** with the `superset` verb before and after, and only then strip.
 6. **Falsifiers, stated up front:** (a) with the record short of the graph, the cutover REFUSES and
