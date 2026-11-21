@@ -3546,6 +3546,84 @@ def test_a_base_element_moves_what_the_section_advertises() -> None:
         "base URL, so every fragment-only link is read as same-page"
     )
 
+    # A `<base>` a browser never parses must NOT move the base.
+    assert extract_first_base_href(
+        page.replace("<head>", '<head><template><base href="https://evil.example/">'
+                     "</template>", 1)
+    ) is None, (
+        "a `<base>` inside an inert `<template>` is not one a browser applies, so "
+        "honouring it would move the base to a page no reader navigates from"
+    )
+    # ⛔ AND A FOREIGN `<base>` IS NOT THE `base` ELEMENT (#14073 review round 14, P2,
+    # measured). Inside `<svg>`/`<math>` a start tag is inserted *"as a foreign element,
+    # in the SVG/MathML namespace"* (§13.2.6.5), and the document base URL is defined by
+    # the HTML `base` element only — so a `<svg><base href>` moves nothing. Measured on
+    # this box's Chrome against a `file://` page: `<base href>` moves `baseURI` to
+    # `https://evil.example/`, while `<svg><base href>` and `<math><base href>` leave it
+    # at the document's own URL. `_record_heading` carries the same guard; this record
+    # was simply missed, and the direction is the fail-open one on this question.
+    for foreign in ("svg", "math"):
+        assert extract_first_base_href(
+            f'<head><{foreign}><base href="https://evil.example/"></{foreign}>'
+        ) is None, (
+            f"a `<base>` inside `<{foreign}>` is a foreign element, not the HTML "
+            f"`base`, so a browser does not apply it — honouring it moves every "
+            f"fragment-only link off the page"
+        )
+    assert extract_first_base_href(
+        '<head><base href="https://evil.example/" target="_blank">'
+    ) == "https://evil.example/", (
+        "premise: an HTML `<base href>` IS applied, so the rows above measure the "
+        "foreign half and not a broken seam"
+    )
+    # ⛔ DECLARED DIVERGENCE — AN HTML INTEGRATION POINT (#14073 review round 15, P2,
+    # measured). `desc`/`title`/`foreignObject` are integration points, so their children
+    # are HTML again and a `<base>` written there IS applied: Chrome moves baseURI to
+    # `https://evil.example/` for both rows below (the base's `namespaceURI` is the XHTML
+    # one). This seam refuses them, because foreign content is tracked as a DEPTH and the
+    # parser cannot tell an integration point from the SVG itself. Pinned as a DECLARED
+    # divergence rather than left implicit: the day the foreign element stack lands, this
+    # row reds and the declared residual is due for deletion.
+    for integration_point in ("desc", "title", "foreignObject"):
+        assert extract_first_base_href(
+            f'<head><svg><{integration_point}><base href="https://evil.example/">'
+            f"</{integration_point}></svg>"
+        ) is None, (
+            f"a `<base>` inside `<svg><{integration_point}>` is now applied: that is the "
+            f"right answer (it is an HTML integration point) — delete this declared "
+            f"residual from `_record_base` and from here, and re-run the base rows"
+        )
+
+    # ⛔ AND THE FIRST ONE WINS. A later `<base href>` is ignored, so honouring it
+    # would compute a base no browser uses — a fail-open on this very question.
+    # Unpinned until round 4: deleting `or self.base_href is not None` left the
+    # whole suite green (measured, #14073 review).
+    assert extract_first_base_href(
+        '<head><base href="/first"><base href="https://evil.example/">'
+    ) == "/first", (
+        "only the FIRST `<base href>` a browser parses can move the base; "
+        "returning a later one computes a URL no browser navigates from"
+    )
+    # …and the bound follows the first base, not the last — WITH A PREMISE THAT
+    # CAN FAIL. The obvious mutant (`<base href="/">` then a foreign host) is not
+    # a control for this rule: BOTH bases leave the page, so the slice is the rest
+    # of the document whichever one wins (measured: 21389 chars for either order),
+    # and a `!=` against the unbased slice passes both ways. The two bases below
+    # differ in what they do to the slice — the FIRST names this page, so the TOC
+    # entries stay same-page and the slice is the reviewed section; the SECOND
+    # leaves the page, so honouring it runs the slice to the end of the document
+    # (measured on this page: 2990 vs 21389).
+    two_bases = page.replace(
+        "<head>", '<head><base href="/tortoise/docs"><base href="/">', 1
+    )
+    assert two_bases != page, "website/docs.html has no `<head>` to inject bases into"
+    assert _docs_section(page=two_bases) == _docs_section(), (
+        "a second `<base href>` overrode the first: the bound must take the base "
+        "the browser takes, which is the FIRST one. Here the first base names "
+        "this page and the second leaves it, so a last-base-wins read runs the "
+        "slice to the end of the document and the reviewable section grows."
+    )
+
 
 def test_a_table_open_across_the_bound_refuses_rather_than_cutting_the_source() -> None:
     """A heading a browser may move content ACROSS cannot bound the slice.
@@ -3623,83 +3701,6 @@ def test_a_table_open_across_the_bound_refuses_rather_than_cutting_the_source() 
         "a `<table>` that opens and closes inside the section moved the bound: the "
         "refusal must fire only for a table OPEN at the bounding heading, not for "
         "any page that contains a table"
-    )
-    # A `<base>` a browser never parses must NOT move the base.
-    assert extract_first_base_href(
-        page.replace("<head>", '<head><template><base href="https://evil.example/">'
-                     "</template>", 1)
-    ) is None, (
-        "a `<base>` inside an inert `<template>` is not one a browser applies, so "
-        "honouring it would move the base to a page no reader navigates from"
-    )
-    # ⛔ AND A FOREIGN `<base>` IS NOT THE `base` ELEMENT (#14073 review round 14, P2,
-    # measured). Inside `<svg>`/`<math>` a start tag is inserted *"as a foreign element,
-    # in the SVG/MathML namespace"* (§13.2.6.5), and the document base URL is defined by
-    # the HTML `base` element only — so a `<svg><base href>` moves nothing. Measured on
-    # this box's Chrome against a `file://` page: `<base href>` moves `baseURI` to
-    # `https://evil.example/`, while `<svg><base href>` and `<math><base href>` leave it
-    # at the document's own URL. `_record_heading` carries the same guard; this record
-    # was simply missed, and the direction is the fail-open one on this question.
-    for foreign in ("svg", "math"):
-        assert extract_first_base_href(
-            f'<head><{foreign}><base href="https://evil.example/"></{foreign}>'
-        ) is None, (
-            f"a `<base>` inside `<{foreign}>` is a foreign element, not the HTML "
-            f"`base`, so a browser does not apply it — honouring it moves every "
-            f"fragment-only link off the page"
-        )
-    assert extract_first_base_href(
-        '<head><base href="https://evil.example/" target="_blank">'
-    ) == "https://evil.example/", (
-        "premise: an HTML `<base href>` IS applied, so the rows above measure the "
-        "foreign half and not a broken seam"
-    )
-    # ⛔ DECLARED DIVERGENCE — AN HTML INTEGRATION POINT (#14073 review round 15, P2,
-    # measured). `desc`/`title`/`foreignObject` are integration points, so their children
-    # are HTML again and a `<base>` written there IS applied: Chrome moves baseURI to
-    # `https://evil.example/` for both rows below (the base's `namespaceURI` is the XHTML
-    # one). This seam refuses them, because foreign content is tracked as a DEPTH and the
-    # parser cannot tell an integration point from the SVG itself. Pinned as a DECLARED
-    # divergence rather than left implicit: the day the foreign element stack lands, this
-    # row reds and the declared residual is due for deletion.
-    for integration_point in ("desc", "title", "foreignObject"):
-        assert extract_first_base_href(
-            f'<head><svg><{integration_point}><base href="https://evil.example/">'
-            f"</{integration_point}></svg>"
-        ) is None, (
-            f"a `<base>` inside `<svg><{integration_point}>` is now applied: that is the "
-            f"right answer (it is an HTML integration point) — delete this declared "
-            f"residual from `_record_base` and from here, and re-run the base rows"
-        )
-
-    # ⛔ AND THE FIRST ONE WINS. A later `<base href>` is ignored, so honouring it
-    # would compute a base no browser uses — a fail-open on this very question.
-    # Unpinned until round 4: deleting `or self.base_href is not None` left the
-    # whole suite green (measured, #14073 review).
-    assert extract_first_base_href(
-        '<head><base href="/first"><base href="https://evil.example/">'
-    ) == "/first", (
-        "only the FIRST `<base href>` a browser parses can move the base; "
-        "returning a later one computes a URL no browser navigates from"
-    )
-    # …and the bound follows the first base, not the last — WITH A PREMISE THAT
-    # CAN FAIL. The obvious mutant (`<base href="/">` then a foreign host) is not
-    # a control for this rule: BOTH bases leave the page, so the slice is the rest
-    # of the document whichever one wins (measured: 21389 chars for either order),
-    # and a `!=` against the unbased slice passes both ways. The two bases below
-    # differ in what they do to the slice — the FIRST names this page, so the TOC
-    # entries stay same-page and the slice is the reviewed section; the SECOND
-    # leaves the page, so honouring it runs the slice to the end of the document
-    # (measured on this page: 2990 vs 21389).
-    two_bases = page.replace(
-        "<head>", '<head><base href="/tortoise/docs"><base href="/">', 1
-    )
-    assert two_bases != page, "website/docs.html has no `<head>` to inject bases into"
-    assert _docs_section(page=two_bases) == _docs_section(), (
-        "a second `<base href>` overrode the first: the bound must take the base "
-        "the browser takes, which is the FIRST one. Here the first base names "
-        "this page and the second leaves it, so a last-base-wins read runs the "
-        "slice to the end of the document and the reviewable section grows."
     )
 
 
