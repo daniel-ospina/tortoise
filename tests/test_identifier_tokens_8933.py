@@ -77,6 +77,12 @@ try:
     _probe = _FP.from_uri(_LANE_URI)
     _probe.close()
     LIVE = True
+# ⛔ A moved or renamed seam — including an import of a moved module — is a
+#   PROGRAMMING error, not "no server": the flag this block sets decides a
+#   SKIP, so swallowing it is a green family over a broken tree
+#   (#14114 class 2, #14125).
+except (AttributeError, NameError, TypeError, ImportError):
+    raise
 except Exception:
     LIVE = False
 finally:
