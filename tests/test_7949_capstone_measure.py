@@ -18063,14 +18063,19 @@ def test_the_D5_current_head_anchors_are_the_lines_they_name():
     # ⛔ AND THE CENSUS READS EVERY SPELLING THE FIGURE IS WRITTEN IN, because a number is only
     # graded by the SENTENCE it sits in (#14060 review round 22 — MEASURED). Two further
     # statements of this same count existed in this file — the `off <number>` spelling in the arm
-    # above and the `carries <number> of them` spelling below — and BOTH were ten below the
-    # derived `280` while every arm stayed green: the census read the phrase `cite-shaped` only,
-    # so the docstring's own promise that "any commit moving the line off … reds" was false about
-    # the mechanism it names. That is the class a phrase-bound pin is FOR (round 13 closed three
-    # findings of exactly this shape), so the phrases are a TABLE — a new spelling of this
-    # figure gets a row here, never a second ungraded number. ⛔ WRITE NO FIGURE IN THIS BLOCK:
-    # a quoted spelling carrying a digit is censused by the very table it documents (measured —
-    # the first cut of this comment made the arm it sits in red with `{270, 280}`).
+    # above and the `carries <number> of them` spelling below — and BOTH stated a figure the row
+    # had already stopped carrying, while every arm stayed green: the census read the phrase
+    # `cite-shaped` only, so the docstring's own promise that "any commit moving the line off …
+    # reds" was false about the mechanism it names. That is the class a phrase-bound pin is FOR
+    # (round 13 closed three findings of exactly this shape), so the phrases are a TABLE — a new
+    # spelling of this figure gets a row here, never a second ungraded number. ⛔ WRITE NO FIGURE
+    # IN THIS BLOCK, AND NO PAST ONE EITHER: a quoted spelling carrying a digit is censused by
+    # the very table it documents, and a STALE figure is censused by NOTHING — so it survives
+    # here in the block whose subject is that a stale figure cannot be seen. The first cut of
+    # this comment carried the then-current count beside the superseded one, and the arm it sits
+    # in reddened on the disagreement (measured: its message listed both counts against the one
+    # the row carried). The figure this pin grades is the one the row carries NOW, derived at the
+    # head being run.
     _D5_LINE_COUNT_PHRASES = (
         r"(\d+)\s+cite-shaped",
         r"moving the line off `(\d+)`",
