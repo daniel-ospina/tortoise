@@ -41,14 +41,18 @@ WHAT A RESTORE MUST REFUSE — the four ways it could be worthless
    the plan's length, this refusal (and the report below it) could never fire
    and the printed ``N node(s) written`` was the plan's size — the #9556
    review's false-PASS finding.
-3. **A restore that cannot name its target refuses.** ``--cache-graph`` has no
-   derived default (the record's ``graph_id`` scope column is NOT the cache
-   graph's name): a wrong guess does not fail — FalkorDB opens an EMPTY graph —
-   so the run would report a restore into a graph nobody reads while the
-   operator's real graph stayed destroyed. Same rule, same reason, as
+3. **A restore that cannot name its target refuses.** The record's ``graph_id``
+   scope column is NOT the cache graph's name (#13337): a wrong guess does not
+   fail — FalkorDB opens an EMPTY graph — so the run would report a restore into
+   a graph nobody reads while the operator's real graph stayed destroyed. The
+   name is therefore either STATED or READ from the control plane
+   (``graphs.namespace``, ``tortoise.cache_graph``); when nothing can answer — a
+   self-host with no control plane — the run REFUSES (exit 2) rather than fall
+   back to the derived registry spelling, which is the one graph it is wrong
+   about (#13337's recorded decision). Same rule, same reason, as
    ``record-reconcile``; for a restore the consequence is worse, which is why
    the pre-wipe node count is **reported** (below) as well as the name being
-   required.
+   required, and why the refusal precedes the wipe rather than following it.
 4. **The wipe the cache refuses is reported as a refusal, not as a crash.**
    ``rebuild_from_record`` runs the projection's destructive-op guard (L2,
    #2944): a server graph whose name does not start with ``test_``/
