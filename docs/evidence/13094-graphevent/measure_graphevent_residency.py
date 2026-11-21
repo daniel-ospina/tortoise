@@ -43,6 +43,7 @@ tenant graph: it writes N synthetic `:GraphEvent` rows.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -133,10 +134,9 @@ def measure(uri: str, graph: str, sizes: list[int], keep: bool,
             f"refusing to write synthetic :GraphEvent rows into {graph!r}: the "
             f"name must start with {GRAPH_PREFIX!r} so a production graph can "
             f"never be measured by accident")
-    try:
+    with contextlib.suppress(Exception):
+        # an absent graph is the desired state
         db.connection.execute_command("GRAPH.DELETE", graph)
-    except Exception:  # noqa: BLE001 — an absent graph is the desired state
-        pass
     g = db.select_graph(graph)
     g.query("CREATE (n:Warmup {i:0})")  # materialise the key before reading usage
     baseline_used = _used_memory(db)
@@ -148,7 +148,7 @@ def measure(uri: str, graph: str, sizes: list[int], keep: bool,
             else:
                 db.connection.execute_command(*statement.split())
             applied.append({"statement": statement, "installed": True})
-        except Exception as exc:  # noqa: BLE001 — the same tolerance production has
+        except Exception as exc:  # the same tolerance production has
             applied.append({"statement": statement, "installed": False,
                             "refused": f"{type(exc).__name__}: {exc}"})
     g.query("MATCH (n:Warmup) DETACH DELETE n")

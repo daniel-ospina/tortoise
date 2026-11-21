@@ -575,6 +575,48 @@ def test_a_vector_parity_harness_only_diff_selects_its_pins():
     )
 
 
+def test_a_graphevent_census_tool_only_diff_selects_its_pins():
+    """#13094 review (P1): the `CORE_ALSO` arm for the census instrument.
+
+    `tools/graphevent_home.py` is the instrument that decides what the change
+    feed's reader census CLAIMS, and its falsifiers live in
+    `tests/test_13094_graphevent_home.py` (registered `core`). `tools/` is a flat
+    `NON_PYTHON_PREFIXES` swallow, so a tool-only diff filters to `changed == []`
+    and takes the docs-only early return. Measured BEFORE the entry:
+    `--changed-files tools/graphevent_home.py` -> `surfaces: []`, `full: false`,
+    and the pin file ABSENT from `test_files`, i.e. tier-1 smoke only — while the
+    sibling `tools/vector_parity_13906.py` entry below answers `['core']` and
+    carries its file.
+
+    The #13094 row in `config/ci-surfaces.yml` registered the TEST and measured
+    only the `cache_projection` -> `core` direction, so it could not see this:
+    the test is selected on a change to its SUBJECT's import closure, not on a
+    change to the subject itself. The stakes are the tool's own exit-code
+    contract (a refused read must exit 2, never 1 — the defect the branch's last
+    commit fixed), the `READERS` census and the `_GRAPH_EVENT_TYPES` equality.
+
+    ⛔ This is the ARM, not the pins: the falsifiers in the census file never
+    call `select()`, so deleting the entry leaves every one of them green
+    (the #13914 round-5 defect recorded on the `tools/vector_parity_13906.py`
+    entry above). Selected on the diff that could delete the entry: a change to
+    `tools/ci_selection.py` resolves `full: True` (measured), so this file runs
+    whatever the entry says.
+    """
+    r = _sel(["tools/graphevent_home.py"])
+    assert r["full"] is False
+    assert r["surfaces"] == ["core"], (
+        "a census-instrument-only diff must select the instrument's own "
+        "falsifiers — `tools/` is swallowed by NON_PYTHON_PREFIXES, so the "
+        "`CORE_ALSO` entry is the only thing keeping this out of the docs-only "
+        f"early return (#4309); got {r['surfaces']!r}"
+    )
+    assert "test_13094_graphevent_home.py" in r["test_files"], (
+        "the entry exists so the census falsifiers run on the one diff class "
+        "that can weaken them (a refused read returning 1, a dropped READERS "
+        "row, an event-type set that stopped matching `sdk._GRAPH_EVENT_TYPES`)"
+    )
+
+
 def test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff():
     """#5333 review (P1): those guards must run on the DOCUMENT they pin.
 

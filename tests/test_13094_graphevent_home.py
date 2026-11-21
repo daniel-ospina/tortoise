@@ -152,7 +152,6 @@ def test_a_payload_only_emit_writes_the_store_and_no_journal_record(tmp_path):
     cursor; it is a missing event type, which is why `#13083` §6.3 refused to
     call the move a "feed re-pointing".
     """
-    from tortoise import event_store
     from tortoise.sdk import TortoiseSDK
 
     journal = tmp_path / "events" / "events.jsonl"

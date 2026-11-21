@@ -29,7 +29,7 @@ multisets per type, and the verdict is:
 ⛔ THE VERDICT IS NOT A LICENCE TO RE-POINT. Even at ``covered`` this verb cannot
 see the two refusals `#13083` §6.3 established from the code, which are properties
 of the PRODUCER and not of any tenant's data: `_emit_event` skips the journal
-entirely when a payload-only emit carries no `point`/`id`/`turns` (`sdk.py:16195`),
+entirely when a payload-only emit carries no `point`/`id`/`turns` (`sdk.py:16204`),
 and the hard-delete lane deliberately writes `PointRetracted` to the store and
 `EntityMutated` to the journal (`sdk.py:3786-3801`, "two stores, one meaning
 each"). ``covered`` on a tenant therefore means "this tenant's history happens to
@@ -288,7 +288,7 @@ def residency(graph_uri: str, graph: str | None) -> dict[str, Any]:
         flat = db.connection.execute_command(
             "GRAPH.MEMORY", "USAGE", graph or "tortoise")
         usage = dict(zip(flat[0::2], flat[1::2], strict=True))
-    except Exception as exc:  # noqa: BLE001 — a server without the verb is not a fault
+    except Exception as exc:  # a server without the verb is not a fault
         usage = {"error": f"{type(exc).__name__}: {exc}"}
     return {
         "labels": labels,
@@ -313,7 +313,7 @@ def residency(graph_uri: str, graph: str | None) -> dict[str, Any]:
 
 def _record_connection(record_dsn: str, org_id: str) -> Any:
     try:
-        import psycopg2  # noqa: PLC0415
+        import psycopg2
     except ModuleNotFoundError as exc:  # pragma: no cover — environment, not code
         raise SystemExit(
             "psycopg2 is not installed, so the record side cannot be read: "
@@ -468,7 +468,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.verb == "residency":
         try:
             print(json.dumps(residency(args.graph_uri, args.graph), indent=2))
-        except Exception as exc:  # noqa: BLE001 — a refused read is not a reading
+        except Exception as exc:  # a refused read is not a reading
             print(f"the graph could not be read ({type(exc).__name__}: {exc}). "
                   "NO VERDICT was produced.", file=sys.stderr)
             return 2
@@ -490,7 +490,7 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             conn.close()
         graph_rows_ = _graph_rows(_graph_connection(args.graph_uri), args.graph)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # a store that refused is not a verdict (see above)
         print(f"a store could not be read ({type(exc).__name__}: {exc}). "
               "NO VERDICT was produced.", file=sys.stderr)
         return 2
