@@ -1433,10 +1433,9 @@ def _modules_reaching_a_store() -> frozenset[str]:
         rel = path.relative_to(package).with_suffix("")
         parts = [part for part in rel.parts if part != "__init__"]
         module = "tortoise" + ("." + ".".join(parts) if parts else "")
-        imported = {
-            _fold_init(name) for name in _imports_of(path.read_text(encoding="utf-8"))
-        }
-        if _reaches_a_store_client(imported):
+        if _reaches_a_store_client(
+            _imports_of(path.read_text(encoding="utf-8"))
+        ):
             found.add(module)
     return frozenset(found)
 
@@ -1451,13 +1450,20 @@ def _reaches_a_store_client(imported: set[str]) -> bool:
     clause — reverting it left the whole file green (measured: 100 passed). A leg
     that no observable input exercises is a leg that can be deleted silently, which
     is this PR's whole subject; the synthetic pins below are the observable input.
+
+    ⛔ AND THE `.__init__` FOLD BELONGS HERE, in the ONE predicate both directions
+    call. It was previously applied at the scan's call site only, which made it
+    unpinnable: removing it there left every row green, because the agreement pin
+    re-derived the predicate inline instead of calling this function — an inert leg,
+    which is this PR's whole subject.
     """
+    folded = {_fold_init(name) for name in imported}
     by_root = any(
         name == root or name.startswith(root + ".")
-        for name in imported
+        for name in folded
         for root in _STORE_CLIENT_ROOTS
     )
-    return by_root or bool(imported & _FORBIDDEN_CLIENT_EXPORTS)
+    return by_root or bool(folded & _FORBIDDEN_CLIENT_EXPORTS)
 
 
 def test_the_store_reach_scan_sees_the_REDIS_spelling_too() -> None:
@@ -1512,13 +1518,13 @@ def test_the_direction_scan_agrees_with_the_ban_on_the_FOLDED_spelling() -> None
     directions cannot drift apart again.
     """
     source = "def f():\n    from tortoise.__init__ import FalkorDB\n"
-    imported = {_fold_init(name) for name in _imports_of(source)}
-    reaches = bool(imported & _FORBIDDEN_CLIENT_EXPORTS) or any(
-        name == root or name.startswith(root + ".")
-        for name in imported
-        for root in _STORE_CLIENT_ROOTS
+    # ⛔ CALLS THE SHARED PREDICATE, does not re-derive it. An inline copy here left
+    # the fold at the scan's call site unpinned (reverting it kept every row green),
+    # so the pin has to exercise the function the scan actually uses.
+    assert _reaches_a_store_client(_imports_of(source)), (
+        "the direction scan would not see this source, so L2 and L1 disagree about "
+        "a module whose only reach is the `.__init__` spelling"
     )
-    assert reaches, f"the scan would not see {sorted(imported)!r}"
     assert _offending(source) == {"tortoise.FalkorDB"}
 
 
