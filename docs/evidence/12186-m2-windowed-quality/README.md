@@ -22,9 +22,14 @@ window's retrieval cost is **the eviction itself, with nothing compensating**: i
 the degraded snapshot after each demotion, a demoted node is never
 handed back as a candidate at any rank **of the depth-50 read**, the caller is never told a store was partial, and on the claim
 population a demoted query returns a **different claim** rather than an empty answer. ⛔ **That zero is
-this configuration's, not a guarantee the shipped path makes**: `tortoise/cache_evictor.py::_delete_nodes`
-issues a bare `DETACH DELETE` and never invalidates `fallback_snapshot`, so today's evictor leaves a
-demoted node returnable for up to 60 s (Finding 6, filed as **#13123**). ⛔ **And "Cost equals
+this configuration's, not a guarantee the shipped path makes** — it is what a run that invalidates
+the degraded snapshot after each demotion reads. At the time of this run
+`tortoise/cache_evictor.py::_delete_nodes` issued a bare `DETACH DELETE` and never invalidated
+`fallback_snapshot`, so an evictor could leave a demoted node returnable for up to 60 s
+(Finding 6). **#13123 landed since**: the eviction path now invalidates the snapshot itself
+(per graph, on every delete route), so that zero is what the shipped path is required to
+reproduce — a run WITHOUT the invalidation is the reading the record warns against, not the
+baseline. ⛔ **And "Cost equals
 the eviction share" is a `:Object` identity, not a statement about the text leg as a whole.**
 `found@deep` equals the resident share in every `:Object` arm, and on `:Point` it merely **coincides at
 one arm** (`random@0.1`, 0.11 == 0.11) while every other windowed `:Point` arm falls short — where the
@@ -337,10 +342,18 @@ eviction the same arms are exact. **This is a §7 pre-beta requirement, not a te
 window may not serve a node it has demoted, on any leg — and the degraded path is the one where it
 matters most, because that path is active exactly when retrieval is already failing.
 
-⚠️ The same gap exists in shipped code: `tortoise/cache_evictor.py::_delete_nodes` issues
-`DETACH DELETE n` and never invalidates the snapshot, so the egress executor can delete a node and
-leave it returnable for up to 60 s. Filed separately as **#13123** rather than fixed here — this
-lane measures and does not change the eviction path.
+⚠️ The same gap existed in shipped code: `tortoise/cache_evictor.py::_delete_nodes` issued
+`DETACH DELETE n` and never invalidated the snapshot, so the egress executor could delete a node
+and leave it returnable for up to 60 s. Filed separately as **#13123** rather than fixed here —
+this lane measures and does not change the eviction path. **#13123 has since landed**: the delete
+path now calls `fallback_snapshot.invalidate_graph(graph_name)` as soon as its statement RETURNS (and
+also when the statement raised, since its effect is then unverified) — and never before the delete,
+which is what stops a build that read the pre-delete rows from caching them (the stamp is per graph).
+The sweep reports the outcome as `degraded_snapshot_invalidated`. Two bounds remain, both stated
+rather than implied: it is PROCESS-LOCAL — an evictor in another process cannot reach a serving
+process's in-memory store, which is still bounded by the 60 s TTL — and a read already in flight
+(a `get` between the delete committing and the stamp move, or a reader that joined a pre-move build)
+is still served that flight's rows, bounded by one round trip or one build rather than by the TTL.
 
 ### 7. The lexical leg's own ceiling is low on claims, independent of the window
 
