@@ -1322,6 +1322,16 @@ def _enclosing_bindings(block: ast.AST, parents: dict[int, ast.AST]) -> set[str]
             # `try: def _inner(x=torch.query(…)): torch = _make_client()` and
             # `try: class C(torch.query(…)): torch = _make_client()` were both graded over
             # a legitimate probe. The node is skipped and the ascent continues outward.
+            # ⛔ EXCEPT ITS TYPE PARAMETERS, which DO reach a header call: PEP 695 puts a
+            # generic's `bound`/`default_value` in the TYPE-PARAMETER scope, where the
+            # list's OWN names are in scope — measured, `def f[T, S: T]()` gives
+            # `f.__type_params__[1].__bound__ is T`, and
+            # `def _inner[torch: object, T: torch.query("…")]()` raises `AttributeError`
+            # at DEFINITION time, i.e. the call resolved to the TypeVar, not the import.
+            # Skipping them here turned that silent drop into an exemption (review of this
+            # PR, P2); contributing them keeps the legitimate row exempt and grades the
+            # shadowing one.
+            out |= _type_param_names(node)
             previous = node
             node = parents.get(id(node))
             continue
@@ -1520,6 +1530,15 @@ def _is_header_child(node: ast.AST, child: ast.AST) -> bool:
     #: assertion message — a numeral written into a growing file is stale by construction,
     #: which is the defect this file has now falsified five times (see the
     #: block-granularity note, `4j-vicesimus-bis`).
+    #: ⛔ AND THE SCOPE IS THE TYPE-PARAMETER ONE, NOT THE ENCLOSING ONE — which matters
+    #: because the list's OWN names are in scope in a bound: measured, `def f[T, S: T]()`
+    #: gives `f.__type_params__[1].__bound__ is T`, and
+    #: `def _inner[torch: object, T: torch.query("…")]()` raises `AttributeError` at
+    #: DEFINITION time, i.e. that call resolved to the TypeVar. So skipping the definition
+    #: wholesale (what fixes the legitimate case) turned that silent drop into an
+    #: exemption; `_enclosing_bindings` contributes `_type_param_names(node)` on the
+    #: header-skip path instead, and the `def`/`class` spellings are pinned by their own
+    #: rows (review of this PR, P2).
     #: The ascent reaches the definition with the TYPE-PARAMETER node as the child, not
     #: the bound expression itself, so the test is on that node's identity.
     if any(parameter is child for parameter in getattr(node, "type_params", ()) or ()):
@@ -4340,8 +4359,31 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
     }.items():
         _header_row = roots(_header_reach_probe.format(header=_header))
         assert _header_row == (), (
-            f"{_label.capitalize()} evaluates in the ENCLOSING scope, so the call there runs on "
-            f"the import and the probe must stay EXEMPT: {_header_row}"
+            f"{_label.capitalize()} does not evaluate in the definition's BODY scope, so "
+            f"the call there still runs on the import and the probe must stay EXEMPT: "
+            f"{_header_row}"
+        )
+    # ⛔ …BUT A TYPE PARAMETER'S OWN LIST IS IN SCOPE IN ITS BOUND, so the exemption above
+    #     must NOT be bought by a type parameter named after the import. PEP 695 puts the
+    #     bound in the TYPE-PARAMETER scope: measured, `def f[T, S: T]()` gives
+    #     `f.__type_params__[1].__bound__ is T`, and this shape raises `AttributeError` at
+    #     DEFINITION time — the call resolved to the TypeVar, not the import. Skipping the
+    #     definition wholesale read it EXEMPT, i.e. a silent drop the widening opened
+    #     (review of this PR, P2); `_enclosing_bindings` contributes the list's names now.
+    for _label, _generic in {
+        "a def": 'def _inner[torch: object, T: torch.query("SELECT 1")]():\n        X = 1',
+        "a class": 'class _Inner[torch: object, T: torch.query("SELECT 1")]:\n        X = 1',
+    }.items():
+        _shadowed_bound_row = roots(_header_reach_probe.format(header=_generic))
+        assert len(_shadowed_bound_row) == 1 and _shadowed_bound_row[0][1:] == (
+            (),
+            True,
+            False,
+            True,
+        ), (
+            f"a type parameter named after the import is IN SCOPE in {_label} generic's "
+            "own bound (PEP 695), so the `.query` runs on the TypeVar and the probe must "
+            f"be graded — exempting it is a silent drop: {_shadowed_bound_row}"
         )
     _body_after_header = roots(
         _header_reach_probe.format(
