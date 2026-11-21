@@ -290,7 +290,7 @@ their `durations:` rows, so removing or shrinking those rows changes nothing (me
 all three `durations:` rows still emits 720.4) — what moves it is three more files in the pack,
 +6 s over 11 shards, which crosses the minute boundary once the ×2 headroom is applied. ⛔ **And
 `#13998`'s registration lands in the SAME pool without a further re-pack**: `tests/test_13998_capacity_notice.py`
-enters at the flat 2.0 s default, and the merged head emits six shards at **720.7 s** and five at
+enters at the flat 2.0 s default, and the merged head emits ten shards at **720.7 s** and one at
 720.6 s — `ceil(720.7/60 x 2)` is still **25 m**, the emitted term, not a hand count. The three
 hand-added figures are re-added from the
 emitted 25 m: 56.6 m / 85.0 m / 5.0 m (the row above), which is the 1-decimal restatement of the

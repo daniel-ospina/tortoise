@@ -1106,9 +1106,11 @@ async def notify_account(org_id: str, *, cp=None, account: Account | None = None
             "DELIVERABLE address — organizations.email and "
             "organizations.customer_email are empty OR do not have an address "
             "shape (`_deliverable_address`), and the owner's GoTrue address "
-            "answered none EITHER (absent, or the lookup FAILED and logged a "
-            "warning above; the two states are not the same and this line does "
-            "not claim which) — nothing is sent for it",
+            "answered none EITHER (absent, present but not an address shape "
+            "(`_deliverable_address` refuses it silently — no line is logged "
+            "for that one), or the lookup FAILED and logged a warning above; "
+            "these are THREE states and this line does not claim which) — "
+            "nothing is sent for it",
             org_id, notice.threshold)
         return {"status": "no-email", "org_id": org_id}
     copy = render(notice.threshold,
