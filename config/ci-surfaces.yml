@@ -1103,6 +1103,17 @@ surfaces:
   # one-surface registration drops this file on one of the two halves' own
   # diffs — the #1349/#3332 silent-drop class the manifest exists for.
   - test_10893_read_stage_attribution.py
+  # #10893 (second cycle): the capture handler's SYNCHRONOUS SDK writes must not
+  # run on the event loop — the measured cause of a six-second `pre_handler`
+  # (`/health` -> `loop_blocks` parked in `record_projection.replay` under
+  # `sdk._create_event`). Dual-registered `api` + `core` for the reason every row
+  # around it is: the handler and the seams live in `tortoise/hosted_api.py` (an
+  # exact `api` SOURCE_PATTERN that REPLACES the `core` fallback), while the
+  # `TortoiseSDK` census walks `tortoise/sdk.py` and the monkeypatched registry /
+  # metering legs fall through to `core`. One surface alone drops the file on the
+  # other half's own diff (#1349/#3332).
+  - test_10893_capture_off_loop.py
+  - test_10893_pre_handler_parts.py
   # #10602: the wait-bound BREACH channel — `wait_bound_breaches` on the health
   # surface, so a `-32009` refusal is observable in-process instead of only in
   # the best-effort analytics sink. Dual-registered for the same reason as its
@@ -6090,7 +6101,15 @@ surfaces:
   # the merge that brought `origin/main`'s repair into this branch kept BOTH `core` rows, which
   # is exactly the duplicate the block above warns about (`--integrity`: "duplicate entry … at
   # .surfaces.core[]"). One row per surface, deleted here rather than resolved by keeping both.
-  - test_10893_read_stage_attribution.py  # #10893: the stage attribution a breach publishes — `read_stages.py` matches no SOURCE_PATTERN (→ `core`), the seams are in `hosted_api.py`/`mcp_server.py` (→ `api`) and the marks are in `sdk.py` (dual: api)
+  - test_10893_read_stage_attribution.py  # #10893: the stage attribution a breach publishes — `read_stages.py` matches no SOURCE_PATTERN (→ `core`), the seams are in `hosted_api.py`/`mcp_server.py` (→ `api`) and the marks in `sdk.py` (dual: api)
+  - test_10893_capture_off_loop.py  # #10893 (second cycle): the capture handler's synchronous SDK writes must not run on the event loop — `hosted_api.py` (→ `api`) holds the handler and the offload seams, `sdk.py` holds the census target, `read_stages.py`/`monitoring.py` fall through to `core` (dual: api)
+  - test_10893_pre_handler_parts.py  # #10893 (second cycle): the `pre_handler` decomposition into parts — `read_stages.py` matches no SOURCE_PATTERN (→ `core`), the four note sites are in `hosted_api.py` (→ `api`) (dual: api)
+  # ⛔ The `test_usage_signal.py` `core` row is NOT repeated here: this branch had added it to
+  # repair the `manifest drift` red on `main` (#14011), and `origin/main` landed the SAME repair
+  # first, in #14072 (`b29d141531`) — same `core` arm, plus its `durations:` row. The 2026-11-21
+  # rebase onto `ad79129cb5` kept BOTH sides, which is exactly the duplicate the block above warns
+  # about (`--integrity`: "duplicate mapping key 'test_usage_signal.py'" and "duplicate entry … at
+  # .surfaces.core[]"). One row per surface, deleted here rather than resolved by keeping both.
   - test_10602_wait_bound_breach_visible.py  # #10602: the breach channel itself — `wait_bound_breaches` on `/health`, the counter family in `tortoise/monitoring.py` (which selects `core`) plus the two emit sites in `hosted_api.py`/`mcp_server.py` (dual: api)
   # #2877: DB-free guards that a dead backup watcher degrades /health (the file
   # it guards, tortoise/hosted_api.py, selects the `api` surface, so it is
@@ -13311,6 +13330,20 @@ durations:
   # collecting `send`, so the file's own cost is interpreter plus `hosted_api` import. Measured
   # 2.9-3.1 s locally across three runs; that reading is NOT the row value, for the reason above.
   test_10893_read_stage_attribution.py: 2.0  # #4894 flat default until `tools/ci_timing.py --refresh-durations` collects it from junit
+  # #10893 (second cycle) — the SAME ENTRY RULE, for the two files this cycle ADDS. A file a PR
+  # adds has no push-to-main junit measurement yet, so the value is the flat default: a hand-picked
+  # number is this host's wall clock, and `fast_pool()` feeds the shard balancer (#2818/#3419/#4348).
+  # `--integrity` CANNOT see a missing row here (the coverage check is a 0.90 RATIO with ~70 files
+  # of headroom), which is why the row is named in `tests/test_ci_selection.py::ROWED_BY_THIS_FOLD`
+  # — an EXPLICIT tuple, so a file nobody lists has no row and nothing reds. #14086's cycle-3 review
+  # found the surface rows had landed and these had not.
+  # `tools/ci_timing.py --refresh-durations` replaces these from junit once a sweep includes them.
+  test_10893_capture_off_loop.py: 2.0  # new in #10893
+  test_10893_pre_handler_parts.py: 2.0  # new in #10893
+  # ⛔ No `test_usage_signal.py` row here: `origin/main` landed the #14011 repair first (#14072,
+  # `b29d141531`), which carries the row at its canonical position in this map. This branch's copy
+  # was deleted on the 2026-11-21 rebase rather than kept as a duplicate key (YAML keeps only the
+  # LAST of two, silently — see the `core` surface note above, same cause).
   test_collision_preflight.py: 102.7  # ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 123.6
   test_gh_write_preflight.py: 5.2  # new in #11026; ⛔ An earlier version of this row carried `12.0` under a "flat estimate" note; ⛔ The CASE COUNT and the local timing are deliberately NOT restated here: both re-stale on every case a later round adds (this row already read "51 cases" against a 56-case file), and `tools/ci_timing.py --refresh-durations` re-derives the row from junit. What the weight covers: hermetic — real bare remotes under `tmp_path` driven through real `git`, no DB, no network, no model, no Docker. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it — ci-timing junit-census+top-15 2026-11-16 (run 43792641690); was 7.9
   test_belief_order_10137.py: 7.4  # The local private-lane reading is stated here precisely because it must NOT be substituted: 12 cases (re-derived with `grep -c '^def test_'`, not estimated), 10.3–13.0 s measured on a private lane at this PR's pre-review head. ⛔ It does not model CI either: all 12 cases take the `sdk` fixture — a LIVE `docker://` graph at `_live_utils.docker_uri(_GRAPH)`, wiped node-by-node per test (`DETACH DELETE n`) rather than re-created — and 11 of the 12 then read the graph through it, so the cost is fixture construction, not the file's own logic. Without a reachable live database this file does NOT skip in the default lane: #1436's gate refuses a silent skip and the cases ERROR (measured: 12 errors in 0.75 s with an unreachable port); only the carve-out lane (`TORTOISE_TEST_CARVE_OUT=1`) skips them. This row is MARGIN on the coverage floor, not the floor itself: the `ep` surface registration above (`:5753`) puts one more fast file in `fast_pool()`, and `duration_coverage_issues()` is count-based and passes with or without this row — its absence costs the shard split one flat-default file and is a derivation to re-run, NOT an `--integrity` red. `tests/test_ci_selection.py::test_2818_new_file_row_carries_the_flat_default_until_a_sweep_collects_it` pins the CONVENTION on its own #2818 row (a new file's first weight IS `DEFAULT_FAST_WEIGHT`); nothing pins THIS row's magnitude, so substitute nothing here and treat a re-derivation as a sweep job. `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.0

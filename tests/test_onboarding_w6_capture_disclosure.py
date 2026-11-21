@@ -4,10 +4,18 @@ docker-lane integration tests (the DE2E-11 self-use surface).
 W6 (session-capture disclosure, self-use path) owns:
 
 - the FIRST-capture in-conversation announcement: a 2xx capture response
-  carries `first_capture` exactly once per org — the capture pipeline writes
-  the graph-held `capture-disclosed` checkpoint (write_completed_step FWW,
+  carries `first_capture` exactly once per org — for a credential whose OWN
+  graph IS the org default, which is the class the pipeline writes the
+  graph-held `capture-disclosed` checkpoint for (`write_completed_step` FWW,
   so the disclosure can never re-fire), UNLESS #1927's session_recording
-  off-switch quieted the request first (409, never a checkpoint write);
+  off-switch quieted the request first (409, never a checkpoint write), OR
+  the key is CUSTOM-graph-bound, which runs neither half and never sets the
+  flag (#14086; the user-facing half is #14131), OR the org's
+  `capture-disclosed` step was already asserted at the checkpoint surface by
+  an ORG-WIDE agent credential — the step is FWW and `first_capture` is its
+  `created`, so an early assert retires the announcement and that surface is
+  only safe ON/AFTER the first capture (SKILL.md §8; the same limit is stated
+  in `tortoise/capture_disclosure.py`);
 - the Settings → Captured-sessions VIEW/DELETE leg (W4's Home 4 seam): GET
   /v1/sessions/{id} (dual-auth, #1828) renders the transcript panel, and
   DELETE /v1/sessions/{id} removes the Session + its owned subgraph AND
@@ -134,7 +142,8 @@ class TestFirstCaptureDisclosure:
     def test_second_capture_never_reannounces(self):
         """A later capture answers first_capture=false and cannot duplicate
         the checkpoint edge (FWW writer) — the announcement fires exactly
-        once per org, even across re-captures of deleted session ids."""
+        once per org for an org-level credential, even across re-captures of
+        deleted session ids (a CUSTOM-bound key never gets it: #14131)."""
         tc, org_id = _registered_client()
         try:
             assert _capture(tc, f"a-{uuid.uuid4().hex[:8]}")["first_capture"] is True
