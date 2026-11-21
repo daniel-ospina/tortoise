@@ -4135,6 +4135,16 @@ PACKS_DIR = "packs"
 #: the section and NOT a line number, so it cannot rot.
 E6_SURFACES = ("relations", "hierarchies")
 
+#: The ONE spelling of "this column was never read", so the two renderers and the three refusal
+#: paths cannot drift apart (#14060 review round 16, P3: the beside column published
+#: `unmeasured=0` beside a source saying this). A `written_source` that starts with this prefix
+#: means the four cells carry no reading, and the renderers say so instead of printing zeros.
+E6_NOT_READ_PREFIX = "not read — "
+
+#: What `written` holds when NO census was read at all: unknown, which is not zero. Zero is a
+#: measurement; `None` is the absence of one, and the row renders it as `NOT MEASURED`.
+_E6_WRITTEN_UNKNOWN = {"direct": None, "mediated": None, "none": None, "unmeasured": None}
+
 #: The open issue that owns a declared row which binds NO write path — `#11484`
 #: ("a pack-declared object relation must be writable as an edge, not just an IMPL label").
 #: ⛔ NOT `#11237`: that issue owns the runtime WRITER, i.e. `written`, which this row
@@ -4398,7 +4408,8 @@ def measure_e6(*, packs_dir: Path | str | None = None,
     except Exception as exc:  # the other rows must still be scored, and the gap named
         measurement["error"] = census_reason(exc)
         measurement["written_source"] = (
-            "not read — the pack registry could not be loaded")
+            E6_NOT_READ_PREFIX + "the pack registry could not be loaded")
+        measurement["written"] = _E6_WRITTEN_UNKNOWN
         return measurement
 
     # ⛔ A MALFORMED CENSUS IS A NAMED GAP, never a crash (#14060 review round 6, P3, measured:
@@ -4413,7 +4424,8 @@ def measure_e6(*, packs_dir: Path | str | None = None,
         measurement["error"] = (f"the census is a {type(census).__name__}, not an object; "
                                 f"no row could be enumerated")
         measurement["written_source"] = (
-            "not read — the census could not be enumerated")
+            E6_NOT_READ_PREFIX + "the census could not be enumerated")
+        measurement["written"] = _E6_WRITTEN_UNKNOWN
         return measurement
 
     packs = census.get("packs")
@@ -4470,7 +4482,17 @@ def measure_e6(*, packs_dir: Path | str | None = None,
     if error:
         measurement["error"] = error
         measurement["written_source"] = (
-            "not read — the census could not be enumerated")
+            E6_NOT_READ_PREFIX + "the census could not be enumerated")
+        # ⛔ A REFUSED ROW PUBLISHES NO COUNT FOR A COLUMN IT DID NOT READ (#14060 review round
+        # 16, P3, measured): `written` stayed at the all-zero dict initialised above, so a
+        # refused census carrying ONE enumerable row rendered `unmeasured=0` — every row
+        # measured — immediately beside `not read`. That is the same silent-zero shape rounds 7
+        # and 9 closed on the two sibling columns, left open on the third: the cells are set
+        # here to what was actually established. The rows exist (`rows` is enumerated above the
+        # guard), so `unmeasured` is their count and the other three are a measured zero; where
+        # no census was read at all, all four are `None` (`_E6_WRITTEN_UNKNOWN`).
+        measurement["written"] = {"direct": 0, "mediated": 0, "none": 0,
+                                  "unmeasured": len(rows)}
         return measurement
     pnia = census_tool.RELATION_PREDICATE_NOT_IN_ALLOWLIST
     # An isolated pack's rows are NOT in `packs`, so they are not in `declared` either — see
@@ -4524,7 +4546,7 @@ def measure_e6(*, packs_dir: Path | str | None = None,
         # left in its twin. The word is what changes here, as there — and the `not read — `
         # prefix with it, because the note splices this source into `… from {source}` (round 10:
         # without it the record read `unmeasured=1 from the census's rows could not be keyed …`).
-        source = ("not read — the census's rows could not be keyed beside the column (a row "
+        source = (E6_NOT_READ_PREFIX + "the census's rows could not be keyed beside the column (a row "
                   "field is a collection); its `written` cells are UNMEASURED")
     measurement["written"] = written
     measurement["written_source"] = source
@@ -4587,11 +4609,21 @@ def build_e6_row(e6: dict, *, bars: dict) -> dict:
         blocked_by = (E6_BINDING_OWNER if result["outcome"] == "FAIL"
                       else E6_POPULATION_OWNER)
     written = e6.get("written") or {}
-    beside = (f"written (REPORTED BESIDE the bar, never the bar — A1 owns the written "
-              f"graph): direct={written.get('direct')} "
-              f"mediated={written.get('mediated')} none={written.get('none')} "
-              f"unmeasured={written.get('unmeasured')} from "
-              f"{e6.get('written_source') or 'no artifact'}")
+    written_source = e6.get("written_source") or "no artifact"
+    # ⛔ NO COUNTS FOR A COLUMN THAT WAS NOT READ (#14060 review round 16, P3): the four cells
+    # were initialised to zero and printed beside a `written_source` saying `not read — …`, so a
+    # refused census with one enumerable row published `unmeasured=0` (every row measured) in
+    # the SAME sentence that said it never read it. The two halves of one sentence may not
+    # contradict each other, so a refused column renders as what it is.
+    if str(written_source).startswith(E6_NOT_READ_PREFIX):
+        beside = (f"written (REPORTED BESIDE the bar, never the bar — A1 owns the written "
+                  f"graph): NOT MEASURED — no cell was read: "
+                  f"{str(written_source)[len(E6_NOT_READ_PREFIX):]}")
+    else:
+        beside = (f"written (REPORTED BESIDE the bar, never the bar — A1 owns the written "
+                  f"graph): direct={written.get('direct')} "
+                  f"mediated={written.get('mediated')} none={written.get('none')} "
+                  f"unmeasured={written.get('unmeasured')} from {written_source}")
     if not measured:
         # ⛔ THE NOTE NAMES THE FAULT IT WAS TOLD ABOUT, not a cause it assumed (#14060 review
         # round 9, same class as the `written_source` fix): this branch said "the pack registry
@@ -5020,10 +5052,18 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         # is the line the log actually reads, so this is the one an arm below drives.
         add(f"e6 error: {e6['error']}")
     written = e6.get("written") or {}
+    written_source = e6.get("written_source")
+    # ⛔ AND THE COMMITTED LOG MAY NOT PRINT A COUNT IT NEVER READ EITHER (#14060 review round
+    # 16, P3 — the same sentence one renderer over): this line printed `unmeasured=0 …` beside
+    # `source=not read — …` for every refused row. The two renderers are pinned together below.
     add("e6 written (REPORTED BESIDE the bar, NEVER the bar — A1 owns the written "
-        f"graph): source={e6.get('written_source')} "
-        f"direct={written.get('direct')} mediated={written.get('mediated')} "
-        f"none={written.get('none')} unmeasured={written.get('unmeasured')}")
+        "graph): "
+        + (f"NOT MEASURED — no cell was read: "
+           f"{str(written_source)[len(E6_NOT_READ_PREFIX):]}"
+           if str(written_source).startswith(E6_NOT_READ_PREFIX) else
+           f"source={written_source} "
+           f"direct={written.get('direct')} mediated={written.get('mediated')} "
+           f"none={written.get('none')} unmeasured={written.get('unmeasured')}"))
     add("")
     # #10982: the A-row census, rendered from the SAME pass as the E-row census so a reader cannot
     # be served two different graphs in one log, and emitted at a REAL section boundary — ⛔ it used

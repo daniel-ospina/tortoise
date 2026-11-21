@@ -1647,6 +1647,19 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
         # differ from `len(rows)`, which no fixture below provides, so it is asserted at the
         # end of this block against a population that was actually enumerated.
         assert e6["error"] is None or "census" in str(e6["error"]), (why, e6["error"])
+        # ⛔ AND THE CELLS FOLLOW WHAT WAS ACTUALLY READ (#14060 review round 16, P3): `written`
+        # used to stay at the all-zero dict initialised in `measure_e6`, so a refused row carried
+        # four numbers for a column no census was read for. The tuple above spans BOTH refusal
+        # paths, and each states only what it established: a census that was never read (not an
+        # object) has no count at all, so its cells are `None`; a dict census that reached the
+        # population guard has ROWS, so its cells are numbers (`unmeasured` = the refused rows).
+        if isinstance(bad_census, dict):
+            assert None not in e6["written"].values(), (why, e6["written"])
+        else:
+            assert all(value is None for value in e6["written"].values()), (why, e6["written"])
+        note = measure.build_e6_row(e6, bars=BARS)["note"]
+        assert "NOT MEASURED" in note, (why, note)
+        assert "unmeasured=" not in note, (why, note)
     # ⛔ …and the DENOMINATOR may not be read from a block that survived a coercion the ROWS
     # did not (#14060 review round 9, P2). ⛔ No fixture in the tuple above carries a `declared`
     # that could DIFFER from `len(rows)` — four omit `population` and the fifth's
@@ -1667,19 +1680,19 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
     intact = {"packs": 7, "relations": 39, "hierarchies": 6, "declared": 45}
     one_row = {"dev": {"relations": [{"predicate": "p", "from_kind": "a", "to_kind": "b"}],
                       "hierarchies": []}}
-    for bad_census, why, refusal in (
+    for bad_census, why, refusal, expected_unmeasured in (
             ({"packs": "x", "population": dict(intact)},
-             "non-object packs beside an INTACT population", "could be enumerated"),
+             "non-object packs beside an INTACT population", "could be enumerated", 0),
             ({"packs": [1, 2], "population": dict(intact)},
-             "list packs beside an intact population", "could be enumerated"),
+             "list packs beside an intact population", "could be enumerated", 0),
             ({"packs": {"dev": {"relations": 42}}, "population": dict(intact)},
-             "non-list surface beside an intact population", "could be enumerated"),
+             "non-list surface beside an intact population", "could be enumerated", 0),
             ({"packs": one_row},
              "an enumerable `packs` block with NO `population` at all",
-             "no usable `population` block"),
+             "no usable `population` block", 1),
             ({"packs": one_row,
               "population": {"packs": 1, "relations": 1, "hierarchies": 0, "declared": 2}},
-             "a population block whose split does not add up", "does not add up")):
+             "a population block whose split does not add up", "does not add up", 1)):
         class _PopulationCensus:
             RELATION_WRITABLE = real.RELATION_WRITABLE
             RELATION_PREDICATE_NOT_IN_ALLOWLIST = real.RELATION_PREDICATE_NOT_IN_ALLOWLIST
@@ -1695,7 +1708,14 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
         assert e6["error"], (why, e6)
         assert refusal in str(e6["error"]), (why, e6["error"])
         assert e6["declared"] == 0, (why, e6["declared"])
-        assert sum(e6["written"].values()) == 0, (why, e6["written"])
+        # ⛔ AND THE REFUSED COLUMN CARRIES WHAT WAS ESTABLISHED, not four zeros (#14060
+        # review round 16, P3, measured): the cells stayed at the initialised all-zero dict, so
+        # a refusal carrying ONE enumerable row published `unmeasured=0` — every row measured —
+        # in the same sentence as `not read`. `unmeasured` is now the count of the rows the
+        # guard refused, and the three other cells are a zero that WAS measured (nothing was
+        # read into them). `expected_unmeasured` is typed per fixture, not derived.
+        assert e6["written"] == {"direct": 0, "mediated": 0, "none": 0,
+                                "unmeasured": expected_unmeasured}, (why, e6["written"])
         row = measure.build_e6_row(e6, bars=BARS)
         assert row["verdict"] == "BLOCKED", (why, row)
         assert row["numerator"] is None and row["denominator"] is None, (why, row)
@@ -1705,6 +1725,14 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
         # pack registry … could not be loaded" for a run whose registry loaded fine.
         assert refusal in row["note"], (why, row["note"])
         assert "could not be loaded" not in row["note"], (why, row["note"])
+        # ⛔ AND THE NOTE PRINTS NO COUNT FOR A COLUMN IT DID NOT READ (#14060 review round 16,
+        # P3): the two halves of this one sentence contradicted each other — `unmeasured=0`
+        # (every row measured) followed by `not read`. The beside column now says NOT MEASURED
+        # and names the reason, and no `direct=`/`unmeasured=` figure is rendered at all.
+        assert "NOT MEASURED" in row["note"], (why, row["note"])
+        assert "unmeasured=" not in row["note"], (why, row["note"])
+        assert "direct=" not in row["note"].split("written (REPORTED BESIDE")[-1], (why,
+                                                                                 row["note"])
     # The coverage claim the tuple above used to make, where it CAN vary: on a census that WAS
     # enumerated, the column covers exactly the rows the row counts.
     monkeypatch.undo()  # `real` is the MODULE; the loader it came from is the patched name
@@ -1752,11 +1780,16 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
         assert measure.E6_CENSUS not in e6["written_source"], (why, e6["written_source"])
         # ⛔ AND THE SENTENCE IS ONE THE NOTE CAN SPLICE (#14060 review round 12, P3: the prefix
         # this PR added had NO arm — deleting it left the whole file exactly as green as the
-        # baseline, measured). `build_e6_row` renders `… unmeasured=N from {written_source}`, so
-        # a source without `not read — ` reads as `from the census's rows could not be keyed …`.
-        assert e6["written_source"].startswith("not read — "), (why, e6["written_source"])
-        assert f"from {e6['written_source']}" in measure.build_e6_row(
-            e6, bars=BARS)["note"], (why, measure.build_e6_row(e6, bars=BARS)["note"])
+        # baseline, measured; round 16 then found the counter-example this arm's own comment had
+        # created, because the splice printed `unmeasured=0` for a column it said was not read).
+        # The prefix is now a NAMED constant and both renderers read it: the beside column says
+        # NOT MEASURED and names the same reason, without a count.
+        assert e6["written_source"].startswith(measure.E6_NOT_READ_PREFIX), (
+            why, e6["written_source"])
+        note = measure.build_e6_row(e6, bars=BARS)["note"]
+        assert "NOT MEASURED" in note, (why, note)
+        assert e6["written_source"][len(measure.E6_NOT_READ_PREFIX):] in note, (why, note)
+        assert "unmeasured=" not in note, (why, note)
     # …and an EMPTY `packs` object, the one shape the fault did not cover: it read as a normal
     # read, so the beside column claimed to have read an artifact it covered none of.
     empty = tmp_path / "empty.json"
@@ -3025,6 +3058,16 @@ def test_the_renderer_renders_a_log_from_the_committed_record(monkeypatch, tmp_p
     gap_lines = [line for line in render(_prereg(), (gap_measured, gap_row)).splitlines()
                  if "e6 error" in line]
     assert gap_lines, "the rendered log must state the gap it could not score"
+    # ⛔ AND THE LOG MAY NOT PRINT THE COUNTS IT DID NOT READ EITHER (#14060 review round 16,
+    # P3 — the SAME sentence one renderer over: `build_e6_row`'s note was fixed above, and
+    # `render_log`'s `e6 written` line printed `unmeasured=0 …` beside `source=not read — …`
+    # for every refused row). This reads the rendered LINE, so a fix applied to the note alone
+    # cannot pass it.
+    written_lines = [line for line in render(_prereg(), (gap_measured, gap_row)).splitlines()
+                     if "e6 written" in line]
+    assert written_lines, "the rendered log must carry the beside column"
+    assert "NOT MEASURED" in written_lines[0], written_lines[0]
+    assert "unmeasured=" not in written_lines[0], written_lines[0]
     assert "does not add up" in "\n".join(gap_lines), gap_lines
     assert "could not be loaded" not in "\n".join(gap_lines), gap_lines
     assert "e1 note: both before realizations clear E1's own floors" in text
