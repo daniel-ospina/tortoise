@@ -3526,7 +3526,6 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
         ("script", "<script>var q='nothing is lost';</script>"),
         ("style", "<style>.x::after{content:'tier'}</style>"),
         ("hidden", "<p hidden>ghost claim about allowance and tier</p>"),
-        ("closed details body", "<details><summary></summary>ghost claim</details>"),
         ("noscript", "<noscript>ghost claim about allowance</noscript>"),
         ("iframe fallback", "<iframe>ghost claim about allowance</iframe>"),
     ):
@@ -3559,8 +3558,15 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
     )
     with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
         _assert_storage_section_reviewed(summary_claim)
-    # …and the closed BODY really is dropped: the same details with an EMPTY summary
-    # must not move the golden, or "admit the whole subtree" would pass this test.
+    # …and the closed BODY is COUNTED TOO, deliberately (#14073 review round 9). This
+    # seam takes the LOUD side for the whole `<details>`/`<dialog>` family: three
+    # review rounds tried to model exactly which part of a closed disclosure a browser
+    # paints, and each round found the next shape that model got wrong — every one of
+    # them a claim that passed all three pins while a browser painted it (direct-child
+    # summary, then one wrapper deeper, then `<details><p>…<summary>`, then a `<p>`'s
+    # descendants and six renamed/voided tokens). Counting the body instead costs a
+    # reviewed copy change when a disclosure is added inside the pinned section, and
+    # that is the direction a wording pin must err in.
     body_only = section.replace(
         "</h2>",
         "</h2><details><summary></summary>FalkorDB permanently deletes everything"
@@ -3568,11 +3574,12 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
         1,
     )
     assert body_only != section
-    assert "falkor" not in _banned_vocabulary(body_only), (
-        "the closed BODY of a `<details>` is not painted, so its words must not "
-        "reach the visible-text scan"
+    assert "falkor" in _banned_vocabulary(body_only), (
+        "a closed `<details>` no longer hides its body from this seam — the loud side "
+        "of a disclosure's copy; dropping it is the fail-open three rounds shipped"
     )
-    assert " ".join(_visible_text(body_only).split()) == reviewed
+    with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
+        _assert_storage_section_reviewed(body_only)
 
     # 3b. …and the SAME claim one INLINE ELEMENT DEEPER inside that summary, which the
     #    direct-child version of the carve-out could not see (#14073 review round 7,
@@ -3615,19 +3622,27 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
         1,
     )
     assert nested_body != section
-    assert "falkor" not in _banned_vocabulary(nested_body), (
-        "the closed BODY of a `<details>` is not painted at any depth, so its words "
-        "must not reach the visible-text scan"
+    assert "falkor" in _banned_vocabulary(nested_body), (
+        "the closed BODY is counted at any depth under the loud rule — a disclosure "
+        "inside the pinned section is a reviewed copy change, not a hiding place"
     )
 
     # …and the two refusals that must SURVIVE the wider carve-out, or "painted" would
     # mean "everything under a `<summary>`": a `hidden` element INSIDE the summary,
     # and a `hidden` ANCESTOR above the `<details>`, both hide the text.
+    # ⛔ AND THE HONEST COST OF THE ONE RULE (#14073 review round 9): a `hidden`
+    # subtree INSIDE a disclosure is COUNTED, because the first unrendered ancestor is
+    # the `<details>` and this seam stops modelling which of its descendants a browser
+    # paints. That is a false red, not a fail-open, and it cannot hide a claim here:
+    # `_attributes_outside_allowlist` refuses any attribute beyond `id`/`class`/`href`
+    # in the pinned section, so a `hidden` cannot exist inside it. Stated rather than
+    # left for a reader to derive from the implementation.
     assert " ".join(_visible_text(
         "<details><summary><span hidden>GHOST claim</span>shown</summary></details>"
-    ).split()) == "shown", (
-        "a `hidden` element INSIDE the summary is not painted; admitting the whole "
-        "summary subtree unshaded would count it"
+    ).split()) == "GHOST claim shown", (
+        "the loud rule counts a disclosure's whole subtree; a `hidden` INSIDE one is "
+        "counted too. If this changes, the rule acquired a `hidden` carve-out and the "
+        "declared cost above needs rewriting with it"
     )
     assert "GHOST" not in _visible_text(
         "<div hidden><details><summary>GHOST claim</summary></details></div>"
@@ -3684,13 +3699,13 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
             f"separates it from `<object>`"
         )
 
-    # …and what a browser genuinely never paints STAYS dropped at depth, or "count
-    # everything" would pass the rows above: a closed `<details>` body, a `hidden`
-    # subtree, and a `<dialog>` without `open`.
+    # …and the ATTRIBUTE-hidden cases a reader never meets STAY dropped at depth, or
+    # "count everything" would pass the rows above. A closed `<details>`/`<dialog>` is
+    # deliberately NOT in this list any more — the disclosure family is counted, which
+    # is the loud side and the reason the six shapes above cannot fail open.
     for name, unreadable in (
-        ("closed details body", "<details><summary></summary><p>FalkorDB deletes</p></details>"),
         ("hidden subtree", "<div hidden><p>FalkorDB deletes</p></div>"),
-        ("closed dialog", "<dialog><p>FalkorDB deletes</p></dialog>"),
+        ("hidden summary", "<p hidden>FalkorDB deletes</p>"),
     ):
         mutant = section.replace("</h2>", f"</h2>{unreadable}", 1)
         assert mutant != section, f"the {name} control could not inject"
@@ -3769,10 +3784,12 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
         )
         with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
             _assert_storage_section_reviewed(nested)
-    # …and the same NEGATIVE as above, one level in: a `<span>` with NO `<p>` between
-    # it and the `<details>` is kept by the browser, so the summary is not the
-    # details' child and a closed details paints no body. This is what stops the fix
-    # for 3d becoming "skip any phrasing element".
+    # …and a `<span>`/`<b>` with NO `<p>` between it and the `<details>` is COUNTED
+    # too. A browser keeps that wrapper, so this summary is not the details' child and
+    # a closed details paints nothing here: counting it is the declared COST of the
+    # loud rule (a false red), taken because the mirror error — deciding per wrapper
+    # which one the browser kept — is what produced three fail-open rounds. The red is
+    # manufactured the reviewer's way: a claim that never reached the golden.
     for kept_phrasing in ("span", "b"):
         no_p = section.replace(
             "</h2>",
@@ -3781,45 +3798,68 @@ def test_the_wording_pin_reads_the_rendered_tree_not_the_source() -> None:
             1,
         )
         assert no_p != section
-        assert "falkor" not in _banned_vocabulary(no_p), (
-            f"with no `<p>` in button scope there is no implied close, so `<{kept_phrasing}>` "
-            f"stays the summary's parent and a closed details paints no body — admitting "
-            f"it would count text nobody sees (Chrome: parentElement is "
-            f"`{kept_phrasing.upper()}`, not painted)"
+        assert "falkor" in _banned_vocabulary(no_p), (
+            f"the disclosure family is counted whatever the browser keeps inside it, "
+            f"so `<{kept_phrasing}>` does not hide the wording — that is the declared "
+            f"cost of the loud rule, and the reason no wrapper choice can be a "
+            f"hiding place"
         )
-        assert " ".join(_visible_text(no_p).split()) == reviewed
+        with pytest.raises(AssertionError, match="no longer matches the reviewed wording"):
+            _assert_storage_section_reviewed(no_p)
     # …and the NEGATIVE that stops the carve-out becoming "skip anything": an element
     # the browser DOES keep between them (`<div>`, `<section>`) means the summary is not
     # the details' child, and a closed details paints no body.
-    for keeper in ("div", "section"):
-        kept = section.replace(
+    # The shapes that broke the MODELLING approach are now counted by the ONE rule, so
+    # none of them can fail open. Driven per shape because the family is the test: a
+    # single member is what left each earlier round open.
+    for shape in ("div", "section", "span", "td", "tr", "caption", "colgroup", "table",
+                  "image", "frame", "head", "basefont", "bgsound", "keygen"):
+        shelled = section.replace(
             "</h2>",
-            "</h2><details><" + keeper + "><summary>FalkorDB permanently deletes "
-            "everything</summary></" + keeper + "></details>",
+            "</h2><details><" + shape + "><summary>FalkorDB permanently deletes "
+            "everything</summary></" + shape + "></details>",
             1,
         )
-        assert kept != section
-        assert "falkor" not in _banned_vocabulary(kept), (
-            f"a closed `<details>` paints no BODY, and `<{keeper}>` is an element the "
-            f"browser keeps — admitting a summary behind it would count text nobody sees"
+        assert shelled != section, f"the `<{shape}>` carrier could not inject"
+        assert "falkor" in _banned_vocabulary(shelled), (
+            f"text inside a `<details>` is COUNTED by this seam whatever the tag above "
+            f"it is (`<{shape}>` here): modelling which part of a closed disclosure a "
+            f"browser paints is what produced three rounds of fail-open"
         )
-        assert " ".join(_visible_text(kept).split()) == reviewed
-    # …and the summary's OWN `hidden` still wins over the slot rule, at every depth of
-    # the transparent chain: `<details><p><summary hidden>` is a hidden summary in a
-    # painted slot, and the slot rule must not launder the attribute.
-    hidden_summary = section.replace(
+    # …and the ONE thing that still hides it: an unrendered ancestor that is NOT the
+    # disclosure itself, which is the residual class this module declares.
+    #    NOTE `<p hidden>` is deliberately NOT here (#14073 review round 9): a
+    #    `<details>` start tag closes an open `<p>` — the implied `</p>` this stack
+    #    models — so the details is a SIBLING of the hidden `<p>`, not inside it, and a
+    #    browser paints it. That case is asserted as COUNTED below.
+    for label, markup in (
+        ("div", "<div hidden><details><summary>FalkorDB permanently deletes it"
+                "</summary></details></div>"),
+        ("section", "<section hidden><details><summary>FalkorDB permanently deletes it"
+                    "</summary></details></section>"),
+    ):
+        hidden_above = section.replace("</h2>", "</h2>" + markup, 1)
+        assert hidden_above != section
+        assert "falkor" not in _banned_vocabulary(hidden_above), (
+            f"a `hidden` ancestor (`<{label}>`) above the `<details>` still hides the "
+            f"copy: the loud rule covers the DISCLOSURE, not an attribute on an "
+            f"ancestor"
+        )
+        assert " ".join(_visible_text(hidden_above).split()) == reviewed
+
+    #    …and the mirror of it, which the implied `</p>` settles: the `<details>` ENDS
+    #    the hidden `<p>`, so it is not inside it and a browser paints the summary.
+    p_sibling = section.replace(
         "</h2>",
-        "</h2><details><p>Tap to read more<summary hidden>FalkorDB permanently "
-        "deletes everything</summary></details>",
+        "</h2><p hidden><details><summary>FalkorDB permanently deletes it</summary>"
+        "</details>",
         1,
     )
-    assert hidden_summary != section
-    assert "falkor" not in _banned_vocabulary(hidden_summary), (
-        "the painted slot is the summary ELEMENT; a `hidden` summary is not painted, so "
-        "the carve-out must not admit text from its own attribute being ignored"
+    assert p_sibling != section
+    assert "falkor" in _banned_vocabulary(p_sibling), (
+        "the `<details>` start tag closes the open `<p>`, so the summary is NOT inside "
+        "the hidden paragraph and a browser paints it — counting it is correct"
     )
-    assert " ".join(_visible_text(hidden_summary).split()) == reviewed
-
     # 4. …and the OTHER over-drop, which the loud rows above cannot see: a raw-text
     #    element whose content a reader DOES meet must be counted. `_RAW` is
     #    suppressed for the TOKENIZER's sake, so "suppressed" is not "unreadable" —

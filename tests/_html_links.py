@@ -322,31 +322,13 @@ class _AnchorHrefParser(HTMLParser):
         "rb", "rp", "rt", "rtc", "select", "table", "tbody", "td", "tfoot",
         "th", "thead", "tr",
     })
-    #: Elements a browser NEVER KEEPS between a closed `<details>` and its `<summary>`,
-    #: so the text recording looks past them when it asks whether a `<summary>` is the
-    #: details' child (#14073 review round 8, P1, measured). It IS `_IMPLICITLY_CLOSED`:
-    #: the tags the tokenizer closes on its own or ignores outside a table (`<p>`,
-    #: `<td>`, `<tr>`, `<caption>`, `<colgroup>`, …) — and `table` is already a member,
-    #: which is what covers a `<summary>` written INSIDE a table (the browser
-    #: FOSTER-PARENTS it out in front of the table, so it is the `<details>`' child
-    #: again). Kept as its own name so the two questions can diverge without one edit
-    #: silently changing both.
-    #:
-    #: ⛔ THIS SET SAYS "THE BROWSER HAS NO ELEMENT HERE", NOT "SKIP ANYTHING". A `<div>`
-    #: or `<section>` is NOT in it: the browser keeps those, so a `<summary>` behind one
-    #: is not the details' child and nothing under it is painted. That negative is what
-    #: stops the carve-out admitting a whole closed body.
-    _SUMMARY_TRANSPARENT = _IMPLICITLY_CLOSED
     #: The block-start tags whose START TAG closes an open `<p>` — spec "in body":
-    #: *"If the stack of open elements has a `p` element in button scope, then close
-    #: a `p` element"*, and "close a `p` element" is *"… pop the current node off
-    #: the stack of open elements until a `p` element has been popped"* — the `<p>`
-    #: AND everything opened inside it.
-    #:
-    #: `summary` is on this list, which is what makes the painted-summary carve-out
-    #: answer the browser's question rather than this stack's (#14073 review round 9,
-    #: P1, measured): with a `<span>` opened inside the `<p>`, the browser pops BOTH
-    #: and the `<summary>` becomes the `<details>`' direct child.
+    #: *"If the stack of open elements has a `p` element in button scope, then close a
+    #: `p` element"*, and "close a `p` element" is *"… pop the current node off the
+    #: stack of open elements until a `p` element has been popped"* — the `<p>` AND
+    #: everything opened inside it. `<summary>` is on this list, which is what puts the
+    #: `<summary>` where a browser puts it and keeps this stack from carrying a `<p>`'s
+    #: descendants past the point the browser closed them (#14073 review round 9).
     _P_CLOSERS = frozenset({
         "address", "article", "aside", "blockquote", "center", "details",
         "dialog", "dir", "div", "dl", "fieldset", "figcaption", "figure",
@@ -461,16 +443,25 @@ class _AnchorHrefParser(HTMLParser):
     # recording a heading in that second summary would BOUND the slice at something no
     # reader meets — the fail-open direction this whole rule exists to close.
     #
-    # ⛔ BUT THE TEXT QUESTION RUNS THE OTHER WAY, and one flag must not answer both
-    # (round-6 review, P1, measured). `<summary>`'s text IS painted, so refusing it in
-    # the TEXT recording DROPS rendered copy — a claim inside a closed
-    # `<details><summary>` left every `#storage` pin green. `_open_extent` therefore
-    # marks a `<summary>` whose immediate parent is the closed `<details>` as rendered,
-    # and `_text_is_painted` reads that. The BOUNDARY inheritance this frozenset drives
-    # stays total for `_unmet_by_reader` even so, because the closed `<details>`'s own
-    # `False` never leaves the stack — `any(not renders …)` still refuses a heading
-    # anywhere under it, so `("summary of a closed details", '<details><summary><h2
-    # id="qs">Q</h2></summary></details>')` keeps bounding nothing.
+    # ⛔ BUT THE TEXT QUESTION RUNS THE OTHER WAY, AND THERE THE FLAG IS SIMPLY NOT
+    # MODELLED (#14073 review rounds 6-9). `<summary>`'s text IS painted, so refusing it
+    # in the TEXT recording DROPS rendered copy — a claim inside a closed
+    # `<details><summary>` left every `#storage` pin green. Four review rounds tried to
+    # model exactly which part of a disclosure a browser paints (the summary slot and
+    # not the body), and each round found the next shape that model got wrong — every
+    # one of them a fail-open: the direct-child summary, one inline wrapper deeper, an
+    # intervening `<p>`/`<td>`/`<table>`, a `<p>`'s descendants, and six tokens the tree
+    # builder renames or voids. So `_text_is_painted` takes the LOUD side instead: the
+    # first unrendered ancestor decides, and when it is one of THESE the text is
+    # COUNTED whatever the browser does with the body. A disclosure inside the pinned
+    # section therefore has to match the golden — a reviewed copy change, not a hiding
+    # place.
+    #
+    # The BOUNDARY inheritance this frozenset drives stays total for
+    # `_unmet_by_reader`: the closed `<details>`'s own `False` never leaves the stack,
+    # and `any(not renders …)` still refuses a heading anywhere under it, so
+    # `("summary of a closed details", '<details><summary><h2 id="qs">Q</h2></summary>
+    # </details>')` keeps bounding nothing.
     _RENDERS_WITH_ATTR = frozenset({"details", "dialog"})
     #: Element types whose CHILD HEADINGS must not bound the slice, while their own
     #: DIRECT TEXT may still be counted — the third pair of answers one flag must not
@@ -1185,11 +1176,11 @@ class _AnchorHrefParser(HTMLParser):
         # that over-counts text a reader may not see, i.e. the LOUD direction, and
         # modelling "first only" needs a per-`<details>` counter in the stack for a
         # distinction no page here makes.
-        if (
-            self._open_elements
-            and not self._open_elements[-1][2]
-            and not self._is_painted_summary_slot(tag)
-        ):
+        if self._open_elements and not self._open_elements[-1][2]:
+            # Inherited, so `<div hidden><section><h2>` hides the heading without
+            # `_unmet_by_reader` having to walk the stack to the `hidden` div. The TEXT
+            # seam deliberately does NOT inherit a closed `<details>`/`<dialog>`'s flag
+            # this way — see `_text_is_painted`.
             renders = False
         self._open_elements.append((tag, opened_container, renders))
 
@@ -1349,93 +1340,47 @@ class _AnchorHrefParser(HTMLParser):
         ):
             self.text.append(data)
 
-    def _is_painted_summary_slot(self, tag: str) -> bool:
-        """Is `tag` the `<summary>` a closed `<details>` is PAINTING?
-
-        A closed `<details>` hides its BODY and paints its summary slot, so the
-        inheritance that makes its children `renders=False` must not reach that one
-        element — otherwise the text recording drops a claim a reader meets (measured:
-        `<details><summary>FalkorDB permanently deletes…</summary></details>` in
-        `#storage` left the allowlist, the destinations, the vocabulary scan and the
-        wording golden all green while Chromium painted the summary).
-
-        ⛔ "THE SLOT" IS NOT "THE NEXT STACK ENTRY" (#14073 review round 8, P1,
-        measured). The stack keeps elements the tokenizer has already closed, ignored or
-        foster-parented, so in `<details><p>Tap to read more<summary>CLAIM</summary>` the
-        `<p>` sits between the two and inherited `False` down into the summary — while
-        every browser closes the `<p>` at the `<summary>` start tag and paints the
-        summary at 812×54 px. So the walk looks PAST `_SUMMARY_TRANSPARENT`: the
-        elements a browser never keeps in that position. It does NOT look past anything
-        else, so `<details><div><summary>…` stays dark (the browser keeps the `div`, the
-        summary is not the details' child, and a closed details paints no body).
-
-        Its own attributes still win: the caller applies this on top of the
-        OWN-attribute decision, so `<details><p><summary hidden>…` stays unpainted.
-        """
-        if tag != "summary":
-            return False
-        stack = self._open_elements
-        index = len(stack) - 1
-        while index >= 0 and stack[index][0] in self._SUMMARY_TRANSPARENT:
-            index -= 1
-        return index >= 0 and stack[index][0] == "details" and not stack[index][2]
-
     def _text_is_painted(self) -> bool:
-        """Is the text just read inside a subtree a browser PAINTS?
+        """Is the text just read inside a subtree the wording pin should READ?
 
-        ⛔ NOT `all(renders for … _open_elements)`, and the difference is a measured
-        P1 (#14073 review round 6). A closed `<details>` carries `renders=False`, which
-        is the right answer to "is this element's CONTENT painted" for the BOUNDARY
-        question — but its `<summary>` IS painted, so a plain `all()` over the stack
-        dropped a claim written in a summary and left every `#storage` pin green while
-        Chromium painted it.
+        ⛔ LOUD BY DESIGN: A CLOSED `<details>`/`<dialog>` DOES NOT HIDE TEXT HERE, and
+        that is a template for how this seam answers every question it cannot settle.
+        Three review rounds tried to model the browser exactly — "the summary slot is
+        painted, its body is not" — and each round found the next shape that model got
+        wrong, every one of them a FAIL-OPEN through all three `#storage` pins:
 
-        The flag on `<details>` describes its BODY. So one case is carved out: a closed
-        `<details>` whose NEXT open element is its `<summary>`. That `<details>` flag is
-        skipped and the answer is whatever the ancestors ABOVE the pair say (a `hidden`
-        div around the `<details>` still hides both). A second `<summary>` is treated the
-        same — the over-count is the loud direction, and the "first only" distinction
-        needs a per-`<details>` counter this stack does not carry.
+        * round 6: the direct-child `<summary>` was dropped (``<details><summary>``);
+        * round 7: one inline wrapper deeper was dropped (``<summary><span>``);
+        * round 8: an intervening element was dropped (``<details><p>…<summary>``),
+          because this stack keeps tags the tokenizer has already closed, ignored or
+          foster-parented — ``<td>``/``<tr>``/``<caption>``/``<colgroup>``/``<table>``;
+        * round 9: a `<p>`'s DESCENDANTS (a `<summary>` start tag closes the `<p>` in
+          button scope and pops everything above it) and six tokens the builder renames
+          or voids (``image``, ``frame``, ``head``, ``basefont``, ``bgsound``, ``keygen``)
+          — plus the opposite error, twenty members of the transparency set being
+          elements the browser KEEPS, which counted unpainted copy (false red).
 
-        ⛔ THE CARVE-OUT IS PER `<details>`, NOT PER "CURRENT ELEMENT" (#14073 review
-        round 7, P1, measured). The first version of this method asked whether the
-        CURRENT element was a `<summary>` whose immediate parent was the `<details>`,
-        which only holds while the text is a DIRECT child of the summary. One inline
-        element deeper — `<details><summary><span>…</span></summary></details>`, and
-        equally `<b>`, `<a>`, `<em>` — the current element is the `<span>`, the
-        carve-out did not fire, and the painted claim was dropped: measured through the
-        `#storage` aggregate, the attribute allowlist, the destination pin, the
-        vocabulary scan AND the wording golden all stayed green while a browser painted
-        the span. Skipping the FLAG (rather than matching the current tag) makes depth
-        irrelevant, which is the property the browser's rendering has.
+        The lesson is not "one more shape": a faithful tree-builder is a parser, not a
+        test helper, and every attempt to approximate it left a hole a claim could be
+        written through. So the seam takes the LOUD side for this whole family, exactly
+        as `_RENDERS_WITH_ATTR` already does for the BOUNDARY question — there the loud
+        side is a longer slice, here it is MORE TEXT:
+
+        * the first unrendered ancestor decides;
+        * if that ancestor is a `<details>`/`<dialog>`, the text is COUNTED whatever the
+          browser does with its body. The cost is named: copy a reader only meets after
+          opening the disclosure also has to match the golden, so adding one inside the
+          pinned section is a deliberate, reviewed copy change rather than a silent
+          edit. That is the safe direction for a wording pin — the alternative, dropping
+          rendered copy, is how three P1s shipped;
+        * any OTHER unrendered ancestor (`hidden`, `_UNRENDERED`, `_FALLBACK_RENDERS`)
+          still drops the text, and those are the residuals the module declares.
         """
-        stack = self._open_elements
-        # Elements the browser does NOT have on this path, so their inherited `False`
-        # must not block: the closed `<details>` whose summary slot is painted, and the
-        # elements it never keeps between itself and that summary.
-        transparent: set[int] = set()
-        for index, (tag, _container, renders) in enumerate(stack):
-            if renders or tag != "details":
+        for tag, _container, renders in self._open_elements:
+            if renders:
                 continue
-            moved_past = index + 1
-            while moved_past < len(stack) and stack[moved_past][0] in self._SUMMARY_TRANSPARENT:
-                moved_past += 1
-            if (
-                moved_past < len(stack)
-                and stack[moved_past][0] == "summary"
-                # Belt-and-braces with the loop below, which checks the summary's own
-                # flag anyway: measured, removing THIS condition alone changes no
-                # answer (#14073 review round 8). It stays because it states the rule
-                # at the point the carve-out is decided, so a later change to the loop
-                # cannot silently admit a `hidden` summary.
-                and stack[moved_past][2]
-            ):
-                transparent.add(index)
-                transparent.update(range(index + 1, moved_past))
-        for index, (_tag, _container, renders) in enumerate(stack):
-            if renders or index in transparent:
-                continue
-            return False
+            # The first unrendered ancestor decides, and this is that ancestor.
+            return tag in self._RENDERS_WITH_ATTR
         return True
 
     def parse_comment(self, i: int, report: bool = True) -> int:
@@ -1818,9 +1763,12 @@ def extract_visible_text(html: str) -> str:
 
     ⛔ WHERE THIS DELIBERATELY DIFFERS FROM `_unmet_by_reader`, because the two
     questions have OPPOSITE loud directions (#14073 review round 6):
-    * a `<summary>` whose parent is a CLOSED `<details>` IS recorded here — it is
-      painted, and dropping it hid a rendered claim from the wording golden (P1,
-      measured); the closed BODY stays dropped, as the browser drops it;
+    * the WHOLE SUBTREE of a closed `<details>`/`<dialog>` is recorded here — the
+      disclosure family is counted rather than modelled, because four review rounds of
+      modelling "which part of a closed disclosure is painted" each produced a new
+      fail-open (direct-child summary, one wrapper deeper, an intervening `<p>`, a
+      `<p>`'s descendants, renamed/voided tokens). The cost is named: copy a reader only
+      meets after opening the disclosure also has to match the golden;
     * `<datalist>`/`<canvas>`/`<video>`/`<audio>`/`<meter>`/`<progress>` FALLBACK
       content is dropped here (`_UNRENDERED`), which is MEASURED rather than a
       direction call: a supporting browser paints none of it (0 painted px with the
