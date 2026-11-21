@@ -276,7 +276,22 @@ def _residue_block() -> str:
     every arm's grading surface.
     """
     lines = (ROOT / "tools" / "sdk_privatise.py").read_text(encoding="utf-8").splitlines()
-    pin = next(i for i, line in enumerate(lines) if line.startswith("SWEEP_RESIDUE = ("))
+    # ⛔ EXACTLY ONE ASSIGNMENT, ASSERTED HERE (#14038 review, P1). The block above states the rule
+    # in its own words — "THIS RECORD CARRIES NO ASSIGNMENT, deliberately … ONE assignment, at the
+    # end of the records, cannot be shadowed by a second re-cut" — and a merge that folds two
+    # sides each carrying a record also carries BOTH assignments. Python binds the LAST one, so
+    # the file still imports the right pin, while this walk anchored on the FIRST and every arm
+    # below graded only the prose above that first pin, silently losing the newest records. The
+    # extent pin in `test_the_residue_block_is_a_real_block_and_publishes_its_addresses` cannot
+    # see this: its anchors all sit ABOVE the first pin, so the truncation is invisible to it.
+    # Anchoring on the single assignment makes a re-kept duplicate a RED here instead.
+    pins = [i for i, line in enumerate(lines) if line.startswith("SWEEP_RESIDUE = (")]
+    assert len(pins) == 1, (
+        f"tools/sdk_privatise.py carries {len(pins)} `SWEEP_RESIDUE = (` assignments, at lines "
+        f"{[n + 1 for n in pins]}; the block requires exactly ONE, at the end of the records. "
+        "Delete the dead assignment(s) and keep their `#:` prose — otherwise this walk grades "
+        "only the prose above the FIRST pin and every arm below is grading less than it claims")
+    pin = pins[0]
     start = pin
     while start and lines[start - 1].lstrip().startswith("#:"):
         start -= 1
