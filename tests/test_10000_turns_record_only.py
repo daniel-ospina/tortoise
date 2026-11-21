@@ -211,6 +211,70 @@ def test_a_refused_record_write_falls_back_to_the_graph(sdk, monkeypatch):
         "capture lost the transcript while reporting success")
 
 
+def test_the_graph_store_lane_keeps_the_turn_VECTOR(sdk, monkeypatch):
+    """`#13971` review P1 (arm 1): where the graph is the store, its copy is NOT a mirror.
+
+    The first cut of `#13971` blanked the turn row's `emb` whenever the `point` label's
+    COVERAGE verdict answered "stop" — a label-level count (`record_vector.coverage` is
+    `record_vectors >= graph_vectors`), which says nothing about whether the record holds
+    THIS turn. On the lanes below it does not: the record cannot hold the capture's turns
+    at all, so the graph batch write is the store. Blanking the vector there wrote the turn
+    to exactly one place with a NULL vector, and `#5004` forbids re-encoding while the
+    journal heals only on a replay that may never come.
+
+    The gate is forced to STOP here, so the pre-fix code lands a NULL `embedding` and this
+    assertion reds; the post-fix code carries the vector because the store decision, not the
+    label's count, decides.
+    """
+    from tortoise import record_vector
+
+    monkeypatch.setattr(record_vector, "mirror_required",
+                        lambda entity_type: False, raising=False)
+    # The record cannot hold these turns: no tenant bound, so `record_holds_turns`
+    # answers False and the batch write below IS the store.
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    monkeypatch.setattr("tortoise.record_writer.write_live_record",
+                        _RecordSeam(_APPLIED))
+    proj = sdk._get_proj()
+    _capture(sdk, "graph-store", [{"role": "user", "content": "a"}],
+             turn_embs=[[0.1, 0.2, 0.3]])
+    rows = proj.g.query(
+        "MATCH (t:Point {id:'graph-store_t0'}) RETURN t.embedding").result_set
+    assert rows, "the graph did not take the turn on the lane where it is the store"
+    assert rows[0][0] is not None, (
+        "the turn's vector reached NEITHER store: the record could not hold the turn, and "
+        "the graph write was blanked on a label-level coverage verdict (#13971 review P1)")
+
+
+def test_a_refused_record_write_falls_back_to_the_graph_WITH_its_vector(
+        sdk, monkeypatch):
+    """`#13971` review P1 (arm 2): the fallback write carries the vector it rescues.
+
+    The preflight said the record could hold these turns; the WRITE refused them. The
+    fallback below is the arm that keeps the transcript (`#10000`), so it is also the arm
+    that must keep the vector — otherwise the turn survives in the graph with a NULL
+    `embedding` while its vector is nowhere, because the record declined it and `#5004`
+    forbids re-encoding.
+    """
+    from tortoise import record_vector
+
+    monkeypatch.setattr(record_vector, "mirror_required",
+                        lambda entity_type: False, raising=False)
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://unused/record")
+    monkeypatch.setattr("tortoise.record_writer.write_live_record",
+                        _RecordSeam(None))
+    _bind_tenant(sdk)
+    proj = sdk._get_proj()
+    _capture(sdk, "refused-vec", [{"role": "user", "content": "a"}],
+             turn_embs=[[0.1, 0.2, 0.3]])
+    assert sdk_mod._capture_turn_ids(proj, "refused-vec") == ["refused-vec_t0"]
+    rows = proj.g.query(
+        "MATCH (t:Point {id:'refused-vec_t0'}) RETURN t.embedding").result_set
+    assert rows and rows[0][0] is not None, (
+        "the rescued turn landed in the graph WITHOUT its vector — the record refused the "
+        "turn, so the graph was its only store and the vector is now nowhere")
+
+
 def test_a_record_write_the_fold_did_nothing_for_is_not_a_success(
         sdk, monkeypatch):
     """`applied` without statements is a record that stored NOTHING for the turn.
