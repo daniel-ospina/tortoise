@@ -378,17 +378,19 @@ def hooked_sdk(ledger, monkeypatch):
     return inst, _Graph
 
 
-def test_the_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
+def test_the_row_paths_record_the_served_page_and_never_an_internal_read(hooked_sdk):
     """A hook that is not exercised is a hook that will be lost in a refactor.
 
-    ⛔ THIS PINS THE PUBLIC ROW PATHS THAT SURVIVE THE #4282 RETIREMENT, and its
-    name says so. `query()`, `paginated_query()` and `query_points_by_tag()` were
-    retired in the #13899 batch, and the retirement table gives each of them the
-    DESTINATION this body now drives: `list_knowledge` (the first two) and
-    `search_knowledge(mode="tag")` (the third). The previous version still called
-    the retired names, so it died on line 1 of its body — taking the p3/p7/p8/p9
-    pins with it — while its own docstring claimed all of them were exercised
-    (#14184). A pin on a name that no longer exists is not a pin.
+    ⛔ THIS PINS THE ROW PATHS THAT SURVIVE THE #4282 RETIREMENT, and its name
+    says so. `query()`, `paginated_query()` and `query_points_by_tag()` were
+    retired in the #13899 batch. The retirement table gives `list_knowledge` as
+    the destination for ALL THREE (it has no tag kind — see its own docstring),
+    and `search_knowledge(mode="tag", tag=...)` is how `list_knowledge`'s own
+    docstring says a TAG read is taken, so this body drives both. The previous
+    version still called the retired names, so it died on line 1 of its body —
+    taking the p3/p7/p8/p9 pins with it — while its own docstring claimed all of
+    them were exercised (#14184). A pin on a name that no longer exists is not a
+    pin.
 
     The other SDK methods recorded in §17.4.6 are not exercised here, and neither
     are the two NON-SDK hooks (the session-start read, and the MCP tag tool's
@@ -398,11 +400,23 @@ def test_the_caller_facing_row_paths_feed_the_ledger(hooked_sdk):
     did not have, so the claim is narrowed to what the body drives rather than
     the guard being trusted on its title.
 
-    Each door returns Point rows to a CALLER, so each must record exactly ONE
-    read event per returned key — no fewer (a missed record inflates the
-    never-read mass, which flatters the split) and no more (a double record
-    overstates how many reads a key gets, which is the same class of wrong as a
-    lost one).
+    ⛔ TWO KINDS OF PATH ARE PINNED HERE AND THEY MUST NOT BE CONFUSED.
+    A path that returns Point rows to a CALLER records exactly ONE read event per
+    key it SERVES — no fewer (a missed record inflates the never-read mass, which
+    flatters the split) and no more (a double record overstates how many reads a
+    key gets, which is the same class of wrong as a lost one). An INTERNAL
+    accessor (``_get_point`` here, and ``_query`` in the population-scan test
+    below) records NOTHING: a written-but-never-read node that an internal check
+    has touched must stay at zero, or `f` biases HIGH. A reader who applies the
+    caller rule to the internal pin gets the #7983 direction exactly backwards.
+
+    ⛔ ONE HOOK IN THIS FAMILY NOW HAS NO IN-TREE CALLER, and that is recorded
+    rather than papered over: `_query_points_by_tag`'s own recording branch
+    (`_record_reads=True`, sdk.py) is passed `False` by its only in-tree caller
+    (`search_knowledge(mode="tag")`), and the MCP tag tool aliases to
+    `tortoise_query`, so the public door that used to reach it is retired. It is
+    therefore NOT pinned here — a pin on a branch nothing can reach proves
+    nothing — and no assertion below depends on it.
     """
     inst, graph = hooked_sdk
     # The keys must exist as STOCK first, or every read is (correctly) reported
@@ -790,6 +804,18 @@ def test_an_internal_population_scan_is_not_recorded_as_a_read(hooked_sdk):
     inst.list_knowledge()
     counts = {k[2]: row.read_count for k, row in fold().rows.items()}
     assert counts == {"p1": 1, "p2": 0}, "the caller-facing default still records"
+
+    # ⛔ AND THE ACCESSOR'S OWN DEFAULT, which the flag above is the exception to.
+    # `TortoiseClient`'s structural reads reach `_query` WITHOUT the flag
+    # (`tortoise_client.py`: `sdk._query(kind=domain)`, `… kind="strategy"`, …), so
+    # the recording branch is live product code — a refactor that dropped it would
+    # silence every CLI structural read while `f` biased LOW, the flattering
+    # direction. This pin is what makes that branch non-vacuously covered: without
+    # it, deleting the `_ledger_record` in `_query` leaves both files green.
+    graph.rows = [{"id": "p2"}]
+    assert [r["id"] for r in inst._query()] == ["p2"]
+    counts = {k[2]: row.read_count for k, row in fold().rows.items()}
+    assert counts == {"p1": 1, "p2": 1}, "the accessor's DEFAULT records (its callers rely on it)"
 
 
 def test_the_mode_tightening_skips_a_directory(tmp_path, monkeypatch):

@@ -106,23 +106,18 @@ class TestDe2e7:
         # The retired doors still DRIVE their original SDK methods, which is what
         # makes each container above the same answer rather than a new capability.
         # ⛔ #13899's batch retirement made those methods PRIVATE: `sdk_method` names
-        # the attribute the shim actually calls, and this test used to assert the
-        # PUBLIC spelling (`promote_point`), which is the door that no longer exists
-        # (#14184). Pin the convention AND that the named attribute is really there —
-        # a `sdk_method` naming an attribute the SDK does not have is an INERT shim,
-        # and only an assertion like this one can notice.
-        from tortoise.sdk import TortoiseSDK
-
+        # the attribute the shim resolves, and this test used to assert the PUBLIC
+        # spelling (`promote_point`), which is the door that no longer exists (#14184).
+        # Resolvability is NOT re-checked here: `tests/test_tool_registry.py`
+        # (`test_bindings_resolve`) already asserts
+        # `binding_resolution_violations(served_registry()) == []`, which covers live
+        # AND retired entries and checks the declared method is REACHED by its handler
+        # (#4337) — strictly stronger than a local `hasattr`, which cannot see an
+        # inert-but-callable target. What belongs here is the spelling, so that is
+        # all this asserts.
         retired_by_name = {t.name: t for t in RETIRED_TOOL_REGISTRY}
-        for tool, method in (("tortoise_promote_point", "_promote_point"),
-                             ("tortoise_belief_timeline", "_belief_timeline")):
-            assert retired_by_name[tool].sdk_method == method, (
-                f"{tool} drives {retired_by_name[tool].sdk_method!r}, not {method!r}"
-            )
-            assert hasattr(TortoiseSDK, method), (
-                f"{tool} drives {method!r}, which TortoiseSDK does not have — "
-                "the retired shim is inert"
-            )
+        assert retired_by_name["tortoise_promote_point"].sdk_method == "_promote_point"
+        assert retired_by_name["tortoise_belief_timeline"].sdk_method == "_belief_timeline"
 
     def test_mcp_handler_error_contract(self, monkeypatch):
         """J-6: handlers return {error: message} on failure — the REAL SDK
