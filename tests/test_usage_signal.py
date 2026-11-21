@@ -1357,12 +1357,19 @@ def test_no_graph_dependency() -> None:
         ⛔ THE DERIVATION STILL HAS ONE OWNER HERE, `_probe_forbidden()`, pinned by
         the assert above — so the DERIVATION cannot be narrowed without reddening a
         row (measured: dotless-only and the hardcoded pair are each 1 failed / 101).
-        That pins the derivation, NOT its use: the list the matcher is handed can be
-        filtered after it (**102 passed**), and ADDING a name to `_PROBE_EXEMPT` leaves
-        the derivation row above green as well — it moves both sides of that equality
-        together. Narrowing `_PROBE_EXEMPT` is pinned by
-        `test_the_no_graph_guard_covers_every_module_that_reaches_a_store` and by the
-        `_PROBE_EXEMPT == (…)` row, not by this one.
+        Its USE is pinned too, by a DIFFERENT row: the per-root loop below drives
+        `_matching([root])` for every root in the derivation, so filtering the list
+        `_matching` hands the comprehension — down to the three named controls, or by
+        dropping a single root — is **1 failed / 101**, not a narrowing. The one
+        filter no row sees is on `_matching`'s RETURNED set inside `_probe` (**102
+        passed**), and it drops no banned ROOT: it keeps exact members of
+        `_probe_forbidden()` and discards `<root>.<sub>` forms, while CPython always
+        registers the parent module — so the submodule clause can never be the sole
+        witness (see the prefix-clause note below). Separately, ADDING a name to
+        `_PROBE_EXEMPT` leaves the derivation row above green, because it moves both
+        sides of that equality together — which is why narrowing `_PROBE_EXEMPT` is
+        pinned by `test_the_no_graph_guard_covers_every_module_that_reaches_a_store`
+        and by the `_PROBE_EXEMPT == (…)` row, not by this one.
 
         ⛔ THE CHILD DOES NOT MATCH ANYTHING — the matching happens HERE, IN THE
         PARENT, against `_probe_forbidden()`. This is the structural fix for six
