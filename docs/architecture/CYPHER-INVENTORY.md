@@ -24,7 +24,7 @@ this document classifies **statements**.
 
 | what | count |
 |---|---|
-| product surface (`tortoise/**/*.py`, test modules excluded) | **302** files scanned |
+| product surface (`tortoise/**/*.py`, test modules excluded) | **303** files scanned |
 | files carrying at least one statement site | **100** |
 | **statement sites (this census)** | **1318** |
 | of those, shape **`plain`** — no traversal, no adjacency, no fulltext, no EP | **868** (586 read, 282 write) |
@@ -927,7 +927,7 @@ the order was fixed (`#13098` review F8).
 
 <!-- cypher-inventory:sites = 1318 -->
 <!-- cypher-inventory:files = 100 -->
-<!-- cypher-inventory:files_scanned = 302 -->
+<!-- cypher-inventory:files_scanned = 303 -->
 <!-- cypher-inventory:unresolved = 103 -->
 <!-- cypher-inventory:candidates = 586 -->
 <!-- cypher-inventory:shape_adjacency = 293 -->

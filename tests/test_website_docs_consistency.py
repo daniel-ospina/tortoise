@@ -1133,6 +1133,220 @@ def test_no_dead_issue_references_in_public_copy(page: Path) -> None:
 # ── Link integrity on the new page ───────────────────────────────────────────
 
 
+def test_docs_toc_anchors_all_resolve() -> None:
+    """Every TOC entry on the docs page must land on a real id.
+
+    The FAQ half of this pin is below; `docs.html` never had one. This is a
+    TOC⇄id CONSISTENCY pin, not the deep-link pin: it would stay green if the
+    `storage` section and its TOC entry were both removed or both renamed.
+    The deep link `/tortoise/docs#storage` is pinned by
+    `test_the_storage_section_is_the_notices_destination_and_is_advertised`
+    below, which names the anchor the notices ship (#14066 review, P2).
+    """
+    html = _read(DOCS)
+    hrefs = set(re.findall(r'href="#([^"]+)"', html))
+    ids = set(re.findall(r'id="([^"]+)"', html))
+    assert hrefs, "website/docs.html has no in-page anchors — did the TOC get removed?"
+    assert hrefs <= ids, f"website/docs.html anchors with no target: {sorted(hrefs - ids)}"
+
+
+# ── #14013: the page the working-set capacity notices link to ────────────────
+#
+# `tortoise/capacity_notice.py` (#13998) ships `STORAGE_DOCS_URL` =
+# `https://premiselabs.co/tortoise/docs#storage` and names this section as its
+# destination. Three things make that link honest rather than merely live:
+#
+#   1. the anchor exists, and the TOC advertises it (else it is an orphan);
+#   2. the section keeps the notices' NON-TECHNICAL voice — the whole point of
+#      the link is the reader who does not know the architecture, and internal
+#      vocabulary (`allowance`, `eviction`, `tier`, `FalkorDB`, `working set`)
+#      is a vocabulary that email is explicitly guarded against;
+#   3. it states what is NOT lost, because the notices' promise is that the
+#      record holds everything. A page that only describes degradation is a
+#      page that undoes the email it was written for.
+#
+# The claims themselves are the durable ones `#13989` records — true before and
+# after the tracker's strands land, because the sections outside the fast layer
+# are fetched when searched. Nothing here quotes a rate or a limit, so nothing
+# here can rot when `product/pricing.json` changes.
+
+
+def _docs_section(anchor: str = "storage") -> str:
+    """The markup of `docs.html`'s `#<anchor>` section, up to the next `<h2`.
+
+    A slice rather than the whole page: the vocabulary rule applies to what a
+    reader arriving at the anchor meets, and holding the page's deliberately
+    technical sections (`How it works`, the API reference) to it would be wrong.
+
+    ⛔ The anchor's absence is asserted BEFORE `str.index` is reached. A bare
+    `index` raises `ValueError`, which surfaces as an ERROR in the three tests
+    that call this helper and names no cause — the opposite of what a guard owes
+    a reader whose edit moved the section (#14066 review, P2).
+    """
+    html = _read(DOCS)
+    opening = f'<h2 id="{anchor}">'
+    assert opening in html, (
+        f"website/docs.html has no {opening}. `capacity_notice.STORAGE_DOCS_URL` "
+        f"(#13998) points at `/tortoise/docs#{anchor}`, so moving or renaming this "
+        f"section silently breaks the notices' link text."
+    )
+    start = html.index(opening)
+    rest = html[start:]
+    # `<h2 id=` searched from index 1 so the section's OWN opening tag is not
+    # mistaken for the next section.
+    end = rest.find("<h2 id=", 1)
+    return rest if end == -1 else rest[:end]
+
+
+def test_the_storage_section_is_the_notices_destination_and_is_advertised() -> None:
+    """The anchor the email links to exists on the page AND appears in its TOC."""
+    html = _read(DOCS)
+    assert 'id="storage"' in html, (
+        "website/docs.html has no `id=\"storage\"`. `capacity_notice.STORAGE_DOCS_URL` "
+        "points at `/tortoise/docs#storage` (#13998), so the notice's link text "
+        "nowhere lands."
+    )
+    assert 'href="#storage"' in html, (
+        "the storage section is an orphan: it has an id but no TOC entry, so the "
+        "only way to reach it is the email itself."
+    )
+
+
+def test_the_storage_section_uses_no_internal_vocabulary() -> None:
+    """Plain language, per #14013's contradiction test.
+
+    These are the words the notices themselves are guarded against. A reader who
+    clicks *\"How Tortoise stores and searches your data\"* arrives without the
+    architecture; naming `FalkorDB`, a `tier`, an `allowance` or `eviction` hands
+    them the internal model instead of the explanation.
+
+    ⛔ THE SECTION IS NORMALISED FIRST, and the vendor key is `falkor`, not
+    `falkordb`. A raw substring test on the lowercased markup is defeated by
+    every spelling a writer actually uses — `Falkor DB`, `working-set`,
+    `hot-cache` all passed a first version of this pin (measured, #14066 review
+    round 2). Punctuation collapses to a space and `falkor` subsumes
+    `falkordb`, `falkor db` and the bare product name the owner himself uses.
+    """
+    section = re.sub(r"[^a-z0-9]+", " ", _docs_section().lower())
+    banned = {
+        "allowance": "the notices say 'fast-search capacity'",
+        "evict": "the notices say items 'step out of' the fast layer",
+        "tier": "capacity is offered first; a plan change is never the answer",
+        "falkor": "the notices say 'a graph database'",
+        "working set": "plain phrasing is 'the fast layer'",
+        "hot cache": "plain phrasing is 'the fast layer'",
+    }
+    for word, why in banned.items():
+        assert word not in section, (
+            f"the #storage section contains {word!r}: {why}. Keep it in the "
+            f"same voice as the capacity notices (#13998/#14013)."
+        )
+
+
+#: The reviewed wording of `#storage`, as a reader sees it.
+#:
+#: ⛔ Regenerate ONLY as part of a deliberate copy change, with these steps, and
+#: treat the resulting diff as the thing that needs reviewing:
+#:
+#:     uv run python - <<'PY'
+#:     import re
+#:     from html import unescape
+#:     from pathlib import Path
+#:     html = Path("website/docs.html").read_text(encoding="utf-8")
+#:     start = html.index('<h2 id="storage">')
+#:     section = html[start:][: html[start + 1:].index('<h2 id=')]
+#:     print("\n".join(textwrap.wrap(
+#:         " ".join(unescape(re.sub(r"<[^>]+>", " ", section)).split()), 98)))
+#:     PY
+#:
+#: (with `import textwrap` — elided above so this comment cannot be run by
+#: accident).
+STORAGE_SECTION_GOLDEN = REPO_ROOT / "tests" / "fixtures" / "14013_storage_section.txt"
+
+
+def _visible_text(markup: str) -> str:
+    """What a reader sees: tags to spaces, entities decoded, whitespace folded.
+
+    The two punctuation fixes exist so the golden reads like prose and its diff
+    is reviewable: stripping an inline `<strong>`/`<a>` leaves a space before the
+    following `.` or `,` (`your record</strong> ,`), which is not what is on the
+    page.
+    """
+    text = html_unescape(re.sub(r"<[^>]+>", " ", markup))
+    text = " ".join(text.split())
+    for spaced in (" .", " ,", " ;", " :"):
+        text = text.replace(spaced, spaced[1])
+    return text
+
+
+def test_the_storage_section_says_exactly_what_was_reviewed() -> None:
+    """Golden block — the WORDING is the deliverable, so any edit is a red.
+
+    Presence pins cannot catch a CONTRADICTING sentence: a first version of these
+    tests passed *\"Items outside the fast layer are removed permanently after 30
+    days of inactivity\"* inserted above the required *\"nothing is lost\"* line,
+    and passed a cost written as words rather than `$`/% (#14066 review round 2,
+    measured against a mutated copy). A page whose whole reason to exist is that
+    it cannot drift from what the product does has to fail on new text, not only
+    on missing text — so the section is compared to the copy that was reviewed.
+
+    This is the same mechanism `tests/test_13998_capacity_notice.py` uses for the
+    notices themselves (`tests/fixtures/13998_notice_*.txt`): the copy is
+    reviewed once, then held. When `#14012` lands its two controls, the wording
+    changes — regenerate the fixture in that PR, where the change IS the review.
+    """
+    got = _visible_text(_docs_section())
+    want = " ".join(STORAGE_SECTION_GOLDEN.read_text(encoding="utf-8").split())
+    assert got == want, (
+        "the #storage section no longer matches the reviewed wording "
+        "(tests/fixtures/14013_storage_section.txt). This section is the "
+        "destination of #13998's notices, so a wording change is a claim change: "
+        "regenerate the fixture deliberately if it is right, do not paste the "
+        "actual text into it to make this green.\n\n"
+        f"--- reviewed ---\n{want}\n\n--- in the page ---\n{got}"
+    )
+
+
+def test_the_storage_section_states_what_is_not_lost_and_quotes_no_figure() -> None:
+    """The claims the email makes, and no figure that could contradict it.
+
+    #14013's done-when is that *\"a reader who has never seen the architecture
+    can say what happens when the fast layer fills\"* — so the section must state
+    the loss mode (a moment longer) and the non-loss mode (nothing) outright,
+    in the notices' own words.
+
+    The figure half is a real constraint, not tidiness: `product/pricing.json`
+    is the one source for any rate the product publishes.
+
+    ⚠️ This pin is NAMED-CLAIMS + SYMBOL-ABSENCE only, and it is deliberately not
+    the drift guard: a cost written as words, or a contradicting sentence, passes
+    it. `test_the_storage_section_says_exactly_what_was_reviewed` above is the
+    pin that fails on new text.
+    """
+    section = _docs_section()
+    folded = section.lower()
+    for claim in (
+        "nothing is lost",
+        "stays searchable",
+        "search keeps working across everything",
+        "can take a moment longer",
+        "postgres",
+        "graph database",
+    ):
+        assert claim in folded, (
+            f"the #storage section no longer says {claim!r}. Those are the "
+            f"notices' own claims (#13998) — the page is where a reader who went "
+            f"looking for the durable explanation has to find them."
+        )
+    for figure in ("$", "%"):
+        assert figure not in section, (
+            f"the #storage section carries {figure!r}. No rate or limit belongs "
+            f"on this page: `product/pricing.json` is the one source for a "
+            f"published figure, and #14013 forbids quoting anything it does not "
+            f"carry."
+        )
+
+
 def test_faq_toc_anchors_all_resolve() -> None:
     """Every TOC entry must land on a real heading id."""
     html = _read(FAQ)
