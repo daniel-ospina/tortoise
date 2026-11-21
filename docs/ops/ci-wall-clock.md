@@ -272,24 +272,24 @@ later**: main's `test_embed_decision_step_11086.py` and that branch's
 packs the worst shard at **840.2 s** (either parent alone packed 840.0 s), `ceil(840.2/60 x 2)`
 rounds up to **29 m**, and the arm-2 SUM became **60.64 m, x 1.5 = 90.96 m against the 90 m cap**
 — RED where both parents pass. `fast_shards: 11` packs the same map to 782.0 s → 27 m, i.e. the
-58.6 m / 2.0 m headroom THAT re-cut recorded (the 2026-11-16 sweep has since moved the emitted term
-to 24 m — `#12926` registered its own fast suite (`tests/test_embed_switch_gate_12926.py`) with a
+58.6 m / 2.0 m headroom THAT re-cut recorded (the 2026-11-16 sweep had moved the emitted term
+to 24 m at THAT head — `#12926` registered its own fast suite (`tests/test_embed_switch_gate_12926.py`) with a
 10 m weight, which re-packs the worst shard across the minute boundary, the same mechanism as the
 `#11576` re-cut two sentences above — and this branch's own registration packs into that same fast
 pool without moving it further: this re-cut's union of the two sides' duration rows (main's
-`test_embed_decision_step_11086.py` and this branch's `test_12943_cache_leg.py`) still emits **24 m**,
-measured: `--emit-push-matrix` on the merged manifest reads 24 m, and it read 23 m on the pre-`#12926`
-base this branch first merged (`2c67c0cf99`). ⛔ **The `#14015` M5 merge then took it to 25 m**, the same
-pool mechanism for the third time: `test_miss_rate_m5.py` packs in at the 2.0 s `DEFAULT_FAST_WEIGHT` and
-takes the worst shard past the boundary `ceil(720.1/60 x 2)` rounds up on — and at THIS head the verb
-reads 25 m again, re-measured rather than carried: `--emit-push-matrix` packs six shards (a, b, c, d, i, k)
-at **720.2 s** and the other five (e, f, g, h, j) at 720.1 s, `ceil(720.2/60 x 2)` = 25 m, the 0.1 s over
-`#14015`'s own emission being this branch's `tests/test_13998_capacity_notice.py` at the flat 2.0 s default.
-That tenth of a second is the whole margin on this boundary — two intermediate folds of this branch emitted
-24 m before main re-packed the same pool to 720.0 s — so the term the row above states, and the three
-figures after it, are this head's emission re-cut by hand from `--emit-push-matrix`, not a re-derivation.
-The three hand-added figures move to 56.6 m / 85.0 m /
-5.0 m (the row above), which is the 1-decimal restatement of the terms' own total, 56.64 m, that
+`test_embed_decision_step_11086.py` and this branch's `test_12943_cache_leg.py`) still emitted **24 m**,
+measured: `--emit-push-matrix` on the merged manifest read 24 m, and it read 23 m on the pre-`#12926`
+base this branch first merged (`2c67c0cf99`). ⛔ **Two merges have since taken it to 25 m, the same
+mechanism each time — and the number is RE-EMITTED on every fold, never carried:** `#14015` M5
+(`test_miss_rate_m5.py` at the 2.0 s `DEFAULT_FAST_WEIGHT`) packed it to 720.1 s, and `#14012`'s three
+`core` suites packed it again; on THIS merged tree (`#13998` × `main` `e74cf1d13d`)
+`--emit-push-matrix` reads six shards at **720.7 s** and five at 720.6 s, `ceil(720.7/60 x 2)` = **25 m**,
+so the term the row above states, and the three figures after it, are this head's emission re-cut by
+hand from the verb, not a re-derivation. A tenth of a second is the whole margin on this boundary —
+intermediate folds of this branch emitted 24 m before `main` re-packed the same pool — so a row quoted
+from the previous revision is a coin-flip here, and the verb decides. The three hand-added figures are
+56.6 m / 85.0 m / 5.0 m (the row above), which is the 1-decimal restatement of the terms' own total,
+56.64 m, that
 `config/ci-surfaces.yml` already records for this same quantity — ⛔ NOT the sum of the four ROUNDED
 terms, which reads 56.7 m: the startup term is 7.27 m (182 s + 254 s, where 254 s is ALREADY the 266 s window net of the
 embedder's 12 s — subtracting that 12 s a second time gives 7.07 m, which is how this figure was
