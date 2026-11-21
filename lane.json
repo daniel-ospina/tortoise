@@ -1,0 +1,42 @@
+{
+  "_ref": "refs/lanes/cmux.kbg-10893-prehandler-1795216531-p1269376-e3cf39e2",
+  "_sha": "127ff01e139726d2634e3424ef85d6ad025b3d8e",
+  "artifacts": [
+    {
+      "kind": "log",
+      "value": "/home/cmux/orchestrator/bg/10893-prehandler.log"
+    },
+    {
+      "kind": "branch",
+      "value": "fix/10893-search-prehandler"
+    },
+    {
+      "kind": "sha",
+      "value": "627d992b3b177137a61cd43587d5c9523c253629"
+    },
+    {
+      "kind": "worktree",
+      "value": "/home/cmux/tortoise/.worktrees/10893-prehandler"
+    }
+  ],
+  "attempt": 1,
+  "branch": null,
+  "budget_s": 36600,
+  "duration_s": 4324,
+  "ended_at": 1795220855,
+  "exit_code": 0,
+  "heartbeat_at": 1795220855,
+  "host": "cmux",
+  "issue": null,
+  "kind": "bg",
+  "lane_id": "cmux.kbg-10893-prehandler-1795216531-p1269376-e3cf39e2",
+  "lease_until": 1795257455,
+  "pid": 1269376,
+  "reason": null,
+  "repo": "daniel-ospina/tortoise",
+  "schema": 1,
+  "started_at": 1795216531,
+  "state": "DONE",
+  "tag": "10893-prehandler",
+  "worktree": "/home/cmux/tortoise/.worktrees/10893-prehandler"
+}
