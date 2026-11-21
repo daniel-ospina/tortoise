@@ -1253,12 +1253,17 @@ def test_the_committed_curve_sits_above_the_identity_it_was_checked_against():
     art = _artifact()
     for label in ("object", "point"):
         block = art["labels"][label]
-        assert block["nodes"] > 0, f"{label}: no node count, so the identity has no operand"
+        # ⛔ The identity is `covered_mass([1] * n, F)`, not `F`: `covered_mass` rounds the
+        # retained node COUNT, so on a finite population the equal-mass vector can sit
+        # slightly below `f` — the tool's own docstring says so. Computing it the same way
+        # `lorenz()` does is what makes this the SAME property rather than a lookalike.
+        identity_of = [1] * block["nodes"]
         for row in block["curve"]:
-            assert row["covered_mass"] >= row["coverage"] - 1e-6, (
+            identity = covered_mass(identity_of, row["coverage"])
+            assert row["covered_mass"] + 1e-12 >= identity, (
                 f"{label}: at coverage {row['coverage']} the curve covers only "
-                f"{row['covered_mass']} of the mass — below the identity, which `lorenz()` "
-                f"refuses: the ordering it was built from is inverted")
+                f"{row['covered_mass']} of the mass, below the identity {identity} — the "
+                f"comparison `lorenz()` refuses, so the ordering it was built from is inverted")
             assert row["fault_in_rate"] == pytest.approx(1.0 - row["covered_mass"], abs=1e-6), (
                 f"{label}: fault_in_rate {row['fault_in_rate']} is not 1 - covered_mass "
                 f"{row['covered_mass']}")
