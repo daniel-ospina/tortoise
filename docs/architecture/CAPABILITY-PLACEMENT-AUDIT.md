@@ -187,10 +187,17 @@ unrelated `params={"eid": _eid, "oid": _oid},` statement (`main`'s `:22919` is a
 door's `MERGE (s:Source {url:$did})`) with `_execute_commit_writes` at `:23315` — ⚠️ **the `hosted_api.py`
 pair is re-derived for THIS edition at `72c104bcbb`** (the two were at 23082 / 22894 at the head the
 `#14022`-rot repair `#14059` wrote them on — ⚠️ **not** the `#13394` sweep's head, where this same pair
-reads `:22919`/`:22731`, as row 13's note below records; a `+421`-line growth of the file between that
-head and this one moved both, the same `+421` that moves row 15's `MERGE (p:PackInstall …)` below — one
-insert above all three sites, not three coincidences (`23503−23082 = 23315−22894 = 421`) — and nothing but
-the file's length changed, so the row's verdict, mechanism and quoted fragments are untouched); and §2.5's `:Tag`
+reads `:22919`/`:22731`, as row 13's note below records. ⚠️ **The uniform `+421` is a measurement, not a
+shortcut:** between those two heads the file grew `+512` net (`571` insertions / `59` deletions) across
+**25** hunks, of which `+421` — 20 hunks, the largest a single `+159` — sits above all three sites and the
+other 5 add `+91` BELOW row 15's `MERGE (p:PackInstall …)` site, which is why every one of the three moved
+by the same `+421` (`23503−23082 = 23315−22894 = 421`) and why the offset is NOT a model to reuse: at the
+same old head a cite at 10500 moved `+97`, one at 40000 `+501`, one at 45000 `+512` (matched by content
+between the two blobs). So `59` lines of that file were rewritten, not just added, and the
+row's verdict survives because of a narrower fact than "nothing but the length changed": the door region a
+reader actually opens (old 22894-23095, new 23315-23516) is **byte-identical** across the two heads — 202
+lines, `diff` empty — and no deleted line in it carries `MERGE (s:Source`, `_execute_commit_writes` or
+`s.summary=$summary`); and §2.5's `:Tag`
 paragraph, whose **five** reader addresses the `#13879` review re-derived from that row's own quoted
 fragments — the group this list carried only as the number it then gave for the `mcp_server.py`
 member — `sdk.py`: `:31551`
