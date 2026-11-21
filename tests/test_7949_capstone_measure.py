@@ -7116,9 +7116,9 @@ def test_the_epic_bundle_cites_the_branch_rederived_resolve():
     # suite GREEN (measured: `:9999` in both twins -> 422 passed) while the row asserted two
     # numbers for one `git grep` hit, which is exactly the defect `count == 1` exists to
     # catch. `count == 2` makes a half-move red (1) and an all-move red (0).
-    _twin = "sits at `:9753` at this head and `:9722` on `origin/main` — ⛔ they no longer agree"
+    _twin = "sits at `:9753` at this head and `:9753` on `origin/main` — ⛔ they AGREE here"
     assert _d5.count(_twin) == 2, (
-        f"05-verify.md states the `register_source(..., raw_state=...)` pair (this head `:9753`, `origin/main` `:9722`) in this "
+        f"05-verify.md states the `register_source(..., raw_state=...)` pair (this head `:9753`, `origin/main` `:9753`) in this "
         f"phrasing {_d5.count(_twin)} time(s), and it must be stated exactly twice. Re-derive "
         "BOTH twins from the tree (`sed -n 'Np' tortoise/sdk.py`) — the row's own rule is that "
         "one present-tense fact carries one number")
