@@ -2029,6 +2029,27 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # green while a tools-only diff collapsed to `surfaces: []` (measured,
              # #13914 review round 5). The entry now cites only the pin that reads it.
              "tools/vector_parity_13906.py",
+             # #13094 review (P1): the census INSTRUMENT
+             # (`tools/graphevent_home.py`) owns
+             # tests/test_13094_graphevent_home.py (registered `core`). The #13094
+             # row's own comment in `config/ci-surfaces.yml` notices that the tool
+             # has no `SOURCE_PATTERNS` entry — but it stops at the
+             # `cache_projection`→`core` measurement, which is the OTHER side of
+             # the selection. `tools/` is swallowed by NON_PYTHON_PREFIXES, so a
+             # tool-only diff still filters to `changed == []` and takes the
+             # docs-only early return. Measured at this head:
+             # `--changed-files tools/graphevent_home.py` -> `surfaces: []`,
+             # `full: false`, and `test_13094_graphevent_home.py` ABSENT from
+             # `test_files` (tier-1 smoke only) — where the #13906 entry directly
+             # above answers `['core']` and carries its file. The diff class this
+             # closes is the tool's own exit-code contract (a refused read must
+             # exit 2, never 1 — the defect the last commit on the #13094 branch
+             # fixed), the `READERS` census and the `_GRAPH_EVENT_TYPES`
+             # equality: all of them would merge with every falsifier asleep on a
+             # later tool-only edit. Same #1349/#3332/#3616 silent-drop class as
+             # the entries above. Pinned by
+             # tests/test_ci_selection.py::test_a_graphevent_census_tool_only_diff_selects_its_pins.
+             "tools/graphevent_home.py",
 
              # #12926: the pre-merge deployment-config check. `tools/` is in
              # `NON_PYTHON_PREFIXES`, so `_keep_changed` DROPS every `tools/` path and a

@@ -575,6 +575,48 @@ def test_a_vector_parity_harness_only_diff_selects_its_pins():
     )
 
 
+def test_a_graphevent_census_tool_only_diff_selects_its_pins():
+    """#13094 review (P1): the `CORE_ALSO` arm for the census instrument.
+
+    `tools/graphevent_home.py` is the instrument that decides what the change
+    feed's reader census CLAIMS, and its falsifiers live in
+    `tests/test_13094_graphevent_home.py` (registered `core`). `tools/` is a flat
+    `NON_PYTHON_PREFIXES` swallow, so a tool-only diff filters to `changed == []`
+    and takes the docs-only early return. Measured BEFORE the entry:
+    `--changed-files tools/graphevent_home.py` -> `surfaces: []`, `full: false`,
+    and the pin file ABSENT from `test_files`, i.e. tier-1 smoke only — while the
+    sibling `tools/vector_parity_13906.py` entry below answers `['core']` and
+    carries its file.
+
+    The #13094 row in `config/ci-surfaces.yml` registered the TEST and measured
+    only the `cache_projection` -> `core` direction, so it could not see this:
+    the test is selected on a change to its SUBJECT's import closure, not on a
+    change to the subject itself. The stakes are the tool's own exit-code
+    contract (a refused read must exit 2, never 1 — the defect the branch's last
+    commit fixed), the `READERS` census and the `_GRAPH_EVENT_TYPES` equality.
+
+    ⛔ This is the ARM, not the pins: the falsifiers in the census file never
+    call `select()`, so deleting the entry leaves every one of them green
+    (the #13914 round-5 defect recorded on the `tools/vector_parity_13906.py`
+    entry above). Selected on the diff that could delete the entry: a change to
+    `tools/ci_selection.py` resolves `full: True` (measured), so this file runs
+    whatever the entry says.
+    """
+    r = _sel(["tools/graphevent_home.py"])
+    assert r["full"] is False
+    assert r["surfaces"] == ["core"], (
+        "a census-instrument-only diff must select the instrument's own "
+        "falsifiers — `tools/` is swallowed by NON_PYTHON_PREFIXES, so the "
+        "`CORE_ALSO` entry is the only thing keeping this out of the docs-only "
+        f"early return (#4309); got {r['surfaces']!r}"
+    )
+    assert "test_13094_graphevent_home.py" in r["test_files"], (
+        "the entry exists so the census falsifiers run on the one diff class "
+        "that can weaken them (a refused read returning 1, a dropped READERS "
+        "row, an event-type set that stopped matching `sdk._GRAPH_EVENT_TYPES`)"
+    )
+
+
 def test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff():
     """#5333 review (P1): those guards must run on the DOCUMENT they pin.
 
@@ -10549,6 +10591,12 @@ ROWED_BY_THIS_FOLD = (
     # `tests/test_uri_requiring_selection.py::test_declared_list_matches_the_observation`,
     # which re-derives the set from a real URI-less collection.
     "test_evictor_invalidates_fallback_snapshot_13123.py",
+    # #13094 — a file this fold ADDED, so its `durations:` row must exist and be
+    # pinned here: the entry-rule test iterates an EXPLICIT tuple, so a row for a
+    # file nobody listed is invisible (`#13110`'s round-5 review recorded that
+    # variant surviving a round; `test_13826_write_gate.py`'s row records the
+    # sibling that was found entirely unregistered).
+    "test_13094_graphevent_home.py",
     # ⛔ `test_usage_signal.py` IS NOT REPEATED HERE. This is the SECOND copy the merge of
     # `origin/main` created, and the #14070 argument above is why it must not stay: carrying
     # a second copy of a file that already has a row is exactly the duplicate shape that
@@ -10561,6 +10609,14 @@ ROWED_BY_THIS_FOLD = (
     # i.e. a pin written for this file could never pass. The entry above (the `#14011`
     # block) is the survivor; the `config/ci-surfaces.yml` `core` scalar was de-unioned the
     # same way in the same merge.
+    # #10893 (second cycle) — the `pre_handler` decomposition's two falsifier files, ADDED by
+    # this fold. The surface rows for both landed in this PR's registration commit and the
+    # `durations:` rows did NOT, which is the residual half of the cycle-2 review's F1:
+    # `--integrity` is a 0.90 RATIO check and stayed green over both absences. Listed here for
+    # the reason every row above states: the ENTRY-RULE pin iterates this EXPLICIT tuple, so a
+    # file nobody listed has no `durations:` row and nothing reds (#14086 cycle-3 review, F1).
+    "test_10893_capture_off_loop.py",
+    "test_10893_pre_handler_parts.py",
 )
 
 
@@ -10575,6 +10631,31 @@ def test_every_fast_file_this_fold_rows_carries_a_durations_row():
         "ENTRY RULE requires the row to EXIST (#3400/#4348) — add it with the "
         "`new in …` note; `tools/ci_timing.py --refresh-durations` fills the value "
         "from a push-to-main junit sweep later.")
+
+
+def test_ROWED_BY_THIS_FOLD_carries_no_duplicate_entries():
+    """The set is a SET — a repeated entry is the shape that breaks the pins.
+
+    A merge of `origin/main` can leave the SAME file listed twice (measured on
+    this PR: `test_usage_signal.py` at two positions, 28 entries / 27 unique).
+    That is inert only until a pin written for that file runs: the list-equality
+    form every ENTRY-RULE pin uses
+    (`[f for f in ROWED_BY_THIS_FOLD if f not in holed] == [name]`) yields
+    `['x', 'x']` against a one-element expectation, so the pin could never pass
+    and its failure would name the wrong cause (#14086, not-clean record).
+
+    Red on a duplicated tuple: append any existing entry — this assertion fails
+    and names BOTH the file and its positions.
+    """
+    seen: dict[str, list[int]] = {}
+    for i, name in enumerate(ROWED_BY_THIS_FOLD):
+        seen.setdefault(name, []).append(i)
+    dupes = {n: pos for n, pos in seen.items() if len(pos) > 1}
+    assert not dupes, (
+        "ROWED_BY_THIS_FOLD lists the same file more than once, so a pin "
+        "written for it can never pass and its message would name the wrong "
+        "cause (the list-equality ENTRY-RULE pins compare against a "
+        f"one-element list): {dupes} of {len(ROWED_BY_THIS_FOLD)} entries")
 
 
 def test_the_eviction_suite_is_in_the_entry_rule_set_13123():

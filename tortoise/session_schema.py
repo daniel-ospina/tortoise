@@ -336,16 +336,36 @@ SESSION_WRITERS: tuple[SessionWriter, ...] = (
         lane="hosted capture",
         properties=frozenset({
             "capture_ok", "capture_extractor",
-            "entity_links_attempted", "entity_links_created",
         }),
         note=(
             "The hosted capture's OUTCOME record. `capture_ok` here is "
             "computed AFTER the post-write verification read (`skipped` ⇒ "
             "verb partial ⇒ False). `capture_ok`/`capture_extractor` are "
             "written only on a genuine attempt (fresh or #2335 retry) — a "
-            "replay writes nothing. The entity-link counters are written only "
-            "when the pass attempted a link and are OVERWRITTEN by the "
-            "index-run writer below, so the counter is non-monotone."),
+            "replay writes nothing. ⛔ The entity-link counters this row used "
+            "to declare are NOT written here any more: #10893 moved that SET "
+            "into the `_link_off_loop` closure so it stops running on the "
+            "event loop, and the row below names the site that writes them "
+            "now (the predicate attributes by enclosing function, so a row "
+            "kept here would be `declared_only`)."),
+    ),
+    SessionWriter(
+        key="tortoise/hosted_api.py::_link_off_loop",
+        kind="capture-aux",
+        lane="hosted capture (entity linking, off the event loop)",
+        properties=frozenset({
+            "entity_links_attempted", "entity_links_created",
+        }),
+        note=(
+            "#10893: the per-session entity-link counters, written by the "
+            "pass that runs `link_session_entities` — one `SET` per capture, "
+            "only when the pass attempted a link. It is a nested closure "
+            "handed to `_run_off_loop(_CAPTURE_EXECUTOR, …)` because the pass "
+            "is synchronous FalkorDB work (a resolve + an `about*` edge per "
+            "referencing turn) that used to park the single uvicorn worker; "
+            "the SAME statement and the same non-fatal arm, only WHERE it runs "
+            "changed. The counters are OVERWRITTEN by the index-run writer "
+            "below, so the counter is non-monotone."),
     ),
     # #9349 split the SDK capture's stamps into two doors (#9206 review): with
     # §17.1's handle ARMED the inline SETs raised `DirectCacheWriteRefused`, and
