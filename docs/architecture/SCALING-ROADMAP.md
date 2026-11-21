@@ -109,7 +109,9 @@ The remaining two ✗ rows — success-path stage metrics and the scaling unit �
 
 - **Storage:** **PostgreSQL + pgvector**. Not a bespoke vector engine — the same stack we chose in `STORAGE-ARCHITECTURE.md` §12.1c.
 - **Retrieval:** *"Recall combines **vector, keyword, graph, and temporal** search **in parallel**"* — we run three of those
-  four legs, but **sequentially**.
+  four legs and **already dispatch them concurrently** (`degradation_chain` → `ThreadPoolExecutor(max_workers=3)`, 500 ms collective
+  cap, since `#7780`). The stage still measures **1,199 ms**, so what remains is contention and cap overrun, not sequencing — a
+  distinction the plan's D2 has to get right, because it changes what `#14192` should build.
 - **The sentence that should reorganise our roadmap:** *"The design shifts **LLM cost to writes** … Embeddings, fact
   extraction, and graph structures are **prepared during retention to reduce retrieval-time work**."* We do the exact
   opposite: the query's embedding is computed **inside** the read.
@@ -168,7 +170,7 @@ The four moves, and how many of the five actually exhibit each:
 2. **A derived, hot, disposable layer** in front — **5 of 5** — we have the shape, and the eviction executor.
 3. **Expensive work at write time, behind a queue** — **4 of 5** (Mem0, Zep, Hindsight, Supermemory) — we do not.
 4. **Parallel retrieval legs with bounded traversal** — **2 of 5** (Hindsight's four legs; Mem0's four signals, scored in parallel
-   and rank-fused — no bounded graph traversal) — we do not (we chain them).
+   and rank-fused — no bounded graph traversal) — we **do** dispatch in parallel and lack only the bounded-traversal half.
 
 So: move 2 is universal, move 3 is near-universal, move 1 is **two of five** and depends on how generously "cheap store" is read, and **move 4 rests on two comparables' published designs** (Hindsight's four parallel legs, Mem0's multi-signal scorer) — worth adopting, and still the thinnest of the four moves rather than a convergence. Item 3 is Phase A work (`A1`); item 4 is `#14192`, tracked as PLAN `F1`. Both cost only code.
 
@@ -217,7 +219,8 @@ batchable work into queues and workers, and we still do it inside the request.**
 stage**: **A3** takes the embed from 2–4 s to the batch cap — at A3's own 4–8 item ceiling that is **~1.4–2.9 s** (4–8 × 0.36 s of
 per-item throughput), not 0.36 s, which is a batch cost and not a request's latency — and **A1** takes the write off the request.
 ⚠️ **Nothing in Phase A touches `pre_handler`**: the queue wait that dominates the slow trace is Track F's job (**F0** stops the
-retry storm; **S4** lands the guards), and the leg parallelisation is `#14192` (**F1**), which buys at most a fraction of the 1.2 s
+retry storm; **S4** lands the guards), and the legs are **already concurrent** — `#14192` (**F1**) must be re-scoped to bounded
+traversal and per-leg budgets before a week is spent on it, and either way the retrieval stage's 1.2 s is at most what it can buy
 (§2.5). On the same slow trace, Phase A's own residual is therefore `pre_handler` 5,996 ms + **1.4–2.9 s** + 1.199 s ≈
 **8.6–10.1 s** — better than 11.35 s, and still not a budget, which is what **S3** exists to write down. Only **S7/C1** takes the
 embed off the request entirely; A3 keeps it inline and merely overlaps it.

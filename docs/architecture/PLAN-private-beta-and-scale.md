@@ -41,7 +41,7 @@ Each has the evidence, a confidence, and **what would disprove it**.
 | # | mechanism | evidence | conf. | what would disprove it |
 |---|---|---|---|---|
 | **D1** | **Batchable work runs inline on the read path.** Every search embeds the query inside the request: `embed_encode` **2,078–4,003 ms** per production query. In a paired bench, 8 sequential queries took **15.2 s (1.9 s/item)** against 32 batched in **11.6 s (0.36 s/item)** — ~5.3× per item, before the production cost above. | stage attribution, production | HIGH | a trace where the query embedding is **pre-computed or served by its own tier** (batching *inside* the request does not count — the work is still on the read path) and the read path's p50/p95 is **no better than its pre-change baseline** (needs A4's stage timings) — then the 2–4 s was never the inline embed |
-| **D2** | **Legs run sequentially, so latency is the sum.** `pre_handler 5,996 · embed_encode 4,003 · retrieval 1,199 · fusion 0.2 · ep 156`. Hindsight: *"latency is determined by the slowest parallel branch rather than the sum"*. | stage attribution vs competitor design | HIGH | the three legs inside `retrieval` measured **concurrently**, with `retrieval`'s OWN p95 unchanged from its sequential run (needs A4's stage timings — the box's end-to-end p95 cannot resolve a 1.2 s effect inside a 2.7–7.1 s spread) — then contention, not sequencing, is the cost |
+| **D2** | **The STAGES are sequential, so their times sum.** `pre_handler 5,996 · embed_encode 4,003 · retrieval 1,199 · fusion 0.2 · ep 156`. ⚠️ **The three legs INSIDE `retrieval` are already concurrent**: `degradation_chain` submits `fts`/`vector`/`structural` to `ThreadPoolExecutor(max_workers=3)` under a 500 ms collective cap (since `#7780`, 2026-08-04), and `read_stages.py` says a per-leg sum would exceed the stage that contains it. So the 1,199 ms is a **concurrent** stage, not a sum of legs; what remains there is contention or cap overrun, not sequencing. Hindsight: *"latency is determined by the slowest parallel branch rather than the sum"*. | stage attribution vs source | HIGH | `leg_trace`'s per-leg durations summing to ≈ the 1,199 ms stage (then the legs ARE serial), or the stage's p95 unchanged when the 500 ms collective cap is raised — then the residue is contention, not sequencing |
 | **D3** | **Live session-capture traffic competes with reads.** 9-second log window: **6 × `POST /v1/sessions`, all 429** (≈40/min). The writer is the **pi capture extension inside agent sessions** — this session's own verifier run printed `[tortoise-capture] spool flush … paused 218 (budget; continues in the background)`. So the traffic is ours, continuous, and rate-limited rather than stopped. | production logs + the capture extension's own output | HIGH | a capture-quiet window (spool drained, zero `POST /v1/sessions`) with the same 504 rate |
 | **D4** | **One worker, one process.** Single uvicorn worker; `TORTOISE_MULTI_WORKER=1` is gated by `worker_topology.py::UNLANDED_GUARDS`, which holds **nine rows, one per holder** — the file's own docstring warns that collapsing them is how a single row gets read as "covered". The three most quoted are duplicate daemons filing issues N times, in-memory OAuth CSRF 404s at N≥2, and per-process index jobs; the rest include **rate-limit buckets × N** and the **model pre-warm at ~N× RSS on a 4096 MB box** — the ledger's row says ~85 s, while the tree's own measurement is a **≈196 s COLD load** (`embeddings.py:885-910`: 156.5 s of imports + 39.3 s construct) — both of which change the real cost of enabling workers. | `worker_topology.py::UNLANDED_GUARDS` | HIGH | **two workers** running with the **eight landable** `#1677` guard rows landed (no duplicate daemons, no CSRF 404s, no duplicate index jobs) and p50/p95 unchanged from the one-worker run — i.e. the worker count was not the limit. ⚠️ `RSS ≈ N×` is accepted for this test: under spawn there is no COW mitigation (`worker_topology.py` says so), so the memory envelope is a **sizing** question (S1) — which a latency falsifier must not smuggle in as a precondition |
 | **D5** | **Storage pressure converts slow into refused.** Graph hit **82 % of 1 GB**; org allowance **cap 102 MB / hard stop 153 MB** refused writes; a 142 MB retirement restored them. The bounded projection is designed (`#13989`) but **not armed** (`#13103`). | measured today | HIGH | **a refusal while the ledger's own reading is under the cap** (real headroom) — then pressure is not what refuses. ⚠️ Not "a write accepted above the 153 MB stop": that reading is a **lower bound with sampling error**, so the gate can accept a write whose true bytes exceed the stop without being wrong (`STORAGE-ARCHITECTURE.md` §2 note on `GRAPH.MEMORY USAGE`) |
@@ -57,7 +57,7 @@ D3 retry loop + live session writes
    → fill the single worker's queue (D4)
       → queue wait lands in pre_handler: 5,996 ms in the slow trace
          + D1 inline embed 2,078–4,003 ms
-            + D2 sequential legs 1,199 ms
+            + D2 the retrieval STAGE 1,199 ms (legs already concurrent)
                = 9.3–11.2 s — under the 10 s wait bound (#3834) only while the embed is below 2,805 ms
                  (5,996 + 1,199 = 7,195); the embed range's own midpoint (3,040 ms) already sums to
                  10.2 s, its top to 11.2 s (11.35 s with the trace's own `ep` — 11.55 s once its
@@ -70,14 +70,14 @@ D5 refuses writes once the corpus outgrows the graph; D6 hides all of it behind 
 
 ## 3. What the comparables say the destination looks like
 
-Four of the five have moved their expensive write work behind a queue; we already match two of the four moves.
+Four of the five have moved their expensive write work behind a queue; we already match two of the four moves, and hold the parallel half of the third (bounded traversal is what is missing).
 
 | move | Mem0 | Zep | Hindsight | Supermemory | turbopuffer | us |
 |---|---|---|---|---|---|---|
 | durable cheap store | vector store primary; SQL = ADD history log | — | **Postgres+pgvector** | — | object storage | ✅ record |
 | derived hot layer in front | vector+entity | **hot-graph cache** | servers as disposable caches | **KV hot layer** | NVMe cache | ✅ graph + eviction executor |
 | **expensive work at write, behind a queue** | **<50 ms ack, queue, scale on depth** | async ingest | **"cost shifted to writes"** | **"dreaming" phase** | — | ❌ inline |
-| **parallel legs, bounded traversal** | **4 signals scored in parallel** | hybrid (legs not stated) | **4 legs in parallel** | *not recorded* | — | ❌ sequential |
+| **parallel legs, bounded traversal** | **4 signals scored in parallel** | hybrid (legs not stated) | **4 legs in parallel** | *not recorded* | — | ✅ **parallel dispatch** · ❓ bounded traversal |
 | **published retrieval latency** | p50 148 ms / p95 200 ms | p95 <100 ms | **recall 100–600 ms** | sub-300 ms | **14 ms warm / 500 ms cold** | ❌ none published |
 
 ⚠️ **Every figure in that table is VENDOR-PUBLISHED, not reproduced here.** They establish the *class* of latency the market ships; they are never our own measurement. Only turbopuffer publishes a **cold/warm split** — the others publish a single retrieval latency.
@@ -95,7 +95,7 @@ Four of the five have moved their expensive write work behind a queue; we alread
 **F0 · Stabilise — free, days.** Stop the retry storm; serialise the capture drain; find the machine POSTing ~40 sessions/min;
 verify allowance headroom before any drain. *Exit:* 429s ≈ 0, spool shrinking, 20/20 searches 200.
 
-**F1 · Read path — free, ~1–2 weeks.** Parallel legs (`#14192`) · embedder seam + query micro-batching with a hard max-wait
+**F1 · Read path — free, ~1–2 weeks.** Bound the legs' traversal and give each its own budget (`#14192` — its *parallel* half already ships, see D2, so re-scope before spending the week) · embedder seam + query micro-batching with a hard max-wait
 (`#14186`) · stage timings on success (`#14187`). *Exit:* p50 ≤ 500 ms, p95 ≤ 1 s over 20 calls, fusion rank-identical.
 
 **F2 · Write path — free, ~1 week.** Projection consumes `journal_event` on a worker loop (`#14185`), and the
