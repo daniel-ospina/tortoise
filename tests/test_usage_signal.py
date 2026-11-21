@@ -72,6 +72,7 @@ named test goes RED):
 
 from __future__ import annotations
 
+import functools
 import json
 import subprocess
 import sys
@@ -651,20 +652,28 @@ def _stamp(value: str | None) -> float:
 #: the tree that imports a store client is named here. Scope, stated rather than
 #: implied: it covers DIRECT importers (the closure is not walked — this module
 #: legitimately imports `read_ledger` for `_stamp`/`row_key`, and a closure would
-#: have to forbid that too). ⛔ ONE MODULE IS OUT OF SCOPE FOR THAT REASON AND NOT
-#: BY OVERSIGHT: `tortoise.embedded_lifecycle` imports `redis`, but importing
-#: `usage_signal` ALREADY pulls it in transitively (measured: it is in
-#: `sys.modules` before this file's probes run), so banning it would make the
-#: reachability probe assert something the module cannot satisfy. The direction
-#: test below skips exactly that one, and names it.
-_CLOSURE_ALREADY_REACHED = ("tortoise.embedded_lifecycle",)
+#: have to forbid that too). ⛔ ONE MODULE IS OUT OF THE **PROBE'S** SCOPE AND STAYS
+#: IN THE BAN: `tortoise.embedded_lifecycle` imports `redis`, but importing
+#: `usage_signal` already pulls it in transitively (`tortoise/__init__.py` does
+#: `from tortoise.embedded_lifecycle import atexit_fast_close` at module level), so
+#: the subprocess probe — which asserts forbidden names are ABSENT from
+#: `sys.modules` — could never name it. An earlier cut therefore dropped it from
+#: the SET, which silently dropped the AST BAN too: a `from . import
+#: embedded_lifecycle` added to `usage_signal` reddened nothing, through the one
+#: module that owns the embedded store. The exemption now applies to the PROBE's
+#: name list only. `tortoise` is exempt for the same kind of reason, and is not in
+#: the set at all: the package root is in `sys.modules` by construction, so banning
+#: it would ban the module itself.
+_PROBE_EXEMPT = ("tortoise", "tortoise.embedded_lifecycle")
 _FORBIDDEN_GRAPH_ROOTS = (
     "falkordb",
     "redis",
+    "redislite",
     "tortoise.__main__",
     "tortoise.acl_graph_users",
     "tortoise.backup",
     "tortoise.cypher_guard",
+    "tortoise.embedded_lifecycle",
     "tortoise.ep",
     "tortoise.hosted_api",
     "tortoise.hosted_backup",
@@ -677,7 +686,12 @@ _FORBIDDEN_GRAPH_ROOTS = (
 
 #: The package roots that ARE a store client, as the direction test below has to
 #: recognise them. Kept beside the set it derives from so the two cannot drift.
-_STORE_CLIENT_ROOTS = ("falkordb", "redis")
+#: ⛔ THREE, NOT TWO: `redislite` is the root the tree actually reaches the client
+#: through (`tortoise/__init__.py`: `from redislite.falkordb_client import
+#: FalkorDB`), and a predicate that scans only `falkordb`/`redis` cannot see its own
+#: package root — the same "only some of the roots" defect this test exists to
+#: stop, one root over.
+_STORE_CLIENT_ROOTS = ("falkordb", "redis", "redislite")
 
 
 def _imports_of(source: str) -> set[str]:
@@ -768,7 +782,7 @@ def test_no_graph_dependency() -> None:
     probe = (
         "import sys;"
         "from tortoise import usage_signal;"
-        f"forbidden={_FORBIDDEN_GRAPH_ROOTS!r};"
+        f"forbidden={tuple(r for r in _FORBIDDEN_GRAPH_ROOTS if r not in _PROBE_EXEMPT)!r};"
         "bad=[n for n in sys.modules if any(n == r or n.startswith(r + '.') "
         "for r in forbidden)];"
         "print(','.join(sorted(bad)))"
@@ -825,18 +839,23 @@ def test_the_no_graph_guard_names_modules_that_EXIST() -> None:
     )
 
 
-def _modules_reaching_a_store() -> set[str]:
+@functools.cache
+def _modules_reaching_a_store() -> frozenset[str]:
     """Every module in the tree that imports a STORE CLIENT, by parsed imports.
 
     ⛔ PARSED, NOT GREPPED, AND AGAINST EVERY DECLARED ROOT. This read
     `"from falkordb import" in source` — a substring test that saw only ONE of the
-    two roots the set itself declares, so the modules that reach the store through
+    roots the set itself declares, so the modules that reach the store through
     `redis` (`hosted_backup` constructs a real client over a derived pool,
     `acl_graph_users`, `tortoise_client`, `retry`, `ep`, `hosted_api`,
     `embedded_lifecycle`) were invisible and the coverage test reported protection
-    it did not deliver. A substring is wrong in the other direction too:
-    `"import redis" in source` matches PROSE (it flags `tortoise/__init__.py`,
-    whose only match is a docstring line).
+    it did not deliver. A substring is wrong in the other direction too: `"import
+    redis" in source` matches PROSE — `tortoise/embedded_lifecycle.py` says
+    "`import tortoise` must not import redislite" in a comment, which contains the
+    substring `import redis`.
+
+    Cached: the tree cannot change within a run, and re-parsing all 300+ files per
+    call cost ~5.9 s a call against this file's `durations: 2.0` shard row.
     """
     package = Path(usage_signal.__file__).parent
     found: set[str] = set()
@@ -851,7 +870,7 @@ def _modules_reaching_a_store() -> set[str]:
             for root in _STORE_CLIENT_ROOTS
         ):
             found.add(module)
-    return found
+    return frozenset(found)
 
 
 def test_the_store_reach_scan_sees_the_REDIS_spelling_too() -> None:
@@ -866,6 +885,7 @@ def test_the_store_reach_scan_sees_the_REDIS_spelling_too() -> None:
         "tortoise.hosted_backup",
         "tortoise.acl_graph_users",
         "tortoise.tortoise_client",
+        "tortoise",  # the package root, via `redislite.falkordb_client`
     ):
         assert module in found, (
             f"{module} imports a store client through `redis` and the scan did not "
@@ -883,7 +903,7 @@ def test_the_no_graph_guard_covers_every_module_that_reaches_a_store() -> None:
     uncovered = [
         module
         for module in _modules_reaching_a_store()
-        if module not in _CLOSURE_ALREADY_REACHED
+        if module not in _PROBE_EXEMPT  # cannot be banned; see the set's comment
         and not any(
             module == root or module.startswith(root + ".")
             for root in _FORBIDDEN_GRAPH_ROOTS
@@ -893,6 +913,12 @@ def test_the_no_graph_guard_covers_every_module_that_reaches_a_store() -> None:
         f"module(s) reach a graph client but are not in the forbidden set, so a "
         f"serve counter could import them unnoticed: {sorted(uncovered)}"
     )
+    # ⛔ AND THE PROBE'S EXEMPTION MUST NOT BECOME A BAN EXEMPTION. This module
+    # owns the embedded store and is exempt from the PROBE only (it is in
+    # `sys.modules` before the probe runs); dropping it from the SET would drop the
+    # AST ban too, which is the hole an earlier cut had. Asserted rather than left
+    # to the coverage row, which skips probe-exempt modules by construction.
+    assert "tortoise.embedded_lifecycle" in _FORBIDDEN_GRAPH_ROOTS
 
 
 def test_recording_never_raises_on_a_broken_path(tmp_path: Path) -> None:
