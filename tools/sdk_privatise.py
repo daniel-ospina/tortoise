@@ -1220,8 +1220,12 @@ SWEEP_NAMES = 66
 #: measurements, never their evidence. `--check` exits 0 on this tree with
 #: `typed references still pointing at a public name: 0`.
 #: ⛔ THE BASE FIGURE IS THE BASE **TREE's** MEASUREMENT, never the `SWEEP_RESIDUE` line committed on
-#: it. `origin/main` at `e74cf1d13d` commits `(11835, "891187f5a4636487")` while its tree MEASURES a
-#: different pair — so a reader who takes the committed line as the base concludes a live pin is off
+#: it. `origin/main` `1b0db0489408` COMMITS `(11843, "6aed5368ffa10513")` while its tree MEASURES
+#: `(11840, "b7eb08ff3acdcce4")` — measured, not asserted: `--repin` in a worktree at that commit
+#: prints the second pair, so `--check` exits 1 on main itself. (The pair `(11835,
+#: "891187f5a4636487")` named here previously is committed at `2c0d66e2ec`, where the committed line
+#: and the tree DO agree — it was the wrong example for this rule, not a wrong rule.) So a reader who
+#: takes the committed line as the base concludes a live pin is off
 #: by rows it is not off by, and that a green `--check` is false. It is not: re-measured on the tree
 #: `--check` is pointed at, the pair is the one that tree prints (#14183 review round 5, finding 2 —
 #: a pair CALLED FALSE while `--check` was green, falsified by measurement rather than argument).
