@@ -29,6 +29,27 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "config" / "surface-manifest.yml"
+
+#: The per-test budget the three long-re-grade rows below declare for themselves.
+#:
+#: `pyproject.toml`'s `[tool.pytest.ini_options] timeout = 300` is what an unmarked item
+#: inherits, and its own comment states the invariant those markers exist to keep: "Every other
+#: file's TOTAL is <=235s, so no unmarked item can reach 300s … A leg that needs a longer single
+#: item must SAY so — `@pytest.mark.timeout(N)` on the test."  These rows break that premise
+#: because the shrink arm re-grades the WHOLE archive: `removal_records()` re-reads and
+#: re-parses every frozen file (~55 s per row — grep `sm.removal_records()`: each of the three
+#: long-grade rows below calls it, the first inline as `sm.removal_records()["forward_raw"]`),
+#: and those three additionally walk the manifest twice — measured on an idle box at this head:
+#: 124.8 s, 115.2 s, 102.3 s.  One of
+#: them was therefore 42% of the repo-wide budget, and it has already red the suite: a
+#: `pytest tests/test_archive.py tests/test_surface_manifest.py` run (409 tests) failed with ONLY
+#: `test_a_REMOVED_SDK_departure_still_needs_its_FREEZE_on_the_shrink_arm` red, and the
+#: identical command re-run 24 minutes later gave `409 passed, 1 skipped` with that same row at
+#: 124.8 s — pytest-timeout armed on it is reproducible (`-o timeout=100` reds it with
+#: `Failed: Timeout (>100.0s) from pytest-timeout`, inside `archive_surface.expected_block`),
+#: and the elapsed time is the only quantity in these rows that varies with box load.  So the
+#: ceiling is declared rather than left to a 2.4x margin: 600 s is 4.8x the measured cost.
+_LONG_GRADE_TIMEOUT = 600
 RENDERED = ROOT / "docs" / "product" / "mcp-sdk-surface.md"
 CANONICAL = ROOT / "docs" / "product" / "canonical-mcp-tools.md"
 SURFACE_ORDER = ROOT / "config" / "surface-order.yml"
@@ -1122,13 +1143,15 @@ def checker(monkeypatch, derived_baseline):
     return sm
 
 
-def _check(sm, doc: dict, tmp_path, *, strict: bool = False) -> tuple[int, str]:
+def _check(sm, doc: dict, tmp_path, *, strict: bool = False, **extra) -> tuple[int, str]:
     """Run `cmd_check` with a redirected manifest, capturing stdout AND stderr.
 
-    stderr is captured because a traceback goes there: an assertion that the output carries
+    `stderr` is captured because a traceback goes there: an assertion that the output carries
     no traceback is vacuous against a stdout-only buffer (review finding). `MANIFEST_FILE`
     is restored, so a test cannot leak the redirect into another one. `strict` drives the
-    `--provenance-strict` arm (#11057) through the SAME path the workflow step uses.
+    `--provenance-strict` arm (#11057) through the SAME path the workflow step uses, and
+    `**extra` carries any other `check` flag — `base_ref`/`allow_surface_shrink` drive the
+    SHRINK arm (#12327) through that same path rather than through a helper.
     """
     path = tmp_path / "manifest.yml"
     path.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110))
@@ -1140,7 +1163,7 @@ def _check(sm, doc: dict, tmp_path, *, strict: bool = False) -> tuple[int, str]:
     buf = io.StringIO()
     try:
         with redirect_stdout(buf), redirect_stderr(buf):
-            rc = sm.cmd_check(argparse.Namespace(provenance_strict=strict))
+            rc = sm.cmd_check(argparse.Namespace(provenance_strict=strict, **extra))
     finally:
         sm.MANIFEST_FILE = previous
     return rc, buf.getvalue()
@@ -6000,6 +6023,7 @@ def test_cut_REFUSES_a_dropped_tool_with_no_record(monkeypatch, tmp_path, derive
     )
 
 
+@pytest.mark.timeout(_LONG_GRADE_TIMEOUT)
 def test_a_dropped_tool_still_in_RETIRED_USE_INSTEAD_is_REFUSED_like_check(
     monkeypatch, tmp_path, derived_baseline, capsys
 ):
@@ -6998,6 +7022,20 @@ def test_an_override_cannot_waive_TWO_surfaces_at_once():
     assert problems == [], problems
     assert sorted(accounting) == [("tortoise_x", "sdk"), ("tortoise_x", "tool")], accounting
 
+    # ⛔ AND THE REFUSAL NAMES THE CALLER'S OWN FLAG (#14039 review). `removal_report` is
+    # shared by `cut` (`--allow-removal`) and by this module's CI shrink arm (`check
+    # --base-ref`, whose override is `--allow-surface-shrink`, passed as `flag=`), so a
+    # message hardcoding `--allow-removal` prescribes a flag that command REJECTS: measured
+    # `check --base-ref --allow-removal same_name` → argparse rc=2 `unrecognized arguments`.
+    # Pinned on the shrink arm's spelling, and on the absence of the other one.
+    shrink_problems, _ = sm.removal_report(
+        prior, set(), records, allowed={"tortoise_x"}, flag="--allow-surface-shrink"
+    )
+    shrink_ambiguous = [p for p in shrink_problems if p.kind == "ambiguous-waiver"]
+    assert len(shrink_ambiguous) == 1, shrink_problems
+    assert "--allow-surface-shrink tortoise_x" in shrink_ambiguous[0], shrink_ambiguous[0]
+    assert "--allow-removal" not in shrink_ambiguous[0], shrink_ambiguous[0]
+
 
 def test_an_override_for_an_ALREADY_recorded_symbol_is_a_false_record():
     """An override for a symbol a REAL record already accounts for waives nothing — and
@@ -7786,3 +7824,528 @@ def test_the_dangling_forward_REMEDY_runs_the_order_it_prints(tmp_path):
     assert (repo / entry["file"]).exists(), entry
     assert "probe_fwd" in (repo / entry["file"]).read_text(encoding="utf-8")
 
+
+
+# ── 15. the SHRINK pin on the COMMITTED baseline (#12327) ─────────────────────────────────
+#
+# `cut`'s removal gate (#12237) grades the transition "committed rows -> freshly derived
+# rows". A HAND-SPLICE never makes that transition: delete a row from the baseline, fix the
+# four mechanical cells a splicer already edits, delete the code — and `cut` never runs, so
+# the removal gate never runs. Property 12 then compares the artifact against a derivation
+# of the code that no longer has the tool, `tools/surface-guard.py` compares the live class
+# against those same rows, and both are green BY THE SAME CONSTRUCTION. It is the shape
+# three gates could not see, and it is the RECOMMENDED procedure here (`MEMORY.md`
+# `[surface-cut]`), so it sat on the path a careful lane is told to take.
+#
+# The reference that fixes it is a version the PR cannot author: the merge base. These tests
+# prove BOTH directions on REAL records — the archive manifest and the retirement maps are
+# the repository's own, never stubbed, because the accounting rule is the thing under test.
+
+
+def _baseline_pair(*, extra_rows: tuple[str, ...] = (), extra_retired: tuple[str, ...] = ()):
+    """`(base, now)`: the real baseline plus the rows a splice would have removed.
+
+    `base` is what the BASE REF held; `now` is the artifact after the hand-edit. Every test
+    below builds its violation this way, so nothing about the accounting is simulated — only
+    the prior is, because no same-tree check can have one.
+    """
+    with MANIFEST.open() as fh:
+        now = yaml.safe_load(fh)
+    base = copy.deepcopy(now)
+    template = now["rows"][0]
+    base["rows"] = list(base["rows"]) + [
+        dict(template, name=name) for name in extra_rows
+    ]
+    if extra_retired:
+        now = copy.deepcopy(now)
+        now["retired"] = list(now.get("retired") or []) + [
+            {"name": name, "use_instead": "tortoise_search"} for name in extra_retired
+        ]
+    return base, now
+
+
+def test_a_spliced_tool_row_with_no_record_is_red_and_names_the_symbol():
+    """#12327's measured exploit: the row AND the code are gone, every gate green."""
+    sm = _load_manifest_tool()
+    base, now = _baseline_pair(extra_rows=("tortoise_spliced_ghost",))
+
+    problems = sm.shrink_problems(base, now)
+
+    assert any("tortoise_spliced_ghost" in p for p in problems), (
+        f"the pin must NAME the symbol that left the baseline: {problems}"
+    )
+    assert any("DROPPED with no record" in p for p in problems), problems
+
+
+def test_a_spliced_row_covered_by_an_archive_entry_is_green():
+    """The legitimate case, on a REAL archive entry (an `mcp-tool` row in archive/MANIFEST.json).
+
+    Not a fixture entry: `removal_records()` re-grades the committed archive, so this is the
+    same accounting a splicer's PR would have to satisfy.
+    """
+    sm = _load_manifest_tool()
+    from tools import archive_surface as arch
+
+    archived = sorted(
+        entry["symbol"]
+        for entry in arch.load_manifest(arch.MANIFEST_PATH).get("entries", [])
+        if entry.get("kind") == arch.MCP_TOOL
+    )
+    assert archived, "the fixture needs a real `mcp-tool` archive entry to prove the green direction"
+    base, now = _baseline_pair(extra_rows=(archived[0],))
+
+    assert sm.shrink_problems(base, now) == [], (
+        f"{archived[0]} left the baseline WITH an archive record, which is a recorded removal"
+    )
+
+
+def test_a_row_that_reappears_as_a_retired_name_is_not_a_shrink():
+    """A retirement is still SERVED (#3883), so nothing left the surface at all.
+
+    This is #12327's acceptance case: the same tree with the name in `RETIRED_USE_INSTEAD`
+    is green — because the derivation writes it into the `retired:` half, which
+    `surface_symbols` reads. Nothing is waived; nothing was removed.
+    """
+    sm = _load_manifest_tool()
+    base, now = _baseline_pair(
+        extra_rows=("tortoise_retired_door",), extra_retired=("tortoise_retired_door",)
+    )
+
+    assert sm.shrink_problems(base, now) == []
+
+
+def test_an_unchanged_baseline_is_green():
+    """Non-vacuity: the pin must not red an ordinary merge (a gate that always fires is off)."""
+    sm = _load_manifest_tool()
+    with MANIFEST.open() as fh:
+        doc = yaml.safe_load(fh)
+
+    assert sm.shrink_problems(doc, doc) == []
+
+
+def test_a_waiver_that_waives_nothing_is_reported():
+    """A false record is worse than no record: it reads as a departure somebody checked.
+
+    ⛔ The "never carried" wording is pinned, not just the verdict (review P3 of PR #14039).
+    All three waiver shapes share the `waives nothing` prefix and the `else` fallback also
+    names the symbol, so asserting only those two strings left this row GREEN when the
+    `symbol not in prior_symbols` branch was deleted — the survivor then said
+    `'tortoise_never_existed' is a [] symbol in the base ref's baseline`, which is the false
+    explanation the branch exists to prevent. Measured on the pre-fix tree: delete
+    `if symbol not in prior_symbols:` -> this test still passes.
+    """
+    sm = _load_manifest_tool()
+    with MANIFEST.open() as fh:
+        doc = yaml.safe_load(fh)
+
+    problems = sm.shrink_problems(doc, doc, allowed=["tool:tortoise_never_existed"])
+
+    assert any("waives nothing" in p and "tortoise_never_existed" in p for p in problems), problems
+    assert any("never carried" in p and "tortoise_never_existed" in p for p in problems), (
+        f"nothing left the surface and the base never had it, so the report must SAY that "
+        f"rather than describe the surviving row: {problems}"
+    )
+
+
+def test_a_deliberate_shrink_passes_with_a_named_waiver():
+    sm = _load_manifest_tool()
+    base, now = _baseline_pair(extra_rows=("tortoise_deliberate_drop",))
+
+    assert sm.shrink_problems(base, now, allowed=["tool:tortoise_deliberate_drop"]) == []
+
+
+def test_the_memory_note_does_not_advertise_a_removal_route_the_pin_refuses():
+    """Review ISSUE 2 of PR #14039: `MEMORY.md`'s `[surface-cut]` is the file that SENDS lanes here.
+
+    It listed three equivalent removal routes. The third — `cut --allow-removal` — cannot land:
+    `cmd_cut` prints it and persists NOTHING, while the required `surface-guard` job runs
+    `surface_manifest.py check --base-ref` and supplies no `--allow-surface-shrink`
+    (deliberately — `archive/README.md` says so). A lane that follows the note into that route
+    reds a required job with no flag it can pass, so the note may still MENTION the flag as long
+    as it says it does not land and names the pin that refuses it.
+
+    The note is now correct; this is the row that keeps it correct, because nothing else in the
+    tree reads it and the sentence is one an edit can silently restore to the pre-fix shape.
+    Non-vacuity: the pre-fix sentence was the plain third route — the flag, `#12237` and the
+    `#12327` reference, with no statement that it is local-only.
+    """
+    note = (ROOT / "MEMORY.md").read_text(encoding="utf-8")
+    entry = [ln for ln in note.splitlines() if ln.startswith("[surface-cut]: ")]
+    assert len(entry) == 1, f"the note needs exactly one `[surface-cut]` home: {entry}"
+    line = entry[0]
+    assert "--allow-removal" in line, "non-vacuity: the note advertises this flag"
+    assert "LOCAL-ONLY" in line, (
+        "the `--allow-removal` route must say it is local-only — `cut` persists nothing from "
+        f"it, so the shrink pin reds the PR and CI supplies no waiver: {line}"
+    )
+    assert "check --base-ref" in line, (
+        "name the pin that refuses it, so a reader can check the claim instead of trusting the "
+        f"note: {line}"
+    )
+
+
+def test_the_gate_reds_through_cmd_check_and_not_only_through_the_helper(
+    checker, tmp_path, monkeypatch
+):
+    """The acceptance says the GATE exits non-zero — so the arm is driven through `cmd_check`.
+
+    A scratch repo supplies the base ref (a real git tree with a real committed baseline),
+    and the assertion is the waiver arm because it is the one shape that needs no archive
+    re-grade: `removal_records()` re-reads every frozen file against THIS checkout, which a
+    scratch tree cannot satisfy, and stubbing it would make the proof prove nothing.
+    """
+    sm = checker  # `checker` is the module with `build_doc` pinned to the real derivation
+    with MANIFEST.open() as fh:
+        doc = yaml.safe_load(fh)
+
+    repo = tmp_path / "scratch"
+    (repo / "config").mkdir(parents=True)
+    (repo / "config" / "surface-manifest.yml").write_text(
+        yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110), encoding="utf-8"
+    )
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "baseline")
+
+    # The scratch repo must also be able to PROVE the record's `cut_at_commit`: property 14
+    # runs BEFORE the shrink arm and refuses a tree whose provenance names no commit in THIS
+    # clone (`git said: Not a valid object name`), so without this the test measures the
+    # provenance arm and never reaches the waiver. Citing the scratch repo's own first commit
+    # — on its default branch by construction — isolates the arm under test.
+    doc["cut_at_commit"] = _git(repo, "rev-parse", "HEAD")
+    (repo / "config" / "surface-manifest.yml").write_text(
+        yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110), encoding="utf-8"
+    )
+    _git(repo, "commit", "-qam", "record provenance on the default branch")
+
+    monkeypatch.setattr(sm, "ROOT", repo)
+    rc, out = _check(
+        sm, doc, tmp_path, base_ref="HEAD", allow_surface_shrink=["tool:tortoise_never_existed"]
+    )
+
+    assert rc == 1, f"the gate must exit non-zero on a false record, not print and pass: {out}"
+    assert "waives nothing" in out and "tortoise_never_existed" in out, out
+
+
+def test_the_shrink_arm_is_off_unless_a_base_ref_is_given(checker, tmp_path, monkeypatch):
+    """`check` keeps its documented meaning: a depth-1 `test` job cannot resolve a merge base."""
+    sm = checker
+    with MANIFEST.open() as fh:
+        doc = yaml.safe_load(fh)
+
+    called = []
+    monkeypatch.setattr(sm, "shrink_report", lambda *a, **k: called.append(1) or ([], "x", False))
+
+    rc, out = _check(sm, doc, tmp_path)
+
+    assert rc == 0, out
+    assert called == [], "the shrink arm ran without --base-ref"
+    assert "shrink checked against" not in out, (
+        "the arm did not run, so the green line must not claim it compared anything: a pass "
+        f"that names a base it never read is the false green this arm exists to prevent: {out}"
+    )
+
+
+def test_a_shrink_waiver_needs_a_reason_and_a_base_ref():
+    """Same pairing `archive_surface.py check` refuses, for the same two reasons.
+
+    ⛔ The first two cases pass NO `--base-ref`, so the adjacent `--allow-surface-shrink needs
+    --base-ref` guard catches them too and the PAIRING guard could be deleted with this row still
+    green (measured by the round-12 mutation pass). The last two cases pass a resolvable base ref,
+    so the base-ref guard is satisfied and the pairing guard is the only thing left that can
+    refuse — which is what makes the pairing itself load-bearing here.
+    """
+    assert _run(
+        "tools/surface_manifest.py", "check", "--allow-surface-shrink", "tool:x"
+    ).returncode == 2
+    assert _run(
+        "tools/surface_manifest.py",
+        "check",
+        "--allow-surface-shrink",
+        "tool:x",
+        "--allow-surface-shrink-reason",
+        "why not",
+    ).returncode == 2
+    # A base ref IS given, so only the pairing guard can refuse: a waiver with no stated reason.
+    missing_reason = _run(
+        "tools/surface_manifest.py",
+        "check",
+        "--base-ref",
+        "HEAD",
+        "--allow-surface-shrink",
+        "tool:x",
+    )
+    assert missing_reason.returncode == 2, missing_reason.stdout + missing_reason.stderr
+    assert "go together" in (missing_reason.stdout + missing_reason.stderr), (
+        "refused for the wrong reason: the PAIRING guard is what must answer here, not the "
+        "needs--base-ref guard"
+    )
+    # ... and the mirror: a reason with no symbol waives nothing.
+    missing_symbol = _run(
+        "tools/surface_manifest.py",
+        "check",
+        "--base-ref",
+        "HEAD",
+        "--allow-surface-shrink-reason",
+        "why not",
+    )
+    assert missing_symbol.returncode == 2, missing_symbol.stdout + missing_symbol.stderr
+    assert "go together" in (missing_symbol.stdout + missing_symbol.stderr)
+
+
+def test_the_ci_job_runs_the_shrink_arm_on_a_base_ref() -> None:
+    """Wiring: an arm no job invokes is a no-op gate (the measured #9075/#11057 shape)."""
+    workflow = (ROOT / ".github" / "workflows" / "python-ci.yml").read_text(encoding="utf-8")
+    needle = "tools/surface_manifest.py check --base-ref"
+    assert needle in workflow, (
+        "no workflow runs the surface shrink arm; deleting the flag from the step must red "
+        "here, not read as a cleanup"
+    )
+    index = workflow.index(needle)
+    job = workflow.rfind("\n  surface-guard:", 0, index)
+    assert job != -1, "the shrink arm needs the job whose clone has real history"
+    assert "fetch-depth: 0" in workflow[job:index], (
+        "the job running the shrink arm must check out full history, or the merge base is "
+        "absent by construction and the gate cannot answer"
+    )
+
+
+def test_a_waiver_for_a_row_that_never_LEFT_is_reported(monkeypatch):
+    """Round 3 F1 (fail-open): the waiver arm only reported two of the three shapes.
+
+    A waiver naming a symbol the BASE carries and this tree still carries matched neither
+    branch, so `check --base-ref` exited 0 with `--allow-surface-shrink tool:<a live tool>
+    --allow-surface-shrink-reason ...` on a tree where nothing shrank — the exact "reads as a
+    departure somebody checked" state the docstring calls worse than no record.
+    """
+    sm = _load_manifest_tool()
+    with MANIFEST.open() as fh:
+        doc = yaml.safe_load(fh)
+    live = doc["rows"][0]
+    symbol = str(live.get("name") or live.get("tool") or live.get("key") or "")
+    assert symbol, live
+
+    problems = sm.shrink_problems(doc, doc, allowed=[f"tool:{symbol}"])
+
+    assert any("waives nothing" in p and symbol in p for p in problems), (
+        f"nothing left the surface, so `tool:{symbol}` waives nothing: {problems}"
+    )
+    assert any("still carries it" in p for p in problems), (
+        f"the stated reason must not claim the base never carried it: {problems}"
+    )
+
+
+def test_a_waiver_on_the_wrong_surface_is_still_reported(monkeypatch):
+    """Non-vacuity for the consumption check: the class-mismatch shape must not be lost.
+
+    ⛔ The CLASS is pinned too (review P3 of PR #14039). `waives nothing` alone is shared with
+    the `else` fallback, so deleting the `cls is not None and (symbol, cls) not in prior`
+    branch left this row GREEN over a report that had stopped naming the surface at all.
+    Measured on the pre-fix tree: delete that branch -> this test still passes.
+
+    The row is picked as a TOOL row rather than `rows[0]`: the claim under test is `this symbol
+    is live on the 'tool' surface`, and `rows[0]` only happens to be one today — a re-cut that
+    reordered the baseline would turn the new assertion into a false red on a required job.
+    """
+    sm = _load_manifest_tool()
+    with MANIFEST.open() as fh:
+        doc = yaml.safe_load(fh)
+    live = next(row for row in doc["rows"] if not row.get("method"))
+    symbol = str(live.get("name") or live.get("tool") or live.get("key") or "")
+    assert symbol, live
+
+    problems = sm.shrink_problems(doc, doc, allowed=[f"sdk:{symbol}"])
+
+    assert any("waives nothing" in p for p in problems), problems
+    assert any("on the 'sdk' surface" in p for p in problems), (
+        f"`{symbol}` is live on the 'tool' surface, so the waiver is on the wrong surface "
+        f"and the report must name the surface it is on: {problems}"
+    )
+
+
+@pytest.mark.timeout(_LONG_GRADE_TIMEOUT)
+def test_a_recorded_SDK_rename_is_green_on_the_shrink_arm():
+    """Review F1 of PR #14039: a RENAME is the one shape that needs no freeze, and the
+    enforcing path had no way to say so.
+
+    `RETIRED_SDK_METHODS` is the rename record (`tortoise/sdk_retired.py:27-29`), every entry
+    is pinned to the owner-approved `docs/product/beta-sdk-surface.md` by
+    `tests/test_sdk_retirement.py`, and `removal_report`'s own docstring calls a rename "the
+    one shape that needs no freeze". But the rename route required a WAIVER, and the CI step
+    passes only `--base-ref` (deliberately), while `cut --allow-removal` is a LOCAL flag that
+    `cmd_cut` persists nowhere — so an ordinary rename PR reddened the required job and the
+    printed remedy said "FREEZE IT", the one thing the record says is not coming back.
+
+    Non-vacuity: the symbol is taken from the REAL maps and required to be one that is NOT
+    archived, which is the shape a rename PR lands (a frozen one is already accounted).
+    """
+    sm = _load_manifest_tool()
+    records = sm.removal_records()
+    archived = {symbol for _kind, symbol in records["archived"]}
+    renames = sorted(set(records["sdk_renamed"]) - archived)
+    assert renames, (
+        "the fixture needs a rename that is NOT frozen — that is the shape a rename PR lands"
+    )
+    symbol = renames[0]
+
+    base, now = _baseline_pair(extra_rows=(f"sdk:{symbol}",))
+
+    assert sm.shrink_problems(base, now) == [], (
+        f"{symbol} left the surface with its `RETIRED_SDK_METHODS` entry, which IS the record "
+        "for a rename (owner-approved, no freeze needed and no waiver available in CI)"
+    )
+
+
+@pytest.mark.timeout(_LONG_GRADE_TIMEOUT)
+def test_a_REMOVED_SDK_departure_still_needs_its_FREEZE_on_the_shrink_arm():
+    """The other direction: the rename route must not blanket-accept the DEPARTURE map.
+
+    `REMOVED_SDK_METHODS` names NO replacement, so it keeps no code and the freeze is still
+    required — accepting it would strip a caller with a bare `AttributeError` and archive
+    nothing (the round-18 defect of PR #12313, re-opened through the new route).
+    """
+    sm = _load_manifest_tool()
+    records = sm.removal_records()
+    archived = {symbol for _kind, symbol in records["archived"]}
+    departures = sorted(set(records["sdk_retired"]) - set(records["sdk_renamed"]) - archived)
+    assert departures, "the fixture needs a departure with no replacement and no freeze"
+    symbol = departures[0]
+
+    base, now = _baseline_pair(extra_rows=(f"sdk:{symbol}",))
+    problems = sm.shrink_problems(base, now)
+
+    assert any("FREEZE IT" in p and symbol in p for p in problems), problems
+    assert any("REMOVED_SDK_METHODS" in p for p in problems), problems
+
+
+def test_an_unrecorded_sdk_removal_is_still_red_on_the_shrink_arm():
+    """Non-vacuity for the fix: a method in NEITHER map is unrecorded and must still red."""
+    sm = _load_manifest_tool()
+    symbol = "tortoise_sdk_ghost_method"
+
+    base, now = _baseline_pair(extra_rows=(f"sdk:{symbol}",))
+    problems = sm.shrink_problems(base, now)
+
+    assert any("DROPPED with no record" in p and symbol in p for p in problems), problems
+
+
+def test_the_shrink_arm_refusal_exits_2_like_the_archive_arm(checker, tmp_path, monkeypatch):
+    """Review F3 of PR #14039: the workflow comment and `archive/README.md` both promise 2.
+
+    `archive_surface.py` returns 2 for this same refusal and this tool's argparse pairings
+    already do; returning 1 sent an operator debugging a refused step looking for a removal
+    that does not exist. An invocation defect is not a finding about the tree.
+    """
+    sm = checker
+    with MANIFEST.open() as fh:
+        doc = yaml.safe_load(fh)
+
+    repo = tmp_path / "scratch"
+    (repo / "config").mkdir(parents=True)
+    (repo / "config" / "surface-manifest.yml").write_text(
+        yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110), encoding="utf-8"
+    )
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "baseline")
+    doc["cut_at_commit"] = _git(repo, "rev-parse", "HEAD")
+    (repo / "config" / "surface-manifest.yml").write_text(
+        yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=110), encoding="utf-8"
+    )
+    _git(repo, "commit", "-qam", "record provenance on the default branch")
+    monkeypatch.setattr(sm, "ROOT", repo)
+
+    rc, out = _check(sm, doc, tmp_path, base_ref="refs/heads/does-not-exist")
+
+    assert rc == 2, f"an unresolvable base ref is a REFUSAL, not a finding about the tree: {out}"
+    assert "REFUSED" in out, out
+    assert "merge base" in out, f"the refusal must be the BASE REF one, not another arm: {out}"
+
+
+def test_the_green_line_echoes_the_waiver_reason(checker, tmp_path, monkeypatch):
+    """Review N1 of PR #14039: a required-and-discarded reason is a decoration.
+
+    The LINE is what is under test (the accounting itself has its own rows above), so the
+    shrink arm's verdict is pinned green here rather than re-graded — which also keeps this
+    row off `removal_records()`'s ~55 s archive re-grade.
+    """
+    sm = checker
+    with MANIFEST.open() as fh:
+        doc = yaml.safe_load(fh)
+    # `(problems, compared, graded)` — the arm GRADED here, which is what makes the line say
+    # "shrink checked against …" (see `property_count_note`).
+    monkeypatch.setattr(
+        sm, "shrink_report", lambda *a, **k: ([], "origin/main (merge base abc)", True)
+    )
+
+    rc, out = _check(
+        sm,
+        doc,
+        tmp_path,
+        base_ref="origin/main",
+        allow_surface_shrink=["tool:tortoise_deliberate_drop"],
+        allow_surface_shrink_reason="deliberate: measured no callers",
+    )
+
+    assert rc == 0, out
+    assert "waived: tool:tortoise_deliberate_drop" in out, out
+    assert "reason: deliberate: measured no callers" in out, out
+    # ⛔ THE POSITIVE SIDE OF THE GREEN LINE (review note of PR #14039, "no red"): the only
+    # row over this string asserted its ABSENCE (`test_the_shrink_arm_is_off_unless_a_base_ref
+    # _is_given`, `assert "shrink checked against" not in out`), so deleting the suffix from
+    # `cmd_check` kept every row green while a green shrink pass went back to reading
+    # identically to a run where the arm silently did nothing. Assert what was COMPARED, and
+    # assert the value the arm produced rather than the literal prefix.
+    assert "shrink checked against origin/main (merge base abc)" in out, out
+
+
+
+@pytest.mark.parametrize(
+    ("provenance_answered", "shrink_graded", "word", "parts", "not_answered"),
+    [
+        (True, True, "fifteen", "one shrink", ""),
+        (True, False, "fourteen", "", ""),
+        (False, True, "fourteen", "one shrink", "provenance NOT VERIFIED"),
+        (False, False, "thirteen", "", "provenance NOT VERIFIED"),
+    ],
+)
+def test_the_green_line_count_is_the_one_the_run_actually_produced(
+    provenance_answered, shrink_graded, word, parts, not_answered
+):
+    """Reviews F2 of PR #14039 (rounds 12-13): the count, and the two ways it can lie (#12327).
+
+    The shrink arm is a fifteenth property, so a `check --base-ref` that said "fourteen"
+    UNDER-stated what it graded. The first cut of that fix then OVER-stated it on two paths,
+    which is the same defect class in the other direction — and the repo's rule is that a
+    verification that did not happen must never read as one that passed:
+
+    * the PROVENANCE arm returns no problem when the clone cannot answer (`_unprovable`, a
+      `::notice::` in `cmd_check`) — a shallow checkout, or a ref behind the record;
+    * the SHRINK arm has one path with nothing to compare: the base ref carries no baseline
+      at all (`shrink_report`'s `graded=False`).
+
+    So the four reachable totals are 13/14/15, and every property that produced no verdict is
+    NAMED on the line rather than dropped. Pinned as a pure function: the totals stay cheap to
+    assert, which is why the arithmetic lives in one testable seam instead of in `cmd_check`.
+
+    DISCRIMINATION: deleting either `else` branch — counting a property that did not run —
+    reds exactly the two False rows, and hard-coding "fourteen" reds the 13 and 15 rows.
+    """
+    sm = _load_manifest_tool()
+
+    note, unanswered = sm.property_count_note(
+        provenance_answered=provenance_answered, shrink_graded=shrink_graded
+    )
+
+    assert note.startswith(f"{word} properties hold ("), note
+    if parts:
+        assert parts in note, note
+    # A property that was not answered is never ALSO claimed as one that holds — the
+    # direction this test exists for, so it is asserted on every row, not only the False ones.
+    assert ("one provenance" in note) is provenance_answered, note
+    assert ("one shrink" in note) is shrink_graded, note
+    assert not_answered in unanswered, unanswered
