@@ -152,7 +152,7 @@
 
 **The strategic reframing, stated by them:** the problem is no longer recall — it is that *"the resulting memory often mixed up distinct entities and generated circular answers"* and that graphs *"contained plenty of connections, but offered little tangible insight into how their product data was actually structured."* Both quoted complaints come from named customer segments (a manufacturing company-brain builder; a manufacturer).
 
-⚠️ **Read the vocabulary carefully:** the example they give to justify an ontology ("a 15% discount only applies to orders signed before March") is a **business rule**, but the mechanism they ship captures it as **entity types plus source-grounded descriptions**, not as an evaluable constraint. See `§6b.1` for what the ontology mechanically does and does not do.
+⚠️ **Read the vocabulary carefully:** the example they give to justify an ontology ("a company's 15% discount only applies to orders signed before March") is a **business rule**, but the mechanism they ship captures it as **entity types plus source-grounded descriptions**, not as an evaluable constraint. See `§6b.1` for what the ontology mechanically does and does not do.
 
 [Source](https://www.cognee.ai/) — retrieved 2026-09-11 · ["Meet the new cognee"](https://www.cognee.ai/new-cognee-experience) — retrieved 2026-11-21 · [cognee.ai/pricing](https://www.cognee.ai/pricing) — retrieved 2026-11-21
 
