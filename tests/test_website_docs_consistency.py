@@ -4026,6 +4026,25 @@ def test_a_table_open_across_the_bound_refuses_rather_than_cutting_the_source() 
         "a nested `</table>` with AAA keeping the outer": (
             "<a><table><tr><td><table></table><a>{h}<tr><td>{c}</td></tr></table>"
         ),
+        # ⛔ AND THE ONE ROUTE THAT PINS THE DEPTH ITSELF (#14073, measured on this
+        # box). The three rows above cannot red when the counter is reverted to a
+        # BOOLEAN, because on those shapes the stack STILL holds the table, so the
+        # stack test refuses first: reverting the depth to a boolean left this whole
+        # module green — 111 passed, 1 skipped — and a 370-shape sweep found no
+        # bypass either, which is how the gap was found. A `<button>` sibling close
+        # pops THROUGH the stack's table, so the counter is the ONLY guard left
+        # there, and a nested `</table>` clears a boolean at exactly that point.
+        # Chrome on this mutant: claim y=4926, `#quickstart` y=5085, ink 12630 px —
+        # the claim renders ABOVE the bounding heading, inside `#storage`, while the
+        # slice excludes it and every pin reads a section the reader does not see.
+        # The same shape with a bare `<td>` measures the same way (y=4926 vs 5016).
+        "<button> pops through the table, so the count must survive a nested close": (
+            "<button><table><tr><td><table></table><button>"
+            "<tr><td>{h}</td></tr>{c}</table>"
+        ),
+        "<button> pops through the table, bare <td> cell": (
+            "<button><table><tr><td><table></table><button><td>{h}</td>{c}</table>"
+        ),
     }
     for why, template in routes.items():
         mutant = (
