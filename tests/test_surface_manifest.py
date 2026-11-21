@@ -8029,6 +8029,103 @@ def test_the_gate_reds_through_cmd_check_and_not_only_through_the_helper(
     assert "waives nothing" in out and "tortoise_never_existed" in out, out
 
 
+def test_the_base_document_is_read_from_the_BASE_commit(checker, tmp_path, monkeypatch):
+    """P3-3 of the round-14 review: the base-document read could become a permanent no-op.
+
+    Measured on the pre-fix tree: replacing `base_doc = _manifest_at(root, sha)` with
+    `base_doc = doc` left every test green (a 22-row shrink subset plus the `cmd_check` rows).
+    The `graded=False` note rounds 12-13 added is the reachable end of that plumbing: a base
+    commit that carries NO baseline must SAY so rather than read as one that graded an empty
+    shrink — and it returns before `removal_report`, which is what keeps this test a real drive
+    of `cmd_check` (a scratch root cannot satisfy the archive re-grade that `removal_report`
+    performs against THIS checkout).
+
+    Mutation: `base_doc = doc` -> the note never appears (RED here).
+    Mutation: `_manifest_at` returning `{}` instead of `None` -> the note never appears (RED).
+    """
+    sm = checker
+    with MANIFEST.open() as fh:
+        now = yaml.safe_load(fh)
+
+    repo = tmp_path / "scratch-no-baseline"
+    (repo / "config").mkdir(parents=True)
+    # A base commit that predates the baseline: `config/surface-manifest.yml` does not exist.
+    (repo / "README.md").write_text("a tree before the baseline\n", encoding="utf-8")
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@example.com")
+    _git(repo, "config", "user.name", "t")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "before the baseline")
+    early_sha = _git(repo, "rev-parse", "HEAD")
+
+    # The tree under test does carry a baseline; provenance names a commit in THIS clone so
+    # property 14 cannot answer first (the same isolation the rows above document).
+    now = copy.deepcopy(now)
+    now["cut_at_commit"] = early_sha
+    (repo / "config" / "surface-manifest.yml").write_text(
+        yaml.safe_dump(now, sort_keys=False, allow_unicode=True, width=110), encoding="utf-8"
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "the tree under test")
+
+    monkeypatch.setattr(sm, "ROOT", repo)
+    rc, out = _check(sm, now, tmp_path, base_ref=early_sha)
+
+    assert rc == 0, out
+    assert "no shrink to grade" in out, (
+        "the base commit carries no baseline, so the arm must SAY it graded nothing instead of "
+        f"reading as an empty shrink (the `graded=False` note): {out}"
+    )
+
+
+def test_the_call_site_passes_the_CHECK_flag_to_removal_report(checker, tmp_path, monkeypatch):
+    """P3-4 of the round-14 review: the `flag=` VALUE at this call site was unpinned.
+
+    Measured on the pre-fix tree: mutating `flag="--allow-surface-shrink"` back to `cut`'s
+    `--allow-removal` left the three `cmd_check`-level shrink rows green — the only row that
+    pins the spelling passes `flag=` ITSELF, so it pins `removal_report`, not this caller. A
+    refusal that prescribes a flag the operator's subcommand rejects is the defect commit
+    `c4616b0929` fixed one artifact over.
+
+    The base document is fabricated here rather than committed (a scratch root cannot satisfy
+    the archive re-grade `removal_report` performs against THIS checkout), so the assertion is
+    on the KWARGS THIS CALL SITE PASSES — which is exactly the wiring that was unpinned.
+    Mutation: `flag="--allow-removal"` -> the captured value differs (RED here).
+    Mutation: `committed_rename_record=False` -> RED here, and in the rename row above.
+    """
+    sm = checker
+    with MANIFEST.open() as fh:
+        doc = yaml.safe_load(fh)
+    base = copy.deepcopy(doc)
+    base["rows"] = [*base["rows"], dict(doc["rows"][0], name="tortoise_base_only_ghost")]
+
+    seen: list[dict] = []
+
+    def _record(*args, **kwargs):
+        seen.append(kwargs)
+        return [], {}
+
+    monkeypatch.setattr(sm, "removal_report", _record)
+    monkeypatch.setattr(
+        sm,
+        "_manifest_at",
+        lambda root, sha, rel="config/surface-manifest.yml": copy.deepcopy(base),
+    )
+
+    rc, out = _check(sm, doc, tmp_path, base_ref="origin/main")
+
+    assert rc == 0, out
+    assert seen, "the shrink arm never reached removal_report, so this pin proves nothing"
+    assert seen[0].get("flag") == "--allow-surface-shrink", (
+        "the refusal this subcommand prints must name the flag IT accepts; `--allow-removal` "
+        f"belongs to `cut` and `check` rejects it: {seen[0]}"
+    )
+    assert seen[0].get("committed_rename_record") is True, (
+        "the enforcing path must read the committed rename record — it has no override to pass, "
+        f"and a rename is the shape that needs no freeze: {seen[0]}"
+    )
+
+
 def test_the_shrink_arm_is_off_unless_a_base_ref_is_given(checker, tmp_path, monkeypatch):
     """`check` keeps its documented meaning: a depth-1 `test` job cannot resolve a merge base."""
     sm = checker
@@ -8045,6 +8142,60 @@ def test_the_shrink_arm_is_off_unless_a_base_ref_is_given(checker, tmp_path, mon
     assert "shrink checked against" not in out, (
         "the arm did not run, so the green line must not claim it compared anything: a pass "
         f"that names a base it never read is the false green this arm exists to prevent: {out}"
+    )
+
+
+def test_a_BLANK_or_whitespace_shrink_reason_is_not_a_reason(monkeypatch):
+    """P3-1 of the round-14 review: the pairing guard compared RAW truthiness.
+
+    Measured before the fix: `check --allow-surface-shrink-reason ""` (no waiver) exited **0**
+    silently, and a whitespace reason satisfied the pairing test beside a real waiver — so an
+    unexplained removal could be waived by pressing space. `cmd_cut` has normalised its own
+    reason with `.strip()` all along; this `check` guard did not.
+    Mutation: drop the `.strip()`/`reason_given` normalisation -> the first case exits 0 again.
+    """
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)  # a hosted key refuses the import
+
+    blank = _run("tools/surface_manifest.py", "check", "--allow-surface-shrink-reason", "")
+    assert blank.returncode == 2, blank.stdout + blank.stderr
+    assert "go together" in (blank.stdout + blank.stderr), (
+        "a reason flag with no waiver names an override that did not happen — including when "
+        f"the value is empty: {blank.stdout}{blank.stderr}"
+    )
+
+    spaces = _run(
+        "tools/surface_manifest.py",
+        "check",
+        "--base-ref",
+        "HEAD",
+        "--allow-surface-shrink",
+        "tool:x",
+        "--allow-surface-shrink-reason",
+        "   ",
+    )
+    assert spaces.returncode == 2, spaces.stdout + spaces.stderr
+    assert "go together" in (spaces.stdout + spaces.stderr), (
+        "refused for the wrong reason: the PAIRING guard is what must answer here, not the "
+        f"needs--base-ref guard: {spaces.stdout}{spaces.stderr}"
+    )
+
+    # Positive control: a REAL reason beside a REAL waiver passes the pairing guard and is
+    # answered by the base-ref arm instead — so the rows above are not green merely because
+    # every invocation of this tool exits 2.
+    real = _run(
+        "tools/surface_manifest.py",
+        "check",
+        "--base-ref",
+        "no-such-ref-14039",
+        "--allow-surface-shrink",
+        "tool:x",
+        "--allow-surface-shrink-reason",
+        "deliberate: measured",
+    )
+    assert real.returncode == 2, real.stdout + real.stderr
+    assert "go together" not in (real.stdout + real.stderr), (
+        "a stated reason must pass the pairing guard and fail on the base ref instead: "
+        f"{real.stdout}{real.stderr}"
     )
 
 
