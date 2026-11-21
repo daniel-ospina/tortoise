@@ -889,13 +889,17 @@ def _own_imported_names(nodes: list[ast.stmt]) -> set[str]:
 def _non_own_imported_names(nodes: list[ast.stmt]) -> set[str]:
     """Names bound by imports that are NOT own code — third-party or stdlib.
 
-    The mirror of ``_own_imported_names``, and the evidence that keeps
-    ``_CAPABILITY_CALLS``' generic attribute (``query``) from grading an OPTIONAL
-    EXTRA as this repository's seam: `import some_optional_dep` …
+    The mirror of ``_own_imported_names``, and ONE OF THE TWO INPUTS to the evidence
+    that keeps ``_CAPABILITY_CALLS``' generic attribute (``query``) from grading an
+    OPTIONAL EXTRA as this repository's seam: `import some_optional_dep` …
     `some_optional_dep.query(…)` binds its receiver HERE, so the attribute call is
-    a third-party client's verb, not a door a rename in this repo can move. A
-    receiver bound any other way — a PARAMETER (`proj.g.query`), or a client built
-    at module scope (`PROJ = _make_proj()`) — is in neither set and stays graded.
+    a third-party client's verb, not a door a rename in this repo can move. It is an
+    INPUT and not the evidence, because this set answers "which names did a non-own
+    import bind ANYWHERE", which is a NAME and not a BINDING:
+    ``_third_party_receivers`` subtracts every re-bound name from it, and THAT is the
+    set ``_reaches_capability_seam`` is given. A receiver bound any other way — a
+    PARAMETER (`proj.g.query`), or a client built at module scope
+    (`PROJ = _make_proj()`) — is in neither set and stays graded.
     """
     out: set[str] = set()
     for stmt in nodes:
