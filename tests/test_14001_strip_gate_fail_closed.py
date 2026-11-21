@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import re
 import sys
 import types
 
@@ -1289,6 +1290,10 @@ def test_the_oracle_records_a_KEYWORD_handoff_to_the_write_channel():
 #: module component alone.
 _UNREADABLE_EXEMPT_MODULES = ("tortoise.sdk",)
 
+#: The ORIGIN token CPython puts in an `ImportError` message (`cannot import name 'x' from
+#: '<this>' (<path>)`). Read on its own, because the parenthesised tail is a FILESYSTEM PATH.
+_IMPORT_ORIGIN_TOKEN = re.compile(r"from '([^']+)'")
+
 
 def _is_absent_third_party_distribution(cause: BaseException | None) -> bool:
     """Did this import failure come from a MISSING THIRD PARTY, or from THIS repo?
@@ -1305,7 +1310,16 @@ def _is_absent_third_party_distribution(cause: BaseException | None) -> bool:
       absent third party       `ModuleNotFoundError`  `.name == 'prometheus_client'`
       partially installed dep  `ImportError`          `.name == 'prometheus_client'`
       repo-side rename         `ImportError`          `.name == 'tortoise.retrieval'`
-      hand-raised, no `name=`  either class           `.name is None` -> the message decides
+      hand-raised, no `name=`  either class           `.name is None` -> the `from '<module>'`
+                                                      TOKEN decides, never the tail
+
+    ⛔ THE RENDERED TAIL NEVER DECIDES (`#14099` F1, cycle 5). CPython renders a partially
+    installed dependency as `cannot import name 'x' from '<mod>' (<the module's __file__>)`, so
+    the parenthesised tail carries a FILESYSTEM PATH — and this repo's venv (and CI's checkout)
+    both live under a path containing `tortoise`. Grading the rendered message therefore reds for
+    the exact environment this exemption exists to excuse: measured, a REAL `ImportError` for a
+    partially installed `prometheus_client` read as repo-side while `.name` said otherwise.
+    `.name` settles every real shape; the message is read only for its origin TOKEN.
 
     Both signals fail CLOSED: an origin that is neither named nor recognisably third-party is not
     the environment, so it keeps the skip out.
@@ -1313,9 +1327,14 @@ def _is_absent_third_party_distribution(cause: BaseException | None) -> bool:
     if not isinstance(cause, ImportError):
         return False
     name = getattr(cause, "name", None) or ""
-    if name == "tortoise" or name.startswith("tortoise."):
-        return False
-    return "tortoise" not in str(cause)
+    if not name:
+        # No `.name` — the only other origin signal is the `from '<module>'` token. Read THAT and
+        # nothing else, so a filesystem path in the parenthesised tail cannot decide the verdict.
+        match = _IMPORT_ORIGIN_TOKEN.search(str(cause))
+        name = match.group(1) if match else ""
+    if not name:
+        return False            # unrecognised origin -> not the environment (fail closed)
+    return not (name == "tortoise" or name.startswith("tortoise."))
 
 
 def _writer_register_population() -> dict[str, list[str]]:
@@ -1337,10 +1356,9 @@ def _writer_register_population() -> dict[str, list[str]]:
     makes a writer's gate disappear quietly. Inside it `_is_absent_third_party_distribution`
     decides: a missing `prometheus_client` is the environment, while a REPO-SIDE
     `ImportError: cannot import name … from 'tortoise.…'` still reds — that is the one break a
-    source-reading pin exists to notice, and grading the class alone let it through. The residual
-    is a cause naming neither a module nor a `tortoise` one (a bare `raise ImportError("…")`
-    inside the declared module's own chain): it reads as environment, and that module's ten
-    writers are imported by ten test files which red on such a break independently.
+    source-reading pin exists to notice, and grading the class alone let it through. A cause that
+    names NO origin at all (a bare `raise ImportError("…")` inside the declared module's chain)
+    is `stray` too: unrecognised is not the environment.
     """
     import ast
 
@@ -1420,9 +1438,36 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
         f"so it has to be argued in review — declared: {_UNREADABLE_EXEMPT_MODULES}")
     keys = sorted(register.EMBED_WRITER_CLASSES)
     assert keys, "the register is empty, so this control proves nothing"
-    sources = {k.partition("::")[0]: strip._module_source(k.partition("::")[0]) for k in keys}
+
+    def _source_or_stand_in(module_name: str) -> str:
+        """Read a module's source, or stand in for the ONE module declared unreadable.
+
+        ⛔ THIS COMPREHENSION USED TO BYPASS THE EXEMPTION (`#14099` F2, cycle 5). A bare
+        `strip._module_source(...)` here raises `_UnreadableFold` for the declared module in the
+        very environment the exemption declares legal (`tortoise.sdk` -> `prometheus_client`), so
+        the CONTROL errored while the pin it guards passed. `origin/main` had no such call — this
+        is the first unguarded one in the file, so it is a regression, not a gap.
+
+        No arm below needs the declared module's REAL source: `folding()` serves `sources[...]`
+        only to a module it is NOT folding, and every arm that reaches the declared module folds
+        it. So a synthetic stand-in keeps this control runnable where the exemption applies,
+        without weakening a single row — and an OUTSIDER that cannot be read still raises, because
+        that is a real shrink and this control must not paper over it.
+        """
+        try:
+            return strip._module_source(module_name)
+        except strip._UnreadableFold:
+            if module_name not in _UNREADABLE_EXEMPT_MODULES:
+                raise
+            return "def _x():\n    pass\n"
+
+    sources = {name: _source_or_stand_in(name) for name in {k.partition("::")[0] for k in keys}}
     outsider = next(k for k in keys if k.partition("::")[0] not in _UNREADABLE_EXEMPT_MODULES)
     declared = next((k for k in keys if k.partition("::")[0] in _UNREADABLE_EXEMPT_MODULES), None)
+    assert declared is not None, (
+        "the declared exemption names a module with no keys in the register, so the F1 arms "
+        "below — the ones that pin the origin gate — would silently become a no-op while the "
+        "declaration pin above still passed")
 
     def folding(module_name: str, cause: BaseException):
         def fake(name: str) -> str:
@@ -1444,14 +1489,35 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
     monkeypatch.setattr(strip, "_module_source", folding(module, ValueError("loader changed")))
     assert outsider in _writer_register_population()["stray"]
 
-    if declared is not None:
+    if declared is not None:      # `declared` is asserted above; the `if` narrows the type
         declared_module = declared.partition("::")[0]
-        # the declared module MAY skip — for a missing dependency, the measured shape.
+        # the declared module MAY skip — for a missing dependency, in the shape CPython REALLY
+        # raises for a PARTIALLY INSTALLED one (`#14099` F1, cycle 5): `.name` is set, and the
+        # rendered message's parenthesised tail is the module's `__file__`. On this repo (and in
+        # CI) that path CONTAINS `tortoise`, so grading the rendered text calls the environment a
+        # repo-side break and reds this pin for the one fact it exists to excuse.
+        installed_under_a_tortoise_path = (
+            "cannot import name 'Counter' from 'prometheus_client' "
+            "(/home/runner/work/tortoise/tortoise/.venv/lib/python3.12/site-packages/"
+            "prometheus_client/__init__.py)")
         monkeypatch.setattr(
             strip, "_module_source",
-            folding(declared_module, ImportError("cannot import name 'Counter'")))
+            folding(declared_module, ImportError(installed_under_a_tortoise_path,
+                                                 name="prometheus_client")))
         skipped = _writer_register_population()
-        assert declared in skipped["unreadable"] and skipped["stray"] == []
+        assert declared in skipped["unreadable"] and skipped["stray"] == [], (
+            "a partially installed optional dependency carries its FILE PATH in the rendered "
+            "message, and that path contains `tortoise`; grading that text instead of the "
+            f"origin reds this pin for the environment it exists to excuse: {skipped['stray']}")
+        # …and when `.name` is absent, the origin TOKEN (`from '<module>'`) decides — not the
+        # tail that carries the path.
+        monkeypatch.setattr(
+            strip, "_module_source",
+            folding(declared_module, ImportError(installed_under_a_tortoise_path)))
+        skipped = _writer_register_population()
+        assert declared in skipped["unreadable"] and skipped["stray"] == [], (
+            "the origin token `from 'prometheus_client'` decides, and the `tortoise` in the "
+            f"parenthesised path must not: {skipped['stray']}")
         # …but a NON-import cause inside it is a loader change, not the environment.
         monkeypatch.setattr(
             strip, "_module_source", folding(declared_module, ValueError("loader changed")))
@@ -1479,6 +1545,44 @@ def test_the_over_refusal_population_is_itself_pinned(monkeypatch):
         assert declared in _writer_register_population()["stray"], (
             "a hand-raised repo-side ImportError carries its origin in the MESSAGE, and the "
             "message was not read")
+        # ⛔ …AND `.name` ALONE MUST DECIDE, WITH NO ORIGIN IN THE MESSAGE (`#14099` review of
+        # this head, "not attributable" #1). Every arm above restates the origin in its message,
+        # so DELETING the `.name` gate left all of them green — the docstring's claim that
+        # ".name settles every REAL shape" was enforced by nothing. These two shapes carry no
+        # `from '<module>'` token at all, so only `.name` can decide them, in both directions.
+        monkeypatch.setattr(
+            strip, "_module_source",
+            folding(declared_module, ImportError("symbol vanished",
+                                                 name="tortoise.retrieval")))
+        assert declared in _writer_register_population()["stray"], (
+            "a repo-side break whose MESSAGE names no module was excused — only `.name` can "
+            "decide that shape, and it said `tortoise.retrieval`")
+        monkeypatch.setattr(
+            strip, "_module_source",
+            folding(declared_module, ImportError("symbol vanished",
+                                                 name="prometheus_client")))
+        skipped = _writer_register_population()
+        assert declared in skipped["unreadable"] and skipped["stray"] == [], (
+            "a third-party `.name` is enough on its own — a message naming no module must not "
+            f"turn the environment into a repo-side break: {skipped['stray']}")
+
+    # ⛔ THE EXEMPTION IS AN EXACT MODULE, NOT A PREFIX (`#14099` review of this head, "not
+    # attributable" #2). No register module begins with `tortoise.sdk`, so NO real row can go red
+    # for a `startswith` mutant — the property the comment above `_UNREADABLE_EXEMPT_MODULES`
+    # advertises had no assertion behind it. A synthetic sibling supplies the row it lacks.
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            register, "EMBED_WRITER_CLASSES",
+            {**register.EMBED_WRITER_CLASSES,
+             "tortoise.sdk_v2::shadow": next(iter(register.EMBED_WRITER_CLASSES.values()))})
+        scoped.setattr(
+            strip, "_module_source",
+            folding("tortoise.sdk_v2",
+                    ModuleNotFoundError("No module named 'prometheus_client'",
+                                        name="prometheus_client")))
+        assert "tortoise.sdk_v2::shadow" in _writer_register_population()["stray"], (
+            "a module that merely STARTS WITH the declared one inherited its exemption — a "
+            "future `tortoise.sdk_v2` must be declared, not inferred")
 
     # a renamed writer is `missing`, never silently dropped.
     blanked = outsider.partition("::")[0]
