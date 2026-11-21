@@ -924,7 +924,25 @@ SWEEP_NAMES = 66
 #: `Graph` is never the SDK), so no shape was absorbed and no defect is hidden — the direction the
 #: pin exists to catch is a NEW shape, and there is none. `--check` exits 0 on this tree after the
 #: re-pin, with `typed references still pointing at a public name: 0`.
-SWEEP_RESIDUE = (11843, "6aed5368ffa10513")
+#:
+#: ⛔ RE-PINNED FOR A −6 THAT **IS** THIS BRANCH'S — `eeed8c2ea8` (`tests/test_read_ledger.py`,
+#: "the read-ledger pins drove three doors #14129 retired") replaced its last calls to the RETIRED
+#: doors with the live ones, and those calls were themselves residue rows (an untyped receiver on an
+#: ordinary-word method is exactly the shape this pin counts, whatever the receiver is called).
+#: THE −6 IS MEASURED, AND IT IS THE PR'S OWN, not `main`'s drift carried forward:
+#: `git diff origin/main HEAD` over the WHOLE PR touches exactly six lines of that shape —
+#: `-inst.query()` ×3, `-inst.paginated_query()`, `-inst.query_points_by_tag()`, `-inst.get_point()`
+#: (counted: `git diff origin/main HEAD -U0 | grep -E '^[+-]' | grep -cE
+#: '\.(query|update|delete|paginated_query|query_points_by_tag|get_point)\('` → **6**, and every
+#: one of them is a REMOVAL in `tests/test_read_ledger.py`), and the observed residue total falls by
+#: exactly those six, `11843 → 11837`. No other file in the PR adds or removes a row. So the delta
+#: is not attributable to `main` and cannot be left to a later main re-pin: this is the direction
+#: the pin's contract requires be DELIBERATE ("re-pin in a commit that says why"), and the
+#: direction is the harmless (downward) one — fewer references to retired doors, no new shape.
+#: `11837` is NOT `main`'s `11843`: this branch removes six rows `main` still has.
+#: `--check` exits 0 on this tree after the re-pin, with
+#: `typed references still pointing at a public name: 0`.
+SWEEP_RESIDUE = (11837, "52e9a205697f528f")
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
 #: and, importantly, `queue`-shaped accidental substrings — do not.
