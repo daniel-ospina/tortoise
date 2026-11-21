@@ -6548,3 +6548,52 @@ def test_a_cost_note_pricing_a_shape_the_vm_block_does_not_declare_says_so():
             "pre-#13665 historical shape — a reader acts on the stale figure "
             "(#14156 review F2)"
         )
+
+
+# ── Non-vacuity, ENCODED (the two pins above are hand-measured otherwise) ────
+# `20f8459795` established both pins and MEASURED that each reds on the pre-fix
+# content. A measurement at authoring time is not a guard: if a later refactor
+# softens either assertion, nothing reds and the pin reads green forever — the
+# inert-enforcer class. These probes mutate the real file and require the pin to
+# raise, so the discrimination is itself a test.
+
+
+def test_the_shape_pin_reds_when_cpus_reverts(monkeypatch):
+    """The #13665 regression, reproduced: `cpus = 4` → `cpus = 2` must redden."""
+    text = REAL_FLY_TOML.read_text(encoding="utf-8")
+    reverted = text.replace("  cpus = 4\n", "  cpus = 2\n", 1)
+    assert reverted != text, (
+        "fly.toml has no `  cpus = 4` line to revert — the probe is stale, so "
+        "it is proving nothing about the pin"
+    )
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "REAL_FLY_TOML",
+        _fixture("fly-cpus-reverted.toml", reverted),
+    )
+    with pytest.raises(AssertionError):
+        test_vm_block_declares_the_four_core_shape()
+
+
+def test_the_cost_note_pin_reds_when_the_historical_label_is_stripped(monkeypatch):
+    """The F2 class reproduced: the COST note prices 2 cores, unlabelled.
+
+    Only the `[[services]]` region is mutated (the `[[vm]]` table is kept
+    verbatim), which is the reviewed head's own shape minus the label the fix
+    added — exactly the state a reader acted on before #14156.
+    """
+    text = REAL_FLY_TOML.read_text(encoding="utf-8")
+    services_region, separator, vm_region = text.partition("[[vm]]")
+    assert separator, "fly.toml has no `[[vm]]` table — the probe is stale"
+    stripped = re.sub(r"(?i)pre-#13665", "historical", services_region)
+    assert stripped != services_region, (
+        "the `[[services]]` region carries no pre-#13665 label to strip — the "
+        "probe is stale, so it is proving nothing about the pin"
+    )
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "REAL_FLY_TOML",
+        _fixture("fly-cost-note-unlabelled.toml", stripped + separator + vm_region),
+    )
+    with pytest.raises(AssertionError):
+        test_a_cost_note_pricing_a_shape_the_vm_block_does_not_declare_says_so()
