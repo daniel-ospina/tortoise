@@ -62,10 +62,13 @@ named test goes RED):
 * **Leave the ATTRIBUTE spelling out of the reachability scan** (drop
   ``_package_root_attributes`` from ``_module_reaches_a_store``) →
   ``test_the_store_reach_scan_sees_the_REDIS_spelling_too`` RED on the synthetic
-  attr-only module — measured, 1 failed / 100 passed, while the coverage row stays
-  GREEN because no tree module reaches a store ONLY that way (the leg flags 0 of
-  305 files). The ban already saw that spelling, so the two directions disagreed
-  about one file — the same defect as the substring, one spelling over.
+  attr-only module, **and**
+  ``test_no_graph_dependency_pins_the_package_root_EXPORT_form`` with it (it calls
+  the same predicate) — measured at ``64f3448a``, **2 failed / 100 passed**, while
+  the coverage row stays GREEN because no tree module reaches a store ONLY that way
+  (the leg flags 0 of 305 files). The ban already saw that spelling, so the two
+  directions disagreed about one file — the same defect as the substring, one
+  spelling over.
 * **Forget a root in the ban floor** (drop ``redislite`` from
   ``_FORBIDDEN_GRAPH_ROOTS``) →
   ``test_the_ban_covers_all_three_roots_the_tree_actually_uses`` RED —
@@ -82,17 +85,19 @@ named test goes RED):
 * **Leave the ``from tortoise import __init__`` binding out of the attribute leg**
   (drop the ``ast.ImportFrom`` branch from ``_package_root_attributes``) →
   ``test_no_graph_dependency_pins_the_package_root_EXPORT_form`` RED on
-  ``from tortoise import __init__ as i`` + ``i.FalkorDB`` — measured, 1 failed /
-  100 passed, every other row green. ``tortoise.__init__`` IS the package and
-  ``_imports_of`` folds it onto the UNBANNED root, so this was the one spelling of
-  the package root no leg saw, in the ban and in the direction scan alike.
+  ``from tortoise import __init__ as i`` + ``i.FalkorDB`` — measured at
+  ``64f3448a``, 1 failed / 101 passed, every other row green. ``tortoise.__init__``
+  IS the package and ``_imports_of`` folds it onto the UNBANNED root, so this was
+  the one spelling of the package root no leg saw, in the ban and in the direction
+  scan alike.
 * **Bind only the ABSOLUTE ``from tortoise import __init__`` and leave the
   relative spelling out** (drop the ``relative_root`` arm of the ``ast.ImportFrom``
   branch in ``_package_root_attributes``) →
   ``test_no_graph_dependency_pins_the_package_root_EXPORT_form`` RED on
-  ``from . import __init__ as i`` + ``i.FalkorDB`` — measured, 1 failed / 100
-  passed. ``ast`` records the relative form as ``module=None, level=1``, so there
-  is no module STRING to compare and an absolute-only branch cannot see it;
+  ``from . import __init__ as i`` + ``i.FalkorDB`` — measured at ``64f3448a``,
+  1 failed / 101 passed. ``ast`` records the relative form as
+  ``module=None, level=1``, so there is no module STRING to compare and an
+  absolute-only branch cannot see it;
   ``_imports_of`` folds ``tortoise.__init__`` onto the unbanned package root, so
   the ban AND the direction scan were both green on a live reach.
 * **Read the relative arm as ``level == 1`` only** (narrow ``relative_root``, so
