@@ -145,6 +145,116 @@ STAGES: tuple[str, ...] = (
 #: inbound stage name (the analytics prop round-trip).
 STAGE_SET = frozenset(STAGES)
 
+#: The names in :data:`STAGES` that a caller may never MARK — they are DERIVED
+#: states this object computes, not stages a read path enters.
+#:
+#: ⛔ WHY THIS IS A GUARD AND NOT A CONVENTION (#14086 review F5 / round-2 F4).
+#: ``mark()``'s closed-vocabulary check accepts anything in :data:`STAGE_SET`, and
+#: both of these are in it because readers group on them and ``spent()`` /
+#: ``snapshot()`` publish them. But marking either produces a state the rest of
+#: the module says is impossible:
+#:
+#: * ``pre_handler`` — a first ``mark("pre_handler")`` arms and banks the
+#:   interval correctly, but leaves ``_stage == "pre_handler"``, so the NEXT mark
+#:   takes ``mark()``'s ``else`` branch and banks a SECOND ``pre_handler``
+#:   interval that no part covers: ``sum(parts) < pre_handler`` while
+#:   ``snapshot()`` publishes both as if they reconciled.
+#: * ``unmarked`` — its own docstring defines it as "no read stage was recorded",
+#:   and ``snapshot()`` publishes it as such; on an ARMED timeline a
+#:   ``mark("unmarked")`` closes the open stage and makes ``current()`` report
+#:   "unmarked" for a request whose stages were measured, so a breached caller's
+#:   body would state an unsupported inference.
+#:
+#: Refusing here is one frozenset membership test on a path that already does
+#: one, and it costs nothing: nothing in the tree marks either name (measured:
+#: every ``_mark_read_stage`` call site uses a real stage).
+_NOT_MARKABLE = frozenset({STAGE_UNMARKED, STAGE_PRE_HANDLER})
+#: The decomposition of ``pre_handler`` — a SECOND closed vocabulary, disjoint
+#: from :data:`STAGES` on purpose.
+#:
+#: ⛔ WHY THIS EXISTS (#10893, second cycle). ``pre_handler`` is ONE number, and
+#: one number cannot be acted on. Measured on the production box after the first
+#: cycle: ``pre_handler 5996.5`` — six seconds before ``/v1/search``'s handler
+#: executed — and three different mechanism classes produce exactly that number:
+#:
+#: * the event loop was SATURATED by another request's synchronous work, so this
+#:   request's task did not get scheduled (the ``#2988``/``#3498`` class);
+#: * the credential/org dependency stack was slow (an awaited JWKS or control
+#:   plane call — real work, not queueing);
+#: * the handler itself was waiting for a READ-LANE worker (the ``#13528``
+#:   shape, where eight workers parked in ``EmbeddingModel.get()`` made reading
+#:   requests "pay the wait a second time before their first stage mark").
+#:
+#: Each needs the OPPOSITE fix (offload the blocking work / repoint the
+#: dependency / widen or re-arm the lane), so the attribution must be a
+#: measurement rather than an inference from the total. The parts below are the
+#: boundaries this process can honestly observe; they sum to ``pre_handler``
+#: exactly, because both are accumulated from the same cursor.
+#:
+#: ⛔ A PART IS CLOSED BY :func:`note`, AND THE INTERVAL IT CLOSES IS THE ONE
+#: BEFORE IT — ``note("sdk_open")`` says "everything up to now belongs to the
+#: SDK open", never "the SDK open starts now". That direction is the contract:
+#: a note is taken at the END of the interval it names, from the call site that
+#: just finished the work.
+#:
+#: ⛔ PARTS ARE TELEMETRY ONLY, never wire. A caller cannot act on "4 s of my
+#: budget was spent before my handler ran" — only an operator can — so
+#: :meth:`ReadStages.wire_snapshot` still publishes the same keys (it DROPS
+#: ``pre_handler_parts`` before returning — that one line is what keeps the
+#: decomposition off the wire, so it must never be "simplified" back to
+#: ``return self.snapshot()``) and a breached caller's body stays byte-identical.
+PRE_HANDLER_PARTS: tuple[str, ...] = (
+    #: Arrival → the handler task created. ⛔ This is the OUTERMOST transport
+    #: middleware's own preamble, plus any time this request spent waiting for
+    #: the loop BEFORE its task existed — NOT the inner middleware chain. Those
+    #: middlewares run INSIDE the created task (``WaitBoundMiddleware`` is
+    #: registered LAST, so it is OUTERMOST and wraps the rest), which is why
+    #: their time lands in ``dispatch`` (measured, #14086 review round 2).
+    "middleware",
+    #: Task created → the handler's first statement. ⛔ THIS INCLUDES THE
+    #: REMAINING MIDDLEWARE CHAIN (inner middlewares execute in the task, after
+    #: the ``middleware`` note), plus the queue for the event loop and the
+    #: credential/organisation dependency stack — this is the part that grows
+    #: when the loop is blocked by another request's work.
+    "dispatch",
+    #: ``_data_sdk_offloaded`` — the graph lane's SDK open and, where the route
+    #: asks for it, the cold projection attach (TCP/TLS/``Is_Sentinel``).
+    "sdk_open",
+    #: The handler's own work between the SDK open and the read-lane hand-off.
+    "read_submit",
+    #: The read-lane hand-off → the read path's FIRST mark: the wait for a
+    #: worker slot (``#13528``'s starvation shape) plus the worker's own
+    #: start-up. Only ever present when ``read_submit`` was noted, so it can
+    #: never be filled from an unrelated interval.
+    "read_lane",
+    #: The remainder when the last note was NOT the read hand-off — time before
+    #: the read started that no call site accounted for. Kept as its own name so
+    #: the table never claims an attribution it did not measure.
+    "other",
+)
+
+#: ``frozenset`` companion — the part vocabulary is closed for the same reason
+#: :data:`STAGE_SET` is: an unknown name must never publish as a part no reader
+#: groups on.
+PRE_HANDLER_PART_SET = frozenset(PRE_HANDLER_PARTS)
+
+
+def _published(values: dict[str, float]) -> dict[str, float]:
+    """Round a reading for publication, omitting entries that accrued no time.
+
+    ONE definition, because both of its rules are load-bearing and they were
+    previously spelled twice (``spent_ms`` and ``parts_ms``) — the drift risk
+    this module's "one accumulation" rule exists to remove:
+
+    * ROUND to 0.1 ms for the wire, and
+    * FILTER ON THE UNROUNDED VALUE. ``round(0.04, 1)`` is ``0.0``, so filtering
+      the rounded number would hide an entry that measured non-zero, which is
+      the opposite error from publishing a phantom zero. An entry that accrued
+      SOME time and still rounds to ``0.0`` is published as ``0.0``: on the
+      >= 10 s records this table serves, that really did cost nothing.
+    """
+    return {name: round(ms, 1) for name, ms in values.items() if ms > 0.0}
+
 
 class ReadStages:
     """The stage timeline of ONE read request, shared by reference.
@@ -155,7 +265,8 @@ class ReadStages:
     the same seam when its bound expires.
     """
 
-    __slots__ = ("_armed", "_lock", "_spent", "_stage", "_stage_t0", "_started_at")
+    __slots__ = ("_armed", "_last_part", "_lock", "_parts", "_parts_t0",
+                 "_spent", "_stage", "_stage_t0", "_started_at")
 
     def __init__(self, started_at: float | None = None) -> None:
         now = time.monotonic()
@@ -172,6 +283,13 @@ class ReadStages:
         self._stage_t0 = self._started_at
         self._spent: dict[str, float] = {}
         self._lock = threading.Lock()
+        #: The ``pre_handler`` decomposition (#10893 second cycle): the cursor
+        #: the open interval is measured from, the closed parts so far, and the
+        #: part the last note named — the last one is what decides whether the
+        #: remainder at the first mark may be called ``read_lane``.
+        self._parts_t0 = self._started_at
+        self._parts: dict[str, float] = {}
+        self._last_part: str | None = None
 
     # ── writing (the read path) ─────────────────────────────────────────────
 
@@ -190,6 +308,21 @@ class ReadStages:
             # a stage no reader groups on. Refuse quietly — this is an instrument
             # on the read path and must never raise into a request.
             return
+        if stage in _NOT_MARKABLE:
+            # ⛔ `pre_handler` is DERIVED, never marked: it is the interval from
+            # arrival to the first mark, closed by the arming branch below. It is
+            # in `STAGES` (readers group on it, and `spent()` and the breach row
+            # publish it), so the guard above ACCEPTS the name — and marking it
+            # would break the one invariant this decomposition rests on. A first
+            # `mark("pre_handler")` arms and banks the interval correctly, but it
+            # then leaves `_stage == "pre_handler"`, so the NEXT mark takes the
+            # `else` branch and adds a SECOND interval to `_spent["pre_handler"]`
+            # that no part covers: `sum(parts) < pre_handler` while `snapshot()`
+            # publishes both as if they reconciled. Nothing calls it today, which
+            # is exactly why it is worth one line — the "parts sum by
+            # construction" claim should not depend on nobody ever typing it
+            # (#14086 review F5).
+            return
         now = time.monotonic()
         with self._lock:
             if stage == self._stage:
@@ -202,12 +335,75 @@ class ReadStages:
                 self._spent[STAGE_PRE_HANDLER] = (
                     self._spent.get(STAGE_PRE_HANDLER, 0.0)
                     + (now - self._stage_t0) * 1000.0)
+                # …and the SAME interval closes the parts cursor, so the parts
+                # sum to `pre_handler` by construction rather than by a test
+                # that reconciles two independently accumulated numbers.
+                self._close_part_unlocked(
+                    "read_lane" if self._last_part == "read_submit" else "other",
+                    now)
             else:
                 self._spent[self._stage] = (
                     self._spent.get(self._stage, 0.0)
                     + (now - self._stage_t0) * 1000.0)
             self._stage = stage
             self._stage_t0 = now
+
+    def note(self, part: str) -> None:
+        """Attribute the interval that JUST ENDED to ``part`` (#10893).
+
+        Taken at the END of the interval it names — ``note("dispatch")`` means
+        "everything since the previous note (or since arrival) belongs to the
+        dispatch wait".
+
+        A no-op once the read path has started: ``pre_handler`` is closed at the
+        first :func:`mark`, so a note landing later would attribute read-path
+        time to a pre-handler part. A no-op for an unknown name (closed
+        vocabulary, the same rule as :func:`mark`) and for an unbound process —
+        this is an instrument on the request path and must never raise.
+        """
+        if part not in PRE_HANDLER_PART_SET:
+            return
+        now = time.monotonic()
+        with self._lock:
+            if self._armed:
+                return
+            self._close_part_unlocked(part, now)
+            self._last_part = part
+
+    def _close_part_unlocked(self, part: str, now: float) -> None:
+        """Move the parts cursor to ``now``, banking the interval on ``part``.
+
+        Caller holds ``self._lock``. Shared by :meth:`note` (the named
+        boundaries) and the first :func:`mark` (the remainder), so the two can
+        never disagree about where the cursor is.
+        """
+        self._parts[part] = (self._parts.get(part, 0.0)
+                             + (now - self._parts_t0) * 1000.0)
+        self._parts_t0 = now
+
+    def parts_ms(self) -> dict[str, float]:
+        """The ``pre_handler`` decomposition, rounded, zero-parts omitted.
+
+        Empty until the read path has started: before that the interval is
+        still OPEN, and publishing a partial sum under a total it does not equal
+        is the same false attribution :data:`PRE_HANDLER_PARTS` exists to
+        prevent.
+
+        Same filter rule as :meth:`spent_ms`, and the SAME conclusion:
+        ``round(0.04, 1)`` is ``0.0``, so the filter asks whether the part
+        accrued ANY time rather than whether that time survived rounding — a part
+        under 0.05 ms (the band that rounds to ``0.0``) IS published as ``0.0``,
+        and that is deliberate. It is the honest reading here for the same reason
+        it is in ``spent_ms``: the records this table serves are >= 10 s breaches,
+        where a part that rounds to ``0.0`` really did cost effectively nothing.
+        (Filtering the ROUNDED value instead would hide a part that measured
+        non-zero, which is the opposite error.)
+        """
+        with self._lock:
+            if not self._armed:
+                return {}
+            parts = dict(self._parts)
+        return _published(parts)
 
     # ── reading (the transport seam, at the deadline) ───────────────────────
 
@@ -242,7 +438,7 @@ class ReadStages:
         """
         with self._lock:
             spent = dict(self._spent)
-        return {name: round(ms, 1) for name, ms in spent.items() if ms > 0.0}
+        return _published(spent)
 
     def snapshot(self) -> dict:
         """``{"stage": …, "stages_ms": {…}}`` — the TELEMETRY publication shape.
@@ -250,8 +446,28 @@ class ReadStages:
         One construction site, so the analytics props and the log line cannot
         drift into two shapes. ⛔ This is NOT the shape that goes on the wire —
         see :meth:`wire_snapshot` for why the refusal body is stricter.
+
+        ⛔ ONE LOCK ACQUISITION, not three (#14086 review, P2). Composing
+        :meth:`current` + :meth:`spent_ms` + :meth:`parts_ms` took ``_lock`` once
+        per accessor, so a ``mark()`` landing between the second and the third
+        call published ``pre_handler_parts`` under a ``stages_ms`` that did not
+        contain ``pre_handler`` — a decomposition with no total, built from
+        three readings of one timeline that were never one observation. The
+        three readings below are taken under a SINGLE acquisition; the
+        accessors keep their own for callers that want one reading only.
         """
-        return {"stage": self.current(), "stages_ms": self.spent_ms()}
+        with self._lock:
+            stage = self._stage
+            spent = _published(self._spent)
+            parts = _published(self._parts) if self._armed else {}
+        view = {"stage": stage, "stages_ms": spent}
+        if parts:
+            # #10893 second cycle: the decomposition rides the SAME snapshot, so
+            # the analytics row and the breach log line carry one shape. ABSENT
+            # (not empty) when nothing was noted — an empty table would read as
+            # "measured, cost nothing" rather than "no boundary was observed".
+            view["pre_handler_parts"] = parts
+        return view
 
     def wire_snapshot(self) -> dict | None:
         """The refusal-body shape, or ``None`` when there is nothing to say.
@@ -268,7 +484,13 @@ class ReadStages:
         """
         if not self._armed:
             return None
-        return self.snapshot()
+        view = self.snapshot()
+        # #10893 second cycle: the decomposition is TELEMETRY ONLY. The wire is a
+        # caller-facing contract and a caller can act on neither "time went by
+        # before my handler ran" nor any other part, so publishing one would be
+        # noise on a wire contract that three shipped tests pin byte for byte.
+        view.pop("pre_handler_parts", None)
+        return view
 
 
 #: The in-flight timeline. Default ``None`` is the unbindable cheap path — see
@@ -302,6 +524,18 @@ def request_stages(stages: ReadStages):
 def begin(started_at: float | None = None) -> ReadStages:
     """Construct a timeline without binding it (the seam binds it itself)."""
     return ReadStages(started_at)
+
+
+def note(part: str) -> None:
+    """Note a ``pre_handler`` boundary on the bound timeline (#10893).
+
+    The module-level twin of :func:`mark` — safe to call from anywhere, a no-op
+    when nothing is bound, and it never raises. See :meth:`ReadStages.note` for
+    the direction of the interval it closes.
+    """
+    stages = _stages.get()
+    if stages is not None:
+        stages.note(part)
 
 
 def mark(stage: str) -> None:
@@ -349,4 +583,10 @@ def log_suffix(view: dict | None) -> str:
     """
     if not view:
         return ""
-    return f" (stage={view.get('stage')} spent_ms={view.get('stages_ms')})"
+    # #10893 second cycle: the `pre_handler` decomposition rides the same tail.
+    # A six-second `pre_handler` is otherwise one opaque number, and the three
+    # mechanisms that produce it need opposite fixes.
+    parts = view.get("pre_handler_parts")
+    suffix = "" if not parts else f" pre_handler_parts={parts}"
+    return (f" (stage={view.get('stage')} spent_ms={view.get('stages_ms')}"
+            f"{suffix})")
