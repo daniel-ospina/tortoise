@@ -728,9 +728,19 @@ def _control_flow_tries(body: list[ast.stmt]) -> list[ast.Try]:
     `for uri in candidates:`, so reading only `stmt.body` graded nothing there
     and their missing arm was invisible to the census (review F3(b)).
 
-    Stops at a NESTED `try`: a `try: _proj.close() / except Exception: pass`
-    cleanup is not the availability decision, and it is graded on its own pass
-    where it is a root's descendant.
+    Stops at a NESTED `try` THAT HAS HANDLERS: a `try: _proj.close() / except
+    Exception: pass` cleanup is not the availability decision, and it is graded
+    on its own pass where it is a root's descendant.
+
+    It does NOT stop at a handler-less `try/finally`, because that is a pure
+    WRAPPER, not a decision — and a probe inside one was invisible for exactly
+    that reason: `tests/test_integration_search.py:45` puts its availability
+    probe under `try: … finally: restore TORTOISE_DB_URI`, so stopping at the
+    wrapper returned NO row for a module-level probe that
+    `_skip_condition_names(tree)` already bound (`FALKORDB_AVAILABLE`), i.e. by
+    the census's own rule it IS the decision. Same hole as the `if _DOCKER_URI:`
+    one one level out (a control-flow node it failed to descend), and the same
+    consequence: a de-armed probe behind it reads GREEN (review of 3ce7ffdd867).
     """
     out: list[ast.Try] = []
     stack: list[ast.stmt] = list(body)
@@ -739,6 +749,10 @@ def _control_flow_tries(body: list[ast.stmt]) -> list[ast.Try]:
         if isinstance(node, ast.Try):
             if node.handlers:
                 out.append(node)
+            else:
+                # `try/finally`: descend the GUARDED region (and no further).
+                # `finalbody` is the restoration arm, never the probe.
+                stack.extend(node.body)
             continue
         if isinstance(node, (ast.If, ast.With, ast.AsyncWith, ast.For, ast.AsyncFor,
                              ast.While)):
@@ -1673,6 +1687,38 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         f"by a `skipif`, so it is the decision whatever the nesting: {nested_guard}"
     )
 
+    # 4e. The same descent, one wrapper out: a probe under a HANDLER-LESS
+    #     `try/finally`. Not a cleanup try (it has no `except`), so it is a pure
+    #     wrapper and the guard inside it is the decision — but the walk stopped
+    #     at ANY `try`, so `tests/test_integration_search.py:45` (a module-level
+    #     probe binding `FALKORDB_AVAILABLE`, which `skipif` reads) produced no
+    #     row at all. The `flat_guard` above is the control: its probe is the
+    #     same three lines without the wrapper, so the pair isolates the WRAPPER.
+    wrapped_guard = roots(
+        """
+        import pytest
+
+        _FALKORDB_UP = False
+        try:
+            try:
+                import tortoise.sdk as _sdkmod
+                _sdkmod.TortoiseSDK().close()
+                _FALKORDB_UP = True
+            except Exception:
+                _FALKORDB_UP = False
+        finally:
+            pass
+
+        @pytest.mark.skipif(not _FALKORDB_UP, reason="docker")
+        def test_docker():
+            pass
+        """
+    )
+    assert wrapped_guard == ((6, (), True, True, True),), (
+        "a guard under a handler-less `try/finally` is a pure WRAPPER, not a "
+        f"cleanup: the probe inside it is still the decision: {wrapped_guard}"
+    )
+
     # 5. The real tree must carry all four shapes, or every assertion above is a
     #    statement about a sample rather than about the code it is meant to guard.
     graded = {row[0] for row in _probe_report()}
@@ -1693,6 +1739,10 @@ def test_the_census_reaches_the_skip_gated_probes_and_every_flag_spelling():
         # unarmed and unreported, so its absence from the report is the signal that
         # the walk has gone blind again.
         "tests/test_assembly_pure.py",
+        # … and the same probe one wrapper out, under a handler-less `try/finally`
+        # (a pure wrapper the walk must descend). Its absence is the signal that
+        # the walk has gone back to stopping at every `try`.
+        "tests/test_integration_search.py",
     ):
         assert rel in graded, (
             f"{rel} is absent from the probe census — a shape it grades has "
