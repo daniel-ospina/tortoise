@@ -1774,13 +1774,15 @@ def test_a_carried_forward_figure_is_reported() -> None:
             {2: _drifters + two_span_uncounted + 1},
             "the alternative basis's numerator is overstated past what its added pairs can contribute — the "
             "direction a stale figure takes when a denominator moves under it. ⛔ DERIVED from the band's "
-            "own edge (`primary + extra_pairs`), not a fixed `+7`: the headroom is a property of the "
-            "document (measured 3 added pairs here, and this branch has already carried 5), so a literal "
-            "offset silently becomes a LEGAL value once the document's uncounted count grows past it — the "
-            "band then correctly stays silent and the band's RULE-2 assertion reds blaming a band that is "
+            "own edge (`primary + extra_pairs`), not a fixed `+7`: the `+7` literal's HEADROOM above that "
+            "edge is `extra_pairs - (alt - primary)`, a property of the document — MEASURED over every "
+            "edition this branch has carried it was 6 or 7 (`extra_pairs` 1..4 against a gap of 1..4) — so "
+            "the literal goes legal only once the document's uncounted two-code-span count clears that "
+            "gap, which is 10 added pairs at this head (7 + a gap of 3), NOT 7. At that point the band is "
+            "correctly silent and the band's RULE-2 assertion below would red blaming a band that is "
             "present and right (#14038 review, P3). "
-            "`two_span_uncounted` is graded equal to that count by the `_TWO_SPAN_NEW` arm, so this anchor "
-            "is always exactly one above the upper edge",
+            "`two_span_uncounted` is graded equal to `extra_pairs` by the `_TWO_SPAN_NEW` arm, so this "
+            "anchor is always exactly one above the upper edge",
         ),
         (
             alt,
