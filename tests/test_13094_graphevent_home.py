@@ -154,6 +154,20 @@ CAPABILITY_CONTROLS = (
     ("shortest path procedure",
      "CALL algo.shortestPath.stream(null, null, {relationshipQuery: 'IMPL'})",
      "cypher:shortestpath"),
+    # ⛔ BACKTICK-QUOTED PROCEDURE NAMES (`#14183` round-8 review, P2/P3). The engine
+    # accepts ``CALL `algo.pageRank`(…)``, and this repo's own write gate documents
+    # that spelling as valid Cypher (`tortoise/projection/__init__.py:3570` carries
+    # the explicit `` `? ``). While the match was whitespace-only a backticked graph
+    # algorithm returned `None` — a capability reader past every check, the
+    # FALSE-PASS direction this guard exists to close. These two rows are the pin
+    # for the backtick half of `_NO_WS`: the first proves `call algo` is not a miss,
+    # the second proves the quoted fulltext call lands on the SAME early arm as its
+    # unquoted spelling (so the bare `db.idx.*` arms below stay undecidable).
+    ("backticked graph algorithm",
+     "CALL `algo.pageRank`(null, null) YIELD nodeId, score", "cypher:call algo"),
+    ("backticked fulltext procedure",
+     "CALL `db.idx.fulltext.queryNodes`('Point', $q) YIELD node",
+     "cypher:call db.idx.fulltext"),
     ("graph algorithm", "CALL algo.pageRank(null, null) YIELD nodeId, score",
      "cypher:call algo"),
     ("fulltext procedure",
