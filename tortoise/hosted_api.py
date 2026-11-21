@@ -21617,10 +21617,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # that makes a CONCURRENT `/v1/search` accrue `pre_handler` seconds it never
     # spent: the read route's task cannot be scheduled while the loop is held.
     #
-    # Only WHERE these run changes. The order, the fail-open arms, the
-    # bucket-aware compensation and the fail-closed warnings are byte-identical —
-    # each call is awaited in the same sequence, so no window opens or closes
-    # that was not already there.
+    # Only WHERE these run changes: order, fail-open arms, bucket-aware
+    # compensation and fail-closed warnings are byte-identical. ⛔ The ATOMICITY
+    # is NOT — an awaited thread is a scheduling point, so the pre-check → PATCH
+    # window is genuinely open; the post-write re-check below is exactly its arm.
     if await _run_off_loop(_CAPTURE_EXECUTOR, _session_alive):
         try:
             # #4625: write-only — the return is discarded here, and this is
