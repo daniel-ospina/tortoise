@@ -507,6 +507,156 @@ SWEEP_NAMES = 66
 #: moved" are each true of the tree they were measured on, and a reader re-deriving the pin needs the
 #: chain, not just the surviving number.
 #: `--check` on this tree: `typed references still pointing at a public name: 0`.
+#:
+#: RE-CUT → (11829, "0a549dd352726b5c") by `#13971` (this PR), and the +7 is ENTIRELY this PR's,
+#: measured against the base it merged rather than inferred from the difference — the pin above is
+#: `main`'s own number and `main` still observes it, so every row below is owned here:
+#:   * `origin/main` `0656b056d7` (the merge this branch took) on its OWN tree prints
+#:     `--report --base 28ca66878d` → **11822**, i.e. exactly the (11822, "05e0ff542dfb8e62") pin, so
+#:     the base contributes NOTHING to the move;
+#:   * THIS branch's merged tree prints **11829** on the same instrument, and the row delta is two
+#:     shapes only, each MEASURED on both trees: `proj.g.query` 3637 → 3642 (+5) and
+#:     `g.query` 1490 → 1492 (+2). 5 + 2 = 7 = 11829 − 11822.
+#: Where the 7 sit, counted per file on both trees: `tests/test_10000_turns_record_only.py`
+#: `proj.g.query` 26 → 28 (+2, the two `rows = proj.g.query(` reads in the review round's P1 pins
+#: `test_the_graph_store_lane_keeps_the_turn_VECTOR` and
+#: `test_a_refused_record_write_falls_back_to_the_graph_WITH_its_vector`), and
+#: `tests/test_13826_write_gate.py` `proj.g.query` 8 → 11 (+3, the `REMOVE n.embedding` resets and the
+#: `DETACH DELETE` between gate arms) and `g.query` 23 → 25 (+2, the same resets on its own graph
+#: fixture). ⛔ Every one is an ordinary-word receiver on a FalkorDB `Graph` or the test's
+#: `FalkorProjection` double (`proj.g`) — the API those stand in for IS `Graph.query`, so
+#: re-pointing them at a private spelling would break the double's fidelity, which is exactly the
+#: `super().query` / `declared_markers.update` precedent declared above. No SDK-holding receiver is
+#: added, and no new shape appears: the typed-reference count is `0` on this tree, measured.
+#:
+#: RE-CUT AGAIN → (11832, "d96145e7d7b3d741") by the SAME PR, and this move is a REPAIR of a
+#: MIS-TYPED receiver rather than a new allowance. `#13899`'s sweep renamed
+#: `tortoise/onboarding/seed.py`'s seed-surface calls from `create_subject`/`create_edge` to the
+#: private spellings, because the parameter holding the surface is NAMED `sdk` and this tool's
+#: own contract (`_SDKISH`) says such a name IS the SDK. It is not one here: the object is the
+#: seed surface (`hosted_api._OrgSeedSurface` / `onboarding.selfhost._SdkSeedSurface`), whose
+#: published doors ARE `create_subject`/`create_edge` — the private spellings are what the
+#: surface calls on the real SDK underneath, so the swept form could only raise `AttributeError`
+#: (measured: twelve `test_onboarding_selfhost_w12.py` cases and four `test_onboarding_seed.py`
+#: cases red, plus a 500 from the REST seed route). The receiver is renamed `surface` there and
+#: the public doors are restored, so the three call sites become UNTYPED receivers — `create_edge`
+#: was already a residue row (`proj.create_edge`), and `surface.create_subject` ×2 /
+#: `surface.create_edge` ×1 are the same ordinary-word shape on an object no typing can decide.
+#: +3 = 11832 − 11829; the typed-reference count went 3 → 0 and is `0` at this pin, measured.
+#: ⛔ The alternative — giving a SURFACE private-looking doors so a name-based sweep stays quiet —
+#: is the sweep dictating the adapter's API, and it is what this re-cut undoes.
+#:
+#: MERGED `origin/main` (`c841cfc269`, #14003) — and the two blocks above and below are the SAME pin
+#: read at two heads, not two competing numbers. `main`'s own lane took 11822 DOWN by one (a removed
+#: call site, `tests/test_12941_read_your_writes.py` re-pointed to `stub._get_point`), so neither side's
+#: figure carries: the merged pin is RE-MEASURED on THIS tree with `--repin`, never computed from
+#: 11821 + 7 + 3. ⛔ The row list is kept as history under the head it was measured at, because a row
+#: list taken from another head is the D5 rot this repo forbids (`05-verify.md` deviation D5).
+#: MEASURED ON THE MERGED TREE (the merge that resolved this file's conflict): `--repin` prints
+#: (11831, "0a42bc1bd08ae831") and `--check` exits 0 with `typed references still pointing at a public
+#: name: 0`. Both sides' histories above are preserved because each row is still owned by the head
+#: that measured it; only THIS pin is this tree's.
+#:
+#: `main`'s own block, kept as the history of the -1:
+#: RE-CUT DOWN 11822 → (11821, "abf4a5c65f380206") by the #14003 lane, and the move is a REMOVED
+#: call site rather than a new shape: the `stub.get_point("p-1", served_out={})` call in
+#: `tests/test_12941_read_your_writes.py` was the LAST site still calling the RETIRED public spelling
+#: on a `TortoiseSDK` — #13899's sweep re-pointed that file's seven other sites to `_get_point` and
+#: missed this one, so it raised `AttributeError` instead of asserting the record bound and reddened
+#: `test (a)`. Re-pointed to `stub._get_point(...)`, which removes exactly that one untyped-receiver
+#: row (-1: 11822 → 11821).
+#: The proof is the ATTRIBUTION, not the sign of the delta: reverting ONLY that one call site (the
+#: file's only `stub._get_point` hit) back to the retired public spelling reproduces exactly 11822,
+#: so the -1 is that one removed call site and nothing else. ⛔ A shrink is NOT evidence on its own —
+#: `--check` compares the `(count, digest)` PAIR and `--repin` prints a fresh pair that is pasted in
+#: deliberately, so a re-pin absorbs whatever shape the tree holds in EITHER direction (remove two
+#: untyped receivers, add one different shape -> net -1, absorbed). Read the ROWS from `--report`'s
+#: dump against `SWEEP_BASE` (`--repin` prints only the tuple), not the direction of the delta
+#: (#14003 review, round 3, P3 / #14030).
+#: ⚠️ NO LINE NUMBERS ARE TYPED HERE ON PURPOSE: a reproducer that says `:803` is not reproducible
+#: once the file moves, and this block carried exactly such a stale address — nothing in the tree
+#: reads it (`grep -rln 'tools/sdk_privatise.py:' tests/` is empty), so a lane following it edits the
+#: WRONG line, measures an unchanged 11821, and concludes the attribution is falsified (#14030
+#: review, P2). Name the call site by its TEXT; the text is the durable fact.
+#: `typed references still pointing at a public name: 0` on this tree says no typed site replaced it.
+#: Measured with `--repin` on THIS tree, never by arithmetic on the last pin.
+#:
+#: RE-CUT AGAIN → (11833, "c115acaf5bbb4163") by the two onboarding-seed PINS this branch adds
+#: (`tests/test_onboarding_seed.py`, `#13971` review round 8): they call
+#: `surface.create_subject(...)` and `surface.create_edge(...)` on the seed surface, which are
+#: ordinary-word receivers on an untyped `surface` — the shape this counter exists to report, not
+#: a typed SDK site. Both calls sit in ONE test
+#: (`test_the_org_seed_surface_delegates_the_seed_doors_to_the_sdk`), and they are the two rows
+#: this branch adds: `surface.create_subject` 6 → 7 and `surface.create_edge` 1 → 2, read from
+#: `--report`'s row dump against `SWEEP_BASE` (⛔ NOT
+#: from `--repin`, which prints the tuple and nothing else). The TOTAL is this tree's own
+#: measurement — `--repin` prints `(11833, "c115acaf5bbb4163")` and `--check` exits 0. The last
+#: step is 11831 → 11833 (+2) and the two rows named above account for it (+1 each), so THAT step
+#: is fully attributed; the earlier per-head totals recorded ABOVE are `--repin` readings at their
+#: own heads, not arithmetic on today's rows.
+#: ⛔ A FIRST READING OF THIS DELTA attributed the +2 to the `tests/test_github_indexer.py`
+#: citation rows added for the moved `entities.py` addresses, on the theory that a pin row
+#: QUOTES its statement and so re-counts the `.query(` inside the string. That is wrong on this
+#: tree and is marked here so it is not re-applied: those rows are unchanged across the move, and
+#: the two rows that actually differ are `surface.create_subject` (6 → 7) and
+#: `surface.create_edge` (1 → 2), both in the seed pins below.
+#:
+#: MERGED ONCE MORE (`origin/main` `7efdedf2382`, #14010/#14020/#14037) — this file's conflict was
+#: resolved by KEEPING BOTH sides' histories (main's attribution wording and no-line-numbers warning,
+#: this branch's +2 seed-pin rows) and then RE-MEASURING the pin on the merged tree with `--repin`,
+#: never by combining 11833 and 11821. All three trees were measured, each on its own tree:
+#: `origin/main` `7efdedf2382` prints (11822, "acf84ed8c407e706"), this branch's own pre-merge head
+#: `23a186c066e2` prints (11833, "c115acaf5bbb4163"), and the MERGED tree prints
+#: (11834, "0253a625dee4ed86"). So the move is this branch's +2 seed rows (already attributed above)
+#: PLUS +1 that is `main`'s own — `main`'s pin itself went 11821 → 11822 after `c841cfc269` — and
+#: nothing in this merge adds a row of its own. ⛔ That attribution is three measurements, not an
+#: arithmetic check: the +1 is named because `main`'s OWN tree prints it, not because 11834 − 11833
+#: equals 1.
+#:
+#: RE-CUT ONTO `origin/main` `d4a8dddc4e` (#14043/#14045/#14050/#14010/#14020/#14032/#14022…) —
+#: re-measured on the merged tree with `--repin`, never computed: `(11841, "53273cee50de5834")`. The
+#: two trees were measured separately on the same instrument, and the ROW LIST was diffed row by row
+#: (`--report --base 28ca66878d --top 5000` on each): `origin/main` `d4a8dddc4e` prints **11829**, this
+#: tree prints **11841**, and the twelve rows between them are exactly the four this branch has
+#: carried since the seed work — `proj.g.query` 3637 → 3642 (+5), `g.query` 1490 → 1492 (+2),
+#: `surface.create_subject` 4 → 7 (+3) and `surface.create_edge` absent → 2 (+2). No new shape comes
+#: from the merge: 11829 + 12 = 11841, and 11829 is `main`'s own measurement, not its pin.
+#: ⛔ `main`'s pin still reads 11821 on that tree, so `main`'s own `--check` is RED by EIGHT — that is
+#: `main`'s number to fix, and this pin takes the MEASUREMENT (11829) rather than `main`'s stale pin,
+#: so none of that drift is attributed to this PR. `--check` on this tree exits 0 with
+#: `typed references still pointing at a public name: 0`.
+#: MEASURED TWICE, INDEPENDENTLY, AND THE ROW SETS AGREE — the decomposition above the pin, so a
+#: reader can reproduce it rather than trust the pair. Three trees were measured separately with
+#: `--report --base 28ca66878d --top 100000` and diffed row by row: `origin/main` `2fe01fc775`
+#: derives **11839**, this branch's pre-merge head derives **11843**, the merged tree **11851**.
+#:  * `main` → merged is **+12**, exactly the four rows this branch has carried since the seed work
+#:    — `proj.g.query` 3637 → 3642 (+5), `g.query` 1490 → 1492 (+2), `surface.create_subject`
+#:    4 → 7 (+3), `surface.create_edge` absent → 2 (+2). No new shape comes from the merge.
+#:  * branch → merged is **+8**, and every row is `main`'s own addition since `df0525a7a9`
+#:    (`#14068`/`#14101`): `db.list_graphs` 28 → 29, `get_control_plane().query` 11 → 12,
+#:    `graph.query` 274 → 276, `payload.update` 23 → 24, `sdk._get_registry().query` 263 → 265,
+#:    `seen.update` 101 → 102. This PR's own diff is figure literals and prose and adds no row.
+#: So 11839 + 12 = 11851 and 11843 + 8 = 11851 — a CROSS-CHECK of three measurements, never the
+#: evidence for the pin. Both lanes that re-cut this file at this tree printed the same pair.
+#: RE-CUT → (11851, "f1ba9f2563209e40") on the SECOND `origin/main` merge into this branch
+#: (`2fe01fc775e`, the `#13337` merge, `#13994`), measured with `--repin` on that merged tree
+#: rather than taken from either side: the pin is graded on PULL REQUESTS only, so `main`'s
+#: own tree drifts under every merge it lands and neither side carries this tree's number.
+#: Rule unchanged: re-derive with `--repin` on YOUR tree, never by arithmetic on the last pin.
+#: RE-CUT AGAIN → (11845, "d86902194b3dbbbb") — a **SHRINK of 6**, and every row is named, because
+#: a shrink is not evidence on its own (see the -1 above). The three module-level availability probes
+#: (`tests/test_assembly_sdk.py`, `tests/test_assembly_fixtures.py`,
+#: `tests/longmem_eval/test_assembly_arm.py`) each carried exactly two untyped rows that #13899 left
+#: behind: `_probe.create_point("statement", …)` and `_probe.tortoise_fts_query(…)`. Both spellings
+#: were RETIRED by #13899 — the public `create_point` (→ `create_entity("point", …)`) and the
+#: `tortoise_fts_query` attribute (→ the internal `_tortoise_fts_query`) — so the probe raised
+#: `AttributeError`, its own `except Exception` swallowed it into `FALKORDB_AVAILABLE = False`, and the
+#: assembly suites went SILENT (skip locally, `refusing that (#1436)` ERROR in CI where
+#: `TORTOISE_TEST_EXPECT_URI=1`). That is the red `test (a)` reported on #13994's shard `a`, not a
+#: code defect in this PR. Re-pointed to the surviving doors, which removes 2 rows per file: measured
+#: `git grep -c 'create_point('` / `'tortoise_fts_query('` on the three files reads 2 each BEFORE and
+#: 0 each AFTER, and 11851 − 6 = 11845 is this tree's own `--repin` reading, not arithmetic on the
+#: last pin. `--check` exits 0 (`typed references still pointing at a public name: 0`).
 #: RE-CUT for the CAPTURE rewrite (#14108 review round 3): (11839, "0a7e60fa05aa31b9") →
 #: (11838, "de5664dc98549d56"). The −1 is THIS LANE's own and it is worth naming, because nothing
 #: about it looks like a receiver edit: `_capture` in
@@ -519,7 +669,16 @@ SWEEP_NAMES = 66
 #: the ONLY row that differs, and the pin is the pair `--repin` prints, never arithmetic.
 #: The row is a plain `dict` accumulator in a test, not a typed reference to a swept name, so the
 #: SDK population is untouched (`typed references still pointing at a public name: 0`).
-SWEEP_RESIDUE = (11838, "de5664dc98549d56")
+#:
+#: MERGED `origin/main` (`e022fc935b2d`, #14100/#14108) — both sides' histories above are kept, and the
+#: pin is RE-MEASURED on THIS tree with `--repin`, never combined arithmetically: it prints
+#: `(11844, "70d6cfdcd8b769e4")` and `--check` exits 0 with `typed references still pointing at a
+#: public name: 0`. The row composition is read off `--report --base 28ca66878d… --top 5000` AT THIS
+#: HEAD, not inferred: `proj.g.query` 3642 and `g.query` 1492 are this PR's own rows, unchanged by the
+#: merge, and `seen.update` is **101** — `main`'s −1, which is `tests/test_13337_cache_graph_declaration.py`
+#: accumulating by APPEND rather than `update` (#14108), a file this branch does not touch. That the
+#: figure lands at 11845 − 1 = 11844 is a CROSS-CHECK of the measurement, not the evidence for it.
+SWEEP_RESIDUE = (11844, "70d6cfdcd8b769e4")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
