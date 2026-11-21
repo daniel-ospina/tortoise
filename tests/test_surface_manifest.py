@@ -37,7 +37,7 @@ MANIFEST = ROOT / "config" / "surface-manifest.yml"
 #: file's TOTAL is <=235s, so no unmarked item can reach 300s … A leg that needs a longer single
 #: item must SAY so — `@pytest.mark.timeout(N)` on the test."  These rows break that premise
 #: because the shrink arm re-grades the WHOLE archive: `removal_records()` re-reads and
-#: re-parses every frozen file (~55 s per row, `:8236`), and the three below additionally walk
+#: re-parses every frozen file (~55 s per row, `:8194`), and the three below additionally walk
 #: the manifest twice — measured on an idle box at this head: 124.8 s, 115.2 s, 102.3 s.  One of
 #: them was therefore 42% of the repo-wide budget, and it has already red the suite: a
 #: `pytest tests/test_archive.py tests/test_surface_manifest.py` run (409 tests) failed with ONLY
