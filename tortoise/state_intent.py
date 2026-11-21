@@ -45,7 +45,9 @@ WHAT IT DOES *NOT* DO
 - **It does not answer.** It returns a population name; the two modules above
   answer from the graph. There is no model call, no IO, no graph handle here —
   it is a pure function of the query string, so the routing table is testable
-  offline and the read path pays two linear regex scans.
+  offline and the read path pays a bounded number of linear regex scans over
+  the shape tables — the order and the count have ONE home, on
+  :func:`detect_state_question`, which owns the scan and states their size.
 - **It does not decide the family.** ``point``/``object``/``subject`` all carry
   a lifecycle; an ``event`` has none (design §8). Whether a population exists
   for the caller's ``entity_type`` is the caller's question (the read path
@@ -717,7 +719,17 @@ SEARCH. There is no second attempt and no fallback: you get the rows the words
 match, which may be empty or unrelated, and an EMPTY answer here is NOT
 evidence that nothing has ended. This tool takes NO argument that forces the
 ended read — the SHAPE is the only way in, so the way to be explicit is to ask
-a form from the ROUTES list above. ⛔ THIS TOOL CANNOT REPORT the cue it saw
+a form from the ROUTES list above. ⛔ AND ANY RETRIEVAL ARGUMENT SILENCES THE
+REPORT, which is the other half of that boundary: `threshold`,
+`min_confidence`, `order_by`, `relationship_filter` and `traversal_path` each
+ask for a FILTERED relevance read, and the cue report is raised inside the
+same guard that decides routing — so with any of them supplied you get that
+filtered read and NO report, and a state question you filtered looks exactly
+like an honest empty again. The filter and the population are different
+answers: send the question ALONE to get the population or the report. (The
+hosted `GET /v1/search` route below takes only the question and `limit`,
+neither of which is a routing argument, so it is not silenced.)
+⛔ THIS TOOL CANNOT REPORT the cue it saw
 and could not apply — its reply is the row list and it takes no sink — so an
 MCP caller who needs that report must use the HOSTED deployment's
 `GET /v1/search` route, whose response body carries `state_question`
@@ -857,9 +869,19 @@ class StateQuestion:
 def detect_state_question(text: str | None) -> StateQuestion:
     """Map a query to the state population it asks about (:data:`POPULATIONS`).
 
-    Deterministic and bounded — one normalisation plus a scan of six compiled
-    patterns, no model call and no IO, so the hot read path pays microseconds
-    and the mapping is unit-testable offline. A ``None``/empty/whitespace query
+    Deterministic and bounded — one normalisation plus AT MOST 18 compiled
+    patterns in three passes that stop at the first shape that fires: the 6
+    ending shapes, then (only if none fired) the 9 missed-cue signals derived
+    from those shapes (:data:`_ENDING_SIGNALS`), then the 3 commitment shapes
+    (:data:`_COMMITMENT_SHAPES`). No model call and no IO, so the hot read path
+    pays microseconds and the mapping is unit-testable offline.
+
+    ⛔ THE THREE NUMBERS ABOVE ARE PINNED, not decorative: a row added to any
+    of those tables reds
+    ``tests/test_13557_13558_reachable_reads.py::test_the_bounded_cost_claims_name_every_scan``
+    until this sentence is updated with it. A cost claim that drifts off the
+    code it describes is how this module — whose job is to be the ONE home for
+    the routing contract — shipped a stale count of its own scans. A ``None``/empty/whitespace query
     yields ``population=None``: full-scan mode and ``ended_scope`` are safe.
 
     ``ENDED`` takes precedence over ``COMMITMENTS`` when BOTH tables match the

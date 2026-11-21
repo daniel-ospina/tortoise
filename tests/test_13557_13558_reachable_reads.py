@@ -1097,6 +1097,72 @@ def test_the_mcp_description_predicts_which_of_the_six_route():
         f"served description says no PUBLIC method exposes the notice; update the text "
         f"to name it rather than leaving the one channel that exists unadvertised")
 
+    # ⛔ AND THE FILTER CONVERSE IS SERVED, NOT MERELY TRUE (#14033 review round-12, P2).
+    # Routing is gated on NO retrieval knob being supplied (`sdk.py`
+    # `_retrieval_knobs()`, the closed list), and the cue report is raised inside that
+    # SAME guard — so a filtered state question gets neither the population NOR the
+    # notice, while the served block listed the routes with no clause saying so. A
+    # caller reading only this description therefore could not predict the outcome of
+    # a filtered call, which is #14033's third acceptance criterion. The five names
+    # below are exactly this tool's retrieval arguments beyond `query`, and the
+    # signature assertion is what keeps that true: an argument that is renamed or
+    # dropped leaves the served clause describing an argument nobody can pass.
+    _filter_args = {"threshold", "min_confidence", "order_by",
+                    "relationship_filter", "traversal_path"}
+    assert _filter_args <= set(inspect.signature(tortoise_search).parameters), (
+        "the served filter clause names arguments `tortoise_search` no longer takes — "
+        f"the description now names a knob the caller cannot pass (params: "
+        f"{sorted(inspect.signature(tortoise_search).parameters)})")
+    for _name in sorted(_filter_args):
+        assert _name in doc, (
+            f"the SERVED description does not name `{_name}`, so a caller who passes it "
+            "is not told that the cue report is suppressed — the filter/population "
+            "boundary is over-promised again (#14033 review round-12, P2)")
+
+
+def test_the_bounded_cost_claims_name_every_scan():
+    """The cost claims this module makes are PINNED to the tables they describe.
+
+    #14033 review round-12, P3: the widening this branch shipped took
+    `detect_state_question` from one shape table to three passes (the 6 ending
+    shapes, then the 9 missed-cue signals derived from them, then the 3
+    commitment shapes) on the DEFAULT read path of every SDK/MCP/hosted search —
+    and two comments in the module still claimed otherwise: ``two linear regex
+    scans`` in the module docstring and ``a scan of six compiled patterns`` on the
+    function. Both were true on ``origin/main`` and false at the head, and nothing
+    read either, which is why they drifted. A stale count in the module whose job
+    is to be the ONE home for the routing contract is the drift #14033 is about,
+    one level down.
+
+    The numbers are DERIVED here from the tables themselves, so adding a row reds
+    this instead of leaving the prose describing a smaller scan than the code
+    performs. The module docstring deliberately carries NO count — the size has
+    one home (the function that owns the scan), so there is nothing there to
+    regress into a second, staler claim.
+    """
+    from tortoise import state_intent as si
+
+    shapes = len(si._ENDING_SHAPES)
+    signals = len(si._ENDING_SIGNALS)
+    commitments = len(si._COMMITMENT_SHAPES)
+    doc = " ".join((si.detect_state_question.__doc__ or "").split())
+    for count, noun in ((shapes, "ending shapes"), (signals, "missed-cue signals"),
+                        (commitments, "commitment shapes")):
+        assert f"{count} {noun}" in doc, (
+            f"`detect_state_question` no longer states `{count} {noun}`, so its cost "
+            f"claim describes a scan the code does not perform (tables: "
+            f"{shapes}/{signals}/{commitments} — #14033 review round-12, P3)")
+    assert f"AT MOST {shapes + signals + commitments} compiled" in doc, (
+        "`detect_state_question` no longer states the total it can scan per query "
+        f"({shapes + signals + commitments}) — the bound is unstated again")
+    module_doc = " ".join((si.__doc__ or "").split())
+    assert "two linear regex scans" not in module_doc, (
+        "the module docstring is back to a hard-coded scan count that no table backs "
+        "— the size belongs to `detect_state_question`, the one home for the scan")
+    assert "detect_state_question" in module_doc, (
+        "the module docstring no longer points at the function that owns the scan "
+        "order and its count, so the reader has no home to check the claim against")
+
 
 def test_the_partitive_is_not_the_discriminator():
     """The `which` guard is HEAD-NOUN ADJACENCY, not the partitive marker.
