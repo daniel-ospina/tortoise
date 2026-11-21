@@ -517,7 +517,7 @@ SWEEP_NAMES = 66
 #: verified is now on the tree" — is NOT triggered; only a count on an already-pinned shape moved.
 #: The SDK population did not move either (`typed references still pointing at a public name: 0`),
 #: so no typed call site is legitimised by this re-cut. `#13998`'s own +7 above survives intact:
-#: `cp.query` **269** and `row.update` **60** carry the seven rows that record enumerates.
+#: `cp.query` **270** and `row.update` **60** carry the seven rows that record enumerates.
 
 #: ⛔ REVERTED BY THE #14038 MERGE: an earlier cut of this file RECORDED a rename of the two
 #: duck-typed onboarding seed surfaces (`_OrgSeedSurface` in `hosted_api.py`, `_SdkSeedSurface` in
@@ -526,12 +526,10 @@ SWEEP_NAMES = 66
 #: BROKE the product: `onboarding/seed.py` calls `surface.create_subject(...)` and
 #: `surface.create_edge(...)` (three sites), neither surface defines `__getattr__`, so every hosted
 #: AND self-hosted seed raised `AttributeError` and the REST seed route 500'd — measured at
-#: `93ada9cece`, where `tests/test_onboarding_selfhost_w12.py` was **11 failed** and
-#: `tests/test_onboarding_seed.py` **2 failed** (both re-MEASURED, `TORTOISE_TEST_CARVE_OUT=1`, with
-#: the doors put back to the private spelling — an earlier cut of this paragraph said "13 failed",
-#: which no measurement produces; the two suites are byte-identical between `93ada9cece` and the
-#: head that restored the doors, so the count is the same on either). The public doors are RESTORED (the surfaces again
-#: declare `create_subject`/`create_edge` and delegate to the SDK's private ones), and the eight
+#: `93ada9cece`: `tests/test_onboarding_selfhost_w12.py` alone was **11 failed** (17 passed),
+#: `tests/test_onboarding_seed.py` **2 failed**, and **13** is the total across BOTH files — the
+#: two figures are not additive pieces of one number. The public doors are RESTORED (the surfaces
+#: again declare `create_subject`/`create_edge` and delegate to the SDK's private ones), and the eight
 #: test-double call sites in `tests/test_9572_discriminator_not_clobbered.py` were restored with
 #: them. ⛔ THIS IS THE SHAPE THE BLOCK BELOW FORBIDS, reached anyway: *"the alternative — giving a
 #: SURFACE private-looking doors so a name-based sweep stays quiet — is the sweep dictating the
