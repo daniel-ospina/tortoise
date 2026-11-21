@@ -1787,8 +1787,9 @@ def test_a_carried_forward_figure_is_reported() -> None:
         # unrelated, §2.5's `:Tag` count), so grep the sentence, not the marker — that `5` is
         # `3 uncounted + 2 already counted`, so it is neither the band's slack nor the literal's distance
         # above the edge, and must not be read as either. That misreading is how this rationale first
-        # claimed the branch 'had already carried 5'; the uncounted count those 44 editions STATE is 3 or
-        # 4 (never 1), while measured `extra_pairs` there is 0, 1, 3 or 4 — the 0s are the nine editions
+        # claimed the branch 'had already carried 5'; the uncounted count STATED anywhere in those 44
+        # editions is 3 or 4 (never 1) — though only 18 of them state one at all, the rest predating that
+        # sentence — while measured `extra_pairs` there is 0, 1, 3 or 4 — the 0s are the nine editions
         # above — and the only editions carrying 5 are on `feat/13971-point-strip`, which is not an
         # ancestor here. ⚠️ Those are ONE scope with ONE set of values: an earlier form of this block
         # printed `extra_pairs` `1..4` in one sentence and "never left 3..4" eight lines later for the same
