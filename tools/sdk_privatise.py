@@ -439,7 +439,21 @@ SWEEP_NAMES = 66
 #: plus the inventory and scorecard commits) was re-measured the same way and did NOT move the pin:
 #: `--check` still exits 0 at 11840 on the merged tree, so the +7 attribution survives a base that
 #: carries a record claiming 11833. Neither record's number is this pin; the tree is.
-SWEEP_RESIDUE = (11840, "9f1b8cff93b3a480")
+#: ⛔ The THIRD merge (`origin/main` `8afd28cd01d`, three commits) DID move the pin, and the move is
+#: `main`'s alone: 11840 → **11838**, −2, re-pinned here at `(11838, "63ba2bae2c53c633")` from
+#: `--repin`'s own output on this tree. ⛔ Attributed by MEASUREMENT and not by count — `edits_for`
+#: was run per file over the 27 `.py` files that differ between `1ad388b5f6ea` and `origin/main`,
+#: and ONE row differs in ONE direction: `found.update` 2 → 0 in `tests/test_usage_signal.py`, from
+#: `df0525a7a90` (`#14011`'s review remainder), which rewrote that file. No other file's residue
+#: counter moved, in either direction — which is the cross-check that nothing was silently absorbed.
+#: ⛔ NO NEW SHAPE APPEARED: `found.update` is a DECLARED row on this tree (`10` occurrences — the
+#: two `#14065` added and this commit removed are why the aggregate reads 10 rather than 12), so the
+#: condition this gate exists to catch — "a reference shape that was not there when this sweep was
+#: verified is now on the tree" — is NOT triggered; only a count on an already-pinned shape moved.
+#: The SDK population did not move either (`typed references still pointing at a public name: 0`),
+#: so no typed call site is legitimised by this re-cut. `#13998`'s own +7 above survives intact:
+#: `cp.query` **269** and `row.update` **60** carry the seven rows that record enumerates.
+SWEEP_RESIDUE = (11838, "63ba2bae2c53c633")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
