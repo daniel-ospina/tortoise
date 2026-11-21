@@ -1412,21 +1412,58 @@ def _row_froze_a_stub(entry: dict) -> bool:
     runtime code, so such a row holds none of the module's body — and crediting it on the row's
     EXISTENCE reads "the removal has its record" over a record holding no code.
 
-    ⛔ ASK `archived_from`, NOT THE ROW'S `file`. Two successive first cuts of this guard asked
-    the archived file's suffix and were DEAD CODE: `archive_rel` always emits
-    `archive/modules/<batch>/<mirror>.py` (`:2177`, "one symbol, one path, always"), so no
-    row the writer produced could satisfy either — and the fixtures that "covered" them
-    hand-wrote a `.pyi` path `archive_rel` cannot produce. Measured through the writer on the
-    pre-fix bytes: the stub's TEXT was frozen into `.../x.py`, the stub was then deleted as the
-    writer itself prints, and `check --base-ref` answered OK with the removed body in NO file
-    under `archive/`. `archive_symbol` sets `archived_from` from `blocks[0][0]` for a MODULE and
-    `file_violations` binds it to the frozen file's `ARCHIVED_FROM` header, so it cannot be
-    spoofed independently of the bytes on disk.
+    ⛔ ASK `blocks[].path` — THE FIELD BOUND TO THE BYTES (round-3 correction of this helper).
+    Three successive cuts of this guard were each wrong in a different way, and only mutation
+    separated them:
+
+      * the archived FILE's suffix — DEAD CODE. `archive_rel` always emits
+        `archive/modules/<batch>/<mirror>.py` (`:2224-2235`, "one symbol, one path, always"),
+        so no row the writer produces could satisfy it, and the fixtures that "covered" it
+        hand-wrote a `.pyi` path `archive_rel` cannot produce.
+      * `archived_from` — SPOOFABLE. It is bound only to the frozen file's own `ARCHIVED_FROM`
+        header, i.e. to a string the same hand-splicing author writes; this file already records
+        that limit at `:1357-1361` ("bound to nothing else on this path … so a consistent lie
+        passed both"), and hand-splicing is what `MEMORY.md` recommends. Measured: a spliced row
+        saying `tortoise/x.py` over frozen STUB bytes was credited, with `shrink_violations` AND
+        `file_violations` both empty.
+      * `blocks[0].path` — the field `file_violations` ties to the path baked into the frozen
+        file's verbatim banner AND to that body's sha256 (`:829-834`), so it cannot be re-pointed
+        without the bytes following. This is the one asked below.
+
+    ⛔ AND FAIL CLOSED ON AN ABSENT SOURCE. An entry recording no block path proves nothing
+    about what it holds, so it is refused WITH the stub, never credited: hence
+    `not src.endswith(".py")`, not `src.endswith(".pyi")` — the latter answers False for an
+    absent field and silently credits it.
 
     ⛔ `_init_carries_a_body` is deliberately NOT the test: it is an AST question and a stub IS
     statements (`def f1() -> int: ...`).
     """
-    return str(entry.get("archived_from") or "").endswith(".pyi")
+    rows = entry.get("blocks")
+    if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+        path = str(rows[0].get("path") or "")
+        if path:
+            # Authoritative: bound to the frozen banner AND the body's sha256, so it answers the
+            # question in BOTH directions (a real `.py` credits, anything else refuses).
+            return not path.endswith(".py")
+    src = str(entry.get("archived_from") or "")
+    if not src:
+        # Records NOTHING about what it froze. Unprovable, so it is refused rather than credited
+        # — but only in this shape: a row that does name a source falls through to the claim-field
+        # test, because `SOURCE_OF` is not a path and refusing it would red the README's own
+        # restore route (measured: two legitimate rows redded when absence alone refused).
+        return True
+    return src.endswith(".pyi")
+
+
+def _row_frozen_source(entry: dict) -> str:
+    """What the row says it froze FROM, preferring the field bound to the bytes."""
+
+    rows = entry.get("blocks")
+    if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+        path = str(rows[0].get("path") or "")
+        if path:
+            return path
+    return str(entry.get("archived_from") or "")
 
 
 def _record_froze_a_stub(
@@ -1436,7 +1473,8 @@ def _record_froze_a_stub(
     return (
         f"{module}: THE RECORD FROZE A STUB — {base_label} carried the module's statements in "
         f"`{base_carrier}`, this tree carries {head_desc}, and the `module` row present froze "
-        f"only `{entry.get('archived_from')}`, which is that stub. This run reports the module "
+        f"only `{_row_frozen_source(entry) or 'NO recorded source'}`, which is not the removed "
+        "runtime source. This run reports the module "
         "body removed and then credits a record that holds none of it, which is the false PASS "
         "`archive/` exists to prevent (#12402). "
         f"{MODULE_ROUTE}"
@@ -1756,11 +1794,26 @@ def shrink_violations(
                         "it, so nothing was removed for it to waive"
                     )
                 else:
-                    why = (
-                        f"{base_label} carries `{symbol}` ({kind}) and this tree does not — "
-                        "the removal IS recorded by the `module` entry you also passed, so the "
-                        "waiver waives nothing"
-                    )
+                    # ⛔ SPLIT ON THE ROW, NOT ON THE MODULE (review P2 of PR #14039). The body
+                    # being gone does NOT imply a row records it: arm 1b `continue`s on
+                    # scaffolding-on-BOTH-sides BEFORE it can consume the waiver, so a module
+                    # whose base file was docstring-only arrives here with NO `module` entry
+                    # anywhere in the tree — and the one-sentence version told the operator "the
+                    # removal IS recorded by the `module` entry you also passed" over a tree that
+                    # has no such entry. Verdict right, stated fact false: this loop's own
+                    # recurring class.
+                    if key in working:
+                        why = (
+                            f"{base_label} carries `{symbol}` ({kind}) and this tree does not "
+                            "— the removal IS recorded by the `module` entry you also passed, "
+                            "so the waiver waives nothing"
+                        )
+                    else:
+                        why = (
+                            f"{base_label} carries `{symbol}` ({kind}) and this tree does not "
+                            "— and NO `module` entry records it, so the removal is UNRECORDED: "
+                            "the entry is what is missing, not what this waiver waives"
+                        )
             elif symbol in head_modules:
                 why = (
                     f"{base_label} carries no `{symbol}` ({kind}) and this tree does — that is "

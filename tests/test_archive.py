@@ -1540,6 +1540,50 @@ def test_a_stub_row_credits_nothing_after_the_stub_is_deleted(
     )
 
 
+def test_a_module_row_that_LIES_about_archived_from_cannot_credit_a_stub(
+    tree: Path,
+) -> None:
+    """The row's claim field is writable by the splicer; `blocks[].path` is not (review P1).
+
+    `archived_from` is bound only to the frozen file's `ARCHIVED_FROM` header — a string the same
+    hand-splicing author writes. This file already records that limit at `:1357-1361`, and
+    hand-splicing is the procedure `MEMORY.md` recommends, so this is a REACHABLE shape, not a
+    contrived one. Measured before the fix: a spliced row saying `tortoise/stubby.py` over frozen
+    STUB bytes was credited, with `shrink_violations` AND `file_violations` BOTH empty.
+
+    The field tied to the bytes is `blocks[].path`: `file_violations` requires it to equal the path
+    baked into the frozen file's verbatim banner and `blocks[].sha256` to equal that body's digest,
+    so it cannot be re-pointed without the bytes following.
+
+    Discriminating: an arm keyed on `archived_from` credits this row (measured) — which is why the
+    writer-driven row above cannot catch it on its own; there `archived_from` and the block path
+    agree, so only this row separates the two answers.
+    """
+    (tree / "tortoise" / "stubby.py").write_text("def value():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/stubby.py")
+    subprocess.run(["git", "rm", "-q", "tortoise/stubby.py"], cwd=tree, check=True)
+    stub = "def value() -> int: ...\n"
+    (tree / "tortoise" / "stubby.pyi").write_text(stub, encoding="utf-8")
+
+    entry = _entry(arch.MODULE, "tortoise.stubby")
+    entry["archived_from"] = "tortoise/stubby.py"  # the lie
+    entry["blocks"] = [{"path": "tortoise/stubby.pyi", "sha256": "a" * 64}]  # the truth
+    frozen = tree / entry["file"]
+    frozen.parent.mkdir(parents=True, exist_ok=True)
+    frozen.write_text(stub, encoding="utf-8")
+    arch.save_manifest({"entries": [entry]}, tree / "archive" / "MANIFEST.json")
+    _commit(tree, ".")
+
+    assert arch._row_froze_a_stub(entry), (
+        "the block path is bound to the frozen banner and digest, so it decides even when the "
+        f"claim field says otherwise: {entry}"
+    )
+    problems = arch.shrink_violations(tree, base_ref="HEAD~1")
+    froze = [p for p in problems if "THE RECORD FROZE A STUB" in p]
+    assert froze, f"a spliced row that froze the stub must not be credited: {problems}"
+    assert "tortoise/stubby.pyi" in froze[0], froze[0]
+
+
 def test_a_module_row_that_froze_the_REAL_body_is_still_credited(tree: Path) -> None:
     """The negative control for both rows above, through the writer's restore-then-freeze route.
 
