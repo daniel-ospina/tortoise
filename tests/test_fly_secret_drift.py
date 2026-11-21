@@ -6501,7 +6501,7 @@ def _real_fly_toml() -> dict:
 
 
 def _services_region(text: str) -> str:
-    """Everything before the `[[vm]]` TABLE — i.e. the `[[services]]` block.
+    """Everything before the `[[vm]]` TABLE (it also holds `[build]`, `[checks]`).
 
     Split on the table's OWN LINE, not on the bare token: the COST note mentions
     `` `[[vm]]` `` inline, so a bare-token split cuts inside that comment and
@@ -6593,7 +6593,7 @@ def test_a_cost_note_pricing_a_shape_the_vm_block_does_not_declare_says_so():
         "this pin can no longer see what it prices — re-derive it against the "
         "note's new spelling rather than deleting it"
     )
-    if declared_cpus not in priced:
+    if priced != {declared_cpus}:
         assert "pre-#13665" in services_region.lower(), (
             f"the [[services]] COST note prices {sorted(priced)} cores while "
             f"[[vm]] declares {declared_cpus}, and never labels itself as the "
