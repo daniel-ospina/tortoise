@@ -4291,7 +4291,17 @@ def _e6_census_rows(census: dict) -> list[tuple[str, str, dict]]:
     spans the ROWS of both surfaces" is a property of the code, not of two loops agreeing today.
     """
     rows: list[tuple[str, str, dict]] = []
-    for pack, block in (census.get("packs") or {}).items():
+    # ⛔ THE `packs` BLOCK IS GUARDED HERE TOO (#14060 review round 6, P3, measured: `{"packs":
+    # "x"}` -> ``AttributeError: 'str' object has no attribute 'items'``; `{"packs": [1, 2]}`
+    # identical; ``[]``/``None`` census -> ``AttributeError`` on ``.get``). The per-surface guard
+    # above is the level the round-5 review measured, and stopping there would repeat the finding
+    # one level up in the same function — the shape `_e6_write_cells` now closes structurally.
+    blocks = census.get("packs") if isinstance(census, dict) else None
+    if not isinstance(blocks, dict):
+        # Absent (None) is an empty census; a wrong SHAPE has nowhere to report through here —
+        # the caller (`measure_e6`) names it instead of this enumeration raising.
+        return rows
+    for pack, block in blocks.items():
         if not isinstance(block, dict):
             continue
         for surface in E6_SURFACES:
@@ -4380,9 +4390,26 @@ def measure_e6(*, packs_dir: Path | str | None = None,
             "not read — the pack registry could not be loaded")
         return measurement
 
-    packs = census.get("packs") or {}
+    # ⛔ A MALFORMED CENSUS IS A NAMED GAP, never a crash (#14060 review round 6, P3, measured:
+    # `_e6_census_rows` and the `population`/`packs` reads below sit OUTSIDE the `try` above, so
+    # a census that is not an object (or whose `packs`/`population` is not one) raised AFTER the
+    # run had paid its cost — the same crash-after-a-paid-run class this PR closes on the
+    # ARTIFACT side, one input over. `build_census` always returns an object with dict
+    # `packs`/`population`, so this is a class closed by construction rather than by a live bug;
+    # it is closed because the invariant "`measure_e6` reports, it does not raise" is worth
+    # holding for every input, not only for the ones the producer emits today.
+    if not isinstance(census, dict):
+        measurement["error"] = (f"the census is a {type(census).__name__}, not an object; "
+                                f"no row could be enumerated")
+        measurement["written_source"] = (
+            "not read — the census could not be enumerated")
+        return measurement
+
+    packs = census.get("packs")
+    packs = packs if isinstance(packs, dict) else {}
     rows = _e6_census_rows(census)
-    population = census.get("population") or {}
+    population = census.get("population")
+    population = population if isinstance(population, dict) else {}
     pnia = census_tool.RELATION_PREDICATE_NOT_IN_ALLOWLIST
     # An isolated pack's rows are NOT in `packs`, so they are not in `declared` either — see
     # this function's docstring. Carried rather than dropped, and the row refuses on it.

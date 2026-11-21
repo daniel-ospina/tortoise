@@ -1458,7 +1458,8 @@ def test_e6_reports_an_unmeasurable_written_cell_as_unmeasured_never_zero(tmp_pa
     assert e6["unbound_and_unexplained"] == 0, e6["unbound_and_unexplained"]
 
 
-def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main(tmp_path):
+def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main(tmp_path,
+                                                                                monkeypatch):
     """A census artifact that parses but is not an OBJECT must not crash `main` (#14060 review 4).
 
     The docstring above promises that an artifact E6 cannot read makes the beside column read
@@ -1501,6 +1502,38 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
     assert rows == [("dev", "hierarchies", {"predicate": "p", "from_kind": "a",
                                             "to_kind": "b"})], (
         f"a malformed surface contributes NO rows and must not raise: {rows!r}")
+    # …and the two levels ABOVE the surface one, which are the same class one input over: the
+    # `packs` block and — in `measure_e6` itself — the `population` read. Measured, each raised
+    # OUTSIDE the `try` and killed a run that had already paid its cost:
+    #   `{"packs": "x"}` / `{"packs": [1, 2]}` -> AttributeError: '…' object has no attribute 'items'
+    #   `[]` / `None` census                  -> AttributeError: '…' object has no attribute 'get'
+    #   `{"population": [1]}`                -> AttributeError: 'list' object has no attribute 'get'
+    # `build_census` emits a dict with dict `packs`/`population` and always emits BOTH surfaces
+    # per pack, so no input from today's producer reaches here: pinned so a removal is not
+    # invisible, and closed because "`measure_e6` reports, it does not raise" should hold for
+    # EVERY input rather than only for the shapes the producer happens to emit (#14060 round 6).
+    real = measure._pack_census_module()
+    for bad_census, why in (([], "a list census"),
+                            ({"packs": "x"}, "non-object packs"),
+                            ({"packs": [1, 2]}, "list packs"),
+                            ({"population": [1]}, "list population"),
+                            ({"packs": {"dev": {"relations": 42}}}, "non-list surface")):
+        class _Census:
+            RELATION_WRITABLE = real.RELATION_WRITABLE
+            RELATION_PREDICATE_NOT_IN_ALLOWLIST = real.RELATION_PREDICATE_NOT_IN_ALLOWLIST
+
+            @staticmethod
+            def build_census(_packs_dir, _bad=bad_census):
+                return _bad
+
+        monkeypatch.setattr(measure, "_pack_census_module", _Census)
+        e6 = measure.measure_e6()
+        # An unenumerable census is a NAMED gap (the convention the loader fault follows);
+        # a wrong-typed block degrades into an empty one. Neither raises, and neither
+        # reports a `written` count the beside column does not cover.
+        assert e6["error"] is None or "census" in str(e6["error"]), (why, e6["error"])
+        assert sum(e6["written"].values()) == e6["declared"], (
+            why, e6["written"], e6["declared"])
 
 
 def test_a_synthetic_hierarchies_defect_runs_through_the_runs_own_defect_scan():
