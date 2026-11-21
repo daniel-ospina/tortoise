@@ -1330,12 +1330,12 @@ without a restart.
 
 #### Default posture, stated
 
-* **`inprocess` — the collection window is 0 ms.** A warm encode is 25-43 ms (#13224's measurement),
+- **`inprocess` — the collection window is 0 ms.** A warm encode is 25-43 ms (#13224's measurement),
   so a 20 ms window would be a *comparable addition* to the very latency it is meant to hide.
   Delaying every query to batch it is a bad trade at that scale. ⛔ **0 is not "batching off"**: the
   collector still takes whatever arrived while the previous encode ran, so a loaded process
   coalesces and an idle one never waits — continuous batching at no admission cost.
-* **`worker` / `external` — 20 ms**, because there the marginal request cost is a round trip and
+- **`worker` / `external` — 20 ms**, because there the marginal request cost is a round trip and
   20 ms is noise beside it. 20 is inside the issue's stated `<= 50 ms`.
 
 #### Rollback is one variable
@@ -1359,18 +1359,18 @@ curl -sS https://api.premiselabs.co/health \
                        batches: .latency.batches, coalesced: .latency.coalesced}'
 ```
 
-* **`wait_ms.p95` against `max_wait_ms` is the bound's own proof.** A p95 at or under the window says
+- **`wait_ms.p95` against `max_wait_ms` is the bound's own proof.** A p95 at or under the window says
   the hard maximum wait is being honoured; a *max* well above it means the collector is being
   starved, which is the one way the bound can slip without the number changing.
-* **`coalesced` / `batches` says whether batching is doing anything**: `coalesced` counts tickets that
+- **`coalesced` / `batches` says whether batching is doing anything**: `coalesced` counts tickets that
   rode a batch they did not open. A large `submissions` with `coalesced: 0` is a process with no
   concurrency — expected on a single interactive user, and *not* evidence the seam is broken.
-* **`last_decline` + `last_decline_age_s` is why a backing failed**, without a log search. It is the
+- **`last_decline` + `last_decline_age_s` is why a backing failed**, without a log search. It is the
   difference between "the worker will not start" and "the endpoint answered 503", which need opposite
   repairs. ⛔ **There is no silent fallback**: a declining backing leaves the dense leg off and the
   read declares itself (#2952). If you see `backing: "worker"` next to a live `last_decline`, you are
   on keyword-only reads — roll back or repair; do not wait for it to self-heal.
-* **`encode_ms` per backing is the number the decision rests on.** It is measured around the encode
+- **`encode_ms` per backing is the number the decision rests on.** It is measured around the encode
   only (not the queue, not `tolist`), so it is directly comparable across backings — which is the
   only way to answer "did moving this help" with a reading instead of an opinion.
 
