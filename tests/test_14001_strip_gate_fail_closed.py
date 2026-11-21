@@ -1872,19 +1872,30 @@ def test_the_control_binds_the_shared_helpers(monkeypatch):
 
     ⛔ A SPY, NOT A COMMENT. An earlier revision recorded this gap as a residual "visible in a
     diff, not caught by a test" — false: patching the two module-level names and driving the
-    control catches it, because the control's `partial(_folding, …)`/`partial(_env_source, …)`
-    resolve against the module globals at call time. Measured: this head binds them 13 / 212
-    times; the local-copy revert drops both counters to 0 and reds on the assertion below.
+    control catches it, because the control binds them when its OWN BODY runs. ⛔ The mechanism
+    is construction, not call time: `partial(_folding, …)` resolves `_folding` the moment the
+    `partial` is built, which is exactly why the patch has to be installed BEFORE the control is
+    called (and why a `partial` argument can never be a late-binding global).
+
+    ⛔ AND A BARE COUNTER IS NOT ENOUGH FOR `_env_source` (`#14099`, re-measured at this head).
+    `_folding`'s inner `fake` ALSO calls the module-level `_env_source` — measured: of 212 calls,
+    **192 come from `fake`** and only 20 from the control's own `served(...)` (the `missing` arm's
+    `lambda`). Replacing the control's `served` with a BEHAVIOURALLY IDENTICAL local copy
+    therefore leaves the counter at 192 and a bare `> 0` assertion GREEN — measured at this head:
+    **96 passed, nothing red**, while the docstring this paragraph replaces claimed that revert
+    was caught. So every call is attributed to its IMMEDIATE CALLER and the control's own binding
+    must appear: `_folding` by the control's name (13 calls, all of them), `_env_source` by a
+    caller that is NOT the fake's transitive fallback.
     """
-    calls = {"_folding": 0, "_env_source": 0}
+    callers: dict[str, set[str]] = {"_folding": set(), "_env_source": set()}
     real_folding, real_env_source = _folding, _env_source
 
     def spy_folding(*args, **kwargs):
-        calls["_folding"] += 1
+        callers["_folding"].add(sys._getframe(1).f_code.co_name)
         return real_folding(*args, **kwargs)
 
     def spy_env_source(*args, **kwargs):
-        calls["_env_source"] += 1
+        callers["_env_source"].add(sys._getframe(1).f_code.co_name)
         return real_env_source(*args, **kwargs)
 
     monkeypatch.setattr(sys.modules[__name__], "_folding", spy_folding)
@@ -1892,9 +1903,19 @@ def test_the_control_binds_the_shared_helpers(monkeypatch):
 
     test_the_over_refusal_population_is_itself_pinned(monkeypatch)
 
-    assert calls["_folding"] and calls["_env_source"], (
-        "the control stopped binding the module-level helpers, so a pre-F1 fake can be rebuilt "
-        f"locally with every helper still correct — that revert is otherwise invisible: {calls}")
+    control = "test_the_over_refusal_population_is_itself_pinned"
+    assert control in callers["_folding"], (
+        "the control stopped binding the module-level `_folding`, so a pre-F1 fake can be rebuilt "
+        f"locally with every helper still correct — that revert is otherwise invisible: "
+        f"{callers['_folding']}")
+    # ⛔ `- {"fake"}` IS THE WHOLE POINT. `fake` is `_folding`'s inner fallback, and it calls
+    # `_env_source` whether or not the CONTROL binds it, so a local copy of `served` leaves this
+    # caller set at exactly `{"fake"}` (measured). Only a NON-`fake` caller proves the control's
+    # own binding survived.
+    assert callers["_env_source"] - {"fake"}, (
+        "the control stopped binding the module-level `_env_source`: every call came from "
+        "`_folding`'s own fallback, so a behaviourally identical LOCAL copy of `served` would "
+        f"leave this arm green — measured: 96 passed: {callers['_env_source']}")
 
 
 #: ⛔ RESIDUAL — A NAME the mention rule cannot READ (`#14001`, measured by the cycle-4 review).
