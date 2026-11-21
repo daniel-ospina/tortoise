@@ -1408,16 +1408,17 @@ def _modules_reaching_a_store() -> frozenset[str]:
     FalkorProjection` written in ANOTHER tree module is one hop from the client, and
     the direction test's only input IS this scan — so no test reds on it. That is an
     out-of-scope residual, not a hand-off: this sentence used to say such a reach
-    "belongs to the direction test", which does not scan for it either. This read
-    `"from falkordb import" in source` — a substring test that saw only ONE of the
-    roots the set itself declares, so the modules that reach the store through
-    `redis` (`hosted_backup` constructs a real client over a derived pool,
-    `acl_graph_users`, `tortoise_client`, `retry`, `ep`, `hosted_api`,
-    `embedded_lifecycle`) were invisible and the coverage test reported protection
-    it did not deliver. A substring is wrong in the other direction too: `"import
-    redis" in source` matches PROSE — `tortoise/embedded_lifecycle.py` says
+    "belongs to the direction test", which does not scan for it either.
+
+    (Before that, the direction test read `"from falkordb import" in source` — a
+    substring test that saw only ONE of the roots the set itself declares, so the
+    modules that reach the store through `redis` (`hosted_backup` constructs a real
+    client over a derived pool, `acl_graph_users`, `tortoise_client`, `retry`, `ep`,
+    `hosted_api`, `embedded_lifecycle`) were invisible and the coverage test reported
+    protection it did not deliver. A substring is wrong in the other direction too:
+    `"import redis" in source` matches PROSE — `tortoise/embedded_lifecycle.py` says
     "`import tortoise` must not import redislite" in a comment, which contains the
-    substring `import redis`.
+    substring `import redis`.)
 
     Cached: the tree cannot change within a run, and re-parsing every file in the
     package on each call is seconds-scale — enough to blow the shard row this file
