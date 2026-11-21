@@ -200,7 +200,7 @@
     <p>If you arrived here from a note about your search layer filling up, this is the full explanation behind it — no architecture required.</p>
     <div class="card">
       <h3 id="storage-record">Everything you save is kept</h3>
-      <p>Your data is kept in a Postgres database. Postgres is ordinary, inexpensive storage, so we can keep all of it: every point, every connection, every session that captured it. This copy is your <strong>record</strong>, and it is the complete one — everything else is built from it.</p>
+      <p>Your data is kept in a Postgres database. Postgres is ordinary, inexpensive storage, so we can keep all of it. This copy is your <strong>record</strong> — the durable one: nothing is taken out of it to make room in the fast layer.</p>
     </div>
     <div class="card">
       <h3 id="storage-fast-layer">A second copy, for the things you use most</h3>
@@ -216,7 +216,7 @@
     <div class="card">
       <h3 id="storage-what-you-can-do">What can be done about it</h3>
       <ul>
-        <li><strong>Add capacity.</strong> More fast capacity can be added to your account at any time — write to <a href="mailto:support@premiselabs.co">support@premiselabs.co</a>. This makes the fast layer bigger; it is not a different plan.</li>
+        <li><strong>Add capacity.</strong> More fast capacity can be added to your account at any time — write to <a href="mailto:hello@premiselabs.co">hello@premiselabs.co</a>. This makes the fast layer bigger; it is not a different plan.</li>
         <li><strong>Keep this resident.</strong> The things you rely on can be kept in the fast layer, together with the things connected to them, so they do not have to be fetched back when you return to them. Keeping things resident has a limit, so it can never take over the fast layer.</li>
         <li><strong>See what is outside.</strong> What has stepped out of the fast layer can be listed — how much of it, roughly when, and what it was about — so what is outside is something you can look at rather than a black box.</li>
       </ul>
