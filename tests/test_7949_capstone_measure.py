@@ -1534,6 +1534,35 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
         assert e6["error"] is None or "census" in str(e6["error"]), (why, e6["error"])
         assert sum(e6["written"].values()) == e6["declared"], (
             why, e6["written"], e6["declared"])
+    # …a row whose KEY field is a COLLECTION, which raised `TypeError: unhashable type: 'list'`
+    # from the beside column's lookup — on the live path, outside every `try` — and, on the
+    # artifact path, from `_e6_key`'s dict key. `_e6_field` makes it a NON-MATCH instead.
+    key_collection_rows = (({"predicate": ["a", "b"]}, "list predicate"),
+                           ({"from_kind": ["x"]}, "list from_kind"),
+                           ({"to_kind": {"a": 1}}, "object to_kind"))
+    for bad_row, why in key_collection_rows:
+        census = {"packs": {"dev": {"relations": [bad_row], "hierarchies": []}}}
+
+        class _KeyCensus:
+            RELATION_WRITABLE = real.RELATION_WRITABLE
+            RELATION_PREDICATE_NOT_IN_ALLOWLIST = real.RELATION_PREDICATE_NOT_IN_ALLOWLIST
+
+            @staticmethod
+            def build_census(_packs_dir, _bad=census):
+                return _bad
+
+        monkeypatch.setattr(measure, "_pack_census_module", _KeyCensus)
+        e6 = measure.measure_e6()
+        assert e6["error"] is None, (why, e6["error"])
+        # The column reads NOTHING for this shape (the artifact path degrades the same way),
+        # and — the property that failed — it does not raise out of a paid run.
+        assert e6["written"]["unmeasured"] == e6["declared"], (why, e6["written"], e6["declared"])
+    # …and an EMPTY `packs` object, the one shape the fault did not cover: it read as a normal
+    # read, so the beside column claimed to have read an artifact it covered none of.
+    empty = tmp_path / "empty.json"
+    empty.write_text('{"packs": {}}')
+    cells, source = measure._e6_write_cells(str(empty))
+    assert cells == {} and "UNMEASURED" in source.upper(), source
 
 
 def test_a_synthetic_hierarchies_defect_runs_through_the_runs_own_defect_scan():

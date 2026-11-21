@@ -4235,6 +4235,14 @@ def _e6_write_cells(census_path: str) -> tuple[dict, str]:
         return {}, (f"{census_path} carries "
                     f"{'no' if blocks is None else 'a ' + type(blocks).__name__} `packs` "
                     f"object; its `written` cells are UNMEASURED")
+    if not blocks:
+        # ⛔ AN EMPTY `packs` IS NOT A NORMAL READ (#14060 review round 7, P3): it returned zero
+        # cells with `(generated_by: …)`, the one shape the shape fault did not cover — and the
+        # beside column then claims it read the artifact while covering none of the population.
+        # The counts were already right (`unmeasured` = every row); only the `source` lied, so
+        # the word is what changes here.
+        return {}, (f"{census_path} carries an EMPTY `packs` object; its `written` cells are "
+                    f"UNMEASURED")
     # ⛔ ONE CATCH FOR THE WHOLE SHAPE CLASS, not a guard per shape (#14060 review round 6).
     # Five rounds each found ONE MORE shape that escaped — a non-object artifact, a non-object
     # `packs`, a non-list surface (`for row in 42`), a non-dict row, and finally a ROW whose id
@@ -4438,10 +4446,21 @@ def measure_e6(*, packs_dir: Path | str | None = None,
 
     cells, source = _e6_write_cells(census_path)
     written = {"direct": 0, "mediated": 0, "none": 0, "unmeasured": 0}
-    for pack, surface, row in rows:
-        cell = cells.get(_e6_key(pack, surface, row)) or {}
-        value = cell.get("written")
-        written[value if value in ("direct", "mediated", "none") else "unmeasured"] += 1
+    # ⛔ THE BESIDE LOOKUP IS OUTSIDE EVERY `try`, and `_e6_key` puts row fields in a dict key:
+    # a LIVE row whose `predicate`/`from_kind`/`to_kind` is a collection raised
+    # ``TypeError: unhashable type: 'list'`` straight out of `measure_e6`, after a paid run
+    # (#14060 review round 7, P3, measured on `{"relations": [{"predicate": ["a", "b"]}]}` and
+    # `{"from_kind": ["x"]}`). Not producer-reachable — a manifest carrying such a field is
+    # ISOLATED by `pack_registry` and refuses through `load_errors` — so this closes the class
+    # by construction: the artifact path already degrades the whole column for this shape
+    # (`_e6_write_cells`' structural catch), and this is its live-path twin.
+    try:
+        for pack, surface, row in rows:
+            cell = cells.get(_e6_key(pack, surface, row)) or {}
+            value = cell.get("written")
+            written[value if value in ("direct", "mediated", "none") else "unmeasured"] += 1
+    except TypeError:  # an unhashable key field: the column reads NOTHING, never a crash
+        written = {"direct": 0, "mediated": 0, "none": 0, "unmeasured": len(rows)}
     measurement["written"] = written
     measurement["written_source"] = source
     return measurement
