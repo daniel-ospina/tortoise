@@ -357,7 +357,7 @@ Two releases, in sequence:
 
 | Release | Date | What shipped (verbatim anchor) |
 |---|---|---|
-| **1.6.3** | 2026-10-21 | Dates extracted at ingest; time-scoped questions routed to temporal search and *"ranked by how tightly they fit the window, boundary dates included"*. Conflicts are **surfaced**: *"if two of your sources disagree, it shows you the conflict instead of quietly picking a side."* Motivation stated as: *"An agent that knows a fact but not when it was true will hand you last quarter's answer with full confidence."* |
+| **1.6.3** | 2026-10-21 | Dates extracted at ingest; time-scoped questions routed to temporal search and *"ranks results by how tightly they fit the window, boundary dates included"*. Conflicts are **surfaced**: *"if two of your sources disagree, it shows you the conflict instead of quietly picking a side."* Motivation stated as: *"An agent that knows a fact but not when it was true will hand you last quarter's answer with full confidence."* |
 | **1.6.6** | 2026-11-04 | **Conflict review on by default**, plus an API (`list_conflicts()` / `resolve_conflict()`) and a Cloud UI flow to pick the winner. *"when you choose which fact is right, cognee keeps that choice and answers from it from then on."* Choice persists **across sessions**; *"Edit, delete or rebuild the data, and choices that no longer apply are retired with it."* |
 
 **The semantics, precisely:** rejected facts are **not deleted** — they remain as *superseded evidence*; the selected fact becomes *current* and alternatives *superseded*; a later review **preserves the user's earlier choice** while that fact remains available; an optional reason can be recorded in the UI.
@@ -383,7 +383,7 @@ Two releases, in sequence:
 - ⚠️ **`strict` mode prunes inconsistently** — the graph prunes, chunk/RAG retrieval does not
 - ⚠️ **Extraction quality is split by tier**: the OSS LLM-free extractor is described as *"a demo you can experiment with, while the production extractor, which offers higher accuracy and broader label coverage, is available through Enterprise"* — so the headline 30×/no-API-bill claim describes the tier that is **not** the accurate one
 
-🔄 **Changed 2026-11-21:** two capability rows added (`Conflict detection surfaced`, `Conflict resolution`), the `contradicts` status corrected from opt-in to on-by-default review, and three subsections added below — the ontology layer, conflict review, and the sharpened gap list.
+🔄 **Changed 2026-11-21:** two capability rows added (`Conflict detection surfaced`, `Conflict resolution`), the `contradicts` status corrected from opt-in to on-by-default review, and three subsections added above — the ontology layer (§6b.1), conflict review (§6b.2), and this sharpened gap list (§6b.3).
 
 *Last checked: 2026-11-21.*
 
