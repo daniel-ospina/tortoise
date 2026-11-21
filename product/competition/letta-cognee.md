@@ -6,7 +6,7 @@
 
 ---
 
-> ### 🔄 Cognee pivoted the framing on 2026-11-19 — from "agent memory" to "an ontology of your business"
+> ## 🔄 Cognee pivoted the framing on 2026-11-19 — from "agent memory" to "an ontology of your business"
 >
 > The **2026-11-19** release ("Meet the new cognee") shipped three things at once, and the first one moves Cognee onto a different competitive axis than the one this profile was originally scoped to:
 >
@@ -64,7 +64,7 @@
 
 🔢 **Milestone arc (newsroom memo sequence) — useful as a strategy read:** memo 003 "memory that learns from its own structure" (ontology learning, 2026-08-26) → memo 004 "who is asking" + provenance (2026-09-09) → memo 005 local extraction / cost (2026-09-24) → memo 007 "memory that resolves conflict" (2026-10-21) → memo 008 "you pick which fact wins" (2026-11-04) → memo 009 "who gets to see what" / auto-ontology (2026-11-19). The order is vocabulary → provenance → conflict → adjudication → governance.
 
-*Last checked: 2026-11-21*
+*Last checked: 2026-11-21.*
 
 ---
 
@@ -100,7 +100,7 @@
 
 🔄 **Changed 2026-11-21 (Cognee release 2026-11-19):** Cognee now sells a *second* category alongside memory — an **ontology of the customer's business**, generated from that customer's data and sold as a Premium tier. That is the **enterprise-ontology axis** (Palantir Foundry Ontology / Microsoft Fabric IQ — see the premise-labs ontology set), not the agent-memory axis this profile was originally scoped to. Cognee's own comparison page now positions it as a **"company brain"** platform ranked against Mem0, Zep, Supermemory, Letta and MemoryLake.
 
-*Last checked: 2026-11-21*
+*Last checked: 2026-11-21.*
 
 ---
 
@@ -141,9 +141,9 @@
 **🔄 Changed 2026-11-21 (Cognee release 2026-11-19) — the "business understanding" value proposition (verbatim):**
 
 > "Automatically build an ontology of your business"
-
+>
 > "Both of these problems boil down to the same limitation — default extraction finds entities and relationships, but doesn't understand the rules of a particular business. It can't know that a company's 15% discount only applies to orders signed before March, or that a 'maintenance contract' and a 'service agreement' describe the same kind of deal. Capturing that context requires an ontology."
-
+>
 > "Now, our auto-ontology builds that structure from your data."
 
 **Premium tier tagline (verbatim, pricing page):** "A knowledge graph that speaks your business's language, with types and domains learned from your own data."
@@ -156,7 +156,7 @@
 
 [Source](https://www.cognee.ai/) — retrieved 2026-09-11 · ["Meet the new cognee"](https://www.cognee.ai/new-cognee-experience) — retrieved 2026-11-21 · [cognee.ai/pricing](https://www.cognee.ai/pricing) — retrieved 2026-11-21
 
-*Last checked: 2026-11-21*
+*Last checked: 2026-11-21.*
 
 ---
 
@@ -243,7 +243,7 @@ Explicitly segmented into three audiences on the homepage:
 
 ✅ Verified against the live pricing page. [Source](https://www.cognee.ai/pricing) — retrieved 2026-11-21
 
-*Last checked: 2026-11-21*
+*Last checked: 2026-11-21.*
 
 ---
 
@@ -374,6 +374,7 @@ Two releases, in sequence:
 - ⚠️ Graph accuracy depends on the extraction LLM and input structure (see §11)
 
 **New / sharpened by the 2026-11 releases:**
+
 - ❌ **Axioms are never enforced**, even in `owl_rl` — the ontology cannot catch "this entity is both a Person and a Company", a violated cardinality, or disjoint classes. It only *matches and annotates*
 - ❌ **Ontology is a retrieval router, not a reasoning substrate** — by their own description its job is *"to find relevant entities before retrieving"*
 - ⚠️ **Business rules are described as the reason for an ontology but are not modelled as rules** — the "15% discount only before March" example lands as a type plus a description, not an evaluable constraint
@@ -384,7 +385,7 @@ Two releases, in sequence:
 
 🔄 **Changed 2026-11-21:** two capability rows added (`Conflict detection surfaced`, `Conflict resolution`), the `contradicts` status corrected from opt-in to on-by-default review, and three subsections added below — the ontology layer, conflict review, and the sharpened gap list.
 
-*Last checked: 2026-11-21*
+*Last checked: 2026-11-21.*
 
 ### 6c. Architecture contrast — graph? reasoning state? (factual capability comparison)
 
@@ -406,7 +407,7 @@ Two releases, in sequence:
 
 🔄 **Changed 2026-11-21:** four rows added (Type/vocabulary layer, Conflict adjudication, Axiom enforcement, Standards-format ontology import) and the Verdict rewritten — Cognee now ships a better-developed *vocabulary* layer than ours while still carrying no belief semantics.
 
-*Last checked: 2026-11-21*
+*Last checked: 2026-11-21.*
 
 ---
 
@@ -450,7 +451,7 @@ Two releases, in sequence:
 
 🔄 **Changed 2026-11-21:** the open-source-funnel row's star count updated 30.6K → 33,448 (in-row dated). The rest of this section is the 2026-09-11 read and was not re-checked on 2026-11-21.
 
-*Last checked: 2026-09-11 (only the open-source-funnel row re-read 2026-11-21)*
+*Last checked: 2026-09-11 (only the open-source-funnel row re-read 2026-11-21).*
 
 ---
 
@@ -499,7 +500,7 @@ Two releases, in sequence:
 
 [Source](https://api.github.com/repos/topoteretes/cognee) · [pypistats](https://pypistats.org/api/packages/cognee/recent) · [BEAM benchmarking post](https://www.cognee.ai/benchmarking-cognee-on-beam) · [cognee.ai/research-and-evaluation-results](https://www.cognee.ai/research-and-evaluation-results) · ["Meet the new cognee"](https://www.cognee.ai/new-cognee-experience) (stars + companies) — retrieved 2026-11-21
 
-*Last checked: 2026-11-21*
+*Last checked: 2026-11-21.*
 
 ---
 
@@ -538,7 +539,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 
 [Source](https://www.cognee.ai/) · [docs.cognee.ai/llms.txt](https://docs.cognee.ai/llms.txt) — retrieved 2026-09-11 · [cognee.ai/newsroom](https://www.cognee.ai/newsroom) · [2026-11-19 launch post](https://www.cognee.ai/new-cognee-experience) · [cognee.ai/build-an-ai-company-brain](https://www.cognee.ai/build-an-ai-company-brain) — retrieved 2026-11-21
 
-*Last checked: 2026-11-21*
+*Last checked: 2026-11-21.*
 
 ---
 
@@ -563,7 +564,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 
 🔄 **Changed 2026-11-21:** the Cognee GitHub cell updated to the 2026-11-21 API read. Discord membership and contributor counts remain the 2026-09-11 reads.
 
-*Last checked: 2026-11-21*
+*Last checked: 2026-11-21.*
 
 ---
 
@@ -658,7 +659,8 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 - [Caplight](https://www.caplight.com/company/cognee) / [Seedtable](https://www.seedtable.com/startups/Cognee-EW98RKN) / [TheCompanyCheck](https://www.thecompanycheck.com/company/b/cognee/zo7d4gvxj80d47h59) — total funding $8.9M–$9.09M across 2 rounds. Retrieved 2026-09-11
 - [BEAM benchmarking post](https://www.cognee.ai/benchmarking-cognee-on-beam) and [research & evaluation results](https://www.cognee.ai/research-and-evaluation-results) — 0.79 @ 100K, 0.67 @ 10M. Retrieved 2026-09-11
 
-**Cognee — 2026-11 delta (ontology pivot), all retrieved 2026-11-21**
+**Cognee — 2026-11 delta (ontology pivot), all retrieved 2026-11-21.**
+
 - ["Meet the new cognee: auto-ontology, local models, permissions"](https://www.cognee.ai/new-cognee-experience) (2026-11-19) — auto-ontology mechanism, the two-pass type assignment, Ontology Editor plain-language editing, OWL/Turtle/JSON-LD import, GLiNER/FastEmbed local extraction (2,000-token chunk ~1.2 s on Apple M4 Pro vs ~35 s for `gpt-5.6-luna`; est. $570/GB avoided), the OSS-vs-Enterprise extractor split, memory promotion + permission flagging, 12 integrations + n8n
 - [Newsroom memo 007 — "memory that resolves conflict"](https://www.cognee.ai/newsroom/memory-that-resolves-conflict) (2026-10-21) — 1.6.3 temporal search, boundary dates, "shows you the conflict instead of quietly picking a side", the "last quarter's answer with full confidence" framing, embedding-vs-LLM token accounting, `.env.template` local run, Codex plugin, vulnerability disclosure policy, n8n verified node (200+ sources)
 - [Newsroom memo 008 — "you pick which fact wins"](https://www.cognee.ai/newsroom/you-pick-which-fact-wins) (2026-11-04) — 1.6.6 conflict review **on by default**, choice persists across sessions, stale choices retired on edit/delete/rebuild, `forget(clean_history=True)`, vector copy without re-embedding, Obsidian/Asana/OneNote sources
@@ -669,7 +671,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 - [docs.cognee.ai/core-concepts/further-concepts/ontologies](https://docs.cognee.ai/core-concepts/further-concepts/ontologies) — re-fetched 2026-11-21: `annotate`/`strict` modes, `ONTOLOGY_REASONING=none|owl_rl`, `EmptyOntologyInStrictModeError`, "no domain/range, cardinality, or disjointness checking", relationship names never checked against object properties, chunk/RAG retrieval unaffected by `strict` pruning, `cognee[ontology]` extra
 - ["Best Platforms to Build an AI Company Brain in 2026"](https://www.cognee.ai/build-an-ai-company-brain) (2026-09-28) — the company-brain category claim, the five-criteria self-ranking (cognee placed first), "30+ data sources", COGX exchange format, single-Postgres claim
 - [cognee.ai/pricing](https://www.cognee.ai/pricing) — re-fetched 2026-11-21: Standard $0 + 100M tokens + $0.10/1M, **Premium $99/mo (auto-ontology)**, Enterprise feature list unchanged (bi-temporal & conflict resolution, provenance, personalization), BYOC engagement table, `gpt-oss-120b` cloud footer
-- [cognee.ai/benchmarks](https://www.cognee.ai/benchmarks) — **404 at retrieval** (the live pages are `/research-and-evaluation-results` and the docs `accuracy-benchmarks`); recorded as a gap, not a negative finding
+- `https://www.cognee.ai/benchmarks` — **404 at retrieval** (the live pages are `/research-and-evaluation-results` and the docs `accuracy-benchmarks`); recorded as a gap, not a negative finding
 
 ### Gaps documented (not fabricated)
 
@@ -689,6 +691,7 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 - ⚠️ **pypistats.org rate-limited** on several attempts; figures above are from successful calls.
 
 **Added 2026-11-21 (ontology pivot):**
+
 - ⚠️ **Auto-ontology → grounding seam undocumented:** the docs describe the **supplied**-ontology path (`ONTOLOGY_FILE_PATH`/resolver → `annotate`/`strict`). Whether the **auto-generated** hierarchy feeds the same grounding machinery, and whether it can be **exported as RDF/OWL**, is not stated anywhere public. Unverified — do not claim either way.
 - ⚠️ **Cloud default LLM conflict:** the pricing-page footer says Cloud runs on `gpt-oss-120b`; the 2026-11-19 post names `gpt-5.6-luna` as "cognee's default LLM" when computing its 35 s baseline. Both recorded; unresolved which is the live default.
 - ⚠️ **The `$570/GB` and `30×` figures are Cognee's own estimates** against an *"estimated"* LLM baseline on a single Apple M4 Pro, not a reproduced measurement. Treated as vendor claims.
@@ -702,4 +705,4 @@ Docs quality is excellent and LLM-consumable — a deliberate developer-adoption
 - Run Cognee's `contradiction_feedback_demo.py` and `fact_validity.py` locally to verify the `contradicts` edge, confidence score, and `valid_to` behavior on a non-default backend (the documented Kuzu/Ladybug limitation).
 - Check whether Cognee's `valid_to` and `contradicts` are available in Cognee Cloud outside the Enterprise tier (pricing page implies not).
 
-*Last updated: 2026-11-21*
+*Last updated: 2026-11-21.*

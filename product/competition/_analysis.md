@@ -169,7 +169,7 @@ Zep is 5 people. We're not competing with them — we're learning from their arc
 
 ---
 
-*Last updated: 2026-11-21 (§1 Cognee row and the §3a/§3b matrices revised on this date; the rest of §2–§4 is unchanged from 2026-09-11)*
+*Last updated: 2026-11-21 (§1 Cognee row and the §3a/§3b matrices revised on this date; the rest of §2–§4 is unchanged from 2026-09-11).*
 
 ---
 
@@ -1175,7 +1175,7 @@ Before the adversarial doubt layer activates:
 **Their own description of what the ontology is for** is unambiguous, and it is a *retrieval* claim, not a *reasoning* claim:
 
 > "When you ask a question, cognee uses these types to find relevant entities before retrieving the information needed to answer." [Profile §6b.1]
-
+>
 > "before extracting, cognee picks the entity and relation types to look for, from your ontology if you have one, or otherwise from a quick scan of each document." [Profile §6b.1]
 
 - **What they optimize for:** *retrieval precision over a messy corpus* — the named pain is entity confusion and circular answers ("the resulting memory often mixed up distinct entities and generated circular answers"), and the fix is a type hierarchy that narrows the candidate set before similarity search runs [Profile §3, §6b.1]. Two data points: the manufacturer/company-brain complaints, and the "find relevant entities before retrieving" mechanism.
@@ -1238,4 +1238,4 @@ Ranked by how much they cost us, not by how interesting they are.
 
 ---
 
-*Last updated: 2026-11-21 (section 10 added; section 1 Cognee row and section 3a matrix revised)
+*Last updated: 2026-11-21 (section 10 added; section 1 Cognee row and section 3a matrix revised).*
