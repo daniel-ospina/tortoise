@@ -660,11 +660,20 @@ def _stamp(value: str | None) -> float:
 #: `sys.modules` — could never name it. An earlier cut therefore dropped it from
 #: the SET, which silently dropped the AST BAN too: a `from . import
 #: embedded_lifecycle` added to `usage_signal` reddened nothing, through the one
-#: module that owns the embedded store. The exemption now applies to the PROBE's
-#: name list only. `tortoise` is exempt for the same kind of reason, and is not in
-#: the set at all: the package root is in `sys.modules` by construction, so banning
-#: it would ban the module itself.
-_PROBE_EXEMPT = ("tortoise", "tortoise.embedded_lifecycle")
+#: module that owns the embedded store.
+#:
+#: ⛔ TWO EXEMPTIONS, TWO ROLES, TWO NAMES. An exemption is a way to switch a
+#: guard OFF, so each one is scoped to the single guard it is justified for;
+#: serving both roles from one list is how a coverage skip quietly becomes a ban
+#: exemption. `_PROBE_EXEMPT` only ever removes a name from the subprocess probe's
+#: list — every member must ALSO stay in `_FORBIDDEN_GRAPH_ROOTS`, so the AST ban
+#: still bites it (asserted in the direction test below). `_COVERAGE_EXEMPT` only
+#: ever excuses a module from the direction test's demand, and `tortoise` is its
+#: sole member: the package root is in `sys.modules` by construction and is
+#: deliberately NOT in the banned set, because banning the package would ban the
+#: module itself.
+_PROBE_EXEMPT = ("tortoise.embedded_lifecycle",)
+_COVERAGE_EXEMPT = ("tortoise",)
 _FORBIDDEN_GRAPH_ROOTS = (
     "falkordb",
     "redis",
@@ -928,8 +937,12 @@ def _modules_reaching_a_store() -> frozenset[str]:
     "`import tortoise` must not import redislite" in a comment, which contains the
     substring `import redis`.
 
-    Cached: the tree cannot change within a run, and re-parsing all 300+ files per
-    call cost ~5.9 s a call against this file's `durations: 2.0` shard row.
+    Cached: the tree cannot change within a run, and re-parsing every file in the
+    package on each call is seconds-scale — enough to blow the shard row this file
+    packs into, and paid for no benefit, since the answer cannot change mid-run.
+    ⛔ No local seconds figure is quoted on purpose: a figure beside a weight
+    re-stales against the run it came from (`config/ci-surfaces.yml` states the
+    same rule where the `durations:` rows live).
     """
     package = Path(usage_signal.__file__).parent
     found: set[str] = set()
@@ -977,7 +990,7 @@ def test_the_no_graph_guard_covers_every_module_that_reaches_a_store() -> None:
     uncovered = [
         module
         for module in _modules_reaching_a_store()
-        if module not in _PROBE_EXEMPT  # cannot be banned; see the set's comment
+        if module not in _COVERAGE_EXEMPT  # cannot be banned; see the set's comment
         and not any(
             module == root or module.startswith(root + ".")
             for root in _FORBIDDEN_GRAPH_ROOTS
@@ -991,8 +1004,31 @@ def test_the_no_graph_guard_covers_every_module_that_reaches_a_store() -> None:
     # owns the embedded store and is exempt from the PROBE only (it is in
     # `sys.modules` before the probe runs); dropping it from the SET would drop the
     # AST ban too, which is the hole an earlier cut had. Asserted rather than left
-    # to the coverage row, which skips probe-exempt modules by construction.
+    # to the coverage row, which skips exempt modules by construction.
     assert "tortoise.embedded_lifecycle" in _FORBIDDEN_GRAPH_ROOTS
+    # ⛔ THE PROBE-EXEMPT LIST CANNOT BE A COVERAGE SKIP IN DISGUISE. Exempting from
+    # the probe is only MEANINGFUL for a name the probe would otherwise assert
+    # absent — one that is BANNED. A probe-exempt name that is not banned is
+    # removed from the probe (a no-op) and excused from THIS row (a silent hole):
+    # exactly the lever that made an earlier cut drop `embedded_lifecycle` from the
+    # set only. So the relation is enforced, not documented.
+    unbanned_probe_exempt = set(_PROBE_EXEMPT) - set(_FORBIDDEN_GRAPH_ROOTS)
+    assert unbanned_probe_exempt == set(), (
+        f"{sorted(unbanned_probe_exempt)} is exempt from the probe but is not in "
+        "_FORBIDDEN_GRAPH_ROOTS, so the exemption buys nothing there and silently "
+        "excuses it from THIS row — a ban exemption wearing a probe exemption's "
+        "name. Ban it, or move it to _COVERAGE_EXEMPT with a stated reason.")
+    # ⛔ AND THE COVERAGE EXEMPTION IS PINNED EXACTLY, because it is the remaining
+    # lever: adding a genuinely store-reaching module to it would make this row
+    # stop demanding the ban while the AST ban still does not name it. Pinning the
+    # exact set makes that a deliberate edit that reddens here, not a quiet skip.
+    assert set(_COVERAGE_EXEMPT) == {"tortoise"}, (
+        f"the coverage exemption is {sorted(_COVERAGE_EXEMPT)!r}; only the package "
+        "root may be excused (it is in `sys.modules` by construction, and banning "
+        "the package would ban the module itself). A store-reaching module added "
+        "here is invisible to the AST ban — ban it instead.")
+    # The two roles must not overlap, or the split above buys nothing.
+    assert set(_PROBE_EXEMPT) & set(_COVERAGE_EXEMPT) == set()
 
 
 def test_recording_never_raises_on_a_broken_path(tmp_path: Path) -> None:
