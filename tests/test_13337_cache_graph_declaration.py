@@ -205,30 +205,84 @@ def test_the_control_plane_read_uses_the_SAME_filters_the_ownership_check_does()
     that the declaration asks the same table with the same two filters, so a
     namespace can never be resolved for a ``(id, org)`` pair the ownership check
     would refuse.
+
+    ⛔ AGREEMENT ALONE IS NOT ENOUGH — the row needs BOTH halves, and it carries
+    both: an EQUIVALENCE (both readers are EXECUTED against one spy and their
+    calls compared) beside a KNOWN-ANSWER LITERAL.
+
+    The equivalence is what a transcription cannot supply: this row once asserted
+    the literal pair alone, and a hardcoded expectation cannot detect the drift it
+    is named for — move the ownership read's filters or its table and it stayed
+    GREEN while the two readers diverged (raised by review).
+
+    The literal is what the equivalence cannot supply: agreement on the WRONG
+    pair is still wrong. An equality between two captured lists is satisfied just
+    as well by ONE filter, or by a different one, as long as both readers were
+    edited the same way — measured: delete ``("org_id", "eq", org_id)`` from
+    BOTH ``tortoise/cache_graph.py`` and ``tortoise/hosted_api.py`` and the two
+    equality rows stay GREEN while the tenant filter this read exists for is
+    gone. The old literal-only row went RED on that joint mutant, and dropping it
+    outright traded away the dimension the read is for. So the anchor stays, as
+    the independently-stated expectation the comparison is checked against.
+    ⛔ The justification is the measurement above, not an appeal to convention: an
+    earlier draft cited "the pattern the review's research pass found in
+    comparable suites" and named no suite, file or line — unverifiable in exactly
+    the way this PR's doctrine rejects (raised by review). What is checkable is
+    the two mutants: each half reds on a mutant the other half survives.
     """
     from tortoise import supabase_control
 
-    seen = {}
+    def _capture(reader):
+        calls = []
 
-    class _CP:
-        def query(self, table, select=None, filters=None):
-            seen.update(table=table, select=select, filters=filters)
-            return [{"id": "g_1", "namespace": "org_orgA"}]
+        class _CP:
+            def query(self, table, select=None, filters=None):
+                calls.append({"table": table, "select": select, "filters": filters})
+                return [{"id": "g_1", "namespace": "org_orgA"}]
+
+        original = supabase_control.is_supabase_enabled
+        original_cp = supabase_control.get_control_plane
+        try:
+            supabase_control.is_supabase_enabled = lambda: True
+            supabase_control.get_control_plane = _CP
+            reader()
+        finally:
+            supabase_control.is_supabase_enabled = original
+            supabase_control.get_control_plane = original_cp
+        # ⛔ EVERY call is recorded, not just the last. A `dict.update` accumulator kept only the
+        # final query, so a reader that grew a SECOND, looser control-plane read would have been
+        # compared on its tail and the extra read would have been invisible — the truncation
+        # channel this row is otherwise exposed to (raised by review). Exactly one call per reader
+        # is now asserted, so a second read is a deliberate, visible change rather than a silent one.
+        assert calls, "the reader made NO control-plane call — this row would be vacuous"
+        assert len(calls) == 1, (
+            f"the reader made {len(calls)} control-plane calls, expected 1: {calls}"
+        )
+        return calls[0]
 
     import tortoise.cache_graph as cg
+    from tortoise.hosted_api import _assert_graph_owned
 
-    original = supabase_control.is_supabase_enabled
-    original_cp = supabase_control.get_control_plane
-    try:
-        supabase_control.is_supabase_enabled = lambda: True
-        supabase_control.get_control_plane = _CP
-        assert cg.namespace_from_control_plane("orgA", "g_1") == "org_orgA"
-    finally:
-        supabase_control.is_supabase_enabled = original
-        supabase_control.get_control_plane = original_cp
+    ownership = _capture(
+        lambda: _assert_graph_owned({"org_id": "orgA"}, "g_1", "org_orgA")
+    )
+    declaration = _capture(lambda: cg.namespace_from_control_plane("orgA", "g_1"))
 
-    assert seen["table"] == "graphs"
-    assert seen["filters"] == [("id", "eq", "g_1"), ("org_id", "eq", "orgA")]
+    assert declaration["table"] == ownership["table"]
+    assert declaration["filters"] == ownership["filters"]
+    # ⛔ The ANCHOR the equivalence above cannot supply: agreement on the WRONG
+    # pair is still wrong, so the pair itself — the "same two filters" this row
+    # is named for — is stated independently. Dropping `org_id` from BOTH readers
+    # leaves every equality above green; this line is what goes RED.
+    assert ownership["filters"] == [("id", "eq", "g_1"),
+                                    ("org_id", "eq", "orgA")]
+    # …and the TABLE half of the same claim ("the same table") needs its own
+    # anchor for the same reason: `"graphs"` → `"graph"` in BOTH readers leaves
+    # the equality above green, so only a literal catches that joint edit.
+    assert ownership["table"] == "graphs"
+    # `select` is deliberately NOT pinned equal: the ownership read also fetches
+    # `id` (it needs the row's identity), the declaration needs only the name.
+    assert "namespace" in declaration["select"]
 
 
 def _reconcile_args(cache_graph=None) -> argparse.Namespace:
