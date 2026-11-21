@@ -767,8 +767,13 @@ def _imports_of(source: str) -> set[str]:
     is not a module path is harmless: `from tortoise import sdk` has to record
     `tortoise.sdk` (a module) and `from tortoise import FalkorDB` has to record
     `tortoise.FalkorDB` (an export, not a module) — `_offending` then matches both
-    against the two name sets, and `_modules_reaching_a_store` only ever asks
-    whether a name starts with a dotless store root, which no export can.
+    against the two name sets, and so does the direction scan: it asks
+    `_reaches_a_store_client`, which tests the dotless store roots AND the export
+    names, so a module whose ONLY reach is `from tortoise import FalkorDB` is found
+    there too. (An earlier version of this paragraph said the scan "only ever asks
+    whether a name starts with a dotless store root, which no export can" — that
+    stopped being true when the export half was added to the shared predicate, and
+    the scan's own docstring said the opposite in the same file.)
 
     ⛔ The RELATIVE resolution is the other point. An earlier version of this guard
     walked `ast.ImportFrom` with `node.module` truthy and compared the leftover
