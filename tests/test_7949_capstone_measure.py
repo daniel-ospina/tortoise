@@ -1697,14 +1697,17 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
         # at the end of this block against a population that was actually enumerated (the fixtures
         # BELOW the tuple are the ones that do disagree — that is the point of them).
         assert e6["error"] is None or "census" in str(e6["error"]), (why, e6["error"])
-        # ⛔ AND THE CELLS FOLLOW WHAT WAS ACTUALLY READ (#14060 review round 16, P3): `written`
-        # used to stay at the all-zero dict initialised in `measure_e6`, so a refused row carried
-        # four numbers for a column no census was read for. The tuple above spans BOTH refusal
-        # paths, and each states only what it established: a census that was never read (not an
-        # object) has no count at all, so its cells are `None`; a dict census that reached the
-        # population guard has ROWS, so its cells are numbers (`unmeasured` = the refused rows).
+        # ⛔ AND THE CELLS FOLLOW WHAT WAS ACTUALLY READ (#14060 review rounds 16 and 22, P3):
+        # `written` used to stay at the all-zero dict initialised in `measure_e6`, so a refused
+        # row carried four numbers for a column no census was read for. A census that was never
+        # read (not an object) has no count at all, so all four cells are `None`; a dict census
+        # that reached the population guard has enumerated ROWS, so `unmeasured` is their count —
+        # but the three write columns are `None` too, because no write path ran for them and a
+        # literal `0` would be a reading this branch never took.
         if isinstance(bad_census, dict):
-            assert None not in e6["written"].values(), (why, e6["written"])
+            assert {key: e6["written"][key] for key in ("direct", "mediated", "none")} == {
+                "direct": None, "mediated": None, "none": None}, (why, e6["written"])
+            assert isinstance(e6["written"]["unmeasured"], int), (why, e6["written"])
         else:
             assert all(value is None for value in e6["written"].values()), (why, e6["written"])
         note = measure.build_e6_row(e6, bars=BARS)["note"]
@@ -1759,13 +1762,27 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
         assert refusal in str(e6["error"]), (why, e6["error"])
         assert e6["declared"] == 0, (why, e6["declared"])
         # ⛔ AND THE REFUSED COLUMN CARRIES WHAT WAS ESTABLISHED, not four zeros (#14060
-        # review round 16, P3, measured): the cells stayed at the initialised all-zero dict, so
-        # a refusal carrying ONE enumerable row published `unmeasured=0` — every row measured —
-        # in the same sentence as `not read`. `unmeasured` is now the count of the rows the
-        # guard refused, and the three other cells are a zero that WAS measured (nothing was
-        # read into them). `expected_unmeasured` is typed per fixture, not derived.
-        assert e6["written"] == {"direct": 0, "mediated": 0, "none": 0,
+        # review rounds 16 and 22, P3, measured): the cells stayed at the initialised all-zero
+        # dict, so a refusal carrying ONE enumerable row published `unmeasured=0` — every row
+        # measured — in the same sentence as `not read`. `unmeasured` is now the count of the
+        # rows the guard refused, and the three write columns are `None`: no write path ran, so
+        # nothing was measured there and a `0` would be a reading this branch never took.
+        # `expected_unmeasured` is typed per fixture, not derived.
+        assert e6["written"] == {"direct": None, "mediated": None, "none": None,
                                 "unmeasured": expected_unmeasured}, (why, e6["written"])
+        # ⛔ …AND IT REACHES THE ROW THAT BECOMES `written_counts` THAT WAY (#14060 round 22, P3):
+        # `build_e6_row` carries `written` straight into the row, and `build_rows`' `row()` copies
+        # that same dict to `written_counts` in the machine record — so a zero in these cells
+        # published "0 rows written" into the JSON every consumer reads, beside a `written_source`
+        # saying `not read — …`. The two renderers suppressed the counts; the record did not, and
+        # no arm read it. This one holds the row's copy to the cells asserted above; the
+        # `written_counts` presence in the machine record is pinned on the measured path by
+        # `test_the_renderer_renders_a_log_from_the_committed_record`.
+        refused_row = measure.build_e6_row(e6, bars=BARS)
+        assert refused_row["written"] == e6["written"], (why, refused_row["written"],
+                                                          e6["written"])
+        assert "direct=" not in refused_row["note"].split("written (REPORTED BESIDE")[-1], (
+            why, refused_row["note"])
         row = measure.build_e6_row(e6, bars=BARS)
         assert row["verdict"] == "BLOCKED", (why, row)
         assert row["numerator"] is None and row["denominator"] is None, (why, row)

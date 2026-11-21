@@ -214,13 +214,18 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    "no arm resolves cites INTO this README", which those two arms refute — what is true is that no
    arm reads a `README.md:<n>` cite THIS RECORD carries). The bare
    parenthetical is the statement no `sdk.py:` token and no `sed` covers, so it is the one that rots silently. #10226 removed 26 SDK methods above this writer, and the prose cite and the `sed` were re-derived with it while this bare parenthetical was not. Then `#12825` (`32011c4dad`, fix(sdk): allow `superseded -> live` when the write clears the carriers) inserted 286 lines into `tortoise/sdk.py`, 185 of them above this writer, so ALL THREE moved again — the prose cite, this parenthetical and the `sed` below — and were re-derived together off `grep -n '^ *proj\.link_source_to_event' tortoise/sdk.py`. Then `#12882` (`2dfbb5d455`) inserted 379 lines and deleted 29 in `tortoise/sdk.py` (`git show --numstat 2dfbb5d455 -- tortoise/sdk.py` → `379 29`, net `+350`; an earlier cut of this note said “inserted 408”, which is the CHURN, not the insertions) and `#12904` (`5cc36a42d4`) added 8 and deleted 2 in `tortoise/hosted_api.py` (`8 2`, net `+6`, not “added 10”), and a third re-derivation moved all three together again, by the same +20 net band, off the same grep. Then `#13084` inserted its own RAM-cap seam into `tortoise/sdk.py` above this writer, and a fourth re-derivation moved all three together off the same grep. Then at the `#14060`
-   review head the writer sat at `tortoise/sdk.py:22440`, so the figure recorded one round earlier
-   (`22385`) was 55 short — measured at the head that wrote it: `sed -n '22385p'` reads `#   * this
-   door's lane authorizes BOTH writes, so a raise between them`, and `source_key =
-   _mint_source_stub(` sits at `22340`. The earlier round took its derivation on a tree 55 lines
-   behind its own head while asserting it was taken there; that sentence is corrected here rather
-   than left standing. The mint range was short by the same 55 and is now `21158-21182`
-   (`_ekind = _payload_entity_kind(e)` at `21158`, the `-A 24` window ending the mint block). This
+   review head the writer sat at `tortoise/sdk.py:22471`. ⛔ The four figures this paragraph first
+   typed (`22440`, `22340`, and the mint range `21158-21182`) and the `22385` the round before it
+   recorded are ALL stale at this head, and they are retracted here rather than left standing: the
+   `origin/main` merge `9785731c15` inserted 43 lines into `tortoise/sdk.py`
+   (`git diff --numstat 9785731c15^ 9785731c15 -- tortoise/sdk.py` → `43 0`), 31 of them above
+   this writer, so each of those four figures moved by +31 while `22385` — already 55 short when it
+   was recorded — is 86 short now. Measured at THIS head: `sed -n '22416p'` reads `#   * this
+   door's lane authorizes BOTH writes, so a raise between them`, `source_key =
+   _mint_source_stub(` sits at `22371`, and the mint range is `21189-21213`
+   (`_ekind = _payload_entity_kind(e)` at `21189`, the `-A 24` window ending the mint block). The
+   lesson the retraction carries is the one this note exists for: a prose figure is correct only
+   at the head it was measured on, and a merge moves it. This
    lane re-derived the FIVE capture-path statements and the three mint-range cites off
    `grep -n '^ *proj\.link_source_to_event' tortoise/sdk.py` and
    `grep -n '_ekind = _payload_entity_kind(e)' tortoise/sdk.py` on THIS tree. --> What is missing is the *declared part-whole* edge, not every structural
