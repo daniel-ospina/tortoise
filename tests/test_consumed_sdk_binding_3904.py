@@ -414,14 +414,18 @@ _DRIVE_OVERRIDES: dict[str, tuple[tuple[str, tuple, dict], ...]] = {
         ),
     ),
     # #11609 lane P7: the ONE linking verb that absorbed `tortoise_create_edge` and
-    # `tortoise_create_operator`. Its declared binding is `link_entities`, and NEITHER
-    # generic vector reaches it: with no `to_id` and no `target_ids` the handler answers
-    # "link_entities requires a target", and with the typed vector's `target_ids=[]` it
-    # answers "target list is empty" — both BEFORE any SDK read, which is the exact
-    # early-return shape `_DRIVE_OVERRIDES` exists for. Two vectors, one per arm: the
-    # relation-decided arm reads the declared `link_entities`, and the LIST arm reads
-    # `_create_operator`, the second writer behind the same declaration (so the union
-    # is what proves the declaration is consumed rather than the arm being lucky).
+    # `tortoise_create_operator`. Its declared binding is `link_entities`, and NO generic
+    # vector reaches it. Two independent reasons, both measured: the `minimal` vector
+    # supplies only the two required arguments, so the handler answers "link_entities
+    # requires a target" and reads nothing; and the `typed` vector is a NO-OP for this
+    # handler — `_vectors_for` builds it as a POSITIONAL tuple over every parameter,
+    # keyword-only ones included, so `tortoise_link_entities() takes from 2 to 3
+    # positional arguments but 14 were given` is raised before the body runs (recorded as
+    # `swallowed: ('typed:TypeError',)`). That early-return shape is exactly what
+    # `_DRIVE_OVERRIDES` exists for. Two vectors, one per arm: the relation-decided arm
+    # reads the declared `link_entities`, and the LIST arm reads `_create_operator`, the
+    # second writer behind the same declaration — so the union is what proves the
+    # declaration is consumed rather than one arm happening to be lucky.
     "tortoise_link_entities": (
         (
             "relation-arm",
