@@ -2052,6 +2052,90 @@ def test_a_module_reduced_to_a_NO_OP_statement_is_not_a_body(tree: Path) -> None
     )
 
 
+@pytest.mark.parametrize(
+    "spelling", ["pass", "...", "Ellipsis", "None", "0", "NotImplemented", "1 + 1"]
+)
+def test_every_SPELLING_of_a_bare_no_op_is_not_a_body(tree: Path, spelling: str) -> None:
+    """The CLASS of no-op, not two of its spellings (round-17 review, P1 — a false PASS).
+
+    Round-16 dropped `ast.Pass` and the `...` CONSTANT only, so the SAME no-op spelled `Ellipsis`
+    (a Name bound to that object) or `None` / `0` / `NotImplemented` (bare constants) still
+    answered "carries a body": the writer froze it as the module's source of record and
+    `check --base-ref` printed `OK — archive consistent` while the base's four functions were in
+    NO file under `archive/` (measured per spelling: `shrink_violations -> 0`). An enumeration of
+    spellings was the defect; the fix asks the language rule instead, so this row tests the rule
+    rather than the list it used to be.
+
+    Mutation: narrow the filter back to `Constant(value is Ellipsis)` -> RED for every other
+    spelling here.
+    """
+    (tree / "tortoise" / "gone.py").write_text("def f1():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/gone.py")
+    (tree / "tortoise" / "gone.py").write_text(f"{spelling}\n", encoding="utf-8")
+    _commit(tree, ".")
+    assert not arch._init_carries_a_body(f"{spelling}\n")
+    with pytest.raises(arch.ArchiveRefused, match=r"no body of its own"):
+        arch.archive_symbol(arch.MODULE, "tortoise.gone", "b1", "r", root=tree)
+    assert any(
+        p.startswith("tortoise.gone: MODULE") and "REMOVED" in p
+        for p in arch.shrink_violations(tree, base_ref="HEAD~1")
+    ), f"a body reduced to `{spelling}` is a removal, and no record may green it"
+
+
+def test_deleting_a_SCAFFOLDING_py_module_is_not_a_removal(tree: Path) -> None:
+    """Arm 1 grades a DELETION by content too, not only an in-place emptying (round-17, P2).
+
+    Measured before the fix: `_modules_with_a_body` content-graded ONLY `__init__.py`, so a base
+    `tortoise/doc.py` that was a docstring alone (or 0 bytes) was "carried", its deletion was
+    `MODULE REMOVED` — and the remedy the violation printed (`archive module tortoise.doc`) is
+    REFUSED by this very tool for a body-less source: the red had NO route (CI passes no
+    `--allow-archive-shrink`). Nothing left the product, so the arm must cancel exactly as it
+    does for an emptied package.
+
+    The `.pyi`-only case is deliberately NOT cancelled: a stub IS the module's code when nothing
+    else carries it (pinned by `test_a_tortoise_archive_stub_module_is_reported`).
+
+    Mutation: drop the base-body test in arm 1 -> RED here.
+    """
+    (tree / "tortoise" / "doc.py").write_text('"""Placeholder module."""\n', encoding="utf-8")
+    (tree / "tortoise" / "empty.py").write_text("", encoding="utf-8")
+    _commit(tree, "tortoise/doc.py", "tortoise/empty.py")
+    _commit_drop(tree, "tortoise/doc.py")
+    _commit_drop(tree, "tortoise/empty.py")
+
+    assert arch.shrink_violations(tree, base_ref="HEAD~2") == [], (
+        "a docstring-only or 0-byte module carries nothing, so deleting it removes nothing"
+    )
+
+
+def test_a_WHITESPACE_only_reason_is_not_a_reason(tree: Path) -> None:
+    """A record's `reason` is what a future reader consults — pressing space is not a reason.
+
+    Round-17 review, P3: raw truthiness at BOTH the writer (`archive_symbol`) and the checker
+    (`file_violations`) let `--reason '   '` through, so a row was written carrying
+    `"reason": "   "` and graded clean. This is the hole the PR's own pairing guard names for
+    `--flag` ("an unexplained removal could be waived by pressing space"); the reason is now
+    normalised in place, so the padding cannot survive into the record.
+
+    Mutation: `reason = (reason or "").strip()` -> `reason = reason or ""` -> RED here.
+    """
+    (tree / "tortoise" / "x.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/x.py")
+
+    with pytest.raises(arch.ArchiveRefused, match="reason"):
+        arch.archive_symbol(arch.MODULE, "tortoise.x", "b1", "   ", root=tree)
+
+    # …and the checker must not accept a row that a hand-edit put on disk with padding either:
+    # build the row with the real writer (a valid reason) and then corrupt only the reason, so
+    # the row reaches the reason arm with a file the checker can actually read.
+    entry = _archive_module(tree, "tortoise.x")
+    entry["reason"] = "   "
+    violations = arch.file_violations([entry], archive_dir=tree / "archive", root=tree)
+    assert any("no `reason`" in v for v in violations), (
+        f"a whitespace-only reason must not satisfy the reason rule: {violations}"
+    )
+
+
 def test_the_CLI_refuses_to_freeze_a_leftover_scaffold(
     tree: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
@@ -2916,9 +3000,33 @@ def test_a_waiver_must_name_a_real_kind_and_symbol(tree: Path) -> None:
 
 
 def test_an_unchanged_tree_is_green(tree: Path) -> None:
-    """Non-vacuity: the arm must not red an ordinary merge."""
-    assert arch.shrink_violations(tree, base_ref="HEAD") == []
-    assert arch.shrink_violations(tree) == []  # default branch of the fixture
+    """Non-vacuity: an ADDITION over the base must not red — and the arm must COMPARE two commits.
+
+    ⛔ The first cut asserted `shrink_violations(tree, base_ref="HEAD") == []` and
+    `shrink_violations(tree) == []` on a fixture whose default branch IS its HEAD: both calls
+    compared the tree with ITSELF, so `resolve_base` could answer HEAD unconditionally — the whole
+    shrink arm made vacuous — and this row stayed green (round-17 review, P3, measured as
+    mutation M10: `resolve_base` -> HEAD left `1 passed, 143 deselected`). The row committed the
+    addition on a SIDE branch instead, so the two sides genuinely differ, and PINS that premise
+    so the vacuous resolver reds HERE rather than nowhere.
+    """
+    subprocess.run(
+        ["git", "switch", "-q", "-c", "adds-a-module"], cwd=tree, check=True
+    )
+    (tree / "tortoise" / "added.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    _commit(tree, "tortoise/added.py")
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=tree, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    # ⛔ THE PREMISE IS COMPARED AGAINST THE SHA, NOT THE TUPLE. `resolve_base` answers
+    # `(sha, label)`, so `resolve_base(...) != head` was a tuple-vs-str comparison that is ALWAYS
+    # true — it pinned nothing and let a `resolve_base` answering HEAD stay green (measured on my
+    # own first cut of this row, mutation M4). Index the sha.
+    assert arch.resolve_base(tree, "main")[0] != head, (
+        "premise: the base must NOT be HEAD, or this row asserts a self-comparison and a vacuous "
+        "`resolve_base` passes it"
+    )
+    assert arch.shrink_violations(tree, base_ref="main") == []
 
 
 def test_the_shrink_arm_is_OFF_unless_a_base_ref_is_given(

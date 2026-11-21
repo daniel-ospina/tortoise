@@ -4544,6 +4544,11 @@ def cmd_check(args: argparse.Namespace) -> int:
     # which is the merge base (see `shrink_report`).
     _shrink_compared: str | None = None
     _shrink_graded = False
+    # ⛔ BOUND UNCONDITIONALLY. The route block below prints from this list, and `check` without
+    # `--base-ref` never enters the branch that assigns it — an `if _shrink_problems:` read there
+    # was an UnboundLocalError on 21 rows (measured: every `check` row that does not pass a base
+    # ref). Empty means "no shrink row", which is exactly what the block must see there.
+    _shrink_problems: list[str] = []
     _base_ref = getattr(args, "base_ref", None)
     if _base_ref is not None:
         try:
@@ -4564,6 +4569,20 @@ def cmd_check(args: argparse.Namespace) -> int:
     for p in problems:
         print(f"FAIL {p}")
     if problems:
+        # ⛔ A GATE WHOSE REMEDY IS ELSEWHERE IS A GATE WHOSE REMEDY IS NOT READ (round-17 P3,
+        # measured). `REMOVAL_WAYS` was printed only by `cmd_cut`, and the CI path
+        # (`check --base-ref`) never runs `cut` — so the one operator who triggers the shrink pin
+        # got a bare `was DROPPED with no record` line and no step to take, while the archive
+        # tool prints its route INSIDE every violation and this file's own design note says a new
+        # class needs "a runnable route in `REMOVAL_WAYS`, or the operator gets a refusal they can
+        # act on". Printed only when a SHRINK row is present: the structural findings above have
+        # their own remedies, and a route block under them would be noise.
+        if _shrink_problems:
+            print("\nAccount for the row(s) above reported as dropped by exactly one of:")
+            for way in REMOVAL_WAYS:
+                print(f"  - {way}")
+            print(f"  {SDK_PAIR_RULE}")
+            print(f"  {NOT_A_REMOVAL_ROUTE}")
         print(f"\n{len(problems)} problem(s)")
         return 1
     _waived_note = ""

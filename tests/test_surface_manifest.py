@@ -7915,12 +7915,31 @@ def test_a_row_that_reappears_as_a_retired_name_is_not_a_shrink():
 
 
 def test_an_unchanged_baseline_is_green():
-    """Non-vacuity: the pin must not red an ordinary merge (a gate that always fires is off)."""
-    sm = _load_manifest_tool()
-    with MANIFEST.open() as fh:
-        doc = yaml.safe_load(fh)
+    """Non-vacuity: an ADDITION over the base must not red, in BOTH directions of the comparison.
 
-    assert sm.shrink_problems(doc, doc) == []
+    ⛔ The first cut asserted `shrink_problems(doc, doc) == []`, which is structurally empty
+    whatever the code does — `prior - derived` over the SAME object is the empty set, and a pin
+    that computed nothing, or that compared the pair BACKWARDS, stayed green (round-17 review,
+    P3). `now` here genuinely differs from `base`: it carries one row the base does not, so a
+    reversed comparison reports it and this row reds.
+    """
+    sm = _load_manifest_tool()
+    base, now = _baseline_pair()
+    now = copy.deepcopy(now)
+    now["rows"] = [
+        dict(now["rows"][0], name="tortoise_added_after_the_base"), *now["rows"]
+    ]
+
+    assert sm.shrink_problems(base, now) == []
+    # ⛔ …and the SAME pair, argument-order swapped, IS a removal. That is the half that makes
+    # this row non-vacuous: a `shrink_problems` that returns a constant — the shape the first cut
+    # could not see — fails HERE, while a green-only assertion cannot tell it apart from a real
+    # comparison. (A reversed `prior - derived` graded `[]` on both orders in a measured mutant,
+    # because `removal_report` filters an addition out; the constant is the mutant that matters.)
+    assert sm.shrink_problems(now, base) != [], (
+        "the added row is a removal when it is the BASE that carries it — if this is empty, the "
+        "pin is not comparing its two arguments"
+    )
 
 
 def test_a_waiver_that_waives_nothing_is_reported():
@@ -8508,3 +8527,34 @@ def test_the_green_line_count_is_the_one_the_run_actually_produced(
     assert ("one provenance" in note) is provenance_answered, note
     assert ("one shrink" in note) is shrink_graded, note
     assert not_answered in unanswered, unanswered
+
+
+def test_the_shrink_refusal_PRINTS_the_route(checker, tmp_path, monkeypatch):
+    """Round-17 review, P3: the one operator who triggers the pin got no step to take.
+
+    `REMOVAL_WAYS` was printed by `cmd_cut` alone, and the CI path (`check --base-ref`) never
+    runs `cut` on a splice — so `check` printed a bare `was DROPPED with no record` and stopped.
+    The archive tool prints its route INSIDE every violation, and this file's own design note
+    says a new class needs "a runnable route in `REMOVAL_WAYS`, or the operator gets a refusal
+    they can act on". The route block is scoped to the shrink rows: the structural findings
+    above it have their own remedies.
+
+    Mutation: drop the `if _shrink_problems:` block in `cmd_check` -> RED (no route in `out`).
+    """
+    sm = checker
+    with MANIFEST.open() as fh:
+        doc = yaml.safe_load(fh)
+    problem = "tortoise_ghost (tool) was DROPPED with no record — it is gone from both"
+    monkeypatch.setattr(
+        sm, "shrink_report", lambda *a, **k: ([problem], "origin/main (merge base abc)", True)
+    )
+
+    rc, out = _check(sm, doc, tmp_path, base_ref="origin/main")
+
+    assert rc == 1, out
+    assert problem in out, out
+    assert "Account for the row(s) above reported as dropped by exactly one of:" in out, (
+        f"the violation must carry its route, not only the finding: {out}"
+    )
+    assert "archive/MANIFEST.json" in out, f"the freeze route must be named: {out}"
+    assert "RETIRED_SDK_METHODS" in out, f"the sdk map route must be named: {out}"

@@ -863,8 +863,11 @@ def file_violations(entries: list[dict], archive_dir: Path | None = None,
                 "sha (or is the all-zero placeholder) — the restore anchor was not recorded "
                 "(a guess is not a record)"
             )
-        if not entry.get("reason"):
-            out.append(f"{symbol}: no `reason` — a reader cannot tell why it was removed")
+        if not str(entry.get("reason") or "").strip():
+            out.append(
+                f"{symbol}: no `reason` — a reader cannot tell why it was removed (a blank or "
+                "whitespace-only reason is not one)"
+            )
 
     if archive_dir.exists():
         for path in sorted(archive_dir.rglob("*.py")):
@@ -1053,9 +1056,10 @@ def _init_carries_a_body(text: str) -> bool:
     "the package still imports" is the wrong question to ask of `__init__.py`.
 
     Only an `__init__.py` with no statements of its own — empty, whitespace, a docstring
-    alone, or a bare no-op (`pass` / `...`) — is pure scaffolding, where deleting it while
-    siblings survive removes nothing. Any statement (an import, a re-export, `__all__`, an
-    assignment, a function) is content.
+    alone, or a bare no-op (any inert expression statement: `pass`, `...`, the name `Ellipsis`,
+    a bare `None`/`0`) — is pure scaffolding, where deleting it while siblings survive removes
+    nothing. Any statement (an import, a re-export, `__all__`, an assignment, a function) is
+    content.
     Unparseable text is treated as carrying NOTHING: a body that no longer parses holds no
     statements a caller can reach, so the arm reports the removal rather than reading the
     garbage as content and cancelling it. (The previous version returned True here and called
@@ -1074,25 +1078,32 @@ def _init_carries_a_body(text: str) -> bool:
         and isinstance(body[0].value.value, str)
     ):
         body = body[1:]  # a docstring alone is prose about scaffolding, not content
-    # ⛔ A NO-OP STATEMENT IS NOT CONTENT EITHER (round-16 review, P2 — measured in BOTH
-    # directions). A file reduced to `pass` or `...` carries nothing a caller can reach, which is
-    # exactly the README's test ("the name no longer resolves to any code"). Counting them as a
-    # body was a false PASS one branch over from the docstring hole: the WRITER accepted `pass` as
-    # the module's source of record (`archived_from = tortoise/x.py`) and `shrink_violations` then
-    # credited the row on its EXISTENCE — every arm green, the body in no file under `archive/`.
-    # The SAME predicate over-blocked the mirror shape: a `pass`-only `__init__.py` read as
-    # CONTENT, so deleting a scaffolding package went RED while deleting a docstring-only one was
-    # green. Only TOP-LEVEL bare no-ops are dropped: a `def`/`class`/`if` whose body happens to be
-    # `pass` is still a statement, and a `.pyi` stub's `def f() -> int: ...` is a FunctionDef.
+    # ⛔ A NO-OP STATEMENT IS NOT CONTENT EITHER (round-16 P2, widened in round-17 P1 — measured
+    # in BOTH directions, then measured again ONE SPELLING OVER). A file reduced to `pass` or `...`
+    # carries nothing a caller can reach, which is exactly the README's test ("the name no longer
+    # resolves to any code"). Counting them as a body was a false PASS one branch over from the
+    # docstring hole: the WRITER accepted `pass` as the module's source of record
+    # (`archived_from = tortoise/x.py`) and `shrink_violations` then credited the row on its
+    # EXISTENCE — every arm green, the body in no file under `archive/`. The SAME predicate
+    # over-blocked the mirror shape: a `pass`-only `__init__.py` read as CONTENT, so deleting a
+    # scaffolding package went RED while deleting a docstring-only one was green.
+    #
+    # ⛔ ROUND-16 FIXED TWO SPELLINGS AND LEFT THE CLASS OPEN (round-17 P1, measured): `Ellipsis`
+    # is the same object spelled as a NAME, and `None` / `0` / `NotImplemented` / `frozenset()` are
+    # equally bare — every one of them still answered "carries a body", so `check --base-ref`
+    # printed OK while the base's four functions were in no file under `archive/`. An enumeration
+    # of spellings IS the defect. So ask the language rule instead, which closes the class:
+    # a top-level expression STATEMENT has no effect unless it calls, awaits, yields, or binds a
+    # named expression. Everything else — a bare constant (the docstring above included), a bare
+    # name, an arithmetic expression — is dead code and cannot be the source of record.
+    # Still only TOP-LEVEL: a `def`/`class`/`if` whose own body is `pass` is a statement, and a
+    # `.pyi` stub's `def f() -> int: ...` is a FunctionDef.
+    _effectful = (ast.Call, ast.Await, ast.Yield, ast.YieldFrom, ast.NamedExpr)
     body = [
         node
         for node in body
         if not isinstance(node, ast.Pass)
-        and not (
-            isinstance(node, ast.Expr)
-            and isinstance(node.value, ast.Constant)
-            and node.value.value is Ellipsis
-        )
+        and not (isinstance(node, ast.Expr) and not isinstance(node.value, _effectful))
     ]
     return bool(body)
 
@@ -1608,6 +1619,18 @@ def shrink_violations(
         # hold RUNTIME code (not a `.pyi` stub only)?" and the `where` in the violation below.
         candidates = sorted(path for path in base_paths if module_name(path) == module)
         runtime_carrier = next((path for path in candidates if not path.endswith(".pyi")), None)
+        # ⛔ SCAFFOLDING AT THE BASE IS NOT A REMOVAL (round-17 P2, measured). Arm 1b already
+        # grades the IN-PLACE shape by content, but this arm graded the DELETION shape by PATH: a
+        # base `tortoise/doc.py` that was a docstring alone (or 0 bytes) landed in `base_modules`,
+        # so deleting it was `MODULE REMOVED` — and the remedy the violation printed
+        # (`archive module tortoise.doc`) is one this tool REFUSES for a body-less source, so the
+        # red had no route at all: not the waiver (CI passes no `--allow-archive-shrink`), not the
+        # writer. Nothing left the product, so the arm must cancel the way an emptied package does.
+        # The `.pyi`-only case is untouched: a stub IS a module's code when nothing else carries it.
+        if runtime_carrier is not None:
+            source = _git_blob(root, sha, runtime_carrier)
+            if source is not None and not _init_carries_a_body(source):
+                continue
         if key in working:
             # ⛔ A row that froze the stub is not a record — and it is credited HERE, not only in
             # arm 1b: when the stub is deleted as the writer's own output asks, the module has NO
@@ -2460,6 +2483,13 @@ def archive_symbol(
     root = Path(root or ROOT)
     if kind not in KINDS:
         raise ArchiveRefused(f"unknown kind {kind!r} — expected one of {KINDS}")
+    # ⛔ WHITESPACE IS NOT A REASON (round-17 P3, measured). Raw truthiness let `--reason '   '`
+    # through: the row was written carrying `"reason": "   "` and `file_violations` accepted it,
+    # so the one field a future reader consults for WHY read as checked while saying nothing —
+    # the same hole the pairing guards name for `--flag` ("an unexplained removal could be waived
+    # by pressing space"). The reason is NORMALISED in place, so the record cannot keep the
+    # padding that made the check pass.
+    reason = (reason or "").strip()
     if not batch or not reason:
         raise ArchiveRefused("a batch slug and a reason are required: they are what a reader has")
     if not _BATCH_RE.match(batch):
