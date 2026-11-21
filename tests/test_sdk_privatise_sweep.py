@@ -250,7 +250,21 @@ RESIDUE_PAIR = '(11838, "de5664dc98549d56")'
 
 
 def _residue_block() -> str:
-    """The `#:` comment block immediately above `SWEEP_RESIDUE`, as text."""
+    """The whole contiguous `#:` prose run above `SWEEP_RESIDUE` — NOT one paragraph.
+
+    ⛔ ITS EXTENT IS THE ENTIRE RUN (651 lines at this head), AND THE ARMS GRADE ALL OF IT
+    (review, round 17, P3: this docstring said "the block immediately above `SWEEP_RESIDUE`",
+    which implied a paragraph). The walk climbs from the pin while each line is `#:`-prefixed,
+    and the residue section's prose is contiguous all the way up to its opening sentence — so
+    every NEGATIVE arm below has that whole surface as its grading area, and an honest edit to
+    a sentence elsewhere in it can red one. That is why the arms are windowed around the
+    sentence they police (see `_ATTRIBUTION_WINDOW`); it is not a licence to shorten the walk,
+    because the sections the arms read live hundreds of lines apart.
+
+    `test_the_residue_block_is_a_real_block_and_publishes_its_addresses` anchors the extent, so
+    a reflow that breaks the run with a blank line SCREAMS here instead of silently shrinking
+    every arm's grading surface.
+    """
     lines = (ROOT / "tools" / "sdk_privatise.py").read_text(encoding="utf-8").splitlines()
     pin = next(i for i, line in enumerate(lines) if line.startswith("SWEEP_RESIDUE = ("))
     start = pin
@@ -391,6 +405,18 @@ def test_the_residue_block_is_a_real_block_and_publishes_its_addresses():
     """
     block = _residue_block()
     assert block.count("\n") > 100, "the residue block is missing or truncated"
+    # ⛔ THE EXTENT IS PINNED, NOT ASSUMED (review, round 17, P3). `_residue_block()` walks up
+    # while lines are `#:`-prefixed, so a single blank line inserted mid-run TRUNCATES it — and
+    # every negative arm below would then pass over a surface that no longer contains the
+    # paragraph it exists to police. One anchor per depth of the run, each a phrase no arm
+    # rewrites: truncation above any of them reds here, where the cause is named.
+    for anchor in ("REFUSED to guess at",               # the run's opening sentence
+                   "RE-PINNED (11776,",                  # the re-pin history, ~10 lines in
+                   "OLDEST of the EIGHT commits"):       # the interval, ~300 lines in
+        assert anchor in block, (
+            f"`{anchor}` is a section of the contiguous `#:` run above `SWEEP_RESIDUE`; its "
+            "absence means a non-`#:` line broke the run and `_residue_block()` now returns a "
+            "SHORTER surface — every negative arm below is grading less than it claims")
     for literal in (RESIDUE_ABBREV, RESIDUE_PR_HEAD, RESIDUE_REWRITE_PARENT):
         assert literal in block, f"{literal} is one of the block's published addresses"
     # ⛔ NON-VACUITY IN BOTH DIRECTIONS: the tree is still attributed to its own squash, so
@@ -1047,6 +1073,27 @@ def _parent_claims(flow: str) -> list[str]:
             if not _refuted(flow, m.start())]
 
 
+#: Direction 1 of the `#14068` arm: a DIFF verb and the tree it diffs against, both inside one
+#: window, with the tree named by SHA.
+#:
+#: ⛔ NOT PHRASE-KEYED (review, round 17, P3). The arm required the literal
+#: "`git diff` … between `A` and `B`", so an honest rewording of the SAME claim —
+#: "diffing `A` against `B`" — was a RED. That is the over-specified-shape defect this file
+#: removes from `_abbreviation_length_claims` and `_already_counted_anchors`, and the wrong
+#: BINDING it exists to catch is already refused by direction 2 (`_PR_REF_AS_TREE`). What is
+#: graded here is the presence of both shas beside the diff command, not the vocabulary.
+_DIFF_VERB = re.compile(r"(?i)\bdiff\w*")
+
+
+def _diff_names_tree_by_sha(flow: str) -> bool:
+    """True when a diff command and BOTH shas share one window — word order and verbs free."""
+    for occ in re.finditer(re.escape(RESIDUE_REWRITE_PARENT), flow):
+        window = flow[max(0, occ.start() - 160):occ.end() + 160]
+        if RESIDUE_ABBREV in window and _DIFF_VERB.search(window):
+            return True
+    return False
+
+
 #: The `#14058` note's ORIGINAL, refuted reason for citing a pre-rebase commit by issue number.
 _PREFIX_REASON_RE = re.compile(
     r"(?i)reachable from no ref|disappears on the next\s*`?gc`?|unreproducible address")
@@ -1120,10 +1167,10 @@ def test_the_14068_attribution_names_its_tree_by_sha_never_by_the_pr_ref():
     mutation is exactly what the finding charged.
     """
     flow = re.sub(r"\n#:\s?", " ", _residue_block())
-    # ⛔ DIRECTION 1 — the tree is named by SHA, in the same clause as the diff command it
-    # qualifies, and the attribution names the PR that landed it by number as well.
-    assert re.search(r"`git diff`[^.]{0,80}between `" + RESIDUE_REWRITE_PARENT
-                     + r"` and `" + RESIDUE_ABBREV + r"`", flow), (
+    # ⛔ DIRECTION 1 — the tree is named by SHA, in the same window as the diff command it
+    # qualifies, and the attribution names the PR that landed it by number as well. The arm is
+    # NOT phrase-keyed (review, round 17, P3): see `_diff_names_tree_by_sha`.
+    assert _diff_names_tree_by_sha(flow), (
         f"the paragraph must name the tree it diffs against by SHA (`{RESIDUE_ABBREV}`), because "
         "the issue number cannot name it")
     assert re.search(r"`#14068`'s \(`" + RESIDUE_REWRITE_PARENT + r"`\)", flow), (
@@ -1134,6 +1181,16 @@ def test_the_14068_attribution_names_its_tree_by_sha_never_by_the_pr_ref():
     assert not _pr_ref_as_tree_violations(flow), (
         "`#14108` resolves to `refs/pull/14108/head`, a ref that TRACKS a branch head — it cannot "
         f"address a tree: {_pr_ref_as_tree_violations(flow)[0]!r}. Name the tree by its sha.")
+    # ⛔ DIRECTION 1 DOES NOT RED AN HONEST REWORDING — the SAME claim as `git diff` between X
+    # and Y, in another wording, must stay green (review, round 17, P3: this arm required the
+    # literal phrase). The anchor is BEST-EFFORT, like the mutant below and for the same reason
+    # (round 17, P3): an honest rewording of the block must not red the arm.
+    anchor = f"`git diff` between `{RESIDUE_REWRITE_PARENT}` and `{RESIDUE_ABBREV}`"
+    assert _diff_names_tree_by_sha(_install_pre_fix(
+        flow, anchor, f"diffing `{RESIDUE_REWRITE_PARENT}` against `{RESIDUE_ABBREV}`",
+        f"diffing `{RESIDUE_REWRITE_PARENT}` against `{RESIDUE_ABBREV}`")), (
+        "`diffing `X` against `Y`` is the SAME claim as `git diff` between `X` and `Y`; redding "
+        "it is the over-specified shape the review removed")
     # ⛔ THE MUTATION, ON THE REAL BLOCK: restore the citation the finding is about. The anchor is
     # BEST-EFFORT (review, round 17, P3) — an honest rewording must not red this arm.
     pre_fix = f"and `{RESIDUE_ABBREV}` over"
