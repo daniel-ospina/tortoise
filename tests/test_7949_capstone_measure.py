@@ -1693,8 +1693,9 @@ def test_a_write_artifact_of_the_wrong_shape_degrades_the_beside_column_not_main
         # An unenumerable census is a NAMED gap (the convention the loader fault follows);
         # a wrong-typed block degrades into an empty one. Neither raises — the property this
         # tuple pins. The COVERAGE claim that used to sit here needed a `declared` that could
-        # differ from `len(rows)`, which no fixture below provides, so it is asserted at the
-        # end of this block against a population that was actually enumerated.
+        # differ from `len(rows)`, which no fixture in the tuple ABOVE provides, so it is asserted
+        # at the end of this block against a population that was actually enumerated (the fixtures
+        # BELOW the tuple are the ones that do disagree — that is the point of them).
         assert e6["error"] is None or "census" in str(e6["error"]), (why, e6["error"])
         # ⛔ AND THE CELLS FOLLOW WHAT WAS ACTUALLY READ (#14060 review round 16, P3): `written`
         # used to stay at the all-zero dict initialised in `measure_e6`, so a refused row carried

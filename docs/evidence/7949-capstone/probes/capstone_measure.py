@@ -4224,7 +4224,7 @@ def _e6_write_cells(census_path: str) -> tuple[dict, str]:
 
     ⛔ AND "unreadable" INCLUDES THE WRONG JSON *SHAPE*, not only bytes that fail to parse
     (#14060 review round 4, P3, reproduced: `[]` -> ``AttributeError: 'list' object has no
-    attribute 'get'``; `{"packs": "x"}`` -> ``AttributeError: 'str' object has no attribute
+    attribute 'get'``; ``{"packs": "x"}`` -> ``AttributeError: 'str' object has no attribute
     'items'``). Both escaped `measure_e6` — this function is called AFTER the run has paid
     its cost — and crashed `main`, when the docstring above promises the beside column
     degrades to `unmeasured`. A truncated or hand-edited artifact is exactly the shape this
