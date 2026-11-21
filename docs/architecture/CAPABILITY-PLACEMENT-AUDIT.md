@@ -716,7 +716,7 @@ issue's rule: **no such reader ⇒ `record_only`, however graph-native it looks.
 | 7b | `:Session` telemetry — the **sibling** members of row 7 plus the remainder (`capture_ok`, `capture_extractor`, `capture_lane`, `entity_links_attempted`, `harness`, `actor_user_id`, `capture_redactions`, `machine_id`, `model`, `client_captured_at*`, `value_nodes_*`, `draft_count`, `commit_count`) | **sibling columns / plain projections** — `hosted_api.py:24770-24802` (`list_sessions`: `s.machine_id, s.model` at `:24791`, `s.capture_ok, s.capture_extractor` at `:24797`, the provenance triplet at `:24801`, each beside `count(p)`), `sdk.py:58315-58339` (the session-detail point lookup — **no walk in the statement**), `session_schema.py:855-861`/`:916-917` (reported beside the retrofit walks), `sdk.py:19357`; point lookups and `SET`-that-reads: `hosted_api.py:22307-22308` (the commit-state load, which names BOTH `value_nodes_*` members), `:22980-22981` (`value_nodes_created`, inside the commit atom), `:22982-22985` (`draft_count`, `commit_count`), `:24493-24497` (**`value_nodes_held`** — its own `:Session` `MERGE`/`SET` with no `:CommitRecord` in the statement, §2.4's split), `sdk.py:4265-4268`; whole-node reads for `capture_redactions` (`tools/backfill_copy_turns.py:188-192`, `projection/__init__.py:14484`) | **no** — `none` capability | **`record_only`** (property-level; §6.1) | read, but by nothing that needs the graph — property projections, property guards and node dumps, not edges. ⚠️ **The four sibling members (`capture_ok`, `capture_extractor`, `capture_lane`, `entity_links_attempted`) were in row 7 until the `#13095` review**; they are siblings of the walks that made the round trip look, and §2.4's rule is what moved them. The counter increments stay graph-coupled, so see §6.1 |
 | 8 | `:Object` / `:Subject` core | §2.5 | **yes** — `aboutObject` adjacency (`assembly.py:2632`), the `-[r]->` walk (`sdk.py:37906`) **and a fulltext index on `name`** | **graph** | an Event reaches its Object by EDGE; ⚠️ `supersededBy` is a **string matched by equality** (`audit.py:817`), not a walk — SQL-shaped, and an earlier draft wrongly cited it as the reason |
 | 9 | `story_arc` (on **any** label) | **no Cypher query NAMES it** — but six whole-node reads carry it (`sdk.py:27669`, `:28513`, `:30171`, `:30267`, `:30366`, `:43995`); capability **`none`** | **no** | **`record_only`** ⛔ **move gated on a deliberate pin decision** (§5.1) | its one NAMED reader is `public.session_narrative`; the graph carries it only via `RETURN properties(n)`, which is `none`-capability by the same disposition row 14 gives `Point.mentions`; the mechanism CAN deny it, two policy pins currently refuse the entry |
-| 10 | `:GraphEvent` | §2.6 | **no** | **`record_only`** ⛔ blocked | ordered scan + aggregates; no `NODE_TABLES` record table and no tier column (§5.2) — `public.journal_event` exists but is not a field-for-field superset (§6.3) |
+| 10 | `:GraphEvent` | §2.6 | **no** | **`record_only`** ⛔ blocked | ordered scan + aggregates; no `NODE_TABLES` record table and no tier column (§5.2) — `public.journal_event` exists but is not a field-for-field superset (§6.3). ⛔ **The tier mechanism is NOT the unblock** (`#13094`): `:GraphEvent` is a second durable STORE, not a projection, and a `NODE_TABLES` row would put it on the rebuild path `#4664` forbids — `docs/evidence/13094-graphevent/README.md` §4, recorded as `#13094`'s remaining scope |
 | 11 | bookkeeping labels (§2.7) | §2.7 | **no** | **`record_only`** ⛔ blocked | key lookups and label scans; no record table (§5.2) |
 | 11c | `:OnboardingState` / `:OnboardingStep` | §2.7 | **yes** — `completed_steps()` walks `COMPLETED_STEP` | **graph** | the docstring is explicit: *"Canonical completed-step ids from the edge set (never a second store)"* — the edge IS the store |
 | 11b | `:Tag` | §2.5 | **yes** — `TAGGED` is how every tag is read | **graph** | the edge is the read; the node is its endpoint |
@@ -957,11 +957,32 @@ The census's largest non-Point verdict (`:GraphEvent`, §2.6) and twelve bookkee
 > home exists": `public.journal_event` DOES exist for `:GraphEvent` (§6.3) — it is simply not a
 > `NODE_TABLES` row and carries no `cache_tier` column, which is what the mechanism needs.
 
-So for `:GraphEvent` and the twelve bookkeeping labels the sequence must be: **give it a `NODE_TABLES`
-record home with a tier column** (for `:GraphEvent`, first *proving* `journal_event` is a field-for-field
-superset — §6.3 shows it is not today; a table for the others) → **then** tier it. That is
+So for the twelve bookkeeping labels the sequence must be: **give it a `NODE_TABLES`
+record home with a tier column** → **then** tier it. That is
 `#13082` Phase 1 territory ("a migrated query must be *deleted* from the graph path in the same PR, and
 the graph-side data it needed becomes a candidate for `record_only` in the next capability audit").
+
+⛔ **`#13094` MEASURED THAT THIS SEQUENCE DOES NOT APPLY TO `:GraphEvent`, and the cell above must not be
+read as prescribing it for that shape.** Two findings, both executed
+(`docs/evidence/13094-graphevent/README.md` §3–§4):
+
+* **`journal_event` is not a field-for-field superset and cannot become one by adding a column.** A
+  payload-only emit writes a `:GraphEvent` row and **no journal record at all** (`sdk.py:16203`; a shipped
+  caller: the turn hard-delete lane, `sdk.py:3801`), and the two stores' `seq`s are deliberately
+  different coordinates (`:GraphEventMeta.last_seq` vs the replay journal's ordinal, `#12894`). §6.3's
+  "prove it, then add what is missing" therefore resolves to **a dedicated record table**, not to
+  `journal_event`.
+* **A `NODE_TABLES` row would put the shape on the REBUILD path.** `read_record_view` projects every
+  `NODE_TABLES` label (`cache_projection.py:3823-3845`), so a record-sourced rebuild would try to
+  re-create `:GraphEvent` from the record view — the resurrection `#4664` forbids (a rebuild leaves the
+  store empty and carries only the watermark). The route is blocked today by the placement table
+  (`UnknownRecordColumn`) and the record's key contract (`node_identity`'s CHECK has no `GraphEvent`);
+  neither is a thing to "fix".
+
+`:GraphEvent` is a **STORE**, not a projection: the mechanism it needs is a store-level home selection
+(writes mirrored to the record first, reads re-pointed only after a coverage census, then a
+preview-by-default cutover/strip verb), not a row-level `cache_tier`. Recorded as **`#13094`**'s remaining
+scope — its comment 7065026251 — with six ordered steps and their falsifiers.
 
 **Filed rather than absorbed:** the `:Point` prose gap is recorded on **`#10429`** (this route's own issue),
 and the `:GraphEvent` record home is **`#13094`**. ⛔ Nothing here arms a cap, a retention rule or an
@@ -971,7 +992,7 @@ eviction policy — that is `#13084` and P0-c.
 
 | precondition | shapes it blocks | what unblocks it |
 |---|---|---|
-| **no `NODE_TABLES` record table** (and no tier column) → no tier can refuse the row | `:GraphEvent`, `:ContextSubscription`, the eleven other bookkeeping labels | a tiered record home, then `cache_tier` (§5.2); for `:GraphEvent` that starts with proving `journal_event` is a field-for-field superset, which it is **not** today (§6.3) |
+| **no `NODE_TABLES` record table** (and no tier column) → no tier can refuse the row | `:ContextSubscription`, the eleven other bookkeeping labels | a tiered record home, then `cache_tier` (§5.2). ⛔ `:GraphEvent` is **NOT** in this row any more: `#13094` measured that the tier mechanism must not be applied to it (§5.2's correction) — it is a STORE, and its route is a store-level home selection |
 | **a policy pin** → the declaration is refused although the seam would honour it | `point.story_arc` **and** `Point.mentions` (§3 row 14) — ONE precondition, TWO shapes | `#10429`: widen the completeness pin with a tail-only category (§5.1). ⚠️ What refuses any new entry regardless of label is the *exact-dict* pin, not the completeness pin (`tests/test_cache_projection.py:186-195` compares `{source, event}` to the WHOLE `CACHE_FORBIDDEN_COLUMNS`) — which is why it blocks both shapes and why naming only `story_arc` here was an error |
 | **a record table but no tier COLUMN** → having a row is not having a tier | every non-`:Point` label whose move is **whole-label** (none in this census — §3 rows 1/4/5/6/8 all read a capability and are all `graph`; §1's record-table column is NOT a move criterion, and reading it as one is the error this cell corrects) | a `cache_tier` column (one migration per label) **plus** the `if table == "point"` arm at `cache_projection.py:3841` widened; ⚠️ this does **not** unblock row 7b, which is a **property-level** move the row-level tier cannot express (§6.1) |
 
@@ -1115,8 +1136,13 @@ rules are arguable here.
   exception (`:104-106` permits a DELETE when `app.record_journal_purge = 'on'`, the tenant-erasure path).
   The accurate statement is **"no `NODE_TABLES` record table, and no `cache_tier` column"** — which is the
   precondition that actually blocks the move (§5.2), and a different fact from "no record home exists".
-  The `#13094` work is therefore **not** "build a store": it is "prove, event type by event type, that the
-  existing stream is a field-for-field superset — and if it is not, add what is missing".
+  The `#13094` work is therefore **not** "build a store" in the sense of a SECOND WRITER of the replay
+  journal: it is "prove, event type by event type, that the existing stream is a field-for-field
+  superset — and if it is not, add what is missing". ⛔ **`#13094` answered that, and the answer is "it is
+  not, and it cannot be made one"** — a payload-only emit has no journal record at all, and the two
+  `seq`s are different coordinates — so "add what is missing" resolves to a dedicated record table for
+  the change feed (not `journal_event`, not `cache_tier`; `docs/evidence/13094-graphevent/README.md`
+  §3–§4).
 
 ### 6.4 `:Source.embedding` on a non-episodic Source — **decided 2026-11-17, cited not reopened**
 

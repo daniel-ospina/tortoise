@@ -1727,6 +1727,20 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # tests/test_measure_4211_session_hierarchy.py::
              # test_a_tool_only_diff_selects_this_pin.
              "tools/measure_4211_session_hierarchy.py",
+             # #13094: the change-feed reader census / `superset` verdict verb. Same
+             # silent-drop class as the two rows above, and MEASURED before this
+             # entry: `--changed-files tools/graphevent_home.py --event
+             # pull_request` -> `surfaces: []` (the path is dropped by
+             # `_keep_changed`), so a PR that changed ONLY the tool — its 0/1/2 exit
+             # contract, the "an empty feed is not `covered`" guard, the paging
+             # cursor that must survive a duplicate or fractional `seq`, the
+             # `GRAPH.LIST` refusal that keeps the read-only verb from minting a
+             # graph through a read — would have run NONE of the pins in
+             # `tests/test_13094_graphevent_home.py` that exist to catch exactly
+             # those. With the entry: `surfaces=['core']` and the suite is selected.
+             # Pinned from the other side by
+             # tests/test_13094_graphevent_home.py::test_a_tool_only_diff_selects_this_pin.
+             "tools/graphevent_home.py",
              # #4211 / #13919 review (round 7): the instrument's COMMITTED RECEIPT.
              # Registering the tool and its suite left the ARTIFACT ungated, and MEASURED
              # before this entry: `select(["docs/scoping/receipts/2026-11-19-4211-

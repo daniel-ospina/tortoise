@@ -65,5 +65,9 @@
     "amortized_edge_block_sz_mb": 0,
     "amortized_edge_attributes_by_type_sz_mb": [],
     "indices_sz_mb": 8
+  },
+  "tree": {
+    "git_head": "05d218fcaf",
+    "note": "the tree the measurement ran on (the head at dispatch, before this PR's commits)"
   }
 }
