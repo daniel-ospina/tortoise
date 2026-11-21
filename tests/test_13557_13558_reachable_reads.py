@@ -675,6 +675,20 @@ NOT_SELECTED = [
     "have any users reported v3 has been deprecated",
     "has anyone complained billing has been deprecated",
     "have any users reported the search index has been deprecated",
+    # ── the ADVERB insertion between the second clause's auxiliary and `been`
+    # (round-23 review, P1, measured) ─────────────────────────────────────────
+    # The asyndetic lookahead required `aux been` ADJACENT, so every
+    # `<verb> <subject> has <adverb> been <participle>` spelling slipped through and
+    # the window fired on the second clause's participle: measured 294 of 294 over
+    # `{reported,noticed,said,heard,complained,claimed,confirmed} x <subject> x
+    # {recently,just,already,finally,quietly,officially} has __ been deprecated` —
+    # the whole ended population, the caller's predicate dropped, and NO notice.
+    # English inserts adverbs exactly there, so the guard now carries an adverb slot
+    # before and after an optional `have` (modal passives, `only just`).
+    "have any users reported the vendor has recently been deprecated",
+    "have any users reported it has recently been deprecated",
+    "have any users reported the vendor will have recently been deprecated",
+    "have any users reported the vendor has only just been deprecated",
     # ── and the SILENT direction of the notice's tail (round-16 review, P2) ──
     # `existence_unguarded` carried no tail guard, so ANY tail reported — falsifying the
     # two paragraphs that say a qualifier outside the closed tail list stays silent. The
@@ -855,6 +869,10 @@ NOTICE_ONLY = [
     "have any users reported v3 has been deprecated",
     "has anyone complained billing has been deprecated",
     "have any users reported the search index has been deprecated",
+    "have any users reported the vendor has recently been deprecated",
+    "have any users reported it has recently been deprecated",
+    "have any users reported the vendor will have recently been deprecated",
+    "have any users reported the vendor has only just been deprecated",
     # …and the ONE row of round-19's pre-determiner-opener class that REPORTS rather than
     # going silent: it is five words long, so the subject bound exceeded is what the
     # notice names (`is_copula_long_subject`). Its short siblings stay in NOT_SELECTED

@@ -467,6 +467,13 @@ _BLOCKED_TAIL = (
 _EXISTENCE_HEAD = (
     r"\b(?:has|have|had)\s+(?:any|anything|someone|something|everything|anyone)\b"
 )
+_EXISTENCE_ADVERB = (
+    r"(?:[a-z]+ly|just|already|only|still|even|also|never|ever|now|yet)"
+)
+_EXISTENCE_HELPER = (
+    rf"(?:not\s+)?(?:(?:{_EXISTENCE_ADVERB})\s+){{0,3}}"
+    rf"(?:have\s+)?(?:(?:{_EXISTENCE_ADVERB})\s+){{0,3}}been\b"
+)
 _EXISTENCE_GUARD = (
     r"(?![^?]{0,60}?\b(?:because|since|when|while|after|before|now|if|unless|given|"
     r"as|where|so|but|although|though|until|whether|once|whereas|why|how)(?![-/])\b)"
@@ -486,7 +493,7 @@ _EXISTENCE_GUARD = (
     r"that)\s+)?(?!it\b|they\b|he\b|she\b|we\b|you\b|i\b)"
     r"[a-z0-9][a-z0-9'’._/-]*\s+"
     r"(?:has|have|had|is|are|was|were|will|would|can|could|did|does|do|may|might|"
-    r"must|should)\s+(?:not\s+)?(?:have\s+)?been\b)"
+    rf"must|should)\s+{_EXISTENCE_HELPER})"
     # ⛔ AND A PRONOUN SUBJECT IS ITS OWN ALTERNATIVE (round-14 review, P2, measured):
     # the slot above requires `<determiner> <noun>`, which a pronoun has NEITHER of, so
     # `have any users reported it has been deprecated` was ROUTED to the whole ended
@@ -504,7 +511,7 @@ _EXISTENCE_GUARD = (
     # question's).
     rf"(?![^?]{{0,60}}?\b(?:it|they|he|she|we|you)\s+"
     r"(?:has|have|had|is|are|was|were|will|would|can|could|did|does|do|may|might|"
-    rf"must|should)\s+(?:not\s+)?(?:have\s+)?been\s+(?:{_ENDING_WORDS})\b)"
+    rf"must|should)\s+{_EXISTENCE_HELPER}\s+(?:{_ENDING_WORDS})\b)"
 )
 _EXISTENCE_WINDOW = rf"[^?]{{0,60}}?\bbeen\s+(?:{_ENDING_WORDS})\b"
 _EXISTENCE_PREFIX = _EXISTENCE_HEAD + _EXISTENCE_GUARD + _EXISTENCE_WINDOW
