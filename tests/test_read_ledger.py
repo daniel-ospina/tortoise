@@ -403,10 +403,12 @@ def test_the_three_hooked_row_paths_feed_the_ledger(hooked_sdk):
       `_query(kind=…)` and take the door's DEFAULT (`_record_reads=True`), so
       their reads are recorded — the `_ledger_record("Point", …)` at the end of
       `_query` is live on a real caller path. The three SDK-internal population
-      scans (`issue_insight`, the FTS TF-IDF fallback and `recall_gaps` — the
-      #7983 capture carve-out) pass `_record_reads=False`. The row pins that
-      DEFAULT, which is what the caller-facing routes and any future door
-      inherit.
+      scans (`_issue_insight`, the FTS TF-IDF fallback and `_recall_gaps` — the
+      #7983 capture carve-out) pass `_record_reads=False` (private spellings:
+      the public `issue_insight` / `recall_gaps` are not attributes of the class
+      — see `test_an_internal_population_scan_is_not_recorded_as_a_read`).
+      The row pins that DEFAULT, which is what the caller-facing routes and any
+      future door inherit.
       ⛔ An earlier draft of this bullet said `_query` had NO caller-facing
       recording route after #13899. It does (above), and the error was the
       dangerous direction: it invites deleting the `_ledger_record` call, which
@@ -774,16 +776,24 @@ def test_a_capped_file_still_says_so_when_one_tenant_is_folded(ledger, monkeypat
 
 
 def test_an_internal_population_scan_is_not_recorded_as_a_read(hooked_sdk):
-    """`recall_gaps` / `issue_insight` / the FTS fallback scan the WHOLE stock.
+    """`_recall_gaps` / `_issue_insight` / the FTS fallback scan the WHOLE stock.
+
+    ⛔ The doors named here are the PRIVATE spellings, because those are the ones
+    that exist: `recall_gaps` is NOT an attribute of `TortoiseSDK` and
+    `retirement_hint("recall_gaps")` is `None` (it was archived without a
+    replacement to name, #12901), while `issue_insight` returns the #4282
+    retirement hint — so a reader grepping either public name finds nothing, the
+    same trap as `_query(` below. `_recall_gaps` and `_issue_insight` are the
+    surviving bodies.
 
     They opt OUT of recording explicitly — `_query(_record_reads=False)` for a
     POPULATION scan, and `_tortoise_fts_query(…, _record_reads=False)` for a
     retrieval POOL (that is a different door, so a reader auditing the opt-outs
-    by grepping `_query(` will not find the FTS arm; `recall_gaps` drives both).
+    by grepping `_query(` will not find the FTS arm; `_recall_gaps` drives both).
     `_query` IS caller-facing with recording ON elsewhere
     (`tortoise_client`'s `query_prior_research` / `query_existing_strategies` /
     `query_existing_visions` take the default), which is exactly why these
-    population scans have to opt OUT explicitly: recording them would mark every Point read after one `recall_gaps()` call — `f` → ~1, the exact contamination excluding
+    population scans have to opt OUT explicitly: recording them would mark every Point read after one `_recall_gaps()` call — `f` → ~1, the exact contamination excluding
     `_get_point` prevented, and it would silently invalidate the one-directional
     "the gaps bias `f` LOW" caveat the docs rest on.
     """
@@ -803,6 +813,47 @@ def test_an_internal_population_scan_is_not_recorded_as_a_read(hooked_sdk):
     assert counts == {"p1": 1, "p2": 0}, (
         "the door's DEFAULT still records — a caller omitting the flag must "
         "still be counted")
+
+
+def test_the_population_scan_doors_the_note_names_are_the_live_ones():
+    """The note above names `_recall_gaps` / `_issue_insight`; this pins it.
+
+    A docstring that names a door is a claim, and this file has already paid for
+    one: `get_point` was listed among the retired names whose call "would only
+    prove the retirement hint still raises", when it has no hint at all. So the
+    spelling is a ROW, measured in both directions — which is what makes the
+    note non-vacuous rather than merely plausible:
+
+    * the PRIVATE bodies must still be defined ON `TortoiseSDK` (a renamed body
+      would leave the note pointing at nothing that exists);
+    * the PUBLIC spellings must still be ABSENT (a re-added `recall_gaps` would
+      make "is NOT an attribute" stale, and send the next reader grepping a name
+      whose absence is the note's whole point);
+    * and the hint asymmetry the note records — `recall_gaps` has NO retirement
+      hint, `issue_insight` DOES — is asserted, because that asymmetry is stated
+      as the measured reason the two are described differently.
+    """
+    from tortoise.sdk import TortoiseSDK
+    from tortoise.sdk_retired import retirement_hint
+
+    class_body = vars(TortoiseSDK)
+    for door in ("_recall_gaps", "_issue_insight", "_query", "_tortoise_fts_query"):
+        assert door in class_body, (
+            f"the note's live door {door!r} is no longer defined on TortoiseSDK — "
+            f"update the note in test_an_internal_population_scan_is_not_recorded_"
+            f"as_a_read, it now names a door the class does not have")
+
+    for retired in ("recall_gaps", "issue_insight"):
+        assert not hasattr(TortoiseSDK, retired), (
+            f"{retired!r} is a public attribute of TortoiseSDK again — the note "
+            f"that calls the private spelling the live one is now stale")
+
+    assert retirement_hint("recall_gaps") is None, (
+        "the note records that `recall_gaps` carries NO retirement hint (it was "
+        "archived without a replacement to name) — if it now has one, say what "
+        "it is instead of claiming its absence")
+    assert retirement_hint("issue_insight"), (
+        "the note records that `issue_insight` DOES carry the #4282 hint")
 
 
 def test_the_mode_tightening_skips_a_directory(tmp_path, monkeypatch):
