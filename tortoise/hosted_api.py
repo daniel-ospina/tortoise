@@ -39431,10 +39431,29 @@ def _maybe_apply_completion(org_id: str, *, sdk=None) -> bool:
     primary-key ``organizations.graph_name`` read, exactly as
     ``_org_default_namespace``'s own docstring states for a GRAPH-BOUND
     credential. So the paragraph above remains accurate for the MCP auto-onboarding
-    lane as well as the ORG-WIDE one, and only the CAPTURE lane's custom-bound
-    case is exempt (#14086 review round 3, P2: an earlier draft of this sentence
-    said the function was "no longer called at all" for such a key, which the
-    tree refutes — the user-facing half of the capture guard is #14131).
+    lane as well as the ORG-WIDE one.
+    ⛔ AND THE EXEMPT SET HAS MORE THAN ONE MEMBER — an earlier draft of this
+    paragraph said "only the CAPTURE lane's custom-bound case is exempt", which
+    its own neighbours refute. Two lanes SKIP the call for a bound key, and the
+    rest simply do not skip:
+      * the CAPTURE route's org-level block — custom-bound only, above;
+      * the REST point-write lane: ``POST /v1/points`` runs
+        ``_maybe_file_harness_connected`` under ``if _credential_is_agent(org)
+        and not org.get("graph_id")``, so ANY key carrying a ``graph_id`` skips
+        it — and ``_maybe_file_harness_connected`` is itself a caller of this
+        function (``_maybe_apply_completion(org_id)`` inside it);
+      * the remaining callers do NOT skip: ``_update_onboarding_state``,
+        ``patch_onboarding_state``, ``onboarding_checkpoint``,
+        ``_run_onboarding_seed`` and ``_run_starter_seed`` all call it
+        unconditionally, and where an org-level ROUTE refuses a graph-bound key
+        that refusal is ``_reject_graph_bound_org_surface``, a different
+        mechanism from skipping this call.
+    So this function is still reached with a graph-bound credential — which is
+    why the ``_org_sdk`` construction constraint above is not relaxed by the
+    capture guard (#14086 review rounds 3-5: an earlier draft said it was "no
+    longer called at all" for such a key, then that only the capture lane
+exempts it; the tree refutes both. The user-facing half of the capture guard is
+    #14131).
     Left as ``None`` the historical behaviour is unchanged for every other
     caller."""
     try:
