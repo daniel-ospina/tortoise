@@ -563,6 +563,25 @@ NOT_SELECTED = [
     "is it what we archived",
     "is that the endpoint we deprecated",
     "is the report the board archived",
+    # ── the BARE-NOUN SUBJECT class (round-16 review, P1) ────────────────────
+    # The asyndetic lookahead required `<determiner> <noun>` before the finite verb, so
+    # every subject spelled without an article still ROUTED and dropped the caller's own
+    # predicate — the pinned twin `have any users reported the vendor has been
+    # deprecated` was refused and these were not, differing only by `the`. The
+    # determiner is optional now and the PRONOUNS are excluded instead (a pronoun
+    # subject is the relative clause's, which is why
+    # `has anything we have been tracking been withdrawn` still routes). The last row is
+    # the same clause reaching the `is_copula` perfect branch, whose subject carried its
+    # own auxiliary; that branch's guard now refuses a nested auxiliary too.
+    "have any users reported v3 has been deprecated",
+    "has anyone complained billing has been deprecated",
+    "have any users reported the search index has been deprecated",
+    # ── and the SILENT direction of the notice's tail (round-16 review, P2) ──
+    # `existence_unguarded` carried no tail guard, so ANY tail reported — falsifying the
+    # two paragraphs that say a qualifier outside the closed tail list stays silent. The
+    # signal now carries the same `_BLOCKED_TAIL` the shapes do, and this row is pinned
+    # HERE and NOT in `NOTICE_ONLY` because "silent" is the claim being made.
+    "has anything we relied on been withdrawn most recently",
     # …the same class on the `which` shape, which is the row the pre-fix detector
     # also served (round-3 review, P1: *"`which claims were retracted by legal`
     # → `by legal` dropped"*). It is pinned HERE because the user-facing MCP
@@ -668,6 +687,12 @@ NOTICE_ONLY = [
     # …and the FREE-RELATIVE (round-17 review, P2) rows pinned in NOT_SELECTED above.
     "has anyone asked why the old plan has been archived",
     "has anyone asked how the old plan has been archived",
+    # …and the BARE-NOUN spellings of the asyndetic class (round-16 review, P1): the
+    # clause guard refused them for lack of a determiner, the cue is real, so they are
+    # reported rather than routed.
+    "have any users reported v3 has been deprecated",
+    "has anyone complained billing has been deprecated",
+    "have any users reported the search index has been deprecated",
 ]
 
 
