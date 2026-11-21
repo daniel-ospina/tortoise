@@ -327,13 +327,13 @@ class ReadStages:
 
         Same filter rule as :meth:`spent_ms`, and the SAME conclusion:
         ``round(0.04, 1)`` is ``0.0``, so the filter asks whether the part
-        accrued ANY time rather than whether that time survived rounding — a
-        sub-0.1 ms part IS published as ``0.0``, and that is deliberate. It is
-        the honest reading here for the same reason it is in ``spent_ms``: the
-        records this table serves are >= 10 s breaches, where a part that rounds
-        to ``0.0`` really did cost effectively nothing. (Filtering the ROUNDED
-        value instead would hide a part that measured non-zero, which is the
-        opposite error.)
+        accrued ANY time rather than whether that time survived rounding — a part
+        under 0.05 ms (the band that rounds to ``0.0``) IS published as ``0.0``,
+        and that is deliberate. It is the honest reading here for the same reason
+        it is in ``spent_ms``: the records this table serves are >= 10 s breaches,
+        where a part that rounds to ``0.0`` really did cost effectively nothing.
+        (Filtering the ROUNDED value instead would hide a part that measured
+        non-zero, which is the opposite error.)
         """
         with self._lock:
             if not self._armed:
