@@ -4,7 +4,7 @@ The seed core (tortoise/onboarding/seed.py) must be importable WITHOUT
 hosted_api (mirror of the state.py hygiene rule — the same module is the
 reusable half of surface 15 that W12's self-hosted path consumes), own the
 ontology vocabulary + normalization + collision semantics, and perform the
-two-Subject seed against a duck-typed SDK surface (create_subject /
+two-Subject seed against a duck-typed SDK surface (create_subject_anchor /
 create_edge / query) so every lane (hosted REST, MCP, self-hosted) shares
 identical ontology behavior.
 
@@ -70,13 +70,17 @@ class _FakeSDK:
         digest = hashlib.sha256(f"{label}:{name}".encode()).hexdigest()[:26]
         return f"{label[:3].lower()}-{digest}"
 
-    # ⛔ PUBLIC NAMES, restored: `#13899`'s privatisation sweep renamed this double's two
-    # doors to `_create_subject`/`_create_edge` because it matched the ATTRIBUTE NAME, but
-    # this class stands in for the SEED SURFACE (`_OrgSeedSurface` / `_SdkSeedSurface`),
-    # whose published API is `create_subject`/`create_edge` — the private spellings are what
-    # the surface calls on the real SDK underneath, never what a surface exposes. The same
-    # sweep mis-renamed the call sites in `tortoise/onboarding/seed.py`.
-    def create_subject(self, name, subjectKind="other", **props):
+    # ⛔ THE SEED SURFACE'S OWN DOOR NAMES, not the SDK's. `#13899`'s privatisation
+    # sweep renamed this double's two doors to `_create_subject`/`_create_edge` because
+    # it matched the ATTRIBUTE NAME, but this class stands in for the SEED SURFACE
+    # (`_OrgSeedSurface` / `_SdkSeedSurface`), whose published API is
+    # `create_subject_anchor`/`create_edge` — the private `_create_subject` spelling is
+    # what the surface calls on the real SDK underneath, never what a surface exposes.
+    # The door is NOT named `create_subject`: that is a RETIRED SDK name
+    # (`tortoise/sdk_retired.py`) and the receiver-blind census cannot exempt a call
+    # reached through a function parameter, so the collision was a red on a correct
+    # call (#13971 review).
+    def create_subject_anchor(self, name, subjectKind="other", **props):
         node = self.subjects.get(name)
         if node is None:
             node = {"id": self._id_for("Subject", name), "name": name,
@@ -347,7 +351,7 @@ def test_every_door_the_seed_calls_is_published_by_both_real_surfaces():
 
     `seed_onboarding_anchors` is handed a duck-typed SURFACE, not the SDK
     (`hosted_api._OrgSeedSurface` for the org-hosted lane, `onboarding.selfhost._SdkSeedSurface`
-    for the self-hosted one). Both publish `query` / `create_subject` / `create_edge` and
+    for the self-hosted one). Both publish `query` / `create_subject_anchor` / `create_edge` and
     delegate to the SDK's PRIVATE `_create_subject` / `_create_edge` underneath — so a seed
     that calls the private spelling raises `AttributeError` on every run, while a test whose
     double was renamed in lockstep stays green. That is exactly how it shipped.
@@ -364,7 +368,7 @@ def test_every_door_the_seed_calls_is_published_by_both_real_surfaces():
 
     used = set(re.findall(r"\bsurface\.(\w+)",
                           inspect.getsource(seed_module)))
-    assert {"create_subject", "create_edge"} <= used, (
+    assert {"create_subject_anchor", "create_edge"} <= used, (
         f"the seed no longer calls the doors this pin exists for: {sorted(used)}")
     # ⛔ THE READ DOOR IS CALLED THROUGH A HELPER, so the `surface.<name>` scan cannot see it:
     # `find_subject_by_name(surface, …)` → `_run(handle, …)` → `handle.query(…)`, and the
@@ -376,7 +380,7 @@ def test_every_door_the_seed_calls_is_published_by_both_real_surfaces():
         missing = sorted(name for name in required if not hasattr(surface_cls, name))
         assert not missing, (
             f"{surface_cls.__name__} does not publish {missing}. The seed's handle surface "
-            "requires them — the write doors directly (`surface.create_subject(...)`) and "
+            "requires them — the write doors directly (`surface.create_subject_anchor(...)`) and "
             "`query` through `_run(handle, ...)` from `find_subject_by_name(surface, ...)` — "
             "so a seed on this lane raises AttributeError, and a double renamed in lockstep "
             "keeps the suite green. Do not narrow this set: `query` is the door whose "
@@ -386,7 +390,7 @@ def test_every_door_the_seed_calls_is_published_by_both_real_surfaces():
 def test_the_org_seed_surface_delegates_the_seed_doors_to_the_sdk():
     """The org-hosted surface is the one no end-to-end pin reaches; bind it here.
 
-    It must forward `create_subject` to the SDK's own door with the caller's props intact
+    It must forward `create_subject_anchor` to the SDK's own door with the caller's props intact
     (and no fabricated kind — `#9572`), so the seed's write path is the SDK's write path.
     """
     from tortoise.hosted_api import _OrgSeedSurface
@@ -406,8 +410,8 @@ def test_the_org_seed_surface_delegates_the_seed_doors_to_the_sdk():
             return {"relation": relation}
 
     surface = _OrgSeedSurface(_Sdk())
-    created = surface.create_subject("Acme", subjectKind="organization",
-                                     entityType="Organization")
+    created = surface.create_subject_anchor("Acme", subjectKind="organization",
+                                            entityType="Organization")
     assert created["id"] == "sub-Acme"
     assert seen[-1][0] == "subject"
     assert seen[-1][2]["subjectKind"] == "organization"

@@ -589,7 +589,11 @@ SWEEP_NAMES = 66
 #: (`test_the_org_seed_surface_delegates_the_seed_doors_to_the_sdk`), and they are the two rows
 #: this branch adds: `surface.create_subject` 6 → 7 and `surface.create_edge` 1 → 2, read from
 #: `--report`'s row dump against `SWEEP_BASE` (⛔ NOT
-#: from `--repin`, which prints the tuple and nothing else). The TOTAL is this tree's own
+#: from `--repin`, which prints the tuple and nothing else). (The `create_subject` half of that row
+#: is GONE as of the seed-surface door rename recorded at the pin below — the door is
+#: `create_subject_anchor` now; `surface.create_edge` is still a row, because `create_edge` is not
+#: a retired name and this counter reports ordinary-word receivers from the swept map only, so
+#: read the LIVE rows off `--report`, never this history.) The TOTAL is this tree's own
 #: measurement — `--repin` prints `(11833, "c115acaf5bbb4163")` and `--check` exits 0. The last
 #: step is 11831 → 11833 (+2) and the two rows named above account for it (+1 each), so THAT step
 #: is fully attributed; the earlier per-head totals recorded ABOVE are `--repin` readings at their
@@ -678,7 +682,22 @@ SWEEP_NAMES = 66
 #: merge, and `seen.update` is **101** — `main`'s −1, which is `tests/test_13337_cache_graph_declaration.py`
 #: accumulating by APPEND rather than `update` (#14108), a file this branch does not touch. That the
 #: figure lands at 11845 − 1 = 11844 is a CROSS-CHECK of the measurement, not the evidence for it.
-SWEEP_RESIDUE = (11844, "70d6cfdcd8b769e4")
+#:
+#: RE-CUT DOWN (11844, "70d6cfdcd8b769e4") → (11833, "4358280454f50b14") by the SEED-SURFACE DOOR
+#: RENAME (`tortoise/onboarding/selfhost.py`, `tortoise/hosted_api.py`, `tortoise/onboarding/seed.py`,
+#: #13971): the two duck-typed seed surfaces published `create_subject`, which is a RETIRED SDK name
+#: (`RETIRED_SDK_METHODS`, #12901), so `seed._write_anchor` calling it red the retired-name census
+#: (`test_11609_write_containers.py`) on a CORRECT call — the census is receiver-blind and its
+#: exemption table refuses a parameter receiver by design (#13863 P1), so the ambiguity is removed
+#: from the product instead: the door is now `create_subject_anchor`. Three residue rows go with it,
+#: and they are the whole delta: `surface.create_subject` 7, `org.create_subject` 2,
+#: `selfhost.create_subject` 2 — **−11**, measured on both trees with
+#: `--report --base 28ca66878d… --top 5000` and diffed (the parent head carries those rows; this head
+#: carries none). No other row differs, so the `query` population this counter exists for is untouched
+#: (`typed references still pointing at a public name: 0`). `create_subject_anchor` is NOT a swept
+#: name, so the renamed call sites stop being residue at all — they are not "guessed at", they are
+#: simply not references to a privatised method. Re-measured with `--repin` on THIS tree.
+SWEEP_RESIDUE = (11833, "4358280454f50b14")
 
 #: A name that says "this is the SDK" in its own spelling. Deliberately a WORD match, so
 #: `sdk`, `sdk2`, `org_sdk`, `_get_org_sdk` and `sdk_factory` all qualify while `sudoku` —
